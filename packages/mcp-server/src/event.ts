@@ -6,6 +6,7 @@
  * append-only log. So `hash` and `prev` are computed here, on ingest, from day one.
  */
 import { randomUUID } from "node:crypto";
+import { merkleRootHex, type GraphHeadRecord } from "@substrate/ledger";
 import { redact, redactValue } from "./redact.ts";
 import { EVENT_KINDS, SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
 
@@ -279,10 +280,10 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
  * branch unlinked and is reported. What it stops reporting is a database's
  * arbitrary tie-break, which was never an integrity property.
  */
-export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
+export function inChainOrder<T extends { hash: string; prev: string | null }>(events: T[]): T[] {
 	if (events.length < 2) return events;
 
-	const next = new Map<string | null, SubstrateEvent>();
+	const next = new Map<string | null, T>();
 	for (const event of events) if (!next.has(event.prev)) next.set(event.prev, event);
 	const present = new Set(events.map((event) => event.hash));
 
@@ -292,9 +293,9 @@ export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
 		events.find((event) => event.prev === null) ?? events.find((event) => !present.has(event.prev ?? ""));
 	if (!start) return events; // every event is claimed: a cycle, for verifyChain to report
 
-	const ordered: SubstrateEvent[] = [];
+	const ordered: T[] = [];
 	const seen = new Set<string>();
-	let current: SubstrateEvent | undefined = start;
+	let current: T | undefined = start;
 	while (current && !seen.has(current.hash)) {
 		ordered.push(current);
 		seen.add(current.hash);
@@ -304,6 +305,109 @@ export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
 	// than quietly dropped from the count.
 	for (const event of events) if (!seen.has(event.hash)) ordered.push(event);
 	return ordered;
+}
+
+/** One stored chain leaf of an hour, as `graph_chain_leaves` holds it (D73-02). */
+export interface StoredLeaf {
+	graph_id: string;
+	session_id: string;
+	seq: number;
+	event_id: string;
+	hash: string;
+}
+
+/** What a ledger row contributes to a chain walk: its id, the hash its content gives, and its predecessor. */
+export interface ChainLink {
+	id: string;
+	hash: string;
+	prev: string | null;
+}
+
+const HASH_HEX_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The leaves in seq order. The table is append-only with no key, so exact duplicates collapse. Two rows that disagree about one
+ * seq, a hash that is not 64 lowercase hex, or seqs that are not 0 … n-1 make the stored chain invalid: null.
+ */
+export function orderedLeaves(leaves: readonly StoredLeaf[]): StoredLeaf[] | null {
+	const bySeq = new Map<number, StoredLeaf>();
+	for (const leaf of leaves) {
+		if (!HASH_HEX_RE.test(leaf.hash)) return null;
+		const prior = bySeq.get(leaf.seq);
+		if (prior === undefined) bySeq.set(leaf.seq, leaf);
+		else if (prior.event_id !== leaf.event_id || prior.hash !== leaf.hash) return null;
+	}
+	const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+	return ordered.every((leaf, i) => leaf.seq === i) ? ordered : null;
+}
+
+/**
+ * The head record each (graph, session) pair's stored leaves give for one hour (D73-01), or null when any pair's leaves do not form
+ * one chain. The records come out in input order; `headsRoot` sorts them.
+ */
+export function headRecordsFromLeaves(leaves: readonly StoredLeaf[], periodStartMs: number): GraphHeadRecord[] | null {
+	const pairs = new Map<string, { graphId: string; sessionId: string; leaves: StoredLeaf[] }>();
+	for (const leaf of leaves) {
+		const key = JSON.stringify([leaf.graph_id, leaf.session_id]);
+		const pair = pairs.get(key);
+		if (pair) pair.leaves.push(leaf);
+		else pairs.set(key, { graphId: leaf.graph_id, sessionId: leaf.session_id, leaves: [leaf] });
+	}
+	const records: GraphHeadRecord[] = [];
+	for (const pair of pairs.values()) {
+		const ordered = orderedLeaves(pair.leaves);
+		const last = ordered?.at(-1);
+		if (ordered === null || last === undefined || pair.graphId === "") return null;
+		records.push({
+			graphId: pair.graphId,
+			sessionId: pair.sessionId,
+			periodStartMs,
+			count: ordered.length,
+			leavesRootHex: merkleRootHex(ordered.map((leaf) => leaf.hash)),
+			headEventId: last.event_id,
+			headHashHex: last.hash,
+		});
+	}
+	return records;
+}
+
+/** Where one (graph, session) pair's chain stands against its anchored leaves (D73-03). */
+export type HeadComparison =
+	| { ok: true }
+	| { ok: false; kind: "stored-leaves-mismatch"; reason: string }
+	| { ok: false; kind: "first-differing"; eventId: string }
+	| { ok: false; kind: "first-missing"; eventId: string };
+
+/**
+ * D73-03 for one pair. `events` are the pair's ledger rows for the hour, each hashed from its own content, `leaves` its stored
+ * leaves and `head` the anchored head. The stored leaves must reproduce the head first. Then the chain, ordered by `inChainOrder`
+ * from the events sorted by id, is walked against the stored seq order. At the first position where the two part, a stored event
+ * absent from the events is first-missing; otherwise the chain's event there is first-differing. Chain events past the stored end
+ * are first-differing too.
+ */
+export function compareToAnchoredHead(events: readonly ChainLink[], leaves: readonly StoredLeaf[], head: GraphHeadRecord): HeadComparison {
+	const stored = orderedLeaves(leaves);
+	const last = stored?.at(-1);
+	if (
+		stored === null ||
+		last === undefined ||
+		stored.length !== head.count ||
+		merkleRootHex(stored.map((leaf) => leaf.hash)) !== head.leavesRootHex ||
+		last.event_id !== head.headEventId ||
+		last.hash !== head.headHashHex
+	) {
+		return { ok: false, kind: "stored-leaves-mismatch", reason: "the stored leaves do not reproduce the anchored head" };
+	}
+	const chain = inChainOrder([...events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
+	for (const [i, leaf] of stored.entries()) {
+		const link = chain[i];
+		if (link !== undefined && link.id === leaf.event_id && link.hash === leaf.hash) continue;
+		if (!events.some((event) => event.id === leaf.event_id)) return { ok: false, kind: "first-missing", eventId: leaf.event_id };
+		return { ok: false, kind: "first-differing", eventId: link?.id ?? leaf.event_id };
+	}
+	const extra = chain[stored.length];
+	if (extra !== undefined) return { ok: false, kind: "first-differing", eventId: extra.id };
+	return { ok: true };
 }
 
 /**

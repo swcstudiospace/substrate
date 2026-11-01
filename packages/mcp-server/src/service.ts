@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RedisClient } from "bun";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
-import { acceptsSigner, createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import {
 	PLANES,
 	PlaneRegistry,
@@ -110,7 +110,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, type StoredLeaf, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -701,6 +701,13 @@ export interface HourDigest {
  * closed yet); `unanchored`, `mismatch` and `unverified` all fail the verify.
  */
 export type HourStatus = "anchored" | "pending" | "unanchored" | "mismatch" | "unverified";
+/** One (graph, session) pair in one hour: whether its chain matches its stored head, and the first event where it parts if not (D73-03). */
+export interface HeadPairReport {
+	session_id: string;
+	trusted: boolean;
+	first_differing_event_id?: string;
+	first_missing_event_id?: string;
+}
 export interface HourReport {
 	period_start: string;
 	period_end: string;
@@ -710,6 +717,15 @@ export interface HourReport {
 	tx_sig?: string;
 	slot?: number;
 	reason?: string;
+	/** The on-chain heads root of a v2 memo (D73-01); absent for a v1 memo and for hours not anchored. */
+	heads_root?: string;
+	/** Whether this hour's anchored heads are trusted (D73-04); set on every hour the verify reports. */
+	trusted?: boolean;
+	trusted_reason?: string;
+	/** Each (graph, session) pair of this graph in the hour, against its own stored head (D73-03). */
+	pairs?: HeadPairReport[];
+	/** True when the ledger or the stored leaves contradict this hour's anchored head: a tamper, not a missing proof (D73-03). */
+	head_failed?: boolean;
 }
 /** The additive verify verdict: the chain fields keep their meaning (D28-14). */
 export interface VerifyVerdict {
@@ -729,6 +745,10 @@ export interface VerifyVerdict {
 	 * racing the two reads is not an entry: the re-read finds its row.
 	 */
 	missing: { count: number; ids: string[] };
+	/** True only when every hour holds its anchored heads (D73-04): the on-chain heads root is reproduced and each pair's chain matches its stored head. */
+	trusted: boolean;
+	/** The first untrusted hour's reason, or the reason every hour is trusted. */
+	trusted_reason: string;
 }
 /** Options for {@link Substrate.verifyGraph}. The evidence bundle asks for the hour report; `anchors: false` is the chain-only read. */
 export interface VerifyOptions {
@@ -7148,7 +7168,7 @@ export class Substrate {
 		// before the event read — not when the hour loop starts — and every
 		// hour's allowance below is what's left of it.
 		const verifyStartedAt = Date.now();
-		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] } };
+		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] }, trusted: false, trusted_reason: "greptime not configured" };
 		// Read by the graph id in its stored form, for the same reason `emit` looks
 		// the session up by its normalised one.
 		const stored = normalizeIdentifier(graphId) ?? graphId;
@@ -7184,6 +7204,8 @@ export class Substrate {
 			uncovered: { count: 0, ids: [] },
 			legacy: { count: 0, ids: [] },
 			missing: { count: 0, ids: [] },
+			trusted: false,
+			trusted_reason: "anchor check skipped (anchors: false)",
 		};
 		if (!withAnchors) return emptyHours;
 		return this.hourReport(stored, rows, chain, now, opts.rpc, verifyStartedAt);
@@ -7526,9 +7548,14 @@ export class Substrate {
 		}
 		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, signers, remaining - margin));
 	}
+	for (const [i, report] of hours.entries()) {
+		const hour = Date.parse(report.period_start);
+		hours[i] = await this.trustHour(report, hour, byHour.get(hour) ?? [], rows, storedGraphId, budgetMs - (Date.now() - startedAt) - margin);
+	}
 
 	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
-	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0;
+	const headFailure = hours.find((hour) => hour.head_failed === true);
+	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0 && headFailure === undefined;
 	const reason = !chain.ok
 		? chain.reason
 		: uncovered.length > 0
@@ -7537,7 +7564,11 @@ export class Substrate {
 				? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
 				: failing
 					? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
-					: undefined;
+					: headFailure
+						? `hour ${headFailure.period_start}: ${headFailure.trusted_reason ?? "head failed"}`
+						: undefined;
+	const untrustedHour = hours.find((hour) => hour.trusted !== true);
+	const anchoredHours = hours.filter((hour) => hour.status === "anchored");
 	return {
 		ok,
 		events: rows.length,
@@ -7548,7 +7579,100 @@ export class Substrate {
 		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
 		legacy: { count: legacy.length, ids: [...legacy].sort() },
 		missing: { count: missing.length, ids: [...missing] },
+		trusted: rows.length > 0 && anchoredHours.length > 0 && untrustedHour === undefined,
+		trusted_reason:
+			rows.length === 0
+				? "no events"
+				: anchoredHours.length === 0
+					? "no anchored hour"
+					: untrustedHour === undefined
+						? "every hour is trusted"
+						: `hour ${untrustedHour.period_start}: ${untrustedHour.trusted_reason ?? "not trusted"}`,
 	};
+	}
+
+	/**
+	 * D73-03 and D73-04 for one hour of one graph. Only the on-chain heads root of a v2 memo is trusted: the stored leaves of every
+	 * graph in the hour must reproduce it, and only then is each of this graph's (graph, session) pairs walked against its own stored
+	 * head. A head recomputed from ledger rows is never trusted, and an hour that cannot be checked says why.
+	 */
+	private async trustHour(
+		report: HourReport,
+		hour: number,
+		members: readonly string[],
+		rows: Array<Record<string, unknown>>,
+		storedGraphId: string,
+		allowanceMs: number,
+	): Promise<HourReport> {
+		const untrusted = (reason: string, headFailed = false): HourReport => ({
+			...report,
+			trusted: false,
+			trusted_reason: reason,
+			pairs: [],
+			...(headFailed ? { head_failed: true } : {}),
+		});
+		if (allowanceMs <= 0) return untrusted("budget exhausted");
+		if (report.status !== "anchored") return untrusted(`hour is ${report.status}: no anchored head to trust`);
+		if (report.heads_root === undefined) return untrusted("anchored with a v1 memo: no heads commitment on chain");
+		const greptime = this.greptime;
+		if (!greptime) throw new Error("GREPTIME_URL is not set");
+		// A read that outlasts the allowance is budget exhausted; a read that throws is a store failure. Neither claims trust.
+		const outcome = Promise.withResolvers<{ kind: "read"; leaves: StoredLeaf[] } | { kind: "failed" } | { kind: "expired" }>();
+		const timer = setTimeout(() => outcome.resolve({ kind: "expired" }), Math.max(0, allowanceMs));
+		timer.unref?.();
+		greptime.hourChainLeaves(hour).then(
+			(leaves) => {
+				clearTimeout(timer);
+				outcome.resolve({ kind: "read", leaves });
+			},
+			() => {
+				clearTimeout(timer);
+				outcome.resolve({ kind: "failed" });
+			},
+		);
+		const read = await outcome.promise;
+		if (read.kind === "expired") return untrusted("budget exhausted");
+		if (read.kind === "failed") return untrusted("store-failed");
+		const leaves = read.leaves;
+		const records = headRecordsFromLeaves(leaves, hour);
+		if (records === null || records.length === 0 || headsRoot(records) !== report.heads_root) {
+			return untrusted("stored leaves do not reproduce the on-chain heads root", true);
+		}
+		const inHour = new Set(members);
+		const events = rows.filter((row) => inHour.has(String(row.id))).map(rowToEvent);
+		const sessions = [
+			...new Set([
+				...records.filter((record) => record.graphId === storedGraphId).map((record) => record.sessionId),
+				...events.map((event) => event.session_id ?? ""),
+			]),
+		].sort();
+		const pairs: HeadPairReport[] = [];
+		for (const session of sessions) {
+			// The content hash the chain recomputes, not the stored column: an edited payload then shows where it parts from its leaf.
+			const links = events
+				.filter((event) => (event.session_id ?? "") === session)
+				.map((event) => {
+					const { hash: _stored, ...content } = event;
+					return { id: event.id, hash: eventHash(content), prev: event.prev };
+				});
+			const record = records.find((candidate) => candidate.graphId === storedGraphId && candidate.sessionId === session);
+			if (record === undefined) {
+				// No anchored head covers these events, so nothing on chain vouches for them: the chain's first event is where it leaves the anchor.
+				const first = inChainOrder([...links].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))[0];
+				pairs.push({ session_id: session, trusted: false, ...(first === undefined ? {} : { first_differing_event_id: first.id }) });
+				continue;
+			}
+			const pairLeaves = leaves.filter((leaf) => leaf.graph_id === storedGraphId && leaf.session_id === session);
+			const result = compareToAnchoredHead(links, pairLeaves, record);
+			if (result.ok) pairs.push({ session_id: session, trusted: true });
+			else if (result.kind === "stored-leaves-mismatch") return untrusted(result.reason, true);
+			else if (result.kind === "first-missing") pairs.push({ session_id: session, trusted: false, first_missing_event_id: result.eventId });
+			else pairs.push({ session_id: session, trusted: false, first_differing_event_id: result.eventId });
+		}
+		const failing = pairs.find((pair) => !pair.trusted);
+		if (failing === undefined) return { ...report, trusted: true, trusted_reason: "every session's chain matches its anchored head", pairs };
+		const where = failing.first_missing_event_id !== undefined ? `missing ${failing.first_missing_event_id}` : `differs at ${failing.first_differing_event_id ?? ""}`;
+		return { ...report, trusted: false, trusted_reason: `session ${failing.session_id} ${where}`, pairs, head_failed: true };
 	}
 
 	/**
@@ -7694,7 +7818,7 @@ export class Substrate {
 		}
 		const parsed = parseMemo(memo.memo);
 		if (!parsed) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not a v1 anchor memo" };
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not a v1 or v2 anchor memo" };
 		}
 		if (parsed.periodStartMs !== hour) {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
@@ -7708,7 +7832,7 @@ export class Substrate {
 		if (signerFault !== null) {
 			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
-		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
+		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}), ...(parsed.headsRootHex !== undefined ? { heads_root: parsed.headsRootHex } : {}) };
 	}
 
 	/** Which planes have configuration, so `/slo` can tell "unconfigured" from "silent". */

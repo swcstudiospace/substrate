@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
+import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
+import { buildGraphHeads } from "./anchor.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
@@ -5114,6 +5115,304 @@ describe("verifyGraph hour report", () => {
 			const verdict = await pending.verifyGraph("ut-1", { now: H + 2 * HOUR, rpc: rpcReturning(world.memo) as never });
 			expect(verdict.hours[0]?.status).toBe("pending");
 			expect(rotationReads).toBe(0);
+		});
+	});
+
+	describe("heads trust (D73-03, D73-04)", () => {
+		const asRow = (event: SubstrateEvent) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+
+		/**
+		 * One v2 hour: the sessions chained in the order given, each event ingested after the last, its leaves stored, and the memo
+		 * carrying the heads root over those leaves. The fixture's own memo, root and leaves are the honest answer every case edits.
+		 */
+		function v2World(sessions: Array<{ session: string; count: number }>): World {
+			const events: SubstrateEvent[] = [];
+			const records: Array<{ event_id: string; event_ts: number; ingested_at: number }> = [];
+			const leaves: Array<{ event_id: string; ingested_at: number; hash: string }> = [];
+			for (const { session, count } of sessions) {
+				let prev: string | null = null;
+				for (let i = 0; i < count; i++) {
+					const event = normalizeEvent({ surface: "omp", kind: "note", summary: `${session}-${i}`, session_id: session, graph_id: "ut-1", actor: "agent" }, prev);
+					prev = event.hash;
+					events.push(event);
+					const ingested_at = H + 1000 * events.length;
+					records.push({ event_id: event.id, event_ts: Date.parse(event.ts), ingested_at });
+					leaves.push({ event_id: event.id, ingested_at, hash: event.hash });
+				}
+			}
+			const members = events.map((event) => ({ id: event.id, hash: event.hash, prev: event.prev, graph_id: event.graph_id, session_id: event.session_id }));
+			const built = buildGraphHeads(members, H);
+			const root = merkleRootHex(events.map((event) => event.hash));
+			const memo = formatMemoV2({ periodStartMs: H, rootHex: root, count: events.length, headsRootHex: headsRoot(built.records) });
+			return { events, rows: events.map(asRow), records, leaves, root, memo, stored: built.leaves };
+		}
+		/** The honest hour every case edits: its events, the ledger rows and ingest records, the stored leaves and the anchored memo. */
+		interface World {
+			events: SubstrateEvent[];
+			rows: Array<Omit<SubstrateEvent, "ts" | "payload"> & { ts: number; payload: string }>;
+			records: Array<{ event_id: string; event_ts: number; ingested_at: number }>;
+			leaves: Array<{ event_id: string; ingested_at: number; hash: string }>;
+			root: string;
+			memo: string;
+			stored: Array<{ graph_id: string; session_id: string; seq: number; event_id: string; hash: string }>;
+		}
+
+		function anchorOf(world: World, over: Record<string, unknown> = {}) {
+			return {
+				period_start: START_ISO,
+				period_end: END_ISO,
+				root: world.root,
+				event_count: world.events.length,
+				memo: world.memo,
+				tx_sig: "sig1",
+				signer: PUBKEY,
+				cluster: "devnet",
+				slot: 42,
+				anchored_at: new Date(H + 5 * HOUR).toISOString(),
+				...over,
+			};
+		}
+
+		function stubOf(world: World, over: Record<string, unknown> = {}) {
+			return {
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorOf(world),
+				hourChainLeaves: async () => world.stored,
+				...over,
+			};
+		}
+
+		const verify = (world: World, over: Record<string, unknown> = {}, memo: string = world.memo) =>
+			substrateWith(stubOf(world, over)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(memo) as never });
+
+		test("an honest v2 hour is trusted, and each session matches its own head", async () => {
+			const world = v2World([
+				{ session: "s1", count: 3 },
+				{ session: "s2", count: 2 },
+			]);
+			const verdict = await verify(world);
+			expect(verdict.ok).toBe(true);
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true });
+			expect(verdict.hours[0]?.pairs).toEqual([
+				{ session_id: "s1", trusted: true },
+				{ session_id: "s2", trusted: true },
+			]);
+			expect(verdict.trusted).toBe(true);
+		});
+
+		test("an edited payload parts the chain at that event: first_differing_event_id", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const edited = defined(world.events[1], "event 2").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: edited }]);
+			expect(verdict.hours[0]?.trusted).toBe(false);
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a deleted middle event is first_missing_event_id", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const deleted = defined(world.events[1], "event 2").id;
+			const verdict = await verify(world, { readEvents: async () => world.rows.filter((row) => row.id !== deleted) });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: deleted }]);
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("truncated last events are first_missing_event_id at the first one gone", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const gone = defined(world.events[1], "event 2").id;
+			const verdict = await verify(world, { readEvents: async () => world.rows.slice(0, 1) });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: gone }]);
+		});
+
+		test("a full rewrite with every hash and prev recalculated parts at the first event", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			let prev: string | null = null;
+			const rewritten = world.events.map((event) => {
+				const content = { ...event, summary: `${event.summary} rewritten`, prev };
+				const { hash: _old, ...rest } = content;
+				const hash = eventHash(rest);
+				prev = hash;
+				return { ...content, hash };
+			});
+			const rows = rewritten.map(asRow);
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: defined(world.events[0], "event 1").id }]);
+		});
+
+		test("sessions verify one by one, and the verdict is the same for every read order", async () => {
+			const world = v2World([
+				{ session: "s1", count: 2 },
+				{ session: "s2", count: 2 },
+			]);
+			const edited = defined(world.events[3], "s2's second event").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const forward = await verify(world, { readEvents: async () => rows });
+			expect(forward.hours[0]?.pairs).toEqual([
+				{ session_id: "s1", trusted: true },
+				{ session_id: "s2", trusted: false, first_differing_event_id: edited },
+			]);
+			expect(await verify(world, { readEvents: async () => [...rows].reverse() })).toEqual(forward);
+			expect(await verify(world, { readEvents: async () => [...rows.slice(2), ...rows.slice(0, 2)] })).toEqual(forward);
+		});
+
+		test("an unanchored hour is untrusted, with the reason", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			expect(verdict.hours[0]?.status).toBe("unanchored");
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "hour is unanchored: no anchored head to trust" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a v1-only anchored hour is untrusted with its reason, and the chain verdict is unchanged", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const v1 = formatMemo({ periodStartMs: H, rootHex: world.root, count: world.events.length });
+			const verdict = await verify(world, { anchorForPeriod: async () => anchorOf(world, { memo: v1 }) }, v1);
+			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "anchored with a v1 memo: no heads commitment on chain" });
+			expect(verdict.ok).toBe(true);
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("stored leaves that no longer reproduce the on-chain heads root are a stored-leaves-mismatch for the whole hour", async () => {
+			const world = v2World([
+				{ session: "s1", count: 3 },
+				{ session: "s2", count: 2 },
+			]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 && leaf.session_id === "s1" ? { ...leaf, hash: "f".repeat(64) } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]).toMatchObject({
+				status: "anchored",
+				trusted: false,
+				trusted_reason: "stored leaves do not reproduce the on-chain heads root",
+				pairs: [],
+			});
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("ok is false for an edited payload, though the hour root still matches", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const edited = defined(world.events[1], "event 2").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok is false for a deleted middle event", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const deleted = defined(world.events[1], "event 2").id;
+			const verdict = await verify(world, { readEvents: async () => world.rows.filter((row) => row.id !== deleted) });
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok is false for truncated last events", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const verdict = await verify(world, { readEvents: async () => world.rows.slice(0, 1) });
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok is false for a full rewrite that passes the local chain check", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			let prev: string | null = null;
+			const rows = world.events.map((event) => {
+				const content = { ...event, summary: `${event.summary} rewritten`, prev };
+				const { hash: _old, ...rest } = content;
+				const hash = eventHash(rest);
+				prev = hash;
+				return asRow({ ...content, hash });
+			});
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.chain).toEqual({ ok: true });
+			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok is false when one session of two is edited", async () => {
+			const world = v2World([
+				{ session: "s1", count: 2 },
+				{ session: "s2", count: 2 },
+			]);
+			const edited = defined(world.events[3], "s2's second event").id;
+			const verdict = await verify(world, { readEvents: async () => world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row)) });
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok is false when the stored leaves are edited against an unchanged on-chain root", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 ? { ...leaf, hash: "f".repeat(64) } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok stays true for an honest anchored hour, and for an unanchored one it is the hour that fails, not a trust proof", async () => {
+			const honest = v2World([{ session: "s1", count: 2 }]);
+			expect((await verify(honest)).ok).toBe(true);
+			const unanchored = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(unanchored, { anchorForPeriod: async () => null });
+			expect(verdict.hours[0]?.status).toBe("unanchored");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a graph with no events is untrusted: no events", async () => {
+			const verdict = await substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+			});
+			expect(verdict.ok).toBe(true);
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("no events");
+		});
+
+		test("a graph with no anchored hour is untrusted: no anchored hour", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("no anchored hour");
+		});
+
+		test("a zero verify budget leaves every hour untrusted as budget exhausted, and reads no stored leaves", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			let reads = 0;
+			const stub = stubOf(world, {
+				hourChainLeaves: async () => {
+					reads += 1;
+					return world.stored;
+				},
+			});
+			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(reads).toBe(0);
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "budget exhausted" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a stored-leaves read that outlives the allowance is untrusted as budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const stub = stubOf(world, { hourChainLeaves: () => new Promise<never>(() => {}) });
+			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "budget exhausted" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a stored-leaves read that throws is untrusted as store-failed, not as budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				hourChainLeaves: async () => {
+					throw new Error("greptime unreachable");
+				},
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "store-failed" });
+			expect(verdict.trusted).toBe(false);
 		});
 	});
 });
