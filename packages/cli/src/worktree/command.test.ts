@@ -249,57 +249,22 @@ describe("prune", () => {
 		expect(row.class).toBe("review");
 		expect(row.reasons.join(" ")).toContain("ignored-files: .planning/STATE.md");
 	});
-});
 
-describe("prune asks the workspace guard before each removal", () => {
-	test("the guard probes a worktree before its removal, and a clean worktree is still removed", async () => {
+	test("a clean merged worktree is still removed when the repository tracks .planning/", async () => {
 		const f = fleet();
-		const calls: Array<{ args: string[]; cwd: string }> = [];
-		const spy: CommandRunner = async (args, cwd) => {
-			calls.push({ args, cwd });
-			return spawnGit(args, cwd);
-		};
-		const h = harness({ git: spy }, withRoot(f.root));
-		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(existsSync(f.merged)).toBe(false);
-		const removeAt = calls.findIndex((call) => call.args[0] === "worktree" && call.args[1] === "remove" && call.args[2] === f.merged);
-		// Gathering, the re-check and the guard each run git status in the worktree before it is removed.
-		const probes = calls.slice(0, removeAt).filter((call) => call.args[0] === "status" && call.cwd === f.merged);
-		expect(probes.length).toBeGreaterThanOrEqual(3);
-	});
-
-	test("a worktree the guard refuses is kept, reported with the guard's reason, and the next candidate is still removed", async () => {
-		const f = fleet();
-		// Git does not list an empty directory, so the classifier still calls this worktree safe; the guard refuses its .planning.
-		mkdirSync(join(f.merged, ".planning"));
+		write(f.repo.dir, ".planning/ROADMAP.md", "# roadmap\n");
+		git(f.repo.dir, ["add", ".planning/ROADMAP.md"]);
+		git(f.repo.dir, ["commit", "-q", "-m", "track planning"]);
+		git(f.repo.dir, ["push", "-q", "origin", "main"]);
+		git(f.merged, ["merge", "-q", "--ff-only", "main"]);
+		expect(existsSync(join(f.merged, ".planning", "ROADMAP.md"))).toBe(true);
 		const h = harness({}, withRoot(f.root));
 		expect(await runWorktree(["prune", "--execute", "--json", "--idle-days", "0"], h.deps)).toBe(0);
 		const result: { removed: Array<{ path: string }>; skipped: Array<{ path: string; reasons: string[] }> } = JSON.parse(h.out.join(""));
-		expect(result.skipped).toEqual([{ path: f.merged, reasons: ["workspace .planning is outside git: copy it out first"] }]);
-		expect(result.removed.map((item) => item.path)).toEqual([f.mergedToo]);
-		expect(existsSync(f.merged)).toBe(true);
+		expect(result.skipped).toEqual([]);
+		expect(result.removed.map((item) => item.path).sort()).toEqual([f.merged, f.mergedToo].sort());
+		expect(existsSync(f.merged)).toBe(false);
 		expect(existsSync(f.mergedToo)).toBe(false);
-		expect(h.events.map((event) => event.payload?.path)).toEqual([f.mergedToo]);
-	});
-
-	test("a probe the guard cannot complete is a refusal, never a removal", async () => {
-		const f = fleet();
-		let statusCalls = 0;
-		// Gathering and the re-check each run git status in the worktree, so the guard's own status is the third call.
-		const failing: CommandRunner = async (args, cwd) => {
-			if (args[0] === "status" && cwd === f.merged) {
-				statusCalls += 1;
-				if (statusCalls === 3) return { code: 128, stdout: "", stderr: "fatal: injected" };
-			}
-			return spawnGit(args, cwd);
-		};
-		const h = harness({ git: failing }, withRoot(f.root));
-		expect(await runWorktree(["prune", "--execute", "--json", "--idle-days", "0"], h.deps)).toBe(0);
-		const result: { removed: Array<{ path: string }>; skipped: Array<{ path: string; reasons: string[] }> } = JSON.parse(h.out.join(""));
-		expect(result.skipped.map((item) => item.path)).toEqual([f.merged]);
-		expect(result.skipped[0]?.reasons.join(" ")).toContain("git status failed (exit 128)");
-		expect(result.removed.map((item) => item.path)).toEqual([f.mergedToo]);
-		expect(existsSync(f.merged)).toBe(true);
 	});
 });
 

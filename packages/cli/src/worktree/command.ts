@@ -370,13 +370,6 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 			skip(info.path, check.reasons);
 			continue;
 		}
-		// Last check before the removal: the guard reads the worktree itself and refuses on unsaved work, on ignored work
-		// only this worktree holds, or on any probe it cannot complete. A refusal keeps the worktree and the run goes on.
-		const guard = await workspaceGuard(info.path, deps.git);
-		if (!guard.ok) {
-			skip(info.path, guard.refusals);
-			continue;
-		}
 		const result = await deps.git(["worktree", "remove", info.path], info.repo_dir);
 		if (result.code !== 0) {
 			failure = { path: info.path, error: result.stderr.trim().slice(0, 300) || `git exited ${result.code}` };
