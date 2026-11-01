@@ -268,8 +268,9 @@ describeLive("durable live-session authority against controlled PostgreSQL (two 
 		expect((await a.read(entry.access, "private-read")).ok).toBe(true);
 	});
 
-	test("discovery expires abandoned sessions in bounded passes; identities stay terminal and free text is cleared", async () => {
+	test("issue expires abandoned sessions in bounded passes; identities stay terminal and free text is cleared", async () => {
 		const scoped = `${repo}-expiry`;
+		const issuer = `${repo}-expiry-issuer`;
 		const abandoned = await issued(a, owner, scoped);
 		const bulk = EXPIRY_PASS_LIMIT + 3;
 		await raw`update live_session_bindings set expires_at = clock_timestamp() - interval '1 second' where session_id = ${abandoned.sessionId}`;
@@ -287,12 +288,25 @@ describeLive("durable live-session authority against controlled PostgreSQL (two 
 				from live_session_bindings where repo_id = ${scoped}`;
 			return defined(rows[0], "scoped counts");
 		};
+		const closedRows = async () => {
+			const rows: Array<{ session_id: string; closed_at: Date | string | null }> = await raw`
+				select session_id, closed_at from live_session_bindings where repo_id = ${scoped} order by session_id`;
+			return rows;
+		};
 		expect(await counts()).toEqual({ total: bulk + 1, open: bulk + 1, tombstoned: 0 });
-		expect(await a.listMetadata({ repoId: scoped, limit: 10 })).toEqual({ ok: true, sessions: [] });
-		// One discovery call closes at most EXPIRY_PASS_LIMIT rows across all repositories, so this scope still holds a backlog.
+		// Each issuance closes at most EXPIRY_PASS_LIMIT rows across all repositories, so this scope still holds a backlog.
+		await issued(a, owner, issuer);
 		expect((await counts()).open).toBeGreaterThanOrEqual(bulk + 1 - EXPIRY_PASS_LIMIT);
+		expect((await counts()).open).toBeGreaterThan(0);
+		// Discovery writes nothing: the backlog and every closed_at value stay exactly as the issuance left them.
+		const beforeDiscovery = await closedRows();
+		expect(await a.listMetadata({ repoId: scoped, limit: 10 })).toEqual({ ok: true, sessions: [] });
+		expect(await closedRows()).toEqual(beforeDiscovery);
+		expect((await counts()).total).toBe(bulk + 1);
+		await issued(a, owner, issuer);
+		expect((await counts()).open).toBeGreaterThanOrEqual(bulk + 1 - 2 * EXPIRY_PASS_LIMIT);
 		for (let round = 0; round < 10 && (await counts()).open > 0; round += 1) {
-			await a.listMetadata({ repoId: scoped, limit: 10 });
+			await issued(a, owner, issuer);
 		}
 		expect(await counts()).toEqual({ total: bulk + 1, open: 0, tombstoned: bulk + 1 });
 		const rows: Array<Record<string, unknown>> = await raw`select * from live_session_bindings where session_id = ${abandoned.sessionId}`;

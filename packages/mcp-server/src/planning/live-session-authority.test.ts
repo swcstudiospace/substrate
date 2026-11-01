@@ -1,5 +1,5 @@
 import type { SQL } from "bun";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { bunLiveSessionAuthority, EXPIRY_PASS_LIMIT, type LiveSessionCaller, type LiveSessionOperation } from "./steering-sessions-store.ts";
 import { createTestLiveSessionAuthority, issueLiveSession } from "./live-session.test-support.ts";
@@ -38,6 +38,7 @@ describe("live authority driver boundary", () => {
 		let calls = 0;
 		let insertValues: unknown[] = [];
 		const driver = scriptedSql((text, values) => {
+			if (text.includes("with due as")) return [];
 			if (text.includes("insert into")) { insertValues = values; return [row()]; }
 			throw new Error("unexpected query");
 		});
@@ -56,14 +57,51 @@ describe("live authority driver boundary", () => {
 		}
 	});
 
+	test("issue runs exactly one bounded expiry pass before its insert attempts", async () => {
+		let passValues: unknown[] = [];
+		let inserts = 0;
+		const driver = scriptedSql((text, values) => {
+			if (text.includes("with due as")) { passValues = values; return []; }
+			if (text.includes("insert into")) { inserts += 1; return inserts === 1 ? [] : [row()]; }
+			throw new Error("unexpected query");
+		});
+		const authority = bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600, randomBytes: (size) => Buffer.alloc(size, 0xab) });
+		expect((await authority.issue({ caller: owner, repoId: "owner/name", state: "ACTIVE" })).ok).toBe(true);
+		expect(driver.statements).toHaveLength(3);
+		expect(driver.statements.filter((text) => text.includes("with due as"))).toHaveLength(1);
+		expect(driver.statements[0]).toContain("for update skip locked");
+		expect(driver.statements.slice(1).every((text) => text.includes("insert into"))).toBe(true);
+		expect(passValues).toEqual([EXPIRY_PASS_LIMIT]);
+	});
+
+	test("a failing expiry pass does not fail issue; it is reported without session id, proof or SQL text", async () => {
+		const driver = scriptedSql((text) => {
+			if (text.includes("with due as")) throw new Error("sensitive driver message");
+			if (text.includes("insert into")) return [row()];
+			throw new Error("unexpected query");
+		});
+		const written: string[] = [];
+		const spy = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => { written.push(String(chunk)); return true; });
+		const result = await bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600, randomBytes: (size) => Buffer.alloc(size, 0xab) })
+			.issue({ caller: owner, repoId: "owner/name", state: "ACTIVE" }).finally(() => spy.mockRestore());
+		expect(result.ok).toBe(true);
+		expect(driver.statements).toHaveLength(2);
+		expect(written).toHaveLength(1);
+		expect(written[0]).toMatch(/^\[substrate\] live session expiry pass failed correlation=[0-9a-f-]{36}: Error\n$/);
+		expect(written[0]).not.toContain("sensitive driver message");
+		expect(written[0]).not.toContain(id);
+		expect(written[0]).not.toContain("with due as");
+	});
+
 	test("four active or tombstone conflicts exhaust without upsert; every candidate gets a new pair", async () => {
 		let draws = 0;
 		const driver = scriptedSql(() => []);
 		const authority = bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600, randomBytes: (n) => Buffer.alloc(n, ++draws) });
 		expect(await authority.issue({ caller: owner, repoId: "owner/name", state: "ACTIVE" })).toEqual(unavailable);
 		expect(draws).toBe(8);
-		expect(driver.statements).toHaveLength(4);
-		expect(driver.statements.every((text) => text.includes("on conflict (session_id) do nothing"))).toBe(true);
+		expect(driver.statements).toHaveLength(5);
+		expect(driver.statements[0]).toContain("with due as");
+		expect(driver.statements.slice(1).every((text) => text.includes("on conflict (session_id) do nothing"))).toBe(true);
 	});
 
 	test("entropy and lost commit responses return no credential or driver diagnostics", async () => {
@@ -115,7 +153,7 @@ describe("live authority driver boundary", () => {
 		const driver = scriptedSql(() => [row()]);
 		const authority = bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600 });
 		expect((await authority.listVisible(owner, { repoId: "owner/name", limit: 1 })).ok).toBe(true);
-		const text = driver.statements.at(-1) ?? "";
+		const text = driver.statements[0] ?? "";
 		expect(text.indexOf("owner_surface =")).toBeLessThan(text.indexOf("limit"));
 		expect(text.indexOf("repo_id =")).toBeLessThan(text.indexOf("limit"));
 		expect(text).not.toContain("steering");
@@ -124,23 +162,12 @@ describe("live authority driver boundary", () => {
 		expect(await authority.listMetadata({ repoId: "owner/name", limit: 1, cursor: "bad" })).toEqual(unavailable);
 	});
 
-	test("discovery runs one bounded expiry pass before the scan; a pass failure is unavailable and skips the scan", async () => {
-		const failing = scriptedSql((text) => {
-			if (text.includes("with due as")) throw new Error("sensitive driver message");
-			return [];
-		});
-		expect(await bunLiveSessionAuthority(failing.sql, { leaseSeconds: 3600 }).listMetadata({ repoId: "owner/name", limit: 10 })).toEqual(unavailable);
-		expect(failing.statements).toHaveLength(1);
-		let passValues: unknown[] = [];
-		const driver = scriptedSql((text, values) => {
-			if (text.includes("with due as")) passValues = values;
-			return [];
-		});
+	test("discovery issues no write statement, so a scan reads the live indexes as they are", async () => {
+		const driver = scriptedSql(() => []);
 		expect(await bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600 }).listMetadata({ repoId: "owner/name", limit: 10 })).toEqual({ ok: true, sessions: [] });
-		expect(driver.statements).toHaveLength(2);
-		expect(driver.statements[0]).toContain("for update skip locked");
-		expect(driver.statements[1]).toContain("from live_session_bindings");
-		expect(passValues).toEqual([EXPIRY_PASS_LIMIT]);
+		expect(driver.statements).toHaveLength(1);
+		expect(driver.statements.every((text) => text.trim().startsWith("select"))).toBe(true);
+		expect(driver.statements[0]).toContain("from live_session_bindings");
 	});
 });
 

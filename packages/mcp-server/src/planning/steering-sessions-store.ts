@@ -4,7 +4,7 @@
  * `live_session_bindings` grant access, through the transactional authority below.
  */
 import type { SQL, TransactionSQL } from "bun";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { nextSteeringSession, scopeRepoId, STEERING_STATES, type SteeringSession, type SteeringSessionState } from "../event.ts";
 import { redact } from "../redact.ts";
 import { SURFACES, type Surface } from "../types.ts";
@@ -165,14 +165,14 @@ function metadataOf(row: Record<string, unknown>): LiveSessionMetadata {
 	};
 }
 
-/** Upper bound on expired, still-open sessions one discovery call marks terminal; the remainder wait for later calls. */
+/** Upper bound on expired, still-open sessions one issuance marks terminal; the remainder wait for later issuances. */
 export const EXPIRY_PASS_LIMIT = 100;
 
 /**
  * Marks up to EXPIRY_PASS_LIMIT expired, still-open sessions terminal. The row keeps its identity; free text is cleared the
  * way `close` clears it, and the `where closed_at is null` partial indexes stop covering it. Expiry is monotone (renewal needs
  * a live row), so a row expired at scan time is still expired once locked. Rows locked elsewhere are skipped, never awaited.
- * Driver errors propagate to the caller, which answers with the sanitized unavailable result.
+ * Driver errors propagate to the caller; issuance reports them and proceeds.
  */
 async function expireDue(sql: SQL): Promise<void> {
 	await sql.begin(async (tx) => {
@@ -185,6 +185,24 @@ async function expireDue(sql: SQL): Promise<void> {
 			set closed_at = clock_timestamp(), close_reason = 'expired', steering = null, planning_hash = null
 			from due where b.session_id = due.session_id`;
 	});
+}
+
+/**
+ * Bounded maintenance before an issuance. A failed pass is reported under a correlation id that carries neither the session,
+ * the proof, nor SQL text, and never fails the issuance it precedes.
+ */
+async function expireDueBeforeIssue(sql: SQL): Promise<void> {
+	try {
+		await expireDue(sql);
+	} catch (cause) {
+		process.stderr.write(`[substrate] live session expiry pass failed correlation=${randomUUID()}: ${failureKind(cause)}\n`);
+	}
+}
+
+/** The error's class and driver code (PostgreSQL SQLSTATE when present). Never its message, which may carry SQL text. */
+function failureKind(cause: unknown): string {
+	if (!(cause instanceof Error)) return "non-error throw";
+	return "code" in cause && typeof cause.code === "string" ? `${cause.name} ${cause.code}` : cause.name;
 }
 
 /**
@@ -224,8 +242,6 @@ export function bunLiveSessionAuthority(
 			if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 200 || (query.cursor !== undefined && !LIVE_ID.test(query.cursor))) return unavailable();
 			const repo = query.repoId === undefined ? null : scopeRepoId(query.repoId);
 			if (repo === "") return unavailable();
-			// Discovery is the maintenance point: expired sessions leave the live indexes before the scan reads them.
-			await expireDue(sql);
 			// All predicates precede LIMIT. SQL selects only the public columns, even for operators.
 			const rows: Array<Record<string, unknown>> = await sql`
 				select session_id, owner_surface, repo_id, state, updated_at, expires_at
@@ -247,6 +263,8 @@ export function bunLiveSessionAuthority(
 		async issue(input) {
 			try {
 				if (!validLease || input.caller.surface === null || !isSurface(input.caller.surface) || !isState(input.state) || scopeRepoId(input.repoId) === "") return unavailable();
+				// Bounded maintenance: expired sessions leave the live indexes. A failure is reported and never blocks issuance.
+				await expireDueBeforeIssue(sql);
 				for (let attempt = 0; attempt < 4; attempt += 1) {
 					const idBytes = entropy(32);
 					const proofBytes = entropy(32);
