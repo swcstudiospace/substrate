@@ -246,6 +246,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// answered before its forward landed must not lose that forward
 			// silently on restart (the durable outbox keeps the rest).
 			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
+			// The telemetry buffer, when it is on, gets the same bound: events the ledger did not take get one pass. A buffer whose file
+			// could not be saved gives up what is left with a dead-letter record each; a saved buffer keeps its entries for the next boot.
+			await substrate.drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true });
 			// Planning transition records in flight are awaited within their own bound, after the retains and before the flush below.
 			await substrate.planningObserver.settleTransitions(Bun.sleep(SHUTDOWN_TRANSITION_MS));
 			// The last export before shutdown, so the counters a restart resets are not

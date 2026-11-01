@@ -1169,7 +1169,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// or an operator's to write: a refusal names `reserved-action` and nothing is appended.
 			const reserved = reservedEmitRefusal({ payload: args.payload, surface: attribution.surface, callerSurface, isOperator });
 			if (reserved !== null) return refusal(reserved);
-			const { event, stored, error, warning } = await substrate.emit({
+			const { event, stored, error, warning, buffered, deadLettered } = await substrate.emit({
 				...args,
 				surface: attribution.surface,
 			}, { caller: { surface: callerSurface, isOperator } });
@@ -1180,6 +1180,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				stored,
 				...(error ? { error } : {}),
 				...(warning ? { warning } : {}),
+				...(buffered ? { buffered: true } : {}),
+				...(deadLettered ? { deadLettered: true } : {}),
 			});
 		},
 	);

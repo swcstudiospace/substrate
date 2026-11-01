@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { merkleRootHex, type GraphHeadRecord } from "@substrate/ledger";
+import { z } from "zod";
 import { redact, redactValue } from "./redact.ts";
 import { EVENT_KINDS, SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
 
@@ -42,6 +43,41 @@ function isSurface(value: string): value is SubstrateEvent["surface"] {
 
 function isKind(value: string): value is SubstrateEvent["kind"] {
 	return (EVENT_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * An event as the substrate writes it to a local file: the telemetry buffer and the dead-letter store. A file is read back
+ * by the same process that wrote it, so every field is checked, and a line that does not match is skipped, never half-trusted.
+ */
+export const StoredEvent: z.ZodType<SubstrateEvent> = z.object({
+	id: z.string(),
+	ts: z.string(),
+	surface: z.custom<SubstrateEvent["surface"]>((value) => typeof value === "string" && isSurface(value)),
+	session_id: z.string().nullable(),
+	graph_id: z.string().nullable(),
+	node_id: z.string().nullable(),
+	linear_identifier: z.string().nullable(),
+	step: z.number().nullable(),
+	repo: z.string().nullable(),
+	branch: z.string().nullable(),
+	actor: z.enum(["agent", "human"]),
+	kind: z.custom<SubstrateEvent["kind"]>((value) => typeof value === "string" && isKind(value)),
+	summary: z.string(),
+	payload: z.record(z.string(), z.unknown()),
+	hash: z.string(),
+	prev: z.string().nullable(),
+});
+
+/** One JSONL line parsed against `schema`, or null when it is not JSON or does not match. */
+export function parseStoredLine<T>(line: string, schema: z.ZodType<T>): T | null {
+	let json: unknown;
+	try {
+		json = JSON.parse(line);
+	} catch {
+		return null;
+	}
+	const parsed = schema.safeParse(json);
+	return parsed.success ? parsed.data : null;
 }
 
 export class InvalidEventError extends Error {}

@@ -223,6 +223,8 @@ import type { FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
+import { DeadLetterStore } from "./event-dead-letter.ts";
+import { EVENT_BUFFER_TICK_MS, EventBuffer, type EventBufferEntry, type EventBufferStats, type EventDelivery, type EventEnqueue } from "./event-buffer.ts";
 import {
 	RecallPrefetcher,
 	BRIEF_RECALL_CAP_MS,
@@ -637,6 +639,13 @@ export interface EmitResult {
 	deduplicated?: true;
 	/** Set (with `stored: false`) when the idempotency lookup itself failed: nothing was written and the event is not in the ledger. */
 	lookupFailed?: true;
+	/**
+	 * Set (with `stored: false`) when the write failed and the event is held for retry. It will be written, or given up with a
+	 * dead-letter record, and never silently. Nothing is in the ledger yet.
+	 */
+	buffered?: true;
+	/** Set (with `stored: false`) when the write failed and the event could not be held either: it was given up at once, with a dead-letter record. */
+	deadLettered?: true;
 }
 
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
@@ -1497,6 +1506,11 @@ export class Substrate {
 	private readonly retainOutbox: RetainOutbox;
 	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
 	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
+	// phase 76 — the telemetry buffer and its dead-letter store, both absent unless SUBSTRATE_EVENT_BUFFER_PATH is set
+	/** Events the ledger did not take, held for retry with backoff, and the store that records the ones given up for good. */
+	private readonly eventBufferStores: { buffer: EventBuffer; deadLetters: DeadLetterStore } | null;
+	/** The interval drain, started while the buffer holds entries and left unref'd so it never holds the process. */
+	private eventDrainTimer: ReturnType<typeof setInterval> | null = null;
 	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
 	private retainRecoverPending = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
@@ -1855,6 +1869,25 @@ export class Substrate {
 			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
 		});
 		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
+		// Phase 76: the telemetry buffer, on only when SUBSTRATE_EVENT_BUFFER_PATH is set. The dead-letter store is built first, because
+		// the buffer gives entries up to it while it loads its file.
+		const eventBuffer = config.eventBuffer;
+		if (eventBuffer === null) {
+			this.eventBufferStores = null;
+		} else {
+			const deadLetters = new DeadLetterStore({ path: eventBuffer.deadLetterPath });
+			const buffer = new EventBuffer({
+				path: eventBuffer.path,
+				max: eventBuffer.max,
+				maxAttempts: eventBuffer.maxAttempts,
+				backoffMs: eventBuffer.backoffMs,
+				backoffCapMs: eventBuffer.backoffCapMs,
+				allow: () => this.planes.gate("greptime").breaker?.state() !== "open",
+				onDeadLetter: (entry, reason) => deadLetters.record(entry, reason),
+			});
+			this.eventBufferStores = { buffer, deadLetters };
+			if (buffer.size() > 0) this.ensureEventDrainTimer();
+		}
 		// uplift-4 S5: the recall prefetcher (inert unless SUBSTRATE_BRIEF_RECALL is shadow or enforce) and the
 		// read-only Hindsight inventory (inert unless SUBSTRATE_HINDSIGHT_INVENTORY=on). Neither starts a timer here.
 		this.recall = new RecallPrefetcher({
@@ -2621,13 +2654,21 @@ export class Substrate {
 		// is still in flight (U5-4a). Keyless sessionless events, and everything under `off`, never wait.
 		const turnKey = sessionId ?? (idem?.key != null ? `${KEY_TURN_PREFIX}${idem.key}` : null);
 		if (!this.greptime || turnKey === null) return this.appendChained(input, sessionId, idem);
+		return this.withSessionTurn(turnKey, () => this.appendChained(input, sessionId, idem));
+	}
+
+	/**
+	 * Runs `fn` as the next turn of `turnKey`: after every earlier turn of that key has settled, and before any later one starts.
+	 * Appends and buffer deliveries of one session share a key, so a delivery never interleaves with an append that reads the tip.
+	 */
+	private async withSessionTurn<T>(turnKey: string, fn: () => Promise<T>): Promise<T> {
 		const previous = this.emitChains.get(turnKey) ?? Promise.resolve();
 		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
 		const tail = previous.then(() => gate);
 		this.emitChains.set(turnKey, tail);
 		await previous;
 		try {
-			return await this.appendChained(input, sessionId, idem);
+			return await fn();
 		} finally {
 			done();
 			if (this.emitChains.get(turnKey) === tail) this.emitChains.delete(turnKey);
@@ -2685,10 +2726,15 @@ export class Substrate {
 	}
 
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
+		const stores = this.eventBufferStores;
+		// A keyed replay is answered from the ledger first: a row that landed is the answer, whatever the buffer holds. Only a replay
+		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write.
 		if (idem?.lookup && idem.key !== null && this.greptime) {
 			const settled = await this.replayOutcome(input, idem.key);
 			if (settled !== null) return settled;
 		}
+		const waiting = idem?.key != null && stores !== null ? stores.buffer.findKeyed(input.surface, idem.key) : null;
+		if (waiting !== null) return { event: waiting.event, stored: false, buffered: true, error: waiting.last_reason };
 		let prev: string | null = null;
 		let tipError: string | null = null;
 		if (this.greptime && sessionId) {
@@ -2700,7 +2746,9 @@ export class Substrate {
 				tipError = redact(String(cause));
 			}
 		}
-		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
+		const build = (chainPrev: string | null): SubstrateEvent =>
+			idem === null ? normalizeEvent(input, chainPrev) : normalizeEvent(input, chainPrev, { key: idem.key });
+		const event = build(prev);
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 		if (tipError !== null) {
 			process.stderr.write(`[substrate] event ${event.id} not stored — chain tip unreadable: ${tipError}\n`);
@@ -2714,6 +2762,20 @@ export class Substrate {
 			const error = appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN;
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
+		}
+
+		const key = idem?.key ?? null;
+		// An earlier event of this session is still waiting for the ledger, so this one waits behind it. Written now, it would land
+		// first, and the buffered event's link would name a row that is not there yet.
+		if (stores !== null && sessionId !== null && stores.buffer.hasSession(sessionId)) {
+			return this.bufferEvent(stores.buffer, {
+				session: sessionId,
+				key,
+				ledgerPrev: prev,
+				build,
+				last_reason: "waiting behind an earlier buffered event of this session",
+				attempts: 0,
+			});
 		}
 
 		try {
@@ -2731,9 +2793,90 @@ export class Substrate {
 					warning: appendOnly !== true ? `${INGEST_NOT_RECORDED} ${DEDUP_WARNING}` : INGEST_NOT_RECORDED,
 				};
 			}
-			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
-			return { event, stored: false, error };
+			// The write failed. With the buffer on, nothing of this session waits ahead of it, so the event is held for retry rather than
+			// given up. `event` was built on the ledger's tip, which nothing of the session can have moved since the check above.
+			if (stores === null) {
+				process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
+				return { event, stored: false, error };
+			}
+			return this.bufferEvent(stores.buffer, { session: sessionId, key, ledgerPrev: prev, build: () => event, last_reason: error, attempts: 1 });
 		}
+	}
+
+	/**
+	 * Hands an event the substrate could not write to the buffer. The answer is `buffered` (it will be written, or given up with a
+	 * dead-letter record) or `deadLettered` (it was given up at once). Neither is `stored`: nothing is in the ledger yet.
+	 */
+	private bufferEvent(buffer: EventBuffer, request: EventEnqueue): EmitResult {
+		const outcome = buffer.enqueue(request);
+		if (!outcome.buffered) return { event: outcome.entry.event, stored: false, deadLettered: true, error: request.last_reason };
+		this.ensureEventDrainTimer();
+		process.stderr.write(`[substrate] event ${outcome.entry.event.id} buffered for retry — ${request.last_reason}\n`);
+		return { event: outcome.entry.event, stored: false, buffered: true, error: request.last_reason };
+	}
+
+	/**
+	 * One delivery attempt for a buffered event, run inside its session's turn. `mayExist` keeps a retry after an ambiguous write
+	 * from storing the row twice. An ingest record that could not be confirmed is reported as stored on the direct path too, so the
+	 * row being stored is the outcome that counts here.
+	 */
+	private async deliverBuffered(entry: EventBufferEntry): Promise<EventDelivery> {
+		const greptime = this.greptime;
+		if (!greptime) return { transient: "GREPTIME_URL is not set" };
+		const appendOnly = await greptime.ensureAppendMode().catch(() => null);
+		if (appendOnly !== true && !this.config.allowDeduplicatingLedger) {
+			return { transient: appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN };
+		}
+		try {
+			await greptime.insertEvent(entry.event, { mayExist: true });
+		} catch (cause) {
+			if (!(cause instanceof IngestNotRecorded)) return { transient: redact(String(cause)).slice(0, 200) };
+			process.stderr.write(`[substrate] event ${entry.event.id} landed; ingest record unconfirmed — ${redact(String(cause))}\n`);
+		}
+		this.publishHint(entry.event);
+		return "landed";
+	}
+
+	/** One attempt, run in the event's session turn so it cannot interleave with an append that reads the same tip. */
+	private deliverBufferedInTurn(entry: EventBufferEntry): Promise<EventDelivery> {
+		const session = entry.event.session_id;
+		return session === null ? this.deliverBuffered(entry) : this.withSessionTurn(session, () => this.deliverBuffered(entry));
+	}
+
+	/** Replays the buffer's due entries once. `all` ignores the backoff schedule, as shutdown and tests need. */
+	drainEventBuffer(options: { all?: boolean } = {}): Promise<void> {
+		const stores = this.eventBufferStores;
+		if (stores === null) return Promise.resolve();
+		return stores.buffer.drain((entry) => this.deliverBufferedInTurn(entry), options).finally(() => {
+			if (stores.buffer.size() === 0) this.stopEventDrain();
+		});
+	}
+
+	/**
+	 * Shutdown (phase 76): one bounded pass over the buffer. With `abandon` the periodic drain stops, and a buffer whose file is not
+	 * current gives up what is left, each entry with its dead-letter record. A durable buffer keeps its entries for the next boot.
+	 */
+	async drainPendingEvents(timeoutMs: number, options: { abandon?: boolean } = {}): Promise<void> {
+		const stores = this.eventBufferStores;
+		if (stores === null) return;
+		if (stores.buffer.size() > 0) await Promise.race([this.drainEventBuffer({ all: true }), Bun.sleep(timeoutMs)]);
+		if (options.abandon === true) this.stopEventDrain();
+		if (options.abandon === true && !stores.buffer.durable) stores.buffer.abandonAll();
+	}
+
+	private ensureEventDrainTimer(): void {
+		if (this.eventDrainTimer !== null) return;
+		this.eventDrainTimer = setInterval(() => {
+			void this.drainEventBuffer();
+		}, EVENT_BUFFER_TICK_MS);
+		this.eventDrainTimer.unref();
+	}
+
+	/** Stops the periodic drain. The timer is unref'd, but a Substrate rebuilt in the same process would otherwise leak one interval per boot. */
+	private stopEventDrain(): void {
+		if (this.eventDrainTimer === null) return;
+		clearInterval(this.eventDrainTimer);
+		this.eventDrainTimer = null;
 	}
 
 	/**
@@ -8022,6 +8165,8 @@ export class Substrate {
 			// change its status code when the cache is down.
 			cache,
 			eventBus: this.eventBusHealth(),
+			// Phase 76: depths and durability, read from memory. Reported, never gating.
+			eventBuffer: this.eventBufferStores === null ? { enabled: false } : { enabled: true, ...this.eventBufferStores.buffer.stats(), deadLetter: { depth: this.eventBufferStores.deadLetters.depth(), durable: this.eventBufferStores.deadLetters.durable } },
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
@@ -8471,6 +8616,8 @@ export interface SubstrateHealth {
 	cache: CacheHealth;
 	/** Phase 50: the wake-up bus's counters, `{ enabled: false }` while it is off. */
 	eventBus: EventBusHealth;
+	/** Phase 76: the telemetry buffer's depths, or `{ enabled: false }` while it is off. Reported, never gating. */
+	eventBuffer: EventBufferHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
@@ -8479,6 +8626,9 @@ export interface SubstrateHealth {
 
 /** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */
 export type EventBusHealth = { enabled: false } | { enabled: true; published: number; failed: number; oversize: number; malformed: number };
+
+/** `/healthz.eventBuffer` (phase 76): `{ enabled: false }` while `SUBSTRATE_EVENT_BUFFER_PATH` is unset. Otherwise the events waiting for the ledger and the dead-letter store: depths and durability only, and nothing here changes the status code. */
+export type EventBufferHealth = { enabled: false } | ({ enabled: true; deadLetter: { depth: number; durable: boolean } } & EventBufferStats);
 
 /** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
 export interface IndexArchiveHealth {

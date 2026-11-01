@@ -1286,6 +1286,8 @@ export function createHttpServer(
 					...(result.error ? { error: result.error } : {}),
 					...(result.warning ? { warning: result.warning } : {}),
 					...(result.deduplicated ? { deduplicated: true } : {}),
+					...(result.buffered ? { buffered: true } : {}),
+					...(result.deadLettered ? { deadLettered: true } : {}),
 				});
 				return;
 			}
