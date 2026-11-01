@@ -142,7 +142,7 @@ import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type Mi
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { CAUSAL_WINDOW, LINKED_EVENTS, causalChain, graphLinks, type ReducedEvent } from "./memory-graph.ts";
-import { memoryExpiry, normalizeSubject, visibleToCaller } from "./memory-policy.ts";
+import { grantedToCaller, memoryExpiry, normalizeSubject, visibleToCaller } from "./memory-policy.ts";
 import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type BankAnswer, type RecallReply } from "./memory-recall.ts";
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type ForwardOutcome, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
@@ -175,6 +175,7 @@ import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
 import { corpusNeardupReply } from "./corpus/neardup.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusPlanReply, corpusProofReply, corpusReconcileReply, corpusRootReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { authorizeRepo, authorizeRepoPath, grantedRepos, isSurfaceName, REPO_REFUSAL_MESSAGES, repoRefusalPayload, type RepoRefusalReason, type RepoScopeRefusal, rowsInGrant } from "./repo-scope.ts";
 import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
@@ -1900,7 +1901,7 @@ export class Substrate {
 				if (hindsight === null || bankForSurface(hindsight, surface) !== bank) return { ok: false };
 				// `banks: null`: the surface's OWN bank only, never the HINDSIGHT_BANKS fan-out. The
 				// deadline `budgetMs` is the recall's abort signal, so it fires inside the gated fetch.
-				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs }, query, surface, repo);
+				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs, granted: this.memoryGrant(surface) }, query, surface, repo);
 				if (reply.degraded) return { ok: false };
 				return {
 					ok: true,
@@ -1996,6 +1997,13 @@ export class Substrate {
 			const authority = this.liveSessions;
 			if (authority === null) throw new LiveSessionBoundaryError({ status: "refused", error: { code: "session-unavailable" } });
 			const request: LiveSessionInput = { repoId: scopeRepoId(input.repo_id), state: input.state, ...(input.steering === undefined ? {} : { steering: input.steering }), ...(input.planning_hash === undefined ? {} : { planningHash: input.planning_hash }) };
+			// Phase 72: a session addresses only the repositories its surface is granted. An ungranted repository answers the same
+			// not-found an unknown session does, so the refusal discloses nothing about the sessions that repository holds.
+			const repoGate = authorizeRepo(this.config.repoScope, caller.surface, request.repoId);
+			if (!repoGate.ok) {
+				await this.repoRefusal("docs_steering_session", caller.surface, repoGate.reason, request.repoId);
+				throw new LiveSessionBoundaryError(liveSessionNotFound());
+			}
 			const checked = this.liveBoundary.checked(prepared);
 			const result = checked === null ? await authority.issue({ ...request, caller }) : await authority.transition(checked.access, { ...request, ...(input.previous_state === undefined ? {} : { previousState: input.previous_state }) }, "owner-transition");
 			if (!result.ok) {
@@ -2037,6 +2045,9 @@ export class Substrate {
 
 	async listLiveSessions(caller: LiveSessionCaller, query: SessionsQuery): Promise<LiveSessionDiscoveryReply> {
 		return this.executeLiveCall({ caller, tool: "live_session_discovery", args: query, operation: "private-read", kind: "discovery", transport: "rest" }, async () => {
+			// Phase 72: discovery names a repository or reads every one, so a scoped caller must name a granted one. A refusal reads
+			// no session and answers the same not-found an unknown session does.
+			if ((await this.scopedRepoRefusal("live_session_discovery", caller.surface, query.repoId, true)) !== null) throw new LiveSessionBoundaryError(liveSessionNotFound());
 			const result = await this.liveSessions?.listVisible(caller, { ...(query.repoId === null ? {} : { repoId: query.repoId }), limit: query.limit, ...(query.cursor === undefined ? {} : { cursor: query.cursor }) });
 			if (result === undefined || !result.ok) throw new LiveSessionBoundaryError({ status: "refused", error: { code: result?.error.code ?? "session-unavailable" } });
 			return { sessions: result.sessions, truncated: result.nextCursor !== undefined, ...(result.nextCursor === undefined ? {} : { next_cursor: result.nextCursor }) };
@@ -3221,7 +3232,7 @@ export class Substrate {
 					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
 					this.recallUncounted({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs, callerRepo),
 				]);
-				return mergeDerivedHits(entries, recall, scope, { surface, repo: callerRepo });
+				return mergeDerivedHits(entries, recall, scope, { surface, repo: callerRepo, granted: this.memoryGrant(surface) });
 			},
 		});
 		if (ledger.graphLinked !== true && ledger.causal !== true) return merged;
@@ -3402,7 +3413,7 @@ export class Substrate {
 		const index = this.index;
 		const load = () => recallMemories(
 			{
-				config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch,
+				config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch, granted: this.memoryGrant(callerSurface),
 				budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
 				...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids) }),
 			}, query, callerSurface, callerRepo,
@@ -4148,6 +4159,16 @@ export class Substrate {
 	 * would not. Throws `MemoryVerifyError` for a bad or unreadable id. `verified` does not prove the source event concerns this entry.
 	 */
 	async memoryVerify(id: string, caller: { surface: string | null; repo?: string | undefined; isOperator: boolean }): Promise<MemoryVerifyResult & { signer_set?: SignerSetSummary }> {
+		// Phase 72: the reader's repository decides which agent-scope entries it may read, so under scope it must be granted. An
+		// ungranted one is answered as an unknown id, before the index is read.
+		const scope = this.config.repoScope;
+		if (scope.enforced) {
+			const gate = authorizeRepo(scope, caller.surface as Surface | null, caller.repo ?? "");
+			if (!gate.ok) {
+				await this.repoRefusal("memory_verify", caller.surface as Surface | null, gate.reason, caller.repo ?? "");
+				throw new MemoryVerifyError("not_found", "no entry can be read for this repository");
+			}
+		}
 		const index = this.index;
 		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
 		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo) };
@@ -4818,9 +4839,16 @@ export class Substrate {
 	}
 
 	/** The registry as a reader sees it: filtered, newest first, at most `query.limit` rows with `truncated` saying more exist. */
-	async listWorktrees(query: WorktreeListQuery): Promise<WorktreeListOutcome> {
+	async listWorktrees(query: WorktreeListQuery, callerSurface: Surface | null = null): Promise<WorktreeListOutcome> {
 		const access = this.worktreeAccess(false);
 		if (!access.ok) return access;
+		if (query.repo !== null) {
+			const gate = authorizeRepo(this.config.repoScope, callerSurface, query.repo);
+			if (!gate.ok) return this.repoRefusal("worktree_list", callerSurface, gate.reason, query.repo);
+		}
+		// A scoped caller reads only its own repositories: the store filters on them, and a caller granted none reads nothing.
+		const repos = grantedRepos(this.config.repoScope, callerSurface);
+		if (repos !== null && repos.length === 0) return { ok: true, worktrees: [], truncated: false };
 		try {
 			// One row past the page tells whether it was cut, without counting the table.
 			const rows = await access.store.list({
@@ -4829,6 +4857,7 @@ export class Substrate {
 				state: query.state,
 				limit: query.limit + 1,
 				staleBefore: staleCutoff(Date.now(), this.config.worktreeRegistry.idleDays),
+				repos,
 			});
 			return { ok: true, worktrees: rows.slice(0, query.limit), truncated: rows.length > query.limit };
 		} catch (cause) {
@@ -6243,6 +6272,165 @@ export class Substrate {
 	}
 
 	/**
+	 * Phase 72: the gate a repository-keyed read or write applies before it touches anything. Scoping off: nothing. A named
+	 * repository must be granted. With `required`, a reply that would span repositories when unnamed is refused too.
+	 */
+	async scopedRepoRefusal(route: string, surface: Surface | null, named: string | null | undefined, required: boolean): Promise<RepoScopeRefusal | null> {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return null;
+		if (named === undefined || named === null || named === "") return required ? this.repoRefusal(route, surface, "all-repos-not-granted", "") : null;
+		const gate = authorizeRepo(scope, surface, named);
+		return gate.ok ? null : this.repoRefusal(route, surface, gate.reason, named);
+	}
+
+	/**
+	 * Phase 72: the repository a graph belongs to, from the index's graph row, or null when there is no index, the graph is unknown,
+	 * the index does not answer, or the row names no repository. Only the graph's row is read here; its content is read by the caller.
+	 */
+	private async graphRepoOf(graphId: string): Promise<string | null> {
+		if (this.index === null) return null;
+		try {
+			const repo = scopeRepoId((await this.index.getGraph(graphId))?.repo ?? null);
+			return repo === "" ? null : repo;
+		} catch {
+			return null;
+		}
+	}
+
+	/** A graph read or write: its repository must be granted before the graph's content is read. An unresolvable graph is refused under scope. */
+	async scopedGraphRefusal(route: string, surface: Surface | null, graphId: string): Promise<RepoScopeRefusal | null> {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return null;
+		const repo = await this.graphRepoOf(graphId);
+		if (repo === null) return this.repoRefusal(route, surface, "graph-repo-unresolved", graphId);
+		const gate = authorizeRepo(scope, surface, repo);
+		return gate.ok ? null : this.repoRefusal(route, surface, gate.reason, repo);
+	}
+
+	/** The brief: an unnamed repository is refused under scope; a named graph must resolve to a granted repository that is the named one. */
+	async scopedBriefRefusal(surface: Surface | null, request: { repo?: string | null | undefined; graph_id?: string | null | undefined }): Promise<RepoScopeRefusal | null> {
+		const named = await this.scopedRepoRefusal("brief", surface, request.repo ?? null, true);
+		if (named !== null || request.repo === undefined || request.repo === null || request.graph_id === undefined || request.graph_id === null || request.graph_id === "") return named;
+		return this.scopedNamedGraphRefusal("brief", surface, request.repo, request.graph_id);
+	}
+
+	/**
+	 * The docs corpus (RAGFlow datasets, LightRAG and their Hindsight fallback) spans every repository, and a reply carries no
+	 * repository to filter on. Under scope it is refused to every scoped caller, unnamed or named, before any retrieval.
+	 */
+	async scopedDocsRefusal(route: string, surface: Surface | null): Promise<RepoScopeRefusal | null> {
+		return this.config.repoScope.enforced ? this.repoRefusal(route, surface, "all-repos-not-granted", "") : null;
+	}
+
+	/**
+	 * A write names the repository it lands in, and may name a graph too. Under scope a named repository must be granted; a named graph
+	 * must be granted and, when it is already recorded, must belong to that repository. With no repository, the graph's repository is
+	 * the target; with neither, the write is refused.
+	 */
+	async scopedWriteRefusal(route: string, surface: Surface | null, target: { repo?: string | null | undefined; graph_id?: string | null | undefined }): Promise<RepoScopeRefusal | null> {
+		if (!this.config.repoScope.enforced) return null;
+		const hasRepo = target.repo !== undefined && target.repo !== null && target.repo !== "";
+		const hasGraph = target.graph_id !== undefined && target.graph_id !== null && target.graph_id !== "";
+		if (hasRepo) {
+			const named = await this.scopedRepoRefusal(route, surface, target.repo, true);
+			if (named !== null || !hasGraph) return named;
+			return this.scopedNamedGraphRefusal(route, surface, target.repo ?? "", target.graph_id ?? "");
+		}
+		if (hasGraph) return this.scopedGraphRefusal(route, surface, target.graph_id ?? "");
+		return this.repoRefusal(route, surface, "all-repos-not-granted", "");
+	}
+
+	/**
+	 * A named graph inside a named repository: the graph's repository must be granted, and a graph already recorded under another
+	 * repository is refused. An unrecorded graph is allowed, since its first write creates it under the named repository. An index
+	 * that cannot answer is refused: an unreadable row is not known to belong to the repository.
+	 */
+	private async scopedNamedGraphRefusal(route: string, surface: Surface | null, repo: string, graphId: string): Promise<RepoScopeRefusal | null> {
+		const granted = await this.scopedRepoRefusal(route, surface, repo, true);
+		if (granted !== null) return granted;
+		if (this.index === null) return null;
+		try {
+			const row = await this.index.getGraph(graphId);
+			if (row === null || scopeRepoId(row.repo ?? null) === scopeRepoId(repo)) return null;
+		} catch {
+			return this.repoRefusal(route, surface, "graph-repo-unresolved", graphId);
+		}
+		return this.repoRefusal(route, surface, "graph-repo-mismatch", graphId);
+	}
+
+	/** Default deny: a route or tool no declaration names is refused to a scoped caller, before its handler runs, and audited under its name. */
+	async refuseUndeclared(name: string, surface: Surface | null): Promise<RepoScopeRefusal> {
+		return this.repoRefusal(name, surface, "not-declared-for-scope", name);
+	}
+
+	/**
+	 * The ledger read (`events_query`, `POST /events/query`). Under scope a named repository must be granted, and an unnamed read is
+	 * refused: the store reads one repository at a time, so a scoped caller never reads another repository's rows. The rows that remain
+	 * are filtered again before the reply.
+	 */
+	async queryEventsFor(input: EventQueryInput = {}, surface: Surface | null): Promise<{ ok: true; result: EventQueryResult } | RepoScopeRefusal> {
+		const scope = this.config.repoScope;
+		const named = await this.scopedRepoRefusal("events_query", surface, input.repo ?? null, true);
+		if (named !== null) return named;
+		const result = await this.queryEvents(input);
+		if (!scope.enforced) return { ok: true, result };
+		const events = rowsInGrant(result.events, scope, surface);
+		return { ok: true, result: { ...result, events, count: events.length } };
+	}
+
+	/** Phase 72: whether a graph's repository is granted to `surface`. An unresolvable graph is not. */
+	private async graphGranted(graphId: string, surface: Surface | null): Promise<boolean> {
+		const repo = await this.graphRepoOf(graphId);
+		return repo !== null && authorizeRepo(this.config.repoScope, surface, repo).ok;
+	}
+
+	/**
+	 * Phase 72: a memory search reply a scoped caller may see. An entry whose scope names a repository outside the grant is dropped; a
+	 * `graph:` scope is kept only when its graph resolves to a granted repository; `global`, `person:` and `agent:` scopes name no repository
+	 * and are kept. Ledger links are kept only for granted graphs, and each kept entry's causal chain is removed, since its events are not
+	 * repository-keyed. Scoping off returns the reply unchanged.
+	 */
+	async memoryReplyInGrant<R extends { entries: LinkedMemoryEntry[]; graph_links?: Array<{ graph_id: string; events: ReducedEvent[] }>; derived?: Array<{ scope?: string | undefined; repo?: string | undefined }> }>(reply: R, surface: Surface | null): Promise<R> {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return reply;
+		const entries: LinkedMemoryEntry[] = [];
+		for (const entry of reply.entries) {
+			let allowed = true;
+			if (entry.scope.startsWith("repo:")) allowed = authorizeRepo(scope, surface, entry.scope.slice("repo:".length)).ok;
+			else if (entry.scope.startsWith("graph:")) allowed = await this.graphGranted(entry.scope.slice("graph:".length), surface);
+			if (allowed) {
+				// The causal chain is not keyed by repository, so a scoped reply omits it: the property is absent, not set to undefined.
+				const { causal_chain: _causalChain, ...unlinked } = entry;
+				entries.push(unlinked);
+			}
+		}
+		const links: Array<{ graph_id: string; events: ReducedEvent[] }> = [];
+		for (const link of reply.graph_links ?? []) if (await this.graphGranted(link.graph_id, surface)) links.push(link);
+		// A derived hit is filtered by the rule the recall applies, so one from an ungranted repository is removed here as well.
+		const granted = this.memoryGrant(surface);
+		const derived = reply.derived?.filter((hit) => grantedToCaller(hit.scope, hit.repo, granted));
+		return { ...reply, entries, ...(reply.graph_links === undefined ? {} : { graph_links: links }), ...(derived === undefined ? {} : { derived }) } as R;
+	}
+
+	/** Phase 72: whether `repo` is granted to `surface` for memory reads. Undefined while scoping is off; a name that is no surface is granted nothing. */
+	private memoryGrant(surface: string | null): ((repo: string) => boolean) | undefined {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return undefined;
+		return (repo) => isSurfaceName(surface) && authorizeRepo(scope, surface, repo).ok;
+	}
+
+	/**
+	 * A refused repository request: the 403 the doors answer with. The ledger records the route, the reason and a digest of what was
+	 * asked for, never the request itself. An anonymous refusal is recorded by the route audit, which runs before every handler.
+	 */
+	private async repoRefusal(route: string, surface: Surface | null, reason: RepoRefusalReason, requested: string): Promise<RepoScopeRefusal> {
+		if (surface !== null) {
+			await this.emit({ surface, kind: "warning", summary: `repo request refused: ${reason}`, payload: repoRefusalPayload(route, reason, requested) }).catch(() => undefined);
+		}
+		return { ok: false, status: 403, body: { error: reason, problem: REPO_REFUSAL_MESSAGES[reason] } };
+	}
+
+	/**
 	 * The corpus doors' dependencies (v1.7 phase 63). Built on each call so a server with `SUBSTRATE_CORPUS` off never touches
 	 * the index or builds a plane: the gates in `corpus/service.ts` answer first.
 	 */
@@ -6259,6 +6447,7 @@ export class Substrate {
 			emit: (event) => this.emit(event),
 			roots: this.corpusRoots(),
 			anchor: { ports: () => this.anchorVerifyPorts(), verify: this.corpusSeam?.anchorVerifier },
+			repoScope: this.config.repoScope,
 		};
 	}
 
@@ -6898,9 +7087,21 @@ export class Substrate {
 	 * naming a holder that is gone, and each release becomes a warning another
 	 * agent will see in its brief.
 	 */
-	async reapExpiredLeases(repo?: string | null) {
+	async reapExpiredLeases(repo?: string | null, surface: Surface | null = null) {
 		if (!this.index) return [];
-		const reaped = await this.index.reapExpiredLeases(repo ?? null);
+		const index = this.index;
+		// The index reaps by repository, and an unnamed reap reaches every graph. Under scope a reap names one granted repository, or
+		// each granted repository in turn; a named repository outside the grant reaps nothing and is audited.
+		const scope = this.config.repoScope;
+		let targets: Array<string | null> = [repo ?? null];
+		if (scope.enforced) {
+			if (repo) {
+				const gate = authorizeRepo(scope, surface, repo);
+				targets = gate.ok ? [scopeRepoId(repo)] : [];
+				if (!gate.ok) await this.repoRefusal("reap_expired_leases", surface, gate.reason, repo);
+			} else targets = [...(grantedRepos(scope, surface) ?? [])];
+		}
+		const reaped = (await Promise.all(targets.map((target) => index.reapExpiredLeases(target)))).flat();
 		const graphIds = [...new Set(reaped.map((lease) => lease.graph_id))];
 		for (const graphId of graphIds) await this.cache.bump(graphGenerationKey(graphId));
 		if (graphIds.length > 0) await this.cache.bump(GRAPHS_GENERATION_KEY);
@@ -7145,6 +7346,21 @@ export class Substrate {
 	}
 
 	// ── drift ──────────────────────────────────────────────────────────────────
+
+	/**
+	 * `POST /drift` and `drift_scan`: the repository gate, then the scan. The repository must be granted, and a path must sit inside
+	 * a registered directory of that same repository, resolved through symlinks. A refusal runs no git and reads no trail. The scan
+	 * then reads the resolved target, never the string the caller sent.
+	 */
+	async scopedDriftScan(request: Parameters<Substrate["driftScan"]>[0], callerSurface: Surface | null): Promise<{ ok: true; report: DriftReport } | RepoScopeRefusal> {
+		const scope = this.config.repoScope;
+		const repoGate = authorizeRepo(scope, callerSurface, request.repo);
+		if (!repoGate.ok) return this.repoRefusal("drift", callerSurface, repoGate.reason, request.repo);
+		if (request.path === undefined || request.path === null) return { ok: true, report: await this.driftScan(request) };
+		const pathGate = authorizeRepoPath(scope, callerSurface, request.path, request.repo);
+		if (!pathGate.ok) return this.repoRefusal("drift", callerSurface, pathGate.reason, request.path);
+		return { ok: true, report: await this.driftScan({ ...request, path: pathGate.target ?? request.path }) };
+	}
 
 	/**
 	 * Compare the tree, the trail and the claims for one repo.
