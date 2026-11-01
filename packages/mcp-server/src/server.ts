@@ -2197,8 +2197,6 @@ export function createHttpServer(
 					return;
 				}
 				const queued = await queueSteering(substrate.steering, { surface, isOperator: caller.isOperator }, { ...input.value, session_binding: sessionBindingOf(req) }, undefined, "rest");
-				// The same two wake-ups the tool gives, neither able to fail the queue: the long-poll waiters, then the hint note.
-				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
 				sendSteeringResult(res, queued);
 				return;
 			}
@@ -2228,7 +2226,7 @@ export function createHttpServer(
 				const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
 				switch (waited.status) {
 					case "directive":
-						sendJson(res, 200, { directive: restDirective(waited.record), wait_ms: timeoutMs });
+						sendJson(res, 200, { directive: restDirective(waited.record, waited.sequence), wait_ms: timeoutMs });
 						return;
 					case "busy":
 						send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });

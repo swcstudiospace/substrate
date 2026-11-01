@@ -51,7 +51,8 @@ import type {
 	Surface,
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
-import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
+import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql, bunSteeringIdempotencyStore } from "./planning/steering-store.ts";
+import type { SteeringIdempotencyStore } from "./planning/steering.ts";
 import { bunLiveSessionAuthority, type LiveSessionAuthority } from "./planning/steering-sessions-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
 import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
@@ -902,6 +903,38 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			create index if not exists live_session_bindings_repo_id_idx
 				on live_session_bindings (repo_id, session_id) where closed_at is null`,
 	},
+	// Durable steering idempotency (v1.8 phase 77): the per-session delivery sequence counter and the keyed-queue replay records.
+	// Opt-in with the audit table (step 33): with SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE off this step is skipped and not ledgered.
+	// Additive: two new tables and one nullable column on planning_steering_audit (the sequence a queued directive was given).
+	// No existing row is touched, and a NULL sequence keeps a row's payload hash. The replay table is pruned by the store (expired
+	// records, then the oldest beyond the configured cap). The audit log itself is never pruned.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 43,
+		name: "planning_steering_idempotency",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `alter table planning_steering_audit drop column if exists delivery_sequence; drop table if exists planning_steering_replay; drop table if exists planning_steering_sequence`,
+		sql: `
+			create table if not exists planning_steering_sequence (
+				target_session_id text primary key,
+				last_sequence     bigint not null check (last_sequence >= 0)
+			);
+			create table if not exists planning_steering_replay (
+				scope_key         text primary key,
+				target_session_id text not null,
+				fingerprint       text not null,
+				directive_json    text not null,
+				sequence          bigint not null check (sequence >= 1),
+				queued_at_ms      bigint not null,
+				expires_at_ms     bigint not null,
+				constraint planning_steering_replay_window_check check (expires_at_ms > queued_at_ms)
+			);
+			create index if not exists planning_steering_replay_recency_idx on planning_steering_replay (queued_at_ms desc, scope_key desc);
+			alter table planning_steering_audit
+				add column if not exists delivery_sequence bigint
+				constraint planning_steering_audit_delivery_sequence_check check (delivery_sequence is null or delivery_sequence >= 1)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -974,6 +1007,14 @@ export class IndexStore implements MemoryStore {
 	 */
 	steeringAudit(): SteeringAuditSink {
 		return new SteeringAuditSink(bunSteeringAuditSql(this.sql), bunSteeringAuditReadSql(this.sql));
+	}
+
+	/**
+	 * The steering idempotency store over this store's pool (v1.8 phase 77): the durable delivery sequence counter and the keyed-queue
+	 * replay records. It only builds the adapter; the tables exist after migration step 43, under the same opt-in as the audit table.
+	 */
+	steeringIdempotency(): SteeringIdempotencyStore {
+		return bunSteeringIdempotencyStore(this.sql);
 	}
 
 	/**
