@@ -5381,6 +5381,21 @@ describe("verifyGraph hour report", () => {
 			expect(verdict.trusted).toBe(false);
 		});
 
+		test("a failing graph_chain_leaves lookup resolves as an untrusted verdict with reason store-failed, and the anchored hour is still reported", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				graphChainLeafHours: async () => {
+					throw new Error("relation graph_chain_leaves does not exist");
+				},
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.reason).toBe("store-failed");
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("store-failed");
+			expect(verdict.hours).toHaveLength(1);
+			expect(verdict.hours[0]?.status).toBe("anchored");
+		});
+
 		test("a trailing hour whose rows and ingest records are deleted, with its anchor and leaves kept, fails the verdict; the intact graph verifies", async () => {
 			const NEXT = H + HOUR;
 			const first = v2World([{ session: "s1", count: 2 }]);
