@@ -1310,7 +1310,7 @@ Plans:
 
 **Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
 
-**Status**: Not started. Discovery: `insertEvent` (`packages/mcp-server/src/greptime.ts:1217`) has no retry, and a failure returns `stored: false` (`packages/mcp-server/src/service.ts:2699`) with nothing queued.
+**Status**: Executed; verification human_needed (live proofs pending; see 76-VERIFICATION.md). Discovery (before the build): `insertEvent` (`packages/mcp-server/src/greptime.ts:1217`) has no retry, and a failure returns `stored: false` (`packages/mcp-server/src/service.ts:2699`) with nothing queued.
 
 **Depends on**: Phase 73 (shared ledger write path)
 
@@ -1319,7 +1319,7 @@ Plans:
   1. A failed event write enters a bounded buffer, is retried with backoff, and after the retry budget is written to a dead-letter store with its hash.
   2. Buffer and dead-letter depth are reported in `/healthz` and bounded by a flag.
 
-**Plans**: none written
+**Plans**: [76-01](phases/76-telemetry-buffer-and-dead-letter/76-01-PLAN.md); [76-01-SUMMARY](phases/76-telemetry-buffer-and-dead-letter/76-01-SUMMARY.md); [76-VERIFICATION](phases/76-telemetry-buffer-and-dead-letter/76-VERIFICATION.md) (human_needed).
 
 ### Phase 77: Steering idempotency and ordering
 
@@ -1417,6 +1417,6 @@ Plans:
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Implemented locally; draft PR #201, not merge-ready | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Not started | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Executed; verification human_needed (live proofs pending) | - |
 | 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
 | 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
