@@ -2051,6 +2051,7 @@ describe("identifier lookups", () => {
 
 	test("verifyGraph reads by the stored form of the graph id", async () => {
 		const asked: Array<[string, string]> = [];
+		const leafAsked: string[] = [];
 		const greptime = {
 			ensureAppendMode: async () => true,
 			readEvents: async (column: "graph_id", value: string) => {
@@ -2058,7 +2059,10 @@ describe("identifier lookups", () => {
 				return [];
 			},
 			graphIngest: async () => [],
-			graphChainLeafHours: async () => [],
+			graphChainLeafHours: async (graphId: string) => {
+				leafAsked.push(graphId);
+				return [];
+			},
 			firstIngestMs: async () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
@@ -2066,6 +2070,8 @@ describe("identifier lookups", () => {
 		await substrate.verifyGraph("ut-1".padEnd(900, "x"));
 
 		expect(asked[0]?.[1].length).toBe(512);
+		expect(leafAsked).toEqual([asked[0]?.[1] ?? ""]);
+		expect(leafAsked[0]?.length).toBe(512);
 	});
 });
 
@@ -5297,6 +5303,7 @@ describe("verifyGraph hour report", () => {
 			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
 			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: defined(world.events[0], "event 1").id }]);
 			expect(verdict.ok).toBe(false);
+			expect(verdict.chain).toEqual({ ok: true });
 		});
 
 		test("sessions verify one by one, and the verdict is the same for every read order", async () => {
@@ -5394,6 +5401,19 @@ describe("verifyGraph hour report", () => {
 			expect(verdict.trusted_reason).toBe("store-failed");
 			expect(verdict.hours).toHaveLength(1);
 			expect(verdict.hours[0]?.status).toBe("anchored");
+		});
+
+		test("a graph_chain_leaves lookup that outlasts the verify budget resolves as an untrusted verdict with reason budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			// A one-millisecond budget leaves no allowance for the lookup, and a lookup that never answers cannot win the race.
+			const verdict = await substrateWith(stubOf(world, { graphChainLeafHours: () => new Promise<never>(() => {}) }), { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.reason).toBe("budget exhausted");
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("budget exhausted");
 		});
 
 		test("a trailing hour whose rows and ingest records are deleted, with its anchor and leaves kept, fails the verdict; the intact graph verifies", async () => {

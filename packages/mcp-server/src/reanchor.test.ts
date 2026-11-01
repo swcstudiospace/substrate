@@ -1055,6 +1055,34 @@ describe("a v2 hour's memo is checked against the heads its members give", () =>
 		expect(rerun.stdout).not.toContain("adopted");
 		w.expectUntouched();
 	});
+
+	test("a read-back with the same period, root and count but another heads root is refused as send-failed", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.readBackMemo = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(9) });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("a read-back of a v1 memo for a v2 hour is refused as send-failed", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.readBackMemo = formatMemo({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1) });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("a read-back that is the exact stored memo is accepted: the send is recorded", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.readBackMemo = memo;
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.emitted).toHaveLength(1);
+	});
 });
 
 function noteRecord(n: number, hourMs: number, signature: string, over: { previous?: string; id?: string } = {}): ReanchorRecord {

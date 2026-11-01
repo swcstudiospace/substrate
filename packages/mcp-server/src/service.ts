@@ -7355,10 +7355,10 @@ export class Substrate {
 		// Hours that hold this graph's chain leaves are checked even when every event row and ingest record in them is gone: a trailing
 		// hour deleted outright is then still expected, and its leaves name what it lost. Anchors are one row per hour for the whole
 		// store, so only the leaves name this graph's hours.
-		const storedLeafHours = await bounded(() => greptime.graphChainLeafHours(storedGraphId), Math.max(0, budgetMs - (Date.now() - startedAt) - margin));
-		// A lookup that throws or outlasts the budget leaves this graph's hours unknown. The hours found so far are still reported, and the verdict says the lookup failed.
-		const leavesUnreadable = storedLeafHours === null;
-		for (const hour of storedLeafHours ?? []) {
+		const leafRead = await outcomeWithin(() => greptime.graphChainLeafHours(storedGraphId), Math.max(0, budgetMs - (Date.now() - startedAt) - margin));
+		// A read that throws is a store failure, and one that outlasts the budget is budget exhausted. Either way the hours found so far are still reported, and the verdict names the reason.
+		const leavesUnreadable: string | null = leafRead.kind === "answer" ? null : leafRead.kind === "timeout" ? "budget exhausted" : "store-failed";
+		for (const hour of leafRead.kind === "answer" ? leafRead.value : []) {
 			if (!byHour.has(hour)) byHour.set(hour, []);
 		}
 	// Retained ingest events with no event row in this graph's read
@@ -7563,11 +7563,11 @@ export class Substrate {
 	}
 
 	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
-	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0 && !leavesUnreadable;
+	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0 && leavesUnreadable === null;
 	const reason = !chain.ok
 		? chain.reason
-		: leavesUnreadable
-			? "store-failed"
+		: leavesUnreadable !== null
+			? leavesUnreadable
 			: uncovered.length > 0
 				? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
 				: missing.length > 0
@@ -7587,9 +7587,9 @@ export class Substrate {
 		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
 		legacy: { count: legacy.length, ids: [...legacy].sort() },
 		missing: { count: missing.length, ids: [...missing] },
-		trusted: !leavesUnreadable && rows.length > 0 && anchoredHours.length > 0 && untrustedHour === undefined,
-		trusted_reason: leavesUnreadable
-			? "store-failed"
+		trusted: leavesUnreadable === null && rows.length > 0 && anchoredHours.length > 0 && untrustedHour === undefined,
+		trusted_reason: leavesUnreadable !== null
+			? leavesUnreadable
 			: rows.length === 0
 				? "no events"
 				: anchoredHours.length === 0

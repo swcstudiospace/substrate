@@ -788,6 +788,7 @@ describe("runAnchorJob failures", () => {
 	});
 
 	test("a store failure on insert stops the run", async () => {
+		let insertReached = false;
 		const { deps: d, emitted } = deps({
 			greptime: {
 				firstIngestMs: async () => H10,
@@ -796,11 +797,13 @@ describe("runAnchorJob failures", () => {
 				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
 				insertGraphChainLeaves: async () => {},
 				insertAnchor: async () => {
-					throw new Error("unreachable");
+					insertReached = true;
+					throw new Error("insert refused");
 				},
 			} as unknown as AnchorDeps["greptime"],
 		});
 		const result = await runAnchorJob(d);
+		expect(insertReached).toBe(true);
 		expect(result.code).toBe(1);
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
 	});

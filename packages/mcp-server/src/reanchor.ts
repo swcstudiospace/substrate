@@ -745,17 +745,7 @@ async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string
 	} catch (cause) {
 		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back failed (re-run to adopt it if it landed): ${reasonOf(cause)}; ${MAY_STILL_LAND}`);
 	}
-	const back = readBack?.memo !== null && readBack?.memo !== undefined ? parseMemo(readBack.memo) : null;
-	if (
-		readBack === null ||
-		back === null ||
-		back.periodStartMs !== hour.period_start_ms ||
-		back.rootHex !== hour.root ||
-		back.count !== hour.event_count ||
-		readBack.payer !== env.pubkey ||
-		!readBack.payerSigned ||
-		readBack.err !== null
-	) {
+	if (readBack === null || readBack.memo !== hour.memo || readBack.payer !== env.pubkey || !readBack.payerSigned || readBack.err !== null) {
 		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back does not match the memo (re-run to adopt it if it landed); ${MAY_STILL_LAND}`);
 	}
 	return signature;
