@@ -1304,7 +1304,7 @@ Plans:
   1. With the cache breaker open, brief and recall return authoritative results. A test proves it.
   2. Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags.
 
-**Plans**: none written
+**Plans**: none written. The code commits predate any plan; that deviation is recorded in [75-VERIFICATION](phases/75-dragonfly-degradation/75-VERIFICATION.md), which is human_needed; live proofs pending.
 
 ### Phase 76: Telemetry buffer and dead-letter
 
@@ -1416,7 +1416,7 @@ Plans:
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Not started | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | Implemented locally; draft PR #200, not merge-ready | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | Implemented without plan or summary; verification human_needed (live proofs pending); draft PR #200, not merge-ready | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
 | 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
 | 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
