@@ -1274,7 +1274,7 @@ Plans:
   1. Tests save the graph's head before the change, then edit a stored payload, delete a middle event, truncate the last events, and rewrite the whole chain with recalculated `hash` and `prev`. Each is compared with that saved head: the edits and the rewrite report the first differing event id, and truncation reports the first missing event id.
   2. The chain head for each graph is recorded in the hourly anchor. That recorded head is the trusted earlier proof criterion 1 compares against; a head recomputed from the stored rows is never used as the proof.
 
-**Plans**: [73-CONTEXT](phases/73-ledger-tamper-evidence/73-CONTEXT.md) (decisions D73-01 to D73-07); [73-01](phases/73-ledger-tamper-evidence/73-01-PLAN.md) (serial units U1 to U4); [73-01-SUMMARY](phases/73-ledger-tamper-evidence/73-01-SUMMARY.md).
+**Plans**: [73-CONTEXT](phases/73-ledger-tamper-evidence/73-CONTEXT.md) (decisions D73-01 to D73-07); [73-01](phases/73-ledger-tamper-evidence/73-01-PLAN.md) (serial units U1 to U4); [73-01-SUMMARY](phases/73-ledger-tamper-evidence/73-01-SUMMARY.md); [73-VERIFICATION](phases/73-ledger-tamper-evidence/73-VERIFICATION.md) (human_needed; live proofs pending).
 
 ### Phase 74: Cross-repo compensating actions
 
@@ -1414,7 +1414,7 @@ Plans:
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 0/0 | Not started | - |
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
-| 73. Ledger tamper evidence | v1.8 | 0/0 | Implemented locally; draft PR #201, not merge-ready | - |
+| 73. Ledger tamper evidence | v1.8 | 0/0 | Executed; verification human_needed (live proofs pending); draft PR #201, not merge-ready | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Not started | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
