@@ -1295,7 +1295,7 @@ Plans:
 
 **Goal**: When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
 
-**Status**: Not started. Discovery: the cache plane already runs through `callPlane` and `CircuitBreaker` (`packages/observability/src/breaker.ts:99`), and no authoritative state lives only in the cache. The gap: the degradation of admission budgets and generation keys under an open breaker is not tested.
+**Status**: Implemented locally; gates green (2026-11-01): typecheck, Biome lint, full repository suite (11,316 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate. Criterion 1 is covered by tests: with the cache breaker open, brief and recall answer authoritatively. Criterion 2 is covered by the per-class `SUBSTRATE_BUDGET_<CLASS>_BREAKER` flags, which default to fail-open, refuse boot on an invalid value, and record a fail-closed refusal as `refused` in enforce and `bypass` in shadow. Residual R1, a refused generation bump remembered in-process only and bounded by the 5-minute brief TTL, is recorded in the phase context. Draft PR #200; not merge-ready. Discovery: the cache plane already runs through `callPlane` and `CircuitBreaker` (`packages/observability/src/breaker.ts:99`), and no authoritative state lives only in the cache.
 
 **Depends on**: none
 
@@ -1416,7 +1416,7 @@ Plans:
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Not started | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | Not started | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | Implemented locally; draft PR #200, not merge-ready | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
 | 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
 | 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
