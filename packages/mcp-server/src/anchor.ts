@@ -51,7 +51,7 @@ import {
 	type TransactionMemo,
 } from "@substrate/ledger";
 import { isAbsolute as isAbsPath } from "node:path";
-import { InvalidEventError, inChainOrder } from "./event.ts";
+import { chainLeafCommitment, InvalidEventError, inChainOrder } from "./event.ts";
 import { GreptimeError, INGEST_LAG_MS, type GraphChainLeafRow, type GreptimeClient, type NewAnchor } from "./greptime.ts";
 import { redact } from "./redact.ts";
 import type { HourDigest, Substrate } from "./service.ts";
@@ -418,7 +418,7 @@ export function buildGraphHeads<T extends ChainMember>(
 			sessionId: group.sessionId,
 			periodStartMs,
 			count: chain.length,
-			leavesRootHex: merkleRootHex(chain.map((member) => member.hash)),
+			leavesRootHex: merkleRootHex(chain.map((member) => chainLeafCommitment(member.id, member.hash))),
 			headEventId: head.id,
 			headHashHex: head.hash,
 		});

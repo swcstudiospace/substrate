@@ -63,6 +63,7 @@ export interface ScratchLedger {
 		readEvents: (column: string, value: string) => Promise<Array<Record<string, unknown>>>;
 		graphIngest: (graphId: string) => Promise<IngestRecord[]>;
 		firstIngestMs: () => Promise<number>;
+		graphChainLeafHours: (graphId: string) => Promise<number[]>;
 		hourLeaves: (hour: number) => Promise<Array<{ event_id: string; hash: string }>>;
 		anchorForPeriod: (hour: number) => Promise<Record<string, unknown> | null>;
 	};
@@ -112,6 +113,7 @@ function scratchLedger(): ScratchLedger {
 			return records.filter((record) => ids.has(record.event_id));
 		},
 		firstIngestMs: async () => H,
+		graphChainLeafHours: async () => [],
 		hourLeaves: async (hour: number) => (hour === H ? leaves() : []),
 		anchorForPeriod: async (hour: number) => (hour === H ? anchored : null),
 	};

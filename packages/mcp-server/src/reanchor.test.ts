@@ -380,6 +380,13 @@ describe("the saved plan", () => {
 		const entry = hourEntry(ONE[0] as Planned);
 		expect(() => parseSavedPlan(planText(ONE, { plan: { dry_run: true, hours: [entry, entry] } }))).toThrow("twice");
 	});
+
+	test("a plan whose hour carries a v2 memo parses, and keeps the memo", () => {
+		const entry = hourEntry(ONE[0] as Planned);
+		const memo = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(5) });
+		const plan = parseSavedPlan(planText(ONE, { plan: { dry_run: true, hours: [{ ...entry, memo }] } }));
+		expect(plan.hours.map((hour) => hour.memo)).toEqual([memo]);
+	});
 });
 
 describe("argument grammar", () => {

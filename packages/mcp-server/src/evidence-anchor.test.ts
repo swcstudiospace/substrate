@@ -8,8 +8,9 @@
  * injected. What is asserted is what a reader of the bundle sees.
  */
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
-import { formatMemo, hourEnd, merkleRootHex } from "@substrate/ledger";
-import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex } from "@substrate/ledger";
+import { buildGraphHeads, DEVNET_GENESIS_HASH } from "./anchor.ts";
+import type { StoredLeaf } from "./event.ts";
 import { loadConfig } from "./config.ts";
 import { buildGraphEvidence, createObservability } from "./observe.ts";
 import { FakeStore } from "./memory-write.test.ts";
@@ -69,6 +70,7 @@ interface ScratchLedger {
 		readEvents: (column: string, value: string) => Promise<Array<Record<string, unknown>>>;
 		graphIngest: (graphId: string) => Promise<IngestRecord[]>;
 		firstIngestMs: () => Promise<number>;
+		graphChainLeafHours: (graphId: string) => Promise<number[]>;
 		hourLeaves: (hour: number) => Promise<Array<{ event_id: string; hash: string }>>;
 		anchorForPeriod: (hour: number) => Promise<Record<string, unknown> | null>;
 	};
@@ -79,6 +81,8 @@ interface ScratchLedger {
 	memoOf: (signature: string) => string | null;
 	/** Freeze the anchor row for `hour` the way the hourly job would have written it. Hour H by default. */
 	anchorHour: (hour?: number) => void;
+	/** Freeze the anchor row for `hour` as a v2 memo over the per-(graph, session) heads. Hour H by default. */
+	anchorHourV2: (hour?: number) => void;
 	/** Ingest every event from here on into this hour. */
 	ingestHour: (hour: number) => void;
 }
@@ -92,6 +96,7 @@ function scratchLedger(): ScratchLedger {
 	const tips = new Map<string, string>();
 	const records: IngestRecord[] = [];
 	const anchored = new Map<number, Record<string, unknown>>();
+	const storedLeaves = new Map<number, StoredLeaf[]>();
 	let clock = 0;
 	let hourBase = H;
 
@@ -120,6 +125,8 @@ function scratchLedger(): ScratchLedger {
 			return records.filter((record) => ids.has(record.event_id));
 		},
 		firstIngestMs: async () => H,
+		graphChainLeafHours: async () => [],
+		hourChainLeaves: async (hour: number) => storedLeaves.get(hour) ?? [],
 		hourLeaves: async (hour: number) => leaves(hour),
 		anchorForPeriod: async (hour: number) => anchored.get(hour) ?? null,
 	};
@@ -153,6 +160,29 @@ function scratchLedger(): ScratchLedger {
 				slot: 42,
 				anchored_at: hourIso(NOW),
 			});
+		},
+		anchorHourV2: (hour = H) => {
+			const batch = leaves(hour);
+			const members = batch.map((leaf) => {
+				const row = rows.get(leaf.event_id);
+				if (!row) throw new Error(`hour member ${leaf.event_id} has no row`);
+				return { id: row.id, hash: row.hash, prev: row.prev, graph_id: row.graph_id ?? "", session_id: row.session_id ?? "" };
+			});
+			const built = buildGraphHeads(members, hour);
+			const root = merkleRootHex(batch.map((leaf) => leaf.hash));
+			anchored.set(hour, {
+				period_start: hourIso(hour),
+				period_end: hourIso(hourEnd(hour)),
+				root,
+				event_count: batch.length,
+				memo: formatMemoV2({ periodStartMs: hour, rootHex: root, count: batch.length, headsRootHex: headsRoot(built.records) }),
+				tx_sig: hour === H ? SIG : `${SIG}-${(hour - H) / HOUR}`,
+				signer: PUBKEY,
+				cluster: "devnet",
+				slot: 42,
+				anchored_at: hourIso(NOW),
+			});
+			storedLeaves.set(hour, built.leaves);
 		},
 		ingestHour: (hour: number) => {
 			hourBase = hour;
@@ -347,6 +377,24 @@ describe("evidence bundle anchors", () => {
 		expect(bundle.anchors[HOURS - 1]?.status).toBe("unverified");
 		expect(bundle.anchors[HOURS - 1]?.reason).toBeTruthy();
 		expect(bundle.teachables.find((teachable) => teachable.hour === hourIso(hourAt(HOURS - 1)))?.anchored).toBe(false);
+	});
+
+	test("an anchored v2 hour whose event was edited after anchoring is unverified, and the evidence says the head failed", async () => {
+		const { ledger, substrate, observed } = await scratchWorld();
+		await writeTeachable(substrate);
+		ledger.anchorHourV2();
+		const altered = [...ledger.rows.values()].find((row) => row.payload.action === "teachable");
+		if (!altered) throw new Error("the teachable should be written");
+		// The hour is anchored over stored hashes; this changes the content and leaves the stored hash alone.
+		ledger.rows.set(altered.id, { ...altered, payload: { ...altered.payload, content_sha256: "e".repeat(64) } });
+
+		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
+			rpc: fakeRpc(async () => signedMemo(ledger.frozenMemo())) as never,
+			now: NOW,
+		});
+
+		expect(bundle.anchors[0]).toMatchObject({ status: "unverified", head_failed: true });
+		expect(bundle.anchors[0]?.reason).toContain("differs at");
 	});
 });
 

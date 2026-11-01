@@ -551,16 +551,16 @@ substrate:v2:<hour start>:<root>:<count>:<headsRoot>
 ```
 
 - `<root>` and `<count>` are the v1 commitment, unchanged: the RFC 6962 root over the hour's event hashes, in ingest order.
-- `<headsRoot>` is the RFC 6962 root over one head record per `(graph_id, session_id)` pair that wrote events in the hour, sorted by that pair (`packages/ledger/src/heads.ts`). A record hashes the canonical JSON of `[graphId, sessionId, periodStartMs, count, leavesRootHex, headEventId, headHashHex]` with SHA-256. `leavesRootHex` is the Merkle root over the pair's event hashes in chain order; the head is the pair's last event in chain order. A missing `session_id` is `""`.
+- `<headsRoot>` is the RFC 6962 root over one head record per `(graph_id, session_id)` pair that wrote events in the hour, sorted by that pair (`packages/ledger/src/heads.ts`). A record hashes the canonical JSON of `[graphId, sessionId, periodStartMs, count, leavesRootHex, headEventId, headHashHex]` with SHA-256. `leavesRootHex` is the RFC 6962 root over one leaf per event of the pair, in chain order, where each leaf is the SHA-256 (lowercase hex) of the JSON `[event_id, hash]` for that event. Each leaf commits to the event id as well as its hash, so a stored `event_id` cannot change unseen. The head is the pair's last event in chain order. A missing `session_id` is `""`.
 
 **`graph_chain_leaves`** holds one row per event: `period_start`, `graph_id`, `session_id`, `seq` (the chain position from 0), `event_id`, `hash`. It is append-only with no primary key, so a retried write can store a row twice. Reads collapse exact duplicates; two rows that disagree about one `seq` make the stored chain invalid. The job writes an hour's leaves before its `anchors` row, so no row exists without its leaves.
 
 **Trust.** `substrate verify` trusts an anchored v2 hour only when:
 
 1. the stored leaves of every graph in that hour, rebuilt into head records, reproduce the on-chain `headsRoot`; and
-2. for each `(graph_id, session_id)` pair of the graph being verified, its events in chain order match its stored leaves position by position.
+2. for each `(graph_id, session_id)` pair of the graph being verified, every stored leaf names an event of that pair whose recomputed content hash and stored hash both equal the leaf's hash, and no event of the pair lies outside the stored leaves.
 
-Only the on-chain root is trusted. A head recomputed from the ledger's rows is never trusted. If (1) fails, the whole hour is untrusted, with no localisation. If (2) fails, the verdict names the first event where the chain parts from its leaves: `first_differing_event_id` (an edited or rewritten event) or `first_missing_event_id` (a deleted or truncated event). Any contradiction of an anchored head makes `ok` false, even when the local chain check passes; a full rewrite passes that check.
+Only the on-chain root is trusted. A head recomputed from the ledger's rows is never trusted. If (1) fails, the whole hour is untrusted, with no localisation. If (2) fails, the verdict names the first event where the chain parts from its leaves, walking the stored order: `first_differing_event_id` (an edited or rewritten event, or the first event past the stored end) or `first_missing_event_id` (a deleted or truncated event). Any contradiction of an anchored head makes `ok` false, even when the local chain check passes; a full rewrite passes that check.
 
 **v1 hours.** Hours anchored before phase 73 carry memo v1 and no per-graph heads. They still verify for root and count, and are reported `trusted: false` with the reason `anchored with a v1 memo: no heads commitment on chain`. `ok` is unchanged for them.
 

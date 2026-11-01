@@ -163,6 +163,7 @@ describe("Substrate.bindGraph", () => {
 			// is pre-coverage legacy, so the hour report stays empty.
 			graphIngest: async () => [],
 			firstIngestMs: async () => null,
+			graphChainLeafHours: async () => [],
 		};
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: stored as never });
 

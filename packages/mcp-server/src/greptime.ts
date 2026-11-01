@@ -1832,6 +1832,21 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * The distinct hours that hold one graph's chain leaves, ascending. Verify reads these as well as the event and ingest rows, so an
+	 * hour whose rows were deleted but whose leaves remain is still checked. Quoted by the stored graph id, as every graph read is.
+	 */
+	async graphChainLeafHours(storedGraphId: string): Promise<number[]> {
+		const rows = await this.sql(`SELECT DISTINCT "period_start" FROM "graph_chain_leaves" WHERE "graph_id" = ${this.q(storedGraphId)}`);
+		return rows
+			.map((row) => {
+				const at = epochMs(row.period_start);
+				if (!Number.isFinite(at)) throw new GreptimeError(`a chain leaf of ${storedGraphId} has a period that is not a number`);
+				return at;
+			})
+			.sort((a, b) => a - b);
+	}
+
+	/**
 	 * The hour of the earliest `event_ingest` record — the coverage start.
 	 *
 	 * No hour before this is ever anchored (D28-05): the deploy hour is

@@ -24,8 +24,8 @@
  *     is accepted by the set at THAT transaction's block time (a missing block time refuses, `rpc-unreadable`), and discovery lists the
  *     signatures of every key in the set, so an hour an earlier key re-anchored before a rotation is adopted, not sent again.
  *  4. For every plan hour the digest is recomputed from the ledger and refused as `root-mismatch` unless the stored row, the
- *     recomputed root and count, and the stored memo (exactly `formatMemo` of the hour, root and count) all agree with the plan
- *     byte for byte.
+ *     recomputed root and count, and the stored memo agree with the plan byte for byte. A v1 memo must be `formatMemo` of the hour,
+ *     root and count; a v2 memo must be the one the anchor job builds from the heads its members give.
  *  5. The run's lock (`deps.lock`; the entry builds `fileLock`: ONE file per host, `<SUBSTRATE_STATE_DIR or /var/lib/substrate>/substrate-reanchor.lock`,
  *     create-exclusive, stale after a dead pid or 30 minutes) is held from here to the end of the run, across discovery, send and recording, so two
  *     overlapping runs cannot both pass discovery before either send is visible; the second refuses as `reanchor-locked`.
@@ -229,7 +229,7 @@ function planHour(raw: unknown, index: number, observedGenesis: string): SavedPl
 
 /**
  * Parse the JSON `reanchor-plan-run.ts --json` printed. Refuses anything that is not a schema-1 dry-run report with an observed
- * genesis, or whose hours are not each self-consistent (memo = `formatMemo` of the hour, root and count). A plan with no hours is
+ * genesis, or whose hours are not each self-consistent (a v1 or v2 memo of the hour's own period, root and count). A plan with no hours is
  * valid: there is nothing to do, and the planner then reads no chain, so its observed genesis is `null` and that is accepted for
  * an empty plan only.
  */

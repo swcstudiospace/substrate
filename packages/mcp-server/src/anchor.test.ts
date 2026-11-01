@@ -21,6 +21,7 @@ import {
 	type AnchorEnv,
 	type ChainMember,
 } from "./anchor.ts";
+import { headRecordsFromLeaves } from "./event.ts";
 import type { NewAnchor } from "./greptime.ts";
 import type { EmitResult, HourDigest } from "./service.ts";
 import type { EventInput } from "./types.ts";
@@ -792,6 +793,8 @@ describe("runAnchorJob failures", () => {
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => null,
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 				insertAnchor: async () => {
 					throw new Error("unreachable");
 				},
@@ -1102,6 +1105,11 @@ describe("anchor heads (D73-01, D73-02)", () => {
 		const { records, leaves } = buildGraphHeads([...chain, member("evt_9", null, null, null)], H10);
 		expect(records).toHaveLength(1);
 		expect(leaves).toHaveLength(3);
+	});
+
+	test("the anchor and the verifier derive the same head records from the same leaves", () => {
+		const { records, leaves } = buildGraphHeads(chain, H10);
+		expect(headRecordsFromLeaves(leaves, H10)).toStrictEqual(records);
 	});
 
 	test("an hour with events anchors a v2 memo carrying the heads root", async () => {

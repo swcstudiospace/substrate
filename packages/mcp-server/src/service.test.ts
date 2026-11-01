@@ -2058,6 +2058,7 @@ describe("identifier lookups", () => {
 				return [];
 			},
 			graphIngest: async () => [],
+			graphChainLeafHours: async () => [],
 			firstIngestMs: async () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
@@ -4209,6 +4210,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4227,6 +4229,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
@@ -4245,6 +4248,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				digested = true;
 				return world.leaves;
@@ -4263,6 +4267,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
@@ -4279,6 +4284,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4294,6 +4300,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4313,6 +4320,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4327,6 +4335,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world, { root: "1".repeat(64) }),
 		});
@@ -4341,6 +4350,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				throw new Error("hour member evt_1 has no event row");
 			},
@@ -4358,6 +4368,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4378,6 +4389,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4396,6 +4408,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		} as never });
@@ -4415,6 +4428,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4435,6 +4449,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4463,6 +4478,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => [...world.rows, extraRow],
 			graphIngest: async () => (++ingests === 1 ? world.records : [...world.records, extraRecord]),
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4498,6 +4514,7 @@ describe("verifyGraph hour report", () => {
 				return world.records;
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4518,7 +4535,7 @@ describe("verifyGraph hour report", () => {
 	});
 
 	test("empty graph verifies with no hours", async () => {
-		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null });
+		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] });
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours).toEqual([]);
@@ -4533,6 +4550,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => [],
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				throw new Error(`hour member ${missing} has no event row`);
 			},
@@ -4553,6 +4571,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4578,6 +4597,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4604,6 +4624,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => {
 					throw new Error("an open hour must never be digested");
 				},
@@ -4626,6 +4647,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4647,6 +4669,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows.slice(0, 1),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4675,6 +4698,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, liveRow]),
 			graphIngest: async () => [...world.records, liveRecord],
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4717,6 +4741,7 @@ describe("verifyGraph hour report", () => {
 				return ingests === 1 ? [...world.records, secondRecord] : [...world.records, firstRecord, secondRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4755,6 +4780,7 @@ describe("verifyGraph hour report", () => {
 				return [...world.records, secondRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4798,6 +4824,7 @@ describe("verifyGraph hour report", () => {
 				return ingests === 1 ? [...world.records, gapRecord] : [...world.records, gapRecord, foreignRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4817,6 +4844,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4839,6 +4867,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows.slice(0, 1),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4866,6 +4895,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [forgedRow]),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4890,6 +4920,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [world.rows[0], restored]),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4924,6 +4955,7 @@ describe("verifyGraph hour report", () => {
 				})(),
 				graphIngest: async () => [...world.records, liveRecord],
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4953,6 +4985,7 @@ describe("verifyGraph hour report", () => {
 				},
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4983,6 +5016,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 				...extra,
@@ -5125,7 +5159,7 @@ describe("verifyGraph hour report", () => {
 		 * One v2 hour: the sessions chained in the order given, each event ingested after the last, its leaves stored, and the memo
 		 * carrying the heads root over those leaves. The fixture's own memo, root and leaves are the honest answer every case edits.
 		 */
-		function v2World(sessions: Array<{ session: string; count: number }>): World {
+		function v2World(sessions: Array<{ session: string; count: number }>, hour = H): World {
 			const events: SubstrateEvent[] = [];
 			const records: Array<{ event_id: string; event_ts: number; ingested_at: number }> = [];
 			const leaves: Array<{ event_id: string; ingested_at: number; hash: string }> = [];
@@ -5135,15 +5169,15 @@ describe("verifyGraph hour report", () => {
 					const event = normalizeEvent({ surface: "omp", kind: "note", summary: `${session}-${i}`, session_id: session, graph_id: "ut-1", actor: "agent" }, prev);
 					prev = event.hash;
 					events.push(event);
-					const ingested_at = H + 1000 * events.length;
+					const ingested_at = hour + 1000 * events.length;
 					records.push({ event_id: event.id, event_ts: Date.parse(event.ts), ingested_at });
 					leaves.push({ event_id: event.id, ingested_at, hash: event.hash });
 				}
 			}
 			const members = events.map((event) => ({ id: event.id, hash: event.hash, prev: event.prev, graph_id: event.graph_id, session_id: event.session_id }));
-			const built = buildGraphHeads(members, H);
+			const built = buildGraphHeads(members, hour);
 			const root = merkleRootHex(events.map((event) => event.hash));
-			const memo = formatMemoV2({ periodStartMs: H, rootHex: root, count: events.length, headsRootHex: headsRoot(built.records) });
+			const memo = formatMemoV2({ periodStartMs: hour, rootHex: root, count: events.length, headsRootHex: headsRoot(built.records) });
 			return { events, rows: events.map(asRow), records, leaves, root, memo, stored: built.leaves };
 		}
 		/** The honest hour every case edits: its events, the ledger rows and ingest records, the stored leaves and the anchored memo. */
@@ -5178,6 +5212,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorOf(world),
 				hourChainLeaves: async () => world.stored,
@@ -5208,28 +5243,43 @@ describe("verifyGraph hour report", () => {
 			const edited = defined(world.events[1], "event 2").id;
 			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
 			const verdict = await verify(world, { readEvents: async () => rows });
-			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
 			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: edited }]);
 			expect(verdict.hours[0]?.trusted).toBe(false);
 			expect(verdict.trusted).toBe(false);
+			expect(verdict.ok).toBe(false);
 		});
 
-		test("a deleted middle event is first_missing_event_id", async () => {
+		test("a deleted middle event is first_missing_event_id, and the verdict fails", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
 			const deleted = defined(world.events[1], "event 2").id;
-			const verdict = await verify(world, { readEvents: async () => world.rows.filter((row) => row.id !== deleted) });
+			// The event row is gone while its ingest record remains, so the whole-hour digest throws naming it, as the store does.
+			const verdict = await verify(world, {
+				readEvents: async () => world.rows.filter((row) => row.id !== deleted),
+				hourLeaves: async () => {
+					throw new Error(`hour member ${deleted} has no event row`);
+				},
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
 			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: deleted }]);
 			expect(verdict.trusted).toBe(false);
+			expect(verdict.ok).toBe(false);
 		});
 
-		test("truncated last events are first_missing_event_id at the first one gone", async () => {
+		test("truncated last events are first_missing_event_id at the first one gone, and the verdict fails", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
 			const gone = defined(world.events[1], "event 2").id;
-			const verdict = await verify(world, { readEvents: async () => world.rows.slice(0, 1) });
+			const verdict = await verify(world, {
+				readEvents: async () => world.rows.slice(0, 1),
+				hourLeaves: async () => {
+					throw new Error(`hour member ${gone} has no event row`);
+				},
+			});
 			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: gone }]);
+			expect(verdict.ok).toBe(false);
 		});
 
-		test("a full rewrite with every hash and prev recalculated parts at the first event", async () => {
+		test("a full rewrite with every hash and prev recalculated parts at the first event, and the verdict fails", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
 			let prev: string | null = null;
 			const rewritten = world.events.map((event) => {
@@ -5239,9 +5289,14 @@ describe("verifyGraph hour report", () => {
 				prev = hash;
 				return { ...content, hash };
 			});
-			const rows = rewritten.map(asRow);
-			const verdict = await verify(world, { readEvents: async () => rows });
+			// The store holds the rewritten hashes, so the whole-hour digest recomputes over them and no longer matches the memo.
+			const verdict = await verify(world, {
+				readEvents: async () => rewritten.map(asRow),
+				hourLeaves: async () => world.leaves.map((leaf, i) => ({ ...leaf, hash: defined(rewritten[i], "rewritten event").hash })),
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
 			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: defined(world.events[0], "event 1").id }]);
+			expect(verdict.ok).toBe(false);
 		});
 
 		test("sessions verify one by one, and the verdict is the same for every read order", async () => {
@@ -5286,7 +5341,8 @@ describe("verifyGraph hour report", () => {
 			const stored = world.stored.map((leaf) => (leaf.seq === 1 && leaf.session_id === "s1" ? { ...leaf, hash: "f".repeat(64) } : leaf));
 			const verdict = await verify(world, { hourChainLeaves: async () => stored });
 			expect(verdict.hours[0]).toMatchObject({
-				status: "anchored",
+				status: "mismatch",
+				head_failed: true,
 				trusted: false,
 				trusted_reason: "stored leaves do not reproduce the on-chain heads root",
 				pairs: [],
@@ -5299,37 +5355,69 @@ describe("verifyGraph hour report", () => {
 			const edited = defined(world.events[1], "event 2").id;
 			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
 			const verdict = await verify(world, { readEvents: async () => rows });
-			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.hours[0]?.status).toBe("mismatch");
 			expect(verdict.ok).toBe(false);
 		});
 
-		test("ok is false for a deleted middle event", async () => {
-			const world = v2World([{ session: "s1", count: 3 }]);
-			const deleted = defined(world.events[1], "event 2").id;
-			const verdict = await verify(world, { readEvents: async () => world.rows.filter((row) => row.id !== deleted) });
-			expect(verdict.ok).toBe(false);
-		});
-
-		test("ok is false for truncated last events", async () => {
-			const world = v2World([{ session: "s1", count: 3 }]);
-			const verdict = await verify(world, { readEvents: async () => world.rows.slice(0, 1) });
-			expect(verdict.ok).toBe(false);
-		});
-
-		test("ok is false for a full rewrite that passes the local chain check", async () => {
-			const world = v2World([{ session: "s1", count: 3 }]);
-			let prev: string | null = null;
-			const rows = world.events.map((event) => {
-				const content = { ...event, summary: `${event.summary} rewritten`, prev };
-				const { hash: _old, ...rest } = content;
-				const hash = eventHash(rest);
-				prev = hash;
-				return asRow({ ...content, hash });
+		test("a trailing hour whose rows and ingest records are gone, with its leaves still stored, fails the verdict", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				readEvents: async () => [],
+				graphIngest: async () => [],
+				hourLeaves: async () => [],
+				graphChainLeafHours: async () => [H],
 			});
-			const verdict = await verify(world, { readEvents: async () => rows });
-			expect(verdict.chain).toEqual({ ok: true });
-			expect(verdict.hours[0]?.status).toBe("anchored");
 			expect(verdict.ok).toBe(false);
+			expect(verdict.hours).toHaveLength(1);
+			expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: defined(world.events[0], "event 1").id }]);
+		});
+
+		test("an empty event id among the stored leaves is untrusted, and the verdict does not throw", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 ? { ...leaf, event_id: "" } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, head_failed: true });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a trailing hour whose rows and ingest records are deleted, with its anchor and leaves kept, fails the verdict; the intact graph verifies", async () => {
+			const NEXT = H + HOUR;
+			const first = v2World([{ session: "s1", count: 2 }]);
+			const last = v2World([{ session: "s2", count: 2 }], NEXT);
+			const lastBlockS = (NEXT + HOUR + 5 * 60_000) / 1000;
+			const stubFor = (lastIntact: boolean) => ({
+				readEvents: async () => (lastIntact ? [...first.rows, ...last.rows] : first.rows),
+				graphIngest: async () => (lastIntact ? [...first.records, ...last.records] : first.records),
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [H, NEXT],
+				hourLeaves: async (startMs: number) => (startMs === H ? first.leaves : lastIntact ? last.leaves : []),
+				anchorForPeriod: async (startMs: number) =>
+					startMs === H
+						? anchorOf(first)
+						: startMs === NEXT
+							? anchorOf(last, { period_start: new Date(NEXT).toISOString(), period_end: new Date(NEXT + HOUR).toISOString(), tx_sig: "sig2" })
+							: null,
+				hourChainLeaves: async (startMs: number) => (startMs === H ? first.stored : last.stored),
+			});
+			const rpc = {
+				getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+				transactionMemo: async (signature: string) =>
+					signature === "sig2"
+						? { memo: last.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: lastBlockS }
+						: { memo: first.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S },
+			};
+			const verdictFor = (lastIntact: boolean) =>
+				substrateWith(stubFor(lastIntact)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+
+			const intact = await verdictFor(true);
+			expect(intact.ok).toBe(true);
+			expect(intact.hours.map((hour) => hour.status)).toEqual(["anchored", "anchored"]);
+
+			const deleted = await verdictFor(false);
+			expect(deleted.ok).toBe(false);
+			expect(deleted.hours.find((hour) => hour.period_start === new Date(H).toISOString())?.status).toBe("anchored");
+			expect(deleted.hours.find((hour) => hour.period_start === new Date(NEXT).toISOString())).toMatchObject({ status: "mismatch", head_failed: true });
 		});
 
 		test("ok is false when one session of two is edited", async () => {
@@ -5346,7 +5434,7 @@ describe("verifyGraph hour report", () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
 			const stored = world.stored.map((leaf) => (leaf.seq === 1 ? { ...leaf, hash: "f".repeat(64) } : leaf));
 			const verdict = await verify(world, { hourChainLeaves: async () => stored });
-			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.hours[0]?.status).toBe("mismatch");
 			expect(verdict.ok).toBe(false);
 		});
 
@@ -5360,7 +5448,7 @@ describe("verifyGraph hour report", () => {
 		});
 
 		test("a graph with no events is untrusted: no events", async () => {
-			const verdict = await substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null }).verifyGraph("ut-1", {
+			const verdict = await substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] }).verifyGraph("ut-1", {
 				now: H + 5 * HOUR,
 			});
 			expect(verdict.ok).toBe(true);

@@ -1048,6 +1048,7 @@ function anchorEvidenceOf(hour: HourReport): AnchorEvidence {
 		...(hour.tx_sig ? { tx_sig: hour.tx_sig, explorer_url: devnetExplorerTxUrl(hour.tx_sig) } : {}),
 		...(hour.slot === undefined ? {} : { slot: hour.slot }),
 		...(hour.reason ? { reason: hour.reason } : {}),
+		...(hour.head_failed ? { head_failed: true } : {}),
 	};
 }
 
