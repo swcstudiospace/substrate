@@ -11,11 +11,15 @@ import pytest
 from substrate_dispatcher.worktree import (
     DEFAULT_MIN_FREE_GB,
     MIN_FREE_ENV,
+    WORKTREE_ROOTS_ENV,
+    WORKTREES_ROOT,
     WorktreeRefused,
+    creation_root,
     ensure_worktree,
     min_free_bytes,
     repo_checkout,
     validate_graph_id,
+    worktree_roots,
 )
 
 MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
@@ -24,6 +28,7 @@ MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
 @pytest.fixture(autouse=True)
 def _clean_floor_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(MIN_FREE_ENV, raising=False)
+    monkeypatch.delenv(WORKTREE_ROOTS_ENV, raising=False)
 
 GID = "ut-mufsocbe-c7ced745"
 SLUG = "swcstudiospace/agent-substrate"
@@ -213,3 +218,64 @@ def test_ensure_worktree_floor_follows_env(repo: Path, tmp_path: Path, monkeypat
     assert err.value.marker == "low-disk"
     assert "20 GB" in str(err.value)
     assert calls == []
+
+
+def test_worktree_roots_keep_absolute_entries_in_order_once(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    value = f"relative/one::{first}:  :./x:{second}:{first}/"
+    assert worktree_roots({WORKTREE_ROOTS_ENV: value}) == [first, second]
+
+
+def test_worktree_roots_are_empty_when_unset():
+    assert worktree_roots({}) == []
+
+
+@pytest.mark.parametrize("value", [None, "", "relative/only", "rel:also-rel:"])
+def test_creation_root_falls_back_to_the_default(value):
+    env = {} if value is None else {WORKTREE_ROOTS_ENV: value}
+    assert creation_root(env) == WORKTREES_ROOT
+
+
+def test_creation_root_is_the_first_configured_root(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    assert creation_root({WORKTREE_ROOTS_ENV: f"{first}:{second}"}) == first
+
+
+def test_ensure_worktree_creates_under_the_first_configured_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+
+    path = ensure_worktree(repo, GID, "main", run=Recorder(), disk_usage=plenty)
+
+    assert path == first / GID
+    assert path.is_dir()
+    assert not second.exists()
+
+
+def test_disk_floor_checks_the_filesystem_of_the_chosen_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, str(tmp_path / "volume" / "worktrees"))
+    checked: list[str] = []
+
+    def usage(path: str) -> Usage:
+        checked.append(path)
+        return PLENTY
+
+    ensure_worktree(repo, GID, "main", run=Recorder(), disk_usage=usage)
+
+    assert checked == [str(tmp_path)]
+
+
+def test_low_disk_on_the_chosen_root_refuses_before_any_git_command(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "wt"
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, str(root))
+    run = Recorder()
+
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", run=run, disk_usage=usage)
+
+    assert err.value.marker == "low-disk"
+    assert run.calls == []
+    assert not root.exists()
