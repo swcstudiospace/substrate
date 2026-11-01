@@ -1265,7 +1265,7 @@ Plans:
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: Implemented locally; gates green (2026-11-01): typecheck, Biome lint, full repository suite (11,355 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate. Criterion 1 is covered by tests against fake stores and the fake Solana runner. Criterion 2 is met per (graph, session) chain, because chains are per session (`verifyGraph` groups by session before ordering). Live devnet sends and production DDL were not run and remain operator-gated. Draft PR; not merge-ready. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts`) and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`).
+**Status**: Implemented locally; gates green (2026-11-01): typecheck, Biome lint, full repository suite (11,358 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate. Re-anchored v2 hours verify against their heads root (330507a6). Criterion 1 is covered by tests against fake stores and the fake Solana runner. Criterion 2 is met per (graph, session) chain, because chains are per session (`verifyGraph` groups by session before ordering). Live devnet sends and production DDL were not run and remain operator-gated. Draft PR; not merge-ready. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts`) and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`).
 
 **Depends on**: none
 
