@@ -685,6 +685,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if (refusedSurface !== null) return refusal(refusedSurface);
 			const briefSurface = surface ?? callerSurface ?? "claude-code";
 			// The profile follows the bearer's own surface, not an `surface` argument a caller may set for attribution.
+			const briefScope = await substrate.scopedBriefRefusal(callerSurface, { repo, graph_id });
+			if (briefScope !== null) return { ...json(briefScope.body), isError: true };
 			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, session_id, steering_session_id, surface: briefSurface }, if_none_match, requested.profile, callerSurface, liveOptions(args, session_binding));
 			if (notModified) {
 				return {
@@ -744,6 +746,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if (!substrate.config.briefSessions) return { ...json({ refused: true, reason: SESSION_CONTEXT_DISABLED, error: SESSION_CONTEXT_DISABLED_MESSAGE }), isError: true };
 			const parsed = parseSessionContextArgs({ repo_id, session_id, limit });
 			if (!parsed.ok) return refusal(parsed.error);
+			const contextScope = await substrate.scopedRepoRefusal("session_context", callerSurface, parsed.value.repoId, true);
+			if (contextScope !== null) return { ...json(contextScope.body), isError: true };
 			return json(await substrate.sessionContext(parsed.value));
 		},
 	);
@@ -893,21 +897,26 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async (request) => {
 			if (request.include_expired && !isOperator) return refusal(INCLUDE_EXPIRED_REFUSED);
 			try {
-				if (isPagedSearch(request)) return json(await substrate.searchMemoryPage(request, callerSurface ?? "unattributed"));
+				const memoryGate = await substrate.scopedRepoRefusal("memory_search", callerSurface, request.repo, false);
+				if (memoryGate !== null) return { ...json(memoryGate.body), isError: true };
+				if (isPagedSearch(request)) return json(await substrate.memoryReplyInGrant(await substrate.searchMemoryPage(request, callerSurface ?? "unattributed"), callerSurface));
 				// Index entries first with derived plane hits appended (D26-05).
 				if (request.query === undefined) {
 					return refusal("memory_search needs `query`, or `subject_prefix` to list a subject family");
 				}
 				return json(
-					await substrate.searchMemory(
-						request.query,
-						request.scope,
-						request.limit,
-						request.include_superseded,
-						callerSurface ?? "unattributed",
-						request.include_expired,
-						request.repo,
-						{ graphLinked: request.graph_linked, causal: request.causal },
+					await substrate.memoryReplyInGrant(
+						await substrate.searchMemory(
+							request.query,
+							request.scope,
+							request.limit,
+							request.include_superseded,
+							callerSurface ?? "unattributed",
+							request.include_expired,
+							request.repo,
+							{ graphLinked: request.graph_linked, causal: request.causal },
+						),
+						callerSurface,
 					),
 				);
 			} catch (cause) {
@@ -937,7 +946,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ query, repo }) => json(await substrate.recallMemories({ query }, callerSurface, repo)),
+		async ({ query, repo }) => {
+			const memoryScope = await substrate.scopedRepoRefusal("memory_recall", callerSurface, repo ?? null, true);
+			if (memoryScope !== null) return { ...json(memoryScope.body), isError: true };
+			return json(await substrate.recallMemories({ query }, callerSurface, repo));
+		},
 	);
 
 	server.registerTool(
@@ -1172,6 +1185,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// or an operator's to write: a refusal names `reserved-action` and nothing is appended.
 			const reserved = reservedEmitRefusal({ payload: args.payload, surface: attribution.surface, callerSurface, isOperator });
 			if (reserved !== null) return refusal(reserved);
+			const writeGate = await substrate.scopedWriteRefusal("events_emit", callerSurface, { repo: args.repo, graph_id: args.graph_id });
+			if (writeGate !== null) return { ...json(writeGate.body), isError: true };
 			const { event, stored, error, warning } = await substrate.emit({
 				...args,
 				surface: attribution.surface,
@@ -1221,7 +1236,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async (args) => json(await substrate.queryEvents(args)),
+		async (args) => {
+			const outcome = await substrate.queryEventsFor(args, callerSurface);
+			return outcome.ok ? json(outcome.result) : { ...json(outcome.body), isError: true };
+		},
 	);
 
 	server.registerTool(
@@ -1249,6 +1267,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { readOnlyHint: true },
 		},
 		async ({ graph_id }) => {
+			const graphGate = await substrate.scopedGraphRefusal("graph_get", callerSurface, graph_id);
+			if (graphGate !== null) return { ...json(graphGate.body), isError: true };
 			const graph = await substrate.getGraph(graph_id, callerSurface ?? "unattributed");
 			return graph ? json(graph) : text(`No graph ${graph_id} in the index.`);
 		},
@@ -1306,7 +1326,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					),
 			},
 		},
-		async (args) => json(await substrate.registerGraph({ ...args, surface: args.surface ?? callerSurface })),
+		async (args) => {
+			const writeGate = await substrate.scopedWriteRefusal("graph_register", callerSurface, { repo: args.repo, graph_id: args.graph_id });
+			if (writeGate !== null) return { ...json(writeGate.body), isError: true };
+			return json(await substrate.registerGraph({ ...args, surface: args.surface ?? callerSurface }));
+		},
 	);
 
 	server.registerTool(
@@ -1330,6 +1354,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 		},
 		async (args) => {
+			const bindGate = await substrate.scopedWriteRefusal("graph_bind", callerSurface, { graph_id: args.graph_id });
+			if (bindGate !== null) return { ...json(bindGate.body), isError: true };
 			try {
 				return json(await substrate.bindGraph(args, callerSurface));
 			} catch (cause) {
@@ -1393,6 +1419,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				const refused = swarmSessionRefusal(attribution.surface, session_id, graph_id);
 				if (refused) return refusal(refused);
 			}
+			const leaseGate = await substrate.scopedGraphRefusal("graph_claim", callerSurface, graph_id);
+			if (leaseGate !== null) return { ...json(leaseGate.body), isError: true };
 			return json(
 				await substrate.claimNode(graph_id, node_id, attribution.surface, session_id, callerSurface, ttl_seconds),
 			);
@@ -1416,8 +1444,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				ttl_seconds: ttlSchema,
 			},
 		},
-		async ({ graph_id, node_id, lease_id, ttl_seconds }) =>
-			json(await substrate.heartbeatNode(graph_id, node_id, lease_id, callerSurface, ttl_seconds)),
+		async ({ graph_id, node_id, lease_id, ttl_seconds }) => {
+			const leaseGate = await substrate.scopedGraphRefusal("graph_heartbeat", callerSurface, graph_id);
+			if (leaseGate !== null) return { ...json(leaseGate.body), isError: true };
+			return json(await substrate.heartbeatNode(graph_id, node_id, lease_id, callerSurface, ttl_seconds));
+		},
 	);
 
 	/**
@@ -1461,6 +1492,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async ({ graph_id, node_id, lease_id, force }) => {
 			if (force && !isOperator) return json(FORCE_REFUSED);
+			const leaseGate = await substrate.scopedGraphRefusal("graph_release", callerSurface, graph_id);
+			if (leaseGate !== null) return { ...json(leaseGate.body), isError: true };
 			return json(await substrate.releaseNode(graph_id, node_id, { lease_id, force }, callerSurface));
 		},
 	);
@@ -1497,6 +1530,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async ({ graph_id, node_id, lease_id, force, state, dod }) => {
 			if (force && !isOperator) return json(FORCE_REFUSED);
+			const leaseGate = await substrate.scopedGraphRefusal("graph_complete", callerSurface, graph_id);
+			if (leaseGate !== null) return { ...json(leaseGate.body), isError: true };
 			return json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state, dod }, callerSurface));
 		},
 	);
@@ -1544,6 +1579,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { readOnlyHint: true },
 		},
 		async (args) => {
+			const docsGate = await substrate.scopedDocsRefusal("docs_search", callerSurface);
+			if (docsGate !== null) return { ...json(docsGate.body), isError: true };
 			const isLive = args.steering_session_id !== undefined;
 			const settings = substrate.config.ragMachine;
 			// Private denial must not mutate the shared RAG health machine.
@@ -1751,6 +1788,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			const backend = substrate.config.docsBackend;
 			const entityList = entities ?? [];
 			const relationList: PlanningGraphRelation[] = relations ?? [];
+			const docsGate = await substrate.scopedDocsRefusal("docs_lightrag_query", callerSurface);
+			if (docsGate !== null) return { ...json(docsGate.body), isError: true };
 			const key = lightragReplayKey(
 				callerSurface,
 				{
@@ -1884,6 +1923,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			// a surface that has no token; this path cannot, so it refuses.
 			const blocked = bridgeBlock("handoff", null);
 			if (blocked) return refusal(blocked);
+			const handoffScope = await substrate.scopedWriteRefusal("handoff", callerSurface, { repo: rest.repo, graph_id: rest.graph_id });
+			if (handoffScope !== null) return { ...json(handoffScope.body), isError: true };
 			return json(
 				await substrate.handoff({
 					...rest,
@@ -1924,7 +1965,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			inputSchema: { graph_id: z.string() },
 			annotations: { readOnlyHint: true },
 		},
-		async ({ graph_id }) => json(await substrate.handoffsForGraph(graph_id)),
+		async ({ graph_id }) => {
+			const graphGate = await substrate.scopedGraphRefusal("handoffs_for_graph", callerSurface, graph_id);
+			if (graphGate !== null) return { ...json(graphGate.body), isError: true };
+			return json(await substrate.handoffsForGraph(graph_id));
+		},
 	);
 
 	server.registerTool(
@@ -1955,8 +2000,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { readOnlyHint: true },
 		},
 		async ({ format, ...request }) => {
-			const report = await substrate.driftScan(request);
-			return format === "text" ? text(formatDrift(report)) : json(report);
+			const outcome = await substrate.scopedDriftScan(request, callerSurface);
+			if (!outcome.ok) return { ...json(outcome.body), isError: true };
+			return format === "text" ? text(formatDrift(outcome.report)) : json(outcome.report);
 		},
 	);
 
@@ -2104,7 +2150,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async (request) => {
 			const query = parseWorktreeListQuery(request);
 			if (!query.ok) return { ...json({ error: "worktrees.invalid", problem: query.problem }), isError: true };
-			const outcome = await substrate.listWorktrees(query.value);
+			const outcome = await substrate.listWorktrees(query.value, callerSurface);
 			if (!outcome.ok) return { ...json(outcome.body), isError: true };
 			return json({ worktrees: outcome.worktrees, truncated: outcome.truncated });
 		},
@@ -2462,7 +2508,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"auto-release visible: the rows stop naming holders that are gone, and other agents see the warnings.",
 			inputSchema: { repo: z.string().optional().describe("Narrow to one repo. Omitted means every graph in the index.") },
 		},
-		async ({ repo }) => json(await substrate.reapExpiredLeases(repo)),
+		async ({ repo }) => json(await substrate.reapExpiredLeases(repo, callerSurface)),
 	);
 
 	server.registerTool(
