@@ -51,10 +51,10 @@ import {
 	AMOUNT_ZERO,
 	assertDevnetRpcUrl,
 	formatMemo,
+	parseMemo,
 	HOUR_MS,
 	hourIso,
 	keygenPath,
-	parseMemo,
 	parseSignature,
 	pubkeyArgv,
 	transferMemoArgv,
@@ -68,7 +68,7 @@ import {
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { newestBoundNote, reanchorSessionId, type ReanchorNotes } from "./anchor-verify-deps.ts";
-import { ADDRESS_MEMO_LIMIT, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
+import { ADDRESS_MEMO_LIMIT, anchorMemo, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, readHourHeads, REQUIRED_BALANCE_LAMPORTS, type HourHeads } from "./anchor.ts";
 import type { AnchorRow, GreptimeClient } from "./greptime.ts";
 import { buildReanchorEvent } from "./reanchor-plan.ts";
 import { redact } from "./redact.ts";
@@ -217,8 +217,9 @@ function planHour(raw: unknown, index: number, observedGenesis: string): SavedPl
 	if (typeof period_start !== "string" || period_start !== hourIso(period_start_ms)) throw new ReanchorPlanError(`${at}.period_start does not name the hour of period_start_ms`);
 	if (typeof root !== "string" || !ROOT_RE.test(root)) throw new ReanchorPlanError(`${at}.root is not 64 lowercase hex`);
 	if (typeof event_count !== "number" || !Number.isSafeInteger(event_count) || event_count < 1) throw new ReanchorPlanError(`${at}.event_count is not a positive integer`);
-	if (typeof memo !== "string" || memo !== formatMemo({ periodStartMs: period_start_ms, rootHex: root, count: event_count })) {
-		throw new ReanchorPlanError(`${at}.memo is not the v1 memo of its own period, root and count`);
+	const parsedMemo = typeof memo === "string" ? parseMemo(memo) : null;
+	if (typeof memo !== "string" || parsedMemo === null || parsedMemo.periodStartMs !== period_start_ms || parsedMemo.rootHex !== root || parsedMemo.count !== event_count) {
+		throw new ReanchorPlanError(`${at}.memo is not a v1 or v2 memo of its own period, root and count`);
 	}
 	if (typeof previous_tx_sig !== "string" || !SIGNATURE_RE.test(previous_tx_sig)) throw new ReanchorPlanError(`${at}.previous_tx_sig is not a base58 signature`);
 	if (typeof previous_signer !== "string" || previous_signer.length === 0) throw new ReanchorPlanError(`${at}.previous_signer is missing`);
@@ -338,8 +339,8 @@ export interface ReanchorLock {
 }
 
 export interface ReanchorDeps {
-	/** `anchorForPeriod` is the only ledger read the executor makes; it never writes the `anchors` table. */
-	ledger: Pick<GreptimeClient, "anchorForPeriod">;
+	/** `anchorForPeriod` and `eventsByIds` are the only ledger reads the executor makes; neither writes the `anchors` table. */
+	ledger: Pick<GreptimeClient, "anchorForPeriod" | "eventsByIds">;
 	rpc: Rpc;
 	runner: Runner;
 	substrate: Pick<Substrate, "hourDigest" | "emit">;
@@ -506,8 +507,24 @@ async function checkHour(hour: SavedPlanHour, deps: ReanchorDeps, now: number): 
 	if (digest.root === null || digest.memo === null || digest.root !== hour.root || digest.event_count !== hour.event_count) {
 		throw new Refusal("root-mismatch", `${hour.period_start}: the ledger now recomputes root ${String(digest.root)} over ${digest.event_count} events, not the stored ${hour.root} over ${hour.event_count}`);
 	}
-	if (digest.memo !== hour.memo || hour.memo !== formatMemo({ periodStartMs: hour.period_start_ms, rootHex: digest.root, count: digest.event_count })) {
-		throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed memo is not byte for byte the stored memo`);
+	const storedV2 = parseMemo(hour.memo)?.headsRootHex !== undefined;
+	if (!storedV2) {
+		// A v1 hour carries formatMemo of its period, root and count, whatever graphs wrote in it.
+		if (digest.memo !== hour.memo || hour.memo !== formatMemo({ periodStartMs: hour.period_start_ms, rootHex: digest.root, count: digest.event_count })) {
+			throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed memo is not byte for byte the stored memo`);
+		}
+		return;
+	}
+	// A v2 hour: the memo must be the one the anchor job builds from the heads its members give, read through the same ledger port.
+	let heads: HourHeads | null;
+	try {
+		heads = await readHourHeads(deps.ledger, hour.period_start_ms, digest.event_ids);
+	} catch (cause) {
+		throw new Refusal("digest-failed", `${hour.period_start}: the hour's heads could not be recomputed: ${reasonOf(cause)}`);
+	}
+	const expected = heads === null ? null : anchorMemo(hour.period_start_ms, digest.root, digest.event_count, heads);
+	if (expected !== hour.memo) {
+		throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed heads do not reproduce the stored memo byte for byte`);
 	}
 }
 

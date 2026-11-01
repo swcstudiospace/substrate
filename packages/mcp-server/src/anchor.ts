@@ -452,7 +452,7 @@ function chainMemberOf(row: Record<string, unknown>): ChainMember {
  * Reads the member rows of one hour and returns its heads, or null when no graph owns one of its
  * events. A member row that does not come back throws: the leaves would otherwise be partial.
  */
-async function readHourHeads(greptime: GreptimeClient, periodStartMs: number, eventIds: readonly string[]): Promise<HourHeads | null> {
+export async function readHourHeads(greptime: Pick<GreptimeClient, "eventsByIds">, periodStartMs: number, eventIds: readonly string[]): Promise<HourHeads | null> {
 	const members: ChainMember[] = [];
 	for (let i = 0; i < eventIds.length; i += HEADS_READ_BATCH) {
 		const rows = await greptime.eventsByIds(eventIds.slice(i, i + HEADS_READ_BATCH));
@@ -470,7 +470,7 @@ async function readHourHeads(greptime: GreptimeClient, periodStartMs: number, ev
  * The memo an hour is anchored with: v2 once a graph owns one of its events (D73-01), else the v1
  * memo every hour has always carried.
  */
-function anchorMemo(periodStartMs: number, rootHex: string, count: number, heads: HourHeads | null): string {
+export function anchorMemo(periodStartMs: number, rootHex: string, count: number, heads: HourHeads | null): string {
 	if (heads === null) return formatMemo({ periodStartMs, rootHex, count });
 	return formatMemoV2({ periodStartMs, rootHex, count, headsRootHex: heads.headsRootHex });
 }
