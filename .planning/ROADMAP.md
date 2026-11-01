@@ -1265,7 +1265,7 @@ Plans:
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: Discussed and planned 2026-11-01 (73-CONTEXT.md, 73-01-PLAN.md); code not started. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts:313`) recomputes a session chain, and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`) reports the verdict. The gap is measured in the unit: tail truncation and whole-ledger rewrites are not yet proven detected.
+**Status**: Implemented locally; gates green (2026-11-01): typecheck, Biome lint, full repository suite (11,355 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate. Criterion 1 is covered by tests against fake stores and the fake Solana runner. Criterion 2 is met per (graph, session) chain, because chains are per session (`verifyGraph` groups by session before ordering). Live devnet sends and production DDL were not run and remain operator-gated. Draft PR; not merge-ready. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts`) and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`).
 
 **Depends on**: none
 
@@ -1274,7 +1274,7 @@ Plans:
   1. Tests save the graph's head before the change, then edit a stored payload, delete a middle event, truncate the last events, and rewrite the whole chain with recalculated `hash` and `prev`. Each is compared with that saved head: the edits and the rewrite report the first differing event id, and truncation reports the first missing event id.
   2. The chain head for each graph is recorded in the hourly anchor. That recorded head is the trusted earlier proof criterion 1 compares against; a head recomputed from the stored rows is never used as the proof.
 
-**Plans**: [73-CONTEXT](phases/73-ledger-tamper-evidence/73-CONTEXT.md) (decisions D73-01 to D73-07); [73-01](phases/73-ledger-tamper-evidence/73-01-PLAN.md) (serial units U1 to U4). Discussed and planned; not started in code.
+**Plans**: [73-CONTEXT](phases/73-ledger-tamper-evidence/73-CONTEXT.md) (decisions D73-01 to D73-07); [73-01](phases/73-ledger-tamper-evidence/73-01-PLAN.md) (serial units U1 to U4); [73-01-SUMMARY](phases/73-ledger-tamper-evidence/73-01-SUMMARY.md).
 
 ### Phase 74: Cross-repo compensating actions
 

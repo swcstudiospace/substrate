@@ -117,7 +117,7 @@ A third party needs the proof file, the recorded root event, and the hourly memo
 1. Run `substrate corpus verify proof.json`. This establishes the document was in the manifest with root `R` and size `N`.
 2. Find the `docs.corpus.root` event whose payload root is `R` (`GET /corpus/anchor?root=R` names its id; `events_query` returns it with its hash) and check its payload: `root` is `R` and `count` is `N`.
 3. Check that event is in an anchored hour: the `evidence` of the anchor answer gives the event's hash, its index in the hour, its audit path and the hour's anchored root. Verify with `verifyMerkleProofAgainstCommitment(eventHash, { index, size: hourEventCount, path }, { rootHex: anchoredRoot, count: hourEventCount })` from `@substrate/ledger`.
-4. Read the anchor transaction on devnet with `evidence.signature`: its memo is `substrate:v1:<hour start>:<root>:<count>`. It must carry the hour and the same root and count, and be signed by an anchor key the operator publishes.
+4. Read the anchor transaction on devnet with `evidence.signature`: its memo is `substrate:v1:<hour start>:<root>:<count>` for hours anchored before phase 73, and `substrate:v2:<hour start>:<root>:<count>:<heads root>` after. Both carry the hour, the same root and the same count, and it must be signed by an anchor key the operator publishes.
 
 Without access to the server, steps 2 and 3 need the root event and the hour's events from whoever operates the ledger (`docs/greptime-ledger.md` describes the event hash, the hour's leaf order and the anchors row); steps 1 and 4 need only the proof file and devnet.
 
