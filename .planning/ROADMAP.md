@@ -1265,7 +1265,7 @@ Plans:
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: Implemented locally; gates green (2026-11-01): typecheck, Biome lint, full repository suite (11,376 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate. Greptile findings on PR 201 are addressed: a mismatched anchored hour still runs the head comparison, deleted trailing hours are found through their anchor and leaves, a failed head reaches evidence as `head_failed`, leaves commit to event ids, malformed leaf ids are untrusted rather than thrown, recovery adopts only a memo whose heads root matches the saved one (7441a02a), and an unreadable leaves lookup is an untrusted `store-failed` verdict rather than a 500 (8d98932d). Criterion 1 is covered by tests against fake stores and the fake Solana runner. Criterion 2 is met per (graph, session) chain, because chains are per session (`verifyGraph` groups by session before ordering). Live devnet sends and production DDL were not run and remain operator-gated. Draft PR; not merge-ready. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts`) and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`).
+**Status**: Implemented locally; gates green (2026-11-01): typecheck, Biome lint, full repository suite (11,380 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate. Greptile findings on PR 201 are addressed: a mismatched anchored hour still runs the head comparison, deleted trailing hours are found through their `graph_chain_leaves` rows, a failed head reaches evidence as `head_failed`, leaves commit to event ids, malformed leaf ids are untrusted rather than thrown, recovery adopts only a memo whose heads root matches the saved one (7441a02a), the landed memo is read back and must equal the stored memo byte for byte (caabf61b), and an unreadable leaves lookup is an untrusted verdict rather than a 500, with an expired read reported as budget exhausted (8d98932d, caabf61b). Known gap: if this graph's leaves for an hour are also deleted, that hour is not enumerated for this graph and this graph's verify does not report it; the hour's anchor stays on chain. Criterion 1 is covered by tests against fake stores and the fake Solana runner. Criterion 2 is met per (graph, session) chain, because chains are per session (`verifyGraph` groups by session before ordering). Live devnet sends and production DDL were not run and remain operator-gated. Draft PR; not merge-ready. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts`) and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`).
 
 **Depends on**: none
 
@@ -1414,7 +1414,7 @@ Plans:
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 0/0 | Not started | - |
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
-| 73. Ledger tamper evidence | v1.8 | 0/0 | Not started | - |
+| 73. Ledger tamper evidence | v1.8 | 0/0 | Implemented locally; draft PR #201, not merge-ready | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Not started | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
