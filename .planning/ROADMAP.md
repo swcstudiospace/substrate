@@ -1231,7 +1231,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: Locally verified (5/5 criteria); awaiting-review / pending QUALITY. Full repository tests, typecheck, lint, Python and locks pass; native CLI–HTTP–PostgreSQL smoke passes. Independent verification remains `human_needed` solely for the mandated Desk Quality / Programming Lead review. No phase-complete or merge-ready claim. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md).
+**Status**: Locally verified (5/5 criteria); awaiting-review / pending QUALITY. Greptile P2 threads on PR #199 remediated and re-verified 2026-11-01 (71-05): typecheck, Biome lint, full repository tests (11621 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate green. `human_needed` remains solely for the mandated Desk Quality / Programming Lead review of the remediation, which has not been observed. No phase-complete or merge-ready claim. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
 
 **Depends on**: none
 
@@ -1247,7 +1247,7 @@ Plans:
   4. The existing operator-only queue/ack contract and legacy unkeyed command shape remain unchanged. All affected callers migrate to the explicit session identity lifecycle; no alias silently bypasses binding checks.
   5. The redacted repo-wide `session_context` digest remains available as designed in Phase 67. Re-run the recorded steering regression file set and the new isolation/revocation/restart failure-injection cases; record pass/skip counts and any deliberate contract changes.
 
-**Plans**: [71-01](phases/71-multi-session-boundary/71-01-PLAN.md) (SQL authority), [71-02](phases/71-multi-session-boundary/71-02-PLAN.md) (CLI/private records), [71-03](phases/71-multi-session-boundary/71-03-PLAN.md) (service and transports), [71-04](phases/71-multi-session-boundary/71-04-PLAN.md) (consumer verification and docs). All four locally verified; external sign-off pending.
+**Plans**: [71-01](phases/71-multi-session-boundary/71-01-PLAN.md) (SQL authority), [71-02](phases/71-multi-session-boundary/71-02-PLAN.md) (CLI/private records), [71-03](phases/71-multi-session-boundary/71-03-PLAN.md) (service and transports), [71-04](phases/71-multi-session-boundary/71-04-PLAN.md) (consumer verification and docs), [71-05](phases/71-multi-session-boundary/71-05-SUMMARY.md) (Greptile remediation, summary only). All four plans locally verified; 71-05 gates re-run; external sign-off pending.
 
 ### Phase 72: Repo allowlist and scoped credentials
 

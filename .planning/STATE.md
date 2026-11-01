@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 Phase 71 locally verified; human_needed: awaiting-review / pending QUALITY; no phase signed off"
-stopped_at: "Phase 71 code and all local gates pass; independent sign-off awaits Desk Quality / Programming Lead. Required SendToAgent/Desk connector is not mounted; draft delivery and held review handoff required."
-last_updated: "2026-10-31T04:13:53.000Z"
-last_activity: 2026-10-31
-last_activity_desc: "Phase 71: 11596 root passes, 2 unrelated skips, zero failures; native CLI/PostgreSQL smoke passed; mandatory external review remains unobserved"
+status: "v1.8 Phase 71 locally verified; Greptile remediation (71-05) gates green; human_needed: awaiting Desk Quality review; no phase signed off"
+stopped_at: "Phase 71 remediation ready for draft review on PR #199; Desk SendToAgent connector not mounted in the autonomous session, so the Desk Quality gate is unobserved. Phases 72-78 not started. v1.7 owner decisions open."
+last_updated: "2026-11-01"
+last_activity: 2026-11-01
+last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); full suite 11621 pass, 0 fail; phase remains human_needed"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
@@ -19,6 +19,17 @@ current_phase_name: multi-session-boundary
 ---
 
 # State
+
+## Autonomous run record (2026-11-01)
+
+- Live milestone is v1.8 (phases 71-78). Origin/main `b1b42f92` is the source of truth. The primary checkout `/root/src/repos/agent-substrate` is on `planning/consistency-check-2026-10-24`, 262 commits behind main, with uncommitted swarm lines in `.planning/STATE.md` and untracked `.claude/`. Those are not ours and were not touched.
+- Phase 71 work runs in `/root/src/worktrees/as-gsd-v18-p71` (branch `gsd/v18-p71-greptile-fixes`, based on PR #199 head `d535f8c6`).
+- Blockers, by class:
+  - Repo, resolved: stale primary checkout (isolated worktree used instead); six Greptile P2 threads (fixed in 71-05); one `substrate-desktop` test failure caused by a 0700 owned temp root (environment prerequisite; test unchanged).
+  - External, open: Linear free issue quota exceeded, so kickoff tracking is partial (Notion rows exist). Desk Quality Greptile review of the phase 71 remediation not observed (SendToAgent connector not mounted). Uncommitted edits lost from `memory-write.test.ts` and `server.test.ts` need the other session's owner to confirm. `stash@{0}` kept until the operator approves dropping it.
+  - Operator-gated, not run: deploy, live ingest, hook and timer install, anchor funding, LightRAG LLM route, Railway writes, production migrations.
+- Decisions taken autonomously are recorded in `phases/71-multi-session-boundary/71-05-SUMMARY.md`. v1.7 owner decisions 1-11 remain open and are not accepted on the owner's behalf.
+- Next: obtain the Desk Quality review for PR #199, then start phase 72 (needs 71). Phases 73, 74 and 75 have no declared dependency; 76 shares the ledger write path with 73; 77 needs 71; 78 needs 73, 75 and 76.
 
 ## Recovery record (2026-10-23)
 
