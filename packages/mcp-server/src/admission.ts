@@ -376,9 +376,9 @@ export class Admission {
 		}
 		const reply = outcome.ok ? parseReply(outcome.value) : null;
 		let verdict: AdmissionVerdict;
-		if (!outcome.ok && outcome.breakerRetryAfterMs !== undefined && this.settings.breakerPolicy[request.klass] === "fail-closed") {
-			// The breaker refused the bucket step. A fail-closed class is refused as a spent bucket is; the mode decides whether that refusal is enforced.
-			verdict = { ...base, decision: this.settings.mode === "enforce" ? "refused" : "shadow_limited", tokensLeft: null, retryAfterMs: outcome.breakerRetryAfterMs, retryAfterS: retryAfterSeconds(outcome.breakerRetryAfterMs) };
+		if (!outcome.ok && outcome.breakerRetryAfterMs !== undefined && this.settings.breakerPolicy[request.klass] === "fail-closed" && this.settings.mode === "enforce") {
+			// The breaker refused the bucket step on a fail-closed class, and enforce refuses it as a spent bucket is. Shadow falls through to the bypass below: the cache plane did not answer, and shadow never refuses.
+			verdict = { ...base, decision: "refused", tokensLeft: null, retryAfterMs: outcome.breakerRetryAfterMs, retryAfterS: retryAfterSeconds(outcome.breakerRetryAfterMs) };
 		} else if (reply === null) {
 			verdict = { ...base, decision: "bypass", tokensLeft: null, retryAfterMs: 0, retryAfterS: 0 };
 		} else if (reply.allowed) {

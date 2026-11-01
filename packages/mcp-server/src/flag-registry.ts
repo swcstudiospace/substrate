@@ -222,7 +222,7 @@ export const FLAG_FAMILIES: readonly FlagFamily[] = [
 		plane: "admission",
 		default: "fail-open",
 		allowed: "fail-open | fail-closed",
-		unset: "fail-open: unset or blank, an open cache breaker admits the request and counts a bypass, as before; fail-closed refuses it with 503 in enforce and counts shadow_limited in shadow; any other value refuses to boot (SUBSTRATE_BUDGETS keeps its older fallback to shadow)",
+		unset: "fail-open: unset or blank, an open cache breaker admits the request and counts a bypass, as before; fail-closed refuses it with 503 in enforce and, in shadow, admits it and counts a bypass; any other value refuses to boot (SUBSTRATE_BUDGETS keeps its older fallback to shadow)",
 		readBy: "mcp-server/config.ts",
 		members: CLASS_BREAKER_NAMES,
 		documentedMembers: CLASS_BREAKER_NAMES,

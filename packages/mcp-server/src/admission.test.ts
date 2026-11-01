@@ -335,10 +335,13 @@ describe("the cache breaker's refusal, by class policy (phase 75)", () => {
 		expect(recorded.map((entry) => entry.decision)).toEqual(["refused", "bypass"]);
 	});
 
-	test("shadow records the refusal it would make and never answers it", async () => {
-		const { admission, recorded } = policyOver({ read: "fail-closed" }, "shadow");
-		expect((await admission.admit(READ)).decision).toBe("shadow_limited");
-		expect(recorded.map((entry) => entry.decision)).toEqual(["shadow_limited"]);
+	test("a breaker refusal of a fail-closed class is a bypass in shadow and a refusal in enforce", async () => {
+		const shadow = policyOver({ read: "fail-closed" }, "shadow");
+		expect(await shadow.admission.admit(READ)).toEqual({ decision: "bypass", surface: "cursor", klass: "read", cost: 1, tokensLeft: null, retryAfterMs: 0, retryAfterS: 0 });
+		expect(shadow.recorded.map((entry) => entry.decision)).toEqual(["bypass"]);
+		const enforce = policyOver({ read: "fail-closed" });
+		expect(await enforce.admission.admit(READ)).toEqual({ decision: "refused", surface: "cursor", klass: "read", cost: 1, tokensLeft: null, retryAfterMs: 2_000, retryAfterS: 2 });
+		expect(enforce.recorded.map((entry) => entry.decision)).toEqual(["refused"]);
 	});
 
 	test("only a breaker refusal is policed: another cache failure stays a bypass in a fail-closed class", async () => {
