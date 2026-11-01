@@ -220,7 +220,7 @@ import type { AuditOutcome, McpToolCall } from "./observe.ts";
 import { z } from "zod";
 import { composeLiveSections, type BriefSteeringInput, type BriefWorktreesInput } from "./brief-sessions.ts";
 import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
-import { sharedDeadline } from "./deadline.ts";
+import { DeadlineError, sharedDeadline } from "./deadline.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -2226,11 +2226,21 @@ export class Substrate {
 	async briefDetailed(request: BriefRequest, requestedProfile?: BriefProfile, bearerSurface?: string | null, live?: LiveAccessOptions): Promise<BriefDetail> {
 		if (request.steering_session_id !== undefined) {
 			const caller = live?.caller ?? { surface: null, isOperator: false };
-			return this.executeLiveCall({ caller, tool: "memory_brief", args: live?.invocationArgs ?? request, operation: "private-read", sessionId: request.steering_session_id, sessionBinding: live?.sessionBinding, transport: live?.transport }, async prepared => {
-				const detail = await this.briefUncounted(request, requestedProfile, bearerSurface, true, false, prepared);
-				await this.liveBoundary.recheck(prepared);
-				return detail;
-			}, live?.preparedLiveDispatch);
+			// The brief budget bounds the authority work too: the boundary's reads before and after composition can wait on a row lock,
+			// so they race the deadline the brief started with. Past it the caller gets session-unavailable and no private text.
+			const deadline = sharedDeadline(this.briefOptions.budgetMs, "brief authority");
+			try {
+				return await deadline.race(this.executeLiveCall({ caller, tool: "memory_brief", args: live?.invocationArgs ?? request, operation: "private-read", sessionId: request.steering_session_id, sessionBinding: live?.sessionBinding, transport: live?.transport }, async prepared => {
+					const detail = await this.briefUncounted(request, requestedProfile, bearerSurface, true, false, prepared);
+					await this.liveBoundary.recheck(prepared);
+					return detail;
+				}, live?.preparedLiveDispatch));
+			} catch (cause) {
+				if (cause instanceof DeadlineError) throw new LiveSessionBoundaryError({ status: "refused", error: { code: "session-unavailable" } });
+				throw cause;
+			} finally {
+				deadline.clear();
+			}
 		}
 		if (this.config.cachePreload.enabled && request.repo !== undefined && normalizeIdentifier(request.repo) !== null) this.repoAccess.record(Date.now(), { ...request, repo: request.repo });
 		return this.briefUncounted(request, requestedProfile, bearerSurface, true, false);
@@ -5800,6 +5810,8 @@ export class Substrate {
 		callerSurface: Surface | null,
 		live?: LiveAccessOptions,
 	): Promise<SearchReply> {
+		// Supplied directions are checked on every path with the schema the steering path parses them by.
+		DOCS_SEARCH_INPUT.shape.steering.parse(input.steering);
 		if (input.steering_session_id !== undefined) {
 			const { probe, cooling, ...wire } = input;
 			const validated = DOCS_SEARCH_INPUT.parse(wire);
@@ -5850,7 +5862,7 @@ export class Substrate {
 		const checked = prepared === undefined ? null : this.liveBoundary.checked(prepared);
 		const sessionId = checked?.access.sessionId ?? (typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined);
 		const originalQuestion = typeof input.question === "string" ? input.question : "";
-		const question = augmentQuestionWithSteering(originalQuestion, checked?.snapshot.session.steering ?? (typeof input.steering === "string" ? input.steering : null));
+		const question = augmentQuestionWithSteering(originalQuestion, typeof input.steering === "string" ? input.steering : (checked?.snapshot.session.steering ?? null));
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];

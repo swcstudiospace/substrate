@@ -14,6 +14,9 @@ import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
+import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
+import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
+import { ZodError } from "zod";
 import { defined } from "./test-support.ts";
 
 /** Records what reached the event log, and stands in for the index. */
@@ -5228,5 +5231,113 @@ describe("boot endpoint notes (phase 48)", () => {
 			await expect(substrate.emitDbEndpoints()).resolves.toBeUndefined();
 			expect(calls).toBe(3);
 		}
+	});
+});
+
+describe("private reads under the request budget and the docs steering precedence", () => {
+	const caller = { surface: "cursor", isOperator: false } as const;
+	const briefRequest = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
+	const briefIndex = {
+		getGraph: async () => ({ graph_id: "ut-1", notion_task_page: null, repo: "acme/app", branch: null, surface: "cursor", status: "active", pr_url: null, created: null, updated: null, nodes: [], steps: [], edges: [] }),
+		openGraphs: async () => [],
+		memoryForBrief: async () => [],
+	};
+
+	/** The authority answers its first `answered` reads and never again, so only the request budget can end the call. */
+	function stallAfter(authority: TestLiveSessionAuthority, answered: number): void {
+		const read = authority.read.bind(authority);
+		let calls = 0;
+		Object.assign(authority, {
+			read: (access: LiveSessionAccess, operation: LiveSessionOperation) => {
+				calls += 1;
+				return calls > answered ? new Promise<never>(() => {}) : read(access, operation);
+			},
+		});
+	}
+
+	function briefOf(substrate: Substrate, sessionId: string, sessionBinding: string) {
+		return substrate.briefDetailed({ ...briefRequest, steering_session_id: sessionId }, undefined, caller.surface, { caller, sessionBinding });
+	}
+
+	test("a private brief whose authority check stalls after composition is session-unavailable within the brief budget", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller, steering: "PRIVATE-BUDGET-DIRECTION" });
+		stallAfter(authority, 1);
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "50" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		await expect(briefOf(substrate, session.sessionId, session.sessionBinding)).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "session-unavailable" } } });
+	});
+
+	test("a private brief whose authority check stalls before composition is session-unavailable within the brief budget", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller, steering: "PRIVATE-BUDGET-DIRECTION" });
+		stallAfter(authority, 0);
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "50" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		await expect(briefOf(substrate, session.sessionId, session.sessionBinding)).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "session-unavailable" } } });
+	});
+
+	test("a private brief inside its budget composes as before", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller });
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "5000" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		const detail = await briefOf(substrate, session.sessionId, session.sessionBinding);
+		expect(detail.state).toBe("complete");
+		expect(detail.failed).toEqual([]);
+	});
+
+	describe("docs_search directions", () => {
+		async function rig(stored?: string) {
+			const ragflow = new RagflowFake();
+			const authority = createTestLiveSessionAuthority();
+			const session = await issueLiveSession(authority, { caller, ...(stored === undefined ? {} : { steering: stored }) });
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+				index: null,
+				greptime: null,
+				ragflowFetch: ragflow.fetch,
+				steering: { history: null, liveSessions: authority },
+			});
+			return { substrate, ragflow, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
+		}
+		const askedWith = (ragflow: RagflowFake): string => JSON.stringify(ragflow.retrievals());
+
+		test("a supplied direction wins over the stored one for that search", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "PER-CALL-DIRECTION" }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("PER-CALL-DIRECTION");
+			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+		});
+
+		test("stored directions answer a search that supplies none", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("STORED-DIRECTION");
+		});
+
+		test("a search with no directions anywhere asks the plain question", async () => {
+			const h = await rig();
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("who reads RAGFlow?");
+			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+		});
+
+		test("an explicitly empty direction replaces the stored one with none", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "" }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+		});
+
+		test("a supplied direction steers a search outside any steering session", async () => {
+			const ragflow = new RagflowFake();
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: ragflow.fetch });
+			await substrate.searchDocs({ question: "who reads RAGFlow?", steering: "PER-CALL-DIRECTION" }, "cursor");
+			expect(askedWith(ragflow)).toContain("PER-CALL-DIRECTION");
+		});
+
+		test("a directions value that is not a string of at most 16000 characters is refused at the boundary", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await expect(h.substrate.searchDocs({ question: "q", steering: 42 }, caller.surface)).rejects.toBeInstanceOf(ZodError);
+			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
+			expect(askedWith(h.ragflow)).toBe("[]");
+		});
 	});
 });
