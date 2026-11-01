@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -7,6 +7,7 @@ export const LIVE_SESSION_ID_PATTERN = /^ls_[0-9a-f]{64}$/;
 export const SESSION_BINDING_PATTERN = /^[0-9a-f]{64}$/;
 export const MAX_BINDING_BYTES = 4096;
 export const MAX_BINDING_RECORDS = 256;
+const RECORD_FILE_PATTERN = /^[0-9a-f]{64}\.json$/;
 export interface LiveSessionBindingRecord {
 	version: 1;
 	server_identity: string;
@@ -67,7 +68,7 @@ function secureDirectory(path: string, create: boolean): void {
 	}
 }
 
-function readBindingRecord(path: string, expected: BindingExpected): { record: LiveSessionBindingRecord; dev: number; ino: number } {
+function readRecordFile(path: string, validate: (value: unknown) => LiveSessionBindingRecord): { record: LiveSessionBindingRecord; dev: number; ino: number } {
 	let fd: number | undefined;
 	try {
 		secureDirectory(dirname(path), false);
@@ -77,7 +78,7 @@ function readBindingRecord(path: string, expected: BindingExpected): { record: L
 		const buffer = Buffer.alloc(MAX_BINDING_BYTES + 1);
 		const size = readSync(fd, buffer, 0, buffer.length, 0);
 		if (size > MAX_BINDING_BYTES) throw new BindingRecordError("invalid");
-		const record = checked(JSON.parse(buffer.subarray(0, size).toString("utf8")), expected);
+		const record = validate(JSON.parse(buffer.subarray(0, size).toString("utf8")));
 		const identity = { dev: stat.dev, ino: stat.ino };
 		assertSameFile(path, identity);
 		return { record, ...identity };
@@ -86,6 +87,18 @@ function readBindingRecord(path: string, expected: BindingExpected): { record: L
 		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") throw new BindingRecordError("missing");
 		throw new BindingRecordError("invalid");
 	} finally { if (fd !== undefined) closeSync(fd); }
+}
+
+function readBindingRecord(path: string, expected: BindingExpected): { record: LiveSessionBindingRecord; dev: number; ino: number } {
+	return readRecordFile(path, (value) => checked(value, expected));
+}
+
+/** The identity a record names for itself; `checked` then validates the rest of its grammar against that identity. */
+function namedBy(value: unknown): BindingExpected {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BindingRecordError("invalid");
+	const rec = value as Record<string, unknown>;
+	if (typeof rec.server_identity !== "string" || typeof rec.surface !== "string" || typeof rec.session_id !== "string") throw new BindingRecordError("invalid");
+	return { server_identity: rec.server_identity, surface: rec.surface, session_id: rec.session_id };
 }
 
 function assertSameFile(path: string, identity: { dev: number; ino: number }): void {
@@ -162,4 +175,24 @@ export function removeBindingRecord(path: string, expected: LiveSessionBindingRe
 		assertSameFile(path, current);
 		unlinkSync(path);
 	});
+}
+
+/**
+ * Clears the local records the authority has confirmed dead, so a full directory can take a new session. Only `isDead`
+ * clears a record: a local expiry timestamp is advisory and never does. A record that cannot be read or validated is an
+ * error, not dead. A throwing `isDead` keeps its record and stops the sweep. Returns how many records were cleared.
+ */
+export async function reclaimDeadBindingRecords(directory: string, isDead: (record: LiveSessionBindingRecord) => Promise<boolean>): Promise<number> {
+	if (!existsSync(directory)) return 0;
+	secureDirectory(directory, false);
+	let cleared = 0;
+	for (const name of readdirSync(directory).filter((entry) => RECORD_FILE_PATTERN.test(entry)).sort()) {
+		const path = join(directory, name);
+		const { record } = readRecordFile(path, (value) => checked(value, namedBy(value)));
+		if (bindingRecordPath(record.server_identity, record.surface, record.session_id, { directory }) !== path) throw new BindingRecordError("invalid");
+		if (!(await isDead(record))) continue;
+		removeBindingRecord(path, record);
+		cleared += 1;
+	}
+	return cleared;
 }

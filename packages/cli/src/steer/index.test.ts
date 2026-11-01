@@ -3,10 +3,10 @@
  * `listen` loop with a fake clock. Nothing opens a socket and nothing sleeps.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadBindingRecord, saveBindingRecord, serverIdentity, type LiveSessionBindingRecord } from "./binding-record.ts";
+import { MAX_BINDING_RECORDS, bindingRecordPath, loadBindingRecord, saveBindingRecord, serverIdentity, type LiveSessionBindingRecord } from "./binding-record.ts";
 import { defined } from "../../../mcp-server/src/test-support.ts";
 import {
 	EXIT_DONE,
@@ -262,7 +262,16 @@ describe("sessions", () => {
 		expect(call).toMatchObject({ method: "GET", path: "/steering/sessions", params: { repo_id: "acme/widgets" }, authorization: "Bearer token-for-default" });
 		const lines = text(r.out).trimEnd().split("\n");
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain(LIVE_ID.slice(0, 63));
+		const handle = defined(lines[0]?.split("  ")[0], "the printed handle");
+		expect(handle).toBe(LIVE_ID);
+		expect(lines[0]).not.toContain("…");
+		const cases: Array<[string, string[]]> = [["queue", ["--action", "annotate", "--body", "note"]], ["list", []], ["close", []]];
+		for (const [sub, extra] of cases) {
+			const parsed = parseSteerArgs([sub, "--session", handle, ...extra]);
+			expect(typeof parsed).toBe("object");
+			if (typeof parsed === "string") throw new Error(`${sub} refused the printed handle: ${parsed}`);
+			expect(parsed.flags.get("session")).toBe(LIVE_ID);
+		}
 		expect(lines[0]).toContain("pending=2");
 		expect(lines[0]).toContain("steering=PAUSED");
 		expect(lines[0]).toContain("updated 5m ago");
@@ -1158,6 +1167,81 @@ describe("open retains the only private proof", () => {
 		expect(text(r.err)).not.toContain(OTHER_PROOF);
 		expect(text(r.err)).not.toContain("token-for-default");
 	});
+});
+
+describe("open at capacity clears only records the server names not found", () => {
+	const directoryOf = (r: Rig): string => defined(r.deps.bindingDirectory);
+	const pathOf = (r: Rig, session: string): string => bindingRecordPath(serverIdentity(r.deps.url), "claude-code", session, { directory: directoryOf(r) });
+	const posts = (r: Rig): Call[] => r.calls.filter((call) => call.method === "POST");
+	const checks = (r: Rig): Call[] => r.calls.filter((call) => call.path === "/steering/directives");
+	const held = (r: Rig): number => readdirSync(directoryOf(r)).length;
+
+	/** Writes `count` valid records for distinct sessions straight to disk; returns their handles. */
+	function fill(r: Rig, count: number): string[] {
+		return Array.from({ length: count }, (_, index) => {
+			const session = `ls_${(index + 1).toString(16).padStart(64, "0")}`;
+			writeFileSync(pathOf(r, session), JSON.stringify(recordFor(r, { session_id: session })), { mode: 0o600 });
+			return session;
+		});
+	}
+
+	test("below capacity no liveness check runs and open proceeds", async () => {
+		const r = rig();
+		fill(r, MAX_BINDING_RECORDS - 1);
+		r.reply = (call) => (call.method === "POST" ? json(issued()) : json({ directives: [] }));
+		expect(await steer(r, "open", "--json")).toBe(EXIT_DONE);
+		expect(checks(r)).toEqual([]);
+		expect(held(r)).toBe(MAX_BINDING_RECORDS);
+	});
+
+	test("at capacity a record the server answers not-found is cleared, and open proceeds", async () => {
+		const r = rig();
+		const sessions = fill(r, MAX_BINDING_RECORDS);
+		const dead = defined(sessions[0]);
+		const kept = defined(sessions[1]);
+		r.reply = (call) => {
+			if (call.method === "POST") return json(issued());
+			return call.params.session_id === dead ? json({ status: "refused", error: { code: "not-found" } }, 404) : json({ directives: [] });
+		};
+		expect(await steer(r, "open", "--json")).toBe(EXIT_DONE);
+		expect(checks(r)).toHaveLength(MAX_BINDING_RECORDS);
+		expect(checks(r).every((call) => call.sessionBinding === PROOF)).toBe(true);
+		expect(existsSync(pathOf(r, dead))).toBe(false);
+		expect(existsSync(pathOf(r, kept))).toBe(true);
+		expect(held(r)).toBe(MAX_BINDING_RECORDS);
+	});
+
+	test("at capacity live answers keep every record and refuse before any identity is issued", async () => {
+		const r = rig();
+		const sessions = fill(r, MAX_BINDING_RECORDS);
+		r.reply = () => json({ directives: [] });
+		expect(await steer(r, "open", "--json")).toBe(EXIT_FAILED);
+		expect(checks(r)).toHaveLength(MAX_BINDING_RECORDS);
+		expect(posts(r)).toEqual([]);
+		expect(existsSync(pathOf(r, defined(sessions[0])))).toBe(true);
+		expect(held(r)).toBe(MAX_BINDING_RECORDS);
+		expect(r.out).toEqual([]);
+		expect(text(r.err)).toContain("unused issued identity expires");
+	});
+
+	const failures: Array<[string, () => Response, number, string]> = [
+		["a session authority outage", () => json({ status: "refused", error: { code: "session-unavailable" } }, 503), EXIT_REFUSED, "the session authority is unavailable"],
+		["a server error", () => json({}, 500), EXIT_FAILED, "could not complete the request"],
+		["a route the server does not have", () => json({ error: "not found" }, 404), EXIT_REFUSED, "predates Live Steering"],
+	];
+	for (const [label, answer, exit, message] of failures) {
+		test(`at capacity ${label} is not death: open fails with that error and removes nothing`, async () => {
+			const r = rig();
+			fill(r, MAX_BINDING_RECORDS);
+			r.reply = (call) => (call.method === "POST" ? json(issued()) : answer());
+			expect(await steer(r, "open", "--json")).toBe(exit);
+			expect(checks(r)).toHaveLength(1);
+			expect(posts(r)).toEqual([]);
+			expect(held(r)).toBe(MAX_BINDING_RECORDS);
+			expect(text(r.err)).toContain(message);
+			expect(r.out).toEqual([]);
+		});
+	}
 });
 
 describe("selected private records drive reads and lifecycle", () => {

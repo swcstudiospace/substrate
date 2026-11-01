@@ -16,6 +16,8 @@
  * command: every request is cut at its end and no pause runs past it. Its clock, sleep and fetch are injected, so
  * the whole loop is testable without waiting; every pause is abortable, so an interrupt ends it at once.
  */
+import { existsSync, readdirSync } from "node:fs";
+import { dirname } from "node:path";
 import {
 	DIRECTIVE_STATUS_FILTERS,
 	STEER_ACTIONS,
@@ -38,7 +40,7 @@ import {
 } from "./client.ts";
 import { plain } from "./plain.ts";
 import { renderDigest, renderDirectiveLine, renderDirectives, renderSessions, renderWriteReply } from "./render.ts";
-import { BindingRecordError, LIVE_SESSION_ID_PATTERN, bindingRecordPath, loadBindingRecord, saveBindingRecord, serverIdentity, updateBindingExpiry, removeBindingRecord, type LiveSessionBindingRecord } from "./binding-record.ts";
+import { BindingRecordError, LIVE_SESSION_ID_PATTERN, MAX_BINDING_RECORDS, bindingRecordPath, loadBindingRecord, reclaimDeadBindingRecords, saveBindingRecord, serverIdentity, updateBindingExpiry, removeBindingRecord, type BindingRecordOptions, type LiveSessionBindingRecord } from "./binding-record.ts";
 
 export const EXIT_DONE = 0;
 export const EXIT_FAILED = 1;
@@ -221,6 +223,34 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
 /** Failures that mean "the server said no" rather than "it could not answer". */
 const REFUSAL_CODES: Record<string, true> = { unauthorized: true, refused: true, "not-found": true, "session-not-found": true, "session-unavailable": true };
 
+/** A liveness check the server did not answer as live or dead: the sweep stops and `open` reports the server's own failure. */
+class LivenessFailure extends Error {
+	constructor(readonly failure: SteerFailure) { super(failure.message); }
+}
+
+/** The refusal when a directory stays full, and the message for a save that fails after issuance; the same text either way. */
+const PERSISTENCE_FAILED = "substrate steer open: private binding persistence failed; the unused issued identity expires, and its lost credential cannot be recovered or reset\n";
+
+/** Any well-formed handle names a file in the directory, so it locates the directory before any real session exists. */
+const DIRECTORY_PROBE_SESSION = `ls_${"0".repeat(64)}`;
+
+/**
+ * Before `open` issues anything: a directory at capacity is swept for records the server has confirmed dead. Only a
+ * `session-not-found` answer to a record's own proof marks it dead; a live answer keeps it, and every other failure
+ * throws a `LivenessFailure`. Returns whether the directory has room afterwards.
+ */
+async function makeRoom(client: SteerClient, directory: string): Promise<boolean> {
+	const held = existsSync(directory) ? readdirSync(directory).filter((name) => name !== ".directory.lock").length : 0;
+	if (held < MAX_BINDING_RECORDS) return true;
+	const cleared = await reclaimDeadBindingRecords(directory, async (record) => {
+		const answer = await client.directives({ sessionId: record.session_id, status: "all", sessionBinding: record.session_binding });
+		if (answer.ok) return false;
+		if (answer.code === "session-not-found") return true;
+		throw new LivenessFailure(answer);
+	});
+	return held - cleared < MAX_BINDING_RECORDS;
+}
+
 export async function runSteer(argv: readonly string[], deps: SteerDeps): Promise<number> {
 	if (argv.length === 0 || argv[0] === "help" || argv[0] === "--help" || argv[0] === "-h") {
 		(argv.length === 0 ? deps.err : deps.out)(STEER_USAGE);
@@ -268,20 +298,29 @@ export async function runSteer(argv: readonly string[], deps: SteerDeps): Promis
 			const repoId = flag(parsed, "repo") ?? deps.repo();
 			if (repoId === undefined || repoId.trim().length === 0) { deps.err("substrate steer open: supply --repo R or use a repository with an origin\n"); return EXIT_USAGE; }
 			try { serverIdentity(deps.url); } catch { deps.err("substrate steer open: invalid configured server URL\n"); return EXIT_FAILED; }
+			const bindingOptions: BindingRecordOptions = {
+				...(deps.bindingDirectory === undefined ? {} : { directory: deps.bindingDirectory }),
+				...(flag(parsed, "binding-file") === undefined ? {} : { path: flag(parsed, "binding-file") as string }),
+			};
+			let room: boolean;
+			try { room = await makeRoom(client, dirname(bindingRecordPath(serverIdentity(deps.url), surface, DIRECTORY_PROBE_SESSION, bindingOptions))); }
+			catch (error) {
+				if (error instanceof LivenessFailure) return failed(error.failure);
+				deps.err("substrate steer open: the private binding directory could not be checked; no identity was issued\n");
+				return EXIT_FAILED;
+			}
+			if (!room) { deps.err(PERSISTENCE_FAILED); return EXIT_FAILED; }
 			const result = await client.open({ repoId });
 			if (!result.ok) return failed(result);
 			try {
 				const value = result.value;
-				const path = saveBindingRecord({ version: 1, server_identity: serverIdentity(deps.url), surface, session_id: value.session_id, session_binding: value.session_binding, expires_at: value.expires_at }, {
-					...(deps.bindingDirectory === undefined ? {} : { directory: deps.bindingDirectory }),
-					...(flag(parsed, "binding-file") === undefined ? {} : { path: flag(parsed, "binding-file") as string }),
-				});
+				const path = saveBindingRecord({ version: 1, server_identity: serverIdentity(deps.url), surface, session_id: value.session_id, session_binding: value.session_binding, expires_at: value.expires_at }, bindingOptions);
 				const publicResult = { status: value.status, session_id: value.session_id, repo_id: value.repo_id, state: value.state, updated_at: value.updated_at, expires_at: value.expires_at, binding_file: path };
 				if (json) jsonLine(publicResult);
 				else deps.out(`issued ${value.session_id}; expires ${value.expires_at}; binding file ${plain(path, 4096)}\n`);
 				return EXIT_DONE;
 			} catch {
-				deps.err("substrate steer open: private binding persistence failed; the unused issued identity expires, and its lost credential cannot be recovered or reset\n");
+				deps.err(PERSISTENCE_FAILED);
 				return EXIT_FAILED;
 			}
 		}

@@ -16,6 +16,8 @@ const MAX_BODY_CHARS = 400;
 const MAX_FIELDS_PER_ITEM = 6;
 const MAX_NOTES_SHOWN = 5;
 const HASH_SHOWN_CHARS = 8;
+/** A server-issued live handle: `ls_` then 64 lowercase hexadecimal characters, the shape `LIVE_SESSION_ID_PATTERN` accepts. */
+const LIVE_SESSION_ID_CHARS = "ls_".length + 64;
 /** Room kept for the "N more lines cut" line when a text is bounded. */
 const CUT_LINE_RESERVE = 40;
 
@@ -50,7 +52,7 @@ function stateOf(steering: unknown): string | undefined {
 
 export function renderSessionLine(session: SteerSession, nowMs: number): string {
 	const parts = [
-		plain(session.session_id, 64),
+		plain(session.session_id, LIVE_SESSION_ID_CHARS),
 		`surface=${plain(session.surface, 32)}`,
 		`state=${plain(session.state, 32)}`,
 		`repo=${plain(session.repo_id, 64)}`,
