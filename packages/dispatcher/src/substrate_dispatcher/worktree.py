@@ -164,9 +164,11 @@ def _registered(run: Runner, repo: Path, path: Path) -> bool:
 
 
 def _registered_path(run: Runner, repo: Path, gid: str, root: Path) -> Path | None:
-    """The first ``<home>/<gid>`` git lists as a worktree: ``root`` first, then every configured root."""
+    """The first ``<home>/<gid>`` that resolves inside its home and that git lists as a worktree: ``root`` first, then every configured root."""
     for home in dict.fromkeys([root, *worktree_roots()]):
         candidate = home / gid
+        if candidate.resolve().parent != home.resolve():
+            continue
         if _registered(run, repo, candidate):
             return candidate
     return None

@@ -362,3 +362,18 @@ def test_ensure_worktree_reuses_a_single_root_checkout_with_one_listing(repo: Pa
     assert ensure_worktree(repo, GID, "main", root=root, run=run, disk_usage=plenty) == root / GID
     assert run.adds() == []
     assert [call[3:5] for call in run.calls] == [["worktree", "list"]]
+
+
+def test_ensure_worktree_ignores_a_later_root_symlink_to_the_primary_checkout(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    second.mkdir()
+    (second / GID).symlink_to(repo)
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == first / GID
+    assert len(run.adds()) == 1
+    assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
