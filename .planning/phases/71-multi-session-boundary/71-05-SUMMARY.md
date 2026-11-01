@@ -33,8 +33,8 @@ Run by the orchestrator in `/root/src/worktrees/as-gsd-v18-p71` after the five f
 | Gate (CI command) | Result |
 |---|---|
 | `bunx tsc --noEmit` | exit 0 |
-| `bunx biome lint --reporter=summary .` | exit 0, 1650 files |
-| `bun test` (full repository, live PostgreSQL), one run after the expiry move, 0711 temp root | 11,623 pass, 2 skip, 0 fail, 427 files (11,625 tests) |
+| `bunx biome lint --reporter=summary .` | exit 0, 1651 files |
+| `bun test` (full repository, live PostgreSQL), one run after the expiry move and the steer sweep fix, 0711 temp root | 11,626 pass, 2 skip, 0 fail, 427 files (11,628 tests) |
 | `python3 -m pytest packages/miner/tests packages/dispatcher/tests` | 330 passed |
 | `bun run check:phase-close` | 4 lock files green; `EVENT_KINDS` unchanged at 12; `SURFACES` at baseline plus `substrate`, 42 |
 | `bun scripts/audit-gate.ts` | 0 unlisted high or critical; 5 accepted, none expired |
