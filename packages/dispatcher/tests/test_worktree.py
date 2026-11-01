@@ -377,3 +377,34 @@ def test_ensure_worktree_ignores_a_later_root_symlink_to_the_primary_checkout(re
     assert len(run.adds()) == 1
     assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
     assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+
+
+def test_ensure_worktree_ignores_a_later_root_sibling_symlink(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    other = "ut-sibling-graph-b"
+    second.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{other}", str(second / other), "main")
+    (second / GID).symlink_to(second / other)
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == first / GID
+    assert len(run.adds()) == 1
+    assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
+
+
+def test_ensure_worktree_refuses_a_creation_root_symlink_to_another_graph(repo: Path, tmp_path: Path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    other = "ut-sibling-graph-b"
+    git(repo, "worktree", "add", "-b", f"substrate/{other}", str(root / other), "main")
+    (root / GID).symlink_to(root / other)
+    run = Recorder()
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=root, run=run, disk_usage=plenty)
+
+    assert err.value.marker == "invalid-graph-id"
+    assert run.adds() == []

@@ -164,10 +164,10 @@ def _registered(run: Runner, repo: Path, path: Path) -> bool:
 
 
 def _registered_path(run: Runner, repo: Path, gid: str, root: Path) -> Path | None:
-    """The first ``<home>/<gid>`` that resolves inside its home and that git lists as a worktree: ``root`` first, then every configured root."""
+    """The first ``<home>/<gid>`` that is that exact path, not a link, and that git lists as a worktree: ``root`` first, then every configured root."""
     for home in dict.fromkeys([root, *worktree_roots()]):
         candidate = home / gid
-        if candidate.resolve().parent != home.resolve():
+        if candidate.resolve() != home.resolve() / gid:
             continue
         if _registered(run, repo, candidate):
             return candidate
@@ -198,7 +198,7 @@ def ensure_worktree(
     configured = bool(worktree_roots())
     root = Path(root) if root is not None else creation_root()
     path = root / gid
-    if path.resolve().parent != root.resolve():
+    if path.resolve() != root.resolve() / gid:
         raise WorktreeRefused(f"worktree path {path} escapes {root}", "invalid-graph-id")
 
     floor_path = str(_nearest_existing(root)) if configured else "/"
