@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections import namedtuple
 from pathlib import Path
@@ -320,3 +321,44 @@ def test_low_disk_comment_states_the_configured_floor(repo: Path, tmp_path: Path
     assert comment_body(err.value.marker, **err.value.fields) == (
         f"{COMMENT_PREFIX} [low-disk] under 10 GB free on /; no worktree created, not dispatching"
     )
+
+
+def test_ensure_worktree_reuses_a_checkout_under_a_later_root_without_adding(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    second.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(second / GID), "main")
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == second / GID
+    assert run.adds() == []
+    assert not first.exists()
+
+
+def test_ensure_worktree_refuses_a_missing_checkout_under_a_later_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    second.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(second / GID), "main")
+    shutil.rmtree(second / GID)
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert err.value.marker == "path-conflict"
+    assert run.adds() == []
+    assert not first.exists()
+
+
+def test_ensure_worktree_reuses_a_single_root_checkout_with_one_listing(repo: Path, tmp_path: Path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(root / GID), "main")
+    run = Recorder()
+
+    assert ensure_worktree(repo, GID, "main", root=root, run=run, disk_usage=plenty) == root / GID
+    assert run.adds() == []
+    assert [call[3:5] for call in run.calls] == [["worktree", "list"]]

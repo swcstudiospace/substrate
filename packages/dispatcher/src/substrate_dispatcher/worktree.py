@@ -163,6 +163,15 @@ def _registered(run: Runner, repo: Path, path: Path) -> bool:
     )
 
 
+def _registered_path(run: Runner, repo: Path, gid: str, root: Path) -> Path | None:
+    """The first ``<home>/<gid>`` git lists as a worktree: ``root`` first, then every configured root."""
+    for home in dict.fromkeys([root, *worktree_roots()]):
+        candidate = home / gid
+        if _registered(run, repo, candidate):
+            return candidate
+    return None
+
+
 def _ref_exists(run: Runner, repo: Path, ref: str) -> bool:
     return _git(run, repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0
 
@@ -180,6 +189,8 @@ def ensure_worktree(
 
     ``root`` defaults to ``creation_root()``. The floor is checked on the filesystem holding the root when
     roots are configured, and on ``/`` when none is.
+
+    A checkout git already lists under any configured root is reused in place, and nothing is added for it.
     """
     gid = validate_graph_id(graph_id)
     configured = bool(worktree_roots())
@@ -199,11 +210,12 @@ def ensure_worktree(
         )
 
     repo = Path(repo)
-    if _registered(run, repo, path):
-        if path.is_dir():
-            return path
+    registered = _registered_path(run, repo, gid, root)
+    if registered is not None:
+        if registered.is_dir():
+            return registered
         raise WorktreeRefused(
-            f"{path} is registered with git but missing on disk (git worktree prune needed)",
+            f"{registered} is registered with git but missing on disk (git worktree prune needed)",
             "path-conflict",
         )
     if path.exists():
