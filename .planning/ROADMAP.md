@@ -1231,7 +1231,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: Locally verified (5/5 criteria); awaiting-review / pending QUALITY. Greptile P2 threads on PR #199 remediated and re-verified 2026-11-01 (71-05): typecheck, Biome lint, full repository tests (11621 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate green. `human_needed` remains solely for the mandated Desk Quality / Programming Lead review of the remediation, which has not been observed. No phase-complete or merge-ready claim. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
+**Status**: Locally verified (5/5 criteria); awaiting-review / pending QUALITY. Greptile P2 threads on PR #199 remediated and re-verified 2026-11-01 (71-05). The expiry pass now runs on the issue path, so discovery and the session digest stay read-only. Verified by typecheck, Biome lint, one full repository run (11,623 pass, 2 skip, 0 fail, 0711 temp root), Python suites (330 pass), phase-close locks and audit gate. `human_needed` remains solely for the mandated Desk Quality / Programming Lead review of the remediation, which has not been observed. No phase-complete or merge-ready claim. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
 
 **Depends on**: none
 

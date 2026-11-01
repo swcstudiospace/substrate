@@ -6,7 +6,7 @@ status: "v1.8 Phase 71 locally verified; Greptile remediation (71-05) gates gree
 stopped_at: "Phase 71 remediation ready for draft review on PR #199; Desk SendToAgent connector not mounted in the autonomous session, so the Desk Quality gate is unobserved. Phases 72-78 not started. v1.7 owner decisions open."
 last_updated: "2026-11-01"
 last_activity: 2026-11-01
-last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); full suite 11621 pass, 0 fail; phase remains human_needed"
+last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); expiry pass moved to issue so discovery and the digest stay read-only; one full run 11623 pass, 0 fail; phase remains human_needed"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
