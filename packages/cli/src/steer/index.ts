@@ -235,14 +235,16 @@ const PERSISTENCE_FAILED = "substrate steer open: private binding persistence fa
 const DIRECTORY_PROBE_SESSION = `ls_${"0".repeat(64)}`;
 
 /**
- * Before `open` issues anything: a directory at capacity is swept for records the server has confirmed dead. Only a
- * `session-not-found` answer to a record's own proof marks it dead; a live answer keeps it, and every other failure
- * throws a `LivenessFailure`. Returns whether the directory has room afterwards.
+ * Before `open` issues anything: a directory at capacity is swept for this server's and surface's records the server has
+ * confirmed dead. Only a `session-not-found` answer to a record's own proof marks it dead; a live answer keeps it, and
+ * every other failure throws a `LivenessFailure`. Records for another server or surface are never sent this client's
+ * bearer and are never removed. Returns whether the directory has room afterwards.
  */
-async function makeRoom(client: SteerClient, directory: string): Promise<boolean> {
+async function makeRoom(client: SteerClient, directory: string, identity: string, surface: string): Promise<boolean> {
 	const held = existsSync(directory) ? readdirSync(directory).filter((name) => name !== ".directory.lock").length : 0;
 	if (held < MAX_BINDING_RECORDS) return true;
 	const cleared = await reclaimDeadBindingRecords(directory, async (record) => {
+		if (record.server_identity !== identity || record.surface !== surface) return false;
 		const answer = await client.directives({ sessionId: record.session_id, status: "all", sessionBinding: record.session_binding });
 		if (answer.ok) return false;
 		if (answer.code === "session-not-found") return true;
@@ -302,8 +304,9 @@ export async function runSteer(argv: readonly string[], deps: SteerDeps): Promis
 				...(deps.bindingDirectory === undefined ? {} : { directory: deps.bindingDirectory }),
 				...(flag(parsed, "binding-file") === undefined ? {} : { path: flag(parsed, "binding-file") as string }),
 			};
+			const identity = serverIdentity(deps.url);
 			let room: boolean;
-			try { room = await makeRoom(client, dirname(bindingRecordPath(serverIdentity(deps.url), surface, DIRECTORY_PROBE_SESSION, bindingOptions))); }
+			try { room = await makeRoom(client, dirname(bindingRecordPath(identity, surface, DIRECTORY_PROBE_SESSION, bindingOptions)), identity, surface); }
 			catch (error) {
 				if (error instanceof LivenessFailure) return failed(error.failure);
 				deps.err("substrate steer open: the private binding directory could not be checked; no identity was issued\n");

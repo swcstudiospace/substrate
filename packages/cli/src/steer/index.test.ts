@@ -1242,6 +1242,61 @@ describe("open at capacity clears only records the server names not found", () =
 			expect(r.out).toEqual([]);
 		});
 	}
+
+	test("a record for another server is never checked with this client's bearer", async () => {
+		const r = rig();
+		const foreign = `ls_${"f".repeat(64)}`;
+		const foreignPath = retain(r, { server_identity: serverIdentity("http://127.0.0.1:7411"), session_id: foreign, session_binding: OTHER_PROOF });
+		fill(r, MAX_BINDING_RECORDS - 1);
+		r.reply = (call) => {
+			if (call.method === "POST") return json(issued());
+			return call.params.session_id === foreign ? json({ status: "refused", error: { code: "not-found" } }, 404) : json({ directives: [] });
+		};
+		expect(await steer(r, "open", "--json")).toBe(EXIT_FAILED);
+		expect(checks(r)).toHaveLength(MAX_BINDING_RECORDS - 1);
+		expect(checks(r).some((call) => call.params.session_id === foreign || call.sessionBinding === OTHER_PROOF)).toBe(false);
+		expect(checks(r).every((call) => call.authorization === "Bearer token-for-default")).toBe(true);
+		expect(existsSync(foreignPath)).toBe(true);
+		expect(posts(r)).toEqual([]);
+		expect(text(r.err)).toContain("unused issued identity expires");
+	});
+
+	test("at capacity a record for this server and surface answered session-not-found is removed beside foreign records", async () => {
+		const r = rig();
+		const sessions = fill(r, MAX_BINDING_RECORDS - 2);
+		const dead = defined(sessions[0]);
+		const foreign = `ls_${"f".repeat(64)}`;
+		const foreignPath = retain(r, { server_identity: serverIdentity("http://127.0.0.1:7411"), session_id: foreign, session_binding: OTHER_PROOF });
+		const omp = `ls_${"e".repeat(64)}`;
+		const ompPath = retain(r, { surface: "omp", session_id: omp, session_binding: OTHER_PROOF });
+		r.reply = (call) => {
+			if (call.method === "POST") return json(issued());
+			const gone = call.params.session_id === dead || call.params.session_id === foreign || call.params.session_id === omp;
+			return gone ? json({ status: "refused", error: { code: "not-found" } }, 404) : json({ directives: [] });
+		};
+		expect(await steer(r, "open", "--json")).toBe(EXIT_DONE);
+		expect(checks(r)).toHaveLength(MAX_BINDING_RECORDS - 2);
+		expect(checks(r).some((call) => call.params.session_id === foreign || call.params.session_id === omp)).toBe(false);
+		expect(existsSync(pathOf(r, dead))).toBe(false);
+		expect(existsSync(foreignPath)).toBe(true);
+		expect(existsSync(ompPath)).toBe(true);
+		expect(held(r)).toBe(MAX_BINDING_RECORDS);
+	});
+
+	test("a record for another surface of this server is never removed, even when its server answers not-found", async () => {
+		const r = rig();
+		const omp = `ls_${"e".repeat(64)}`;
+		const ompPath = retain(r, { surface: "omp", session_id: omp, session_binding: OTHER_PROOF });
+		fill(r, MAX_BINDING_RECORDS - 1);
+		r.reply = (call) => {
+			if (call.method === "POST") return json(issued());
+			return call.params.session_id === omp ? json({ status: "refused", error: { code: "not-found" } }, 404) : json({ directives: [] });
+		};
+		expect(await steer(r, "open", "--json")).toBe(EXIT_FAILED);
+		expect(checks(r).some((call) => call.params.session_id === omp || call.sessionBinding === OTHER_PROOF)).toBe(false);
+		expect(existsSync(ompPath)).toBe(true);
+		expect(posts(r)).toEqual([]);
+	});
 });
 
 describe("selected private records drive reads and lifecycle", () => {
