@@ -350,6 +350,7 @@ describe("runReport", () => {
 		expect(report.first).toEqual({ lease: null, memory: null, generation: null });
 		expect(Object.values(report.truncated).every((value) => value === false)).toBe(true);
 		expect(report.unchecked_memory_rows).toBe(1);
+		expect(report.unchecked_layers).toEqual([]);
 		expect(report.counts["index.holds"]).toBe(2);
 		expect(report.counts["cache.brief"]).toBe(1);
 		// Every command the run issued is a SCAN; every index call is a read; every ledger call is queryEvents.
@@ -384,6 +385,24 @@ describe("runReport", () => {
 		const report = await runWith(world, [], [], [], 1);
 		expect(report.truncated["cache.brief"]).toBe(true);
 		expect(report.counts["cache.brief"]).toBe(1);
+		expect(report.clean).toBe(false);
+	});
+
+	test("with the cache off, the cache layer is unchecked and absent from the counts, and the run is not clean", async () => {
+		const world = cleanWorld();
+		const report = await runReport({
+			ledger: fakeLedger(world.ledgerRows, []),
+			index: fakeIndex(world.index, []),
+			cache: new ReadThroughCache({ redis: null, enabled: false }),
+			now: NOW,
+			windowHours: 24,
+			caps: CAPS,
+		});
+		expect(report.unchecked_layers).toEqual(["cache"]);
+		expect(Object.keys(report.counts).filter((key) => key.startsWith("cache."))).toEqual([]);
+		expect(report.counts["index.holds"]).toBe(2);
+		expect(report.truncated["cache.brief"]).toBe(true);
+		expect(report.truncated["cache.gen:graph"]).toBe(true);
 		expect(report.clean).toBe(false);
 	});
 });

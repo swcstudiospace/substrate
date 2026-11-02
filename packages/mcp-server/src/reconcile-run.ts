@@ -14,7 +14,7 @@ import {
 	type IndexReader,
 	type LedgerReader,
 } from "./reconcile-read.ts";
-import { buildReport, compareGenerations, compareLeases, compareMemory, type Finding, type Report } from "./reconcile.ts";
+import { buildReport, compareGenerations, compareLeases, compareMemory, type Finding, type Layer, type Report } from "./reconcile.ts";
 
 /** Row caps for one run. A capped read reports `truncated`, and a truncated report is never clean. */
 export interface ReconcileCaps {
@@ -80,14 +80,21 @@ export async function runReport(deps: ReconcileDeps): Promise<Report> {
 	counts["index.graphs"] = indexGraphs.value.size;
 	truncated["index.graphs"] = indexGraphs.truncated;
 
+	// The cache layer. An off cache scans nothing: every scan comes back empty and truncated. A live scan that truncates
+	// holds keys past its cap, so it always has at least one key. Empty and truncated is therefore the off cache's answer.
+	const scans: Array<[string, { keys: string[]; truncated: boolean }]> = [];
 	for (const klass of CACHE_CLASSES) {
-		const scan = await deps.cache.scanKeys(`${CACHE_PREFIX}:${klass}:*`, caps.cacheKeys);
-		counts[`cache.${klass}`] = scan.keys.length;
-		truncated[`cache.${klass}`] = scan.truncated;
+		scans.push([`cache.${klass}`, await deps.cache.scanKeys(`${CACHE_PREFIX}:${klass}:*`, caps.cacheKeys)]);
 	}
 	const generations = await deps.cache.scanKeys(`${GENERATION_PREFIX}*`, caps.cacheKeys);
-	counts["cache.gen:graph"] = generations.keys.length;
-	truncated["cache.gen:graph"] = generations.truncated;
+	scans.push(["cache.gen:graph", generations]);
+	const cacheOff = scans.every(([, scan]) => scan.keys.length === 0 && scan.truncated);
+	// An off cache has no counts to report. Its classes stay truncated, so the run is never clean, and the layer is named unchecked.
+	for (const [name, scan] of scans) {
+		if (!cacheOff) counts[name] = scan.keys.length;
+		truncated[name] = scan.truncated;
+	}
+	const uncheckedLayers: Layer[] = cacheOff ? ["cache"] : [];
 	const generationGraphIds = new Set(generations.keys.map((key) => key.slice(GENERATION_PREFIX.length)));
 
 	const findings: Finding[] = [
@@ -102,6 +109,7 @@ export async function runReport(deps: ReconcileDeps): Promise<Report> {
 		counts,
 		truncated,
 		unchecked_memory_rows: uncheckedMemoryRows,
+		unchecked_layers: uncheckedLayers,
 		findings,
 	});
 }

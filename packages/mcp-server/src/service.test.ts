@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
@@ -14,7 +14,7 @@ import { HindsightFake } from "./hindsight-fake.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
-import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
+import { GRAPHS_GENERATION_KEY, graphGenerationKey, ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { defined } from "./test-support.ts";
 
 /** Records what reached the event log, and stands in for the index. */
@@ -5660,5 +5660,72 @@ describe("the scheduled reconcile timer (phase 78)", () => {
 		expect(live.startReconcile()).toBe(false);
 		live.stopReconcile();
 		expect(live.startReconcile()).toBe(true);
+	});
+
+	test("one scheduled tick on a clean fixture logs one clean reconcile line and writes nothing", async () => {
+		// Each store answers only the reads the run makes. Any other method reached through it is recorded and throws.
+		const writes: string[] = [];
+		const readOnlyStore = <T extends object>(reads: T): T =>
+			new Proxy(reads, {
+				get(target, prop, receiver) {
+					if (typeof prop === "symbol" || prop in target) return Reflect.get(target, prop, receiver);
+					return () => {
+						writes.push(String(prop));
+						throw new Error(`reconcile reached ${String(prop)}`);
+					};
+				},
+			});
+		const ledger = readOnlyStore({ queryEvents: async () => [] });
+		const index = readOnlyStore({
+			reconcileHolds: async () => [],
+			reconcileHeldNodes: async () => ({ rows: [], truncated: false }),
+			reconcileMemoryIds: async () => ({ rows: [], truncated: false }),
+			reconcileGraphIds: async () => ({ rows: [], truncated: false }),
+			reconcileMemoryRowsBefore: async () => 0,
+		});
+		// A live cache with nothing in it: every scan is empty and complete, so the run is clean rather than off.
+		const redis: CacheRedis = {
+			get: async () => null,
+			set: async () => {
+				writes.push("set");
+			},
+			incr: async () => {
+				writes.push("incr");
+				return 0;
+			},
+			eval: async () => {
+				writes.push("eval");
+				return null;
+			},
+			scan: async () => ["0", []],
+			unlink: async () => {
+				writes.push("unlink");
+				return 0;
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: ledger as never,
+			cache: new ReadThroughCache({ redis, enabled: true, log: () => {} }),
+		});
+
+		const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
+		const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+		// The tick is private. This cast is the narrowest reach to it, as session-rollback.testkit.ts reaches sessionRollbackDeps.
+		const seam = substrate as unknown as { reconcileTick(): Promise<void> };
+		try {
+			await seam.reconcileTick();
+			// Read while the spies are live: restoring a spy clears its calls.
+			const lines = stdout.mock.calls.map((call) => String(call[0]));
+			expect(lines).toHaveLength(1);
+			const prefix = "[substrate] reconcile ";
+			expect(lines[0]?.startsWith(prefix)).toBe(true);
+			expect(JSON.parse(defined(lines[0]).slice(prefix.length)).clean).toBe(true);
+			expect(stderr.mock.calls).toHaveLength(0);
+			expect(writes).toEqual([]);
+		} finally {
+			stdout.mockRestore();
+			stderr.mockRestore();
+		}
 	});
 });

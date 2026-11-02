@@ -31,6 +31,8 @@ export interface Report {
 	counts: Record<string, number>;
 	truncated: Record<string, boolean>;
 	unchecked_memory_rows: number;
+	/** Layers the run did not check; see `ReportInput.unchecked_layers`. */
+	unchecked_layers: Layer[];
 	findings: Finding[];
 	first: { lease: Finding | null; memory: Finding | null; generation: Finding | null };
 	clean: boolean;
@@ -43,6 +45,8 @@ export interface ReportInput {
 	counts: Record<string, number>;
 	truncated: Record<string, boolean>;
 	unchecked_memory_rows: number;
+	/** Layers the run did not check. `cache` when the cache is off: its counts are absent, so the layer is named here instead. */
+	unchecked_layers: Layer[];
 	findings: readonly Finding[];
 }
 
@@ -196,6 +200,7 @@ export function buildReport(input: ReportInput): Report {
 		counts: Object.fromEntries(Object.entries(input.counts).sort(([a], [b]) => byteOrder(a, b))),
 		truncated: Object.fromEntries(Object.entries(input.truncated).sort(([a], [b]) => byteOrder(a, b))),
 		unchecked_memory_rows: input.unchecked_memory_rows,
+		unchecked_layers: input.unchecked_layers,
 		findings,
 		first: {
 			lease: firstOf("lease"),

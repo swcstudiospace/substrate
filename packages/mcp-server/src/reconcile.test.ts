@@ -169,6 +169,7 @@ describe("buildReport", () => {
 		counts: { "ledger.lease": 3, "index.graph": 2 },
 		truncated: { cache: false },
 		unchecked_memory_rows: 0,
+		unchecked_layers: [],
 	};
 
 	test("no findings and no truncation is clean", () => {
@@ -180,7 +181,14 @@ describe("buildReport", () => {
 		expect(report.generated_at).toBe(base.generated_at);
 		expect(report.window_hours).toBe(24);
 		expect(report.unchecked_memory_rows).toBe(0);
+		expect(report.unchecked_layers).toEqual([]);
 		expect(report.counts).toEqual({ "index.graph": 2, "ledger.lease": 3 });
+	});
+
+	test("unchecked layers are reported as given, and the run is not clean while one of its classes is truncated", () => {
+		const report = buildReport({ ...base, unchecked_layers: ["cache"], truncated: { "cache.brief": true }, findings: [] });
+		expect(report.unchecked_layers).toEqual(["cache"]);
+		expect(report.clean).toBe(false);
 	});
 
 	test("a truncation flag makes the report not clean even with no findings", () => {

@@ -23,7 +23,7 @@ Heartbeats and expiry are not compared. Renewals are silent in the ledger, and a
 
 **Cache generations (cache against index).** The cache is enumerated with a capped, read-only `SCAN`. Keys are counted per class. Drift is a `gen:graph:<id>` key whose graph is absent from `graph_index`. That key is the finding. A capped scan reports `truncated` and is never clean.
 
-The report lists per-layer counts: ledger lease transitions and memory writes in the window; index holds, memory rows in the window and graphs; cache keys per class. `first` names the first mismatching key of each comparison, in sorted order.
+The report lists per-layer counts: ledger lease transitions and memory writes in the window; index holds, memory rows in the window and graphs; cache keys per class. `first` names the first mismatching key of each comparison, in sorted order. When the cache is off, no `cache.*` count is reported. `unchecked_layers` names `cache`, the way `unchecked_memory_rows` counts the memory rows the window does not check, and every cache class stays `truncated`, so the run is never clean. The scheduled log line carries `counts`, `truncated`, `first` and `clean`, but not `unchecked_layers`; its `truncated` map still shows the cache classes.
 
 ## Report and exit codes
 
