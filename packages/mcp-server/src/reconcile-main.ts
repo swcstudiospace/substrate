@@ -9,7 +9,7 @@
  *   reconcile repair --plan <file> --execute    flushes the derived cache, then writes `<file>.result.json`
  *
  * Exit codes: 0 done (a clean report, a plan written, a dry run or an executed repair); 1 a report that is not clean, a
- * refused or unreadable plan, or a failure reading a layer; 2 usage, or configuration this run needs and does not have.
+ * refused or unreadable plan, a failed repair, or a failure reading a layer; 2 usage, or configuration this run needs and does not have.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { createReadThroughCache } from "./cache.ts";
@@ -18,8 +18,7 @@ import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
 import { DEFAULT_RECONCILE_CAPS, type ReconcileDeps, runReport } from "./reconcile-run.ts";
-import { executePlan, planFromReport, type Plan, type RepairResult } from "./reconcile-repair.ts";
-import { redact } from "./redact.ts";
+import { executePlan, failureReason, planFromReport, type Plan, type RepairResult } from "./reconcile-repair.ts";
 import type { Report } from "./reconcile.ts";
 
 /** The three layers a run reads, and the call that releases the index socket once the run is over. */
@@ -91,19 +90,12 @@ export function parseReconcileArgs(argv: readonly string[]): Command {
 	throw new UsageError(`unknown subcommand: ${sub.startsWith("--") ? sub : "(positional)"}`);
 }
 
-/** A message that names no URL: a connection error can quote the one it was given, password and all. */
-function reasonOf(cause: unknown): string {
-	const text = String(cause instanceof Error ? cause.message : cause);
-	return redact(text)
-		.replace(/\b(?:redis|rediss|postgres|postgresql|https?):\/\/\S+/gi, "<url>")
-		.slice(0, 300);
-}
-
 /** What this run needs from configuration and does not have, or null when it has all of it. */
 export function missingConfig(config: SubstrateConfig): string | null {
 	if (config.postgresUrl === undefined) return "SUBSTRATE_PG_URL is not set; the reconcile reads the index";
 	if (config.greptime === null) return "GREPTIME_URL is not set; the reconcile reads the ledger";
-	// A cache that is off scans nothing, so the report would read clean for the wrong reason.
+	// A cache that is off scans nothing, so a report over it is incomplete and must not read clean; this check also makes the
+	// CLI refuse before it reads when the cache is not enabled.
 	if (!config.cacheEnabled) return "the cache is off (DRAGONFLY_URL is unset, refused, or SUBSTRATE_CACHE=0); the reconcile needs it to read";
 	return null;
 }
@@ -150,7 +142,7 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 	try {
 		command = parseReconcileArgs(argv);
 	} catch (cause) {
-		io.err(`${reasonOf(cause)}\n${USAGE}`);
+		io.err(`${failureReason(cause)}\n${USAGE}`);
 		return 2;
 	}
 
@@ -158,7 +150,7 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 	try {
 		config = loadConfig(env);
 	} catch (cause) {
-		io.err(`reconcile: ${reasonOf(cause)}`);
+		io.err(`reconcile: ${failureReason(cause)}`);
 		return 2;
 	}
 	const missing = missingConfig(config);
@@ -197,23 +189,35 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 		try {
 			plan = parsePlan(await readFile(command.plan, "utf8"));
 		} catch (cause) {
-			io.err(`refused: the plan file cannot be read as a ${PLAN_SCHEMA} record: ${reasonOf(cause)}`);
+			io.err(`refused: the plan file cannot be read as a ${PLAN_SCHEMA} record: ${failureReason(cause)}`);
 			return 1;
 		}
-		const result: RepairResult = await executePlan(plan, deps, { execute: command.execute });
-		io.out(JSON.stringify(result, null, 2));
-		if (command.execute) {
-			// Written after the flush, whether or not the plan was refused, so a refusal is on record too. It overwrites: an
-			// earlier record must not block the one that follows a flush.
-			await writeFile(`${command.plan}.result.json`, `${JSON.stringify({ result, recorded_at: now().toISOString() }, null, 2)}\n`);
+		let result: RepairResult;
+		try {
+			result = await executePlan(plan, deps, { execute: command.execute });
+		} catch (cause) {
+			// Only the re-run report throws before the flush; the flush reports its own failure in the result. An execute still
+			// records the failure below. A dry run is an ordinary error.
+			if (!command.execute) throw cause;
+			const error = failureReason(cause);
+			result = { executed: false, reason: `failed: ${error}`, listed: plan.items.length, repaired: 0, truncated: false, refused: false, error };
 		}
-		if (result.refused) {
+		try {
+			io.out(JSON.stringify(result, null, 2));
+		} finally {
+			if (command.execute) {
+				// Written after the flush, whether or not the plan was refused or failed, so every outcome of an execute is on
+				// record. It overwrites: an earlier record must not block the one that follows a flush.
+				await writeFile(`${command.plan}.result.json`, `${JSON.stringify({ result, recorded_at: now().toISOString() }, null, 2)}\n`);
+			}
+		}
+		if (result.refused || result.error !== undefined) {
 			io.err(result.reason);
 			return 1;
 		}
 		return 0;
 	} catch (cause) {
-		io.err(`reconcile failed: ${reasonOf(cause)}`);
+		io.err(`reconcile failed: ${failureReason(cause)}`);
 		return 1;
 	} finally {
 		await clients?.close();

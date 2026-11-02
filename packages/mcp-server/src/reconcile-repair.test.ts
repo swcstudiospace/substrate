@@ -173,4 +173,16 @@ describe("executePlan", () => {
 		expect(result.reason).toMatch(/partial flush/);
 		expect(cache.keys.size).toBe(2);
 	});
+
+	test("a plan item that names another match is refused and writes nothing", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		const widened = { ...plan, items: plan.items.map((item) => ({ ...item, match: "substrate:v1:brief:*" })) };
+		const result = await executePlan(widened, deps, { execute: true });
+		expect(result.refused).toBe(true);
+		expect(result.executed).toBe(false);
+		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
+		expect(cache.keys.size).toBe(6);
+	});
 });

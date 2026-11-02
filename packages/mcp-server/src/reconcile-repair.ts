@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import type { ReadThroughCache } from "./cache.ts";
 import { DEFAULT_RECONCILE_CAPS, type ReconcileDeps, runReport } from "./reconcile-run.ts";
 import type { Finding, Report } from "./reconcile.ts";
+import { redact } from "./redact.ts";
 
 /** The whole cache prefix. A flush never narrows below it: a counter alone can revive a stale answer (D78-5). */
 const FLUSH_MATCH = "substrate:v1:*";
@@ -36,6 +37,8 @@ export interface RepairResult {
 	repaired: number;
 	truncated: boolean;
 	refused: boolean;
+	/** Set when the flush failed part way; `repaired` is then the keys removed before the failure. */
+	error?: string;
 }
 
 /**
@@ -47,6 +50,18 @@ export function findingsDigest(findings: readonly Finding[]): string {
 		.sort((a, b) => (a.comparison < b.comparison ? -1 : a.comparison > b.comparison ? 1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 		.map((finding) => `${finding.comparison}|${finding.key}`);
 	return createHash("sha256").update(lines.join("\n")).digest("hex");
+}
+
+/**
+ * A message that fits one line and names no URL: a connection error can quote the URL it was given, password and all.
+ */
+export function failureReason(cause: unknown): string {
+	const text = String(cause instanceof Error ? cause.message : cause);
+	return redact(text)
+		.replace(/\b(?:redis|rediss|postgres|postgresql|https?):\/\/\S+/gi, "<url>")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 300);
 }
 
 /**
@@ -76,10 +91,29 @@ export function planFromReport(report: Report, now: Date): Plan {
 }
 
 /**
- * Run a plan. It re-runs the read-only report first, then refuses when the findings differ from the plan's digest or no
- * generation orphan remains. Without `execute` it returns what it would do and writes nothing. With `execute` it scans the
- * whole `substrate:v1:*` prefix and unlinks every key it found. A capped scan flushes only part of the prefix; the result
- * says so, and a fresh plan finishes it.
+ * Why a plan's items may not be run, or null when every item is the flush this repair runs. The digest pins what the report
+ * found; this pins what the plan asks to remove. Messages never echo a value from the plan file.
+ */
+function planRefusal(items: readonly PlanItem[], liveOrphans: ReadonlySet<string>): string | null {
+	for (const item of items) {
+		if (typeof item !== "object" || item === null || item.action !== "flush-derived-cache") {
+			return "the plan names an action this repair does not run; re-plan before repairing";
+		}
+		if (item.match !== FLUSH_MATCH) return `the plan names a match other than ${FLUSH_MATCH}; re-plan before repairing`;
+		if (!Array.isArray(item.orphans) || item.orphans.some((orphan) => !liveOrphans.has(orphan))) {
+			return "the plan names an orphan that the fresh report does not list as a live generation orphan; re-plan before repairing";
+		}
+	}
+	return null;
+}
+
+/**
+ * Run a plan. It re-runs the read-only report first, then refuses when the findings differ from the plan's digest, when no
+ * generation orphan remains, or when any plan item is not the flush this repair runs: another action, another match than
+ * `substrate:v1:*`, or an orphan the fresh report does not list as live. Without `execute` it returns what it would do and
+ * writes nothing. With `execute` it scans the whole `substrate:v1:*` prefix and unlinks every key it found; a failure part way
+ * is returned in `error`, with the count removed so far. A capped scan flushes only part of the prefix; the result says so,
+ * and a fresh plan finishes it.
  */
 export async function executePlan(
 	plan: Plan,
@@ -109,6 +143,11 @@ export async function executePlan(
 			refused: true,
 		};
 	}
+	const refusal = planRefusal(plan.items, new Set(orphans.map((finding) => finding.key)));
+	if (refusal !== null) {
+		return { executed: false, reason: `refused: ${refusal}`, listed, repaired: 0, truncated: false, refused: true };
+	}
+
 	if (!options.execute) {
 		return {
 			executed: false,
@@ -119,10 +158,19 @@ export async function executePlan(
 			refused: false,
 		};
 	}
-	const scan = await deps.cache.scanKeys(FLUSH_MATCH, DEFAULT_RECONCILE_CAPS.cacheKeys);
-	const repaired = scan.keys.length > 0 ? await deps.cache.unlinkKeys(scan.keys) : 0;
-	const reason = scan.truncated
+	let repaired = 0;
+	let truncated = false;
+	try {
+		const scan = await deps.cache.scanKeys(FLUSH_MATCH, DEFAULT_RECONCILE_CAPS.cacheKeys);
+		truncated = scan.truncated;
+		repaired = scan.keys.length > 0 ? await deps.cache.unlinkKeys(scan.keys) : 0;
+	} catch (cause) {
+		// The flush stopped part way: report the keys removed before the failure, so the result record says so.
+		const error = failureReason(cause);
+		return { executed: false, reason: `failed: the flush of ${FLUSH_MATCH} stopped: ${error}`, listed, repaired, truncated, refused: false, error };
+	}
+	const reason = truncated
 		? `partial flush: the scan stopped at ${DEFAULT_RECONCILE_CAPS.cacheKeys} keys and removed ${repaired}; re-plan and execute again to finish`
 		: `flushed ${repaired} key(s) under ${FLUSH_MATCH}; the cache is cold until it refills`;
-	return { executed: true, reason, listed, repaired, truncated: scan.truncated, refused: false };
+	return { executed: true, reason, listed, repaired, truncated, refused: false };
 }

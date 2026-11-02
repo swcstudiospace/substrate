@@ -3846,7 +3846,7 @@ export class Substrate {
 				windowHours: this.config.reconcile.windowHours,
 				caps: DEFAULT_RECONCILE_CAPS,
 			});
-			const line = { schema: report.schema, generated_at: report.generated_at, clean: report.clean, counts: report.counts, first: report.first };
+			const line = { schema: report.schema, generated_at: report.generated_at, clean: report.clean, counts: report.counts, truncated: report.truncated, first: report.first };
 			process.stdout.write(`[substrate] reconcile ${JSON.stringify(line)}\n`);
 		} catch (cause) {
 			process.stderr.write(`[substrate] reconcile: run failed — ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);

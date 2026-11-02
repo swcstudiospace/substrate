@@ -232,6 +232,29 @@ describe("readLedgerLatestLeases", () => {
 		const read = await readLedgerLatestLeases(fakeLedger([], []), [{ graph_id: "g1", node_id: "A" }, { graph_id: "g1", node_id: "B" }], 1);
 		expect(read.truncated).toBe(true);
 	});
+
+	test("a newest release frees the key even when an older grant exists", async () => {
+		const rows = [
+			row("grant", 5, { kind: "claim", graph_id: "g1", node_id: "A", surface: "s1", session_id: "sess1", payload: { action: "granted", lease_epoch: 1 } }),
+			row("release", 1, { kind: "note", graph_id: "g1", node_id: "A", surface: "s1", session_id: "sess1", payload: { action: "released", lease_epoch: 1 } }),
+		];
+		const read = await readLedgerLatestLeases(fakeLedger(rows, []), [{ graph_id: "g1", node_id: "A" }], 200);
+		expect(read.value.has("g1/A")).toBe(true);
+		expect(read.value.get("g1/A")).toBeNull();
+	});
+
+	test("a lookup whose rows run out before any transition is truncated", async () => {
+		// The fake answers any limit with that many rows of an unrelated kind, so the test never copies LOOKUP_LIMIT.
+		const silent: LedgerReader = {
+			queryEvents: async (query: EventQuery = {}) =>
+				Array.from({ length: query.limit ?? 0 }, (_, index) =>
+					row(`hb${index}`, 1, { kind: "heartbeat", graph_id: "g1", node_id: "A", surface: "s1", session_id: "sess1", payload: { action: "heartbeat" } }),
+				),
+		};
+		const read = await readLedgerLatestLeases(silent, [{ graph_id: "g1", node_id: "A" }], 200);
+		expect(read.value.has("g1/A")).toBe(false);
+		expect(read.truncated).toBe(true);
+	});
 });
 
 describe("ReadThroughCache scan and unlink", () => {

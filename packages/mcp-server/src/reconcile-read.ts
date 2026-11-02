@@ -175,7 +175,7 @@ export async function readLedgerLatestLeases(ledger: LedgerReader, nodes: readon
 			const transition = transitionOf(row);
 			if (transition === null) continue;
 			events += 1;
-			latest ??= transition.hold;
+			if (latest === undefined) latest = transition.hold;
 		}
 		if (latest !== undefined) {
 			value.set(key, latest);
