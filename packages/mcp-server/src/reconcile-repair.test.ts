@@ -225,6 +225,48 @@ describe("executePlan", () => {
 		expect(cache.keys.has(FORGET_MARK)).toBe(true);
 	});
 
+	test("a failure in the counter pass keeps the forget mark in place", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		let pass = 0;
+		const unlinkKeys = mock(async (keys: readonly string[], onBatch?: (removed: number) => void): Promise<number> => {
+			pass += 1;
+			if (pass === 2) throw new Error("unlink failed");
+			return cache.cache.unlinkKeys(keys, onBatch);
+		});
+		const failing = { ...deps, cache: { scanKeys: cache.cache.scanKeys, unlinkKeys } };
+		const result = await executePlan(plan, failing, { execute: true, serverStopped: true });
+		expect(result).toMatchObject({ executed: false, refused: false });
+		expect(result.error).toEqual(expect.any(String));
+		expect(result.error?.length).toBeGreaterThan(0);
+		expect(unlinkKeys).toHaveBeenCalledTimes(2);
+		for (const key of ["substrate:v1:brief:a1", "substrate:v1:brief-snapshot:b2"]) expect(cache.keys.has(key)).toBe(false);
+		expect(cache.keys.has(ORPHAN_KEY)).toBe(true);
+		expect(cache.keys.has(MEMORY_COUNTER_KEY)).toBe(true);
+		expect(cache.keys.has(FORGET_MARK)).toBe(true);
+	});
+
+	test("a failure in the mark pass leaves the answers and counters removed and the mark in place", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		const unlinkKeys = mock(async (keys: readonly string[], onBatch?: (removed: number) => void): Promise<number> => {
+			if (keys.includes(FORGET_MARK)) throw new Error("unlink failed");
+			return cache.cache.unlinkKeys(keys, onBatch);
+		});
+		const failing = { ...deps, cache: { scanKeys: cache.cache.scanKeys, unlinkKeys } };
+		const result = await executePlan(plan, failing, { execute: true, serverStopped: true });
+		expect(result).toMatchObject({ executed: false, refused: false, repaired: 4 });
+		expect(result.error).toEqual(expect.any(String));
+		expect(result.error?.length).toBeGreaterThan(0);
+		expect(unlinkKeys).toHaveBeenCalledTimes(3);
+		for (const key of ["substrate:v1:brief:a1", "substrate:v1:brief-snapshot:b2", ORPHAN_KEY, MEMORY_COUNTER_KEY]) {
+			expect(cache.keys.has(key)).toBe(false);
+		}
+		expect(cache.keys.has(FORGET_MARK)).toBe(true);
+	});
+
 	test("execute without the server stopped refuses and removes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
