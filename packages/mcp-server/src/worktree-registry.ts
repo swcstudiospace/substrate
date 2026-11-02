@@ -387,14 +387,14 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 
 	async list(filter: WorktreeStoreFilter): Promise<StoredWorktree[]> {
 		const staleBefore = filter.staleBefore.toISOString();
-		const reposJson = filter.repos === null ? null : JSON.stringify(filter.repos);
+		const repos = filter.repos === null ? null : this.sql.array([...filter.repos], "TEXT");
 		return this.run("worktrees.list", async () => {
 			const rows = (await this.sql`
 				select host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes,
 				       locked, is_primary, pr_state, session_id, graph_id, first_seen_at, last_seen_at, reported_at
 				from worktrees
 				where (${filter.repo}::text is null or repo = ${filter.repo})
-				  and (${reposJson}::text is null or lower(repo) in (select jsonb_array_elements_text(${reposJson}::jsonb)))
+				  and (${repos}::text[] is null or lower(repo) = any(${repos}::text[]))
 				  and (${filter.host}::text is null or host = ${filter.host})
 				  and (${filter.state}::text = 'all'
 				       or (${filter.state}::text = 'dirty' and dirty)

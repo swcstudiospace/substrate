@@ -13,16 +13,16 @@
  */
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
-import { AuditLog } from "@substrate/audit";
+import type { AuditLog } from "@substrate/audit";
 import { createReadThroughCache } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
+import { openAuditLog } from "./observe.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
 import { DEFAULT_RECONCILE_CAPS, type ReconcileDeps, runReport } from "./reconcile-run.ts";
 import { executePlan, failedRepair, failureReason, planFromReport, type Plan, type RepairResult } from "./reconcile-repair.ts";
 import type { Report } from "./reconcile.ts";
-import { redact } from "./redact.ts";
 
 /** The three layers a run reads, and the call that releases the index socket once the run is over. */
 export interface ReconcileClients {
@@ -133,7 +133,7 @@ export function openReconcileClients(config: SubstrateConfig): ReconcileClients 
 
 /** The MCP audit chain, the same file the server writes. A repair execute appends its one record here. */
 export function openRepairAudit(config: SubstrateConfig): AuditLog {
-	return new AuditLog({ path: config.audit.path, redact });
+	return openAuditLog(config);
 }
 
 /** A plan file as this unit wrote it. Anything else is refused, never guessed at. */

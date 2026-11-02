@@ -290,6 +290,11 @@ export interface CheckpointFiles {
 	rename(from: string, to: string): Promise<void>;
 }
 
+/** The MCP audit chain, opened with the shared redaction. Every construction of it is in this module (the redaction lock). */
+export function openAuditLog(config: SubstrateConfig): AuditLog {
+	return new AuditLog({ path: config.audit.path, redact });
+}
+
 export function createObservability(
 	config: SubstrateConfig,
 	env: Record<string, string | undefined> = process.env,
@@ -319,7 +324,7 @@ export function createObservability(
 	let checkpointAt: string | null = restored?.writtenAt ?? null;
 	const notifyRecords: Record<string, NotifyRecord> = { ...(restored?.notify ?? {}) };
 	const tracer = new Tracer({ maxSpans: settings.maxSpans, sampleRatio: settings.sampleRatio });
-	const audit = new AuditLog({ path: config.audit.path, redact });
+	const audit = openAuditLog(config);
 	const slos = sloCatalogue(settings.slo);
 	/** One window per process: successive `/slo` reads are its samples; restored buckets seed it. */
 	const planeWindow = new PlaneWindow(undefined, undefined, restored?.planes ?? {});

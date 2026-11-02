@@ -28,10 +28,10 @@ const NOW = new Date("2026-11-02T12:00:00.000Z");
 
 /** The env a repair needs: the index, the ledger and the cache. An audit path is added per test. */
 const REPAIR_ENV: Record<string, string> = {
-	SUBSTRATE_PG_URL: "postgres://user:pw@127.0.0.1:5432/db",
+	SUBSTRATE_PG_URL: "postgres://127.0.0.1:5432/db",
 	DRAGONFLY_URL: "redis://127.0.0.1:6379",
-	GREPTIME_URL: "http://127.0.0.1:4000",
 };
+REPAIR_ENV["GREPTIME_URL"] = "http://127.0.0.1:4000";
 
 /** Clients over the given keys. SCAN matches a trailing `*` as a prefix; UNLINK removes what it is given and records it. */
 function repairClients(initial: readonly string[]): { clients: ReconcileClients; keys: Set<string>; removed: string[] } {
