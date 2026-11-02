@@ -1,30 +1,30 @@
 # Phase 74 context: cross-repo compensating actions
 
-Goal (origin/main ROADMAP, phase 74 entry at b1b42f92): a multi-repo operation that fails partway undoes its completed steps, and a failed undo is recorded, not dropped.
+Goal and success criteria: the integration ROADMAP text for phase 74 (the build wording, introduced by commit d535f8c6). It requires a real operation spanning at least two registered repositories, persisted per-repository step state, compensated or needs-attention results on forced failure, and tests against temporary real repositories.
 
-Success criteria (origin/main ROADMAP, verbatim):
-1. Owner decides whether a cross-repo write path is built first; no compensation is built against a path that does not exist.
-2. The install-git-hook robustness gap is fixed or tracked separately; it is not a compensation case.
+Requirement: HARD-R1 (`.planning/REQUIREMENTS.md:118`, introduced by commit 23bd0733, the owner-approved phase 71 revision). It reads: "Execute a real operation across at least two registered repositories with a durable per-step transaction log and idempotent retries. Forced failure leaves compensated state or explicit needs-attention state; no silent partial success. Absence of an existing transaction path is not delivery."
 
-## Finding (corrected after verification)
+## Status: gaps_found
 
-The ROADMAP records that no multi-repo, multi-step write path needs compensation. Verification found that this premise is only partly right:
-- Worktree prune (packages/cli/src/worktree/command.ts, about lines 321 to 395) removes worktrees across repositories in one command, and it writes a ledger note. It is multi-repo and multi-step.
-- The git hook installer (packages/collectors/src/install-git-hook.ts, about lines 186 to 286) writes the post-commit hook and the corpus hooks in each repository. It is multi-repo and multi-step.
-- Ingest (packages/cli/src/corpus/ingest.ts, about lines 98 to 204) is multi-step but writes to one remote target.
-- Neither prune nor the installer keeps durable per-repository step state. Both are idempotent: a partial failure is repaired by running the same command again. The installer re-run was observed to install in the second run after a thrown error. Prune re-inventories from git on re-run; a dropped ledger note is not re-emitted when the spool is off.
+- HARD-R1 is not built. No multi-repo operation with persisted step state exists on this tree.
+- Criterion 2 of the old origin/main text (the install-git-hook robustness gap) is delivered separately: commit d65d74fb, with 20 of 20 hook tests passing. It is not the HARD-R1 deliverable.
 
-## Decisions
+## Decision for the owner (not made here)
 
-- D74-1 (criterion 1, decided by the orchestrator on the owner's delegation, 2026-11-02; reversible by the owner): no compensation is built in v1.8. Compensation exists to undo completed steps that cannot be repeated safely. The multi-repo paths above are idempotent: undoing a completed hook install or a completed prune would be the wrong repair, and re-running is the correct one. Ingest writes to one target and needs no cross-repo compensation. The owner may reverse this; a reversal opens a new phase against the path it chooses.
-- D74-2 (criterion 2): the install-git-hook gap is fixed in this phase. One failing repository no longer aborts the loop; each repository is counted once; the failure is named with a redacted one-line reason; the CLI exit code is unchanged on the no-failure path.
-- D74-3 (the reason for D74-1, recorded so the owner can judge it): where a multi-repo write can fail partway, the repair is an idempotent re-run that the operator starts, and the CLI reports the failed repository by name. Durable step state and compensation are not added for idempotent steps.
+- Build HARD-R1. The candidate is `worktree prune` with persisted step state, since prune is already a multi-repo write. Or,
+- Formally waive HARD-R1: amend the requirement and the ROADMAP text, with owner approval, because HARD-R1 is owner-approved text.
 
-## Scope of this phase
+## Withdrawn
 
-- Code: `packages/collectors/src/install-git-hook.ts` (the `installRepos` loop) and its tests.
-- No compensation code and no new write path.
+- D74-1 ("no compensation built in v1.8", recorded under delegation). It was withdrawn after review: it closed phase 74 against owner-approved HARD-R1, which says absence of a transaction path is not delivery. A decision that changes an approved requirement is the owner's, not the orchestrator's.
 
-## Dependency
+## Facts used in the review (unchanged)
 
-The ROADMAP says "Depends on: none". The branch is stacked on the phase 72 result so the repo-executor is available if a non-idempotent multi-repo path is introduced later. Phase 74 itself does not call it.
+- Worktree prune (packages/cli/src/worktree/command.ts) and the git hook installer (packages/collectors/src/install-git-hook.ts) are multi-repo writes. Both are idempotent: a re-run repairs a partial failure. Neither keeps durable step state.
+- Ingest (packages/cli/src/corpus/ingest.ts) writes to one target.
+- Re-running is a repair, not a transaction. HARD-R1 asks for a durable per-step log, so a re-run does not satisfy it.
+
+## Scope on this tree
+
+- Code: packages/collectors/src/install-git-hook.ts and its tests (the hook fix, d65d74fb).
+- No HARD-R1 code.

@@ -1231,7 +1231,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: human_needed: 3 of 5 criteria verified on gsd/v18-int-all c7788f9d; Postgres restart clauses pending; owner items open.
 
 **Depends on**: none
 
@@ -1253,7 +1253,7 @@ Plans:
 
 **Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: gaps_found: HARD-S2 unmet as written; corpus CLI scope and allowlist unit and proof disclosure await the owner.
 
 **Depends on**: Phase 71
 
@@ -1268,7 +1268,7 @@ Plans:
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: gaps_found: whole-hour removal undetected (probe-confirmed); owner decides threat model and remedy.
 
 **Depends on**: none
 
@@ -1283,7 +1283,7 @@ Plans:
 
 **Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: gaps_found: HARD-R1 not built; owner chooses build or waive.
 
 **Depends on**: none
 
@@ -1299,7 +1299,7 @@ Plans:
 
 **Goal**: When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: human_needed: 5 of 6 truths, 2 of 2 criteria as declared; owner items O1 and O2 open.
 
 **Depends on**: none
 
@@ -1314,7 +1314,7 @@ Plans:
 
 **Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: gaps_found: SC1 not verified pending owner decision D76-16; G1 to G3 closed in c7788f9d; SC2 by owner override.
 
 **Depends on**: Phase 73 (shared ledger write path)
 
@@ -1329,7 +1329,7 @@ Plans:
 
 **Goal**: A steering command carrying an idempotency key applies once across retries and carries a sequence number, so the reader sees delivery order.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: human_needed: 5 of 8; T5 to T7 need a Postgres run the verifier did not observe (orchestrator log: pg-perfile-steering-idempotency.pg.test.log, 4 of 4).
 
 **Depends on**: Phase 71
 
@@ -1345,7 +1345,7 @@ Plans:
 
 **Goal**: The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
 
-**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
+**Status**: human_needed: 1 of 2 in code; SC2 uncertain, with corpus delete-rule clauses R5, R6 and R7 not met as written; owner decides.
 
 **Depends on**: Phases 73, 75, 76
 
@@ -1416,11 +1416,11 @@ Plans:
 | 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); PARTIAL: no report scheduler; dispatcher ignores roots variable | 2026-10-30 |
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
-| 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 3 of 5 criteria verified on gsd/v18-int-all 7382ad10; Postgres restart clauses and Greptile gate open | - |
-| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | human_needed: 16 of 20 must-haves verified | - |
-| 73. Ledger tamper evidence | v1.8 | 1/1 local | human_needed: live proofs (operator) | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/0 | human_needed: criterion 2 verified; criterion 1 owner decision D74-1 | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: live proof (operator) | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | human_needed: live proof (operator); must-have 2 override accepted | - |
-| 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 5 of 8 verified; T5 and T6 need live PostgreSQL | - |
-| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 2 of 2 verified; live proofs pending | - |
+| 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 3 of 5 criteria verified on gsd/v18-int-all c7788f9d; Postgres restart clauses pending; owner items open. | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | gaps_found: HARD-S2 unmet as written; corpus CLI scope and allowlist unit and proof disclosure await the owner. | - |
+| 73. Ledger tamper evidence | v1.8 | 1/1 local | gaps_found: whole-hour removal undetected (probe-confirmed); owner decides threat model and remedy. | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/0 | gaps_found: HARD-R1 not built; owner chooses build or waive. | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: 5 of 6 truths, 2 of 2 criteria as declared; owner items O1 and O2 open. | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | gaps_found: SC1 not verified pending owner decision D76-16; G1 to G3 closed in c7788f9d; SC2 by owner override. | - |
+| 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 5 of 8; T5 to T7 need a Postgres run the verifier did not observe (orchestrator log: pg-perfile-steering-idempotency.pg.test.log, 4 of 4). | - |
+| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 1 of 2 in code; SC2 uncertain, with corpus delete-rule clauses R5, R6 and R7 not met as written; owner decides. | - |

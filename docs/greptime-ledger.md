@@ -572,7 +572,7 @@ Only the on-chain root is trusted. A head recomputed from the ledger's rows is n
 - the stored-leaves read outlasts the verify budget: `budget exhausted`;
 - the stored-leaves read fails: `store-failed`.
 
-`budget exhausted` and `store-failed` claim no tampering, so `ok` is unchanged for them.
+`budget exhausted` and `store-failed` make `ok` false and the hour untrusted, because the chain could not be checked. They claim no tampering: the reason says what could not be read.
 
 ## Reading the ledger
 
