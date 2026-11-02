@@ -4407,13 +4407,15 @@ export class Substrate {
 		}
 		const index = this.index;
 		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
-		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo) };
+		// Phase 72: the reader's grant is passed so an entry in an ungranted repository reads as absent, as an unknown id does.
+		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo), granted: this.memoryGrant(caller.surface) };
 		const ports = this.anchorVerifyPorts();
 		let signers: SignerSetSummary | undefined;
 		const result = await verifyMemoryRecord(
 			{
 				getEntry: async (entryId) => {
 					const entry = await index.readEntry(entryId);
+					// An ungranted entry is answered as absent before anything past this line reads it: its hash, its anchor, its content.
 					if (entry === null || !visibleToCaller(entry.scope, entry.repo, reader)) return null;
 					if (this.config.memoryExpiry === "enforce" && !caller.isOperator) {
 						const graph = entry.ttl === "graph" ? await index.graphLifetime(entry) : null;
@@ -6630,11 +6632,13 @@ export class Substrate {
 	async memoryReplyInGrant<R extends { entries: LinkedMemoryEntry[]; graph_links?: Array<{ graph_id: string; events: ReducedEvent[] }>; derived?: Array<{ scope?: string | undefined; repo?: string | undefined }> }>(reply: R, surface: Surface | null): Promise<R> {
 		const scope = this.config.repoScope;
 		if (!scope.enforced) return reply;
+		const granted = this.memoryGrant(surface);
 		const entries: LinkedMemoryEntry[] = [];
 		for (const entry of reply.entries) {
-			let allowed = true;
-			if (entry.scope.startsWith("repo:")) allowed = authorizeRepo(scope, surface, entry.scope.slice("repo:".length)).ok;
-			else if (entry.scope.startsWith("graph:")) allowed = await this.graphGranted(entry.scope.slice("graph:".length), surface);
+			// The row's own repository must be granted too: a `global` row names no repository in its scope, so the scope check alone let it through.
+			let allowed = grantedToCaller(undefined, entry.repo, granted);
+			if (allowed && entry.scope.startsWith("repo:")) allowed = authorizeRepo(scope, surface, entry.scope.slice("repo:".length)).ok;
+			else if (allowed && entry.scope.startsWith("graph:")) allowed = await this.graphGranted(entry.scope.slice("graph:".length), surface);
 			if (allowed) {
 				// The causal chain is not keyed by repository, so a scoped reply omits it: the property is absent, not set to undefined.
 				const { causal_chain: _causalChain, ...unlinked } = entry;
@@ -6644,7 +6648,6 @@ export class Substrate {
 		const links: Array<{ graph_id: string; events: ReducedEvent[] }> = [];
 		for (const link of reply.graph_links ?? []) if (await this.graphGranted(link.graph_id, surface)) links.push(link);
 		// A derived hit is filtered by the rule the recall applies, so one from an ungranted repository is removed here as well.
-		const granted = this.memoryGrant(surface);
 		const derived = reply.derived?.filter((hit) => grantedToCaller(hit.scope, hit.repo, granted));
 		return { ...reply, entries, ...(reply.graph_links === undefined ? {} : { graph_links: links }), ...(derived === undefined ? {} : { derived }) } as R;
 	}
