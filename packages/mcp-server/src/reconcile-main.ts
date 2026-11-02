@@ -6,20 +6,23 @@
  *   reconcile [report]                          the live report as JSON; writes nothing
  *   reconcile plan --out <file>                 runs the report and writes one plan file, and nothing else
  *   reconcile repair --plan <file>              dry run: re-checks the plan and prints what it would do; writes nothing
- *   reconcile repair --plan <file> --execute --server-stopped    flushes the derived cache with the server stopped, then writes `<file>.result.json`
+ *   reconcile repair --plan <file> --execute --server-stopped    flushes the derived cache with the server stopped, then writes `<file>.result.json`; appends one audit record to the MCP audit chain, which must be durable
  *
  * Exit codes: 0 done (a clean report, a plan written, a dry run or an executed repair); 1 a report that is not clean, a
  * refused or unreadable plan, a failed repair, or a failure reading a layer; 2 usage, or configuration this run needs and does not have.
  */
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
+import { AuditLog } from "@substrate/audit";
 import { createReadThroughCache } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
 import { DEFAULT_RECONCILE_CAPS, type ReconcileDeps, runReport } from "./reconcile-run.ts";
-import { executePlan, failureReason, planFromReport, type Plan, type RepairResult } from "./reconcile-repair.ts";
+import { executePlan, failedRepair, failureReason, planFromReport, type Plan, type RepairResult } from "./reconcile-repair.ts";
 import type { Report } from "./reconcile.ts";
+import { redact } from "./redact.ts";
 
 /** The three layers a run reads, and the call that releases the index socket once the run is over. */
 export interface ReconcileClients {
@@ -36,6 +39,8 @@ export interface ReconcileIo {
 	now?: () => Date;
 	env?: Record<string, string | undefined>;
 	open?: (config: SubstrateConfig) => ReconcileClients;
+	/** The MCP audit chain a repair execute records to. Built from `SUBSTRATE_AUDIT_PATH` unless a test passes one. */
+	openAudit?: (config: SubstrateConfig) => AuditLog;
 }
 
 const USAGE =
@@ -126,6 +131,11 @@ export function openReconcileClients(config: SubstrateConfig): ReconcileClients 
 	};
 }
 
+/** The MCP audit chain, the same file the server writes. A repair execute appends its one record here. */
+export function openRepairAudit(config: SubstrateConfig): AuditLog {
+	return new AuditLog({ path: config.audit.path, redact });
+}
+
 /** A plan file as this unit wrote it. Anything else is refused, never guessed at. */
 function parsePlan(text: string): Plan {
 	const value: unknown = JSON.parse(text);
@@ -135,6 +145,29 @@ function parsePlan(text: string): Plan {
 		throw new Error(`not a ${PLAN_SCHEMA} record`);
 	}
 	return plan;
+}
+
+/**
+ * The one audit record a repair execute writes: `denied` when the plan was refused, `allowed` when the flush was let run. It
+ * names the counts and the outcome, the plan's digest (the sha256 of the plan file) and the report's. It is written after the
+ * flush, because it carries the outcome; the chain was checked durable before the flush began. Returns why the record was not
+ * written, or null when it was.
+ */
+async function recordRepair(audit: AuditLog, result: RepairResult, planDigest: string, reportDigest: string): Promise<string | null> {
+	const outcome = result.refused ? "refused" : result.error !== undefined ? "failed" : result.truncated ? "truncated" : "executed";
+	try {
+		const appended = await audit.append({
+			surface: "operator",
+			tool: "reconcile_repair",
+			transport: "internal",
+			decision: result.refused ? "denied" : "allowed",
+			mode: "fail-closed",
+			reason: `outcome=${outcome} planned=${result.planned} removed=${result.removed} remaining=${result.remaining} limit=${result.limit} plan_digest=${planDigest} report_digest=${reportDigest}`,
+		});
+		return appended.written ? null : (appended.error ?? "the chain did not take the record");
+	} catch (cause) {
+		return failureReason(cause);
+	}
 }
 
 /**
@@ -165,6 +198,18 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 		io.err(`reconcile: ${missing}`);
 		return 2;
 	}
+	// A repair writes one record to the MCP audit chain, so it runs only on a durable chain: a flush that cannot be recorded is
+	// not started. Checked before any store client opens.
+	let audit: AuditLog | null = null;
+	if (command.command === "repair" && command.execute) {
+		audit = (io.openAudit ?? openRepairAudit)(config);
+		const opened = await audit.open();
+		if (!opened.durable) {
+			const why = opened.error === undefined ? "SUBSTRATE_AUDIT_PATH is unset" : failureReason(opened.error);
+			io.err(`reconcile: the repair records to the MCP audit chain, which is not durable (${why}); nothing was flushed`);
+			return 2;
+		}
+	}
 
 	let clients: ReconcileClients | null = null;
 	try {
@@ -193,8 +238,10 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 		}
 
 		let plan: Plan;
+		let planText: string;
 		try {
-			plan = parsePlan(await readFile(command.plan, "utf8"));
+			planText = await readFile(command.plan, "utf8");
+			plan = parsePlan(planText);
 		} catch (cause) {
 			io.err(`refused: the plan file cannot be read as a ${PLAN_SCHEMA} record: ${failureReason(cause)}`);
 			return 1;
@@ -206,9 +253,11 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 			// Only the re-run report throws before the flush; the flush reports its own failure in the result. An execute still
 			// records the failure below. A dry run is an ordinary error.
 			if (!command.execute) throw cause;
-			const error = failureReason(cause);
-			result = { executed: false, reason: `failed: ${error}`, listed: plan.items.length, repaired: 0, truncated: false, refused: false, error };
+			result = failedRepair(failureReason(cause));
 		}
+		// One audit record per execute, after the flush because it carries the outcome. A failure to write it is reported below.
+		const auditFailure =
+			audit === null ? null : await recordRepair(audit, result, createHash("sha256").update(planText).digest("hex"), plan.report_digest);
 		try {
 			io.out(JSON.stringify(result, null, 2));
 		} finally {
@@ -217,6 +266,10 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 				// record. It overwrites: an earlier record must not block the one that follows a flush.
 				await writeFile(`${command.plan}.result.json`, `${JSON.stringify({ result, recorded_at: now().toISOString() }, null, 2)}\n`);
 			}
+		}
+		if (auditFailure !== null) {
+			io.err(`reconcile: the repair ran, but its audit record was not written: ${auditFailure}`);
+			return 1;
 		}
 		if (result.refused || result.error !== undefined) {
 			io.err(result.reason);

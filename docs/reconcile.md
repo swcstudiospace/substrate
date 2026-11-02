@@ -43,15 +43,16 @@ Repair is a derived-cache flush of the `substrate:v1` prefix, behind a confirmed
 
 Budget keys (`budget:`, live rate-limit state) and embedding keys (`emb:`, content-keyed and never stale) are never removed. Neither is any key the classifier does not name.
 
-The flush considers at most 1000000 keys (a fail-closed bound). A scan that cannot complete, because the cache is off or the prefix holds more than that many keys, refuses with nothing removed. A flush that fails part way keeps every counter it has not reached: a failure in the first pass leaves every counter and the mark in place, and a failure in the second leaves the mark in place. The repair never touches the ledger or the index. The cost of a flush is a cold cache until it refills.
+The flush removes at most 500 keys per run. That is `RECONCILE_MAX_ITEMS` in `packages/corpus/src/protocol.ts`, the same bound the corpus reconcile lists use. The counts are keys throughout: `planned` is the keys the plan's flush names in the run's scan, `removed` the keys this run removed, and `remaining` their difference. A plan's items count actions, not keys, and the report never compares the two. When the plan names more than 500 keys the run stops at the bound and reports `truncated: true` with `remaining` set. The order holds across runs, because each run takes a prefix of the same ordered list: every answer goes before any counter, and every counter before the mark. A scan that cannot complete, because the cache is off or the prefix holds more than 1000000 keys (a fail-closed bound), refuses with nothing removed. A flush that fails part way keeps every counter it has not reached: a failure in the first pass leaves every counter and the mark in place, and a failure in the second leaves the mark in place. The repair never touches the ledger or the index. The cost of a flush is a cold cache until it refills.
 
 Safety rules:
 
 - **Plan first.** `plan --out <file>` runs the report and writes one plan file, and nothing else. It refuses to overwrite an existing file, so a plan in use is never replaced.
-- **Dry run first.** `repair --plan <file>` re-runs the report, checks the plan's digest, and prints what it would do. It writes nothing, and needs no server flag.
+- **Dry run first.** `repair --plan <file>` re-runs the report, checks the plan's digest, and reads the cache keys with a read-only scan. It prints the planned keys, how many one run would remove, and what would be left. It writes nothing, and needs no server flag.
 - **Server stopped.** `repair --plan <file> --execute` without `--server-stopped` is a usage error (exit 2), and nothing is read or removed. A live server can write a snapshot between the passes. If the forget mark were removed before that snapshot is written, the snapshot would survive the forget and could serve forgotten memory. So the server must be stopped for the whole flush.
-- **Confirmed execute.** `repair --plan <file> --execute --server-stopped` re-checks the digest and the orphan condition, then flushes. It writes `<file>.result.json` with the result and a timestamp. It refuses when the findings have changed since the plan was made.
-- **Re-run is safe.** A second execute finds nothing to repair.
+- **Confirmed execute.** `repair --plan <file> --execute --server-stopped` re-checks the digest and the orphan condition, then removes up to 500 keys. It writes `<file>.result.json` with the result and a timestamp, whatever the outcome. It refuses when the findings have changed since the plan was made.
+- **Audited.** Each execute appends one record to the MCP audit chain (see [Audit record](#audit-record)). An execute refuses, and flushes nothing, when that chain is not durable: `SUBSTRATE_AUDIT_PATH` is unset, or the file cannot be opened.
+- **Re-run continues.** A run that reports `truncated: true` removed its bound and left `remaining` keys. Run `repair --execute --server-stopped` again. A run that stops among the answers leaves every counter in place, so the same plan still matches the report and removes the next bound. A run that reaches the counters changes the report, so the digest no longer matches: re-run `plan`, then repair from the new plan. A repair that finds nothing left to remove is refused.
 
 Operator procedure:
 
@@ -62,9 +63,20 @@ Operator procedure:
 5. Restart the server.
 6. `bun run reconcile -- report`
 
-Exit codes for `repair`: 0 for a dry run or an executed flush; 1 for a refused or unreadable plan, a refused scan, or a flush that failed part way (the reason is printed, and `<plan>.result.json` records the keys removed before the failure); 2 for usage errors, including `repair --execute` without `--server-stopped`. `report` and `plan` exit 0 when they write their output (`report` exits 1 when not clean). Every command exits 2 when `SUBSTRATE_PG_URL` or `GREPTIME_URL` is unset, or when the cache is off: a scan of an off cache is incomplete, so a report without it must not read as clean.
+Exit codes for `repair`: 0 for a dry run or an executed flush, including a run that stopped at the bound (its JSON says `truncated: true`); 1 for a refused or unreadable plan, a refused scan, a flush that failed part way (the reason is printed, and `<plan>.result.json` records the keys removed before the failure), or an audit record that could not be written after the flush; 2 for usage errors, including `repair --execute` without `--server-stopped`, and for an execute whose audit chain is not durable, which flushes nothing. `report` and `plan` exit 0 when they write their output (`report` exits 1 when not clean). Every command exits 2 when `SUBSTRATE_PG_URL` or `GREPTIME_URL` is unset, or when the cache is off: a scan of an off cache is incomplete, so a report without it must not read as clean.
 
 **What else compares these stores.** Memory across the index, the Hindsight bank and the ledger is compared by `consistency-run` (`consistency-verify.ts`), which this report does not replace. `coord_drift_scan` checks lease health (expired, idle, orphaned) and does not compare index holds with ledger transitions, which this report does.
+
+## Audit record
+
+Each `repair --execute` appends one record to the MCP audit chain, the file at `SUBSTRATE_AUDIT_PATH` that `substrate-mcp` writes. It is recorded under tool `reconcile_repair`, surface `operator` and transport `internal`:
+
+- `decision` is `allowed` when the flush was let run, and `denied` when the plan was refused.
+- `reason` carries the outcome (`executed`, `truncated`, `failed` or `refused`), the counts (`planned`, `removed`, `remaining`, `limit`), `plan_digest` (the sha256 of the plan file's bytes) and `report_digest` (the digest the plan pinned). The stored reason is redacted and capped like every audit record. The chain stores the arguments only as a digest, so the counts are read from `reason`.
+
+The record is written after the flush, because it carries the outcome. So the chain is checked durable before the flush begins, and an execute on a chain that is not durable exits 2 and flushes nothing. If the record cannot be written after the flush, the flush has already run: the run exits 1 with the reason, and `<plan>.result.json` still holds the result.
+
+The server is the chain's writer. A repair execute is the one other writer, and it runs only with the server stopped, which the flush already requires. Its append rewrites the chain's checkpoint, so the next server start verifies the record like any other.
 
 ## Scheduled report
 

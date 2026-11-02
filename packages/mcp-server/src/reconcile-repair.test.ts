@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { RECONCILE_MAX_ITEMS } from "@substrate/corpus";
 import type { ReadThroughCache } from "./cache.ts";
 import { executePlan, findingsDigest, planFromReport } from "./reconcile-repair.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
@@ -108,7 +109,16 @@ describe("executePlan", () => {
 		const deps = fakeDeps(cache, []);
 		const plan = planFromReport(await runReport(deps), NOW);
 		const result = await executePlan(plan, deps, { execute: false, serverStopped: false });
-		expect(result).toEqual({ executed: false, reason: expect.any(String), listed: 1, repaired: 0, truncated: false, refused: false });
+		expect(result).toEqual({
+			executed: false,
+			reason: expect.any(String),
+			planned: 5,
+			removed: 0,
+			remaining: 5,
+			limit: RECONCILE_MAX_ITEMS,
+			truncated: false,
+			refused: false,
+		});
 		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
 		expect(cache.keys.size).toBe(FIXTURE_KEYS.length);
 	});
@@ -146,8 +156,10 @@ describe("executePlan", () => {
 		expect(result).toEqual({
 			executed: false,
 			reason: "refused: no generation orphans remain, so there is nothing to repair",
-			listed: 0,
-			repaired: 0,
+			planned: 0,
+			removed: 0,
+			remaining: 0,
+			limit: RECONCILE_MAX_ITEMS,
 			truncated: false,
 			refused: true,
 		});
@@ -159,7 +171,16 @@ describe("executePlan", () => {
 		const deps = fakeDeps(cache, []);
 		const plan = planFromReport(await runReport(deps), NOW);
 		const result = await executePlan(plan, deps, { execute: true, serverStopped: true });
-		expect(result).toEqual({ executed: true, reason: expect.any(String), listed: 1, repaired: 5, truncated: false, refused: false });
+		expect(result).toEqual({
+			executed: true,
+			reason: expect.any(String),
+			planned: 5,
+			removed: 5,
+			remaining: 0,
+			limit: RECONCILE_MAX_ITEMS,
+			truncated: false,
+			refused: false,
+		});
 		expect(cache.calls).toContain("scan substrate:v1:* 1000000");
 		// Three passes, in order: two answers, two counters (the orphan and the memory counter), then the mark.
 		expect(cache.calls.filter((call) => call.startsWith("unlink"))).toEqual(["unlink 2", "unlink 2", "unlink 1"]);
@@ -181,7 +202,7 @@ describe("executePlan", () => {
 		const second = await executePlan(plan, deps, { execute: true, serverStopped: true });
 		expect(second.refused).toBe(true);
 		expect(second.executed).toBe(false);
-		expect(second.repaired).toBe(0);
+		expect(second.removed).toBe(0);
 		expect(cache.calls.filter((call) => call.startsWith("unlink"))).toHaveLength(3);
 	});
 
@@ -200,7 +221,7 @@ describe("executePlan", () => {
 			},
 		};
 		const result = await executePlan(plan, incomplete, { execute: true, serverStopped: true });
-		expect(result).toMatchObject({ executed: false, refused: true, repaired: 0, truncated: true });
+		expect(result).toMatchObject({ executed: false, refused: true, removed: 0 });
 		expect(result.reason).toMatch(/could not be read completely/);
 		expect(unlinkKeys).not.toHaveBeenCalled();
 		for (const key of FIXTURE_KEYS) expect(cache.keys.has(key)).toBe(true);
@@ -215,7 +236,7 @@ describe("executePlan", () => {
 		});
 		const failing = { ...deps, cache: { scanKeys: cache.cache.scanKeys, unlinkKeys } };
 		const result = await executePlan(plan, failing, { execute: true, serverStopped: true });
-		expect(result).toMatchObject({ executed: false, refused: false, repaired: 0 });
+		expect(result).toMatchObject({ executed: false, refused: false, removed: 0 });
 		expect(result.error).toEqual(expect.any(String));
 		expect(result.error?.length).toBeGreaterThan(0);
 		expect(unlinkKeys).toHaveBeenCalledTimes(1);
@@ -257,7 +278,7 @@ describe("executePlan", () => {
 		});
 		const failing = { ...deps, cache: { scanKeys: cache.cache.scanKeys, unlinkKeys } };
 		const result = await executePlan(plan, failing, { execute: true, serverStopped: true });
-		expect(result).toMatchObject({ executed: false, refused: false, repaired: 4 });
+		expect(result).toMatchObject({ executed: false, refused: false, planned: 5, removed: 4, remaining: 1 });
 		expect(result.error).toEqual(expect.any(String));
 		expect(result.error?.length).toBeGreaterThan(0);
 		expect(unlinkKeys).toHaveBeenCalledTimes(3);
@@ -275,12 +296,15 @@ describe("executePlan", () => {
 		expect(result).toEqual({
 			executed: false,
 			reason: "refused: a flush needs the server stopped (--server-stopped); a live server can write a snapshot between the passes",
-			listed: 1,
-			repaired: 0,
+			planned: 5,
+			removed: 0,
+			remaining: 5,
+			limit: RECONCILE_MAX_ITEMS,
 			truncated: false,
 			refused: true,
 		});
-		expect(cache.calls).not.toContain("scan substrate:v1:* 1000000");
+		// The keys are read first, in every mode, so a refusal reports what it held back; nothing is removed.
+		expect(cache.calls).toContain("scan substrate:v1:* 1000000");
 		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
 		expect(cache.keys.size).toBe(FIXTURE_KEYS.length);
 	});
@@ -336,7 +360,7 @@ describe("executePlan", () => {
 			cache: {
 				scanKeys: cache.cache.scanKeys,
 				unlinkKeys: async (_keys: readonly string[], onBatch?: (removed: number) => void) => {
-					onBatch?.(500);
+					onBatch?.(2);
 					throw new Error("unlink failed");
 				},
 			},
@@ -344,7 +368,8 @@ describe("executePlan", () => {
 		const result = await executePlan(plan, failing, { execute: true, serverStopped: true });
 		expect(result.executed).toBe(false);
 		expect(result.refused).toBe(false);
-		expect(result.repaired).toBe(500);
+		expect(result.removed).toBe(2);
+		expect(result.remaining).toBe(3);
 		expect(result.error).toBe("unlink failed");
 	});
 
@@ -367,10 +392,43 @@ describe("executePlan", () => {
 		const result = await executePlan(plan, failing, { execute: true, serverStopped: true });
 		expect(result.executed).toBe(false);
 		expect(result.refused).toBe(false);
-		expect(result.repaired).toBe(0);
+		expect(result.removed).toBe(0);
 		expect(result.error).toEqual(expect.any(String));
 		expect(result.error?.length).toBeGreaterThan(0);
 		expect(result.error).not.toContain("hunter2");
 		expect(unlinkKeys).not.toHaveBeenCalled();
+	});
+
+	test("a run removes at most the corpus bound of keys and reports the remainder", async () => {
+		const briefs = Array.from({ length: 600 }, (_, i) => `substrate:v1:brief:k${String(i).padStart(3, "0")}`);
+		const cache = fakeCache([ORPHAN_KEY, ...briefs]);
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		const result = await executePlan(plan, deps, { execute: true, serverStopped: true });
+		expect(result).toEqual({
+			executed: true,
+			reason: expect.any(String),
+			planned: 601,
+			removed: RECONCILE_MAX_ITEMS,
+			remaining: 601 - RECONCILE_MAX_ITEMS,
+			limit: RECONCILE_MAX_ITEMS,
+			truncated: true,
+			refused: false,
+		});
+		expect(cache.removed).toHaveLength(RECONCILE_MAX_ITEMS);
+		// The answers go first, so the counter it depends on stays until every answer is gone.
+		expect(cache.keys.has(ORPHAN_KEY)).toBe(true);
+		expect([...cache.keys].filter((key) => key.startsWith("substrate:v1:brief:"))).toHaveLength(600 - RECONCILE_MAX_ITEMS);
+	});
+
+	test("a second run with the same plan removes the remainder, counter and mark last", async () => {
+		const briefs = Array.from({ length: 600 }, (_, i) => `substrate:v1:brief:k${String(i).padStart(3, "0")}`);
+		const cache = fakeCache([ORPHAN_KEY, ...briefs]);
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		await executePlan(plan, deps, { execute: true, serverStopped: true });
+		const second = await executePlan(plan, deps, { execute: true, serverStopped: true });
+		expect(second).toMatchObject({ executed: true, planned: 601 - RECONCILE_MAX_ITEMS, removed: 601 - RECONCILE_MAX_ITEMS, remaining: 0, truncated: false, refused: false });
+		expect(cache.keys.size).toBe(0);
 	});
 });
