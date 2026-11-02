@@ -442,8 +442,8 @@ describe("generated muse hook", () => {
 			// Real 1 s delay, the one allowed exception: the hook runs in a child process, so fake timers cannot drive its deadline. Stdin closes after it, so the POST starts with budget already spent.
 			await Bun.sleep(1000);
 			proc.stdin.end();
-			// Bounded: a hook whose shared budget is spent before its POST exits without one under load; the timing and exit assertions below still judge it.
-			await Promise.race([received.promise, proc.exited]);
+			// Bounded and strict: the POST must arrive. A child that exits without one fails here at once instead of hanging the suite.
+			expect(await Promise.race([received.promise.then(() => true), proc.exited.then(() => false)])).toBe(true);
 			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 			// One shared 1.5 s budget ends near 1.5 s plus process start. Fresh timers for the POST would end near 2.5 s plus start.
 			expect(Date.now() - started).toBeLessThan(2500);
