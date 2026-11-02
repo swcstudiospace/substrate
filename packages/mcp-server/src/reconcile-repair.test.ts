@@ -185,4 +185,55 @@ describe("executePlan", () => {
 		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
 		expect(cache.keys.size).toBe(6);
 	});
+
+	test("a plan item with another action is refused and writes nothing", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		const other = { ...plan, items: plan.items.map((item) => ({ ...item, action: "prune-ledger" as unknown as "flush-derived-cache" })) };
+		const result = await executePlan(other, deps, { execute: true });
+		expect(result.refused).toBe(true);
+		expect(result.executed).toBe(false);
+		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
+		expect(cache.keys.size).toBe(6);
+	});
+
+	test("a plan item naming an orphan the fresh report does not list is refused and writes nothing", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		const ghost = {
+			...plan,
+			items: [
+				...plan.items,
+				{ action: "flush-derived-cache" as const, match: "substrate:v1:*", reason: "ghost orphan", orphans: ["substrate:v1:gen:graph:g-ghost"] },
+			],
+		};
+		const result = await executePlan(ghost, deps, { execute: true });
+		expect(result.refused).toBe(true);
+		expect(result.executed).toBe(false);
+		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
+		expect(cache.keys.size).toBe(6);
+	});
+
+	test("a flush that fails after one batch reports the keys that batch removed", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		const failing = {
+			...deps,
+			cache: {
+				scanKeys: cache.cache.scanKeys,
+				unlinkKeys: async (_keys: readonly string[], onBatch?: (removed: number) => void) => {
+					onBatch?.(500);
+					throw new Error("unlink failed");
+				},
+			},
+		};
+		const result = await executePlan(plan, failing, { execute: true });
+		expect(result.executed).toBe(false);
+		expect(result.refused).toBe(false);
+		expect(result.repaired).toBe(500);
+		expect(result.error).toBe("unlink failed");
+	});
 });

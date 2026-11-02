@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { type CacheRedis, ReadThroughCache } from "./cache.ts";
 import type { EventQuery } from "./greptime.ts";
 import type { ReconcileNodeHold } from "./index-store.ts";
@@ -283,6 +283,24 @@ describe("ReadThroughCache scan and unlink", () => {
 		const keys = Array.from({ length: 1201 }, (_, index) => `substrate:v1:brief:${index}`);
 		expect(await cache.unlinkKeys(keys)).toBe(1201);
 		expect(commands).toEqual(["unlink:500", "unlink:500", "unlink:201"]);
+	});
+
+	test("a failed batch keeps the batches already removed", async () => {
+		let calls = 0;
+		const redis: CacheRedis = {
+			...fakeRedis([], []),
+			unlink: async (batch) => {
+				calls += 1;
+				if (calls === 2) throw new Error("unlink failed");
+				return batch.length;
+			},
+		};
+		const cache = new ReadThroughCache({ redis, enabled: true, commandTimeoutMs: 1_000 });
+		const keys = Array.from({ length: 501 }, (_, index) => `substrate:v1:brief:${index}`);
+		const onBatch = mock((_removed: number) => {});
+		await expect(cache.unlinkKeys(keys, onBatch)).rejects.toThrow("unlink failed");
+		expect(onBatch).toHaveBeenCalledTimes(1);
+		expect(onBatch).toHaveBeenCalledWith(500);
 	});
 });
 

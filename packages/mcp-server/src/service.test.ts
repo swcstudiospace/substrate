@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
@@ -5641,5 +5641,24 @@ describe("boot endpoint notes (phase 48)", () => {
 			await expect(substrate.emitDbEndpoints()).resolves.toBeUndefined();
 			expect(calls).toBe(3);
 		}
+	});
+});
+
+describe("the scheduled reconcile timer (phase 78)", () => {
+	let live: Substrate | null = null;
+	afterEach(() => {
+		live?.stopReconcile();
+		live = null;
+	});
+
+	test("startReconcile starts no timer at interval 0, and starts one at 60 that stopReconcile clears", () => {
+		const off = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "0" }), { index: null, greptime: null });
+		expect(off.startReconcile()).toBe(false);
+
+		live = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "60" }), { index: null, greptime: null });
+		expect(live.startReconcile()).toBe(true);
+		expect(live.startReconcile()).toBe(false);
+		live.stopReconcile();
+		expect(live.startReconcile()).toBe(true);
 	});
 });

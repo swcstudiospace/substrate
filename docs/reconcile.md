@@ -54,7 +54,7 @@ bun run reconcile -- repair --plan plan.json --execute
 
 **Partial flush.** The flush scan is capped. A truncated flush removes only part of the prefix, and that includes generation counters. Removing counters changes the live findings. So the same plan file then refuses on digest mismatch. The operator must run `plan` again to make a new plan. The second run does not reuse the old plan.
 
-Exit codes for `repair`: 0 for a dry run or an executed flush, 1 for a refused or unreadable plan (the reason is printed), 2 for usage errors. `report` and `plan` exit 0 when they write their output (`report` exits 1 when not clean). Every command exits 2 when `SUBSTRATE_PG_URL` or `GREPTIME_URL` is unset, or when the cache is off, since a report without the cache would read as clean.
+Exit codes for `repair`: 0 for a dry run or an executed flush; 1 for a refused or unreadable plan, or a flush that failed part way (the reason is printed, and `<plan>.result.json` records the keys removed before the failure); 2 for usage errors. `report` and `plan` exit 0 when they write their output (`report` exits 1 when not clean). Every command exits 2 when `SUBSTRATE_PG_URL` or `GREPTIME_URL` is unset, or when the cache is off: a scan of an off cache is incomplete, so a report without it must not read as clean.
 
 ## Scheduled report
 

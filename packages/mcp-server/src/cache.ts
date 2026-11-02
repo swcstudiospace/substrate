@@ -1080,9 +1080,11 @@ export class ReadThroughCache {
 
 	/**
 	 * Remove keys with UNLINK in batches of at most 500 and return how many went. The only write the reconcile path makes,
-	 * and only from the confirmed repair. Nothing is removed when the cache is off; a client without UNLINK throws.
+	 * and only from the confirmed repair. Nothing is removed when the cache is off; a client without UNLINK throws. `onBatch`
+	 * is called once after each batch with that batch's removed count, before the next batch starts, so a caller whose later
+	 * batch fails still knows what the earlier ones removed.
 	 */
-	async unlinkKeys(keys: readonly string[]): Promise<number> {
+	async unlinkKeys(keys: readonly string[], onBatch?: (removed: number) => void): Promise<number> {
 		const redis = this.redis;
 		if (!this.enabled || !redis) return 0;
 		const unlink = redis.unlink;
@@ -1091,7 +1093,9 @@ export class ReadThroughCache {
 		let removed = 0;
 		for (let from = 0; from < keys.length; from += batchSize) {
 			const batch = keys.slice(from, from + batchSize);
-			removed += await this.attempt(() => unlink.call(redis, batch));
+			const batchRemoved = await this.attempt(() => unlink.call(redis, batch));
+			removed += batchRemoved;
+			onBatch?.(batchRemoved);
 		}
 		if (keys.length > 0) this.noteConnected();
 		return removed;

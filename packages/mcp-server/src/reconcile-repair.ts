@@ -163,9 +163,10 @@ export async function executePlan(
 	try {
 		const scan = await deps.cache.scanKeys(FLUSH_MATCH, DEFAULT_RECONCILE_CAPS.cacheKeys);
 		truncated = scan.truncated;
-		repaired = scan.keys.length > 0 ? await deps.cache.unlinkKeys(scan.keys) : 0;
+		// Each batch is counted as it is removed, so `repaired` stays right when a later batch fails; on success the returned total is the count.
+		if (scan.keys.length > 0) repaired = await deps.cache.unlinkKeys(scan.keys, (removed) => { repaired += removed; });
 	} catch (cause) {
-		// The flush stopped part way: report the keys removed before the failure, so the result record says so.
+		// The flush stopped part way: `repaired` holds the keys the batches before the failure removed, so the result says so.
 		const error = failureReason(cause);
 		return { executed: false, reason: `failed: the flush of ${FLUSH_MATCH} stopped: ${error}`, listed, repaired, truncated, refused: false, error };
 	}
