@@ -158,6 +158,14 @@ describe("memory (criterion 2: memory rows outside the grant are dropped before 
 		expect(filtered.graph_links?.map((link) => link.graph_id)).toEqual(["ut-a"]);
 		expect(filtered.entries.every((entry) => !("causal_chain" in entry))).toBe(true);
 	});
+
+	test("boundary: a memory row whose own repository is ungranted is dropped even under a global scope; the granted row stays", async () => {
+		const { index } = countingIndex({});
+		const substrate = new Substrate(loadConfig(scopedEnv()), { index: index as never, greptime: null });
+		const reply = { entries: [{ ...memory("m6", "global"), repo: "owner/b" }, { ...memory("m7", "global"), repo: "owner/a" }] };
+		const filtered = await substrate.memoryReplyInGrant(reply, SURFACE);
+		expect(filtered.entries.map((entry) => entry.id)).toEqual(["m7"]);
+	});
 });
 
 describe("memory verify (criterion 2: the reader's repository must be granted before the index is read)", () => {
@@ -174,6 +182,37 @@ describe("memory verify (criterion 2: the reader's repository must be granted be
 		touched = 0;
 		await expect(scoped.memoryVerify("mem-1", { surface: SURFACE, repo: "owner/b", isOperator: false })).rejects.toBeInstanceOf(MemoryVerifyError);
 		expect(touched).toBe(0);
+	});
+
+	test("boundary: an entry in an ungranted repository is answered as an unknown id, and its content is never read", async () => {
+		const { index } = countingIndex({});
+		const stored = { ...memory("mem-1", "global"), repo: "owner/b" };
+		const reads: string[] = [];
+		const hidden = new Proxy(stored, {
+			get(target, property, receiver) {
+				reads.push(String(property));
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		const caller = { surface: SURFACE, repo: "owner/a", isOperator: false };
+		const withRow = new Substrate(loadConfig(scopedEnv()), { index: { ...index, readEntry: async () => hidden } as never, greptime: null });
+		const withoutRow = new Substrate(loadConfig(scopedEnv()), { index: { ...index, readEntry: async () => null } as never, greptime: null });
+		const hiddenAnswer = await withRow.memoryVerify("mem-1", caller).catch((cause: unknown) => cause);
+		const unknownAnswer = await withoutRow.memoryVerify("mem-1", caller).catch((cause: unknown) => cause);
+		expect(hiddenAnswer).toBeInstanceOf(MemoryVerifyError);
+		expect(unknownAnswer).toBeInstanceOf(MemoryVerifyError);
+		expect((hiddenAnswer as MemoryVerifyError).rule).toBe("not_found");
+		expect((hiddenAnswer as MemoryVerifyError).message).toBe((unknownAnswer as MemoryVerifyError).message);
+		// Only the row's scope and repository decide that it is ungranted; `then` is read by the promise that returns it. Its text, hash and anchor are never read.
+		expect(reads.filter((property) => property !== "scope" && property !== "repo" && property !== "then")).toEqual([]);
+	});
+
+	test("positive control: an entry in a granted repository reaches the verifier, not the absent answer", async () => {
+		const { index } = countingIndex({});
+		const granted = { ...memory("mem-2", "global"), repo: "owner/a" };
+		const substrate = new Substrate(loadConfig(scopedEnv()), { index: { ...index, readEntry: async () => granted } as never, greptime: null });
+		const result = await substrate.memoryVerify("mem-2", { surface: SURFACE, repo: "owner/a", isOperator: false });
+		expect(result.status).toBe("hash-mismatch");
 	});
 });
 
