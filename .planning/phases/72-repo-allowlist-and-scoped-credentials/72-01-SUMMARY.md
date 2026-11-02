@@ -61,3 +61,20 @@ Git calls are argv-only; no `shell: true` in packages or scripts. No per-session
 ## 6. Follow-up: route gates added after review
 
 The open-risk bullet on live-session list, brief, memory recall, handoff and session context is superseded. Those five are now gated at their doors (PLAN section 8), with `repo-scope.routes.test.ts`. Still open, per PLAN section 8: graph-keyed reads (`handoffsForGraph`, `graph_get`, brief `graph_id`), the `docs_search` Hindsight fallback, and `memory_search`, `memory_verify`, `events_query`, `graph_register`, `events_emit` and `reapExpiredLeases`, which were found but not assessed.
+
+## 7. Verification by execution (2026-11-02)
+
+Orchestrator serial gates on this branch at merge db8ff907 (includes phase 71 Greptile fixes 0e97a5e7):
+
+- tsc 0; lint 0; bun test 11768 pass, 2 skip, 5 fail; test:py 0; phase-close 239/0.
+
+The five failures were brief tests: uplift-4 S4 stale age; memory_brief degraded and stale metadata; the compact degraded brief; the HTTP degraded brief (200).
+
+Root cause: `scopedNamedGraphRefusal` read the graph row even with scoping off, so a failed graph read refused a brief that should have been served degraded. Fixed in commit 5cd3adaf with one early return when `repoScope` is not enforced. With scoping enforced, the refusal path is unchanged.
+
+Gates after the fix: tsc 0; lint 0; bun test 11773 pass, 2 skip, 0 fail; test:py 0; phase-close 239/0.
+
+Not executed:
+
+- The Postgres list query `lower(repo) in (select jsonb_array_elements_text(...))` has not been run against a live database in this phase.
+- The criterion-2 route decisions (PLAN section 9) are code decisions verified by the unit tests named there, not by a live run.
