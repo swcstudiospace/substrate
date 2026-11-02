@@ -6,7 +6,7 @@
  *   reconcile [report]                          the live report as JSON; writes nothing
  *   reconcile plan --out <file>                 runs the report and writes one plan file, and nothing else
  *   reconcile repair --plan <file>              dry run: re-checks the plan and prints what it would do; writes nothing
- *   reconcile repair --plan <file> --execute    flushes the derived cache, then writes `<file>.result.json`
+ *   reconcile repair --plan <file> --execute --server-stopped    flushes the derived cache with the server stopped, then writes `<file>.result.json`
  *
  * Exit codes: 0 done (a clean report, a plan written, a dry run or an executed repair); 1 a report that is not clean, a
  * refused or unreadable plan, a failed repair, or a failure reading a layer; 2 usage, or configuration this run needs and does not have.
@@ -25,7 +25,7 @@ import type { Report } from "./reconcile.ts";
 export interface ReconcileClients {
 	ledger: LedgerReader;
 	index: IndexReader;
-	cache: Pick<ReconcileDeps["cache"], "scanKeys"> & { unlinkKeys(keys: readonly string[]): Promise<number> };
+	cache: Pick<ReconcileDeps["cache"], "scanKeys"> & { unlinkKeys(keys: readonly string[], onBatch?: (removed: number) => void): Promise<number> };
 	close: () => Promise<void>;
 }
 
@@ -39,14 +39,17 @@ export interface ReconcileIo {
 }
 
 const USAGE =
-	"usage: bun run reconcile -- [report] | plan --out <file> | repair --plan <file> [--execute]";
+	"usage: bun run reconcile -- [report] | plan --out <file> | repair --plan <file> [--execute] [--server-stopped]";
 
 const PLAN_SCHEMA = "substrate.reconcile.plan.v1";
 
 /** A bad command line. Its message is ours, never a value from the environment. */
 class UsageError extends Error {}
 
-type Command = { command: "report" } | { command: "plan"; out: string } | { command: "repair"; plan: string; execute: boolean };
+type Command =
+	| { command: "report" }
+	| { command: "plan"; out: string }
+	| { command: "repair"; plan: string; execute: boolean; serverStopped: boolean };
 
 /** Split a subcommand's flags: `valued` take the next argument, `switches` stand alone. Any other token is a usage error. */
 function flagsOf(rest: readonly string[], valued: readonly string[], switches: readonly string[]): Map<string, string | true> {
@@ -82,10 +85,14 @@ export function parseReconcileArgs(argv: readonly string[]): Command {
 		return { command: "plan", out };
 	}
 	if (sub === "repair") {
-		const found = flagsOf(rest, ["--plan"], ["--execute"]);
+		const found = flagsOf(rest, ["--plan"], ["--execute", "--server-stopped"]);
 		const plan = found.get("--plan");
 		if (typeof plan !== "string") throw new UsageError("repair needs --plan <file>");
-		return { command: "repair", plan, execute: found.get("--execute") === true };
+		const execute = found.get("--execute") === true;
+		const serverStopped = found.get("--server-stopped") === true;
+		// A flush removes keys from a cache a live server may be writing, so it runs only with the server stopped.
+		if (execute && !serverStopped) throw new UsageError("reconcile: --execute needs --server-stopped");
+		return { command: "repair", plan, execute, serverStopped };
 	}
 	throw new UsageError(`unknown subcommand: ${sub.startsWith("--") ? sub : "(positional)"}`);
 }
@@ -194,7 +201,7 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 		}
 		let result: RepairResult;
 		try {
-			result = await executePlan(plan, deps, { execute: command.execute });
+			result = await executePlan(plan, deps, { execute: command.execute, serverStopped: command.serverStopped });
 		} catch (cause) {
 			// Only the re-run report throws before the flush; the flush reports its own failure in the result. An execute still
 			// records the failure below. A dry run is an ordinary error.

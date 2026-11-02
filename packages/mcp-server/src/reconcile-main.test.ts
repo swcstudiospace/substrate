@@ -88,7 +88,7 @@ describe("reconcileMain", () => {
 			const out: string[] = [];
 			const err: string[] = [];
 			const io: ReconcileIo = { out: (line) => out.push(line), err: (line) => err.push(line), now: () => now, env, open: () => clients };
-			expect(await reconcileMain(["repair", "--plan", planPath, "--execute"], io)).toBe(1);
+			expect(await reconcileMain(["repair", "--plan", planPath, "--execute", "--server-stopped"], io)).toBe(1);
 			expect(err.join("\n")).toMatch(/unlink failed/);
 			const record = JSON.parse(await readFile(`${planPath}.result.json`, "utf8")) as {
 				result: { executed: boolean; refused: boolean; repaired: number; error?: string };
@@ -99,5 +99,22 @@ describe("reconcileMain", () => {
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	test("execute without --server-stopped exits 2 and opens no client", async () => {
+		const opened: string[] = [];
+		const { io, err } = fakeIo(opened);
+		expect(await reconcileMain(["repair", "--plan", "plan.json", "--execute"], io)).toBe(2);
+		expect(err.join("\n")).toMatch(/reconcile: --execute needs --server-stopped/);
+		expect(err.join("\n")).toMatch(/usage: bun run reconcile/);
+		expect(opened).toEqual([]);
+	});
+
+	test("--server-stopped with a command other than repair exits 2 and opens no client", async () => {
+		const opened: string[] = [];
+		const { io, err } = fakeIo(opened);
+		expect(await reconcileMain(["report", "--server-stopped"], io)).toBe(2);
+		expect(err.join("\n")).toMatch(/unknown argument: --server-stopped/);
+		expect(opened).toEqual([]);
 	});
 });

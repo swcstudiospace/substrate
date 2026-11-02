@@ -35,26 +35,36 @@ bun run reconcile -- report
 
 ## Repair
 
-Repair is a whole derived-cache flush of the `substrate:v1` prefix, behind a confirmed plan. It is never a per-key or per-graph delete. Answer keys are hashes with no graph id, so they cannot be selected per graph. A counter alone is unsafe to delete, because an answer built while the counter was absent can become reachable again and revive a stale answer. Counters, answers, snapshots and the forget mark all go together.
+Repair is a derived-cache flush of the `substrate:v1` prefix, behind a confirmed plan. It is never a per-key or per-graph delete. Answer keys are hashes with no graph id, so they cannot be selected per graph. A counter alone is unsafe to delete, because an answer built while the counter was absent can become reachable again and revive a stale answer. So the flush removes keys in three ordered passes, and never removes a counter or the forget mark while a key that depends on it may still exist:
 
-The repair never touches the ledger or the index. It is safe because the cache is derived. The cost is a cold cache until it refills.
+1. **Answers and snapshots** (`brief`, `memory-search`, `graph-view`, `brief-snapshot`, `recall-snapshot`, `docs-search`). Each is derived from a counter or the forget mark, so they go first.
+2. **Generation counters** (`gen:*`, except the forget mark). They go only after every answer and snapshot has gone.
+3. **The forget mark** (`gen:forgotten`). It goes last. `snapshotSurvivesForget` reads it to decide whether a saved brief written before a forget may still be served. Removing it while a saved brief remains would let that brief serve forgotten memory.
+
+Budget keys (`budget:`, live rate-limit state) and embedding keys (`emb:`, content-keyed and never stale) are never removed. Neither is any key the classifier does not name.
+
+The flush considers at most 1000000 keys (a fail-closed bound). A scan that cannot complete, because the cache is off or the prefix holds more than that many keys, refuses with nothing removed. A flush that fails part way keeps every counter it has not reached: a failure in the first pass leaves every counter and the mark in place, and a failure in the second leaves the mark in place. The repair never touches the ledger or the index. The cost of a flush is a cold cache until it refills.
 
 Safety rules:
 
 - **Plan first.** `plan --out <file>` runs the report and writes one plan file, and nothing else. It refuses to overwrite an existing file, so a plan in use is never replaced.
-- **Dry run first.** `repair --plan <file>` re-runs the report, checks the plan's digest, and prints what it would do. It writes nothing.
-- **Confirmed execute.** `repair --plan <file> --execute` re-checks the digest and the orphan condition, then flushes. It writes `<file>.result.json` with the result and a timestamp. It refuses when the findings have changed since the plan was made.
+- **Dry run first.** `repair --plan <file>` re-runs the report, checks the plan's digest, and prints what it would do. It writes nothing, and needs no server flag.
+- **Server stopped.** `repair --plan <file> --execute` without `--server-stopped` is a usage error (exit 2), and nothing is read or removed. A live server can write a snapshot between the passes. If the forget mark were removed before that snapshot is written, the snapshot would survive the forget and could serve forgotten memory. So the server must be stopped for the whole flush.
+- **Confirmed execute.** `repair --plan <file> --execute --server-stopped` re-checks the digest and the orphan condition, then flushes. It writes `<file>.result.json` with the result and a timestamp. It refuses when the findings have changed since the plan was made.
 - **Re-run is safe.** A second execute finds nothing to repair.
 
-```
-bun run reconcile -- plan --out plan.json
-bun run reconcile -- repair --plan plan.json
-bun run reconcile -- repair --plan plan.json --execute
-```
+Operator procedure:
 
-**Partial flush.** The flush scan is capped. A truncated flush removes only part of the prefix, and that includes generation counters. Removing counters changes the live findings. So the same plan file then refuses on digest mismatch. The operator must run `plan` again to make a new plan. The second run does not reuse the old plan.
+1. Stop the server.
+2. `bun run reconcile -- plan --out plan.json`
+3. `bun run reconcile -- repair --plan plan.json` (dry run; writes nothing)
+4. `bun run reconcile -- repair --plan plan.json --execute --server-stopped`
+5. Restart the server.
+6. `bun run reconcile -- report`
 
-Exit codes for `repair`: 0 for a dry run or an executed flush; 1 for a refused or unreadable plan, or a flush that failed part way (the reason is printed, and `<plan>.result.json` records the keys removed before the failure); 2 for usage errors. `report` and `plan` exit 0 when they write their output (`report` exits 1 when not clean). Every command exits 2 when `SUBSTRATE_PG_URL` or `GREPTIME_URL` is unset, or when the cache is off: a scan of an off cache is incomplete, so a report without it must not read as clean.
+Exit codes for `repair`: 0 for a dry run or an executed flush; 1 for a refused or unreadable plan, a refused scan, or a flush that failed part way (the reason is printed, and `<plan>.result.json` records the keys removed before the failure); 2 for usage errors, including `repair --execute` without `--server-stopped`. `report` and `plan` exit 0 when they write their output (`report` exits 1 when not clean). Every command exits 2 when `SUBSTRATE_PG_URL` or `GREPTIME_URL` is unset, or when the cache is off: a scan of an off cache is incomplete, so a report without it must not read as clean.
+
+**What else compares these stores.** Memory across the index, the Hindsight bank and the ledger is compared by `consistency-run` (`consistency-verify.ts`), which this report does not replace. `coord_drift_scan` checks lease health (expired, idle, orphaned) and does not compare index holds with ledger transitions, which this report does.
 
 ## Scheduled report
 
