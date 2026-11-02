@@ -6346,6 +6346,7 @@ export class Substrate {
 	 * that cannot answer is refused: an unreadable row is not known to belong to the repository.
 	 */
 	private async scopedNamedGraphRefusal(route: string, surface: Surface | null, repo: string, graphId: string): Promise<RepoScopeRefusal | null> {
+		if (!this.config.repoScope.enforced) return null;
 		const granted = await this.scopedRepoRefusal(route, surface, repo, true);
 		if (granted !== null) return granted;
 		if (this.index === null) return null;
