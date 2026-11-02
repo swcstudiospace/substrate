@@ -670,6 +670,8 @@ export interface SubstrateConfig {
 	corpus: CorpusSettings;
 	/** The docs learning loop (v1.7 phase 66): telemetry, the authority re-rank and the gap threshold. Every switch is off by default. */
 	docsReflect: DocsReflectSettings;
+	/** The scheduled reconcile (Phase 78, D78-7): `SUBSTRATE_RECONCILE_INTERVAL_S` and `SUBSTRATE_RECONCILE_WINDOW_HOURS`. Off by default. */
+	reconcile: ReconcileSettings;
 	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
 	docsSlo: SloThresholds;
 	/**
@@ -1217,6 +1219,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		corpus: loadCorpusSettings(env),
 		planningHashStore: (env.SUBSTRATE_PLANNING_HASH_STORE?.trim().toLowerCase() ?? "") === "on",
 		docsReflect: loadDocsReflectSettings(env),
+		reconcile: loadReconcileSettings(env),
 		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
@@ -1570,6 +1573,41 @@ export function loadDocsReflectSettings(env: Record<string, string | undefined>)
 		rerank: rerank === "shadow" || rerank === "on" ? rerank : "off",
 		gapScore: unitIntervalOr(env.SUBSTRATE_DOCS_GAP_SCORE, DOCS_GAP_SCORE_DEFAULT),
 	};
+}
+
+/** The scheduled reconcile's two knobs (Phase 78, D78-7). */
+export interface ReconcileSettings {
+	/** Seconds between scheduled runs (`SUBSTRATE_RECONCILE_INTERVAL_S`); `0` is off, and a value above 0 is at least 60. */
+	intervalS: number;
+	/** Hours of ledger and index history each run compares (`SUBSTRATE_RECONCILE_WINDOW_HOURS`), from 1 to 168. */
+	windowHours: number;
+}
+
+/** The default window in hours (`SUBSTRATE_RECONCILE_WINDOW_HOURS`). */
+export const DEFAULT_RECONCILE_WINDOW_HOURS = 24;
+/** The longest interval `setInterval` can hold: its delay is a signed 32-bit count of milliseconds, and a longer one fires at once. */
+export const RECONCILE_MAX_INTERVAL_S = 2_147_483;
+
+/**
+ * `SUBSTRATE_RECONCILE_*` as the server reads them. An unset or blank interval is 0 (off); a value above 0 is clamped into
+ * 60 to `RECONCILE_MAX_INTERVAL_S` seconds. The window is clamped into 1 to 168 hours, 24 by default. A value that is not a
+ * whole number, a negative one included, refuses boot with a ConfigError that names the variable.
+ */
+export function loadReconcileSettings(env: Record<string, string | undefined> = process.env): ReconcileSettings {
+	const interval = wholeNumberOrRefuse("SUBSTRATE_RECONCILE_INTERVAL_S", env.SUBSTRATE_RECONCILE_INTERVAL_S);
+	const hours = wholeNumberOrRefuse("SUBSTRATE_RECONCILE_WINDOW_HOURS", env.SUBSTRATE_RECONCILE_WINDOW_HOURS);
+	return {
+		intervalS: interval === null || interval === 0 ? 0 : Math.min(RECONCILE_MAX_INTERVAL_S, Math.max(60, interval)),
+		windowHours: hours === null ? DEFAULT_RECONCILE_WINDOW_HOURS : Math.min(168, Math.max(1, hours)),
+	};
+}
+
+/** A whole number, or null when the variable is unset or blank. Anything else, a negative number included, refuses boot. */
+function wholeNumberOrRefuse(name: string, raw: string | undefined): number | null {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return null;
+	if (!/^\d+$/.test(trimmed)) throw new ConfigError(`${name}=${JSON.stringify(trimmed)} is not a whole number; set one, or unset it for the default`);
+	return Number(trimmed);
 }
 
 /**

@@ -316,6 +316,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_SLO_NOTIFY` | toggle | off | 1 | off: no transition notifier. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SLO_NOTIFY_S` | number | 60 | 5..86400 | 60 s. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SLO_NOTIFY_SUSTAIN_S` | number | 300 | 0..86400 (0 announces at once) | 300 s. See `docs/observability.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RECONCILE_INTERVAL_S` | number | 0 | 0 (off) or whole seconds, at least 60 above 0; not a whole number refuses boot | off: no scheduled reconcile. Above 0 the cross-layer report runs on that interval and writes one JSON log line per run; the reconcile writes nothing to the ledger, the index or the cache. See `docs/reconcile.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RECONCILE_WINDOW_HOURS` | number | 24 | 1..168 whole hours (outside it is clamped; not a whole number refuses boot) | 24 hours of ledger and index history per scheduled run; the reconcile only reads, and writes nothing. See `docs/reconcile.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SLO_WEBHOOK_URL` | secret-ref | none | http(s) URL | no webhook; the URL may carry a token and is never printed. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BURN_TOKENS_PER_HOUR` | number | none | tokens per rolling hour | the burn.tokens row is unconfigured and never judged. See `docs/observability.md` | observability/burn.ts | yes |
 | `SUBSTRATE_BURN_COST_USD_PER_HOUR` | number | none | USD per rolling hour | the burn.cost_usd row is unconfigured and never judged. See `docs/observability.md` | observability/burn.ts | yes |

@@ -248,6 +248,7 @@ import {
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
 import { RepoAccess, requireComplete, startPreloader, type Preloader } from "./preload.ts";
+import { DEFAULT_RECONCILE_CAPS, runReport } from "./reconcile-run.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -1487,6 +1488,10 @@ export class Substrate {
 	private readonly retrievalRecorder: RetrievalRecorder;
 	/** Stops the hourly retrieval-retention sweep; null while it is not running. */
 	private retrievalSweepStop: (() => void) | null = null;
+	/** Stops the scheduled reconcile (`SUBSTRATE_RECONCILE_INTERVAL_S`); null while it is off or stopped. */
+	private reconcileStop: (() => void) | null = null;
+	/** The scheduled reconcile pass in flight, so a tick while one runs starts nothing. */
+	private reconcilePass: Promise<void> | null = null;
 	/** Re-rank shadow runs since this process started, and the corpus positions they would have moved. */
 	private readonly shadowCounts = { searches: 0, moved: 0 };
 	private corpusRootKeeper: CorpusRootKeeper | null = null;
@@ -3785,15 +3790,67 @@ export class Substrate {
 		}
 	}
 
-	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
+	/** Start the recall prefetch, the Hindsight inventory, the scheduled reconcile (phase 78) and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
 	startRecall(): { recall: boolean; inventory: boolean } {
 		this.startPreload();
+		this.startReconcile();
 		return { recall: this.recall.start(), inventory: this.hindsightInventory.start() };
 	}
 
-	/** Clear both timers and wait, bounded, for the work in flight. No final refresh: the snapshot is cache-only. */
+	/** Clear the recall, Hindsight inventory and reconcile timers, and wait, bounded, for the recall work in flight. No final refresh: the snapshot is cache-only. */
 	async stopRecall(): Promise<void> {
+		this.stopReconcile();
 		await Promise.all([this.recall.stop(), this.hindsightInventory.stop()]);
+	}
+
+	/**
+	 * Start the scheduled reconcile (Phase 78, D78-7): one unref'd interval at `SUBSTRATE_RECONCILE_INTERVAL_S`, and nothing while it is 0.
+	 * Each tick is one read-only run. Idempotent.
+	 */
+	startReconcile(): boolean {
+		const { intervalS, windowHours } = this.config.reconcile;
+		if (this.reconcileStop !== null || intervalS <= 0) return false;
+		const handle = setInterval(() => void this.reconcileTick(), intervalS * 1000);
+		handle.unref();
+		this.reconcileStop = () => clearInterval(handle);
+		process.stdout.write(`[substrate] reconcile: every ${intervalS} s, window ${windowHours} h, read-only\n`);
+		return true;
+	}
+
+	/** Clear the scheduled reconcile's timer. A run in flight finishes on its own; it writes nothing on the way out. */
+	stopReconcile(): void {
+		this.reconcileStop?.();
+		this.reconcileStop = null;
+	}
+
+	/** One scheduled run, single-flight: a tick while a run is in flight starts nothing. Never rejects. */
+	private reconcileTick(): Promise<void> {
+		this.reconcilePass ??= this.runScheduledReconcile().finally(() => {
+			this.reconcilePass = null;
+		});
+		return this.reconcilePass;
+	}
+
+	/** One read-only reconcile over the ledger, the index and the cache: one JSON log line on success, a stderr line on failure. */
+	private async runScheduledReconcile(): Promise<void> {
+		if (this.greptime === null || this.index === null) {
+			process.stderr.write("[substrate] reconcile: skipped, the ledger and the index are both needed\n");
+			return;
+		}
+		try {
+			const report = await runReport({
+				ledger: this.greptime,
+				index: this.index,
+				cache: this.cache,
+				now: new Date(),
+				windowHours: this.config.reconcile.windowHours,
+				caps: DEFAULT_RECONCILE_CAPS,
+			});
+			const line = { schema: report.schema, generated_at: report.generated_at, clean: report.clean, counts: report.counts, first: report.first };
+			process.stdout.write(`[substrate] reconcile ${JSON.stringify(line)}\n`);
+		} catch (cause) {
+			process.stderr.write(`[substrate] reconcile: run failed — ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+		}
 	}
 
 	/** Start the cache preloader (phase 47): one unref'd interval, and nothing while `SUBSTRATE_CACHE_PRELOAD` is off or it is already running. */
