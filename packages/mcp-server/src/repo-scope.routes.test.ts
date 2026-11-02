@@ -385,6 +385,41 @@ describe("POST /drift (repo-keyed door)", () => {
 	});
 });
 
+/**
+ * A `tools/call` over the MCP door. The reply is one JSON body, or one event-stream frame whose data is that body; the status
+ * is the transport's own (a refusal is a 403 before any member runs, a declared tool's refusal is a 200 with `isError`).
+ */
+async function callMcpTool(base: string, tool: string, args: unknown): Promise<{ status: number; body: unknown }> {
+	const response = await fetch(`${base}/mcp`, {
+		method: "POST",
+		headers: { ...BEARER, accept: "application/json, text/event-stream" },
+		body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } }),
+	});
+	const raw = await response.text();
+	if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) return { status: response.status, body: JSON.parse(raw) };
+	const data = raw.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+	return { status: response.status, body: JSON.parse(data) };
+}
+
+describe("MCP coord_drift_scan (repo-keyed read through the MCP door)", () => {
+	test("boundary: coord_drift_scan of an ungranted repository is refused before the scan and before any git call", async () => {
+		const h = await start(scopedEnv());
+		const scan = spyOn(h.substrate, "driftScan");
+		const spawn = spyOn(Bun, "spawnSync");
+		try {
+			const reply = await callMcpTool(h.base, "coord_drift_scan", { repo: "owner/b", path: join(tmpdir(), "not-granted-checkout") });
+			expect(JSON.stringify(reply.body)).toContain("repo-not-granted");
+			expect(scan).not.toHaveBeenCalled();
+			expect(spawn.mock.calls.filter(([argv]) => Array.isArray(argv) && argv[0] === "git")).toHaveLength(0);
+			expect(h.ledger.reads).toHaveLength(0);
+			expect(refusalRoutes(h.ledger.written)).toEqual(["drift"]);
+		} finally {
+			spawn.mockRestore();
+			scan.mockRestore();
+		}
+	});
+});
+
 describe("GET /worktrees (repo-keyed read)", () => {
 	test("boundary: an unnamed read by a scoped caller returns only the granted repository's rows, and the store is asked for that grant alone", async () => {
 		const store = await seededWorktrees();

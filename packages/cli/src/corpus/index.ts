@@ -79,6 +79,7 @@ import {
 	supersededEntries,
 	type VerifyReport,
 } from "./render.ts";
+import { corpusScopeRefusal, type LocalAudit, type LocalTarget } from "./scope.ts";
 import {
 	HOOK_ACTIONS,
 	type HookAction,
@@ -138,6 +139,8 @@ export interface CorpusDeps {
 	readPrefix?: ((path: string, maxBytes: number) => Uint8Array) | undefined;
 	/** Test seam of `prove --out`. */
 	writeFile?: ((path: string, text: string) => void) | undefined;
+	/** Audits a refused request (phase 72); the CLI wires the ledger, and a refusal is never blocked by a failed write. */
+	audit?: LocalAudit | undefined;
 }
 
 const SCAN_VALUES = ["root", "tier", "max-bytes", "source", "greptile-dir", "github-owner", "max-repos"] as const;
@@ -172,6 +175,26 @@ interface ScanArgs {
 function resolveRoots(parsed: Parsed, env: Record<string, string | undefined>): string[] {
 	const configured = (env.SUBSTRATE_CORPUS_ROOTS ?? "").split(":").filter((root) => root !== "");
 	return parsed.values.get("root") ?? (configured.length > 0 ? configured : [DEFAULT_ROOT]);
+}
+
+/**
+ * What a corpus command would run git in, hook, or name, before it runs (phase 72). `scan`, `plan`, `ingest` and `eval` run git
+ * over their roots only when the filesystem source is selected. `hint` writes a spool file and runs no git, so it has no target.
+ */
+function localTargets(sub: string, parsed: Parsed, env: Record<string, string | undefined>): LocalTarget[] {
+	const roots = (): LocalTarget[] => resolveRoots(parsed, env).map((path) => ({ path }));
+	const repos = (): LocalTarget[] => (parsed.values.get("repo") ?? []).map((repo) => ({ repo }));
+	if (sub === "scan" || sub === "plan" || sub === "ingest" || sub === "eval") {
+		const sources = (parsed.values.get("source") ?? ["fs"]).flatMap((text) => text.split(","));
+		return sources.includes("fs") ? roots() : [];
+	}
+	if (sub === "reflect" || sub === "sync") return [...roots(), ...repos()];
+	if (sub === "watch" || sub === "reconcile") return roots();
+	if (sub === "hook") {
+		const repo = last(parsed, "repo");
+		return repo === undefined ? [] : [{ path: resolve(repo) }];
+	}
+	return [];
 }
 
 function resolveScanArgs(parsed: Parsed, env: Record<string, string | undefined>): ScanArgs | string {
@@ -277,6 +300,12 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 		deps.err(`[substrate] corpus ${sub}: ${message}\n`);
 		return 2;
 	};
+	// Phase 72: a root, hook directory or repository the registry does not place is refused before any git call or hook write.
+	const refusal = await corpusScopeRefusal(sub, deps.env, localTargets(sub, parsed, deps.env), deps.audit);
+	if (refusal !== null) {
+		deps.err(`[substrate] corpus ${sub}: ${refusal}`);
+		return 2;
+	}
 	try {
 		if (sub === "status") return await status(parsed, deps);
 		if (sub === "hint" || sub === "hook") return hintOrHook(sub, argv[1], parsed, deps, usage);

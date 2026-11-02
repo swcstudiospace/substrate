@@ -261,6 +261,39 @@ export function authorizeRepoPath(scope: RepoScope, surface: Surface | null, pat
 }
 
 /**
+ * The registry a local command (the corpus CLI, the top-level CLI's cwd reads, the hook installer) gates on. Unset or blank is
+ * `null`: the gate is off and the command runs as it did. Set, the registry and any grants are parsed, and a malformed value is
+ * a problem the command reports before any git call. Unlike {@link repoScopeFromEnv}, a set registry gates even when grants are
+ * not enforced: a path must lie inside a registration.
+ */
+export function localRegistryScope(env: Record<string, string | undefined>): ParseOutcome<RepoScope | null> {
+	if ((env[REPO_REGISTRY_ENV] ?? "").trim() === "") return { ok: true, value: null };
+	return repoScopeFromEnv(env);
+}
+
+/**
+ * Gate for a directory a local command would run git in or write a hook into. The directory must lie inside a registration
+ * and, when grants are enforced, the surface must hold that repository. Never reads a grant when grants are off.
+ */
+export function localPathGate(scope: RepoScope, surface: Surface | null, path: string): RepoGate {
+	const located = locateRepoPath(scope, path);
+	if (located === null) return refuse("path-not-registered");
+	if (!isGranted(scope, surface, located.repo)) return refuse("repo-not-granted");
+	return { ok: true, repo: located.repo, target: located.target };
+}
+
+/**
+ * Gate for a repository a local command names. The name must be a registered repository and, when grants are enforced, granted
+ * to the surface.
+ */
+export function localRepoGate(scope: RepoScope, surface: Surface | null, named: string): RepoGate {
+	const repo = scopeRepoId(named);
+	if (repo === "" || !scope.registry.has(repo)) return refuse("repo-not-registered");
+	if (!isGranted(scope, surface, repo)) return refuse("repo-not-granted");
+	return { ok: true, repo, target: null };
+}
+
+/**
  * The key the refusal digest is keyed with: random per process and never written anywhere. A digest of an unkeyed hash of a path
  * can be checked against guessed paths by anyone who reads the audit; a keyed one cannot, and a restart changes the key.
  */

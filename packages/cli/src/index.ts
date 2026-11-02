@@ -68,6 +68,7 @@ import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
 import { runSteer } from "./steer/index.ts";
 import { CORPUS_TIMEOUT_MS, runCorpus } from "./corpus/index.ts";
+import { localGitPermitted } from "./corpus/scope.ts";
 import type { TranscriptPort } from "./session/rollback.ts";
 import { runConsistency } from "./consistency.ts";
 import { httpCapsuleMcp, nodeCapsuleFs, runMemory } from "./capsule.ts";
@@ -119,7 +120,12 @@ function timeout(): number {
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
 }
 
+/**
+ * Reads git in `cwd` only when the registry permits it (phase 72): an unset registry reads as before; a set one reads only a
+ * registered checkout the local surface is granted. An unregistered checkout yields "", as a checkout with no git would.
+ */
 function git(args: string[], cwd = process.cwd()): string {
+	if (!localGitPermitted(process.env, cwd)) return "";
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
 	return result.status === 0 ? result.stdout.trim() : "";
 }
@@ -810,6 +816,7 @@ switch (command) {
 				env: process.env,
 				out: (text) => process.stdout.write(text),
 				err: (text) => process.stderr.write(text),
+				audit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.corpus", url: base() }),
 			}),
 		);
 		break;
