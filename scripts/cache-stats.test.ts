@@ -146,7 +146,8 @@ describe("collectStats", () => {
 		const stalls: StatsClient = {
 			send: (command, args) => (command === "TYPE" && inner.commands.filter((entry) => entry === "TYPE").length >= 50 ? new Promise(() => {}) : inner.send(command, args)),
 		};
-		const stats = await collectStats(stalls, { wallBudgetMs: 30 });
+		// The budget only has to outlast fifty in-memory rounds on a loaded host; the stalled round ends the scan at the budget either way.
+		const stats = await collectStats(stalls, { wallBudgetMs: 2_000 });
 		expect(stats.truncated).toBe("wall");
 		expect(stats.scanned).toBe(50);
 	});
