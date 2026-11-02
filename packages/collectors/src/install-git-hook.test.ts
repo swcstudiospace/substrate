@@ -13,6 +13,7 @@ import {
 	CORPUS_HOOKS,
 	corpusHookBlock,
 	installCorpusHooks,
+	installRepos,
 	uninstallCorpusHooks,
 } from "./install-git-hook.ts";
 
@@ -220,5 +221,73 @@ describe("corpus hint hooks", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
+	});
+});
+
+describe("installRepos keeps going past a failing repository", () => {
+	test("one failing repository does not stop the others, which still get their hook", () => {
+		const bad = emptyRepo();
+		const good = emptyRepo();
+		const alsoGood = emptyRepo();
+		// A directory where the hook file belongs: reading it throws, as an unreadable hook would.
+		mkdirSync(hookPath(bad, "post-commit"), { recursive: true });
+		const lines: string[] = [];
+		const outcome = installRepos([bad, good, alsoGood], { write: (text) => lines.push(text) });
+		for (const repo of [good, alsoGood]) {
+			const hook = hookPath(repo, "post-commit");
+			expect(statSync(hook).isFile()).toBe(true);
+			expect(statSync(hook).mode & 0o111).not.toBe(0);
+		}
+		expect(outcome.failures).toBe(1);
+		expect(lines.length).toBe(3);
+		expect(lines[0]?.startsWith(`✗ ${bad} — install failed: `)).toBe(true);
+		expect(lines.slice(1)).toEqual([`✓ ${good} — installed\n`, `✓ ${alsoGood} — installed\n`]);
+	});
+
+	test("the failing repository is named in the result with a one-line reason", () => {
+		const bad = emptyRepo();
+		mkdirSync(hookPath(bad, "post-commit"), { recursive: true });
+		const outcome = installRepos([bad], { write: () => {} });
+		expect(outcome.errors.length).toBe(1);
+		const failure = outcome.errors[0];
+		expect(failure?.repo).toBe(bad);
+		expect(failure?.reason.length).toBeGreaterThan(0);
+		expect(failure?.reason).not.toContain("\n");
+		expect(failure?.reason).not.toMatch(/:\/\//);
+		expect(outcome.failures).toBe(1);
+	});
+
+	test("with no failure the result is unchanged: no errors, the same line per repository", () => {
+		const repo = emptyRepo();
+		const lines: string[] = [];
+		const outcome = installRepos([repo], { write: (text) => lines.push(text) });
+		expect(outcome).toEqual({ failures: 0, errors: [] });
+		expect(lines).toEqual([`✓ ${repo} — installed\n`]);
+		const again: string[] = [];
+		expect(installRepos([repo], { write: (text) => again.push(text) })).toEqual({ failures: 0, errors: [] });
+		expect(again).toEqual([`✓ ${repo} — refreshed\n`]);
+	});
+
+	test("the CLI exits 1 for a failing repository, names it, and still installs the others", () => {
+		const bad = emptyRepo();
+		const good = emptyRepo();
+		mkdirSync(hookPath(bad, "post-commit"), { recursive: true });
+		const result = run(bad, good);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(`✗ ${bad} — install failed: `);
+		expect(result.out).toContain(`✓ ${good} — installed`);
+		expect(existsSync(hookPath(good, "post-commit"))).toBe(true);
+	});
+
+	test("a repository with several problems is counted once in failures, not once per problem", () => {
+		const repo = emptyRepo();
+		writeFileSync(hookPath(repo, "post-commit"), "#!/bin/sh\necho mine\n");
+		writeFileSync(hookPath(repo, "post-merge"), "#!/bin/sh\necho mine\n");
+		writeFileSync(hookPath(repo, "post-checkout"), "#!/bin/sh\necho mine\n");
+		const lines: string[] = [];
+		const outcome = installRepos([repo], { corpus: true, write: (text) => lines.push(text) });
+		expect(outcome).toEqual({ failures: 1, errors: [] });
+		expect(lines.some((line) => line.includes(`${repo} — post-merge foreign`))).toBe(true);
+		expect(lines.some((line) => line.includes(`${repo} — post-checkout foreign`))).toBe(true);
 	});
 });

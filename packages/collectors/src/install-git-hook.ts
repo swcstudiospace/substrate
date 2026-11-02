@@ -19,6 +19,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, type Stats, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { redact } from "../../mcp-server/src/redact.ts";
 
 const MARKER = "Agent Substrate — git post-commit collector";
 const SOURCE = join(import.meta.dir, "git", "post-commit");
@@ -32,6 +33,9 @@ const SRC_PLACEHOLDER = "__SUBSTRATE_COLLECTORS_SRC__";
 
 /** A directory with shell metacharacters is never written into a script: the placeholder stays. */
 const SAFE_PATH = /^[A-Za-z0-9._/@+-]+$/;
+
+/** A failure reason is printed on one line and capped to this many characters. */
+const MAX_REASON_CHARS = 200;
 
 function writeHook(path: string): void {
 	const safeDir = SAFE_PATH.test(import.meta.dir) ? import.meta.dir : SRC_PLACEHOLDER;
@@ -206,6 +210,81 @@ export function uninstallCorpusHooks(repo: string): HookReport[] {
 	});
 }
 
+/** A repository whose install threw: its path and a redacted one-line reason. */
+export interface RepoFailure {
+	repo: string;
+	reason: string;
+}
+
+export interface InstallOptions {
+	checkOnly?: boolean | undefined;
+	corpus?: boolean | undefined;
+	/** Where the per-repository lines go. Defaults to stdout. */
+	write?: ((text: string) => void) | undefined;
+}
+
+/** `failures` counts the distinct repositories with a problem and decides the exit code; `errors` names the repositories whose install threw (each is also in `failures`). */
+export interface InstallOutcome {
+	failures: number;
+	errors: RepoFailure[];
+}
+
+/** A reason fit to print: redacted, first line only, no URL, short. */
+function oneLineReason(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	const firstLine = redact(message).split("\n")[0] ?? "";
+	const reason = firstLine.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>").replace(/\s+/g, " ").trim().slice(0, MAX_REASON_CHARS);
+	return reason === "" ? "install failed" : reason;
+}
+
+/** Installs the post-commit collector (and the corpus hooks when asked) into each repository. A repository whose install throws is recorded and the loop goes on. */
+export function installRepos(repos: readonly string[], options: InstallOptions = {}): InstallOutcome {
+	const checkOnly = options.checkOnly ?? false;
+	const corpus = options.corpus ?? false;
+	const write = options.write ?? ((text: string) => process.stdout.write(text));
+	let failures = 0;
+	const errors: RepoFailure[] = [];
+	for (const repo of repos) {
+		let problem = false;
+		try {
+			const { status, path } = inspect(repo);
+			if (status === "not-a-repo") {
+				write(`✗ ${repo} — not a git repository\n`);
+				problem = true;
+				continue;
+			}
+			if (status === "foreign-hook") {
+				write(`⚠ ${repo} — a different post-commit hook is already installed; left alone\n`);
+				problem = true;
+			} else if (status === "already-ours") {
+				if (!checkOnly && path) {
+					writeHook(path);
+				}
+				write(`✓ ${repo} — ${checkOnly ? "present" : "refreshed"}\n`);
+			} else if (checkOnly) {
+				write(`○ ${repo} — not installed\n`);
+			} else if (path) {
+				writeHook(path);
+				write(`✓ ${repo} — installed\n`);
+			}
+			if (!corpus) continue;
+			for (const report of installCorpusHooks(repo, { check: checkOnly })) {
+				const mark = report.state === "foreign" ? "⚠" : report.state === "absent" ? "○" : "✓";
+				write(`${mark} ${repo} — ${report.hook} ${report.state}${report.detail === undefined ? "" : ` (${report.detail}; left alone)`}\n`);
+				if (report.state === "foreign") problem = true;
+			}
+		} catch (error) {
+			const reason = oneLineReason(error);
+			errors.push({ repo, reason });
+			problem = true;
+			write(`✗ ${repo} — install failed: ${reason}\n`);
+		} finally {
+			if (problem) failures++;
+		}
+	}
+	return { failures, errors };
+}
+
 function main(): void {
 	const args = process.argv.slice(2);
 	const checkOnly = args.includes("--check");
@@ -217,37 +296,8 @@ function main(): void {
 		process.exit(2);
 	}
 
-	let failures = 0;
-	for (const repo of repos) {
-		const { status, path } = inspect(repo);
-		if (status === "not-a-repo") {
-			process.stdout.write(`✗ ${repo} — not a git repository\n`);
-			failures++;
-			continue;
-		}
-		if (status === "foreign-hook") {
-			process.stdout.write(`⚠ ${repo} — a different post-commit hook is already installed; left alone\n`);
-			failures++;
-		} else if (status === "already-ours") {
-			if (!checkOnly && path) {
-				writeHook(path);
-			}
-			process.stdout.write(`✓ ${repo} — ${checkOnly ? "present" : "refreshed"}\n`);
-		} else if (checkOnly) {
-			process.stdout.write(`○ ${repo} — not installed\n`);
-		} else if (path) {
-			writeHook(path);
-			process.stdout.write(`✓ ${repo} — installed\n`);
-		}
-		if (!corpus) continue;
-		for (const report of installCorpusHooks(repo, { check: checkOnly })) {
-			const mark = report.state === "foreign" ? "⚠" : report.state === "absent" ? "○" : "✓";
-			process.stdout.write(`${mark} ${repo} — ${report.hook} ${report.state}${report.detail === undefined ? "" : ` (${report.detail}; left alone)`}\n`);
-			if (report.state === "foreign") failures++;
-		}
-	}
-
-	process.exit(failures > 0 ? 1 : 0);
+	const outcome = installRepos(repos, { checkOnly, corpus });
+	process.exit(outcome.failures > 0 ? 1 : 0);
 }
 
 if (import.meta.main) main();
