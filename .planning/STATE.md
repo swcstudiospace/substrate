@@ -674,14 +674,16 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 
 ## Run 15 (graph ut-1c9ee5ae87-8e2879a8, 2026-11-01): phase 75 verification record and roadmap sync
 
-- **Record:** `.planning/phases/75-dragonfly-degradation/75-VERIFICATION.md`, status `human_needed`. Both ROADMAP success criteria are MET in-repo; the live-only items below stay open.
+- **Record:** `.planning/phases/75-dragonfly-degradation/75-VERIFICATION.md`, re-verified 2026-11-02 with the procedure in `/root/.agents/gsd-core/agents/gsd-verifier.md`: status `human_needed`, 2 of 2 must-haves VERIFIED, one truth behavior-unverified (the degraded brief path, H-1). Self-check `gsd_run query verification.status` exits 0.
 - **Gates (orchestrator, serial, scratch Postgres 16):** tsc exit 0; bun test 11316 pass, 2 skip, 0 fail; check:phase-close 236 pass, 0 fail; config reference up to date. Log: `/root/src/worktrees/backups/gates2-p75.log`.
 - **Deviation, recorded:** no `75-PLAN.md` and no `75-SUMMARY.md`. The code commit `63772d5e` predates the decisions (`e622816c`) and any plan, so no plan or summary is written retroactively. The record and the roadmap say so.
-- **Manual-fallback deviation (recorded):** the gsd-verifier agent's configured model was denied (Muse Code subscription). A general-purpose agent wrote the record following the gsd-verifier rules; the GSD skill cannot be invoked from this session.
+- **Correction (2026-11-02):** the first record (commit `132974d8`) did not follow the gsd-verifier procedure: it was written from a path that does not exist, it lacks `covered_files`, `covered_digest` and `overrides_applied`, its `verified` field is a date, and it was never run through the `gsd_run` self-check. It is superseded by the re-verification. The earlier statement that it followed the gsd-verifier rules was wrong.
 - **Human verification, not run:** stop the live Dragonfly while brief and recall run, and confirm authoritative answers and the degraded `/healthz` cache state; with `SUBSTRATE_BUDGET_READ_BREAKER=fail-closed` and `SUBSTRATE_BUDGETS=enforce`, confirm a live open breaker answers 503 with an integer `Retry-After` (operator decision whether to set it); confirm `substrate.admission.decisions` with `decision=refused` reaches the live metrics pipeline.
 - **Residuals and findings, NOT FIXED:**
   - R1: a refused generation bump is remembered in-process only (`cache.ts` around line 494); other replicas or a restarted process can serve a pre-write brief until the 300 s brief TTL. Predates this phase.
   - The degraded brief path (live source fails while the breaker is open) has no test.
   - Cooldown refusals (`cache.ts` around lines 402 to 403) reject with a plain `Error`, not `BreakerOpenError`, so a fail-closed class admits during the 5 s connect cooldown while the breaker is still closed. This matches the CONTEXT rule that only breaker refusals are policed; the owner decides whether cooldown should count as a refusal.
   - With `read=fail-closed` in enforce, `/brief` and recall answer 503 at the door (`server.ts` around lines 908 to 909), so criterion 1's authoritative answers hold under the default fail-open policy only.
+  - CONTEXT is stale: it says a fail-closed refusal in shadow records `shadow_limited`, but the code (`admission.ts` 383) and the ROADMAP say `bypass`. Not edited (verifier D5).
+  - Human decisions (verifier H-4 and H-5): accept that the fail-closed read policy refuses `/brief` and `/memory/recall` with 503 while the breaker is open, and accept or change the 5 s connect-cooldown window for fail-closed classes.
 - **Not done:** no push, PR, merge, tracker writes, complete or cleanup.
