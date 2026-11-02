@@ -1231,7 +1231,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: Locally verified (5/5 criteria); awaiting-review / pending QUALITY. Greptile threads on PR #199 remediated and re-verified 2026-11-01 (71-05). The expiry pass runs on the issue path, so discovery and the session digest stay read-only. The steer capacity sweep checks and removes only records for this server and surface, so a foreign server never receives this client's bearer. Verified by typecheck, Biome lint, one full repository run after the sweep fix (11,626 pass, 2 skip, 0 fail, 0711 temp root), Python suites (330 pass), phase-close locks and audit gate. `human_needed` remains solely for the mandated Desk Quality / Programming Lead review of the remediation, which has not been observed. No phase-complete or merge-ready claim. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
 **Depends on**: none
 
@@ -1253,7 +1253,7 @@ Plans:
 
 **Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
 
-**Status**: Not started. Discovery: git calls use argv arrays with no shell string; no per-session repository allowlist was found. The unit confirms that before building it.
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
 **Depends on**: Phase 71
 
@@ -1262,13 +1262,13 @@ Plans:
   1. A repository outside the session's allowlist is refused at the API and the CLI before any git call runs.
   2. A credential scoped to one repository cannot read another repository's worktrees or corpus.
 
-**Plans**: none written
+**Plans**: [72-01](phases/72-repo-allowlist-and-scoped-credentials/72-01-PLAN.md) (summary 72-01-SUMMARY.md). Manual fallback for the plan step, owner-approved (STATE Run 18). Verifications re-run at the fix commit.
 
 ### Phase 73: Ledger tamper evidence
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: Not started. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts:313`) recomputes a session chain, and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`) reports the verdict. The gap is measured in the unit: tail truncation and whole-ledger rewrites are not yet proven detected.
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
 **Depends on**: none
 
@@ -1277,17 +1277,15 @@ Plans:
   1. Tests save the graph's head before the change, then edit a stored payload, delete a middle event, truncate the last events, and rewrite the whole chain with recalculated `hash` and `prev`. Each is compared with that saved head: the edits and the rewrite report the first differing event id, and truncation reports the first missing event id.
   2. The chain head for each graph is recorded in the hourly anchor. That recorded head is the trusted earlier proof criterion 1 compares against; a head recomputed from the stored rows is never used as the proof.
 
-**Plans**: none written
+**Plans**: [73-01](phases/73-ledger-tamper-evidence/73-01-PLAN.md) (summary 73-01-SUMMARY.md). Context: 73-CONTEXT.md.
 
 ### Phase 74: Cross-repo compensating actions
 
 **Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: Not started. Discovery found no existing multi-repo transaction path; that absence is not delivery of the accepted feature and does not waive it. Planning must select and implement a concrete multi-repo operation using Phase 72's registry and scoped executor. The unrelated git-hook install loop robustness observation remains separate.
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
-**Depends on**: Phase 72 (registered repositories, containment and credential-scoped execution)
-
-**Requirements**: [HARD-R1]
+**Depends on**: none
 
 **Success Criteria** (what must be TRUE):
 
@@ -1295,13 +1293,13 @@ Plans:
   2. A forced failure at step N yields compensated pre-operation state or a durable needs-attention result naming unfinished/failed compensation steps; never report success for a partial operation.
   3. Exercise failure and compensation failure against temporary real repositories. Recovery/status exposes the parked result and cannot overwrite an outside ref change or silently repeat a completed effect.
 
-**Plans**: none written
+**Plans**: none written. Manual fallback for the context step, owner-approved (STATE Run 18). Context: 74-CONTEXT.md; summary: 74-SUMMARY.md.
 
 ### Phase 75: DragonflyDB degradation
 
 **Goal**: When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
 
-**Status**: Not started. Discovery: the cache plane already runs through `callPlane` and `CircuitBreaker` (`packages/observability/src/breaker.ts:99`), and no authoritative state lives only in the cache. The gap: the degradation of admission budgets and generation keys under an open breaker is not tested.
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
 **Depends on**: none
 
@@ -1310,13 +1308,13 @@ Plans:
   1. With the cache breaker open, brief and recall return authoritative results. A test proves it.
   2. Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags.
 
-**Plans**: none written
+**Plans**: none written (context in 75-CONTEXT.md).
 
 ### Phase 76: Telemetry buffer and dead-letter
 
 **Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
 
-**Status**: Not started. Discovery: `insertEvent` (`packages/mcp-server/src/greptime.ts:1217`) has no retry, and a failure returns `stored: false` (`packages/mcp-server/src/service.ts:2699`) with nothing queued.
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
 **Depends on**: Phase 73 (shared ledger write path)
 
@@ -1325,13 +1323,13 @@ Plans:
   1. A failed event write enters a bounded buffer, is retried with backoff, and after the retry budget is written to a dead-letter store with its hash.
   2. Buffer and dead-letter depth are reported in `/healthz` and bounded by a flag.
 
-**Plans**: none written
+**Plans**: [76-01](phases/76-telemetry-buffer-and-dead-letter/76-01-PLAN.md) (summary 76-01-SUMMARY.md).
 
 ### Phase 77: Steering idempotency and ordering
 
 **Goal**: A steering command carrying an idempotency key applies once across retries and carries a sequence number, so the reader sees delivery order.
 
-**Status**: Not started. Discovery: no steering command carries a client idempotency key or a sequence number today.
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
 **Depends on**: Phase 71
 
@@ -1341,13 +1339,13 @@ Plans:
   2. Unkeyed commands keep working unchanged (owner decision, 2026-10-30).
   3. A keyed reply exposes its sequence number, a replay returns the same sequence, and two distinct commands are delivered in sequence order. `restDirective` omits the sequence today, though `SteeringInbox` tracks one internally.
 
-**Plans**: none written
+**Plans**: [77-01](phases/77-steering-idempotency-and-ordering/77-01-PLAN.md) (summary 77-01-SUMMARY.md).
 
 ### Phase 78: Cross-layer reconciliation
 
 **Goal**: The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
 
-**Status**: Not started. Discovery: `substrate_coord_drift_scan` compares git HEAD, the ledger and leases. It does not compare GreptimeDB against TimescaleDB.
+**Status**: human_needed (verified on gsd/v18-int-all 7382ad10; live items open)
 
 **Depends on**: Phases 73, 75, 76
 
@@ -1356,7 +1354,7 @@ Plans:
   1. A scheduled reconcile reports per-layer counts and the first mismatching key, and writes nothing on a clean run.
   2. Repair is a separate confirmed step with a plan record, following the corpus delete rules.
 
-**Plans**: none written
+**Plans**: [78-01](phases/78-cross-layer-reconciliation/78-01-PLAN.md) (summary 78-SUMMARY.md). Context: 78-CONTEXT.md.
 
 
 ## Progress
@@ -1418,11 +1416,11 @@ Plans:
 | 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); PARTIAL: no report scheduler; dispatcher ignores roots variable | 2026-10-30 |
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
-| 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
-| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
-| 73. Ledger tamper evidence | v1.8 | 0/0 | Not started | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | Not started | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
-| 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
-| 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
+| 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 3 of 5 criteria verified on gsd/v18-int-all 7382ad10; Postgres restart clauses and Greptile gate open | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | human_needed: 16 of 20 must-haves verified | - |
+| 73. Ledger tamper evidence | v1.8 | 1/1 local | human_needed: live proofs (operator) | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/0 | human_needed: criterion 2 verified; criterion 1 owner decision D74-1 | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: live proof (operator) | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | human_needed: live proof (operator); must-have 2 override accepted | - |
+| 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 5 of 8 verified; T5 and T6 need live PostgreSQL | - |
+| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 2 of 2 verified; live proofs pending | - |

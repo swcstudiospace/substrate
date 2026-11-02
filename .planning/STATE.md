@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 Phase 71 locally verified; Greptile remediation (71-05) gates green; human_needed: awaiting Desk Quality review; no phase signed off"
-stopped_at: "Phase 71 remediation ready for draft review on PR #199; Desk SendToAgent connector not mounted in the autonomous session, so the Desk Quality gate is unobserved. Phases 72-78 not started. v1.7 owner decisions open."
-last_updated: "2026-11-01"
-last_activity: 2026-11-01
-last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); expiry pass moved to issue so discovery and the digest stay read-only; one full run 11623 pass, 0 fail; phase remains human_needed"
+status: "v1.8 phases 71-78 human_needed, none complete; integration gate r5 at 7382ad10: 12021 pass, 2 skip, 0 fail, 0 errors (timeout deviation logged); live items open"
+stopped_at: "Integration tree gsd/v18-int-all at 7382ad10 carries phases 71-78 records (Run 18). Final gate r5 recorded. Open: three unhandled TimeoutError blocks in r3, source not located. Owner decisions open; no phase signed off; v1.7 open."
+last_updated: "2026-11-02"
+last_activity: 2026-11-02
+last_activity_desc: "Run 18: final gate r5 at 7382ad10: 12021 pass, 2 skip, 0 fail, 0 errors (timeout 30000 deviation logged); phases 71-78 human_needed"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
@@ -683,10 +683,102 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Plan:** one pull request per phase through `ultrathink-ship`; shared contracts are fixed in ROADMAP phase 63; migration step numbers are assigned in merge order (the migrate-contract test needs every version from 1 to N), so each unit takes the next free number when it rebases onto main. Wave A: phases 63 (two units), 64, 67, 68 core, 69 core, 70 core. Wave B after phase 63 merges: 65, 66 and the integrations of 68, 69 and 70. Operator-gated and not done by this run: deploy, timers and hooks, the live ingest, anchor funding.
 - **Ultrathink plan (graph ut-mvtjveh1-26111d38, Notion Task 408bc1a0c7ae813a947efa582daedf83; Linear is blocked by the free-issue limit):** it arrived after the first units were dispatched, as in Runs 12 and 13, and was folded in rather than restarted. Its phases map onto this milestone: audit and feature lock (the Run 14 scouts and the audit record under `.planning/phases/63-corpus-atlas/audit/`), foundations and ingestion (63 and 64), change-triggered sync (65), the self-improving loop (66), worktrees and Live Steering (68 and 67), provenance anchoring (69) and hardening (70 and the closeout). Its eight features differ from this milestone's in one place: observability and the evaluation gate share phase 70, and the TEI embedding fabric (64) is added because TEI has no client. Its non-blocking questions took their defaults: the five capabilities the owner described are inside the eight; Solana devnet is used for anchoring only, through the hourly anchor that already exists; extraction-LLM egress is moot while LightRAG runs in naive mode with the LLM bypass (text goes to embeddings only, no token cost), and a graph mode would need the owner's approval first. Its binding constraints changed the phase text: the default sync triggers write nothing into any repository and git hooks are an operator-run opt-in; new tables are covered by the archive and restore spec; the manifest and the docs plane get a reconcile because they are a dual write; staged units are resource-bounded; and the documents this milestone writes must be retrievable through the finished pipeline.
 
+## Run 15 (graph ut-1c9ee5ae87-8e2879a8, 2026-11-01): phase 76 verification record and roadmap sync
+
+- **Record:** `.planning/phases/76-telemetry-buffer-and-dead-letter/76-VERIFICATION.md`, re-verified 2026-11-02 with the procedure in `/root/.agents/gsd-core/agents/gsd-verifier.md`. Owner decision on 2026-11-02: must-have 2 accepted as an override (the dead-letter store is unbounded by D76-13; a cap is the follow-up). Status `human_needed`, 2 of 2 must-haves (must-have 2 PASSED by override). Self-check `gsd_run query verification.status` exits 0.
+- **Gates (orchestrator, serial, scratch Postgres 16):** tsc exit 0; bun test 11413 pass, 2 skip, 0 fail; check:phase-close 236 pass, 0 fail; config reference up to date. Log: `/root/src/worktrees/backups/gates-p76.log`.
+- **Correction (2026-11-02):** the first record (commit `f85299eb`) did not follow the gsd-verifier procedure: wrong path, no `covered_files`, `covered_digest` or `overrides_applied`, a date instead of a timestamp, and no `gsd_run` self-check. It is superseded. The earlier statement that it followed the gsd-verifier rules was wrong.
+- **Human verification, not run:** live GreptimeDB rehearsal (block the ledger, confirm 503 with `buffered: true` and the `/healthz` depth; restore and confirm each event lands once in chain order; confirm the `mayExist` cell predicate against real timestamp precision); exhaust the default budget (about four minutes) on a live outage and confirm the dead-letter line, mode 0600 and the boot refusal; restart mid-outage with a durable buffer file; shutdown under the service manager; buffered `session.end` on a live session; keyed replay on a live collector spool; operator decision to enable the buffer (off by default, D76-15); `/healthz` memo staleness (up to 5 s) acceptable to pollers.
+- **Findings, NOT FIXED, decision pending:**
+  - R-1: a dead-lettered event is not deduplicated against its record. Event ids are random per `normalizeEvent` (`event.ts` 278 and 282). The common case is that a dead-lettered event never landed: a replay then writes its only copy, and the dead-letter record is orphaned. A duplicate needs one of two triggers, neither reproduced: (a) the original write commits after give-up or during a shutdown abandon (`service.ts` 2862 to 2864); (b) a keyed request in enforce mode without the replay header and without a `ts` misses the lookup and writes a second row (`event.ts` 145, `service.ts` 2625 to 2627, and a ts-carrying replay dedupes at `service.ts` 2732 to 2734).
+  - R-2: `EventBuffer.drain` drops `options.all` and returns the in-flight pass (`event-buffer.ts` 215 to 221), so a shutdown pass can join a periodic pass and not-yet-due entries are not attempted. With an unsaved buffer they are abandoned with records (`service.ts` 2864), not silently lost.
+  - Must-have 2 is accepted by owner override. Follow-up: a dead-letter cap. Design to decide: admission counts buffered and dead-lettered entries against one cap, so a write that cannot be buffered or recorded answers `stored: false`, and no buffered entry is dropped for lack of room.
+  - D76-11 is superseded by D76-17 (memory buffer abandoned at shutdown; configuration never builds one). Criterion 1 holds only with `SUBSTRATE_EVENT_BUFFER_PATH` set (opt-in).
+  - The docs overstate outage tolerance: `docs/greptime-ledger.md` 951 says about five minutes; the schedule gives about four (243 s nominal; verifier).
+- **Not done:** no push, PR, merge, tracker writes, complete or cleanup.
+
+## Run 16 (graph ut-1c9ee5ae87-8e2879a8, 2026-11-02): phase 78 cross-layer reconciliation
+
+- **Record:** `.planning/phases/78-cross-layer-reconciliation/78-VERIFICATION.md`, from the gsd-verifier procedure at `/root/.agents/gsd-core/agents/gsd-verifier.md`, fourth pass at HEAD `cb56ec2a`. Status `human_needed`, 1 of 2 must-haves verified: must-have 2 VERIFIED; must-have 1 PRESENT_BEHAVIOR_UNVERIFIED, because the scheduled tick has no test. Self-check `gsd_run query verification.status` exits 0.
+- **Code (branch `gsd/v18-p78-reconcile`, base `0a1f7c68`):** `3ad7bc12` the feature; `1e592b8c` pass-1 fixes; `16513b53` failed-flush count, plan-gating tests and the timer gate test; `cb56ec2a` failing-scan and failed-flush CLI tests. Summary: `78-SUMMARY.md` (manual). Not merged into `gsd/v18-int-73-75-76`.
+- **Defects the verifier found, fixed:** (1) BLOCKER, a false clean: `latest ??= transition.hold` let an older grant overwrite a newer release, so a freed node matched the index. The gate was green because no test covered it. Fixed to `if (latest === undefined)`, with a regression test. (2) A failed flush recorded `repaired: 0` after batches had been removed; `unlinkKeys` now reports each batch through `onBatch`. (3) Plan items were not checked against the live report; `planRefusal` now refuses an item whose action or match is not the flush, or whose orphan is not live. (4) The executor's `redactedReason` matched redact-lock rule 2 and failed the lock test; renamed `failureReason`. (5) A new CLI test's loopback `GREPTIME_URL` literal failed the no-secrets scan; set with the bracket form that `anchor-run.test.ts` uses (the value is loopback, not a credential).
+- **Gates (orchestrator, serial, scratch Postgres 16, final tree):** install 0; config reference up to date; tsc 0; lint 0 over 1659 files; bun test 11497 pass, 2 skip, 0 fail; test:py 0; phase-close 236 pass, 0 fail; CLI usage exit 2. Log: `/root/src/worktrees/backups/gates-p78-r7.log`.
+- **Environment incident:** the root filesystem filled during a gate run (617 bun-test ENOSPC failures; that run is void). Freed only this session's `node_modules` in `/root/src/worktrees/as-gsd-v18-int` (3.1 GB, reinstallable). Left alone, owned by others or not provable: 73 unused anonymous Docker volumes (72 dated 2026-11-01, 1 dated 2026-11-02), 11 named volumes, the unused 13.35 GB image `asterinas/asterinas`, `/root/src/repos` (99 GB) and `/root/.omp` (17 GB). Free space went from 7.1 MB to 9.0 GB. The owner decides what else to remove.
+- **Human verification, not run:** (1) the scheduled tick on a clean fixture: one `clean:true` line, no ledger, index or cache write, single-flight; (2) cache-off scheduled counts read 0 rather than absent, a decision; (3) live Dragonfly SCAN and UNLINK at production key counts (H5); (4) live GreptimeDB `queryEvents` for lease kinds in a busy window; (5) a live CLI run with real stores, including exit 1 and the result file.
+- **Deviations, recorded:** the SUMMARY and the STATE and ROADMAP edits are a manual fallback to the GSD workflow (owner-approved). The verification record came from the real procedure. The ROADMAP row for phase 75 still reads "Not started" though its record is `human_needed`; not changed here.
+- **Not done:** no push, PR, merge, tracker write, complete or cleanup. The ship state is unchanged.
+
+## Run 17 (2026-11-02): phase 78 review pass, ordered flush, record corrections
+
+- **External review findings, each checked against the code or the host before acting:**
+  - Stale record, valid. The self-check returned `stale` after the summary was written, because the fingerprint folds in the phase's PLAN and SUMMARY files (`verification.cjs` 596 to 601). The record was regenerated after the last phase-directory write.
+  - Stray `package.json` line in the primary checkout, valid. Its diff was exactly that line. It is removed; the patch is in `/root/src/worktrees/backups/primary-package-json-reconcile-line.patch`. The primary checkout is back to `M .planning/STATE.md` and `?? .claude/`. The phase branch carries the script (`3ad7bc12`).
+  - Flush removes counters while the answers they guard survive, valid. A capped scan removed an arbitrary subset; an uncapped one interleaved counters with answers; and `budget:` admission state and `emb:` keys were removed too. Fixed in `ee1c9534`: answers first, then counters, then the forget mark; budget, emb and unnamed keys are never removed; a scan that cannot complete refuses; `--server-stopped` is required, as `consistency-run` requires for `--repair`. The failure-path tests are in `d43c259e`.
+  - Missing lease key read as free, not valid. The lookup has no time bound (`reconcile-read.ts` 153 to 170), and the test "a hold granted before the window is found by its node, with no time bound" covers it. A missing key means the ledger has no transition for that node at all, which is the drift this report exists to show.
+  - Reusing the SCAN loop in `scripts/cache-stats.ts`, rejected. That script is a bounded census (5000 keys, 250 ms), and it imports from `packages/`; the repair needs a complete enumeration and must not import from `scripts/`.
+  - Memory overlapping `consistency-verify.ts`, partly valid. Left as an owner decision (below). The lease overlap is not real: `coord_drift_scan` checks lease health (`DriftKind` in `drift.ts`), not index-to-ledger identity.
+  - PR #125 Linear todo, valid. The graph is tracked in Notion only (Run 6: Linear is blocked by the free-issue limit and fails open). The todo is dropped as not applicable.
+  - Disk statement, valid. See the correction below.
+- **Correction to Run 16 (disk).** "Freed 3.1 GB; 7.1 MB to 9.0 GB" is wrong. Most files in the phase 78 worktree's `node_modules` are hard links (29,884 of 29,932 regular files have more than one link), so deleting the integration copy freed an unmeasured share. The rise to 9.0 GB across that step has no identified source. Free space has since read 12, 16, 15 and 14 GB, so it is volatile.
+- **Disk attribution (read-only `du`, 2026-11-02, about 374 GB used of 387 GB).**
+  - `/root` 236 GB: `/root/src` 108 GB (`repos` 99 GB, `worktrees` 16 GB), `/root/.local` 42 GB, `/root/.omp` 17 GB, `/root/.rustup` 13 GB, `/root/.cache` 9.1 GB, `/root/.cursor-server` 5.7 GB, `/root/.dotnet` 5.1 GB, and smaller entries.
+  - `/tmp` 30 GB: `pytest-of-root` 7.6 GB, `ag-scratch` 4.9 GB, `ompos-head-baseline` 2.9 GB, and smaller entries.
+  - `/var` 28 GB (`/var/lib` 24 GB, of which Docker is 16 GB); `/opt` 26 GB; `/usr` 18 GB; `/home` 13 GB.
+  - Docker: 16.5 GB of images, 13.35 GB of it unused (`asterinas/asterinas:0.16.1`); 1.3 GB of volumes, 1.1 GB unused, 73 of them anonymous.
+  - Nothing in this list was deleted in this run.
+- **Verification.** Pass 6 at `d43c259e` (`78-VERIFICATION.md`): `human_needed`, 1 of 2 must-haves verified. Must-have 2 VERIFIED; must-have 1 behavior-unverified (the scheduled tick). Self-check exit 0. Passes 5 and 6 were both needed, because the phase directory changed after each record.
+- **Gates (orchestrator, serial, tree at `d43c259e`).** tsc 0; lint 0; bun test 11503 pass, 2 skip, 0 fail; test:py 0; phase-close 236 pass, 0 fail; CLI usage exit 2. Log: `/root/src/worktrees/backups/gates-p78-r9.log`.
+- **Owner decisions.** (1) Accept the ordered three-pass flush (D78-5, amended in `ee1c9534`) and the mandatory `--server-stopped` (D78-6) as the design of record. (2) Cache-off scheduled counts read 0, or are absent. (3) Whether to converge memory with `consistency-verify.ts`; that needs Hindsight in the scheduled run. (4) Approval of the live checks: Dragonfly SCAN and UNLINK with the server stopped, the Greptime lease query, and the CLI with real stores. (5) Disk: which items above to remove, and whether to prune the 13.35 GB unused image.
+- **Not done.** No push, PR, merge, tracker write or cleanup. The integration merge of phase 78 is not done.
+
+## Run 18 (2026-11-02, integration tree gsd/v18-int-all at 7382ad10): phases 71-78 records; final gate r5
+
+- **Gate (final, r5).** Full gate on `gsd/v18-int-all` HEAD `7382ad10`: tsc 0; lint 0; `bun test` 12,021 pass, 2 skip, 0 fail, 0 errors; test:py 0; check:phase-close 239 pass, 0 fail. Log: `/root/src/worktrees/backups/gates-int-r5.log`.
+- **Gate history.** r1 (12,002 pass, 2 skip, 19 fail, 3 errors) and r3 (5 failures, 3 errors) were not green. The gate wrapper's exit status hid those failures; the wrapper is fixed. The r1 integration defects were repaired as listed below.
+- **Deviation (logged).** The final gate ran with `BUNTEST_ARGS="--timeout 30000"` because host load averaged 20 to 35 on 8 CPUs from other sessions. Nine tests take 5 to 13 s alone and pass with a longer budget; the same tests fail the same way on the phase 77 branch at 5 s. CI config is unchanged.
+- **Integration fixes.** `634b6171`: Substrate builds the live-session facade on first use, not at construction; `settle()` in `live-session-consumer.test-support.ts` waits 3 s wall-clock. `7382ad10`: the muse hook test's POST wait races the child exit; assertions unchanged.
+- **Open, not resolved.** Three unhandled `TimeoutError` blocks appeared in r3 (the `AbortSignal.timeout` default message). They did not recur in r4 or r5, where an abort-site trace preload was active. Source not located; recorded as open.
+- **Environment incident (correction to the Run 16 and Run 17 disk note).** The root filesystem reached ENOSPC during the phase 77 gate runs r2 to r4; those runs are void. The Run 16 figure of 3.1 GB freed was not measured, and Run 17 says so. Do not claim space was freed by any particular deletion. The r1 full gate on the integration tree ran with TMPDIR on the 8 GB tmpfs at `/root/src/worktrees/backups/gate-tmpfs`.
+- **Verification at 7382ad10 (fresh records, all human_needed).** Milestone v1.8 is not complete; complete and cleanup need operator confirmation (irreversible).
+  - 71: 3 of 5 criteria verified on this tree; criteria 3 and 5 have PG-gated restart clauses; D71-08 open; ROADMAP test count 11,626 vs record 11,596, unreconciled.
+  - 72: 16 of 20. Criterion 2 open on the corpus proof disclosure, the credential model and the allowlist unit (= surface). The corpus CLI runs git with no scope check (owner decision). The proof door returns `root` and `treeSize`, which the root door denies to scoped callers.
+  - 73: criterion 1 verified with W4. Criterion 2 carried as owner override. Open: W2 adoption path without a `heads_root` check; W3 boot DDL versus D73-05.
+  - 74: criterion 2 verified. Criterion 1 is D74-1.
+  - 75: 5 of 6 truths; 2 of 2 must-haves. Cooldown and W2 kept NOT FIXED. H-1 degraded-brief test gap.
+  - 76: SC1 verified, conditional on buffer enablement (D76-15). SC2 passed by override; the dead-letter store is unbounded by design (D76-13).
+  - 77: 5 of 8. T5 to T7 are PG-gated and not run. Accepted residual: a concurrent keyed loser consumes one sequence number (a gap, never a duplicate).
+  - 78: 2 of 2 verified in code. Live cadence, Dragonfly SCAN/UNLINK, Greptime lease query and the live CLI are operator items.
+- **Roadmap.** Status lines for 71 to 78 set to "human_needed (verified on gsd/v18-int-all 7382ad10; live items open)". Phase 71 keeps the owner-approved revision (23bd0733). Phases 72 to 78 keep origin/main (b1b42f92) wording. Progress-table rows were not changed in this pass.
+- **Decisions (orchestrator choice under delegated owner authority; reversible by the owner).**
+  - D74-1: no compensation is built in v1.8; prune and installer are idempotent multi-repo writes repaired by re-run; ingest writes one target. D74-2: the install-git-hook loop is fixed.
+  - 72 credential model: surface bearer plus repository grants (D72-03), amending the HARD-S2 wording.
+  - 72 allowlist unit: the surface (SUBSTRATE_REPO_SCOPES keys), not the session.
+  - 72 corpus proof disclosure: open for the owner. Sibling leaf commitments of other repositories (hashes of repository, path and digest) are a documented residual; a per-repository tree is a future phase if the owner reverses this.
+  - 77: a concurrent keyed loser may consume one counter number before the claim (sequence gap, never a duplicate). Accepted residual.
+  - 76: accepted override for must-have 2.
+  - 78: unchecked cache layer reported as "unchecked", not zero. Memory overlap with consistency-verify documented, not converged.
+  - Still binding: R-1, R-2, the 75 cooldown and the 73 W2 adoption path stay NOT FIXED; v1.7 stays open; phase 46 waits until after v1.8.
+- **Path incident.** Verifiers for phases 75 and 76 wrote stray files into the primary checkout `/root/src/repos/agent-substrate`. Both were moved into the worktree and the directories removed. The orchestrator verified primary status as only the pre-existing ` M .planning/STATE.md` and `?? .claude/`.
+- **Deviations (manual fallback, owner-approved).**
+  - Phases 71 and 78 records were written by the GSD verifier procedure. Phases 72, 74 and 77 were re-run after fixes; verifications were re-run at the fix commit.
+  - Manual fallbacks replaced a GSD workflow step: the phase 72 plan step and the phase 74 CONTEXT step.
+  - The final gate used the timeout deviation above.
+- **Record.** Runs 15 to 17 are restored above this entry verbatim from afd35f71. Needs Human lists phase 71 and the phase 72 to 78 human items.
+
 ## Needs Human
 
 | Phase | State | Blocker | Resume |
 |-------|-------|---------|--------|
 | 71 | awaiting-review / pending QUALITY | Local acceptance passed; native Programming Lead held-message dispatch or an authorized Desk connector is not exposed. No external Greptile clearance observed. | Complete LEAD → QUALITY review, address findings, then `/gsd:verify-work 71` |
+| 72 | human_needed: corpus proof disclosure | Corpus proof discloses other repositories' leaf commitments (hash of repository, path and digest); policy call, accepted as a documented residual by the orchestrator and open for the owner (72-VERIFICATION human decision 1). | Owner confirms, or reverses to a per-repository tree (future phase) |
+| 72 | human_needed: credential model | HARD-S2 per-repository credential references are absent; implemented as surface bearer plus repository grants (D72-03), amending HARD-S2 wording (human decision 2). | Owner confirms the model and amends HARD-S2 |
+| 72 | human_needed: allowlist unit | Code grants per surface (SUBSTRATE_REPO_SCOPES keys); criterion 1 says session. | Owner confirms surface as the unit |
+| 72 | human_needed: live PG item | Worktree-registry repos filter not run against Postgres (no repos case in worktree-registry.pg.test.ts); MCP drift_scan refusal and live-session gate tests missing. | Run the Postgres filter; add the two missing tests |
+| 73 | human_needed: live proofs | Live devnet v2 memo round trip for a closed hour; anchor adoption path on a live hour; boot-time DDL on live GreptimeDB (D73-05, W3). Operator-gated on production stores. W2 adoption path NOT FIXED (owner decision). | Operator runs live proofs; owner decides W2 |
+| 74 | human_needed: D74-1 | D74-1 taken by the orchestrator under delegation: no compensation built in v1.8; prune and installer are idempotent multi-repo writes repaired by re-run; ingest writes one target. Criterion 1 is an owner decision and reversible. | Owner confirms or reverses D74-1 |
+| 75 | human_needed: live proof | Live proof by the operator. The 75 cooldown is NOT FIXED (owner decision). | Operator runs live proof; owner decides the cooldown |
+| 76 | human_needed: live proof | Live GreptimeDB rehearsal and outage tests (operator). Must-have 2 accepted by owner override. R-1 (dead-letter dedupe) and R-2 (drain drops options.all) NOT FIXED. | Operator runs live proofs; owner decides R-1 and R-2 |
+| 77 | human_needed: live PG run | T5 and T6 need a live PostgreSQL run. Counter-gap residual accepted: a concurrent keyed loser may consume one counter number (sequence gap, never a duplicate). | Run T5 and T6 on live PostgreSQL; owner confirms the residual |
+| 78 | human_needed: live proofs | Live proofs for the scheduled tick on a clean fixture, Dragonfly SCAN/UNLINK, Greptime lease query and the CLI. Owner decisions: memory convergence with consistency-verify, cache-off counts. | Operator runs live checks after owner approval |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.
