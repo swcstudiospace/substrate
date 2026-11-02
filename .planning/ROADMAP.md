@@ -1419,4 +1419,4 @@ Plans:
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Not started | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Executed; verification human_needed (dead-letter depth unbounded by D76-13, accepted by owner override; cap follow-up; live proofs pending) | - |
 | 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
-| 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
+| 78. Cross-layer reconciliation | v1.8 | 0/0 | Executed; verification human_needed (scheduled tick untested; cache-off counts a decision; live Dragonfly, Greptime and CLI proofs pending) | - |
