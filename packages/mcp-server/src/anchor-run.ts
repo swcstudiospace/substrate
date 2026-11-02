@@ -45,7 +45,8 @@ if (flags.onlyPeriodMs !== undefined && !isClosed(flags.onlyPeriodMs, Date.now()
 }
 
 const greptime = new GreptimeClient(config.greptime);
-const substrate = new Substrate(config, { greptime });
+// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+const substrate = new Substrate({ ...config, eventBuffer: null }, { greptime });
 const rpc = createRpc({ url: rpcUrl, timeoutMs: RPC_TIMEOUT_MS, attempts: RPC_ATTEMPTS, backoffMs: RPC_BACKOFF_MS });
 
 const result = await runAnchorJob({

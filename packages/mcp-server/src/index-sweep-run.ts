@@ -67,7 +67,8 @@ if (!config.postgresUrl) exitUsage("SUBSTRATE_PG_URL is not set");
 
 const index = new IndexStore(config.postgresUrl);
 const greptime = config.greptime ? new GreptimeClient(config.greptime) : null;
-const substrate = new Substrate(config, { index, greptime });
+// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+const substrate = new Substrate({ ...config, eventBuffer: null }, { index, greptime });
 const policy = sweepPolicyFromEnv(process.env);
 const now = Date.now();
 const session = `index-sweep:${new Date(now).toISOString().slice(0, 10)}`;

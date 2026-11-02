@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeEvent } from "./event.ts";
@@ -54,5 +54,22 @@ describe("DeadLetterStore", () => {
 		expect(store.durable).toBe(false);
 		expect(store.depth()).toBe(1);
 		expect(store.records()).toHaveLength(1);
+	});
+});
+
+describe("DeadLetterStore boot read", () => {
+	test("a file that cannot be read at boot is not durable, since the records on it are unknown", () => {
+		// A directory: the read fails with EISDIR, which is not an empty history.
+		expect(new DeadLetterStore({ path: tempDir() }).durable).toBe(false);
+	});
+
+	test("a history longer than one read is counted in full, and a torn line is skipped", () => {
+		const path = join(tempDir(), "dead.jsonl");
+		const big = normalizeEvent({ surface: "omp", kind: "note", summary: "y".repeat(4000), session_id: "s-1" }, null);
+		const store = new DeadLetterStore({ path });
+		for (let i = 0; i < 40; i++) store.record({ event: big, attempts: 1, enqueued_at: 0, last_reason: "unreachable" }, "exhausted");
+		appendFileSync(path, "{torn\n");
+
+		expect(new DeadLetterStore({ path }).depth()).toBe(40);
 	});
 });

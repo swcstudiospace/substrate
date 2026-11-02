@@ -12,7 +12,7 @@
  * end. Its depth is reported on `/healthz` instead.
  */
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { parseStoredLine, StoredEvent } from "./event.ts";
@@ -28,6 +28,9 @@ import type { SubstrateEvent } from "./types.ts";
  */
 export const DEAD_LETTER_REASONS = ["exhausted", "overflow", "buffer-full", "predecessor-dead-lettered", "abandoned"] as const;
 export type DeadLetterReason = (typeof DEAD_LETTER_REASONS)[number];
+
+/** How much of the file the boot count reads at a time. */
+const COUNT_CHUNK_BYTES = 64 * 1024;
 
 /** What a record is made from: the event and what happened to it. */
 export interface DeadLetterCandidate {
@@ -72,16 +75,18 @@ export class DeadLetterStore {
 	private held: DeadLetterRecord[] = [];
 	/** File-system error codes already reported, so a broken disk logs once per code. */
 	private readonly reported = new Set<string>();
+	/** Set when the file exists but could not be read at boot, so the records already on it are unknown. */
+	private unverified = false;
 
 	constructor(options: DeadLetterOptions = {}) {
 		this.path = options.path ?? null;
 		this.now = options.now ?? Date.now;
-		if (this.path !== null) this.onDisk = this.read(this.path).length;
+		if (this.path !== null) this.onDisk = this.countOnFile(this.path);
 	}
 
-	/** True only while every record is on the file. Memory mode is never durable. */
+	/** True only while every record is on the file. Memory mode is never durable, and nor is a file whose records could not be counted. */
 	get durable(): boolean {
-		return this.path !== null && this.held.length === 0;
+		return this.path !== null && this.held.length === 0 && !this.unverified;
 	}
 
 	depth(): number {
@@ -117,6 +122,12 @@ export class DeadLetterStore {
 		return [...onFile, ...this.held];
 	}
 
+	/** Writes the records still held in memory. Returns true when every record is on the file. Spends no attempt. */
+	writeHeld(): boolean {
+		this.flush();
+		return this.durable;
+	}
+
 	private flush(): void {
 		if (this.path === null || this.held.length === 0) return;
 		try {
@@ -129,6 +140,55 @@ export class DeadLetterStore {
 		} catch (cause) {
 			this.report("append", cause);
 		}
+	}
+
+	/**
+	 * The records already on the file, counted without holding them: the file is read in fixed chunks, each complete line is checked
+	 * and dropped, so the memory a restart needs does not grow with the history. A file that cannot be read counts as none, and is
+	 * marked `unverified` so the store is not durable until the count is known.
+	 */
+	private countOnFile(path: string): number {
+		let fd: number;
+		try {
+			if (!existsSync(path)) return 0;
+			fd = openSync(path, "r");
+		} catch (cause) {
+			this.unverified = true;
+			this.report("read", cause);
+			return 0;
+		}
+		let count = 0;
+		let malformed = 0;
+		const tally = (line: Buffer): void => {
+			const text = line.toString("utf8");
+			if (text.trim().length === 0) return;
+			if (parseStoredLine(text, StoredDeadLetter) === null) malformed += 1;
+			else count += 1;
+		};
+		const chunk = Buffer.alloc(COUNT_CHUNK_BYTES);
+		let pending = Buffer.alloc(0);
+		try {
+			for (;;) {
+				const read = readSync(fd, chunk, 0, chunk.length, null);
+				if (read === 0) break;
+				pending = Buffer.concat([pending, chunk.subarray(0, read)]);
+				let from = 0;
+				for (let nl = pending.indexOf(0x0a, from); nl !== -1; nl = pending.indexOf(0x0a, from)) {
+					tally(pending.subarray(from, nl));
+					from = nl + 1;
+				}
+				pending = pending.subarray(from);
+			}
+			if (pending.length > 0) tally(pending);
+		} catch (cause) {
+			this.unverified = true;
+			this.report("read", cause);
+			return 0;
+		} finally {
+			closeSync(fd);
+		}
+		if (malformed > 0) process.stderr.write(`[substrate] dead-letter store: skipped ${malformed} malformed line(s) in ${path}\n`);
+		return count;
 	}
 
 	private read(path: string): DeadLetterRecord[] {

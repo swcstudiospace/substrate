@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, loadConfig } from "./config.ts";
+import { GreptimeBreakerOpen } from "./greptime.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
@@ -11,14 +12,22 @@ import type { EventInput, SubstrateEvent } from "./types.ts";
  * alone. `down` makes every write fail, and `lostReplies` makes writes land and then report a timeout.
  */
 function fakeLedger() {
-	const state = { rows: [] as SubstrateEvent[], attempts: 0, down: false, lostReplies: 0 };
+	const state = { rows: [] as SubstrateEvent[], attempts: 0, down: false, lostReplies: 0, breakerOpen: false, lookupDown: false, gate: null as null | (() => Promise<void>) };
 	const tips = new Map<string, string>();
 	const greptime = {
 		ensureAppendMode: async () => true,
 		lastHash: async (session: string): Promise<string | null> => tips.get(session) ?? null,
+		findByIdempotencyKey: async (_cell: unknown, key: string): Promise<{ id: string; hash: string } | null> => {
+			if (state.lookupDown) throw new Error("greptime unreachable: lookup timed out");
+			const row = state.rows.find((stored) => stored.payload._ik === key);
+			return row === undefined ? null : { id: row.id, hash: row.hash };
+		},
+		cursorPosition: async (id: string): Promise<{ id: string } | null> => (state.rows.some((row) => row.id === id) ? { id } : null),
 		insertEvent: async (event: SubstrateEvent, options: { mayExist?: boolean } = {}): Promise<void> => {
 			state.attempts += 1;
+			if (state.breakerOpen) throw new GreptimeBreakerOpen("greptime breaker open");
 			if (state.down) throw new Error("greptime unreachable: connect ETIMEDOUT");
+			if (state.gate !== null) await state.gate();
 			if (options.mayExist === true && state.rows.some((row) => row.id === event.id)) return;
 			state.rows.push(event);
 			if (event.session_id !== null) tips.set(event.session_id, event.hash);
@@ -234,5 +243,76 @@ describe("/healthz and the flags", () => {
 			backoffMs: 1000,
 			backoffCapMs: 60_000,
 		});
+	});
+});
+
+describe("the telemetry buffer's refusals, replays and config", () => {
+	test("a delivery the breaker refused is not an attempt: the event keeps its budget and lands once the breaker closes", async () => {
+		const t = telemetry({ SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS: "2" });
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(t.env, greptime);
+		state.down = true;
+		const queued = await substrate.emit(input("refused"));
+		state.down = false;
+		state.breakerOpen = true;
+
+		await substrate.drainEventBuffer({ all: true });
+		expect(await substrate.health()).toMatchObject({ eventBuffer: { depth: 1, deadLetter: { depth: 0 } } });
+
+		state.breakerOpen = false;
+		await substrate.drainEventBuffer({ all: true });
+		expect(state.rows.map((row) => row.id)).toEqual([queued.event.id]);
+	});
+
+	test("a keyed event queued behind a failed replay lookup still answers as queued, and nothing is appended", async () => {
+		const t = telemetry({ SUBSTRATE_EVENT_IDEMPOTENCY: "enforce" });
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(t.env, greptime);
+		state.down = true;
+		const keyed: EventInput = { ...input("lookup"), idempotency_key: "replay-key-0003" };
+		const first = await substrate.emit(keyed);
+		state.lookupDown = true;
+
+		const replay = await substrate.emit(keyed);
+
+		expect(replay).toMatchObject({ stored: false, buffered: true });
+		expect(replay.event.id).toBe(first.event.id);
+		expect(state.rows).toEqual([]);
+	});
+
+	test("a keyed replay waits for the buffered delivery of its key, so it reads the ledger only after that write settles", async () => {
+		const t = telemetry({ SUBSTRATE_EVENT_IDEMPOTENCY: "enforce" });
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(t.env, greptime);
+		state.down = true;
+		const keyed: EventInput = { surface: "omp", kind: "note", summary: "keyed", idempotency_key: "replay-key-0002" };
+		const first = await substrate.emit(keyed);
+		expect(first).toMatchObject({ stored: false, buffered: true });
+
+		state.down = false;
+		const release = Promise.withResolvers<void>();
+		const inFlight = Promise.withResolvers<void>();
+		state.gate = async () => {
+			inFlight.resolve();
+			await release.promise;
+		};
+		const delivery = substrate.drainEventBuffer({ all: true });
+		await inFlight.promise;
+		// Issued while the delivery holds the key's turn: it must not read the ledger until that write has settled.
+		const replay = substrate.emit(keyed);
+
+		state.gate = null;
+		release.resolve();
+		await delivery;
+		const answered = await replay;
+
+		expect(answered).toMatchObject({ stored: true, deduplicated: true });
+		expect(answered.event.id).toBe(first.event.id);
+		expect(state.rows.map((row) => row.id)).toEqual([first.event.id]);
+	});
+
+	test("the buffer and the dead-letter store cannot name one file", () => {
+		const t = telemetry();
+		expect(() => loadConfig({ ...t.env, SUBSTRATE_EVENT_DEAD_LETTER_PATH: t.bufferPath })).toThrow(ConfigError);
 	});
 });

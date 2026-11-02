@@ -1261,7 +1261,15 @@ export class GreptimeClient {
 		}
 		if (options.mayExist === true && (await this.eventRowPresent(event))) {
 			if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
-			if ((await this.cursorPosition(event.id)) === null) await this.recordIngest(event);
+			// The row stands. A membership read that fails leaves only its ingest unconfirmed, which is what `IngestNotRecorded` reports:
+			// the event is stored, and a buffered retry must not count it as a failed write.
+			let membership: unknown;
+			try {
+				membership = await this.cursorPosition(event.id);
+			} catch (cause) {
+				throw new IngestNotRecorded(event.id, cause);
+			}
+			if (membership === null) await this.recordIngest(event);
 			return;
 		}
 		const cell = (column: (typeof EVENT_COLUMNS)[number]): string => {

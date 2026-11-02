@@ -11,6 +11,7 @@ import { BreakerOpenError, CircuitBreaker, type PlaneGate, type PlaneSample } fr
 import { normalizeEvent } from "./event.ts";
 import {
 	AppendOnlyViolation,
+	IngestNotRecorded,
 	assertAppendOnly,
 	chainTip,
 	COVERAGE_MAX_UNCOVERED,
@@ -29,7 +30,6 @@ import {
 	INGEST_LAG_MS,
 	INGEST_BUDGET_MS,
 	INGEST_RETRY_LOOKBACK_MS,
-	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
 	MAX_RECENT_EVENTS,
 	queryLimit,
@@ -274,6 +274,19 @@ describe("insertEvent with mayExist", () => {
 
 		expect(sql.some((statement) => statement.startsWith('INSERT INTO "agent_events"'))).toBe(false);
 		expect(sql.some((statement) => statement.startsWith('INSERT INTO "event_ingest"'))).toBe(true);
+	});
+});
+
+describe("insertEvent with mayExist, when the membership read fails", () => {
+	test("a row already stored whose ingest membership cannot be read is an unconfirmed ingest, not a failed write", async () => {
+		const event = normalizeEvent(input, null);
+		stubFetch((statement) => {
+			if (statement.includes('SELECT "id" FROM "agent_events"')) return records(["id"], [[event.id]]);
+			if (statement.includes('FROM "event_ingest" WHERE "event_id"')) return new Response("unavailable", { status: 500 });
+			return defaultReply(statement);
+		});
+
+		await expect(new GreptimeClient(config).insertEvent(event, { mayExist: true })).rejects.toBeInstanceOf(IngestNotRecorded);
 	});
 });
 

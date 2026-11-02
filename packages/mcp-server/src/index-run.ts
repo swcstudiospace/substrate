@@ -147,7 +147,8 @@ try {
 	// The path gates run before anything is written, markers included: an unmounted volume must not collect a note marker on the root disk.
 	assertArchiveDir(outDir, options, process.cwd());
 	const greptime = config.greptime ? new GreptimeClient(config.greptime, { ledger: config.ledger }) : null;
-	const substrate = new Substrate(config, { index, greptime });
+	// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+	const substrate = new Substrate({ ...config, eventBuffer: null }, { index, greptime });
 	const emitNote = (input: EventInput): Promise<NoteOutcome> => substrate.emit(input);
 
 	const retried = await retryPendingIndexNotes(outDir, emitNote);

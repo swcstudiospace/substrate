@@ -396,6 +396,25 @@ describe("evidence bundle anchors", () => {
 		expect(bundle.anchors[0]).toMatchObject({ status: "unverified", head_failed: true });
 		expect(bundle.anchors[0]?.reason).toContain("differs at");
 	});
+
+	test("an hour list that cannot be read leaves the app chain unverifiable, though every listed hour is anchored", async () => {
+		const { ledger, substrate, observed } = await scratchWorld();
+		await writeAnchoredTeachables(ledger, substrate);
+		// The chain-leaves store cannot name this graph's hours, so the verdict is untrusted and the bundle must not attest to the chain.
+		ledger.greptime.graphChainLeafHours = async () => {
+			throw new Error("graph_chain_leaves unreadable");
+		};
+
+		startVirtualClock();
+		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
+			rpc: timedRpc(ledger) as never,
+			now: NOW_LATE,
+		});
+
+		expect(bundle.anchors.every((anchor) => anchor.status === "anchored")).toBe(true);
+		expect(bundle.chains.app_events).toMatchObject({ state: "unverifiable", ok: null });
+		expect(bundle.chains.app_events.reason).toContain("store-failed");
+	});
 });
 
 describe("evidence bundle teachable moments", () => {

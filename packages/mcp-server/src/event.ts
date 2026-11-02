@@ -213,6 +213,17 @@ function capStrings(value: unknown, limit: number): unknown {
 }
 
 /**
+ * The payload as a record. The wire types it as one, but the HTTP route does not check that, so a scalar or an array arrives as
+ * given. It is kept under `_payload`: the buffer and the dead-letter store read every stored event back as a record, and a line
+ * that is not one is dropped at restart. Keyed and unkeyed events are stored the same way.
+ */
+function asPayloadRecord(payload: unknown): Record<string, unknown> {
+	if (payload === undefined || payload === null) return {};
+	if (typeof payload !== "object" || Array.isArray(payload)) return { _payload: payload };
+	return payload as Record<string, unknown>;
+}
+
+/**
  * Redact the payload, cap each string in it, then cap the whole thing.
  *
  * A collector that attaches a full diff or a command's entire stdout writes it
@@ -220,8 +231,8 @@ function capStrings(value: unknown, limit: number): unknown {
  * intact; if the result is still oversized the payload is replaced outright,
  * because a silently half-written object reads as complete and a marker does not.
  */
-function normalizePayload(payload: Record<string, unknown> | undefined): Record<string, unknown> {
-	const capped = capStrings(redactValue(payload ?? {}), MAX_PAYLOAD_STRING) as Record<string, unknown>;
+function normalizePayload(payload: unknown): Record<string, unknown> {
+	const capped = capStrings(redactValue(asPayloadRecord(payload)), MAX_PAYLOAD_STRING) as Record<string, unknown>;
 	const bytes = Buffer.byteLength(JSON.stringify(capped) ?? "{}");
 	if (bytes <= MAX_PAYLOAD_BYTES) return capped;
 	return { _dropped: `payload exceeded ${MAX_PAYLOAD_BYTES} bytes`, _bytes: bytes };
@@ -249,8 +260,6 @@ function normalizedPayload(input: EventInput, idempotency: EventIdempotency | un
 	if (idempotency === undefined) return normalizePayload(input.payload);
 	const payload = normalizePayload(withoutReservedKey(input.payload));
 	if (idempotency.key === null) return payload;
-	// A scalar or array payload is wrong on the wire but stored today as given; spreading it would scramble it.
-	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return { _payload: payload, [IDEMPOTENCY_PAYLOAD_KEY]: idempotency.key };
 	return { ...payload, [IDEMPOTENCY_PAYLOAD_KEY]: idempotency.key };
 }
 
@@ -458,7 +467,9 @@ export function compareToAnchoredHead(events: readonly ChainLink[], leaves: read
 	}
 	const committed = new Set(stored.map((leaf) => leaf.event_id));
 	const extras = events.filter((event) => !committed.has(event.id)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-	const extra = inChainOrder(extras)[0];
+	// The committed chain goes on from its last hash, so the extra linked to that hash is the first event past the anchored end. Only when none
+	// is linked is an order taken from the extras themselves, and their hashes may be the edited ones.
+	const extra = extras.find((event) => event.prev === last.hash) ?? inChainOrder(extras)[0];
 	return extra === undefined ? { ok: true } : { ok: false, kind: "first-differing", eventId: extra.id };
 }
 

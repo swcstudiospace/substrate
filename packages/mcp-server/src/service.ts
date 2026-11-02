@@ -113,6 +113,7 @@ import { createEventBus, type EventBus, type EventBusClient, type EventBusStats,
 import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, type StoredLeaf, verifyChain, type SteeringSession } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
+	GreptimeBreakerOpen,
 	GreptimeClient,
 	INGEST_LAG_MS,
 	IngestNotRecorded,
@@ -745,6 +746,11 @@ export interface VerifyVerdict {
 	brokenAt?: string;
 	reason?: string;
 	chain: { ok: boolean; brokenAt?: string; reason?: string };
+	/**
+	 * Why the graph's hours could not all be named: its chain-leaves read failed or outlasted the budget. Set means the verdict is untrusted and
+	 * the hours listed may be incomplete, so an evidence bundle built from it must not attest to the chain.
+	 */
+	hours_unreadable?: string;
 	hours: HourReport[];
 	uncovered: { count: number; ids: string[] };
 	legacy: { count: number; ids: string[] };
@@ -1966,7 +1972,11 @@ export class Substrate {
 				backoffMs: eventBuffer.backoffMs,
 				backoffCapMs: eventBuffer.backoffCapMs,
 				allow: () => this.planes.gate("greptime").breaker?.state() !== "open",
-				onDeadLetter: (entry, reason) => deadLetters.record(entry, reason),
+				onDeadLetter: (entry, reason) => {
+					deadLetters.record(entry, reason);
+					return deadLetters.durable;
+				},
+				flushDeadLetters: () => deadLetters.writeHeld(),
 			});
 			this.eventBufferStores = { buffer, deadLetters };
 			if (buffer.size() > 0) this.ensureEventDrainTimer();
@@ -2951,13 +2961,17 @@ export class Substrate {
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
 		const stores = this.eventBufferStores;
 		// A keyed replay is answered from the ledger first: a row that landed is the answer, whatever the buffer holds. Only a replay
-		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write.
+		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write. A failed lookup is not a miss:
+		// it still answers for a queued event, and otherwise its refusal stands. It never appends.
+		let lookupFailure: EmitResult | null = null;
 		if (idem?.lookup && idem.key !== null && this.greptime) {
 			const settled = await this.replayOutcome(input, idem.key);
-			if (settled !== null) return settled;
+			if (settled !== null && settled.lookupFailed !== true) return settled;
+			lookupFailure = settled;
 		}
-		const waiting = idem?.key != null && stores !== null ? stores.buffer.findKeyed(input.surface, idem.key) : null;
+		const waiting = idem?.key != null && stores !== null ? stores.buffer.findKeyed(normalizeEvent(input, null, { key: idem.key }), idem.key) : null;
 		if (waiting !== null) return { event: waiting.event, stored: false, buffered: true, error: waiting.last_reason };
+		if (lookupFailure !== null) return lookupFailure;
 		let prev: string | null = null;
 		let tipError: string | null = null;
 		if (this.greptime && sessionId) {
@@ -3032,7 +3046,13 @@ export class Substrate {
 	 */
 	private bufferEvent(buffer: EventBuffer, request: EventEnqueue): EmitResult {
 		const outcome = buffer.enqueue(request);
-		if (!outcome.buffered) return { event: outcome.entry.event, stored: false, deadLettered: true, error: request.last_reason };
+		if (!outcome.buffered) {
+			// Refused, not recorded: nothing was given up, so the caller keeps its copy and the write is answered as an unstored write is.
+			if (!outcome.recorded) {
+				return { event: outcome.entry.event, stored: false, error: `telemetry buffer is full and its dead-letter store is not writing: ${request.last_reason}` };
+			}
+			return { event: outcome.entry.event, stored: false, deadLettered: true, error: request.last_reason };
+		}
 		this.ensureEventDrainTimer();
 		process.stderr.write(`[substrate] event ${outcome.entry.event.id} buffered for retry — ${request.last_reason}\n`);
 		return { event: outcome.entry.event, stored: false, buffered: true, error: request.last_reason };
@@ -3046,13 +3066,17 @@ export class Substrate {
 	private async deliverBuffered(entry: EventBufferEntry): Promise<EventDelivery> {
 		const greptime = this.greptime;
 		if (!greptime) return { transient: "GREPTIME_URL is not set" };
-		const appendOnly = await greptime.ensureAppendMode().catch(() => null);
-		if (appendOnly !== true && !this.config.allowDeduplicatingLedger) {
-			return { transient: appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN };
-		}
 		try {
+			const appendOnly = await greptime.ensureAppendMode().catch(() => null);
+			if (appendOnly !== true && !this.config.allowDeduplicatingLedger) {
+				// An unanswered probe while the breaker is not closed was refused, not failed: nothing was sent, so it is not an attempt.
+				if (appendOnly === null && this.planes.gate("greptime").breaker?.state() !== "closed") return "skipped";
+				return { transient: appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN };
+			}
 			await greptime.insertEvent(entry.event, { mayExist: true });
 		} catch (cause) {
+			// The breaker refused the write before it was sent, so nothing reached the ledger and the entry keeps its budget.
+			if (cause instanceof GreptimeBreakerOpen) return "skipped";
 			if (!(cause instanceof IngestNotRecorded)) return { transient: redact(String(cause)).slice(0, 200) };
 			process.stderr.write(`[substrate] event ${entry.event.id} landed; ingest record unconfirmed — ${redact(String(cause))}\n`);
 		}
@@ -3060,10 +3084,14 @@ export class Substrate {
 		return "landed";
 	}
 
-	/** One attempt, run in the event's session turn so it cannot interleave with an append that reads the same tip. */
+	/**
+	 * One attempt, run in the event's turn so it cannot interleave with an append that reads the same tip or key. A session's entries
+	 * share the session's turn. A keyed sessionless entry takes its key's turn, as an append or replay of that key does, so a replay
+	 * never reads the ledger between this write and the entry's removal from the buffer.
+	 */
 	private deliverBufferedInTurn(entry: EventBufferEntry): Promise<EventDelivery> {
-		const session = entry.event.session_id;
-		return session === null ? this.deliverBuffered(entry) : this.withSessionTurn(session, () => this.deliverBuffered(entry));
+		const turnKey = entry.event.session_id ?? (entry.key !== null ? `${KEY_TURN_PREFIX}${entry.key}` : null);
+		return turnKey === null ? this.deliverBuffered(entry) : this.withSessionTurn(turnKey, () => this.deliverBuffered(entry));
 	}
 
 	/** Replays the buffer's due entries once. `all` ignores the backoff schedule, as shutdown and tests need. */
@@ -8223,6 +8251,7 @@ export class Substrate {
 		events: rows.length,
 		...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
 		...(reason ? { reason } : {}),
+		...(leavesUnreadable !== null ? { hours_unreadable: leavesUnreadable } : {}),
 		chain,
 		hours,
 		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
@@ -8429,6 +8458,8 @@ export class Substrate {
 		}
 		const recomputed = await this.hourDigestOrFault(hour, now);
 		const shown = "digest" in recomputed ? { event_count: recomputed.digest.event_count, root: recomputed.digest.root } : { event_count: 0, root: null };
+		// A ledger fault the digest already found is kept on every unverified return below, so an RPC or config error cannot hide its cause.
+		const withFault = (reason: string): string => ("fault" in recomputed ? `${recomputed.fault}; ${reason}` : reason);
 		const greptime = this.greptime;
 		if (!greptime) throw new Error("GREPTIME_URL is not set");
 		const stored = await greptime.anchorForPeriod(hour);
@@ -8440,7 +8471,7 @@ export class Substrate {
 			} catch (cause) {
 				// The notes could not all be read, so judging the stored row could pass over a newer pointer: unverified, with the reason.
 				if (cause instanceof ReanchorReadIncomplete) {
-					return { period_start, period_end, status: "unverified", ...shown, tx_sig: stored.tx_sig, reason: redact(cause.message) };
+					return { period_start, period_end, status: "unverified", ...shown, tx_sig: stored.tx_sig, reason: withFault(redact(cause.message)) };
 				}
 				throw cause;
 			}
@@ -8453,50 +8484,50 @@ export class Substrate {
 			return { period_start, period_end, status: "unanchored", ...shown, reason: "no anchors row 3 h after the hour closed" };
 		}
 		if (!pubkey) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault("SOLANA_ANCHOR_PUBKEY is not set") };
 		}
 		let genesis: string;
 		try {
 			genesis = await readRpc().getGenesisHash();
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault(redact(String(cause))) };
 		}
 		if (genesis !== DEVNET_GENESIS_HASH) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "RPC genesis hash is not devnet's" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault("RPC genesis hash is not devnet's") };
 		}
 		let memo: TransactionMemo | null;
 		try {
 			memo = await readRpc().transactionMemo(row.tx_sig, "confirmed");
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault(redact(String(cause))) };
 		}
 		if (!memo) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "transaction not found on devnet" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault("transaction not found on devnet") };
 		}
 		if (!memo.memo) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("transaction carries no memo-program instruction") };
 		}
 		// The signer is judged the way `checkpoint_verify` judges it: by the signer set at the transaction's own block time, so an hour a
 		// key signed before a rotation stays valid after the job key moved on, and a key outside its window is not accepted.
 		if (!memo.payerSigned) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("memo is not signed by SOLANA_ANCHOR_PUBKEY") };
 		}
 		const signerFault = await judgeSigner(memo, signers);
 		// A proven signer fault is final. An UNVERIFIABLE signer (no block time yet, an incomplete rotation read, an unbuildable set)
 		// waits for the content checks below: a transaction that already disagrees with the ledger is a mismatch whatever its signer,
 		// and that known cause must not be hidden behind the missing time (`checkpoint_verify` ranks proven disagreements first).
 		if (signerFault !== null && signerFault.status === "mismatch") {
-			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: signerFault.reason };
+			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: withFault(signerFault.reason) };
 		}
 		if (memo.err !== null && memo.err !== undefined) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("anchor transaction failed") };
 		}
 		const parsed = parseMemo(memo.memo);
 		if (!parsed) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "memo is not a v1 or v2 anchor memo" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("memo is not a v1 or v2 anchor memo") };
 		}
 		if (parsed.periodStartMs !== hour) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault(`memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}`) };
 		}
 		// A memo signed by an accepted key for this hour commits to its heads, whatever the rows now say: trustHour checks the stored
 		// leaves against that root. An unaccepted signer carries no such commitment.

@@ -116,7 +116,8 @@ if (until === undefined) {
 	exitUsage(`day ${until} is not closed yet`);
 }
 
-const substrate = new Substrate(config, { greptime });
+// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+const substrate = new Substrate({ ...config, eventBuffer: null }, { greptime });
 const releaseSha = releaseShaOf(process.cwd());
 // The same floor and grammar as `deploy-release.sh` (`^[0-9]{1,4}$`, `0` disables); anything else is the default.
 const floorRaw = process.env.SUBSTRATE_DEPLOY_MIN_FREE_GB?.trim() ?? "";

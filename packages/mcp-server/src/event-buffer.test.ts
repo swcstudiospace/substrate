@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeEvent } from "./event.ts";
@@ -17,17 +17,36 @@ function tempPath(): string {
 	return join(dir, "buffer.jsonl");
 }
 
-/** A buffer whose clock the test moves by hand, with every give-up recorded by summary and reason. */
-function harness(options: { path?: string; max?: number; maxAttempts?: number; backoffMs?: number; backoffCapMs?: number } = {}) {
+/**
+ * A buffer whose clock the test moves by hand, with every give-up recorded by summary and reason. Its dead-letter store can be taken
+ * down (`store.down`): a record then stays held, and the entry it belongs to stays pending in the buffer, until the store is back.
+ */
+function harness(options: { path?: string; max?: number; maxAttempts?: number; backoffMs?: number; backoffCapMs?: number; deadLetterDown?: boolean } = {}) {
 	const clock = { now: 1_000_000 };
 	const dead: Array<{ summary: string; reason: DeadLetterReason }> = [];
+	const store = { down: options.deadLetterDown === true, failRecords: 0, held: [] as string[], written: [] as string[] };
+	const flush = (): boolean => {
+		if (store.down) return false;
+		store.written.push(...store.held.splice(0));
+		return true;
+	};
 	const buffer = new EventBuffer({
 		...options,
 		now: () => clock.now,
 		random: () => 0.5,
-		onDeadLetter: (entry: EventBufferEntry, reason: DeadLetterReason) => dead.push({ summary: entry.event.summary, reason }),
+		onDeadLetter: (entry: EventBufferEntry, reason: DeadLetterReason) => {
+			dead.push({ summary: entry.event.summary, reason });
+			store.held.push(entry.event.summary);
+			// `failRecords` makes the next record stay in memory: the store took it but could not write it.
+			if (store.failRecords > 0) {
+				store.failRecords -= 1;
+				return false;
+			}
+			return flush();
+		},
+		flushDeadLetters: flush,
 	});
-	return { buffer, clock, dead };
+	return { buffer, clock, dead, store };
 }
 
 /** A request for one event of `session`. A session's first event is a live write that failed; later ones have not tried yet. */
@@ -232,5 +251,183 @@ describe("EventBuffer persistence", () => {
 
 	test("a memory-only buffer reports that it is not durable", () => {
 		expect(harness().buffer.durable).toBe(false);
+	});
+});
+
+describe("EventBuffer refusals, keyed cells and unreadable files", () => {
+	test("a delivery the breaker refused is not an attempt, so the entry keeps its budget", async () => {
+		const { buffer, dead } = harness({ maxAttempts: 2 });
+		buffer.enqueue(request("s-1", "a"));
+		let calls = 0;
+
+		await buffer.drain(async () => {
+			calls += 1;
+			return "skipped";
+		}, { all: true });
+
+		expect(calls).toBe(1);
+		expect(dead).toEqual([]);
+		expect(buffer.list()[0]).toMatchObject({ attempts: 1 });
+	});
+
+	test("a queued keyed event answers only a replay of its own cell, not any event that reuses its key", () => {
+		const { buffer } = harness();
+		const queued = normalizeEvent({ surface: "omp", kind: "note", summary: "first", session_id: "s-1", graph_id: "g-1" }, null, { key: "replay-key-0001" });
+		buffer.enqueue({ ...request("s-1", "first"), key: "replay-key-0001", build: () => queued });
+
+		expect(buffer.findKeyed(queued, "replay-key-0001")?.event.id).toBe(queued.id);
+		expect(buffer.findKeyed({ ...queued, kind: "warning" }, "replay-key-0001")).toBeNull();
+		expect(buffer.findKeyed({ ...queued, graph_id: "g-2" }, "replay-key-0001")).toBeNull();
+	});
+
+	test("a file that cannot be read at boot is never rewritten, and the buffer says it is not durable", () => {
+		const path = tempPath();
+		// A directory: the read fails with EISDIR, which is not an empty buffer.
+		mkdirSync(path);
+		const { buffer } = harness({ path });
+		expect(buffer.durable).toBe(false);
+	});
+
+	test("an event with an array payload survives a restart, so the buffer's own read-back keeps it", () => {
+		const path = tempPath();
+		const first = harness({ path });
+		const event = normalizeEvent({ surface: "omp", kind: "note", summary: "arr", payload: ["note"] as unknown as Record<string, unknown> }, null);
+		first.buffer.enqueue({ ...request(null, "arr"), build: () => event });
+
+		const second = harness({ path });
+		expect(summaries(second.buffer)).toEqual(["arr"]);
+	});
+});
+
+describe("EventBuffer pending dead letters", () => {
+	test("a failed dead-letter write keeps the given-up entry in the buffer, and it is never attempted again", async () => {
+		const { buffer, store } = harness({ maxAttempts: 2, deadLetterDown: true });
+		buffer.enqueue(request("s-1", "a"));
+		let attempts = 0;
+		const deliver = async (): Promise<EventDelivery> => {
+			attempts += 1;
+			return { transient: "down" };
+		};
+
+		await buffer.drain(deliver, { all: true });
+		await buffer.drain(deliver, { all: true });
+
+		expect(attempts).toBe(1);
+		expect(buffer.list()).toMatchObject([{ given_up: "exhausted" }]);
+		expect(store.held).toEqual(["a"]);
+		expect(store.written).toEqual([]);
+	});
+
+	test("when the dead-letter store recovers, the record is written once and the entry leaves the buffer", async () => {
+		const { buffer, store } = harness({ maxAttempts: 2, deadLetterDown: true });
+		buffer.enqueue(request("s-1", "a"));
+		await buffer.drain(async () => ({ transient: "down" }), { all: true });
+
+		store.down = false;
+		const attempted: string[] = [];
+		const deliver = async (entry: EventBufferEntry): Promise<EventDelivery> => {
+			attempted.push(entry.event.summary);
+			return "landed";
+		};
+		await buffer.drain(deliver, { all: true });
+		await buffer.drain(deliver, { all: true });
+
+		expect(attempted).toEqual([]);
+		expect(store.written).toEqual(["a"]);
+		expect(buffer.size()).toBe(0);
+	});
+
+	test("a restart while the entry is pending records it once, when the dead-letter store works", async () => {
+		const path = tempPath();
+		const first = harness({ path, maxAttempts: 2, deadLetterDown: true });
+		first.buffer.enqueue(request("s-1", "a"));
+		await first.buffer.drain(async () => ({ transient: "down" }), { all: true });
+
+		const second = harness({ path, maxAttempts: 2 });
+		expect(second.buffer.list()).toMatchObject([{ given_up: "exhausted" }]);
+		const attempted: string[] = [];
+		await second.buffer.drain(
+			async (entry) => {
+				attempted.push(entry.event.summary);
+				return "landed";
+			},
+			{ all: true },
+		);
+
+		expect(attempted).toEqual([]);
+		expect(second.store.written).toEqual(["a"]);
+		expect(second.dead).toEqual([{ summary: "a", reason: "exhausted" }]);
+		expect(second.buffer.size()).toBe(0);
+	});
+
+	test("a full buffer of pending entries refuses the next event, and gives up nothing", async () => {
+		const { buffer, store } = harness({ max: 1, maxAttempts: 2, deadLetterDown: true });
+		buffer.enqueue(request("s-1", "a"));
+		await buffer.drain(async () => ({ transient: "down" }), { all: true });
+
+		const refused = buffer.enqueue(request("s-2", "b"));
+
+		expect(refused).toMatchObject({ buffered: false, reason: "buffer-full", recorded: false });
+		expect(summaries(buffer)).toEqual(["a"]);
+		expect(store.held).toEqual(["a"]);
+	});
+
+	test("a give-up whose record write fails stays in the file as pending while there is room, and is written once when the store recovers", async () => {
+		const path = tempPath();
+		const { buffer, store, dead } = harness({ path, maxAttempts: 1 });
+		store.failRecords = 1;
+
+		const outcome = buffer.enqueue(request("s-1", "a", { attempts: 1 }));
+
+		expect(outcome).toMatchObject({ buffered: false, reason: "exhausted", recorded: true });
+		expect(buffer.list()).toMatchObject([{ given_up: "exhausted" }]);
+		expect(readFileSync(path, "utf8")).toContain('"given_up":"exhausted"');
+
+		const attempted: string[] = [];
+		const deliver = async (entry: EventBufferEntry): Promise<EventDelivery> => {
+			attempted.push(entry.event.summary);
+			return "landed";
+		};
+		await buffer.drain(deliver, { all: true });
+		await buffer.drain(deliver, { all: true });
+
+		expect(attempted).toEqual([]);
+		expect(store.written).toEqual(["a"]);
+		expect(dead).toEqual([{ summary: "a", reason: "exhausted" }]);
+		expect(buffer.size()).toBe(0);
+	});
+
+	test("a give-up whose record write fails with a full buffer is refused, and the caller keeps its copy", () => {
+		const { buffer, store } = harness({ max: 1, maxAttempts: 2 });
+		buffer.enqueue(request("s-1", "a"));
+		store.failRecords = 1;
+
+		const outcome = buffer.enqueue(request("s-2", "b", { attempts: 2 }));
+
+		expect(outcome).toMatchObject({ buffered: false, recorded: false });
+		expect(summaries(buffer)).toEqual(["a"]);
+	});
+
+	test("a restart while the pending give-up is in the file records it once, when the store works", async () => {
+		const path = tempPath();
+		const first = harness({ path, maxAttempts: 1 });
+		first.store.failRecords = 1;
+		first.buffer.enqueue(request("s-1", "a", { attempts: 1 }));
+
+		const second = harness({ path, maxAttempts: 1 });
+		expect(second.buffer.list()).toMatchObject([{ given_up: "exhausted" }]);
+		const attempted: string[] = [];
+		await second.buffer.drain(
+			async (entry) => {
+				attempted.push(entry.event.summary);
+				return "landed";
+			},
+			{ all: true },
+		);
+
+		expect(attempted).toEqual([]);
+		expect(second.store.written).toEqual(["a"]);
+		expect(second.dead).toEqual([{ summary: "a", reason: "exhausted" }]);
+		expect(second.buffer.size()).toBe(0);
 	});
 });

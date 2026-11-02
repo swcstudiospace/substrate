@@ -476,6 +476,17 @@ describe("chain leaves and the anchored head (D73-02, D73-03)", () => {
 		expect(compareToAnchoredHead(sliceEvents, sliceLeaves, sliceHead)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_m2" });
 	});
 
+	test("an edit past the committed end names the event that links to the head, not an intact successor that sorts first", () => {
+		// evt_z was appended after the anchored head and its payload was then edited, so its recomputed hash no longer matches the stored one.
+		// evt_a sorts first and its prev is evt_z's stored hash: an order built from the changed hashes would start there.
+		const extended: ChainLink[] = [
+			...intact,
+			{ id: "evt_z", hash: hashOf("evt_z edited"), storedHash: hashOf("evt_z"), prev: hashOf("evt_4") },
+			{ id: "evt_a", hash: hashOf("evt_a"), storedHash: hashOf("evt_a"), prev: hashOf("evt_z") },
+		];
+		expect(compareToAnchoredHead(extended, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_z" });
+	});
+
 	test("a leaf with an empty event id is no head and does not throw", () => {
 		const blank = leaves.map((stored) => (stored.seq === 3 ? { ...stored, event_id: "" } : stored));
 		expect(() => headRecordsFromLeaves(blank, H10)).not.toThrow();

@@ -5299,6 +5299,91 @@ describe("verifyGraph hour report", () => {
 			expect(verdict.ok).toBe(false);
 		});
 
+		test("an unreadable genesis read keeps the ledger fault already found, and says why the hour is unverified", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const deleted = defined(world.events[1], "event 2").id;
+			const unreadable = {
+				getGenesisHash: async () => {
+					throw new Error("devnet unreachable");
+				},
+				transactionMemo: async () => null,
+			};
+			const verdict = await substrateWith(
+				stubOf(world, {
+					readEvents: async () => world.rows.filter((row) => row.id !== deleted),
+					hourLeaves: async () => {
+						throw new Error(`hour member ${deleted} has no event row`);
+					},
+				}),
+			).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: unreadable as never });
+			expect(verdict.hours[0]).toMatchObject({ status: "unverified" });
+			expect(verdict.hours[0]?.reason).toContain(deleted);
+			expect(verdict.hours[0]?.reason).toContain("devnet unreachable");
+			expect(verdict.ok).toBe(false);
+		});
+
+		/** One v2 hour with a deleted member, so the digest faults and every early return below runs with a known ledger fault. */
+		async function deletedHour(world: World, rpc: unknown) {
+			const deleted = defined(world.events[1], "event 2").id;
+			const verdict = await substrateWith(
+				stubOf(world, {
+					readEvents: async () => world.rows.filter((row) => row.id !== deleted),
+					hourLeaves: async () => {
+						throw new Error(`hour member ${deleted} has no event row`);
+					},
+				}),
+			).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+			return { deleted, hour: verdict.hours[0] };
+		}
+
+		test("a transaction with no memo instruction is a mismatch that keeps the ledger fault", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const { deleted, hour } = await deletedHour(world, rpcReturning(null));
+			expect(hour).toMatchObject({ status: "mismatch" });
+			expect(hour?.reason).toContain(deleted);
+			expect(hour?.reason).toContain("no memo-program instruction");
+		});
+
+		test("an unsigned memo is a mismatch that keeps the ledger fault", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { payerSigned: false }));
+			expect(hour).toMatchObject({ status: "mismatch" });
+			expect(hour?.reason).toContain(deleted);
+			expect(hour?.reason).toContain("is not signed by SOLANA_ANCHOR_PUBKEY");
+		});
+
+		test("a memo proven to come from another payer is a mismatch that keeps the ledger fault", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { payer: "SomeoneElse11111111111111111111111111111" }));
+			expect(hour).toMatchObject({ status: "mismatch" });
+			expect(hour?.reason).toContain(deleted);
+		});
+
+		test("a failed anchor transaction is a mismatch that keeps the ledger fault", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { err: { InstructionError: [0, "Custom"] } }));
+			expect(hour).toMatchObject({ status: "mismatch" });
+			expect(hour?.reason).toContain(deleted);
+			expect(hour?.reason).toContain("anchor transaction failed");
+		});
+
+		test("a memo that is not an anchor memo is a mismatch that keeps the ledger fault", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const { deleted, hour } = await deletedHour(world, rpcReturning("not an anchor memo"));
+			expect(hour).toMatchObject({ status: "mismatch" });
+			expect(hour?.reason).toContain(deleted);
+			expect(hour?.reason).toContain("is not a v1 or v2 anchor memo");
+		});
+
+		test("a memo for another hour is a mismatch that keeps the ledger fault", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const otherHour = formatMemoV2({ periodStartMs: H + HOUR, rootHex: world.root, count: world.events.length, headsRootHex: world.root });
+			const { deleted, hour } = await deletedHour(world, rpcReturning(otherHour));
+			expect(hour).toMatchObject({ status: "mismatch" });
+			expect(hour?.reason).toContain(deleted);
+			expect(hour?.reason).toContain("memo names");
+		});
+
 		test("a full rewrite with every hash and prev recalculated parts at the first event, and the verdict fails", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
 			let prev: string | null = null;

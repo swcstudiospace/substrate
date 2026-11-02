@@ -5,6 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
+import { resolve } from "node:path";
 import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
 import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
@@ -2593,6 +2594,12 @@ function loadEventBufferSettings(env: Record<string, string | undefined>): Event
 		throw new ConfigError(
 			"SUBSTRATE_EVENT_BUFFER_PATH is set, so SUBSTRATE_EVENT_DEAD_LETTER_PATH must be set too: a buffered event that exhausts its " +
 				"retries needs a file to be recorded in. Set SUBSTRATE_EVENT_DEAD_LETTER_PATH, or unset SUBSTRATE_EVENT_BUFFER_PATH",
+		);
+	}
+	if (resolve(path) === resolve(deadLetterPath)) {
+		throw new ConfigError(
+			"SUBSTRATE_EVENT_BUFFER_PATH and SUBSTRATE_EVENT_DEAD_LETTER_PATH name one file, so each store would rewrite the other's records. " +
+				"Give them two different files",
 		);
 	}
 	return {

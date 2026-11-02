@@ -1045,6 +1045,16 @@ export async function buildGraphEvidence(
 function appChainOf(verdict: VerifyVerdict): ChainEvidence {
 	// `greptime not configured` is a deployment with no ledger, not a ledger that would not answer.
 	const notConfigured = verdict.chain.reason === "greptime not configured";
+	// An intact chain is attested only over the hours it names. When those could not all be read the bundle must not claim the chain verified: it is
+	// unverifiable, with `ok` null, not broken. The chain verdict itself is unchanged.
+	if (!notConfigured && verdict.chain.ok && verdict.hours_unreadable !== undefined) {
+		return {
+			state: "unverifiable",
+			ok: null,
+			records: verdict.events,
+			reason: `the hours of this chain could not be read in full: ${verdict.hours_unreadable}`,
+		};
+	}
 	return {
 		state: notConfigured ? "not-configured" : chainState(verdict.chain.ok),
 		ok: notConfigured ? null : verdict.chain.ok,
