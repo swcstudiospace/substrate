@@ -96,6 +96,7 @@ Retired restart-cache TTL configuration has no reader/example. [config-reference
 ```
 substrate steer open [--repo R] [--binding-file PATH] [--json]
 substrate steer heartbeat|close --session LIVE_ID [--binding-file PATH] [--json]
+substrate steer forget HANDLE [--binding-file PATH] [--surface S] [--json]
 substrate steer sessions [--repo R] [--limit N] [--json]
 substrate steer status [--repo R] [--session LIVE_ID [--binding-file PATH]] [--json]
 substrate steer queue --session LIVE_ID --action pause|redirect|annotate --body TEXT [--priority low|normal|high] [--conflicts] [--json]
@@ -104,6 +105,8 @@ substrate steer list --session LIVE_ID [--binding-file PATH] [--status queued|ac
 substrate steer listen --session LIVE_ID [--binding-file PATH] [--once] [--max-wait-ms N] [--after DIRECTIVE] [--json]
 substrate steer context [--repo R] [--session HISTORICAL_ID] [--limit N] [--format text|json]
 ```
+
+`forget HANDLE` removes the named local binding record without contacting the server, never prints a proof, and refuses a record that fails validation, which must then be removed by hand.
 
 Every command takes `--surface S` (default `claude-code`). The existing resolver reads `SUBSTRATE_URL` and surface bearer (`SUBSTRATE_TOKEN` or existing token files). Repo otherwise resolves origin. Surface selection is not operator elevation.
 

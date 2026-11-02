@@ -236,7 +236,7 @@ describe("the grammar", () => {
 	});
 
 	test("every subcommand and the exit codes are in the usage text", () => {
-		for (const word of ["open", "heartbeat", "close", "--binding-file", "sessions", "status", "queue", "ack", "list", "listen", "context", "--once", "--max-wait-ms", "exit: 0 done, 1 failed, 2 usage, 3 refused"]) {
+		for (const word of ["open", "heartbeat", "close", "forget", "--binding-file", "sessions", "status", "queue", "ack", "list", "listen", "context", "--once", "--max-wait-ms", "exit: 0 done, 1 failed, 2 usage, 3 refused"]) {
 			expect(STEER_USAGE).toContain(word);
 		}
 	});
@@ -1077,6 +1077,7 @@ describe("strict live lifecycle grammar", () => {
 		["heartbeat", "--session", LIVE_ID, "--repo", "acme/widgets"],
 		["close", "--session", LIVE_ID, "--session", OTHER_LIVE_ID],
 		["heartbeat", "--session", `ls_${"A".repeat(64)}`],
+		["forget"], ["forget", "historical-session"], ["forget", LIVE_ID, OTHER_LIVE_ID], ["forget", LIVE_ID, "--session", LIVE_ID],
 	];
 	for (const argv of invalid) {
 		test(`rejects ${argv.join(" ")} before resolving a bearer or fetching`, async () => {
@@ -1473,6 +1474,51 @@ describe("selected private records drive reads and lifecycle", () => {
 		expect(defined(r.calls[0]).body).toEqual({ session_id: LIVE_ID, action: "pause", body: "x" });
 		expect(defined(r.calls[1]).body).toEqual({ directive_id: "d-1", outcome: "applied", confirm: true });
 		for (const call of r.calls) expect(call.sessionBinding).toBeUndefined();
+	});
+});
+
+describe("forget removes a local record without the server", () => {
+	test("removes only the named record, contacts no server and prints no proof", async () => {
+		const r = rig();
+		const path = retain(r);
+		const sibling = retain(r, { session_id: OTHER_LIVE_ID, session_binding: OTHER_PROOF });
+		const siblingBefore = readFileSync(sibling, "utf8");
+		expect(await steer(r, "forget", LIVE_ID)).toBe(EXIT_DONE);
+		expect(existsSync(path)).toBe(false);
+		expect(readFileSync(sibling, "utf8")).toBe(siblingBefore);
+		expect(r.calls).toEqual([]);
+		expect(text(r.out)).toContain(LIVE_ID);
+		expect(text(r.out) + text(r.err)).not.toContain(PROOF);
+	});
+
+	test("--json names the handle, and --binding-file selects the record it removes", async () => {
+		const r = rig();
+		const chosen = join(defined(r.deps.bindingDirectory), "chosen.json");
+		retain(r, {}, chosen);
+		expect(await steer(r, "forget", LIVE_ID, "--binding-file", chosen, "--json")).toBe(EXIT_DONE);
+		expect(existsSync(chosen)).toBe(false);
+		expect(JSON.parse(text(r.out))).toEqual({ session_id: LIVE_ID, forgotten: true });
+		expect(r.calls).toEqual([]);
+	});
+
+	test("a missing or mismatched record is refused locally and nothing is removed", async () => {
+		const r = rig();
+		expect(await steer(r, "forget", LIVE_ID)).toBe(EXIT_FAILED);
+		expect(text(r.err)).toContain("nothing was removed");
+		const other = join(defined(r.deps.bindingDirectory), "other.json");
+		retain(r, { session_id: OTHER_LIVE_ID, session_binding: OTHER_PROOF }, other);
+		const before = readFileSync(other, "utf8");
+		expect(await steer(r, "forget", LIVE_ID, "--binding-file", other)).toBe(EXIT_FAILED);
+		expect(readFileSync(other, "utf8")).toBe(before);
+		expect(r.calls).toEqual([]);
+		expect(text(r.out) + text(r.err)).not.toContain(PROOF);
+	});
+
+	test("takes no proof flag on argv", async () => {
+		const r = rig();
+		expect(await steer(r, "forget", LIVE_ID, "--proof", PROOF)).toBe(EXIT_USAGE);
+		expect(r.calls).toEqual([]);
+		expect(text(r.out) + text(r.err)).not.toContain(PROOF);
 	});
 });
 
