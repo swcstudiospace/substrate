@@ -63,7 +63,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
-import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import { Admission, admitBatch, budgetBody, budgetRefusal, isRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
 import { acknowledgeSteeringWithState, type SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
 import { listRestDirectives, listSteeringSessions, parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, steeringUnavailable } from "./planning/steering-rest.ts";
 import { queueSteering, type SteeringWriteResult } from "./planning/steering-tools.ts";
@@ -621,12 +621,12 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 }
 
 /**
- * The 429 of an enforced budget: an integer `Retry-After` and the bounded body
- * from `admission.ts`. Sent before the handler and before the audit — a refused
+ * The refusal of an enforced budget: 429 for a spent bucket, 503 for a fail-closed class while the cache plane is open;
+ * with an integer `Retry-After` and the bounded body from `admission.ts`. Sent before the handler and before the audit — a refused
  * request did nothing, so there is no action to record, only a decision to count.
  */
 function sendBudgetRefusal(res: ServerResponse, verdict: AdmissionVerdict, body: unknown = budgetBody(verdict)): void {
-	send(res, 429, JSON.stringify(body), "application/json", { "retry-after": String(verdict.retryAfterS) });
+	send(res, verdict.decision === "refused" ? 503 : 429, JSON.stringify(body), "application/json", { "retry-after": String(verdict.retryAfterS) });
 }
 
 /** A surface named in a request body. Only ever trusted on an unauthenticated run. */
@@ -900,12 +900,12 @@ export function createHttpServer(
 
 		// uplift-3 N3: admission, after the bearer is known and before any handler.
 		// Monitor GETs are not metered; `/mcp` is metered per tool call in
-		// `handleMcp`, where the batch is parsed. A `limited` verdict only exists in
+		// `handleMcp`, where the batch is parsed. A refusal (`limited`, or `refused` for a fail-closed class) only exists in
 		// `enforce`; `shadow` and every bypass fall through to the handler.
 		const klass = routeClass(req.method ?? "GET", url.pathname);
 		if (klass !== null) {
 			const verdict = await admission.admit({ surface, klass, cost: 1 });
-			if (verdict.decision === "limited") {
+			if (isRefusal(verdict)) {
 				sendBudgetRefusal(res, verdict);
 				return;
 			}

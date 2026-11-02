@@ -13,10 +13,11 @@
  *   - **Identity is the bearer's surface.** A body-claimed `surface` is never the
  *     bucket: a caller could otherwise spend another surface's budget by naming
  *     it. Accepted untokened callers on the bridge share one `anonymous` bucket.
- *   - **The cache failing is not a refusal.** Cache off, breaker open, cooldown,
- *     timeout, a malformed reply — every one admits the request and counts a
- *     `bypass`. Admission control bounds load on the planes; it must not become a
- *     way for the cache plane to fail every other plane's callers.
+ *   - **The cache failing is not a refusal.** Cache off, cooldown, timeout, a
+ *     malformed reply — every one admits the request and counts a `bypass`. So does
+ *     a breaker refusal, unless its class is `fail-closed` (`AdmissionBreakerPolicy`).
+ *     Admission control bounds load on the planes; it must not become a way for
+ *     the cache plane to fail every other plane's callers.
  *   - **Shadow first.** `shadow` evaluates and records `shadow_limited` and never
  *     refuses, so the budgets are tuned from the metric before `enforce` turns a
  *     wrong number into a 429. `off` skips the eval entirely.
@@ -41,6 +42,15 @@ export interface BucketLimit {
 	burst: number;
 }
 
+/**
+ * What a decision does when the cache plane's breaker refuses the bucket step. `fail-open` admits and counts a `bypass`
+ * (the default: the budgets always did that); `fail-closed` refuses it.
+ */
+export type AdmissionBreakerPolicy = "fail-open" | "fail-closed";
+export const ADMISSION_BREAKER_POLICIES: readonly AdmissionBreakerPolicy[] = ["fail-open", "fail-closed"];
+/** Every class fail-open: an open breaker admits, as it always has. */
+export const DEFAULT_ADMISSION_BREAKER_POLICY: Readonly<Record<AdmissionClass, AdmissionBreakerPolicy>> = { read: "fail-open", write: "fail-open", coordination: "fail-open" };
+
 /** From `SUBSTRATE_BUDGETS` and `SUBSTRATE_BUDGET_*`; parsed in `config.ts`. */
 export interface AdmissionSettings {
 	mode: AdmissionMode;
@@ -48,6 +58,8 @@ export interface AdmissionSettings {
 	classes: Record<AdmissionClass, BucketLimit>;
 	/** Every class of the shared `anonymous` bucket. */
 	anonymous: BucketLimit;
+	/** What an open cache breaker does to each class (`SUBSTRATE_BUDGET_<CLASS>_BREAKER`). */
+	breakerPolicy: Record<AdmissionClass, AdmissionBreakerPolicy>;
 	/** `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS|_BURST`, by surface then class. */
 	overrides: Partial<Record<Surface, Partial<Record<AdmissionClass, BucketLimit>>>>;
 }
@@ -364,7 +376,10 @@ export class Admission {
 		}
 		const reply = outcome.ok ? parseReply(outcome.value) : null;
 		let verdict: AdmissionVerdict;
-		if (reply === null) {
+		if (!outcome.ok && outcome.breakerRetryAfterMs !== undefined && this.settings.breakerPolicy[request.klass] === "fail-closed" && this.settings.mode === "enforce") {
+			// The breaker refused the bucket step on a fail-closed class, and enforce refuses it as a spent bucket is. Shadow falls through to the bypass below: the cache plane did not answer, and shadow never refuses.
+			verdict = { ...base, decision: "refused", tokensLeft: null, retryAfterMs: outcome.breakerRetryAfterMs, retryAfterS: retryAfterSeconds(outcome.breakerRetryAfterMs) };
+		} else if (reply === null) {
 			verdict = { ...base, decision: "bypass", tokensLeft: null, retryAfterMs: 0, retryAfterS: 0 };
 		} else if (reply.allowed) {
 			verdict = { ...base, decision: "allowed", tokensLeft: reply.tokensLeft, retryAfterMs: 0, retryAfterS: 0 };
@@ -395,6 +410,11 @@ function parseReply(value: unknown): { allowed: boolean; tokensLeft: number; ret
 	return { allowed: allowed === 1, tokensLeft, retryAfterMs: Math.max(0, retryAfterMs) };
 }
 
+/** A verdict that refuses the request: `limited` (a spent bucket, 429) or `refused` (a fail-closed class while the cache plane is open, 503). Shadow never refuses. */
+export function isRefusal(verdict: AdmissionVerdict): boolean {
+	return verdict.decision === "limited" || verdict.decision === "refused";
+}
+
 /**
  * Admit an MCP batch: each `tools/call` member costs one token of its class, and
  * the classes are stepped in `ADMISSION_CLASSES` order — reads first, so the
@@ -418,14 +438,14 @@ export async function admitBatch(
 		const cost = costs.get(klass);
 		if (cost === undefined) continue;
 		const verdict = await admission.admit({ surface, klass, cost });
-		if (verdict.decision === "limited") return verdict;
+		if (isRefusal(verdict)) return verdict;
 	}
 	return null;
 }
 
-/** The bounded 429 body: no identity, no limit, no payload — the class and the wait. */
-export function budgetBody(verdict: AdmissionVerdict): { error: "budget"; class: AdmissionClass; retry_after_s: number } {
-	return { error: "budget", class: verdict.klass, retry_after_s: verdict.retryAfterS };
+/** The bounded refusal body: no identity, no limit, no payload — the class and the wait. A fail-closed refusal names the cache, never a budget. */
+export function budgetBody(verdict: AdmissionVerdict): { error: "budget" | "cache_unavailable"; class: AdmissionClass; retry_after_s: number } {
+	return { error: verdict.decision === "refused" ? "cache_unavailable" : "budget", class: verdict.klass, retry_after_s: verdict.retryAfterS };
 }
 
 /**
@@ -442,7 +462,7 @@ export function budgetRefusal(body: unknown, verdict: AdmissionVerdict): unknown
 			id,
 			error: {
 				code: -32000,
-				message: `budget: the ${verdict.klass} budget of this surface is spent; retry after ${verdict.retryAfterS} s`,
+				message: verdict.decision === "refused" ? `cache_unavailable: the cache plane is open and the ${verdict.klass} class is fail-closed; retry after ${verdict.retryAfterS} s` : `budget: the ${verdict.klass} budget of this surface is spent; retry after ${verdict.retryAfterS} s`,
 				data: budgetBody(verdict),
 			},
 		};

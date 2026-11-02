@@ -273,6 +273,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_BREAKER_FAILURES` | number | 5 | 1..100 | 5. See `docs/observability.md` | observability/breaker.ts | yes |
 | `SUBSTRATE_BREAKER_OPEN_MS` | number | 30000 | 1000..600000 | 30000 ms. See `docs/observability.md` | observability/breaker.ts | yes |
 | `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | number | read 20/40, write 10/20, coordination 30/60 (rps/burst) | positive number (rps) or positive integer (burst) | the class default; per-surface SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS \| _BURST override a half and the half left out is the class value. See `docs/observability.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_BUDGET_<CLASS>_BREAKER` | mode | fail-open | fail-open \| fail-closed | fail-open: unset or blank, an open cache breaker admits the request and counts a bypass, as before; fail-closed refuses it with 503 in enforce and, in shadow, admits it and counts a bypass; any other value refuses to boot (SUBSTRATE_BUDGETS keeps its older fallback to shadow). See `docs/observability.md` | mcp-server/config.ts | yes |
 
 ## Observability, SLOs and metrics history
 
@@ -483,6 +484,7 @@ The scan sees only the prefix of a name the code builds, so each family is regis
 | --- | --- | --- |
 | `SUBSTRATE_TOKEN_<SURFACE>` | `SUBSTRATE_TOKEN_` | 42 |
 | `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | `SUBSTRATE_BUDGET_` | 258 |
+| `SUBSTRATE_BUDGET_<CLASS>_BREAKER` | `SUBSTRATE_BUDGET_` | 3 |
 | `SUBSTRATE_REHEARSAL_<NAME>` | `SUBSTRATE_REHEARSAL_` | 1 |
 
 ## Names that are not configuration

@@ -186,6 +186,7 @@ const CLASS_BUDGET_NAMES: readonly string[] = ADMISSION_CLASSES.flatMap((klass) 
 const SURFACE_BUDGET_NAMES: readonly string[] = SURFACES.flatMap((surface) =>
 	ADMISSION_CLASSES.flatMap((klass) => [`SUBSTRATE_BUDGET_${spelled(surface)}_${klass.toUpperCase()}_RPS`, `SUBSTRATE_BUDGET_${spelled(surface)}_${klass.toUpperCase()}_BURST`]),
 );
+const CLASS_BREAKER_NAMES: readonly string[] = ADMISSION_CLASSES.map((klass) => `SUBSTRATE_BUDGET_${klass.toUpperCase()}_BREAKER`);
 
 export const FLAG_FAMILIES: readonly FlagFamily[] = [
 	{
@@ -212,6 +213,19 @@ export const FLAG_FAMILIES: readonly FlagFamily[] = [
 		readBy: "mcp-server/config.ts",
 		members: [...CLASS_BUDGET_NAMES, ...SURFACE_BUDGET_NAMES],
 		documentedMembers: CLASS_BUDGET_NAMES,
+		doc: "docs/observability.md",
+	},
+	{
+		pattern: "SUBSTRATE_BUDGET_<CLASS>_BREAKER",
+		prefix: "SUBSTRATE_BUDGET_",
+		kind: "mode",
+		plane: "admission",
+		default: "fail-open",
+		allowed: "fail-open | fail-closed",
+		unset: "fail-open: unset or blank, an open cache breaker admits the request and counts a bypass, as before; fail-closed refuses it with 503 in enforce and, in shadow, admits it and counts a bypass; any other value refuses to boot (SUBSTRATE_BUDGETS keeps its older fallback to shadow)",
+		readBy: "mcp-server/config.ts",
+		members: CLASS_BREAKER_NAMES,
+		documentedMembers: CLASS_BREAKER_NAMES,
 		doc: "docs/observability.md",
 	},
 	{

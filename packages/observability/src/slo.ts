@@ -345,8 +345,8 @@ export function evaluateSlos(snapshot: MetricSnapshot[], catalogue: SloTarget[] 
  * `admission.limited_rate`: refusals ÷ decisions of `substrate.admission.decisions`,
  * at most 1 %. Beside the catalogue like the plane and burn objectives, because
  * the catalogue is pinned to SPE-4793's four. `decided` is every decision the
- * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass`
- * (the cache not answering) neither helps nor hurts the rate; `limited` alone is
+ * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass` or a
+ * `refused` (the cache not answering) neither helps nor hurts the rate; `limited` alone is
  * the numerator, so in `shadow` mode the rate is 0 whatever the shadow refusals
  * say, and the shadow count is read from the metric while the budgets are tuned.
  * 100 decisions before it is judged: a 1 % ceiling cannot be told from noise on
@@ -364,13 +364,15 @@ export const ADMISSION_SLO: Exclude<SloTarget, { kind: "latency-quantile" }> = {
 };
 
 /**
- * The bypasses are not decisions, so they are taken out of the denominator
- * rather than summed by `evaluateRatio`: a cache outage must not dilute the
- * refusal rate into `ok`.
+ * Only the bucket's own decisions (`allowed`, `limited`, `shadow_limited`) form the
+ * denominator. `bypass` and `refused` are not decisions: a cache outage must not dilute
+ * the refusal rate into `ok`, so 97 allowed, 3 limited and 900 refused is 3 %, a breach.
  */
 export function evaluateAdmissionSlo(snapshot: MetricSnapshot[], target = ADMISSION_SLO): SloResult {
 	const counter = findCounter(snapshot, target.denominator.metric);
-	const decided = counter ? sumCounter(counter) - sumCounter(counter, { decision: "bypass" }) : 0;
+	const decided = counter
+		? ["allowed", "limited", "shadow_limited"].reduce((total, decision) => total + sumCounter(counter, { decision }), 0)
+		: 0;
 	const limited = counter ? sumCounter(counter, target.numerator.where) : 0;
 	const base = { id: target.id, title: target.title, statement: target.statement, unit: "ratio" as const, target: target.target };
 	if (decided < target.minSamples) {

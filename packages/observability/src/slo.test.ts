@@ -70,15 +70,16 @@ describe("the catalogue", () => {
 });
 
 describe("admission.limited_rate (uplift-3 N3), beside the catalogue", () => {
-	function decided(counts: { allowed?: number; limited?: number; shadow?: number; bypass?: number }): SubstrateInstruments {
+	function decided(counts: { allowed?: number; limited?: number; shadow?: number; bypass?: number; refused?: number }): SubstrateInstruments {
 		const instruments = new SubstrateInstruments();
-		const record = (decision: "allowed" | "limited" | "shadow_limited" | "bypass", times = 0) => {
+		const record = (decision: "allowed" | "limited" | "shadow_limited" | "bypass" | "refused", times = 0) => {
 			for (let index = 0; index < times; index += 1) instruments.recordAdmission({ surface: "cursor", klass: "read", decision });
 		};
 		record("allowed", counts.allowed);
 		record("limited", counts.limited);
 		record("shadow_limited", counts.shadow);
 		record("bypass", counts.bypass);
+		record("refused", counts.refused);
 		return instruments;
 	}
 
@@ -104,6 +105,13 @@ describe("admission.limited_rate (uplift-3 N3), beside the catalogue", () => {
 		expect(result).toMatchObject({ status: "insufficient-data", samples: 92 });
 		const judged = evaluateAdmissionSlo(decided({ allowed: 97, limited: 3, bypass: 900 }).snapshot());
 		expect(judged).toMatchObject({ status: "breached", samples: 100, observed: 0.03 });
+	});
+
+	test("a refused decision is not a decision either: a cache outage that refuses 900 keeps the 3 % breach", () => {
+		expect(evaluateAdmissionSlo(decided({ allowed: 90, limited: 2, refused: 500 }).snapshot())).toMatchObject({ status: "insufficient-data", samples: 92 });
+		const judged = evaluateAdmissionSlo(decided({ allowed: 97, limited: 3, refused: 900 }).snapshot());
+		expect(judged).toMatchObject({ status: "breached", samples: 100, observed: 0.03 });
+		expect(judged.detail).toBe("3 of 100 (3.000 %); objective is at most 1.000 %");
 	});
 });
 
