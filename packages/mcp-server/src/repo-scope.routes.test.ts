@@ -3,16 +3,19 @@
  * writes only its own refusal audit and reads nothing: no ledger read, no Hindsight call, no handoff packet. The granted
  * brief is the positive control, so the gate is not a blanket refusal.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
+import type { CorpusStore } from "./corpus/store.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
+import type { ReportedWorktree } from "./worktree-registry.ts";
+import { MemoryWorktreeRegistry } from "./worktree-registry-fake.ts";
 
 const running: Array<{ close(): void }> = [];
 afterAll(() => {
@@ -65,6 +68,12 @@ function ledger(): Ledger {
 	return { written, reads, greptime };
 }
 
+/** Store seams a test injects in place of the index-built ones: the worktree registry the list reads, and the corpus manifest store. */
+interface Seams {
+	worktrees?: MemoryWorktreeRegistry;
+	corpus?: { store: CorpusStore };
+}
+
 interface Harness {
 	base: string;
 	ledger: Ledger;
@@ -73,7 +82,7 @@ interface Harness {
 	substrate: Substrate;
 }
 
-async function start(env: Record<string, string | undefined>): Promise<Harness> {
+async function start(env: Record<string, string | undefined>, seams: Seams = {}): Promise<Harness> {
 	const config = loadConfig(env);
 	const observability = createObservability(config, env);
 	await observability.start();
@@ -88,6 +97,7 @@ async function start(env: Record<string, string | undefined>): Promise<Harness> 
 				hindsightCalls.push(String(url));
 				return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
 			}) as never,
+			...seams,
 		},
 		observability.observer,
 	);
@@ -338,6 +348,82 @@ describe("RS-17: anonymous refusals are audited", () => {
 		expect(written).toContain("route_sha256");
 		expect(written).not.toContain("ut-secret-graph");
 		expect(written).not.toContain("/evidence");
+		expect(h.ledger.reads).toHaveLength(0);
+	});
+});
+
+/** A worktree row as a host reports it: only the repository and path vary by case. */
+function reportedRow(repo: string, path: string): ReportedWorktree {
+	return { path, repo, branch: "feature/x", head: "a".repeat(40), base: "b".repeat(40), dirty: false, ahead: 0, behind: 0, last_commit_at: null, size_bytes: null, locked: false, primary: false, pr_state: "none" };
+}
+
+/** A registry holding one granted worktree (`owner/a`) and one ungranted (`owner/b`), reported just now. */
+async function seededWorktrees(): Promise<MemoryWorktreeRegistry> {
+	const store = new MemoryWorktreeRegistry();
+	const seenAt = new Date();
+	await store.report({ host: "host-1", reportedAt: seenAt, seenAt, ttlS: 30 * 86_400, worktrees: [reportedRow("owner/a", "/w/a-1"), reportedRow("owner/b", "/w/b-1")] });
+	return store;
+}
+
+describe("POST /drift (repo-keyed door)", () => {
+	test("boundary: a drift scan of an ungranted repository is refused before the scan and before any git call", async () => {
+		const h = await start(scopedEnv());
+		const scan = spyOn(h.substrate, "driftScan");
+		const spawn = spyOn(Bun, "spawnSync");
+		try {
+			const reply = await fetch(`${h.base}/drift`, { method: "POST", headers: BEARER, body: JSON.stringify({ repo: "owner/b" }) });
+			expect(reply.status).toBe(403);
+			expect(await reply.json()).toMatchObject({ error: "repo-not-granted" });
+			expect(scan).not.toHaveBeenCalled();
+			expect(spawn.mock.calls.filter(([argv]) => Array.isArray(argv) && argv[0] === "git")).toHaveLength(0);
+			expect(h.ledger.reads).toHaveLength(0);
+			expect(refusalRoutes(h.ledger.written)).toEqual(["drift"]);
+		} finally {
+			spawn.mockRestore();
+			scan.mockRestore();
+		}
+	});
+});
+
+describe("GET /worktrees (repo-keyed read)", () => {
+	test("boundary: an unnamed read by a scoped caller returns only the granted repository's rows, and the store is asked for that grant alone", async () => {
+		const store = await seededWorktrees();
+		const list = spyOn(store, "list");
+		const h = await start({ ...scopedEnv(), SUBSTRATE_WORKTREE_REGISTRY: "on" }, { worktrees: store });
+		const reply = await fetch(`${h.base}/worktrees`, { headers: BEARER });
+		expect(reply.status).toBe(200);
+		const body = (await reply.json()) as { worktrees: Array<{ repo: string }> };
+		expect(body.worktrees.map((row) => row.repo)).toEqual(["owner/a"]);
+		expect(list.mock.calls[0]?.[0]).toMatchObject({ repos: ["owner/a"] });
+		list.mockRestore();
+	});
+
+	test("boundary: a read naming an ungranted repository is refused before the store is read", async () => {
+		const store = await seededWorktrees();
+		const list = spyOn(store, "list");
+		const h = await start({ ...scopedEnv(), SUBSTRATE_WORKTREE_REGISTRY: "on" }, { worktrees: store });
+		const reply = await fetch(`${h.base}/worktrees?repo=owner/b`, { headers: BEARER });
+		expect(reply.status).toBe(403);
+		expect(await reply.json()).toMatchObject({ error: "repo-not-granted" });
+		expect(list).not.toHaveBeenCalled();
+		list.mockRestore();
+	});
+});
+
+describe("GET /corpus/proof (repo-keyed read)", () => {
+	test("boundary: a proof for an ungranted repository is refused before the corpus manifest is read", async () => {
+		const reads: string[] = [];
+		const store = new Proxy({}, {
+			get(_target, property) {
+				reads.push(String(property));
+				return undefined;
+			},
+		});
+		const h = await start({ ...scopedEnv(), SUBSTRATE_CORPUS: "on" }, { corpus: { store: store as never } });
+		const reply = await fetch(`${h.base}/corpus/proof?repo=owner/b&path=README.md`, { headers: BEARER });
+		expect(reply.status).toBe(403);
+		expect(await reply.json()).toMatchObject({ reason: "repo-not-granted" });
+		expect(reads).toEqual([]);
 		expect(h.ledger.reads).toHaveLength(0);
 	});
 });
