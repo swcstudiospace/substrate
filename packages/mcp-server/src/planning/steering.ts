@@ -182,9 +182,16 @@ export type SteeringAuditEntry =
 			reason?: SteeringAckReason;
 	  };
 
+/** An opaque unit of work the idempotency store opens for a keyed queue (a transaction on Postgres). Only the store that opened it reads it. */
+export type SteeringUnit = unknown;
+
 /** The append-only history port (the `HistorySink` shape of phase 52, typed for steering entries). */
 export interface SteeringHistorySink {
-	append(entry: SteeringAuditEntry): Promise<void>;
+	/**
+	 * Writes one transition. `unit` is the store's open unit of work for a keyed queue: the write uses it, so it commits or rolls back with
+	 * the replay claim. Absent, the write stands alone.
+	 */
+	append(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<void>;
 	/**
 	 * The time a transition was saved with, or null when none was. A retry reuses it, so the audit content is unchanged.
 	 * Optional: a sink with no durable store has none, and every attempt takes a fresh time. A rejection is an audit failure.
@@ -307,9 +314,16 @@ export interface SteeringIdempotencyStore {
 	advancePast(sessionId: string, sequence: number): Promise<void>;
 	/** The live replay record for a scope key at `nowMs`, or null. A record at or past its expiry is not live. */
 	findReplay(scopeKey: string, nowMs: number): Promise<SteeringReplayRecord | null>;
-	/** Keeps an accepted keyed queue. Expired records are pruned, a live record for the key is never overwritten, and at most `cap` records are kept. */
-	saveReplay(record: SteeringReplayRecord, nowMs: number, cap: number): Promise<void>;
+	/**
+	 * Claims a keyed queue and runs its audit write in the same unit of work. The claim is taken first: when another call already holds the
+	 * scope key, `queue` does not run and the holder's record comes back. Otherwise `queue(unit)` must write through `unit`, and the claim is
+	 * kept only if it returns; a throw keeps nothing. Expired records are pruned, and at most `cap` records are kept.
+	 */
+	claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim>;
 }
+
+/** The outcome of a keyed claim: this call holds the scope key, or another call already holds it and its record is returned. */
+export type SteeringReplayClaim = { claimed: true } | { claimed: false; held: SteeringReplayRecord };
 
 /** One process, no restart: the default store when none is injected. */
 export class MemorySteeringIdempotencyStore implements SteeringIdempotencyStore {
@@ -331,15 +345,18 @@ export class MemorySteeringIdempotencyStore implements SteeringIdempotencyStore 
 		return held === undefined || held.expiresAtMs <= nowMs ? null : structuredClone(held);
 	}
 
-	async saveReplay(record: SteeringReplayRecord, nowMs: number, cap: number): Promise<void> {
+	async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
 		for (const [key, held] of this.replays) if (held.expiresAtMs <= nowMs) this.replays.delete(key);
-		if (this.replays.has(record.scopeKey)) return;
+		const held = this.replays.get(record.scopeKey);
+		if (held !== undefined) return { claimed: false, held: structuredClone(held) };
+		await queue(undefined);
 		this.replays.set(record.scopeKey, structuredClone(record));
 		while (this.replays.size > cap) {
 			const oldest = this.replays.keys().next();
 			if (oldest.done) break;
 			this.replays.delete(oldest.value);
 		}
+		return { claimed: true };
 	}
 }
 
@@ -497,11 +514,7 @@ export class SteeringInbox {
 		if (replay !== null) {
 			const held = await this.storeCall(() => this.store.findReplay(replay.scopeKey, seenMs));
 			if (!held.ok) return held;
-			if (held.value !== null) {
-				if (held.value.fingerprint !== replay.fingerprint) return fail({ code: "idempotency-conflict" });
-				if (!this.sequences.has(held.value.directive.id)) this.sequences.set(held.value.directive.id, held.value.sequence);
-				return { ok: true, value: { record: { state: "queued", directive: held.value.directive, queuedAtMs: held.value.queuedAtMs }, replayed: true } };
-			}
+			if (held.value !== null) return this.replayOf(held.value, replay.fingerprint);
 		}
 
 		if (this.records.has(directive.id)) return fail({ code: "duplicate-directive" });
@@ -519,21 +532,21 @@ export class SteeringInbox {
 		const sequenced = reserved === undefined ? await this.storeCall(() => this.store.nextSequence(directive.targetSessionId)) : { ok: true as const, value: reserved };
 		if (!sequenced.ok) return sequenced;
 		const sequence = sequenced.value;
-		const audited = await this.audit({ event: "queued", atMs: nowMs, directive, sequence });
-		if (!audited.ok) {
-			this.reservedSequences.set(directive.id, sequence);
-			return audited;
-		}
-		this.reservedSequences.delete(directive.id);
+		const entry: SteeringAuditEntry = { event: "queued", atMs: nowMs, directive, sequence };
 
-		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
-		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
-		this.records.set(directive.id, record);
-		this.sequences.set(directive.id, sequence);
-		if (replay !== null) {
-			await this.keepReplay({ scopeKey: replay.scopeKey, fingerprint: replay.fingerprint, directive, queuedAtMs: nowMs, sequence, expiresAtMs: nowMs + this.idempotency.ttlMs }, seenMs);
+		if (replay === null) {
+			const audited = await this.audit(entry);
+			if (!audited.ok) {
+				this.reservedSequences.set(directive.id, sequence);
+				return audited;
+			}
+			return this.acceptQueued(directive, nowMs, sequence, bucket);
 		}
-		return { ok: true, value: { record: structuredClone(record), replayed: false } };
+		// The audit row and the replay claim commit as one unit. A refused audit keeps no claim; a claim another call holds queues nothing here.
+		const claim = await this.claimKeyed({ scopeKey: replay.scopeKey, fingerprint: replay.fingerprint, directive, queuedAtMs: nowMs, sequence, expiresAtMs: nowMs + this.idempotency.ttlMs }, seenMs, entry);
+		if (!claim.ok) return claim;
+		if (!claim.value.claimed) return this.replayOf(claim.value.held, replay.fingerprint);
+		return this.acceptQueued(directive, nowMs, sequence, bucket);
 	}
 
 	/** A store call as a typed result: a failure is `audit-unavailable` with the driver's code, and is never thrown into the queue. */
@@ -545,16 +558,37 @@ export class SteeringInbox {
 		}
 	}
 
+	/** Records an accepted queue: the bucket spends its token, and the record and its sequence are held. Its audit row is already committed. */
+	private acceptQueued(directive: SteeringDirective, nowMs: number, sequence: number, bucket: TokenBucket): SteeringResult<SteeringReceipt> {
+		this.reservedSequences.delete(directive.id);
+		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
+		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
+		this.records.set(directive.id, record);
+		this.sequences.set(directive.id, sequence);
+		return { ok: true, value: { record: structuredClone(record), replayed: false } };
+	}
+
+	/** The reply to a keyed queue already held: the same record with `replayed` set, or a conflict when the content differs. Writes nothing. */
+	private replayOf(held: SteeringReplayRecord, fingerprint: string): SteeringResult<SteeringReceipt> {
+		if (held.fingerprint !== fingerprint) return fail({ code: "idempotency-conflict" });
+		if (!this.sequences.has(held.directive.id)) this.sequences.set(held.directive.id, held.sequence);
+		return { ok: true, value: { record: { state: "queued", directive: held.directive, queuedAtMs: held.queuedAtMs }, replayed: true } };
+	}
+
 	/**
-	 * Saves the replay record of an accepted keyed queue, after its audit row. A crash between the two leaves a queued directive with no
-	 * record, so a retry applies again (plan residual R2). A failed save does not fail the queue: the directive is audited and queued, and
-	 * an error would invite a retry that queues it a second time. The failure is reported on stderr, with its code only.
+	 * Claims a keyed queue and audits it in one unit of work: the store runs the audit write inside the claim, and a refused write rolls
+	 * the claim back. A store failure is `audit-unavailable` with its driver code, never thrown into the queue.
 	 */
-	private async keepReplay(record: SteeringReplayRecord, nowMs: number): Promise<void> {
+	private async claimKeyed(record: SteeringReplayRecord, nowMs: number, entry: SteeringAuditEntry): Promise<SteeringResult<SteeringReplayClaim>> {
 		try {
-			await this.store.saveReplay(record, nowMs, this.idempotency.cap);
+			const claim = await this.store.claimReplay(record, nowMs, this.idempotency.cap, async (unit) => {
+				const audited = await this.audit(entry, unit);
+				if (!audited.ok) throw new AuditRefused(audited.error);
+			});
+			return { ok: true, value: claim };
 		} catch (cause) {
-			process.stderr.write(`[substrate] steering replay record not saved (${errnoCode(cause)}); a retry of its key would queue again\n`);
+			if (cause instanceof AuditRefused) return fail(cause.refusal);
+			return fail({ code: "audit-unavailable", attempts: 1, lastErrorCode: errnoCode(cause) });
 		}
 	}
 
@@ -731,12 +765,12 @@ export class SteeringInbox {
 		return fail({ code: "audit-unavailable", attempts: STEERING_AUDIT_ATTEMPTS, lastErrorCode });
 	}
 
-	/** Append with a bounded retry. Failure is returned with the last error code, never swallowed. */
-	private async audit(entry: SteeringAuditEntry): Promise<SteeringResult<void>> {
+	/** Append with a bounded retry, inside `unit` when the store opened one. Failure is returned with the last error code, never swallowed. */
+	private async audit(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<SteeringResult<void>> {
 		let lastErrorCode = "UNKNOWN";
 		for (let attempt = 0; attempt < STEERING_AUDIT_ATTEMPTS; attempt++) {
 			try {
-				await this.deps.history.append(entry);
+				await this.deps.history.append(entry, unit);
 				return { ok: true, value: undefined };
 			} catch (cause) {
 				lastErrorCode = errnoCode(cause);
@@ -938,6 +972,14 @@ function wellFormedDirectiveId(entry: unknown): string | null {
 	const directive = entry.directive;
 	if (typeof directive !== "object" || directive === null || !("id" in directive)) return null;
 	return typeof directive.id === "string" && DIRECTIVE_ID_RE.test(directive.id) ? directive.id : null;
+}
+
+/** Thrown inside a keyed claim when its audit write is refused: the store rolls the claim back and rethrows it, and the inbox reports the refusal. */
+class AuditRefused extends Error {
+	constructor(readonly refusal: SteeringError) {
+		super("steering audit refused");
+		this.name = "AuditRefused";
+	}
 }
 
 function fail<T>(error: SteeringError): SteeringResult<T> {

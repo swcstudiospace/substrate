@@ -20,6 +20,9 @@ import {
 	type SteeringAuditEntry,
 	type SteeringClock,
 	type SteeringHistorySink,
+	type SteeringReplayClaim,
+	type SteeringReplayRecord,
+	type SteeringUnit,
 } from "./steering.ts";
 import {
 	SteeringAuditConflictError,
@@ -925,5 +928,43 @@ describe("keyed replay and delivery sequence across a restart", () => {
 		const other = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2", action: "annotate" }), KEY);
 		expect(other).toEqual({ ok: false, error: { code: "idempotency-conflict" } });
 		expect(sql.insertAttempts).toBe(attempts);
+	});
+
+	/** A store whose claim commits, then loses its reply: the caller sees a failure, while the claim and its audit row stay kept. */
+	class LostReplyStore extends MemorySteeringIdempotencyStore {
+		loseNextReply = false;
+		override async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
+			const claim = await super.claimReplay(record, nowMs, cap, queue);
+			if (this.loseNextReply) {
+				this.loseNextReply = false;
+				throw new Error("reply lost after commit");
+			}
+			return claim;
+		}
+	}
+
+	const queuedIds = (sql: DurableSql): string[] => sql.rows.filter((row) => row.transition === "queued").map((row) => row.directiveId);
+
+	test("a keyed queue whose reply is lost after its audit row committed replays on retry and is never queued twice", async () => {
+		const sql = new DurableSql();
+		const store = new LostReplyStore();
+		const clock = new ManualClock(T0);
+		store.loseNextReply = true;
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		expect(queuedIds(sql)).toEqual(["d-1"]);
+		const retry = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY);
+		expect(retry).toMatchObject({ ok: true, value: { directive: { id: "d-1" } } });
+		expect(queuedIds(sql)).toEqual(["d-1"]);
+	});
+
+	test("an audit refusal inside the keyed claim holds nothing, so the retry queues once", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		sql.failInsert = new Error("connection reset");
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		sql.failInsert = null;
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(queuedIds(sql)).toEqual(["d-2"]);
 	});
 });

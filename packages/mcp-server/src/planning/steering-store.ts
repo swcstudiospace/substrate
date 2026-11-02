@@ -39,7 +39,9 @@ import type {
 	SteeringPriority,
 	SteeringRestoreReport,
 	SteeringIdempotencyStore,
+	SteeringReplayClaim,
 	SteeringReplayRecord,
+	SteeringUnit,
 } from "./steering.ts";
 import { SteeringDirectiveSchema } from "./steering.ts";
 
@@ -228,9 +230,9 @@ export class SteeringAuditSink implements SteeringHistorySink {
 		private readonly reads: SteeringAuditReadSql | null = null,
 	) {}
 
-	/** The port method `SteeringInbox` calls. A failed write throws a {@link SteeringAuditFailure}. */
-	async append(entry: SteeringAuditEntry): Promise<void> {
-		const result = await this.record(entry);
+	/** The port method `SteeringInbox` calls. A failed write throws a {@link SteeringAuditFailure}. `unit` is the store's open transaction for a keyed queue. */
+	async append(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<void> {
+		const result = await this.record(entry, unit);
 		if (!result.ok) throw result.error;
 	}
 
@@ -285,21 +287,22 @@ export class SteeringAuditSink implements SteeringHistorySink {
 		}
 	}
 
-	/** Writes one transition and reports the outcome as a value. A same-payload repeat is `inserted: false`. */
-	async record(entry: SteeringAuditEntry): Promise<SteeringAuditResult> {
+	/** Writes one transition and reports the outcome as a value. A same-payload repeat is `inserted: false`. `unit` is a transaction the store opened: the write goes through it. */
+	async record(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<SteeringAuditResult> {
 		let row: SteeringAuditRow;
 		try {
 			row = toAuditRow(entry);
 		} catch (cause) {
 			return { ok: false, error: new SteeringAuditError(errnoCode(cause), cause) };
 		}
+		const port = unit === undefined ? this.sql : bunSteeringAuditSql(unit as SQL);
 		try {
-			if (await this.sql.insertAbsent(row)) return { ok: true, value: { inserted: true } };
-			const stored = await this.sql.savedRow(row.directiveId, row.transition);
+			if (await port.insertAbsent(row)) return { ok: true, value: { inserted: true } };
+			const stored = await port.savedRow(row.directiveId, row.transition);
 			if (stored?.payloadSha256 === row.payloadSha256) return { ok: true, value: { inserted: false } };
 			return { ok: false, error: new SteeringAuditConflictError(row.directiveId, row.transition) };
 		} catch (cause) {
-			return this.recoverOrFail(row, cause);
+			return this.recoverOrFail(port, row, cause);
 		}
 	}
 
@@ -308,9 +311,9 @@ export class SteeringAuditSink implements SteeringHistorySink {
 	 * the transition happened, so it is reported as recorded. No such row, or a read-back that also fails, is the original
 	 * failure, and the transition stays held for a retry.
 	 */
-	private async recoverOrFail(row: SteeringAuditRow, cause: unknown): Promise<SteeringAuditResult> {
+	private async recoverOrFail(port: SteeringAuditSql, row: SteeringAuditRow, cause: unknown): Promise<SteeringAuditResult> {
 		try {
-			if ((await this.sql.savedRow(row.directiveId, row.transition))?.payloadSha256 === row.payloadSha256) {
+			if ((await port.savedRow(row.directiveId, row.transition))?.payloadSha256 === row.payloadSha256) {
 				return { ok: true, value: { inserted: false } };
 			}
 		} catch {
@@ -654,8 +657,9 @@ function requiredInteger(value: unknown): number {
 
 /**
  * The Bun SQL store for the delivery sequence counter and the keyed-queue replay records (migration 43). A sequence is taken with one
- * upsert, so two processes never take the same number. A replay save is one transaction: expired records are pruned, the record is
- * inserted unless a live one holds the key, and the oldest records beyond the cap are deleted.
+ * upsert, so two processes never take the same number. A keyed queue is one transaction: expired records are pruned, the scope key is
+ * claimed by insert (a key another transaction holds makes this one wait, then lose), the queued audit row is written through the same
+ * transaction, and the oldest records beyond the cap are deleted. A refused audit write rolls the claim back with it.
  */
 export function bunSteeringIdempotencyStore(sql: SQL): SteeringIdempotencyStore {
 	return {
@@ -679,25 +683,26 @@ export function bunSteeringIdempotencyStore(sql: SQL): SteeringIdempotencyStore 
 				from planning_steering_replay
 				where scope_key = ${scopeKey} and expires_at_ms > ${nowMs}`) as Array<Record<string, unknown>>;
 			const row = rows[0];
-			if (row === undefined) return null;
-			const directive = SteeringDirectiveSchema.safeParse(JSON.parse(String(row.directive_json)));
-			if (!directive.success) throw new RangeError("stored steering replay record does not hold a directive");
-			return {
-				scopeKey,
-				fingerprint: String(row.fingerprint),
-				directive: directive.data,
-				sequence: requiredInteger(row.sequence),
-				queuedAtMs: requiredInteger(row.queued_at_ms),
-				expiresAtMs: requiredInteger(row.expires_at_ms),
-			};
+			return row === undefined ? null : replayRecord(row, scopeKey);
 		},
-		async saveReplay(record: SteeringReplayRecord, nowMs: number, cap: number): Promise<void> {
-			await sql.begin(async (tx) => {
+		async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
+			return sql.begin(async (tx): Promise<SteeringReplayClaim> => {
 				await tx`delete from planning_steering_replay where expires_at_ms <= ${nowMs}`;
-				await tx`
+				const claimed = await tx`
 					insert into planning_steering_replay (scope_key, target_session_id, fingerprint, directive_json, sequence, queued_at_ms, expires_at_ms)
 					values (${record.scopeKey}, ${record.directive.targetSessionId}, ${record.fingerprint}, ${JSON.stringify(record.directive)}, ${record.sequence}, ${record.queuedAtMs}, ${record.expiresAtMs})
-					on conflict (scope_key) do nothing`;
+					on conflict (scope_key) do nothing
+					returning scope_key`;
+				if (claimed.length === 0) {
+					const rows = (await tx`
+						select fingerprint, directive_json, sequence, queued_at_ms, expires_at_ms
+						from planning_steering_replay
+						where scope_key = ${record.scopeKey}`) as Array<Record<string, unknown>>;
+					const held = rows[0];
+					if (held === undefined) throw new Error("a held replay claim could not be read");
+					return { claimed: false, held: replayRecord(held, record.scopeKey) };
+				}
+				await queue(tx);
 				await tx`
 					delete from planning_steering_replay
 					where scope_key in (
@@ -705,7 +710,22 @@ export function bunSteeringIdempotencyStore(sql: SQL): SteeringIdempotencyStore 
 						order by queued_at_ms desc, scope_key desc
 						offset ${cap}
 					)`;
+				return { claimed: true };
 			});
 		},
+	};
+}
+
+/** A replay row as the record it was saved as. A row whose directive does not parse is a driver fault, thrown. */
+function replayRecord(row: Record<string, unknown>, scopeKey: string): SteeringReplayRecord {
+	const directive = SteeringDirectiveSchema.safeParse(JSON.parse(String(row.directive_json)));
+	if (!directive.success) throw new RangeError("stored steering replay record does not hold a directive");
+	return {
+		scopeKey,
+		fingerprint: String(row.fingerprint),
+		directive: directive.data,
+		sequence: requiredInteger(row.sequence),
+		queuedAtMs: requiredInteger(row.queued_at_ms),
+		expiresAtMs: requiredInteger(row.expires_at_ms),
 	};
 }
