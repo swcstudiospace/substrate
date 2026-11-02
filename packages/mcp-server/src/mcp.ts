@@ -1187,7 +1187,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if (reserved !== null) return refusal(reserved);
 			const writeGate = await substrate.scopedWriteRefusal("events_emit", callerSurface, { repo: args.repo, graph_id: args.graph_id });
 			if (writeGate !== null) return { ...json(writeGate.body), isError: true };
-			const { event, stored, error, warning } = await substrate.emit({
+			const { event, stored, error, warning, buffered, deadLettered } = await substrate.emit({
 				...args,
 				surface: attribution.surface,
 			});
@@ -1198,6 +1198,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				stored,
 				...(error ? { error } : {}),
 				...(warning ? { warning } : {}),
+				...(buffered ? { buffered: true } : {}),
+				...(deadLettered ? { deadLettered: true } : {}),
 			});
 		},
 	);

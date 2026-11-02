@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
 	canonicalJson,
+	type ChainLink,
+	compareToAnchoredHead,
 	eventHash,
+	headRecordsFromLeaves,
 	inChainOrder,
 	InvalidEventError,
 	normalizeEvent,
 	normalizeIdentifier,
+	sha256Hex,
 	steeringSessionPayload,
 	type SteeringSession,
+	type StoredLeaf,
 	verifyChain,
 } from "./event.ts";
 import { REDACTED } from "./redact.ts";
@@ -393,5 +398,88 @@ describe("historical event payload compatibility", () => {
 		}, null);
 		expect(stored.session_id).toBe("historical-session-71");
 		expect(stored.payload).toEqual(payload);
+	});
+});
+
+describe("chain leaves and the anchored head (D73-02, D73-03)", () => {
+	const H10 = Date.UTC(2026, 8, 26, 10);
+	const hashOf = (text: string): string => sha256Hex(text);
+	const leaf = (seq: number, eventId: string, hash: string = hashOf(eventId)): StoredLeaf => ({
+		graph_id: "graph-a",
+		session_id: "s",
+		seq,
+		event_id: eventId,
+		hash,
+	});
+	const link = (id: string, prev: string | null = null): ChainLink => ({ id, hash: hashOf(id), storedHash: hashOf(id), prev });
+	const headOf = (stored: StoredLeaf[]) => {
+		const head = headRecordsFromLeaves(stored, H10)?.[0];
+		if (head === undefined) throw new Error("the leaves form no head");
+		return head;
+	};
+
+	const ids = ["evt_1", "evt_2", "evt_3", "evt_4"];
+	const leaves = ids.map((id, seq) => leaf(seq, id));
+	const head = headOf(leaves);
+	const intact = ids.map((id) => link(id));
+
+	test("an intact chain agrees with its anchored head", () => {
+		expect(compareToAnchoredHead(intact, leaves, head)).toEqual({ ok: true });
+	});
+
+	test("changing any stored event id changes the leaves root, so the leaves no longer reproduce the head", () => {
+		for (const seq of [0, 1, 2]) {
+			const forged = leaves.map((stored) => (stored.seq === seq ? { ...stored, event_id: "evt_forged" } : stored));
+			expect(headOf(forged).leavesRootHex).not.toBe(head.leavesRootHex);
+			expect(compareToAnchoredHead(intact, forged, head)).toMatchObject({ ok: false, kind: "stored-leaves-mismatch" });
+		}
+	});
+
+	test("a deleted middle event is first-missing at the deleted id", () => {
+		const without = intact.filter((event) => event.id !== "evt_2");
+		expect(compareToAnchoredHead(without, leaves, head)).toEqual({ ok: false, kind: "first-missing", eventId: "evt_2" });
+	});
+
+	test("a truncated tail is first-missing at the first absent event", () => {
+		const truncated = intact.filter((event) => event.id !== "evt_3" && event.id !== "evt_4");
+		expect(compareToAnchoredHead(truncated, leaves, head)).toEqual({ ok: false, kind: "first-missing", eventId: "evt_3" });
+	});
+
+	test("an edited payload is first-differing at the edited event", () => {
+		const edited = intact.map((event) => (event.id === "evt_2" ? { ...event, hash: hashOf("evt_2 edited") } : event));
+		expect(compareToAnchoredHead(edited, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_2" });
+	});
+
+	test("a row whose stored hash no longer matches its content is first-differing at that row", () => {
+		const rewritten = intact.map((event) => (event.id === "evt_3" ? { ...event, storedHash: hashOf("evt_3 rewritten") } : event));
+		expect(compareToAnchoredHead(rewritten, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_3" });
+	});
+
+	test("an event past the stored end is first-differing", () => {
+		const extended = [...intact, link("evt_5", hashOf("evt_4"))];
+		expect(compareToAnchoredHead(extended, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_5" });
+	});
+
+	test("two rows under one id are first-differing at that id", () => {
+		expect(compareToAnchoredHead([...intact, link("evt_2")], leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_2" });
+	});
+
+	test("in a later-hour slice a middle payload edit names that event, not an intact successor", () => {
+		// evt_a0 sorts before evt_m1 and its prev points at the edited event's old hash: an order built from changed hashes would start there.
+		const sliceLeaves = [leaf(0, "evt_m1"), leaf(1, "evt_m2"), leaf(2, "evt_a0")];
+		const sliceHead = headOf(sliceLeaves);
+		const sliceEvents: ChainLink[] = [
+			{ id: "evt_m1", hash: hashOf("evt_m1"), storedHash: hashOf("evt_m1"), prev: hashOf("previous hour") },
+			{ id: "evt_m2", hash: hashOf("evt_m2 edited"), storedHash: hashOf("evt_m2"), prev: hashOf("evt_m1") },
+			{ id: "evt_a0", hash: hashOf("evt_a0"), storedHash: hashOf("evt_a0"), prev: hashOf("evt_m2") },
+		];
+		expect(compareToAnchoredHead(sliceEvents, sliceLeaves, sliceHead)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_m2" });
+	});
+
+	test("a leaf with an empty event id is no head and does not throw", () => {
+		const blank = leaves.map((stored) => (stored.seq === 3 ? { ...stored, event_id: "" } : stored));
+		expect(() => headRecordsFromLeaves(blank, H10)).not.toThrow();
+		expect(headRecordsFromLeaves(blank, H10)).toBeNull();
+		expect(compareToAnchoredHead(intact, blank, head)).toMatchObject({ ok: false, kind: "stored-leaves-mismatch" });
 	});
 });

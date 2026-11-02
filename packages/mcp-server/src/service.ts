@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RedisClient } from "bun";
 import { canonicalJson, decideClaim, type AuditTransport, type ClaimDecision } from "@substrate/audit";
-import { acceptsSigner, createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import {
 	PLANES,
 	PlaneRegistry,
@@ -110,7 +110,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, type StoredLeaf, verifyChain, type SteeringSession } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -226,6 +226,8 @@ import type { FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
+import { DeadLetterStore } from "./event-dead-letter.ts";
+import { EVENT_BUFFER_TICK_MS, EventBuffer, type EventBufferEntry, type EventBufferStats, type EventDelivery, type EventEnqueue } from "./event-buffer.ts";
 import {
 	RecallPrefetcher,
 	BRIEF_RECALL_CAP_MS,
@@ -249,6 +251,7 @@ import {
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
 import { RepoAccess, requireComplete, startPreloader, type Preloader } from "./preload.ts";
+import { DEFAULT_RECONCILE_CAPS, runReport } from "./reconcile-run.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -640,6 +643,13 @@ export interface EmitResult {
 	deduplicated?: true;
 	/** Set (with `stored: false`) when the idempotency lookup itself failed: nothing was written and the event is not in the ledger. */
 	lookupFailed?: true;
+	/**
+	 * Set (with `stored: false`) when the write failed and the event is held for retry. It will be written, or given up with a
+	 * dead-letter record, and never silently. Nothing is in the ledger yet.
+	 */
+	buffered?: true;
+	/** Set (with `stored: false`) when the write failed and the event could not be held either: it was given up at once, with a dead-letter record. */
+	deadLettered?: true;
 }
 
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
@@ -702,6 +712,13 @@ export interface HourDigest {
  * closed yet); `unanchored`, `mismatch` and `unverified` all fail the verify.
  */
 export type HourStatus = "anchored" | "pending" | "unanchored" | "mismatch" | "unverified";
+/** One (graph, session) pair in one hour: whether its chain matches its stored head, and the first event where it parts if not (D73-03). */
+export interface HeadPairReport {
+	session_id: string;
+	trusted: boolean;
+	first_differing_event_id?: string;
+	first_missing_event_id?: string;
+}
 export interface HourReport {
 	period_start: string;
 	period_end: string;
@@ -711,6 +728,15 @@ export interface HourReport {
 	tx_sig?: string;
 	slot?: number;
 	reason?: string;
+	/** The on-chain heads root of a v2 memo (D73-01); absent for a v1 memo and for hours not anchored. */
+	heads_root?: string;
+	/** Whether this hour's anchored heads are trusted (D73-04); set on every hour the verify reports. */
+	trusted?: boolean;
+	trusted_reason?: string;
+	/** Each (graph, session) pair of this graph in the hour, against its own stored head (D73-03). */
+	pairs?: HeadPairReport[];
+	/** True when the ledger or the stored leaves contradict this hour's anchored head: a tamper, not a missing proof (D73-03). */
+	head_failed?: boolean;
 }
 /** The additive verify verdict: the chain fields keep their meaning (D28-14). */
 export interface VerifyVerdict {
@@ -730,6 +756,10 @@ export interface VerifyVerdict {
 	 * racing the two reads is not an entry: the re-read finds its row.
 	 */
 	missing: { count: number; ids: string[] };
+	/** True only when every hour holds its anchored heads (D73-04): the on-chain heads root is reproduced and each pair's chain matches its stored head. */
+	trusted: boolean;
+	/** The first untrusted hour's reason, or the reason every hour is trusted. */
+	trusted_reason: string;
 }
 /** Options for {@link Substrate.verifyGraph}. The evidence bundle asks for the hour report; `anchors: false` is the chain-only read. */
 export interface VerifyOptions {
@@ -1506,6 +1536,10 @@ export class Substrate {
 	private readonly retrievalRecorder: RetrievalRecorder;
 	/** Stops the hourly retrieval-retention sweep; null while it is not running. */
 	private retrievalSweepStop: (() => void) | null = null;
+	/** Stops the scheduled reconcile (`SUBSTRATE_RECONCILE_INTERVAL_S`); null while it is off or stopped. */
+	private reconcileStop: (() => void) | null = null;
+	/** The scheduled reconcile pass in flight, so a tick while one runs starts nothing. */
+	private reconcilePass: Promise<void> | null = null;
 	/** Re-rank shadow runs since this process started, and the corpus positions they would have moved. */
 	private readonly shadowCounts = { searches: 0, moved: 0 };
 	private corpusRootKeeper: CorpusRootKeeper | null = null;
@@ -1525,6 +1559,11 @@ export class Substrate {
 	private readonly retainOutbox: RetainOutbox;
 	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
 	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
+	// phase 76 — the telemetry buffer and its dead-letter store, both absent unless SUBSTRATE_EVENT_BUFFER_PATH is set
+	/** Events the ledger did not take, held for retry with backoff, and the store that records the ones given up for good. */
+	private readonly eventBufferStores: { buffer: EventBuffer; deadLetters: DeadLetterStore } | null;
+	/** The interval drain, started while the buffer holds entries and left unref'd so it never holds the process. */
+	private eventDrainTimer: ReturnType<typeof setInterval> | null = null;
 	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
 	private retainRecoverPending = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
@@ -1902,6 +1941,25 @@ export class Substrate {
 			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
 		});
 		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
+		// Phase 76: the telemetry buffer, on only when SUBSTRATE_EVENT_BUFFER_PATH is set. The dead-letter store is built first, because
+		// the buffer gives entries up to it while it loads its file.
+		const eventBuffer = config.eventBuffer;
+		if (eventBuffer === null) {
+			this.eventBufferStores = null;
+		} else {
+			const deadLetters = new DeadLetterStore({ path: eventBuffer.deadLetterPath });
+			const buffer = new EventBuffer({
+				path: eventBuffer.path,
+				max: eventBuffer.max,
+				maxAttempts: eventBuffer.maxAttempts,
+				backoffMs: eventBuffer.backoffMs,
+				backoffCapMs: eventBuffer.backoffCapMs,
+				allow: () => this.planes.gate("greptime").breaker?.state() !== "open",
+				onDeadLetter: (entry, reason) => deadLetters.record(entry, reason),
+			});
+			this.eventBufferStores = { buffer, deadLetters };
+			if (buffer.size() > 0) this.ensureEventDrainTimer();
+		}
 		// uplift-4 S5: the recall prefetcher (inert unless SUBSTRATE_BRIEF_RECALL is shadow or enforce) and the
 		// read-only Hindsight inventory (inert unless SUBSTRATE_HINDSIGHT_INVENTORY=on). Neither starts a timer here.
 		this.recall = new RecallPrefetcher({
@@ -2808,13 +2866,21 @@ export class Substrate {
 		// is still in flight (U5-4a). Keyless sessionless events, and everything under `off`, never wait.
 		const turnKey = sessionId ?? (idem?.key != null ? `${KEY_TURN_PREFIX}${idem.key}` : null);
 		if (!this.greptime || turnKey === null) return this.appendChained(input, sessionId, idem);
+		return this.withSessionTurn(turnKey, () => this.appendChained(input, sessionId, idem));
+	}
+
+	/**
+	 * Runs `fn` as the next turn of `turnKey`: after every earlier turn of that key has settled, and before any later one starts.
+	 * Appends and buffer deliveries of one session share a key, so a delivery never interleaves with an append that reads the tip.
+	 */
+	private async withSessionTurn<T>(turnKey: string, fn: () => Promise<T>): Promise<T> {
 		const previous = this.emitChains.get(turnKey) ?? Promise.resolve();
 		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
 		const tail = previous.then(() => gate);
 		this.emitChains.set(turnKey, tail);
 		await previous;
 		try {
-			return await this.appendChained(input, sessionId, idem);
+			return await fn();
 		} finally {
 			done();
 			if (this.emitChains.get(turnKey) === tail) this.emitChains.delete(turnKey);
@@ -2872,10 +2938,15 @@ export class Substrate {
 	}
 
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
+		const stores = this.eventBufferStores;
+		// A keyed replay is answered from the ledger first: a row that landed is the answer, whatever the buffer holds. Only a replay
+		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write.
 		if (idem?.lookup && idem.key !== null && this.greptime) {
 			const settled = await this.replayOutcome(input, idem.key);
 			if (settled !== null) return settled;
 		}
+		const waiting = idem?.key != null && stores !== null ? stores.buffer.findKeyed(input.surface, idem.key) : null;
+		if (waiting !== null) return { event: waiting.event, stored: false, buffered: true, error: waiting.last_reason };
 		let prev: string | null = null;
 		let tipError: string | null = null;
 		if (this.greptime && sessionId) {
@@ -2887,7 +2958,9 @@ export class Substrate {
 				tipError = redact(String(cause));
 			}
 		}
-		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
+		const build = (chainPrev: string | null): SubstrateEvent =>
+			idem === null ? normalizeEvent(input, chainPrev) : normalizeEvent(input, chainPrev, { key: idem.key });
+		const event = build(prev);
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 		if (tipError !== null) {
 			process.stderr.write(`[substrate] event ${event.id} not stored — chain tip unreadable: ${tipError}\n`);
@@ -2901,6 +2974,20 @@ export class Substrate {
 			const error = appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN;
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
+		}
+
+		const key = idem?.key ?? null;
+		// An earlier event of this session is still waiting for the ledger, so this one waits behind it. Written now, it would land
+		// first, and the buffered event's link would name a row that is not there yet.
+		if (stores !== null && sessionId !== null && stores.buffer.hasSession(sessionId)) {
+			return this.bufferEvent(stores.buffer, {
+				session: sessionId,
+				key,
+				ledgerPrev: prev,
+				build,
+				last_reason: "waiting behind an earlier buffered event of this session",
+				attempts: 0,
+			});
 		}
 
 		try {
@@ -2918,9 +3005,90 @@ export class Substrate {
 					warning: appendOnly !== true ? `${INGEST_NOT_RECORDED} ${DEDUP_WARNING}` : INGEST_NOT_RECORDED,
 				};
 			}
-			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
-			return { event, stored: false, error };
+			// The write failed. With the buffer on, nothing of this session waits ahead of it, so the event is held for retry rather than
+			// given up. `event` was built on the ledger's tip, which nothing of the session can have moved since the check above.
+			if (stores === null) {
+				process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
+				return { event, stored: false, error };
+			}
+			return this.bufferEvent(stores.buffer, { session: sessionId, key, ledgerPrev: prev, build: () => event, last_reason: error, attempts: 1 });
 		}
+	}
+
+	/**
+	 * Hands an event the substrate could not write to the buffer. The answer is `buffered` (it will be written, or given up with a
+	 * dead-letter record) or `deadLettered` (it was given up at once). Neither is `stored`: nothing is in the ledger yet.
+	 */
+	private bufferEvent(buffer: EventBuffer, request: EventEnqueue): EmitResult {
+		const outcome = buffer.enqueue(request);
+		if (!outcome.buffered) return { event: outcome.entry.event, stored: false, deadLettered: true, error: request.last_reason };
+		this.ensureEventDrainTimer();
+		process.stderr.write(`[substrate] event ${outcome.entry.event.id} buffered for retry — ${request.last_reason}\n`);
+		return { event: outcome.entry.event, stored: false, buffered: true, error: request.last_reason };
+	}
+
+	/**
+	 * One delivery attempt for a buffered event, run inside its session's turn. `mayExist` keeps a retry after an ambiguous write
+	 * from storing the row twice. An ingest record that could not be confirmed is reported as stored on the direct path too, so the
+	 * row being stored is the outcome that counts here.
+	 */
+	private async deliverBuffered(entry: EventBufferEntry): Promise<EventDelivery> {
+		const greptime = this.greptime;
+		if (!greptime) return { transient: "GREPTIME_URL is not set" };
+		const appendOnly = await greptime.ensureAppendMode().catch(() => null);
+		if (appendOnly !== true && !this.config.allowDeduplicatingLedger) {
+			return { transient: appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN };
+		}
+		try {
+			await greptime.insertEvent(entry.event, { mayExist: true });
+		} catch (cause) {
+			if (!(cause instanceof IngestNotRecorded)) return { transient: redact(String(cause)).slice(0, 200) };
+			process.stderr.write(`[substrate] event ${entry.event.id} landed; ingest record unconfirmed — ${redact(String(cause))}\n`);
+		}
+		this.publishHint(entry.event);
+		return "landed";
+	}
+
+	/** One attempt, run in the event's session turn so it cannot interleave with an append that reads the same tip. */
+	private deliverBufferedInTurn(entry: EventBufferEntry): Promise<EventDelivery> {
+		const session = entry.event.session_id;
+		return session === null ? this.deliverBuffered(entry) : this.withSessionTurn(session, () => this.deliverBuffered(entry));
+	}
+
+	/** Replays the buffer's due entries once. `all` ignores the backoff schedule, as shutdown and tests need. */
+	drainEventBuffer(options: { all?: boolean } = {}): Promise<void> {
+		const stores = this.eventBufferStores;
+		if (stores === null) return Promise.resolve();
+		return stores.buffer.drain((entry) => this.deliverBufferedInTurn(entry), options).finally(() => {
+			if (stores.buffer.size() === 0) this.stopEventDrain();
+		});
+	}
+
+	/**
+	 * Shutdown (phase 76): one bounded pass over the buffer. With `abandon` the periodic drain stops, and a buffer whose file is not
+	 * current gives up what is left, each entry with its dead-letter record. A durable buffer keeps its entries for the next boot.
+	 */
+	async drainPendingEvents(timeoutMs: number, options: { abandon?: boolean } = {}): Promise<void> {
+		const stores = this.eventBufferStores;
+		if (stores === null) return;
+		if (stores.buffer.size() > 0) await Promise.race([this.drainEventBuffer({ all: true }), Bun.sleep(timeoutMs)]);
+		if (options.abandon === true) this.stopEventDrain();
+		if (options.abandon === true && !stores.buffer.durable) stores.buffer.abandonAll();
+	}
+
+	private ensureEventDrainTimer(): void {
+		if (this.eventDrainTimer !== null) return;
+		this.eventDrainTimer = setInterval(() => {
+			void this.drainEventBuffer();
+		}, EVENT_BUFFER_TICK_MS);
+		this.eventDrainTimer.unref();
+	}
+
+	/** Stops the periodic drain. The timer is unref'd, but a Substrate rebuilt in the same process would otherwise leak one interval per boot. */
+	private stopEventDrain(): void {
+		if (this.eventDrainTimer === null) return;
+		clearInterval(this.eventDrainTimer);
+		this.eventDrainTimer = null;
 	}
 
 	/**
@@ -3815,15 +3983,67 @@ export class Substrate {
 		}
 	}
 
-	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
+	/** Start the recall prefetch, the Hindsight inventory, the scheduled reconcile (phase 78) and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
 	startRecall(): { recall: boolean; inventory: boolean } {
 		this.startPreload();
+		this.startReconcile();
 		return { recall: this.recall.start(), inventory: this.hindsightInventory.start() };
 	}
 
-	/** Clear both timers and wait, bounded, for the work in flight. No final refresh: the snapshot is cache-only. */
+	/** Clear the recall, Hindsight inventory and reconcile timers, and wait, bounded, for the recall work in flight. No final refresh: the snapshot is cache-only. */
 	async stopRecall(): Promise<void> {
+		this.stopReconcile();
 		await Promise.all([this.recall.stop(), this.hindsightInventory.stop()]);
+	}
+
+	/**
+	 * Start the scheduled reconcile (Phase 78, D78-7): one unref'd interval at `SUBSTRATE_RECONCILE_INTERVAL_S`, and nothing while it is 0.
+	 * Each tick is one read-only run. Idempotent.
+	 */
+	startReconcile(): boolean {
+		const { intervalS, windowHours } = this.config.reconcile;
+		if (this.reconcileStop !== null || intervalS <= 0) return false;
+		const handle = setInterval(() => void this.reconcileTick(), intervalS * 1000);
+		handle.unref();
+		this.reconcileStop = () => clearInterval(handle);
+		process.stdout.write(`[substrate] reconcile: every ${intervalS} s, window ${windowHours} h, read-only\n`);
+		return true;
+	}
+
+	/** Clear the scheduled reconcile's timer. A run in flight finishes on its own; it writes nothing on the way out. */
+	stopReconcile(): void {
+		this.reconcileStop?.();
+		this.reconcileStop = null;
+	}
+
+	/** One scheduled run, single-flight: a tick while a run is in flight starts nothing. Never rejects. */
+	private reconcileTick(): Promise<void> {
+		this.reconcilePass ??= this.runScheduledReconcile().finally(() => {
+			this.reconcilePass = null;
+		});
+		return this.reconcilePass;
+	}
+
+	/** One read-only reconcile over the ledger, the index and the cache: one JSON log line on success, a stderr line on failure. */
+	private async runScheduledReconcile(): Promise<void> {
+		if (this.greptime === null || this.index === null) {
+			process.stderr.write("[substrate] reconcile: skipped, the ledger and the index are both needed\n");
+			return;
+		}
+		try {
+			const report = await runReport({
+				ledger: this.greptime,
+				index: this.index,
+				cache: this.cache,
+				now: new Date(),
+				windowHours: this.config.reconcile.windowHours,
+				caps: DEFAULT_RECONCILE_CAPS,
+			});
+			const line = { schema: report.schema, generated_at: report.generated_at, clean: report.clean, counts: report.counts, truncated: report.truncated, unchecked_layers: report.unchecked_layers, first: report.first };
+			process.stdout.write(`[substrate] reconcile ${JSON.stringify(line)}\n`);
+		} catch (cause) {
+			process.stderr.write(`[substrate] reconcile: run failed — ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+		}
 	}
 
 	/** Start the cache preloader (phase 47): one unref'd interval, and nothing while `SUBSTRATE_CACHE_PRELOAD` is off or it is already running. */
@@ -7575,7 +7795,7 @@ export class Substrate {
 		// before the event read — not when the hour loop starts — and every
 		// hour's allowance below is what's left of it.
 		const verifyStartedAt = Date.now();
-		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] } };
+		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] }, trusted: false, trusted_reason: "greptime not configured" };
 		// Read by the graph id in its stored form, for the same reason `emit` looks
 		// the session up by its normalised one.
 		const stored = normalizeIdentifier(graphId) ?? graphId;
@@ -7611,6 +7831,8 @@ export class Substrate {
 			uncovered: { count: 0, ids: [] },
 			legacy: { count: 0, ids: [] },
 			missing: { count: 0, ids: [] },
+			trusted: false,
+			trusted_reason: "anchor check skipped (anchors: false)",
 		};
 		if (!withAnchors) return emptyHours;
 		return this.hourReport(stored, rows, chain, now, opts.rpc, verifyStartedAt);
@@ -7755,6 +7977,15 @@ export class Substrate {
 		// throws naming the missing member instead of passing unseen.
 		for (const record of ingest) {
 			const hour = hourStart(record.ingested_at);
+			if (!byHour.has(hour)) byHour.set(hour, []);
+		}
+		// Hours that hold this graph's chain leaves are checked even when every event row and ingest record in them is gone: a trailing
+		// hour deleted outright is then still expected, and its leaves name what it lost. Anchors are one row per hour for the whole
+		// store, so only the leaves name this graph's hours.
+		const leafRead = await outcomeWithin(() => greptime.graphChainLeafHours(storedGraphId), Math.max(0, budgetMs - (Date.now() - startedAt) - margin));
+		// A read that throws is a store failure, and one that outlasts the budget is budget exhausted. Either way the hours found so far are still reported, and the verdict names the reason.
+		const leavesUnreadable: string | null = leafRead.kind === "answer" ? null : leafRead.kind === "timeout" ? "budget exhausted" : "store-failed";
+		for (const hour of leafRead.kind === "answer" ? leafRead.value : []) {
 			if (!byHour.has(hour)) byHour.set(hour, []);
 		}
 	// Retained ingest events with no event row in this graph's read
@@ -7953,18 +8184,26 @@ export class Substrate {
 		}
 		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, signers, remaining - margin));
 	}
+	for (const [i, report] of hours.entries()) {
+		const hour = Date.parse(report.period_start);
+		hours[i] = await this.trustHour(report, hour, byHour.get(hour) ?? [], rows, storedGraphId, budgetMs - (Date.now() - startedAt) - margin);
+	}
 
 	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
-	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0;
+	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0 && leavesUnreadable === null;
 	const reason = !chain.ok
 		? chain.reason
-		: uncovered.length > 0
-			? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
-			: missing.length > 0
-				? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
-				: failing
-					? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
-					: undefined;
+		: leavesUnreadable !== null
+			? leavesUnreadable
+			: uncovered.length > 0
+				? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
+				: missing.length > 0
+					? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
+					: failing
+						? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
+						: undefined;
+	const untrustedHour = hours.find((hour) => hour.trusted !== true);
+	const anchoredHours = hours.filter((hour) => hour.status === "anchored");
 	return {
 		ok,
 		events: rows.length,
@@ -7975,7 +8214,116 @@ export class Substrate {
 		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
 		legacy: { count: legacy.length, ids: [...legacy].sort() },
 		missing: { count: missing.length, ids: [...missing] },
+		trusted: leavesUnreadable === null && rows.length > 0 && anchoredHours.length > 0 && untrustedHour === undefined,
+		trusted_reason: leavesUnreadable !== null
+			? leavesUnreadable
+			: rows.length === 0
+				? "no events"
+				: anchoredHours.length === 0
+					? "no anchored hour"
+					: untrustedHour === undefined
+						? "every hour is trusted"
+						: `hour ${untrustedHour.period_start}: ${untrustedHour.trusted_reason ?? "not trusted"}`,
 	};
+	}
+
+	/**
+	 * D73-03 and D73-04 for one hour of one graph. Only the on-chain heads root of a signed v2 memo is trusted: the stored leaves of every
+	 * graph in the hour must reproduce it, and only then is each of this graph's (graph, session) pairs walked against its own stored
+	 * head. A head recomputed from ledger rows is never trusted, and an hour that cannot be checked says why. A `mismatch` hour whose
+	 * memo was signed is still compared, because the rows are what changed and the stored leaves say what they lost; such an hour is
+	 * untrusted whatever the comparison finds.
+	 */
+	private async trustHour(
+		report: HourReport,
+		hour: number,
+		members: readonly string[],
+		rows: Array<Record<string, unknown>>,
+		storedGraphId: string,
+		allowanceMs: number,
+	): Promise<HourReport> {
+		// A head the stored leaves contradict makes the hour a `mismatch`, which is what the verdict's `ok` reads. An hour's own reason is kept.
+		const untrusted = (reason: string, headFailed = false): HourReport =>
+			headFailed
+				? { ...report, status: "mismatch", reason: report.reason ?? reason, trusted: false, trusted_reason: reason, pairs: [], head_failed: true }
+				: { ...report, trusted: false, trusted_reason: reason, pairs: [] };
+		if (allowanceMs <= 0) return untrusted("budget exhausted");
+		if (report.status !== "anchored" && report.status !== "mismatch") return untrusted(`hour is ${report.status}: no anchored head to trust`);
+		if (report.heads_root === undefined) {
+			return untrusted(
+				report.status === "anchored" ? "anchored with a v1 memo: no heads commitment on chain" : "hour is mismatch: its memo carries no verified heads commitment",
+			);
+		}
+		const onChainHeadsRoot = report.heads_root;
+		const greptime = this.greptime;
+		if (!greptime) throw new Error("GREPTIME_URL is not set");
+		// A read that outlasts the allowance is budget exhausted; a read that throws is a store failure. Neither claims trust.
+		const outcome = Promise.withResolvers<{ kind: "read"; leaves: StoredLeaf[] } | { kind: "failed" } | { kind: "expired" }>();
+		const timer = setTimeout(() => outcome.resolve({ kind: "expired" }), Math.max(0, allowanceMs));
+		timer.unref?.();
+		greptime.hourChainLeaves(hour).then(
+			(leaves) => {
+				clearTimeout(timer);
+				outcome.resolve({ kind: "read", leaves });
+			},
+			() => {
+				clearTimeout(timer);
+				outcome.resolve({ kind: "failed" });
+			},
+		);
+		const read = await outcome.promise;
+		if (read.kind === "expired") return untrusted("budget exhausted");
+		if (read.kind === "failed") return untrusted("store-failed");
+		const leaves = read.leaves;
+		// The trust computation runs over stored bytes that may be malformed. Whatever it throws is an untrusted result, never an escape.
+		try {
+			const records = headRecordsFromLeaves(leaves, hour);
+			if (records === null || records.length === 0 || headsRoot(records) !== onChainHeadsRoot) {
+				return untrusted("stored leaves do not reproduce the on-chain heads root", true);
+			}
+			const inHour = new Set(members);
+			const events = rows.filter((row) => inHour.has(String(row.id))).map(rowToEvent);
+			const sessions = [
+				...new Set([
+					...records.filter((record) => record.graphId === storedGraphId).map((record) => record.sessionId),
+					...events.map((event) => event.session_id ?? ""),
+				]),
+			].sort();
+			const pairs: HeadPairReport[] = [];
+			for (const session of sessions) {
+				// The content hash the chain recomputes, not the stored column: an edited payload then shows where it parts from its leaf.
+				const links = events
+					.filter((event) => (event.session_id ?? "") === session)
+					.map((event) => {
+						const { hash: _stored, ...content } = event;
+						return { id: event.id, hash: eventHash(content), prev: event.prev, storedHash: event.hash };
+					});
+				const record = records.find((candidate) => candidate.graphId === storedGraphId && candidate.sessionId === session);
+				if (record === undefined) {
+					// No anchored head covers these events, so nothing on chain vouches for them: the chain's first event is where it leaves the anchor.
+					const first = inChainOrder([...links].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))[0];
+					pairs.push({ session_id: session, trusted: false, ...(first === undefined ? {} : { first_differing_event_id: first.id }) });
+					continue;
+				}
+				const pairLeaves = leaves.filter((leaf) => leaf.graph_id === storedGraphId && leaf.session_id === session);
+				const result = compareToAnchoredHead(links, pairLeaves, record);
+				if (result.ok) pairs.push({ session_id: session, trusted: true });
+				else if (result.kind === "stored-leaves-mismatch") return untrusted(result.reason, true);
+				else if (result.kind === "first-missing") pairs.push({ session_id: session, trusted: false, first_missing_event_id: result.eventId });
+				else pairs.push({ session_id: session, trusted: false, first_differing_event_id: result.eventId });
+			}
+			const failing = pairs.find((pair) => !pair.trusted);
+			if (failing === undefined) {
+				return report.status === "anchored"
+					? { ...report, trusted: true, trusted_reason: "every session's chain matches its anchored head", pairs }
+					: { ...report, trusted: false, trusted_reason: `hour is mismatch: ${report.reason ?? "not confirmed"}`, pairs };
+			}
+			const where = failing.first_missing_event_id !== undefined ? `missing ${failing.first_missing_event_id}` : `differs at ${failing.first_differing_event_id ?? ""}`;
+			const reason = `session ${failing.session_id} ${where}`;
+			return { ...report, status: "mismatch", reason: report.reason ?? reason, trusted: false, trusted_reason: reason, pairs, head_failed: true };
+		} catch (cause) {
+			return untrusted(`the anchored head could not be compared: ${redact(String(cause))}`);
+		}
 	}
 
 	/**
@@ -8026,12 +8374,28 @@ export class Substrate {
 	}
 
 	/**
+	 * The hour's recomputed digest, or the reason it cannot be made. A digest with no root (no members) has nothing to compare a
+	 * signed memo with, so it is a fault too.
+	 */
+	private async hourDigestOrFault(hour: number, now: number): Promise<{ digest: HourDigest } | { fault: string }> {
+		try {
+			const digest = await this.hourDigest(hour, now);
+			return digest.root === null ? { fault: "hour holds graph events but digests empty" } : { digest };
+		} catch (cause) {
+			return { fault: redact(String(cause)) };
+		}
+	}
+
+	/**
 	 * Check one distinct hour: digest whole, then resolve to its D28-15 status.
 	 *
 	 * The memo bytes cross from devnet untrusted: every field is re-checked,
 	 * never trusted. Anything devnet-shaped but wrong — signer, period, root,
 	 * count, row disagreement — is `mismatch`; anything unreadable is
-	 * `unverified`, fail-closed, never `anchored`.
+	 * `unverified`, fail-closed, never `anchored`. A digest that cannot be made
+	 * is a `mismatch` as well, but the memo is still read and verified: a signed
+	 * memo's heads root is what {@link trustHour} checks the stored leaves
+	 * against, so the damage to the rows is named there rather than hidden.
 	 */
 	private async checkHour(
 		hour: number,
@@ -8049,15 +8413,8 @@ export class Substrate {
 		if (!isClosed(hour, now, INGEST_LAG_MS)) {
 			return { period_start, period_end, status: "pending", event_count: memberCount, root: null };
 		}
-		let digest: HourDigest;
-		try {
-			digest = await this.hourDigest(hour, now);
-		} catch (cause) {
-			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, reason: redact(String(cause)) };
-		}
-		if (digest.root === null) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: null, reason: "hour holds graph events but digests empty" };
-		}
+		const recomputed = await this.hourDigestOrFault(hour, now);
+		const shown = "digest" in recomputed ? { event_count: recomputed.digest.event_count, root: recomputed.digest.root } : { event_count: 0, root: null };
 		const greptime = this.greptime;
 		if (!greptime) throw new Error("GREPTIME_URL is not set");
 		const stored = await greptime.anchorForPeriod(hour);
@@ -8069,73 +8426,97 @@ export class Substrate {
 			} catch (cause) {
 				// The notes could not all be read, so judging the stored row could pass over a newer pointer: unverified, with the reason.
 				if (cause instanceof ReanchorReadIncomplete) {
-					return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: stored.tx_sig, reason: redact(cause.message) };
+					return { period_start, period_end, status: "unverified", ...shown, tx_sig: stored.tx_sig, reason: redact(cause.message) };
 				}
 				throw cause;
 			}
 		}
 		if (!row) {
+			if ("fault" in recomputed) return { period_start, period_end, status: "mismatch", event_count: 0, root: null, reason: recomputed.fault };
 			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
-				return { period_start, period_end, status: "pending", event_count: digest.event_count, root: digest.root };
+				return { period_start, period_end, status: "pending", ...shown };
 			}
-			return { period_start, period_end, status: "unanchored", event_count: digest.event_count, root: digest.root, reason: "no anchors row 3 h after the hour closed" };
+			return { period_start, period_end, status: "unanchored", ...shown, reason: "no anchors row 3 h after the hour closed" };
 		}
 		if (!pubkey) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
 		}
 		let genesis: string;
 		try {
 			genesis = await readRpc().getGenesisHash();
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: redact(String(cause)) };
 		}
 		if (genesis !== DEVNET_GENESIS_HASH) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "RPC genesis hash is not devnet's" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "RPC genesis hash is not devnet's" };
 		}
 		let memo: TransactionMemo | null;
 		try {
 			memo = await readRpc().transactionMemo(row.tx_sig, "confirmed");
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: redact(String(cause)) };
 		}
 		if (!memo) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction not found on devnet" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "transaction not found on devnet" };
 		}
 		if (!memo.memo) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
 		}
 		// The signer is judged the way `checkpoint_verify` judges it: by the signer set at the transaction's own block time, so an hour a
 		// key signed before a rotation stays valid after the job key moved on, and a key outside its window is not accepted.
 		if (!memo.payerSigned) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
 		}
 		const signerFault = await judgeSigner(memo, signers);
 		// A proven signer fault is final. An UNVERIFIABLE signer (no block time yet, an incomplete rotation read, an unbuildable set)
 		// waits for the content checks below: a transaction that already disagrees with the ledger is a mismatch whatever its signer,
 		// and that known cause must not be hidden behind the missing time (`checkpoint_verify` ranks proven disagreements first).
 		if (signerFault !== null && signerFault.status === "mismatch") {
-			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
+			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
 		if (memo.err !== null && memo.err !== undefined) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
 		}
 		const parsed = parseMemo(memo.memo);
 		if (!parsed) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not a v1 anchor memo" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "memo is not a v1 or v2 anchor memo" };
 		}
 		if (parsed.periodStartMs !== hour) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
 		}
+		// A memo signed by an accepted key for this hour commits to its heads, whatever the rows now say: trustHour checks the stored
+		// leaves against that root. An unaccepted signer carries no such commitment.
+		const signedHeads = signerFault === null && parsed.headsRootHex !== undefined ? { heads_root: parsed.headsRootHex } : {};
+		if ("fault" in recomputed) {
+			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, tx_sig: row.tx_sig, reason: recomputed.fault, ...signedHeads };
+		}
+		const { digest } = recomputed;
 		if (parsed.rootHex !== digest.root || parsed.count !== digest.event_count) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `chain root ${parsed.rootHex}/${parsed.count} != recomputed ${digest.root}/${digest.event_count}` };
+			return {
+				period_start,
+				period_end,
+				status: "mismatch",
+				...shown,
+				tx_sig: row.tx_sig,
+				reason: `chain root ${parsed.rootHex}/${parsed.count} != recomputed ${digest.root}/${digest.event_count}`,
+				...signedHeads,
+			};
 		}
 		if (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo", ...signedHeads };
 		}
 		if (signerFault !== null) {
-			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
+			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
-		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
+		return {
+			period_start,
+			period_end,
+			status: "anchored",
+			...shown,
+			tx_sig: row.tx_sig,
+			...(memo.slot !== null ? { slot: memo.slot } : {}),
+			...(parsed.headsRootHex !== undefined ? { heads_root: parsed.headsRootHex } : {}),
+		};
 	}
 
 	/** Which planes have configuration, so `/slo` can tell "unconfigured" from "silent". */
@@ -8268,6 +8649,8 @@ export class Substrate {
 			// change its status code when the cache is down.
 			cache,
 			eventBus: this.eventBusHealth(),
+			// Phase 76: depths and durability, read from memory. Reported, never gating.
+			eventBuffer: this.eventBufferStores === null ? { enabled: false } : { enabled: true, ...this.eventBufferStores.buffer.stats(), deadLetter: { depth: this.eventBufferStores.deadLetters.depth(), durable: this.eventBufferStores.deadLetters.durable } },
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
@@ -8717,6 +9100,8 @@ export interface SubstrateHealth {
 	cache: CacheHealth;
 	/** Phase 50: the wake-up bus's counters, `{ enabled: false }` while it is off. */
 	eventBus: EventBusHealth;
+	/** Phase 76: the telemetry buffer's depths, or `{ enabled: false }` while it is off. Reported, never gating. */
+	eventBuffer: EventBufferHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
@@ -8725,6 +9110,9 @@ export interface SubstrateHealth {
 
 /** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */
 export type EventBusHealth = { enabled: false } | { enabled: true; published: number; failed: number; oversize: number; malformed: number };
+
+/** `/healthz.eventBuffer` (phase 76): `{ enabled: false }` while `SUBSTRATE_EVENT_BUFFER_PATH` is unset. Otherwise the events waiting for the ledger and the dead-letter store: depths and durability only, and nothing here changes the status code. */
+export type EventBufferHealth = { enabled: false } | ({ enabled: true; deadLetter: { depth: number; durable: boolean } } & EventBufferStats);
 
 /** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
 export interface IndexArchiveHealth {

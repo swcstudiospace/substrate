@@ -542,6 +542,38 @@ hour forever, so the rehearsal harness never carries `SOLANA_*` names.
 
 The signer set is the bootstrap set (`SUBSTRATE_ANCHOR_SIGNER_SET` when set, else the configured anchor key `SOLANA_ANCHOR_PUBKEY` alone) plus the `anchor.signer.rotate` notes an operator surface wrote (read by paging each operator surface's notes, 500 a page, at most 50 pages, keeping only the rotation action); when that read is cut by the cap, cannot advance or fails, a signer is not provably current: the answer carries `signer_set_complete: false` and an anchor that would verify, or a mismatch that only the signer set explains, is reported `unverified` with reason `rotation-read-incomplete`, never `anchored`. A signer whose window closed at or before the anchored hour started is a `mismatch` with reason `signer-retired` (the read was complete, so the signature is known to be by a key that no longer spoke for the ledger; `substrate session rollback` refuses on it unless `--force`). A malformed `SUBSTRATE_ANCHOR_SIGNER_SET` answers `unverified` with a fixed reason (the boot warning names the rule and field, never the value). Every answer that judged a signer carries `signer_set: {source, entries, rotation_notes_applied, rotation_issues, read_gap}` (`checkpoint_verify` and `memory_verify`), so an ignored rotation note or a truncated read is visible; see `docs/runbooks/anchor-signer-rotation.md`. A `ckpt_id` is found in the newest 500 notes of `session_id`, else of the caller's surface in the last seven days (the ledger has no read by payload); an older or foreign checkpoint needs its `event_id`. The evidence is hashes, the proof path, public keys and the transaction signature only, never event contents.
 
+### Memo v2 and per-graph heads
+
+From phase 73 a new hour is anchored with memo v2:
+
+```
+substrate:v2:<hour start>:<root>:<count>:<headsRoot>
+```
+
+- `<root>` and `<count>` are the v1 commitment, unchanged: the RFC 6962 root over the hour's event hashes, in ingest order.
+- `<headsRoot>` is the RFC 6962 root over one head record per `(graph_id, session_id)` pair that wrote events in the hour, sorted by that pair (`packages/ledger/src/heads.ts`). A record hashes the canonical JSON of `[graphId, sessionId, periodStartMs, count, leavesRootHex, headEventId, headHashHex]` with SHA-256. `leavesRootHex` is the RFC 6962 root over one leaf per event of the pair, in chain order, where each leaf is the SHA-256 (lowercase hex) of the JSON `[event_id, hash]` for that event. Each leaf commits to the event id as well as its hash, so a stored `event_id` cannot change unseen. The head is the pair's last event in chain order. A missing `session_id` is `""`.
+
+**`graph_chain_leaves`** holds one row per event: `period_start`, `graph_id`, `session_id`, `seq` (the chain position from 0), `event_id`, `hash`. It is append-only with no primary key, so a retried write can store a row twice. Reads collapse exact duplicates; two rows that disagree about one `seq` make the stored chain invalid. The job writes an hour's leaves before its `anchors` row, so no row exists without its leaves.
+
+**Trust.** `substrate verify` trusts an anchored v2 hour only when:
+
+1. the stored leaves of every graph in that hour, rebuilt into head records, reproduce the on-chain `headsRoot`; and
+2. for each `(graph_id, session_id)` pair of the graph being verified, every stored leaf names an event of that pair whose recomputed content hash and stored hash both equal the leaf's hash, and no event of the pair lies outside the stored leaves.
+
+Only the on-chain root is trusted. A head recomputed from the ledger's rows is never trusted. If (1) fails, the whole hour is untrusted, with no localisation. If (2) fails, the verdict names the first event where the chain parts from its leaves, walking the stored order: `first_differing_event_id` (an edited or rewritten event, or the first event past the stored end) or `first_missing_event_id` (a deleted or truncated event). Any contradiction of an anchored head makes `ok` false, even when the local chain check passes; a full rewrite passes that check.
+
+**v1 hours.** Hours anchored before phase 73 carry memo v1 and no per-graph heads. They still verify for root and count, and are reported `trusted: false` with the reason `anchored with a v1 memo: no heads commitment on chain`. `ok` is unchanged for them.
+
+**Trust reasons.** `trusted` is false, with the reason, when:
+
+- the graph holds no events: `no events`;
+- no hour of the graph is anchored: `no anchored hour`;
+- an hour is pending or unanchored: `hour is <status>: no anchored head to trust`;
+- the stored-leaves read outlasts the verify budget: `budget exhausted`;
+- the stored-leaves read fails: `store-failed`.
+
+`budget exhausted` and `store-failed` claim no tampering, so `ok` is unchanged for them.
+
 ## Reading the ledger
 
 `events_query` is the read counterpart of `events_emit`, and the reason a desk seat
@@ -910,6 +942,21 @@ run by the operator against the store, with `SUBSTRATE_LEDGER_TTL` unset in
 unsetting stops further deletion but does not restore rows already removed — which
 is what the export step above is for.
 
+## Telemetry buffer and dead-letter (phase 76)
+
+The buffer is **off by default**. With `SUBSTRATE_EVENT_BUFFER_PATH` unset, a failed write answers `stored: false` exactly as it always has, and nothing is queued. With the path set, an event whose ledger write fails is not dropped: it waits in a bounded buffer and is retried with exponential backoff. When its retry budget is spent it is written to the dead-letter store: one record per event, carrying the event's hash and the reason. Nothing is discarded without a record.
+
+- **Buffer.** `SUBSTRATE_EVENT_BUFFER_MAX` (default 256) bounds it. A session's events stay in chain order: while one of its events waits, a later event of that session waits behind it, and its `prev` is the hash of the event ahead of it. Hashes are never rewritten.
+- **No duplicates.** Each retry first looks for the event's row by id inside its cell. A row already in `agent_events` is not inserted again, and only a missing ingest record is repaired.
+- **Budget and backoff.** `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` (default 10) counts the live write. The first retry waits `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` (default 1000), doubles per attempt up to `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` (default 60000), with ±20 % jitter. The defaults ride out an outage of about five minutes.
+- **Overflow.** When the buffer is full, the oldest waiting event that is not being delivered is dead-lettered. Later events of its session are dead-lettered with it (`predecessor-dead-lettered`): they could never chain once it is missing.
+- **Dead letters.** `SUBSTRATE_EVENT_DEAD_LETTER_PATH` names an append-only 0600 JSONL file, and it is required while the buffer is on: boot refuses without it, and the message names the variable. Each record holds `event_id`, `event_hash`, `reason` (`exhausted`, `overflow`, `buffer-full`, `predecessor-dead-lettered` or `abandoned`), `attempts`, `last_reason` and the whole event, so an operator can replay it by hand.
+- **Durability.** Both files are durable: a restart re-reads the buffer and retries what was waiting. A shutdown keeps the buffered entries for the next boot. Only a buffer whose file could not be saved gives its entries up at shutdown, as `abandoned`, each with a record.
+- **Responses.** A buffered event answers `stored: false` with `buffered: true`, and `/events` answers 503 as for any unstored event. A keyed event that is still queued answers that same queued event when replayed, so a client that resends it with its idempotency key (`SUBSTRATE_EVENT_IDEMPOTENCY` `accept` or `enforce`) does not create a second row. A given-up event answers `deadLettered: true`. Only a landed event is `stored: true`.
+- **Not buffered.** A chain-tip read failure and an append-mode refusal still answer `stored: false` without queueing. Both are configuration or read failures, and queueing them would hide that.
+- **`/healthz`.** `eventBuffer` is `{ enabled: false }` while the buffer is off. When on it reports `depth`, `max`, `oldestAt`, `durable` and `deadLetter: { depth, durable }`. Depth never changes the status code. The dead-letter store is not bounded, because a bound would have to discard records; alert on its depth.
+- **Residuals.** A buffered `session.end` does not close its steering session until it lands, and a landed event publishes its wake-up hint. Sessionless buffered events have no chain, so they are independent entries with no ordering promise.
+
 ## Configuration
 
 Four variables, read from the environment and never from this repo:
@@ -934,6 +981,12 @@ Plus switches, none of which is a credential:
 | `SUBSTRATE_EVENT_IDEMPOTENCY` | `off` (default), `accept` or `enforce`. Anything else is `off` with a boot warning. See *Idempotent replay*. |
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2, 0..100000; default 2. Report-only on `/healthz`. See *Coverage and archive*. |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
+| `SUBSTRATE_EVENT_BUFFER_MAX` | events the buffer holds, positive integer; default 256; read only while the buffer is on. Over it, the oldest waiting event is dead-lettered. See *Telemetry buffer*. |
+| `SUBSTRATE_EVENT_BUFFER_PATH` | the buffer's file, and the switch: unset (the default) keeps the buffer off, so a failed write answers `stored: false` as before. Set, it requires `SUBSTRATE_EVENT_DEAD_LETTER_PATH`. |
+| `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` | write attempts per event, the live one included, positive integer; default 10; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` | delay before the first retry, positive integer ms; default 1000, doubling per attempt; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` | ceiling on one retry delay, positive integer ms; default 60000; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_DEAD_LETTER_PATH` | the dead-letter records' file, append-only. Required while `SUBSTRATE_EVENT_BUFFER_PATH` is set; boot refuses without it. |
 
 Out-of-range numbers clamp and unparseable ones fall back, as the breaker settings do.
 

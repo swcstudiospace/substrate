@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
-import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
+import { buildGraphHeads } from "./anchor.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
@@ -13,7 +14,7 @@ import { HindsightFake } from "./hindsight-fake.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
-import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
+import { GRAPHS_GENERATION_KEY, graphGenerationKey, ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
 import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
 import { ZodError } from "zod";
@@ -944,6 +945,7 @@ describe("append-mode enforcement", () => {
 				cooldownUntil: null,
 			},
 			eventBus: { enabled: false },
+			eventBuffer: { enabled: false },
 			planes: {
 				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
 				index: { ok: null, breaker: closed("index"), lastErrorAt: null },
@@ -2056,6 +2058,7 @@ describe("identifier lookups", () => {
 
 	test("verifyGraph reads by the stored form of the graph id", async () => {
 		const asked: Array<[string, string]> = [];
+		const leafAsked: string[] = [];
 		const greptime = {
 			ensureAppendMode: async () => true,
 			readEvents: async (column: "graph_id", value: string) => {
@@ -2063,6 +2066,10 @@ describe("identifier lookups", () => {
 				return [];
 			},
 			graphIngest: async () => [],
+			graphChainLeafHours: async (graphId: string) => {
+				leafAsked.push(graphId);
+				return [];
+			},
 			firstIngestMs: async () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
@@ -2070,6 +2077,8 @@ describe("identifier lookups", () => {
 		await substrate.verifyGraph("ut-1".padEnd(900, "x"));
 
 		expect(asked[0]?.[1].length).toBe(512);
+		expect(leafAsked).toEqual([asked[0]?.[1] ?? ""]);
+		expect(leafAsked[0]?.length).toBe(512);
 	});
 });
 
@@ -4221,6 +4230,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4239,6 +4249,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
@@ -4257,6 +4268,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				digested = true;
 				return world.leaves;
@@ -4275,6 +4287,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
@@ -4291,6 +4304,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4306,6 +4320,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4325,6 +4340,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4339,6 +4355,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world, { root: "1".repeat(64) }),
 		});
@@ -4353,6 +4370,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				throw new Error("hour member evt_1 has no event row");
 			},
@@ -4370,6 +4388,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4390,6 +4409,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4408,6 +4428,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		} as never });
@@ -4427,6 +4448,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4447,6 +4469,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4475,6 +4498,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => [...world.rows, extraRow],
 			graphIngest: async () => (++ingests === 1 ? world.records : [...world.records, extraRecord]),
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4510,6 +4534,7 @@ describe("verifyGraph hour report", () => {
 				return world.records;
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4530,7 +4555,7 @@ describe("verifyGraph hour report", () => {
 	});
 
 	test("empty graph verifies with no hours", async () => {
-		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null });
+		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] });
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours).toEqual([]);
@@ -4545,6 +4570,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => [],
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				throw new Error(`hour member ${missing} has no event row`);
 			},
@@ -4565,6 +4591,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4590,6 +4617,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4616,6 +4644,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => {
 					throw new Error("an open hour must never be digested");
 				},
@@ -4638,6 +4667,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4659,6 +4689,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows.slice(0, 1),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4687,6 +4718,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, liveRow]),
 			graphIngest: async () => [...world.records, liveRecord],
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4729,6 +4761,7 @@ describe("verifyGraph hour report", () => {
 				return ingests === 1 ? [...world.records, secondRecord] : [...world.records, firstRecord, secondRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4767,6 +4800,7 @@ describe("verifyGraph hour report", () => {
 				return [...world.records, secondRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4810,6 +4844,7 @@ describe("verifyGraph hour report", () => {
 				return ingests === 1 ? [...world.records, gapRecord] : [...world.records, gapRecord, foreignRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4829,6 +4864,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4851,6 +4887,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows.slice(0, 1),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4878,6 +4915,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [forgedRow]),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4902,6 +4940,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [world.rows[0], restored]),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4936,6 +4975,7 @@ describe("verifyGraph hour report", () => {
 				})(),
 				graphIngest: async () => [...world.records, liveRecord],
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4965,6 +5005,7 @@ describe("verifyGraph hour report", () => {
 				},
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4995,6 +5036,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 				...extra,
@@ -5127,6 +5169,387 @@ describe("verifyGraph hour report", () => {
 			const verdict = await pending.verifyGraph("ut-1", { now: H + 2 * HOUR, rpc: rpcReturning(world.memo) as never });
 			expect(verdict.hours[0]?.status).toBe("pending");
 			expect(rotationReads).toBe(0);
+		});
+	});
+
+	describe("heads trust (D73-03, D73-04)", () => {
+		const asRow = (event: SubstrateEvent) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+
+		/**
+		 * One v2 hour: the sessions chained in the order given, each event ingested after the last, its leaves stored, and the memo
+		 * carrying the heads root over those leaves. The fixture's own memo, root and leaves are the honest answer every case edits.
+		 */
+		function v2World(sessions: Array<{ session: string; count: number }>, hour = H): World {
+			const events: SubstrateEvent[] = [];
+			const records: Array<{ event_id: string; event_ts: number; ingested_at: number }> = [];
+			const leaves: Array<{ event_id: string; ingested_at: number; hash: string }> = [];
+			for (const { session, count } of sessions) {
+				let prev: string | null = null;
+				for (let i = 0; i < count; i++) {
+					const event = normalizeEvent({ surface: "omp", kind: "note", summary: `${session}-${i}`, session_id: session, graph_id: "ut-1", actor: "agent" }, prev);
+					prev = event.hash;
+					events.push(event);
+					const ingested_at = hour + 1000 * events.length;
+					records.push({ event_id: event.id, event_ts: Date.parse(event.ts), ingested_at });
+					leaves.push({ event_id: event.id, ingested_at, hash: event.hash });
+				}
+			}
+			const members = events.map((event) => ({ id: event.id, hash: event.hash, prev: event.prev, graph_id: event.graph_id, session_id: event.session_id }));
+			const built = buildGraphHeads(members, hour);
+			const root = merkleRootHex(events.map((event) => event.hash));
+			const memo = formatMemoV2({ periodStartMs: hour, rootHex: root, count: events.length, headsRootHex: headsRoot(built.records) });
+			return { events, rows: events.map(asRow), records, leaves, root, memo, stored: built.leaves };
+		}
+		/** The honest hour every case edits: its events, the ledger rows and ingest records, the stored leaves and the anchored memo. */
+		interface World {
+			events: SubstrateEvent[];
+			rows: Array<Omit<SubstrateEvent, "ts" | "payload"> & { ts: number; payload: string }>;
+			records: Array<{ event_id: string; event_ts: number; ingested_at: number }>;
+			leaves: Array<{ event_id: string; ingested_at: number; hash: string }>;
+			root: string;
+			memo: string;
+			stored: Array<{ graph_id: string; session_id: string; seq: number; event_id: string; hash: string }>;
+		}
+
+		function anchorOf(world: World, over: Record<string, unknown> = {}) {
+			return {
+				period_start: START_ISO,
+				period_end: END_ISO,
+				root: world.root,
+				event_count: world.events.length,
+				memo: world.memo,
+				tx_sig: "sig1",
+				signer: PUBKEY,
+				cluster: "devnet",
+				slot: 42,
+				anchored_at: new Date(H + 5 * HOUR).toISOString(),
+				...over,
+			};
+		}
+
+		function stubOf(world: World, over: Record<string, unknown> = {}) {
+			return {
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorOf(world),
+				hourChainLeaves: async () => world.stored,
+				...over,
+			};
+		}
+
+		const verify = (world: World, over: Record<string, unknown> = {}, memo: string = world.memo) =>
+			substrateWith(stubOf(world, over)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(memo) as never });
+
+		test("an honest v2 hour is trusted, and each session matches its own head", async () => {
+			const world = v2World([
+				{ session: "s1", count: 3 },
+				{ session: "s2", count: 2 },
+			]);
+			const verdict = await verify(world);
+			expect(verdict.ok).toBe(true);
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true });
+			expect(verdict.hours[0]?.pairs).toEqual([
+				{ session_id: "s1", trusted: true },
+				{ session_id: "s2", trusted: true },
+			]);
+			expect(verdict.trusted).toBe(true);
+		});
+
+		test("an edited payload parts the chain at that event: first_differing_event_id", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const edited = defined(world.events[1], "event 2").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: edited }]);
+			expect(verdict.hours[0]?.trusted).toBe(false);
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a deleted middle event is first_missing_event_id, and the verdict fails", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const deleted = defined(world.events[1], "event 2").id;
+			// The event row is gone while its ingest record remains, so the whole-hour digest throws naming it, as the store does.
+			const verdict = await verify(world, {
+				readEvents: async () => world.rows.filter((row) => row.id !== deleted),
+				hourLeaves: async () => {
+					throw new Error(`hour member ${deleted} has no event row`);
+				},
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: deleted }]);
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("truncated last events are first_missing_event_id at the first one gone, and the verdict fails", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const gone = defined(world.events[1], "event 2").id;
+			const verdict = await verify(world, {
+				readEvents: async () => world.rows.slice(0, 1),
+				hourLeaves: async () => {
+					throw new Error(`hour member ${gone} has no event row`);
+				},
+			});
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: gone }]);
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a full rewrite with every hash and prev recalculated parts at the first event, and the verdict fails", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			let prev: string | null = null;
+			const rewritten = world.events.map((event) => {
+				const content = { ...event, summary: `${event.summary} rewritten`, prev };
+				const { hash: _old, ...rest } = content;
+				const hash = eventHash(rest);
+				prev = hash;
+				return { ...content, hash };
+			});
+			// The store holds the rewritten hashes, so the whole-hour digest recomputes over them and no longer matches the memo.
+			const verdict = await verify(world, {
+				readEvents: async () => rewritten.map(asRow),
+				hourLeaves: async () => world.leaves.map((leaf, i) => ({ ...leaf, hash: defined(rewritten[i], "rewritten event").hash })),
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: defined(world.events[0], "event 1").id }]);
+			expect(verdict.ok).toBe(false);
+			expect(verdict.chain).toEqual({ ok: true });
+		});
+
+		test("sessions verify one by one, and the verdict is the same for every read order", async () => {
+			const world = v2World([
+				{ session: "s1", count: 2 },
+				{ session: "s2", count: 2 },
+			]);
+			const edited = defined(world.events[3], "s2's second event").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const forward = await verify(world, { readEvents: async () => rows });
+			expect(forward.hours[0]?.pairs).toEqual([
+				{ session_id: "s1", trusted: true },
+				{ session_id: "s2", trusted: false, first_differing_event_id: edited },
+			]);
+			expect(await verify(world, { readEvents: async () => [...rows].reverse() })).toEqual(forward);
+			expect(await verify(world, { readEvents: async () => [...rows.slice(2), ...rows.slice(0, 2)] })).toEqual(forward);
+		});
+
+		test("an unanchored hour is untrusted, with the reason", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			expect(verdict.hours[0]?.status).toBe("unanchored");
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "hour is unanchored: no anchored head to trust" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a v1-only anchored hour is untrusted with its reason, and the chain verdict is unchanged", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const v1 = formatMemo({ periodStartMs: H, rootHex: world.root, count: world.events.length });
+			const verdict = await verify(world, { anchorForPeriod: async () => anchorOf(world, { memo: v1 }) }, v1);
+			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "anchored with a v1 memo: no heads commitment on chain" });
+			expect(verdict.ok).toBe(true);
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("stored leaves that no longer reproduce the on-chain heads root are a stored-leaves-mismatch for the whole hour", async () => {
+			const world = v2World([
+				{ session: "s1", count: 3 },
+				{ session: "s2", count: 2 },
+			]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 && leaf.session_id === "s1" ? { ...leaf, hash: "f".repeat(64) } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]).toMatchObject({
+				status: "mismatch",
+				head_failed: true,
+				trusted: false,
+				trusted_reason: "stored leaves do not reproduce the on-chain heads root",
+				pairs: [],
+			});
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("ok is false for an edited payload, though the hour root still matches", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const edited = defined(world.events[1], "event 2").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.hours[0]?.status).toBe("mismatch");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a trailing hour whose rows and ingest records are gone, with its leaves still stored, fails the verdict", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				readEvents: async () => [],
+				graphIngest: async () => [],
+				hourLeaves: async () => [],
+				graphChainLeafHours: async () => [H],
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.hours).toHaveLength(1);
+			expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: defined(world.events[0], "event 1").id }]);
+		});
+
+		test("an empty event id among the stored leaves is untrusted, and the verdict does not throw", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 ? { ...leaf, event_id: "" } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, head_failed: true });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a failing graph_chain_leaves lookup resolves as an untrusted verdict with reason store-failed, and the anchored hour is still reported", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				graphChainLeafHours: async () => {
+					throw new Error("relation graph_chain_leaves does not exist");
+				},
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.reason).toBe("store-failed");
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("store-failed");
+			expect(verdict.hours).toHaveLength(1);
+			expect(verdict.hours[0]?.status).toBe("anchored");
+		});
+
+		test("a graph_chain_leaves lookup that outlasts the verify budget resolves as an untrusted verdict with reason budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			// A one-millisecond budget leaves no allowance for the lookup, and a lookup that never answers cannot win the race.
+			const verdict = await substrateWith(stubOf(world, { graphChainLeafHours: () => new Promise<never>(() => {}) }), { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.reason).toBe("budget exhausted");
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("budget exhausted");
+		});
+
+		test("a trailing hour whose rows and ingest records are deleted, with its anchor and leaves kept, fails the verdict; the intact graph verifies", async () => {
+			const NEXT = H + HOUR;
+			const first = v2World([{ session: "s1", count: 2 }]);
+			const last = v2World([{ session: "s2", count: 2 }], NEXT);
+			const lastBlockS = (NEXT + HOUR + 5 * 60_000) / 1000;
+			const stubFor = (lastIntact: boolean) => ({
+				readEvents: async () => (lastIntact ? [...first.rows, ...last.rows] : first.rows),
+				graphIngest: async () => (lastIntact ? [...first.records, ...last.records] : first.records),
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [H, NEXT],
+				hourLeaves: async (startMs: number) => (startMs === H ? first.leaves : lastIntact ? last.leaves : []),
+				anchorForPeriod: async (startMs: number) =>
+					startMs === H
+						? anchorOf(first)
+						: startMs === NEXT
+							? anchorOf(last, { period_start: new Date(NEXT).toISOString(), period_end: new Date(NEXT + HOUR).toISOString(), tx_sig: "sig2" })
+							: null,
+				hourChainLeaves: async (startMs: number) => (startMs === H ? first.stored : last.stored),
+			});
+			const rpc = {
+				getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+				transactionMemo: async (signature: string) =>
+					signature === "sig2"
+						? { memo: last.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: lastBlockS }
+						: { memo: first.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S },
+			};
+			const verdictFor = (lastIntact: boolean) =>
+				substrateWith(stubFor(lastIntact)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+
+			const intact = await verdictFor(true);
+			expect(intact.ok).toBe(true);
+			expect(intact.hours.map((hour) => hour.status)).toEqual(["anchored", "anchored"]);
+
+			const deleted = await verdictFor(false);
+			expect(deleted.ok).toBe(false);
+			expect(deleted.hours.find((hour) => hour.period_start === new Date(H).toISOString())?.status).toBe("anchored");
+			expect(deleted.hours.find((hour) => hour.period_start === new Date(NEXT).toISOString())).toMatchObject({ status: "mismatch", head_failed: true });
+		});
+
+		test("ok is false when one session of two is edited", async () => {
+			const world = v2World([
+				{ session: "s1", count: 2 },
+				{ session: "s2", count: 2 },
+			]);
+			const edited = defined(world.events[3], "s2's second event").id;
+			const verdict = await verify(world, { readEvents: async () => world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row)) });
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok is false when the stored leaves are edited against an unchanged on-chain root", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 ? { ...leaf, hash: "f".repeat(64) } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]?.status).toBe("mismatch");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok stays true for an honest anchored hour, and for an unanchored one it is the hour that fails, not a trust proof", async () => {
+			const honest = v2World([{ session: "s1", count: 2 }]);
+			expect((await verify(honest)).ok).toBe(true);
+			const unanchored = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(unanchored, { anchorForPeriod: async () => null });
+			expect(verdict.hours[0]?.status).toBe("unanchored");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a graph with no events is untrusted: no events", async () => {
+			const verdict = await substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+			});
+			expect(verdict.ok).toBe(true);
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("no events");
+		});
+
+		test("a graph with no anchored hour is untrusted: no anchored hour", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("no anchored hour");
+		});
+
+		test("a zero verify budget leaves every hour untrusted as budget exhausted, and reads no stored leaves", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			let reads = 0;
+			const stub = stubOf(world, {
+				hourChainLeaves: async () => {
+					reads += 1;
+					return world.stored;
+				},
+			});
+			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(reads).toBe(0);
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "budget exhausted" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a stored-leaves read that outlives the allowance is untrusted as budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const stub = stubOf(world, { hourChainLeaves: () => new Promise<never>(() => {}) });
+			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "budget exhausted" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a stored-leaves read that throws is untrusted as store-failed, not as budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				hourChainLeaves: async () => {
+					throw new Error("greptime unreachable");
+				},
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "store-failed" });
+			expect(verdict.trusted).toBe(false);
 		});
 	});
 });
@@ -5339,5 +5762,91 @@ describe("private reads under the request budget and the docs steering precedenc
 			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
 			expect(askedWith(h.ragflow)).toBe("[]");
 		});
+	});
+});
+
+describe("the scheduled reconcile timer (phase 78)", () => {
+	let live: Substrate | null = null;
+	afterEach(() => {
+		live?.stopReconcile();
+		live = null;
+	});
+
+	test("startReconcile starts no timer at interval 0, and starts one at 60 that stopReconcile clears", () => {
+		const off = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "0" }), { index: null, greptime: null });
+		expect(off.startReconcile()).toBe(false);
+
+		live = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "60" }), { index: null, greptime: null });
+		expect(live.startReconcile()).toBe(true);
+		expect(live.startReconcile()).toBe(false);
+		live.stopReconcile();
+		expect(live.startReconcile()).toBe(true);
+	});
+
+	test("one scheduled tick on a clean fixture logs one clean reconcile line and writes nothing", async () => {
+		// Each store answers only the reads the run makes. Any other method reached through it is recorded and throws.
+		const writes: string[] = [];
+		const readOnlyStore = <T extends object>(reads: T): T =>
+			new Proxy(reads, {
+				get(target, prop, receiver) {
+					if (typeof prop === "symbol" || prop in target) return Reflect.get(target, prop, receiver);
+					return () => {
+						writes.push(String(prop));
+						throw new Error(`reconcile reached ${String(prop)}`);
+					};
+				},
+			});
+		const ledger = readOnlyStore({ queryEvents: async () => [] });
+		const index = readOnlyStore({
+			reconcileHolds: async () => [],
+			reconcileHeldNodes: async () => ({ rows: [], truncated: false }),
+			reconcileMemoryIds: async () => ({ rows: [], truncated: false }),
+			reconcileGraphIds: async () => ({ rows: [], truncated: false }),
+			reconcileMemoryRowsBefore: async () => 0,
+		});
+		// A live cache with nothing in it: every scan is empty and complete, so the run is clean rather than off.
+		const redis: CacheRedis = {
+			get: async () => null,
+			set: async () => {
+				writes.push("set");
+			},
+			incr: async () => {
+				writes.push("incr");
+				return 0;
+			},
+			eval: async () => {
+				writes.push("eval");
+				return null;
+			},
+			scan: async () => ["0", []],
+			unlink: async () => {
+				writes.push("unlink");
+				return 0;
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: ledger as never,
+			cache: new ReadThroughCache({ redis, enabled: true, log: () => {} }),
+		});
+
+		const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
+		const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+		// The tick is private. This cast is the narrowest reach to it, as session-rollback.testkit.ts reaches sessionRollbackDeps.
+		const seam = substrate as unknown as { reconcileTick(): Promise<void> };
+		try {
+			await seam.reconcileTick();
+			// Read while the spies are live: restoring a spy clears its calls.
+			const lines = stdout.mock.calls.map((call) => String(call[0]));
+			expect(lines).toHaveLength(1);
+			const prefix = "[substrate] reconcile ";
+			expect(lines[0]?.startsWith(prefix)).toBe(true);
+			expect(JSON.parse(defined(lines[0]).slice(prefix.length)).clean).toBe(true);
+			expect(stderr.mock.calls).toHaveLength(0);
+			expect(writes).toEqual([]);
+		} finally {
+			stdout.mockRestore();
+			stderr.mockRestore();
+		}
 	});
 });

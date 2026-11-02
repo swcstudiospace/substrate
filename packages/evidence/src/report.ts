@@ -69,6 +69,8 @@ export interface AnchorEvidence {
 	/** The Solana devnet transaction page for `tx_sig`. */
 	explorer_url?: string;
 	reason?: string;
+	/** True when the ledger or the stored leaves contradict this hour's anchored head (D73-03); absent otherwise. */
+	head_failed?: boolean;
 }
 
 /**

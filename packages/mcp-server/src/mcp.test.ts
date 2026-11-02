@@ -38,6 +38,7 @@ function ledger(rows: Array<Record<string, unknown>> = []) {
 				return rows;
 			},
 			readEvents: async () => rows,
+			graphChainLeafHours: async () => [],
 			// No ingest table concept here: with no coverage start every event
 			// is pre-coverage legacy, so the hour report stays empty.
 			graphIngest: async () => [],

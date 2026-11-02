@@ -173,8 +173,10 @@ export type AdmissionClass = (typeof ADMISSION_CLASSES)[number];
 /**
  * What the bucket decided. `shadow_limited` is a refusal that was not enforced
  * (`SUBSTRATE_BUDGETS=shadow`); `bypass` is the cache not answering, which admits.
+ * `refused` is a request the cache plane's open breaker refused in a class whose
+ * `SUBSTRATE_BUDGET_<CLASS>_BREAKER` is `fail-closed`: answered 503, never in shadow.
  */
-export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "bypass"] as const;
+export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "bypass", "refused"] as const;
 export type AdmissionDecision = (typeof ADMISSION_DECISIONS)[number];
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
@@ -394,7 +396,7 @@ export class SubstrateInstruments {
 			unit: "{call}",
 		});
 		this.admissionDecisions = registry.counter(METRIC.admissionDecisions, {
-			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass).",
+			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass|refused).",
 			unit: "{decision}",
 		});
 		this.docsSearch = registry.counter(METRIC.docsSearch, {

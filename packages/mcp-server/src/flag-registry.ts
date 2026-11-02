@@ -186,6 +186,7 @@ const CLASS_BUDGET_NAMES: readonly string[] = ADMISSION_CLASSES.flatMap((klass) 
 const SURFACE_BUDGET_NAMES: readonly string[] = SURFACES.flatMap((surface) =>
 	ADMISSION_CLASSES.flatMap((klass) => [`SUBSTRATE_BUDGET_${spelled(surface)}_${klass.toUpperCase()}_RPS`, `SUBSTRATE_BUDGET_${spelled(surface)}_${klass.toUpperCase()}_BURST`]),
 );
+const CLASS_BREAKER_NAMES: readonly string[] = ADMISSION_CLASSES.map((klass) => `SUBSTRATE_BUDGET_${klass.toUpperCase()}_BREAKER`);
 
 export const FLAG_FAMILIES: readonly FlagFamily[] = [
 	{
@@ -212,6 +213,19 @@ export const FLAG_FAMILIES: readonly FlagFamily[] = [
 		readBy: "mcp-server/config.ts",
 		members: [...CLASS_BUDGET_NAMES, ...SURFACE_BUDGET_NAMES],
 		documentedMembers: CLASS_BUDGET_NAMES,
+		doc: "docs/observability.md",
+	},
+	{
+		pattern: "SUBSTRATE_BUDGET_<CLASS>_BREAKER",
+		prefix: "SUBSTRATE_BUDGET_",
+		kind: "mode",
+		plane: "admission",
+		default: "fail-open",
+		allowed: "fail-open | fail-closed",
+		unset: "fail-open: unset or blank, an open cache breaker admits the request and counts a bypass, as before; fail-closed refuses it with 503 in enforce and, in shadow, admits it and counts a bypass; any other value refuses to boot (SUBSTRATE_BUDGETS keeps its older fallback to shadow)",
+		readBy: "mcp-server/config.ts",
+		members: CLASS_BREAKER_NAMES,
+		documentedMembers: CLASS_BREAKER_NAMES,
 		doc: "docs/observability.md",
 	},
 	{
@@ -341,6 +355,12 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_LEDGER_CHAIN_CACHE_MAX", kind: "number", plane: "ledger", default: "10000", allowed: "1..1000000", unset: "10000 sessions", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS", kind: "number", plane: "ledger", default: "30", allowed: "1..3650", unset: "30 days", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_WRITE_PROBE_S", kind: "number", plane: "ledger", default: "60", allowed: "0..86400 (0 never probes)", unset: "60 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_MAX", kind: "number", plane: "ledger", default: "256", allowed: "positive integer", unset: "256 entries (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path", unset: "buffer off: a failed write answers stored: false, as before", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS", kind: "number", plane: "ledger", default: "10", allowed: "positive integer", unset: "10 attempts (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_BACKOFF_MS", kind: "number", plane: "ledger", default: "1000", allowed: "positive integer ms", unset: "1000 ms (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS", kind: "number", plane: "ledger", default: "60000", allowed: "positive integer ms", unset: "60000 ms (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_DEAD_LETTER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path, required while SUBSTRATE_EVENT_BUFFER_PATH is set", unset: "no dead-letter file: boot refuses while the buffer is on", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{
 		name: "SUBSTRATE_LEDGER_TTL",
 		kind: "string",
@@ -963,6 +983,8 @@ export const FLAGS: readonly FlagSpec[] = [
 	},
 	{ name: "SUBSTRATE_SLO_NOTIFY_S", kind: "number", plane: "observability", default: "60", allowed: "5..86400", unset: "60 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_SLO_NOTIFY_SUSTAIN_S", kind: "number", plane: "observability", default: "300", allowed: "0..86400 (0 announces at once)", unset: "300 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
+	{ name: "SUBSTRATE_RECONCILE_INTERVAL_S", kind: "number", plane: "observability", default: "0", allowed: "0 (off) or whole seconds, at least 60 above 0; not a whole number refuses boot", unset: "off: no scheduled reconcile. Above 0 the cross-layer report runs on that interval and writes one JSON log line per run; the reconcile writes nothing to the ledger, the index or the cache", readBy: "mcp-server/config.ts", documented: true, doc: "docs/reconcile.md" },
+	{ name: "SUBSTRATE_RECONCILE_WINDOW_HOURS", kind: "number", plane: "observability", default: "24", allowed: "1..168 whole hours (outside it is clamped; not a whole number refuses boot)", unset: "24 hours of ledger and index history per scheduled run; the reconcile only reads, and writes nothing", readBy: "mcp-server/config.ts", documented: true, doc: "docs/reconcile.md" },
 	{ name: "SUBSTRATE_SLO_WEBHOOK_URL", kind: "secret-ref", plane: "observability", default: "none", allowed: "http(s) URL", unset: "no webhook; the URL may carry a token and is never printed", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_BURN_TOKENS_PER_HOUR", kind: "number", plane: "observability", default: "none", allowed: "tokens per rolling hour", unset: "the burn.tokens row is unconfigured and never judged", readBy: "observability/burn.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_BURN_COST_USD_PER_HOUR", kind: "number", plane: "observability", default: "none", allowed: "USD per rolling hour", unset: "the burn.cost_usd row is unconfigured and never judged", readBy: "observability/burn.ts", documented: true, doc: "docs/observability.md" },

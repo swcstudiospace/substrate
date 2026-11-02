@@ -13,7 +13,7 @@ import type { AddressInfo } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { METRIC, findCounter, sumCounter } from "@substrate/observability";
+import { BreakerOpenError, METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { FakeBudgetRedis } from "./admission.test.ts";
 import { ReadThroughCache } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
@@ -269,6 +269,21 @@ describe("when the cache cannot answer", () => {
 			observability.stop();
 			server.close();
 		}
+	});
+
+	test("an open cache breaker is a bypass for a fail-open class and a 503 for a fail-closed one", async () => {
+		const open = await start(ENFORCE);
+		open.redis.refusal = new BreakerOpenError("cache", 2_000);
+		expect((await fetch(`${open.base}/brief`, { method: "POST", headers: CURSOR, body: "{}" })).status).toBe(200);
+		expect(decisions(open, { decision: "bypass" })).toBe(1);
+
+		const closed = await start({ ...ENFORCE, SUBSTRATE_BUDGET_READ_BREAKER: "fail-closed" });
+		closed.redis.refusal = new BreakerOpenError("cache", 2_000);
+		const refused = await fetch(`${closed.base}/brief`, { method: "POST", headers: CURSOR, body: "{}" });
+		expect(refused.status).toBe(503);
+		expect(refused.headers.get("retry-after")).toBe("2");
+		expect(await refused.json()).toEqual({ error: "cache_unavailable", class: "read", retry_after_s: 2 });
+		expect(decisions(closed, { decision: "refused" })).toBe(1);
 	});
 });
 
