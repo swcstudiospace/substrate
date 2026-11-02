@@ -354,7 +354,7 @@ function hintOrHook(sub: "hint" | "hook", action: string | undefined, parsed: Pa
 	if (sub === "hint") return runHintCommand({ settings: readWatchSettings(deps.env), now: deps.now ?? Date.now, err: deps.err }, repo);
 	const known = HOOK_ACTIONS.find((candidate): candidate is HookAction => candidate === action);
 	if (known === undefined) return usage("hook needs one of install, uninstall, status");
-	return runHookCommand({ out: deps.out }, known, resolve(repo));
+	return runHookCommand({ out: deps.out, env: deps.env }, known, resolve(repo));
 }
 
 async function watchFamily(

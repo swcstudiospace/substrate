@@ -4,7 +4,7 @@
  * `--check` writes nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,9 +26,13 @@ function emptyRepo(): string {
 	return repo;
 }
 
-function run(...args: string[]): { code: number; out: string } {
-	const result = Bun.spawnSync(["bun", "--no-env-file", INSTALLER, ...args], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" } });
+function runWith(env: Record<string, string>, ...args: string[]): { code: number; out: string } {
+	const result = Bun.spawnSync(["bun", "--no-env-file", INSTALLER, ...args], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env } });
 	return { code: result.exitCode, out: result.stdout.toString() };
+}
+
+function run(...args: string[]): { code: number; out: string } {
+	return runWith({}, ...args);
 }
 
 describe("install-git-hook", () => {
@@ -289,5 +293,34 @@ describe("installRepos keeps going past a failing repository", () => {
 		expect(outcome).toEqual({ failures: 1, errors: [] });
 		expect(lines.some((line) => line.includes(`${repo} — post-merge foreign`))).toBe(true);
 		expect(lines.some((line) => line.includes(`${repo} — post-checkout foreign`))).toBe(true);
+	});
+});
+
+function registryOf(repo: string): string {
+	return JSON.stringify({ "acme/hooks-fixture": { checkouts: [repo] } });
+}
+
+describe("core.hooksPath under a repository registry", () => {
+	test("a hooks directory outside the registered repository is refused and nothing is written there; an in-repo one still installs", () => {
+		const repo = emptyRepo();
+		const outside = mkdtempSync(join(tmpdir(), "install-hook-outside-"));
+		Bun.spawnSync(["git", "-C", repo, "config", "core.hooksPath", outside]);
+
+		const refused = runWith({ SUBSTRATE_REPO_REGISTRY: registryOf(repo) }, "--corpus", repo);
+
+		expect(refused.code).toBe(1);
+		expect(refused.out).toContain(`✗ ${repo} — refused: `);
+		expect(refused.out).toContain(outside);
+		expect(readdirSync(outside)).toEqual([]);
+
+		const inside = emptyRepo();
+		mkdirSync(join(inside, ".githooks"));
+		Bun.spawnSync(["git", "-C", inside, "config", "core.hooksPath", ".githooks"]);
+
+		const installed = runWith({ SUBSTRATE_REPO_REGISTRY: registryOf(inside) }, "--corpus", inside);
+
+		expect(installed.code).toBe(0);
+		expect(existsSync(join(inside, ".githooks", "post-commit"))).toBe(true);
+		expect(readdirSync(outside)).toEqual([]);
 	});
 });

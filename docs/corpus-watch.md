@@ -191,8 +191,8 @@ delete the orphans, then runs the sync that ingests what changed. The route is `
 
 `sync`, `reconcile` and `watch --once` exit 0 when nothing asked for was refused or failed, 1 when a request failed, a
 document ended `refused` or `failed`, or a repository named with `--repo` was not found, and 2 for a usage error. `hint`
-exits 0 whatever happens. `hook install` and `uninstall` exit 1 for a foreign hook or a directory that is not a
-repository. The long-running `watch` exits 0 when it is stopped by a signal.
+exits 0 whatever happens. `hook install` and `uninstall` exit 1 for a foreign hook, a directory that is not a repository, or, with a
+registry set, a hooks directory (`core.hooksPath` included) outside the registered repository's worktree or git directory; a refusal writes nothing there. The long-running `watch` exits 0 when it is stopped by a signal.
 
 ## Troubleshooting
 

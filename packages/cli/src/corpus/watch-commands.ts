@@ -216,9 +216,10 @@ export function runHintCommand(ctx: Pick<WatchContext, "settings" | "now" | "err
 export const HOOK_ACTIONS = ["install", "uninstall", "status"] as const;
 export type HookAction = (typeof HOOK_ACTIONS)[number];
 
-export function runHookCommand(ctx: Pick<WatchContext, "out">, action: HookAction, repo: string): number {
-	const reports = action === "install" ? installCorpusHooks(repo, { check: false }) : action === "status" ? installCorpusHooks(repo, { check: true }) : uninstallCorpusHooks(repo);
+export function runHookCommand(ctx: Pick<WatchContext, "out"> & { env?: Readonly<Record<string, string | undefined>> | undefined }, action: HookAction, repo: string): number {
+	const env = ctx.env ?? process.env;
+	const reports = action === "install" ? installCorpusHooks(repo, { check: false, env }) : action === "status" ? installCorpusHooks(repo, { check: true, env }) : uninstallCorpusHooks(repo, env);
 	ctx.out(renderHooks(reports));
-	const refused = reports.some((report) => report.state === "not-a-repo" || (report.state === "foreign" && action !== "status"));
+	const refused = reports.some((report) => report.state === "not-a-repo" || report.state === "refused" || (report.state === "foreign" && action !== "status"));
 	return refused ? 1 : 0;
 }

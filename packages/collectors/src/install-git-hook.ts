@@ -15,11 +15,16 @@
  * `post-checkout` and `post-rewrite` hooks. Each one drops a tiny hint for the corpus watcher into the hint spool (outside
  * the repository), in the background with a hard timeout, and always exits 0. `substrate corpus hook install|uninstall|status`
  * uses the functions below; uninstalling removes only our block.
+ *
+ * With a repository registry (`SUBSTRATE_REPO_REGISTRY`; unset means no check) a hooks directory outside the repository's own
+ * worktree or git directory is refused before anything is written, so a `core.hooksPath` cannot place a hook outside the registration.
  */
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, type Stats, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { LOCAL_SURFACE } from "../../cli/src/worktree/scope.ts";
 import { redact } from "../../mcp-server/src/redact.ts";
+import { localPathGate, localRegistryScope, REPO_REFUSAL_MESSAGES, resolveContained } from "../../mcp-server/src/repo-scope.ts";
 
 const MARKER = "Agent Substrate — git post-commit collector";
 const SOURCE = join(import.meta.dir, "git", "post-commit");
@@ -51,11 +56,52 @@ function hooksDir(repo: string): string | null {
 	return resolve(repo, relative);
 }
 
-type Status = "installed" | "already-ours" | "foreign-hook" | "not-a-repo";
+type Status = "installed" | "already-ours" | "foreign-hook" | "not-a-repo" | "refused";
 
-function inspect(repo: string): { status: Status; path?: string } {
+/** The environment the registry is read from. Callers may pass their own; the default is the process environment. */
+type Env = Readonly<Record<string, string | undefined>>;
+
+/** The real locations git reports for `repo`: its worktree, its git directory and its common git directory. */
+function ownLocations(repo: string): string[] {
+	const found: string[] = [];
+	const top = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+	if (top.status === 0) found.push(resolve(repo, top.stdout.trim()));
+	const dirs = spawnSync("git", ["-C", repo, "rev-parse", "--git-dir", "--git-common-dir"], { encoding: "utf8" });
+	if (dirs.status === 0) {
+		for (const line of dirs.stdout.split("\n")) {
+			if (line.trim() !== "") found.push(resolve(repo, line.trim()));
+		}
+	}
+	return found.map((dir) => resolveContained(dir) ?? dir);
+}
+
+/** Whether `target` is `root` or lies beneath it. Both are real, absolute paths. */
+function within(root: string, target: string): boolean {
+	const rel = relative(root, target);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Why the hooks directory `dir` of `repo` may not be written, or null when it may. Unset registry: null, as before. Set: `repo`
+ * must lie in a registration (the lookup the corpus CLI gates on), and `dir` must lie in the repository's own worktree or git
+ * directory, so a `core.hooksPath` that points elsewhere is refused before anything is written there.
+ */
+function hooksDirRefusal(repo: string, dir: string, env: Env): string | null {
+	const parsed = localRegistryScope(env);
+	if (!parsed.ok) return `hooks directory ${dir}: ${parsed.problem}`;
+	if (parsed.value === null) return null;
+	const gate = localPathGate(parsed.value, LOCAL_SURFACE, resolve(repo));
+	if (!gate.ok) return `hooks directory ${dir}: ${REPO_REFUSAL_MESSAGES[gate.reason]}`;
+	const target = resolveContained(dir) ?? dir;
+	if (ownLocations(repo).some((root) => within(root, target))) return null;
+	return `hooks directory ${dir} is outside the repository's own worktree and git directory`;
+}
+
+function inspect(repo: string, env: Env): { status: Status; path?: string; detail?: string } {
 	const dir = hooksDir(repo);
 	if (!dir) return { status: "not-a-repo" };
+	const refusal = hooksDirRefusal(repo, dir, env);
+	if (refusal !== null) return { status: "refused", detail: refusal };
 	const path = join(dir, "post-commit");
 	if (!existsSync(path)) return { status: "installed", path };
 	const existing = readFileSync(path, "utf8");
@@ -109,7 +155,7 @@ export function corpusHookBlock(hook: CorpusHook, cliPath: string): string {
 	].join("\n");
 }
 
-export const HOOK_STATES = ["installed", "refreshed", "present", "absent", "removed", "foreign", "not-a-repo"] as const;
+export const HOOK_STATES = ["installed", "refreshed", "present", "absent", "removed", "foreign", "not-a-repo", "refused"] as const;
 export type HookState = (typeof HOOK_STATES)[number];
 
 export interface HookReport {
@@ -167,9 +213,11 @@ function isShebangOnly(text: string): boolean {
 }
 
 /** Installs (or with `check` only reports) the three corpus hint hooks. A hook file that is not ours is reported and left alone. */
-export function installCorpusHooks(repo: string, options: { check: boolean; cliPath?: string | undefined }): HookReport[] {
+export function installCorpusHooks(repo: string, options: { check: boolean; cliPath?: string | undefined; env?: Env | undefined }): HookReport[] {
 	const dir = hooksDir(repo);
 	if (!dir) return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+	const refusal = hooksDirRefusal(repo, dir, options.env ?? process.env);
+	if (refusal !== null) return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail: refusal }));
 	const cliPath = options.cliPath ?? resolve(import.meta.dir, "..", "..", "cli", "src", "index.ts");
 	return CORPUS_HOOKS.map((hook): HookReport => {
 		const path = join(dir, hook);
@@ -191,9 +239,11 @@ export function installCorpusHooks(repo: string, options: { check: boolean; cliP
 }
 
 /** Removes only our block from each hook; a file left with nothing but a shebang is deleted, any other line is kept. */
-export function uninstallCorpusHooks(repo: string): HookReport[] {
+export function uninstallCorpusHooks(repo: string, env: Env = process.env): HookReport[] {
 	const dir = hooksDir(repo);
 	if (!dir) return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+	const refusal = hooksDirRefusal(repo, dir, env);
+	if (refusal !== null) return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail: refusal }));
 	return CORPUS_HOOKS.map((hook): HookReport => {
 		const path = join(dir, hook);
 		const existing = readExisting(path);
@@ -219,6 +269,8 @@ export interface RepoFailure {
 export interface InstallOptions {
 	checkOnly?: boolean | undefined;
 	corpus?: boolean | undefined;
+	/** The environment the registry is read from. Defaults to the process environment. */
+	env?: Env | undefined;
 	/** Where the per-repository lines go. Defaults to stdout. */
 	write?: ((text: string) => void) | undefined;
 }
@@ -241,15 +293,21 @@ function oneLineReason(error: unknown): string {
 export function installRepos(repos: readonly string[], options: InstallOptions = {}): InstallOutcome {
 	const checkOnly = options.checkOnly ?? false;
 	const corpus = options.corpus ?? false;
+	const env = options.env ?? process.env;
 	const write = options.write ?? ((text: string) => process.stdout.write(text));
 	let failures = 0;
 	const errors: RepoFailure[] = [];
 	for (const repo of repos) {
 		let problem = false;
 		try {
-			const { status, path } = inspect(repo);
+			const { status, path, detail } = inspect(repo, env);
 			if (status === "not-a-repo") {
 				write(`✗ ${repo} — not a git repository\n`);
+				problem = true;
+				continue;
+			}
+			if (status === "refused") {
+				write(`✗ ${repo} — refused: ${detail}; nothing was written\n`);
 				problem = true;
 				continue;
 			}
@@ -268,7 +326,7 @@ export function installRepos(repos: readonly string[], options: InstallOptions =
 				write(`✓ ${repo} — installed\n`);
 			}
 			if (!corpus) continue;
-			for (const report of installCorpusHooks(repo, { check: checkOnly })) {
+			for (const report of installCorpusHooks(repo, { check: checkOnly, env })) {
 				const mark = report.state === "foreign" ? "⚠" : report.state === "absent" ? "○" : "✓";
 				write(`${mark} ${repo} — ${report.hook} ${report.state}${report.detail === undefined ? "" : ` (${report.detail}; left alone)`}\n`);
 				if (report.state === "foreign") problem = true;
