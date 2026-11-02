@@ -73,3 +73,17 @@ describe("DeadLetterStore boot read", () => {
 		expect(new DeadLetterStore({ path }).depth()).toBe(40);
 	});
 });
+
+describe("DeadLetterStore torn tail", () => {
+	test("a record written after a torn last line is readable: the torn line is skipped and the record is not glued to it", () => {
+		const path = join(tempDir(), "dead.jsonl");
+		writeFileSync(path, '{"id":"dlq_torn","reason":"exh');
+		const store = new DeadLetterStore({ path });
+
+		const record = store.record({ event, attempts: 1, enqueued_at: 0, last_reason: "unreachable" }, "exhausted");
+
+		const reopened = new DeadLetterStore({ path });
+		expect(reopened.records()).toMatchObject([{ id: record.id, event_hash: event.hash }]);
+		expect(reopened.depth()).toBe(1);
+	});
+});

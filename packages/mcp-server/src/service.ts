@@ -2969,8 +2969,14 @@ export class Substrate {
 			if (settled !== null && settled.lookupFailed !== true) return settled;
 			lookupFailure = settled;
 		}
-		const waiting = idem?.key != null && stores !== null ? stores.buffer.findKeyed(normalizeEvent(input, null, { key: idem.key }), idem.key) : null;
-		if (waiting !== null) return { event: waiting.event, stored: false, buffered: true, error: waiting.last_reason };
+		if (idem?.key != null && stores !== null) {
+			const cell = normalizeEvent(input, null, { key: idem.key });
+			const waiting = stores.buffer.findKeyed(cell, idem.key);
+			if (waiting !== null) return { event: waiting.event, stored: false, buffered: true, error: waiting.last_reason };
+			// A replay of an event already given up is refused as a give-up: it is not waiting for a write, and nothing is appended for it.
+			const given = stores.buffer.findPendingKeyed(cell, idem.key);
+			if (given !== null) return { event: given.event, stored: false, deadLettered: true, error: given.last_reason };
+		}
 		if (lookupFailure !== null) return lookupFailure;
 		let prev: string | null = null;
 		let tipError: string | null = null;
@@ -3036,7 +3042,9 @@ export class Substrate {
 				process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 				return { event, stored: false, error };
 			}
-			return this.bufferEvent(stores.buffer, { session: sessionId, key, ledgerPrev: prev, build: () => event, last_reason: error, attempts: 1 });
+			// A call the breaker refused was never sent, so it is not an attempt: the event keeps its full budget.
+			const attempts = cause instanceof GreptimeBreakerOpen ? 0 : 1;
+			return this.bufferEvent(stores.buffer, { session: sessionId, key, ledgerPrev: prev, build: () => event, last_reason: error, attempts });
 		}
 	}
 

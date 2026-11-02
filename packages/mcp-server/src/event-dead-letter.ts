@@ -12,7 +12,7 @@
  * end. Its depth is reported on `/healthz` instead.
  */
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { parseStoredLine, StoredEvent } from "./event.ts";
@@ -93,7 +93,12 @@ export class DeadLetterStore {
 		return this.onDisk + this.held.length;
 	}
 
-	/** Keep one record for an event given up under `reason`. Never throws: a failed write is reported and the record is held. */
+	/**
+	 * Keep one record for an event given up under `reason`. Never throws: a failed write is reported and the record is held.
+	 *
+	 * At-least-once. If the process stops after this record reaches the file but before the buffer drops the entry, the entry is given
+	 * up again on the next boot and a second record is written. Both copies carry the same event id and hash.
+	 */
 	record(candidate: DeadLetterCandidate, reason: DeadLetterReason): DeadLetterRecord {
 		const event = candidate.event;
 		const record: DeadLetterRecord = {
@@ -122,7 +127,12 @@ export class DeadLetterStore {
 		return [...onFile, ...this.held];
 	}
 
-	/** Writes the records still held in memory. Returns true when every record is on the file. Spends no attempt. */
+	/**
+	 * Writes the records still held in memory. Returns true when every record is on the file. Spends no attempt.
+	 *
+	 * At-least-once. A write that fails partway can leave some of the held records on the file; they stay held and are written again by
+	 * the next flush, so the same record can appear twice. Each copy carries the same event id and hash, so the duplicate is detectable.
+	 */
 	writeHeld(): boolean {
 		this.flush();
 		return this.durable;
@@ -133,12 +143,29 @@ export class DeadLetterStore {
 		try {
 			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
 			const fresh = !existsSync(this.path);
-			appendFileSync(this.path, this.held.map((record) => `${JSON.stringify(record)}\n`).join(""), { mode: 0o600 });
+			// A torn last line (a write cut short) has no newline. The records go on a line of their own, so the torn line stays alone
+			// and is skipped on read, instead of gluing its tail onto the first record and losing that record too.
+			const lead = !fresh && this.endsMidLine(this.path) ? "\n" : "";
+			appendFileSync(this.path, lead + this.held.map((record) => `${JSON.stringify(record)}\n`).join(""), { mode: 0o600 });
 			if (fresh) chmodSync(this.path, 0o600);
 			this.onDisk += this.held.length;
 			this.held = [];
 		} catch (cause) {
 			this.report("append", cause);
+		}
+	}
+
+	/** Whether the file's last byte is not a newline. */
+	private endsMidLine(path: string): boolean {
+		const size = statSync(path).size;
+		if (size === 0) return false;
+		const fd = openSync(path, "r");
+		try {
+			const last = Buffer.alloc(1);
+			readSync(fd, last, 0, 1, size - 1);
+			return last[0] !== 0x0a;
+		} finally {
+			closeSync(fd);
 		}
 	}
 

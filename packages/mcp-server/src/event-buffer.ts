@@ -182,14 +182,24 @@ export class EventBuffer {
 	}
 
 	/**
-	 * The buffered entry a keyed replay names: the same idempotency key in the same cell as the replay, the cell being the columns a
-	 * ledger lookup keys on (`surface`, `repo`, `graph_id`, `kind`). A different event that reuses the key is another event. `ts` is
-	 * not compared: a keyed resend that carries no timestamp of its own must still find the event it resends.
+	 * The live buffered entry a keyed replay names: the same idempotency key in the same cell as the replay, the cell being the columns
+	 * a ledger lookup keys on (`surface`, `repo`, `graph_id`, `kind`). A different event that reuses the key is another event. `ts` is
+	 * not compared: a keyed resend that carries no timestamp of its own must still find the event it resends. A pending give-up is not
+	 * waiting for its write and is not returned here (see `findPendingKeyed`).
 	 */
 	findKeyed(cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind">, key: string): EventBufferEntry | null {
+		return this.findByKey(cell, key, (entry) => entry.given_up == null);
+	}
+
+	/** The pending give-up a keyed replay names, matched on the same cell and key as `findKeyed`. */
+	findPendingKeyed(cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind">, key: string): EventBufferEntry | null {
+		return this.findByKey(cell, key, (entry) => entry.given_up != null);
+	}
+
+	private findByKey(cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind">, key: string, want: (entry: EventBufferEntry) => boolean): EventBufferEntry | null {
 		for (const entry of this.entries.values()) {
 			const event = entry.event;
-			if (entry.key === key && event.surface === cell.surface && event.repo === cell.repo && event.graph_id === cell.graph_id && event.kind === cell.kind) {
+			if (want(entry) && entry.key === key && event.surface === cell.surface && event.repo === cell.repo && event.graph_id === cell.graph_id && event.kind === cell.kind) {
 				return entry;
 			}
 		}
@@ -336,6 +346,10 @@ export class EventBuffer {
 	 * Hands the dead-letter record of each pending entry to the store once, then removes the pending entries when the store reports every
 	 * record on disk. A pending entry this process has not handed over yet (one left in the file by a restart) is handed over here.
 	 * Returns true when the buffer changed.
+	 *
+	 * At-least-once. The set of records already handed over is not persisted, so after a restart a pending entry's record is handed over
+	 * again. A crash between the store's write and this buffer's compaction leaves the entry in the file, and the next boot hands it over
+	 * again. Either way one record can be written twice; both copies carry the same event id and hash, so the duplicate is detectable.
 	 */
 	private settlePending(): boolean {
 		const pending = [...this.entries.values()].filter((entry) => entry.given_up != null);

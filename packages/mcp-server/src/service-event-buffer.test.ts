@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, loadConfig } from "./config.ts";
@@ -314,5 +314,46 @@ describe("the telemetry buffer's refusals, replays and config", () => {
 	test("the buffer and the dead-letter store cannot name one file", () => {
 		const t = telemetry();
 		expect(() => loadConfig({ ...t.env, SUBSTRATE_EVENT_DEAD_LETTER_PATH: t.bufferPath })).toThrow(ConfigError);
+	});
+
+	test("a live write the breaker refused is buffered with its full budget, not given up at once", async () => {
+		const t = telemetry({ SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS: "1" });
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(t.env, greptime);
+		state.breakerOpen = true;
+
+		const result = await substrate.emit(input("refused-live"));
+
+		expect(result).toMatchObject({ stored: false, buffered: true });
+		expect(result.deadLettered).toBeUndefined();
+		state.breakerOpen = false;
+		await substrate.drainEventBuffer({ all: true });
+		expect(state.rows.map((row) => row.id)).toEqual([result.event.id]);
+	});
+
+	test("a keyed replay of a pending give-up is refused as a give-up, not answered as buffered, and appends nothing", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "telemetry-pending-"));
+		dirs.push(dir);
+		// A file where the dead-letter directory should be: every record write fails, so the give-up stays pending in the buffer.
+		const blocker = join(dir, "blocker");
+		writeFileSync(blocker, "");
+		const env = {
+			SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "buffer.jsonl"),
+			SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(blocker, "dead.jsonl"),
+			SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS: "1",
+			SUBSTRATE_EVENT_IDEMPOTENCY: "enforce",
+		};
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(env, greptime);
+		state.down = true;
+		const keyed: EventInput = { surface: "omp", kind: "note", summary: "pending", idempotency_key: "replay-key-0004" };
+
+		const first = await substrate.emit(keyed);
+		expect(first).toMatchObject({ stored: false, deadLettered: true });
+		const replay = await substrate.emit(keyed);
+
+		expect(replay).toMatchObject({ stored: false, deadLettered: true });
+		expect(replay.buffered).toBeUndefined();
+		expect(state.rows).toEqual([]);
 	});
 });
