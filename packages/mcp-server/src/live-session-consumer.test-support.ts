@@ -55,10 +55,10 @@ export class History implements SteeringHistorySink {
 	readonly entries: SteeringAuditEntry[] = [];
 	async append(entry: SteeringAuditEntry): Promise<void> { this.entries.push(entry); }
 }
-export async function settle(condition: () => boolean): Promise<void> {
-	for (let turn = 0; turn < 2000 && !condition(); turn++) {
-		const next = Promise.withResolvers<void>(); setImmediate(next.resolve); await next.promise;
-	}
+/** Waits for a condition the code under test reaches over real I/O (HTTP, ledger). The budget is wall time: a setImmediate turn takes microseconds, so a turn count gives up before a request arrives. */
+export async function settle(condition: () => boolean, budgetMs = 3_000): Promise<void> {
+	const deadline = Date.now() + budgetMs;
+	while (!condition() && Date.now() < deadline) { const tick = Promise.withResolvers<void>(); setTimeout(tick.resolve, 5); await tick.promise; }
 	expect(condition()).toBe(true);
 }
 const stops: Array<() => Promise<void>> = [];

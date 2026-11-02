@@ -1650,8 +1650,13 @@ export class Substrate {
 	private readonly steeringSweeper: SteeringExpirySweeper | null;
 	/** Phase 58: one wake-up hint per queued directive. */
 	readonly steeringHints: SteeringHintAnnouncer;
-	/** Durable authority is the only source of live identity and private state. */
-	readonly liveSessions: LiveSessionAuthority | null;
+	/** Durable authority is the only source of live identity and private state. Built on first use: the constructor never reads the index. */
+	get liveSessions(): LiveSessionAuthority | null {
+		if (this.liveSessionsCache === undefined) this.liveSessionsCache = this.liveSessionsSource();
+		return this.liveSessionsCache;
+	}
+	private liveSessionsCache: LiveSessionAuthority | null | undefined;
+	private readonly liveSessionsSource: () => LiveSessionAuthority | null;
 	readonly liveBoundary: LiveSessionBoundary;
 	private readonly preparedBatches = new WeakMap<object, { caller: LiveSessionCaller; callsDigest: string; entries: Array<{ key: string; prepared: PreparedLiveCall }> }>();
 	private readonly liveDispatches = new WeakMap<PreparedLiveDispatch, Array<{ key: string; prepared: PreparedLiveCall; consumed: boolean }>>();
@@ -1876,9 +1881,15 @@ export class Substrate {
 						...(config.steeringIdempotency.ok ? { idempotency: config.steeringIdempotency.settings } : {}),
 					})
 				: null;
-		this.liveSessions = steeringSeam?.liveSessions !== undefined ? steeringSeam.liveSessions : this.index?.liveSessions({ leaseSeconds: config.liveSessionLeaseS }) ?? null;
+		const liveSessionsOverride = steeringSeam?.liveSessions;
+		const liveSessionLeaseS = config.liveSessionLeaseS;
+		this.liveSessionsSource = () => (liveSessionsOverride !== undefined ? liveSessionsOverride : (this.index?.liveSessions({ leaseSeconds: liveSessionLeaseS }) ?? null));
+		// Resolved per call: building the boundary and the state port never reads the index.
+		const resolveLive = (): LiveSessionAuthority | null => this.liveSessions;
 		this.liveBoundary = new LiveSessionBoundary({
-			authority: this.liveSessions,
+			get authority() {
+				return resolveLive();
+			},
 			settings: config.admission,
 			resolveDirective: (id) => steeringInbox?.get(id)?.directive.targetSessionId ?? null,
 			recordRefusal: async (event) => (await this.emit(event)).stored,
@@ -1894,7 +1905,7 @@ export class Substrate {
 			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();
-		this.sessionState = steeringSeam?.sessionState !== undefined ? steeringSeam.sessionState : steeringInbox !== null ? new LiveSessionStatePort({ authority: this.liveSessions, emit: (event) => this.emit(event) }) : null;
+		this.sessionState = steeringSeam?.sessionState !== undefined ? steeringSeam.sessionState : steeringInbox !== null ? new LiveSessionStatePort({ get authority() { return resolveLive(); }, emit: (event) => this.emit(event) }) : null;
 		this.steeringHints = new SteeringHintAnnouncer({
 			emit: async (event: EventInput) => (await this.emit(event)).stored,
 			...(steeringSeam?.report === undefined ? {} : { report: steeringSeam.report }),
