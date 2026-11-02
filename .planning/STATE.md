@@ -710,8 +710,8 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
   - Disk statement, valid. See the correction below.
 - **Correction to Run 16 (disk).** "Freed 3.1 GB; 7.1 MB to 9.0 GB" is wrong. Most files in the phase 78 worktree's `node_modules` are hard links (29,884 of 29,932 regular files have more than one link), so deleting the integration copy freed an unmeasured share. The rise to 9.0 GB across that step has no identified source. Free space has since read 12, 16, 15 and 14 GB, so it is volatile.
 - **Disk attribution (read-only `du`, 2026-11-02, about 374 GB used of 387 GB).**
-  - `/root` 236 GB: `/root/src` 108 GB (`repos` 99 GB, `worktrees` 16 GB), `/root/.local` 42 GB, `/root/.omp` 17 GB, `/root/.rustup` 13 GB, `/root/.cache` 9.1 GB, `/root/.cursor-server` 5.7 GB, `/root/.dotnet` 5.1 GB, and smaller entries.
-  - `/tmp` 30 GB: `pytest-of-root` 7.6 GB, `ag-scratch` 4.9 GB, `ompos-head-baseline` 2.9 GB, and smaller entries.
+  - `/root` 236 GB: `/root/src` about 108 GB (its `repos` and `worktrees` are part of it; those two were measured at different times), `/root/.local` 42 GB, `/root/.omp` 17 GB, `/root/.rustup` 13 GB, `/root/.cache` 9.1 GB, `/root/.cursor-server` 5.7 GB, `/root/.dotnet` 5.1 GB, and smaller entries.
+  - `/tmp` 30 GB: `pytest-of-root` about 7 GB, `ag-scratch` about 5 GB, `ompos-head-baseline` about 3 GB, and smaller entries.
   - `/var` 28 GB (`/var/lib` 24 GB, of which Docker is 16 GB); `/opt` 26 GB; `/usr` 18 GB; `/home` 13 GB.
   - Docker: 16.5 GB of images, 13.35 GB of it unused (`asterinas/asterinas:0.16.1`); 1.3 GB of volumes, 1.1 GB unused, 73 of them anonymous.
   - Nothing in this list was deleted in this run.
