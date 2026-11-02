@@ -32,7 +32,13 @@ class FakeTimers implements SteeringWaitTimers {
 	fire(): void { const [id, run] = defined([...this.live.entries()][0], "pending wait timer"); this.live.delete(id); run(); }
 }
 async function settle(condition: () => boolean): Promise<void> {
-	for (let n = 0; n < 2000 && !condition(); n++) { const turn = Promise.withResolvers<void>(); setImmediate(turn.resolve); await turn.promise; }
+	// Real socket I/O reaches the waiter; a fake clock cannot drive it, so this polls real time, bounded at 2 s.
+	const deadline = Date.now() + 2000;
+	while (!condition() && Date.now() < deadline) {
+		const tick = Promise.withResolvers<void>();
+		setTimeout(tick.resolve, 1);
+		await tick.promise;
+	}
 	expect(condition()).toBe(true);
 }
 const cleanup: Array<() => void | Promise<void>> = [];
@@ -239,6 +245,15 @@ describe("bounded long-poll release and cleanup", () => {
 		const response = await h.get(h.path, h.headers);
 		expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ directive: { session_id: h.row.sessionId }, wait_ms: 5000 });
 		expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
+	});
+	test("the wait body carries the delivery sequence of the directive it returns", async () => {
+		const h = await held(); const directiveId = await queue(h, h.row.sessionId);
+		const response = await h.get(h.path, h.headers);
+		expect(response.status).toBe(200);
+		const body = await response.json() as { directive: { id: string; sequence: unknown } };
+		expect(body.directive.id).toBe(directiveId);
+		expect(typeof body.directive.sequence).toBe("number");
+		expect(body.directive.sequence).toBe(h.substrate.steering.inbox?.sequenceOf(directiveId));
 	});
 	test("queue wakes only the owner's held wait and releases all resources", async () => {
 		const h = await held(); const pending = h.get(h.path, h.headers); await settle(() => h.waiters.size === 1);

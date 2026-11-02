@@ -210,7 +210,7 @@ import { PlanningReader } from "./planning/read.ts";
 import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import { DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundary, LiveSessionBoundaryError, liveSessionNotFound, SESSION_BINDING_INPUT, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, type LiveCallFailure, type LiveSessionAuditPort, type LiveSessionInvocation, type PreparedLiveCall, type PreparedLiveDispatch, type SteeringWiring } from "./planning/steering-tools.ts";
-import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
+import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink, type SteeringIdempotencyStore } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
 import { LiveSessionStatePort, STEERING_SESSION_ENDED_ACTION, steeringSessionEvent } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
@@ -1605,6 +1605,8 @@ export class Substrate {
 	readonly planningObserver: PlanningObserver;
 	/** Phase 58: the Postgres audit sink behind the inbox while `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on (or a test injects one). Null keeps the inbox in memory. */
 	private readonly steeringDurable: SteeringAuditSink | null;
+	/** Phase 77: the durable sequence counter and keyed-queue replay records behind the inbox, under the same opt-in as the audit sink. Null keeps them in the inbox's memory. */
+	private readonly steeringDurableIdempotency: SteeringIdempotencyStore | null;
 	/** Phase 58: closes directives nobody acknowledged in time. Null unless the inbox is durable. Started by `startSteering`. */
 	private readonly steeringSweeper: SteeringExpirySweeper | null;
 	/** Phase 58: one wake-up hint per queued directive. */
@@ -1658,6 +1660,7 @@ export class Substrate {
 			steering?: {
 				history: SteeringHistorySink | null;
 				durable?: SteeringAuditSink | null;
+				idempotency?: SteeringIdempotencyStore | null;
 				sessionState?: SessionStatePort | null;
 				timers?: PlanningTimers;
 				nowMs?: () => number;
@@ -1802,7 +1805,7 @@ export class Substrate {
 		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
 		// Phase 58: the acknowledgement deadline and sweep interval are part of those settings.
 		const steeringSettings = config.steering.ok ? config.steering.settings : null;
-		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors)];
+		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors), ...(config.steeringIdempotency.ok ? [] : config.steeringIdempotency.errors)];
 		if (steeringErrors.length > 0) {
 			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
 		}
@@ -1815,12 +1818,24 @@ export class Substrate {
 				: config.steeringAuditTable && steeringSettings?.enabled === true && this.index !== null
 					? this.index.steeringAudit()
 					: null;
+		this.steeringDurableIdempotency =
+			steeringSeam !== undefined
+				? (steeringSeam.idempotency ?? null)
+				: this.steeringDurable !== null && this.index !== null
+					? this.index.steeringIdempotency()
+					: null;
 		const steeringHistory = this.steeringDurable ?? steeringSeam?.history ?? null;
 		const steeringClock = { nowMs: steeringSeam?.nowMs ?? (() => Date.now()) };
 		const ackTtlMs = this.steeringDurable !== null && config.steeringExpiry.ok ? config.steeringExpiry.settings.ackTtlMs : undefined;
 		const steeringInbox =
 			steeringSettings?.enabled === true && steeringHistory !== null && steeringErrors.length === 0
-				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
+				? new SteeringInbox({
+						history: steeringHistory,
+						clock: steeringClock,
+						policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs },
+						...(this.steeringDurableIdempotency === null ? {} : { store: this.steeringDurableIdempotency }),
+						...(config.steeringIdempotency.ok ? { idempotency: config.steeringIdempotency.settings } : {}),
+					})
 				: null;
 		this.liveSessions = steeringSeam?.liveSessions !== undefined ? steeringSeam.liveSessions : this.index?.liveSessions({ leaseSeconds: config.liveSessionLeaseS }) ?? null;
 		this.liveBoundary = new LiveSessionBoundary({
@@ -1836,6 +1851,7 @@ export class Substrate {
 			settingsErrors: steeringErrors,
 			inbox: steeringInbox,
 			boundary: this.liveBoundary,
+			onQueued: (directiveId) => this.onSteeringQueued(directiveId),
 			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();

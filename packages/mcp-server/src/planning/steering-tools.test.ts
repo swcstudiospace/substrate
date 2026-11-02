@@ -210,3 +210,58 @@ describe("real registered MCP tools", () => {
 		expect((await b.listTools()).tools.map(tool => tool.name)).not.toContain("steering_queue");
 	});
 });
+
+describe("keyed queue through the real boundary: a replay returns the original reply and writes nothing", () => {
+	const KEY = "retry-key-0001";
+
+	test("a keyed reply carries its sequence, and a replay returns the same reply with no second audit write", async () => {
+		const h = await fixture();
+		const keyed = { ...queue(h.row.sessionId), idempotency_key: KEY };
+		const first = await queueSteering(h.substrate.steering, OPERATOR, keyed);
+		const replay = await queueSteering(h.substrate.steering, OPERATOR, keyed);
+		expect(first).toMatchObject({ status: "queued", target_session_id: h.row.sessionId, sequence: 1 });
+		expect(replay).toEqual(first);
+		expect(h.history.entries.map((entry) => entry.event)).toEqual(["queued"]);
+	});
+
+	test("an unkeyed queue keeps its reply shape, with no sequence", async () => {
+		const h = await fixture();
+		const queued = await queueSteering(h.substrate.steering, OPERATOR, queue(h.row.sessionId));
+		if (queued.status !== "queued") throw new Error("test queue refused");
+		expect(Object.keys(queued).sort()).toEqual(["directive_id", "queued_at_ms", "status", "target_session_id"]);
+	});
+
+	test("a key from another operator surface does not replay", async () => {
+		const h = await fixture({ SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp,claude-code" });
+		const keyed = { ...queue(h.row.sessionId), idempotency_key: KEY };
+		const first = await queueSteering(h.substrate.steering, OPERATOR, keyed);
+		const other = await queueSteering(h.substrate.steering, { surface: "claude-code", isOperator: true }, keyed);
+		if (first.status !== "queued" || other.status !== "queued") throw new Error("test queue refused");
+		expect(other.directive_id).not.toBe(first.directive_id);
+		expect(other.sequence).toBe(2);
+		expect(h.history.entries.map((entry) => entry.event)).toEqual(["queued", "queued"]);
+	});
+
+	test("the MCP steering_queue tool takes the key, and a repeat returns the original reply", async () => {
+		const h = await fixture();
+		const client = await h.connect(OPERATOR);
+		const args = { ...queue(h.row.sessionId), idempotency_key: KEY };
+		const first = await call(client, "steering_queue", args);
+		const replay = await call(client, "steering_queue", args);
+		expect(first.isError).toBe(false);
+		expect(first.body).toMatchObject({ status: "queued", sequence: 1 });
+		expect(replay.body).toEqual(first.body);
+		expect(h.history.entries.map((entry) => entry.event)).toEqual(["queued"]);
+	});
+
+	test("a replayed keyed queue announces nothing: only the fresh queue wakes its session", async () => {
+		const h = await fixture();
+		const emit = spyOn(h.substrate, "emit");
+		const first = await queueSteering(h.substrate.steering, OPERATOR, { ...queue(h.row.sessionId), idempotency_key: KEY });
+		const announced = emit.mock.calls.length;
+		const replay = await queueSteering(h.substrate.steering, OPERATOR, { ...queue(h.row.sessionId), idempotency_key: KEY });
+		expect(replay).toEqual(first);
+		expect(announced).toBeGreaterThan(0);
+		expect(emit.mock.calls.length).toBe(announced);
+	});
+});

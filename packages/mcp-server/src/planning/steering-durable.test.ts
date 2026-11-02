@@ -6,6 +6,9 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
+	DEFAULT_STEERING_IDEMPOTENCY_TTL_S,
+	MemorySteeringIdempotencyStore,
+	type SteeringIdempotencyStore,
 	STEERING_ACK_TTL_BOUNDS_S,
 	STEERING_ACK_TTL_ENV,
 	STEERING_AUDIT_ATTEMPTS,
@@ -17,6 +20,9 @@ import {
 	type SteeringAuditEntry,
 	type SteeringClock,
 	type SteeringHistorySink,
+	type SteeringReplayClaim,
+	type SteeringReplayRecord,
+	type SteeringUnit,
 } from "./steering.ts";
 import {
 	SteeringAuditConflictError,
@@ -143,6 +149,7 @@ function stored(row: SteeringAuditRow, acknowledgement: SteeringStoredAckRow | n
 		planPlan: row.planPlan,
 		conflictsWithActivePlan: row.conflictsWithActivePlan,
 		directiveCreatedAtMs: row.directiveCreatedAtMs,
+		deliverySequence: row.deliverySequence,
 		queuedAt: row.recordedAt,
 		acknowledgement,
 	};
@@ -165,6 +172,7 @@ function queuedRow(overrides: Partial<SteeringAuditRow> = {}): SteeringAuditRow 
 		planPlan: null,
 		conflictsWithActivePlan: false,
 		directiveCreatedAtMs: 1_000,
+		deliverySequence: null,
 		payloadSha256: "seeded",
 		recordedAt: new Date(T0),
 		...overrides,
@@ -859,5 +867,104 @@ describe("private durable history through the service boundary", () => {
 		if (failure === "outage") h.authority.unavailable = true;
 		release.resolve();
 		await expect(pending).rejects.toMatchObject({ refusal: { status: "refused", error: { code: failure === "outage" ? "session-unavailable" : "not-found" } } });
+	});
+});
+
+describe("keyed replay and delivery sequence across a restart", () => {
+	const KEY = "retry-key-0001";
+
+	/** A server process over the shared audit log and the shared replay store. A restart is a new process over the same two. */
+	function serverOver(sql: DurableSql, store: SteeringIdempotencyStore, clock: SteeringClock): ServerProcess {
+		const sink = new SteeringAuditSink(sql, sql);
+		const inbox = new SteeringInbox({ history: sink, clock, policy: { allowlist: [HUMAN], ratePerMin: 100 }, store });
+		return { inbox, sink };
+	}
+
+	test("a keyed retry after a restart returns the original record and sequence, even once the directive was acknowledged, and writes no audit row", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		const writer = serverOver(sql, store, clock).inbox;
+		const first = await writer.enqueue(directive({ id: "d-1" }), KEY);
+		await writer.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
+		const attempts = sql.insertAttempts;
+		const restarted = serverOver(sql, store, clock).inbox;
+		const replay = await restarted.enqueue(directive({ id: "d-2" }), KEY);
+		expect(replay).toEqual(first);
+		expect(sql.insertAttempts).toBe(attempts);
+		expect(restarted.sequenceOf("d-1")).toBe(1);
+		expect(restarted.get("d-2")).toBeNull();
+	});
+
+	test("after a restart the next distinct command takes the next sequence, and a restored directive keeps its own", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }));
+		const restarted = serverOver(sql, store, clock);
+		expect(await restoreSteeringInboxPaged(restarted.inbox, restarted.sink, { limit: 100 })).toMatchObject({ ok: true, value: { report: { restored: ["d-1", "d-2"] } } });
+		expect([restarted.inbox.sequenceOf("d-1"), restarted.inbox.sequenceOf("d-2")]).toEqual([1, 2]);
+		const next = await restarted.inbox.enqueue(directive({ id: "d-3" }), "retry-key-0002");
+		expect(next.ok ? restarted.inbox.sequenceOf("d-3") : null).toBe(3);
+	});
+
+	test("past the retention window a retry across a restart is a new command with the next sequence", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
+		const later = serverOver(sql, store, new ManualClock(T0 + DEFAULT_STEERING_IDEMPOTENCY_TTL_S * 1_000)).inbox;
+		expect((await later.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(later.sequenceOf("d-2")).toBe(2);
+	});
+
+	test("a retry across a restart with different content is refused as a conflict, and writes nothing", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
+		const attempts = sql.insertAttempts;
+		const other = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2", action: "annotate" }), KEY);
+		expect(other).toEqual({ ok: false, error: { code: "idempotency-conflict" } });
+		expect(sql.insertAttempts).toBe(attempts);
+	});
+
+	/** A store whose claim commits, then loses its reply: the caller sees a failure, while the claim and its audit row stay kept. */
+	class LostReplyStore extends MemorySteeringIdempotencyStore {
+		loseNextReply = false;
+		override async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
+			const claim = await super.claimReplay(record, nowMs, cap, queue);
+			if (this.loseNextReply) {
+				this.loseNextReply = false;
+				throw new Error("reply lost after commit");
+			}
+			return claim;
+		}
+	}
+
+	const queuedIds = (sql: DurableSql): string[] => sql.rows.filter((row) => row.transition === "queued").map((row) => row.directiveId);
+
+	test("a keyed queue whose reply is lost after its audit row committed replays on retry and is never queued twice", async () => {
+		const sql = new DurableSql();
+		const store = new LostReplyStore();
+		const clock = new ManualClock(T0);
+		store.loseNextReply = true;
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		expect(queuedIds(sql)).toEqual(["d-1"]);
+		const retry = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY);
+		expect(retry).toMatchObject({ ok: true, value: { directive: { id: "d-1" } } });
+		expect(queuedIds(sql)).toEqual(["d-1"]);
+	});
+
+	test("an audit refusal inside the keyed claim holds nothing, so the retry queues once", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		sql.failInsert = new Error("connection reset");
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		sql.failInsert = null;
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(queuedIds(sql)).toEqual(["d-2"]);
 	});
 });
