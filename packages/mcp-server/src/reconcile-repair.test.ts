@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import type { ReadThroughCache } from "./cache.ts";
 import { executePlan, findingsDigest, planFromReport } from "./reconcile-repair.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
@@ -235,5 +235,31 @@ describe("executePlan", () => {
 		expect(result.refused).toBe(false);
 		expect(result.repaired).toBe(500);
 		expect(result.error).toBe("unlink failed");
+	});
+
+	test("a scan that fails removes nothing and reports the failure", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = planFromReport(await runReport(deps), NOW);
+		const unlinkKeys = mock(async (_keys: readonly string[], _onBatch?: (removed: number) => void) => 0);
+		const failing = {
+			...deps,
+			cache: {
+				// Only the flush's own scan fails: the report scans narrower prefixes and must still read the cache.
+				scanKeys: async (match: string, limit: number) => {
+					if (match === "substrate:v1:*") throw new Error("scan failed at postgres://user:hunter2@host/db");
+					return cache.cache.scanKeys(match, limit);
+				},
+				unlinkKeys,
+			},
+		};
+		const result = await executePlan(plan, failing, { execute: true });
+		expect(result.executed).toBe(false);
+		expect(result.refused).toBe(false);
+		expect(result.repaired).toBe(0);
+		expect(result.error).toEqual(expect.any(String));
+		expect(result.error?.length).toBeGreaterThan(0);
+		expect(result.error).not.toContain("hunter2");
+		expect(unlinkKeys).not.toHaveBeenCalled();
 	});
 });
