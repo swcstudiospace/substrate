@@ -65,6 +65,8 @@ The session id comes from `--session`. With no flag it is the one session that h
 
 This `--session` is a **historical checkpoint/memory label**, not a live steering credential. Keep it stable across live-handle expiry/replacement and rollback. Private hints require a separately issued live handle (`substrate steer open`) and selected 0600 binding record; `--steering-session` / `--binding-file` authorize that hint read only. Historical event/checkpoint/rollback APIs and their existing authorization do not change. A historical `session.end` never closes a live handle; use explicit `substrate steer close`. No proof reset/re-registration or implicit reuse follows a rollback.
 
+`substrate steer forget HANDLE` removes the named local binding record without contacting the server, never prints a proof, and refuses a record that fails validation (remove that one by hand).
+
 Binding records belong outside repositories and snapshots; use the default per-user state directory or a secure external directory. The file path may be referenced by the host, but its proof must never enter argv, stdin envelopes, stdout, prompt, checkpoint metadata or pending journal. Same-OS-account processes can read the record: file modes are not a process sandbox. See [Live Steering](../live-steering.md#cli-and-the-private-record).
 
 Every line of output is scrubbed: the bearer, anything the redactor recognises, and absolute paths (`<worktree>`, `~`).
