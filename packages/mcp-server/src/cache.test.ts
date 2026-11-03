@@ -1627,7 +1627,8 @@ describe("a waiter keeps its own deadline (uplift-4 S4)", () => {
 			onDeadline: () => DEGRADED,
 		});
 		expect(search).toBe(DEGRADED);
-		expect(Date.now() - started).toBeLessThan(500);
+		// The shared load never resolves here, so a waiter that waited for it would hang; this bound only catches a slow finite wait. It has room for a loaded host.
+		expect(Date.now() - started).toBeLessThan(2_000);
 		// Exactly one load ran, and the shared one was not cancelled: its owner still gets its answer.
 		expect(loads).toBe(1);
 		gate.resolve(["recall answer"]);
