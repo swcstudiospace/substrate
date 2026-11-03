@@ -131,7 +131,7 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 | Requirement | Category | Phase | Status |
 |-------------|----------|-------|--------|
 | HARD-S1 | Security | 71 | Human-needed: 3 of 5 criteria verified on gsd/v18-int-all; Postgres restart clauses pending |
-| HARD-S2 | Security | 72 | Partly met. Amended 2026-11-03: surface-bearer model with repository grants; identifier clause amended to a path gated to a registration. Identifier clause closed; the server refuses to start with the registry set and no scope gate (owner decision 2026-11-03). |
+| HARD-S2 | Security | 72 | Identifier clause closed under SUBSTRATE_REPO_SCOPES; the server refuses to start with the registry set and no scopes (owner decision 2026-11-03); open: default-off posture of the corpus CLI and collector installer. |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
 | HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |

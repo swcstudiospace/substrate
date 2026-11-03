@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 phases 71-78 gaps_found or human_needed, none complete; integration gate r15 green on 79b3ba32 (12082 pass, 2 skip, 0 fail, 0 errors); phases 72 and 76 re-verified at 79b3ba32 (72 gaps_found; 76 human_needed); phase 78 re-verified at f1854711 (human_needed); owner round 3 decisions applied; 6c open."
-stopped_at: "Integration tree gsd/v18-int-all at f1854711 carries the third Run 18 pass. Gate r15 green on 79b3ba32; later commits are records and a comment-only audit header. Owner round 3 decisions applied (5d, 6b, identifier clause, the 76 boundary, D78-5, the audit writer); 6c open. Greptile threads on PR 199, 201 and 204 NOT resolved; nothing pushed; no PR merge-ready. No phase complete; v1.7 open."
+status: "v1.8 phases 71-78 none complete; integration gate r19 green on f86388cf (12192 pass, 2 skip, 0 fail, 0 errors); verifier round at f86388cf: 71, 72, 73, 75, 76, 77 and 78 human_needed; 74 gaps_found; v1.8 not complete; owner decisions open; nothing pushed."
+stopped_at: "Integration tree gsd/v18-int-all at f86388cf carries the fourth Run 18 pass. Gate r19 green on f86388cf (12192 pass, 2 skip, 0 fail, 0 errors). Verifier round at f86388cf. No phase complete; v1.8 not complete. Owner decisions open (see Needs Human); nothing pushed."
 last_updated: "2026-11-02"
 last_activity: 2026-11-02
-last_activity_desc: "Run 18 third pass at f1854711: gate r15 green on 79b3ba32 (12082 pass, 2 skip, 0 fail, 0 errors); phases re-verified (72 gaps_found, 6c open; 76 and 78 human_needed; 78 re-issued at f1854711 after the comment-only header change)"
+last_activity_desc: "Run 18 fourth pass at f86388cf: gate r19 green on f86388cf (12192 pass, 2 skip, 0 fail, 0 errors); verifier round at f86388cf (71, 72, 73, 75, 76, 77, 78 human_needed; 74 gaps_found); no phase complete; v1.8 not complete; nothing pushed."
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
@@ -787,6 +787,14 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Scheduled.** Phase 74 HARD-R1 after v1.8 closes (owner decision, 2026-11-03).
 - **GitHub.** No GitHub writes; PRs 199, 201 and 204 unchanged.
 
+## Run 18, fourth pass (2026-11-03, HEAD f86388cf)
+
+- **Commits.** `500e4fb3` (72: 6c strict nested refusal; refuse-to-start in `loadConfig`, failed review: the loader stays fail closed for every production loader); `a28ecac8` (72: 5d and 6b); `9ab6f111` (73: memo v3, design deviations listed in its message); `d05ae871` (78: corpus bound total); `97defd59` (73 round 4: byte cap, job-key pointers, pre-send validation, adoption window, RPC guard); `62a25181` (73: NUL refusal); `f86388cf` (76: cache-off wording in `docs/greptime-ledger.md` corrected to the code).
+- **Gates.** r15 green (79b3ba32). r16 red on the in-process smoke timing under load, then fixed. r17 green (9ab6f111). r18 green (97defd59). r19 green (f86388cf).
+- **Owner decisions executed.** 6c strict; the server refuses to start with the registry and no scopes; the bound is total, 500 per run; B1 512 UTF-8 bytes refused at write; only job-key successful pointers count; fail closed on an unreadable chain; the unanchored mismatching alarm stores no row; the in-process smoke has its own 2000 ms not-modified budget, the live smoke keeps 500 ms; the 76 boundary accepted.
+- **Incidents.** Relative-path edits by verifiers and units landed in the primary checkout `/root/src/repos/agent-substrate` on several occasions; each was removed, and the primary checkout was verified (`M .planning/STATE.md` and `?? .claude/` only). Briefs use absolute worktree paths only. The verifier for 75 edited its report with `sed`; its record was checked.
+- **Open owner decisions.** Q8; N5; the stored-id repair after an operator scan; W-L1; the 76 wording ratification; 72 decision 1, decision 3 and the default-off posture; 78 post-flush audit policy; 71 items; HARD-S3 scope; the GitHub pushes for PRs 199, 201 and 204 (not approved).
+
 ## Needs Human
 
 | Phase | Item | What is needed | Who decides |
@@ -794,36 +802,42 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 71 | D71-08 | Open decision per the 71 verification record | Owner |
 | 71 | Malformed-ID response (400 or 404) | Choose 400 or 404 for malformed session IDs | Owner |
 | 71 | argDigest | Open item in the 71 verification record | Owner |
-| 71 | Unkeyed refusal acceptance | Accept or reject the refusal of unkeyed commands | Owner |
-| 71 | Test count reconciliation | ROADMAP 11,626 vs record 11,596, unreconciled | Orchestrator |
+| 71 | Unkeyed refusal | Accept or reject the owner unkeyed refusal | Owner |
+| 71 | Operator close | Operator close named in the 71 verification record | Operator |
+| 71 | Test-count reconciliation | ROADMAP 11,626 vs record 11,596, unreconciled | Owner |
 | 71 | Postgres restart clauses (criteria 3 and 5) | Run the PG-gated restart tests and record the result | Orchestrator |
-| 72 | HARD-S2 identifier clause | Met under SUBSTRATE_REPO_SCOPES; partial under the registry alone | Owner |
-| 72 | 6c container reading (BLOCKER) | With the registry set, a registered plain directory with no .git admits an unregistered nested checkout (repo-scope.ts:114); decide container reading or strict refusal | Owner |
-| 72 | Default-off posture | The scope gate and the corpus registry are default-off; decide whether the default stands | Owner |
-| 72 | Corpus proof disclosure (decision 1) | Accept as a documented residual, or reverse to a per-repository tree | Owner |
-| 72 | Allowlist unit (decision 3) | Confirm the surface (SUBSTRATE_REPO_SCOPES keys) as the unit | Owner |
-| 72 | Row 18 | Service-level live gate not exercised under scope; run it under scope | Orchestrator |
-| 73 | Whole-hour removal and memo v3 | Threat model includes it; remedy not built; memo v3 with the graph identity in the clear approved 2026-11-03, build not started | Owner |
-| 73 | W2, W3, W4, W5 and live devnet items | Fix or accept each gap; operator runs the live devnet proofs; W2 adoption path NOT FIXED | Owner; operator |
-| 74 | HARD-R1 | Scheduled to start after v1.8 closes (owner decision, 2026-11-03) | Owner |
-| 75 | O1 read policy | Decide the read policy | Owner |
-| 75 | O2 cooldown | Decide the cooldown; currently NOT FIXED | Owner |
-| 75 | Live proof and H-1 degraded-brief test | Operator runs the live proof; add the H-1 test | Operator; orchestrator |
-| 76 | Chain-cache-off outage note | With SUBSTRATE_LEDGER_CHAIN_CACHE=0 no tip is cached, so (inference, docs/greptime-ledger.md:961) nothing is buffered during an outage; the doc does not state this. Decide whether to document it | Owner |
-| 76 | D76-15 buffer opt-in | Decide whether to enable the buffer | Owner |
-| 76 | D76-13 override (dead-letter unbounded) | Confirm the accepted override; carried as PASSED, not verified | Owner |
-| 76 | D76-14 and D76-19 buffered session.end | Decide | Owner |
+| 72 | Decision 1: corpus proof disclosure | Accept as a documented residual, or reverse to a per-repository tree | Owner |
+| 72 | Decision 3: allowlist unit | Choose the surface (SUBSTRATE_REPO_SCOPES keys) or the session as the unit | Owner |
+| 72 | Default-off posture | The corpus CLI and collector installer accept a registry without scopes (documented); decide whether the default stands | Owner |
+| 72 | Row 18 | Service gate under scope not reached; run it under scope | Orchestrator |
+| 72 | Row 8 | Postgres filter has orchestrator evidence only | Orchestrator |
+| 73 | N5 | RPC history depth bounds G1 for older hours; decide the bound | Owner |
+| 73 | Q8 | A graph lost before its first pointer, pinned ok true, not ratified | Owner |
+| 73 | N4 | Owner decided fail closed (2026-11-03); the 73 record still lists it open | Owner |
+| 73 | W3, W4, W5, N6, N8 | Fix or accept each open gap in the 73 record | Owner |
+| 73 | HARD-S3 scope | Decide the scope of HARD-S3 | Owner |
+| 73 | W-L1 | A lone UTF-16 surrogate in a graph id; owner decision | Owner |
+| 73 | Stored over-512-byte or NUL graph ids | No repair decided; blocks live anchoring on such a store | Owner |
+| 73 | W-DOC | NUL refusal not yet stated in docs/greptime-ledger.md | Orchestrator |
+| 73 | Live devnet probe and live store scan | Operator runs both | Operator |
+| 75 | O1 | Decide the fail-closed read policy | Owner |
+| 75 | O2 | Decide the connect cooldown; NOT FIXED | Owner |
+| 75 | H-1 | Add the H-1 degraded-brief test | Orchestrator |
+| 75 | H-2 to H-4 | Operator runs the live proofs | Operator |
+| 76 | Cache-off wording in docs/greptime-ledger.md | Ratify the exact wording; three precision points: the append-mode gate also applies to session inserts; the allow flag takes 1, true or yes; keyed replays are not writes | Owner |
+| 76 | D76-15 | Decide whether to enable the buffer | Owner |
+| 76 | D76-13 override | Confirm the override (dead-letter unbounded); carried as PASSED, not verified | Owner |
+| 76 | D76-14 and D76-19 | Decide | Owner |
 | 76 | R-1, R-2, R-3 | Decide each; R-1 and R-2 NOT FIXED | Owner |
-| 76 | Live GreptimeDB rehearsal | Operator runs the rehearsal | Operator |
-| 77 | T5 to T7 Postgres run | Per-file run done by orchestrator (steering-idempotency 4 of 4); verifier record re-run needed | Orchestrator |
+| 76 | Operator items 1 to 8 | Operator runs them as listed in the 76 record | Operator |
+| 77 | T8 ordering rule | Confirm the documented out-of-order rule; the pull path orders by priority (H5) | Owner |
+| 77 | T5 to T7 | Verifier re-run of the Postgres per-file record; steering-idempotency 4 of 4 is orchestrator evidence | Orchestrator |
 | 77 | H3, H5, H6 | Verifier human items per 77-VERIFICATION | Orchestrator |
 | 77 | Migration 43 rehearsal | Operator rehearses the migration | Operator |
-| 78 | Bound reading (total versus per kind) | Decide the bound reading | Owner |
 | 78 | Post-flush audit policy | Decide the policy for a failure after the flush | Owner |
-| 78 | HARD-H2 orphaned | Orphaned in REQUIREMENTS (lines 125, 140); decide whether to keep it or retire it | Owner |
+| 78 | Unreadable-plan audit gap | Decide whether to close it (reconcile-main.ts around 240 to 247) | Owner |
+| 78 | HARD-H2 | Orphaned in REQUIREMENTS (lines 125, 140); decide whether to keep or retire it | Owner |
 | 78 | Live proofs | Scheduled tick and single-flight (staging); live Dragonfly SCAN/UNLINK; live GreptimeDB busy window; live CLI run with audit chain verify after restart (R8) | Operator |
-| Smoke SLO | grok connector smoke 500 ms SLO on a shared host | Decide whether the SLO holds under shared-host load; not changed | Owner |
-| GitHub | Threads and push | No pushes; owner approved no GitHub writes; threads on PRs 199, 201, 204 not resolved | Owner |
-| v1.8 | Milestone completion and cleanup | Irreversible | Owner |
+| GitHub | PRs 199, 201 and 204 | Pushes not approved; Greptile threads not resolved | Owner |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.
