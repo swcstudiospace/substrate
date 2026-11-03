@@ -73,6 +73,26 @@ export function bs58decode(text: string): Uint8Array {
 	return out;
 }
 
+/** Bytes → base58 (Bitcoin alphabet); each leading zero byte is one leading "1". The inverse of bs58decode. */
+export function bs58encode(bytes: Uint8Array): string {
+	const digits: number[] = [];
+	for (const byte of bytes) {
+		let carry = byte;
+		for (let i = 0; i < digits.length; i++) {
+			carry += (digits[i] as number) << 8;
+			digits[i] = carry % 58;
+			carry = Math.floor(carry / 58);
+		}
+		while (carry > 0) {
+			digits.push(carry % 58);
+			carry = Math.floor(carry / 58);
+		}
+	}
+	let zeros = 0;
+	while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+	return "1".repeat(zeros) + digits.reverse().map((d) => BS58_ALPHABET.charAt(d)).join("");
+}
+
 export type Commitment = "processed" | "confirmed" | "finalized";
 
 export type TransactionMemo = {
@@ -94,6 +114,17 @@ export type AddressMemo = {
 	blockTime?: number | null;
 };
 
+/** The node's own cap on getSignaturesForAddress. */
+export const SIGNATURE_PAGE_MAX = 1000;
+
+export type SignaturePageOptions = {
+	/** Clamped to SIGNATURE_PAGE_MAX; must be a positive integer. */
+	limit: number;
+	/** The last signature of the previous page; the page starts just older than it. */
+	before?: string;
+	commitment: Commitment;
+};
+
 export type RpcOptions = {
 	url: string;
 	timeoutMs: number;
@@ -112,6 +143,12 @@ export interface Rpc {
 	 * when given, is sent in the request config; absent, the node's default (finalized) applies and the request is unchanged.
 	 */
 	addressMemos(pubkey: string, limit: number, before?: string, commitment?: Commitment): Promise<AddressMemo[]>;
+	/**
+	 * One page of signatures touching `address`, newest first, memo text as a hint only (confirm with transactionMemo). `limit`
+	 * is clamped to SIGNATURE_PAGE_MAX; `before` continues from the last signature of the previous page. Used for the graph index
+	 * addresses; the job key keeps addressMemos.
+	 */
+	addressSignaturePage(address: string, options: SignaturePageOptions): Promise<AddressMemo[]>;
 	/** The cluster's genesis hash, for the job's devnet gate. Thin `getGenesisHash` call. */
 	getGenesisHash(): Promise<string>;
 	/** Lamports held by `pubkey`. */
@@ -129,6 +166,19 @@ type ParsedTransaction = {
 type SignatureInfo = { signature?: unknown; memo?: unknown; err?: unknown; slot?: unknown; blockTime?: unknown };
 
 const numberOrNull = (v: unknown): number | null => (typeof v === "number" ? v : null);
+
+/** A getSignaturesForAddress listing as AddressMemos; the memo is the listing's hint with its `[len] ` prefix stripped. */
+function signaturesFrom(list: SignatureInfo[]): AddressMemo[] {
+	return list
+		.filter((s): s is SignatureInfo & { signature: string } => typeof s?.signature === "string")
+		.map((s) => ({
+			signature: s.signature,
+			memo: stripListingPrefix(typeof s.memo === "string" ? s.memo : null),
+			err: s.err ?? null,
+			slot: numberOrNull(s.slot),
+			blockTime: numberOrNull(s.blockTime),
+		}));
+}
 
 function instructionMemo(ix: ParsedInstruction): string | null {
 	if (typeof ix.parsed === "string") return ix.parsed;
@@ -230,15 +280,19 @@ export function createRpc({ url, timeoutMs, attempts, backoffMs, fetchImpl = fet
 			if (commitment !== undefined) config.commitment = commitment;
 			const list = await call<SignatureInfo[]>("getSignaturesForAddress", [pubkey, config]);
 			if (!Array.isArray(list)) throw new RpcError("getSignaturesForAddress returned a non-array");
-			return list
-				.filter((s): s is SignatureInfo & { signature: string } => typeof s?.signature === "string")
-				.map((s) => ({
-					signature: s.signature,
-					memo: stripListingPrefix(typeof s.memo === "string" ? s.memo : null),
-					err: s.err ?? null,
-					slot: numberOrNull(s.slot),
-					blockTime: numberOrNull(s.blockTime),
-				}));
+			return signaturesFrom(list);
+		},
+
+		async addressSignaturePage(address: string, { limit, before, commitment }: SignaturePageOptions): Promise<AddressMemo[]> {
+			if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("addressSignaturePage: limit must be a positive integer");
+			const config: { limit: number; before?: string; commitment: Commitment } = {
+				limit: Math.min(limit, SIGNATURE_PAGE_MAX),
+				commitment,
+			};
+			if (before !== undefined) config.before = before;
+			const list = await call<SignatureInfo[]>("getSignaturesForAddress", [address, config]);
+			if (!Array.isArray(list)) throw new RpcError("getSignaturesForAddress returned a non-array");
+			return signaturesFrom(list);
 		},
 
 		async balance(pubkey: string): Promise<number> {

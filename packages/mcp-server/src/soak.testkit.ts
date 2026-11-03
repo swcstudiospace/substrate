@@ -243,6 +243,9 @@ export class SoakRpc implements Rpc {
 	async addressMemos(): Promise<never[]> {
 		throw new Error("verification never lists addresses");
 	}
+	async addressSignaturePage(): Promise<never[]> {
+		return [];
+	}
 	async getGenesisHash(): Promise<string> {
 		this.calls++;
 		if (this.down !== null) throw new Error(this.down);

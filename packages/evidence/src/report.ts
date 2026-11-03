@@ -71,6 +71,8 @@ export interface AnchorEvidence {
 	reason?: string;
 	/** True when the ledger or the stored leaves contradict this hour's anchored head (D73-03); absent otherwise. */
 	head_failed?: boolean;
+	/** The graph's v3 pointer for this hour (design 5): `verified` when a pointer confirmed on chain names it, `failed` when one fails its checks, `absent` when none names it. */
+	pointer?: "verified" | "failed" | "absent";
 }
 
 /**

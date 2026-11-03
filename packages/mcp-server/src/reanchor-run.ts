@@ -27,7 +27,7 @@ import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "no
 import { dirname, isAbsolute, join } from "node:path";
 import { createRpc, execFileRunner, RpcError, type Rpc } from "@substrate/ledger";
 import { loadConfig, operatorSurfaces, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
-import { readReanchorNotes, resolveSignerSet } from "./anchor-verify-deps.ts";
+import { graphPointerPorts, readReanchorNotes, resolveSignerSet } from "./anchor-verify-deps.ts";
 import { GreptimeClient } from "./greptime.ts";
 import {
 	dryRunReanchor,
@@ -307,6 +307,7 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 				solana: { pubkey, problem: null, signerSet: config.solana.signerSet, signerSetProblem: config.solana.signerSetProblem },
 				operatorSurfaces: operators,
 				nowMs: () => Date.now(),
+				...graphPointerPorts(() => rpc, () => Date.now()),
 			}),
 		// One lock per host and state directory, not per signer or plan file: a copy of the plan elsewhere, or a run under another key, must not be a second lock.
 		lock: fileLock(lockPath.path),

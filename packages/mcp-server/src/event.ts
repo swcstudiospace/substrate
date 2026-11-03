@@ -399,11 +399,13 @@ export function orderedLeaves(leaves: readonly StoredLeaf[]): StoredLeaf[] | nul
 
 /**
  * The head record each (graph, session) pair's stored leaves give for one hour (D73-01), or null when any pair's leaves do not form
- * one chain. The records come out in input order; `headsRoot` sorts them.
+ * one chain. The records come out in input order; `headsRoot` sorts them. With `graphId`, only that graph's leaves are read, so one
+ * graph's records rebuild whatever another graph's chain holds (a v3 pointer commits to one graph's heads, design 5 step 8).
  */
-export function headRecordsFromLeaves(leaves: readonly StoredLeaf[], periodStartMs: number): GraphHeadRecord[] | null {
+export function headRecordsFromLeaves(leaves: readonly StoredLeaf[], periodStartMs: number, graphId?: string): GraphHeadRecord[] | null {
 	const pairs = new Map<string, { graphId: string; sessionId: string; leaves: StoredLeaf[] }>();
 	for (const leaf of leaves) {
+		if (graphId !== undefined && leaf.graph_id !== graphId) continue;
 		const key = JSON.stringify([leaf.graph_id, leaf.session_id]);
 		const pair = pairs.get(key);
 		if (pair) pair.leaves.push(leaf);

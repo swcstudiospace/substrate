@@ -8,7 +8,7 @@
  * injected. What is asserted is what a reader of the bundle sees.
  */
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
-import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex } from "@substrate/ledger";
+import { formatMemo, formatMemoV2, formatMemoV3, graphHeadsRoot, headsRoot, hourEnd, merkleRootHex } from "@substrate/ledger";
 import { buildGraphHeads, DEVNET_GENESIS_HASH } from "./anchor.ts";
 import type { StoredLeaf } from "./event.ts";
 import { loadConfig } from "./config.ts";
@@ -25,6 +25,8 @@ const GRAPH = "ut-teach-41";
 const SESSION = "sess-p41-anchor";
 const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
 const SIG = "sig-scratch-41";
+/** The v2 hour's transaction: base58, as a real signature is, since its graph pointer names it (design 3.2). */
+const V2_HOUR_SIG = "5".repeat(64);
 const EXPLORER = `https://explorer.solana.com/tx/${SIG}?cluster=devnet`;
 const hourIso = (ms: number) => new Date(ms).toISOString();
 
@@ -83,6 +85,8 @@ interface ScratchLedger {
 	anchorHour: (hour?: number) => void;
 	/** Freeze the anchor row for `hour` as a v2 memo over the per-(graph, session) heads. Hour H by default. */
 	anchorHourV2: (hour?: number) => void;
+	/** The v3 pointers this ledger wrote for its v2 hours, as the index listing carries them. */
+	pointerEntries: () => Array<{ signature: string; memo: string }>;
 	/** Ingest every event from here on into this hour. */
 	ingestHour: (hour: number) => void;
 }
@@ -97,6 +101,7 @@ function scratchLedger(): ScratchLedger {
 	const records: IngestRecord[] = [];
 	const anchored = new Map<number, Record<string, unknown>>();
 	const storedLeaves = new Map<number, StoredLeaf[]>();
+	const pointers = new Map<string, string>();
 	let clock = 0;
 	let hourBase = H;
 
@@ -142,8 +147,9 @@ function scratchLedger(): ScratchLedger {
 			for (const row of anchored.values()) {
 				if (row.tx_sig === signature) return String(row.memo);
 			}
-			return null;
+			return pointers.get(signature) ?? null;
 		},
+		pointerEntries: () => [...pointers].map(([signature, memo]) => ({ signature, memo })),
 		anchorHour: (hour = H) => {
 			const batch = leaves(hour);
 			const root = merkleRootHex(batch.map((leaf) => leaf.hash));
@@ -176,13 +182,17 @@ function scratchLedger(): ScratchLedger {
 				root,
 				event_count: batch.length,
 				memo: formatMemoV2({ periodStartMs: hour, rootHex: root, count: batch.length, headsRootHex: headsRoot(built.records) }),
-				tx_sig: hour === H ? SIG : `${SIG}-${(hour - H) / HOUR}`,
+				tx_sig: V2_HOUR_SIG,
 				signer: PUBKEY,
 				cluster: "devnet",
 				slot: 42,
 				anchored_at: hourIso(NOW),
 			});
 			storedLeaves.set(hour, built.leaves);
+			for (const graphId of new Set(members.map((member) => member.graph_id))) {
+				const count = members.filter((member) => member.graph_id === graphId).length;
+				pointers.set(`pointer-${hour}-${graphId}`, formatMemoV3({ graphId, periodStartMs: hour, count, graphHeadsRootHex: graphHeadsRoot(built.records, graphId), hourTxSig: V2_HOUR_SIG }));
+			}
 		},
 		ingestHour: (hour: number) => {
 			hourBase = hour;
@@ -190,9 +200,14 @@ function scratchLedger(): ScratchLedger {
 	};
 }
 
-/** A fake devnet read-back: a genesis hash, and whatever `transactionMemo` answers for a signature. */
-function fakeRpc(transactionMemo: (signature: string) => Promise<unknown>) {
-	return { getGenesisHash: async () => DEVNET_GENESIS_HASH, transactionMemo };
+/** A fake devnet read-back: a genesis hash, whatever `transactionMemo` answers for a signature, and the pointers listed at the index addresses. */
+function fakeRpc(transactionMemo: (signature: string) => Promise<unknown>, pointers: Array<{ signature: string; memo: string }> = []) {
+	return {
+		getGenesisHash: async () => DEVNET_GENESIS_HASH,
+		transactionMemo,
+		addressSignaturePage: async (_address: string, options: { before?: string }) =>
+			options.before === undefined ? pointers.map((pointer) => ({ signature: pointer.signature, memo: pointer.memo, err: null, slot: 42 })) : [],
+	};
 }
 
 /**
@@ -389,7 +404,7 @@ describe("evidence bundle anchors", () => {
 		ledger.rows.set(altered.id, { ...altered, payload: { ...altered.payload, content_sha256: "e".repeat(64) } });
 
 		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
-			rpc: fakeRpc(async () => signedMemo(ledger.frozenMemo())) as never,
+			rpc: fakeRpc(async (signature) => signedMemo(ledger.memoOf(signature)), ledger.pointerEntries()) as never,
 			now: NOW,
 		});
 

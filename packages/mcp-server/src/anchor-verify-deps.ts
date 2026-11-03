@@ -41,6 +41,8 @@
  *   carries a small `signer_set` summary (source, size, rotation notes applied, rotation notes ignored and why, the read gap), so
  *   an ignored rotation note is not silent.
  * - `expectedGenesis`: devnet's (`DEVNET_GENESIS_HASH`).
+ * - `listGraphPointers` / `confirmPointer`: `readGraphPointers` and `confirmGraphPointer`. A graph's v3 pointers are listed at its index
+ *   address (confirmed, paged, within a budget), and each listed pointer is confirmed through its transaction (design 5, steps 2 and 3).
  *
  * Solana unconfigured (no anchor public key, or a refused RPC URL) or no ledger: the answer is `unverified` with the reason,
  * decided BEFORE any read, so no network call is made. Nothing here sends a transaction.
@@ -53,7 +55,7 @@ import {
 	type RotationEventInput,
 	type SignerSet,
 } from "@substrate/ledger";
-import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { DEVNET_GENESIS_HASH, readGraphPointers } from "./anchor.ts";
 import {
 	CheckpointVerifyError,
 	DEFAULT_ANCHOR_LAG_MS,
@@ -87,6 +89,30 @@ const SIGNATURE_LEVELS = ["finalized", "confirmed"] as const;
 /** The ledger reads verification uses. `GreptimeClient` satisfies it; a test passes a fake. */
 export type AnchorLedger = Pick<GreptimeClient, "queryEvents" | "eventsByIds" | "cursorPosition" | "hourLeaves" | "anchorForPeriod">;
 
+/** One entry of a graph's index listing: the signature and the memo text the listing hints. The hint is confirmed before it counts. */
+export interface PointerEntry {
+	signature: string;
+	memo: string | null;
+}
+
+/** A graph's index listing. `complete` is false when the page cap or the budget stopped it before the listing ended. */
+export interface PointerListing {
+	entries: PointerEntry[];
+	complete: boolean;
+}
+
+/** One pointer transaction's fields, as the verifier reads a transaction (`confirmGraphPointer`). */
+export interface PointerConfirmation {
+	signature: string;
+	memo: string;
+	payer: string;
+	payerSigned: boolean;
+	err: unknown;
+	slot: number;
+	/** Block time in seconds, as the RPC reports it; null when the node has none. The signer is judged at this time. */
+	blockTime: number | null;
+}
+
 export interface AnchorVerifyPorts {
 	/** The event ledger, or null when it is not configured. */
 	ledger: AnchorLedger | null;
@@ -107,6 +133,10 @@ export interface AnchorVerifyPorts {
 	operatorSurfaces: ReadonlySet<string>;
 	/** Epoch milliseconds. */
 	nowMs: () => number;
+	/** One graph's v3 pointers, listed at its index address within `budgetMs` (`readGraphPointers`; design 5, step 2). */
+	listGraphPointers: (graphId: string, opts: { budgetMs: number }) => Promise<PointerListing>;
+	/** One pointer transaction's fields, or null when the node cannot answer (`confirmGraphPointer`; design 5, step 3). */
+	confirmPointer: (signature: string) => Promise<PointerConfirmation | null>;
 }
 
 /** Where a checkpoint id is searched: the caller's session, else the caller's surface. */
@@ -296,6 +326,27 @@ async function fetchTransaction(rpc: Rpc, signature: string): Promise<AnchorTran
 		};
 	}
 	return null;
+}
+
+/**
+ * The two pointer ports over the devnet RPC, for `AnchorVerifyPorts`. `rpc` is read lazily, as `ports.rpc` is; the listing budget runs
+ * on `nowMs`.
+ */
+export function graphPointerPorts(rpc: () => Rpc, nowMs: () => number): Pick<AnchorVerifyPorts, "listGraphPointers" | "confirmPointer"> {
+	return {
+		listGraphPointers: (graphId, opts) => readGraphPointers(rpc(), graphId, { budgetMs: opts.budgetMs, nowMs }),
+		confirmPointer: (signature) => confirmGraphPointer(rpc(), signature),
+	};
+}
+
+/**
+ * One pointer transaction's fields, read as the hour transaction is (finalized, then confirmed). Null when the node does not know the
+ * signature, or the transaction carries no memo or no payer: the verifier then cannot confirm the pointer, which fails closed.
+ */
+export async function confirmGraphPointer(rpc: Rpc, signature: string): Promise<PointerConfirmation | null> {
+	const found = await fetchTransaction(rpc, signature);
+	if (found === null || found.memo === null || found.signer === null) return null;
+	return { signature, memo: found.memo, payer: found.signer, payerSigned: found.signerSigned, err: found.err, slot: found.slot ?? 0, blockTime: found.blockTimeMs === null ? null : found.blockTimeMs / 1000 };
 }
 
 /**

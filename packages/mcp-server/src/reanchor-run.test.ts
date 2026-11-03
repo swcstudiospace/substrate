@@ -64,6 +64,10 @@ function spies(): { cli: ReanchorCliDeps; opened: ReanchorOptions[]; runnerCalls
 			rpcCalls.push("addressMemos");
 			return [];
 		},
+		addressSignaturePage: async () => {
+			rpcCalls.push("addressSignaturePage");
+			return [];
+		},
 		getGenesisHash: async () => {
 			rpcCalls.push("getGenesisHash");
 			return GENESIS;

@@ -172,6 +172,7 @@ describe("substrate evidence", () => {
 			transactionMemo: async (): Promise<never> => {
 				throw new Error("devnet unreachable");
 			},
+			addressSignaturePage: async () => [],
 		};
 		const base = await serveEvidence(substrate, rpc, H + 5 * HOUR);
 
@@ -191,7 +192,7 @@ describe("substrate evidence", () => {
 			index: null,
 			greptime: stubGreptime([anchored, open], { [H]: anchorRow(H, anchored, "sig-ev-ok") }) as never,
 		});
-		const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(anchored.memo) };
+		const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(anchored.memo), addressSignaturePage: async () => [] };
 		const base = await serveEvidence(substrate, rpc, H + 4 * HOUR);
 
 		const result = await run(["evidence", "--graph", graph], { SUBSTRATE_URL: base });
@@ -222,7 +223,7 @@ describe("substrate evidence", () => {
 				index: null,
 				greptime: stubGreptime([world], { [H]: anchorRow(H, world, "sig-ev-n") }) as never,
 			});
-			const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(world.memo) };
+			const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(world.memo), addressSignaturePage: async () => [] };
 			return serveEvidence(substrate, rpc, H + 4 * HOUR, serve);
 		}
 

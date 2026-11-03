@@ -1086,6 +1086,7 @@ function anchorEvidenceOf(hour: HourReport): AnchorEvidence {
 		...(hour.slot === undefined ? {} : { slot: hour.slot }),
 		...(hour.reason ? { reason: hour.reason } : {}),
 		...(hour.head_failed ? { head_failed: true } : {}),
+		...(hour.pointer === undefined ? {} : { pointer: hour.pointer }),
 	};
 }
 

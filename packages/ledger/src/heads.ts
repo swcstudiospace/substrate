@@ -70,3 +70,11 @@ export function headsRoot(records: readonly GraphHeadRecord[]): string {
 	}
 	return merkleRootHex([...records].sort(byGraphThenSession).map((record) => headRecordHash(record)));
 }
+
+/**
+ * The same root as headsRoot, over only the records of `graphId` (a v3 pointer commits to one graph's heads). With no record
+ * for the graph it throws exactly as headsRoot does on an empty list.
+ */
+export function graphHeadsRoot(records: readonly GraphHeadRecord[], graphId: string): string {
+	return headsRoot(records.filter((record) => record.graphId === graphId));
+}

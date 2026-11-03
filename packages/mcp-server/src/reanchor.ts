@@ -25,7 +25,8 @@
  *     signatures of every key in the set, so an hour an earlier key re-anchored before a rotation is adopted, not sent again.
  *  4. For every plan hour the digest is recomputed from the ledger and refused as `root-mismatch` unless the stored row, the
  *     recomputed root and count, and the stored memo agree with the plan byte for byte. A v1 memo must be `formatMemo` of the hour,
- *     root and count; a v2 memo must be the one the anchor job builds from the heads its members give.
+ *     root and count; a v2 memo must be the one the anchor job builds from the heads its members give. Once an hour's transaction is known,
+ *     each graph's v3 pointer to it is sent unless the graph's index listing already holds it (`completePointers`, design 3.5).
  *  5. The run's lock (`deps.lock`; the entry builds `fileLock`: ONE file per host, `<SUBSTRATE_STATE_DIR or /var/lib/substrate>/substrate-reanchor.lock`,
  *     create-exclusive, stale after a dead pid or 30 minutes) is held from here to the end of the run, across discovery, send and recording, so two
  *     overlapping runs cannot both pass discovery before either send is visible; the second refuses as `reanchor-locked`.
@@ -68,7 +69,7 @@ import {
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { newestBoundNote, reanchorSessionId, type ReanchorNotes } from "./anchor-verify-deps.ts";
-import { ADDRESS_MEMO_LIMIT, anchorMemo, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, readHourHeads, REQUIRED_BALANCE_LAMPORTS, type HourHeads } from "./anchor.ts";
+import { anchorMemo, completePointers, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, readHourHeads, REQUIRED_BALANCE_LAMPORTS, SystemicError, type HourHeads } from "./anchor.ts";
 import type { AnchorRow, GreptimeClient } from "./greptime.ts";
 import { buildReanchorEvent } from "./reanchor-plan.ts";
 import { redact } from "./redact.ts";
@@ -485,9 +486,10 @@ function signedByAcceptedKey(found: TransactionMemo, set: SignerSet, hour: Saved
 
 /**
  * Gate 4, for one hour: the stored row, the plan and the recomputed digest must agree byte for byte. Read-only. A disagreement is a
- * ledger-integrity question, never something a re-anchor may paper over.
+ * ledger-integrity question, never something a re-anchor may paper over. Returns the hour's heads for a v2 hour (their pointers are
+ * built from them, design 3.2), null for a v1 hour.
  */
-async function checkHour(hour: SavedPlanHour, deps: ReanchorDeps, now: number): Promise<void> {
+async function checkHour(hour: SavedPlanHour, deps: ReanchorDeps, now: number): Promise<HourHeads | null> {
 	let stored: AnchorRow | null;
 	try {
 		stored = await deps.ledger.anchorForPeriod(hour.period_start_ms);
@@ -513,7 +515,7 @@ async function checkHour(hour: SavedPlanHour, deps: ReanchorDeps, now: number): 
 		if (digest.memo !== hour.memo || hour.memo !== formatMemo({ periodStartMs: hour.period_start_ms, rootHex: digest.root, count: digest.event_count })) {
 			throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed memo is not byte for byte the stored memo`);
 		}
-		return;
+		return null;
 	}
 	// A v2 hour: the memo must be the one the anchor job builds from the heads its members give, read through the same ledger port.
 	let heads: HourHeads | null;
@@ -526,6 +528,7 @@ async function checkHour(hour: SavedPlanHour, deps: ReanchorDeps, now: number): 
 	if (expected !== hour.memo) {
 		throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed heads do not reproduce the stored memo byte for byte`);
 	}
+	return heads;
 }
 
 /** The transaction as the cluster answers at either level, highest first; null when it knows neither. */
@@ -551,7 +554,7 @@ async function checkPreviousAbsent(hour: SavedPlanHour, rpc: Rpc): Promise<void>
 }
 
 /** Signatures one discovery page asks for. */
-export const DISCOVERY_PAGE_SIZE = ADDRESS_MEMO_LIMIT;
+export const DISCOVERY_PAGE_SIZE = 100;
 /** Pages discovery may read before it refuses: the hard cap on `getSignaturesForAddress` calls. */
 export const DISCOVERY_MAX_PAGES = 100;
 
@@ -752,6 +755,33 @@ async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string
 }
 
 /**
+ * The pointers of one hour (design 3.5, step 4): each graph with events in it gets its v3 pointer to `signature` on chain, sent and read
+ * back, unless its index listing already holds that pointer. `completePointers` refuses a fork (another pointer of the same graph and
+ * hour) and an unreadable listing. It runs after the hour transaction is known and before its note is written, so a failure here leaves
+ * the hour unrecorded and a re-run adopts it and completes its pointers. A v1 hour has no heads and no pointers. `checkGates` counts the
+ * hour sends only, so the balance is read again before each pointer send: a pointer fee is paid from the same key.
+ */
+async function ensurePointers(hour: SavedPlanHour, signature: string, heads: HourHeads | null, deps: ReanchorDeps): Promise<void> {
+	if (heads === null) return;
+	const ensure = async (): Promise<void> => {
+		let balance: number;
+		try {
+			balance = await deps.rpc.balance(deps.env.pubkey);
+		} catch (cause) {
+			throw new Refusal("rpc-unreadable", `${hour.period_start}: getBalance failed: ${reasonOf(cause)}`);
+		}
+		if (balance < SEND_FEE_LAMPORTS) throw new Refusal("unfunded", `${hour.period_start}: the key holds ${balance} lamports, below the fee of one pointer (${SEND_FEE_LAMPORTS})`);
+	};
+	try {
+		await completePointers(deps, hour.period_start_ms, hour.period_start, heads, signature, ensure);
+	} catch (cause) {
+		if (cause instanceof Refusal) throw cause;
+		const code = cause instanceof SystemicError && (cause.reason === "root-mismatch" || cause.reason === "rpc-unreadable") ? cause.reason : "send-failed";
+		throw new Refusal(code, `${hour.period_start}: the pointers are not complete (${reasonOf(cause)}): nothing is recorded for this hour, so a re-run adopts it and completes its pointers`);
+	}
+}
+
+/**
  * The idempotency key of a REPAIR note: `reanchor:<period_start>:r:<first 40 hex of sha256(new_tx_sig + ":" + supersedes)>`, where
  * `supersedes` is the event id of the stale newest note the repair replaces. The plain key (`reanchor:<period_start>:<new_tx_sig>`)
  * would equal that of an older note naming the same signature, so the repair would be deduplicated away and the stale note would stay
@@ -826,7 +856,8 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 		const cap = Math.min(options.maxHours, MAX_HOURS_PER_RUN);
 		const budget = Math.min(cap, plan.hours.length);
 		const { genesis, signers } = await checkGates(plan, options, deps, budget, now);
-		for (const hour of plan.hours) await checkHour(hour, deps, now);
+		const heads = new Map<number, HourHeads | null>();
+		for (const hour of plan.hours) heads.set(hour.period_start_ms, await checkHour(hour, deps, now));
 
 		const lock = deps.lock.acquire();
 		if ("held" in lock) throw new Refusal("reanchor-locked", `the re-anchor lock is not available (${lock.held}): if another run holds it, wait for it to finish; otherwise fix the cause named`);
@@ -858,6 +889,7 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 				if (noted !== undefined) {
 					state.adopted += 1;
 					out.push(`[reanchor] ${hour.period_start} adopted ${noted} (already recorded)`);
+					await ensurePointers(hour, noted, heads.get(hour.period_start_ms) ?? null, deps);
 					continue;
 				}
 				const found = earlier.get(hour.period_start_ms);
@@ -875,6 +907,7 @@ export async function executeReanchor(plan: SavedPlan, options: ReanchorOptions,
 					state.sent += 1;
 					out.push(`[reanchor] ${hour.period_start} re-anchored ${signature}`);
 				}
+				await ensurePointers(hour, signature, heads.get(hour.period_start_ms) ?? null, deps);
 				await recordReanchor(hour, signature, genesis, deps, stale.get(hour.period_start_ms) ?? null);
 			}
 			out.push(`[reanchor] done: ${state.sent} sent, ${state.adopted} adopted, ${left} left in the plan${left > 0 ? " (run again)" : ""}`);

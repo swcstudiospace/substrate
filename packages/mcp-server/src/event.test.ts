@@ -493,4 +493,16 @@ describe("chain leaves and the anchored head (D73-02, D73-03)", () => {
 		expect(headRecordsFromLeaves(blank, H10)).toBeNull();
 		expect(compareToAnchoredHead(intact, blank, head)).toMatchObject({ ok: false, kind: "stored-leaves-mismatch" });
 	});
+
+	test("a graph filter rebuilds one graph's records alone: another graph's broken chain does not stop it (design 5, step 8)", () => {
+		const broken = [
+			{ graph_id: "graph-b", session_id: "s", seq: 0, event_id: "evt_x", hash: hashOf("evt_x") },
+			{ graph_id: "graph-b", session_id: "s", seq: 0, event_id: "evt_y", hash: hashOf("evt_y") },
+		];
+		const mixed = [...leaves, ...broken];
+		expect(headRecordsFromLeaves(mixed, H10)).toBeNull();
+		expect(headRecordsFromLeaves(mixed, H10, "graph-a")).toEqual([head]);
+		expect(headRecordsFromLeaves(mixed, H10, "graph-b")).toBeNull();
+		expect(headRecordsFromLeaves(mixed, H10, "graph-c")).toEqual([]);
+	});
 });

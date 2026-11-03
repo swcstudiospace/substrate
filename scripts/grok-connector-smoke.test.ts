@@ -178,14 +178,15 @@ describe("verdict arithmetic", () => {
 describe("against the harness", () => {
 	test("every check ok as the grok-bot bearer: exit 0, timings reported, one line per check", async () => {
 		const harness = await start(TOKENS, UP_INDEX);
-		const report = await runSmoke({ base: harness.base, bearer: GROK });
+		const notModifiedMs = 2000;
+		const report = await runSmoke({ base: harness.base, bearer: GROK, budgets: { notModifiedMs } });
 		expect(verdicts(report)).toEqual({ "mcp.brief": "ok", "mcp.brief.not_modified": "ok", "rest.brief.304": "ok", "healthz.planes": "ok" });
 		expect(report.verdict).toBe("ok");
 		expect(report.exit).toBe(0);
 		expect(report.checks.map((check) => check.id)).toEqual([...CHECK_IDS]);
 		for (const check of report.checks) {
 			expect(check.ms).toBeGreaterThanOrEqual(0);
-			expect(check.ms).toBeLessThan(BRIEF_BUDGET_MS);
+			expect(check.ms).toBeLessThan(check.id === "mcp.brief.not_modified" ? notModifiedMs : BRIEF_BUDGET_MS);
 			expect(check.detail).not.toContain(GROK);
 		}
 		expect(report.checks[0]?.detail).toContain("state complete");

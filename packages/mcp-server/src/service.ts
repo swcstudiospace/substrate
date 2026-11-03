@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RedisClient } from "bun";
 import { canonicalJson, decideClaim, type AuditTransport, type ClaimDecision } from "@substrate/audit";
-import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, MEMO_PREFIX_V3, parseMemo, parseMemoV3, stripListingPrefix, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import {
 	PLANES,
 	PlaneRegistry,
@@ -151,7 +151,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
-import { anchorEvidenceFor, followReanchor, ReanchorReadIncomplete, resolveSignerSet, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
+import { anchorEvidenceFor, followReanchor, graphPointerPorts, ReanchorReadIncomplete, resolveSignerSet, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type PointerConfirmation, type SignerSetSummary } from "./anchor-verify-deps.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import {
 	DEFAULT_ANCHOR_TIMEOUT_MS,
@@ -738,6 +738,11 @@ export interface HourReport {
 	pairs?: HeadPairReport[];
 	/** True when the ledger or the stored leaves contradict this hour's anchored head: a tamper, not a missing proof (D73-03). */
 	head_failed?: boolean;
+	/**
+	 * The graph's v3 pointer for this hour (design 5): `verified` when a pointer confirmed on chain names it, `failed` when a pointer for it
+	 * fails its checks (the hour is then a mismatch), `absent` when the graph has no pointer here.
+	 */
+	pointer?: "verified" | "failed" | "absent";
 }
 /** The additive verify verdict: the chain fields keep their meaning (D28-14). */
 export interface VerifyVerdict {
@@ -820,7 +825,7 @@ interface SignerFault {
  * - A transaction without a block time is `unverified`: the signer's valid window cannot be checked.
  * - On a complete set with a block time, a payer outside every window (or not in the set) is `mismatch`.
  */
-async function judgeSigner(memo: TransactionMemo, signers: () => Promise<{ set: SignerSet; gap: string | null }>): Promise<SignerFault | null> {
+async function judgeSigner(memo: Pick<TransactionMemo, "payer" | "blockTime">, signers: () => Promise<{ set: SignerSet; gap: string | null }>): Promise<SignerFault | null> {
 	if (memo.payer === null) return { status: "mismatch", reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
 	let read: { set: SignerSet; gap: string | null };
 	try {
@@ -836,6 +841,130 @@ async function judgeSigner(memo: TransactionMemo, signers: () => Promise<{ set: 
 	}
 	const verdict = acceptsSigner(read.set, memo.payer, memo.blockTime * 1000);
 	return verdict.ok ? null : { status: "mismatch", reason: redact(verdict.reason).slice(0, 300) };
+}
+
+/** One of a graph's pointers, confirmed on chain: the hour it names and the fields it commits to (design 5, steps 2 to 4). */
+interface VerifiedPointer {
+	signature: string;
+	periodStartMs: number;
+	count: number;
+	graphHeadsRootHex: string;
+	hourTxSig: string;
+}
+
+/**
+ * What one graph's pointers came to. `byHour` holds the verified pointer of each hour that has exactly one. `failures` are pointers that fail
+ * their checks: one that names its hour makes that hour a mismatch, one that names none fails the verdict alone. `unreadable` is set when the
+ * listing or a confirmation could not finish, so the graph's hours cannot all be named (`hours_unreadable`).
+ */
+interface PointerReadout {
+	byHour: Map<number, VerifiedPointer>;
+	failures: Array<{ signature: string; periodStartMs: number | null; reason: string }>;
+	unreadable: string | null;
+}
+
+/** A confirmed pointer judged: verified, a proven failure (naming its hour when the memo says which), or unverifiable (fails closed). */
+type PointerJudgement = { kind: "verified"; pointer: VerifiedPointer } | { kind: "failed"; periodStartMs: number | null; reason: string } | { kind: "unverified"; reason: string };
+
+/**
+ * The checks on one confirmed pointer (design 5, step 3), in the order that names its hour as early as the memo allows: the v3 memo, its graph,
+ * a closed hour, the configured payer that signed and succeeded, then the signer judged at block time as `checkHour` judges an hour's transaction.
+ * A missing key or an unverifiable signer is `unverified`; a proven fault is `failed`.
+ */
+async function judgePointer(
+	confirmed: PointerConfirmation,
+	graphId: string,
+	pubkey: string | null,
+	signers: () => Promise<{ set: SignerSet; gap: string | null }>,
+	now: number,
+): Promise<PointerJudgement> {
+	const parsed = parseMemoV3(confirmed.memo);
+	if (parsed === null) return { kind: "failed", periodStartMs: null, reason: "is not a v3 pointer" };
+	const periodStartMs = parsed.periodStartMs;
+	if (parsed.graphId !== graphId) return { kind: "failed", periodStartMs, reason: `names graph ${parsed.graphId}, not ${graphId}` };
+	if (!isClosed(periodStartMs, now, INGEST_LAG_MS)) return { kind: "failed", periodStartMs, reason: "names an hour that has not closed" };
+	if (pubkey === null) return { kind: "unverified", reason: "SOLANA_ANCHOR_PUBKEY is not set" };
+	if (confirmed.payer !== pubkey || !confirmed.payerSigned) return { kind: "failed", periodStartMs, reason: "is not signed by SOLANA_ANCHOR_PUBKEY" };
+	if (confirmed.err !== null && confirmed.err !== undefined) return { kind: "failed", periodStartMs, reason: "the transaction failed" };
+	const fault = await judgeSigner(confirmed, signers);
+	if (fault !== null) return fault.status === "mismatch" ? { kind: "failed", periodStartMs, reason: fault.reason } : { kind: "unverified", reason: fault.reason };
+	return {
+		kind: "verified",
+		pointer: { signature: confirmed.signature, periodStartMs, count: parsed.count, graphHeadsRootHex: parsed.graphHeadsRootHex, hourTxSig: parsed.hourTxSig },
+	};
+}
+
+/**
+ * One graph's pointers (design 5, steps 2 to 4): its index address listed within `allowanceMs`, every candidate whose listing hint names the v3
+ * prefix confirmed through its own transaction, and the verified ones grouped by hour. Identical pointers for an hour collapse; different ones
+ * are a fork. A listing that stops early, or a pointer that cannot be confirmed, is `unreadable`: fail closed.
+ */
+async function readPointerChecks(args: {
+	graphId: string;
+	ports: Pick<AnchorVerifyPorts, "listGraphPointers" | "confirmPointer">;
+	pubkey: string | null;
+	signers: () => Promise<{ set: SignerSet; gap: string | null }>;
+	/** Milliseconds these reads may still take: the whole-verify budget, less what is spent and the response margin. */
+	allowanceMs: () => number;
+	now: number;
+}): Promise<PointerReadout> {
+	const readout: PointerReadout = { byHour: new Map(), failures: [], unreadable: null };
+	const listAllowance = args.allowanceMs();
+	if (listAllowance <= 0) return { ...readout, unreadable: "budget exhausted" };
+	const listed = await outcomeWithin(() => args.ports.listGraphPointers(args.graphId, { budgetMs: listAllowance }), listAllowance);
+	if (listed.kind === "timeout") return { ...readout, unreadable: "budget exhausted" };
+	if (listed.kind === "failed") return { ...readout, unreadable: "pointer listing failed" };
+	if (!listed.value.complete) return { ...readout, unreadable: "pointer listing incomplete: the budget or the page limit stopped it" };
+	const seen = new Set<string>();
+	const candidates: string[] = [];
+	for (const entry of listed.value.entries) {
+		if (seen.has(entry.signature)) continue;
+		seen.add(entry.signature);
+		// The listing's memo is a hint: one that carries the v3 prefix is a candidate and must confirm; anything else at the index address is not a pointer.
+		const hint = stripListingPrefix(entry.memo);
+		if (hint?.startsWith(MEMO_PREFIX_V3)) candidates.push(entry.signature);
+	}
+	const verified: VerifiedPointer[] = [];
+	for (const signature of candidates) {
+		const left = args.allowanceMs();
+		if (left <= 0) {
+			readout.unreadable ??= "budget exhausted";
+			break;
+		}
+		const answer = await outcomeWithin(() => args.ports.confirmPointer(signature), left);
+		if (answer.kind === "timeout") {
+			readout.unreadable ??= "budget exhausted";
+			break;
+		}
+		if (answer.kind === "failed") {
+			readout.unreadable ??= `pointer ${signature} could not be read`;
+			continue;
+		}
+		if (answer.value === null) {
+			readout.unreadable ??= `pointer ${signature} could not be confirmed on devnet`;
+			continue;
+		}
+		const judged = await judgePointer(answer.value, args.graphId, args.pubkey, args.signers, args.now);
+		if (judged.kind === "verified") verified.push(judged.pointer);
+		else if (judged.kind === "failed") readout.failures.push({ signature, periodStartMs: judged.periodStartMs, reason: judged.reason });
+		else readout.unreadable ??= `pointer ${signature}: ${judged.reason}`;
+	}
+	const byHour = new Map<number, VerifiedPointer[]>();
+	for (const pointer of verified) {
+		const group = byHour.get(pointer.periodStartMs);
+		if (group) group.push(pointer);
+		else byHour.set(pointer.periodStartMs, [pointer]);
+	}
+	for (const [periodStartMs, group] of byHour) {
+		const [first] = group;
+		const distinct = new Set(group.map((pointer) => JSON.stringify([pointer.count, pointer.graphHeadsRootHex, pointer.hourTxSig])));
+		if (first !== undefined && distinct.size === 1) {
+			readout.byHour.set(periodStartMs, first);
+			continue;
+		}
+		for (const pointer of group) readout.failures.push({ signature: pointer.signature, periodStartMs, reason: "fork: pointers disagree about this hour" });
+	}
+	return readout;
 }
 
 /** What `memory_verify` waits for the anchor lookup: it reads the hour's leaves, then the chain, so it gets more than a single read. */
@@ -4389,13 +4518,14 @@ export class Substrate {
 	/** The ledger and devnet reads anchor verification goes through. Built per call; the RPC client is built on first use, so an unconfigured Solana never constructs one. */
 	private anchorVerifyPorts(): AnchorVerifyPorts {
 		let rpc: Rpc | null = null;
+		const devnet = (): Rpc => {
+			rpc ??= this.rpcOverride ?? createRpc({ url: this.config.solana.rpcUrl, timeoutMs: VERIFY_RPC_TIMEOUT_MS, attempts: VERIFY_RPC_ATTEMPTS, backoffMs: VERIFY_RPC_BACKOFF_MS });
+			return rpc;
+		};
 		return {
 			ledger: this.greptime,
 			rowToEvent,
-			rpc: () => {
-				rpc ??= this.rpcOverride ?? createRpc({ url: this.config.solana.rpcUrl, timeoutMs: VERIFY_RPC_TIMEOUT_MS, attempts: VERIFY_RPC_ATTEMPTS, backoffMs: VERIFY_RPC_BACKOFF_MS });
-				return rpc;
-			},
+			rpc: devnet,
 			solana: {
 				pubkey: this.config.solana.pubkey,
 				problem: this.config.solana.problem,
@@ -4404,6 +4534,7 @@ export class Substrate {
 			},
 			operatorSurfaces: operatorSurfaces(this.config),
 			nowMs: () => Date.now(),
+			...graphPointerPorts(devnet, () => Date.now()),
 		};
 	}
 
@@ -8211,9 +8342,35 @@ export class Substrate {
 		return signerRead;
 	};
 
+	// Design 5, steps 2 to 4: the graph's pointers, each confirmed on chain, under the same whole-verify budget as the hours.
+	const pointerRead = await readPointerChecks({
+		graphId: storedGraphId,
+		ports: graphPointerPorts(readRpc, () => Date.now()),
+		pubkey,
+		signers,
+		allowanceMs: () => budgetMs - (Date.now() - startedAt) - margin,
+		now,
+	});
+	// Step 5: the hour set is the store's hours and the pointers' hours. A pointer that fails its checks names its hour through its memo.
+	const failureByHour = new Map<number, string>();
+	for (const failure of pointerRead.failures) {
+		if (failure.periodStartMs === null) continue;
+		const reason = `pointer ${failure.signature} ${failure.reason}`;
+		const prior = failureByHour.get(failure.periodStartMs);
+		failureByHour.set(failure.periodStartMs, prior === undefined ? reason : `${prior}; ${reason}`);
+	}
+	for (const hour of [...pointerRead.byHour.keys(), ...failureByHour.keys()]) {
+		if (!byHour.has(hour)) byHour.set(hour, []);
+	}
+
 	const hours: HourReport[] = [];
 	for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
 		const memberCount = byHour.get(hour)?.length ?? 0;
+		const failed = failureByHour.get(hour);
+		if (failed !== undefined) {
+			hours.push({ period_start: hourIso(hour), period_end: hourIso(hourEnd(hour)), status: "mismatch", event_count: memberCount, root: null, reason: failed, trusted: false, trusted_reason: failed, pairs: [] });
+			continue;
+		}
 		// An hour that is still open needs no devnet read and no digest —
 		// it is pending by definition — so it never spends the budget.
 		if (!isClosed(hour, now, INGEST_LAG_MS)) {
@@ -8232,15 +8389,27 @@ export class Substrate {
 			});
 			continue;
 		}
-		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, signers, remaining - margin));
+		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, signers, remaining - margin, pointerRead.byHour.get(hour) ?? null));
+	}
+	// Step 7: a v2 hour the graph has events in, with no pointer for the graph, is pre-index: its pointer is missing, so it is not proven.
+	for (const [i, report] of hours.entries()) {
+		const hour = Date.parse(report.period_start);
+		if (report.status === "anchored" && report.heads_root !== undefined && !pointerRead.byHour.has(hour)) hours[i] = { ...report, status: "mismatch", reason: "pre-index v2 hour" };
 	}
 	for (const [i, report] of hours.entries()) {
 		const hour = Date.parse(report.period_start);
-		hours[i] = await this.trustHour(report, hour, byHour.get(hour) ?? [], rows, storedGraphId, budgetMs - (Date.now() - startedAt) - margin);
+		if (failureByHour.has(hour)) continue;
+		hours[i] = await this.trustHour(report, hour, byHour.get(hour) ?? [], rows, storedGraphId, budgetMs - (Date.now() - startedAt) - margin, pointerRead.byHour.get(hour) ?? null);
 	}
+	const pointerStatusOf = (periodStartMs: number): NonNullable<HourReport["pointer"]> =>
+		failureByHour.has(periodStartMs) ? "failed" : pointerRead.byHour.has(periodStartMs) ? "verified" : "absent";
+	for (const [i, report] of hours.entries()) hours[i] = { ...report, pointer: pointerStatusOf(Date.parse(report.period_start)) };
 
+	// Step 11: the verdict. A pointer that cannot be read or judged, and one that fails without naming an hour, fail the verdict too.
+	const hoursUnreadable = leavesUnreadable ?? pointerRead.unreadable;
+	const [pointerLoose] = pointerRead.failures.filter((failure) => failure.periodStartMs === null);
 	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
-	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0 && leavesUnreadable === null;
+	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0 && hoursUnreadable === null && pointerLoose === undefined;
 	const reason = !chain.ok
 		? chain.reason
 		: leavesUnreadable !== null
@@ -8249,9 +8418,13 @@ export class Substrate {
 				? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
 				: missing.length > 0
 					? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
-					: failing
-						? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
-						: undefined;
+					: pointerRead.unreadable !== null
+						? pointerRead.unreadable
+						: pointerLoose !== undefined
+							? `pointer ${pointerLoose.signature} ${pointerLoose.reason}`
+							: failing
+								? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
+								: undefined;
 	const untrustedHour = hours.find((hour) => hour.trusted !== true);
 	const anchoredHours = hours.filter((hour) => hour.status === "anchored");
 	return {
@@ -8259,22 +8432,24 @@ export class Substrate {
 		events: rows.length,
 		...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
 		...(reason ? { reason } : {}),
-		...(leavesUnreadable !== null ? { hours_unreadable: leavesUnreadable } : {}),
+		...(hoursUnreadable !== null ? { hours_unreadable: hoursUnreadable } : {}),
 		chain,
 		hours,
 		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
 		legacy: { count: legacy.length, ids: [...legacy].sort() },
 		missing: { count: missing.length, ids: [...missing] },
-		trusted: leavesUnreadable === null && rows.length > 0 && anchoredHours.length > 0 && untrustedHour === undefined,
-		trusted_reason: leavesUnreadable !== null
-			? leavesUnreadable
-			: rows.length === 0
-				? "no events"
-				: anchoredHours.length === 0
-					? "no anchored hour"
-					: untrustedHour === undefined
-						? "every hour is trusted"
-						: `hour ${untrustedHour.period_start}: ${untrustedHour.trusted_reason ?? "not trusted"}`,
+		trusted: hoursUnreadable === null && pointerLoose === undefined && rows.length > 0 && anchoredHours.length > 0 && untrustedHour === undefined,
+		trusted_reason: hoursUnreadable !== null
+			? hoursUnreadable
+			: pointerLoose !== undefined
+				? `pointer ${pointerLoose.signature} ${pointerLoose.reason}`
+				: rows.length === 0 && failing === undefined
+					? "no events"
+					: anchoredHours.length === 0
+						? "no anchored hour"
+						: untrustedHour === undefined
+							? "every hour is trusted"
+							: `hour ${untrustedHour.period_start}: ${untrustedHour.trusted_reason ?? "not trusted"}`,
 	};
 	}
 
@@ -8292,6 +8467,7 @@ export class Substrate {
 		rows: Array<Record<string, unknown>>,
 		storedGraphId: string,
 		allowanceMs: number,
+		pointer: VerifiedPointer | null,
 	): Promise<HourReport> {
 		// A head the stored leaves contradict makes the hour a `mismatch`, which is what the verdict's `ok` reads. An hour's own reason is kept.
 		const untrusted = (reason: string, headFailed = false): HourReport =>
@@ -8328,9 +8504,23 @@ export class Substrate {
 		const leaves = read.leaves;
 		// The trust computation runs over stored bytes that may be malformed. Whatever it throws is an untrusted result, never an escape.
 		try {
+			// Design 5, step 8: a pointer's graph must have leaves in this hour. That is named before the hour root, so an hour with none of
+			// this graph's leaves is not blamed on the root.
+			if (pointer !== null && !leaves.some((leaf) => leaf.graph_id === storedGraphId)) {
+				return untrusted(`anchored hour holds ${pointer.count} events of ${storedGraphId} on chain; the store has none`, true);
+			}
 			const records = headRecordsFromLeaves(leaves, hour);
 			if (records === null || records.length === 0 || headsRoot(records) !== onChainHeadsRoot) {
 				return untrusted("stored leaves do not reproduce the on-chain heads root", true);
+			}
+			if (pointer !== null) {
+				const graphRecords = headRecordsFromLeaves(leaves, hour, storedGraphId);
+				const reproduced =
+					graphRecords !== null &&
+					graphRecords.length > 0 &&
+					headsRoot(graphRecords) === pointer.graphHeadsRootHex &&
+					graphRecords.reduce((sum, record) => sum + record.count, 0) === pointer.count;
+				if (!reproduced) return untrusted("stored leaves do not reproduce the pointer", true);
 			}
 			const inHour = new Set(members);
 			const events = rows.filter((row) => inHour.has(String(row.id))).map(rowToEvent);
@@ -8394,6 +8584,7 @@ export class Substrate {
 		memberCount: number,
 		signers: () => Promise<{ set: SignerSet; gap: string | null }>,
 		allowanceMs: number,
+		pointer: VerifiedPointer | null,
 	): Promise<HourReport> {
 		const period_start = hourIso(hour);
 		const period_end = hourIso(hourEnd(hour));
@@ -8411,7 +8602,7 @@ export class Substrate {
 				Math.max(0, allowanceMs),
 			);
 			timer.unref?.();
-			this.checkHour(hour, now, readRpc, pubkey, memberCount, signers).then(
+			this.checkHour(hour, now, readRpc, pubkey, memberCount, signers, pointer).then(
 				(report) => {
 					clearTimeout(timer);
 					resolve(report);
@@ -8455,6 +8646,7 @@ export class Substrate {
 		pubkey: string | null,
 		memberCount: number,
 		signers: () => Promise<{ set: SignerSet; gap: string | null }>,
+		pointer: VerifiedPointer | null,
 	): Promise<HourReport> {
 		const period_start = hourIso(hour);
 		const period_end = hourIso(hourEnd(hour));
@@ -8484,7 +8676,9 @@ export class Substrate {
 				throw cause;
 			}
 		}
-		if (!row) {
+		// The hour transaction is the one the graph's pointer names (design 5, step 6). With no pointer, the anchors row names it.
+		const anchorSig = pointer?.hourTxSig ?? row?.tx_sig;
+		if (anchorSig === undefined) {
 			if ("fault" in recomputed) return { period_start, period_end, status: "mismatch", event_count: 0, root: null, reason: recomputed.fault };
 			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
 				return { period_start, period_end, status: "pending", ...shown };
@@ -8492,56 +8686,60 @@ export class Substrate {
 			return { period_start, period_end, status: "unanchored", ...shown, reason: "no anchors row 3 h after the hour closed" };
 		}
 		if (!pubkey) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault("SOLANA_ANCHOR_PUBKEY is not set") };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: anchorSig, reason: withFault("SOLANA_ANCHOR_PUBKEY is not set") };
 		}
 		let genesis: string;
 		try {
 			genesis = await readRpc().getGenesisHash();
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault(redact(String(cause))) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: anchorSig, reason: withFault(redact(String(cause))) };
 		}
 		if (genesis !== DEVNET_GENESIS_HASH) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault("RPC genesis hash is not devnet's") };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: anchorSig, reason: withFault("RPC genesis hash is not devnet's") };
 		}
 		let memo: TransactionMemo | null;
 		try {
-			memo = await readRpc().transactionMemo(row.tx_sig, "confirmed");
+			memo = await readRpc().transactionMemo(anchorSig, "confirmed");
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault(redact(String(cause))) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: anchorSig, reason: withFault(redact(String(cause))) };
 		}
 		if (!memo) {
-			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: withFault("transaction not found on devnet") };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: anchorSig, reason: withFault("transaction not found on devnet") };
 		}
 		if (!memo.memo) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("transaction carries no memo-program instruction") };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: anchorSig, reason: withFault("transaction carries no memo-program instruction") };
 		}
 		// The signer is judged the way `checkpoint_verify` judges it: by the signer set at the transaction's own block time, so an hour a
 		// key signed before a rotation stays valid after the job key moved on, and a key outside its window is not accepted.
 		if (!memo.payerSigned) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("memo is not signed by SOLANA_ANCHOR_PUBKEY") };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: anchorSig, reason: withFault("memo is not signed by SOLANA_ANCHOR_PUBKEY") };
 		}
 		const signerFault = await judgeSigner(memo, signers);
 		// A proven signer fault is final. An UNVERIFIABLE signer (no block time yet, an incomplete rotation read, an unbuildable set)
 		// waits for the content checks below: a transaction that already disagrees with the ledger is a mismatch whatever its signer,
 		// and that known cause must not be hidden behind the missing time (`checkpoint_verify` ranks proven disagreements first).
 		if (signerFault !== null && signerFault.status === "mismatch") {
-			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: withFault(signerFault.reason) };
+			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: anchorSig, reason: withFault(signerFault.reason) };
 		}
 		if (memo.err !== null && memo.err !== undefined) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("anchor transaction failed") };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: anchorSig, reason: withFault("anchor transaction failed") };
 		}
 		const parsed = parseMemo(memo.memo);
 		if (!parsed) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault("memo is not a v1 or v2 anchor memo") };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: anchorSig, reason: withFault("memo is not a v1 or v2 anchor memo") };
+		}
+		// A pointer names a v2 hour: its heads commitment is what the pointer's own graph heads root is checked against.
+		if (pointer !== null && parsed.headsRootHex === undefined) {
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: anchorSig, reason: withFault("pointer names a v1 hour") };
 		}
 		if (parsed.periodStartMs !== hour) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: withFault(`memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}`) };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: anchorSig, reason: withFault(`memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}`) };
 		}
 		// A memo signed by an accepted key for this hour commits to its heads, whatever the rows now say: trustHour checks the stored
 		// leaves against that root. An unaccepted signer carries no such commitment.
 		const signedHeads = signerFault === null && parsed.headsRootHex !== undefined ? { heads_root: parsed.headsRootHex } : {};
 		if ("fault" in recomputed) {
-			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, tx_sig: row.tx_sig, reason: recomputed.fault, ...signedHeads };
+			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, tx_sig: anchorSig, reason: recomputed.fault, ...signedHeads };
 		}
 		const { digest } = recomputed;
 		if (parsed.rootHex !== digest.root || parsed.count !== digest.event_count) {
@@ -8550,23 +8748,24 @@ export class Substrate {
 				period_end,
 				status: "mismatch",
 				...shown,
-				tx_sig: row.tx_sig,
+				tx_sig: anchorSig,
 				reason: `chain root ${parsed.rootHex}/${parsed.count} != recomputed ${digest.root}/${digest.event_count}`,
 				...signedHeads,
 			};
 		}
-		if (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo) {
-			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo", ...signedHeads };
+		// The anchors row, where the store holds one, must agree with the memo it names. A pointer-named hour with no row is judged by its memo alone.
+		if (row !== null && (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo)) {
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: anchorSig, reason: "anchors row disagrees with the memo", ...signedHeads };
 		}
 		if (signerFault !== null) {
-			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: signerFault.reason };
+			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: anchorSig, reason: signerFault.reason };
 		}
 		return {
 			period_start,
 			period_end,
 			status: "anchored",
 			...shown,
-			tx_sig: row.tx_sig,
+			tx_sig: anchorSig,
 			...(memo.slot !== null ? { slot: memo.slot } : {}),
 			...(parsed.headsRootHex !== undefined ? { heads_root: parsed.headsRootHex } : {}),
 		};

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
+import { type GraphHeadRecord, formatMemo, formatMemoV2, formatMemoV3, graphHeadsRoot, graphIndexAddress, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
 import { buildGraphHeads } from "./anchor.ts";
@@ -2074,7 +2074,7 @@ describe("identifier lookups", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
 
-		await substrate.verifyGraph("ut-1".padEnd(900, "x"));
+		await substrate.verifyGraph("ut-1".padEnd(900, "x"), { rpc: { addressSignaturePage: async () => [] } as never });
 
 		expect(asked[0]?.[1].length).toBe(512);
 		expect(leafAsked).toEqual([asked[0]?.[1] ?? ""]);
@@ -4213,11 +4213,48 @@ describe("verifyGraph hour report", () => {
 		};
 	}
 
-	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}) {
+	/** A v3 pointer as the chain holds it: a transaction listed at its graph's index address. `unknown` makes the node refuse the signature. */
+	interface PointerFixture {
+		signature: string;
+		/** The graph whose index address lists this pointer (its memo may name another graph). */
+		graphId: string;
+		memo: string;
+		/** Overrides of the pointer transaction's fields. */
+		tx?: Record<string, unknown>;
+		unknown?: boolean;
+	}
+
+	/** One page of the pointers listed at `address`, newest first, the memo text carried as a `[len] ` listing hint. */
+	function pointerPage(pointers: readonly PointerFixture[], address: string, limit: number, before: string | undefined) {
+		const listed = pointers.filter((pointer) => graphIndexAddress(pointer.graphId) === address);
+		const start = before === undefined ? 0 : listed.findIndex((pointer) => pointer.signature === before) + 1;
+		return listed.slice(start, start + limit).map((pointer) => ({ signature: pointer.signature, memo: `[${pointer.memo.length}] ${pointer.memo}`, err: null, slot: 42 }));
+	}
+
+	/**
+	 * A node's answers: the hour transaction is `memo` (with `over`'s fields) unless `hours` names another memo for its signature, and each pointer
+	 * is answered from its fixture. Every pointer's index listing is the one `pointers` gives.
+	 */
+	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}, pointers: readonly PointerFixture[] = [], hours: Record<string, string> = {}) {
 		return {
 			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S, ...over }),
+			transactionMemo: async (signature: string) => {
+				const pointer = pointers.find((candidate) => candidate.signature === signature);
+				if (pointer) {
+					if (pointer.unknown) return null;
+					return { memo: pointer.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S, ...pointer.tx };
+				}
+				const named = hours[signature];
+				if (named !== undefined) return { memo: named, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S };
+				return { memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S, ...over };
+			},
+			addressSignaturePage: async (address: string, { limit, before }: { limit: number; before?: string }) => pointerPage(pointers, address, limit, before),
 		};
+	}
+
+	/** A v3 pointer memo for one hour of one graph, as the job writes it. */
+	function pointerMemo(graphId: string, periodStartMs: number, count: number, graphHeadsRootHex: string, hourTxSig: string): string {
+		return formatMemoV3({ graphId, periodStartMs, count, graphHeadsRootHex, hourTxSig });
 	}
 
 	function substrateWith(stub: Record<string, unknown>, env: Record<string, string | undefined> = {}) {
@@ -4253,7 +4290,7 @@ describe("verifyGraph hour report", () => {
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
-		const verdict = await substrate.verifyGraph("ut-1", { now: H + 2 * HOUR });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 2 * HOUR, rpc: rpcReturning(null) as never });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending" });
 	});
@@ -4275,7 +4312,7 @@ describe("verifyGraph hour report", () => {
 			},
 			anchorForPeriod: async () => null,
 		});
-		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000 });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000, rpc: rpcReturning(null) as never });
 		expect(digested).toBe(false);
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending", root: null });
@@ -4291,7 +4328,7 @@ describe("verifyGraph hour report", () => {
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
-		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(null) as never });
 		expect(verdict.ok).toBe(false);
 		expect(verdict.hours[0]?.status).toBe("unanchored");
 		expect(verdict.reason).toContain(START_ISO);
@@ -4325,6 +4362,7 @@ describe("verifyGraph hour report", () => {
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
+			addressSignaturePage: async () => [],
 			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S }),
 		};
@@ -4393,6 +4431,7 @@ describe("verifyGraph hour report", () => {
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
+			addressSignaturePage: async () => [],
 			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => {
 				throw new Error("fetch failed");
@@ -4414,6 +4453,7 @@ describe("verifyGraph hour report", () => {
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
+			addressSignaturePage: async () => [],
 			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => null,
 		};
@@ -4556,7 +4596,7 @@ describe("verifyGraph hour report", () => {
 
 	test("empty graph verifies with no hours", async () => {
 		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] });
-		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(null) as never });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours).toEqual([]);
 	});
@@ -4598,6 +4638,7 @@ describe("verifyGraph hour report", () => {
 			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1" },
 		);
 		const rpc = {
+			addressSignaturePage: async () => [],
 			transactionMemo: async () => {
 				rpcCalls += 1;
 				return { memo: world.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S };
@@ -4612,6 +4653,11 @@ describe("verifyGraph hour report", () => {
 
 	test("a slow devnet read is cut off inside the budget", async () => {
 		const world = sessionRows();
+		// The read answers only after SLOW_READ_MS, so an elapsed time near that bound would mean the verify waited for it.
+		const SLOW_READ_MS = 10_000;
+		// The verify returns inside its budget. The tolerance covers scheduling overhead on a loaded runner, which added ~280 ms to a ~1.7 s cut-off.
+		const BUDGET_MS = VERIFY_RESPONSE_MARGIN_MS + 150;
+		const TOLERANCE_MS = 500;
 		const substrate = substrateWith(
 			{
 				readEvents: async () => world.rows,
@@ -4621,15 +4667,24 @@ describe("verifyGraph hour report", () => {
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
-			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) },
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(BUDGET_MS) },
 		);
 		const rpc = {
+			addressSignaturePage: async () => [],
 			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			transactionMemo: (): Promise<never> => Promise.withResolvers<never>().promise,
+			// A real delay on purpose: the verify cuts its read off on the platform clock (Date.now and timers), which fake timers would not drive.
+			transactionMemo: () => {
+				const { promise, resolve } = Promise.withResolvers<null>();
+				const timer = setTimeout(() => resolve(null), SLOW_READ_MS);
+				timer.unref?.();
+				return promise;
+			},
 		};
 		const started = Date.now();
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
-		expect(Date.now() - started).toBeLessThan(2000);
+		const elapsed = Date.now() - started;
+		expect(elapsed).toBeLessThan(BUDGET_MS + TOLERANCE_MS);
+		expect(elapsed).toBeLessThan(SLOW_READ_MS / 2);
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
 		expect(verdict.hours[0]?.reason).toContain("timed out checking this hour");
 		expect(verdict.ok).toBe(false);
@@ -4654,10 +4709,13 @@ describe("verifyGraph hour report", () => {
 			},
 			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1" },
 		);
-		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000 });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000, rpc: rpcReturning(null) as never });
 		expect(verdict.hours).toHaveLength(1);
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending", root: null });
-		expect(verdict.ok).toBe(true);
+		// The pointer listing is a devnet read under the same budget (design 5, step 13): spent, it cannot be read, so the verdict is not ok.
+		// The open hour itself stays pending, unread and undigested.
+		expect(verdict.ok).toBe(false);
+		expect(verdict.reason).toBe("budget exhausted");
 	});
 
 	test("a short budget still runs quick checks under a scaled margin", async () => {
@@ -5175,11 +5233,16 @@ describe("verifyGraph hour report", () => {
 	describe("heads trust (D73-03, D73-04)", () => {
 		const asRow = (event: SubstrateEvent) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
 
+		/** The hour transaction and the pointer transaction the honest fixture names. Base58, 64 characters, as a real signature is. */
+		const HOUR_SIG = "5".repeat(64);
+		const POINTER_SIG = "7".repeat(64);
+
 		/**
 		 * One v2 hour: the sessions chained in the order given, each event ingested after the last, its leaves stored, and the memo
-		 * carrying the heads root over those leaves. The fixture's own memo, root and leaves are the honest answer every case edits.
+		 * carrying the heads root over those leaves. The graph's pointer for the hour names `hourSig` (design 3.2). The fixture's own memo,
+		 * root, leaves and pointers are the honest answer every case edits.
 		 */
-		function v2World(sessions: Array<{ session: string; count: number }>, hour = H): World {
+		function v2World(sessions: Array<{ session: string; count: number }>, hour = H, hourSig = HOUR_SIG, pointerSig = POINTER_SIG): World {
 			const events: SubstrateEvent[] = [];
 			const records: Array<{ event_id: string; event_ts: number; ingested_at: number }> = [];
 			const leaves: Array<{ event_id: string; ingested_at: number; hash: string }> = [];
@@ -5198,9 +5261,14 @@ describe("verifyGraph hour report", () => {
 			const built = buildGraphHeads(members, hour);
 			const root = merkleRootHex(events.map((event) => event.hash));
 			const memo = formatMemoV2({ periodStartMs: hour, rootHex: root, count: events.length, headsRootHex: headsRoot(built.records) });
-			return { events, rows: events.map(asRow), records, leaves, root, memo, stored: built.leaves };
+			const pointer: PointerFixture = {
+				signature: pointerSig,
+				graphId: "ut-1",
+				memo: pointerMemo("ut-1", hour, events.length, graphHeadsRoot(built.records, "ut-1"), hourSig),
+			};
+			return { events, rows: events.map(asRow), records, leaves, root, memo, stored: built.leaves, hour, hourSig, heads: built.records, pointers: [pointer] };
 		}
-		/** The honest hour every case edits: its events, the ledger rows and ingest records, the stored leaves and the anchored memo. */
+		/** The honest hour every case edits: its events, the ledger rows and ingest records, the stored leaves, the anchored memo and the graph's pointer. */
 		interface World {
 			events: SubstrateEvent[];
 			rows: Array<Omit<SubstrateEvent, "ts" | "payload"> & { ts: number; payload: string }>;
@@ -5209,6 +5277,10 @@ describe("verifyGraph hour report", () => {
 			root: string;
 			memo: string;
 			stored: Array<{ graph_id: string; session_id: string; seq: number; event_id: string; hash: string }>;
+			hour: number;
+			hourSig: string;
+			heads: GraphHeadRecord[];
+			pointers: PointerFixture[];
 		}
 
 		function anchorOf(world: World, over: Record<string, unknown> = {}) {
@@ -5240,8 +5312,9 @@ describe("verifyGraph hour report", () => {
 			};
 		}
 
-		const verify = (world: World, over: Record<string, unknown> = {}, memo: string = world.memo) =>
-			substrateWith(stubOf(world, over)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(memo) as never });
+		/** The verdict over one world at 5 h, its hour transaction answered as `memo` and its pointers listed as `pointers`. */
+		const verify = (world: World, over: Record<string, unknown> = {}, memo: string = world.memo, pointers: PointerFixture[] = world.pointers) =>
+			substrateWith(stubOf(world, over)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(memo, {}, pointers) as never });
 
 		test("an honest v2 hour is trusted, and each session matches its own head", async () => {
 			const world = v2World([
@@ -5303,6 +5376,7 @@ describe("verifyGraph hour report", () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
 			const deleted = defined(world.events[1], "event 2").id;
 			const unreadable = {
+				...rpcReturning(null, {}, world.pointers),
 				getGenesisHash: async () => {
 					throw new Error("devnet unreachable");
 				},
@@ -5338,7 +5412,7 @@ describe("verifyGraph hour report", () => {
 
 		test("a transaction with no memo instruction is a mismatch that keeps the ledger fault", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
-			const { deleted, hour } = await deletedHour(world, rpcReturning(null));
+			const { deleted, hour } = await deletedHour(world, rpcReturning(null, {}, world.pointers));
 			expect(hour).toMatchObject({ status: "mismatch" });
 			expect(hour?.reason).toContain(deleted);
 			expect(hour?.reason).toContain("no memo-program instruction");
@@ -5346,7 +5420,7 @@ describe("verifyGraph hour report", () => {
 
 		test("an unsigned memo is a mismatch that keeps the ledger fault", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
-			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { payerSigned: false }));
+			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { payerSigned: false }, world.pointers));
 			expect(hour).toMatchObject({ status: "mismatch" });
 			expect(hour?.reason).toContain(deleted);
 			expect(hour?.reason).toContain("is not signed by SOLANA_ANCHOR_PUBKEY");
@@ -5354,14 +5428,14 @@ describe("verifyGraph hour report", () => {
 
 		test("a memo proven to come from another payer is a mismatch that keeps the ledger fault", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
-			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { payer: "SomeoneElse11111111111111111111111111111" }));
+			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { payer: "SomeoneElse11111111111111111111111111111" }, world.pointers));
 			expect(hour).toMatchObject({ status: "mismatch" });
 			expect(hour?.reason).toContain(deleted);
 		});
 
 		test("a failed anchor transaction is a mismatch that keeps the ledger fault", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
-			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { err: { InstructionError: [0, "Custom"] } }));
+			const { deleted, hour } = await deletedHour(world, rpcReturning(world.memo, { err: { InstructionError: [0, "Custom"] } }, world.pointers));
 			expect(hour).toMatchObject({ status: "mismatch" });
 			expect(hour?.reason).toContain(deleted);
 			expect(hour?.reason).toContain("anchor transaction failed");
@@ -5369,7 +5443,7 @@ describe("verifyGraph hour report", () => {
 
 		test("a memo that is not an anchor memo is a mismatch that keeps the ledger fault", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
-			const { deleted, hour } = await deletedHour(world, rpcReturning("not an anchor memo"));
+			const { deleted, hour } = await deletedHour(world, rpcReturning("not an anchor memo", {}, world.pointers));
 			expect(hour).toMatchObject({ status: "mismatch" });
 			expect(hour?.reason).toContain(deleted);
 			expect(hour?.reason).toContain("is not a v1 or v2 anchor memo");
@@ -5378,7 +5452,7 @@ describe("verifyGraph hour report", () => {
 		test("a memo for another hour is a mismatch that keeps the ledger fault", async () => {
 			const world = v2World([{ session: "s1", count: 3 }]);
 			const otherHour = formatMemoV2({ periodStartMs: H + HOUR, rootHex: world.root, count: world.events.length, headsRootHex: world.root });
-			const { deleted, hour } = await deletedHour(world, rpcReturning(otherHour));
+			const { deleted, hour } = await deletedHour(world, rpcReturning(otherHour, {}, world.pointers));
 			expect(hour).toMatchObject({ status: "mismatch" });
 			expect(hour?.reason).toContain(deleted);
 			expect(hour?.reason).toContain("memo names");
@@ -5423,7 +5497,7 @@ describe("verifyGraph hour report", () => {
 
 		test("an unanchored hour is untrusted, with the reason", async () => {
 			const world = v2World([{ session: "s1", count: 2 }]);
-			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			const verdict = await verify(world, { anchorForPeriod: async () => null }, world.memo, []);
 			expect(verdict.hours[0]?.status).toBe("unanchored");
 			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "hour is unanchored: no anchored head to trust" });
 			expect(verdict.trusted).toBe(false);
@@ -5432,7 +5506,7 @@ describe("verifyGraph hour report", () => {
 		test("a v1-only anchored hour is untrusted with its reason, and the chain verdict is unchanged", async () => {
 			const world = v2World([{ session: "s1", count: 2 }]);
 			const v1 = formatMemo({ periodStartMs: H, rootHex: world.root, count: world.events.length });
-			const verdict = await verify(world, { anchorForPeriod: async () => anchorOf(world, { memo: v1 }) }, v1);
+			const verdict = await verify(world, { anchorForPeriod: async () => anchorOf(world, { memo: v1 }) }, v1, []);
 			expect(verdict.hours[0]?.status).toBe("anchored");
 			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "anchored with a v1 memo: no heads commitment on chain" });
 			expect(verdict.ok).toBe(true);
@@ -5507,7 +5581,7 @@ describe("verifyGraph hour report", () => {
 			// A one-millisecond budget leaves no allowance for the lookup, and a lookup that never answers cannot win the race.
 			const verdict = await substrateWith(stubOf(world, { graphChainLeafHours: () => new Promise<never>(() => {}) }), { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
 				now: H + 5 * HOUR,
-				rpc: rpcReturning(world.memo) as never,
+				rpc: rpcReturning(world.memo, {}, world.pointers) as never,
 			});
 			expect(verdict.ok).toBe(false);
 			expect(verdict.reason).toBe("budget exhausted");
@@ -5517,10 +5591,10 @@ describe("verifyGraph hour report", () => {
 
 		test("a trailing hour whose rows and ingest records are deleted, with its anchor and leaves kept, fails the verdict; the intact graph verifies", async () => {
 			const NEXT = H + HOUR;
+			const LAST_HOUR_SIG = "6".repeat(64);
 			const first = v2World([{ session: "s1", count: 2 }]);
-			const last = v2World([{ session: "s2", count: 2 }], NEXT);
-			const lastBlockS = (NEXT + HOUR + 5 * 60_000) / 1000;
-			const stubFor = (lastIntact: boolean) => ({
+			const last = v2World([{ session: "s2", count: 2 }], NEXT, LAST_HOUR_SIG, "8".repeat(64));
+			const stubFor = (lastIntact: boolean, over: Record<string, unknown> = {}) => ({
 				readEvents: async () => (lastIntact ? [...first.rows, ...last.rows] : first.rows),
 				graphIngest: async () => (lastIntact ? [...first.records, ...last.records] : first.records),
 				firstIngestMs: async () => H,
@@ -5530,28 +5604,28 @@ describe("verifyGraph hour report", () => {
 					startMs === H
 						? anchorOf(first)
 						: startMs === NEXT
-							? anchorOf(last, { period_start: new Date(NEXT).toISOString(), period_end: new Date(NEXT + HOUR).toISOString(), tx_sig: "sig2" })
+							? anchorOf(last, { period_start: new Date(NEXT).toISOString(), period_end: new Date(NEXT + HOUR).toISOString(), tx_sig: LAST_HOUR_SIG })
 							: null,
 				hourChainLeaves: async (startMs: number) => (startMs === H ? first.stored : last.stored),
+				...over,
 			});
-			const rpc = {
-				getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-				transactionMemo: async (signature: string) =>
-					signature === "sig2"
-						? { memo: last.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: lastBlockS }
-						: { memo: first.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S },
-			};
-			const verdictFor = (lastIntact: boolean) =>
-				substrateWith(stubFor(lastIntact)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+			const rpc = rpcReturning(first.memo, {}, [...first.pointers, ...last.pointers], { [LAST_HOUR_SIG]: last.memo });
+			const verdictFor = (lastIntact: boolean) => substrateWith(stubFor(lastIntact)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 
 			const intact = await verdictFor(true);
 			expect(intact.ok).toBe(true);
 			expect(intact.hours.map((hour) => hour.status)).toEqual(["anchored", "anchored"]);
+			expect(intact.hours.map((hour) => hour.pointer)).toEqual(["verified", "verified"]);
 
 			const deleted = await verdictFor(false);
 			expect(deleted.ok).toBe(false);
 			expect(deleted.hours.find((hour) => hour.period_start === new Date(H).toISOString())?.status).toBe("anchored");
 			expect(deleted.hours.find((hour) => hour.period_start === new Date(NEXT).toISOString())).toMatchObject({ status: "mismatch", head_failed: true });
+
+			// The chain-leaves index no longer lists the trailing hour: its pointer still names it, so the verdict fails all the same.
+			const unlisted = await substrateWith(stubFor(false, { graphChainLeafHours: async () => [H] })).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+			expect(unlisted.ok).toBe(false);
+			expect(unlisted.hours.find((hour) => hour.period_start === new Date(NEXT).toISOString())).toMatchObject({ status: "mismatch", pointer: "verified" });
 		});
 
 		test("ok is false when one session of two is edited", async () => {
@@ -5576,7 +5650,7 @@ describe("verifyGraph hour report", () => {
 			const honest = v2World([{ session: "s1", count: 2 }]);
 			expect((await verify(honest)).ok).toBe(true);
 			const unanchored = v2World([{ session: "s1", count: 2 }]);
-			const verdict = await verify(unanchored, { anchorForPeriod: async () => null });
+			const verdict = await verify(unanchored, { anchorForPeriod: async () => null }, unanchored.memo, []);
 			expect(verdict.hours[0]?.status).toBe("unanchored");
 			expect(verdict.ok).toBe(false);
 		});
@@ -5584,6 +5658,7 @@ describe("verifyGraph hour report", () => {
 		test("a graph with no events is untrusted: no events", async () => {
 			const verdict = await substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] }).verifyGraph("ut-1", {
 				now: H + 5 * HOUR,
+				rpc: rpcReturning(null) as never,
 			});
 			expect(verdict.ok).toBe(true);
 			expect(verdict.trusted).toBe(false);
@@ -5592,7 +5667,7 @@ describe("verifyGraph hour report", () => {
 
 		test("a graph with no anchored hour is untrusted: no anchored hour", async () => {
 			const world = v2World([{ session: "s1", count: 2 }]);
-			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			const verdict = await verify(world, { anchorForPeriod: async () => null }, world.memo, []);
 			expect(verdict.trusted).toBe(false);
 			expect(verdict.trusted_reason).toBe("no anchored hour");
 		});
@@ -5608,7 +5683,7 @@ describe("verifyGraph hour report", () => {
 			});
 			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
 				now: H + 5 * HOUR,
-				rpc: rpcReturning(world.memo) as never,
+				rpc: rpcReturning(world.memo, {}, world.pointers) as never,
 			});
 			expect(reads).toBe(0);
 			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "budget exhausted" });
@@ -5620,7 +5695,7 @@ describe("verifyGraph hour report", () => {
 			const stub = stubOf(world, { hourChainLeaves: () => new Promise<never>(() => {}) });
 			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) }).verifyGraph("ut-1", {
 				now: H + 5 * HOUR,
-				rpc: rpcReturning(world.memo) as never,
+				rpc: rpcReturning(world.memo, {}, world.pointers) as never,
 			});
 			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "budget exhausted" });
 			expect(verdict.trusted).toBe(false);
@@ -5635,6 +5710,246 @@ describe("verifyGraph hour report", () => {
 			});
 			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "store-failed" });
 			expect(verdict.trusted).toBe(false);
+		});
+
+		describe("v3 pointers: each hour of a graph is named by its own pointer (design 5)", () => {
+			const NEXT = H + HOUR;
+			const NEXT_ISO = new Date(NEXT).toISOString();
+			const HOUR2_SIG = "6".repeat(64);
+			const POINTER2_SIG = "8".repeat(64);
+			const THIRD_POINTER_SIG = "3".repeat(64);
+			const OTHER_HOUR_SIG = "9".repeat(64);
+			const ZERO_ROOT = "a".repeat(64);
+
+			/** Two anchored hours of graph ut-1, the second one hour on, each with its own pointer and hour transaction. */
+			function twoHours(): { first: World; second: World } {
+				return {
+					first: v2World([{ session: "s1", count: 2 }]),
+					second: v2World([{ session: "s2", count: 2 }], NEXT, HOUR2_SIG, POINTER2_SIG),
+				};
+			}
+
+			/**
+			 * The store of two hours. With `secondRemoved` the second hour's rows, ingest and leaves are gone; `secondRowKept` keeps its
+			 * anchors row; `leafHours` is what the chain-leaves index lists for the graph.
+			 */
+			function twoHourStub(first: World, second: World, options: { secondRemoved: boolean; secondRowKept: boolean; leafHours: number[] }) {
+				return {
+					readEvents: async () => (options.secondRemoved ? first.rows : [...first.rows, ...second.rows]),
+					graphIngest: async () => (options.secondRemoved ? first.records : [...first.records, ...second.records]),
+					firstIngestMs: async () => H,
+					graphChainLeafHours: async () => options.leafHours,
+					hourLeaves: async (startMs: number) => (startMs === H ? first.leaves : options.secondRemoved ? [] : second.leaves),
+					anchorForPeriod: async (startMs: number) => {
+						if (startMs === H) return anchorOf(first);
+						if (startMs === NEXT && options.secondRowKept) return anchorOf(second, { period_start: NEXT_ISO, period_end: new Date(NEXT + HOUR).toISOString(), tx_sig: HOUR2_SIG });
+						return null;
+					},
+					hourChainLeaves: async (startMs: number) => (startMs === H ? first.stored : options.secondRemoved ? [] : second.stored),
+				};
+			}
+
+			/** The second hour's verdict at 6 h, with both hours' pointers listed and the second hour's transaction answered from its own memo. */
+			function twoHourVerdict(first: World, second: World, options: { secondRemoved: boolean; secondRowKept: boolean; leafHours: number[] }) {
+				const rpc = rpcReturning(first.memo, {}, [...first.pointers, ...second.pointers], { [HOUR2_SIG]: second.memo });
+				return substrateWith(twoHourStub(first, second, options)).verifyGraph("ut-1", { now: H + 6 * HOUR, rpc: rpc as never });
+			}
+
+			test("G1Probe, variant 1a: a trailing hour whose rows, ingest and leaves are gone fails the verdict naming it, though its anchors row is kept", async () => {
+				const { first, second } = twoHours();
+				const verdict = await twoHourVerdict(first, second, { secondRemoved: true, secondRowKept: true, leafHours: [H] });
+				expect(verdict.ok).toBe(false);
+				expect(verdict.trusted).toBe(false);
+				expect(verdict.hours.find((hour) => hour.period_start === NEXT_ISO)).toMatchObject({ status: "mismatch", head_failed: true, pointer: "verified" });
+				expect(verdict.hours.find((hour) => hour.period_start === START_ISO)).toMatchObject({ status: "anchored", trusted: true });
+			});
+
+			test("G1Probe, variant 1b: the same with its anchors row removed too: the verdict still names the hour, through its pointer", async () => {
+				const { first, second } = twoHours();
+				const verdict = await twoHourVerdict(first, second, { secondRemoved: true, secondRowKept: false, leafHours: [H] });
+				expect(verdict.ok).toBe(false);
+				expect(verdict.trusted).toBe(false);
+				expect(verdict.hours.find((hour) => hour.period_start === NEXT_ISO)).toMatchObject({ status: "mismatch", head_failed: true, pointer: "verified" });
+			});
+
+			test("a single anchored hour whose rows, ingest, leaves and row are gone fails the verdict naming the hour, because its pointer names it", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const verdict = await verify(world, {
+					readEvents: async () => [],
+					graphIngest: async () => [],
+					hourLeaves: async () => [],
+					hourChainLeaves: async () => [],
+					graphChainLeafHours: async () => [],
+					anchorForPeriod: async () => null,
+				});
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours).toHaveLength(1);
+				expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "mismatch", head_failed: true, pointer: "verified" });
+				expect(verdict.reason).toContain(START_ISO);
+			});
+
+			test("with no pointer either, a graph whose only hour is gone has no events on chain: ok, untrusted, no events (design 6, row 6)", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const gone = { readEvents: async () => [], graphIngest: async () => [], hourLeaves: async () => [], hourChainLeaves: async () => [], graphChainLeafHours: async () => [], anchorForPeriod: async () => null };
+				const verdict = await verify(world, gone, world.memo, []);
+				expect(verdict.ok).toBe(true);
+				expect(verdict.hours).toEqual([]);
+				expect(verdict.trusted).toBe(false);
+				expect(verdict.trusted_reason).toBe("no events");
+			});
+
+			test("a v2 hour the graph has events in, with no pointer, is a mismatch: pre-index v2 hour", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const verdict = await verify(world, {}, world.memo, []);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.trusted).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", reason: "pre-index v2 hour", pointer: "absent" });
+			});
+
+			test("a hour with a verified pointer is anchored from the chain, though the store holds no anchors row", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const verdict = await verify(world, { anchorForPeriod: async () => null });
+				expect(verdict.ok).toBe(true);
+				expect(verdict.trusted).toBe(true);
+				expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true, pointer: "verified" });
+			});
+
+			test("a pointer whose hour transaction is a v1 memo is a mismatch: pointer names a v1 hour", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const v1 = formatMemo({ periodStartMs: H, rootHex: world.root, count: world.events.length });
+				const verdict = await verify(world, { anchorForPeriod: async () => anchorOf(world, { memo: v1 }) }, v1);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", reason: "pointer names a v1 hour", pointer: "verified" });
+			});
+
+			test("a pointer whose transaction is unsigned or failed is a mismatch of its hour, naming the pointer", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const cases: Array<{ tx: Record<string, unknown>; reason: string }> = [
+					{ tx: { payerSigned: false }, reason: "is not signed by SOLANA_ANCHOR_PUBKEY" },
+					{ tx: { err: { InstructionError: [0, "Custom"] } }, reason: "the transaction failed" },
+				];
+				for (const { tx, reason } of cases) {
+					const pointers = [{ ...defined(world.pointers[0], "the pointer"), tx } as PointerFixture];
+					const verdict = await verify(world, {}, world.memo, pointers);
+					expect(verdict.ok).toBe(false);
+					expect(verdict.hours[0]).toMatchObject({ status: "mismatch", pointer: "failed" });
+					expect(verdict.hours[0]?.reason).toContain(POINTER_SIG);
+					expect(verdict.hours[0]?.reason).toContain(reason);
+				}
+			});
+
+			test("a pointer signed by another key is a mismatch of its hour, naming the pointer", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers = [{ ...defined(world.pointers[0], "the pointer"), tx: { payer: "SomeoneElse11111111111111111111111111111" } } as PointerFixture];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", pointer: "failed" });
+				expect(verdict.hours[0]?.reason).toContain(POINTER_SIG);
+				expect(verdict.hours[0]?.reason).toContain("is not signed by SOLANA_ANCHOR_PUBKEY");
+			});
+
+			test("a pointer whose transaction reports no block time cannot be judged: ok false, untrusted, naming the pointer", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers = [{ ...defined(world.pointers[0], "the pointer"), tx: { blockTime: null } } as PointerFixture];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.trusted).toBe(false);
+				expect(verdict.reason).toContain(POINTER_SIG);
+				expect(verdict.reason).toContain("no block time");
+			});
+
+			test("a pointer the node cannot confirm fails closed, naming the pointer", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers = [{ ...defined(world.pointers[0], "the pointer"), unknown: true } as PointerFixture];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.trusted).toBe(false);
+				expect(verdict.reason).toContain(POINTER_SIG);
+				expect(verdict.reason).toContain("could not be confirmed");
+			});
+
+			test("a pointer that names another graph than its index address is a mismatch of its hour", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers: PointerFixture[] = [{ signature: POINTER_SIG, graphId: "ut-1", memo: pointerMemo("ut-2", H, world.events.length, graphHeadsRoot(world.heads, "ut-1"), HOUR_SIG) }];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", pointer: "failed" });
+				expect(verdict.hours[0]?.reason).toContain("names graph ut-2, not ut-1");
+			});
+
+			test("a pointer that is not a v3 pointer for its graph (count 0, or a bad ISO period) is a mismatch naming the pointer", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const memos = [`substrate:v3:ut-1:${START_ISO}:0:${ZERO_ROOT}:${HOUR_SIG}`, `substrate:v3:ut-1:2026-10-01T10:30:00.000Z:2:${ZERO_ROOT}:${HOUR_SIG}`];
+				for (const memo of memos) {
+					const verdict = await verify(world, {}, world.memo, [{ signature: POINTER_SIG, graphId: "ut-1", memo }]);
+					expect(verdict.ok).toBe(false);
+					expect(verdict.reason).toContain(POINTER_SIG);
+					expect(verdict.reason).toContain("is not a v3 pointer");
+				}
+			});
+
+			test("two pointers that disagree about one hour are a fork: a mismatch of that hour", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const rival = pointerMemo("ut-1", H, world.events.length, graphHeadsRoot(world.heads, "ut-1"), OTHER_HOUR_SIG);
+				const pointers = [...world.pointers, { signature: THIRD_POINTER_SIG, graphId: "ut-1", memo: rival }];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch" });
+				expect(verdict.hours[0]?.reason).toContain("fork");
+			});
+
+			test("identical pointers under two signatures collapse to one: the hour is anchored and trusted", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const twin = { ...defined(world.pointers[0], "the pointer"), signature: THIRD_POINTER_SIG };
+				const verdict = await verify(world, {}, world.memo, [...world.pointers, twin]);
+				expect(verdict.ok).toBe(true);
+				expect(verdict.trusted).toBe(true);
+				expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true, pointer: "verified" });
+			});
+
+			test("a pointer for an hour that has not closed is a mismatch: pointers name closed hours only", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const verdict = await substrateWith(stubOf(world)).verifyGraph("ut-1", { now: H + 30 * 60_000, rpc: rpcReturning(world.memo, {}, world.pointers) as never });
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", pointer: "failed" });
+				expect(verdict.hours[0]?.reason).toContain("names an hour that has not closed");
+			});
+
+			test("stored leaves that do not carry the pointer's count are a mismatch: stored leaves do not reproduce the pointer", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers = [{ ...defined(world.pointers[0], "the pointer"), memo: pointerMemo("ut-1", H, world.events.length + 1, graphHeadsRoot(world.heads, "ut-1"), HOUR_SIG) }];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true, pointer: "verified", trusted: false });
+				expect(verdict.hours[0]?.reason).toBe("stored leaves do not reproduce the pointer");
+			});
+
+			test("stored leaves whose heads root differs from the pointer's are a mismatch: stored leaves do not reproduce the pointer", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers = [{ ...defined(world.pointers[0], "the pointer"), memo: pointerMemo("ut-1", H, world.events.length, ZERO_ROOT, HOUR_SIG) }];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
+				expect(verdict.hours[0]?.reason).toBe("stored leaves do not reproduce the pointer");
+			});
+
+			test("a pointer listed at another graph's index address is not read for this graph: its hour is a pre-index mismatch", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers: PointerFixture[] = [{ signature: POINTER_SIG, graphId: "ut-2", memo: pointerMemo("ut-2", H, world.events.length, graphHeadsRoot(world.heads, "ut-1"), HOUR_SIG) }];
+				const verdict = await verify(world, {}, world.memo, pointers);
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", reason: "pre-index v2 hour", pointer: "absent" });
+			});
+
+			test("a pointer listing that outlasts the verify budget is budget exhausted: ok false, untrusted", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const rpc = { ...rpcReturning(world.memo, {}, world.pointers), addressSignaturePage: () => new Promise<never>(() => {}) };
+				const verdict = await substrateWith(stubOf(world), { SUBSTRATE_VERIFY_TIMEOUT_MS: "1000" }).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+				expect(verdict.ok).toBe(false);
+				expect(verdict.reason).toBe("budget exhausted");
+				expect(verdict.trusted).toBe(false);
+				expect(verdict.trusted_reason).toBe("budget exhausted");
+			});
 		});
 	});
 });

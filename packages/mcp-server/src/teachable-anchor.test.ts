@@ -155,6 +155,7 @@ export interface ScratchWorld {
 			slot: number;
 			blockTime: number;
 		}>;
+		addressSignaturePage: () => Promise<never[]>;
 	};
 }
 
@@ -177,6 +178,7 @@ function scratchWorld(): ScratchWorld {
 			slot: 42,
 			blockTime: 1_790_000_000,
 		}),
+		addressSignaturePage: async () => [],
 	};
 	return { ledger, substrate, rpc };
 }

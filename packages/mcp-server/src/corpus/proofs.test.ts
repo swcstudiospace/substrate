@@ -47,6 +47,12 @@ const UNUSED_PORTS: AnchorVerifyPorts = {
 	solana: { pubkey: null, problem: null },
 	operatorSurfaces: new Set<string>(),
 	nowMs: () => 0,
+	listGraphPointers: () => {
+		throw new Error("not used");
+	},
+	confirmPointer: () => {
+		throw new Error("not used");
+	},
 };
 
 function world(options: { enabled?: boolean; verify?: AnchorVerifier } = {}) {

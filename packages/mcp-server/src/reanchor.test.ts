@@ -7,7 +7,7 @@
  * answers only `solana-keygen pubkey` and `solana transfer`; any other argv is a TypeError.
  */
 import { describe, expect, test } from "bun:test";
-import { type Commitment, formatMemo, formatMemoV2, headsRoot, HOUR_MS, hourIso, type AddressMemo, type Rpc, type RunResult, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { type Commitment, formatMemo, formatMemoV2, formatMemoV3, graphHeadsRoot, graphIndexAddress, headsRoot, HOUR_MS, hourIso, parseMemoV3, type AddressMemo, type Rpc, type RunResult, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import type { ReanchorNotes, ReanchorRecord } from "./anchor-verify-deps.ts";
 import { buildGraphHeads, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
 import type { AnchorRow } from "./greptime.ts";
@@ -123,6 +123,8 @@ class World {
 	/** The send is killed at the runner's timeout: no exit code, no output, and the transaction may still land. */
 	sendTimesOut = false;
 	readBackMemo: string | null | undefined = undefined;
+	/** The exit code of a pointer send (a v3 memo); 0 unless a test makes the pointer send fail. */
+	pointerSendCode = 0;
 	emitStored = true;
 	/** The recorded notes the ledger would answer, per hour; `emit` adds the notes the executor writes. */
 	noteRecords = new Map<number, ReanchorRecord[]>();
@@ -175,6 +177,10 @@ class World {
 
 	/** The member rows `eventsByIds` answers with; empty by default, so an hour with no member rows gives no heads. */
 	eventRows: (ids: readonly string[]) => Array<Record<string, unknown>> = () => [];
+	/** Each graph's index address and the pointer listing it answers with, newest first (`addressSignaturePage`). */
+	pointerListings = new Map<string, AddressMemo[]>();
+	/** The index addresses listed, in call order. */
+	pointerListAddresses: string[] = [];
 	/** Only the two reads exist: the executor cannot write the `anchors` table through this object. */
 	readonly ledger = {
 		anchorForPeriod: async (ms: number): Promise<AnchorRow | null> => {
@@ -204,6 +210,13 @@ class World {
 			const start = before === undefined ? 0 : source.findIndex((hint) => hint.signature === before) + 1;
 			return source.slice(start, start + limit);
 		},
+		addressSignaturePage: async (address, { limit, before }) => {
+			this.rpcCalls.push(`pointers:${address.slice(0, 4)}`);
+			this.pointerListAddresses.push(address);
+			const source = this.pointerListings.get(address) ?? [];
+			const start = before === undefined ? 0 : source.findIndex((hint) => hint.signature === before) + 1;
+			return source.slice(start, start + limit);
+		},
 		getGenesisHash: async () => {
 			this.rpcCalls.push("genesis");
 			if (this.genesis instanceof Error) throw this.genesis;
@@ -221,13 +234,14 @@ class World {
 		if (argv[1] !== "transfer") throw new TypeError(`the fake runner answers only pubkey and transfer, got ${String(argv[1])}`);
 		if (this.sendTimesOut) return { code: null, stdout: "", stderr: "" };
 		if (this.sendCode !== 0) return { code: this.sendCode, stdout: "", stderr: "Error: RPC response error -32002 at https://rpc.example.invalid/v1/key-4411" };
+		if (this.pointerSendCode !== 0 && parseMemoV3(argv[5] as string) !== null) return { code: this.pointerSendCode, stdout: "", stderr: "Error: pointer refused" };
 		if (this.sendGate !== null) {
 			this.sendReached.resolve();
 			await this.sendGate;
 		}
 		const signature = newSig(++this.sends);
 		const memo = argv[5] as string;
-		this.chain.set(signature, { ...TX_TEMPLATE, blockTime: NOW / 1000, memo: this.readBackMemo === undefined ? memo : this.readBackMemo });
+		this.chain.set(signature, { ...TX_TEMPLATE, blockTime: NOW / 1000, memo: this.readBackMemo === undefined || parseMemoV3(memo) !== null ? memo : this.readBackMemo });
 		this.listing.unshift({ signature, memo, err: null, slot: 7 });
 		return { code: 0, stdout: JSON.stringify({ signature }), stderr: "" };
 	};
@@ -325,8 +339,9 @@ describe("the saved plan", () => {
 		const planned = await runReanchorPlan(["--json"], {
 			now: () => NOW,
 			open: async () => ({
-				ledger: { anchorsBetween: async () => [] },
+				ledger: { anchorsBetween: async () => [], hourChainLeaves: async () => [] },
 				rpc: {
+					addressSignaturePage: async () => [],
 					getGenesisHash: async () => {
 						throw new Error("an empty window reads no chain");
 					},
@@ -1009,14 +1024,15 @@ describe("a v2 hour's memo is checked against the heads its members give", () =>
 		return signature;
 	}
 
-	test("a v2 memo on chain with the saved period, root, count and heads root is adopted: no transfer, one note", async () => {
+	test("a v2 memo on chain with the saved period, root, count and heads root is adopted: no hour transfer, its pointer sent, one note", async () => {
 		const memo = v2Over(members());
 		const w = savedV2(memo);
 		const adopted = listOnChain(w, memo);
 		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
 		expect(result).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
 		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${adopted}`);
-		expect(w.sendCalls).toEqual([]);
+		// The hour is not sent again; its graph has no pointer yet, so that pointer is the only send.
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([pointerFor(members(), adopted)]);
 		expect(w.emitted).toHaveLength(1);
 		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: adopted, previous_tx_sig: oldSig(1) });
 	});
@@ -1082,6 +1098,83 @@ describe("a v2 hour's memo is checked against the heads its members give", () =>
 		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
 		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
 		expect(w.emitted).toHaveLength(1);
+	});
+
+	/** The pointer the executor owes `graphId` for hour H1 over `events`, naming the hour transaction `hourTxSig` (design 3.2). */
+	function pointerFor(events: Member[], hourTxSig: string, graphId = "ut-1"): string {
+		const records = buildGraphHeads(events, H1).records;
+		return formatMemoV3({ graphId, periodStartMs: H1, count: events.filter((event) => event.graph_id === graphId).length, graphHeadsRootHex: graphHeadsRoot(records, graphId), hourTxSig });
+	}
+
+	test("the hour is sent, then its pointer names the new hour transaction byte for byte, and the hour is then recorded", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo, pointerFor(members(), newSig(1))]);
+		expect(w.pointerListAddresses).toEqual([graphIndexAddress("ut-1")]);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: newSig(1), previous_tx_sig: oldSig(1) });
+	});
+
+	test("a pointer the index listing already holds for the new hour is not sent again", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const held = pointerFor(members(), newSig(1));
+		w.pointerListings.set(graphIndexAddress("ut-1"), [{ signature: newSig(8), memo: held, err: null, slot: 3 }]);
+		w.chain.set(newSig(8), { ...TX_TEMPLATE, memo: held });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo]);
+	});
+
+	test("another pointer of the same graph and hour, paid by the job key, is a fork: the hour is sent, the run refuses, and no note is written", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const fork = pointerFor(members(), newSig(5));
+		w.pointerListings.set(graphIndexAddress("ut-1"), [{ signature: newSig(8), memo: fork, err: null, slot: 3 }]);
+		w.chain.set(newSig(8), { ...TX_TEMPLATE, memo: fork });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 1 });
+		expect(result.stderr).toContain("names other content for the same graph");
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("a pointer send that fails is send-failed and records nothing; a re-run adopts the hour and completes its pointer without sending the hour again", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.pointerSendCode = 1;
+		const first = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(first).toMatchObject({ code: 1, refused: "send-failed", sent: 1 });
+		expect(w.emitted).toEqual([]);
+		w.pointerSendCode = 0;
+		const second = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(second).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo, pointerFor(members(), newSig(1)), pointerFor(members(), newSig(1))]);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: newSig(1) });
+	});
+
+	test("a recorded hour whose pointer is missing gets it: the note stands, nothing is recorded again, and only the pointer is sent", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const done = newSig(7);
+		w.chain.set(done, { ...TX_TEMPLATE, memo });
+		w.noteRecords.set(H1, [noteRecord(1, H1, done)]);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([pointerFor(members(), done)]);
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("one pointer goes out for each graph with events in the hour, in graph-id order", async () => {
+		const two = members().map((event, i) => ({ ...event, graph_id: i < 2 ? "ut-1" : "ut-2" }));
+		const memo = v2Over(two);
+		const w = savedV2(memo);
+		w.eventRows = () => two;
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo, pointerFor(two, newSig(1), "ut-1"), pointerFor(two, newSig(1), "ut-2")]);
 	});
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type GraphHeadRecord, headRecordHash, headsRoot } from "./heads.ts";
+import { type GraphHeadRecord, graphHeadsRoot, headRecordHash, headsRoot } from "./heads.ts";
 import { merkleRootHex } from "./merkle.ts";
 import { HOUR_MS } from "./period.ts";
 
@@ -114,5 +114,31 @@ describe("headsRoot", () => {
 		expect(() => headsRoot([a, withRecord({ graphId: "graph-b", periodStartMs: H10 + HOUR_MS })])).toThrow(
 			"headsRoot:",
 		);
+	});
+});
+
+describe("graphHeadsRoot", () => {
+	const a = withRecord({ graphId: "graph-a" });
+	const s2 = withRecord({ graphId: "graph-a", sessionId: "session-2", headEventId: "evt-s2" });
+	const b = withRecord({ graphId: "graph-b", count: 5, headEventId: "evt-b" });
+	const c = withRecord({ graphId: "graph-c", count: 1, headEventId: "evt-c" });
+
+	test("equals headsRoot over that graph's records only", () => {
+		expect(graphHeadsRoot([a, b, s2, c], "graph-a")).toBe(headsRoot([a, s2]));
+		expect(graphHeadsRoot([a, b, s2, c], "graph-b")).toBe(headsRoot([b]));
+		expect(graphHeadsRoot([a, b, s2, c], "graph-a")).not.toBe(headsRoot([a, b, s2, c]));
+	});
+
+	test("is identical for every input order", () => {
+		expect(graphHeadsRoot([c, s2, b, a], "graph-a")).toBe(graphHeadsRoot([a, b, s2, c], "graph-a"));
+	});
+
+	test("with only one graph in the hour, equals the hour root", () => {
+		expect(graphHeadsRoot([s2, a], "graph-a")).toBe(headsRoot([a, s2]));
+	});
+
+	test("with no record for the graph throws exactly as headsRoot does on an empty list", () => {
+		expect(() => graphHeadsRoot([a, b], "graph-z")).toThrow("headsRoot: empty input");
+		expect(() => graphHeadsRoot([], "graph-a")).toThrow("headsRoot: empty input");
 	});
 });

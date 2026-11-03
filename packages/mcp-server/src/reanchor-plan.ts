@@ -24,7 +24,7 @@
  * operator records AFTER a real re-anchor; the builder and validator live here, pure like
  * `session-events.ts`.
  */
-import { HOUR_MS, hourIso, parseMemo, type ChainVerdict, type SignatureStatus } from "@substrate/ledger";
+import { HOUR_MS, hourIso, parseMemo, parseMemoV3, type ChainVerdict, type SignatureStatus } from "@substrate/ledger";
 import type { AnchorRow } from "./greptime.ts";
 
 export const ANCHOR_REANCHOR_ACTION = "anchor.reanchor";
@@ -37,6 +37,11 @@ export interface HourChainEvidence {
 	signatureStatus: SignatureStatus;
 	/** The genesis hash the RPC reported; null when it could not be read. */
 	observedGenesis: string | null;
+	/**
+	 * The index listing's pointers for this hour, as the plan run read them: null when every v3 pointer of the hour matches it, else the
+	 * first mismatch. Absent when they were not read.
+	 */
+	pointerMismatch?: string | null;
 }
 
 export type ReanchorSkipCode =
@@ -45,6 +50,7 @@ export type ReanchorSkipCode =
 	| "chain-unreachable"
 	| "signature-missing-without-reset"
 	| "present-on-observed-cluster"
+	| "pointer-mismatch"
 	| "invalid-row"
 	| "duplicate-row";
 
@@ -106,6 +112,29 @@ function rowProblem(row: AnchorRow, hour: number): string | null {
 		return "the row's memo is not a v1 or v2 memo of its own period, root and count";
 	}
 	if (typeof row.tx_sig !== "string" || row.tx_sig.length === 0) return "the row has no transaction signature";
+	return null;
+}
+
+/** One pointer listed under a graph's index address, as the plan run read it: the graph it was listed under, its signature and its memo hint. */
+export interface PointerHint {
+	graphId: string;
+	signature: string;
+	memo: string | null;
+}
+
+/**
+ * The first v3 pointer of this hour among `hints` that does not match it, or null. A v3 pointer of this hour must name the graph it is
+ * listed under and the hour transaction (`txSig`) the hour was anchored with (design 3.2, 5 step 6). A memo that is not a v3 pointer, or a
+ * pointer of another hour, is not judged here.
+ */
+export function pointerMismatch(periodStartMs: number, txSig: string, hints: readonly PointerHint[]): string | null {
+	for (const hint of hints) {
+		if (hint.memo === null) continue;
+		const pointer = parseMemoV3(hint.memo);
+		if (pointer === null || pointer.periodStartMs !== periodStartMs) continue;
+		if (pointer.graphId !== hint.graphId) return `pointer ${hint.signature} is listed under one graph but names another`;
+		if (pointer.hourTxSig !== txSig) return `pointer ${hint.signature} names hour transaction ${pointer.hourTxSig}, not the stored ${txSig}`;
+	}
 	return null;
 }
 
@@ -173,6 +202,8 @@ export function planReanchor(input: {
 						code: "present-on-observed-cluster",
 						detail: `the signature is ${evidence.signatureStatus} on the observed cluster ${evidence.observedGenesis}, so this anchor already lives there`,
 					});
+				} else if (typeof evidence.pointerMismatch === "string") {
+					skipped.push({ period_start, code: "pointer-mismatch", detail: `${evidence.pointerMismatch}; a pointer that does not match its hour is never re-anchored from here: investigate, do not re-anchor` });
 				} else {
 					hours.push({
 						period_start,

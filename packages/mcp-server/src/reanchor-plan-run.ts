@@ -11,10 +11,11 @@
  * classifies each hour with `classifyChainEvidence`, hands the result to `planReanchor` and prints the plan.
  *
  * READ-ONLY, by construction rather than by promise:
- * - the only chain calls are `getGenesisHash` and `getTransaction` (`Rpc.getGenesisHash`, `Rpc.transactionMemo`);
- * - the only ledger call is `GreptimeClient.anchorsBetween`, a SELECT;
- * - this module imports no signer, no solana CLI helper, no runner and no anchor job: from `./anchor.ts` it
- *   takes the one constant `DEVNET_GENESIS_HASH`, and `reanchor-plan-run.test.ts` pins that import list;
+ * - the only chain calls are `getGenesisHash`, `getTransaction` (`Rpc.getGenesisHash`, `Rpc.transactionMemo`) and the paged
+ *   `getSignaturesForAddress` of a graph's index address, read by `readGraphPointers`;
+ * - the only ledger calls are `GreptimeClient.anchorsBetween` and `hourChainLeaves`, both SELECTs;
+ * - this module imports no signer, no solana CLI helper, no runner and no anchor job: from `./anchor.ts` it takes the constant
+ *   `DEVNET_GENESIS_HASH` and the read `readGraphPointers`, and `reanchor-plan-run.test.ts` pins that import list;
  * - it never reads a keypair path or a public key, so it needs no `SOLANA_ANCHOR_*` variable at all.
  * A plan is a dry run (`dry_run: true`). Sending is a separate, operator-run step: see
  * `docs/runbooks/devnet-reset-and-reanchor.md`.
@@ -54,10 +55,10 @@ import {
 	type Rpc,
 	type SignatureStatus,
 } from "@substrate/ledger";
-import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { DEVNET_GENESIS_HASH, readGraphPointers } from "./anchor.ts";
 import { loadConfig, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { GreptimeClient, type AnchorRow } from "./greptime.ts";
-import { planReanchor, type HourChainEvidence, type ReanchorPlan, type ReanchorSkipCode } from "./reanchor-plan.ts";
+import { planReanchor, pointerMismatch, type HourChainEvidence, type PointerHint, type ReanchorPlan, type ReanchorSkipCode } from "./reanchor-plan.ts";
 import { redact } from "./redact.ts";
 
 // ---------------------------------------------------------------------------
@@ -189,10 +190,10 @@ function reasonOf(cause: unknown): string {
 		.slice(0, 200);
 }
 
-/** The only ledger call: a window SELECT. A test hands in a fake that has nothing else to call. */
-export type AnchorsReader = Pick<GreptimeClient, "anchorsBetween">;
-/** The only chain calls: `getGenesisHash` and `getTransaction`. */
-export type ChainReader = Pick<Rpc, "getGenesisHash" | "transactionMemo">;
+/** The only ledger calls: a window SELECT and one hour's chain leaves. A test hands in a fake that has nothing else to call. */
+export type AnchorsReader = Pick<GreptimeClient, "anchorsBetween" | "hourChainLeaves">;
+/** The only chain calls: `getGenesisHash`, `getTransaction`, and the paged signature listing of an index address. */
+export type ChainReader = Pick<Rpc, "getGenesisHash" | "transactionMemo" | "addressSignaturePage">;
 
 export interface ReanchorRunContext {
 	ledger: AnchorsReader;
@@ -237,7 +238,7 @@ export interface ReanchorReport {
 	plan: ReanchorPlan;
 }
 
-const ATTENTION_CODES: readonly ReanchorSkipCode[] = ["signature-missing-without-reset", "invalid-row", "duplicate-row", "no-evidence"];
+const ATTENTION_CODES: readonly ReanchorSkipCode[] = ["signature-missing-without-reset", "invalid-row", "duplicate-row", "no-evidence", "pointer-mismatch"];
 const TEXT_HOURS_SHOWN = 20;
 
 const usageFailure = (message: string): ReanchorRunResult => ({ code: 2, stdout: "", stderr: `${message}\n${REANCHOR_USAGE}` });
@@ -313,6 +314,34 @@ function formatText(report: ReanchorReport): string {
 		lines.push("  next     save this plan with --json and follow docs/runbooks/devnet-reset-and-reanchor.md (every sending step is OPERATOR ONLY)");
 	}
 	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Reads the index listing of every graph with a leaf in each hour the plan would re-anchor (its signature is not on the observed cluster)
+ * and writes the first v3 pointer of that hour that does not match it onto the hour's evidence. planReanchor then refuses the hour. A
+ * listing that cannot be read to its end throws, and the run claims no plan.
+ */
+async function readPointerMismatches(
+	ledger: AnchorsReader,
+	rpc: ChainReader,
+	evidence: ReadonlyMap<number, HourChainEvidence>,
+	askable: ReadonlyArray<{ hour: number; row: AnchorRow }>,
+	nowMs: number,
+): Promise<void> {
+	const txByHour = new Map(askable.map(({ hour, row }) => [hour, row.tx_sig]));
+	for (const [hour, found] of evidence) {
+		if (found.verdict !== "reset-suspected" || found.signatureStatus !== "not-found") continue;
+		const txSig = txByHour.get(hour);
+		if (txSig === undefined) continue;
+		const graphIds = [...new Set((await ledger.hourChainLeaves(hour)).map((leaf) => leaf.graph_id))].sort();
+		const hints: PointerHint[] = [];
+		for (const graphId of graphIds) {
+			const listing = await readGraphPointers(rpc, graphId, { budgetMs: Number.POSITIVE_INFINITY, nowMs: () => nowMs });
+			if (!listing.complete) throw new Error(`the index listing of a graph in ${hourIso(hour)} is incomplete`);
+			for (const entry of listing.entries) hints.push({ graphId, signature: entry.signature, memo: entry.memo });
+		}
+		found.pointerMismatch = pointerMismatch(hour, txSig, hints);
+	}
 }
 
 /** One run: parse, open, read the ledger and the chain, plan, format. Never throws for an outage; the result carries the exit code. */
@@ -414,6 +443,11 @@ export async function runReanchorPlan(argv: readonly string[], deps: ReanchorRun
 			return noPlan(
 				`the devnet endpoint did not answer ${unreachable} of ${signatureLookups} signature lookup(s)${firstFailure === undefined ? "" : ` (first: ${firstFailure})`}`,
 			);
+		}
+		try {
+			await readPointerMismatches(ledger, rpc, chainEvidenceByHour, askable, nowMs);
+		} catch (cause) {
+			return noPlan(`the index listing of a reset hour could not be read: ${reasonOf(cause)}`);
 		}
 	}
 

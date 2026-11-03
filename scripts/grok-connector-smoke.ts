@@ -188,6 +188,8 @@ export interface SmokeOptions {
 	repo?: string;
 	fetchImpl?: typeof fetch;
 	timeoutMs?: number;
+	/** Per-run budgets in ms; an omitted field keeps its default (the live CLI passes none). */
+	budgets?: { notModifiedMs?: number; briefMs?: number };
 }
 
 /**
@@ -201,6 +203,8 @@ export async function runSmoke(options: SmokeOptions): Promise<Report> {
 	const fetchImpl = options.fetchImpl ?? fetch;
 	const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
 	const repo = options.repo ?? DEFAULT_REPO;
+	const briefBudgetMs = options.budgets?.briefMs ?? BRIEF_BUDGET_MS;
+	const notModifiedBudgetMs = options.budgets?.notModifiedMs ?? NOT_MODIFIED_BUDGET_MS;
 
 	const call = async (path: string, init: { body?: unknown; headers?: Record<string, string> } = {}): Promise<Attempt> => {
 		const started = performance.now();
@@ -263,8 +267,8 @@ export async function runSmoke(options: SmokeOptions): Promise<Report> {
 		check("mcp.brief", "failed", first.ms, "no `surface` in structuredContent — an older server, or the caller identity is not reported");
 	} else if (brief.surface !== GROK_SURFACE) {
 		check("mcp.brief", "failed", first.ms, `the bearer resolved to surface ${brief.surface}, not ${GROK_SURFACE}; ${BEARER_HINT}`);
-	} else if (first.ms > BRIEF_BUDGET_MS) {
-		check("mcp.brief", "failed", first.ms, `state ${brief.state}, but over the ${BRIEF_BUDGET_MS} ms budget`);
+	} else if (first.ms > briefBudgetMs) {
+		check("mcp.brief", "failed", first.ms, `state ${brief.state}, but over the ${briefBudgetMs} ms budget`);
 	} else {
 		etag = brief.etag;
 		check("mcp.brief", brief.state === "complete" ? "ok" : "degraded", first.ms, `state ${brief.state}, ${brief.text.length} chars, etag ${brief.etag}`);
@@ -281,7 +285,7 @@ export async function runSmoke(options: SmokeOptions): Promise<Report> {
 		else if (again === null || again.isError) check("mcp.brief.not_modified", "failed", second.ms, "the reply was not a tool result");
 		else if (!again.notModified) check("mcp.brief.not_modified", "failed", second.ms, `the brief was sent again (etag ${again.etag ?? "none"}) instead of not_modified`);
 		else if (again.text.length > 80) check("mcp.brief.not_modified", "failed", second.ms, "not_modified, but the text was not the one-line notice");
-		else if (second.ms > NOT_MODIFIED_BUDGET_MS) check("mcp.brief.not_modified", "failed", second.ms, `not_modified, but over the ${NOT_MODIFIED_BUDGET_MS} ms budget`);
+		else if (second.ms > notModifiedBudgetMs) check("mcp.brief.not_modified", "failed", second.ms, `not_modified, but over the ${notModifiedBudgetMs} ms budget`);
 		else check("mcp.brief.not_modified", "ok", second.ms, `not_modified, etag ${again.etag ?? etag}`);
 	}
 

@@ -171,7 +171,7 @@ describe("Substrate.bindGraph", () => {
 		await substrate.bindGraph({ correlation_id: "run-2", graph_id: GRAPH_A }, "swarm-a01-orch");
 
 		expect(written.map((event) => event.session_id)).toEqual([`bind:${GRAPH_A}:run-1`, `bind:${GRAPH_A}:run-2`]);
-		const verdict = await substrate.verifyGraph(GRAPH_A);
+		const verdict = await substrate.verifyGraph(GRAPH_A, { rpc: { addressSignaturePage: async () => [] } as never });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.events).toBe(2);
 		expect(verdict.chain).toEqual({ ok: true });

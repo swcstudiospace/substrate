@@ -6,16 +6,16 @@
  * per-hour digest failures continue, systemic failures stop the run.
  */
 import { describe, expect, test } from "bun:test";
-import { formatMemo, formatMemoV2, headsRoot, parseMemo } from "@substrate/ledger";
+import { formatMemo, formatMemoV2, formatMemoV3, graphHeadsRoot, graphIndexAddress, headsRoot, parseMemo, parseMemoV3, type AddressMemo, type Rpc, type RunResult } from "@substrate/ledger";
 import { GreptimeError, type GraphChainLeafRow, INGEST_LAG_MS } from "./greptime.ts";
 import {
-	ADDRESS_MEMO_LIMIT,
 	ANCHOR_LOOKBACK_MS,
 	buildGraphHeads,
 	DEVNET_GENESIS_HASH,
 	MAX_HOURS_PER_RUN,
 	UsageError,
 	parseAnchorArgs,
+	readGraphPointers,
 	runAnchorJob,
 	type AnchorDeps,
 	type AnchorEnv,
@@ -137,6 +137,7 @@ function deps(
 				blockTime: 1_790_000_000,
 			}),
 			addressMemos: async () => [],
+			addressSignaturePage: async () => [],
 			balance: async () => 1_000_000,
 			getGenesisHash: async () => DEVNET_GENESIS_HASH,
 		},
@@ -161,7 +162,7 @@ describe("runAnchorJob candidates and exits", () => {
 			greptime: { firstIngestMs: async () => null } as unknown as AnchorDeps["greptime"],
 		});
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0, funded: 0 });
 		expect(invocations).toEqual([]);
 		expect(inserts).toEqual([]);
 	});
@@ -267,6 +268,7 @@ describe("runAnchorJob candidates and exits", () => {
 					blockTime: 1,
 				}),
 				addressMemos: async () => [],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -301,7 +303,7 @@ describe("runAnchorJob candidates and exits", () => {
 			digests: empties,
 		});
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 1, adopted: 0, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 1, adopted: 0, failed: 0, funded: 0 });
 		expect(inserts).toHaveLength(1);
 		expect(inserts[0]?.period_start).toBe(new Date(late).toISOString());
 	});
@@ -311,8 +313,8 @@ describe("runAnchorJob send path", () => {
 	test("a fresh hour sends through the D-06 argv and writes the 11-column row", async () => {
 		const { deps: d, emitted, inserts, invocations } = deps();
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 1, adopted: 0, failed: 0 });
-		expect(invocations).toHaveLength(2);
+		expect(result).toEqual({ code: 0, anchored: 1, adopted: 0, failed: 0, funded: 0 });
+		expect(invocations).toHaveLength(3);
 		const keygen = invocations[0] ?? [];
 		expect(keygen.slice(1)).toEqual(["pubkey", ENV.keypairPath]);
 		const send = invocations[1] ?? [];
@@ -364,6 +366,7 @@ describe("runAnchorJob send path", () => {
 					blockTime: 1,
 				}),
 				addressMemos: async () => [],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -419,12 +422,13 @@ describe("runAnchorJob send path", () => {
 			rpc: {
 				transactionMemo: async () => null,
 				addressMemos: async () => [],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
 		});
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0, funded: 0 });
 		expect(invocations).toEqual([]);
 		expect(inserts).toEqual([]);
 		expect(emitted).toEqual([]);
@@ -444,6 +448,7 @@ describe("runAnchorJob adopt and alarm", () => {
 				blockTime: 1,
 			}),
 			addressMemos: async () => [{ signature: SIG, memo, err: null, slot }],
+			addressSignaturePage: async () => [],
 			balance: async () => 1_000_000,
 			getGenesisHash: async () => DEVNET_GENESIS_HASH,
 		};
@@ -453,7 +458,7 @@ describe("runAnchorJob adopt and alarm", () => {
 		const memo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
 		const { deps: d, emitted, inserts, invocations } = deps({ rpc: confirmingRpc(memo) });
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 0, adopted: 1, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 1, failed: 0, funded: 0 });
 		expect(invocations).toEqual([]);
 		expect(inserts[0]).toMatchObject({ tx_sig: SIG, slot: 77, root: ROOT, event_count: 3 });
 		expect(written(emitted)[0]?.payload).toMatchObject({ adopted: true, tx_sig: SIG });
@@ -505,6 +510,7 @@ describe("runAnchorJob adopt and alarm", () => {
 					{ signature: badSig, memo: badMemo, err: null, slot: 77 },
 					{ signature: goodSig, memo: goodMemo, err: null, slot: 78 },
 				],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -522,35 +528,32 @@ describe("runAnchorJob adopt and alarm", () => {
 
 	test("a hint for another hour never blocks the send", async () => {
 		const otherMemo = formatMemo({ periodStartMs: H10 + HOUR, rootHex: ROOT, count: 3 });
-		const sentMemo = formatMemoV2({
-			periodStartMs: H10,
-			rootHex: ROOT,
-			count: 3,
-			headsRootHex: headsRoot(buildGraphHeads(memberRows(["evt_1", "evt_2", "evt_3"]), H10).records),
-		});
 		const hintSig = "6".repeat(87);
-		const { deps: d, inserts, invocations } = deps({
+		// What the stub CLI was last asked to send: the read-back answers with it, the way a real RPC answers with what the signature carries.
+		let lastSentMemo = "";
+		const sends: string[][] = [];
+		const { deps: d, inserts } = deps({
+			runner: async (argv: readonly string[]) => {
+				if (argv[1] === "pubkey") return { code: 0, stdout: `${PUBKEY}\n`, stderr: "" };
+				sends.push([...argv]);
+				const flag = argv.indexOf("--with-memo");
+				lastSentMemo = flag >= 0 ? String(argv[flag + 1] ?? "") : "";
+				return { code: 0, stdout: `{"signature":"${SIG}"}`, stderr: "" };
+			},
 			rpc: {
 				transactionMemo: async (signature: string) =>
 					signature === hintSig
 						? null
-						: {
-								memo: sentMemo,
-								payer: PUBKEY,
-								payerSigned: true,
-								err: null,
-								fee: 5000,
-								slot: 42,
-								blockTime: 1,
-							},
+						: { memo: lastSentMemo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: 1 },
 				addressMemos: async () => [{ signature: hintSig, memo: otherMemo, err: null, slot: 1 }],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
 		});
 		const result = await runAnchorJob(d);
 		expect(result.anchored).toBe(1);
-		expect(invocations.length).toBeGreaterThan(0);
+		expect(sends.length).toBeGreaterThan(0);
 		expect(inserts[0]?.tx_sig).toBeDefined();
 	});
 
@@ -564,6 +567,7 @@ describe("runAnchorJob adopt and alarm", () => {
 			rpc: {
 				transactionMemo: async () => null,
 				addressMemos: async () => [{ signature: hintSig, memo, err: null, slot: 1 }],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -599,7 +603,7 @@ describe("runAnchorJob failures", () => {
 		expect(inserts[0]?.period_start).toBe(new Date(late).toISOString());
 		expect(failed(emitted)).toHaveLength(MAX_HOURS_PER_RUN);
 		expect(failed(emitted).every((event) => event.payload?.reason === "digest-failed")).toBe(true);
-		expect(invocations.filter((argv) => argv.includes("--with-memo"))).toHaveLength(1);
+		expect(invocations.filter((argv) => argv.includes("--with-memo"))).toHaveLength(2);
 	});
 
 	test("a dry-run digest failure does not spend a candidate slot", async () => {
@@ -617,7 +621,7 @@ describe("runAnchorJob failures", () => {
 				digests: new Map<number, HourDigest | Error>([[H10, new GreptimeError("hour member evt_1 has no event row")]]),
 			});
 			const result = await runAnchorJob(d);
-			expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+			expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0, funded: 0 });
 			expect(invocations).toEqual([]);
 			expect(inserts).toEqual([]);
 			expect(emitted).toEqual([]);
@@ -709,6 +713,7 @@ describe("runAnchorJob failures", () => {
 			rpc: {
 				transactionMemo: async () => null,
 				addressMemos: async () => [],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -727,6 +732,7 @@ describe("runAnchorJob failures", () => {
 			rpc: {
 				transactionMemo: async () => null,
 				addressMemos: async () => [],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => "5eykt4UsFv8P8NJdTREpYbfX66U2GJkSnp6vn33VqDv",
 			},
@@ -760,6 +766,7 @@ describe("runAnchorJob failures", () => {
 			rpc: {
 				transactionMemo: async () => null,
 				addressMemos: async () => [],
+				addressSignaturePage: async () => [],
 				balance: async () => 100,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -777,6 +784,7 @@ describe("runAnchorJob failures", () => {
 				addressMemos: async () => {
 					throw new Error("connection refused");
 				},
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -823,9 +831,9 @@ describe("runAnchorJob failures", () => {
 		expect(result.anchored).toBe(0);
 		expect(result.failed).toBe(1);
 		// The row is written but the transaction goes out once: one pubkey
-		// check plus one transfer, then the run stops on the lost note.
-		expect(invocations).toHaveLength(2);
-		expect(invocations.filter((argv) => argv.includes("--with-memo"))).toHaveLength(1);
+		// check, the hour transfer and its pointer, then the run stops on the lost note.
+		expect(invocations).toHaveLength(3);
+		expect(invocations.filter((argv) => argv.includes("--with-memo"))).toHaveLength(2);
 		expect(inserts).toHaveLength(1);
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
 	});
@@ -863,6 +871,7 @@ describe("runAnchorJob failures", () => {
 					blockTime: 1,
 				}),
 				addressMemos: async () => [{ signature: SIG, memo, err: null, slot: 77 }],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -882,7 +891,6 @@ describe("runAnchorJob constants", () => {
 	test("bounds match the plan", () => {
 		expect(MAX_HOURS_PER_RUN).toBe(24);
 		expect(ANCHOR_LOOKBACK_MS).toBe(7 * 24 * 3_600_000);
-		expect(ADDRESS_MEMO_LIMIT).toBe(100);
 		expect(INGEST_LAG_MS).toBe(300_000);
 	});
 });
@@ -896,7 +904,7 @@ describe("parseAnchorArgs", () => {
 		expect(parseAnchorArgs(["--dry-run"])).toEqual({ dryRun: true });
 		const { deps: d, emitted, inserts, invocations } = deps({ options: { dryRun: true } });
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0, funded: 0 });
 		expect(invocations).toEqual([]);
 		expect(inserts).toEqual([]);
 		expect(emitted).toEqual([]);
@@ -948,12 +956,13 @@ describe("parseAnchorArgs", () => {
 					blockTime: 1,
 				}),
 				addressMemos: async () => [{ signature: SIG, memo, err: null, slot: 77 }],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
 		});
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 0, adopted: 1, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 1, failed: 0, funded: 0 });
 		expect(invocations).toEqual([]);
 		expect(inserts).toEqual([]);
 		expect(written(emitted)[0]?.payload).toMatchObject({ adopted: true, tx_sig: SIG });
@@ -993,12 +1002,13 @@ describe("parseAnchorArgs", () => {
 			rpc: {
 				transactionMemo: async () => null,
 				addressMemos: async () => [],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
 		});
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0, funded: 0 });
 		expect(invocations).toEqual([]);
 		expect(inserts).toEqual([]);
 		expect(emitted).toEqual([]);
@@ -1040,6 +1050,7 @@ describe("parseAnchorArgs", () => {
 					blockTime: 1,
 				}),
 				addressMemos: async () => [{ signature: SIG, memo, err: null, slot: 77 }],
+				addressSignaturePage: async () => [],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => "5eykt4UsFv8P8NJdTREpYbfX66U2GJkSnp6vn33VqDv",
 			},
@@ -1188,9 +1199,202 @@ describe("anchored hours and the heads read", () => {
 			} as unknown as AnchorDeps["greptime"],
 		});
 		const result = await runAnchorJob(d);
-		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0, funded: 0 });
 		expect(invocations).toEqual([]);
 		expect(inserts).toEqual([]);
 		expect(emitted).toEqual([]);
+	});
+});
+
+/** Base-58 digits without the ambiguous ones: the alphabet the stand-in signatures are written in. */
+const SIG_DIGITS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+/** The most entries the stand-in node answers a listing with, below the 1000 a real node allows, so a walk has to page. */
+const PAGE_CAP = 100;
+
+/** A distinct 68-character base58 signature for the n-th stand-in transaction. */
+function sigOf(n: number): string {
+	let rest = n;
+	let tail = "";
+	for (let i = 0; i < 8; i++) {
+		tail += SIG_DIGITS.charAt(rest % SIG_DIGITS.length);
+		rest = Math.floor(rest / SIG_DIGITS.length);
+	}
+	return `${"5".repeat(60)}${tail}`;
+}
+
+interface ChainTx {
+	signature: string;
+	memo: string;
+	/** The account the transfer names: the job key for an hour transaction, a graph's index address for a pointer. */
+	recipient: string;
+	lamports: number;
+}
+
+/**
+ * A devnet stand-in for the send, read-back and listing paths. Transfers that land join `txs`, every one paid by the job key, and the
+ * listings answer from `txs` newest first, a page at a time. `failure` decides which sends fail, and with what stderr.
+ */
+class ChainWorld {
+	readonly txs: ChainTx[] = [];
+	/** Every send that reached the runner, in order: `hour` or `pointer`, its lamports, and whether it landed. */
+	readonly log: string[] = [];
+	failure: (argv: readonly string[]) => string | null = () => null;
+
+	runner = async (argv: readonly string[]): Promise<RunResult> => {
+		if (argv[1] === "pubkey") return { code: 0, stdout: `${PUBKEY}\n`, stderr: "" };
+		const recipient = String(argv[2]);
+		const lamports = Math.round(Number(argv[3]) * 1_000_000_000);
+		const kind = recipient === PUBKEY ? "hour" : "pointer";
+		const stderr = this.failure(argv);
+		if (stderr !== null) {
+			this.log.push(`${kind} ${lamports} failed`);
+			return { code: 1, stdout: "", stderr };
+		}
+		const signature = sigOf(this.txs.length);
+		this.txs.push({ signature, memo: String(argv[argv.indexOf("--with-memo") + 1]), recipient, lamports });
+		this.log.push(`${kind} ${lamports} landed`);
+		return { code: 0, stdout: `{"signature":"${signature}"}`, stderr: "" };
+	};
+
+	rpc(): Rpc {
+		return {
+			transactionMemo: async (signature: string) => {
+				const tx = this.txs.find((candidate) => candidate.signature === signature);
+				return tx === undefined ? null : { memo: tx.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 40, blockTime: 1 };
+			},
+			addressMemos: async (_pubkey, limit, before) => this.listing(() => true, limit, before),
+			addressSignaturePage: async (address, options) => this.listing((tx) => tx.recipient === address, options.limit, options.before),
+			balance: async () => 1_000_000,
+			getGenesisHash: async () => DEVNET_GENESIS_HASH,
+		};
+	}
+
+	/** One page, newest first, after `before`; at most PAGE_CAP entries whatever `limit` asks. */
+	listing(keep: (tx: ChainTx) => boolean, limit: number, before?: string): AddressMemo[] {
+		const newest = this.txs.filter(keep).reverse();
+		const start = before === undefined ? 0 : newest.findIndex((tx) => tx.signature === before) + 1;
+		return newest.slice(start, start + Math.min(limit, PAGE_CAP)).map((tx) => ({ signature: tx.signature, memo: tx.memo, err: null, slot: 40 }));
+	}
+}
+
+/** The store a stand-in run writes to. `log` gets a `row` line per anchors row, so sends and writes keep their order. */
+function chainStore(log: string[], inserts: Array<Record<string, unknown>>): AnchorDeps["greptime"] {
+	return {
+		firstIngestMs: async () => H10,
+		anchorsBetween: async () => [],
+		anchorForPeriod: async () => null,
+		insertAnchor: async (row: NewAnchor) => {
+			log.push("row");
+			inserts.push({ ...row });
+		},
+		eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+		insertGraphChainLeaves: async () => {},
+	} as unknown as AnchorDeps["greptime"];
+}
+
+/** Deps over a stand-in chain: the store, the runner and the RPC all answer from `world`. */
+function chainDeps(world: ChainWorld, overrides: Partial<AnchorDeps> = {}) {
+	const inserts: Array<Record<string, unknown>> = [];
+	const { deps: d, emitted } = deps({ greptime: chainStore(world.log, inserts), runner: world.runner, rpc: world.rpc(), ...overrides });
+	return { deps: d, emitted, inserts };
+}
+
+describe("runAnchorJob pointers (design 3.5)", () => {
+	test("the hour transaction goes out first, then each graph's pointer after its read-back, then the row", async () => {
+		const world = new ChainWorld();
+		const { deps: d, emitted, inserts } = chainDeps(world);
+		const result = await runAnchorJob(d);
+		expect(result).toEqual({ code: 0, anchored: 1, adopted: 0, failed: 0, funded: 0 });
+		expect(world.log).toEqual(["hour 0 landed", "pointer 0 landed", "row"]);
+		const [hour, pointer] = world.txs;
+		expect(hour?.recipient).toBe(PUBKEY);
+		expect(pointer?.recipient).toBe(graphIndexAddress("graph-a"));
+		expect(parseMemoV3(pointer?.memo ?? "")).toStrictEqual({
+			graphId: "graph-a",
+			periodStartMs: H10,
+			count: 3,
+			graphHeadsRootHex: graphHeadsRoot(buildGraphHeads(memberRows(["evt_1", "evt_2", "evt_3"]), H10).records, "graph-a"),
+			hourTxSig: hour?.signature ?? "",
+		});
+		expect(inserts).toEqual([expect.objectContaining({ tx_sig: hour?.signature })]);
+		expect(written(emitted)[0]?.payload).toMatchObject({ adopted: false, tx_sig: hour?.signature });
+	});
+
+	test("a pointer failure stores no row, and the next run completes the pointer without a new hour transaction", async () => {
+		const world = new ChainWorld();
+		world.failure = (argv) => (String(argv[2]) === PUBKEY ? null : "rpc request timed out");
+		const first = chainDeps(world);
+		expect(await runAnchorJob(first.deps)).toEqual({ code: 1, anchored: 0, adopted: 0, failed: 1, funded: 0 });
+		expect(first.inserts).toEqual([]);
+		expect(failed(first.emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
+		const hourSig = world.txs[0]?.signature;
+
+		world.failure = () => null;
+		const second = chainDeps(world);
+		expect(await runAnchorJob(second.deps)).toEqual({ code: 0, anchored: 0, adopted: 1, failed: 0, funded: 0 });
+		expect(world.log).toEqual(["hour 0 landed", "pointer 0 failed", "pointer 0 landed", "row"]);
+		expect(second.inserts).toEqual([expect.objectContaining({ tx_sig: hourSig })]);
+		expect(world.txs.filter((tx) => tx.recipient === graphIndexAddress("graph-a"))).toHaveLength(1);
+	});
+
+	test("the adoption window pages past a 100-entry page of pointers and adopts the hour without a new transaction", async () => {
+		const world = new ChainWorld();
+		const heads = buildGraphHeads(memberRows(["evt_1", "evt_2", "evt_3"]), H10).records;
+		world.txs.push({
+			signature: sigOf(0),
+			memo: formatMemoV2({ periodStartMs: H10, rootHex: ROOT, count: 3, headsRootHex: headsRoot(heads) }),
+			recipient: PUBKEY,
+			lamports: 0,
+		});
+		for (let i = 0; i < 120; i++) {
+			const graphId = `other-${i}`;
+			world.txs.push({
+				signature: sigOf(i + 1),
+				memo: formatMemoV3({ graphId, periodStartMs: H10, count: 1, graphHeadsRootHex: ROOT, hourTxSig: sigOf(0) }),
+				recipient: graphIndexAddress(graphId),
+				lamports: 0,
+			});
+		}
+		const { deps: d, inserts } = chainDeps(world);
+		expect(await runAnchorJob(d)).toEqual({ code: 0, anchored: 0, adopted: 1, failed: 0, funded: 0 });
+		expect(world.log).toEqual(["pointer 0 landed", "row"]);
+		expect(inserts).toEqual([expect.objectContaining({ tx_sig: sigOf(0), period_start: new Date(H10).toISOString() })]);
+	});
+
+	test("a refused 0-lamport pointer takes the funded path once; any other failure does not", async () => {
+		const refused = new ChainWorld();
+		refused.failure = (argv) => (String(argv[3]) === "0" && String(argv[2]) !== PUBKEY ? "Error: Transaction simulation failed: InsufficientFundsForRent" : null);
+		const funded = chainDeps(refused);
+		expect(await runAnchorJob(funded.deps)).toEqual({ code: 0, anchored: 1, adopted: 0, failed: 0, funded: 1 });
+		expect(refused.log).toEqual(["hour 0 landed", "pointer 0 failed", "pointer 890880 landed", "row"]);
+		expect(refused.txs[1]?.lamports).toBe(890_880);
+
+		const timedOut = new ChainWorld();
+		timedOut.failure = (argv) => (String(argv[3]) === "0" && String(argv[2]) !== PUBKEY ? "RPC request timed out" : null);
+		const stopped = chainDeps(timedOut);
+		expect(await runAnchorJob(stopped.deps)).toEqual({ code: 1, anchored: 0, adopted: 0, failed: 1, funded: 0 });
+		expect(timedOut.log).toEqual(["hour 0 landed", "pointer 0 failed"]);
+		expect(stopped.inserts).toEqual([]);
+		expect(failed(stopped.emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
+	});
+
+	test("a pointer listing stops at its budget or its page cap and says it is incomplete", async () => {
+		const world = new ChainWorld();
+		for (let i = 0; i < 150; i++) {
+			world.txs.push({
+				signature: sigOf(i),
+				memo: formatMemoV3({ graphId: "g1", periodStartMs: H10, count: 1, graphHeadsRootHex: ROOT, hourTxSig: sigOf(999) }),
+				recipient: graphIndexAddress("g1"),
+				lamports: 0,
+			});
+		}
+		const rpc = world.rpc();
+		expect(await readGraphPointers(rpc, "g1", { budgetMs: 0, nowMs: () => 0 })).toEqual({ entries: [], complete: false });
+		const capped = await readGraphPointers(rpc, "g1", { budgetMs: Number.POSITIVE_INFINITY, nowMs: () => 0, maxPages: 1 });
+		expect(capped.entries).toHaveLength(PAGE_CAP);
+		expect(capped.complete).toBe(false);
+		const whole = await readGraphPointers(rpc, "g1", { budgetMs: Number.POSITIVE_INFINITY, nowMs: () => 0 });
+		expect(whole.entries).toHaveLength(150);
+		expect(whole.complete).toBe(true);
 	});
 });

@@ -25,22 +25,33 @@ export {
 export {
 	formatMemo,
 	formatMemoV2,
+	formatMemoV3,
 	type Memo,
 	type MemoV2,
+	type MemoV3,
+	MEMO_GRAPH_ID_MAX,
 	MEMO_PREFIX,
 	MEMO_PREFIX_V2,
+	MEMO_PREFIX_V3,
 	MEMO_PROGRAM_IDS,
 	MEMO_RE,
 	MEMO_V2_RE,
+	MEMO_V3_RE,
 	parseMemo,
+	parseMemoV3,
 	stripListingPrefix,
 } from "./memo.ts";
 
 export {
 	type GraphHeadRecord,
+	graphHeadsRoot,
 	headRecordHash,
 	headsRoot,
 } from "./heads.ts";
+
+export {
+	graphIndexAddress,
+} from "./graph-index.ts";
 
 export {
 	closedHours,
@@ -55,12 +66,15 @@ export {
 	type AddressMemo,
 	assertDevnetRpcUrl,
 	bs58decode,
+	bs58encode,
 	type Commitment,
 	createRpc,
 	type Rpc,
 	RpcError,
 	type RpcOptions,
 	RpcUrlError,
+	SIGNATURE_PAGE_MAX,
+	type SignaturePageOptions,
 	type TransactionMemo,
 } from "./rpc.ts";
 
@@ -70,6 +84,8 @@ export {
 	execFileRunner,
 	keygenPath,
 	parseSignature,
+	type PointerTransferInput,
+	pointerTransferArgv,
 	pubkeyArgv,
 	type Runner,
 	type RunResult,

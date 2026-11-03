@@ -159,7 +159,7 @@ describe("substrate verify", () => {
 			index: null,
 			greptime: stubGreptime([world], { [H]: anchorRow(H, world, "sig-cli-mismatch") }) as never,
 		});
-		const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(other) };
+		const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(other), addressSignaturePage: async () => [] };
 		const base = await serveVerify(substrate, rpc, H + 5 * HOUR);
 
 		const result = await run(["verify", graph], { SUBSTRATE_URL: base, SUBSTRATE_VERIFY_TIMEOUT_MS: "10000" });
@@ -181,6 +181,7 @@ describe("substrate verify", () => {
 			transactionMemo: async (): Promise<never> => {
 				throw new Error("devnet unreachable");
 			},
+			addressSignaturePage: async () => [],
 		};
 		const base = await serveVerify(substrate, rpc, H + 5 * HOUR);
 
@@ -200,7 +201,7 @@ describe("substrate verify", () => {
 			index: null,
 			greptime: stubGreptime([anchored, open], { [H]: anchorRow(H, anchored, "sig-cli-ok") }) as never,
 		});
-		const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(anchored.memo) };
+		const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(anchored.memo), addressSignaturePage: async () => [] };
 		const base = await serveVerify(substrate, rpc, H + 4 * HOUR);
 
 		const result = await run(["verify", graph], { SUBSTRATE_URL: base, SUBSTRATE_VERIFY_TIMEOUT_MS: "10000" });
@@ -208,6 +209,22 @@ describe("substrate verify", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout).toContain(`${anchored.iso} anchored sig-cli-ok`);
 		expect(result.stdout).toContain(`${open.iso} pending`);
+	});
+
+	test("each hour line names its pointer status: a v1 hour has no pointer", async () => {
+		const graph = "ut-cli-pointer";
+		const anchored = buildHour(H, "sess-cli-p", graph);
+		const substrate = new Substrate(loadConfig({ SOLANA_ANCHOR_PUBKEY: PUBKEY }), {
+			index: null,
+			greptime: stubGreptime([anchored], { [H]: anchorRow(H, anchored, "sig-cli-p") }) as never,
+		});
+		const rpc = { getGenesisHash: async () => GENESIS, transactionMemo: async () => memoTx(anchored.memo), addressSignaturePage: async () => [] };
+		const base = await serveVerify(substrate, rpc, H + 4 * HOUR);
+
+		const result = await run(["verify", graph], { SUBSTRATE_URL: base, SUBSTRATE_VERIFY_TIMEOUT_MS: "10000" });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain(`${anchored.iso} anchored sig-cli-p [pointer absent]`);
 	});
 
 	test("refuses without a graph id", async () => {

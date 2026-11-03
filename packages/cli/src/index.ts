@@ -263,7 +263,7 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 		reason?: string;
 		events?: number;
 		chain?: { ok: boolean; brokenAt?: string; reason?: string };
-		hours?: Array<{ period_start: string; status: string; tx_sig?: string; reason?: string }>;
+		hours?: Array<{ period_start: string; status: string; tx_sig?: string; reason?: string; pointer?: "verified" | "failed" | "absent" }>;
 		uncovered?: { count: number; ids: string[] };
 		missing?: { count: number; ids: string[] };
 	};
@@ -276,16 +276,18 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 		process.stderr.write(`chain BROKEN for ${graphId} at ${body.chain?.brokenAt ?? body.brokenAt}: ${body.chain?.reason ?? body.reason}\n`);
 	}
 	for (const hour of body.hours ?? []) {
+		// Each hour line names its pointer status, so an hour the chain names through no pointer is visible as such (design 5).
+		const pointer = hour.pointer === undefined ? "" : ` [pointer ${hour.pointer}]`;
 		if (hour.status === "anchored") {
-			process.stdout.write(`${hour.period_start} anchored ${hour.tx_sig ?? ""}\n`);
+			process.stdout.write(`${hour.period_start} anchored ${hour.tx_sig ?? ""}${pointer}\n`);
 		} else if (hour.status === "pending") {
-			process.stdout.write(`${hour.period_start} pending\n`);
+			process.stdout.write(`${hour.period_start} pending${pointer}\n`);
 		} else if (hour.status === "mismatch") {
-			process.stdout.write(`hour ${hour.period_start} does not match its anchor: ${hour.reason ?? "mismatch"}\n`);
+			process.stdout.write(`hour ${hour.period_start} does not match its anchor: ${hour.reason ?? "mismatch"}${pointer}\n`);
 		} else if (hour.status === "unverified") {
 			process.stderr.write(`[substrate] verify could not check devnet for ${hour.period_start}: ${hour.reason ?? "unreadable"}\n`);
 		} else {
-			process.stdout.write(`${hour.period_start} ${hour.status}${hour.reason ? `: ${hour.reason}` : ""}\n`);
+			process.stdout.write(`${hour.period_start} ${hour.status}${hour.reason ? `: ${hour.reason}` : ""}${pointer}\n`);
 		}
 	}
 	if ((body.uncovered?.count ?? 0) > 0) {
