@@ -4,9 +4,9 @@
  * A file rather than a table, and a local file rather than a remote one, because
  * the audit's job is to still be there when the stores are not. `substrate-mcp` is
  * the writer. A repair execute (`reconcile repair --execute`) is an approved second
- * writer: it runs only with the server stopped, and it appends one record after the
- * flush (`docs/mcp-audit.md`). `seq` and `prev` need no coordination because the
- * server and a repair never run together.
+ * writer: it runs only with the server stopped (`--server-stopped`, an operator
+ * assertion the code does not check), and it appends one record after the flush
+ * (`docs/mcp-audit.md`). `seq` and `prev` need no coordination only while that holds.
  *
  * With no path configured the chain lives in memory: verifiable, bounded, and gone
  * at restart. That is the local-dev shape, and `/healthz` reports `auditDurable:
