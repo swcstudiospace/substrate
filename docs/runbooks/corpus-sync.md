@@ -73,7 +73,7 @@ The route is `POST /corpus/reconcile` with `{protocol: 1, execute}`. It needs a 
 `503 corpus.disabled` while the corpus is off, `503 corpus.backend-unavailable` without a LightRAG plane,
 `503 corpus.index-unavailable` when the manifest does not answer and `503 corpus.plane-unreachable` when the plane cannot list.
 A dry run is audited under `corpus_status` (fail-open); `execute` is audited under `corpus_ingest` (fail-closed: an audit chain that
-cannot take the record refuses it). It takes the same lock as the ingest, so a repair never overlaps an insert.
+cannot take the record refuses it). It takes the same lock as the ingest, so a repair never overlaps an insert. The cache repair, `reconcile repair --execute` (docs/reconcile.md), is a different execute: it appends its audit record after its flush, and a failed append exits 1 with the flush already run (owner-accepted, 2026-11-03; docs/mcp-audit.md).
 
 **Proof.** Run the dry run again after `--execute` and then a `substrate corpus sync --execute`: `missingInPlane` and the repaired
 orphans are gone from the report.
