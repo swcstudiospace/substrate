@@ -562,7 +562,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		);
 	}
 	const graphId = normalizeIdentifier(request.graph_id);
-	const repo = normalizeKey(request.repo);
+	const repo = normalizeIdentifier(request.repo);
 	// v1 passes the historical object and nothing else. A null `hv` or `tenant`
 	// would be kept by canonicalJson and change every digest.
 	const hashVersion = deps.hashVersion === "v2" ? "v2" : "v1";

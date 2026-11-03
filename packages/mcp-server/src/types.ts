@@ -289,7 +289,7 @@ export interface MemoryReadOptions {
 	surface?: string;
 	/**
 	 * The repo the caller works in. An `agent:` row is read only in the repo it was written for, so a read that
-	 * names none sees no agent row. Normalised with `normalizeKey`, as the write stores it.
+	 * names none sees no agent row. Normalised with `normalizeIdentifier`, as the write stores it.
 	 */
 	repo?: string;
 }

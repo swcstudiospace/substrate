@@ -12,7 +12,7 @@
  * writer gets nothing rather than the benefit of the doubt. `events.emit` keeps
  * failing open; this does not.
  */
-import { normalizeIdentifier, normalizeKey } from "./event.ts";
+import { normalizeIdentifier } from "./event.ts";
 import { redact } from "./redact.ts";
 import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import {
@@ -43,7 +43,7 @@ export const MAX_SUBJECT = 200;
  * so a typo'd `repos:foo` is a denial rather than a new, ungoverned namespace.
  *
  * The id is normalised the same way every other query key is (see
- * `normalizeIdentifier`, or `normalizeKey` for a repo): the scope is written *and* read by
+ * `normalizeIdentifier`): the scope is written *and* read by
  * `memoryForBrief`, so the two forms have to agree by construction.
  */
 export function parseScope(raw: unknown): MemoryScope | null {
@@ -66,7 +66,7 @@ export function parseScope(raw: unknown): MemoryScope | null {
 	// is left alone: GitHub slugs can carry case, and lowercasing the write while the
 	// brief reads the original spelling is the lookup-that-never-matches bug.
 	const spelled = family === "agent" ? rawId.toLowerCase() : rawId;
-	const id = family === "repo" ? normalizeKey(spelled) : normalizeIdentifier(spelled);
+	const id = normalizeIdentifier(spelled);
 	if (!id) return null;
 	return { class: family as MemoryScopeClass, id, canonical: `${family}:${id}` };
 }
@@ -428,7 +428,7 @@ export interface MemoryCaller {
  */
 export function grantedToCaller(scope: string | undefined, repo: string | null | undefined, granted: ((repo: string) => boolean) | undefined): boolean {
 	if (granted === undefined) return true;
-	const rowRepo = normalizeKey(repo);
+	const rowRepo = normalizeIdentifier(repo);
 	if (rowRepo !== null && !granted(rowRepo)) return false;
 	const normalized = scope?.trim().toLowerCase();
 	if (normalized?.startsWith("repo:") && !granted(normalized.slice("repo:".length))) return false;
@@ -449,6 +449,6 @@ export function visibleToCaller(scope: string | undefined, repo: string | null |
 	const normalized = scope.trim().toLowerCase();
 	if (!normalized.startsWith("agent:")) return true;
 	if (normalized !== `agent:${caller.surface.trim().toLowerCase()}`) return false;
-	const callerRepo = normalizeKey(caller.repo);
-	return callerRepo !== null && normalizeKey(repo) === callerRepo;
+	const callerRepo = normalizeIdentifier(caller.repo);
+	return callerRepo !== null && normalizeIdentifier(repo) === callerRepo;
 }

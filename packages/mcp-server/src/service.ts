@@ -2498,7 +2498,7 @@ export class Substrate {
 			let staleAgeS: number | undefined;
 			// uplift-4 S5: with recall `off` none of this runs and every key and text is today's.
 			const recallMode = this.config.briefRecall.mode;
-			const recallRepo = normalizeKey(request.repo);
+			const recallRepo = normalizeIdentifier(request.repo);
 			// Recall is for the caller whose bearer IS the surface the brief names: the snapshot is that
 			// surface's own bank. The body or argument `surface` is attribution only, so a bearer that names
 			// another surface, and an anonymous caller, get no recall: nothing is registered, read or
@@ -3644,7 +3644,7 @@ export class Substrate {
 	 * and the repo the caller works in, which decides the `agent:` rows it may read.
 	 */
 	private memoryRead(surface: string, includeExpired: boolean | undefined, repo?: string): MemoryReadOptions {
-		const callerRepo = normalizeKey(repo);
+		const callerRepo = normalizeIdentifier(repo);
 		return {
 			surface,
 			...(includeExpired === true ? { includeExpired: true } : {}),
@@ -3732,7 +3732,7 @@ export class Substrate {
 	 * `memory_search` is not a reply to a caller and is not counted.
 	 */
 	async recallMemories(input: { query?: unknown }, callerSurface: string | null, callerRepo?: string): Promise<RecallReply> {
-		const reply = await this.recallUncounted(input, callerSurface, undefined, normalizeKey(callerRepo));
+		const reply = await this.recallUncounted(input, callerSurface, undefined, normalizeIdentifier(callerRepo));
 		this.noteServed("recall", callerSurface, reply);
 		return reply;
 	}
@@ -4589,7 +4589,7 @@ export class Substrate {
 		const index = this.index;
 		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
 		// Phase 72: the reader's grant is passed so an entry in an ungranted repository reads as absent, as an unknown id does.
-		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeKey(caller.repo), granted: this.memoryGrant(caller.surface) };
+		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo), granted: this.memoryGrant(caller.surface) };
 		const ports = this.anchorVerifyPorts();
 		let signers: SignerSetSummary | undefined;
 		const result = await verifyMemoryRecord(

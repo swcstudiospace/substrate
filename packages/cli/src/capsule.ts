@@ -28,7 +28,7 @@ import * as nodeFs from "node:fs/promises";
 import { resolve } from "node:path";
 import type { EmitOutcome } from "../../collectors/src/emit.ts";
 import { redact } from "../../mcp-server/src/redact.ts";
-import { normalizeKey } from "../../mcp-server/src/event.ts";
+import { normalizeIdentifier, normalizeKey } from "../../mcp-server/src/event.ts";
 import { isForgottenMarker, toCapsuleRecord, type CapsuleRecord } from "../../mcp-server/src/memory-record.ts";
 import {
 	CapsuleError,
@@ -422,7 +422,8 @@ function filterId(value: string | null): string | null {
  */
 export async function collectEntries(mcp: CapsuleMcp, filters: CollectFilters): Promise<CollectedEntries> {
 	const session = filterId(filters.session);
-	const repo = filterId(filters.repo);
+	// The repo is also the caller's visibility key on the server, so it keeps its exact spelling.
+	const repo = filters.repo === null ? null : (normalizeIdentifier(filters.repo) ?? filters.repo);
 	const sinceMs = filters.since === null ? null : Date.parse(filters.since);
 	const seen = new Set<string>();
 	const entries: MemoryEntry[] = [];

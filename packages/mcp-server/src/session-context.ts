@@ -20,7 +20,7 @@
  * - **Never the caller's own.** With `session_id`, that session's own presence, steering and ledger rows are left out.
  */
 import { sharedDeadline } from "./deadline.ts";
-import { normalizeKey, scopeRepoId } from "./event.ts";
+import { normalizeIdentifier, scopeRepoId } from "./event.ts";
 import { SESSION_ID_RE } from "./planning/presence.ts";
 import { redact } from "./redact.ts";
 
@@ -410,7 +410,7 @@ export function parseSessionContextArgs(args: { repo_id?: unknown; session_id?: 
 		if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) return { ok: false, error: "limit must be a whole number from 1 to 100" };
 		limit = parsed;
 	}
-	return { ok: true, value: { repoId: normalizeKey(spelled) ?? spelled, sessionId, limit } };
+	return { ok: true, value: { repoId: normalizeIdentifier(spelled) ?? spelled, sessionId, limit } };
 }
 
 // ── ledger rows ───────────────────────────────────────────────────────────────

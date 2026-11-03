@@ -2647,7 +2647,7 @@ export class IndexStore implements MemoryStore {
 		// same rule to derived hits. An internal read with no `read` is unfiltered, as the write gate's own
 		// lookups have always been.
 		const agentScope = read === undefined ? null : `agent:${(normalizeIdentifier(read.surface) ?? "unattributed").toLowerCase()}`;
-		const agentRepo = read === undefined ? null : normalizeKey(read.repo);
+		const agentRepo = read === undefined ? null : normalizeIdentifier(read.repo);
 		return this.plane("memory.search", async () => {
 			const rows = (await this.sql`
 				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
@@ -2679,7 +2679,7 @@ export class IndexStore implements MemoryStore {
 	 * `emit` fell into with session ids.
 	 */
 	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10, read?: MemoryReadOptions): Promise<MemoryEntry[]> {
-		const normalizedRepo = normalizeKey(repo);
+		const normalizedRepo = normalizeIdentifier(repo);
 		const normalizedGraph = normalizeIdentifier(graphId);
 		const scopes = [
 			"global",
