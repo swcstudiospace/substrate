@@ -324,3 +324,25 @@ describe("core.hooksPath under a repository registry", () => {
 		expect(readdirSync(outside)).toEqual([]);
 	});
 });
+
+describe("a registry is checked before any git call", () => {
+	test("with a registry set, an unregistered repository is refused without spawning git, and nothing is written", () => {
+		const repo = emptyRepo();
+		const registered = emptyRepo();
+		const shims = mkdtempSync(join(tmpdir(), "install-hook-git-shim-"));
+		const callLog = join(shims, "git-calls.log");
+		const realGit = Bun.which("git");
+		if (realGit === null) throw new Error("git is not on PATH");
+		// A git shim that records each call and then runs the real git, so a call is visible without changing the answer.
+		writeFileSync(join(shims, "git"), `#!/bin/sh\necho "$*" >> '${callLog}'\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+
+		const result = Bun.spawnSync([process.execPath, "--no-env-file", INSTALLER, repo], {
+			env: { PATH: shims, HOME: process.env.HOME ?? "", SUBSTRATE_REPO_REGISTRY: registryOf(registered) },
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout.toString()).toContain(`✗ ${repo} — refused: `);
+		expect(existsSync(callLog)).toBe(false);
+		expect(existsSync(hookPath(repo, "post-commit"))).toBe(false);
+	});
+});

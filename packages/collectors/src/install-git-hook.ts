@@ -82,27 +82,36 @@ function within(root: string, target: string): boolean {
 }
 
 /**
- * Why the hooks directory `dir` of `repo` may not be written, or null when it may. Unset registry: null, as before. Set: `repo`
- * must lie in a registration (the lookup the corpus CLI gates on), and `dir` must lie in the repository's own worktree or git
- * directory, so a `core.hooksPath` that points elsewhere is refused before anything is written there.
+ * Where `repo` may be written, decided in the order that keeps git away from an unregistered repository. Unset registry: no
+ * check, as before. Set: `repo` must lie in a registration (the lookup the corpus CLI gates on) before any git call runs. Only
+ * then is the hooks directory asked for, and it must lie in the repository's own worktree or git directory, so a `core.hooksPath`
+ * that points elsewhere is refused before anything is written there.
  */
-function hooksDirRefusal(repo: string, dir: string, env: Env): string | null {
+type Located = { status: "refused"; detail: string } | { status: "not-a-repo" } | { status: "ok"; dir: string };
+
+function locate(repo: string, env: Env): Located {
 	const parsed = localRegistryScope(env);
-	if (!parsed.ok) return `hooks directory ${dir}: ${parsed.problem}`;
-	if (parsed.value === null) return null;
-	const gate = localPathGate(parsed.value, LOCAL_SURFACE, resolve(repo));
-	if (!gate.ok) return `hooks directory ${dir}: ${REPO_REFUSAL_MESSAGES[gate.reason]}`;
-	const target = resolveContained(dir) ?? dir;
-	if (ownLocations(repo).some((root) => within(root, target))) return null;
-	return `hooks directory ${dir} is outside the repository's own worktree and git directory`;
+	if (!parsed.ok) return { status: "refused", detail: parsed.problem };
+	const scope = parsed.value;
+	if (scope !== null) {
+		const gate = localPathGate(scope, LOCAL_SURFACE, resolve(repo));
+		if (!gate.ok) return { status: "refused", detail: REPO_REFUSAL_MESSAGES[gate.reason] };
+	}
+	const dir = hooksDir(repo);
+	if (dir === null) return { status: "not-a-repo" };
+	if (scope !== null) {
+		const target = resolveContained(dir) ?? dir;
+		if (!ownLocations(repo).some((root) => within(root, target))) {
+			return { status: "refused", detail: `hooks directory ${dir} is outside the repository's own worktree and git directory` };
+		}
+	}
+	return { status: "ok", dir };
 }
 
 function inspect(repo: string, env: Env): { status: Status; path?: string; detail?: string } {
-	const dir = hooksDir(repo);
-	if (!dir) return { status: "not-a-repo" };
-	const refusal = hooksDirRefusal(repo, dir, env);
-	if (refusal !== null) return { status: "refused", detail: refusal };
-	const path = join(dir, "post-commit");
+	const located = locate(repo, env);
+	if (located.status !== "ok") return located;
+	const path = join(located.dir, "post-commit");
 	if (!existsSync(path)) return { status: "installed", path };
 	const existing = readFileSync(path, "utf8");
 	return { status: existing.includes(MARKER) ? "already-ours" : "foreign-hook", path };
@@ -214,10 +223,13 @@ function isShebangOnly(text: string): boolean {
 
 /** Installs (or with `check` only reports) the three corpus hint hooks. A hook file that is not ours is reported and left alone. */
 export function installCorpusHooks(repo: string, options: { check: boolean; cliPath?: string | undefined; env?: Env | undefined }): HookReport[] {
-	const dir = hooksDir(repo);
-	if (!dir) return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
-	const refusal = hooksDirRefusal(repo, dir, options.env ?? process.env);
-	if (refusal !== null) return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail: refusal }));
+	const located = locate(repo, options.env ?? process.env);
+	if (located.status === "not-a-repo") return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+	if (located.status === "refused") {
+		const detail = located.detail;
+		return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail }));
+	}
+	const dir = located.dir;
 	const cliPath = options.cliPath ?? resolve(import.meta.dir, "..", "..", "cli", "src", "index.ts");
 	return CORPUS_HOOKS.map((hook): HookReport => {
 		const path = join(dir, hook);
@@ -240,10 +252,13 @@ export function installCorpusHooks(repo: string, options: { check: boolean; cliP
 
 /** Removes only our block from each hook; a file left with nothing but a shebang is deleted, any other line is kept. */
 export function uninstallCorpusHooks(repo: string, env: Env = process.env): HookReport[] {
-	const dir = hooksDir(repo);
-	if (!dir) return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
-	const refusal = hooksDirRefusal(repo, dir, env);
-	if (refusal !== null) return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail: refusal }));
+	const located = locate(repo, env);
+	if (located.status === "not-a-repo") return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+	if (located.status === "refused") {
+		const detail = located.detail;
+		return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail }));
+	}
+	const dir = located.dir;
 	return CORPUS_HOOKS.map((hook): HookReport => {
 		const path = join(dir, hook);
 		const existing = readExisting(path);
