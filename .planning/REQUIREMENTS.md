@@ -131,7 +131,7 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 | Requirement | Category | Phase | Status |
 |-------------|----------|-------|--------|
 | HARD-S1 | Security | 71 | Human-needed: 3 of 5 criteria verified on gsd/v18-int-all; Postgres restart clauses pending |
-| HARD-S2 | Security | 72 | Not started |
+| HARD-S2 | Security | 72 | Partly met. Amended 2026-11-03: surface-bearer model with repository grants; identifier clause amended to a path gated to a registration. Open: 6c; default-off posture. |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
 | HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |

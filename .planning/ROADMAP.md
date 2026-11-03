@@ -1253,7 +1253,7 @@ Plans:
 
 **Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
 
-**Status**: gaps_found: 21 of 26 truth rows at 27778dee. Open: 5d (a registered linked worktree's shared hooks land in the unregistered primary checkout's git directory; owner decision); 6b (nested checkouts; owner decision); HARD-S2 identifier clause (raw paths at POST /drift, drift --path and --root; owner decision); corpus proof disclosure; allowlist unit; row 18 (service-level live gate not exercised under scope).
+**Status**: gaps_found: 23 of 27 truth rows verified at 79b3ba32 (verifier re-issue). 5d and 6b closed for the decision-6 cases by a28ecac8 (named tests pass). Open: 6c (BLOCKER: with the registry set, a registered plain directory with no .git admits an unregistered nested checkout, repo-scope.ts:114; owner decides container reading or strict refusal). Identifier clause met under SUBSTRATE_REPO_SCOPES, partial under the registry alone (default-off posture). Decision 1 (corpus proof disclosure), decision 3 (allowlist unit) and row 18 (service gate not reached under scope) open. Row 8 Postgres filter is orchestrator evidence only.
 
 **Depends on**: Phase 71
 
@@ -1268,7 +1268,7 @@ Plans:
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: gaps_found: whole-hour removal undetected (probe-confirmed on a two-hour graph). Owner: the threat model includes it; remedy not built; needs a go-ahead for the memo format change. memo v3 with the graph identity in the clear is approved (owner, 2026-11-03); the build is not started in this pass.
+**Status**: gaps_found: whole-hour removal undetected (probe-confirmed on a two-hour graph). Owner: the threat model includes it; remedy not built. memo v3 with the graph identity in the clear is approved (owner, 2026-11-03); the build is not started in this pass.
 
 **Depends on**: none
 
@@ -1314,7 +1314,7 @@ Plans:
 
 **Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
 
-**Status**: human_needed: SC1 verified within the owner-accepted pre-send scope; the owner still confirms the broader boundary (non-breaker tip-read failures are also not buffered); SC2 by owner override.
+**Status**: human_needed: SC1 verified within the owner-accepted pre-send scope. The broader boundary (any tip-read failure is refused, not buffered) was accepted 2026-11-03 and is documented in docs/greptime-ledger.md. SC2 by owner override. Open: D76-13 (override carried as PASSED, not verified), D76-15, D76-14/19, R-1, R-2, R-3, operator items 1 to 8. To decide: with SUBSTRATE_LEDGER_CHAIN_CACHE=0 no tip is cached, so by docs/greptime-ledger.md:961 (inference, not tested) nothing is buffered during an outage; the doc does not state this for the cache-off setting.
 
 **Depends on**: Phase 73 (shared ledger write path)
 
@@ -1345,7 +1345,7 @@ Plans:
 
 **Goal**: The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
 
-**Status**: human_needed: 1 of 2 in code; SC2 verified: corpus rules R5 to R7 met in code; owner items open: D78-5, audit-chain single-writer statement, post-flush audit failure policy, bound reading.
+**Status**: human_needed: 1 of 2 must-haves verified. SC1 verified by named tests. SC2 uncertain: the bound reading (total versus per kind) and the post-flush audit policy open. D78-5 ratified 2026-11-03 (docs/reconcile.md:48); audit second writer approved 2026-11-03 (docs/mcp-audit.md:37-38). Operator items: scheduled tick and single-flight (staging); live Dragonfly SCAN/UNLINK; live GreptimeDB busy window; live CLI run with audit chain verify after restart (R8). HARD-H2 is ORPHANED in REQUIREMENTS (lines 125, 140).
 
 **Depends on**: Phases 73, 75, 76
 
@@ -1417,10 +1417,10 @@ Plans:
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 3 of 5 criteria verified on gsd/v18-int-all 9ee12695; Postgres restart clauses pending; owner items open. | - |
-| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | gaps_found: 21 of 26 truth rows at 27778dee. Open: 5d (owner decision); 6b (owner decision); HARD-S2 identifier clause (owner decision); corpus proof disclosure; allowlist unit; row 18. | - |
-| 73. Ledger tamper evidence | v1.8 | 1/1 local | gaps_found: whole-hour removal undetected (probe-confirmed on a two-hour graph); owner decides threat model and remedy. | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/0 | gaps_found: HARD-R1 not built; owner chooses build (as its own phase) or waive. | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | gaps_found: 23 of 27 truth rows verified at 79b3ba32 (verifier re-issue). 5d and 6b closed for the decision-6 cases by a28ecac8 (named tests pass). Open: 6c (BLOCKER: with the registry set, a registered plain directory with no .git admits an unregistered nested checkout, repo-scope.ts:114; owner decides container reading or strict refusal). Identifier clause met under SUBSTRATE_REPO_SCOPES, partial under the registry alone (default-off posture). Decision 1 (corpus proof disclosure), decision 3 (allowlist unit) and row 18 (service gate not reached under scope) open. Row 8 Postgres filter is orchestrator evidence only. | - |
+| 73. Ledger tamper evidence | v1.8 | 1/1 local | gaps_found: whole-hour removal undetected (probe-confirmed on a two-hour graph); memo v3 with the graph identity in the clear approved 2026-11-03, not built. | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/0 | gaps_found: HARD-R1 not built; scheduled after v1.8 closes (owner decision, 2026-11-03). | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: 5 of 6 truths; 2 of 2 criteria as declared; owner items O1 and O2 open. | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | human_needed: SC1 verified within the owner-accepted pre-send scope; broader boundary to confirm; SC2 by owner override. | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | human_needed: SC1 verified within the owner-accepted pre-send scope. The broader boundary (any tip-read failure is refused, not buffered) was accepted 2026-11-03 and is documented in docs/greptime-ledger.md. SC2 by owner override. Open: D76-13 (override carried as PASSED, not verified), D76-15, D76-14/19, R-1, R-2, R-3, operator items 1 to 8. To decide: with SUBSTRATE_LEDGER_CHAIN_CACHE=0 every write reads the tip (greptime.ts:776), and a failed read is refused (service.ts:2996-2999), so nothing is buffered during an outage (switch parsed at config.ts:2424; code read, not tested). docs/greptime-ledger.md does not say this; owner decides whether to add it. | - |
 | 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 5 of 8; T5 to T7 Postgres run per file on scratch Postgres 16 (steering-idempotency 4 of 4). | - |
-| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: SC1 verified; SC2 corpus rules R5 to R7 met in code; owner items open: D78-5, audit-chain single-writer statement, post-flush audit failure policy, bound reading. | - |
+| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 1 of 2 must-haves verified. SC1 verified by named tests. SC2 uncertain: the bound reading (total versus per kind) and the post-flush audit policy open. D78-5 ratified 2026-11-03 (docs/reconcile.md:48); audit second writer approved 2026-11-03 (docs/mcp-audit.md:37-38). Operator items: scheduled tick and single-flight (staging); live Dragonfly SCAN/UNLINK; live GreptimeDB busy window; live CLI run with audit chain verify after restart (R8). HARD-H2 is ORPHANED in REQUIREMENTS (lines 125, 140). | - |
