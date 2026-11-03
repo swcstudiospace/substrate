@@ -209,13 +209,25 @@ export class GraphIdTooLongError extends InvalidEventError {
 }
 
 /**
+ * A graph id with a NUL byte, refused on write. The pointer transfer passes the memo to execFile as an argument, and execFile refuses a
+ * NUL there only after the hour transaction has gone out, which would strand the hour.
+ */
+export class GraphIdNulError extends InvalidEventError {
+	constructor() {
+		super("graph_id_nul: a graph id may not contain a NUL byte");
+	}
+}
+
+/**
  * The graph id a write stores: redacted, and empty is absent, as for every identifier. Unlike the others it is refused over the cap
  * rather than cut to it: the hour's pointer memo carries the stored id whole (ledger memo.ts formatMemoV3), and an id cut to fit would
  * name a different graph. The cap is measured on the stored form, in UTF-8 bytes.
+ * A NUL byte is refused too (GraphIdNulError): the memo reaches execFile as an argument, and a NUL there throws after the hour is sent.
  */
 export function normalizeGraphId(value: string | null | undefined): string | null {
 	if (value === undefined || value === null) return null;
 	const stored = redact(value);
+	if (stored.includes("\0")) throw new GraphIdNulError();
 	const bytes = new TextEncoder().encode(stored).byteLength;
 	if (bytes > MEMO_GRAPH_ID_MAX) throw new GraphIdTooLongError(bytes);
 	return stored.length > 0 ? stored : null;

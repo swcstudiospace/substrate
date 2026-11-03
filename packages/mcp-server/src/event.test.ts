@@ -4,6 +4,7 @@ import {
 	type ChainLink,
 	compareToAnchoredHead,
 	eventHash,
+	GraphIdNulError,
 	GraphIdTooLongError,
 	headRecordsFromLeaves,
 	inChainOrder,
@@ -303,6 +304,16 @@ describe("graph id cap on the write path", () => {
 	test("an absent or empty graph id stays null", () => {
 		expect(normalizeEvent({ ...base, graph_id: undefined }, null).graph_id).toBeNull();
 		expect(normalizeEvent({ ...base, graph_id: "" }, null).graph_id).toBeNull();
+	});
+
+	test("refuses a graph id with a NUL byte at write, by name", () => {
+		expect(() => normalizeEvent({ ...base, graph_id: "g\u0000x" }, null)).toThrow(GraphIdNulError);
+		expect(() => normalizeEvent({ ...base, graph_id: "g\u0000x" }, null)).toThrow("graph_id_nul:");
+	});
+
+	test("accepts a graph id with a newline, which is not a NUL", () => {
+		const graphId = "first line\nsecond line";
+		expect(normalizeEvent({ ...base, graph_id: graphId }, null).graph_id).toBe(graphId);
 	});
 });
 

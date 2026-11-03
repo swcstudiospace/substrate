@@ -548,11 +548,12 @@ const PLACEHOLDER_HOUR_TX_SIG = "1".repeat(88);
 
 /**
  * The pointers an hour owes, one per graph with events in it, in graph-id order (design 3.2). Each names the hour transaction's signature,
- * so the hour transaction is sent first. A graph id not in its stored, normalised form is refused before any send.
+ * so the hour transaction is sent first. A graph id not in its stored, normalised form, or with a NUL byte, is refused before any send.
  */
 export function pointerPlans(periodStartMs: number, heads: HourHeads, hourTxSig: string): PointerPlan[] {
 	const graphIds = [...new Set(heads.records.map((record) => record.graphId))].sort(compareText);
 	return graphIds.map((graphId) => {
+		if (graphId.includes("\0")) throw new Error("pointer: graph id contains a NUL byte");
 		if (normalizeIdentifier(graphId) !== graphId) throw new Error("pointer: graph id is not in its normalised form");
 		const count = heads.records.reduce((sum, record) => (record.graphId === graphId ? sum + record.count : sum), 0);
 		return {
@@ -952,8 +953,8 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			return result;
 		}
 
-		// The pointer plans are formed before the hour transaction is sent. A graph id the memo cannot carry (over 512 UTF-8 bytes, or not in
-		// its normalised form) is refused here: no transaction goes out for the hour, it gets no row, and the run sends nothing later. The
+		// The pointer plans are formed before the hour transaction is sent. A graph id the memo cannot carry (over 512 UTF-8 bytes, not in its
+		// normalised form, or with a NUL byte) is refused here: no transaction goes out for the hour, it gets no row, and the run sends nothing later. The
 		// placeholder is the longest signature the memo takes; the real one exists only after the send.
 		if (heads !== null) {
 			try {

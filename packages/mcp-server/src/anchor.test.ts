@@ -1515,4 +1515,29 @@ describe("runAnchorJob pointers (design 3.5)", () => {
 		expect(inserts).toEqual([]);
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
 	});
+
+	test("a graph id with a NUL byte stops the hour before the hour transaction is sent", async () => {
+		// A NUL cannot go to execFile as a memo argument: the pointer transfer would throw after the hour transaction had gone out, stranding
+		// the hour. A NUL already in the store is refused by the pointer plans before any send, so the hour gets no row and the run stops
+		// with a named send-failed reason.
+		const world = new ChainWorld();
+		const calls: string[][] = [];
+		const runner = async (argv: readonly string[]): Promise<RunResult> => {
+			calls.push([...argv]);
+			return world.runner(argv);
+		};
+		const inserts: Array<Record<string, unknown>> = [];
+		const nulGraphId = "g\u0000x";
+		const greptime = {
+			...chainStore(world.log, inserts, world),
+			eventsByIds: async (ids: readonly string[]) => memberRows(ids).map((row) => ({ ...row, graph_id: nulGraphId })),
+		} as unknown as AnchorDeps["greptime"];
+		const { deps: d, emitted } = deps({ greptime, runner, rpc: world.rpc() });
+		expect(await runAnchorJob(d)).toEqual({ code: 1, anchored: 0, adopted: 0, failed: 1, funded: 0 });
+		expect(calls).toEqual([]);
+		expect(world.txs).toEqual([]);
+		expect(world.log).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
+	});
 });
