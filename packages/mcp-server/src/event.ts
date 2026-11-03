@@ -198,17 +198,23 @@ function withoutDanglingHigh(text: string | null): string | null {
 /**
  * Normalise an identifier the same way `normalizeEvent` stores it.
  *
- * `session_id`, `graph_id` and `repo` are query keys as well as stored values —
- * `emit` looks up the previous hash by session, `verifyGraph` reads by graph, the
- * brief reads by repo. Cleaning them on the write path but querying with the raw
- * value would mean a lookup that never matches: every event would restart its
- * session's chain, and verification would find no rows at all. Anything that
- * reads by one of these columns goes through here, so the two agree by
- * construction rather than by both remembering to. The write path does not cap a graph id to MAX_FIELD: normalizeGraphId refuses one over
- * the memo cap instead, so the stored graph id is always whole.
+ * `graph_id`, `node_id` and the other identifiers are query keys as well as stored values: `verifyGraph` reads by graph.
+ * Cleaning them on the write path but querying with the raw value would mean a lookup that never matches. Anything that
+ * reads by one of these columns goes through here, so the two agree by construction rather than by both remembering
+ * to. `session_id` and `repo` use {@link normalizeKey} instead. The write path does not cap a graph id to MAX_FIELD:
+ * normalizeGraphId refuses one over the memo cap instead, so the stored graph id is always whole.
  */
 export function normalizeIdentifier(value: string | null | undefined): string | null {
 	return clean(value, MAX_FIELD);
+}
+
+/**
+ * `normalizeIdentifier`, with a dangling high surrogate dropped from the end. This is the form `session_id` and `repo`
+ * are stored in, so every read or filter on either goes through it too: a cap at MAX_FIELD can cut a surrogate pair in
+ * half, and the stored value must not end in a lone surrogate.
+ */
+export function normalizeKey(value: string | null | undefined): string | null {
+	return withoutDanglingHigh(normalizeIdentifier(value));
 }
 
 /**
@@ -262,6 +268,21 @@ function refuseLoneSurrogate(field: string, text: string | null | undefined): vo
 	if (typeof text !== "string") return;
 	const lone = LONE_SURROGATE_RE.exec(redact(text));
 	if (lone) throw new FieldLoneSurrogateError(field, lone[0].charCodeAt(0));
+}
+
+/**
+ * Refuse a lone surrogate in any of the six write text fields (summary, session_id, repo, branch, node_id, linear_identifier), by field
+ * name. Pure: it stores nothing. The sessioned write path calls it before it reads the chain tip, so a refused event costs no read.
+ */
+export function assertWriteTextFields(
+	input: Pick<EventInput, "summary" | "session_id" | "repo" | "branch" | "node_id" | "linear_identifier">,
+): void {
+	refuseLoneSurrogate("summary", input.summary);
+	refuseLoneSurrogate("session_id", input.session_id);
+	refuseLoneSurrogate("repo", input.repo);
+	refuseLoneSurrogate("branch", input.branch);
+	refuseLoneSurrogate("node_id", input.node_id);
+	refuseLoneSurrogate("linear_identifier", input.linear_identifier);
 }
 
 /**
@@ -368,9 +389,7 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
 	if (typeof input.summary !== "string" || input.summary.length === 0) {
 		throw new InvalidEventError("summary is required");
 	}
-	refuseLoneSurrogate("summary", input.summary);
-	refuseLoneSurrogate("session_id", input.session_id);
-	refuseLoneSurrogate("repo", input.repo);
+	assertWriteTextFields(input);
 
 	const ts = input.ts ? new Date(input.ts) : new Date();
 	if (Number.isNaN(ts.getTime())) throw new InvalidEventError(`invalid ts: ${String(input.ts)}`);
@@ -379,13 +398,13 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
 		id: `evt_${randomUUID().replace(/-/g, "")}`,
 		ts: ts.toISOString(),
 		surface: input.surface,
-		session_id: normalizeIdentifier(input.session_id),
+		session_id: normalizeKey(input.session_id),
 		graph_id: normalizeGraphId(input.graph_id),
 		node_id: normalizeIdentifier(input.node_id),
 		linear_identifier: normalizeIdentifier(input.linear_identifier),
 		// A fractional or infinite step would reach a BIGINT column.
 		step: typeof input.step === "number" && Number.isFinite(input.step) ? Math.trunc(input.step) : null,
-		repo: normalizeIdentifier(input.repo),
+		repo: normalizeKey(input.repo),
 		branch: clean(input.branch, MAX_FIELD),
 		actor: input.actor === "human" ? "human" : "agent",
 		kind: input.kind,

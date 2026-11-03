@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	assertWriteTextFields,
 	canonicalJson,
 	type ChainLink,
 	compareToAnchoredHead,
@@ -11,6 +12,7 @@ import {
 	InvalidEventError,
 	normalizeEvent,
 	normalizeIdentifier,
+	normalizeKey,
 	sha256Hex,
 	steeringSessionPayload,
 	type SteeringSession,
@@ -274,6 +276,36 @@ describe("normalizeIdentifier", () => {
 	});
 });
 
+describe("normalizeKey", () => {
+	// A surrogate pair across the 512-unit cap: the cap leaves a lone high surrogate, which the stored form drops.
+	const straddling = (head: string) => `${head.padEnd(511, "s")}\u{1F600}`;
+
+	test("matches what normalizeEvent stores for a session id whose surrogate pair straddles the cap", () => {
+		const raw = straddling("sess-");
+		const stored = normalizeEvent({ ...base, session_id: raw }, null).session_id;
+		expect(stored).toBe(raw.slice(0, 511));
+		expect(normalizeKey(raw)).toBe(stored);
+	});
+
+	test("matches what normalizeEvent stores for a repo whose surrogate pair straddles the cap", () => {
+		const raw = straddling("owner/");
+		const stored = normalizeEvent({ ...base, repo: raw }, null).repo;
+		expect(stored).toBe(raw.slice(0, 511));
+		expect(normalizeKey(raw)).toBe(stored);
+	});
+
+	test("drops the dangling high surrogate that normalizeIdentifier keeps", () => {
+		expect(normalizeIdentifier(straddling("sess-"))?.endsWith("\uD83D")).toBe(true);
+		expect(normalizeKey(straddling("sess-"))?.endsWith("\uD83D")).toBe(false);
+	});
+
+	test("leaves an ordinary identifier and an absent one as normalizeIdentifier does", () => {
+		expect(normalizeKey("ut-mz3k1q-8a1f2c3d")).toBe("ut-mz3k1q-8a1f2c3d");
+		expect(normalizeKey(undefined)).toBeNull();
+		expect(normalizeKey("")).toBeNull();
+	});
+});
+
 describe("graph id cap on the write path", () => {
 	test("refuses a graph id of 513 characters by name, rather than storing it cut to 512", () => {
 		expect(() => normalizeEvent({ ...base, graph_id: "g".repeat(513) }, null)).toThrow(GraphIdTooLongError);
@@ -370,6 +402,21 @@ describe("lone surrogates in the other write text fields", () => {
 		expect(() => normalizeEvent({ ...base, repo: "swcstudiospace/\uD800x" }, null)).toThrow("U+D800");
 	});
 
+	test("refuses a lone high surrogate in the branch, by name, with its code unit", () => {
+		expect(() => normalizeEvent({ ...base, branch: "feat/\uD800x" }, null)).toThrow("branch_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, branch: "feat/\uD800x" }, null)).toThrow("U+D800");
+	});
+
+	test("refuses a lone high surrogate in the node id, by name, with its code unit", () => {
+		expect(() => normalizeEvent({ ...base, node_id: "n\uD800" }, null)).toThrow("node_id_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, node_id: "n\uD800" }, null)).toThrow("U+D800");
+	});
+
+	test("refuses a lone high surrogate in the linear identifier, by name, with its code unit", () => {
+		expect(() => normalizeEvent({ ...base, linear_identifier: "ENG-\uD800" }, null)).toThrow("linear_identifier_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, linear_identifier: "ENG-\uD800" }, null)).toThrow("U+D800");
+	});
+
 	test("accepts a well-formed astral character in the summary, as a surrogate pair or as one code point", () => {
 		const pair = "shipped the page \uD83D\uDE42";
 		const point = "shipped the page \u{1F642}";
@@ -387,6 +434,39 @@ describe("lone surrogates in the other write text fields", () => {
 		const event = normalizeEvent({ ...base, summary: `${"x".repeat(1999)}\u{1F642}` }, null);
 		expect(event.summary).toBe("x".repeat(1999));
 		expect(event.summary.length).toBe(1999);
+	});
+});
+
+describe("assertWriteTextFields refuses a lone surrogate in each write text field", () => {
+	const clean = {
+		summary: "ran cargo test",
+		session_id: "sess-1",
+		repo: "swcstudiospace/autonogrammer",
+		branch: "gsd/v18-int-all",
+		node_id: "n2",
+		linear_identifier: "ENG-123",
+	};
+
+	test("refuses a lone high surrogate in each of the six fields, by name", () => {
+		for (const field of ["summary", "session_id", "repo", "branch", "node_id", "linear_identifier"] as const) {
+			expect(() => assertWriteTextFields({ ...clean, [field]: "a\uD800b" })).toThrow(InvalidEventError);
+			expect(() => assertWriteTextFields({ ...clean, [field]: "a\uD800b" })).toThrow(`${field}_lone_surrogate:`);
+		}
+	});
+
+	test("refuses a lone low surrogate in each of the six fields, by name", () => {
+		for (const field of ["summary", "session_id", "repo", "branch", "node_id", "linear_identifier"] as const) {
+			expect(() => assertWriteTextFields({ ...clean, [field]: "a\uDC00b" })).toThrow(`${field}_lone_surrogate:`);
+		}
+	});
+
+	test("does not throw for clean input, including well-formed astral characters", () => {
+		expect(() => assertWriteTextFields(clean)).not.toThrow();
+		expect(() => assertWriteTextFields({ ...clean, summary: "shipped \u{1F642}", branch: "feat/\uD83D\uDE42" })).not.toThrow();
+	});
+
+	test("does not throw when the optional fields are absent", () => {
+		expect(() => assertWriteTextFields({ summary: "ran cargo test" })).not.toThrow();
 	});
 });
 

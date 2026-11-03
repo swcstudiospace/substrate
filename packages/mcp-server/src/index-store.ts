@@ -9,7 +9,7 @@
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
 import { callPlane, type PlaneGate } from "@substrate/observability";
-import { normalizeIdentifier } from "./event.ts";
+import { normalizeIdentifier, normalizeKey } from "./event.ts";
 import {
 	TERMINAL_GRAPH_STATUSES,
 	executeSweep,
@@ -2188,7 +2188,7 @@ export class IndexStore implements MemoryStore {
 	 *
 	 * The instant and `created` are compared in whole milliseconds (`created` is truncated to the millisecond, the
 	 * precision of an event `ts`), so a tie keeps the entry: one written in the same millisecond as the rollback point
-	 * is not selected. `session` and `graphId` go through `normalizeIdentifier`, the form the gate stores them in.
+	 * is not selected. `session` goes through `normalizeKey` and `graphId` through `normalizeIdentifier`, the form the gate stores them in.
 	 * There is no index on `session_id`; the scan is bounded by the session's own rows being few, and the limit.
 	 *
 	 * `untilIso`, when not null, is an INCLUSIVE upper bound (whole milliseconds): an entry created after it belongs to
@@ -2205,7 +2205,7 @@ export class IndexStore implements MemoryStore {
 		untilIso: string | null = null,
 		writer: string | null = null,
 	): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
-		const sessionId = normalizeIdentifier(session);
+		const sessionId = normalizeKey(session);
 		if (sessionId === null) throw new Error("memoryEntriesCreatedAfter: session is required");
 		const graph = graphId === null ? null : normalizeIdentifier(graphId);
 		if (graphId !== null && graph === null) throw new Error("memoryEntriesCreatedAfter: graphId is empty after normalisation");
@@ -2647,7 +2647,7 @@ export class IndexStore implements MemoryStore {
 		// same rule to derived hits. An internal read with no `read` is unfiltered, as the write gate's own
 		// lookups have always been.
 		const agentScope = read === undefined ? null : `agent:${(normalizeIdentifier(read.surface) ?? "unattributed").toLowerCase()}`;
-		const agentRepo = read === undefined ? null : normalizeIdentifier(read.repo);
+		const agentRepo = read === undefined ? null : normalizeKey(read.repo);
 		return this.plane("memory.search", async () => {
 			const rows = (await this.sql`
 				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
@@ -2679,7 +2679,7 @@ export class IndexStore implements MemoryStore {
 	 * `emit` fell into with session ids.
 	 */
 	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10, read?: MemoryReadOptions): Promise<MemoryEntry[]> {
-		const normalizedRepo = normalizeIdentifier(repo);
+		const normalizedRepo = normalizeKey(repo);
 		const normalizedGraph = normalizeIdentifier(graphId);
 		const scopes = [
 			"global",

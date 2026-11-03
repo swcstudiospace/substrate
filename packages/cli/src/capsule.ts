@@ -28,7 +28,7 @@ import * as nodeFs from "node:fs/promises";
 import { resolve } from "node:path";
 import type { EmitOutcome } from "../../collectors/src/emit.ts";
 import { redact } from "../../mcp-server/src/redact.ts";
-import { normalizeIdentifier } from "../../mcp-server/src/event.ts";
+import { normalizeKey } from "../../mcp-server/src/event.ts";
 import { isForgottenMarker, toCapsuleRecord, type CapsuleRecord } from "../../mcp-server/src/memory-record.ts";
 import {
 	CapsuleError,
@@ -411,7 +411,7 @@ interface CollectFilters {
 }
 
 function filterId(value: string | null): string | null {
-	return value === null ? null : (normalizeIdentifier(value) ?? value);
+	return value === null ? null : (normalizeKey(value) ?? value);
 }
 
 /**

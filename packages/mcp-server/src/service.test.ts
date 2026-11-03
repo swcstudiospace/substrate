@@ -700,6 +700,48 @@ describe("emit", () => {
 		expect(result.error).toContain("chain tip unreadable");
 		expect(written).toEqual([]);
 	});
+
+	/** A ledger stub that counts each chain-tip read by session and records each write. */
+	function countingLedger() {
+		const tipReads: string[] = [];
+		const written: SubstrateEvent[] = [];
+		return {
+			tipReads,
+			written,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async (session: string) => {
+					tipReads.push(session);
+					return "prev-hash";
+				},
+				insertEvent: async (event: SubstrateEvent) => {
+					written.push(event);
+				},
+			},
+		};
+	}
+
+	test("refuses a lone surrogate in the summary before it reads the chain tip", async () => {
+		const { tipReads, written, greptime } = countingLedger();
+		await expect(substrateWith(greptime).emit({ ...input, summary: "ran \uD800 tests" })).rejects.toThrow("summary_lone_surrogate:");
+		expect(tipReads).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
+	test("refuses a lone surrogate in the session id before it reads the chain tip", async () => {
+		const { tipReads, written, greptime } = countingLedger();
+		await expect(substrateWith(greptime).emit({ ...input, session_id: "sess-\uD800" })).rejects.toThrow("session_id_lone_surrogate:");
+		expect(tipReads).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
+	test("a clean sessioned write reads the chain tip once", async () => {
+		const { tipReads, written, greptime } = countingLedger();
+		const result = await substrateWith(greptime).emit(input);
+		expect(result.stored).toBe(true);
+		expect(tipReads).toEqual(["sess-1"]);
+		expect(written).toHaveLength(1);
+	});
 });
 
 describe("event bus wiring (phase 50)", () => {
@@ -2079,6 +2121,72 @@ describe("identifier lookups", () => {
 		expect(asked[0]?.[1].length).toBe(512);
 		expect(leafAsked).toEqual([asked[0]?.[1] ?? ""]);
 		expect(leafAsked[0]?.length).toBe(512);
+	});
+});
+
+describe("a straddling identifier round-trips", () => {
+	// A surrogate pair across the 512-unit cap: the cap leaves a lone high surrogate, which the stored form drops.
+	const straddling = (head: string) => `${head.padEnd(511, "s")}\u{1F600}`;
+
+	/** A ledger stub that keeps appended events and answers a query with those whose columns match it. */
+	function ledger(asked: string[] = []) {
+		const stored: Array<Record<string, unknown>> = [];
+		const queries: EventQuery[] = [];
+		return {
+			stored,
+			queries,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async (sessionId: string) => {
+					asked.push(sessionId);
+					return null;
+				},
+				insertEvent: async (event: Record<string, unknown>) => {
+					stored.push(event);
+				},
+				queryEvents: async (query: EventQuery) => {
+					queries.push(query);
+					// Unset filters arrive as undefined; only the columns the query names are matched.
+					const match = Object.entries(query.match ?? {}).filter(([, value]) => value !== undefined && value !== null);
+					return stored
+						.filter((event) => match.every(([column, value]) => event[column] === value))
+						.map((event) => ({ ...event, ts: Date.parse(String(event.ts)), payload: null }));
+				},
+			},
+		};
+	}
+
+	test("a session id straddling the cap is stored, looked up and read back in one form", async () => {
+		const raw = straddling("sess-");
+		const asked: string[] = [];
+		const { stored, queries, greptime } = ledger(asked);
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+		const written = await substrate.emit({ surface: "omp", kind: "note", summary: "x", session_id: raw });
+
+		// The stored form drops the dangling high surrogate; the lookup for the chain uses that same form.
+		expect(written.event.session_id).toBe(raw.slice(0, 511));
+		expect(asked).toEqual([raw.slice(0, 511)]);
+		expect(stored[0]?.session_id).toBe(raw.slice(0, 511));
+
+		const read = await substrate.queryEvents({ session_id: raw });
+		expect(queries[0]?.match?.session_id).toBe(raw.slice(0, 511));
+		expect(read.events.map((event) => event.id)).toEqual([written.event.id]);
+	});
+
+	test("a repo straddling the cap is stored and read back in one form", async () => {
+		const raw = straddling("owner/");
+		const { stored, queries, greptime } = ledger();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+		const written = await substrate.emit({ surface: "omp", kind: "note", summary: "x", session_id: "sess-1", repo: raw });
+
+		expect(written.event.repo).toBe(raw.slice(0, 511));
+		expect(stored[0]?.repo).toBe(raw.slice(0, 511));
+
+		const read = await substrate.queryEvents({ repo: raw });
+		expect(queries[0]?.match?.repo).toBe(raw.slice(0, 511));
+		expect(read.events.map((event) => event.id)).toEqual([written.event.id]);
 	});
 });
 

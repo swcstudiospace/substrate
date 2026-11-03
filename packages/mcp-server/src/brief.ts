@@ -11,7 +11,7 @@
 import { MAX_ENCODED_CHARS, foldLine, renderFullBrief, type BriefItem, type BriefSection, type BriefSectionId } from "./brief-profile.ts";
 import { earliestRefreshAt } from "./cache.ts";
 import { sharedDeadline } from "./deadline.ts";
-import { normalizeIdentifier } from "./event.ts";
+import { normalizeKey } from "./event.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
 import { leaseSnapshot, type IndexStore } from "./index-store.ts";
@@ -288,7 +288,7 @@ export async function composeBriefSections(
 			? start("graph", () => (options.graphRead === "lite" ? index.getGraphForBrief(graphId) : index.getGraph(graphId)), null as GraphView | null)
 			: null;
 	// Recent actions in this repo, from any surface. The repo is matched in the form
-	// the write path stores it, not as the caller spelled it — see normalizeIdentifier.
+	// the write path stores it, not as the caller spelled it — see normalizeKey.
 	// Bounded in time so an uncached brief never scans the repo's whole history,
 	// and in wall time by the same budget the deadline enforces, so a stalled
 	// ledger is released by the client itself rather than left running. With no
@@ -445,7 +445,7 @@ export async function composeBriefSections(
  */
 export function recentActionsSql(repo: string, sinceMs: number): string {
 	return `SELECT "ts", "surface", "summary", "node_id", "step" FROM "agent_events"
-				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
+				 WHERE "repo" = ${quote(normalizeKey(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
 				 AND "ts" >= ${quote(new Date(sinceMs).toISOString())}
 				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`;
 }

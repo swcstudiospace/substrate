@@ -32,7 +32,7 @@
  */
 import { CHECKPOINT_VERIFY_STATUSES } from "./checkpoint-verify.ts";
 import { sharedDeadline } from "./deadline.ts";
-import { IdempotencyRefusal, InvalidEventError, canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
+import { IdempotencyRefusal, InvalidEventError, canonicalJson, normalizeKey, sha256Hex } from "./event.ts";
 import {
 	FORGET_ACTION,
 	FORGET_PAYLOAD_ENTRY_IDS,
@@ -279,12 +279,12 @@ function patternField(value: unknown, name: string, pattern: RegExp, what: strin
 const ckptIdField = (value: unknown, name: string): string => patternField(value, name, CKPT_ID, '"ckpt_" followed by 26 characters of 0-9 a-z');
 const rollbackIdField = (value: unknown, name: string): string => patternField(value, name, ROLLBACK_ID, '"rb_" followed by 26 characters of 0-9 a-z');
 
-/** A session id the ledger stores unchanged: non-empty, bounded, no control characters, and `normalizeIdentifier` leaves it as it is. */
+/** A session id the ledger stores unchanged: non-empty, bounded, no control characters, and `normalizeKey` leaves it as it is. */
 function sessionIdField(value: unknown): string {
 	if (typeof value !== "string" || value.length === 0) refuse("invalid-request", "session_id is required and must be a non-empty string");
 	if (value.length > MAX_SESSION_ID_CHARS) refuse("invalid-request", `session_id must be at most ${MAX_SESSION_ID_CHARS} characters`);
 	if (CONTROL_CHARS.test(value)) refuse("invalid-request", "session_id must not contain control characters");
-	if (normalizeIdentifier(value) !== value) refuse("invalid-request", "session_id is not a valid identifier (it would be altered by redaction or length limits)");
+	if (normalizeKey(value) !== value) refuse("invalid-request", "session_id is not a valid identifier (it would be altered by redaction or length limits)");
 	return value;
 }
 

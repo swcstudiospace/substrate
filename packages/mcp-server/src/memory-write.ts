@@ -26,7 +26,7 @@
  * testable without a Postgres: the SQL is thin, the decisions are not.
  */
 import { randomUUID } from "node:crypto";
-import { canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
+import { canonicalJson, normalizeIdentifier, normalizeKey, sha256Hex } from "./event.ts";
 import { isLessonWrite, lessonWriteIssue } from "./lesson-content.ts";
 import { classify } from "./memory-classify.ts";
 import {
@@ -370,7 +370,7 @@ function candidateKey(
 	sourceEvent: string | null,
 	reviewed: boolean,
 ): { key: string; explicit: boolean } {
-	const explicitKey = normalizeKey(raw);
+	const explicitKey = normalizeIdempotencyKey(raw);
 	return { key: explicitKey ?? derivedKey(entryHash, sourceEvent, reviewed), explicit: explicitKey !== null };
 }
 
@@ -548,7 +548,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	}
 	const subject = normalizeSubject(request.subject);
 	let sourceEvent = normalizeIdentifier(request.source_event);
-	const sessionId = normalizeIdentifier(request.session_id);
+	const sessionId = normalizeKey(request.session_id);
 	// The memory-bank retain drops a fact that names no source. A lesson without
 	// one would read as saved in the index and never come back from the bank.
 	if (isLessonWrite(judged, subjectInput) && !sourceEvent && sessionId) {
@@ -562,7 +562,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		);
 	}
 	const graphId = normalizeIdentifier(request.graph_id);
-	const repo = normalizeIdentifier(request.repo);
+	const repo = normalizeKey(request.repo);
 	// v1 passes the historical object and nothing else. A null `hv` or `tenant`
 	// would be kept by canonicalJson and change every digest.
 	const hashVersion = deps.hashVersion === "v2" ? "v2" : "v1";
@@ -644,7 +644,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		trust: "agent-claimed",
 		ttl,
 		source_event: sourceEvent,
-		session_id: normalizeIdentifier(request.session_id),
+		session_id: normalizeKey(request.session_id),
 		graph_id: graphId,
 		repo,
 		conflict_key: null,
@@ -1077,7 +1077,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
  * free-text field. Redaction is deterministic, so the same key still dedupes
  * against itself on a retry.
  */
-function normalizeKey(value: unknown): string | null {
+function normalizeIdempotencyKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const cleaned = redact(value.trim()).slice(0, MAX_KEY);
 	return cleaned.length > 0 ? cleaned : null;
