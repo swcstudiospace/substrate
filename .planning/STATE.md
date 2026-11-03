@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 phases 71-78 none complete; integration gate r19 green on f86388cf (12192 pass, 2 skip, 0 fail, 0 errors); verifier round at f86388cf: 71, 72, 73, 75, 76, 77 and 78 human_needed; 74 gaps_found; v1.8 not complete; owner decisions open; nothing pushed."
-stopped_at: "Integration tree gsd/v18-int-all at f86388cf carries the fourth Run 18 pass. Gate r19 green on f86388cf (12192 pass, 2 skip, 0 fail, 0 errors). Verifier round at f86388cf. No phase complete; v1.8 not complete. Owner decisions open (see Needs Human); nothing pushed."
-last_updated: "2026-11-02"
-last_activity: 2026-11-02
-last_activity_desc: "Run 18 fourth pass at f86388cf: gate r19 green on f86388cf (12192 pass, 2 skip, 0 fail, 0 errors); verifier round at f86388cf (71, 72, 73, 75, 76, 77, 78 human_needed; 74 gaps_found); no phase complete; v1.8 not complete; nothing pushed."
+status: "v1.8 phases 71-78 none complete; integration gate r20 green on 6644698e (12199 pass, 2 skip, 0 fail, 0 errors); verifier round at 046fbe05 (71, 72, 73, 75, 76, 77 and 78 human_needed; 74 gaps_found; 73, 76 and 78 re-issued, 71, 72, 75 and 77 kept); v1.8 not complete; owner decisions open; nothing pushed."
+stopped_at: "Integration tree gsd/v18-int-all at 046fbe05 carries the fifth Run 18 pass. Gate r20 green on 6644698e (12199 pass, 2 skip, 0 fail, 0 errors). Verifier round at 046fbe05. No phase complete; v1.8 not complete. Owner decisions open (see Needs Human); nothing pushed."
+last_updated: "2026-11-03"
+last_activity: 2026-11-03
+last_activity_desc: "Run 18 fifth pass at 046fbe05: gate r20 green on 6644698e (12199 pass, 2 skip, 0 fail, 0 errors); verifier round at 046fbe05 (73, 76, 78 re-issued; 71, 72, 75, 77 kept; 74 gaps_found); no phase complete; v1.8 not complete; nothing pushed."
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
@@ -795,6 +795,15 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Incidents.** Relative-path edits by verifiers and units landed in the primary checkout `/root/src/repos/agent-substrate` on several occasions; each was removed, and the primary checkout was verified (`M .planning/STATE.md` and `?? .claude/` only). Briefs use absolute worktree paths only. The verifier for 75 edited its report with `sed`; its record was checked.
 - **Open owner decisions.** Q8; N5; the stored-id repair after an operator scan; W-L1; the 76 wording ratification; 72 decision 1, decision 3 and the default-off posture; 78 post-flush audit policy; 71 items; HARD-S3 scope; the GitHub pushes for PRs 199, 201 and 204 (not approved).
 
+## Run 18, fifth pass (2026-11-03, HEAD 046fbe05)
+
+- **Commits.** `62a25181` (NUL refusal at write and before send); `d23a919a` (lone surrogate refusal at write and in the memo); `6644698e` (corpus-sync and the v3 section; the surrogate and accepted limits); `046fbe05` (the two wording points in the cache-off bullet); `2cbd183f` (records).
+- **Gates.** Gate r20 green on `6644698e`: tsc 0, lint 0, bun 12199 pass, 2 skip, 0 fail, 0 errors, py 239, phase-close 239 of 239.
+- **Verifier round at 046fbe05.** The verifiers re-issued 73, 76 and 78 and kept 71, 72, 75 and 77 (fresh).
+- **Owner decisions executed.** W-L1 refused at write (the owner's answer); Q8 and N5 accepted and documented; the 76 cache-off wording ratified with its points; the 72 server-only refusal accepted; the 78 post-flush policy kept and documented.
+- **Wording question left open.** The phase 76 verifier's replay point: a keyed replay can write a missing event_ingest record, which the doc states at lines 413 to 416. Left as a wording question.
+- **Incidents.** None new. The primary checkout was not written in this pass.
+
 ## Needs Human
 
 | Phase | Item | What is needed | Who decides |
@@ -803,41 +812,37 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 71 | Malformed-ID response (400 or 404) | Choose 400 or 404 for malformed session IDs | Owner |
 | 71 | argDigest | Open item in the 71 verification record | Owner |
 | 71 | Unkeyed refusal | Accept or reject the owner unkeyed refusal | Owner |
-| 71 | Operator close | Operator close named in the 71 verification record | Operator |
 | 71 | Test-count reconciliation | ROADMAP 11,626 vs record 11,596, unreconciled | Owner |
-| 71 | Postgres restart clauses (criteria 3 and 5) | Run the PG-gated restart tests and record the result | Orchestrator |
+| 71 | Operator close | Operator close named in the 71 verification record | Operator |
+| 71 | Postgres restart clauses (criteria 3 and 5) | Orchestrator Postgres per-file evidence: run the PG-gated restart tests and record the result | Orchestrator |
 | 72 | Decision 1: corpus proof disclosure | Accept as a documented residual, or reverse to a per-repository tree | Owner |
 | 72 | Decision 3: allowlist unit | Choose the surface (SUBSTRATE_REPO_SCOPES keys) or the session as the unit | Owner |
-| 72 | Default-off posture | The corpus CLI and collector installer accept a registry without scopes (documented); decide whether the default stands | Owner |
 | 72 | Row 18 | Service gate under scope not reached; run it under scope | Orchestrator |
 | 72 | Row 8 | Postgres filter has orchestrator evidence only | Orchestrator |
-| 73 | N5 | RPC history depth bounds G1 for older hours; decide the bound | Owner |
-| 73 | Q8 | A graph lost before its first pointer, pinned ok true, not ratified | Owner |
-| 73 | N4 | Owner decided fail closed (2026-11-03); the 73 record still lists it open | Owner |
-| 73 | W3, W4, W5, N6, N8 | Fix or accept each open gap in the 73 record | Owner |
+| 73 | W-L2 | Lone surrogate in summary, session_id or repo; decide the same remedy as W-L1 (refuse at write) | Owner |
+| 73 | Stored graph ids over 512 bytes, NUL or lone surrogate | Operator scan of the store, then the owner decides the repair; blocks live anchoring on such a store | Owner |
+| 73 | W3, W4 (label), W5, N6, N8 | Fix or accept each open gap in the 73 record | Owner |
 | 73 | HARD-S3 scope | Decide the scope of HARD-S3 | Owner |
-| 73 | W-L1 | A lone UTF-16 surrogate in a graph id; owner decision | Owner |
-| 73 | Stored over-512-byte or NUL graph ids | No repair decided; blocks live anchoring on such a store | Owner |
-| 73 | W-DOC | NUL refusal not yet stated in docs/greptime-ledger.md | Orchestrator |
 | 73 | Live devnet probe and live store scan | Operator runs both | Operator |
 | 75 | O1 | Decide the fail-closed read policy | Owner |
 | 75 | O2 | Decide the connect cooldown; NOT FIXED | Owner |
 | 75 | H-1 | Add the H-1 degraded-brief test | Orchestrator |
-| 75 | H-2 to H-4 | Operator runs the live proofs | Operator |
-| 76 | Cache-off wording in docs/greptime-ledger.md | Ratify the exact wording; three precision points: the append-mode gate also applies to session inserts; the allow flag takes 1, true or yes; keyed replays are not writes | Owner |
+| 75 | Live Dragonfly runs (H-2 to H-4) | Operator runs the live proofs | Operator |
 | 76 | D76-15 | Decide whether to enable the buffer | Owner |
-| 76 | D76-13 override | Confirm the override (dead-letter unbounded); carried as PASSED, not verified | Owner |
+| 76 | D76-13 override | Confirm the override (dead-letter store unbounded) | Owner |
 | 76 | D76-14 and D76-19 | Decide | Owner |
 | 76 | R-1, R-2, R-3 | Decide each; R-1 and R-2 NOT FIXED | Owner |
 | 76 | Operator items 1 to 8 | Operator runs them as listed in the 76 record | Operator |
+| 76 | HARD-R3 | Orphaned in REQUIREMENTS, as listed in the 76 status | Orchestrator |
 | 77 | T8 ordering rule | Confirm the documented out-of-order rule; the pull path orders by priority (H5) | Owner |
+| 77 | H5 and H6 | Decide per the 77 verification record | Owner |
 | 77 | T5 to T7 | Verifier re-run of the Postgres per-file record; steering-idempotency 4 of 4 is orchestrator evidence | Orchestrator |
-| 77 | H3, H5, H6 | Verifier human items per 77-VERIFICATION | Orchestrator |
-| 77 | Migration 43 rehearsal | Operator rehearses the migration | Operator |
-| 78 | Post-flush audit policy | Decide the policy for a failure after the flush | Owner |
-| 78 | Unreadable-plan audit gap | Decide whether to close it (reconcile-main.ts around 240 to 247) | Owner |
-| 78 | HARD-H2 | Orphaned in REQUIREMENTS (lines 125, 140); decide whether to keep or retire it | Owner |
-| 78 | Live proofs | Scheduled tick and single-flight (staging); live Dragonfly SCAN/UNLINK; live GreptimeDB busy window; live CLI run with audit chain verify after restart (R8) | Operator |
+| 77 | H3 | Verifier human item per 77-VERIFICATION | Orchestrator |
+| 77 | Migration 43 rehearsal | Operator runs the migration 43 rehearsal on a restored dump | Operator |
+| 78 | Unreadable-plan audit gap and tests | Decide whether to close the gap (reconcile-main.ts around 242 to 248); counter-cut and unwritable audit path tests are open | Owner |
+| 78 | HARD-H2 | Orphaned in REQUIREMENTS (lines 125, 140) | Orchestrator |
+| 78 | Operator items 1 to 4 | Operator runs them as listed in the 78 record | Operator |
+| Milestone | v1.8 completion | Not started; no phase or milestone is complete | Owner |
 | GitHub | PRs 199, 201 and 204 | Pushes not approved; Greptile threads not resolved | Owner |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.
