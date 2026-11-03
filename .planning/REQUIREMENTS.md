@@ -130,7 +130,7 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 
 | Requirement | Category | Phase | Status |
 |-------------|----------|-------|--------|
-| HARD-S1 | Security | 71 | Locally verified (5/5); awaiting-review / pending QUALITY |
+| HARD-S1 | Security | 71 | Human-needed: 3 of 5 criteria verified on gsd/v18-int-all; Postgres restart clauses pending |
 | HARD-S2 | Security | 72 | Not started |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |

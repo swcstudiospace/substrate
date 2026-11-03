@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 phases 71-78 gaps_found or human_needed, none complete; integration gate r8 green on c7788f9d (12051 pass, 2 skip, 0 fail, 0 errors; timeout deviation logged); owner decisions open"
-stopped_at: "Integration tree gsd/v18-int-all at c7788f9d carries the Run 18 review pass. Gate r8 green. Greptile threads on PR 201 and PR 204 NOT resolved; nothing pushed; neither PR merge-ready. Owner decisions open; no phase complete; v1.7 open."
+status: "v1.8 phases 71-78 gaps_found or human_needed, none complete; integration gate r14 green on 27778dee (12077 pass, 2 skip, 0 fail, 0 errors; timeout deviation and diagnostic preload logged); owner decisions open"
+stopped_at: "Integration tree gsd/v18-int-all at 27778dee carries the second Run 18 pass. Gate r14 green. Greptile threads on PR 199, 201 and 204 NOT resolved; nothing pushed; no PR merge-ready. Owner decisions open; no phase complete; v1.7 open."
 last_updated: "2026-11-02"
 last_activity: 2026-11-02
-last_activity_desc: "Run 18 review pass at c7788f9d: gate r8 green (12051 pass, 2 skip, 0 fail, 0 errors); phases 71-78 re-verified (gaps_found 72, 73, 74, 76; human_needed 71, 75, 77, 78)"
+last_activity_desc: "Run 18 second pass at 27778dee: gate r14 green (12077 pass, 2 skip, 0 fail, 0 errors); phases re-verified: gaps_found 72, 73, 74; human_needed 71, 75, 76, 77, 78"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
@@ -767,6 +767,15 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
   - A phase 75 brief error (W2 is a phase 73 item) was corrected by the verifier.
   - Carried from earlier records: ENOSPC during the phase 77 gate runs r2 to r4 (void); the Run 16 figure of 3.1 GB freed was not measured (see Run 17). Manual fallbacks, owner-approved: the phase 72 plan step and the phase 74 CONTEXT step; phases 71 and 78 records by the GSD verifier procedure; phases 72, 74 and 77 re-run after fixes.
 
+## Run 18, second pass (2026-11-03, HEAD 27778dee)
+
+- **Commits.** `a147228f` (phase 72: corpus CLI git and hook gated to the registry; HARD-S2 amended); `1633fecf` (phase 78: R5 bound 500, R6 one unit, R7 audit record per execute); `9ee12695` (gate r9 fixes: a real Postgres repos-filter defect in `worktree-registry.ts`, now a typed text array, verified 12 of 12 on scratch Postgres 16; redaction lock by moving AuditLog construction into `observe.ts` `openAuditLog`; herdr bounded wait; secrets-scan fixture); `0504e77c` (5c: a hook under a registry must lie inside its registered repository); `48fb961c` (observer 10,000-scan test budget 180 s to 600 s; assertions unchanged); `4600d2a2` (cache waiter-deadline bound 500 ms to 2 s; the shared load never resolves in that test); `27778dee` (5b: registration checked before any git call).
+- **Gates.** r8 green (c7788f9d); r9 red (4 tests and phase-close, all fixed in `9ee12695`); r10 green (`9ee12695`); r11 red (observer test at its 180 s budget under load); r12 red (cache bound; grok connector smoke `not_modified` 500 ms SLO under load, a product check, NOT changed); r13 green (`4600d2a2`); r14 green (`27778dee`). Deviations still in force: `--timeout 30000` and the diagnostic abort-trace preload.
+- **Owner decisions executed.** 2: HARD-S2 amended to the surface model; identifier clause still open. 4: corpus CLI and hooks gated; 5d, 6b and collectors cwd reads still open. 6: phase 78 rules applied. D76-16 accepted for SC1 scope; broader boundary still to confirm.
+- **Owner decisions still open.** The phase 73 memo format change (protocol; go-ahead needed); HARD-R1 as a new phase; 5d; 6b; HARD-S2 identifier clause; decision 1 (corpus proof disclosure); decision 3 (allowlist unit); D78-5; audit-chain single-writer statement; post-flush audit failure policy; the 76 broader boundary; the smoke 500 ms SLO on a shared host; the 71 items.
+- **GitHub.** No pushes; the owner approved no GitHub writes.
+- **Incidents.** The integration `node_modules` was reinstalled after an earlier scratch cleanup (verified). The scratch-worktree method is no longer used.
+
 ## Needs Human
 
 | Phase | Item | What is needed | Who decides |
@@ -777,30 +786,34 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 71 | Unkeyed refusal acceptance | Accept or reject the refusal of unkeyed commands | Owner |
 | 71 | Test count reconciliation | ROADMAP 11,626 vs record 11,596, unreconciled | Orchestrator |
 | 71 | Postgres restart clauses (criteria 3 and 5) | Run the PG-gated restart tests and record the result | Orchestrator |
-| 72 | HARD-S2 | Amend the wording to the surface-bearer model, or implement per-repository credential references | Owner |
-| 72 | Corpus CLI scope | The corpus CLI runs git with no scope check; scope it or accept | Owner |
-| 72 | Corpus proof disclosure | Accept as a documented residual, or reverse to a per-repository tree | Owner |
-| 72 | Allowlist unit | Confirm the surface (SUBSTRATE_REPO_SCOPES keys) as the unit | Owner |
-| 72 | Tests 2b, 8 and 18; Postgres worktree filter | Write the missing tests and run the Postgres worktree-registry filter | Orchestrator |
-| 73 | Whole-hour removal (probe-confirmed, undetected) | Set the threat model and the remedy | Owner |
+| 72 | HARD-S2 identifier clause | Raw paths at POST /drift, drift --path and --root; decide the identifier clause | Owner |
+| 72 | 5d | A registered linked worktree's shared hooks land in the unregistered primary checkout's git directory; decide | Owner |
+| 72 | 6b | Nested checkouts; decide | Owner |
+| 72 | Corpus proof disclosure (decision 1) | Accept as a documented residual, or reverse to a per-repository tree | Owner |
+| 72 | Allowlist unit (decision 3) | Confirm the surface (SUBSTRATE_REPO_SCOPES keys) as the unit | Owner |
+| 72 | Row 18 | Service-level live gate not exercised under scope; run it under scope | Orchestrator |
+| 73 | Whole-hour removal | Threat model includes it; remedy not built; go-ahead needed for the memo format change | Owner |
 | 73 | W2, W3, W4, W5 and live devnet items | Fix or accept each gap; operator runs the live devnet proofs; W2 adoption path NOT FIXED | Owner; operator |
-| 74 | HARD-R1 | Build the cross-repo operation or waive the requirement | Owner |
+| 74 | HARD-R1 | Build as its own phase, or waive | Owner |
 | 75 | O1 read policy | Decide the read policy | Owner |
 | 75 | O2 cooldown | Decide the cooldown; currently NOT FIXED | Owner |
 | 75 | Live proof and H-1 degraded-brief test | Operator runs the live proof; add the H-1 test | Operator; orchestrator |
-| 76 | D76-16 pre-send refusal boundary | Decide the boundary | Owner |
+| 76 | Broader boundary | Confirm the boundary beyond the accepted pre-send scope (D76-16); non-breaker tip-read failures are also not buffered | Owner |
 | 76 | D76-15 buffer opt-in | Decide whether to enable the buffer | Owner |
 | 76 | D76-13 override (dead-letter unbounded) | Confirm the accepted override | Owner |
 | 76 | D76-14 and D76-19 buffered session.end | Decide | Owner |
 | 76 | R-1, R-2, R-3 | Decide each; R-1 and R-2 NOT FIXED | Owner |
 | 76 | Live GreptimeDB rehearsal | Operator runs the rehearsal | Operator |
-| 77 | T5 to T7 Postgres run | Verifier did not observe the run; orchestrator log pg-perfile-steering-idempotency.pg.test.log shows 4 of 4; verifier re-run needed | Orchestrator |
+| 77 | T5 to T7 Postgres run | Per-file run done by orchestrator (steering-idempotency 4 of 4); verifier record re-run needed | Orchestrator |
 | 77 | H3, H5, H6 | Verifier human items per 77-VERIFICATION | Orchestrator |
 | 77 | Migration 43 rehearsal | Operator rehearses the migration | Operator |
-| 78 | Corpus delete rules R5, R6, R7 | Apply as written or narrow them | Owner |
 | 78 | D78-5 | Accept the ordered three-pass flush as design of record | Owner |
+| 78 | Audit-chain single-writer statement | Decide the statement | Owner |
+| 78 | Post-flush audit failure policy | Decide the policy | Owner |
+| 78 | Bound reading | Decide the reading | Owner |
 | 78 | Live proofs | Scheduled tick, Dragonfly SCAN/UNLINK, Greptime lease query, live CLI | Operator |
-| PRs 199, 201, 204 | GitHub threads and push approval | Threads NOT resolved; nothing pushed; no PR is merge-ready | Owner |
+| Smoke SLO | grok connector smoke 500 ms SLO on a shared host | Decide whether the SLO holds under shared-host load; not changed | Owner |
+| GitHub | Threads and push | No pushes; owner approved no GitHub writes; threads on PRs 199, 201, 204 not resolved | Owner |
 | v1.8 | Milestone completion and cleanup | Irreversible | Owner |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.

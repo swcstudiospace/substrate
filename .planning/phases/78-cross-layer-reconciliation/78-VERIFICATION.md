@@ -1,25 +1,24 @@
 ---
 phase: 78-cross-layer-reconciliation
-verified: 2026-11-02T18:27:55Z
+verified: 2026-11-02T22:21:10Z
 status: human_needed
-score: 1/2 must-haves verified in code; SC2 UNCERTAIN (owner decision: repair result units and corpus-rule scope); 4 live proofs human_needed
-tree: /root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD c7788f9d
-criteria_source: this tree's ROADMAP, Phase 78 section. origin/main has identical success-criteria text but different Status and Plans lines, so its section does not match this tree's; reported below
+score: 1/2 must-haves verified; SC2 mechanics and owner decision 6 rules (R5, R6, R7) verified in code and by named tests; SC2 stays UNCERTAIN on owner-held items (D78-5, R3 per-key form, R8, audit single-writer statement, post-flush record placement); 4 live proofs human_needed
+tree: /root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD 9ee12695
+criteria_source: this tree's ROADMAP, Phase 78 section. The success-criteria text matches origin/main exactly. The Status and Plans lines differ (origin/main: "Not started", "none written"); this tree's section is used, and the difference is reported below, not chosen silently
 covered_files: [
     ".planning/phases/78-cross-layer-reconciliation/78-01-PLAN.md",
     ".planning/phases/78-cross-layer-reconciliation/78-CONTEXT.md",
     ".planning/phases/78-cross-layer-reconciliation/78-SUMMARY.md",
     "docs/reconcile.md",
+    "docs/mcp-audit.md",
     "docs/runbooks/corpus-sync.md",
+    "packages/audit/src/log.ts",
     "packages/corpus/src/protocol.ts",
-    "packages/mcp-server/src/admission.ts",
     "packages/mcp-server/src/cache.ts",
-    "packages/mcp-server/src/config.test.ts",
     "packages/mcp-server/src/config.ts",
-    "packages/mcp-server/src/corpus/reconcile.ts",
-    "packages/mcp-server/src/flag-registry.ts",
     "packages/mcp-server/src/greptime.ts",
     "packages/mcp-server/src/index-store.ts",
+    "packages/mcp-server/src/observe.ts",
     "packages/mcp-server/src/reconcile-main.test.ts",
     "packages/mcp-server/src/reconcile-main.ts",
     "packages/mcp-server/src/reconcile-read.test.ts",
@@ -29,184 +28,182 @@ covered_files: [
     "packages/mcp-server/src/reconcile-run.ts",
     "packages/mcp-server/src/reconcile.test.ts",
     "packages/mcp-server/src/reconcile.ts",
-    "packages/mcp-server/src/service.test.ts",
     "packages/mcp-server/src/service.ts",
     "scripts/reconcile.ts"
   ]
-covered_digest: "v3:sha256:22bfbf767638293cfedc24b5b4f3c44dc93126de2461af56994538a36cfb14a1"
+covered_digest: "v3:sha256:72803a186210afc7834e17ce76825c15156f6ece62742769e5018042f4611e5d"
 behavior_unverified: 1
 overrides_applied: 0
 re_verification:
-  previous_record: "78-VERIFICATION.md at tree 749e97e3 (re-verification), status human_needed, 1/2 verified, SC2 UNCERTAIN"
-  reason: "Re-verification at HEAD c7788f9d. No phase 78 file changed since 749e97e3: the only tree delta in packages, scripts and docs is phase 76 (event-buffer.ts, event-dead-letter.ts and its test, service-event-buffer.test.ts, docs/greptime-ledger.md) and service.ts, which shifted the reconcile block by about 8 lines (tick now service.ts:4067-4072). Every citation is re-read on this tree. SC2 stays UNCERTAIN. The corpus delete rules were compared point by point this pass and show two divergences not in the prior record: a per-run bound and an audit record (W7, W8)."
+  previous_record: "78-VERIFICATION.md at tree c7788f9d, status human_needed, 1/2, SC2 UNCERTAIN (WARNINGS 1, 7, 8)"
+  reason: "Owner decision 6 applied in 1633fecf (R5 bound, R6 one unit, R7 audit record) and gated by 9ee12695 (reconcile-main.ts import and REPAIR_ENV fixture). The SC1 code paths (reconcile.ts, reconcile-run.ts, reconcile-read.ts, service.ts, config.ts, cache.ts, index-store.ts) have no delta since c7788f9d; SC1 is re-observed below by name."
   gaps_closed:
-    - "The prior record's advisory on the memory-window edge is re-read: the audit is awaited after the row insert and before the reply (service.ts:3259, :3289). The prior text said the audit came after the reply; corrected (advisory below)"
+    - "WARNING 1 (repair result units): closed. The result counts keys in one unit: planned, removed, remaining (reconcile-repair.ts:56-67); `listed` and `repaired` are gone from the source and docs"
+    - "WARNING 7 (no per-run bound): closed for the owner's rule. One execute removes at most RECONCILE_MAX_ITEMS = 500 keys across the three passes (reconcile-repair.ts:11, :240, :185-192)"
+    - "WARNING 8 (no audit record): closed for executes. One record per execute on the MCP audit chain (reconcile-main.ts:156-171, :259-260), with the plan digest, counts and outcome. Two residuals stay open, listed below"
   gaps_remaining:
-    - "WARNING 1: the repair result sets listed (plan item count, 1 for any repair with orphans) against repaired (keys removed) (reconcile-repair.ts:139, :192-196, :51)"
-    - "WARNING 2: the flush removes every answer, counter and mark under substrate:v1:*, not the orphan graphs' keys (reconcile-repair.ts:15, :212-220); recorded as D78-5, kept open"
-    - "WARNING 3: no tick test runs a cache-off fixture; the cache-off line is covered by runReport (reconcile-read.test.ts:391) only"
-    - "WARNING 7 (new): the corpus rule bounds a run at 500 repairs (packages/corpus/src/protocol.ts:262; corpus/reconcile.ts:171); the flush has no per-run bound on removed keys (scan refusal only, at 1000000 keys)"
-    - "WARNING 8 (new): the corpus rule audits execute as corpus_ingest, fail-closed (admission.ts:253); the reconcile repair writes no audit event on any path"
-    - "Live-only checks: interval firing and single-flight, Dragonfly SCAN and UNLINK at production counts, GreptimeDB queryEvents in a busy window, a live CLI run"
+    - "D78-5: whole-prefix flush and the three ordered passes. Owner ratification pending (WARNING 2; R3 per-key form)"
+    - "R8: --server-stopped is an operator assertion (reconcile-main.ts:98-99; reconcile-repair.ts:252-259)"
+    - "Audit-chain single-writer: docs/mcp-audit.md:33-35 says substrate-mcp is the only writer; docs/reconcile.md:79 says a repair execute is a second writer. Owner statement needed (see Open decisions)"
+    - "Post-flush record: the audit append follows the flush (reconcile-main.ts:258-260, :270-273). Only the chain's durability is checked before the flush (:201-212)"
+    - "Second run with the same plan is refused when the bound cuts into the counter pass (digest changes; see W9). The named test covers only the answer-cut case"
+    - "An execute with an unreadable plan file writes no audit record (reconcile-main.ts:240-248)"
+    - "Live proofs (human items 1 to 4)"
   regressions: []
 behavior_unverified_items:
-  - truth: "Single-flight: a scheduled tick that starts while a run is in flight starts no second run (service.ts:4068-4071, reconcilePass ??=)"
+  - truth: "Single-flight: a scheduled tick that starts while a run is in flight starts no second run (service.ts:4067-4072, reconcilePass ??=)"
     test: "Start the server with SUBSTRATE_RECONCILE_INTERVAL_S=60 over a clean fixture. Start a second tick while the first is in flight (or force one with a slow ledger read)"
     expected: "Exactly one run is in flight. The second tick returns the in-flight promise and writes no second line. Neither run writes to the ledger, the index or the cache"
     why_human: "No test covers the guard. The interval cadence is real time and no test fires setInterval. This is an ordering invariant that presence and wiring cannot show"
 advisory:
   - finding: "A write whose memory row is created before the window start but whose audit event is stamped after it is reported as an accepted audit event with no index row (false drift at the window edge)"
     category: other
-    reason: "Both sides use one sinceIso (reconcile-run.ts:51). The index side filters memory_entries.created >= sinceIso (index-store.ts:2955); the ledger side filters ts >= since (greptime.ts:1533). The row is written inside governMemoryWrite (service.ts:3259) and its audit is awaited after the insert, before the reply (auditMemoryWrite at service.ts:3289). A write that straddles the window start therefore appears on the ledger side only. Narrow: only writes in the emit latency before the boundary. Not repaired, because the report never repairs memory; it only makes the run unclean"
-    evidence_status: "none provided: code read only [INFERENCE from the call order]; not reproduced"
+    reason: "Both sides use one sinceIso (reconcile-run.ts:51). The row is inserted in governMemoryWrite and its audit is awaited before the reply (service.ts:3259, :3289). A write straddling the window start appears on the ledger side only. Not repaired; the report never repairs memory"
+    evidence_status: "code-order reasoning only [INFERENCE]; not reproduced"
+  - finding: "Dry-run result reads remaining equal to planned (remaining = planned - removed, with removed 0). The reason string states the one-run split (500 removed, the rest left)"
+    category: other
+    reason: "Consistent with the field definition (reconcile-repair.ts:51-54). A reader comparing `remaining` in a dry run to the post-run figure will read it wrong; the reason string is the one-run figure"
+    evidence_status: "read in code"
 human_verification:
   - test: "Staging host with SUBSTRATE_RECONCILE_INTERVAL_S=60 over a clean fixture: let one interval fire, then start a second tick while the first is in flight. Compare ledger, index and cache write counts before and after"
     expected: "Each tick writes one '[substrate] reconcile {...}' line with clean:true. No ledger, index or cache write. The second tick starts no second run"
-    why_human: "The interval cadence is real time and no test fires the interval. The single-flight guard (service.ts:4068-4071) has no test. The tick body is covered by service.test.ts:5871"
-  - test: "Live Dragonfly with the server stopped, on a copy of production key counts: repair --plan <file> (dry run), then repair --plan <file> --execute --server-stopped"
-    expected: "The dry run writes nothing. The execute removes answers, then generation counters, then the forget mark, and keeps budget: and emb: keys. A prefix above 1000000 keys refuses with nothing removed. <plan>.result.json shows repaired against listed"
+    why_human: "The interval cadence is real time and no test fires the interval. The single-flight guard (service.ts:4067-4072) has no test"
+  - test: "Live Dragonfly with the server stopped, on a copy of production key counts: repair --plan <file> (dry run); then repair --plan <file> --execute --server-stopped; then a second execute. Then, if the bound cut into the counter pass, plan again and repair again"
+    expected: "The dry run writes nothing and its reason states the one-run split. The execute removes at most 500 keys: answers first, then generation counters, then the forget mark; budget: and emb: keys are kept. <plan>.result.json holds planned, removed, remaining, limit and truncated (no listed or repaired). One audit record is appended with outcome, counts and plan_digest. A prefix above 1000000 keys refuses with nothing removed"
     why_human: "Real SCAN and UNLINK cost and behaviour at production counts (H5) cannot be exercised by a unit test"
   - test: "Live GreptimeDB queryEvents for claim, warning and note kinds in a busy window"
     expected: "The lease comparison completes, or reports truncated when a node exceeds LOOKUP_LIMIT (100) rows or the lookup count passes the cap of 200"
     why_human: "Needs a live ledger with real volume"
-  - test: "Live CLI run with real stores: report; repair --plan <file> --execute without --server-stopped; a dry run; repair --plan <file> --execute --server-stopped"
-    expected: "Exit codes match docs/reconcile.md: report 0 or 1, usage and missing config 2, refused or failed repair 1. Missing --server-stopped exits 2 before any connection. The result file holds executed, refused, repaired, listed and error"
-    why_human: "Needs live PG, GreptimeDB and Dragonfly"
+  - test: "Live CLI run with real stores and a real audit file: report; repair --plan <file> --execute without --server-stopped (exit 2); repair --plan <file> --execute --server-stopped without SUBSTRATE_AUDIT_PATH (exit 2, nothing flushed); the execute with SUBSTRATE_AUDIT_PATH set; then restart substrate-mcp and verify the audit chain"
+    expected: "Exit codes match docs/reconcile.md. The chain verifies after the restart, with the repair record in place and a continuous seq and prev. The record reason carries outcome, planned, removed, remaining, limit, plan_digest and report_digest"
+    why_human: "Needs live PG, GreptimeDB, Dragonfly and an audit file the server writes. The single-writer sequence (CLI append, then server restart and verify) is the proof the owner's statement depends on"
 ---
 
 # Phase 78: Cross-layer reconciliation Verification Report
 
 **Phase goal:** The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
-**Verified:** 2026-11-02T18:27:55Z
+**Verified:** 2026-11-02T22:21:10Z
 **Status:** human_needed
-**Re-verification:** Yes, at HEAD c7788f9d (previous record at 749e97e3)
-**Scope:** the integration tree at `c7788f9d`. Procedure: gsd-verifier, goal-backward. Live proofs are operator items and stay human_needed. Owner-held decisions stay open.
+**Re-verification:** Yes, at HEAD 9ee12695 (previous record at c7788f9d)
+**Scope:** the integration tree at `9ee12695`. Procedure: gsd-verifier, goal-backward. Live proofs are operator items. Owner-held decisions stay open.
 
 ## Criteria and conflicts
 
-- **Criteria source used:** this tree's ROADMAP, Phase 78 section. The brief's rule uses origin/main only when its phase text matches this tree's. The success criteria match exactly, but the Status and Plans lines do not, so the rule selects this tree. The prior record used origin/main; this pass corrects that. The verdicts do not depend on the choice.
-- **Difference reported, not chosen:** origin/main says `Status: Not started` and `Plans: none written`. This tree says `human_needed (verified on gsd/v18-int-all 7382ad10; live items open)` and links 78-01 and 78-CONTEXT. The phase directory holds a plan and a summary, so origin/main's section is stale. The owner should reconcile the ROADMAP.
-- **Naming deviation (no criterion failure):** 78-CONTEXT.md D78-6 names the plan's window field `window`. The code writes `window_hours` (reconcile-repair.ts:42, :102).
-- **Recorded amendment:** 78-CONTEXT.md D78-5 specifies a whole-prefix delete. The code runs three ordered passes (reconcile-repair.ts:212-220). The amendment is recorded in 78-SUMMARY.md and STATE.md Run 17. CONTEXT is not edited. See Open decisions.
-- **Gate evidence (orchestrator, not re-run here):** `/root/src/worktrees/backups/gates-int-r8.log` opens with `PG_READY port=59689 head=c7788f9d`. TSC_EXIT=0 (line 8); LINT_EXIT=0 (line 11); bun test 12051 pass, 2 skip, 0 fail (lines 16738-16740); PY_EXIT=0 (line 16772); phase-close 239 pass, 0 fail (lines 16776-16777); GATES_DONE rc=0 (line 16782).
-- **Tree delta since 749e97e3:** the packages, scripts and docs delta is six files, all phase 76 (event-buffer.ts, event-dead-letter.ts and its test, service-event-buffer.test.ts, service.ts, docs/greptime-ledger.md). No phase 78 file changed: `reconcile*.ts`, `cache.ts`, `index-store.ts`, `config.ts`, `flag-registry.ts`, `scripts/reconcile.ts`, `docs/reconcile.md`, `package.json` and the reconcile tests are unchanged. `service.ts` gained lines above the reconcile block, so its citations are re-read.
+- **Criteria source used:** this tree's ROADMAP, Phase 78 section (`/root/src/worktrees/as-gsd-v18-all/.planning/ROADMAP.md`). The brief uses origin/main only when its text matches this tree. The two success-criteria texts are identical. Only the Status and Plans lines differ.
+- **Difference reported, not chosen:** origin/main says `Status: Not started` and `Plans: none written`. This tree says `human_needed: 1 of 2 in code; SC2 uncertain, with corpus delete-rule clauses R5, R6 and R7 not met as written; owner decides`. That Status line is now stale: 1633fecf met R5, R6 and R7 in code under owner decision 6. The owner or orchestrator should update the ROADMAP line (W11). The verdicts below do not depend on which section is used.
+- **Naming deviation (no criterion failure):** 78-CONTEXT.md D78-6 names the plan's window field `window`. The code writes `window_hours` (reconcile-repair.ts:45, :125-145).
+- **Recorded amendment:** 78-CONTEXT.md D78-5 specifies a whole-prefix delete. The code runs three ordered passes (reconcile-repair.ts:272-276). The amendment is recorded in 78-SUMMARY.md and STATE.md. Owner ratification is pending (Open decisions).
+- **Gate evidence (orchestrator's run, not re-run here):** `/root/src/worktrees/backups/gates-int-r10.log` line 7 `PG_READY port=54285 head=9ee12695`; line 8 `TSC_EXIT=0`; line 11 `LINT_EXIT=0`; line 17097 `12075 pass`; line 17099 `0 fail`; line 17131 `PY_EXIT=0`; line 17135 `239 pass`; line 17136 `0 fail`; line 17141 `GATES_DONE rc=0`.
+- **Tree state:** `packages/` and `docs/` at 9ee12695 change phase 78 in three files since c7788f9d: reconcile-repair.ts, reconcile-main.ts and observe.ts (which now exposes `openAuditLog`, observe.ts:294-296). `reconcile.ts`, `reconcile-run.ts`, `reconcile-read.ts`, `service.ts`, `config.ts`, `cache.ts` and `index-store.ts` are unchanged since c7788f9d (checked by `git diff --stat`). `docs/mcp-audit.md` is unchanged. `packages/audit/src/log.ts` is unchanged. An unrelated uncommitted edit exists in the tree at `.planning/phases/76-telemetry-buffer-and-dead-letter/76-VERIFICATION.md`; it is not this phase's and was not read or changed.
 
 ## Must-haves
 
 | # | Criterion (this tree's ROADMAP) | Verdict | Evidence on this tree |
 | - | ------------------------------- | ------- | --------------------- |
-| 1 | A scheduled reconcile reports per-layer counts and the first mismatching key, and writes nothing on a clean run | VERIFIED in code and by test; live cadence and single-flight human_needed | Counts: reconcile-run.ts:55-96 (ledger 56, 60; index 64, 75, 80; cache 87-96). First key: reconcile.ts:193-194 (`firstOf`) and :205-209 (`first`). Comparators: reconcile.ts:82-119 (lease), :129-153 (memory), :162-174 (generation). Scheduled line: service.ts:4089-4090 carries `schema`, `generated_at`, `clean`, `counts`, `truncated`, `unchecked_layers`, `first`. Writes per tick: one stdout line (service.ts:4090); stderr only on skip (:4077) and failure (:4092). Read-only path: `runReport` calls `queryEvents` (greptime.ts:1519-1538, a SELECT), index SELECTs only (index-store.ts:2924-2981), and cache SCANs only (cache.ts:1061-1079). `unlinkKeys` has one caller, reconcile-repair.ts:193. Clean-run no-write proof: service.test.ts:5871-5936 (proxies at :5874-5891 throw on any non-read call; asserts one stdout line, `clean:true`, empty stderr and empty `writes` at :5925-5931). Cadence: `startReconcile` is off at interval 0 (service.ts:4052), with one unref'd `setInterval` (:4053-4054); `stopReconcile` clears it (:4061-4064); test service.test.ts:5860. Config: config.ts:1616-1623 (interval min 60, window 1 to 168); flag-registry.ts:986-987 |
-| 2 | Repair is a separate confirmed step with a plan record, following the corpus delete rules | UNCERTAIN (owner decision; WARNINGS 1, 2, 7, 8) | Mechanics verified. A separate `repair` subcommand, dry run by default (reconcile-repair.ts:167-176). Execute needs `--server-stopped`, a usage error with exit 2 before any client (reconcile-main.ts:93-94, called at :150 before `loadConfig` at :158; reconcile-repair.ts:177-186). Plan record: `planFromReport` (reconcile-repair.ts:86-106; schema :100, `report_digest` :103), written with `wx` (reconcile-main.ts:190). Digest recheck (reconcile-repair.ts:141-150); orphan recheck and plan-item check (:151-165, `planRefusal` :112-123). Flush: scan once (:199), refuse on truncation (:200-209), three ordered passes (:212-220). Removed count is the server's UNLINK reply (cache.ts:1096-1101); only confirmed removals reach `repaired` (reconcile-repair.ts:192-196). Result file `<plan>.result.json` (reconcile-main.ts:212-220). Corpus-rule conformance is point by point in the next table: most rules hold; the unit mismatch (WARNING 1), the per-run bound (WARNING 7) and the audit record (WARNING 8) do not |
+| 1 | A scheduled reconcile reports per-layer counts and the first mismatching key, and writes nothing on a clean run | VERIFIED in code and by named test (re-observed this pass); live cadence and single-flight human_needed | Counts: reconcile-run.ts:55-96. First key: reconcile.ts:193-194 (`firstOf`), :205-209. Comparators: reconcile.ts:82-119 (lease), :129-153 (memory), :162-174 (generation). Scheduled line: service.ts:4089-4090. The tick writes one stdout line and stderr only on skip or failure (service.ts:4075-4094). The report path is read-only: `queryEvents` SELECT (greptime.ts:1519-1538), index SELECTs (index-store.ts:2924-2981), cache SCAN (cache.ts:1061-1079) |
+| 2 | Repair is a separate confirmed step with a plan record, following the corpus delete rules | UNCERTAIN (WARNING; owner-held items D78-5, R3 per-key form, R8, single-writer statement, post-flush record placement). The owner decision 6 rules R5, R6, R7 are VERIFIED in code and by named tests | Separate `repair` subcommand, dry run by default (reconcile-main.ts:92-101; reconcile-repair.ts:243-251). Execute needs `--server-stopped`, a usage error with exit 2 before any client (reconcile-main.ts:98-99, called at :183, before `loadConfig` at :191). Plan record: `planFromReport` (reconcile-repair.ts:125-145), written with `wx` (reconcile-main.ts:235). Digest recheck (reconcile-repair.ts:210-216). Orphan and plan-item recheck (:217-222; `planRefusal` :151-162). Scan once, refuse on truncation (:226-233). Bound (R5): reconcile-repair.ts:240-241 and :185-192. Unit (R6): :56-67. Audit (R7): reconcile-main.ts:156-171 and :203-212, :259-260 |
 
-Must-haves: 1 of 2 verified in code. SC2 is UNCERTAIN, with its mechanics verified and its reporting rule and corpus scope held for an owner decision. No truth FAILED. Human items are non-empty, so status is `human_needed`.
+Must-haves: 1 of 2 verified in code. SC2 is UNCERTAIN on owner-held items, with no truth FAILED. The human items are non-empty, so the status is `human_needed` (Step 9, rule 2).
 
 ## SC2: the corpus delete rules, point by point
 
-The corpus rules are in `docs/runbooks/corpus-sync.md` (§2 lines 60-70 and §5 lines 120-121) and implemented in `packages/mcp-server/src/corpus/reconcile.ts`. The bound is `RECONCILE_MAX_ITEMS = 500` in `packages/corpus/src/protocol.ts:262`.
+The rules are in `docs/runbooks/corpus-sync.md` (§2 lines 60-79; §5 lines 115-121). The bound is `RECONCILE_MAX_ITEMS = 500` in `packages/corpus/src/protocol.ts:262`.
 
-| # | Corpus rule | Corpus evidence | Reconcile evidence | Verdict |
-| - | ----------- | --------------- | ------------------ | ------- |
-| R1 | Dry run first; reads and changes nothing | corpus-sync.md:47 and :60; `reconcileCorpus(deps, execute)` (corpus/reconcile.ts:202) | Dry run default (reconcile-repair.ts:167-176); `plan` writes only `--out` (reconcile-main.ts:187-191) | MET |
-| R2 | Explicit execute | corpus-sync.md:63 (`--execute`) | `--execute --server-stopped` (reconcile-main.ts:93-94) | MET |
-| R3 | Act only on what the plan names; an orphan an active row holds is kept | corpus-sync.md:67-68; `deleteOrphans` keeps ids with `activeReferences > 0` (corpus/reconcile.ts:119) | Plan is pinned by digest and the live orphan set, so a change refuses the whole plan (reconcile-repair.ts:141-165). The flush is by class, not by named key: it removes every counter, including live graphs' counters (:216), and every answer class (:212-215). Divergence, recorded as D78-5 and WARNING 2 | PARTLY MET; owner decision |
-| R4 | Delete confirmed by the store; an unconfirmed delete is not counted | corpus-sync.md:68-69; `deleteOrphans` counts `outcome.deleted` filtered to asked ids (corpus/reconcile.ts:127-130) | Count is the server's UNLINK reply (cache.ts:1096-1101), added to `repaired` only per batch (reconcile-repair.ts:192-196) | MET |
-| R5 | At most 500 of each repaired per run | corpus-sync.md:70; `RECONCILE_MAX_ITEMS = 500` (packages/corpus/src/protocol.ts:262), applied with `slice` (corpus/reconcile.ts:170-171) | None. The flush removes every key under `substrate:v1:*` it finds, in one run. The only bound is the scan refusal at 1000000 keys (reconcile-repair.ts:18, :200-209) | NOT MET as written (WARNING 7; owner decision on whether the bound applies to a cache flush) |
-| R6 | `repaired` is read against the listed orphans; a shortfall means run it again | corpus-sync.md:69; `listed` is `orphansInPlane`, and `repaired.deleted` counts the same unit (corpus/reconcile.ts:190-195) | `listed` is `plan.items.length`, which is 1 for any repair with orphans (reconcile-repair.ts:139, reported at :51). `repaired` is keys removed (:192-196). The units differ, so the shortfall check cannot read as the corpus rule means it (WARNING 1) | NOT MET as written (owner decision on the unit) |
-| R7 | Audit: the dry run is audited as `corpus_status` (fail-open); the execute as `corpus_ingest` (fail-closed) | corpus-sync.md:75-76; `corpus_status` read and `corpus_ingest` write (admission.ts:252-253) | No audit call on any repair path (reconcile-main.ts:181-232 and reconcile-repair.ts; `grep` for audit and emit in the reconcile files finds none). The record is the `<plan>.result.json` file only (reconcile-main.ts:212-220) | NOT MET as written (WARNING 8; owner decision on whether the result file is the record) |
-| R8 | Serialised with ingest by the corpus lock | corpus-sync.md:76; `withCorpusLock` (corpus/reconcile.ts:202-203) | `--server-stopped` is an operator assertion, not checked (reconcile-main.ts:93-94). Already an open decision | OPEN (operator assertion; recorded) |
-| R9 | Re-run is safe: a second run finds nothing | corpus-sync.md:78-79 (proof: dry run again) | Second execute refuses with no orphans left (reconcile-repair.ts:151-160); test "a second execute after the first finds nothing and is a no-op" (reconcile-repair.test.ts:176) | MET |
+| # | Corpus rule | Reconcile evidence on 9ee12695 | Verdict |
+| - | ----------- | ------------------------------ | ------- |
+| R1 | Dry run first; reads and changes nothing | Dry run is the default (reconcile-repair.ts:243-251; reconcile-main.ts:98-101). The dry run reads the cache keys with a read-only SCAN (:226), then writes nothing. The dry run is not audited (see W8) | MET |
+| R2 | Explicit execute | `--execute --server-stopped` (reconcile-main.ts:98-99) | MET |
+| R3 | Act only on what the plan names; a key an active row holds is kept | Plan pinned by digest and by the live orphan set (reconcile-repair.ts:210-222). The flush selects by class, not by named key: every answer class (:24-31, :168-179), every `gen` counter and the mark (:172-177). Recorded divergence: D78-5 and W2 | PARTLY MET; owner decision (D78-5) |
+| R4 | A delete confirmed by the store; an unconfirmed delete is not counted | `removed` is the UNLINK count per batch (reconcile-repair.ts:264-271); the count is the server's reply (cache.ts:1087-1102) | MET |
+| R5 | At most 500 per run (corpus: "at most 500 of each") | One run removes at most `RECONCILE_MAX_ITEMS` keys across the three passes: `boundPasses` takes the first 500 keys in pass order (reconcile-repair.ts:185-192, :240); `truncated` is `planned > limit` (:87). The owner's text is "at most RECONCILE_MAX_ITEMS keys per run", which the code follows. The corpus text says "of each", a per-kind reading; the owner should confirm the total reading (Open decisions) | MET as the owner ruled |
+| R6 | `repaired` read against the listed items in one unit | `planned`, `removed` and `remaining` are all cache keys (reconcile-repair.ts:56-67; :239 `planned` = sum of the pass lengths). `listed` and `repaired` are gone from source and from docs/reconcile.md:46 | MET as the owner ruled |
+| R7 | Audit: the dry run is audited (fail-open); the execute is audited (fail-closed) | One record per execute, tool `reconcile_repair`, surface `operator`, transport `internal`, `decision` allowed or denied, `reason` with `outcome`, `planned`, `removed`, `remaining`, `limit`, `plan_digest` (sha256 of the plan file bytes, reconcile-main.ts:260) and `report_digest` (reconcile-main.ts:156-171). Owner text scopes R7 to the execute. Residuals: the record is appended after the flush (see W8); the dry run writes no record; an unreadable plan writes none (W8) | MET for the execute as the owner ruled; residuals open |
+| R8 | Serialised with ingest by the corpus lock | `--server-stopped` is an operator assertion (reconcile-main.ts:98-99; reconcile-repair.ts:252-259). Not checked by code | OPEN (operator assertion; recorded) |
+| R9 | A re-run is safe: a second run finds nothing | A second execute after a full flush refuses with no orphans left (reconcile-repair.ts:217-220); test at reconcile-repair.test.ts:197 | MET |
 
-Reading: R1, R2, R4 and R9 hold as written. R3 holds in its digest form and diverges in its per-key form, which the owner accepted as D78-5. R5, R6 and R7 do not hold as written. Each is a point the owner must settle. This verifier does not downgrade SC2 to FAILED on them, because whether the corpus rules bind a cache flush (where the cache is derived and the deletes are not data loss) is a design question the owner holds. If the owner rules that they bind, SC2 fails on R5 and R7 and the fix is code, not a decision.
+**Reading:** R1, R2, R4, R5, R6 and R9 hold as written. R7 holds for the execute with the residuals below. R3 holds in its digest form and diverges in its per-key form (D78-5, open). R8 is an operator assertion, open.
 
-## Sub-checks, by test (this pass)
+**Why SC2 stays UNCERTAIN rather than VERIFIED:** D78-5 (whole-prefix flush, three ordered passes) has not been ratified by the owner. R8 and the single-writer statement are owner-held. Whether the record may follow the flush is also an owner reading (see Open decisions). Nothing here is FAILED.
+
+## Owner decision 6: the bound, the unit and the audit record, checked point by point
+
+| Requirement (owner decision 6) | Code | Named test | Verdict |
+| ------------------------------ | ---- | ---------- | ------- |
+| R5: at most RECONCILE_MAX_ITEMS (500) keys per run, reporting planned, removed, remaining and truncated | reconcile-repair.ts:11, :56-67, :87, :185-192, :239-241, :290-300 | reconcile-repair.test.ts:402 "a run removes at most the corpus bound of keys and reports the remainder" (asserts `planned: 601`, `removed: 500`, `remaining: 101`, `truncated: true`, and that the orphan counter is still present) | VERIFIED |
+| R5: a second run with the same plan finishes the remainder | reconcile-repair.ts:210-222 (digest and orphan recheck before the flush) | reconcile-repair.test.ts:424 "a second run with the same plan removes the remainder, counter and mark last". It covers only a cut that stays in the answer pass. See W9 | VERIFIED for the answer-cut case; the counter-cut case is refused and needs a re-plan (W9) |
+| R6: one unit for planned, removed and remaining | reconcile-repair.ts:56-67, :239, :285-300 | reconcile-repair.test.ts:169 (exact result shape: `planned: 5, removed: 5, remaining: 0`), :402 | VERIFIED |
+| R7: one audit record per execute, with the plan digest, counts and outcome | reconcile-main.ts:156-171 (record), :259-260 (write after the flush), :203-212 (durable check before the flush) | reconcile-main.test.ts:176 "one repair execute writes exactly one audit record, carrying the plan digest and the counts" (asserts one line, `tool: reconcile_repair`, `decision: allowed`, `plan_digest=` the sha256 of the plan text, `report_digest=`, `outcome=executed planned=2 removed=2 remaining=0`) | VERIFIED for an execute that reaches the plan parse |
+| Execute exits 2 without SUBSTRATE_AUDIT_PATH | reconcile-main.ts:203-212; `openRepairAudit` at :134-137 | reconcile-main.test.ts:199 "a repair execute with no durable audit chain exits 2 and flushes nothing" (exit 2; the message names SUBSTRATE_AUDIT_PATH; no client opened; nothing removed) | VERIFIED for the unset path |
+| Execute exits 2 without a durable chain | `audit.open()` durable check at reconcile-main.ts:205-211 (`durable` false when the path is null or the file cannot be opened; packages/audit/src/log.ts:261-263, :305-420) | The unset path is tested (above). The set-but-not-durable path (for example, an unwritable file) is not tested | VERIFIED in code; the set-but-unwritable path is not tested (W10) |
+
+## Sub-checks, by test (re-observed this pass)
 
 | Sub-check | Verdict | Evidence |
 | --------- | ------- | -------- |
-| Scheduled tick on a clean fixture logs one clean line and writes nothing | PASS | service.test.ts:5871 (targeted run 1) |
-| Interval 0 starts no timer; 60 starts one; stop clears it; start is idempotent | PASS | service.test.ts:5860 (run 1) |
-| Dirty fixture reports the first mismatching key per comparison | PASS | reconcile-read.test.ts:362 (run 2) |
-| Clean fixture is clean, `unchecked_layers` empty, nothing written | PASS | reconcile-read.test.ts:343 (run 2) |
-| Cache off: layer unchecked, absent from counts, classes truncated, run not clean | PASS | reconcile-read.test.ts:391; reconcile.test.ts:188 "unchecked layers are reported as given, and the run is not clean" (run 2) |
-| Lease identity only (surface, session, epoch); both free is not drift; epoch not compared while free | PASS | reconcile.test.ts:41, :52, :61, :70, :79, :87 (run 2). Code: reconcile.ts:82-119 |
-| A newest release frees the key even when an older grant exists | PASS | reconcile-read.test.ts:236 (run 2). Reader: reconcile-read.ts:135-150, :157-188 |
-| A hold granted before the window is found by node, with no time bound | PASS | reconcile-read.test.ts:222 (run 2). Run: reconcile-run.ts:67-72 |
-| A latest-lease lookup past its cap is truncated (not clean) | PASS | reconcile-read.test.ts:231 (run 2) |
-| A lookup whose rows run out before any transition is truncated | PASS | reconcile-read.test.ts:246 (run 2) |
-| A scan that reaches its cap reports truncated and returns at most the cap | PASS | reconcile-read.test.ts:263 (run 2) |
-| Unlink runs in batches of at most 500 and returns the count removed; a failed batch keeps earlier batches | PASS | reconcile-read.test.ts:280, :288 (run 2). Code: cache.ts:1087-1102 |
-| Dry run writes nothing; digest mismatch refuses; other-match plan item refuses | PASS | reconcile-repair.test.ts:106, :116, :288 (run 2) |
-| Orphan gone refuses and writes nothing; plan item with another action refuses | PASS | reconcile-repair.test.ts:130, :300 (run 2) |
-| Plan naming an orphan the fresh report does not list refuses | PASS | reconcile-repair.test.ts:312 (run 2) |
-| Plan with no generation orphans refuses | PASS | reconcile-repair.test.ts:141 (run 2) |
-| Config: interval blank and 0 are off; 1 to 59 clamp to 60; 99999999999 clamps to 2147483; invalid refuses boot; window clamps 0 to 1 and 169 to 168 | PASS | config.test.ts:730-775 (run 3, 9 tests) |
-
-Note: every PASS was run in the three targeted commands below, or read in code and named as such.
+| Scheduled tick on a clean fixture logs one clean line and writes nothing | PASS | Run 3 below ("scheduled reconcile timer" tests match by name; prior record service.test.ts:5871) |
+| Clean fixture is clean, `unchecked_layers` empty, nothing written | PASS | reconcile-read.test.ts:343 (run 3, name "a clean fixture reports clean") |
+| Dirty fixture reports the first mismatching key per comparison | PASS | reconcile-read.test.ts:362 (run 3) |
+| Cache off: layer unchecked, absent from counts, not clean | PASS | reconcile-read.test.ts:391 (run 3, "with the cache off"); reconcile.test.ts:188 (run 3, "unchecked layers are reported as given") |
+| A capped cache scan makes the run unclean | PASS | reconcile-read.test.ts:381 (run 3) |
+| Unlink runs in batches of at most 500; a failed batch keeps earlier batches | PASS | reconcile-read.test.ts:280, :288 (run 3). Code: cache.ts:1087-1102 |
+| Comparators and buildReport (first key, clean) | PASS | reconcile.test.ts "first is the first finding..." and "end to end: comparator output feeds buildReport..." (run 3) |
+| Config: SUBSTRATE_RECONCILE interval and window clamps | PASS | config.test.ts "SUBSTRATE_RECONCILE" (run 3) |
 
 ## Repair sub-checks
 
 | Sub-check | Verdict | Evidence |
 | --------- | ------- | -------- |
-| Execute removes answers, then counters, then the mark; budget and emb untouched | PASS | reconcile-repair.test.ts:157 (run 2); classes :21-28; passes :212-220 |
-| Second execute is a no-op | PASS | reconcile-repair.test.ts:176 (run 2) |
-| Truncated or incomplete scan removes nothing | PASS | reconcile-repair.test.ts:188 (run 2); :200-209 |
-| Failure in the answer, counter or mark pass keeps the later keys in place | PASS | reconcile-repair.test.ts:209, :228, :250 (run 2) |
-| Failed batch keeps the count of earlier batches; failing scan reports the failure | PASS | reconcile-repair.test.ts:330, :351 (run 2); cache.ts:1087-1102 |
-| Execute without `--server-stopped` refuses and removes nothing | PASS | reconcile-repair.test.ts:270 (run 2); reconcile-main.test.ts:104 (exit 2, no client) (run 2) |
-| `--server-stopped` with another command exits 2 | PASS | reconcile-main.test.ts:113 (run 2) |
-| Failed flush exits 1 and writes the result file with the error | PASS | reconcile-main.test.ts:52 (run 2); reconcile-main.ts:221-224 |
-| Only destructive call on this path is `unlinkKeys` | PASS by reading | Single caller reconcile-repair.ts:193, after the server-stopped gate (:177-186). Report and readers call `queryEvents`, index SELECTs and `scanKeys` only |
-| Flush excludes `budget:` and `emb:` keys, and any unnamed key | PASS by reading | `FLUSH_ANSWER_CLASSES` :21-28; partition :212-217; `CACHE_CLASSES` (cache.ts:71) lists all nine classes, so an unnamed `substrate:v1` key has `classOf` null (cache.ts:75-82) and is not removed |
+| Execute removes answers, then counters, then the mark; budget and emb untouched | PASS | reconcile-repair.test.ts:169 (run 2): unlink calls `2, 2, 1` in that order; keys left are budget, emb and the unrelated key |
+| Second execute after a full flush is a refused no-op | PASS | reconcile-repair.test.ts:197 (run 2) |
+| Truncated or incomplete scan removes nothing | PASS | reconcile-repair.test.ts:209 (run 2) |
+| Failure in the answer, counter or mark pass keeps the later keys in place | PASS | reconcile-repair.test.ts:230, :249, :271 (run 2) |
+| Failed batch keeps the count of earlier batches | PASS | reconcile-repair.test.ts:354 (run 2); reconcile-repair.ts:264-271 |
+| Execute without `--server-stopped` refuses and removes nothing | PASS | reconcile-repair.test.ts:291 (run 2); reconcile-main.test.ts:159 (exit 2, no client) |
+| `--server-stopped` with another command exits 2 | PASS | reconcile-main.test.ts:168 (run 2) |
+| Failed flush exits 1 and writes the result file with the error | PASS | reconcile-main.test.ts:106 (run 2); reconcile-main.ts:264-269, :274-277 |
+| Only destructive call on this path is `unlinkKeys` | PASS by reading | reconcile-repair.ts:264-271 is the only caller of `unlinkKeys`. It runs after the server-stopped gate (:252-259). Report and readers call `queryEvents`, index SELECTs and `scanKeys` only |
+| Flush excludes `budget:` and `emb:` keys, and any unnamed key | PASS by reading | `FLUSH_ANSWER_CLASSES` :24-31; `flushPasses` :168-179 (only `FORGET_MARK_KEY`, `gen` and the listed answer classes enter a pass) |
+| The dry run reads with SCAN and refuses on a truncated scan | PASS by reading | reconcile-repair.ts:226-233 runs before the dry-run return at :243 |
 
-## Behavioral spot-checks (Step 7b, re-run this pass)
+## Behavioral spot-checks (Step 7b, this pass)
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
-| Repair `--execute` without `--server-stopped` exits 2 before any connection | `env -u SUBSTRATE_PG_URL -u GREPTIME_URL -u DRAGONFLY_URL -u SUBSTRATE_CACHE bun scripts/reconcile.ts repair --plan /nonexistent.json --execute` | "reconcile: --execute needs --server-stopped", rc 2 | PASS |
-| Unknown subcommand exits 2 | `... bun scripts/reconcile.ts bogus` | "unknown subcommand: (positional)", rc 2 | PASS |
-| `plan` without `--out` exits 2 | `... bun scripts/reconcile.ts plan` | "plan needs --out <file>", rc 2 | PASS |
-| Report with no `SUBSTRATE_PG_URL` exits 2 and reads nothing | `... bun scripts/reconcile.ts report` | "SUBSTRATE_PG_URL is not set; the reconcile reads the index", rc 2 | PASS |
-| Live report, scheduled tick against real stores | not run: needs live PG, GreptimeDB, Dragonfly | none | ? SKIP, see human items |
+| Repair `--execute` without `--server-stopped` exits 2 before any connection | Not re-run this pass. Covered by reconcile-main.test.ts:159 | none | PASS (by test) |
+| Live repair, audit record, chain verify after restart | not run: needs live PG, GreptimeDB, Dragonfly and an audit file the server writes | none | ? SKIP, see human item 4 |
+| Live report, scheduled tick against real stores | not run: needs live stores | none | ? SKIP, see human items 1 and 3 |
 
-## Targeted tests (run this pass)
+## Targeted tests (this pass)
 
-Each command ran once, serially, from `packages/mcp-server`, with `TMPDIR=/root/src/worktrees/backups/gate-tmpfs` and `SUBSTRATE_TEST_PG_URL` unset. No Postgres container was started. Three `bun test` commands in total. Each was filtered by name with `-t`.
+Three `bun test` commands in total, run from `packages/mcp-server`, each with `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`. No Postgres container was started. Each filter is by test name.
 
 | # | Command | Result |
 | - | ------- | ------ |
-| 1 | `bun test service.test.ts -t "scheduled reconcile timer"` | 2 pass, 339 filtered out, 0 fail, 9 expect calls. Covers service.test.ts:5860 and :5871 |
-| 2 | `bun test reconcile.test.ts reconcile-read.test.ts reconcile-repair.test.ts reconcile-main.test.ts -t '<names>'`. The name filter lists the comparators, `buildReport`, the readers, `runReport`, the scan and unlink tests, the repair tests and the CLI tests by name | 69 pass, 23 filtered out, 0 fail, 247 expect calls, "Ran 69 tests across 6 files" |
-| 3 | `bun test config.test.ts -t "SUBSTRATE_RECONCILE"` | 9 pass, 96 filtered out, 0 fail, 36 expect calls |
+| 1 | `bun test reconcile-repair.test.ts reconcile-main.test.ts -t "corpus bound\|second run with the same plan\|one repair execute\|no durable audit chain\|execute removes answers\|mark pass\|failed flush exits 1\|one batch\|second execute after"` | 9 pass, 19 filtered out, 0 fail, 45 expect calls. Covers the R5, R6 and R7 named tests and the failure-path tests |
+| 2 | `bun test reconcile-repair.test.ts reconcile-main.test.ts -t "executePlan\|reconcileMain"` | 25 pass, 3 filtered out, 0 fail, 125 expect calls. This is every test in the `executePlan` (18) and `reconcileMain` (7) describe blocks. The 3 filtered are `planFromReport` (2) and `findingsDigest` (1) |
+| 3 | `bun test reconcile.test.ts reconcile-read.test.ts service.test.ts config.test.ts -t "a clean fixture reports clean\|a dirty fixture reports\|with the cache off\|unlink runs in batches\|a capped cache scan\|scheduled reconcile timer\|SUBSTRATE_RECONCILE\|no findings and no truncation is clean\|first is the first finding\|end to end: comparator\|unchecked layers are reported"` | 21 pass, 493 filtered out, 0 fail, 94 expect calls, "Ran 21 tests across 12 files" (SC1 names) |
 
-Totals across the three commands: 80 pass, 0 fail, 0 skip. No PG-gated test was in these filters. The single-flight guard has no test and was not exercised.
+Totals across the three commands: 46 distinct tests pass (command 2's 25 and command 3's 21; command 1's 9 are a subset of command 2), 0 fail, 0 skip. No PG-gated test was in these filters. The single-flight guard has no test and was not exercised.
 
-Not run by the verifier (per the brief): the full suite, tsc, lint, formatters, the gate. The gate evidence cited above is the orchestrator's run on this HEAD.
+**Counter-cut probe (this pass, not a test run).** A `bun -e` script in `packages/mcp-server`, importing `reconcile-repair.ts` and `reconcile-run.ts` by absolute path, over a fake cache with 499 `brief:` keys and 3 `gen:graph:` counters (no graph in the index):
 
-## Known-defect check (cache off makes the report read clean)
+- first execute: planned 502, removed 500, remaining 2, truncated true; the answers and one counter removed.
+- second execute, same plan: refused, reason `refused: the findings changed since the plan was made (digest mismatch); re-plan before repairing`; planned 0, removed 0; 2 generation keys left.
 
-Not reproduced on this tree.
-
-- `scanKeys` returns `{keys: [], truncated: true}` when the cache is off (cache.ts:1064).
-- `runReport` detects an off cache when every class scan and the generation scan are empty and truncated (reconcile-run.ts:91). A live empty scan is never truncated: the loop runs until the cursor returns to 0 or the key count passes the cap, so a truncated scan always holds keys (cache.ts:1068-1078).
-- The counts guard omits every `cache.*` count when off (reconcile-run.ts:93-96). `uncheckedLayers` names `cache` (:97) and reaches the report (:112). `buildReport` is unclean while any `truncated` flag is set (reconcile.ts:195, :210).
-- The CLI refuses a cache-off config before reading (reconcile-main.ts:106, :163-167).
+So the second run with the same plan finishes the remainder only when the bound stops inside the answer pass. When it stops in the counter pass, the removed counters change the report digest and the same plan is refused. Re-plan, then repair, finishes it. This is fail-closed and the reason string says so (reconcile-repair.ts:299). `docs/reconcile.md:55` states the same. The named test (reconcile-repair.test.ts:424) and the commit message describe "a second run with the same plan" without that limit.
 
 ## Artifacts
 
 | Artifact | Status | Evidence |
 | -------- | ------ | -------- |
-| `packages/mcp-server/src/reconcile.ts` | VERIFIED | Comparators :82-174; `buildReport` :186-212 |
-| `packages/mcp-server/src/reconcile-run.ts` | VERIFIED | `runReport` :49-115; caps :32; counts :55-96 |
-| `packages/mcp-server/src/reconcile-read.ts` | VERIFIED | Window rows :100-111; ledger leases :135-150; latest-lease lookup :157-188; memory :194-206; index leases :212-229 |
-| `packages/mcp-server/src/reconcile-repair.ts` | VERIFIED (mechanics); unit, bound and audit held for the owner (SC2, WARNINGS 1, 7, 8) | Plan :86-106; gating :112-123; execute :134-235 |
-| `packages/mcp-server/src/reconcile-main.ts` | VERIFIED | Args :74-98 (execute gate :93-94); `missingConfig` :101-108; `openReconcileClients` :111-127; `parsePlan` :130-138; `reconcileMain` :144-232 |
-| `packages/mcp-server/src/service.ts` | VERIFIED | `startRecall` :4034-4038; `stopRecall` :4041-4044; `startReconcile` :4050-4058; `stopReconcile` :4061-4064; `reconcileTick` (single flight) :4067-4072; `runScheduledReconcile` :4075-4094 |
-| `packages/mcp-server/src/cache.ts` | VERIFIED | `CACHE_CLASSES` :71; `classOf` :75-82; `scanKeys` :1061-1079; `unlinkKeys` :1087-1102 |
-| `packages/mcp-server/src/index-store.ts` | VERIFIED | Reconcile SELECTs only :2924-2981 |
-| `packages/mcp-server/src/config.ts` | VERIFIED | `ReconcileSettings` :1599-1604; `loadReconcileSettings` :1616-1623; wired at :1238 |
-| `packages/mcp-server/src/flag-registry.ts` | VERIFIED | Both `SUBSTRATE_RECONCILE_*` entries :986-987 |
-| `scripts/reconcile.ts` | VERIFIED | Thin wrapper, explicit exit. `package.json` script `reconcile` |
-| `docs/reconcile.md` | VERIFIED | Line 26 names `unchecked_layers` on the scheduled line; passes :38-44; exit codes :65 |
-| `docs/runbooks/corpus-sync.md` | VERIFIED as the rule source | §2 :45-79; §5 :115-121 |
+| `packages/mcp-server/src/reconcile-repair.ts` | VERIFIED (mechanics, R5 bound, R6 unit); audit residual and D78-5 held | Result shape :56-67; `repairOutcome` :70-91; `planFromReport` :125-145; `planRefusal` :151-162; `flushPasses` :168-179; `boundPasses` :185-192; `executePlan` :204-301 |
+| `packages/mcp-server/src/reconcile-main.ts` | VERIFIED (R7 record, durable check, exit codes); residuals open | Args and execute gate :79-103; `missingConfig` :106-113; `openRepairAudit` :134-137; `parsePlan` :140-148; `recordRepair` :156-171; `reconcileMain` :177-285 |
+| `packages/mcp-server/src/observe.ts` | VERIFIED | `openAuditLog` :294-296 (the server's factory; the CLI and the server build the chain the same way) |
+| `packages/audit/src/log.ts` | VERIFIED as the chain's sink; its header states single writer | Header :1-8 (single writer; "substrate-mcp is the only process that writes it"); `durable` :261-263; `open` :305+; `append` fail-closed throw :434-478 |
+| `packages/mcp-server/src/reconcile-run.ts`, `reconcile.ts`, `reconcile-read.ts`, `service.ts`, `config.ts`, `cache.ts`, `index-store.ts` | VERIFIED for SC1; unchanged since c7788f9d | Same citations as the previous record; `git diff --stat c7788f9d 9ee12695` shows no delta on these files |
+| `docs/reconcile.md` | VERIFIED (accurate to the code); the single-writer paragraph at :79 is the owner statement's subject | :46 bound and key counts; :54 audited; :55 re-run continues; :66 exit codes; :70-79 audit record |
+| `docs/mcp-audit.md` | CONFLICTS with `docs/reconcile.md:79` | :33-35 "single writer. `substrate-mcp` is the only process that writes it"; unchanged since before 1633fecf |
+| `docs/runbooks/corpus-sync.md` | VERIFIED as the rule source | §2 :60-79 (bound :70; audit :75-76); §5 :115-121 |
 | Test files | VERIFIED | Named tests in the targeted runs above |
 
 ## Key links
@@ -214,90 +211,85 @@ Not reproduced on this tree.
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
 | `scripts/reconcile.ts` | `reconcileMain` | import and call, `process.exit(code)` | WIRED | scripts/reconcile.ts |
-| `reconcileMain` | `parseReconcileArgs` | before `loadConfig` (reconcile-main.ts:150, :158) | WIRED | usage errors exit 2 before config |
-| `reconcileMain` (repair) | `executePlan` | with `serverStopped` (reconcile-main.ts:204) | WIRED | |
-| `executePlan` | `cache.unlinkKeys` with callback | per pass (reconcile-repair.ts:190-197) | WIRED | |
-| `executePlan` | `runReport` | re-run before any write (reconcile-repair.ts:140) | WIRED | |
-| `startRecall` | `startReconcile` | service.ts:4036, called from index.ts:196 | WIRED | |
-| `stopRecall` | `stopReconcile` | service.ts:4042, called from index.ts:234 | WIRED | |
-| `startReconcile` | `reconcileTick` | `setInterval` (service.ts:4053) | WIRED; interval firing untested | |
-| `reconcileTick` | `runScheduledReconcile` | single flight `??=` (service.ts:4068) | WIRED; single flight untested | |
-| `runScheduledReconcile` | `runReport` | `DEFAULT_RECONCILE_CAPS` (service.ts:4081-4088) | WIRED | |
+| `reconcileMain` | `parseReconcileArgs` | before `loadConfig` (reconcile-main.ts:183, :191) | WIRED | usage errors exit 2 before config |
+| `reconcileMain` (execute) | `openAudit` durable check | before any client opens (reconcile-main.ts:203-212, :216) | WIRED | exit 2 with nothing flushed |
+| `reconcileMain` (execute) | `executePlan` | with `serverStopped` (reconcile-main.ts:251) | WIRED | |
+| `reconcileMain` (execute) | `recordRepair` | after `executePlan`, before the result is printed (reconcile-main.ts:259-260) | WIRED; placement after the flush is an open reading | |
+| `executePlan` | `cache.unlinkKeys` with callback | per pass (reconcile-repair.ts:264-276) | WIRED | |
+| `executePlan` | `runReport` | re-run before any write (reconcile-repair.ts:209) | WIRED | |
+| `startRecall` | `startReconcile` | service.ts:4034-4038 | WIRED | |
+| `reconcileTick` | `runScheduledReconcile` | single flight `??=` (service.ts:4067-4072) | WIRED; single flight untested | |
 | `runReport` | `cache.scanKeys` | class and generation scans (reconcile-run.ts:85-90) | WIRED | |
-| `service.ts` lease grant | ledger claim event | `emit` with `session_id` and `lease_epoch` (service.ts:5424-5445, `lease_epoch` at :5439); index write `claim_session`, `lease_epoch` (index-store.ts:1426-1435) | WIRED | field names match the reader (reconcile-read.ts:114-127) |
 
 ## Data-flow (Level 4)
 
-The report renders live reads: ledger `queryEvents` (greptime.ts:1519-1538), index SELECTs (index-store.ts:2924-2981) and cache SCANs (cache.ts:1061-1079), combined at reconcile-run.ts:55-96. Off cache renders no count. The flush reads the live `substrate:v1:*` keys and removes only those it classifies (reconcile-repair.ts:198-220). No hardcoded result feeds these values.
-
-## Integration facts judged on this tree
-
-- **Tree delta since 749e97e3.** Phase 76 only (see Criteria and conflicts). `service.ts` shifted by about 8 lines above the reconcile block. Judged neutral to phase 78: the reconcile code paths are unchanged, and the scheduled-tick test still passes (run 1).
-- **Lazy live-session facade (634b6171).** The tick test's index is a read-only proxy (service.test.ts:5874-5891). It throws on any non-read property, so an eager `liveSessions` read in the constructor would fail the tick test. The reconcile path never reads `liveSessions`, so the change is neutral to the reconcile.
+The report renders live reads: ledger `queryEvents` (greptime.ts:1519-1538), index SELECTs (index-store.ts:2924-2981) and cache SCANs (cache.ts:1061-1079), combined at reconcile-run.ts:55-96. The flush reads the live `substrate:v1:*` keys and removes only the classes it names (reconcile-repair.ts:226-276). The audit record's counts come from the same `RepairResult` the flush returns (reconcile-main.ts:156-171). No hardcoded result feeds these values.
 
 ## Anti-patterns (Step 7)
 
-Debt-marker scan (TODO, FIXME, XXX, HACK, PLACEHOLDER, "not yet implemented", "coming soon") over `packages/mcp-server/src/reconcile*.ts`, `scripts/reconcile.ts` and `docs/reconcile.md`, run this pass: no matches. No debt-marker gate fires.
-
-Warning-level findings are listed in Warnings below; none is a stub.
+Debt-marker scan (TODO, FIXME, XXX, HACK, PLACEHOLDER, "not yet implemented", "coming soon") over `packages/mcp-server/src/reconcile*.ts`, `scripts/reconcile.ts` and `docs/reconcile.md`: no matches. No debt-marker gate fires. No stub, placeholder or no-op was found in the R5, R6 or R7 code.
 
 ## Probe execution (Step 7c)
 
-No `scripts/*/tests/probe-*.sh` exists for this phase, and no PLAN or SUMMARY declares a probe. Skipped: no probes declared.
+No `scripts/*/tests/probe-*.sh` exists for this phase, and no PLAN or SUMMARY declares a probe. Skipped: no probes declared. The counter-cut probe above is this verifier's own one-off check, not a declared probe.
 
 ## Warnings (non-blocking)
 
-1. **Repair result units differ (SC2, owner decision).** `listed` is `plan.items.length` (reconcile-repair.ts:139, reported at :51), which is 1 for any repair with orphans. `repaired` counts keys removed (:192-196). The corpus compares the same unit on both sides (orphan documents listed, orphan documents deleted: corpus/reconcile.ts:190-195), so the corpus shortfall check reads correctly and this one does not. Owner decision: count `listed` in the unit the flush removes (for example, the orphan counters it expects to remove), or accept the mismatch. Human item 2 expects this comparison; it reads as a count pair, not as a verdict.
-2. **Flush scope is the whole prefix (SC2, owner decision).** The plan names `match: substrate:v1:*` and the orphans (reconcile-repair.ts:91-97). The flush selects by class, not by the orphan graph (:212-217). Answer keys carry no graph id (D78-5), so this is the recorded design, not a defect. Under the corpus reading "act only on what the plan names", it is a deliberate divergence. Kept open; see Open decisions.
-3. **No tick test runs a cache-off fixture.** The cache-off line is covered by runReport (reconcile-read.test.ts:391), and the scheduled line copies `unchecked_layers` (service.ts:4089). Low risk, since the line copies the report field.
-4. **Advisory: index read cost.** `reconcileHolds` reads every `graph_nodes` row of the graphs in a 500-key batch and filters in JS (index-store.ts:2924-2934). Correct, but O(rows of those graphs). H5 covers scan cost; this is the index-side analogue [INFERENCE from the SQL; not measured].
-5. **Advisory: the repair is gated on one live generation orphan, not on a clean report.** A truncated report can still produce a plan (reconcile-run.ts:88-90). The flush is fail-closed on its own 1000000-key scan (reconcile-repair.ts:198-209). Recorded as the D78-6 reading.
-6. **Advisory: window-edge false drift.** See the advisory frontmatter entry. A write straddling the window start is reported as a ledger-side memory finding. Not tested; code-order reasoning only.
-7. **Repair has no per-run bound (SC2, owner decision; new this pass).** The corpus rule caps a run at 500 repairs of each kind (corpus-sync.md:70; `RECONCILE_MAX_ITEMS = 500`, packages/corpus/src/protocol.ts:262; applied at corpus/reconcile.ts:170-171). The flush has no equivalent: it removes every matching key in one run, with only the 1000000-key scan refusal (reconcile-repair.ts:18, :200-209). This is a cache flush, so the bound may not transfer; the owner must say which. Stays open.
-8. **Repair leaves no audit record (SC2, owner decision; new this pass).** The corpus runbook says a dry run is audited as `corpus_status` and an execute as `corpus_ingest`, fail-closed (corpus-sync.md:75-76; admission.ts:252-253). No reconcile path emits an audit event; the record is `<plan>.result.json` only (reconcile-main.ts:212-220). The result file is an operator-readable record, but it is not in the audit chain. Owner decision: accept the file as the record, or add an audit event before the flush (fail-closed).
+1. **Repair result units (R6): RESOLVED by owner decision 6.** `planned`, `removed` and `remaining` count keys (reconcile-repair.ts:56-67). The old `listed` and `repaired` pair is gone.
+2. **Flush scope is the whole prefix (D78-5): OPEN, owner ratification.** `FLUSH_MATCH` `substrate:v1:*` (reconcile-repair.ts:18). The flush selects by class, not by the orphan graph (:168-179). Answer keys carry no graph id (D78-5), so this is the recorded design. Under the corpus reading "act only on what the plan names", it is a deliberate divergence.
+3. **No tick test runs a cache-off fixture: unchanged.** The cache-off line is covered by runReport (reconcile-read.test.ts:391).
+4. **Advisory: index read cost: unchanged.** `reconcileHolds` reads every `graph_nodes` row of the graphs in a batch (index-store.ts:2924-2934). [INFERENCE from the SQL; not measured]
+5. **Advisory: the repair is gated on one live generation orphan, not on a clean report: unchanged.** A truncated report can still produce a plan (reconcile-run.ts:88-90). The flush is fail-closed on its own 1000000-key scan (reconcile-repair.ts:226-233).
+6. **Advisory: window-edge false drift:** see the advisory frontmatter entry. Not tested.
+7. **Repair has a per-run bound: RESOLVED for the owner's rule (R5).** Total keys per run, 500 (reconcile-repair.ts:185-192, :240). The owner should confirm the total reading, since the corpus text says "of each" (corpus-sync.md:70).
+8. **Audit record (R7): PARTLY RESOLVED. Four residuals are open, each an owner reading or a small code gap:**
+   - (a) **Post-flush placement.** The durable check runs before the flush (reconcile-main.ts:203-212). The append runs after it (:259-260). A write failure at that point leaves the flush done, and the run exits 1 with `the repair ran, but its audit record was not written` (:270-273). The corpus runbook says the execute is "fail-closed" (corpus-sync.md:75-76). docs/reconcile.md:77 records this reading. The owner must accept it or require a pre-flush intent record.
+   - (b) **Dry run not audited.** The corpus rule audits the dry run as `corpus_status` (fail-open). The owner's decision 6 text scopes R7 to the execute. The owner should confirm the scope.
+   - (c) **Unreadable plan writes no record.** An `--execute` whose plan file cannot be read or parsed returns 1 before `executePlan` (reconcile-main.ts:240-248). No audit record is written and no flush runs. This is a gap against "one audit record per repair execute" read literally. No test covers it. Fixing it means writing the record on that path too, with a reason that names the parse failure.
+   - (d) **Single writer.** See Open decisions.
+9. **Second run with the same plan (R5): NEW.** When the bound cuts into the counter pass, the second run with the same plan is refused by the digest check (reconcile-repair.ts:210-216). The docs say so (docs/reconcile.md:55), and the reason string says so (reconcile-repair.ts:299). The named test and the commit message describe "a second run with the same plan" without that limit. The test covers only the answer-cut case. Recommend a test for the counter-cut refusal, plus re-plan-then-finish. No code change is needed for the bound itself.
+10. **Set-but-not-durable chain path untested: NEW, minor.** The unset path is tested (reconcile-main.test.ts:199). An unwritable `SUBSTRATE_AUDIT_PATH` takes the same branch (reconcile-main.ts:207-211) and is not tested.
+11. **ROADMAP Status line is stale: NEW.** This tree's Phase 78 Status (ROADMAP.md) still names R5, R6 and R7 as not met. The owner decision 6 commit met them in code. The owner or orchestrator should update the line. Not edited here.
 
 ## Open decisions (kept open)
 
-- **Cache layer reported as unchecked, not zero.** Recorded: 78-SUMMARY.md "Decisions carried from the context" (decided in 0d896577, delegated by the owner); STATE.md Run 17 owner decision (2). The code matches the decision (reconcile-run.ts:91-97). This pass checked that the code does what is recorded, not that the choice is right. Stays open for the owner.
-- **Memory overlap with `consistency-verify.ts` not converged.** Recorded: 78-SUMMARY.md; docs/reconcile.md:67; STATE.md Run 17 owner decision (3). The report's memory check is the ledger-to-index window comparison (reconcile-run.ts:59-61, :74-77; compareMemory reconcile.ts:129-153). Stays open for the owner.
-- **Whole-prefix flush and the ordered three passes (D78-5, amended in ee1c9534).** Recorded in STATE.md Run 17 and 78-SUMMARY.md. Warning 2 above. Stays open for the owner to ratify. This is also the reading of "act only on what the plan names" that SC2 depends on.
-- **Repair result units (D78-6 "repaired against listed").** Warning 1 above. Stays open: the owner chooses the unit or accepts the mismatch. SC2 stays UNCERTAIN until then.
-- **Which corpus rules bind a cache flush (SC2; new this pass).** The corpus rules include a 500-per-run bound (Warning 7) and an audit record (Warning 8). The reconcile follows neither. The owner must rule: (a) the corpus rules bind and the code must change (add a bound and an audit event), so SC2 would fail on those points until it does; or (b) the corpus rules cover the plan, dry run, explicit execute, confirmed-delete and re-run rules only (R1, R2, R4, R9), and D78-5 and D78-6 are the design of record. The verifier has not chosen.
-- **`--server-stopped` as an operator assertion (D78-6, amended).** The code cannot check the server is stopped (reconcile-main.ts:93-94; reconcile-repair.ts:177-186). Same convention as `consistency-run`. Stays open.
-- **ROADMAP status line.** origin/main and this tree disagree (see Criteria and conflicts). Not chosen; the owner should reconcile.
+- **Whole-prefix flush and the three ordered passes (D78-5).** Recorded in 78-CONTEXT.md, 78-SUMMARY.md and STATE.md. Warning 2. Stays open for the owner to ratify. This is also the reading of "act only on what the plan names" that R3 depends on.
+- **`--server-stopped` as an operator assertion (R8, D78-6 as amended).** The code cannot check the server is stopped (reconcile-main.ts:98-99; reconcile-repair.ts:252-259). Same convention as `consistency-run`. Stays open.
+- **Audit-chain single writer: an owner statement is needed.** `docs/mcp-audit.md:33-35` and the chain's own header (`packages/audit/src/log.ts:5-8`) say `substrate-mcp` is the only writer. `docs/reconcile.md:79` says a repair execute is "the one other writer", run with the server stopped. The append is correct only if the server really is stopped: the server holds `seq` and `tip` in memory (log.ts, `open` and `append`), so a live server would chain from a stale tip. The owner must state either that a repair execute is an allowed second writer under the server-stopped rule (then `docs/mcp-audit.md` and the log header change), or that it is not (then the repair needs another route). Not decided here.
+- **Post-flush record placement (fail-closed reading).** See Warning 8(a). The owner must accept the post-flush append, or require a pre-flush intent record.
+- **Dry-run audit scope.** See Warning 8(b). The owner's text scopes R7 to the execute.
+- **Bound: total per run or per kind.** The owner's text says "keys per run" (implemented as a total). The corpus text says "at most 500 of each" (corpus-sync.md:70). Owner confirms the total reading.
+- **Cache layer reported as unchecked, not zero.** Recorded: 78-SUMMARY.md; STATE.md owner decision (2). The code matches the decision (reconcile-run.ts:91-97). Stays open for the owner.
+- **Memory overlap with `consistency-verify.ts` not converged.** Recorded: 78-SUMMARY.md; docs/reconcile.md:68; STATE.md owner decision (3). Stays open for the owner.
+- **ROADMAP Status line.** origin/main and this tree disagree, and this tree's line is stale on R5, R6, R7 (Warning 11). Not chosen; the owner should reconcile.
 
 ## Human Verification Required
 
-1. **Scheduled interval: one clean tick, and single-flight.** Start with `SUBSTRATE_RECONCILE_INTERVAL_S=60` over a clean fixture. Let one interval fire, then start a second tick while the first is in flight. Compare ledger, index and cache write counts before and after. Expected: one clean line per tick, no writes, no second run. Why human: real-time cadence and the single-flight guard (service.ts:4068-4071) have no test. This is also the behavior-unverified item.
-2. **Live Dragonfly SCAN and UNLINK at production counts**, server stopped, on a copy of the key counts: `repair --plan <file>` (dry run), then `repair --plan <file> --execute --server-stopped`. Expected as in the frontmatter. Why human: H5 cost and behaviour at scale. The comparison of `repaired` with `listed` is the owner's call (Warning 1).
+1. **Scheduled interval: one clean tick, and single-flight.** Start with `SUBSTRATE_RECONCILE_INTERVAL_S=60` over a clean fixture. Let one interval fire, then start a second tick while the first is in flight. Compare ledger, index and cache write counts before and after. Expected: one clean line per tick, no writes, no second run. Why human: real-time cadence and the single-flight guard (service.ts:4067-4072) have no test. This is also the behavior-unverified item.
+2. **Live Dragonfly SCAN and UNLINK at production counts**, server stopped, on a copy of the key counts. Dry run, then execute with `--server-stopped`, then a second execute; if the bound cut into the counter pass, plan again and repair again. Expected as in the frontmatter, with `<plan>.result.json` holding `planned`, `removed`, `remaining`, `limit` and `truncated`, and one audit record appended. Why human: H5 cost and behaviour at scale.
 3. **Live GreptimeDB `queryEvents` in a busy window.** Expected: completes, or reports `truncated` at `LOOKUP_LIMIT` 100 or the lookup cap of 200. Why human: needs live ledger volume.
-4. **Live CLI run with real stores.** Expected: exit codes per docs/reconcile.md; missing `--server-stopped` exits 2 before any connection; the result file holds `executed`, `refused`, `repaired`, `listed`, `error`. Why human: needs live PG, GreptimeDB and Dragonfly.
+4. **Live CLI run with real stores and a real audit file.** Expected: exit codes per docs/reconcile.md; `--execute` without `--server-stopped` exits 2 before any connection; `--execute --server-stopped` without `SUBSTRATE_AUDIT_PATH` exits 2 with nothing flushed; with the path set, the execute appends one record. After a `substrate-mcp` restart the chain verifies, with the repair record in sequence. Why human: needs live PG, GreptimeDB, Dragonfly and an audit file the server writes. This run is also the only proof of the single-writer sequence the owner's statement depends on.
 
 ## Gaps Summary
 
-**Blocking gaps: none.** No truth FAILED. No artifact MISSING or STUB. No key link NOT_WIRED. SC1 is verified in code and by the targeted tests. SC2's mechanics are verified in code and by the targeted tests. Its reporting rule ("repaired against listed") is UNCERTAIN for the owner, and its corpus-rule scope has two further points (a per-run bound and an audit record) that the owner must rule on. Whole-prefix scope is also held.
+**Blocking gaps: none.** No truth FAILED. No artifact MISSING or STUB. No key link NOT_WIRED. SC1 is verified in code and by named tests on this HEAD. SC2's mechanics are verified in code. Owner decision 6 (R5, R6, R7) is met in code and by named tests, with residuals: the post-flush record placement, the dry-run audit scope, the unreadable-plan no-record path, and the counter-cut same-plan refusal (Warnings 8 and 9). SC2 stays UNCERTAIN until the owner ratifies D78-5, R8 and the single-writer statement.
 
-**Status:** `human_needed`, from the four human items. Warnings 1 to 8 do not change the status. Owner-held decisions stay open.
+**Status:** `human_needed`, from the four human items and the owner-held decisions. Warnings 1 to 11 do not change the status.
 
-## Summary claims checked (78-SUMMARY.md)
+## Summary claims checked (78-SUMMARY.md and the 1633fecf and 9ee12695 commit messages)
 
 | Claim | Result | Evidence |
 | ----- | ------ | -------- |
-| Lease comparison is identity only | TRUE | reconcile.ts:82-119 |
-| Memory compared both ways over the window | TRUE | reconcile.ts:129-153; reconcile-run.ts:74-77 |
-| Generation orphans compare `gen:graph:<id>` with `graph_index` | TRUE | reconcile.ts:162-174; reconcile-run.ts:98-103 |
-| Caps `ledgerRows` 500, `ledgerLookups` 200, `indexRows` 5000, `cacheKeys` 10000 | TRUE | reconcile-run.ts:32 |
-| Cache off: layer listed in `unchecked_layers`, counts omitted, classes truncated, never clean | TRUE | reconcile-run.ts:91-97, :112; reconcile-read.test.ts:391 |
-| `scanKeys` reports `truncated` when off; `unlinkKeys(keys, onBatch?)` | TRUE | cache.ts:1064; cache.ts:1087 |
-| Timer off by default; each tick one read-only report and one line with `counts`, `truncated`, `unchecked_layers`, `first`, `clean` | TRUE | service.ts:4052-4053; config.ts:1616-1623; service.ts:4089-4090 |
-| Flush: `substrate:v1:*` scanned once, refused when incomplete, three ordered passes, budget and emb never removed | TRUE | reconcile-repair.ts:15, :18, :21-28, :199-220 |
-| Execute needs `--server-stopped`; dry run is the default | TRUE | reconcile-main.ts:93-94; reconcile-repair.ts:167-186 |
-| Tick test exists and passes | TRUE | service.test.ts:5871; targeted run 1 |
-| The scheduled-line doc correction is in | TRUE | docs/reconcile.md:26 |
-| Gate results (12051 pass, 2 skip, 0 fail) | Not re-run this pass; orchestrator's log on this HEAD | gates-int-r8.log lines 7 and 16738-16740 (`head=c7788f9d`) |
-| "Gate runs were voided once by a full root filesystem" | Not checked; no artifact read beyond the r8 log | [INFERENCE] from the summary text |
+| R5: at most 500 keys per run, with the remainder reported | TRUE | reconcile-repair.ts:185-192, :240, :290-300; reconcile-repair.test.ts:402 (run 1) |
+| R6: one unit in the report; the listed-versus-repaired comparison is gone | TRUE | reconcile-repair.ts:56-67; no `listed` or `repaired` in source or docs/reconcile.md |
+| R7: one audit record per execute with the plan digest, counts and outcome | TRUE for the execute that reaches the plan parse | reconcile-main.ts:156-171, :259-260; reconcile-main.test.ts:176 (run 1) |
+| A repair execute with no durable chain exits 2 and flushes nothing | TRUE for the unset path | reconcile-main.ts:203-212; reconcile-main.test.ts:199 (run 1). Set-but-unwritable path untested (W10) |
+| "A second run with the same plan removes the remainder" | TRUE for the answer-cut only | reconcile-repair.test.ts:424 (run 1); the counter-cut probe above shows a digest refusal (W9) |
+| "Repair --execute now requires SUBSTRATE_AUDIT_PATH" | TRUE | reconcile-main.ts:203-212 |
+| Targeted counts: reconcile.test.ts, reconcile-read.test.ts, reconcile-repair.test.ts, reconcile-main.test.ts 73 pass; config SUBSTRATE_RECONCILE 9 pass | Not re-run as stated. This pass ran a different filter: 25 repair and CLI tests pass (command 2); 9 named R5/R6/R7 tests pass (command 1); 21 SC1 tests pass (command 3) | Command outputs above |
+| Full gate green on 9ee12695 | Orchestrator's evidence, not re-run | gates-int-r10.log lines 7, 8, 11, 17097, 17099, 17131, 17135-17136, 17141 |
+| Single-writer and D78-5, R8 kept open | TRUE: the commit says so and this pass agrees | commit 1633fecf message; docs/reconcile.md:79; docs/mcp-audit.md:33-35 |
 
 ---
 
-_Verified: 2026-11-02T18:27:55Z_
-_Verifier: Claude (gsd-verifier, re-verification at HEAD c7788f9d)_
+_Verifier: Claude (gsd-verifier, re-verification at HEAD 9ee12695). Verified by this pass: the code reads and line citations above; three targeted `bun test` commands; the counter-cut probe; `git diff --stat` on the SC1 files; the ROADMAP section comparison. Orchestrator's evidence, not re-run: the full gate on 9ee12695 (gates-int-r10.log) and the commit-message before-and-after claims._
