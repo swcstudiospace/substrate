@@ -92,10 +92,19 @@ export type MemoV3 = {
 	hourTxSig: string;
 };
 
+/** A high or low UTF-16 surrogate without its pair. argv encodes one as U+FFFD, so a pointer naming it would name another graph. */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /** The v3 pointer memo: `substrate:v3:<graph_id>:<period ISO>:<count>:<graph_heads_root>:<hour_tx_sig>`. Throws on a bad field. */
 export function formatMemoV3({ graphId, periodStartMs, count, graphHeadsRootHex, hourTxSig }: MemoV3): string {
 	if (typeof graphId !== "string" || graphId.length === 0 || new TextEncoder().encode(graphId).byteLength > MEMO_GRAPH_ID_MAX) {
 		throw new Error(`formatMemoV3: graph id must be 1 to ${MEMO_GRAPH_ID_MAX} UTF-8 bytes`);
+	}
+	const lone = LONE_SURROGATE_RE.exec(graphId);
+	if (lone) {
+		throw new Error(
+			`formatMemoV3: graph id has a lone UTF-16 surrogate (U+${lone[0].charCodeAt(0).toString(16).toUpperCase()}); a graph id must be well-formed Unicode`,
+		);
 	}
 	checkMemoFields("formatMemoV3", { periodStartMs, rootHex: graphHeadsRootHex, count });
 	if (!HOUR_TX_SIG_RE.test(hourTxSig)) throw new Error("formatMemoV3: hour transaction signature is not 64-88 base58 characters");

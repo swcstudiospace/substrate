@@ -311,6 +311,38 @@ describe("graph id cap on the write path", () => {
 		expect(() => normalizeEvent({ ...base, graph_id: "g\u0000x" }, null)).toThrow("graph_id_nul:");
 	});
 
+	test("refuses a graph id with a lone high surrogate at write, by name", () => {
+		expect(() => normalizeEvent({ ...base, graph_id: "g\uD800x" }, null)).toThrow("graph_id_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, graph_id: "g\uD800x" }, null)).toThrow("U+D800");
+	});
+
+	test("refuses a graph id with a lone low surrogate at write, by name", () => {
+		expect(() => normalizeEvent({ ...base, graph_id: "\uDC00g" }, null)).toThrow("graph_id_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, graph_id: "\uDC00g" }, null)).toThrow("U+DC00");
+	});
+
+	test("refuses a high surrogate that is followed by another high surrogate, not a low one", () => {
+		expect(() => normalizeEvent({ ...base, graph_id: "\uD83D\uD83D\uDE42" }, null)).toThrow("graph_id_lone_surrogate:");
+	});
+
+	test("the lone surrogate refusal is a named subclass of InvalidEventError", () => {
+		let refused: unknown;
+		try {
+			normalizeEvent({ ...base, graph_id: "x\uD83D" }, null);
+		} catch (error) {
+			refused = error;
+		}
+		expect(refused).toBeInstanceOf(InvalidEventError);
+		expect((refused as Error).constructor.name).toBe("GraphIdLoneSurrogateError");
+	});
+
+	test("accepts a well-formed astral character, written as a surrogate pair or as one code point", () => {
+		const astral = "graph-\u{1F642}-x";
+		expect(normalizeEvent({ ...base, graph_id: astral }, null).graph_id).toBe(astral);
+		const pair = "graph-\uD83D\uDE42-x";
+		expect(normalizeEvent({ ...base, graph_id: pair }, null).graph_id).toBe(pair);
+	});
+
 	test("accepts a graph id with a newline, which is not a NUL", () => {
 		const graphId = "first line\nsecond line";
 		expect(normalizeEvent({ ...base, graph_id: graphId }, null).graph_id).toBe(graphId);

@@ -153,6 +153,19 @@ describe("memo v3", () => {
 		expect(() => formatMemoV3({ ...V3, graphId: "g".repeat(513) })).toThrow("formatMemoV3:");
 	});
 
+	test("formatMemoV3 refuses a graph id with a lone surrogate, naming it", () => {
+		expect(() => formatMemoV3({ ...V3, graphId: "g\uD800x" })).toThrow("formatMemoV3:");
+		expect(() => formatMemoV3({ ...V3, graphId: "g\uD800x" })).toThrow("U+D800");
+		expect(() => formatMemoV3({ ...V3, graphId: "\uDC00g" })).toThrow("U+DC00");
+	});
+
+	test("formatMemoV3 round-trips a well-formed astral graph id", () => {
+		for (const graphId of ["graph-\u{1F642}", "\uD83D\uDE42", "g\u{10FFFF}x"]) {
+			const memo = { ...V3, graphId };
+			expect(parseMemoV3(formatMemoV3(memo))).toStrictEqual(memo);
+		}
+	});
+
 	test("formatMemoV3 rejects a bad period, count, root or signature", () => {
 		expect(() => formatMemoV3({ ...V3, periodStartMs: H10 + 1 })).toThrow("formatMemoV3:");
 		expect(() => formatMemoV3({ ...V3, count: 0 })).toThrow("formatMemoV3:");

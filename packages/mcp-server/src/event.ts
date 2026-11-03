@@ -218,16 +218,32 @@ export class GraphIdNulError extends InvalidEventError {
 	}
 }
 
+/** A high or low UTF-16 surrogate without its pair. Matches the first such code unit; well-formed text (a pair) never matches. */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * A graph id with a lone UTF-16 surrogate, refused on write. The message names the code unit, so the refusal says which surrogate it is.
+ */
+export class GraphIdLoneSurrogateError extends InvalidEventError {
+	constructor(readonly codeUnit: number) {
+		super(`graph_id_lone_surrogate: a graph id may not contain a lone UTF-16 surrogate; found U+${codeUnit.toString(16).toUpperCase()}`);
+	}
+}
+
 /**
  * The graph id a write stores: redacted, and empty is absent, as for every identifier. Unlike the others it is refused over the cap
  * rather than cut to it: the hour's pointer memo carries the stored id whole (ledger memo.ts formatMemoV3), and an id cut to fit would
  * name a different graph. The cap is measured on the stored form, in UTF-8 bytes.
  * A NUL byte is refused too (GraphIdNulError): the memo reaches execFile as an argument, and a NUL there throws after the hour is sent.
+ * A lone UTF-16 surrogate (a high or low surrogate without its pair) is refused too (GraphIdLoneSurrogateError): argv encodes it as U+FFFD,
+ * so the memo would name a different id than the stored row.
  */
 export function normalizeGraphId(value: string | null | undefined): string | null {
 	if (value === undefined || value === null) return null;
 	const stored = redact(value);
 	if (stored.includes("\0")) throw new GraphIdNulError();
+	const lone = LONE_SURROGATE_RE.exec(stored);
+	if (lone) throw new GraphIdLoneSurrogateError(lone[0].charCodeAt(0));
 	const bytes = new TextEncoder().encode(stored).byteLength;
 	if (bytes > MEMO_GRAPH_ID_MAX) throw new GraphIdTooLongError(bytes);
 	return stored.length > 0 ? stored : null;
