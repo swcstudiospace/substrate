@@ -67,7 +67,7 @@ substrate corpus reconcile --execute
 the path as an `add` and the next `substrate corpus sync --execute` puts the document back. It deletes each orphan from the plane with
 the ingest's rules: the delete is confirmed by the plane, an orphan an active row holds at that moment is kept, and a delete that
 failed or was not confirmed is not counted as repaired (`repaired.deleted` is smaller than the orphans listed; run it again).
-At most 500 of each are repaired per run.
+At most 500 keys are repaired per run, in total.
 
 The route is `POST /corpus/reconcile` with `{protocol: 1, execute}`. It needs a bearer (401 without one), answers
 `503 corpus.disabled` while the corpus is off, `503 corpus.backend-unavailable` without a LightRAG plane,
