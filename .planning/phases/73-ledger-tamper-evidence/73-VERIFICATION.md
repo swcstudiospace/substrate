@@ -1,26 +1,30 @@
 ---
 phase: 73-ledger-tamper-evidence
-verified: 2026-11-03T14:54:08Z
+verified: 2026-11-03T16:04:08Z
 status: human_needed
 score: 8/8 must-haves verified (T2 counted as PASSED override)
-covered_files: [".planning/phases/73-ledger-tamper-evidence/73-01-PLAN.md", ".planning/phases/73-ledger-tamper-evidence/73-01-SUMMARY.md", "docs/greptime-ledger.md", "packages/ledger/src/memo.test.ts", "packages/ledger/src/memo.ts", "packages/mcp-server/src/anchor-verify-deps.ts", "packages/mcp-server/src/anchor.test.ts", "packages/mcp-server/src/anchor.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v3:sha256:04a93299cc9c779939b685501127bb92f7c6e617d209d58f396f54974c1925f7"
+covered_files: ["docs/greptime-ledger.md", "packages/cli/src/capsule.ts", "packages/ledger/src/memo.test.ts", "packages/ledger/src/memo.ts", "packages/mcp-server/src/anchor-verify-deps.ts", "packages/mcp-server/src/anchor.test.ts", "packages/mcp-server/src/anchor.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/memory-policy.test.ts", "packages/mcp-server/src/memory-policy.ts", "packages/mcp-server/src/memory-record.ts", "packages/mcp-server/src/memory-retain.ts", "packages/mcp-server/src/memory-verify.ts", "packages/mcp-server/src/memory-write.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/session-context.ts", "packages/mcp-server/src/session-rollback.ts", "packages/mcp-server/src/types.ts"]
+covered_digest: "not recomputed in this pass (v3 digest of the 8a604455 record is superseded; the file set above includes the 4b84e50c edits)"
 behavior_unverified: 0
 overrides_applied: 1
 overrides:
   - must_have: "The chain head for each graph is recorded in the hourly anchor. That recorded head is the trusted earlier proof criterion 1 compares against; a head recomputed from the stored rows is never the proof."
-    reason: "Owner accepted the commitment reading on 2026-11-02: each graph head is committed on chain by the memo v2 heads_root and recovered only through stored leaves that reproduce it. Carried from the prior record; acceptance not re-obtained here. This override covers the commitment reading only. It does not cover the write-path gap B2 below."
+    reason: "Owner accepted the commitment reading on 2026-11-02: each graph head is committed on chain by the memo v2 heads_root and recovered only through stored leaves that reproduce it. Carried from the prior record; acceptance not re-obtained here. This override covers the commitment reading only. It does not cover the write-path items W-L3b, W-K1 and W-K3 below."
     accepted_by: "owner"
     accepted_at: "2026-11-02"
 re_verification:
   previous_status: human_needed
   previous_score: 8/8 (T2 counted as PASSED override)
-  previous_verified: 2026-11-03T12:49:50Z
-  previous_scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD 046fbe05 (3008d16d records only on top)"
-  scope: "worktree /root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD 3e26a5c1 (3e26a5c1 is the only code commit since 046fbe05; 3008d16d is planning records only)"
-  reason: "3e26a5c1 refuses a lone UTF-16 surrogate in summary, session_id and repo at write (FieldLoneSurrogateError, refuseLoneSurrogate, normalizeEvent event.ts:371-373), before any hash or store write. It also drops a dangling high surrogate after the 2,000-unit summary cap (withoutDanglingHigh, event.ts:190-196, applied at event.ts:392). Both are judged below against their named tests. Status and open items are carried as they were; the new open items are named in the open-items section."
-  gaps_closed: []
-  gaps_remaining: []
+  previous_verified: 2026-11-03T15:41:41Z
+  previous_scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD 8a604455 (9b0fa1f9 records only on top)"
+  scope: "worktree /root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD 4b84e50c (the only code commit since 8a604455; it changes the repo access and visibility comparisons and the session-context parse)"
+  reason: "4b84e50c reverts the repo access and visibility comparisons to exact normalizeIdentifier on both sides (memory-policy.ts parseScope, grantedToCaller, visibleToCaller; index-store.ts memorySearch and memoryForBrief; memory-write.ts repo; service.ts recall, memoryRead, recallMemories and memoryVerify caller repo; session-context.ts parse; capsule.ts repo filter). Ledger write (event.ts:407) and every ledger read stay on normalizeKey. The pass re-checks the six-field refusal, the normalizeKey parity for the ledger, the straddle items, and the chain-verify carried truths for regression."
+  gaps_closed:
+    - "No phase 73 gap closed by 4b84e50c. Its regression for the access leak is in phase 72's scope; the ledger write path is unchanged."
+  gaps_remaining:
+    - "W-L3b: branch, node_id and linear_identifier still take the 512-unit cut without the dangling-high trim (unchanged, event.ts:403, :404, :408)"
+  gaps_new:
+    - "W-M1 (memory plane, WARNING): a repo scope or memory repo spelled with a lone high surrogate at the 512-unit cut is now kept untrimmed (parseScope, memory-policy.ts:69-71; memory-write.ts:565). The memory entry hash covers the scope, so the stored row no longer reproduces its entry_hash and memory verify reports hash-mismatch. Fail-closed; no tamper is hidden. Introduced by 4b84e50c relative to 8a604455."
   regressions: []
 human_verification:
   - test: "Devnet 0-lamport pointer probe: send a 0-lamport pointer to an unfunded index address and record the refusal text"
@@ -29,8 +33,8 @@ human_verification:
   - test: "Live devnet send of one pointer whose graph id is 512 UTF-8 bytes, read back with transactionMemo"
     expected: "The transaction serialises within the 1,232-byte limit, and the measured size replaces the hand-counted 251-byte overhead (memo.test.ts:231-241)."
     why_human: "Needs a live send. The overhead is hand-counted and not measured from transferArgv."
-  - test: "Scan the live agent_events store: graph_id over 512 bytes, any graph_id containing a NUL byte, any graph_id or summary, session_id or repo containing a U+FFFD, and v2 memos in the anchor listings"
-    expected: "Zero rows, or an owner decision on each. A stored U+FFFD cannot be told from a lone-surrogate write by the scan, so the scan proves nothing about pre-fix lone surrogates on its own."
+  - test: "Scan the live agent_events store: graph_id over 512 bytes, any graph_id containing a NUL byte, any graph_id or summary, session_id, repo, branch, node_id or linear_identifier containing a U+FFFD, and v2 memos in the anchor listings"
+    expected: "Zero rows, or an owner decision on each. A stored U+FFFD cannot be told from a lone-surrogate write by the scan alone. The scan is the only way to size the pre-change straddling rows (owner item O-S1 below)."
     why_human: "Needs read access to the live store."
   - test: "RPC history depth for index addresses (N5): find the oldest signature still listed on a job-key address and on an index address"
     expected: "The depth is known. The owner decides whether a pruned pointer for an old hour is acceptable, as the accepted limit already states. The depth is still unmeasured."
@@ -41,162 +45,182 @@ human_verification:
   - test: "Owner decision on stored graph ids over 512 bytes or containing NUL, and on pre-fix rows with a lone surrogate (no data repair decided)"
     expected: "A recorded decision. Until then a live anchor run against a store holding over-512 or NUL rows halts at the first such hour (anchor.ts:958-967)."
     why_human: "Data-repair policy. Owner call."
-  - test: "Owner decision on W-L2: refuse a lone UTF-16 surrogate in summary, session_id and repo at write, as d23a919a does for graph_id, or record the fail-closed verdict as accepted"
-    expected: "A recorded decision. If refused: a named error, the same refusal beside normalizeGraphId, and tests beside event.test.ts:314."
-    why_human: "Extends the owner's W-L1 remedy to other free-text fields. Refusal at write is now implemented at 3e26a5c1 for the three fields; the 512-unit residual below is not. The item is carried as written until the owner records it."
+  - test: "O-S1 (owner data decision): pre-change straddling rows. Decide between (a) accepting that a pre-change session_id, repo, branch, node_id or linear_identifier that straddled 512 units is a fail-closed verdict, recorded as accepted, or (b) a read alias that also matches the pre-change stored spelling. agent_events is append-only (assertAppendOnly, greptime.ts:446), so no in-place repair is available."
+    expected: "A recorded decision for each of the five fields. Under (b): one named alias, and a test that a pre-change row is found by its id. Under (a): the verdict is recorded as accepted."
+    why_human: "Data decision. The owner's list covers session_id and repo only; the three other fields are not on it yet."
+  - test: "W-L3b owner decision: branch, node_id and linear_identifier take the same dangling-high trim as session_id and repo at the 512-unit cut (a stored-form and read-key change for node_id and linear_identifier queries), or the fail-closed verdict is recorded as accepted"
+    expected: "A recorded decision. If trimmed: normalizeKey on those three at event.ts:403, 404, 408, every read site for node_id and linear_identifier moved to the same key, and a test that a 512-unit id with a pair at the cut round-trips. If accepted: recorded as accepted."
+    why_human: "Scope decision the owner has not yet taken. 8a604455 refuses caller lone surrogates in these fields but leaves the cut alone."
+  - test: "W-M1 owner decision: a repo scope (memory-policy.ts parseScope) and a memory repo (memory-write.ts:565) spelled with a lone high surrogate at the 512-unit cut. Either refuse a lone surrogate in those two fields at write, by name, as the six-field rule does, so the stored form is the hashed form, or record the memory verify hash-mismatch for such rows as accepted"
+    expected: "A recorded decision. Trimming the stored scope is not an option: it would make a repo:owner/name+surrogate row visible to a caller granted owner/name, the leak 4b84e50c closes. If refused: a named test that a straddling repo scope is refused and that the stored scope equals the hashed scope."
+    why_human: "Policy choice between a write refusal and an accepted verdict. Owner call. The hash-mismatch on a stored U+FFFD is [INFERENCE] until a live row is read back."
+  - test: "W-K1 owner or maintainer decision: checkpoint_verify's session_id (mcp.ts:992, up to 512 units) is searched raw (anchor-verify-deps.ts:216). Route it through normalizeKey, or record the not-found outcome for a straddling or redacted session_id as accepted."
+    expected: "A recorded decision. If routed: one normaliser on the lookup, and a test that a 512-unit session_id with a pair at the cut finds its checkpoint."
+    why_human: "The commit's claim that anything reading by these columns goes through normalizeKey does not hold for this site. Maintainer call."
+  - test: "W-K3 decision: graph_index.repo (Postgres) is written raw by graph_register (index-store.ts:1175; mcp.ts:1288 has no length cap) and read through normalizeKey (claimedNodesForRepo, service.ts:3973 and index-store.ts:1757). Write the normalised repo, or accept the mismatch for repos over 511 units or redacted spellings."
+    expected: "A recorded decision and, if written normalised, a migration note that existing graph_index rows keep their raw spelling."
+    why_human: "Postgres index, outside the ledger. Owner call on whether the read or the write moves."
   - test: "HARD-S3: decide whether scheduled verification is in this phase or a later one, and name the trusted earlier proof for it"
     expected: "A decision recorded against REQUIREMENTS.md:114 and :135."
     why_human: "Scope decision. Still open."
   - test: "W4: restate or retire the recorded label 'No verdict-level payload test'"
     expected: "A restated gap that names the missing test, or retirement of the label. service.test.ts:5386 asserts verdict-level fields."
     why_human: "The label has no definition in the repo beyond the prior record. Owner call."
-  - test: "New W-L3: decide between a shared normalizeKey at every session_id and repo site (about 20 read sites) or leaving the 512-unit cut as it is, with the stored lone high surrogate accepted as a fail-closed verdict"
-    expected: "A recorded decision. If a shared key: one normaliser for reads and writes, a refusal or trim that both sides use, and tests that a 512-unit id with a pair at the cut round-trips. If left: the fail-closed verdict is recorded as accepted."
-    why_human: "The commit 3e26a5c1 records this as the owner's choice. A write-only trim would break session reads, so the choice is not a code fix on the write path alone."
-  - test: "New W-L4: decide whether branch, node_id and linear_identifier take the same refusal as summary, session_id and repo, and whether branch takes the dangling-high trim at its 512-unit cut"
-    expected: "A recorded decision. If refused: named errors and tests beside event.test.ts:352. If accepted: the fail-closed verdict recorded as accepted."
-    why_human: "Outside the owner's list in 3e26a5c1. The owner decides scope."
+  - test: "W-O1 wording: the commit body says a refused write reads nothing from the store. Either restate it as 'the six text fields are refused before the tip read', or move the graph id check (normalizeGraphId) ahead of the tip read for unkeyed sessioned writes"
+    expected: "The commit record matches the code. Under the move: one test that a graph id with a lone surrogate, a NUL or over the byte cap is refused with lastHash uncalled."
+    why_human: "Wording or a small ordering change. Owner call; no integrity effect either way."
 ---
 
 # Phase 73: Ledger tamper evidence Verification Report
 
 **Phase Goal:** A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from stored rows, and the verified head is anchored.
-**Verified:** 2026-11-03T14:54:08Z
+**Verified:** 2026-11-03T16:04:08Z
 **Status:** human_needed
-**Re-verification:** Yes. Previous record 046fbe05 (status human_needed, score 8/8).
-
-## Scope and method
-
-- Worktree `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`, HEAD `3e26a5c1`. Read-only: no code edits, no commits. The only write is this file.
-- Changes since 046fbe05: `3e26a5c1` (`packages/mcp-server/src/event.ts` +38/-1, `event.test.ts` +41) and `3008d16d` (planning records only, no `packages/` change). Both code files are in the phase's covered set. `memo.ts`, `anchor.ts`, `greptime.ts`, `service.ts` and their tests are identical to 046fbe05.
-- Owner decisions taken into account: W-L1 refusal (d23a919a, 2026-11-03); the W-L2 refusal at write (3e26a5c1 commit message, owner decision 2026-11-03); Q8 and N5 accepted as documented limits (6644698e, 2026-11-03). Q8 and N5 are judged as documented, not as closed.
-- Targeted runs at 3e26a5c1:
-  1. `bun test packages/mcp-server/src/event.test.ts --timeout 30000` (env `-u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`): **69 pass, 0 fail**, 168 expect calls, 52 ms. Whole file, so every new surrogate test ran.
-  2. `bun test ... event.test.ts -t "lone surrogates in the other write text fields"`: **7 pass, 0 fail**. This is a subset of run 1. It was a second invocation, so this pass used two `bun test` commands where the brief allowed one. No code changed between them; the second adds no evidence beyond the first.
-- Not re-run this pass: `memo.test.ts`, `anchor.test.ts`, the service named subset. The commit touches neither file, and the brief's one-command limit applied. The service subset (32 pass) is carried from 6644698e.
-- Ad hoc probes not run this pass (one-command limit). The W-L2 probe result in the prior record (hash of in-memory form differs from the U+FFFD form) is carried, not re-observed. Judgements below that rest on code reading are marked [INFERENCE].
-- Debt markers (TBD, FIXME, XXX) in the changed files: none.
-- Probes (Step 7c): none declared or present.
-- Fingerprint: `node /root/.claude/gsd-core/bin/gsd-tools.cjs query verification.fingerprint` over the same 13 files as the prior record. The digest moved from `bba5…` to `04a9…`, which is expected: `event.ts` and `event.test.ts` changed in 3e26a5c1.
+**Re-verification:** Yes, after 4b84e50c. Scope: the repo access and visibility change (its effect on phase 73's ledger read paths and on the carried truths), the six-field refusal and the straddle items as carried. Carried truths T1 to T8 get a regression check, not a re-judgement.
 
 ## Goal Achievement
 
 ### Observable Truths
 
-Status of T1 to T8 is carried from the prior record. None of the chain-check, anchor, pointer or RPC-guard code changed in 3e26a5c1. The `event.ts` change touches only the write-time text fields, so T4 is re-read against it and carried.
-
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
-| T1 | SC1: an edited payload, a deleted middle event, truncated last events and a full rewrite are each compared with the saved head; the first differing or first missing id is named | ✓ VERIFIED | Named runs pass: `service.test.ts:5386` (first_differing), `:5398` (middle deletion), `:5414` (truncation, first_missing), `:5513` (full rewrite). No chain-check code changed since f86388cf. |
-| T2 | SC2: each graph's chain head is recorded in the hourly anchor and the recorded head is the trusted proof | ✓ PASSED (override) | Memo v2 `heads_root` (`memo.ts:41-46`), per-session head records (`packages/ledger/src/heads.ts`), trust against the on-chain root (`service.ts:8409`, `:8470`). Owner override 2026-11-02, commitment reading only; carried, acceptance not re-obtained. |
-| T3 | G1: an anchored hour removed from `agent_events`, `event_ingest` and `graph_chain_leaves` fails the verdict and is named | ✓ VERIFIED for pointer-listed hours, bounded by Q8 and N5 (accepted limits) | Pass: `service.test.ts:5810` (1a), `:5819` (1b), `:5827` (single hour with pointer), `:5594` and `:5644` (rows and ingest removed, leaves kept). Q8 (`:5843`) pins `ok` true for a graph with no landed pointer; N5 is a pruned listing. Both are accepted limits, not closed. |
-| T4 | The hourly job sends every closed hour's pointers for every graph id the write path accepts, so the job does not halt on a valid event | ✓ VERIFIED for NUL and lone surrogate at write and before send | NUL: `event.ts:244`, `anchor.ts:958-967`, tests `event.test.ts:309-311`, `anchor.test.ts:1519`. Lone surrogate in graph id: `event.ts:246` and `memo.ts:103`, tests `event.test.ts:314-342`, `memo.test.ts:156-166`. Accepted ids pass `redact` idempotently (prior probe), so the pre-send `normalizeIdentifier` equality holds. Pre-fix stored rows are open (stored-id item, below). |
-| T5 | N1/W2: the hour is sent, then pointers, then the row; a pointer failure stores no row; an unanchored mismatch stores no row | ✓ VERIFIED | Whole-file pass of `anchor.test.ts` at 046fbe05 (unchanged). Order `:1343`, pointer failure `:1363`, alarm `:473`, `:495`, `:518`. Code: alarm no row `anchor.ts:868-875`, adopt heads mismatch no row `:886-896`, pointers after read-back then row last `:1044-1056`. |
-| T6 | N2: the adoption window covers the lookback's newer transactions | ✓ VERIFIED | Regression `anchor.test.ts:1404` (unchanged). Code `anchor.ts:850`, `:315` ((1 + g) x 168), `greptime.ts:1900-1905`. |
-| T7 | N3: verify counts only job-key pointers that succeeded; other entries are ignored; a job-key pointer naming another hour still fails | ✓ VERIFIED (verify side) | Pass: `service.test.ts:5877`, `:5889`, `:5898`, `:5907`, `:5916`, `:5926`. Code `service.ts:875-893`, `:924-960`. Anchor side (`anchor.ts:633`, `:643`) still has no test (W-N3c). |
-| T8 | Refused `SOLANA_RPC_URL`: no chain read, `ok` false, `trusted` false, a named reason | ✓ VERIFIED | Pass: `service.test.ts:4283`. Code `service.ts:8020-8025`, `config.ts:906-910`. |
+| T1 | SC1: an edited payload, a deleted middle event, truncated last events and a full rewrite are each compared with the saved head; the first differing or first missing id is named | ✓ VERIFIED (carried) | Named runs: `service.test.ts:5494` (first_differing), `:5506` (middle deletion), `:5522` (truncation, first_missing), `:5621` (full rewrite). `headRecordsFromLeaves` event.ts:512, `compareToAnchoredHead` event.ts:553, `verifyChain` event.ts:589-603 unchanged. 4b84e50c does not touch the chain check or its tests. |
+| T2 | SC2: each graph's chain head is recorded in the hourly anchor and the recorded head is the trusted proof | ✓ PASSED (override) | Memo v2 `heads_root` present (`packages/ledger/src/memo.ts:12`, `MEMO_V2_RE`). Owner override 2026-11-02, commitment reading only; carried, acceptance not re-obtained here. |
+| T3 | G1: an anchored hour removed from `agent_events`, `event_ingest` and `graph_chain_leaves` fails the verdict and is named | ✓ VERIFIED for pointer-listed hours, bounded by Q8 and N5 (accepted limits) | Carried: `service.test.ts:5918`, `:5927`, `:5935` (pointer-listed hours), `:5702` and `:5752` (rows and ingest removed, leaves kept), `:5951` (Q8: no pointer, ok, untrusted). Q8 and N5 are accepted limits, not closed. |
+| T4 | The hourly job sends every closed hour's pointers for every graph id the write path accepts, so the job does not halt on a valid event | ✓ VERIFIED (carried, graph id); the text-field write path is refused or trimmed as judged below | Graph id: NUL `event.ts:299`, lone surrogate `event.ts:300-301`, `memo.ts:103`; tests `event.test.ts`, `memo.test.ts:156-166`, `anchor.test.ts:1519`. The six-field refusal (Judgement 1) adds to this at write. |
+| T5 | N1/W2: the hour is sent, then pointers, then the row; a pointer failure stores no row; an unanchored mismatch stores no row | ✓ VERIFIED (carried) | Whole-file pass of `anchor.test.ts` at 046fbe05, unchanged since. Code `anchor.ts:868-896`, `:1044-1056`. |
+| T6 | N2: the adoption window covers the lookback's newer transactions | ✓ VERIFIED (carried) | `anchor.test.ts:1404`; `anchor.ts:315`, `:850`; `greptime.ts:1900-1905`. |
+| T7 | N3: verify counts only job-key pointers that succeeded; other entries are ignored; a job-key pointer naming another hour still fails | ✓ VERIFIED (verify side, carried) | `service.test.ts:5985`, `:5997`, `:6006`, `:6015`, `:6024`, `:6034`; code `service.ts:875-893`, `:924-960`. Anchor side (`anchor.ts:633`, `:643`) still untested (W-N3c). |
+| T8 | Refused `SOLANA_RPC_URL`: no chain read, `ok` false, `trusted` false, a named reason | ✓ VERIFIED (carried) | `service.test.ts:4391`; `service.ts:8024-8026` (refusal before any RPC call). |
 
 **Score:** 8/8 truths verified (T2 counted as PASSED override). Presence-only truths: none. Behavior unverified: 0.
 
-### Judgement: the field-level refusal (3e26a5c1) against its named tests
+The checks from the prior record, judged again at 4b84e50c:
 
-**Code.** `refuseLoneSurrogate(field, text)` (`event.ts:261-265`) runs `LONE_SURROGATE_RE` on `redact(text)` and throws `FieldLoneSurrogateError` (`event.ts:249`), which carries the field name and code unit (`summary_lone_surrogate: ... found U+D800`). It is called in `normalizeEvent` at `event.ts:371-373`, after the summary-required check and before the timestamp, the hash, and any store write. `FieldLoneSurrogateError` extends `InvalidEventError`, so the HTTP route answers 400 as for the other write refusals.
+| #  | Check | Status | Evidence |
+| -- | ----- | ------ | -------- |
+| R1 | Six-field refusal: a lone surrogate in summary, session_id, repo, branch, node_id or linear_identifier is refused at write by name, before any hash or store write | ✓ VERIFIED (unchanged code) | `assertWriteTextFields` event.ts:277-286; called from `normalizeEvent` event.ts:392, before the hash at :416. 4b84e50c does not touch event.ts. Targeted run below. |
+| R2 | The refusal runs before the sessioned chain-tip read, the replay lookup, the buffer and the append-mode probe | ✓ VERIFIED for the six fields (unchanged code) | `service.ts:3093` assert is the first statement of `appendChained` (:3091); tip read `lastHash` :3119. Line numbers unchanged: 4b84e50c is count-neutral in service.ts. |
+| R3 | normalizeKey read and write parity for the LEDGER (session_id and repo) | ✓ VERIFIED for the ledger write and every ledger read; the prior site list is stale for memory-plane sites moved by 4b84e50c (see Judgement 3) | Write: `event.ts:401`, `:407` (normalizeKey, unchanged). Ledger reads on normalizeKey: `brief.ts:448`; `service.ts:3014`, `:3297`, `:3973` (sessionContext re-normalises with normalizeKey before the ledger read at `:4020`), `:4095`, `:4628`, `:4663`, `:4924`, `:7612`, `:7803`/`:7823`; `session-rollback.ts:287`; `cli/src/capsule.ts:414` (session filter). |
+| R4 | A session_id or repo that straddles 512 units round-trips: stored, looked up and read back in one form | ✓ VERIFIED (targeted run) | Named tests "a session id straddling the cap is stored, looked up and read back in one form" and "a repo straddling the cap is stored and read back in one form" pass in the run below. |
+| R5 | 4b84e50c regression test: a row with repo `owner/name` plus a lone high surrogate is not visible to a caller granted `owner/name`; a scope spelled with a surrogate keeps it | ✓ VERIFIED (targeted run) | `memory-policy.test.ts` "a repo keeps its exact spelling for visibility ..." passes. It is a phase 72 access test; it is recorded here because it sets the memory-plane spelling that Judgement 5 finds. |
 
-**Named tests** (`event.test.ts:352-391`, describe "lone surrogates in the other write text fields", 7 tests, all pass in run 2):
+### Judgement 1: the six-field refusal (8a604455, unchanged at 4b84e50c)
 
-| Test | Asserts | Fails before 3e26a5c1? | Judgement |
-| ---- | ------- | ---------------------- | --------- |
-| refuses a lone high surrogate in the summary, by name, with its code unit | `InvalidEventError`, `summary_lone_surrogate:`, `U+D800` | yes (no throw before) | Meets its name. |
-| refuses a lone low surrogate in the summary, by name | `summary_lone_surrogate:` for U+DC00 | yes | Meets its name. Covers the low-surrogate branch of the regex for summary. |
-| refuses a lone high surrogate in the session id, by name, with its code unit | `session_id_lone_surrogate:`, `U+D800` | yes | Meets its name. Low surrogate not tested for session_id. |
-| refuses a lone high surrogate in the repo, by name, with its code unit | `repo_lone_surrogate:`, `U+D800` | yes | Meets its name. Low surrogate not tested for repo. |
-| accepts a well-formed astral character in the summary, as a surrogate pair or as one code point | the pair and the code point round-trip unchanged | **no**: no refusal existed before, so it passes at 046fbe05 too | A regression guard, not a fail-before test. The commit message lists it among the fail-before tests; that is loose for this case. [INFERENCE from the diff] |
-| does not refuse a surrogate pair that the summary cap cuts in half | `not.toThrow()` on 1,999 `x` plus U+1F642 | **no**: passes before too | Guard only. Asserts the absence of a throw; the outcome of the cut is in the next test. |
-| stores a summary whose surrogate pair the length cap cuts without a lone surrogate at its end | summary equals 1,999 `x`, length 1,999 | **yes**: before, the stored summary is 2,000 units ending in U+D83D | This is the cap-trim test. It meets its name. |
+**Code.** `assertWriteTextFields` (event.ts:277-286) checks the six fields by name. It runs in `normalizeEvent` (event.ts:392) and as the first statement of `appendChained` (service.ts:3093). The check runs on `redact(text)`, the text that gets stored before the cap.
 
-Pairs and code points are accepted; the one name check (`toThrow("U+D800")`) confirms the code unit in the message. Every refusal test matches the message prefix the commit names (`summary_lone_surrogate:`, `session_id_lone_surrogate:`, `repo_lone_surrogate:`).
+**Targeted run (one command, this pass).** `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs bun test packages/mcp-server/src/event.test.ts packages/mcp-server/src/service.test.ts packages/mcp-server/src/memory-policy.test.ts -t "surrogate|straddl|normalizeKey|assertWriteTextFields|exact spelling" --timeout 30000`: 28 pass, 0 fail, 415 filtered. The prior run was 27 pass on the first two files; the one addition is the 4b84e50c regression test. The "fail before, pass after" claims are carried, not re-run.
 
-**What the refusal does and does not cover.**
+**Verdict:** VERIFIED for caller-supplied lone surrogates in all six fields, and for the refusal's place before the tip read.
 
-- It refuses the three fields for a lone surrogate anywhere in the redacted text, checked before any cap. So a lone surrogate the 512- or 2,000-unit cut would remove is still refused. This is over-refusal, fail-closed (a 400 for the caller), and not a tamper miss. [INFERENCE from code]
-- The check runs on `redact(text)`, the same text `clean` stores. `clean` redacts again, so the refusal relies on `redact` being idempotent on the stored text. The prior record probed idempotence on seven graph-id samples only. For summary text this is [INFERENCE].
-- For the three fields, a lone high surrogate at the end of a summary cut is trimmed (below). A lone surrogate in the caller's text is refused, so the refusal and the trim never both act on the same unit.
-- The named tests check refusal by message. None checks the consequence the commit names (the in-memory hash equals the hash of the stored form). That consequence is closed by refusal for these three fields, not by a test that asserts the hash. [INFERENCE: the hash property is inferred from the refusal path.]
+### Judgement 2: the cap straddle for branch, node_id and linear_identifier (W-L3b, open, unchanged)
 
-**Verdict on the refusal:** met for summary, session_id and repo at the field level, as far as the named tests and the code reach. Residual below.
+`event.ts:403` and `:404` keep `normalizeIdentifier` (node_id, linear_identifier) and `:408` keeps `clean` (branch). None trims a dangling high at the 512-unit cut. Prior probe (8a604455, same code, carried): a 511-unit prefix plus a pair gives a stored trailing U+D83D, a wire form containing U+FFFD (URLSearchParams in `greptime.ts` `send`), and a hash of the stored form that differs from the in-memory hash. `verifyChain` (event.ts:593-597) then reports `hash does not match contents`. This is a false verify on an untampered event; it fails closed. No test covers the straddle for these three fields.
 
-### Judgement: the summary cap trim (withoutDanglingHigh, event.ts:190-196)
+**Verdict:** WARNING, open, named W-L3b. Owner item.
 
-- `clean(summary, 2000)` redacts, then cuts to 2,000 units. If the cut's last unit is a high surrogate, `withoutDanglingHigh` drops it. The trim runs before `eventHash`, so the hashed summary is the stored summary (`event.ts:392`).
-- Why one unit is enough: the refusal ran first, so every high surrogate in the redacted text is followed by its low in the caller's text. A high at unit 1,999 in a cut at 2,000 therefore has its low at unit 2,000, which the cut removed. Dropping that one unit leaves a text that ends in a non-high unit. The unit before the dangling high cannot be a high either: that high would be followed by another high at 1,999, which the refusal already rejects. So one trim is enough. [INFERENCE from the pairing rule, not probed.]
-- The trim empties to `null` (stored as `""`) only for a one-unit high text, which the refusal already refuses. Not reachable.
-- Behaviour change: a summary whose pair straddles the 2,000th unit stores 1,999 units, not 2,000. The cap remains 2,000 units, so it is not raised or lowered.
-- Verdict: correct for the summary cut. Covered by the cap-trim test, which fails before and passes after.
+### Judgement 3: normalizeKey read and write parity (ledger), and what 4b84e50c moved
 
-### Judgement: the lone-surrogate refusal (d23a919a) is closed at write and at the memo
+**Ledger (phase 73 scope).** The ledger write uses `normalizeKey` for session_id and repo (event.ts:401, :407). Every ledger read the chain and pointer code and the brief/session-context paths use is still on `normalizeKey`: `brief.ts:448` (`WHERE "repo" = normalizeKey(repo)`), `service.ts:3297` (`filterText("repo", ..., normalizeKey)`), and `sessionContext` (service.ts:3972-4020). `sessionContext` takes the parse-level value, which is now `normalizeIdentifier` (session-context.ts:413), and re-normalises it at service.ts:3973 with `normalizeKey` before `recentForRepo(stored)` at :4020. `normalizeKey(normalizeIdentifier(x)) === normalizeKey(x)` because `withoutDanglingHigh` is applied last, so the ledger read matches the ledger write. The brief path (service.ts:4095) and the drift path (service.ts:7803, :7823) are also on `normalizeKey`. No ledger read was moved to `normalizeIdentifier` by 4b84e50c.
 
-Carried from the prior record, unchanged by 3e26a5c1. `graph_id` refusal is `event.ts:244-246` and `memo.ts:103`. Notes: the `summary` refusal above uses the same regex, so the two checks agree on what a lone surrogate is.
+**Memory plane (moved by 4b84e50c, by design).** These sites now use `normalizeIdentifier` for repo, per the commit's access rule: `memory-policy.ts:69-71` (parseScope), `:431`, `:452-453` (grantedToCaller, visibleToCaller); `memory-write.ts:565`; `index-store.ts:2650`, `:2682`; `service.ts:2501`, `:3647`, `:3735`, `:4592`; `session-context.ts:413`; `capsule.ts` repo filter; `types.ts` doc. The prior record listed some of them as ledger-parity sites; that listing is withdrawn. Their effect on the memory plane is Judgement 5.
 
-### Judgement: 046fbe05 doc wording (line 979, phase 76 buffer section)
+**Reads that do not go through the key (unchanged, named):**
 
-Carried from the prior record. 3008d16d and 3e26a5c1 do not change `docs/greptime-ledger.md`. No verdict effect.
+- **W-K1, pre-existing, not in 4b84e50c.** `checkpoint_verify` takes `session_id` (mcp.ts:992, `max(512)`) and passes it raw: `service.ts:4557` → `verifyCheckpointRef` → `findCheckpoint` (anchor-verify-deps.ts:213-217, `match: { kind: "note", session_id: lookup.sessionId }`). Not-found for straddling or token-shaped ids; fails closed.
+- **W-K2, `[INFERENCE]`, low.** Live-session reads (`service.ts:6594` and the comparisons in `session-context.ts`) compare the raw session id. `SESSION_ID_RE` (`planning/presence.ts:18`) bounds it, so no straddle is reachable.
+- **W-K3, pre-existing, Postgres, outside the ledger.** `graph_register` writes `plan.repo` raw (`index-store.ts:1175`), `claimedNodesForRepo` reads `normalizeKey(repo)` (`service.ts:3973`, `index-store.ts:1757`).
 
-### Judgement: Q8 and N5 are accepted limits, not closed
+**Verdict on parity:** VERIFIED for every ledger read path and the ledger write path. PARTIAL for W-K1, W-K2, W-K3 as named. The memory-plane change is a separate judgement.
 
-Carried from the prior record. No code under `service.ts` changed in 3e26a5c1.
+### Judgement 4: the pre-existing straddling rows (open owner item O-S1, unchanged)
+
+Unchanged by 4b84e50c. Rows whose session_id, repo, branch, node_id or linear_identifier straddled 512 units before the change are stored as 511 units plus U+FFFD (transport), already fail `verifyChain`, and are not found by a read of the same id. `assertAppendOnly` (greptime.ts:446-458) blocks any in-place repair. Owner options (a) accepted fail-closed verdict or (b) read alias are unchanged. Five fields, not two.
+
+### Judgement 5: memory-plane straddle introduced by 4b84e50c (W-M1, new, WARNING)
+
+4b84e50c moved parseScope's repo id from `normalizeKey` (trims a dangling high) to `normalizeIdentifier` (keeps it). Probe (read-only `bun` script under `/tmp`, not a test, removed after the run):
+
+| Input | Units | Last unit | Wire (URLSearchParams) |
+| ----- | ----- | --------- | ---------------------- |
+| `normalizeIdentifier('a'.repeat(511) + U+1F600)` | 512 | U+D83D | contains U+FFFD |
+| `normalizeKey(same)` | 511 | U+0061 | no U+FFFD |
+
+Consequence chain, from the code:
+
+1. `parseScope` (memory-policy.ts:69-71) has no length cap, so `repo:<511 units + pair>` gives `canonical` = `repo:` + the 512-unit id with a lone high.
+2. The entry hash covers `scope.canonical` (`contentHash` over `scope.canonical`, memory-write.ts ~590-602; `contentOf` in memory-record.ts:122-123 includes `scope`). The write is accepted and hashed over the lone-high form.
+3. The stored scope is written to the memory index. Read back, it is the U+FFFD form `[INFERENCE: postgres.js UTF-8 encoding, as with the ledger transport; not read back live]`.
+4. `verifyMemoryRecord` recomputes `entryHashFor(contentOf(entry))` (memory-verify.ts:173-183) and returns `hash-mismatch`: "the row changed after the gate wrote it".
+
+Before 4b84e50c (8a604455), parseScope used `normalizeKey` for repo, so the stored scope and the hashed scope agreed. The new behaviour is a regression at this commit, not a pre-existing condition. It is fail-closed: a legitimately written memory row is reported as tampered. No tamper is hidden. The memory repo (memory-write.ts:565) has the same untrimmed form in its request hash (`requestHash`, not the content hash), which is not verified in this pass.
+
+Trimming the stored scope is not an acceptable repair: it would make a `repo:owner/name` plus surrogate row visible to a caller granted `owner/name`, which is the leak 4b84e50c closes. The choices are the owner's: refuse a lone surrogate in a repo scope and a memory repo at write, by name, as the six-field rule does (so stored form equals hashed form), or record the memory hash-mismatch for such rows as accepted.
+
+**Verdict:** WARNING (new). Not a FAILED truth: phase 73's must-haves are ledger truths, and the ledger is unchanged by this commit. Logged as the owner item W-M1. Not a re-verification blocker because no phase 73 truth depends on the memory plane.
 
 ## Required Artifacts
 
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
-| `packages/mcp-server/src/event.ts` | Write-time byte cap, NUL and lone-surrogate refusal, field-level refusal and cap trim | ✓ VERIFIED | `:222` regex, `:227` class, `:244` NUL, `:246` lone surrogate, `:248-250` byte cap, `:346`→`:360` sole graph id constructor (`normalizeEvent`). New: `:249` `FieldLoneSurrogateError`, `:261-265` `refuseLoneSurrogate`; `:190-196` `withoutDanglingHigh`; `:371-373` refusals; `:392` trim. Field-level refusal and cap trim judged above. |
-| `packages/mcp-server/src/event.test.ts` | Named tests for the field-level refusal and the cap trim | ✓ VERIFIED | 7 tests in the describe at `:352`, all pass. Two are guards (not fail-before) as noted. |
-| `packages/mcp-server/src/memo.ts` | v3 format, byte-capped id, tail-anchored parse, lone-surrogate refusal | ✓ VERIFIED | Unchanged. `:96` regex, `:103` refusal, `:82` cap, `:106-122` parse. |
-| `packages/mcp-server/src/anchor.ts` | Pre-send plan, NUL and surrogate refusal, adopt, alarm, pointers, window | ✓ VERIFIED | Unchanged. `pointerPlans` `:553-562`; pre-send `:958-967`; post-read-back pointers `:1045`; alarm `:868-896`; window `:315`, `:850`. |
-| `packages/mcp-server/src/service.ts` | Pointer judgement, RPC guard, buffer enqueue after normalisation | ✓ VERIFIED | Unchanged. `:875-893`, `:917-960`, `:3124`, `:3177`, `:8020-8025`. |
-| `packages/mcp-server/src/greptime.ts` | `lookbackGraphCount`, sole `agent_events` writer | ✓ VERIFIED | Unchanged. `:1900-1905`; `insertEvent` `:1248`, INSERT `:1282`. |
-| `docs/greptime-ledger.md` | Memo v3 section: pointers, cap, refusals, accepted limits | ✓ VERIFIED | Unchanged since 046fbe05. Does not yet describe the field-level refusal or the cap trim; the commit did not touch docs. Not a verdict input. |
+| `packages/mcp-server/src/event.ts` | Six-field refusal, normalizeKey, graph id refusal, cap trim, verdict helpers | ✓ VERIFIED (unchanged at 4b84e50c) | `normalizeKey` :216-218; `clean`/`normalizeIdentifier` :180-209 (W-L3b at :403, :404, :408); `refuseLoneSurrogate` :267-271; `assertWriteTextFields` :277-286; `normalizeGraphId` :296-305; `normalizeEvent` :381-417; `withoutDanglingHigh` :190-196; `headRecordsFromLeaves` :512; `compareToAnchoredHead` :553; `verifyChain` :589-603. |
+| `packages/mcp-server/src/event.test.ts` | Named tests for the refusal, the key and the straddle | ✓ VERIFIED (targeted run) | No straddle test for branch, node_id or linear_identifier (W-L3b). |
+| `packages/mcp-server/src/service.ts` | Refusal before tip read; normalizeKey at the ledger sites | ✓ VERIFIED for the appendChained order and the ledger sites | `appendChained` :3091-3093; `lastHash` :3119; `build` :3125. Changed by 4b84e50c at :2501, :3647, :3735, :4592 (memory plane, count-neutral). `checkpointVerify` :4557 passes raw session id (W-K1). |
+| `packages/mcp-server/src/service.test.ts` | Refusal before tip read; straddle round trip | ✓ VERIFIED (targeted run) | Both "before it reads the chain tip" tests pass. File unchanged by 4b84e50c. |
+| `packages/mcp-server/src/memory-policy.ts` | Repo scope id (parseScope) | ⚠️ WARNING (W-M1) | `parseScope` :69-71 now `normalizeIdentifier` for repo; the scope is hashed; see Judgement 5. |
+| `packages/mcp-server/src/memory-policy.test.ts` | Exact-spelling visibility regression | ✓ VERIFIED (targeted run) | Passes. Does not cover the stored-scope hash for a straddling repo (W-M1). |
+| `packages/mcp-server/src/memory-write.ts` | Memory repo (request hash) | ⚠️ WARNING (W-M1, request hash) | `repo = normalizeIdentifier(request.repo)` :565; not verified against the request hash in this pass. |
+| `packages/mcp-server/src/anchor-verify-deps.ts` | Checkpoint lookup session id | ✗ NOT NORMALISED (W-K1) | `findCheckpoint` :213-217, `verifyCheckpointRef` :598. Not touched by 4b84e50c. |
+| `packages/mcp-server/src/index-store.ts` | normalizeKey for graph_index repo reads | ⚠️ PARTIAL (W-K3) | `registerGraph` writes raw repo at :1175. Memory reads at :2650, :2682 now `normalizeIdentifier` (memory plane). |
+| `packages/mcp-server/src/session-context.ts` | Ledger context read | ✓ VERIFIED (via service re-normalisation) | :413 parse now `normalizeIdentifier`; service.ts:3973 re-normalises with `normalizeKey` before the ledger read at :4020. |
+| `packages/mcp-server/src/types.ts` | MemoryReadOptions doc | ✓ VERIFIED | Doc only (4b84e50c). |
+| `packages/ledger/src/memo.ts` | v2 heads_root memo; v3 pointer memo; graph id refusal | ✓ VERIFIED (carried) | `MEMO_V2_RE` :12; v3 at :98; lone surrogate :96-106. |
+| `packages/mcp-server/src/greptime.ts` | Single INSERT path with JSON payload; append-only guard | ✓ VERIFIED | `insertEvent` payload `JSON.stringify` :1276; `assertAppendOnly` :446. |
+| `packages/mcp-server/src/anchor.ts` | Pointer send and refusal before send | ✓ VERIFIED (carried) | `pointerPlans` :553-562; pre-send :958-967; post-read-back pointers :1044-1056; `POINTER_REFUSED_RE` :85. |
+| `packages/mcp-server/src/memory-verify.ts` | Memory entry hash check | ⚠️ WARNING (W-M1) | `hash-mismatch` :173-183 reachable for a straddling repo scope. |
+| `docs/greptime-ledger.md` | Memo v3 section and accepted limits | ✓ VERIFIED (carried, not changed by 4b84e50c) | The field-level refusal and the cap trim are not described there. Not a verdict input. |
 
 ## Key Link Verification
 
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
-| `normalizeEvent` | `normalizeGraphId` | `graph_id` in `normalizeEvent` | ✓ WIRED | NUL and lone surrogate refused at write. |
-| `normalizeEvent` | `refuseLoneSurrogate` | `summary`, `session_id`, `repo` at event.ts:371-373 | ✓ WIRED | Before the hash and before any store write. |
-| `normalizeGraphId` | `formatMemoV3` | stored id carried whole in the pointer | ✓ WIRED | Byte cap, NUL and lone surrogate each refused upstream and again in `formatMemoV3`. |
-| `pointerPlans` | hour transaction | refusal before any send | ✓ WIRED | `anchor.ts:553-562`; pre-send `:958-967`. |
-| `checkAdopt` window | `lookbackGraphCount` | `(1 + g) x 168` | ✓ WIRED | `anchor.ts:315`, `:850`. |
-| `judgePointer` candidacy | `readPointerChecks` | ignored entries neither verified nor failed | ✓ WIRED | `service.ts:887-888`. |
-| `verifyGraph` guard | `hourReport` | refused RPC returns before any read | ✓ WIRED | `service.ts:8020-8025`. |
-| `normalizeEvent` | `withoutDanglingHigh` | summary after cap, before hash | ✓ WIRED | `event.ts:392`. |
-| buffered write | `normalizeEvent` | build before enqueue | ✓ WIRED | `service.ts:3124`, `:3177`. Pre-fix durable entries replayed through `insertEvent` at `service.ts:3214` bypass it (W-B2b). |
-| SQL transport (`insertEvent`) | stored text fields | form-urlencoded body via `URLSearchParams` | ⚠️ PARTIAL | A lone surrogate is stored as U+FFFD in any raw text column. Refused now for summary, session_id, repo, graph_id. Not refused for branch, node_id, linear_identifier (W-L4). Payload is `JSON.stringify`'d before the cell (`greptime.ts:1276`), which escapes lone surrogates, so payload is not in this class. [INFERENCE from code] |
-| `normalizeIdentifier` | stored session_id, repo | 512-unit cut without trim | ⚠️ PARTIAL | A pair straddling unit 512 leaves a stored lone high (W-L3). |
+| `normalizeEvent` | `assertWriteTextFields` | first check after shape checks, event.ts:392 | ✓ WIRED | Before the hash at :416. |
+| `appendChained` | `assertWriteTextFields` | first statement, service.ts:3093 | ✓ WIRED | Before the replay lookup :3100 and the tip read :3119. |
+| `normalizeEvent` | `normalizeKey` | session_id and repo, event.ts:401, :407 | ✓ WIRED | One key for write and for the ledger read sites. |
+| `normalizeEvent` | `normalizeIdentifier` | node_id, linear_identifier, branch (`clean`), event.ts:403, :404, :408 | ⚠️ PARTIAL | No dangling-high trim at the cut (W-L3b). |
+| `normalizeEvent` | `normalizeGraphId` | graph_id, event.ts:402 | ✓ WIRED | NUL, lone surrogate and byte cap refused. Refusal runs after the tip read on unkeyed sessioned writes (W-O1). |
+| `sessionContext` | ledger `recentForRepo` | `normalizeKey(request.repoId)`, service.ts:3973 → :4020 | ✓ WIRED | Parse-level `normalizeIdentifier` is re-normalised before the ledger read. |
+| `parseScope` (repo) | memory entry hash | `scope.canonical`, memory-policy.ts:69-71 → memory-write.ts content hash | ⚠️ PARTIAL | Untrimmed lone high reaches the hash (W-M1). |
+| `checkpointVerify` | `findCheckpoint` | raw `session_id`, service.ts:4557, anchor-verify-deps.ts:216 | ✗ NOT_WIRED to the key | W-K1. |
+| `graph_register` | `graph_index.repo` | raw `plan.repo`, index-store.ts:1175 | ⚠️ PARTIAL | W-K3. |
+| `insertEvent` | stored text fields | URLSearchParams body (`send`) | ✓ WIRED for the six fields | Lone surrogates no longer reach it from the six fields. The three cap-straddle fields still can (W-L3b). |
+| `verifyChain` | stored row | `eventHash(rest)` recompute, event.ts:593 | ✓ WIRED | The source of the false verify for W-L3b and O-S1 rows. |
 
 ## Data-Flow Trace (Level 4)
 
-Chain and pointer data come from the store (`readEvents`, `hourLeaves`, `graphChainLeafHours`) and from RPC (`addressSignaturePage`, `transactionMemo`). Real queries, not static returns: ✓ FLOWING. The pointer memo's graph id comes from the store read (`readHourHeads` → `eventsByIds`), so a stored NUL or over-512 id is refused by `pointerPlans` before any send (test `anchor.test.ts:1519`).
+Chain and pointer data come from the store (`readEvents`, `hourLeaves`, `graphChainLeafHours`) and from RPC (`addressSignaturePage`, `transactionMemo`). Real queries, not static returns: ✓ FLOWING (carried). The `checkpoint_verify` lookup (W-K1) is a real query with the un-normalised key: ✓ FLOWING but mis-keyed for the affected spellings. The memory entry verify (W-M1) recomputes from the stored row: ✓ FLOWING, with a fail-closed mismatch for straddling repo scopes.
 
 ## Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
-| Event test file, whole | `bun test packages/mcp-server/src/event.test.ts` | 69 pass, 0 fail | ✓ PASS |
-| Field-level refusal and cap trim, named block | `bun test ... event.test.ts -t "lone surrogates in the other write text fields"` | 7 pass, 0 fail | ✓ PASS |
-| Memo and anchor targeted run | `bun test` on memo.test.ts, anchor.test.ts | Not re-run at 3e26a5c1 (unchanged files; 046fbe05 run: 150 pass across memo, event and anchor, before this commit's event.test additions) | ✓ PASS (carried) |
-| Service named subset (criterion 1, G1, Q8, N3, RPC guard, no events) | `bun test service.test.ts -t "..."` (run at 6644698e, carried) | 32 pass, 0 fail | ✓ PASS (carried) |
-| Lone surrogate in `summary`, `session_id`, `repo` | ad hoc probe, prior record | hash mismatch, accepted at write | ✗ FAIL at 046fbe05; now refused at write by `refuseLoneSurrogate` (code reading and named tests, not re-probed) |
-| Lone surrogate in `graph_id` at write | prior record probe | refused, `graph_id_lone_surrogate`, U+D800 | ✓ PASS (carried) |
+| Six-field refusal, straddle, key and exact-spelling tests, targeted | `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs bun test packages/mcp-server/src/event.test.ts packages/mcp-server/src/service.test.ts packages/mcp-server/src/memory-policy.test.ts -t "surrogate\|straddl\|normalizeKey\|assertWriteTextFields\|exact spelling" --timeout 30000` | 28 pass, 0 fail, 415 filtered | ✓ PASS |
+| Straddle at 512 for repo scope (memory plane) | read-only `bun` probe of `normalizeIdentifier` and `normalizeKey` (not a test; removed) | 512 units, last U+D83D, wire has U+FFFD; `normalizeKey` gives 511 | ✗ FAIL (W-M1) |
+| Straddle at 512 for branch, node_id, linear_identifier | prior probe, 8a604455, code unchanged at 4b84e50c | stored trailing U+D83D; wire contains U+FFFD | ✗ FAIL (W-L3b, carried) |
+| Straddle at 512 for session_id, repo (ledger) | prior probe, 8a604455, ledger write unchanged | stored 511 units; hash of the stored form matches | ✓ PASS |
+| Each of six fields refused by name | prior probe, 8a604455, code unchanged | six `<field>_lone_surrogate` refusals | ✓ PASS |
+| Fail-before for the commit tests | parent checkout | not run in this pass | ? SKIP (carried from the commit record) |
+| Carried truths T1 to T8 | not re-run in this pass (one targeted command, used above) | carried from 8a604455 record; no code or test change on their paths in 4b84e50c | ✓ CARRIED |
 
 ## Probe Execution
 
-No probe scripts declared or present for this phase. Not applicable.
+No probe scripts declared or present for this phase (`scripts/*/tests/probe-*.sh` not declared in the phase plan). Not applicable.
 
 ## Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 | ----------- | ----------- | ----------- | ------ | -------- |
-| HARD-S3 | 73-01 | Chain canonical checksums; on-demand and scheduled verification detect modified, deleted, gapped or reordered entries and report the first bad position; name the trusted earlier proof | ? NEEDS HUMAN (open) | On-demand verify is present; criterion 1 named tests pass. Scheduled verification was not judged in this pass. The trusted earlier proof is named: the anchored on-chain head (T2 override). `REQUIREMENTS.md:114` and `:135` ("Preliminary edits validated; not complete") stand. |
+| HARD-S3 | 73-01 | Chain canonical checksums; on-demand and scheduled verification detect modified, deleted, gapped or reordered entries and report the first bad position; name the trusted earlier proof | ? NEEDS HUMAN (open) | On-demand verify is present; criterion 1 named tests pass. Scheduled verification was not judged in this pass. The trusted earlier proof is named: the anchored on-chain head (T2 override). `REQUIREMENTS.md:114` and `:135`. |
 
 Orphaned requirements: none. `REQUIREMENTS.md:135` is the only row mapped to phase 73.
 
@@ -204,87 +228,41 @@ Orphaned requirements: none. `REQUIREMENTS.md:135` is the only row mapped to pha
 
 | File | Line | Pattern | Severity | Impact |
 | ---- | ---- | ------- | -------- | ------ |
-| `packages/mcp-server/src/event.ts` | `normalizeIdentifier` (`:210-212`) and `clean` (`:180-185`) | Cut at 512 units without a dangling-high trim for session_id, repo, node_id, linear_identifier, branch | ⚠️ Warning | W-L3, W-L4: stored lone high, fail-closed false verify on affected sessions or repos. |
-| `packages/mcp-server/src/event.ts` | `normalizeEvent` `branch`, `node_id`, `linear_identifier` | Lone surrogate accepted at write | ⚠️ Warning | W-L4: same consequence as W-L2 before 3e26a5c1. |
-| `packages/mcp-server/src/event.test.ts` | `:352` describe | No test for a lone low surrogate in session_id or repo; no test that asserts the hash round trip | ⚠️ Warning | Coverage gap, not a defect. |
-| `packages/mcp-server/src/anchor.test.ts` | 1494-1530 | No lone-surrogate test beside the NUL test | ⚠️ Warning | W-L1t: coverage gap at the pre-send layer. |
-| `packages/mcp-server/src/anchor.ts` | 633-643 | Anchor-side payer and err skip in `completePointers` untested | ⚠️ Warning | W-N3c |
-| `packages/ledger/src/memo.test.ts` | 231-241 | Transaction overhead hand-counted, not measured from `transferArgv` | ⚠️ Warning | B1 model unverified against the CLI's layout (operator item 2). |
-
-No 🛑 blockers. Debt markers: none.
-
-## Warnings and new findings (not gaps)
-
-- **W-L2 (carried as written; refusal implemented at 3e26a5c1).** Lone surrogate in `summary`, `session_id` and `repo`. The owner's refusal is now in place at write for all three, with named errors and the named tests above. What remains is the 512-unit cut on session_id and repo (W-L3). The owner item stays open as written in the prior record until the owner records it.
-- **W-L3 (new). `session_id` and `repo` 512-unit cut can store a lone high surrogate.** `normalizeIdentifier` is `clean(value, 512)`, which is `redact(value).slice(0, 512)` (`event.ts:180-185`, `:210-212`). The refusal checks the full text, so a pair straddling unit 512 passes the refusal, and the cut leaves a lone high as the last unit. The in-memory `eventHash` covers that high surrogate (`canonicalJson` escapes it), while the store keeps U+FFFD, so verify fails closed for that session or repo. Commit 3e26a5c1 records this as open, and the reason: trimming on write alone would make a session's writes miss its own reads (about 20 read sites use `normalizeIdentifier`). Not tested, not refused, not trimmed. The owner decides (Owner item 10). This is related to the carried read-side cut (below), but is separate: this is the write-side stored form.
-- **W-L4 (new, scope outside the owner's list). `branch`, `node_id` and `linear_identifier` accept a lone surrogate on write.** `branch` uses `clean(input.branch, MAX_FIELD)` (`event.ts:389`); `node_id` and `linear_identifier` use `normalizeIdentifier` (`:384-385`). None is refused, and none is trimmed. Each is inside `unhashed`, so each is hashed in its in-memory form and stored as U+FFFD, with the same fail-closed consequence as W-L2 before 3e26a5c1. `branch` also takes the 512-unit cut, so the same residual as W-L3 applies to it. Commit 3e26a5c1 names these as outside the owner's list. Owner item 11.
-- **W-B2b (carried, stored state).** Buffer replay skips normalisation. `service.ts:3214` replays durable entries through `insertEvent` without `normalizeEvent`. New entries are normalised before they are buffered (`:3124`, `:3177`), so only pre-fix durable entries can reach the store unchecked. Buffer off by default. Part of the stored-id item. The field-level refusal does not reach these entries.
-- **Stored-id item (carried; no repair decided).** Pre-fix rows with a stored NUL or over-512 graph id halt a live anchor run at the first such hour (pre-send `anchor.ts:958-967`; every later hour waits). Pre-fix rows with a lone surrogate in any text field are stored as U+FFFD, so they are indistinguishable from real U+FFFD in a scan. Operator check: `SELECT count(*) FROM agent_events WHERE octet_length(graph_id) > 512`, and a NUL scan on `graph_id`.
-- **W-N3b (carried).** Third-party grief at a graph's index address. Verify fails closed (budget exhausted, `service.ts:937`). Open.
-- **W-N3c (carried).** The anchor-side N3 skip (`anchor.ts:633`, `:643`) has no test.
-- **W-N4 (carried; owner decided fail closed).** Verify needs devnet even with no anchored hour (`service.ts:912-916`). Decided; no change.
-- **W-N6 (carried).** `POINTER_REFUSED_RE` (`anchor.ts:85`) matches any "transaction simulation failed". Refusal text unobserved (operator item 1).
-- **W-N7 (carried, partial).** `73-MEMO-V3-DESIGN.md` does not carry the deviations listed in the 9ab6f111 commit message. Open.
-- **W-N8 (carried).** Budget not measured for a year-old graph (`config.ts:1207`). Operator item 5.
-- **Read-side cut (carried).** `normalizeIdentifier` still cuts a longer id to 512 units on reads (`event.ts:210-212`), so a read of an over-long stored id can match another graph. Open. W-L3 is the write-side counterpart.
-- **W4 (label stale, owner to restate or retire).** The recorded label "No verdict-level payload test" has no definition in the repo beyond the prior record and the ROADMAP/STATE labels. `service.test.ts:5386` asserts `verdict.ok`, `verdict.trusted` and `hours[0].pairs[].first_differing_event_id`, which is verdict-level.
-- **W3, W5 (carried, not re-judged this pass).** W3: boot DDL `CREATE TABLE IF NOT EXISTS "graph_chain_leaves"` runs at every boot (`greptime.ts:1024`), append-mode check incomplete. W5: the evidence bundle attests the app chain from the chain verdict only (`observe.ts:1050`). Neither is in SC1 or SC2.
+| `packages/mcp-server/src/event.ts` | 403, 404, 408 | `node_id`, `linear_identifier`, `branch` cut at 512 without the dangling-high trim | ⚠️ Warning | W-L3b: a legitimate write is stored with U+FFFD and fails `verifyChain`. Fail-closed. |
+| `packages/mcp-server/src/event.test.ts` | straddle describe | No straddle test for branch, node_id or linear_identifier | ⚠️ Warning | Coverage gap behind W-L3b. |
+| `packages/mcp-server/src/memory-policy.ts` | 69-71 | Repo scope id kept untrimmed at the cut; no surrogate refusal on scope | ⚠️ Warning | W-M1: a legitimate memory row is reported `hash-mismatch`. Fail-closed. New at 4b84e50c. |
+| `packages/mcp-server/src/anchor-verify-deps.ts` | 213-217 | `checkpoint_verify` session lookup not normalised | ⚠️ Warning | W-K1: `not-found` for straddling or token-shaped session ids. Pre-existing. |
+| `packages/mcp-server/src/service.ts` | 3091-3125 | Unkeyed sessioned write reads the tip before a graph id refusal | ⚠️ Warning | W-O1: wording and ordering; no row written; no integrity effect. |
+| `packages/mcp-server/src/index-store.ts` | 1175 | `graph_register` writes repo raw | ⚠️ Warning | W-K3: Postgres, pre-existing. |
+| `packages/mcp-server/src/service.ts` | 6594 | Raw session id read and equality filter | ℹ️ Info | W-K2: bounded by `SESSION_ID_RE`; low. |
+| `packages/mcp-server/src/anchor.ts` | 633-643 | Anchor-side payer and err skip in `completePointers` untested | ⚠️ Warning | W-N3c (carried). |
+| `packages/ledger/src/memo.test.ts` | 231-241 | Transaction overhead hand-counted, not measured from `transferArgv` | ⚠️ Warning | B1 model unverified (carried). |
 
 ## Human Verification Required
 
-Operator items (not run by this verifier; they need devnet, a funded key or a live store):
+Listed in the frontmatter. The items that are new in this pass:
 
-1. **Devnet 0-lamport pointer probe.** Send a 0-lamport pointer to an unfunded index address; record the refusal text. Decides `POINTER_REFUSED_RE` (N6) and whether the funded path is needed.
-2. **Live devnet send of a 512-byte-id pointer.** Serialised size within 1,232 bytes; the measured size replaces the 251-byte model.
-3. **Live store scan.** Count `graph_id` over 512 bytes; find any `graph_id` containing NUL; find U+FFFD in `graph_id`, `summary`, `session_id` and `repo` (not attributable to a lone-surrogate write by a scan alone); find v2 memos in the anchor listings.
-4. **RPC history depth (N5).** Find the oldest signature still listed for a job-key address and an index address. The acceptance is recorded; the depth is not.
-5. **Budget measurement (W-N8).** Time `verifyGraph` for a year-old graph under the 30 s default.
+1. **W-M1, the memory-plane straddle introduced by 4b84e50c.** A repo scope and a memory repo with a lone high at the cut. Refuse at write, or record the hash-mismatch as accepted. Trimming is excluded.
+2. **O-S1, the pre-change straddling rows.** Five fields, unchanged; not widened further by this commit (the new rows are W-M1, not pre-change rows).
 
-Owner decisions:
-
-6. **Stored graph ids over 512 bytes or containing NUL, and pre-fix lone-surrogate rows.** No repair decided.
-7. **W-L2: lone surrogates in `summary`, `session_id` and `repo`.** Refusal at write is implemented at 3e26a5c1; the item stays open as written until the owner records it. The 512-unit residual is item 10.
-8. **HARD-S3: scheduled verification.** Scope decision recorded against `REQUIREMENTS.md:114` and `:135`.
-9. **W4: restate or retire the recorded label.**
-10. **W-L3: `session_id` and `repo` 512-unit cut.** Shared normaliser at every read and write site, or leave the cut and accept the fail-closed verdict.
-11. **W-L4: `branch`, `node_id`, `linear_identifier` lone surrogates on write.** Refuse as summary, session_id and repo are refused, or accept the fail-closed verdict. `branch` also decides on the dangling-high trim.
-
-Accepted limits, recorded and not closed (owner-accepted 2026-11-03; no human item):
-
-- **Q8.** A graph whose only hour lost its pointer and rows verifies `ok` true, `trusted` false, `no events` (`service.test.ts:5843`).
-- **N5.** A pruned RPC history for an index address passes the hour for hours older than that depth (`service.ts:917-918`).
-
-## Open items (named, kept open)
-
-- **Phase 73 N5.** Accepted limit; depth unmeasured (operator item 4).
-- **Phase 73 Q8.** Accepted limit; pinned by `service.test.ts:5843`.
-- **Phase 73 W3, W4, W5, HARD-S3, N6, N8.** Open, as above.
-- **Stored over-512-byte, NUL, or pre-fix lone-surrogate graph ids.** No repair decided. Blocks a live anchor run against a store that holds such rows. Operator item 3; owner item 6.
-- **W-L2 (carried as written).** Refusal at write implemented at 3e26a5c1 for summary, session_id, repo. Owner item 7.
-- **W-L3 (new).** `session_id` and `repo` 512-unit cut can store a lone high surrogate. Owner item 10.
-- **W-L4 (new).** `branch`, `node_id`, `linear_identifier` accept a lone surrogate on write. Owner item 11.
-- **W-L1t, W-B2b, W-N3b, W-N3c, W-N7, read-side cut.** Warnings above.
-- **Live devnet sends and live store scans.** Operator items 1 to 5.
-- **Phases 72, 75, 76, 77, 78.** Not re-judged here.
-
-## Does any open item block the phase goal?
-
-- **No code-level item blocks the goal as ROADMAP states it.** SC1 (T1) and SC2 (T2, by override) hold; T3 holds for pointer-listed hours; T4 and the graph-id surrogate refusal are closed at write and at the memo. The field-level refusal and the cap trim meet their named tests.
-- **Q8 and N5 are exceptions to "deletion is detected."** The owner has accepted both as documented limits. They do not block under that acceptance, but they bound the claim and must be quoted with it.
-- **The stored-id item is the one open item with a blocking effect, and it is operational.** It halts a live anchor run on any store that holds an over-512 or NUL graph id, so the anchored-head half cannot proceed there until the owner decides. It does not block the verification code.
-- **Live anchoring has not run (D73-05).** The anchored half is proven against the fake runner and fake Greptile only. Operator items 1 and 2 gate production readiness; they are not code blockers.
-- **W-L2, W-L3 and W-L4 do not block the goal.** Each fails closed (a false verify on affected graphs or sessions) and never hides a tamper. They are correctness defects the owner should decide.
-- **HARD-S3 does not block the ROADMAP goal sentence or SC1/SC2.** It blocks closure of the HARD-S3 requirement.
+Carried, unchanged: W-L3b, W-K1, W-K3, W-O1, the devnet and live-store items, N5, W-N8, the stored-id decision, HARD-S3, W4.
 
 ## Gaps Summary
 
-No gaps. No truth is FAILED. No artifact is MISSING or STUB. No key link is NOT_WIRED. No 🛑 blocker. The status is `human_needed` because the human-verification section is non-empty (operator checks, owner decisions on the stored-id item, W-L2, W-L3, W-L4 and HARD-S3, and the W4 label), not because of a failed truth.
+No truth is FAILED. No artifact is MISSING or STUB. No must-have is blocked. The status is `human_needed` because the human-verification list is non-empty.
+
+Against the commit's own claims:
+
+- The ledger parity claim holds: 4b84e50c moved no ledger read or write off `normalizeKey`, and the one ledger read that starts from a moved value (session context) is re-normalised before the ledger query.
+- The prior record's R3 list of ledger-parity sites is stale for the memory-plane sites the commit moved. Withdrawn as ledger evidence; recorded as the memory plane in Judgement 3.
+- New WARNING W-M1: a repo scope with a lone high at the cut is hashed untrimmed and reported `hash-mismatch` on a memory read. Fail-closed. Owner decision.
+- Open and unchanged: W-L3b, W-K1, W-K2, W-K3, W-O1, O-S1, and the carried accepted limits.
 
 ## Verdict
 
-**Status: human_needed.** Score 8/8 truths verified (T2 by override). The field-level refusal and the summary cap trim at 3e26a5c1 meet their named tests (7 of 7 pass). Two of the seven are guards rather than fail-before tests. W-L2's refusal is in place at write; its 512-unit residual (W-L3) and the branch, node_id, linear_identifier surface (W-L4) are new open items. Q8 and N5 remain accepted limits, not closed.
+**Status: human_needed.** Score 8/8 truths verified (T2 by override). The ledger truths and checks R1, R2, R4 verify at 4b84e50c; R3 verifies for the ledger, with the memory-plane sites moved by the commit stated separately. R5 (the 4b84e50c regression test) verifies. W-M1 is a new WARNING for the owner. W-L3b, W-K1, W-K3, W-O1 and O-S1 remain open as named. Q8 and N5 remain accepted limits, not closed.
 
 ---
 
-_Verified: 2026-11-03T14:54:08Z_
+_Verified: 2026-11-03T16:04:08Z_
 _Verifier: Claude (gsd-verifier)_

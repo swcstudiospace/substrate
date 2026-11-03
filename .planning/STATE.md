@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 phases 71-78 none complete; integration gate r21 green on 3e26a5c1 (12206 pass, 2 skip, 0 fail, 0 errors); verifier round at 3e26a5c1 for 73 and 76, the rest fresh; v1.8 not complete; owner decisions open; nothing pushed."
-stopped_at: "Integration tree gsd/v18-int-all at 3e26a5c1 carries the sixth Run 18 pass. Gate r21 green on 3e26a5c1 (12206 pass, 2 skip, 0 fail, 0 errors). Verifier round at 3e26a5c1 for 73 and 76, the rest fresh. No phase complete; v1.8 not complete. Owner decisions open (see Needs Human); nothing pushed."
+status: "v1.8 phases 71-78 none complete; integration gate r23 green on 4b84e50c (12223 pass, 2 skip, 0 fail, 0 errors); the seven records re-verified at 4b84e50c; v1.8 not complete; owner decisions open; nothing pushed."
+stopped_at: "Integration tree gsd/v18-int-all at 4b84e50c carries the seventh Run 18 pass. Gate r23 green on 4b84e50c (12223 pass, 2 skip, 0 fail, 0 errors). The seven records (71, 72, 73, 75, 76, 77, 78) re-verified at 4b84e50c. No phase complete; v1.8 not complete. Owner decisions open (see Needs Human); nothing pushed."
 last_updated: "2026-11-03"
 last_activity: 2026-11-03
-last_activity_desc: "Run 18 sixth pass at 3e26a5c1: gate r21 green on 3e26a5c1 (12206 pass, 2 skip, 0 fail, 0 errors); verifier round at 3e26a5c1 (73 and 76 re-issued, the rest fresh); no phase complete; v1.8 not complete; nothing pushed."
+last_activity_desc: "Run 18 seventh pass at 4b84e50c: gate r23 green on 4b84e50c (12223 pass, 2 skip, 0 fail, 0 errors); seven records re-verified at 4b84e50c; no phase complete; v1.8 not complete; nothing pushed."
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
@@ -814,6 +814,14 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Gates.** Gate r21 green on `3e26a5c1` (12206 pass, 2 skip, 0 fail, 0 errors).
 - **Verifier round at 3e26a5c1.** The verifiers re-issued 73 and 76 at 3e26a5c1.
 
+## Run 18, seventh pass (2026-11-03, HEAD 4b84e50c)
+
+- **Commits.** `8a604455` (refuse lone surrogates in all six write text fields; refuse before the sessioned tip read; normalizeKey for session_id and repo on both paths, 34 sites); `4b84e50c` (access and visibility repo comparisons back to exact spelling after a regression found by the phase 72 verifier: a legacy repo with a lone high surrogate was treated as granted; 22 key sites kept on normalizeKey).
+- **Gates.** Gate r22 green on `8a604455`; gate r23 green on `4b84e50c` (12223 pass, 2 skip, 0 fail, 0 errors).
+- **Verifier round at 4b84e50c.** The verifiers re-issued all seven records at 4b84e50c.
+- **Owner decisions executed.** W-L4 (refuse), W-L3 (normalizeKey at every site), and the tip order (move before the read) executed.
+- **Read/write parity.** The W-L3 decision had a read/write parity consequence for pre-existing straddling rows; it is an owner data item (73 W-L3b in Needs Human).
+
 ## Needs Human
 
 | Phase | Item | What is needed | Who decides |
@@ -825,16 +833,21 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 71 | Test-count reconciliation | ROADMAP 11,626 vs record 11,596, unreconciled | Owner |
 | 71 | Operator close | Operator close named in the 71 verification record | Operator |
 | 71 | Postgres restart clauses (criteria 3 and 5) | Orchestrator Postgres per-file evidence: run the PG-gated restart tests and record the result | Orchestrator |
+| 71 | Straddling data | Decide the treatment of the straddling data named in the 71 status | Owner |
 | 72 | Decision 1: corpus proof disclosure | Accept as a documented residual, or reverse to a per-repository tree | Owner |
 | 72 | Decision 3: allowlist unit | Choose the surface (SUBSTRATE_REPO_SCOPES keys) or the session as the unit | Owner |
 | 72 | Row 18 | Service gate under scope not reached; run it under scope | Orchestrator |
 | 72 | Row 8 | Postgres filter has orchestrator evidence only | Orchestrator |
+| 72 | Legacy row repair | Owner data decision on repairing the legacy rows | Owner |
 | 73 | W-L3 | session_id and repo cut at 512 code units can store a lone high surrogate; decide a shared normalizeKey at about 20 read and write sites, or leave the cut residual | Owner |
 | 73 | W-L4 | branch, node_id and linear_identifier accept a lone surrogate on write; decide whether they refuse lone surrogates at write, as summary, session_id and repo now do | Owner |
 | 73 | Stored graph ids over 512 bytes, NUL or lone surrogate | Operator scan of the store, then the owner decides the repair; blocks live anchoring on such a store | Owner |
 | 73 | W3, W4 (label), W5, N6, N8 | Fix or accept each open gap in the 73 record | Owner |
 | 73 | HARD-S3 scope | Decide the scope of HARD-S3 | Owner |
 | 73 | Live devnet probe and live store scan | Operator runs both | Operator |
+| 73 | W-M1 | A repo straddling the 512-unit cut makes a memory entry fail its hash, which verify reports as a mismatch: refuse such repos at write, or record the mismatch as accepted | Owner |
+| 73 | W-L3b | branch, node_id, linear_identifier, session_id and repo straddling a 512-unit cut can store a lone high surrogate; decide a repair for pre-existing rows | Owner |
+| 73 | W-K1 and W-K3 | Pre-existing unnormalised reads and writes; decide the treatment | Owner |
 | 75 | O1 | Decide the fail-closed read policy | Owner |
 | 75 | O2 | Decide the connect cooldown; NOT FIXED | Owner |
 | 75 | H-1 | Add the H-1 degraded-brief test | Orchestrator |
@@ -846,12 +859,14 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 76 | Operator items 1 to 8 | Operator runs them as listed in the 76 record | Operator |
 | 76 | HARD-R3 | Orphaned in REQUIREMENTS, as listed in the 76 status | Orchestrator |
 | 76 | Tip-read order on the sessioned path | A warning on the sessioned path reads the tip before the surrogate refusal; move the surrogate refusal ahead of the tip read, or keep the order | Owner |
+| 76 | W-L2-TIP-ORDER (handoff) | handoff() reads the tip before its emit; move the tip read after the refusal in handoff, or keep the order | Owner |
 | 77 | T8 ordering rule | Confirm the documented out-of-order rule; the pull path orders by priority (H5) | Owner |
 | 77 | H5 and H6 | Decide per the 77 verification record | Owner |
 | 77 | T5 to T7 | Verifier re-run of the Postgres per-file record; steering-idempotency 4 of 4 is orchestrator evidence | Orchestrator |
 | 77 | H3 | Verifier human item per 77-VERIFICATION | Orchestrator |
 | 77 | Migration 43 rehearsal | Operator runs the migration 43 rehearsal on a restored dump | Operator |
 | 78 | Unreadable-plan audit gap and tests | Decide whether to close the gap (reconcile-main.ts around 242 to 248); counter-cut and unwritable audit path tests are open | Owner |
+| 78 | node_id straddle in graph_register and graph_claim | Decide the treatment of a node_id straddling the cut (a pre-existing data class) | Owner |
 | 78 | HARD-H2 | Orphaned in REQUIREMENTS (lines 125, 140) | Orchestrator |
 | 78 | Operator items 1 to 4 | Operator runs them as listed in the 78 record | Operator |
 | Milestone | v1.8 completion | Not started; no phase or milestone is complete | Owner |
