@@ -16,7 +16,7 @@
  * digest (see {@link repoRefusalPayload}).
  */
 import { createHmac, randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { scopeRepoId } from "./event.ts";
 import { SURFACES, type Surface } from "./types.ts";
@@ -44,12 +44,13 @@ export interface RepoScope {
 export const REPO_SCOPE_OFF: RepoScope = { enforced: false, registry: new Map(), grants: new Map() };
 
 /** Why a repository or path is refused. Closed; the audit and the HTTP body carry these codes and nothing else. */
-export type RepoRefusalReason = "repo-not-granted" | "repo-not-registered" | "path-not-registered" | "path-repo-mismatch" | "all-repos-not-granted" | "graph-repo-unresolved" | "graph-repo-mismatch" | "not-declared-for-scope";
+export type RepoRefusalReason = "repo-not-granted" | "repo-not-registered" | "path-not-registered" | "nested-checkout" | "path-repo-mismatch" | "all-repos-not-granted" | "graph-repo-unresolved" | "graph-repo-mismatch" | "not-declared-for-scope";
 
 export const REPO_REFUSAL_MESSAGES: Readonly<Record<RepoRefusalReason, string>> = {
 	"repo-not-granted": "the caller is not granted this repository",
 	"repo-not-registered": "the repository has no registered checkout on this host",
 	"path-not-registered": "the path is not inside a directory registered for any repository",
+	"nested-checkout": "the path lies inside a checkout nested under a registered repository, and that checkout is not registered",
 	"path-repo-mismatch": "the path belongs to a different repository than the one named",
 	"all-repos-not-granted": "the request reads every repository, and the caller is granted only some of them",
 	"graph-repo-unresolved": "the graph has no resolvable repository, so it cannot be placed in a grant",
@@ -92,6 +93,31 @@ function parseDirectories(value: unknown, where: string): ParseOutcome<string[]>
 		if (!directories.includes(normal)) directories.push(normal);
 	}
 	return { ok: true, value: directories };
+}
+
+/** The kind of `.git` entry in `dir`: "file" for a linked worktree's gitfile, "dir" for a repository directory, null for none. */
+function gitEntryKind(dir: string): "file" | "dir" | null {
+	try {
+		return lstatSync(join(dir, ".git")).isFile() ? "file" : "dir";
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether a `.git` entry lies strictly between `root` (a real registered directory) and `target` (inside it). Below a checkout
+ * root any such entry is a nested checkout. Below a worktrees directory only a linked worktree directly in it (a `.git` file) is
+ * allowed; a `.git` directory, or any entry deeper down, is a nested checkout. A checkout root with no `.git` of its own is a plain
+ * directory that holds repositories as children, so it nests nothing.
+ */
+function nestedCheckoutBetween(root: string, checkout: boolean, target: string): boolean {
+	if (checkout && gitEntryKind(root) === null) return false;
+	for (let dir = target; dir !== root && contains(root, dir); dir = dirname(dir)) {
+		const kind = gitEntryKind(dir);
+		if (kind === null) continue;
+		if (checkout || kind === "dir" || dirname(dir) !== root) return true;
+	}
+	return false;
 }
 
 /** Whether `target` is `root` or lies beneath it. Both are normalised, absolute paths. */
@@ -210,19 +236,37 @@ export function realDirectoryOrNull(dir: string): string | null {
 	}
 }
 
-/** The registration whose registered directory contains `path`, with that directory's real location. The deepest match wins. */
-export function locateRepoPath(scope: RepoScope, path: string): { repo: string; root: string; target: string } | null {
+/** Where a directory of a registration sits: a checkout (a repository's root) or a worktrees directory (holds its linked worktrees). */
+export type LocatedRepoPath = { repo: string; root: string; target: string };
+
+/** The located path, or why it has no place: outside every registration, or inside a nested checkout (see {@link locateRepoPath}). */
+export type LocateOutcome = { ok: true; located: LocatedRepoPath } | { ok: false; reason: "path-not-registered" | "nested-checkout" };
+
+/**
+ * The registration whose registered directory contains `path`, with that directory's real location. The deepest match wins; a
+ * checkout wins a tie with a worktrees directory at the same location. A checkout nested under a registered directory is refused
+ * (`nested-checkout`): any `.git` strictly below a checkout is nested, and below a worktrees directory only a linked worktree
+ * directly in it (a `.git` file) is allowed.
+ */
+export function locateRepoPath(scope: RepoScope, path: string): LocateOutcome {
 	const target = resolveContained(path);
-	if (target === null) return null;
-	let best: { repo: string; root: string; target: string } | null = null;
+	if (target === null) return { ok: false, reason: "path-not-registered" };
+	let best: { repo: string; root: string; checkout: boolean } | null = null;
 	for (const registration of scope.registry.values()) {
-		for (const dir of [...registration.checkouts, ...registration.worktrees]) {
-			const root = realDirectoryOrNull(dir);
-			if (root === null || !contains(root, target)) continue;
-			if (best === null || root.length > best.root.length) best = { repo: registration.repo, root, target };
+		for (const [dirs, checkout] of [
+			[registration.checkouts, true],
+			[registration.worktrees, false],
+		] as const) {
+			for (const dir of dirs) {
+				const root = realDirectoryOrNull(dir);
+				if (root === null || !contains(root, target)) continue;
+				if (best === null || root.length > best.root.length) best = { repo: registration.repo, root, checkout };
+			}
 		}
 	}
-	return best;
+	if (best === null) return { ok: false, reason: "path-not-registered" };
+	if (nestedCheckoutBetween(best.root, best.checkout, target)) return { ok: false, reason: "nested-checkout" };
+	return { ok: true, located: { repo: best.repo, root: best.root, target } };
 }
 
 /** Whether `surface` holds a grant for the canonical `repo`. Anonymous callers hold none. Scoping off grants everything. */
@@ -254,10 +298,10 @@ export function authorizeRepo(scope: RepoScope, surface: Surface | null, named: 
 export function authorizeRepoPath(scope: RepoScope, surface: Surface | null, path: string, named: string | null): RepoGate {
 	if (!scope.enforced) return { ok: true, repo: null, target: null };
 	const located = locateRepoPath(scope, path);
-	if (located === null) return refuse("path-not-registered");
-	if (!isGranted(scope, surface, located.repo)) return refuse("repo-not-granted");
-	if (named !== null && scopeRepoId(named) !== located.repo) return refuse("path-repo-mismatch");
-	return { ok: true, repo: located.repo, target: located.target };
+	if (!located.ok) return refuse(located.reason);
+	if (!isGranted(scope, surface, located.located.repo)) return refuse("repo-not-granted");
+	if (named !== null && scopeRepoId(named) !== located.located.repo) return refuse("path-repo-mismatch");
+	return { ok: true, repo: located.located.repo, target: located.located.target };
 }
 
 /**
@@ -277,9 +321,9 @@ export function localRegistryScope(env: Record<string, string | undefined>): Par
  */
 export function localPathGate(scope: RepoScope, surface: Surface | null, path: string): RepoGate {
 	const located = locateRepoPath(scope, path);
-	if (located === null) return refuse("path-not-registered");
-	if (!isGranted(scope, surface, located.repo)) return refuse("repo-not-granted");
-	return { ok: true, repo: located.repo, target: located.target };
+	if (!located.ok) return refuse(located.reason);
+	if (!isGranted(scope, surface, located.located.repo)) return refuse("repo-not-granted");
+	return { ok: true, repo: located.located.repo, target: located.located.target };
 }
 
 /**

@@ -72,7 +72,7 @@ function checkoutOf(scope: RepoScope, repo: string): { ok: true; location: Scope
 function locate(request: ScopedGitRequest, named: string | null): { ok: true; location: ScopedLocation } | { ok: false; reason: RepoRefusalReason } {
 	if (request.path !== null) {
 		const located = locateRepoPath(request.scope, request.path);
-		return located === null ? { ok: false, reason: "path-not-registered" } : { ok: true, location: located };
+		return located.ok ? { ok: true, location: located.located } : { ok: false, reason: located.reason };
 	}
 	return named === null ? { ok: false, reason: "repo-not-registered" } : checkoutOf(request.scope, named);
 }

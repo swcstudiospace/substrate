@@ -75,6 +75,24 @@ function ownLocations(repo: string): string[] {
 	return found.map((dir) => resolveContained(dir) ?? dir);
 }
 
+/** The common git directory git reports for `repo`, resolved. Its hooks directory is shared by every worktree of the repository. */
+function commonGitDir(repo: string): string | null {
+	const result = spawnSync("git", ["-C", repo, "rev-parse", "--git-common-dir"], { encoding: "utf8" });
+	if (result.status !== 0) return null;
+	const dir = resolve(repo, result.stdout.trim());
+	return resolveContained(dir) ?? dir;
+}
+
+/** The primary checkout of `repo`: the first worktree git lists, which is the main checkout whichever linked worktree asks. */
+function primaryCheckout(repo: string): string | null {
+	const result = spawnSync("git", ["-C", repo, "worktree", "list", "--porcelain"], { encoding: "utf8" });
+	if (result.status !== 0) return null;
+	const line = result.stdout.split("\n").find((text) => text.startsWith("worktree "));
+	if (line === undefined) return null;
+	const path = line.slice("worktree ".length);
+	return resolveContained(path) ?? path;
+}
+
 /** Whether `target` is `root` or lies beneath it. Both are real, absolute paths. */
 function within(root: string, target: string): boolean {
 	const rel = relative(root, target);
@@ -85,7 +103,8 @@ function within(root: string, target: string): boolean {
  * Where `repo` may be written, decided in the order that keeps git away from an unregistered repository. Unset registry: no
  * check, as before. Set: `repo` must lie in a registration (the lookup the corpus CLI gates on) before any git call runs. Only
  * then is the hooks directory asked for, and it must lie in the repository's own worktree or git directory, so a `core.hooksPath`
- * that points elsewhere is refused before anything is written there.
+ * that points elsewhere is refused before anything is written there. A hooks directory in the common git directory is shared
+ * by every linked worktree, so the primary checkout that owns that directory must be registered too.
  */
 type Located = { status: "refused"; detail: string } | { status: "not-a-repo" } | { status: "ok"; dir: string };
 
@@ -103,6 +122,16 @@ function locate(repo: string, env: Env): Located {
 		const target = resolveContained(dir) ?? dir;
 		if (!ownLocations(repo).some((root) => within(root, target))) {
 			return { status: "refused", detail: `hooks directory ${dir} is outside the repository's own worktree and git directory` };
+		}
+		const common = commonGitDir(repo);
+		if (common !== null && within(common, target)) {
+			const primary = primaryCheckout(repo);
+			if (primary === null) {
+				return { status: "refused", detail: `the primary checkout of ${repo} cannot be determined, and hooks directory ${dir} is shared through it` };
+			}
+			if (!localPathGate(scope, LOCAL_SURFACE, primary).ok) {
+				return { status: "refused", detail: `primary checkout ${primary} is not registered, and hooks directory ${dir} is shared through it` };
+			}
 		}
 	}
 	return { status: "ok", dir };

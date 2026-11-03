@@ -126,3 +126,21 @@ describe("scopedGit granted calls", () => {
 		expect(calls).toHaveLength(1);
 	});
 });
+
+describe("scopedGit refuses a nested checkout under a registered checkout", () => {
+	test("a checkout nested under a registered checkout is refused by name before the runner is called, and the outer checkout still runs", () => {
+		const f = fixture();
+		mkdirSync(join(f.a.checkout, ".git"));
+		const nested = join(f.a.checkout, "vendor", "lib");
+		mkdirSync(join(nested, ".git"), { recursive: true });
+		mkdirSync(join(nested, "src"));
+		const scope = scopeFor(f, { omp: ["owner/a"] });
+		const { run, calls } = recorder();
+		expect(scopedGit({ scope, surface: "omp", repo: null, path: nested, args: ARGS }, run)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(scopedGit({ scope, surface: "omp", repo: null, path: join(nested, "src"), args: ARGS }, run)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(calls).toHaveLength(0);
+		const outer = scopedGit({ scope, surface: "omp", repo: "owner/a", path: null, args: ARGS }, run);
+		expect(outer).toMatchObject({ ok: true, repo: "owner/a", root: f.a.checkout });
+		expect(calls).toEqual([{ args: ARGS, cwd: f.a.checkout, env: { GIT_CEILING_DIRECTORIES: dirname(f.a.checkout) } }]);
+	});
+});

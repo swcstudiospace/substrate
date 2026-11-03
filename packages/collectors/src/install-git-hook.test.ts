@@ -346,3 +346,38 @@ describe("a registry is checked before any git call", () => {
 		expect(existsSync(hookPath(repo, "post-commit"))).toBe(false);
 	});
 });
+
+describe("a linked worktree's shared hooks need its primary checkout registered", () => {
+	function linkedWorktreeOf(primary: string): string {
+		const parent = mkdtempSync(join(tmpdir(), "install-hook-linked-"));
+		const linked = join(parent, "linked");
+		Bun.spawnSync(["git", "-C", primary, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--allow-empty", "-m", "init"]);
+		const added = Bun.spawnSync(["git", "-C", primary, "worktree", "add", "--detach", linked]);
+		if (added.exitCode !== 0) throw new Error(added.stderr.toString());
+		return linked;
+	}
+
+	test("a registered linked worktree whose primary is not registered is refused: nothing is written to the primary's hooks and the line names the primary", () => {
+		const primary = emptyRepo();
+		const linked = linkedWorktreeOf(primary);
+
+		const refused = runWith({ SUBSTRATE_REPO_REGISTRY: registryOf(linked) }, linked);
+
+		expect(refused.code).toBe(1);
+		expect(refused.out).toContain(`✗ ${linked} — refused: `);
+		expect(refused.out).toContain(`primary checkout ${primary}`);
+		expect(existsSync(hookPath(primary, "post-commit"))).toBe(false);
+	});
+
+	test("with the primary registered too, the linked worktree installs into the primary's shared hooks", () => {
+		const primary = emptyRepo();
+		const linked = linkedWorktreeOf(primary);
+		const registry = JSON.stringify({ "acme/hooks-fixture": { checkouts: [primary, linked] } });
+
+		const installed = runWith({ SUBSTRATE_REPO_REGISTRY: registry }, linked);
+
+		expect(installed.code).toBe(0);
+		expect(installed.out).toContain(`✓ ${linked} — installed`);
+		expect(existsSync(hookPath(primary, "post-commit"))).toBe(true);
+	});
+});

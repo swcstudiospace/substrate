@@ -12,6 +12,7 @@
 import { spawnSync } from "node:child_process";
 import { lstatSync, readdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { localRegistryScope, locateRepoPath, type RepoScope } from "../../mcp-server/src/repo-scope.ts";
 import { hasDocExtension, isExcludedSegment } from "./classify.ts";
 import { localRepoId } from "./names.ts";
 
@@ -77,6 +78,8 @@ export interface DiscoverOptions {
 	/** How many directory levels below a root are searched for `.git`. Default 3. */
 	depth?: number | undefined;
 	run?: GitRunner | undefined;
+	/** The environment the registry is read from (`SUBSTRATE_REPO_REGISTRY`). Defaults to `process.env`. */
+	env?: Record<string, string | undefined> | undefined;
 }
 
 export interface DiscoverResult {
@@ -192,6 +195,8 @@ function holdsDocs(dir: string): boolean {
 
 interface Walk {
 	maxDepth: number;
+	/** The registry whose nested checkouts are refused, or null when no registry is set. */
+	scope: RepoScope | null;
 	gitDirs: string[];
 	collections: string[];
 	notes: string[];
@@ -202,6 +207,13 @@ interface Walk {
 function explore(dir: string, depth: number, walk: Walk): void {
 	if (!walk.order.has(dir)) walk.order.set(dir, walk.order.size);
 	if (hasGitEntry(dir)) {
+		const placed = walk.scope === null ? null : locateRepoPath(walk.scope, dir);
+		if (placed !== null && !placed.ok && placed.reason === "nested-checkout") {
+			// A checkout nested under a registered repository that is not itself registered belongs to no registration. It is
+			// skipped, and no git runs in it, so no call is attributed to the repository that holds it.
+			walk.notes.push(`nested checkout ${dir} is refused: it lies inside a registered repository and is not registered; no git was run in it`);
+			return;
+		}
 		walk.gitDirs.push(dir);
 		return;
 	}
@@ -336,12 +348,17 @@ function compareText(a: string, b: string): number {
  */
 export function discoverRepos(roots: readonly string[], opts: DiscoverOptions = {}): DiscoverResult {
 	const run = opts.run ?? defaultGitRunner;
+	// The registry is read from the environment unless a caller supplies one. Unset is no registry: discovery is unchanged. A set
+	// registry that does not parse is refused here, as the corpus CLI refuses it before any dispatch.
+	const registry = localRegistryScope(opts.env ?? process.env);
+	if (!registry.ok) throw new Error(`corpus discovery: ${registry.problem}`);
 	const walk: Walk = {
 		maxDepth: Math.max(0, Math.floor(opts.depth ?? DEFAULT_DISCOVER_DEPTH)),
 		gitDirs: [],
 		collections: [],
 		notes: [],
 		order: new Map(),
+		scope: registry.value,
 	};
 	for (const root of new Set(roots.map((root) => resolve(root)))) {
 		if (!isDirectory(root)) {

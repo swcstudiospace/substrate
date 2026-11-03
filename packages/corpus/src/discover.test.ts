@@ -308,3 +308,33 @@ describe("discoverRepos", () => {
 		expect(defaultGitRunner(["definitely-not-a-git-command"], root).code).not.toBe(0);
 	});
 });
+
+describe("discoverRepos under a registry refuses a nested checkout", () => {
+	test("a standalone checkout inside a registered worktrees directory is skipped with a note that names it, runs no git, and the linked worktree beside it is still found", () => {
+		// outer holds the registered checkout and worktrees directory; a directory with a `.git` directory is a clone, not a linked worktree.
+		const root = fixture({
+			"outer/checkout/.git/HEAD": "",
+			"outer/worktrees/feat/.git": "gitdir: x\n",
+			"outer/worktrees/clone/.git/HEAD": "",
+		});
+		const outer = join(root, "outer");
+		const checkout = join(outer, "checkout");
+		const feat = join(outer, "worktrees", "feat");
+		const clone = join(outer, "worktrees", "clone");
+		const env = { SUBSTRATE_REPO_REGISTRY: JSON.stringify({ "owner/outer": { checkouts: [checkout], worktrees: [join(outer, "worktrees")] } }) };
+		const run = fakeGit({ [checkout]: { branch: "main" }, [feat]: { branch: "feat" }, [clone]: { branch: "main" } });
+		const found = discoverRepos([outer], { run, env });
+		expect(found.checkouts.map((c) => c.dir).sort()).toEqual([checkout, feat].sort());
+		expect(found.notes.some((note) => note.includes(clone) && note.includes("nested"))).toBe(true);
+		expect(run.calls.some((call) => call.cwd === clone)).toBe(false);
+		expect(run.calls.some((call) => call.cwd === checkout)).toBe(true);
+	});
+
+	test("with no registry set, the same standalone checkout is discovered as before", () => {
+		const root = fixture({ "outer/checkout/.git/HEAD": "", "outer/worktrees/clone/.git/HEAD": "" });
+		const outer = join(root, "outer");
+		const run = fakeGit({ [join(outer, "checkout")]: { branch: "main" }, [join(outer, "worktrees", "clone")]: { branch: "main" } });
+		const found = discoverRepos([outer], { run, env: {} });
+		expect(found.checkouts.map((c) => c.dir).sort()).toEqual([join(outer, "checkout"), join(outer, "worktrees", "clone")].sort());
+	});
+});
