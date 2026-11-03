@@ -202,4 +202,41 @@ describe("memo v3", () => {
 		expect(parseMemoV3(`substrate:v3:${id512}:2026-09-26T10:00:00.000Z:79:${HEADS3}:${SIG}`)?.graphId).toBe(id512);
 		expect(parseMemoV3(formatMemoV3({ ...V3, graphId: id512 }))).toStrictEqual({ ...V3, graphId: id512 });
 	});
+
+	test("a graph id of 512 ASCII characters, 512 bytes, round-trips", () => {
+		const memo = { ...V3, graphId: "g".repeat(512) };
+		expect(parseMemoV3(formatMemoV3(memo))).toStrictEqual(memo);
+	});
+
+	test("a graph id of 512 UTF-8 bytes round-trips: 256 two-byte characters", () => {
+		const graphId = "é".repeat(256);
+		expect(new TextEncoder().encode(graphId).byteLength).toBe(512);
+		expect(parseMemoV3(formatMemoV3({ ...V3, graphId }))).toStrictEqual({ ...V3, graphId });
+	});
+
+	test("a graph id of 513 UTF-8 bytes is refused on format and on parse", () => {
+		const graphId = `${"é".repeat(256)}a`;
+		expect(new TextEncoder().encode(graphId).byteLength).toBe(513);
+		expect(() => formatMemoV3({ ...V3, graphId })).toThrow("formatMemoV3:");
+		expect(parseMemoV3(`substrate:v3:${graphId}:2026-09-26T10:00:00.000Z:79:${HEADS3}:${SIG}`)).toBeNull();
+	});
+
+	test("512 multibyte characters, 1,536 bytes, are refused on format and on parse", () => {
+		const graphId = "€".repeat(512);
+		expect(new TextEncoder().encode(graphId).byteLength).toBe(1536);
+		expect(() => formatMemoV3({ ...V3, graphId })).toThrow("formatMemoV3:");
+		expect(parseMemoV3(`substrate:v3:${graphId}:2026-09-26T10:00:00.000Z:79:${HEADS3}:${SIG}`)).toBeNull();
+	});
+
+	test("a pointer memo for a 512-byte graph id plus its 251-byte transaction overhead is under the 1,232-byte packet", () => {
+		// Overhead of the pointer transaction `solana transfer --with-memo` builds (solana.ts transferArgv), counted without the memo
+		// bytes: 1 signature count + 64 signature; 3 header; 1 key count + 4 keys (payer, index address, System, Memo) × 32; 32 blockhash;
+		// 1 instruction count; transfer = program index 1 + account count 1 + 2 indices + data length 1 + 12 data bytes;
+		// memo = program index 1 + account count 1 (none) + data length 2 (the memo is 128 to 16,383 bytes).
+		const overhead = 1 + 64 + 3 + (1 + 4 * 32) + 32 + 1 + (1 + 1 + 2 + 1 + 12) + (1 + 1 + 2);
+		expect(overhead).toBe(251);
+		const memo = formatMemoV3({ ...V3, graphId: "g".repeat(512), hourTxSig: "5".repeat(88) });
+		expect(new TextEncoder().encode(memo).byteLength).toBe(707);
+		expect(new TextEncoder().encode(memo).byteLength + overhead).toBeLessThan(1232);
+	});
 });

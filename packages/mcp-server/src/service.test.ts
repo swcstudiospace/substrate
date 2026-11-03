@@ -4280,6 +4280,58 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
 	});
 
+	test("a refused SOLANA_RPC_URL makes no chain read and fails closed, naming the devnet guard", async () => {
+		const world = sessionRows();
+		// Each RPC method counts its calls, so a read made through the injected node is seen even though the guard refused the URL.
+		const answers = rpcReturning(world.memo) as Record<string, (...args: unknown[]) => Promise<unknown>>;
+		let rpcCalls = 0;
+		const rpc = Object.fromEntries(
+			Object.keys(answers).map((name) => [
+				name,
+				(...args: unknown[]) => {
+					rpcCalls += 1;
+					return answers[name]?.(...args);
+				},
+			]),
+		);
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SOLANA_RPC_URL: "https://api.mainnet-beta.solana.com" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(rpcCalls).toBe(0);
+		expect(verdict.ok).toBe(false);
+		expect(verdict.trusted).toBe(false);
+		expect(verdict.reason).toBe("Solana is not usable: SOLANA_RPC_URL refused by the devnet-only guard (the server's boot warnings say why)");
+		expect(verdict.trusted_reason).toBe("Solana is not usable: SOLANA_RPC_URL refused by the devnet-only guard (the server's boot warnings say why)");
+		expect(verdict.hours).toEqual([]);
+	});
+
+	test("an accepted devnet SOLANA_RPC_URL verifies through the configured URL", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SOLANA_RPC_URL: "https://api.devnet.solana.com" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+	});
+
 	test("pending inside 3 h: no row, ok true", async () => {
 		const world = sessionRows();
 		const substrate = substrateWith({
@@ -5822,30 +5874,62 @@ describe("verifyGraph hour report", () => {
 				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", reason: "pointer names a v1 hour", pointer: "verified" });
 			});
 
-			test("a pointer whose transaction is unsigned or failed is a mismatch of its hour, naming the pointer", async () => {
+			test("a pointer the job key did not sign, or that failed on chain, is ignored: not a mismatch, and the hour has no pointer of its own", async () => {
 				const world = v2World([{ session: "s1", count: 2 }]);
-				const cases: Array<{ tx: Record<string, unknown>; reason: string }> = [
-					{ tx: { payerSigned: false }, reason: "is not signed by SOLANA_ANCHOR_PUBKEY" },
-					{ tx: { err: { InstructionError: [0, "Custom"] } }, reason: "the transaction failed" },
-				];
-				for (const { tx, reason } of cases) {
+				const cases: Array<Record<string, unknown>> = [{ payerSigned: false }, { err: { InstructionError: [0, "Custom"] } }];
+				for (const tx of cases) {
 					const pointers = [{ ...defined(world.pointers[0], "the pointer"), tx } as PointerFixture];
 					const verdict = await verify(world, {}, world.memo, pointers);
 					expect(verdict.ok).toBe(false);
-					expect(verdict.hours[0]).toMatchObject({ status: "mismatch", pointer: "failed" });
-					expect(verdict.hours[0]?.reason).toContain(POINTER_SIG);
-					expect(verdict.hours[0]?.reason).toContain(reason);
+					expect(verdict.hours[0]).toMatchObject({ status: "mismatch", reason: "pre-index v2 hour", pointer: "absent" });
+					expect(verdict.hours[0]?.reason).not.toContain(POINTER_SIG);
 				}
 			});
 
-			test("a pointer signed by another key is a mismatch of its hour, naming the pointer", async () => {
+			test("a pointer signed by another key is ignored: not a mismatch, and the hour has no pointer of its own", async () => {
 				const world = v2World([{ session: "s1", count: 2 }]);
 				const pointers = [{ ...defined(world.pointers[0], "the pointer"), tx: { payer: "SomeoneElse11111111111111111111111111111" } } as PointerFixture];
 				const verdict = await verify(world, {}, world.memo, pointers);
 				expect(verdict.ok).toBe(false);
-				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", pointer: "failed" });
-				expect(verdict.hours[0]?.reason).toContain(POINTER_SIG);
-				expect(verdict.hours[0]?.reason).toContain("is not signed by SOLANA_ANCHOR_PUBKEY");
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", reason: "pre-index v2 hour", pointer: "absent" });
+				expect(verdict.hours[0]?.reason).not.toContain(POINTER_SIG);
+			});
+
+			test("a foreign-payer pointer does not fail a valid hour: the job key's own pointer verifies it", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const foreign: PointerFixture = { ...defined(world.pointers[0], "the pointer"), signature: THIRD_POINTER_SIG, tx: { payer: "SomeoneElse11111111111111111111111111111" } };
+				const verdict = await verify(world, {}, world.memo, [...world.pointers, foreign]);
+				expect(verdict.ok).toBe(true);
+				expect(verdict.trusted).toBe(true);
+				expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true, pointer: "verified" });
+			});
+
+			test("an errored pointer does not fail a valid hour: the job key's own pointer verifies it", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const errored: PointerFixture = { ...defined(world.pointers[0], "the pointer"), signature: THIRD_POINTER_SIG, tx: { err: { InstructionError: [0, "Custom"] } } };
+				const verdict = await verify(world, {}, world.memo, [...world.pointers, errored]);
+				expect(verdict.ok).toBe(true);
+				expect(verdict.trusted).toBe(true);
+				expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true, pointer: "verified" });
+			});
+
+			test("a valid pointer beside a foreign one still verifies: the foreign pointer neither forks nor fails the hour", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const rival = pointerMemo("ut-1", H, world.events.length, graphHeadsRoot(world.heads, "ut-1"), OTHER_HOUR_SIG);
+				const foreign: PointerFixture = { signature: THIRD_POINTER_SIG, graphId: "ut-1", memo: rival, tx: { payer: "SomeoneElse11111111111111111111111111111" } };
+				const verdict = await verify(world, {}, world.memo, [foreign, ...world.pointers]);
+				expect(verdict.ok).toBe(true);
+				expect(verdict.trusted).toBe(true);
+				expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true, pointer: "verified" });
+			});
+
+			test("a job-key pointer whose hour transaction names another hour is still a mismatch of its hour", async () => {
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const otherHour = formatMemoV2({ periodStartMs: H + HOUR, rootHex: world.root, count: world.events.length, headsRootHex: headsRoot(world.heads) });
+				const verdict = await substrateWith(stubOf(world)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo, {}, world.pointers, { [HOUR_SIG]: otherHour }) as never });
+				expect(verdict.ok).toBe(false);
+				expect(verdict.hours[0]).toMatchObject({ status: "mismatch", pointer: "verified" });
+				expect(verdict.hours[0]?.reason).toContain("memo names");
 			});
 
 			test("a pointer whose transaction reports no block time cannot be judged: ok false, untrusted, naming the pointer", async () => {

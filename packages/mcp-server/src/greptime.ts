@@ -1893,6 +1893,18 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * The distinct graphs with an `event_ingest` record at or after `sinceMs`. An hour's members are its ingest records, so this covers
+	 * every graph an hour from `sinceMs` on can hold a pointer for: the adoption window (anchor.ts) counts the job key's signatures over
+	 * the lookback with it. Read-only, one DISTINCT column; a graph with no records in those hours only widens the window.
+	 */
+	async lookbackGraphCount(sinceMs: number): Promise<number> {
+		const rows = await this.sql(
+			`SELECT DISTINCT "graph_id" FROM "event_ingest" WHERE "ingested_at" >= ${this.q(new Date(sinceMs).toISOString())} AND "graph_id" IS NOT NULL`,
+		);
+		return rows.length;
+	}
+
+	/**
 	 * One event's first ingest record, for verify's hour report.
 	 *
 	 * Read by the stored (normalised) graph id; an event's hour is its first

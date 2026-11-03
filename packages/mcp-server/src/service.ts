@@ -863,12 +863,13 @@ interface PointerReadout {
 	unreadable: string | null;
 }
 
-/** A confirmed pointer judged: verified, a proven failure (naming its hour when the memo says which), or unverifiable (fails closed). */
-type PointerJudgement = { kind: "verified"; pointer: VerifiedPointer } | { kind: "failed"; periodStartMs: number | null; reason: string } | { kind: "unverified"; reason: string };
+/** A confirmed pointer judged: verified, a proven failure (naming its hour when the memo says which), unverifiable (fails closed), or not a candidate of this verify (ignored). */
+type PointerJudgement = { kind: "verified"; pointer: VerifiedPointer } | { kind: "failed"; periodStartMs: number | null; reason: string } | { kind: "unverified"; reason: string } | { kind: "ignored" };
 
 /**
- * The checks on one confirmed pointer (design 5, step 3), in the order that names its hour as early as the memo allows: the v3 memo, its graph,
- * a closed hour, the configured payer that signed and succeeded, then the signer judged at block time as `checkHour` judges an hour's transaction.
+ * The checks on one confirmed pointer (design 5, step 3), in the order that names its hour as early as the memo allows. Candidacy comes first:
+ * with a key configured, only a pointer the job key signed that succeeded on chain is judged; any other listed entry is `ignored`, never a
+ * mismatch. Then the v3 memo, its graph, a closed hour, and the signer judged at block time as `checkHour` judges an hour's transaction.
  * A missing key or an unverifiable signer is `unverified`; a proven fault is `failed`.
  */
 async function judgePointer(
@@ -878,14 +879,13 @@ async function judgePointer(
 	signers: () => Promise<{ set: SignerSet; gap: string | null }>,
 	now: number,
 ): Promise<PointerJudgement> {
+	if (pubkey !== null && (confirmed.payer !== pubkey || !confirmed.payerSigned || (confirmed.err !== null && confirmed.err !== undefined))) return { kind: "ignored" };
 	const parsed = parseMemoV3(confirmed.memo);
 	if (parsed === null) return { kind: "failed", periodStartMs: null, reason: "is not a v3 pointer" };
 	const periodStartMs = parsed.periodStartMs;
 	if (parsed.graphId !== graphId) return { kind: "failed", periodStartMs, reason: `names graph ${parsed.graphId}, not ${graphId}` };
 	if (!isClosed(periodStartMs, now, INGEST_LAG_MS)) return { kind: "failed", periodStartMs, reason: "names an hour that has not closed" };
 	if (pubkey === null) return { kind: "unverified", reason: "SOLANA_ANCHOR_PUBKEY is not set" };
-	if (confirmed.payer !== pubkey || !confirmed.payerSigned) return { kind: "failed", periodStartMs, reason: "is not signed by SOLANA_ANCHOR_PUBKEY" };
-	if (confirmed.err !== null && confirmed.err !== undefined) return { kind: "failed", periodStartMs, reason: "the transaction failed" };
 	const fault = await judgeSigner(confirmed, signers);
 	if (fault !== null) return fault.status === "mismatch" ? { kind: "failed", periodStartMs, reason: fault.reason } : { kind: "unverified", reason: fault.reason };
 	return {
@@ -897,7 +897,8 @@ async function judgePointer(
 /**
  * One graph's pointers (design 5, steps 2 to 4): its index address listed within `allowanceMs`, every candidate whose listing hint names the v3
  * prefix confirmed through its own transaction, and the verified ones grouped by hour. Identical pointers for an hour collapse; different ones
- * are a fork. A listing that stops early, or a pointer that cannot be confirmed, is `unreadable`: fail closed.
+ * are a fork. A listing that stops early, or a pointer that cannot be confirmed, is `unreadable`: fail closed. A confirmed pointer the job key did not
+ * sign, or that failed on chain, is not this graph's pointer: it is ignored, neither verified nor a failure.
  */
 async function readPointerChecks(args: {
 	graphId: string;
@@ -947,7 +948,7 @@ async function readPointerChecks(args: {
 		const judged = await judgePointer(answer.value, args.graphId, args.pubkey, args.signers, args.now);
 		if (judged.kind === "verified") verified.push(judged.pointer);
 		else if (judged.kind === "failed") readout.failures.push({ signature, periodStartMs: judged.periodStartMs, reason: judged.reason });
-		else readout.unreadable ??= `pointer ${signature}: ${judged.reason}`;
+		else if (judged.kind === "unverified") readout.unreadable ??= `pointer ${signature}: ${judged.reason}`;
 	}
 	const byHour = new Map<number, VerifiedPointer[]>();
 	for (const pointer of verified) {
@@ -8016,6 +8017,12 @@ export class Substrate {
 			trusted_reason: "anchor check skipped (anchors: false)",
 		};
 		if (!withAnchors) return emptyHours;
+		// The chain is read through the configured RPC URL, and the devnet guard refused it: every chain check (the hour reads, the pointer
+		// listing and its confirmations) is unreadable, so the verdict fails closed before any RPC call, an injected node included.
+		if (this.config.solana.problem !== null) {
+			const refused = "Solana is not usable: SOLANA_RPC_URL refused by the devnet-only guard (the server's boot warnings say why)";
+			return { ...emptyHours, ok: false, reason: refused, trusted_reason: refused };
+		}
 		return this.hourReport(stored, rows, chain, now, opts.rpc, verifyStartedAt);
 	}
 

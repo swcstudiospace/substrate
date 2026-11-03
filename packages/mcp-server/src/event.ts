@@ -6,7 +6,7 @@
  * append-only log. So `hash` and `prev` are computed here, on ingest, from day one.
  */
 import { randomUUID } from "node:crypto";
-import { merkleRootHex, type GraphHeadRecord } from "@substrate/ledger";
+import { merkleRootHex, MEMO_GRAPH_ID_MAX, type GraphHeadRecord } from "@substrate/ledger";
 import { z } from "zod";
 import { redact, redactValue } from "./redact.ts";
 import { EVENT_KINDS, SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
@@ -192,10 +192,33 @@ function clean(value: string | null | undefined, limit: number): string | null {
  * value would mean a lookup that never matches: every event would restart its
  * session's chain, and verification would find no rows at all. Anything that
  * reads by one of these columns goes through here, so the two agree by
- * construction rather than by both remembering to.
+ * construction rather than by both remembering to. The write path does not cap a graph id to MAX_FIELD: normalizeGraphId refuses one over
+ * the memo cap instead, so the stored graph id is always whole.
  */
 export function normalizeIdentifier(value: string | null | undefined): string | null {
 	return clean(value, MAX_FIELD);
+}
+
+/**
+ * A graph id over the memo cap, refused on write. Named, so a client and the tests can tell it from the other 400s.
+ */
+export class GraphIdTooLongError extends InvalidEventError {
+	constructor(readonly bytes: number) {
+		super(`graph_id_too_long: a graph id may be at most ${MEMO_GRAPH_ID_MAX} UTF-8 bytes; this one is ${bytes}`);
+	}
+}
+
+/**
+ * The graph id a write stores: redacted, and empty is absent, as for every identifier. Unlike the others it is refused over the cap
+ * rather than cut to it: the hour's pointer memo carries the stored id whole (ledger memo.ts formatMemoV3), and an id cut to fit would
+ * name a different graph. The cap is measured on the stored form, in UTF-8 bytes.
+ */
+export function normalizeGraphId(value: string | null | undefined): string | null {
+	if (value === undefined || value === null) return null;
+	const stored = redact(value);
+	const bytes = new TextEncoder().encode(stored).byteLength;
+	if (bytes > MEMO_GRAPH_ID_MAX) throw new GraphIdTooLongError(bytes);
+	return stored.length > 0 ? stored : null;
 }
 
 /** Cap every string inside a JSON-shaped value. */
@@ -292,7 +315,7 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
 		ts: ts.toISOString(),
 		surface: input.surface,
 		session_id: normalizeIdentifier(input.session_id),
-		graph_id: normalizeIdentifier(input.graph_id),
+		graph_id: normalizeGraphId(input.graph_id),
 		node_id: normalizeIdentifier(input.node_id),
 		linear_identifier: normalizeIdentifier(input.linear_identifier),
 		// A fractional or infinite step would reach a BIGINT column.

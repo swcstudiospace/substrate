@@ -96,6 +96,7 @@ function deps(
 	let lastSentMemo = "";
 	const full: AnchorDeps = {
 		greptime: {
+			lookbackGraphCount: async () => 1,
 			firstIngestMs: async () => H10,
 			anchorsBetween: async () => [],
 			anchorForPeriod: async () => null,
@@ -180,6 +181,7 @@ describe("runAnchorJob candidates and exits", () => {
 		const seen: number[] = [];
 		const { deps: d } = deps({
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10 + HOUR,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => null,
@@ -202,6 +204,7 @@ describe("runAnchorJob candidates and exits", () => {
 	test("already-anchored hours are never written again", async () => {
 		const { deps: d, inserts } = deps({
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [
 					{
@@ -237,6 +240,7 @@ describe("runAnchorJob candidates and exits", () => {
 		const { deps: d } = deps({
 			clock: () => NOW,
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => early,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => null,
@@ -282,6 +286,7 @@ describe("runAnchorJob candidates and exits", () => {
 	test("a store failure reading coverage stops the run", async () => {
 		const { deps: d, invocations } = deps({
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => {
 					throw new Error("down");
 				},
@@ -410,6 +415,7 @@ describe("runAnchorJob send path", () => {
 		};
 		const { deps: d, emitted, inserts, invocations } = deps({
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => anchored,
@@ -464,7 +470,7 @@ describe("runAnchorJob adopt and alarm", () => {
 		expect(written(emitted)[0]?.payload).toMatchObject({ adopted: true, tx_sig: SIG });
 	});
 
-	test("a different root alarms, writes the row as found, and exits 1", async () => {
+	test("a different root alarms, stores no row, and exits 1", async () => {
 		const memo = formatMemo({ periodStartMs: H10, rootHex: OTHER_ROOT, count: 3 });
 		const errors: string[] = [];
 		const originalWrite = process.stderr.write;
@@ -478,9 +484,32 @@ describe("runAnchorJob adopt and alarm", () => {
 			const result = await runAnchorJob(d);
 			expect(result.code).toBe(1);
 			expect(invocations).toEqual([]);
-			expect(inserts[0]).toMatchObject({ tx_sig: SIG, root: OTHER_ROOT });
+			expect(inserts).toEqual([]);
 			expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "root-mismatch" });
 			expect(errors.some((line) => line.includes(`[anchor] ALARM ${new Date(H10).toISOString()}`))).toBe(true);
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+	});
+
+	test("an alarm stores no row and no chain leaves, and the next run alarms again", async () => {
+		const memo = formatMemo({ periodStartMs: H10, rootHex: OTHER_ROOT, count: 3 });
+		const errors: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string) => {
+			errors.push(chunk);
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			for (let run = 0; run < 2; run++) {
+				const { deps: d, emitted, inserts, invocations, leafInserts } = deps({ rpc: confirmingRpc(memo) });
+				expect(await runAnchorJob(d)).toEqual({ code: 1, anchored: 0, adopted: 0, failed: 1, funded: 0 });
+				expect(invocations).toEqual([]);
+				expect(inserts).toEqual([]);
+				expect(leafInserts).toEqual([]);
+				expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "root-mismatch" });
+			}
+			expect(errors.filter((line) => line.includes(`[anchor] ALARM ${new Date(H10).toISOString()}`))).toHaveLength(2);
 		} finally {
 			process.stderr.write = originalWrite;
 		}
@@ -520,9 +549,8 @@ describe("runAnchorJob adopt and alarm", () => {
 		expect(result.failed).toBe(1);
 		expect(result.adopted).toBe(1);
 		expect(invocations).toEqual([]);
-		expect(inserts).toHaveLength(2);
-		expect(inserts[0]).toMatchObject({ period_start: new Date(H10).toISOString(), tx_sig: badSig });
-		expect(inserts[1]).toMatchObject({ period_start: new Date(later).toISOString(), tx_sig: goodSig });
+		expect(inserts).toHaveLength(1);
+		expect(inserts[0]).toMatchObject({ period_start: new Date(later).toISOString(), tx_sig: goodSig });
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "root-mismatch" });
 	});
 
@@ -703,6 +731,7 @@ describe("runAnchorJob failures", () => {
 		// durable row cannot be read: fail closed before any send.
 		const { deps: d, emitted, inserts, invocations } = deps({
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => {
@@ -799,6 +828,7 @@ describe("runAnchorJob failures", () => {
 		let insertReached = false;
 		const { deps: d, emitted } = deps({
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => null,
@@ -936,6 +966,7 @@ describe("parseAnchorArgs", () => {
 		const { deps: d, emitted, inserts, invocations } = deps({
 			options: { onlyPeriodMs: H10 },
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [anchored],
 				anchorForPeriod: async () => anchored,
@@ -990,6 +1021,7 @@ describe("parseAnchorArgs", () => {
 		const { deps: d, emitted, inserts, invocations } = deps({
 			options: { onlyPeriodMs: old },
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => old,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => anchored,
@@ -1018,6 +1050,7 @@ describe("parseAnchorArgs", () => {
 		const { deps: d, emitted, inserts, invocations } = deps({
 			options: { onlyPeriodMs: H10 },
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => {
@@ -1184,6 +1217,7 @@ describe("anchored hours and the heads read", () => {
 		};
 		const { deps: d, emitted, inserts, invocations } = deps({
 			greptime: {
+				lookbackGraphCount: async () => 1,
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [anchored],
 				anchorForPeriod: async () => anchored,
@@ -1275,11 +1309,17 @@ class ChainWorld {
 		const start = before === undefined ? 0 : newest.findIndex((tx) => tx.signature === before) + 1;
 		return newest.slice(start, start + Math.min(limit, PAGE_CAP)).map((tx) => ({ signature: tx.signature, memo: tx.memo, err: null, slot: 40 }));
 	}
+
+	/** The distinct graphs the stand-in holds: one index address per graph that has a pointer. */
+	graphCount(): number {
+		return new Set(this.txs.map((tx) => tx.recipient).filter((recipient) => recipient !== PUBKEY)).size;
+	}
 }
 
 /** The store a stand-in run writes to. `log` gets a `row` line per anchors row, so sends and writes keep their order. */
-function chainStore(log: string[], inserts: Array<Record<string, unknown>>): AnchorDeps["greptime"] {
+function chainStore(log: string[], inserts: Array<Record<string, unknown>>, world: ChainWorld): AnchorDeps["greptime"] {
 	return {
+		lookbackGraphCount: async () => world.graphCount(),
 		firstIngestMs: async () => H10,
 		anchorsBetween: async () => [],
 		anchorForPeriod: async () => null,
@@ -1295,7 +1335,7 @@ function chainStore(log: string[], inserts: Array<Record<string, unknown>>): Anc
 /** Deps over a stand-in chain: the store, the runner and the RPC all answer from `world`. */
 function chainDeps(world: ChainWorld, overrides: Partial<AnchorDeps> = {}) {
 	const inserts: Array<Record<string, unknown>> = [];
-	const { deps: d, emitted } = deps({ greptime: chainStore(world.log, inserts), runner: world.runner, rpc: world.rpc(), ...overrides });
+	const { deps: d, emitted } = deps({ greptime: chainStore(world.log, inserts, world), runner: world.runner, rpc: world.rpc(), ...overrides });
 	return { deps: d, emitted, inserts };
 }
 
@@ -1361,6 +1401,59 @@ describe("runAnchorJob pointers (design 3.5)", () => {
 		expect(inserts).toEqual([expect.objectContaining({ tx_sig: sigOf(0), period_start: new Date(H10).toISOString() })]);
 	});
 
+	test("a lost row behind denser newer hours adopts without a second transaction: the window counts the lookback's graphs", async () => {
+		// H10's row is lost after its transactions landed. H11, the hour after it, is anchored with 400 graphs of its own, so 402
+		// transactions the job key signed sit newer than H10's hour transaction. The old window, (1 + 1 graph of H10) x 168, reads 336.
+		const DENSE = 400;
+		const H11 = H10 + HOUR;
+		const world = new ChainWorld();
+		const heads = buildGraphHeads(memberRows(["evt_1", "evt_2", "evt_3"]), H10).records;
+		world.txs.push({
+			signature: sigOf(0),
+			memo: formatMemoV2({ periodStartMs: H10, rootHex: ROOT, count: 3, headsRootHex: headsRoot(heads) }),
+			recipient: PUBKEY,
+			lamports: 0,
+		});
+		world.txs.push({
+			signature: sigOf(1),
+			memo: formatMemoV3({ graphId: "graph-a", periodStartMs: H10, count: 3, graphHeadsRootHex: graphHeadsRoot(heads, "graph-a"), hourTxSig: sigOf(0) }),
+			recipient: graphIndexAddress("graph-a"),
+			lamports: 0,
+		});
+		world.txs.push({ signature: sigOf(2), memo: formatMemo({ periodStartMs: H11, rootHex: ROOT, count: 3 }), recipient: PUBKEY, lamports: 0 });
+		for (let i = 0; i < DENSE; i++) {
+			const graphId = `dense-${i}`;
+			world.txs.push({
+				signature: sigOf(3 + i),
+				memo: formatMemoV3({ graphId, periodStartMs: H11, count: 1, graphHeadsRootHex: ROOT, hourTxSig: sigOf(2) }),
+				recipient: graphIndexAddress(graphId),
+				lamports: 0,
+			});
+		}
+		const inserts: Array<Record<string, unknown>> = [];
+		// H11 is closed and anchored, so the sweep skips it; H10 is closed and its row is gone.
+		const h11Row = {
+			period_start: new Date(H11).toISOString(),
+			period_end: new Date(H11 + HOUR).toISOString(),
+			root: ROOT,
+			event_count: 3,
+			memo: formatMemo({ periodStartMs: H11, rootHex: ROOT, count: 3 }),
+			tx_sig: sigOf(2),
+			signer: PUBKEY,
+			cluster: "devnet",
+			slot: 40,
+			anchored_at: new Date(H11).toISOString(),
+			stale_hashes: null,
+		};
+		const store = { ...chainStore(world.log, inserts, world), anchorsBetween: async () => [h11Row] } as unknown as AnchorDeps["greptime"];
+		const { deps: d, emitted } = deps({ greptime: store, runner: world.runner, rpc: world.rpc(), clock: () => H10 + 2 * HOUR + INGEST_LAG_MS + 60_000 });
+		expect(await runAnchorJob(d)).toEqual({ code: 0, anchored: 0, adopted: 1, failed: 0, funded: 0 });
+		expect(world.log).toEqual(["row"]);
+		expect(world.txs.filter((tx) => tx.recipient === PUBKEY)).toHaveLength(2);
+		expect(inserts).toEqual([expect.objectContaining({ tx_sig: sigOf(0), period_start: new Date(H10).toISOString() })]);
+		expect(written(emitted)[0]?.payload).toMatchObject({ adopted: true, tx_sig: sigOf(0) });
+	});
+
 	test("a refused 0-lamport pointer takes the funded path once; any other failure does not", async () => {
 		const refused = new ChainWorld();
 		refused.failure = (argv) => (String(argv[3]) === "0" && String(argv[2]) !== PUBKEY ? "Error: Transaction simulation failed: InsufficientFundsForRent" : null);
@@ -1396,5 +1489,30 @@ describe("runAnchorJob pointers (design 3.5)", () => {
 		const whole = await readGraphPointers(rpc, "g1", { budgetMs: Number.POSITIVE_INFINITY, nowMs: () => 0 });
 		expect(whole.entries).toHaveLength(150);
 		expect(whole.complete).toBe(true);
+	});
+
+	test("an over-long graph id stops the hour before the hour transaction is sent", async () => {
+		// The pointer memo cannot carry a graph id over 512 UTF-8 bytes: 200 euro signs are 600 bytes in 200 characters, so the normalised
+		// form is kept and formatMemoV3 is what refuses it. The plan is built before the send: no transaction goes out, the hour gets no
+		// row, and the run stops with a named send-failed reason.
+		const world = new ChainWorld();
+		const calls: string[][] = [];
+		const runner = async (argv: readonly string[]): Promise<RunResult> => {
+			calls.push([...argv]);
+			return world.runner(argv);
+		};
+		const inserts: Array<Record<string, unknown>> = [];
+		const longGraphId = "€".repeat(200);
+		const greptime = {
+			...chainStore(world.log, inserts, world),
+			eventsByIds: async (ids: readonly string[]) => memberRows(ids).map((row) => ({ ...row, graph_id: longGraphId })),
+		} as unknown as AnchorDeps["greptime"];
+		const { deps: d, emitted } = deps({ greptime, runner, rpc: world.rpc() });
+		expect(await runAnchorJob(d)).toEqual({ code: 1, anchored: 0, adopted: 0, failed: 1, funded: 0 });
+		expect(calls).toEqual([]);
+		expect(world.txs).toEqual([]);
+		expect(world.log).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
 	});
 });

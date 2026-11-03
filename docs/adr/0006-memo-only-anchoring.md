@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (verification code is on this branch; **no live anchor has ever been sent**, see "The genesis hash finding" and the operator gates)
 - **Superseded in part (v1.8, phase 73):** `parseMemo` now accepts memo v2, `substrate:v2:<hour>:<root>:<count>:<headsRoot>`, which commits one head record per (graph, session) pair for anchored hours. Decision 1 below and its statement that `parseMemo` rejects v2 no longer hold. Memo v1 and its root derivation are unchanged, and v1 hours still verify. The memo still carries no event content.
+- **Note (2026-11-03, memo v3):** memo v3 pointers now exist beside the hour memo: one `substrate:v3:` pointer per (graph, hour), sent to the graph's index address. The hour memo (v1 or v2) is unchanged. The per-checkpoint "memo v2" proposed in section 6 is a different thing from the hour memo v2 above.
 - **Date:** 2026-10-26
 - **Tickets:** v1.6 phase 59 (SOTA-15); phase 62, success criterion 2
 - **Deciders:** Spectrum Web Co platform. Decisions D55-2 and D55-6 in `.planning/phases/55-migration-safety/CONTEXT.md`.

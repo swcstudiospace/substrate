@@ -44,8 +44,11 @@
  * - `listGraphPointers` / `confirmPointer`: `readGraphPointers` and `confirmGraphPointer`. A graph's v3 pointers are listed at its index
  *   address (confirmed, paged, within a budget), and each listed pointer is confirmed through its transaction (design 5, steps 2 and 3).
  *
- * Solana unconfigured (no anchor public key, or a refused RPC URL) or no ledger: the answer is `unverified` with the reason,
- * decided BEFORE any read, so no network call is made. Nothing here sends a transaction.
+ * Solana unconfigured (no anchor public key, or a refused RPC URL) or no ledger: `anchorVerifyBlocker` answers `unverified` with the reason,
+ * decided BEFORE any read, so the checkpoint and event verify make no network call. The graph pointer ports are not behind that gate:
+ * `verifyGraph` refuses to read the chain at all when `SOLANA_RPC_URL` was refused by the devnet guard (its verdict is `ok` false with the
+ * named reason, and no RPC call is made); otherwise it lists a graph's index address through the configured RPC URL. With no key the confirmed
+ * pointers cannot be told apart by payer, so they are judged `unverified`. Nothing here sends a transaction.
  */
 import {
 	ANCHOR_SIGNER_ROTATE_ACTION,

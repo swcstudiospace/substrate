@@ -4,6 +4,7 @@ import {
 	type ChainLink,
 	compareToAnchoredHead,
 	eventHash,
+	GraphIdTooLongError,
 	headRecordsFromLeaves,
 	inChainOrder,
 	InvalidEventError,
@@ -261,14 +262,47 @@ describe("normalizeIdentifier", () => {
 	});
 
 	test("agrees with the stored value for an over-long identifier", () => {
-		const raw = "g".repeat(900);
-		expect(normalizeEvent({ ...base, graph_id: raw }, null).graph_id).toBe(normalizeIdentifier(raw));
+		const raw = "s".repeat(900);
+		expect(normalizeEvent({ ...base, session_id: raw }, null).session_id).toBe(normalizeIdentifier(raw));
 		expect(normalizeIdentifier(raw)?.length).toBe(512);
 	});
 
 	test("leaves an ordinary identifier untouched", () => {
 		expect(normalizeIdentifier("ut-mz3k1q-8a1f2c3d")).toBe("ut-mz3k1q-8a1f2c3d");
 		expect(normalizeIdentifier(undefined)).toBeNull();
+	});
+});
+
+describe("graph id cap on the write path", () => {
+	test("refuses a graph id of 513 characters by name, rather than storing it cut to 512", () => {
+		expect(() => normalizeEvent({ ...base, graph_id: "g".repeat(513) }, null)).toThrow(GraphIdTooLongError);
+		expect(() => normalizeEvent({ ...base, graph_id: "g".repeat(900) }, null)).toThrow("graph_id_too_long:");
+	});
+
+	test("refuses a graph id over 512 UTF-8 bytes even when it is under 512 characters", () => {
+		// 257 characters of two bytes each: 514 bytes.
+		expect(() => normalizeEvent({ ...base, graph_id: "é".repeat(257) }, null)).toThrow(GraphIdTooLongError);
+		// 512 characters of three bytes each: 1,536 bytes.
+		expect(() => normalizeEvent({ ...base, graph_id: "€".repeat(512) }, null)).toThrow(GraphIdTooLongError);
+	});
+
+	test("accepts a 512-character ASCII graph id unchanged", () => {
+		const graphId = "g".repeat(512);
+		expect(normalizeEvent({ ...base, graph_id: graphId }, null).graph_id).toBe(graphId);
+	});
+
+	test("accepts a graph id of exactly 512 UTF-8 bytes", () => {
+		const graphId = "é".repeat(256);
+		expect(normalizeEvent({ ...base, graph_id: graphId }, null).graph_id).toBe(graphId);
+	});
+
+	test("the refusal is an InvalidEventError, so the existing 400 path answers it", () => {
+		expect(() => normalizeEvent({ ...base, graph_id: "€".repeat(512) }, null)).toThrow(InvalidEventError);
+	});
+
+	test("an absent or empty graph id stays null", () => {
+		expect(normalizeEvent({ ...base, graph_id: undefined }, null).graph_id).toBeNull();
+		expect(normalizeEvent({ ...base, graph_id: "" }, null).graph_id).toBeNull();
 	});
 });
 

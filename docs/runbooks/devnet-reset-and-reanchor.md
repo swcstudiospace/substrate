@@ -185,6 +185,8 @@ The verification caveat: `checkpoint_verify` still compares the cluster's genesi
 | e. **OPERATOR ONLY** Re-send the old hours | operator | first the dry run, then one hour, then the rest (commands below). **The send itself is operator-run.** Deleting or overwriting an `anchors` row has no tool, no test and unverified store semantics: never do it by hand |
 | f. Record each real re-anchor | the entry | automatic: step e writes one `anchor.reanchor` note per hour as an operator surface (below). Only a `store-failed` refusal after a send needs you: run step e again (it adopts the transaction and records it) |
 
+**Pointers.** After a reset the v3 pointers of each anchored hour are re-sent too, each with the memo recomputed from the new hour transaction signature. A pointer is first sent with 0 lamports. The funded path (`INDEX_FUND_LAMPORTS`, 890 880 lamports, once per pointer) applies only when that 0-lamport transfer is refused.
+
 Step e, from the host, with the plan saved in step 3 (`<PLAN_FILE>`) and the new cluster's genesis hash (`<NEW_GENESIS_HASH>`, the plan's `chain.observed_genesis`):
 
 ```sh

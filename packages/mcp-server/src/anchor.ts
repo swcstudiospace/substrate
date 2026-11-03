@@ -84,7 +84,7 @@ export const INDEX_FUND_LAMPORTS = 890_880;
 /** The cluster's refusal of a 0-lamport pointer to an unfunded index account (design Q3). Its exact text is not observed yet; the devnet probe confirms it. */
 const POINTER_REFUSED_RE = /insufficient funds for rent|InsufficientFundsForRent|transaction simulation failed/i;
 
-/** Hours the adoption walk covers; it reads (1 + graphs) signatures for each (design Q6). */
+/** Hours the adoption walk covers; it reads (1 + lookback graphs) signatures for each: every signature the job key signed over the lookback (design Q6). */
 export const ADOPT_LOOKBACK_HOURS = 168;
 
 /** Signatures per adoption page: the node's own cap (design Q6). */
@@ -308,11 +308,11 @@ async function assertDevnetCluster(rpc: Rpc): Promise<void> {
 	}
 }
 
-async function checkAdopt(deps: AnchorDeps, periodStartMs: number, digest: HourDigest, graphs: number): Promise<AdoptVerdict> {
+async function checkAdopt(deps: AnchorDeps, periodStartMs: number, digest: HourDigest, lookbackGraphs: number): Promise<AdoptVerdict> {
 	const { rpc, env } = deps;
 	let listing: AddressMemo[];
 	try {
-		listing = await listJobMemos(rpc, env.pubkey, (1 + graphs) * ADOPT_LOOKBACK_HOURS);
+		listing = await listJobMemos(rpc, env.pubkey, (1 + lookbackGraphs) * ADOPT_LOOKBACK_HOURS);
 	} catch (cause) {
 		throw new SystemicError("rpc-unreadable", `getSignaturesForAddress failed: ${redact(String(cause).slice(0, 200))}`);
 	}
@@ -542,6 +542,9 @@ export interface PointerPlan {
 	graphId: string;
 	memo: string;
 }
+
+/** A stand-in hour transaction signature of the longest length the memo parser takes (88 base58 characters), for validating a pointer plan before its hour transaction exists. */
+const PLACEHOLDER_HOUR_TX_SIG = "1".repeat(88);
 
 /**
  * The pointers an hour owes, one per graph with events in it, in graph-id order (design 3.2). Each names the hour transaction's signature,
@@ -800,6 +803,8 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		await checkPreconditions(deps);
 		preconditionsOk = true;
 	};
+	// The lookback's distinct graphs, read once the first hour needs an adopt walk: each walk reads (1 + this) x ADOPT_LOOKBACK_HOURS signatures.
+	let lookbackGraphs: number | null = null;
 	for (const hour of candidates) {
 		const periodIso = hourIso(hour);
 		let digest = peeked.get(hour);
@@ -828,7 +833,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		}
 		if (digest.root === null || digest.event_count === 0 || digest.memo === null) continue;
 
-		// Heads are read before the adopt check: the walk reads (1 + graphs) signatures per hour, and a v2 adopt is checked against them.
+		// Heads are read before the adopt check: a v2 adopt is checked against them.
 		// An anchored hour skips the read, as its row already settles it.
 		let heads: HourHeads | null = null;
 		if (anchored[periodIso] !== true) {
@@ -840,11 +845,19 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 				return result;
 			}
 		}
-		const graphs = heads === null ? 0 : new Set(heads.records.map((record) => record.graphId)).size;
+		if (lookbackGraphs === null) {
+			try {
+				lookbackGraphs = await greptime.lookbackGraphCount(windowStart);
+			} catch (cause) {
+				await failHour(periodIso, "store-failed");
+				process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+				return result;
+			}
+		}
 
 		let verdict: AdoptVerdict;
 		try {
-			verdict = await checkAdopt(deps, hour, digest, graphs);
+			verdict = await checkAdopt(deps, hour, digest, lookbackGraphs);
 		} catch (cause) {
 			const reason = cause instanceof SystemicError ? cause.reason : "rpc-unreadable";
 			await failHour(periodIso, reason);
@@ -853,26 +866,18 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		}
 
 		if (verdict.kind === "alarm") {
-			// A `--period` re-run over an anchored hour keeps its row: the
-			// alarm is reported, never rewritten over the original.
-			if (anchored[periodIso] !== true) {
-				try {
-					await storeAnchor(greptime, heads, anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
-				} catch {
-					await failHour(periodIso, "store-failed");
-					return result;
-				}
+			// A root mismatch stores no row and no chain leaves: the alarm is raised and the next run alarms again until the mismatch is
+			// resolved.
+			const warned = await failHour(periodIso, "root-mismatch");
+			process.stderr.write(`[anchor] ALARM ${periodIso}: chain root ${verdict.root} != recomputed ${digest.root}\n`);
+			// The alarm is reported, but a later hour still anchors — unless the
+			// warning itself was not stored, which stops the run like the
+			// adopted-note path below.
+			if (!warned) {
+				process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
+				return result;
 			}
-		const warned = await failHour(periodIso, "root-mismatch");
-		process.stderr.write(`[anchor] ALARM ${periodIso}: chain root ${verdict.root} != recomputed ${digest.root}\n`);
-		// The alarm is reported, but a later hour still anchors — unless the
-		// warning itself was not stored, which stops the run like the
-		// adopted-note path below.
-		if (!warned) {
-			process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
-			return result;
-		}
-		continue;
+			continue;
 		}
 
 		if (verdict.kind === "adopt") {
@@ -945,6 +950,19 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			await failHour(periodIso, "store-failed");
 			process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
 			return result;
+		}
+
+		// The pointer plans are formed before the hour transaction is sent. A graph id the memo cannot carry (over 512 UTF-8 bytes, or not in
+		// its normalised form) is refused here: no transaction goes out for the hour, it gets no row, and the run sends nothing later. The
+		// placeholder is the longest signature the memo takes; the real one exists only after the send.
+		if (heads !== null) {
+			try {
+				pointerPlans(hour, heads, PLACEHOLDER_HOUR_TX_SIG);
+			} catch (cause) {
+				await failHour(periodIso, "send-failed");
+				process.stderr.write(`[anchor] ${periodIso} send-failed: pointer plan refused before the hour transaction: ${redact(String(cause).slice(0, 200))}\n`);
+				return result;
+			}
 		}
 
 		try {

@@ -574,6 +574,22 @@ Only the on-chain root is trusted. A head recomputed from the ledger's rows is n
 
 `budget exhausted` and `store-failed` make `ok` false and the hour untrusted, because the chain could not be checked. They claim no tampering: the reason says what could not be read.
 
+### Memo v3 pointers
+
+Each graph with events in an hour also gets one pointer per hour, sent as its own transaction. The hour transaction stays v1 or v2, unchanged. The pointer memo is:
+
+```
+substrate:v3:<graph_id>:<period_start_iso>:<count>:<graph_heads_root>:<hour_tx_sig>
+```
+
+It is sent to the graph's index address: base58 of SHA-256 over `substrate:graph-index:v1\n` followed by the graph id (`packages/ledger/src/graph-index.ts`). One pointer per (graph, hour).
+
+- **Only job-key pointers that succeeded count.** Verify counts a pointer only when the job key signed it and it succeeded on chain. A pointer the job key did not sign, or one that failed on chain, is ignored: it neither verifies nor fails the hour.
+- **Graph id cap.** A graph id over 512 UTF-8 bytes is refused at write with `graph_id_too_long` (`packages/mcp-server/src/event.ts`).
+- **Pre-index v2 hours.** A v2 hour that holds the graph's events but has no pointer for that graph is `ok` false, with the reason `pre-index v2 hour`: its pointer is missing, so it is not proven.
+- **Unreadable chain.** An unreadable chain is `ok` false. Verify fails closed and does not read the hour as proven.
+- **Alarm, no row.** An unanchored hour whose root differs from the chain's memo alarms and stores no row.
+
 ## Reading the ledger
 
 `events_query` is the read counterpart of `events_emit`, and the reason a desk seat
@@ -958,7 +974,7 @@ The buffer is **off by default**. With `SUBSTRATE_EVENT_BUFFER_PATH` unset, a fa
 - **Standalone jobs.** The anchor, backfill, index, index-sweep and ledger jobs run with the buffer off, as the re-anchor job does. The server alone owns the buffer files.
 - **At-least-once.** A dead-letter record can be written twice when a write fails partway, or when a crash falls between a dead-letter write and the buffer's compaction. Both copies carry the same event id and hash, so the duplicate is detectable.
 - **Responses.** A buffered event answers `stored: false` with `buffered: true`, and `/events` answers 503 as for any unstored event. A keyed event that is still queued answers that same queued event when replayed, so a client that resends it with its idempotency key (`SUBSTRATE_EVENT_IDEMPOTENCY` `accept` or `enforce`) does not create a second row. A given-up event answers `deadLettered: true`. Only a landed event is `stored: true`.
-- **Not buffered.** A write whose chain tip cannot be read answers `stored: false` without queueing. That holds for any failure of the read, not only a breaker refusal: the event has no hash without its tip, so the caller keeps its copy. During an outage, for a session whose tip is not cached, the buffer does not hold the event. An append-mode refusal also answers `stored: false` without queueing. Queueing either would hide a configuration or read failure. With `SUBSTRATE_LEDGER_CHAIN_CACHE=0` every write reads the tip, and a failed read is refused, so nothing is buffered during an outage (switch parsed at `packages/mcp-server/src/config.ts:2424`; tip cache null when off at `packages/mcp-server/src/greptime.ts:798`; refusal at `packages/mcp-server/src/service.ts:2997`). Owner-accepted, 2026-11-03.
+- **Not buffered.** A write whose chain tip cannot be read answers `stored: false` without queueing. That holds for any failure of the read, not only a breaker refusal: the event has no hash without its tip, so the caller keeps its copy. During an outage, for a session whose tip is not cached, the buffer does not hold the event. An append-mode refusal also answers `stored: false` without queueing. Queueing either would hide a configuration or read failure. With `SUBSTRATE_LEDGER_CHAIN_CACHE=0` every write for a session reads the tip and a failed read is refused, so no session event is buffered during an outage. A sessionless write reads no tip, so it is buffered during an outage with the cache on or off, while the buffer is on. (The switch is `chainCache` in `packages/mcp-server/src/config.ts`; the tip cache `chainTips` is null when the switch is off, in `packages/mcp-server/src/greptime.ts`; the refusal is the `chain tip unreadable` branch in `packages/mcp-server/src/service.ts`.) Owner-accepted, 2026-11-03.
 - **`/healthz`.** `eventBuffer` is `{ enabled: false }` while the buffer is off. When on it reports `depth`, `max`, `oldestAt`, `durable`, `pending` (given-up entries whose dead-letter record is not yet on disk) and `deadLetter: { depth, durable }`. Depth never changes the status code. The dead-letter store is not bounded, because a bound would have to discard records; alert on its depth.
 - **Residuals.** A buffered `session.end` does not wait for the ledger to close its steering session. The session is closed first, in the live store, and only then is the `session.end` note emitted (`service.ts`, `closeLiveSession`). The close does not depend on the ledger write, which may be down. While the note is buffered, `event_stored` is false, and the docs-canary note runs only for stored events. Sessionless buffered events have no chain, so they are independent entries with no ordering promise.
 

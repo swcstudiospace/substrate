@@ -75,7 +75,10 @@ export const MEMO_PREFIX_V3 = "substrate:v3:";
  */
 export const MEMO_V3_RE =
 	/^substrate:v3:([\s\S]+):(\d{4}-\d\d-\d\dT\d\d:00:00\.000Z):([1-9]\d*):([0-9a-f]{64}):([1-9A-HJ-NP-Za-km-z]{64,88})$/;
-/** The longest graph id a v3 memo carries: the normalised identifier cap (mcp-server event.ts MAX_FIELD). */
+/**
+ * The longest graph id a v3 memo carries, in UTF-8 bytes: the cap the event write path enforces (mcp-server event.ts
+ * normalizeGraphId), so every stored graph id fits a pointer. Bytes, not UTF-16 units: one character is one to four bytes.
+ */
 export const MEMO_GRAPH_ID_MAX = 512;
 const HOUR_TX_SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/;
 
@@ -91,8 +94,8 @@ export type MemoV3 = {
 
 /** The v3 pointer memo: `substrate:v3:<graph_id>:<period ISO>:<count>:<graph_heads_root>:<hour_tx_sig>`. Throws on a bad field. */
 export function formatMemoV3({ graphId, periodStartMs, count, graphHeadsRootHex, hourTxSig }: MemoV3): string {
-	if (typeof graphId !== "string" || graphId.length === 0 || graphId.length > MEMO_GRAPH_ID_MAX) {
-		throw new Error(`formatMemoV3: graph id must be 1 to ${MEMO_GRAPH_ID_MAX} characters`);
+	if (typeof graphId !== "string" || graphId.length === 0 || new TextEncoder().encode(graphId).byteLength > MEMO_GRAPH_ID_MAX) {
+		throw new Error(`formatMemoV3: graph id must be 1 to ${MEMO_GRAPH_ID_MAX} UTF-8 bytes`);
 	}
 	checkMemoFields("formatMemoV3", { periodStartMs, rootHex: graphHeadsRootHex, count });
 	if (!HOUR_TX_SIG_RE.test(hourTxSig)) throw new Error("formatMemoV3: hour transaction signature is not 64-88 base58 characters");
@@ -103,7 +106,7 @@ export function formatMemoV3({ graphId, periodStartMs, count, graphHeadsRootHex,
 export function parseMemoV3(text: string): MemoV3 | null {
 	const m = MEMO_V3_RE.exec(text);
 	if (!m) return null;
-	if ((m[1] as string).length > MEMO_GRAPH_ID_MAX) return null;
+	if (new TextEncoder().encode(m[1] as string).byteLength > MEMO_GRAPH_ID_MAX) return null;
 	const iso = m[2] as string;
 	const periodStartMs = Date.parse(iso);
 	const count = Number(m[3]);
