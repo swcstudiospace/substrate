@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 phases 71-78 gaps_found or human_needed, none complete; integration gate r15 green on 79b3ba32 (12082 pass, 2 skip, 0 fail, 0 errors); phases 72, 76 and 78 re-verified at 79b3ba32 (72 gaps_found; 76 and 78 human_needed); owner round 3 decisions applied; 6c open."
-stopped_at: "Integration tree gsd/v18-int-all at 79b3ba32 carries the third Run 18 pass. Gate r15 green. Owner round 3 decisions applied (5d, 6b, identifier clause, the 76 boundary, D78-5, the audit writer); 6c open. Greptile threads on PR 199, 201 and 204 NOT resolved; nothing pushed; no PR merge-ready. No phase complete; v1.7 open."
+status: "v1.8 phases 71-78 gaps_found or human_needed, none complete; integration gate r15 green on 79b3ba32 (12082 pass, 2 skip, 0 fail, 0 errors); phases 72 and 76 re-verified at 79b3ba32 (72 gaps_found; 76 human_needed); phase 78 re-verified at f1854711 (human_needed); owner round 3 decisions applied; 6c open."
+stopped_at: "Integration tree gsd/v18-int-all at f1854711 carries the third Run 18 pass. Gate r15 green on 79b3ba32; later commits are records and a comment-only audit header. Owner round 3 decisions applied (5d, 6b, identifier clause, the 76 boundary, D78-5, the audit writer); 6c open. Greptile threads on PR 199, 201 and 204 NOT resolved; nothing pushed; no PR merge-ready. No phase complete; v1.7 open."
 last_updated: "2026-11-02"
 last_activity: 2026-11-02
-last_activity_desc: "Run 18 third pass at 79b3ba32: gate r15 green (12082 pass, 2 skip, 0 fail, 0 errors); phases 72, 76, 78 re-verified (72 gaps_found, 6c open; 76 and 78 human_needed)"
+last_activity_desc: "Run 18 third pass at f1854711: gate r15 green on 79b3ba32 (12082 pass, 2 skip, 0 fail, 0 errors); phases re-verified (72 gaps_found, 6c open; 76 and 78 human_needed; 78 re-issued at f1854711 after the comment-only header change)"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
