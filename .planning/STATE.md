@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 phases 71-78 none complete; integration gate r20 green on 6644698e (12199 pass, 2 skip, 0 fail, 0 errors); verifier round at 046fbe05 (71, 72, 73, 75, 76, 77 and 78 human_needed; 74 gaps_found; 73, 76 and 78 re-issued, 71, 72, 75 and 77 kept); v1.8 not complete; owner decisions open; nothing pushed."
-stopped_at: "Integration tree gsd/v18-int-all at 046fbe05 carries the fifth Run 18 pass. Gate r20 green on 6644698e (12199 pass, 2 skip, 0 fail, 0 errors). Verifier round at 046fbe05. No phase complete; v1.8 not complete. Owner decisions open (see Needs Human); nothing pushed."
+status: "v1.8 phases 71-78 none complete; integration gate r21 green on 3e26a5c1 (12206 pass, 2 skip, 0 fail, 0 errors); verifier round at 3e26a5c1 for 73 and 76, the rest fresh; v1.8 not complete; owner decisions open; nothing pushed."
+stopped_at: "Integration tree gsd/v18-int-all at 3e26a5c1 carries the sixth Run 18 pass. Gate r21 green on 3e26a5c1 (12206 pass, 2 skip, 0 fail, 0 errors). Verifier round at 3e26a5c1 for 73 and 76, the rest fresh. No phase complete; v1.8 not complete. Owner decisions open (see Needs Human); nothing pushed."
 last_updated: "2026-11-03"
 last_activity: 2026-11-03
-last_activity_desc: "Run 18 fifth pass at 046fbe05: gate r20 green on 6644698e (12199 pass, 2 skip, 0 fail, 0 errors); verifier round at 046fbe05 (73, 76, 78 re-issued; 71, 72, 75, 77 kept; 74 gaps_found); no phase complete; v1.8 not complete; nothing pushed."
+last_activity_desc: "Run 18 sixth pass at 3e26a5c1: gate r21 green on 3e26a5c1 (12206 pass, 2 skip, 0 fail, 0 errors); verifier round at 3e26a5c1 (73 and 76 re-issued, the rest fresh); no phase complete; v1.8 not complete; nothing pushed."
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
@@ -804,6 +804,16 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Wording question left open.** The phase 76 verifier's replay point: a keyed replay can write a missing event_ingest record, which the doc states at lines 413 to 416. Left as a wording question.
 - **Incidents.** None new. The primary checkout was not written in this pass.
 
+## Run 18, sixth pass (2026-11-03, HEAD 3e26a5c1)
+
+- **Commit.** `3e26a5c1` (W-L2 refusal for summary, session_id and repo, with named errors, before any hash or store write; the summary trim runs after its cap; tests).
+- **Owner answer.** The owner's answer to W-L2 was "refuse at write, with named errors".
+- **Residuals.** W-L3 (session_id and repo cut at 512 code units can store a lone high surrogate) and W-L4 (branch, node_id and linear_identifier accept a lone surrogate on write) are the residuals the verifier named; both stay open.
+- **Read/write mismatch, not applied.** A trim on write alone would make a session's writes miss its own reads; about 20 sites use normalizeIdentifier. The same fix was not applied to session_id and repo; it is W-L3 for the owner.
+- **Commit message.** The commit message overstates one guard test as fail-before; recorded here.
+- **Gates.** Gate r21 green on `3e26a5c1` (12206 pass, 2 skip, 0 fail, 0 errors).
+- **Verifier round at 3e26a5c1.** The verifiers re-issued 73 and 76 at 3e26a5c1.
+
 ## Needs Human
 
 | Phase | Item | What is needed | Who decides |
@@ -819,7 +829,8 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 72 | Decision 3: allowlist unit | Choose the surface (SUBSTRATE_REPO_SCOPES keys) or the session as the unit | Owner |
 | 72 | Row 18 | Service gate under scope not reached; run it under scope | Orchestrator |
 | 72 | Row 8 | Postgres filter has orchestrator evidence only | Orchestrator |
-| 73 | W-L2 | Lone surrogate in summary, session_id or repo; decide the same remedy as W-L1 (refuse at write) | Owner |
+| 73 | W-L3 | session_id and repo cut at 512 code units can store a lone high surrogate; decide a shared normalizeKey at about 20 read and write sites, or leave the cut residual | Owner |
+| 73 | W-L4 | branch, node_id and linear_identifier accept a lone surrogate on write; decide whether they refuse lone surrogates at write, as summary, session_id and repo now do | Owner |
 | 73 | Stored graph ids over 512 bytes, NUL or lone surrogate | Operator scan of the store, then the owner decides the repair; blocks live anchoring on such a store | Owner |
 | 73 | W3, W4 (label), W5, N6, N8 | Fix or accept each open gap in the 73 record | Owner |
 | 73 | HARD-S3 scope | Decide the scope of HARD-S3 | Owner |
@@ -834,6 +845,7 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 76 | R-1, R-2, R-3 | Decide each; R-1 and R-2 NOT FIXED | Owner |
 | 76 | Operator items 1 to 8 | Operator runs them as listed in the 76 record | Operator |
 | 76 | HARD-R3 | Orphaned in REQUIREMENTS, as listed in the 76 status | Orchestrator |
+| 76 | Tip-read order on the sessioned path | A warning on the sessioned path reads the tip before the surrogate refusal; move the surrogate refusal ahead of the tip read, or keep the order | Owner |
 | 77 | T8 ordering rule | Confirm the documented out-of-order rule; the pull path orders by priority (H5) | Owner |
 | 77 | H5 and H6 | Decide per the 77 verification record | Owner |
 | 77 | T5 to T7 | Verifier re-run of the Postgres per-file record; steering-idempotency 4 of 4 is orchestrator evidence | Orchestrator |
