@@ -349,6 +349,47 @@ describe("graph id cap on the write path", () => {
 	});
 });
 
+describe("lone surrogates in the other write text fields", () => {
+	test("refuses a lone high surrogate in the summary, by name, with its code unit", () => {
+		expect(() => normalizeEvent({ ...base, summary: "ran \uD800 tests" }, null)).toThrow(InvalidEventError);
+		expect(() => normalizeEvent({ ...base, summary: "ran \uD800 tests" }, null)).toThrow("summary_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, summary: "ran \uD800 tests" }, null)).toThrow("U+D800");
+	});
+
+	test("refuses a lone low surrogate in the summary, by name", () => {
+		expect(() => normalizeEvent({ ...base, summary: "ran \uDC00 tests" }, null)).toThrow("summary_lone_surrogate:");
+	});
+
+	test("refuses a lone high surrogate in the session id, by name, with its code unit", () => {
+		expect(() => normalizeEvent({ ...base, session_id: "sess-\uD800" }, null)).toThrow("session_id_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, session_id: "sess-\uD800" }, null)).toThrow("U+D800");
+	});
+
+	test("refuses a lone high surrogate in the repo, by name, with its code unit", () => {
+		expect(() => normalizeEvent({ ...base, repo: "swcstudiospace/\uD800x" }, null)).toThrow("repo_lone_surrogate:");
+		expect(() => normalizeEvent({ ...base, repo: "swcstudiospace/\uD800x" }, null)).toThrow("U+D800");
+	});
+
+	test("accepts a well-formed astral character in the summary, as a surrogate pair or as one code point", () => {
+		const pair = "shipped the page \uD83D\uDE42";
+		const point = "shipped the page \u{1F642}";
+		expect(normalizeEvent({ ...base, summary: pair }, null).summary).toBe(pair);
+		expect(normalizeEvent({ ...base, summary: point }, null).summary).toBe(point);
+	});
+
+	test("does not refuse a surrogate pair that the summary cap cuts in half", () => {
+		// The caller's text is well formed; the cut belongs to the length cap, so it is not refused here.
+		expect(() => normalizeEvent({ ...base, summary: `${"x".repeat(1999)}\u{1F642}` }, null)).not.toThrow();
+	});
+
+	test("stores a summary whose surrogate pair the length cap cuts without a lone surrogate at its end", () => {
+		// 1,999 ASCII characters, then a pair that straddles character 2,000, which the cap cuts.
+		const event = normalizeEvent({ ...base, summary: `${"x".repeat(1999)}\u{1F642}` }, null);
+		expect(event.summary).toBe("x".repeat(1999));
+		expect(event.summary.length).toBe(1999);
+	});
+});
+
 describe("new live events expose public metadata only", () => {
 	const privateFields = {
 		steering: "PRIVATE_DIRECTION_MARKER_71",

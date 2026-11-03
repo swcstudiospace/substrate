@@ -184,6 +184,18 @@ function clean(value: string | null | undefined, limit: number): string | null {
 }
 
 /**
+ * A summary cut at MAX_SUMMARY can end on a high surrogate whose low half the cut dropped. Drop it, so the stored summary never ends in a
+ * lone surrogate. Only the summary uses this: the other capped fields keep their cut unchanged.
+ */
+function withoutDanglingHigh(text: string | null): string | null {
+	if (text === null) return null;
+	const last = text.charCodeAt(text.length - 1);
+	if (last < 0xd800 || last > 0xdbff) return text;
+	const trimmed = text.slice(0, -1);
+	return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
  * Normalise an identifier the same way `normalizeEvent` stores it.
  *
  * `session_id`, `graph_id` and `repo` are query keys as well as stored values —
@@ -228,6 +240,28 @@ export class GraphIdLoneSurrogateError extends InvalidEventError {
 	constructor(readonly codeUnit: number) {
 		super(`graph_id_lone_surrogate: a graph id may not contain a lone UTF-16 surrogate; found U+${codeUnit.toString(16).toUpperCase()}`);
 	}
+}
+
+/**
+ * A lone UTF-16 surrogate in a write text field other than the graph id, refused by name: the field and the code unit. Same reason as
+ * GraphIdLoneSurrogateError, and the message says which field it was.
+ */
+export class FieldLoneSurrogateError extends InvalidEventError {
+	constructor(readonly field: string, readonly codeUnit: number) {
+		super(
+			`${field}_lone_surrogate: ${field} may not contain a lone UTF-16 surrogate; found U+${codeUnit.toString(16).toUpperCase()}`,
+		);
+	}
+}
+
+/**
+ * Refuse a lone surrogate in a write text field, by field name. Checked on the redacted text, which is what gets stored, and before the
+ * length cap: a pair the cap splits was whole in the caller's text, so it is not refused here.
+ */
+function refuseLoneSurrogate(field: string, text: string | null | undefined): void {
+	if (typeof text !== "string") return;
+	const lone = LONE_SURROGATE_RE.exec(redact(text));
+	if (lone) throw new FieldLoneSurrogateError(field, lone[0].charCodeAt(0));
 }
 
 /**
@@ -334,6 +368,9 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
 	if (typeof input.summary !== "string" || input.summary.length === 0) {
 		throw new InvalidEventError("summary is required");
 	}
+	refuseLoneSurrogate("summary", input.summary);
+	refuseLoneSurrogate("session_id", input.session_id);
+	refuseLoneSurrogate("repo", input.repo);
 
 	const ts = input.ts ? new Date(input.ts) : new Date();
 	if (Number.isNaN(ts.getTime())) throw new InvalidEventError(`invalid ts: ${String(input.ts)}`);
@@ -352,7 +389,7 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
 		branch: clean(input.branch, MAX_FIELD),
 		actor: input.actor === "human" ? "human" : "agent",
 		kind: input.kind,
-		summary: clean(input.summary, MAX_SUMMARY) ?? "",
+		summary: withoutDanglingHigh(clean(input.summary, MAX_SUMMARY)) ?? "",
 		payload: normalizedPayload(input, idempotency),
 		prev,
 	};
