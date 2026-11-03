@@ -1268,7 +1268,7 @@ Plans:
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: gaps_found: whole-hour removal undetected (probe-confirmed on a two-hour graph). Owner: the threat model includes it; remedy not built; needs a go-ahead for the memo format change.
+**Status**: gaps_found: whole-hour removal undetected (probe-confirmed on a two-hour graph). Owner: the threat model includes it; remedy not built; needs a go-ahead for the memo format change. memo v3 with the graph identity in the clear is approved (owner, 2026-11-03); the build is not started in this pass.
 
 **Depends on**: none
 
@@ -1283,7 +1283,7 @@ Plans:
 
 **Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: gaps_found: HARD-R1 not built. Owner: build it as its own phase.
+**Status**: gaps_found: HARD-R1 not built. Owner: build it as its own phase. HARD-R1 is scheduled to start after v1.8 closes (owner decision, 2026-11-03).
 
 **Depends on**: none
 

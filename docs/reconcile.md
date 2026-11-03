@@ -45,6 +45,8 @@ Budget keys (`budget:`, live rate-limit state) and embedding keys (`emb:`, conte
 
 The flush removes at most 500 keys per run. That is `RECONCILE_MAX_ITEMS` in `packages/corpus/src/protocol.ts`, the same bound the corpus reconcile lists use. The counts are keys throughout: `planned` is the keys the plan's flush names in the run's scan, `removed` the keys this run removed, and `remaining` their difference. A plan's items count actions, not keys, and the report never compares the two. When the plan names more than 500 keys the run stops at the bound and reports `truncated: true` with `remaining` set. The order holds across runs, because each run takes a prefix of the same ordered list: every answer goes before any counter, and every counter before the mark. A scan that cannot complete, because the cache is off or the prefix holds more than 1000000 keys (a fail-closed bound), refuses with nothing removed. A flush that fails part way keeps every counter it has not reached: a failure in the first pass leaves every counter and the mark in place, and a failure in the second leaves the mark in place. The repair never touches the ledger or the index. The cost of a flush is a cold cache until it refills.
 
+The whole-prefix flush and the three ordered passes above are ratified as the design of record (D78-5), owner, 2026-11-03.
+
 Safety rules:
 
 - **Plan first.** `plan --out <file>` runs the report and writes one plan file, and nothing else. It refuses to overwrite an existing file, so a plan in use is never replaced.
