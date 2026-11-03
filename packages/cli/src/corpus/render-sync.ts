@@ -98,7 +98,7 @@ export function renderReconcile(view: ReconcileView): string {
 	const { drift } = view;
 	const out: string[] = [`reconcile${view.execute ? "" : " (dry run)"}: ${drift.checked} compared, ${drift.missingInPlane.length} missing from the docs plane, ${drift.orphansInPlane.length} orphaned in the plane\n`];
 	out.push(renderMirrorProblems(view.sync.mirrors));
-	if (drift.truncated) out.push(`the comparison was cut short (lists are capped at ${RECONCILE_MAX_ITEMS}, or the plane listing was not complete)\n`);
+	if (drift.truncated) out.push(`the comparison was cut short (the drift is capped at ${RECONCILE_MAX_ITEMS} keys in total, or the plane listing was not complete)\n`);
 	if (drift.missingInPlane.length > 0) {
 		out.push("active rows whose plane document is gone:\n");
 		for (const row of drift.missingInPlane.slice(0, LIST_LIMIT)) out.push(`  ${row.repo}:${row.path}\n`);

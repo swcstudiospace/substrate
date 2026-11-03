@@ -275,7 +275,7 @@ export interface ReconcileDrift {
 	orphansInPlane: string[];
 	/** How many active rows and plane documents were compared. */
 	checked: number;
-	/** True when a list was cut at {@link RECONCILE_MAX_ITEMS} or the plane listing was not complete. */
+	/** True when the drift was cut at {@link RECONCILE_MAX_ITEMS} keys in total, missing rows and orphans together, or the plane listing was not complete. */
 	truncated: boolean;
 }
 

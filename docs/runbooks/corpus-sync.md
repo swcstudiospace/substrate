@@ -51,8 +51,8 @@ substrate corpus reconcile
 ```
 
 It reports `missingInPlane` (active manifest rows whose plane document is gone), `orphansInPlane` (names of `corpus:` plane
-documents no active row owns; never their text) and `checked` (rows compared). The reply is `truncated` when a list was cut at
-500 or the read was incomplete (the plane listing hit its page or time bound, or the manifest has more than 100,000 active rows);
+documents no active row owns; never their text) and `checked` (rows compared). The reply is `truncated` when the drift is cut at
+500 keys in total (missing rows and orphans together) or the read was incomplete (the plane listing hit its page or time bound, or the manifest has more than 100,000 active rows);
 the server does not claim a document missing from a cut listing, nor an orphan when it did not read every row, so a truncated
 report can under-report but never invents drift. It never names or touches a plane document whose name does not start with
 `corpus:`.

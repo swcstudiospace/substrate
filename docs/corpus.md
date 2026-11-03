@@ -314,7 +314,7 @@ time or null and `lagSeconds` the seconds since the newest manifest write, or nu
 ### `POST /corpus/reconcile`
 
 Request: `{protocol, execute}`. Without `execute` it is a dry run. Response: `{protocol, drift, repaired, manifestVersion}`
-with `drift: {missingInPlane: [{repo, path}], orphansInPlane: [name], checked, truncated}` (each list capped at 500; the
+with `drift: {missingInPlane: [{repo, path}], orphansInPlane: [name], checked, truncated}` (the lists are cut at 500 keys in total, missing rows and orphans together; the
 counts and `checked` cover everything, and `truncated` is true when a list was cut or the plane listing was not complete)
 and `repaired: {requeued, deleted}` (both 0 on a dry run). With `execute` the server marks the active rows whose plane
 document is gone as removed, without touching the plane, so the next plan offers them as `add`; and it deletes plane

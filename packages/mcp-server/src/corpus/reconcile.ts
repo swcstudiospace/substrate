@@ -167,9 +167,11 @@ async function run(deps: ReconcileDeps, execute: boolean): Promise<ReconcileResu
 		if (looked === "absent") gone.push(row);
 		else if (looked === "unknown") lookupFailed = true;
 	}
+	// One bound for the whole run: RECONCILE_MAX_ITEMS keys in total, missing rows and orphans together. Missing rows take first
+	// (marking one removed needs no plane delete); orphans take what is left. Whatever the bound cuts is reported truncated.
 	const missing = gone.slice(0, RECONCILE_MAX_ITEMS);
-	const orphans = drift.orphans.slice(0, RECONCILE_MAX_ITEMS);
-	const truncated = listing.truncated || !rowsComplete || gone.length > RECONCILE_MAX_ITEMS || drift.orphans.length > RECONCILE_MAX_ITEMS || lookupFailed || unlooked;
+	const orphans = drift.orphans.slice(0, RECONCILE_MAX_ITEMS - missing.length);
+	const truncated = listing.truncated || !rowsComplete || gone.length + drift.orphans.length > RECONCILE_MAX_ITEMS || lookupFailed || unlooked;
 
 	// Rows first: marking one removed needs no plane delete, so a slow or failing plane delete cannot hold that repair back.
 	// The lookup above already confirmed the id is gone; a failed lookup never reaches here.
