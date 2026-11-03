@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type ScopedGitRunner, scopedGit } from "./repo-executor.ts";
@@ -142,5 +142,48 @@ describe("scopedGit refuses a nested checkout under a registered checkout", () =
 		const outer = scopedGit({ scope, surface: "omp", repo: "owner/a", path: null, args: ARGS }, run);
 		expect(outer).toMatchObject({ ok: true, repo: "owner/a", root: f.a.checkout });
 		expect(calls).toEqual([{ args: ARGS, cwd: f.a.checkout, env: { GIT_CEILING_DIRECTORIES: dirname(f.a.checkout) } }]);
+	});
+});
+
+describe("scopedGit refuses a nested checkout under a plain registered directory, and an unnamed linked worktree", () => {
+	test("a nested checkout (a .git directory) under a registered plain directory is refused by name, and no git runs in it", () => {
+		const f = fixture();
+		// a.checkout has no .git of its own: it is a plain directory, and the repository nested in it is not registered.
+		const nested = join(f.a.checkout, "vendor", "lib");
+		mkdirSync(join(nested, ".git"), { recursive: true });
+		const scope = scopeFor(f, { omp: ["owner/a"] });
+		const { run, calls } = recorder();
+		expect(scopedGit({ scope, surface: "omp", repo: null, path: nested, args: ARGS }, run)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(calls).toHaveLength(0);
+		const registered = scopedGit({ scope, surface: "omp", repo: "owner/a", path: null, args: ARGS }, run);
+		expect(registered).toMatchObject({ ok: true, repo: "owner/a", root: f.a.checkout, target: f.a.checkout });
+		expect(calls.map((call) => call.cwd)).toEqual([f.a.checkout]);
+	});
+
+	test("a linked worktree (a .git file) directly under a registered worktrees directory is refused by name, and no git runs in it", () => {
+		const f = fixture();
+		const linked = join(f.a.worktrees, "feat");
+		mkdirSync(linked);
+		writeFileSync(join(linked, ".git"), "gitdir: /elsewhere/.git/worktrees/feat\n");
+		const scope = scopeFor(f, { omp: ["owner/a"] });
+		const { run, calls } = recorder();
+		expect(scopedGit({ scope, surface: "omp", repo: null, path: linked, args: ARGS }, run)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(calls).toHaveLength(0);
+	});
+
+	test("a linked worktree is placed once the registry names it as a checkout of its own", () => {
+		const f = fixture();
+		const linked = join(f.a.worktrees, "feat");
+		mkdirSync(linked);
+		writeFileSync(join(linked, ".git"), "gitdir: /elsewhere/.git/worktrees/feat\n");
+		const env: Record<string, string | undefined> = {
+			[REPO_REGISTRY_ENV]: JSON.stringify({ "owner/a": { checkouts: [f.a.checkout, linked], worktrees: [f.a.worktrees] } }),
+			[REPO_SCOPES_ENV]: JSON.stringify({ omp: ["owner/a"] }),
+		};
+		const parsed = repoScopeFromEnv(env);
+		if (!parsed.ok) throw new Error(parsed.problem);
+		const { run, calls } = recorder();
+		expect(scopedGit({ scope: parsed.value, surface: "omp", repo: null, path: linked, args: ARGS }, run)).toMatchObject({ ok: true, repo: "owner/a", root: linked, target: linked });
+		expect(calls.map((call) => call.cwd)).toEqual([linked]);
 	});
 });

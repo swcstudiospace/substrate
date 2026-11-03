@@ -95,27 +95,24 @@ function parseDirectories(value: unknown, where: string): ParseOutcome<string[]>
 	return { ok: true, value: directories };
 }
 
-/** The kind of `.git` entry in `dir`: "file" for a linked worktree's gitfile, "dir" for a repository directory, null for none. */
-function gitEntryKind(dir: string): "file" | "dir" | null {
+/** Whether `dir` has a `.git` entry of any kind: a repository directory, or a linked worktree's gitfile. */
+function hasGitEntry(dir: string): boolean {
 	try {
-		return lstatSync(join(dir, ".git")).isFile() ? "file" : "dir";
+		lstatSync(join(dir, ".git"));
+		return true;
 	} catch {
-		return null;
+		return false;
 	}
 }
 
 /**
- * Whether a `.git` entry lies strictly between `root` (a real registered directory) and `target` (inside it). Below a checkout
- * root any such entry is a nested checkout. Below a worktrees directory only a linked worktree directly in it (a `.git` file) is
- * allowed; a `.git` directory, or any entry deeper down, is a nested checkout. A checkout root with no `.git` of its own is a plain
- * directory that holds repositories as children, so it nests nothing.
+ * Whether a `.git` entry lies strictly between `root` (a real registered directory) and `target` (inside it). Any such entry is a
+ * nested checkout, whether or not `root` has a `.git` of its own: a repository inside a registered directory is placed only when it
+ * is registered by name. The registered directory itself is never tested, so it is always placed.
  */
-function nestedCheckoutBetween(root: string, checkout: boolean, target: string): boolean {
-	if (checkout && gitEntryKind(root) === null) return false;
+function nestedCheckoutBetween(root: string, target: string): boolean {
 	for (let dir = target; dir !== root && contains(root, dir); dir = dirname(dir)) {
-		const kind = gitEntryKind(dir);
-		if (kind === null) continue;
-		if (checkout || kind === "dir" || dirname(dir) !== root) return true;
+		if (hasGitEntry(dir)) return true;
 	}
 	return false;
 }
@@ -243,29 +240,23 @@ export type LocatedRepoPath = { repo: string; root: string; target: string };
 export type LocateOutcome = { ok: true; located: LocatedRepoPath } | { ok: false; reason: "path-not-registered" | "nested-checkout" };
 
 /**
- * The registration whose registered directory contains `path`, with that directory's real location. The deepest match wins; a
- * checkout wins a tie with a worktrees directory at the same location. A checkout nested under a registered directory is refused
- * (`nested-checkout`): any `.git` strictly below a checkout is nested, and below a worktrees directory only a linked worktree
- * directly in it (a `.git` file) is allowed.
+ * The registration whose registered directory contains `path`, with that directory's real location. The deepest match wins. A
+ * `.git` entry strictly below the matched directory is a nested checkout (`nested-checkout`): a repository inside a registered
+ * directory is refused unless it is registered itself, so a linked worktree is placed only once it is named.
  */
 export function locateRepoPath(scope: RepoScope, path: string): LocateOutcome {
 	const target = resolveContained(path);
 	if (target === null) return { ok: false, reason: "path-not-registered" };
-	let best: { repo: string; root: string; checkout: boolean } | null = null;
+	let best: { repo: string; root: string } | null = null;
 	for (const registration of scope.registry.values()) {
-		for (const [dirs, checkout] of [
-			[registration.checkouts, true],
-			[registration.worktrees, false],
-		] as const) {
-			for (const dir of dirs) {
-				const root = realDirectoryOrNull(dir);
-				if (root === null || !contains(root, target)) continue;
-				if (best === null || root.length > best.root.length) best = { repo: registration.repo, root, checkout };
-			}
+		for (const dir of [...registration.checkouts, ...registration.worktrees]) {
+			const root = realDirectoryOrNull(dir);
+			if (root === null || !contains(root, target)) continue;
+			if (best === null || root.length > best.root.length) best = { repo: registration.repo, root };
 		}
 	}
 	if (best === null) return { ok: false, reason: "path-not-registered" };
-	if (nestedCheckoutBetween(best.root, best.checkout, target)) return { ok: false, reason: "nested-checkout" };
+	if (nestedCheckoutBetween(best.root, target)) return { ok: false, reason: "nested-checkout" };
 	return { ok: true, located: { repo: best.repo, root: best.root, target } };
 }
 

@@ -143,10 +143,11 @@ describe("substrate corpus refuses an unregistered root or repository before any
 });
 
 describe("substrate corpus runs as before for registered repositories, and when the registry is unset", () => {
-	test("positive control: scan over a registered root proceeds and runs git", async () => {
+	test("positive control: scan over a registered repository proceeds and runs git", async () => {
 		const root = checkoutRoot();
+		const repo = join(root, "alpha");
 		const runner = gitFor(root);
-		const result = await run(["scan", "--root", root], { [REPO_REGISTRY_ENV]: registry({ "owner/acme": root }) }, runner);
+		const result = await run(["scan", "--root", repo], { [REPO_REGISTRY_ENV]: registry({ "owner/acme": repo }) }, runner);
 		expect(result.code).toBe(0);
 		expect(runner.calls.length).toBeGreaterThan(0);
 	});
@@ -183,9 +184,14 @@ describe("the top-level CLI reads cwd git only inside a registered checkout", ()
 		expect(localGitPermitted({ [REPO_REGISTRY_ENV]: registry({ "owner/acme": registered }) }, stray)).toBe(false);
 	});
 
-	test("positive control: a registered cwd is read", () => {
+	test("positive control: a registered repository's own directory is read", () => {
+		const repo = join(checkoutRoot(), "alpha");
+		expect(localGitPermitted({ [REPO_REGISTRY_ENV]: registry({ "owner/acme": repo }) }, repo)).toBe(true);
+	});
+
+	test("boundary: a checkout nested under a registered plain directory is not read when the registry is set", () => {
 		const registered = checkoutRoot();
-		expect(localGitPermitted({ [REPO_REGISTRY_ENV]: registry({ "owner/acme": registered }) }, join(registered, "alpha"))).toBe(true);
+		expect(localGitPermitted({ [REPO_REGISTRY_ENV]: registry({ "owner/acme": registered }) }, join(registered, "alpha"))).toBe(false);
 	});
 
 	test("default off: with the registry unset every cwd is read as before", () => {

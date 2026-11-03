@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { DerivedMemoryHit, RecallReply } from "./memory-recall.ts";
 import { mergeDerivedHits } from "./memory-search.ts";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -177,6 +177,18 @@ describe("authorizeRepoPath", () => {
 	test("boundary: a repository named that does not own the path is a mismatch, after the grant check", () => {
 		const scope = scopeFor(fixture, { omp: ["owner/a", "owner/b"] });
 		expect(authorizeRepoPath(scope, "omp", fixture.a.checkout, "owner/b")).toEqual({ ok: false, reason: "path-repo-mismatch" });
+	});
+
+	test("boundary: a nested checkout under a registered directory is refused by name, and the registered checkout is placed", () => {
+		const f = layout();
+		mkdirSync(join(f.a.checkout, "vendor", "lib", ".git"), { recursive: true });
+		const linked = join(f.a.worktrees, "feat");
+		mkdirSync(linked);
+		writeFileSync(join(linked, ".git"), "gitdir: x\n");
+		const scope = scopeFor(f, { omp: ["owner/a"] });
+		expect(authorizeRepoPath(scope, "omp", join(f.a.checkout, "vendor", "lib"), null)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(authorizeRepoPath(scope, "omp", linked, null)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(authorizeRepoPath(scope, "omp", f.a.checkout, null)).toEqual({ ok: true, repo: "owner/a", target: f.a.checkout });
 	});
 
 	test("scoping off places nothing and refuses nothing, as before", () => {

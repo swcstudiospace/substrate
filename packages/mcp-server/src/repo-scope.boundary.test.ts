@@ -106,9 +106,8 @@ describe("worktree list (criterion 2: a credential reads only its own repository
 		expect(await substrate.listWorktrees(ALL, null)).toEqual({ ok: true, worktrees: [], truncated: false });
 	});
 
-	test("scoping off lists every repository, as before", async () => {
-		const repos = twoRepos();
-		const env = { [REPO_REGISTRY_ENV]: repos.registry, SUBSTRATE_WORKTREE_REGISTRY: "on" };
+	test("scoping off (no registry) lists every repository, as before", async () => {
+		const env = { SUBSTRATE_WORKTREE_REGISTRY: "on" };
 		const substrate = new Substrate(loadConfig(env), { index: null, greptime: null, worktrees: await seededRegistry() });
 		const outcome = await substrate.listWorktrees({ ...ALL, repo: "owner/b" }, null);
 		expect(outcome.ok && outcome.worktrees.map((row) => row.repo)).toEqual(["owner/b"]);

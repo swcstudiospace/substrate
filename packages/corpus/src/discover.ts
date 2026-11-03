@@ -78,7 +78,7 @@ export interface DiscoverOptions {
 	/** How many directory levels below a root are searched for `.git`. Default 3. */
 	depth?: number | undefined;
 	run?: GitRunner | undefined;
-	/** The environment the registry is read from (`SUBSTRATE_REPO_REGISTRY`). Defaults to `process.env`. */
+	/** The environment the registry is read from (`SUBSTRATE_REPO_REGISTRY`). Defaults to `process.env`. A nested `.git` under a registered directory is refused (the strict rule); the server, unlike discovery, requires `SUBSTRATE_REPO_SCOPES` when this is set. */
 	env?: Record<string, string | undefined> | undefined;
 }
 

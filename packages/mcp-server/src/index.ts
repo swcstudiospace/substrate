@@ -17,6 +17,7 @@ import { existsSync, statSync } from "node:fs";
 import { gatedFetch } from "@substrate/observability";
 import {
 	ConfigError,
+	RepoScopesRequiredError,
 	configWarnings,
 	contextualRecallConfigWarnings,
 	desktopConfigWarnings,
@@ -60,6 +61,11 @@ try {
 	if (error instanceof ConfigError) {
 		process.stderr.write(`[substrate] refused — ${error.message}\n`);
 		process.exit(78);
+	}
+	if (error instanceof RepoScopesRequiredError) {
+		// The registry is set without its scopes: a boot refusal with exit 1, not 78. The message names variables only.
+		process.stderr.write(`[substrate] refused — ${error.message}\n`);
+		process.exit(1);
 	}
 	throw error;
 }

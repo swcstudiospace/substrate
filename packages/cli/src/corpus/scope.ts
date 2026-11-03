@@ -3,7 +3,7 @@
  *
  * A corpus command runs git in each `--root` it walks, in each `--repo` directory it hooks, and names each `--repo` it reads.
  * Those are the targets the registry must place before the command runs: a root or hook directory must lie inside a registered
- * directory; a named repository must be registered. Scoping off (`SUBSTRATE_REPO_REGISTRY` unset or blank) changes nothing.
+ * directory; a named repository must be registered, and a `.git` nested under a registered directory is refused (the strict rule). The server, unlike this command, requires `SUBSTRATE_REPO_SCOPES` when the registry is set. Scoping off (`SUBSTRATE_REPO_REGISTRY` unset or blank) changes nothing.
  *
  * A refusal exits 2 with the reason and runs no git: `runCorpus` calls {@link corpusScopeRefusal} before any dispatch. The local
  * commands act as surface `claude-code`, the surface they post as, the same as `substrate worktree`. A refusal is audited as a

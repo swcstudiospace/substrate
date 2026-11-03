@@ -777,3 +777,88 @@ describe("SUBSTRATE_RECONCILE_* (phase 78, D78-7)", () => {
 		}
 	});
 });
+
+describe("SUBSTRATE_REPO_REGISTRY needs SUBSTRATE_REPO_SCOPES (phase 72)", () => {
+	const REGISTRY = JSON.stringify({ "owner/a": { checkouts: ["/srv/repo-a"], worktrees: [] } });
+	const SCOPES = JSON.stringify({ "claude-code": ["owner/a"] });
+
+	function refusalOf(env: Record<string, string | undefined>): Error {
+		try {
+			loadConfig(env);
+		} catch (error) {
+			return error as Error;
+		}
+		throw new Error("loadConfig did not throw");
+	}
+
+	test("a registry with no scopes variable refuses the load, naming both variables and never the registry value", () => {
+		const error = refusalOf({ SUBSTRATE_REPO_REGISTRY: REGISTRY });
+
+		expect(error.name).toBe("RepoScopesRequiredError");
+		expect(error.message).toContain("SUBSTRATE_REPO_REGISTRY");
+		expect(error.message).toContain("SUBSTRATE_REPO_SCOPES");
+		expect(error.message).not.toContain("owner/a");
+		expect(error.message).not.toContain("/srv/repo-a");
+	});
+
+	test("an empty or blank scopes variable is the same refusal", () => {
+		for (const scopes of ["", "   "]) {
+			const error = refusalOf({ SUBSTRATE_REPO_REGISTRY: REGISTRY, SUBSTRATE_REPO_SCOPES: scopes });
+
+			expect(error.name).toBe("RepoScopesRequiredError");
+			expect(error.message).toContain("SUBSTRATE_REPO_SCOPES");
+		}
+	});
+
+	test("both variables set loads, with scoping enforced", () => {
+		const config = loadConfig({ SUBSTRATE_REPO_REGISTRY: REGISTRY, SUBSTRATE_REPO_SCOPES: SCOPES });
+
+		expect(config.repoScope.enforced).toBe(true);
+		expect(config.repoScope.registry.has("owner/a")).toBe(true);
+	});
+
+	test("neither variable set loads, with scoping off", () => {
+		const config = loadConfig({});
+
+		expect(config.repoScope.enforced).toBe(false);
+		expect(config.repoScope.registry.size).toBe(0);
+	});
+
+	test("a blank registry is unset, so it loads without a scopes variable", () => {
+		const config = loadConfig({ SUBSTRATE_REPO_REGISTRY: "  " });
+
+		expect(config.repoScope.enforced).toBe(false);
+	});
+});
+
+describe("the server entry point refuses a registry without scopes (phase 72)", () => {
+	const ROOT = join(import.meta.dir, "..", "..", "..");
+	const ENTRY = join(import.meta.dir, "index.ts");
+
+	test("the process prints the refusal naming both variables and exits 1", async () => {
+		const env: Record<string, string> = { SUBSTRATE_REPO_REGISTRY: JSON.stringify({ "owner/a": { checkouts: ["/srv/repo-a"], worktrees: [] } }), SUBSTRATE_PORT: "0" };
+		for (const key of ["PATH", "HOME"]) {
+			const value = process.env[key];
+			if (value !== undefined) env[key] = value;
+		}
+		const child = Bun.spawn([process.execPath, "--no-env-file", ENTRY], { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" });
+		// Read stdout until the process exits (stream closes) or it reports it is listening, which only a booted server does.
+		const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+		const decoder = new TextDecoder();
+		let out = "";
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (value) out += decoder.decode(value, { stream: true });
+			if (done || out.includes("listening on")) break;
+		}
+		reader.releaseLock();
+		child.kill();
+		const exitCode = await child.exited;
+		const stderr = await new Response(child.stderr).text();
+
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("[substrate] refused");
+		expect(stderr).toContain("SUBSTRATE_REPO_REGISTRY");
+		expect(stderr).toContain("SUBSTRATE_REPO_SCOPES");
+	});
+});

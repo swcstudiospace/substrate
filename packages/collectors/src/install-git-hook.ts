@@ -17,7 +17,7 @@
  * uses the functions below; uninstalling removes only our block.
  *
  * With a repository registry (`SUBSTRATE_REPO_REGISTRY`; unset means no check) a hooks directory outside the repository's own
- * worktree or git directory is refused before anything is written, so a `core.hooksPath` cannot place a hook outside the registration.
+ * worktree or git directory is refused before anything is written, so a `core.hooksPath` cannot place a hook outside the registration. The strict rule refuses any nested `.git` under a registered root; the server, unlike this installer, requires `SUBSTRATE_REPO_SCOPES` when the registry is set.
  */
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, type Stats, writeFileSync } from "node:fs";

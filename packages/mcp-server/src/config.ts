@@ -35,7 +35,7 @@ import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OU
 import { DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
-import { repoScopeFromEnv, type RepoScope } from "./repo-scope.ts";
+import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV, repoScopeFromEnv, type RepoScope } from "./repo-scope.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
 export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
@@ -506,7 +506,8 @@ export interface SubstrateConfig {
 	worktreeRegistry: { mode: WorktreeRegistryMode; ttlS: number; idleDays: number };
 	/**
 	 * Phase 72: which repositories each surface may address and where each lives, from `SUBSTRATE_REPO_SCOPES` and
-	 * `SUBSTRATE_REPO_REGISTRY`. Scoping is off unless the scopes variable is set; a malformed value refuses the boot.
+	 * `SUBSTRATE_REPO_REGISTRY`. Scoping is off unless the scopes variable is set; a malformed value refuses the boot, and a
+	 * registry set without a non-empty scopes variable refuses it too ({@link RepoScopesRequiredError}).
 	 */
 	repoScope: RepoScope;
 	/**
@@ -957,8 +958,22 @@ export class ConfigError extends Error {
 	}
 }
 
+/**
+ * `SUBSTRATE_REPO_REGISTRY` is set and `SUBSTRATE_REPO_SCOPES` is unset or empty. Scoping is enforced only by the scopes
+ * variable, so a registry alone would leave every surface free to address every repository it names; the boot refuses
+ * rather than run in that state. Not a {@link ConfigError}: the entry point exits 1 for it, not 78. The message names
+ * variables only.
+ */
+export class RepoScopesRequiredError extends Error {
+	constructor() {
+		super(`${REPO_REGISTRY_ENV} is set but ${REPO_SCOPES_ENV} is unset or empty; set ${REPO_SCOPES_ENV} to the surfaces' grants, or unset ${REPO_REGISTRY_ENV}`);
+		this.name = "RepoScopesRequiredError";
+	}
+}
+
 /** The repository scope from the environment. A problem is a boot refusal: a scope that cannot be read must not default to open. */
 function repoScopeOrRefuse(env: Record<string, string | undefined>): RepoScope {
+	if (env[REPO_REGISTRY_ENV]?.trim() && !env[REPO_SCOPES_ENV]?.trim()) throw new RepoScopesRequiredError();
 	const parsed = repoScopeFromEnv(env);
 	if (!parsed.ok) throw new ConfigError(`${parsed.problem}; fix it or unset it (unset scoping is off)`);
 	return parsed.value;
