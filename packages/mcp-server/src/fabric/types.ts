@@ -77,6 +77,8 @@ export interface FabricResourceStatus {
 	/** A fixed phrase naming where the reading came from. Never an error text. */
 	source: string;
 	checkedAt: string;
+	/** Present on the `tei` row only when TEI is configured: the embedding client's breaker, read at the status call. Folded into `state` by {@link serviceState}; never shown as an error. */
+	breaker?: BreakerReading;
 	/** Present on the `tei` row (only when TEI is configured) and on the `corpus` row. */
 	detail?: FabricTeiDetail | CorpusDetail;
 }

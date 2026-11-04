@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { healthyFacts, healthyServices, unconfiguredFacts } from "./fixtures.ts";
 import { buildFabricStatus } from "./status.ts";
+import { gatherFabricFacts } from "./gather.ts";
+import type { FabricHealthView, FabricSources } from "./types.ts";
+import { SLO_DEFAULTS } from "@substrate/corpus";
 import { FABRIC_RESOURCES, type FabricFacts, type FabricResourceName, type FabricResourceStatus, type ServiceName } from "./types.ts";
 
 function rowOf(facts: FabricFacts, resource: FabricResourceName): FabricResourceStatus {
@@ -181,5 +184,53 @@ describe("buildFabricStatus", () => {
 		const total = status.counts.ok + status.counts.degraded + status.counts.unavailable + status.counts.unconfigured;
 		expect(total).toBe(FABRIC_RESOURCES.length);
 		expect(status.counts.unavailable).toBe(1);
+	});
+});
+
+describe("the tei row's breaker (phase 64)", () => {
+	/** The sources of one gather: the TEI breaker in `state`, every other breaker closed and every plane answering. */
+	function sourcesWithTeiBreaker(state: "closed" | "open" | "half-open"): FabricSources {
+		const closed = { state: "closed" as const };
+		const snapshot: FabricHealthView = {
+			cache: { enabled: true, connected: true, mode: "on", hits: 0, misses: 0, errors: 0, bypasses: 0 },
+			eventBus: { enabled: true },
+			tei: { model: "test-model", modelSource: "pinned", dimension: 384, latencyMs: 12 },
+			breakers: { greptime: closed, index: closed, cache: closed, hindsight: closed, ragflow: closed, lightrag: closed, tei: { state } },
+		};
+		const answered = Promise.resolve(true);
+		return {
+			now: () => "2026-10-21T00:00:00.000Z",
+			health: () => ({
+				greptime: Promise.resolve({ up: true, eventsWritable: true, writeTimedOut: false, writeUnread: false }),
+				index: answered,
+				hindsight: answered,
+				ragflow: answered,
+				lightrag: answered,
+				tei: answered,
+			}),
+			snapshot: () => snapshot,
+			railwayCost: async () => ({ status: "ok", projectedMonthlyUsd: 3, budgetUsd: 50 }),
+			corpus: async () => ({ readings: { freshnessS: 120, recall5: 0.9, ingestDocsPerS: 1 }, unread: null }),
+			outbox: () => ({ size: 0, oldestAt: null }),
+			config: {
+				endpointPolicy: "enforce",
+				endpointClasses: { greptime: "proxy" },
+				configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, lightrag: true, hindsight: true, tei: true },
+				teiEndpoint: "loopback",
+				dragonflyRefused: false,
+				corpusEnabled: false,
+				docsSlo: { ...SLO_DEFAULTS },
+			},
+		};
+	}
+
+	test("an open TEI breaker is reported on the row, and the row is still unavailable", async () => {
+		const row = rowOf(await gatherFabricFacts(sourcesWithTeiBreaker("open")), "tei");
+		expect(row).toMatchObject({ state: "unavailable", breaker: "open" });
+	});
+
+	test("a closed TEI breaker is reported as closed, and the row is ok", async () => {
+		const row = rowOf(await gatherFabricFacts(sourcesWithTeiBreaker("closed")), "tei");
+		expect(row).toMatchObject({ state: "ok", breaker: "closed" });
 	});
 });

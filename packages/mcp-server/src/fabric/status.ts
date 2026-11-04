@@ -107,12 +107,12 @@ export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 	return { checkedAt: at, resources, counts };
 }
 
-/** The embedding service's row: its class is `TEI_URL`'s, and a configured one carries the model, its source, the dimension and the latency the client saw. */
+/** The embedding service's row: its class is `TEI_URL`'s; a configured one carries its breaker, and the model, its source, the dimension and the latency the client saw. */
 function teiRow(facts: FabricFacts, checkedAt: string): FabricResourceStatus {
 	const row = serviceRow("tei", facts.tei.endpointClass ?? "unset", facts.services.tei, checkedAt);
 	if (!facts.services.tei.configured) return row;
 	const { model, modelSource, dimension, latencyMs } = facts.tei;
-	return { ...row, detail: { model, modelSource, dimension, latencyMs } };
+	return { ...row, breaker: facts.services.tei.breaker, detail: { model, modelSource, dimension, latencyMs } };
 }
 
 function serviceRow(
