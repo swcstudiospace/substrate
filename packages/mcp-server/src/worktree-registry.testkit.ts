@@ -100,8 +100,8 @@ export function worktreeStoreContract(harness: () => ContractHarness): void {
 		const rows = await store.list(filter({ repo: r }));
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({ dirty: true, head: HEAD_B, ahead: 2, pr_state: "merged", first_seen_at: T0.toISOString(), last_seen_at: later.toISOString() });
-		// The reporter dropped the attribution, and the row follows the latest report rather than keeping the old one.
-		expect(rows[0] !== undefined && "session_id" in rows[0]).toBe(false);
+		// The reporter dropped the attribution, and the row keeps the stored value: a report that omits attribution never clears it.
+		expect(rows[0]).toMatchObject({ session_id: "sess-1" });
 	});
 
 	test("a row the report leaves out is kept while it is inside the retention window, and deleted once it is older than the window at report time", async () => {

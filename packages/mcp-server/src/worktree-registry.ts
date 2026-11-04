@@ -362,6 +362,7 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 				for (const worktree of input.worktrees) {
 					// `::text::jsonb`: a bare `::jsonb` makes the driver JSON-encode the string into a scalar (see index-sweep.ts).
 					const filesJson = worktree.files === undefined || worktree.files === null ? null : JSON.stringify(worktree.files);
+					// A report that omits session_id or graph_id keeps the stored value: attribution is replaced, never cleared, by silence.
 					await tx`
 						insert into worktrees (
 							host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes,
@@ -377,7 +378,7 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 						    dirty = excluded.dirty, ahead = excluded.ahead, behind = excluded.behind,
 						    last_commit_at = excluded.last_commit_at, size_bytes = excluded.size_bytes,
 						    locked = excluded.locked, is_primary = excluded.is_primary, pr_state = excluded.pr_state,
-						    session_id = excluded.session_id, graph_id = excluded.graph_id,
+						    session_id = coalesce(excluded.session_id, worktrees.session_id), graph_id = coalesce(excluded.graph_id, worktrees.graph_id),
 						    changed_files = excluded.changed_files, files_truncated = excluded.files_truncated,
 						    last_seen_at = excluded.last_seen_at, reported_at = excluded.reported_at`;
 				}

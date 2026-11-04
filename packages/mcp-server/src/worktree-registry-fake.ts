@@ -26,15 +26,22 @@ export class MemoryWorktreeRegistry implements WorktreeRegistryStore {
 		this.reports += 1;
 		const seenAt = input.seenAt.getTime();
 		for (const reported of input.worktrees) {
-			const { files, files_truncated: truncated, ...record } = reported;
-			const key = `${input.host}\u0000${record.path}`;
+			const { files, files_truncated: truncated, session_id, graph_id, ...rest } = reported;
+			const key = `${input.host}\u0000${rest.path}`;
+			const previous = this.rows.get(key);
+			// Attribution is replaced, never cleared, by silence: an omitted session_id or graph_id keeps the stored one, as the SQL's coalesce does.
+			const record: WorktreeRecord = { ...rest };
+			const sessionId = session_id ?? previous?.record.session_id;
+			if (sessionId !== undefined) record.session_id = sessionId;
+			const graphId = graph_id ?? previous?.record.graph_id;
+			if (graphId !== undefined) record.graph_id = graphId;
 			const kept = files ?? null;
 			this.rows.set(key, {
 				record,
 				host: input.host,
 				files: kept,
 				filesTruncated: kept !== null && (truncated ?? false),
-				firstSeenAt: this.rows.get(key)?.firstSeenAt ?? seenAt,
+				firstSeenAt: previous?.firstSeenAt ?? seenAt,
 				lastSeenAt: seenAt,
 			});
 		}
