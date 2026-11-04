@@ -72,6 +72,7 @@ import {
 	type CheckpointVerifyResult,
 	type EventAnchorResult,
 } from "./checkpoint-verify.ts";
+import { normalizeKey } from "./event.ts";
 import { MAX_QUERY_LIMIT, type AnchorRow, type GreptimeClient } from "./greptime.ts";
 import { parseReanchorPayload, type ReanchorPayload } from "./reanchor-plan.ts";
 import { redact } from "./redact.ts";
@@ -213,7 +214,7 @@ async function findById(ports: AnchorVerifyPorts, ledger: AnchorLedger, id: stri
 async function findCheckpoint(ports: AnchorVerifyPorts, ledger: AnchorLedger, ckptId: string, lookup: CheckpointLookup): Promise<CheckpointEventRecord | null> {
 	const match =
 		lookup.sessionId !== undefined
-			? { kind: "note", session_id: lookup.sessionId }
+			? { kind: "note", session_id: normalizeKey(lookup.sessionId) ?? lookup.sessionId }
 			: lookup.surface !== undefined
 				? { kind: "note", surface: lookup.surface }
 				: null;
