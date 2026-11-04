@@ -680,7 +680,7 @@ export interface SubstrateConfig {
 	docsReflect: DocsReflectSettings;
 	/** The scheduled reconcile (Phase 78, D78-7): `SUBSTRATE_RECONCILE_INTERVAL_S` and `SUBSTRATE_RECONCILE_WINDOW_HOURS`. Off by default. */
 	reconcile: ReconcileSettings;
-	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
+	/** The docs plane's objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S` and, once set, `SUBSTRATE_DOCS_SLO_SYNC_LAG_S`. */
 	docsSlo: SloThresholds;
 	/**
 	 * `SUBSTRATE_PLANNING_HASH_STORE=on` (v1.7 phase 65): the planning refresh keeps its per-page hashes in a store (the index

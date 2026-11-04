@@ -56,17 +56,18 @@ export interface FabricTeiDetail {
 	latencyMs: number | null;
 }
 
-/** One objective of the corpus row: the reading (`null` while nobody has measured it) against the threshold it is judged by. */
+/** One objective of the corpus row: the reading (`null` while nobody has measured it) against the threshold it is judged by (`null` when the objective is not set). */
 export interface SloLine {
 	reading: number | null;
-	threshold: number;
+	threshold: number | null;
 }
 
-/** The corpus row's detail (phase 70): the three readings with their thresholds, and the objectives that are breached. Numbers and names only. */
+/** The corpus row's detail (phase 70): the readings with their thresholds, and the objectives that are breached. Numbers and names only. */
 export interface CorpusDetail {
 	freshnessS: SloLine;
 	recall5: SloLine;
 	ingestDocsPerS: SloLine;
+	syncLag: SloLine;
 	breaches: SloBreach[];
 }
 

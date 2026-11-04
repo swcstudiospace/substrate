@@ -37,6 +37,7 @@ import {
 	CORPUS_FRESHNESS_METRIC,
 	CORPUS_GOLDEN_RECALL5_METRIC,
 	CORPUS_INGEST_RATE_METRIC,
+	CORPUS_SYNC_LAG_METRIC,
 	DOCS_SEARCH_OUTCOMES,
 	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
@@ -143,10 +144,11 @@ const MEMORY_MODE_VALUES: ReadonlySet<string> = new Set<string>(MEMORY_EXPIRED_M
  * `admission.decisions` already carries `limited` and
  * `shadow_limited`, so nothing is added for admission.
  *
- * The three `corpus.*` gauges (v1.7 phase 70) are the docs plane's service objectives: the age of the newest manifest change
+ * The four `corpus.*` gauges (v1.7 phase 70) are the docs plane's service objectives: the age of the newest manifest change
  * (the worst reading in a step), the documents per second of the last ingest request and the golden-set recall at 5 as the
  * docs canary last reported it (both averaged: a gauge repeats its last value every interval, so the mean of a step is
  * that value, never an invented tail).
+ * The fourth, `corpus.sync_lag_seconds`, is the lag the newest `docs.sync` note reported (the worst in a step, as freshness is).
  */
 export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"cache.operations": { kind: "counter", label: "result", values: CACHE_RESULT_VALUES, agg: "sum", unit: "{operation}" },
@@ -161,6 +163,7 @@ export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"corpus.freshness_seconds": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 	"corpus.ingest_docs_per_s": { kind: "gauge", label: null, values: null, agg: "avg", unit: "{document}/s" },
 	"corpus.golden_recall5": { kind: "gauge", label: null, values: null, agg: "avg", unit: "ratio" },
+	"corpus.sync_lag_seconds": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 };
 
 /** Core plus extended: what the ledger client can store and read, whatever the mode. Never what a caller may ask for; that is {@link metricSeriesFor}. */
@@ -415,6 +418,7 @@ const EXTENDED_GAUGE_SOURCES: ReadonlyArray<{ series: string; metric: string }> 
 	{ series: "corpus.freshness_seconds", metric: CORPUS_FRESHNESS_METRIC },
 	{ series: "corpus.ingest_docs_per_s", metric: CORPUS_INGEST_RATE_METRIC },
 	{ series: "corpus.golden_recall5", metric: CORPUS_GOLDEN_RECALL5_METRIC },
+	{ series: "corpus.sync_lag_seconds", metric: CORPUS_SYNC_LAG_METRIC },
 ];
 
 /** A gauge nobody set has no point (the archive age before a first archive), and a non-finite reading is not a number to store: both are skipped. */

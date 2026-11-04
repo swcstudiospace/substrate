@@ -72,6 +72,32 @@ describe("the corpus row (phase 70)", () => {
 		});
 		expect(rowOf(withCorpus({ unread: "failed" }), "corpus").source).toBe("corpus.slo: failed");
 	});
+
+	test("a sync lag above its threshold is a breach named sync that degrades the row; a lag on the threshold or under it is not", () => {
+		const readings = { freshnessS: 1, recall5: 0.9, ingestDocsPerS: 1 };
+		const thresholds = { ...SLO_DEFAULTS, syncLagS: 3600 };
+		expect(rowOf(withCorpus({ readings: { ...readings, syncLagS: 3601 }, thresholds }), "corpus")).toMatchObject({
+			state: "degraded",
+			source: "corpus.slo: breached sync",
+			detail: { syncLag: { reading: 3601, threshold: 3600 }, breaches: ["sync"] },
+		});
+		expect(rowOf(withCorpus({ readings: { ...readings, syncLagS: 3600 }, thresholds }), "corpus")).toMatchObject({
+			state: "ok",
+			source: "corpus.slo",
+			detail: { syncLag: { reading: 3600, threshold: 3600 }, breaches: [] },
+		});
+		expect(rowOf(withCorpus({ readings: { ...readings, syncLagS: 12 }, thresholds }), "corpus")).toMatchObject({ state: "ok", detail: { breaches: [] } });
+	});
+
+	test("unset, the sync lag is shown with no verdict: no threshold and no breach, whatever the lag, and an unmeasured lag reads null", () => {
+		const readings = { freshnessS: 1, recall5: 0.9, ingestDocsPerS: 1 };
+		expect(rowOf(withCorpus({ readings: { ...readings, syncLagS: 999_999 } }), "corpus")).toMatchObject({
+			state: "ok",
+			source: "corpus.slo",
+			detail: { syncLag: { reading: 999_999, threshold: null }, breaches: [] },
+		});
+		expect(rowOf(withCorpus({ readings: { ...readings, syncLagS: null } }), "corpus").detail).toMatchObject({ syncLag: { reading: null, threshold: null } });
+	});
 });
 
 describe("buildFabricStatus", () => {

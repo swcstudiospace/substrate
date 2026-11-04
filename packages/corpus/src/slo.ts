@@ -1,7 +1,7 @@
 /**
- * The docs plane's three service-level objectives (v1.7 phase 70): how fresh the corpus is, how fast it ingests and how well it
- * retrieves. The thresholds are flags, so the server's `fabric_status` row and `substrate corpus eval` read them through the
- * same two functions and cannot disagree about a breach.
+ * The docs plane's service-level objectives (v1.7 phase 70): how fresh the corpus is, how fast it ingests, how well it retrieves,
+ * and, once a threshold is set, how far behind its source the newest sync ran. The thresholds are flags, so the server's
+ * `fabric_status` row and `substrate corpus eval` read them through the same two functions and cannot disagree about a breach.
  */
 
 export interface SloThresholds {
@@ -11,6 +11,8 @@ export interface SloThresholds {
 	recall5: number;
 	/** An ingest request that sent documents may not average below this many documents per second (`SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`). */
 	ingestDocsPerS: number;
+	/** The newest `docs.sync` note's lag may be at most this many seconds (`SUBSTRATE_DOCS_SLO_SYNC_LAG_S`). Unset, the lag is shown and never judged. */
+	syncLagS?: number;
 }
 
 export const SLO_DEFAULTS: Readonly<SloThresholds> = { freshnessS: 86_400, recall5: 0.6, ingestDocsPerS: 0.2 };
@@ -20,14 +22,16 @@ export interface SloReadings {
 	freshnessS: number | null;
 	recall5: number | null;
 	ingestDocsPerS: number | null;
+	syncLagS?: number | null;
 }
 
-export const SLO_BREACHES = ["freshness", "recall5", "ingest"] as const;
+export const SLO_BREACHES = ["freshness", "recall5", "ingest", "sync"] as const;
 export type SloBreach = (typeof SLO_BREACHES)[number];
 
-function positiveWhole(raw: string | undefined, fallback: number): number {
+/** A whole number of 1 or more, rounded down; anything else is `undefined`. */
+function optionalWhole(raw: string | undefined): number | undefined {
 	const value = Number(raw?.trim());
-	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined;
 }
 
 function positiveNumber(raw: string | undefined, fallback: number): number {
@@ -40,12 +44,14 @@ function unitInterval(raw: string | undefined, fallback: number): number {
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value > 0 && value <= 1 ? value : fallback;
 }
 
-/** The thresholds an environment sets. Anything unset, empty, not a number or out of range is the default, so a typo never disables a check. */
+/** The thresholds an environment sets. Anything unset, empty, not a number or out of range is the default, so a typo never disables a check. The sync lag has no default: unset, it is not an objective and no verdict is drawn. */
 export function loadSloThresholds(env: Record<string, string | undefined>): SloThresholds {
+	const syncLagS = optionalWhole(env.SUBSTRATE_DOCS_SLO_SYNC_LAG_S);
 	return {
-		freshnessS: positiveWhole(env.SUBSTRATE_DOCS_SLO_FRESHNESS_S, SLO_DEFAULTS.freshnessS),
+		freshnessS: optionalWhole(env.SUBSTRATE_DOCS_SLO_FRESHNESS_S) ?? SLO_DEFAULTS.freshnessS,
 		recall5: unitInterval(env.SUBSTRATE_DOCS_SLO_RECALL5, SLO_DEFAULTS.recall5),
 		ingestDocsPerS: positiveNumber(env.SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S, SLO_DEFAULTS.ingestDocsPerS),
+		...(syncLagS === undefined ? {} : { syncLagS }),
 	};
 }
 
@@ -55,6 +61,8 @@ export function sloBreaches(readings: SloReadings, thresholds: SloThresholds): S
 	if (readings.freshnessS !== null && readings.freshnessS > thresholds.freshnessS) breaches.push("freshness");
 	if (readings.recall5 !== null && readings.recall5 < thresholds.recall5) breaches.push("recall5");
 	if (readings.ingestDocsPerS !== null && readings.ingestDocsPerS < thresholds.ingestDocsPerS) breaches.push("ingest");
+	const lag = readings.syncLagS ?? null;
+	if (lag !== null && thresholds.syncLagS !== undefined && lag > thresholds.syncLagS) breaches.push("sync");
 	return breaches;
 }
 

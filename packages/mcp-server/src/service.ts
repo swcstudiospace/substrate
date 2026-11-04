@@ -2958,6 +2958,7 @@ export class Substrate {
 		}
 		this.planningEvent(input);
 		if (result.stored) this.noteDocsCanary(result.event);
+		if (result.stored) this.corpusSlo.recordSyncLag(result.event.payload);
 		if (result.stored) this.publishHint(result.event);
 		return result;
 	}
