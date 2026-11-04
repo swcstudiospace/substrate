@@ -6392,7 +6392,7 @@ export class Substrate {
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
 		const steering = this.steeringNoticeOf(prepared);
 		const final = this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
-		if (prepared === undefined) this.recordRetrieval(surface, originalQuestion, chunks, reflected.shadow);
+		this.recordRetrieval(surface, originalQuestion, chunks, reflected.shadow, prepared !== undefined);
 		return final;
 	}
 
@@ -6418,10 +6418,10 @@ export class Substrate {
 	}
 
 	/** One retrieval row for `SUBSTRATE_DOCS_TELEMETRY=on`, started after the answer is built and never waited for. Fail-open. */
-	private recordRetrieval(surface: Surface, question: string, reply: SearchReply, shadow: ShadowNote | null): void {
+	private recordRetrieval(surface: Surface, question: string, reply: SearchReply, shadow: ShadowNote | null, isPrivate: boolean): void {
 		if (!this.config.docsReflect.telemetry) return;
 		try {
-			this.retrievalRecorder.record(retrievalRowOf({ surface, question, backend: reply.backend ?? this.config.docsBackend, reply, shadow }));
+			this.retrievalRecorder.record(retrievalRowOf({ surface, question, backend: reply.backend ?? this.config.docsBackend, reply, shadow, isPrivate }));
 		} catch (cause) {
 			process.stderr.write(`[substrate] docs telemetry: retrieval row not built — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
 		}

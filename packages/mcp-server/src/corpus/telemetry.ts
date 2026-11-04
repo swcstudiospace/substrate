@@ -78,6 +78,8 @@ export interface RetrievalInput {
 	backend: string;
 	reply: Pick<SearchReply, "chunks" | "degraded">;
 	shadow: ShadowNote | null;
+	/** A steering-session search is private: its row keeps the hash of the question and never the text of it. */
+	isPrivate: boolean;
 }
 
 /** The row for one answered search. */
@@ -87,7 +89,7 @@ export function retrievalRowOf(input: RetrievalInput): RetrievalRow {
 	return {
 		surface: input.surface,
 		queryHash: queryHash(input.question),
-		queryText: queryTextOf(input.question),
+		queryText: input.isPrivate ? null : queryTextOf(input.question),
 		backend: input.backend,
 		returned,
 		topScore: scores.length === 0 ? null : Math.max(...scores),

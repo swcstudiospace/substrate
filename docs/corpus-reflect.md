@@ -21,7 +21,7 @@ exactly as before.
 | Digest | `substrate corpus reflect` | one document per repository at the virtual path `.substrate/digest.md` (kind `digest`, tier 1) | replaced when its sha256 changes |
 
 A retrieval row never holds the text of a document, and a verdict is idempotent: the same session giving the same
-verdict for the same document twice changes nothing.
+verdict for the same document twice changes nothing. A steering-session `docs_search` row keeps no query text, only the hash of its question, because the question may carry private steering.
 
 ## Authority: one number per document
 
