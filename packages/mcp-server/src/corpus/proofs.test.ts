@@ -3,16 +3,17 @@
  * root the server reports, the gates refuse before anything is read, and `docs_search` carries the cached root only when the corpus
  * is on. A fake manifest, a fake bulk plane and a manual clock: no network, no database, no real delay.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { CORPUS_PROTOCOL, corpusLeafHex, shortRoot, type CorpusDocument } from "@substrate/corpus";
 import { verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
 import type { AnchorVerifyPorts } from "../anchor-verify-deps.ts";
 import { loadConfig, loadCorpusSettings } from "../config.ts";
+import { normalizeEvent } from "../event.ts";
 import { Substrate } from "../service.ts";
 import { defined } from "../test-support.ts";
 import type { EventInput } from "../types.ts";
 import type { AnchorVerifier } from "./anchor.ts";
-import { CorpusRootKeeper, corpusRoot, type RootClock } from "./root.ts";
+import { CORPUS_ROOT_ACTION, CorpusRootKeeper, corpusRoot, type RootClock } from "./root.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusProofReply, corpusRootReply, type CorpusServiceDeps } from "./service.ts";
 import { FakePlane, FakeStore, makeDocument, makeRow } from "./testkit.ts";
 
@@ -187,11 +188,12 @@ describe("the root and proof doors", () => {
 	});
 });
 
-describe("docs_search names the corpus root it was answered under", () => {
-	function substrateOf(corpus: "on" | "off", store: FakeStore, clock: ManualClock): Substrate {
-		return new Substrate(loadConfig(corpus === "on" ? { SUBSTRATE_CORPUS: "on" } : {}), { index: null, greptime: null, corpus: { store, plane: new FakePlane(), rootClock: clock } });
-	}
+/** A service with the corpus on or off, over the fake manifest and the manual clock. */
+function substrateOf(corpus: "on" | "off", store: FakeStore, clock: ManualClock): Substrate {
+	return new Substrate(loadConfig(corpus === "on" ? { SUBSTRATE_CORPUS: "on" } : {}), { index: null, greptime: null, corpus: { store, plane: new FakePlane(), rootClock: clock } });
+}
 
+describe("docs_search names the corpus root it was answered under", () => {
 	test("with the corpus off the reply has neither field, and with it on the reply is the same reply plus exactly those two", async () => {
 		const store = new FakeStore();
 		for (const doc of [DOC_A, DOC_B]) store.seed(makeRow({ repo: doc.repo, path: doc.path, sha256: doc.sha256 }));
@@ -230,5 +232,35 @@ describe("docs_search names the corpus root it was answered under", () => {
 		expect("corpus_root" in during).toBe(false);
 		await flush();
 		expect(await on.searchDocs({ question: "" }, "omp")).toMatchObject({ corpus_count: 2, corpus_root: shortRoot(corpusRoot([DOC_A, DOC_B]).root) });
+	});
+});
+
+describe("shutdown writes the root event still owed (v1.7 phase 69)", () => {
+	test("drainCorpusRoots writes an owed root once and leaves the armed timer disarmed; a second drain writes nothing more", async () => {
+		const store = new FakeStore();
+		const clock = new ManualClock();
+		const on = substrateOf("on", store, clock);
+		const written: EventInput[] = [];
+		spyOn(on, "emit").mockImplementation(async (event) => {
+			written.push(event);
+			return { event: normalizeEvent(event, null), stored: true };
+		});
+		const rootEvents = () => written.filter((event) => event.payload?.action === CORPUS_ROOT_ACTION);
+		const reply = await on.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [DOC_A, DOC_B], tombstones: [] }, "omp");
+		expect(reply.ok).toBe(true);
+		// The change is owed inside the five-second window: its timer is armed and has not fired.
+		expect(clock.timers).toHaveLength(1);
+		expect(rootEvents()).toEqual([]);
+
+		await on.drainCorpusRoots(1_000);
+		expect(rootEvents()).toHaveLength(1);
+		expect(defined(rootEvents()[0], "the root event").payload).toEqual({ action: CORPUS_ROOT_ACTION, root: corpusRoot([DOC_A, DOC_B]).root, count: 2, manifest_version: await store.manifestVersion() });
+
+		// The timer the drain left behind runs later and writes nothing; a second drain has nothing owed and writes nothing.
+		clock.fire();
+		await flush();
+		expect(rootEvents()).toHaveLength(1);
+		await on.drainCorpusRoots(1_000);
+		expect(rootEvents()).toHaveLength(1);
 	});
 });
