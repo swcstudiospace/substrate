@@ -735,6 +735,13 @@ describe("emit", () => {
 		expect(written).toEqual([]);
 	});
 
+	test("refuses a NUL in the graph id before it reads the chain tip", async () => {
+		const { tipReads, written, greptime } = countingLedger();
+		await expect(substrateWith(greptime).emit({ ...input, graph_id: "ut\u00001" })).rejects.toThrow("graph_id_nul:");
+		expect(tipReads).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
 	test("a clean sessioned write reads the chain tip once", async () => {
 		const { tipReads, written, greptime } = countingLedger();
 		const result = await substrateWith(greptime).emit(input);
@@ -1658,6 +1665,25 @@ describe("handoff", () => {
 		graph_id: "ut-1",
 		node_id: "n2",
 	};
+
+	test("refuses a lone surrogate in the handoff summary before it reads the chain tip", async () => {
+		const tipReads: string[] = [];
+		const written: SubstrateEvent[] = [];
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async (session: string) => {
+				tipReads.push(session);
+				return "tip-hash";
+			},
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
+		};
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
+		await expect(substrate.handoff({ ...input, goal: "finish the \uD800 lease path" })).rejects.toThrow("summary_lone_surrogate:");
+		expect(tipReads).toEqual([]);
+		expect(written).toEqual([]);
+	});
 
 	test("anchors the packet to the sender's chain tip without being told it", async () => {
 		// `prev_event_hash` is a fact about the ledger, and the ledger is here. A

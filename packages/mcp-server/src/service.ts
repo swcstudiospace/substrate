@@ -110,7 +110,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { assertWriteTextFields, checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, normalizeKey, planningIngestTrigger as planningEventTrigger, scopeRepoId, type StoredLeaf, verifyChain, type SteeringSession } from "./event.ts";
+import { assertWriteTextFields, checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeGraphId, normalizeIdentifier, normalizeKey, planningIngestTrigger as planningEventTrigger, scopeRepoId, type StoredLeaf, verifyChain, type SteeringSession } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeBreakerOpen,
@@ -3091,6 +3091,8 @@ export class Substrate {
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
 		// Refused before anything is read: the replay lookup, the buffer and the chain tip all come after this.
 		assertWriteTextFields(input);
+		// The graph id gets the same named refusals as the write (NUL, lone surrogate, over the cap) before the chain tip is read.
+		normalizeGraphId(input.graph_id);
 		const stores = this.eventBufferStores;
 		// A keyed replay is answered from the ledger first: a row that landed is the answer, whatever the buffer holds. Only a replay
 		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write. A failed lookup is not a miss:
@@ -7608,6 +7610,24 @@ export class Substrate {
 		warning?: string;
 		lease_released?: boolean;
 	}> {
+		// The text the event will carry is refused before anything is read: the place lookup and the chain tip come after this, so a
+		// refused handoff reads nothing from the store. The probe is the packet with no chain tip; its summary and identifiers do not depend on it.
+		const probe = buildHandoff({
+			...input,
+			repo: input.repo ?? null,
+			branch: input.branch ?? null,
+			prev_event_hash: null,
+			handover_lease_id: input.handover_lease_id ?? null,
+		});
+		normalizeGraphId(probe.graph_id);
+		assertWriteTextFields({
+			summary: handoffSummary(probe),
+			session_id: probe.from.session_id ?? undefined,
+			node_id: probe.node_id ?? undefined,
+			linear_identifier: probe.linear_identifier ?? undefined,
+			repo: probe.repo ?? undefined,
+			branch: probe.branch ?? undefined,
+		});
 		const place = input.graph_id ? await this.placeOf(input.graph_id) : {};
 		const sessionId = normalizeKey(input.from?.session_id);
 		// The sender's chain tip, read from the ledger. There is deliberately no way
