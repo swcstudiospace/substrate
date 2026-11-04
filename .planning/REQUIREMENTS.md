@@ -136,5 +136,5 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
 | HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |
 | HARD-R3 | Redundancy | 76 | Not started |
-| HARD-H1 | Hardening | 77 | Not started |
+| HARD-H1 | Hardening | 77 | Human-needed (2026-11-03): 4 of 8 truths verified at 4b84e50c (T1 to T4); T5 to T7 Postgres proofs present and wired, not re-observed; open: T8 per-session ordering rule and HARD-H1 ownership, no plan claims it (STATE Needs Human, H5); see 77-VERIFICATION.md |
 | HARD-H2 | Hardening | 78 | Not started |

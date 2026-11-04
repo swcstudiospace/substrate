@@ -1,6 +1,6 @@
-# Phase 77 — Steering idempotency and ordering (SUMMARY, revision 2: durable)
+# Phase 77 — Steering idempotency and ordering (SUMMARY, revision 3: durable)
 
-Plan: `77-01-PLAN.md` (revision 2). Branch `gsd/v18-p77-steering-idempotency`, stacked on phase 71.
+Plan: `77-01-PLAN.md` (revision 3). Branch `gsd/v18-p77-steering-idempotency`, stacked on phase 71.
 
 ## What changed
 
@@ -47,10 +47,9 @@ stand-in, so they prove the inbox's use of the port, not the SQL.
 
 ## Open risks (residuals)
 
-- R1 **Crash between the audit row and the replay record.** The audit row commits, then the process dies before the replay record is saved:
-  a retry of that key applies again. Closing this needs the audit row and the replay record in one transaction, so the sink's append must
-  carry the replay record. The audit port is one statement today. Documented residual. A save failure after an accepted audit is reported
-  on stderr and does not fail the queue, for the same reason.
+- R1 **Crash between the audit row and the replay record.** Closed on the Postgres keyed path, which commits the audit row and the replay
+  claim in one `sql.begin` (D11 in the plan). Not behaviour-verified here: the Postgres proof (`steering-idempotency.pg.test.ts`) is
+  orchestrator evidence that predates 4b84e50c. The memory store has no transaction and no durability across restart.
 - R2 A failed audit after the counter was taken leaves a gap in the session's numbers. Numbers are never reused, and order is unaffected.
 - R3 SQL unexecuted (see Verification).
 - R4 At capacity the oldest key is forgotten before its retention. Under the default rate (10 per minute per session) this needs very heavy
