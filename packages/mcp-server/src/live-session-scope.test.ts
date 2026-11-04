@@ -1,13 +1,13 @@
 /**
- * Phase 72 at the live-session door: a scoped surface's live-session issue and transition are refused at the public routes
- * before any session is read or written. Each test drives the REST route or the MCP tool the way a client does, and asserts the
- * refusal the route answers with. The surface `cursor` is granted `owner/name` only; `owner/other` is registered and not granted.
+ * Phase 72 at the live-session door: a scoped surface's live-session issue and transition are refused at the public routes and at the
+ * service call before any session is read or written. Each test drives the REST route, the MCP tool, or the service call the way a
+ * client does, and asserts the refusal it answers with. The surface `cursor` is granted `owner/name` only; `owner/other` is registered and not granted.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTH_OWNER, call, cleanupLiveHarness, serveLive, UNKNOWN } from "./live-session-consumer.test-support.ts";
+import { AUTH_OWNER, call, cleanupLiveHarness, NOT_FOUND, OWNER, serveLive, UNKNOWN } from "./live-session-consumer.test-support.ts";
 
 afterEach(cleanupLiveHarness);
 
@@ -60,5 +60,16 @@ describe("live-session transition under scope, at the public routes", () => {
 		expect(await reply.json()).toMatchObject({ error: "not-declared-for-scope" });
 		expect(nonAuditWrites(h.ledger.events)).toHaveLength(0);
 		expect(h.ledger.reads).toBe(0);
+	});
+});
+
+describe("live-session issue under scope, at the service call", () => {
+	test("gate: updateLiveSession issue for a repository the caller's grant does not include is refused and writes nothing", async () => {
+		const h = await serveLive(scopedEnv());
+		await expect(h.substrate.updateLiveSession(OWNER, { repo_id: "owner/other", state: "ACTIVE" })).rejects.toMatchObject({ refusal: NOT_FOUND });
+		const refusals = h.ledger.events.filter((event) => (event.payload as { action?: string } | undefined)?.action === "repo.scope-refused");
+		expect(refusals.map((event) => event.payload)).toMatchObject([{ reason: "repo-not-granted" }]);
+		expect(nonAuditWrites(h.ledger.events)).toHaveLength(0);
+		expect(h.history.entries).toHaveLength(0);
 	});
 });
