@@ -1,0 +1,17 @@
+[Unit]
+Description=Run the corpus reconcile dry run daily (substrate-corpus-reconcile.service; staged, opt-in)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Once a day, off the hour and off the index sweep's 03:17 tick, so the two never share a window. The reconcile reads every
+# repository, so a daily pass is enough to catch a drift the sync and the watch missed. The unit is a oneshot, so systemd
+# does not start a second pass while one is running. Persistent=true runs a missed day at the next boot.
+#
+# Staged, not installed: copying this file and the service, and `systemctl enable --now`, are operator steps
+# (docs/runbooks/corpus-sync.md). The server must run with SUBSTRATE_CORPUS=on, or the pass reports corpus.disabled.
+OnCalendar=*-*-* 04:43:00 UTC
+Persistent=true
+Unit=substrate-corpus-reconcile.service
+
+[Install]
+WantedBy=timers.target
