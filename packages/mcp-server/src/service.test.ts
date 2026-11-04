@@ -6384,18 +6384,8 @@ describe("the scheduled reconcile timer (phase 78)", () => {
 		live = null;
 	});
 
-	test("startReconcile starts no timer at interval 0, and starts one at 60 that stopReconcile clears", () => {
-		const off = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "0" }), { index: null, greptime: null });
-		expect(off.startReconcile()).toBe(false);
-
-		live = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "60" }), { index: null, greptime: null });
-		expect(live.startReconcile()).toBe(true);
-		expect(live.startReconcile()).toBe(false);
-		live.stopReconcile();
-		expect(live.startReconcile()).toBe(true);
-	});
-
-	test("one scheduled tick on a clean fixture logs one clean reconcile line and writes nothing", async () => {
+	/** A scheduled-run fixture that is clean: every read answers empty and complete, and any write is recorded and throws. */
+	const cleanReconcileFixture = (queryEvents: () => Promise<unknown[]> = async () => []) => {
 		// Each store answers only the reads the run makes. Any other method reached through it is recorded and throws.
 		const writes: string[] = [];
 		const readOnlyStore = <T extends object>(reads: T): T =>
@@ -6408,7 +6398,7 @@ describe("the scheduled reconcile timer (phase 78)", () => {
 					};
 				},
 			});
-		const ledger = readOnlyStore({ queryEvents: async () => [] });
+		const ledger = readOnlyStore({ queryEvents });
 		const index = readOnlyStore({
 			reconcileHolds: async () => [],
 			reconcileHeldNodes: async () => ({ rows: [], truncated: false }),
@@ -6441,6 +6431,22 @@ describe("the scheduled reconcile timer (phase 78)", () => {
 			greptime: ledger as never,
 			cache: new ReadThroughCache({ redis, enabled: true, log: () => {} }),
 		});
+		return { substrate, writes };
+	};
+
+	test("startReconcile starts no timer at interval 0, and starts one at 60 that stopReconcile clears", () => {
+		const off = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "0" }), { index: null, greptime: null });
+		expect(off.startReconcile()).toBe(false);
+
+		live = new Substrate(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "60" }), { index: null, greptime: null });
+		expect(live.startReconcile()).toBe(true);
+		expect(live.startReconcile()).toBe(false);
+		live.stopReconcile();
+		expect(live.startReconcile()).toBe(true);
+	});
+
+	test("one scheduled tick on a clean fixture logs one clean reconcile line and writes nothing", async () => {
+		const { substrate, writes } = cleanReconcileFixture();
 
 		const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
 		const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -6456,6 +6462,45 @@ describe("the scheduled reconcile timer (phase 78)", () => {
 			expect(JSON.parse(defined(lines[0]).slice(prefix.length)).clean).toBe(true);
 			expect(stderr.mock.calls).toHaveLength(0);
 			expect(writes).toEqual([]);
+		} finally {
+			stdout.mockRestore();
+			stderr.mockRestore();
+		}
+	});
+
+	test("overlapping scheduled ticks share one run: the second starts nothing and both resolve to its outcome, and a tick after it settles runs again", async () => {
+		const { promise: firstRunEntered, resolve: entered } = Promise.withResolvers<void>();
+		const { promise: firstRunHeld, resolve: release } = Promise.withResolvers<void>();
+		let firstReadSeen = false;
+		const { substrate } = cleanReconcileFixture(async () => {
+			// Only the first run's first read blocks, so that run stays in flight until the test releases it.
+			if (!firstReadSeen) {
+				firstReadSeen = true;
+				entered();
+				await firstRunHeld;
+			}
+			return [];
+		});
+		const prefix = "[substrate] reconcile ";
+		const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
+		const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+		// The tick is private. This cast is the narrowest reach to it, as in the test above.
+		const seam = substrate as unknown as { reconcileTick(): Promise<void> };
+		try {
+			const first = seam.reconcileTick();
+			await firstRunEntered;
+			// The second tick lands while the first run is in flight: it joins that run and starts none of its own.
+			const second = seam.reconcileTick();
+			expect(second).toBe(first);
+			release();
+			await Promise.all([first, second]);
+			expect(stdout.mock.calls).toHaveLength(1);
+			expect(String(stdout.mock.calls[0]?.[0]).startsWith(prefix)).toBe(true);
+			// Once that run has settled, the next tick is a new run.
+			await seam.reconcileTick();
+			expect(stdout.mock.calls).toHaveLength(2);
+			expect(String(stdout.mock.calls[1]?.[0]).startsWith(prefix)).toBe(true);
+			expect(stderr.mock.calls).toHaveLength(0);
 		} finally {
 			stdout.mockRestore();
 			stderr.mockRestore();
