@@ -89,9 +89,10 @@ A failed or refused document is named in the output with its reason (the table i
 
 Everything below is staged: the files exist in `infra/vps/` and nothing installs them.
 
-**The sync units (phase 65).** `substrate-corpus-sync.timer` fires `substrate-corpus-sync.service`, which plans and ingests only what changed; `substrate-corpus-watch.service` is the optional long-running watcher that coalesces a burst of changes into one sync per repository. Both run with a nice level, an idle I/O class, a CPU quota and a memory cap so the shared host is never starved. They are staged by the phase 65 unit; if `ls infra/vps/substrate-corpus-sync.*` finds nothing in your checkout, that unit has not landed and this part waits. Install in the order the other staged units use ([`../../infra/vps/README.md`](../../infra/vps/README.md)):
+**The sync units (phase 65).** `substrate-corpus-sync.timer` (every 15 minutes, `Persistent=true`) fires `substrate-corpus-sync.service`, a oneshot that runs `substrate corpus watch --once`: one sweep that fetches each registered repository's Substrate-managed blobless mirror and syncs only the repositories that changed. It never writes into a checkout. `substrate-corpus-watch.service` is the optional long-running watcher (`substrate corpus watch`): it coalesces a burst of changes into one sync per repository and sweeps on its own timer as well. Both run with a nice level, an idle I/O class, a CPU quota and a memory cap so the shared host is never starved. The units are in `infra/vps/` in this checkout. Install them as [`corpus-sync.md`](corpus-sync.md) §3 says, in this order ([`../../infra/vps/README.md`](../../infra/vps/README.md)):
 
 ```sh
+[ -e /etc/substrate/substrate-corpus.env ] || install -m 0600 /dev/null /etc/substrate/substrate-corpus.env   # then fill in SUBSTRATE_URL, the CLI's token and SUBSTRATE_CORPUS_ROOTS
 cp infra/vps/substrate-corpus-sync.service infra/vps/substrate-corpus-sync.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl start substrate-corpus-sync.service            # one run by hand
@@ -101,9 +102,11 @@ systemctl enable --now substrate-corpus-sync.timer
 
 Add the watcher only when a timer's lag is not enough: `cp infra/vps/substrate-corpus-watch.service /etc/systemd/system/`, `systemctl daemon-reload`, `systemctl enable --now substrate-corpus-watch.service`.
 
+**The reconcile dry run.** `substrate-corpus-reconcile.timer` (daily, 04:43 UTC) runs `substrate corpus reconcile --json`: it compares the manifest with the docs plane, reports the drift and changes nothing. Install it the same way: `cp infra/vps/substrate-corpus-reconcile.service infra/vps/substrate-corpus-reconcile.timer /etc/systemd/system/`, `systemctl daemon-reload`, `systemctl enable --now substrate-corpus-reconcile.timer`. No unit runs `--execute`; see step 10.
+
 **Check.** `systemctl list-timers 'substrate-corpus*'` lists the timer with a next run; the manual run exits 0 and the journal shows documents unchanged; `bun scripts/doctor-units.ts --dry-run` stays green.
 
-**The canary.** `substrate-docs-canary.timer` runs the daily canary: the fixture questions of [`../docs-search-ingest.md`](../docs-search-ingest.md) and, since this phase, the golden set of this checkout's `docs/`. The golden part needs this repository's documents in the corpus under `SUBSTRATE_DOCS_EVAL_REPO` (default `swcstudiospace/agent-substrate`), which step 4 does when `/root/src/repos` holds it. Follow the install steps in that page (the corpus pins, the manifest, `SUBSTRATE_DOCS_CANARY=1` on the drop-in), then:
+**The canary.** `substrate-docs-canary.timer` runs the daily canary at 04:41 UTC: the fixture questions of [`../docs-search-ingest.md`](../docs-search-ingest.md) and, since phase 70, the golden set of this checkout's `docs/`. The golden part needs two things: this repository's documents in the corpus under `SUBSTRATE_DOCS_EVAL_REPO` (default `swcstudiospace/agent-substrate`), which step 4 does when `/root/src/repos` holds it, and `SUBSTRATE_CORPUS=on` in the environment the canary loads (`/etc/substrate/substrate.env`, the line step 2 sets). With the corpus off the canary sends no golden search and prints no golden line. Follow the install steps in that page (the corpus pins, the manifest, `SUBSTRATE_DOCS_CANARY=1` on the drop-in), then:
 
 ```sh
 systemctl start substrate-docs-canary.service      # one run
@@ -111,23 +114,27 @@ journalctl -u substrate-docs-canary -n 50          # look for: golden recall@5 <
 systemctl enable --now substrate-docs-canary.timer
 ```
 
-**Check.** The journal line names a recall and a count, the unit exits 0, and `fabric_status` then shows `recall5.reading` in the `corpus` row. If the journal says `golden recall not measured`, the reason is on the line above it (no `docs/` in the release, a scan of `docs/` that a bound cut short, or a question that failed). The posted report (`docs.canary`) is accepted only from the canary's own `substrate` token: any other token is refused with `reserved-action`, so a missing reading is never one somebody else could have written.
+**Check.** The journal line names a recall and a count, the unit exits 0, and `fabric_status` then shows `recall5.reading` in the `corpus` row. If the journal says `golden recall not measured`, the parenthesis on that line gives the reason: no documents to ask about, the scan of `docs/` was partial, or a question failed or came back degraded. `golden recall not measured (the documents could not be read)` means the read threw. The posted report (`docs.canary`) is accepted only from the canary's own `substrate` token: any other token is refused with `reserved-action` (`packages/mcp-server/src/reserved-actions.ts`), so a missing reading is never one somebody else could have written.
 
-**Rollback.** `systemctl disable --now substrate-corpus-sync.timer substrate-corpus-watch.service substrate-docs-canary.timer`, then remove the unit files and `systemctl daemon-reload`. Documents stay on the plane; they simply stop following the repositories.
+**Rollback.** `systemctl disable --now substrate-corpus-sync.timer substrate-corpus-watch.service substrate-corpus-reconcile.timer substrate-docs-canary.timer`, then remove the unit files you copied (sync service and timer, watch service, reconcile service and timer, canary service and timer, and any drop-ins) and `systemctl daemon-reload`. Documents stay on the plane; they simply stop following the repositories.
 
 ## 6. Turn the re-rank on
 
-**This step waits for the re-rank implementation.** Nothing in this checkout reads `SUBSTRATE_DOCS_RERANK` or `SUBSTRATE_DOCS_TELEMETRY` (`grep -rn SUBSTRATE_DOCS_RERANK packages scripts` finds no reader), so setting them changes no behaviour, and a `corpus eval` run afterwards would pass for reasons that have nothing to do with the re-rank. Do not follow the steps below, and do not record a value for it as a promotion, until that grep finds a reader in `packages/mcp-server/src`; the same way step 5 waits for the sync units.
+The re-rank (phase 66) is in this checkout. `SUBSTRATE_DOCS_RERANK` is read by `loadDocsReflectSettings` in `packages/mcp-server/src/config.ts` and applied in `reflectAnswer` in `packages/mcp-server/src/service.ts`, through `reflectCitations` in `packages/mcp-server/src/corpus/rank.ts`. Any value other than `shadow` or `on` is `off`:
 
-The re-rank (phase 66) is meant to prefer the current document to the one it replaced, using the authority scores, with three modes: `SUBSTRATE_DOCS_RERANK=off` (the default), `shadow` (records what it would have changed and changes nothing) and `on`. Once it exists, promote it the way [`flag-promotion.md`](flag-promotion.md) says to promote any flag, with the corpus numbers as the evidence:
+- `off` (default): the answer is exactly what the plane returned.
+- `shadow`: the answer is unchanged. The order `on` would take and how many positions would move go to the retrieval telemetry row, which is written only with `SUBSTRATE_DOCS_TELEMETRY=on`.
+- `on`: each corpus citation whose document the manifest holds as an active row is annotated with `stale` and `superseded_by`, and the corpus citations are re-ordered by their score times `0.5 + 0.5 × authority`, so authority moves a citation by at most half its score. Other citations keep their positions. A degraded answer, a missing manifest (`SUBSTRATE_CORPUS` off) or a manifest that cannot be read leaves the answer as `off` leaves it.
 
-1. Record the number to beat: `substrate corpus eval --root /root/src/repos --server "$SUBSTRATE_URL" --json > before.json`.
-2. Set `SUBSTRATE_DOCS_RERANK=shadow`, restart, and let it run for the days you choose. Read what it would have changed in the retrieval telemetry (`SUBSTRATE_DOCS_TELEMETRY=on`).
-3. Change `shadow` to `on`, restart.
+Promote it the way [`flag-promotion.md`](flag-promotion.md) says to promote any flag, with the corpus numbers as the evidence:
 
-**Check.** Not available until the re-rank is implemented (see the notice above): with no reader of the flag, a `corpus eval` that passes proves nothing about the re-rank. Offline, `bun scripts/docs-eval.ts` guards the order of its hook, on the lexical run and through the server's search code.
+1. Record the number to beat with the mode off: `substrate corpus eval --root /root/src/repos --server "$SUBSTRATE_URL" --json > before.json`.
+2. Set `SUBSTRATE_DOCS_RERANK=shadow` and `SUBSTRATE_DOCS_TELEMETRY=on`, restart, and let it run for the days you choose. Read the `rerank` column of the `corpus_retrievals` rows (`mode: "shadow"`, `order`, `moved`). Shadow answers exactly as off does, so `corpus eval` does not move in this mode.
+3. Set `SUBSTRATE_DOCS_RERANK=on`, restart, run the same `corpus eval ... --json > after.json`, and compare it with `before.json` (recall at 5 and MRR).
 
-**Rollback.** Set the value back to `shadow` or `off` and restart (once the re-rank exists). The re-rank acts at query time and writes nothing to the manifest or the plane, so nothing is left to undo.
+**Check.** `corpus eval` asks the server's `POST /docs/search`, so it scores the mode the server is running. Exit 0 means recall at 5 holds the objective; it does not by itself show that the re-rank helped, so compare the two JSON files. Offline, `bun test scripts/docs-eval.test.ts` checks that an identity re-rank changes no score.
+
+**Rollback.** Set `SUBSTRATE_DOCS_RERANK=off` (or `shadow`) and restart. The re-rank writes nothing to the manifest or the plane; retrieval rows already recorded stay until the telemetry retention sweep removes them.
 
 ## 7. Read the objectives
 
@@ -162,9 +169,9 @@ The row's `detail` has `freshnessS`, `recall5` and `ingestDocsPerS`, each `{ rea
 | --- | --- | --- |
 | The release | `infra/vps/deploy-release.sh rollback` | Everything but code: units, env files, stores, migrations. |
 | The corpus | `SUBSTRATE_CORPUS=off`, restart | The manifest and every plane document; the routes answer `503 corpus.disabled`. |
-| The re-rank | Nothing to undo yet: this checkout has no reader of `SUBSTRATE_DOCS_RERANK` (step 6 waits for the re-rank implementation). Once it lands: `SUBSTRATE_DOCS_RERANK=shadow` or `off`, restart | Nothing: it writes nothing. |
-| The timers | `systemctl disable --now` each timer and the watcher, remove the unit files | Documents on the plane. |
+| The re-rank | `SUBSTRATE_DOCS_RERANK=off` (or `shadow`), restart | The manifest and the plane, untouched. `corpus_retrievals` rows already recorded (telemetry on) stay until the retention sweep. |
+| The timers | `systemctl disable --now` the sync timer, the watcher, the reconcile timer and the canary timer; remove their unit files | Documents on the plane. |
 | The manifest table | Its migration step is `phase: "expand"` and additive; an older release ignores it. The step's declared `down` (`drop table if exists corpus_documents`) is an operator statement that nothing in the code runs; run it only with the corpus off, and read [`rollback-compat.md`](rollback-compat.md) first. | The plane documents, now unreferenced by any row. |
-| Plane documents | `substrate corpus reconcile` lists the `corpus:` documents the plane holds that no active manifest row names (orphans), and the rows whose plane document is gone; with `--execute` it deletes the orphans and re-queues the missing ones. It needs `SUBSTRATE_CORPUS=on`, so run it before step 2's rollback, and read its `--help` for the exact flags. It is staged by the phase 65 unit. | Nothing else on the plane. |
+| Plane documents | `substrate corpus reconcile` (a dry run unless `--execute`) lists the `corpus:` documents the plane holds that no active manifest row names (orphans), and the rows whose plane document is gone. With `--execute` it deletes the orphans and marks the missing rows removed, so the next `corpus plan` offers them as adds and `corpus ingest --execute` puts them back. It needs `SUBSTRATE_CORPUS=on` and the LightRAG backend, so run it before step 2's rollback, and read its `--help` for the exact flags. No unit runs `--execute`: `substrate-corpus-reconcile.timer` runs the dry run daily (step 5). | Nothing else on the plane. |
 
 The plane documents this milestone writes are named `corpus:<repo>:<path>@<sha12>` (percent-encoded), so they can be told from every other document, and the manifest key is `(repo, path)`.
