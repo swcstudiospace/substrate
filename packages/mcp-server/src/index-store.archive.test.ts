@@ -20,7 +20,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ARCHIVE_TABLES, exportedColumns, type ArchiveTableSpec, type ColumnType } from "./index-archive-spec.ts";
+import { ARCHIVE_TABLES, exportedColumns, tableSpec, type ArchiveTableSpec, type ColumnType } from "./index-archive-spec.ts";
 import { archiveIndex, refusedScratchUrl, restoreIndexArchive, verifyIndexArchive, type IndexArchiveSource } from "./index-archive.ts";
 import { IndexStore } from "./index-store.ts";
 import { defined } from "./test-support.ts";
@@ -42,7 +42,7 @@ const BASE = Date.now();
 const at = (n: number) => (): number => BASE + n * 5_000;
 
 /** `information_schema.columns.data_type` for each archive column type. */
-const PG_DATA_TYPE: Record<ColumnType, string> = { text: "text", int: "integer", bigint: "bigint", bool: "boolean", timestamptz: "timestamp with time zone" };
+const PG_DATA_TYPE: Record<ColumnType, string> = { text: "text", int: "integer", smallint: "smallint", bigint: "bigint", bool: "boolean", timestamptz: "timestamp with time zone", jsonb: "jsonb" };
 
 let store: IndexStore;
 let raw: SQL;
@@ -59,18 +59,18 @@ function withDatabase(url: string, database: string): string {
 }
 
 /** An independent oracle for what an export should hold: the table read directly, in key order, rendered the way the archive writes values. */
-async function directRows(spec: ArchiveTableSpec): Promise<Array<Record<string, unknown>>> {
+async function directRows(spec: ArchiveTableSpec, db: SQL = raw): Promise<Array<Record<string, unknown>>> {
 	const columns = exportedColumns(spec)
 		.map((column) =>
 			column.type === "timestamptz"
 				? `to_char("${column.name}" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "${column.name}"`
-				: column.type === "bigint"
+				: column.type === "bigint" || column.type === "jsonb"
 					? `"${column.name}"::text as "${column.name}"`
 					: `"${column.name}"`,
 		)
 		.join(", ");
 	const keys = spec.key.map((name) => `"${name}"`).join(", ");
-	const rows = (await raw.unsafe(`select ${columns} from "${spec.name}" order by ${keys}`)) as Array<Record<string, unknown>>;
+	const rows = (await db.unsafe(`select ${columns} from "${spec.name}" order by ${keys}`)) as Array<Record<string, unknown>>;
 	return rows.map((row) => Object.fromEntries(exportedColumns(spec).map((column) => [column.name, row[column.name] ?? null])));
 }
 
@@ -110,6 +110,7 @@ describeLive("index archive against a live index", () => {
 		await raw`delete from memory_reviews where id like ${like}`.catch(() => undefined);
 		await raw`delete from memory_quarantine where id like ${like}`.catch(() => undefined);
 		await raw`delete from memory_writes where idempotency_key like ${like}`.catch(() => undefined);
+		await raw`delete from corpus_documents where repo like ${like}`.catch(() => undefined);
 		if (scratchName !== null) await raw.unsafe(`drop database if exists "${scratchName}" with (force)`).catch(() => undefined);
 		await raw.end().catch(() => undefined);
 		await store.close().catch(() => undefined);
@@ -149,6 +150,13 @@ describeLive("index archive against a live index", () => {
 			await raw`insert into memory_reviews (id, scope, kind, body, subject, writer, entry_hash, reason)
 				values (${id(name)}, 'global', 'fact', ${SECRET_BODY}, ${SECRET_BODY}, 'omp', ${`hash-${RUN}-${name}`}, 'review')`;
 		}
+		// Corpus manifest rows: a jsonb signals column, a smallint tier, a generated bigint manifest_seq, and a tombstone with its successor.
+		await raw`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, commit_sha, state, docs_document_id, signals, ingested_at)
+			values (${RUN}, 'docs/a.md', 'doc', 1, ${`sha-${RUN}-a`}, 120, 'git', 'abc123', 'active', 'doc-a', ${'{"rank": 2, "tags": ["a"]}'}::text::jsonb, '2026-10-14T03:15:00.123456Z')`;
+		await raw`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, state)
+			values (${RUN}, 'docs/b.md', 'doc', 2, ${`sha-${RUN}-b`}, 64, 'git', 'active')`;
+		await raw`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, state, tombstoned_at, superseded_by, signals)
+			values (${RUN}, 'docs/c.md', 'doc', 3, ${`sha-${RUN}-c`}, 8, 'git', 'tombstoned', now(), 'docs/a.md', ${'{"rank": 3, "tags": ["c"]}'}::text::jsonb)`;
 	}
 
 	test("the closed whitelist is exactly what migrate() created: every table, column, type and primary key", async () => {
@@ -179,7 +187,7 @@ describeLive("index archive against a live index", () => {
 		}
 		const tables = (await raw`
 			select table_name from information_schema.tables
-			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%')`) as Array<Record<string, unknown>>;
+			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name = 'corpus_documents')`) as Array<Record<string, unknown>>;
 		expect(tables.map((row) => String(row.table_name)).sort()).toEqual(ARCHIVE_TABLES.map((spec) => spec.name).sort());
 	});
 
@@ -235,6 +243,13 @@ describeLive("index archive against a live index", () => {
 				expect(parked[0]?.body).toBe("[withheld by index-archive]");
 				expect(parked[0]?.subject).toBeNull();
 				expect(parked[0]?.entry_hash).toBe(`hash-${RUN}-q1`);
+				// The corpus manifest came back as the archive wrote it: jsonb as text, the bigint sequence and microsecond timestamps unchanged.
+				const corpus = tableSpec("corpus_documents");
+				expect(await directRows(corpus, restored)).toEqual(fileRows(dir, corpus));
+				// A tombstone with its successor and its jsonb signals; manifest_seq is the source's own value, not a fresh sequence value.
+				const source = (await raw`select manifest_seq::text as seq, signals::text as signals from corpus_documents where repo = ${RUN} and path = 'docs/c.md'`) as Array<Record<string, unknown>>;
+				const doc = (await restored`select manifest_seq::text as seq, signals::text as signals, tombstoned_at is not null as tombstoned, superseded_by from corpus_documents where repo = ${RUN} and path = 'docs/c.md'`) as Array<Record<string, unknown>>;
+				expect(doc[0]).toEqual({ seq: source[0]?.seq, signals: '{"rank": 3, "tags": ["c"]}', tombstoned: true, superseded_by: "docs/a.md" });
 			} finally {
 				await restored.end().catch(() => undefined);
 			}
@@ -242,6 +257,32 @@ describeLive("index archive against a live index", () => {
 			await expect(restoreIndexArchive(scratch, { dir })).rejects.toThrow("already holds");
 		} finally {
 			await scratch.close().catch(() => undefined);
+		}
+	});
+
+	test("after a restore, a plain insert into corpus_documents takes a manifest_seq above every restored one", async () => {
+		if (scratchUrl === null) return;
+		const manifest = await archiveIndex(store, { outDir: out, cwd, dev: dedicated, df: roomy, minFreeGb: 5, now: at(5) });
+		const dir = join(out, manifest.snapshot);
+		// The known maximum: the largest manifest_seq the archive carries. The restore writes those values explicitly.
+		const seqs = (fileRows(dir, tableSpec("corpus_documents")) as Array<{ manifest_seq: string }>).map((row) => BigInt(row.manifest_seq));
+		expect(seqs.length).toBeGreaterThanOrEqual(3);
+		const known = seqs.reduce((max, seq) => (seq > max ? seq : max), 0n);
+		const name = `substrate_restore_seq_${Date.now().toString(36)}`;
+		await raw.unsafe(`create database "${name}"`);
+		const url = withDatabase(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), name);
+		const scratch = new IndexStore(url);
+		const probe = new SQL(url);
+		try {
+			await restoreIndexArchive(scratch, { dir });
+			// No manifest_seq in the statement: the identity sequence supplies it, and must not start over at 1 under the restored rows.
+			await probe`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source) values (${RUN}, 'docs/seq.md', 'doc', 1, ${`sha-${RUN}-seq`}, 1, 'git')`;
+			const written = (await probe`select manifest_seq::text as seq from corpus_documents where repo = ${RUN} and path = 'docs/seq.md'`) as Array<Record<string, unknown>>;
+			expect(BigInt(String(written[0]?.seq)) > known).toBe(true);
+		} finally {
+			await probe.end().catch(() => undefined);
+			await scratch.close().catch(() => undefined);
+			await raw.unsafe(`drop database if exists "${name}" with (force)`).catch(() => undefined);
 		}
 	});
 

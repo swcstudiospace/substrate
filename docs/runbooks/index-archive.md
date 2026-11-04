@@ -5,7 +5,7 @@
 | Question | Can the archived graph, lease and governed-memory subset be rebuilt if the Postgres volume is lost? This is not a complete security-authority backup. |
 | Scope | Read-only against the index; writes only under `SUBSTRATE_INDEX_ARCHIVE_DIR` and one ledger `note` per run |
 | Blast radius | None on production. The export is one `REPEATABLE READ READ ONLY` transaction; restore refuses the production database |
-| Not covered | `live_session_bindings` (including permanent identity/tombstone security history), historical `steering_sessions`, `planning_steering_audit`, other tables outside the closed graph/memory list; Hindsight, docs datasets, Greptime ledger (see `docs/greptime-ledger.md`), desk tables and Redis |
+| Not covered | `live_session_bindings` (including permanent identity/tombstone security history), historical `steering_sessions`, `planning_steering_audit`, other tables outside the closed graph/memory/corpus-manifest list; Hindsight, docs datasets, Greptime ledger (see `docs/greptime-ledger.md`), desk tables and Redis |
 
 The release gate does not prove this archive unless `SUBSTRATE_GATE_INDEX_DRILL=1`. That opt-in drill archives the twin's scratch Postgres into a temp directory under the run dir and restores it into a second database on the same loopback server. It does not read or write `/mnt/index-archive`, and it does not set `SUBSTRATE_INDEX_ARCHIVE_DIR`.
 
@@ -23,9 +23,10 @@ check it.
 | `graph_index.ndjson`, `graph_nodes.ndjson`, `graph_edges.ndjson`, `graph_steps.ndjson`, `graph_bindings.ndjson` | The graph and lease tables, one JSON row per line |
 | `memory_entries.ndjson`, `memory_writes.ndjson` | Accepted memory and the idempotency ledger |
 | `memory_quarantine.ndjson`, `memory_reviews.ndjson` | Parked writes — **without their text** (below) |
+| `corpus_documents.ndjson` | The corpus manifest: one row per documentation file the ingest has seen, keyed by `(repo, path)`. `signals` is JSON text; `manifest_seq` is the bigint version the ingest reads |
 | `manifest.json` | Format version, `createdAt`, release sha, Postgres `server_version`, the schema hash, and per table `{file, rows, bytes, sha256, columns, withheld, rowDigest, entryHashDigest}` |
 
-The closed list is the nine graph/memory tables in `index-archive-spec.ts`, **not every table created by `IndexStore.migrate()`**. Its compatibility schema hash remains unchanged by live-authority migration 42. Excluding a table preserves old logical-archive compatibility; it does not provide backup coverage.
+The closed list is the ten graph, memory and corpus-manifest tables in `index-archive-spec.ts`, **not every table created by `IndexStore.migrate()`**. Its compatibility schema hash remains unchanged by live-authority migration 42. Excluding a table preserves old logical-archive compatibility; it does not provide backup coverage. Adding `corpus_documents` (migration 35) changed the schema hash, so an archive written before that change fails `verify-archive` with kind `schema`; take a new archive on this release.
 
 `skills_registry` is also excluded. Its `skill.*` events are best-effort trail, not restore source: approvals must be decided again ([skills-propose.md](../skills-propose.md#approving-a-skill)). Unlike rebuildable metadata, live binding/tombstone history cannot safely be decided again from events or legacy rows.
 `index-store.archive.test.ts` compares the list

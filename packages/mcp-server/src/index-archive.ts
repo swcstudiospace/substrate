@@ -1024,6 +1024,8 @@ export async function restoreIndexArchive(target: RestoreTarget, options: { dir:
 				}
 			}
 			if (chunk.length > 0) await tx.insert(spec.name, chunk);
+			// The rows carried their own identity values: move each sequence past them before anything else writes to the table.
+			await tx.advanceIdentity(spec.name);
 		}
 		const compared: RestoreTableResult[] = [];
 		for (const spec of ARCHIVE_TABLES) {

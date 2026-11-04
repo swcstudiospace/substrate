@@ -3043,7 +3043,7 @@ export const MAX_ARCHIVE_PAGE_ROWS = 5000;
 const RESTORE_BATCH_ROWS = 200;
 
 /** The Postgres type a column type is cast to when a restore binds it. */
-const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz" };
+const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", smallint: "smallint", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz", jsonb: "jsonb" };
 
 /** One REPEATABLE READ READ ONLY view of the archived tables: every read through it sees the same instant. */
 export interface IndexSnapshotReader {
@@ -3059,6 +3059,8 @@ export interface IndexSnapshotReader {
 export interface IndexRestoreTx extends IndexSnapshotReader {
 	/** Insert rows of a whitelisted table; withheld columns are refilled from the spec's placeholders. */
 	insert(table: string, rows: readonly ArchiveRow[]): Promise<void>;
+	/** After a table's rows are in: move each identity column's sequence past the largest value loaded, so the next write takes a value above every restored one. */
+	advanceIdentity(table: string): Promise<void>;
 }
 
 /**
@@ -3073,6 +3075,7 @@ function exportSelectList(spec: ArchiveTableSpec): string {
 			const quoted = `"${column.name}"`;
 			if (column.type === "timestamptz") return `to_char(${quoted} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as ${quoted}`;
 			if (column.type === "bigint") return `${quoted}::text as ${quoted}`;
+			if (column.type === "jsonb") return `${quoted}::text as ${quoted}`;
 			return quoted;
 		})
 		.join(", ");
@@ -3124,8 +3127,17 @@ function archiveAccess(sql: SQL): IndexRestoreTx {
 			for (let from = 0; from < rows.length; from += RESTORE_BATCH_ROWS) {
 				const batch = rows.slice(from, from + RESTORE_BATCH_ROWS);
 				const params: Array<string | number | boolean | null> = [];
-				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${PG_TYPE[column.type]}`).join(", ")})`);
+				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${column.type === "jsonb" ? "text::jsonb" : PG_TYPE[column.type]}`).join(", ")})`);
 				await sql.unsafe(`insert into "${spec.name}" (${columns.map((column) => `"${column.name}"`).join(", ")}) values ${tuples.join(", ")}`, params);
+			}
+		},
+		async advanceIdentity(table) {
+			const spec = tableSpec(table);
+			for (const column of spec.columns) {
+				if (column.identity !== true) continue;
+				// `max` is null for an empty table: setval(seq, 1, false) makes the first nextval return 1, as on a fresh table.
+				const max = `max("${column.name}")`;
+				await sql.unsafe(`select setval(pg_get_serial_sequence($1, $2), coalesce(${max}, 1), ${max} is not null) from "${spec.name}"`, [spec.name, column.name]);
 			}
 		},
 	};

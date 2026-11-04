@@ -69,6 +69,8 @@ function cell(column: ArchiveColumn, i: number): string | number | boolean | nul
 	if (column.type === "text") return column.name === "entry_hash" ? `hash-${pad}` : `${column.name}-${pad}`;
 	if (column.type === "int") return i;
 	if (column.type === "bigint") return String(i);
+	if (column.type === "smallint") return i % 32_767;
+	if (column.type === "jsonb") return `{"i": ${i}}`;
 	if (column.type === "bool") return i % 2 === 0;
 	return `2026-10-14T00:00:00.${String(i % 1_000_000).padStart(6, "0")}Z`;
 }
@@ -766,6 +768,8 @@ class MemoryTarget implements RestoreTarget {
 				const kept = this.dropFromMemoryEntries && table === "memory_entries" ? rows.slice(1) : rows;
 				staged.set(table, [...(staged.get(table) ?? []), ...kept]);
 			},
+			// The fake has no sequences: an identity advance has nothing to move.
+			advanceIdentity: async () => undefined,
 		};
 		const result = await work(tx);
 		this.tables = staged;
