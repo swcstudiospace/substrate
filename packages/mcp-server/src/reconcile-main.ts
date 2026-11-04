@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import type { AuditLog } from "@substrate/audit";
+import { RECONCILE_MAX_ITEMS } from "@substrate/corpus";
 import { createReadThroughCache } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { GreptimeClient } from "./greptime.ts";
@@ -238,12 +239,30 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 		}
 
 		let plan: Plan;
-		let planText: string;
+		// The sha256 of the plan file as read: the digest the audit record names. "unreadable" when the file cannot be read.
+		let planDigest = "unreadable";
 		try {
-			planText = await readFile(command.plan, "utf8");
+			const planText = await readFile(command.plan, "utf8");
+			planDigest = createHash("sha256").update(planText).digest("hex");
 			plan = parsePlan(planText);
 		} catch (cause) {
-			io.err(`refused: the plan file cannot be read as a ${PLAN_SCHEMA} record: ${failureReason(cause)}`);
+			const reason = `refused: the plan file cannot be read as a ${PLAN_SCHEMA} record: ${failureReason(cause)}`;
+			io.err(reason);
+			// Every execute attempt leaves one audit record, so a refused plan is recorded too, before the exit.
+			if (audit !== null) {
+				const refusal: RepairResult = {
+					executed: false,
+					refused: true,
+					reason,
+					planned: 0,
+					removed: 0,
+					remaining: 0,
+					limit: RECONCILE_MAX_ITEMS,
+					truncated: false,
+				};
+				const auditFailure = await recordRepair(audit, refusal, planDigest, "unavailable");
+				if (auditFailure !== null) io.err(`reconcile: the refusal was not written to the audit chain: ${auditFailure}`);
+			}
 			return 1;
 		}
 		let result: RepairResult;
@@ -257,7 +276,7 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 		}
 		// One audit record per execute, after the flush because it carries the outcome. A failure to write it is reported below.
 		const auditFailure =
-			audit === null ? null : await recordRepair(audit, result, createHash("sha256").update(planText).digest("hex"), plan.report_digest);
+			audit === null ? null : await recordRepair(audit, result, planDigest, plan.report_digest);
 		try {
 			io.out(JSON.stringify(result, null, 2));
 		} finally {
