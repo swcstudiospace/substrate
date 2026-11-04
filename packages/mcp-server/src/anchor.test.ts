@@ -1471,6 +1471,18 @@ describe("runAnchorJob pointers (design 3.5)", () => {
 		expect(failed(stopped.emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
 	});
 
+	test("an unrelated simulation failure does not take the funded path", async () => {
+		const unrelated = new ChainWorld();
+		const message = "Error: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x1";
+		unrelated.failure = (argv) => (String(argv[3]) === "0" && String(argv[2]) !== PUBKEY ? message : null);
+		const stopped = chainDeps(unrelated);
+		expect(await runAnchorJob(stopped.deps)).toEqual({ code: 1, anchored: 0, adopted: 0, failed: 1, funded: 0 });
+		expect(unrelated.log).toEqual(["hour 0 landed", "pointer 0 failed"]);
+		expect(unrelated.txs).toHaveLength(1);
+		expect(stopped.inserts).toEqual([]);
+		expect(failed(stopped.emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
+	});
+
 	test("a pointer listing stops at its budget or its page cap and says it is incomplete", async () => {
 		const world = new ChainWorld();
 		for (let i = 0; i < 150; i++) {

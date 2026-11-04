@@ -81,8 +81,14 @@ export const REQUIRED_BALANCE_LAMPORTS = 890_880 + 5_000;
 /** Lamports an index account is funded with when the cluster refuses its 0-lamport pointer: the rent-exempt minimum of an empty account (design Q3). */
 export const INDEX_FUND_LAMPORTS = 890_880;
 
-/** The cluster's refusal of a 0-lamport pointer to an unfunded index account (design Q3). Its exact text is not observed yet; the devnet probe confirms it. */
-const POINTER_REFUSED_RE = /insufficient funds for rent|InsufficientFundsForRent|transaction simulation failed/i;
+/**
+ * The cluster's refusal of a 0-lamport pointer to an unfunded index account (design Q3). The rent wording is the solana CLI's
+ * transaction-error text, "Transaction results in an account (N) with insufficient funds for rent", present in the local solana-cli 4.2.2
+ * binary; `InsufficientFundsForRent` is that error's variant name, as its Debug form prints it. The "Transaction simulation failed:"
+ * prefix is added by the RPC preflight, so it is not matched: an unrelated simulation failure must not fund the index account. The full
+ * line the devnet node returns is [INFERENCE] until the devnet probe confirms it.
+ */
+const POINTER_REFUSED_RE = /insufficient funds for rent|InsufficientFundsForRent/i;
 
 /** Hours the adoption walk covers; it reads (1 + lookback graphs) signatures for each: every signature the job key signed over the lookback (design Q6). */
 export const ADOPT_LOOKBACK_HOURS = 168;
