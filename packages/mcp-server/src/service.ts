@@ -6885,6 +6885,12 @@ export class Substrate {
 		return this.corpusRootKeeper;
 	}
 
+	/** Shutdown (v1.7 phase 69): writes the root event still owed, bounded by `timeoutMs`. Does nothing when no keeper was made. */
+	async drainCorpusRoots(timeoutMs: number): Promise<void> {
+		if (this.corpusRootKeeper === null) return;
+		await Promise.race([this.corpusRootKeeper.flush(), Bun.sleep(timeoutMs)]);
+	}
+
 	/**
 	 * Phase 69: a `docs_search` reply names the corpus root it was answered under, from the cache only. With `SUBSTRATE_CORPUS` off the
 	 * reply is returned untouched. A root that is not cached yet is left out and its computation starts off this call's path.

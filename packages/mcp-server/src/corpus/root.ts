@@ -154,6 +154,8 @@ export class CorpusRootKeeper {
 	private cached: (CorpusRootSnapshot & { generation: number }) | null = null;
 	private reading: { generation: number; promise: Promise<CorpusRootRead> } | null = null;
 	private timerPending = false;
+	/** Identifies the armed timer; flush advances it so a timer it disarmed does nothing when it fires. */
+	private timerToken = 0;
 	/** When the last root write was attempted: the five-second window runs from there, rerun or not. */
 	private lastWriteMs: number | null = null;
 	/** The root the ledger holds last. A root is compared, not its version: concurrent batches may commit out of order, so a final state can share the version of an earlier read. */
@@ -252,7 +254,10 @@ export class CorpusRootKeeper {
 		if (this.deps.store() === null || this.timerPending) return;
 		const wait = this.lastWriteMs === null ? 0 : Math.max(0, this.lastWriteMs + ROOT_EMIT_MIN_INTERVAL_MS - this.clock.now());
 		this.timerPending = true;
+		this.timerToken += 1;
+		const token = this.timerToken;
 		this.clock.setTimer(() => {
+			if (token !== this.timerToken) return;
 			this.timerPending = false;
 			void this.emitRoot();
 		}, wait);
@@ -299,5 +304,16 @@ export class CorpusRootKeeper {
 		} catch {
 			// The ingest this follows already answered; a root that did not reach the ledger is written by the next change.
 		}
+	}
+
+	/**
+	 * Shutdown: the owed root event is written now, not when its timer fires. An emission in flight is awaited first, and the armed
+	 * timer is disarmed so it cannot write again. Never throws.
+	 */
+	async flush(): Promise<void> {
+		while (this.emitting !== null) await this.emitting;
+		this.timerToken += 1;
+		this.timerPending = false;
+		if (this.owed && this.writers === 0) await this.emitRoot();
 	}
 }

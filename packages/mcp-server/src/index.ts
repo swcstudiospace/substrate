@@ -253,6 +253,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// answered before its forward landed must not lose that forward
 			// silently on restart (the durable outbox keeps the rest).
 			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
+			// The corpus root event still owed is written inside the same bound, so a manifest change made just before shutdown is recorded.
+			await substrate.drainCorpusRoots(SHUTDOWN_RETAIN_MS);
 			// The telemetry buffer, when it is on, gets the same bound: events the ledger did not take get one pass. A buffer whose file
 			// could not be saved gives up what is left with a dead-letter record each; a saved buffer keeps its entries for the next boot.
 			await substrate.drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true });
