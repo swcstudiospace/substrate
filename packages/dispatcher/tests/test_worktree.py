@@ -213,3 +213,25 @@ def test_ensure_worktree_floor_follows_env(repo: Path, tmp_path: Path, monkeypat
     assert err.value.marker == "low-disk"
     assert "20 GB" in str(err.value)
     assert calls == []
+
+
+def test_ensure_worktree_creates_under_the_configured_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    configured = tmp_path / "configured"
+    monkeypatch.setenv("SUBSTRATE_WORKTREE_ROOTS", str(configured))
+    repo = tmp_path / "repo"
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[3:5] == ["worktree", "list"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[3] == "rev-parse":
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == configured / GID
+    assert [c for c in calls if c[3:5] == ["worktree", "add"]] == [
+        ["git", "-C", str(repo), "worktree", "add", "-b", f"substrate/{GID}", str(configured / GID), "HEAD"]
+    ]

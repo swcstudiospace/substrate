@@ -4,7 +4,7 @@
  * - `SUBSTRATE_WORKTREE_ROOTS`: colon-separated absolute directories that hold worktrees. Unset (or with no
  *   absolute entry) means "no root configured" for the commands here and for the doctor: they say so and assume
  *   no location. The collector's graph attribution (`worktreeRoots` in collectors/worktree-graph.ts) reads the same
- *   variable but falls back to the dispatcher's directory, and the dispatcher does not read it at all.
+ *   variable but falls back to the dispatcher's default directory. The dispatcher reads it too: it reuses a worktree under any configured root and creates new ones under the first.
  * - `SUBSTRATE_WORKTREE_MIN_FREE_GB`: the free-disk floor, shared with the Python dispatcher (default 5).
  *   A value that is not a positive number falls back to the default so a typo never switches the floor off.
  * - `SUBSTRATE_WORKTREE_IDLE_DAYS`: how long a worktree must be untouched before prune may call it safe (default 14).

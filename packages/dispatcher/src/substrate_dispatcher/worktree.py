@@ -1,8 +1,9 @@
 """Per-Graph-ID git worktrees (D-12).
 
-A dispatched session works in ``/var/lib/substrate/worktrees/<graph_id>`` on branch
-``substrate/<graph_id>``. The worktree is reused when git already has it registered, created
-from the existing branch when only the branch exists, and created with a new branch otherwise.
+A dispatched session works in ``<root>/<graph_id>`` on branch ``substrate/<graph_id>``, where ``<root>``
+is the first of ``SUBSTRATE_WORKTREE_ROOTS`` (default ``/var/lib/substrate/worktrees``). The worktree is
+reused when git already has it registered under any configured root, created from the existing branch when
+only the branch exists, and created with a new branch otherwise.
 Creation is refused when ``/`` has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``,
 default 5 GiB), and no git command runs in that case.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
@@ -14,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -26,6 +28,7 @@ WORKTREES_ROOT = Path("/var/lib/substrate/worktrees")
 REPOS_ROOT = Path("/root/src/repos")
 DEFAULT_MIN_FREE_GB = 5
 MIN_FREE_ENV = "SUBSTRATE_WORKTREE_MIN_FREE_GB"
+ROOTS_ENV = "SUBSTRATE_WORKTREE_ROOTS"
 BRANCH_PREFIX = "substrate/"
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -54,6 +57,25 @@ def min_free_gb(env: Mapping[str, str] | None = None) -> float:
 def min_free_bytes(env: Mapping[str, str] | None = None) -> int:
     """The floor in bytes, read from the environment at call time."""
     return int(min_free_gb(env) * 1024**3)
+
+
+def worktree_roots(env: Mapping[str, str] | None = None) -> list[Path]:
+    """The directories that hold worktrees, in the order ``SUBSTRATE_WORKTREE_ROOTS`` gives them.
+
+    Parsed as the fleet parses it (``worktreeRootsFromEnv``): colon separated, each entry trimmed, entries
+    that are empty or not absolute dropped, the rest normalised and de-duplicated. Unset, or with no usable
+    entry, the single default ``WORKTREES_ROOT`` is returned.
+    """
+    raw = (os.environ if env is None else env).get(ROOTS_ENV) or ""
+    roots: list[str] = []
+    for part in raw.split(":"):
+        entry = part.strip()
+        if not entry.startswith("/"):
+            continue
+        normal = "/" + posixpath.normpath(entry).lstrip("/")
+        if normal not in roots:
+            roots.append(normal)
+    return [Path(root) for root in roots] or [WORKTREES_ROOT]
 
 
 class WorktreeRefused(Exception):
@@ -133,16 +155,21 @@ def ensure_worktree(
     graph_id: str,
     base_branch: str | None,
     *,
-    root: Path = WORKTREES_ROOT,
+    root: Path | None = None,
     run: Runner = subprocess.run,
     disk_usage: Callable[[str], Any] = shutil.disk_usage,
 ) -> Path:
-    """Return the graph's worktree, creating it only with at least the free-disk floor free on /."""
+    """Return the graph's worktree, creating it only with at least the free-disk floor free on /.
+
+    ``root`` pins one directory. Unset, the configured roots are used: a worktree git already has under any
+    of them is returned, and a new one is created under the first.
+    """
     gid = validate_graph_id(graph_id)
-    root = Path(root)
-    path = root / gid
-    if path.resolve().parent != root.resolve():
-        raise WorktreeRefused(f"worktree path {path} escapes {root}", "invalid-graph-id")
+    roots = [Path(root)] if root is not None else worktree_roots()
+    for candidate_root in roots:
+        candidate = candidate_root / gid
+        if candidate.resolve().parent != candidate_root.resolve():
+            raise WorktreeRefused(f"worktree path {candidate} escapes {candidate_root}", "invalid-graph-id")
 
     free = disk_usage("/").free
     floor = min_free_bytes()
@@ -153,17 +180,20 @@ def ensure_worktree(
         )
 
     repo = Path(repo)
-    if _registered(run, repo, path):
-        if path.is_dir():
-            return path
-        raise WorktreeRefused(
-            f"{path} is registered with git but missing on disk (git worktree prune needed)",
-            "path-conflict",
-        )
+    for candidate_root in roots:
+        candidate = candidate_root / gid
+        if _registered(run, repo, candidate):
+            if candidate.is_dir():
+                return candidate
+            raise WorktreeRefused(
+                f"{candidate} is registered with git but missing on disk (git worktree prune needed)",
+                "path-conflict",
+            )
+    path = roots[0] / gid
     if path.exists():
         raise WorktreeRefused(f"{path} exists but is not a registered worktree", "path-conflict")
 
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    roots[0].mkdir(mode=0o700, parents=True, exist_ok=True)
     branch = BRANCH_PREFIX + gid
     if _ref_exists(run, repo, f"refs/heads/{branch}"):
         add = _git(run, repo, "worktree", "add", str(path), branch)

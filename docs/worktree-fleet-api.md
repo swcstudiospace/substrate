@@ -122,13 +122,13 @@ The table is created by migration step `worktrees` (additive, `expand`; see `doc
 
 ## Flags
 
-All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
+All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_ROOTS` and `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
 
 | Variable | Default | Read by | Meaning |
 | --- | --- | --- | --- |
 | `SUBSTRATE_WORKTREE_REGISTRY` | `off` | the server | `on` enables the routes and the tool |
 | `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` | `1209600` | the server | the retention window, 60 to 31,536,000 seconds |
-| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher does not read it and always uses that directory |
+| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor, the dispatcher | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher reads it too and creates each graph's worktree under its first entry, which is `/var/lib/substrate/worktrees` when unset |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | `5` | the CLI, the fleet package, the dispatcher | the free-disk floor for creating a worktree |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | `14` | the server, the CLI, the fleet package | how long a worktree must be untouched before prune may call it safe, and when a listing calls it `stale` |
 | `SUBSTRATE_SESSION_ID` | none | the CLI, the fleet package | the session `substrate worktree scan --report` attributes the worktree holding the current directory to when `--session ID` is absent (the flag wins; a value that is not a session id is a usage error) |
