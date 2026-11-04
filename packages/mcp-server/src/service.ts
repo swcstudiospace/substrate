@@ -6419,7 +6419,7 @@ export class Substrate {
 
 	/** One retrieval row for `SUBSTRATE_DOCS_TELEMETRY=on`, started after the answer is built and never waited for. Fail-open. */
 	private recordRetrieval(surface: Surface, question: string, reply: SearchReply, shadow: ShadowNote | null): void {
-		if (!this.config.docsReflect.telemetry || question.trim().length === 0) return;
+		if (!this.config.docsReflect.telemetry) return;
 		try {
 			this.retrievalRecorder.record(retrievalRowOf({ surface, question, backend: reply.backend ?? this.config.docsBackend, reply, shadow }));
 		} catch (cause) {

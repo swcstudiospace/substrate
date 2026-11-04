@@ -234,11 +234,14 @@ describe("SUBSTRATE_DOCS_TELEMETRY", () => {
 		expect(defined(defined(built.reflect.retrievals[0], "the telemetry row").row.queryText, "the cut text")).toHaveLength(RETRIEVAL_QUERY_TEXT_CHARS);
 	});
 
-	test("an empty question writes no row", async () => {
+	test("an empty question writes one row with no text and the hash of the empty string", async () => {
 		const built = world({ SUBSTRATE_DOCS_TELEMETRY: "on" }, MIXED);
 		await ask(built, "   ");
 		await settle();
-		expect(built.reflect.retrievals).toEqual([]);
+		expect(built.reflect.retrievals).toHaveLength(1);
+		const stored = defined(built.reflect.retrievals[0], "the telemetry row").row;
+		expect(stored.queryText).toBeNull();
+		expect(stored.queryHash).toBe(createHash("sha256").update("", "utf8").digest("hex"));
 	});
 
 	test("with the flag off nothing is written, counted or swept", async () => {
