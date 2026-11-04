@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
-import { CORPUS_PROTOCOL } from "@substrate/corpus";
+import { CORPUS_PROTOCOL, CORPUS_SOURCES } from "@substrate/corpus";
 import { FEEDBACK_VERDICTS } from "./corpus/reflect-store.ts";
 import { z } from "zod";
 import { BRIEF_SOURCES } from "./brief.ts";
@@ -1726,11 +1726,20 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.array(z.object({ repo: z.string(), path: z.string() }))
 					.optional()
 					.describe("Manifest keys whose plane document should be removed."),
+				scope: z
+					.object({
+						coverage: z
+							.array(z.object({ repo: z.string(), source: z.enum(CORPUS_SOURCES) }))
+							.describe("The (repo, source) pairs the scan read completely."),
+						maxTier: z.union([z.literal(1), z.literal(2), z.literal(3)]).describe("The highest tier a tombstone may remove."),
+					})
+					.optional()
+					.describe("Required with tombstones: each tombstoned row must have its (repo, source) pair in coverage and its tier at most maxTier."),
 			},
 			annotations: { destructiveHint: true, openWorldHint: true },
 		},
-		async ({ documents, tombstones }) => {
-			const reply = await substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: documents ?? [], tombstones: tombstones ?? [] }, callerSurface);
+		async ({ documents, tombstones, scope }) => {
+			const reply = await substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: documents ?? [], tombstones: tombstones ?? [], scope }, callerSurface);
 			return reply.ok ? json(reply.body) : { ...json(reply.body), isError: true };
 		},
 	);

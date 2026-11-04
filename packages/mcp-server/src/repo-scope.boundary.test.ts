@@ -6,9 +6,11 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { corpusProofReply, corpusStatusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { corpusIngestReply, corpusProofReply, corpusStatusReply, type CorpusServiceDeps } from "./corpus/service.ts";
 import type { CorpusRootKeeper } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
+import { FakePlane, FakeStore, makeRow } from "./corpus/testkit.ts";
+import { CORPUS_PROTOCOL } from "@substrate/corpus";
 import { loadConfig } from "./config.ts";
 import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV, type RepoScope, repoScopeFromEnv } from "./repo-scope.ts";
 import { Substrate } from "./service.ts";
@@ -193,5 +195,76 @@ describe("corpus (criterion 2: a credential cannot read another repository's cor
 		const deps = corpusDeps(scopeOf(scopeEnv(repos, { omp: ["owner/a"] })), reads);
 		expect(await corpusStatusReply(deps, "omp")).toMatchObject({ ok: false, status: 403, body: { reason: "all-repos-not-granted" } });
 		expect(reads.count).toBe(0);
+	});
+});
+
+describe("corpus ingest tombstones (ATLAS-04: a tombstone removes only what the request's scope covers)", () => {
+	function ingestDeps(scope: RepoScope, store: FakeStore, plane: FakePlane): CorpusServiceDeps {
+		return {
+			settings: { enabled: true, concurrency: 1, batchDocs: 20, batchBytes: 1_000_000, freshMaxAgeS: 0 },
+			vmGuest: false,
+			store,
+			plane,
+			emit: async () => undefined,
+			roots: { writeStarted: () => undefined, writeSettled: () => undefined } as unknown as CorpusRootKeeper,
+			anchor: { ports: () => ({}) as never },
+			repoScope: scope,
+		};
+	}
+	const scoped = (repos: Two) => scopeOf(scopeEnv(repos, { omp: ["owner/a"] }));
+	const fs = (repo: string) => ({ repo, source: "fs" as const });
+
+	test("a tombstone for a repository the caller is not granted is refused, and the plane deletes nothing", async () => {
+		const repos = twoRepos();
+		const store = new FakeStore();
+		const plane = new FakePlane();
+		store.seed(makeRow({ repo: "owner/b", path: "docs/b.md" }));
+		const reply = await corpusIngestReply(ingestDeps(scoped(repos), store, plane), { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: "owner/b", path: "docs/b.md" }], scope: { coverage: [fs("owner/b")], maxTier: 1 } }, "omp");
+		expect(reply).toMatchObject({ ok: false, status: 403, body: { reason: "repo-not-granted" } });
+		expect(plane.deletes).toEqual([]);
+		expect(store.row("owner/b", "docs/b.md")?.state).toBe("active");
+	});
+
+	test("a tombstone of a document whose tier is above the request's maxTier is refused, and the plane deletes nothing", async () => {
+		const repos = twoRepos();
+		const store = new FakeStore();
+		const plane = new FakePlane();
+		store.seed(makeRow({ repo: "owner/a", path: "docs/tier3.md", tier: 3 }));
+		const reply = await corpusIngestReply(ingestDeps(scoped(repos), store, plane), { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: "owner/a", path: "docs/tier3.md" }], scope: { coverage: [fs("owner/a")], maxTier: 1 } }, "omp");
+		expect(reply).toMatchObject({ ok: false, status: 403, body: { reason: "tombstone-out-of-scope" } });
+		expect(plane.deletes).toEqual([]);
+		expect(store.row("owner/a", "docs/tier3.md")?.state).toBe("active");
+	});
+
+	test("a tombstone of a document whose source the request does not cover is refused, and the plane deletes nothing", async () => {
+		const repos = twoRepos();
+		const store = new FakeStore();
+		const plane = new FakePlane();
+		store.seed(makeRow({ repo: "owner/a", path: "docs/gh.md", source: "github" }));
+		const reply = await corpusIngestReply(ingestDeps(scoped(repos), store, plane), { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: "owner/a", path: "docs/gh.md" }], scope: { coverage: [fs("owner/a")], maxTier: 1 } }, "omp");
+		expect(reply).toMatchObject({ ok: false, status: 403, body: { reason: "tombstone-out-of-scope" } });
+		expect(plane.deletes).toEqual([]);
+		expect(store.row("owner/a", "docs/gh.md")?.state).toBe("active");
+	});
+
+	test("a tombstone request without a scope is refused, and the plane deletes nothing", async () => {
+		const repos = twoRepos();
+		const store = new FakeStore();
+		const plane = new FakePlane();
+		store.seed(makeRow({ repo: "owner/a", path: "docs/a.md" }));
+		const reply = await corpusIngestReply(ingestDeps(scoped(repos), store, plane), { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: "owner/a", path: "docs/a.md" }] }, "omp");
+		expect(reply).toMatchObject({ ok: false, status: 400, body: { reason: "tombstone-scope-required" } });
+		expect(plane.deletes).toEqual([]);
+	});
+
+	test("an in-scope tombstone is applied: the plane document is deleted and the row is tombstoned", async () => {
+		const repos = twoRepos();
+		const store = new FakeStore();
+		const plane = new FakePlane();
+		store.seed(makeRow({ repo: "owner/a", path: "docs/a.md" }));
+		const reply = await corpusIngestReply(ingestDeps(scoped(repos), store, plane), { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: "owner/a", path: "docs/a.md" }], scope: { coverage: [fs("owner/a")], maxTier: 1 } }, "omp");
+		expect(reply).toMatchObject({ ok: true, status: 200, body: { results: [{ repo: "owner/a", path: "docs/a.md", status: "tombstoned" }] } });
+		expect(plane.deletes).toEqual([["doc-docs/a.md"]]);
+		expect(store.row("owner/a", "docs/a.md")?.state).toBe("tombstoned");
 	});
 });

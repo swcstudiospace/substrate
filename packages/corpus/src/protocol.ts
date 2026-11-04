@@ -223,6 +223,8 @@ export interface CorpusIngestRequest {
 	documents: CorpusDocument[];
 	/** Manifest keys to remove from the docs plane, as `{repo, path}`. */
 	tombstones: Array<{ repo: string; path: string }>;
+	/** Required when `tombstones` is not empty: the `{coverage, maxTier}` the plan was built with, the bound a tombstone is judged against. */
+	scope?: CorpusScope;
 }
 
 export const INGEST_STATUSES = ["ingested", "updated", "unchanged", "tombstoned", "refused", "failed"] as const;

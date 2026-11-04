@@ -153,7 +153,8 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 	const pending = [...tombstones.values()];
 	for (let start = 0; start < pending.length && state.fatal === null; start += MAX_INGEST_TOMBSTONES) {
 		const chunk = pending.slice(start, start + MAX_INGEST_TOMBSTONES);
-		const response = await input.client.ingest({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: chunk });
+		// The scope the plan was built with: the server refuses a tombstone request without it, and judges each tombstone against it.
+		const response = await input.client.ingest({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: chunk, scope: input.inventory.scope });
 		if (response.ok) absorb(response.value, chunk);
 		else failAll(chunk, response.error);
 	}

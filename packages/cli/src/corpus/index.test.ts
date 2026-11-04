@@ -471,6 +471,24 @@ describe("substrate corpus ingest", () => {
 		expect(good.out).toContain("tombstoned 2");
 	});
 
+	test("a tombstone request carries the scope the plan was built with, and a documents-only request carries none", async () => {
+		const { root, runner } = fixture();
+		const items: PlanItem[] = [
+			{ action: "rename", repo: "Acme/Alpha", path: "docs/guide.md", sha256: "a".repeat(64), renamedFrom: "docs/old-guide.md" },
+			{ action: "tombstone", repo: "Acme/Alpha", path: "old/gone.md" },
+		];
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf(items) }));
+		stub.on("POST /corpus/ingest", answerIngest());
+		const good = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(good.code).toBe(0);
+		const planScope = rec(rec(defined(stub.requests("/corpus/plan")[0], "plan request").body, "plan request").scope, "plan scope");
+		expect(list(planScope.coverage, "coverage").length).toBeGreaterThan(0);
+		const sent = stub.requests("/corpus/ingest").map((s) => rec(s.body, "ingest request"));
+		expect(sent).toHaveLength(2);
+		expect(defined(sent[0], "tombstone request").scope).toEqual(planScope);
+		expect(defined(sent[1], "document request")).not.toHaveProperty("scope");
+	});
+
 	test("a rename whose old row could not be removed is not inserted, because the plane would link it to the old document", async () => {
 		const { root, runner } = fixture();
 		const items: PlanItem[] = [{ action: "rename", repo: "Acme/Alpha", path: "docs/guide.md", renamedFrom: "docs/old-guide.md" }];

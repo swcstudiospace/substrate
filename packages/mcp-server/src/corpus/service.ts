@@ -30,8 +30,8 @@ import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { planCorpus, planRepos } from "./plan.ts";
 import { reconcileCorpus } from "./reconcile.ts";
 import { inclusionOf, type CorpusRootKeeper } from "./root.ts";
-import type { CorpusStore } from "./store.ts";
-import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type RequestRefusal } from "./validate.ts";
+import type { CorpusStore, ManifestRow } from "./store.ts";
+import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type ParsedIngestRequest, type RequestRefusal } from "./validate.ts";
 
 /** Every reason a corpus door refuses: the gates, the request refusals, an index or plane or embedding service that does not answer, and the proof lookups. Closed. */
 export type CorpusRefusalReason =
@@ -43,6 +43,7 @@ export type CorpusRefusalReason =
 	| "corpus.too-large"
 	| "not-in-corpus"
 	| "bad-root"
+	| "tombstone-out-of-scope"
 	| RepoRefusalReason;
 
 export interface CorpusRefusal {
@@ -95,6 +96,7 @@ const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	"too-many-documents": "the ingest carries more documents than one request may",
 	"too-many-tombstones": "the ingest carries more tombstones than one request may",
 	"empty-request": "the ingest carries no document and no tombstone",
+	"tombstone-scope-required": "a tombstone request names no scope (coverage and maxTier); nothing was removed",
 	"bad-scope": "the plan's scope is not valid",
 	"bad-repo": "a repository name is not owner/name or local/<directory>",
 	"bad-path": "a path is not a normal repository-relative path",
@@ -111,6 +113,7 @@ const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	"text-too-long": "an item text is longer than one request may carry",
 	"bad-threshold": "the threshold is not a number from 0.5 to 1",
 	"bad-max-pairs": "maxPairs is not a whole number from 1 to 1000",
+	"tombstone-out-of-scope": "a tombstone names a document outside the request's scope (its source is not covered, or its tier is above maxTier); nothing was removed",
 	...REPO_REFUSAL_MESSAGES,
 };
 
@@ -167,6 +170,31 @@ function allReposRefusal(deps: CorpusServiceDeps): CorpusFailure | null {
 	return (deps.repoScope ?? REPO_SCOPE_OFF).enforced ? refusal(403, "all-repos-not-granted") : null;
 }
 
+/**
+ * The tombstones a request may remove. Each active row a tombstone names must sit inside the scope the request declares, the bound
+ * the plan puts on a tombstone: its (repo, source) pair is covered and its tier is at most `maxTier`. A digest row is never a plan
+ * tombstone, so it is refused here too. A row that is absent or already tombstoned removes nothing and is not judged. Checked before
+ * any plane write, so a refusal deletes nothing; the refusal names no repository or path.
+ */
+async function tombstoneScopeRefusal(deps: CorpusServiceDeps, surface: Surface, store: CorpusStore, request: ParsedIngestRequest): Promise<CorpusFailure | null> {
+	const scope = request.scope;
+	if (scope === undefined) return null;
+	const covered = new Set(scope.coverage.map((pair) => `${pair.repo}\n${pair.source}`));
+	for (const { repo, path } of request.tombstones) {
+		let row: ManifestRow | null;
+		try {
+			row = await store.rowFor(repo, path);
+		} catch {
+			return refusal(503, "corpus.index-unavailable");
+		}
+		if (row === null || row.state !== "active") continue;
+		if (row.kind !== "digest" && row.tier <= scope.maxTier && covered.has(`${row.repo}\n${row.source}`)) continue;
+		await emitRefusal(deps, surface, "tombstone-out-of-scope", `corpus-scope:${randomUUID()}`);
+		return refusal(403, "tombstone-out-of-scope");
+	}
+	return null;
+}
+
 /** `POST /corpus/plan`: what an ingest would add, change, update, rename or tombstone. Reads the manifest; writes nothing. */
 export async function corpusPlanReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusPlanResponse>> {
 	const gated = gateOf(deps, surface, false);
@@ -206,6 +234,8 @@ export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, s
 	}
 	const scoped = await repoRefusalOf(deps, surface, [...parsed.value.documents, ...parsed.value.tombstones].map((item) => item.repo));
 	if (scoped !== null) return scoped;
+	const outOfScope = await tombstoneScopeRefusal(deps, surface, store, parsed.value);
+	if (outOfScope !== null) return outOfScope;
 	// The root cache is unavailable from the first write to the last: each batch saves its rows before the later ones and the cleanup.
 	// A request that recorded, changed or removed anything (or failed part-way, or threw) moved the manifest: a root event is owed.
 	// The keeper coalesces and dedupes by manifest version, so a request that changed nothing writes nothing.
