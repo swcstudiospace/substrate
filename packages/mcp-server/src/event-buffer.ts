@@ -147,6 +147,8 @@ export class EventBuffer {
 	/** The id of the entry a delivery is working on. No eviction takes it. */
 	private flying: string | null = null;
 	private draining: Promise<void> | null = null;
+	/** The follow-up pass queued for an `all` request that arrived while a pass ran. Null when none is queued. */
+	private followUp: Promise<void> | null = null;
 	/** True from a failed save until the next one that succeeds; `durable` is false meanwhile. */
 	private unsaved = false;
 	private readonly reported = new Set<string>();
@@ -281,12 +283,27 @@ export class EventBuffer {
 	}
 
 	/**
-	 * Replay the due entries, one delivery at a time, in age order. Overlapping calls share one pass. `all` ignores the
-	 * schedule (shutdown and tests use it). A pass stops at its first transient failure: the ledger is probably down.
+	 * Replay the due entries, one delivery at a time, in age order. A call made while a pass runs shares that pass, except one that asks
+	 * for `all`: that gets a follow-up pass after it, so entries the running pass skipped as not yet due are delivered too. `all`
+	 * ignores the schedule (shutdown and tests use it). A pass stops at its first transient failure: the ledger is probably down.
 	 */
 	drain(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, options: { all?: boolean } = {}): Promise<void> {
-		if (this.draining) return this.draining;
-		this.draining = this.runDrain(deliver, options.all === true).finally(() => {
+		const all = options.all === true;
+		// A follow-up is already queued behind the running pass, and it covers this request too.
+		if (this.followUp !== null) return this.followUp;
+		if (this.draining === null) return this.pass(deliver, all);
+		if (!all) return this.draining;
+		const running = this.draining;
+		const next = (): Promise<void> => {
+			this.followUp = null;
+			return this.pass(deliver, true);
+		};
+		this.followUp = running.then(next, next);
+		return this.followUp;
+	}
+
+	private pass(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, all: boolean): Promise<void> {
+		this.draining = this.runDrain(deliver, all).finally(() => {
 			this.draining = null;
 		});
 		return this.draining;
@@ -294,13 +311,19 @@ export class EventBuffer {
 
 	/**
 	 * Give every remaining entry up as `abandoned`. A memory-only buffer calls this at shutdown, so none vanishes unrecorded. A pending
-	 * entry already has its record with the store, so it is not recorded twice.
+	 * entry already has its record with the store, so it is not recorded twice. The entry a delivery is working on is not recorded yet:
+	 * it stays in the buffer as pending, and `drain` records it once that delivery settles without landing (a landed event needs no
+	 * record). Returns how many entries were given up now.
 	 */
 	abandonAll(): number {
-		const dropped = [...this.entries.values()];
-		this.entries.clear();
-		this.recordedIds.clear();
+		const flying = this.flying === null ? undefined : this.entries.get(this.flying);
+		const dropped = [...this.entries.values()].filter((entry) => entry !== flying);
+		for (const entry of dropped) {
+			this.entries.delete(entry.event.id);
+			this.recordedIds.delete(entry.event.id);
+		}
 		for (const entry of dropped) if (entry.given_up == null) this.onDeadLetter(entry, "abandoned");
+		if (flying !== undefined) flying.given_up = "abandoned";
 		return dropped.length;
 	}
 
@@ -327,6 +350,11 @@ export class EventBuffer {
 			if (outcome === "landed") {
 				this.entries.delete(entry.event.id);
 				continue;
+			}
+			// Abandoned while this delivery was in flight: it is never retried. Its record is owed now that the delivery has settled.
+			if (entry.given_up != null) {
+				this.settlePending();
+				break;
 			}
 			// A breaker refusal is not an attempt: nothing was sent, so the entry keeps its budget and waits for the next pass.
 			if (outcome === "skipped") break;

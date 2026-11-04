@@ -222,6 +222,60 @@ describe("EventBuffer delivery", () => {
 			{ summary: "b", reason: "abandoned" },
 		]);
 	});
+
+	test("a drain with all during a running pass still delivers the entries that pass skipped as not yet due", async () => {
+		const { buffer } = harness();
+		buffer.enqueue(request("s-1", "a", { attempts: 0 }));
+		buffer.enqueue(request("s-2", "b"));
+		const gate = Promise.withResolvers<EventDelivery>();
+		const running = buffer.drain(() => gate.promise);
+		const delivered: string[] = [];
+
+		const followUp = buffer.drain(async (entry) => {
+			delivered.push(entry.event.summary);
+			return "landed";
+		}, { all: true });
+		gate.resolve("landed");
+		await Promise.all([running, followUp]);
+
+		expect(delivered).toEqual(["b"]);
+		expect(buffer.size()).toBe(0);
+	});
+
+	test("abandoning the buffer during a delivery keeps the in-flight entry pending until that delivery fails", async () => {
+		const { buffer, dead } = harness();
+		buffer.enqueue(request("s-1", "a"));
+		buffer.enqueue(request("s-2", "b"));
+		const gate = Promise.withResolvers<EventDelivery>();
+		const running = buffer.drain(() => gate.promise, { all: true });
+
+		expect(buffer.abandonAll()).toBe(1);
+		expect(dead).toEqual([{ summary: "b", reason: "abandoned" }]);
+		expect(buffer.list()).toMatchObject([{ given_up: "abandoned" }]);
+
+		gate.resolve({ transient: "down" });
+		await running;
+		expect(buffer.size()).toBe(0);
+		expect(dead).toEqual([
+			{ summary: "b", reason: "abandoned" },
+			{ summary: "a", reason: "abandoned" },
+		]);
+	});
+
+	test("an in-flight entry that lands after the buffer was abandoned is not recorded as abandoned", async () => {
+		const { buffer, dead } = harness();
+		buffer.enqueue(request("s-1", "a"));
+		buffer.enqueue(request("s-2", "b"));
+		const gate = Promise.withResolvers<EventDelivery>();
+		const running = buffer.drain(() => gate.promise, { all: true });
+
+		expect(buffer.abandonAll()).toBe(1);
+		gate.resolve("landed");
+		await running;
+
+		expect(buffer.size()).toBe(0);
+		expect(dead).toEqual([{ summary: "b", reason: "abandoned" }]);
+	});
 });
 
 describe("EventBuffer persistence", () => {
