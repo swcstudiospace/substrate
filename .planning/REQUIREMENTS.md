@@ -14,9 +14,9 @@
 
 ### Corpus Atlas (phase 63)
 
-- [ ] **ATLAS-01**: A scan of the repositories on the VPS lists every documentation file with repo, path, kind, tier, sha256 and size, and collapses clones, linked worktrees and byte-identical copies into one canonical entry.
+- [ ] **ATLAS-01**: A scan of the repositories on the VPS lists every documentation file with repo, path, kind, tier, sha256 and size, and collapses clones, linked worktrees and byte-identical copies into one canonical entry; a rename is recognised only within one repository, and a copy that moves a document to another collection is recorded as an add plus a tombstone (owner decision, 2026-11-04).
 - [ ] **ATLAS-02**: `substrate corpus plan` reports what a bulk ingest would add, change, rename or tombstone against the server's manifest, without sending a document body.
-- [ ] **ATLAS-03**: A bulk ingest route puts new and changed documents into the docs plane with repo, path, kind, tier and commit provenance and without a serial wait per page, and refuses secrets the way `docs_ingest` does.
+- [ ] **ATLAS-03**: A bulk ingest route puts new and changed documents into the docs plane with repo and path provenance (kind, tier and commit stay in the manifest; the plane document carries name and text; owner decision, 2026-11-04) and without a serial wait per page, and refuses secrets the way `docs_ingest` does.
 - [ ] **ATLAS-04**: A document removed or renamed in its repository is tombstoned: its docs-plane document is deleted (unless another active row shares it) and its manifest row says so; a scan that is narrower than the manifest, or that failed on a repository, never tombstones anything outside what it covered.
 - [ ] **ATLAS-05**: Running the same scan and ingest again changes nothing, and an interrupted run resumes where it stopped.
 - [ ] **ATLAS-06**: Greptile knowledge-base documents and GitHub repositories with no local clone enter the same manifest through documented source adapters.
