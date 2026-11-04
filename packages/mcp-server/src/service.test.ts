@@ -2124,7 +2124,7 @@ describe("identifier lookups", () => {
 	});
 });
 
-describe("a straddling identifier round-trips", () => {
+describe("a straddling identifier: a session id round-trips, a repo over the cap is refused", () => {
 	// A surrogate pair across the 512-unit cap: the cap leaves a lone high surrogate, which the stored form drops.
 	const straddling = (head: string) => `${head.padEnd(511, "s")}\u{1F600}`;
 
@@ -2174,19 +2174,13 @@ describe("a straddling identifier round-trips", () => {
 		expect(read.events.map((event) => event.id)).toEqual([written.event.id]);
 	});
 
-	test("a repo straddling the cap is stored and read back in one form", async () => {
+	test("a repo longer than the cap is refused at write, naming the rule, and nothing is stored", async () => {
 		const raw = straddling("owner/");
-		const { stored, queries, greptime } = ledger();
+		const { stored, greptime } = ledger();
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
 
-		const written = await substrate.emit({ surface: "omp", kind: "note", summary: "x", session_id: "sess-1", repo: raw });
-
-		expect(written.event.repo).toBe(raw.slice(0, 511));
-		expect(stored[0]?.repo).toBe(raw.slice(0, 511));
-
-		const read = await substrate.queryEvents({ repo: raw });
-		expect(queries[0]?.match?.repo).toBe(raw.slice(0, 511));
-		expect(read.events.map((event) => event.id)).toEqual([written.event.id]);
+		await expect(substrate.emit({ surface: "omp", kind: "note", summary: "x", session_id: "sess-1", repo: raw })).rejects.toThrow("repo_too_long:");
+		expect(stored).toEqual([]);
 	});
 });
 
