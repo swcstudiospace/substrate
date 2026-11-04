@@ -210,8 +210,8 @@ export function normalizeIdentifier(value: string | null | undefined): string | 
 
 /**
  * `normalizeIdentifier`, with a dangling high surrogate dropped from the end. This is the form `session_id` and `repo`
- * are stored in, so every read or filter on either goes through it too: a cap at MAX_FIELD can cut a surrogate pair in
- * half, and the stored value must not end in a lone surrogate.
+ * are stored in, so every read or filter on either goes through it too. A cap at MAX_FIELD can cut a surrogate pair in half,
+ * and the stored value must not end in a lone surrogate. A repo over MAX_REPO is refused on write, so only a session id is cut.
  */
 export function normalizeKey(value: string | null | undefined): string | null {
 	return withoutDanglingHigh(normalizeIdentifier(value));
@@ -260,6 +260,38 @@ export class FieldLoneSurrogateError extends InvalidEventError {
 	}
 }
 
+/** The most code units a repo may have once redacted. A longer repo is refused on write, never cut: a cut can leave a dangling high surrogate. */
+const MAX_REPO = 512;
+
+/** The message for a repo over {@link MAX_REPO}. Its code is `repo_too_long`, so a client can tell it from the other 400s. */
+export function repoTooLongMessage(units: number): string {
+	return `repo_too_long: a repo may not exceed ${MAX_REPO} code units; got ${units}`;
+}
+
+/** A repo over {@link MAX_REPO} code units, refused on write, by name, with its length. */
+export class RepoTooLongError extends InvalidEventError {
+	constructor(readonly units: number) {
+		super(repoTooLongMessage(units));
+	}
+}
+
+/**
+ * The redacted repo's length in code units when it is over {@link MAX_REPO}, else null. Measured on the redacted text, which is what would
+ * be stored, and before any cap: a repo over the cap is refused, not cut. Every write path that stores a repo calls this (or
+ * {@link assertRepoLength}), so they all refuse the same length.
+ */
+export function repoOverCap(value: string | null | undefined): number | null {
+	if (typeof value !== "string") return null;
+	const units = redact(value).length;
+	return units > MAX_REPO ? units : null;
+}
+
+/** Throw {@link RepoTooLongError} when a repo is over {@link MAX_REPO}. For the write paths that refuse by throwing. */
+export function assertRepoLength(value: string | null | undefined): void {
+	const units = repoOverCap(value);
+	if (units !== null) throw new RepoTooLongError(units);
+}
+
 /**
  * Refuse a lone surrogate in a write text field, by field name. Checked on the redacted text, which is what gets stored, and before the
  * length cap: a pair the cap splits was whole in the caller's text, so it is not refused here.
@@ -272,7 +304,8 @@ function refuseLoneSurrogate(field: string, text: string | null | undefined): vo
 
 /**
  * Refuse a lone surrogate in any of the six write text fields (summary, session_id, repo, branch, node_id, linear_identifier), by field
- * name. Pure: it stores nothing. The sessioned write path calls it before it reads the chain tip, so a refused event costs no read.
+ * name, and a repo over the cap ({@link assertRepoLength}). Pure: it stores nothing. The sessioned write path calls it before it reads the
+ * chain tip, so a refused event costs no read.
  */
 export function assertWriteTextFields(
 	input: Pick<EventInput, "summary" | "session_id" | "repo" | "branch" | "node_id" | "linear_identifier">,
@@ -283,6 +316,7 @@ export function assertWriteTextFields(
 	refuseLoneSurrogate("branch", input.branch);
 	refuseLoneSurrogate("node_id", input.node_id);
 	refuseLoneSurrogate("linear_identifier", input.linear_identifier);
+	assertRepoLength(input.repo);
 }
 
 /**

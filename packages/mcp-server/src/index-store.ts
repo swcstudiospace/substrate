@@ -9,7 +9,7 @@
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
 import { callPlane, type PlaneGate } from "@substrate/observability";
-import { normalizeIdentifier, normalizeKey } from "./event.ts";
+import { assertRepoLength, normalizeIdentifier, normalizeKey } from "./event.ts";
 import {
 	TERMINAL_GRAPH_STATUSES,
 	executeSweep,
@@ -1171,6 +1171,8 @@ export class IndexStore implements MemoryStore {
 		steps?: Array<{ [K in keyof GraphStep]?: GraphStep[K] | undefined } & { node_id: string; step: number }> | undefined;
 		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }> | undefined;
 	}): Promise<GraphView> {
+		// Refused before any statement runs, so an over-long repo writes no row and no node.
+		assertRepoLength(plan.repo);
 		await this.sql`
 			insert into graph_index (graph_id, notion_task_page, repo, branch, surface, status, pr_url, updated)
 			values (${plan.graph_id}, ${plan.notion_task_page ?? null}, ${plan.repo ?? null}, ${plan.branch ?? null},
@@ -2442,6 +2444,8 @@ export class IndexStore implements MemoryStore {
 		content_sha256: string;
 		proposed_by: string;
 	}): Promise<void> {
+		// Refused before the plane wraps the write, so the refusal is not reported as a degraded plane.
+		assertRepoLength(input.repo);
 		await this.plane("skills.propose", async () =>
 			this.sql.begin(async (tx: SQL) => {
 				// Serialised with decisions on the same (repo, name), so the version a new row takes is the true next one.
@@ -2498,6 +2502,7 @@ export class IndexStore implements MemoryStore {
 		decided_by: string;
 		reason: string | null;
 	}): Promise<SkillDecisionResult> {
+		assertRepoLength(input.repo);
 		return this.plane("skills.decide", async () =>
 			this.sql.begin(async (tx: SQL) => {
 				// How many approved rows the name has once this decision stands, in the same transaction.

@@ -18,6 +18,7 @@
  * reporting keeps its rows (their `last_seen_at` says how old they are) until it reports again.
  */
 import type { SQL } from "bun";
+import { repoOverCap, repoTooLongMessage } from "./event.ts";
 
 /** The report's `protocol` member. A different value is refused, so a changed shape never half-parses. */
 export const WORKTREE_REPORT_PROTOCOL = 1;
@@ -224,6 +225,8 @@ function validateWorktree(raw: unknown, index: number): Parsed<ReportedWorktree>
 	if (typeof path !== "string" || !path.startsWith("/") || path.length > WORKTREE_PATH_MAX_CHARS || path.includes("\u0000")) {
 		return fail(`${at}.path must be an absolute path of at most ${WORKTREE_PATH_MAX_CHARS} characters with no NUL`);
 	}
+	const repoUnits = typeof repo === "string" ? repoOverCap(repo) : null;
+	if (repoUnits !== null) return fail(repoTooLongMessage(repoUnits));
 	if (typeof repo !== "string" || !WORKTREE_REPO_PATTERN.test(repo)) return fail(`${at}.repo must be owner/name`);
 	if (branch !== null && !isWorktreeLabel(branch)) return fail(`${at}.branch must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
 	if (typeof head !== "string" || !HEAD_PATTERN.test(head)) return fail(`${at}.head must be 40 or 64 hex characters`);

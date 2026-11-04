@@ -287,11 +287,11 @@ describe("normalizeKey", () => {
 		expect(normalizeKey(raw)).toBe(stored);
 	});
 
-	test("matches what normalizeEvent stores for a repo whose surrogate pair straddles the cap", () => {
+	test("refuses a repo whose surrogate pair straddles the cap on write, by name", () => {
+		// 513 code units: the write refuses it. A read still cuts it, as it always has.
 		const raw = straddling("owner/");
-		const stored = normalizeEvent({ ...base, repo: raw }, null).repo;
-		expect(stored).toBe(raw.slice(0, 511));
-		expect(normalizeKey(raw)).toBe(stored);
+		expect(() => normalizeEvent({ ...base, repo: raw }, null)).toThrow("repo_too_long:");
+		expect(normalizeKey(raw)).toBe(raw.slice(0, 511));
 	});
 
 	test("drops the dangling high surrogate that normalizeIdentifier keeps", () => {
@@ -378,6 +378,39 @@ describe("graph id cap on the write path", () => {
 	test("accepts a graph id with a newline, which is not a NUL", () => {
 		const graphId = "first line\nsecond line";
 		expect(normalizeEvent({ ...base, graph_id: graphId }, null).graph_id).toBe(graphId);
+	});
+});
+
+describe("repo cap on the write path", () => {
+	// "owner/" is six code units, so 507 more makes 513 and 506 more makes 512.
+	test("refuses a repo of 513 code units by name, rather than storing it cut to 512", () => {
+		const repo = `owner/${"r".repeat(507)}`;
+		expect(repo.length).toBe(513);
+		let refused: unknown;
+		try {
+			normalizeEvent({ ...base, repo }, null);
+		} catch (error) {
+			refused = error;
+		}
+		expect(refused).toBeInstanceOf(InvalidEventError);
+		expect((refused as Error).constructor.name).toBe("RepoTooLongError");
+		expect((refused as Error).message).toBe("repo_too_long: a repo may not exceed 512 code units; got 513");
+	});
+
+	test("refuses an over-long repo in the sessioned path's text-field check, before any chain read", () => {
+		expect(() => assertWriteTextFields({ ...base, repo: `owner/${"r".repeat(507)}` })).toThrow("repo_too_long:");
+	});
+
+	test("accepts a repo of exactly 512 code units, stored unchanged", () => {
+		const repo = `owner/${"r".repeat(506)}`;
+		expect(repo.length).toBe(512);
+		expect(normalizeEvent({ ...base, repo }, null).repo).toBe(repo);
+	});
+
+	test("accepts a 512-unit repo whose last two units are an astral pair, stored unchanged", () => {
+		const repo = `owner/${"r".repeat(504)}\u{1F600}`;
+		expect(repo.length).toBe(512);
+		expect(normalizeEvent({ ...base, repo }, null).repo).toBe(repo);
 	});
 });
 

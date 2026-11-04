@@ -225,3 +225,14 @@ describe("shared issued-session test authority contract", () => {
 		expect(JSON.stringify(publicRows)).not.toContain("private");
 	});
 });
+
+describe("the repo cap on a live session issue", () => {
+	test("refuses an over-long repo by name before any statement reaches the driver", async () => {
+		const driver = scriptedSql(() => {
+			throw new Error("no statement may run for a refused repo");
+		});
+		const authority = bunLiveSessionAuthority(driver.sql, { leaseSeconds: 3600 });
+		const repoId = `owner/${"r".repeat(507)}`;
+		await expect(authority.issue({ caller: owner, repoId, state: "ACTIVE" })).rejects.toThrow("repo_too_long: a repo may not exceed 512 code units; got 513");
+	});
+});

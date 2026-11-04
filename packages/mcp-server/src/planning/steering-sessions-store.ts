@@ -5,7 +5,7 @@
  */
 import type { SQL, TransactionSQL } from "bun";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { nextSteeringSession, scopeRepoId, STEERING_STATES, type SteeringSession, type SteeringSessionState } from "../event.ts";
+import { assertRepoLength, nextSteeringSession, scopeRepoId, STEERING_STATES, type SteeringSession, type SteeringSessionState } from "../event.ts";
 import { redact } from "../redact.ts";
 import { SURFACES, type Surface } from "../types.ts";
 
@@ -261,6 +261,8 @@ export function bunLiveSessionAuthority(
 
 	return {
 		async issue(input) {
+			// Thrown before the try, so an over-long repo is the named refusal and not a session-unavailable answer.
+			assertRepoLength(input.repoId);
 			try {
 				if (!validLease || input.caller.surface === null || !isSurface(input.caller.surface) || !isState(input.state) || scopeRepoId(input.repoId) === "") return unavailable();
 				// Bounded maintenance: expired sessions leave the live indexes. A failure is reported and never blocks issuance.

@@ -12,7 +12,7 @@
  * writer gets nothing rather than the benefit of the doubt. `events.emit` keeps
  * failing open; this does not.
  */
-import { normalizeIdentifier } from "./event.ts";
+import { normalizeIdentifier, repoOverCap } from "./event.ts";
 import { redact } from "./redact.ts";
 import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import {
@@ -69,6 +69,18 @@ export function parseScope(raw: unknown): MemoryScope | null {
 	const id = normalizeIdentifier(spelled);
 	if (!id) return null;
 	return { class: family as MemoryScopeClass, id, canonical: `${family}:${id}` };
+}
+
+/**
+ * The redacted id of a `repo:` scope when it is over the repo cap, else null. The memory write refuses such a scope. `parseScope` caps
+ * the id to fit, which a read needs and a write must not do: a write would store a repo cut to fit. Reads never call this.
+ */
+export function repoScopeOverCap(raw: unknown): number | null {
+	if (typeof raw !== "string") return null;
+	const trimmed = raw.trim();
+	const split = trimmed.indexOf(":");
+	if (split < 1 || trimmed.slice(0, split).toLowerCase() !== "repo") return null;
+	return repoOverCap(trimmed.slice(split + 1).trim());
 }
 
 export function isMemoryKind(value: unknown): value is MemoryKind {

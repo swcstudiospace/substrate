@@ -271,3 +271,23 @@ describe("IndexStore.ping", () => {
 		expect(store.poolSettings.applicationName).toBe("substrate-mcp");
 	});
 });
+
+describe("the repo cap on the graph and skill writes", () => {
+	// A repo of 513 code units. Each write refuses it before its first statement, so the store never connects: no database is needed.
+	const repo = `owner/${"r".repeat(507)}`;
+	const refusal = "repo_too_long: a repo may not exceed 512 code units; got 513";
+
+	test("registerGraph refuses an over-long repo by name", async () => {
+		await expect(new IndexStore("postgres://u@localhost/x").registerGraph({ graph_id: "g-1", repo })).rejects.toThrow(refusal);
+	});
+
+	test("upsertProposedSkill refuses an over-long repo by name", async () => {
+		const input = { repo, name: "demo", pr_number: 1, pr_url: "https://github.com/x/y/pull/1", branch: null, content_sha256: "ab".repeat(32), proposed_by: "omp" };
+		await expect(new IndexStore("postgres://u@localhost/x").upsertProposedSkill(input)).rejects.toThrow(refusal);
+	});
+
+	test("decideSkill refuses an over-long repo by name", async () => {
+		const input = { repo, name: "demo", pr_number: 1, decision: "approve" as const, merge_sha: null, pr_url: null, branch: null, proposed_by: null, decided_by: "ops", reason: null };
+		await expect(new IndexStore("postgres://u@localhost/x").decideSkill(input)).rejects.toThrow(refusal);
+	});
+});

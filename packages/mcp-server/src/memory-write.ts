@@ -26,7 +26,7 @@
  * testable without a Postgres: the SQL is thin, the decisions are not.
  */
 import { randomUUID } from "node:crypto";
-import { canonicalJson, normalizeIdentifier, normalizeKey, sha256Hex } from "./event.ts";
+import { canonicalJson, normalizeIdentifier, normalizeKey, repoOverCap, repoTooLongMessage, sha256Hex } from "./event.ts";
 import { isLessonWrite, lessonWriteIssue } from "./lesson-content.ts";
 import { classify } from "./memory-classify.ts";
 import {
@@ -40,6 +40,7 @@ import {
 	needsReverification,
 	normalizeSubject,
 	parseScope,
+	repoScopeOverCap,
 	resolveActor,
 	resolveTrust,
 	reverifyAfter,
@@ -489,6 +490,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 			"scope must be `global`, or `graph:<id>` / `repo:<owner/name>` / `agent:<surface>` / `person:<name>`.",
 		);
 	}
+	// A repo over the cap is refused before anything is judged or hashed: the cap would cut it, and a cut repo is a different repo.
+	const overRepo = repoOverCap(request.repo) ?? repoScopeOverCap(request.scope);
+	if (overRepo !== null) return refuse("denied", "repo_too_long", `${repoTooLongMessage(overRepo)}. Nothing was stored.`);
 	if (!isMemoryKind(request.kind)) {
 		return refuse("denied", "kind.unknown", "kind must be one of decision, fact, warning, handoff, todo.");
 	}
