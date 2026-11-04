@@ -1,53 +1,199 @@
 ---
 phase: 65-doc-watch
-verified: 2026-10-30
+verified: 2026-11-04T23:05:32Z
 status: gaps_found
-score: 3 of 5 success criteria MET in the repository (1, 4, 5); 2 PARTIAL (2, 3); no trigger installed on any host, no live sync run
-verified_on: commit aa19c926 on main (files read with git show; nothing was run by the author of this record)
+score: 3/5 success criteria verified (1, 4, 5); 2 PARTIAL (2, 3); WATCH-04 reconcile timer staged in infra/vps, not installed
+covered_files:
+  - ".planning/phases/65-doc-watch/65-SUMMARY.md"
+  - "docs/corpus-watch.md"
+  - "docs/runbooks/corpus-sync.md"
+  - "infra/vps/substrate-corpus-reconcile.service"
+  - "infra/vps/substrate-corpus-reconcile.service.d/30-sandbox.conf.example"
+  - "infra/vps/substrate-corpus-reconcile.timer"
+  - "infra/vps/substrate-corpus-sync.service"
+  - "infra/vps/substrate-corpus-sync.timer"
+  - "infra/vps/substrate-corpus-watch.service"
+  - "packages/cli/src/corpus/events.ts"
+  - "packages/cli/src/corpus/render-sync.ts"
+  - "packages/cli/src/corpus/sync.ts"
+  - "packages/cli/src/corpus/watch-commands.ts"
+  - "packages/cli/src/corpus/watch-loop.ts"
+  - "packages/cli/src/corpus/watch-settings.ts"
+  - "packages/collectors/src/install-git-hook.ts"
+  - "packages/corpus/src/coalesce.ts"
+  - "packages/corpus/src/hints.ts"
+  - "packages/corpus/src/mirror.ts"
+  - "packages/corpus/src/view.ts"
+  - "packages/corpus/src/watch.ts"
+  - "packages/mcp-server/src/corpus/reconcile.ts"
+  - "packages/mcp-server/src/corpus/sync-event.ts"
+  - "packages/mcp-server/src/event-sources.ts"
+  - "packages/mcp-server/src/planning-hash-store.ts"
+  - "packages/observability/src/instruments.ts"
+  - "scripts/doctor-units.test.ts"
+covered_digest: "v3:sha256:ba1ec4bb47f6575b9214b2a095a9abab72c787ac29cf8efc2b9861ecfc6f2830"
+behavior_unverified: 0
+overrides_applied: 0
+re_verification:
+  previous_status: gaps_found
+  previous_score: 3/5
+  gaps_closed:
+    - "Criterion 2 artifact: docs/runbooks/corpus-sync.md line 15 named a docs.changed hint; now states the hint is {v, dir, at} with no action name (9e71f263)"
+    - "Runbook section 5 described a weekly manual reconcile; now describes the staged daily dry-run timer (9e71f263)"
+    - "Reconcile drop-in example purpose comment named the doc-watch sweep; now names the reconcile unit (9e71f263)"
+  gaps_remaining:
+    - "Criterion 2: docs.changed wording (ROADMAP.md line 1112) still unresolved; owner decision outstanding"
+    - "Criterion 3: planning page state in table planning_page_hashes, not the manifest; owner decision outstanding"
+  regressions: []
+gaps:
+  - truth: "Criterion 2: a hook sends a bounded docs.changed hint, always exits 0, never overwrites a foreign hook"
+    status: partial
+    reason: "The hook installer and the hint writer are present and bounded (exit 0, timeout 10, foreign hook refused). The hint carries no action name: it is {v, dir, at} (hints.ts writeHint line 109), and no docs.changed action exists in packages/, scripts/ or the event vocabulary. The runbook now says so (9e71f263). ROADMAP.md line 1112 still states the docs.changed wording, so criterion 2 as written is not met. The hook set is post-merge, post-checkout, post-rewrite (CORPUS_HOOKS), with no post-commit hint."
+    artifacts:
+      - path: "packages/corpus/src/hints.ts"
+        issue: "Hint body is {v, dir, at}; no docs.changed action name"
+      - path: ".planning/ROADMAP.md"
+        issue: "Criterion 2 (line 1112) still says a hook sends a docs.changed hint"
+    missing:
+      - "Owner decision: either emit the hint as docs.changed, or record that the unnamed {v, dir, at} hint satisfies criterion 2 and amend ROADMAP.md line 1112 to match"
+  - truth: "Criterion 3: the planning refresh reads its state from the manifest, so a restart re-ingests nothing unchanged"
+    status: partial
+    reason: "Planning page hashes are kept in table planning_page_hashes (migration step 39, keyed by destination and path), not in the manifest corpus_documents. The in-memory planningHashes map is still the working set. The store is off by default (SUBSTRATE_PLANNING_HASH_STORE, flag-registry.ts). The SUMMARY records this as D65-2 changed. Not changed since 504da465."
+    artifacts:
+      - path: "packages/mcp-server/src/index-store.ts"
+        issue: "Step 39 creates planning_page_hashes, outside the manifest"
+      - path: "packages/mcp-server/src/planning-hash-store.ts"
+        issue: "Separate port and adapters; not the manifest"
+    missing:
+      - "Move planning page state into the manifest, or record an owner decision accepting the separate table for criterion 3"
 ---
 
-# 65-VERIFICATION: Doc Watch, four triggers into one idempotent sync
+# Phase 65: Doc Watch Verification Report
 
-## Gates
+**Phase Goal:** When documentation changes in a registered repository, the docs plane follows without anyone running a command, and a restart never re-ingests what has not changed.
+**Verified:** 2026-11-04T23:05:32Z
+**Head:** 9e71f263 (integration branch gsd/v18-int-all, worktree /root/src/worktrees/as-gsd-v18-all)
+**Status:** gaps_found
+**Re-verification:** Yes — re-audit at 9e71f263 after the runbook and drop-in example corrections (prior record: 504da465, gaps_found, 3/5)
 
-Not run by the author of this record. Files, function names and test titles were read at aa19c926 with `git show <sha>:<path>` and `git show --stat`. No test counts or timings are cited, and no test was run. The squash body lists 12 fix commits after the feature commit; it does not record gate results. The gates the orchestrator ran in worktrees before the PR (Biome, tests, `tsc`) and the Greptile merge gate (5/5, no open threads, CI green, squash) come from the orchestrator's brief, not from the commit, and are not verified here. Test titles below are cited as evidence that a test exists, not that it passes.
+## Goal Achievement
 
-## Success criteria
+### Observable Truths
 
-| # | Criterion | Status | Evidence |
-| --- | --- | --- | --- |
-| 1 | `substrate corpus sync --repo R` plans and ingests only that repository's changes; `substrate corpus watch` watches the registered roots with a debounce and coalesces a burst into one sync per repository (injected clock and fake watcher in the tests) | MET | `packages/cli/src/corpus/watch-commands.ts` `runSyncCommand` passes `repos: [R]` to `runSync`; `packages/corpus/src/coalesce.ts` `Coalescer.signal`, `due`, `finished`; `packages/corpus/src/watch.ts` `createWatcher`; `packages/cli/src/corpus/watch-loop.test.ts` "a burst of file events is one sync per repository, started after the quiet time", "a signal that arrives while a repository syncs becomes exactly one more sync of it"; `packages/cli/src/corpus/sync.test.ts` "ingests a remote-only push from the mirror and writes nothing into the checkout" |
-| 2 | The default triggers write nothing into any repository (watcher and reconcile read-only). Git hooks are an opt-in installer adding post-merge, post-checkout and post-rewrite hints beside the post-commit collector; a hook sends a bounded `docs.changed` hint, always exits 0, never overwrites a foreign hook | PARTIAL | Met: `packages/collectors/src/install-git-hook.ts` `installCorpusHooks` (`readExisting` returns "foreign" for a hook without our marker or with a damaged pair; the block runs `corpus hint` under `timeout 10` in the background and `return 0`); `packages/corpus/src/hints.ts` `writeHint` (`MAX_HINT_FILES` 1000, `MAX_HINT_BYTES` 4096, `spool-full` refusal). Not met as worded: no `docs.changed` action exists in `packages/`, `docs/` or `scripts/`; the hint is `{v, dir, at}`. `CORPUS_HOOKS` is `post-merge`, `post-checkout`, `post-rewrite`, with no post-commit. |
-| 3 | The planning refresh reads its state from the manifest instead of an in-memory map, so a restart re-ingests nothing unchanged (test with two server instances over one store) | PARTIAL | `packages/mcp-server/src/service.ts` `planningHashStore`, `loadPlanningHashes`, `savePlanningHashes`; the store is table `planning_page_hashes` (migration step 39, `packages/mcp-server/src/index-store.ts`), not the manifest `corpus_documents`. The in-memory `planningHashes` map is still the working set. Test: `packages/mcp-server/src/planning-hash-store.test.ts` "a second server over the same store ingests nothing unchanged, and exactly the changed page after an edit" (the in-memory adapter path is the one named). The Postgres adapter test runs only when `SUBSTRATE_TEST_PG_URL` is set (`describeLive`). Off by default (`SUBSTRATE_PLANNING_HASH_STORE`, `flag-registry.ts`). |
-| 4 | `infra/vps` units `substrate-corpus-watch.service`, `substrate-corpus-sync.service` and `substrate-corpus-sync.timer` are staged, with `Nice`, an idle I/O class, `CPUQuota` and `MemoryMax`; the watcher drops to sweep-only at the inotify limit; `substrate corpus reconcile` reports a missing row and re-ingests only with `--execute`; the reconcile fetches into a managed mirror and reads its default-branch tree; one view per repository per sync | MET (staged, not installed) | The three units: `Nice=15`, `IOSchedulingClass=idle`, `CPUQuota=25%`, `MemoryMax=512M`, `ProtectSystem=strict`, writable paths only under the mirror and spool directories. `packages/corpus/src/watch.ts` `degraded: "inotify-limit"`. `packages/mcp-server/src/corpus/reconcile.ts` `diffPlane`, `reconcileCorpus`; `runReconcileCommand` in `watch-commands.ts` (plans with `fetchMirrors: true`; `--execute` runs the server repair, then a sync). `packages/corpus/src/mirror.ts` `ensureMirror` (`git clone --mirror --filter=blob:none`, `git fetch --prune` with `cwd` set to the mirror); `packages/corpus/src/view.ts` header (one view, the checkout's changes laid over the mirror path by path). Nothing is installed; `docs/runbooks/corpus-sync.md` section 3 is the operator step. |
-| 5 | Each sync emits a `docs.sync` note (event-sources row, vocabulary lock unchanged) and a lag metric; a breach raises the existing `docs.freshness` warning | MET | `packages/mcp-server/src/event-sources.ts` row `docs.sync` (phase 65, runtime `corpus-sync`); `packages/cli/src/corpus/events.ts` `docsSyncBody`, `createHttpEmitter`; `packages/cli/src/corpus/sync.ts` `runSync` emits only when `execute`; `packages/mcp-server/src/corpus/sync-event.ts` `syncLagSeconds`; `packages/mcp-server/src/server.ts` sets `setCorpusSyncLag` only when `result.stored`; `packages/observability/src/instruments.ts` `CORPUS_SYNC_LAG_METRIC`. Freshness: `packages/mcp-server/src/service.ts` `corpusFreshness`; `packages/mcp-server/src/docs-freshness.test.ts` "a corpus past the limit warns once however many passes the breach lasts". "Vocabulary lock unchanged" is `[INFERENCE]`: the lock test was not read. |
+| #   | Truth | Status | Evidence |
+| --- | ----- | ------ | -------- |
+| 1 | `corpus sync --repo R` plans and ingests only R; `corpus watch` debounces and coalesces a burst into one sync per repository | ✓ VERIFIED | Carried forward from 504da465: no code in the truth's files changed in 504da465..9e71f263. `watch-commands.ts` passes `repos: [R]` to `runSync`; `coalesce.ts` and `watch.ts` unchanged. `sync.test.ts` passed at 504da465 (remote-only push ingested from the mirror, nothing written into the checkout; second sync idempotent). Not re-run this pass. |
+| 2 | Default triggers write nothing into any repository; hooks are opt-in; hint is bounded, exits 0, never overwrites a foreign hook; `docs.changed` hint | ✗ FAILED (PARTIAL, see gaps) | Met: `install-git-hook.ts` refuses a foreign hook, the block runs `timeout 10 corpus hint` in the background and `return 0`; `hints.ts` bounds the spool. Changed this pass: runbook line 15 now describes the hint as `{v, dir, at}` with no action name (matches `writeHint`). Not met as worded: ROADMAP.md line 1112 still requires a `docs.changed` hint; no such action exists; no post-commit hint entry. Owner decision open. |
+| 3 | The planning refresh reads state from the manifest; a restart re-ingests nothing unchanged | ✗ FAILED (PARTIAL, see gaps) | Carried forward: `planning-hash-store.ts`, `index-store.ts` unchanged since 504da465. State is in `planning_page_hashes`, not the manifest. Restart protection holds only with `SUBSTRATE_PLANNING_HASH_STORE=on` (off by default). The prior in-memory run (`planning-hash-store.test.ts`, 3 skipped) is not repeated: no database supplied (see PG counts). |
+| 4 | Units `substrate-corpus-watch.service`, `substrate-corpus-sync.service`, `substrate-corpus-sync.timer` staged with Nice, idle I/O, CPUQuota, MemoryMax; watcher drops to sweep-only at the inotify limit; `corpus reconcile` reports a missing row and re-ingests only with `--execute`; reconcile fetches a managed mirror and reads its default-branch tree; one view per repository per sync | ✓ VERIFIED (staged, not installed) | Units unchanged since 504da465. `view.ts` reads the mirror tree (`git ls-tree -r -z`, then `cat-file --batch`, cwd = mirror). `watch.ts` sets `degraded: "inotify-limit"`. `runReconcileCommand` (watch-commands.ts) plans a dry run unless `--execute`. Reconcile unit: `ExecStart=... corpus reconcile --json` (no `--execute`), `Nice=15`, `IOSchedulingClass=idle`, `CPUQuota=25%`, `MemoryMax=512M`, `ProtectSystem=strict`. Changed this pass: runbook section 5 now describes the staged daily dry-run timer and the operator steps; the claims match `substrate-corpus-reconcile.timer` and `.service`. |
+| 5 | Each sync emits a `docs.sync` note (event-sources row) and a lag metric; a breach raises `docs.freshness` | ✓ VERIFIED (code; the reserved decision is held) | Carried forward: `event-sources.ts` row `docs.sync` (line 1551) and `docs.planning` (line 1584); `docs/event-vocabulary.md` lines 121-122; lag gauge in `sync-event.ts` and `instruments.ts`. `docs.sync` is absent from `RESERVED_NOTE_ACTIONS` (`reserved-actions.ts` lines 23-33): held, see open items. |
 
-## Requirements
+**Score:** 3/5 truths verified (1, 4, 5); 2 PARTIAL (2, 3); behavior_unverified 0
 
-- **WATCH-01** (a change reaches the plane within a lag, no command): met in code through the watcher and the sweep. Not delivered: no trigger is installed.
-- **WATCH-02** (coalescing; restart re-ingests nothing unchanged): coalescing met. The restart part holds only with `SUBSTRATE_PLANNING_HASH_STORE=on`. Otherwise every restart re-ingests the planning pages.
-- **WATCH-03** (no writes into repositories; hooks opt-in; hooks and watcher never fail git): met in code. `watch` always writes to the docs plane (documented in `docs/corpus-watch.md`).
-- **WATCH-04** (a reconcile timer finds changes no trigger saw, including a push from another machine, through a managed mirror): PARTIAL. The sweep finds remote-only pushes through the mirror (`sync.test.ts`, "ingests a remote-only push from the mirror"). No reconcile timer exists; `corpus reconcile` is manual (`infra/vps` contains no unit that runs it; `watch-loop.ts` does not call it).
-- **WATCH-05** (outcome, lag and failures as events and metrics; a freshness breach raises `docs.freshness`): met in code. The gauge is last-write-wins and accepts any authenticated caller's `docs.sync` note (`reserved-actions.ts` does not reserve the action).
+### WATCH-04 reconcile timer
 
-## Residual risks
+- `infra/vps/substrate-corpus-reconcile.timer`: `OnCalendar=*-*-* 04:43:00 UTC`, `Persistent=true`, `Unit=substrate-corpus-reconcile.service`. Staged, not installed. Its comment names the operator steps in `docs/runbooks/corpus-sync.md`.
+- `infra/vps/substrate-corpus-reconcile.service`: oneshot; dry run by default; `ReadWritePaths=/var/lib/substrate/corpus-mirrors /var/lib/substrate/corpus-hints`; `ProtectHome=false` (see open items).
+- `infra/vps/substrate-corpus-reconcile.service.d/30-sandbox.conf.example`: example only (`.example` suffix), class A, ceiling 5.0. Changed this pass (9e71f263): the purpose comment now names the reconcile unit instead of the doc-watch sweep. Its comment still says `ProtectHome=read-only`; the unit has `ProtectHome=false`. The example is not installed; the mismatch is an open owner decision.
+- `scripts/doctor-units.test.ts` lists the reconcile unit in the inventory. Re-run this pass with the drop-in tests: 100 pass, 0 fail across `doctor-sandbox.test.ts`, `sandbox-dropins.test.ts`, `doctor-units.test.ts`.
+- WATCH-04 code status: the reconcile timer exists and is a dry run by default. The timer is not installed on any host, so no scheduled reconcile runs.
 
-- **Triggers are not running anywhere.** Until an operator installs them, nothing syncs automatically. The only automatic path after install is the sweep (900 s by default), so a push from another machine waits up to a sweep interval.
-- **Hook set and naming.** No post-commit hint; the hint has no action name; the runbook and ROADMAP say otherwise (see the SUMMARY deviations).
-- **Planning state location.** `planning_page_hashes` sits outside the manifest and outside the index archive (`index-store.migrate-contract.test.ts` allowlist). A lost table costs one re-ingest of the planning pages.
-- **Migration step 39 always runs, and its repair statement runs on every boot** (`index-store.ts`, `PLANNING_HASH_TABLE_REPAIR`). It drops the table when its primary key lacks `destination`. This matters only for a database that took an earlier draft of step 39.
-- **Forgeable lag gauge.** `docs.sync` is not a reserved action, so any authenticated caller can set `substrate.corpus.sync_lag_seconds`. Ingest is not affected.
-- **Unscoped `execute` on reconcile.** `POST /corpus/reconcile` with `execute: true` needs an authenticated, non-VM-guest surface and the corpus gate, not the operator. The same as the phase 63 ingest.
-- **Reconcile dry run uses the network.** It fetches every mirror first (`runReconcileCommand`, `fetchMirrors: true`).
-- **Single process.** The per-repository lock is a file under the mirror directory, and each watcher is one process. Two watchers on one host are coordinated only by that lock and by the spool lock `[INFERENCE: not exercised]`.
-- **Watch limit.** When the host runs out of inotify watches the watcher drops to sweep-only, and the loop reports it once (`watch-loop.test.ts`, "when the watch limit is hit the loop says so once and keeps sweeping").
-- **Docs drift.** `docs/corpus-watch.md` and `docs/runbooks/corpus-sync.md` describe a `docs.changed` hint, a manifest-backed planning state and a reconcile schedule that the code does not have, as noted above.
+### Required Artifacts
 
-## Operator-gated
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `infra/vps/substrate-corpus-watch.service` | watch unit, sweep-only fallback | ✓ VERIFIED (staged) | Unchanged since 504da465 |
+| `infra/vps/substrate-corpus-sync.service` and `.timer` | sweep, 15-minute OnCalendar, Persistent | ✓ VERIFIED (staged) | Unchanged since 504da465; `Slice=substrate.slice` |
+| `infra/vps/substrate-corpus-reconcile.service` and `.timer` | daily dry-run reconcile | ✓ VERIFIED (staged) | Dry run by default; not installed |
+| `infra/vps/substrate-corpus-reconcile.service.d/30-sandbox.conf.example` | sandbox drop-in example | ✓ VERIFIED (example) | Comment corrected 9e71f263; inventory and parser tests pass (100 pass, this pass) |
+| `packages/corpus/src/hints.ts` | bounded hint spool | ✓ VERIFIED (partial vs wording) | Hint is `{v, dir, at}`; no action name |
+| `packages/collectors/src/install-git-hook.ts` | opt-in hook installer | ✓ VERIFIED | Refuses foreign hook; exit 0; timeout 10 |
+| `packages/mcp-server/src/planning-hash-store.ts` | planning hash store | ✗ PARTIAL | Table, not manifest (criterion 3) |
+| `packages/mcp-server/src/event-sources.ts` | `docs.sync` and `docs.planning` rows | ✓ VERIFIED | Lines 1551, 1584 |
 
-- Installing the git hooks: `substrate corpus hook install --repo R`, per repository.
-- Installing the watch service and the sweep timer, and the environment file they read (`docs/runbooks/corpus-sync.md`, section 3). Sandbox drop-ins are examples only.
-- `SUBSTRATE_CORPUS=on` plus a LightRAG backend on the server. Without it every sync and reconcile answers `corpus.disabled` or `corpus.backend-unavailable`.
-- `SUBSTRATE_PLANNING_HASH_STORE=on` and a rehearsal of migration step 39 on a restored dump (`docs/runbooks/rollback-compat.md`).
-- A reconcile schedule, if one is wanted. None is staged.
-- Any live sync, and any ingest it drives into production. None was run.
+### Key Link Verification
+
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| `watch-commands.ts` reconcile | `reconcileCorpus` (server) | `ctx.client.reconcile({ execute })` | ✓ WIRED | Dry run unless `--execute` |
+| `reconcile.service` | `corpus reconcile --json` | `ExecStart` | ✓ WIRED | No `--execute` in ExecStart |
+| `view.ts` | mirror default-branch tree | `git ls-tree -r -z` and `cat-file --batch` in mirror cwd | ✓ WIRED | Checkout not read |
+| `hook` block | `corpus hint` | `timeout 10 ... corpus hint` | ✓ WIRED | Background, exit 0 |
+| planning refresh | `planning_page_hashes` | `planningHashStore` | ⚠️ WIRED to table, not manifest | Criterion 3 gap |
+| `docs.sync` note | lag gauge | `sync-event.ts` to `instruments.ts` | ✓ WIRED | Forgeable: `docs.sync` not reserved |
+
+### Data-Flow Trace (Level 4)
+
+| Artifact | Data Variable | Source | Produces Real Data | Status |
+| -------- | ------------- | ------ | ------------------ | ------ |
+| `runReconcileCommand` | drift | server `POST /corpus/reconcile` | Yes (route in `server.ts`) | ✓ FLOWING |
+| `view.ts` | tree entries | `git ls-tree` in the mirror | Yes | ✓ FLOWING |
+| lag gauge | `lag_s` | `docs.sync` note body | Yes, but caller-supplied | ⚠️ FLOWING, untrusted input |
+
+### Behavioral Spot-Checks
+
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Drop-in example and unit inventory after the example comment change (this pass) | `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs bun test --timeout 30000 scripts/doctor-sandbox.test.ts scripts/sandbox-dropins.test.ts scripts/doctor-units.test.ts` | 100 pass, 0 fail, 1047 expects, 5.22 s | ✓ PASS |
+| Reconcile dry run default; remote-only push via mirror; planning restart on in-memory store | Recorded at 504da465 (`watch-commands.test.ts` 120 pass across four files; `sync.test.ts` + `planning-hash-store.test.ts` 29 pass, 3 skip, 0 fail). Not re-run this pass: the inputs of those tests did not change in 504da465..9e71f263. | carried forward | ✓ PASS (recorded) |
+
+### Probe Execution
+
+No `scripts/*/tests/probe-*.sh` is declared for this phase. Skipped.
+
+### Requirements Coverage
+
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ----------- | ----------- | ------ | -------- |
+| WATCH-01 | SUMMARY | change reaches plane without a command | ✓ SATISFIED in code; ✗ not delivered (no trigger installed) | Watch, sweep, sync tests; units staged |
+| WATCH-02 | SUMMARY | coalesce; restart re-ingests nothing unchanged | ◐ PARTIAL | Coalescing met; restart needs `SUBSTRATE_PLANNING_HASH_STORE=on` |
+| WATCH-03 | SUMMARY | no writes into repos by default; hooks opt-in; never fail git | ✓ SATISFIED | `install-git-hook.ts`; watcher read-only; runbook section 4 matches |
+| WATCH-04 | SUMMARY | reconcile timer finds unseen changes via mirror | ◐ PARTIAL (code and staged unit; no installed timer) | Remote-only push test recorded; reconcile unit is dry run by default (a048bc99); runbook section 5 now matches the unit |
+| WATCH-05 | SUMMARY | outcome, lag, failures as events and metrics; `docs.freshness` breach | ✓ SATISFIED in code | `docs.sync` row; gauge; reserved decision held |
+
+### Anti-Patterns Found
+
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| `docs/runbooks/corpus-sync.md` | 15 | named `docs.changed` hint | ✓ Resolved (9e71f263) | Now states `{v, dir, at}` with no action name |
+| `docs/runbooks/corpus-sync.md` | 120 | "run weekly" manual reconcile | ✓ Resolved (9e71f263) | Now describes the staged daily dry-run timer |
+| `infra/vps/substrate-corpus-reconcile.service.d/30-sandbox.conf.example` | 1-2 | copied "doc-watch sweep" comment | ✓ Resolved (9e71f263) | Now names the reconcile unit |
+| `infra/vps/substrate-corpus-reconcile.service.d/30-sandbox.conf.example` | 13 | `ProtectHome=read-only` text vs unit `ProtectHome=false` | ℹ️ Info | Example only; open owner decision (shared with sync and watch units) |
+| `packages/mcp-server/src/reserved-actions.ts` | 23-33 | `docs.sync` not reserved | ⚠️ Warning | Held decision; any authenticated caller can set the lag gauge |
+
+No TBD, FIXME or XXX markers found in the phase 65 implementation files read. No 🛑 blocker anti-pattern.
+
+### Human Verification Required
+
+Operator-gated; not run here:
+
+1. **Install the git hooks per repository** — `substrate corpus hook install --repo R`. Expected: marked block in `post-merge`, `post-checkout`, `post-rewrite`; a `corpus hint` file appears in the spool after a merge.
+2. **Install and enable the sweep, watch and reconcile units** — copy the units and `/etc/substrate/substrate-corpus.env`, `systemctl daemon-reload`, `systemctl enable --now substrate-corpus-sync.timer substrate-corpus-watch.service substrate-corpus-reconcile.timer`. Expected: sweeps every 15 min; reconcile dry run daily at 04:43 UTC; no repository written.
+3. **Server with `SUBSTRATE_CORPUS=on` and a LightRAG backend** — otherwise every sync and reconcile answers `corpus.disabled` or `corpus.backend-unavailable`.
+4. **`SUBSTRATE_PLANNING_HASH_STORE=on`** after a rehearsal of migration step 39 on a restored dump (`docs/runbooks/rollback-compat.md`).
+5. **Owner decision on `docs.sync`** — held pending confirmation of the CLI token; reserved-action status open.
+
+### Open Items (owner decisions, not verifier-closable)
+
+1. Criterion 2: `docs.changed` wording (ROADMAP.md line 1112) vs the unnamed `{v, dir, at}` hint. Emit the name, or record acceptance and amend the ROADMAP line.
+2. Criterion 3: planning page state in `planning_page_hashes` rather than the manifest.
+3. `ProtectHome` mismatch: the corpus units and the reconcile drop-in example say `read-only`/`false` inconsistently (unit `false`, drop-in read-only).
+4. `docs.sync` reserved-action status (held).
+
+### PG counts per file
+
+- `packages/mcp-server/src/planning-hash-store.test.ts`: Postgres-gated (`describeLive` when `SUBSTRATE_TEST_PG_URL` is set). No database supplied for this pass: the live block was not run. Prior non-PG run at 504da465: 29 pass, 3 skip, 0 fail across `sync.test.ts` and this file.
+- `scripts/doctor-sandbox.test.ts`, `scripts/sandbox-dropins.test.ts`, `scripts/doctor-units.test.ts`: no PG gate (grep: no `SUBSTRATE_TEST_PG_URL`). Run with the variable unset: 100 pass, 0 fail.
+
+### Gaps Summary
+
+Criteria 2 and 3 remain PARTIAL against their wording. This pass closed the runbook half of criterion 2 (line 15 now describes the `{v, dir, at}` hint), and the runbook's reconcile paragraph and the drop-in example comment now match the staged units. The remaining criterion 2 gap is the owner decision on the `docs.changed` wording; criterion 3 is the owner decision on the table. WATCH-04 is code-met and staged but not delivered until an operator installs it. No live sync, no ingest and no installed trigger was observed.
+
+### Scope of this pass
+
+Changed since 504da465 in phase 65's files: `docs/runbooks/corpus-sync.md` and `30-sandbox.conf.example` (re-audited above). Changed elsewhere in the range and not in phase 65's covered files: `corpus/proofs.test.ts` (phase 69), `fabric/status.ts`, `fabric/types.ts`, `fabric/status.test.ts` (phase 64), `service.test.ts` (the phase 78 scheduled reconcile tick, a separate reconcile from the corpus reconcile). None of these affects a phase 65 criterion; carried forward.
+
+---
+
+_Verified: 2026-11-04T23:05:32Z_
+_Verifier: Claude (gsd-verifier), rewrite2-1, worktree /root/src/worktrees/as-gsd-v18-all, head 9e71f263_
