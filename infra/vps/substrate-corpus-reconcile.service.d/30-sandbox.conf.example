@@ -6,7 +6,7 @@
 # sandbox-class: A
 # exposure-ceiling: 5.0
 #
-# Purpose: take the doc-watch sweep from the shipped EXPOSED score (`systemd-analyze security`) by ending its
+# Purpose: take the corpus reconcile unit from the shipped EXPOSED score (`systemd-analyze security`) by ending its
 #   access to what it does not use. Class A: it writes only the mirror and hint spool, so the whole
 #   filesystem is read-only (ProtectSystem=strict, already on the unit) and /root becomes read-only
 #   (ProtectHome=read-only). The bun binary under /root/.local stays executable; it is only unwritable.

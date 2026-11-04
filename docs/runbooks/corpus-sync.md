@@ -12,7 +12,7 @@ reconcile are read-only, and git hooks are an opt-in you install for repositorie
 
 | Trigger | What it is | Writes into a repository? |
 | --- | --- | --- |
-| `hook` | A git hook (post-merge, post-checkout, post-rewrite) leaves a bounded `docs.changed` hint in the spool and always exits 0. | Yes: the hook file in that repository's `.git/hooks`, installed only by `substrate corpus hook install`, never over a foreign hook |
+| `hook` | A git hook (post-merge, post-checkout, post-rewrite) leaves a bounded hint in the spool, a small file holding the repository's directory and a timestamp (`{v, dir, at}`; it carries no action name), and always exits 0. | Yes: the hook file in that repository's `.git/hooks`, installed only by `substrate corpus hook install`, never over a foreign hook |
 | `watch` | `substrate corpus watch` watches the registered roots, waits for quiet (`SUBSTRATE_CORPUS_DEBOUNCE_MS`, at most `SUBSTRATE_CORPUS_MAX_WAIT_MS`) and runs one sync per repository however many edits there were. | No |
 | `sweep` | The same command on a timer (`--once`, or the watcher's own interval `SUBSTRATE_CORPUS_SWEEP_S`): reads each repository's Substrate-managed blobless mirror, so a push made from another machine is found although the local checkout has not pulled. | No (it fetches into the mirror directory, never into your clone) |
 | `manual` | `substrate corpus sync --repo R`. | No |
@@ -117,8 +117,7 @@ it into a `docs.sync` note with `trigger: hook`.
 - A `docs.freshness` warning with `dataset: corpus` means the last ingest is older than `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`.
   Check `substrate corpus status` (`lagSeconds`, `lastIngestAt`), the units' journal, and run `substrate corpus sync --execute`. If the
   documentation really did not change, raise the limit; the note when it clears is the end of the episode.
-- Scheduled reconcile: run `substrate corpus reconcile` (dry run) weekly; a non-empty report means the manifest and the plane
-  disagreed (a plane restore, a killed run between the plane write and the manifest write). Repair with `--execute`.
+- Scheduled reconcile: `substrate-corpus-reconcile.timer` runs `substrate-corpus-reconcile.service` daily at 04:43 UTC, which runs `substrate corpus reconcile --json` as a dry run. The units are staged in `infra/vps`, not installed: an operator copies them and runs `systemctl enable --now substrate-corpus-reconcile.timer` (the server needs `SUBSTRATE_CORPUS=on`, or the pass reports `corpus.disabled`). A non-empty report means the manifest and the plane disagreed (a plane restore, a killed run between the plane write and the manifest write). Running `substrate corpus reconcile --execute` to repair it is an operator choice, taken by hand after reading the report.
 
 ## 6. Rollback
 
