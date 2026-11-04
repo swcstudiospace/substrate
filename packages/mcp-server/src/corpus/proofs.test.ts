@@ -78,7 +78,8 @@ function world(options: { enabled?: boolean; verify?: AnchorVerifier } = {}) {
 		roots,
 		anchor: { ports: () => UNUSED_PORTS, verify: options.verify },
 	};
-	const ingest = (documents: CorpusDocument[], tombstones: Array<{ repo: string; path: string }> = []) => corpusIngestReply(deps, { protocol: CORPUS_PROTOCOL, documents, tombstones }, "claude-code");
+	const ingest = (documents: CorpusDocument[], tombstones: Array<{ repo: string; path: string }> = []) =>
+		corpusIngestReply(deps, { protocol: CORPUS_PROTOCOL, documents, tombstones, ...(tombstones.length > 0 ? { scope: { coverage: [{ repo: REPO, source: "fs" as const }], maxTier: 3 as const } } : {}) }, "claude-code");
 	return { store, plane, clock, rootEvents, otherEvents, roots, deps, ingest };
 }
 
