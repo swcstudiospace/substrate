@@ -226,15 +226,19 @@ patterns are in `redact.ts`, ported from `grok-hermes-connector`'s
 append-only log.
 
 **Caps, so one collector cannot flood a log nothing will ever reclaim.** Summary
-2000 chars; each other text field 512; each string in the payload 4000; the
+2000 chars; `session_id`, `branch`, `node_id` and `linear_identifier` 512 code units,
+cut; `repo` 512 code units, refused above that instead of cut (see
+[Identifiers at the 512-unit cut](#identifiers-at-the-512-unit-cut)); each string in
+the payload 4000; the
 whole payload 16 KB, above which it is replaced by a marker rather than
 half-written.
 
 **Consistent identifiers.** `session_id`, `graph_id` and `repo` are query keys as
 well as stored values — `emit` finds the previous hash by session, `verifyGraph`
 reads by graph, the brief reads by repo. Because the write path redacts and caps
-them, every read goes through the same `normalizeIdentifier`, so the stored and
-queried forms agree by construction. Cleaning on write while querying the raw
+them, every read goes through the same normaliser: `normalizeKey` for `session_id` and
+`repo`, `normalizeIdentifier` for the rest (`packages/mcp-server/src/event.ts`). The
+stored and queried forms agree by construction. Cleaning on write while querying the raw
 value would mean a lookup that never matches: every event would restart its
 session's chain, and verification would find no rows at all.
 
@@ -362,6 +366,77 @@ landed quickly. A timeout is not proof the write was lost, so the warning does n
 say the hour will be uncovered.
 There is **no backfill**: events stored before this table first existed belong to no
 hour, and the first anchored hour is Phase 28's decision.
+
+### Identifiers at the 512-unit cut
+
+Before commit `8a604455`, a `session_id`, `repo`, `branch`, `node_id` or
+`linear_identifier` longer than 512 code units was cut at 512. A cut that fell inside
+a surrogate pair left a lone high surrogate at the end, which the transport encodes
+as U+FFFD. These rows are the **straddled rows**. Their failure mode is recorded in
+`.planning/phases/73-ledger-tamper-evidence/73-VERIFICATION.md`.
+
+A straddled row:
+
+- fails `verifyChain` with `hash does not match contents`, because the stored form is
+  not the form that was hashed. It fails closed; it is not evidence of tampering.
+- is not found by a read of the same identifier, for `session_id` and `repo`, which now
+  read through `normalizeKey` (`packages/mcp-server/src/event.ts`) and so no longer
+  carry the dangling high. Reads of `branch`, `node_id` and `linear_identifier` have not
+  been probed against a live store.
+- cannot be repaired in place. `assertAppendOnly` (`packages/mcp-server/src/greptime.ts`)
+  refuses any statement that is not a read or an append.
+
+**Owner decision, 2026-11-04:** straddled rows are left as they are. No live store was
+read for this section, so no ids are listed here; the scan below finds them.
+
+**Write rules now.**
+
+- A lone UTF-16 surrogate in any of the six text fields (`summary`, `session_id`,
+  `repo`, `branch`, `node_id`, `linear_identifier`) is refused with a named error,
+  `<field>_lone_surrogate` (`assertWriteTextFields`, `packages/mcp-server/src/event.ts`).
+- A graph id over 512 UTF-8 bytes is refused with `graph_id_too_long`.
+- A repo over 512 code units is refused with `repo_too_long: a repo may not exceed 512
+  code units; got N`. A repo is never cut at write.
+- **Not covered.** `branch`, `node_id` and `linear_identifier` are still cut at 512 code
+  units without the dangling-high trim (`normalizeIdentifier` and `clean`). A new write
+  whose cut falls inside a pair is still stored with U+FFFD in those fields.
+  `session_id` and `repo` are trimmed, so the cut stores no U+FFFD for them.
+- **Reads are unchanged.** A filter longer than 512 code units is still cut to 512 before
+  it is compared (`normalizeIdentifier`, `normalizeKey`). This is a residual of the
+  refusal, which applies at write only.
+
+**Detection rule.** A row is affected when a field's length is 512 code units and its
+last unit is U+FFFD (bytes `EF BF BD`). **NOT RUN against a live store.** Check
+`character_length` and `substring` against the store's SQL functions before use.
+
+```sql
+-- NOT RUN against a live store. Verify character_length and substring against the
+-- store's SQL functions before use. Column names are from the agent_events schema
+-- above; "id" is quoted because it is reserved.
+SELECT "id", "ts", 'session_id' AS "field" FROM "agent_events"
+ WHERE character_length("session_id") = 512 AND substring("session_id", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'repo' FROM "agent_events"
+ WHERE character_length("repo") = 512 AND substring("repo", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'branch' FROM "agent_events"
+ WHERE character_length("branch") = 512 AND substring("branch", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'node_id' FROM "agent_events"
+ WHERE character_length("node_id") = 512 AND substring("node_id", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'linear_identifier' FROM "agent_events"
+ WHERE character_length("linear_identifier") = 512 AND substring("linear_identifier", 512, 1) = '�';
+```
+
+- `character_length` counts code points, not UTF-16 code units. A value that is 512 code
+  units long and holds an astral character has fewer code points, so this query misses
+  it. To catch those, select rows whose field ends in U+FFFD without the length test, and
+  check `value.length === 512` in application code.
+- The scan cannot tell a straddle from a collector that wrote U+FFFD itself at 512 units.
+  Each hit needs an owner decision.
+- Run it from Greptime's console, not through `substrate-mcp`, which offers no statement
+  route (see [Reading the ledger](#reading-the-ledger)).
 
 ## Idempotent replay (U5-4a)
 
@@ -614,11 +689,12 @@ hold this shape: only `greptime.ts` and `brief.ts` may compose a statement, and 
 tool or route may take one. A `sql` tool would have made the read path an arbitrary
 door onto every row in the ledger, redaction and chain notwithstanding.
 
-**Query keys are normalised like stored ones.** `Substrate.queryEvents` runs every
-identifier filter through `normalizeIdentifier`, for the same reason `emit` looks up
-a session's chain tip that way. Querying the raw value would match nothing for any
-identifier that redaction or the 512-character cap touched — and an empty window
-reads exactly like an empty ledger.
+**Query keys are normalised like stored ones.** `Substrate.queryEvents` runs the
+`session_id` and `repo` filters through `normalizeKey`, and every other identifier
+filter through `normalizeIdentifier` (`packages/mcp-server/src/service.ts`), for the
+same reason `emit` looks up a session's chain tip that way. Querying the raw value
+would match nothing for any identifier that redaction or the 512-code-unit cut
+touched — and an empty window reads exactly like an empty ledger.
 
 **`payload` is excluded unless asked for.** It is the one unbounded column, up to
 16 KB an event, so a 500-row reply carrying it would be megabytes of MCP response
