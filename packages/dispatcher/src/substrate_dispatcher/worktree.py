@@ -150,6 +150,14 @@ def _ref_exists(run: Runner, repo: Path, ref: str) -> bool:
     return _git(run, repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0
 
 
+def _existing_ancestor(path: Path) -> Path:
+    """The nearest directory at or above ``path`` that exists: the filesystem a worktree created there lands on."""
+    probe = Path(path)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return probe
+
+
 def ensure_worktree(
     repo: Path,
     graph_id: str,
@@ -159,7 +167,7 @@ def ensure_worktree(
     run: Runner = subprocess.run,
     disk_usage: Callable[[str], Any] = shutil.disk_usage,
 ) -> Path:
-    """Return the graph's worktree, creating it only with at least the free-disk floor free on /.
+    """Return the graph's worktree, creating it only with at least the free-disk floor free under the root it lands in.
 
     ``root`` pins one directory. Unset, the configured roots are used: a worktree git already has under any
     of them is returned, and a new one is created under the first.
@@ -171,11 +179,13 @@ def ensure_worktree(
         if candidate.resolve().parent != candidate_root.resolve():
             raise WorktreeRefused(f"worktree path {candidate} escapes {candidate_root}", "invalid-graph-id")
 
-    free = disk_usage("/").free
+    # The worktree is created under roots[0], so the floor is read where it will land: the nearest directory above it that exists.
+    probe = _existing_ancestor(roots[0])
+    free = disk_usage(str(probe)).free
     floor = min_free_bytes()
     if free < floor:
         raise WorktreeRefused(
-            f"only {free / 1024**3:.1f} GB free on /; a worktree needs at least {floor / 1024**3:g} GB",
+            f"only {free / 1024**3:.1f} GB free on {probe}; a worktree needs at least {floor / 1024**3:g} GB",
             "low-disk",
         )
 

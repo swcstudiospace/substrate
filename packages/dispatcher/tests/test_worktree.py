@@ -168,7 +168,7 @@ def test_ensure_worktree_disk_floor(repo: Path, tmp_path: Path, free, refused):
         return subprocess.run(argv, **kwargs)
 
     def usage(path: str) -> Usage:
-        assert path == "/"
+        assert path == str(tmp_path)
         return Usage(100 * 1024**3, 0, free)
 
     root = tmp_path / "wt"
@@ -213,6 +213,28 @@ def test_ensure_worktree_floor_follows_env(repo: Path, tmp_path: Path, monkeypat
     assert err.value.marker == "low-disk"
     assert "20 GB" in str(err.value)
     assert calls == []
+
+
+def test_ensure_worktree_reads_free_space_where_the_worktree_goes(repo: Path, tmp_path: Path):
+    probed: list[str] = []
+
+    def probe(path: str) -> Usage:
+        probed.append(path)
+        return PLENTY
+
+    ensure_worktree(repo, GID, "main", root=tmp_path / "not-yet" / "wt", run=Recorder(), disk_usage=probe)
+
+    assert probed == [str(tmp_path)]
+
+
+def test_low_disk_refusal_names_the_filesystem_it_checked(repo: Path, tmp_path: Path):
+    low = Usage(100 * 1024**3, 99 * 1024**3, 1 * 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=tmp_path / "wt", run=Recorder(), disk_usage=lambda _path: low)
+
+    assert err.value.marker == "low-disk"
+    assert f"free on {tmp_path};" in str(err.value)
 
 
 def test_ensure_worktree_creates_under_the_configured_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
