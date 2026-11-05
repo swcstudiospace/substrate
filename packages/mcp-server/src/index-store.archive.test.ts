@@ -245,7 +245,7 @@ describeLive("index archive against a live index", () => {
 				expect(parked[0]?.entry_hash).toBe(`hash-${RUN}-q1`);
 				// The corpus manifest came back as the archive wrote it: jsonb as text, the bigint sequence and microsecond timestamps unchanged.
 				const corpus = tableSpec("corpus_documents");
-				expect(await directRows(corpus, restored)).toEqual(fileRows(dir, corpus));
+				expect(await directRows(corpus, restored)).toEqual(fileRows(dir, corpus) as Array<Record<string, unknown>>);
 				// A tombstone with its successor and its jsonb signals; manifest_seq is the source's own value, not a fresh sequence value.
 				const source = (await raw`select manifest_seq::text as seq, signals::text as signals from corpus_documents where repo = ${RUN} and path = 'docs/c.md'`) as Array<Record<string, unknown>>;
 				const doc = (await restored`select manifest_seq::text as seq, signals::text as signals, tombstoned_at is not null as tombstoned, superseded_by from corpus_documents where repo = ${RUN} and path = 'docs/c.md'`) as Array<Record<string, unknown>>;
@@ -267,7 +267,8 @@ describeLive("index archive against a live index", () => {
 		// The known maximum: the largest manifest_seq the archive carries. The restore writes those values explicitly.
 		const seqs = (fileRows(dir, tableSpec("corpus_documents")) as Array<{ manifest_seq: string }>).map((row) => BigInt(row.manifest_seq));
 		expect(seqs.length).toBeGreaterThanOrEqual(3);
-		const known = seqs.reduce((max, seq) => (seq > max ? seq : max), 0n);
+		let known = 0n;
+		for (const seq of seqs) if (seq > known) known = seq;
 		const name = `substrate_restore_seq_${Date.now().toString(36)}`;
 		await raw.unsafe(`create database "${name}"`);
 		const url = withDatabase(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), name);

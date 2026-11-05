@@ -434,7 +434,7 @@ describe("the fabric's corpus source", () => {
 });
 
 describe("a stored docs.sync note", () => {
-	const sync = (lag: unknown) => ({ surface: "omp", kind: "note" as const, summary: "docs sync", session_id: "docs-sync:t", payload: { action: "docs.sync", runtime: "corpus-sync", lag_s: lag } });
+	const sync = (lag: unknown) => ({ surface: "omp" as const, kind: "note" as const, summary: "docs sync", session_id: "docs-sync:t", payload: { action: "docs.sync", runtime: "corpus-sync", lag_s: lag } });
 	const rowFor = async (w: World) => {
 		const corpus = await w.substrate.fabricSources().corpus();
 		return corpusRow(healthyFacts({ corpus: { enabled: true, readings: corpus.readings, thresholds: w.substrate.fabricSources().config.docsSlo, unread: corpus.unread } }));
