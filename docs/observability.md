@@ -227,6 +227,8 @@ answers `not_modified: true` with no text by the same matcher — see
 `docs/grok-bot.md` § The brief contract over MCP. Every answer at either door counts
 once in `substrate.brief.result`.
 
+While the cache cannot be read (its breaker is open) and a live source is down, the brief is served as `snapshot` from this process's own last complete brief for the same arguments: at most 256 argument sets, held in memory, for the same `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` window and on the same terms. A forget another process made is not seen while the cache is unreadable; once it can be read again its forget mark decides, and a forget this process made refuses the copy at once. A cache that answers with no snapshot for the key is not an outage, and the brief stays `degraded`.
+
 `GET /healthz` is memoised for `SUBSTRATE_HEALTHZ_CACHE_MS` (5000 ms; `0` recomputes
 on every call): the body gains `cachedAt` (ISO time it was computed) and `stale`
 (`true` when this answer was served from the memo), and the status code is derived
