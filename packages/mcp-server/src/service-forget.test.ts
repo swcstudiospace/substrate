@@ -9,9 +9,11 @@
  * error is pending and a re-run retries only that delete; an unconfigured plane is skipped; one ledger note per call,
  * as the caller's surface and session, and a ledger failure is reported and never thrown; both cache generations move
  * when a row changed and neither moves on a no-op re-run; the delete waits behind a retain of the same document; a parked
- * replay of a forgotten entry is dropped; and recall, the brief and memory search stop serving a forgotten entry.
+ * replay of a forgotten entry is dropped; recall, the brief and memory search stop serving a forgotten entry; and a forget
+ * refuses the in-process last-good brief saved at or before it while the cache breaker is open.
  */
 import { describe, expect, test } from "bun:test";
+import { PlaneRegistry, callPlane, type PlaneGate } from "@substrate/observability";
 import { CACHE_TTL, FORGET_MARK_KEY, FORGET_MARK_MARGIN_S, MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY, ReadThroughCache, classOf, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
@@ -21,6 +23,7 @@ import { retainDocumentId } from "./memory-retain.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { clearEnsuredBanks, type FetchLike } from "./planes/hindsight.ts";
 import { Substrate, type ForgetCaller } from "./service.ts";
+import { defined } from "./test-support.ts";
 import type { MemoryEntry, MemoryWriteResult, SubstrateEvent } from "./types.ts";
 
 const GRANTS = `[{"surfaces":["cursor"],"scopes":["graph"],"kinds":["fact","decision"]}]`;
@@ -98,6 +101,20 @@ class CountingRedis implements CacheRedis {
 	}
 }
 
+/** The counting server behind a plane gate, the way `bunRedis` puts its commands behind one: an open breaker refuses a command before the server is touched. */
+class GatedRedis implements CacheRedis {
+	constructor(private readonly inner: CountingRedis, private readonly gate: PlaneGate) {}
+	get(key: string): Promise<string | null> {
+		return callPlane(this.gate, "get", () => this.inner.get(key));
+	}
+	set(key: string, value: string, ttlSeconds: number): Promise<void> {
+		return callPlane(this.gate, "set", () => this.inner.set(key, value, ttlSeconds));
+	}
+	incr(key: string): Promise<number> {
+		return callPlane(this.gate, "incr", () => this.inner.incr(key));
+	}
+}
+
 /** A ledger stub that keeps every event it is given; `fail` makes the insert throw. */
 class LedgerStub {
 	readonly events: SubstrateEvent[] = [];
@@ -139,13 +156,13 @@ interface World {
 	plane: Plane;
 }
 
-function world(options: { env?: Record<string, string>; ledger?: boolean; index?: boolean; now?: () => number; swr?: boolean } = {}): World {
+function world(options: { env?: Record<string, string>; ledger?: boolean; index?: boolean; now?: () => number; swr?: boolean; gated?: PlaneGate } = {}): World {
 	clearEnsuredBanks();
 	const fake = new HindsightFake();
 	const store = new ForgetStore();
 	const redis = new CountingRedis();
 	const cache = new ReadThroughCache({
-		redis,
+		redis: options.gated === undefined ? redis : new GatedRedis(redis, options.gated),
 		enabled: true,
 		log: () => {},
 		...(options.now === undefined ? {} : { now: options.now }),
@@ -187,7 +204,7 @@ function setEnv(values: Record<string, string | undefined>): () => void {
 	};
 }
 
-async function inWorld<T>(options: { env?: Record<string, string>; ledger?: boolean; plane?: boolean; now?: () => number; swr?: boolean }, body: (w: World) => Promise<T>): Promise<T> {
+async function inWorld<T>(options: { env?: Record<string, string>; ledger?: boolean; plane?: boolean; now?: () => number; swr?: boolean; gated?: PlaneGate }, body: (w: World) => Promise<T>): Promise<T> {
 	const restore = setEnv(options.plane === false ? HINDSIGHT_OFF : HINDSIGHT_ON);
 	try {
 		return await body(world(options));
@@ -665,6 +682,33 @@ describe("Substrate.memoryForget: a saved brief has no generation, so the forget
 			takeMemoryDown(w);
 			await bumpGenerations(w);
 			expect((await w.substrate.briefDetailed(request)).state).toBe("degraded");
+		});
+	});
+
+	test("a forget that deletes a plane document refuses the in-process last-good brief while the cache breaker is open", async () => {
+		const gate = new PlaneRegistry({ enabled: true, failureThreshold: 1, openMs: 3_600_000 }).gate("cache");
+		const breaker = defined(gate.breaker, "cache breaker");
+		await inWorld({ ledger: false, gated: gate }, async (w) => {
+			const written = await w.substrate.writeMemory({ scope: "graph:ut-1", kind: "decision", subject: "handoff-rule", text: "fence every handoff of the node lease", writer: "cursor", source_event: "evt_e2e" });
+			expect(written.outcome).toBe("accepted");
+			if (written.entry === undefined) throw new Error("an accepted write carries no entry");
+			await w.substrate.drainPendingRetains(2000);
+			// Composed with the breaker closed: this brief is kept in process as the last-good for these arguments.
+			const complete = await w.substrate.briefDetailed(request);
+			expect(complete.state).toBe("complete");
+			expect(complete.text).toContain("fence every handoff of the node lease");
+
+			// The forget deletes the plane document the brief was built from, so the process is marked forgotten at this moment.
+			const report = await w.substrate.memoryForget(forgetRequest([written.entry.id]), CALLER);
+			expect(report.plane.deleted).toBe(1);
+
+			// The breaker opens and the memory read fails: the cache cannot answer, so only the in-process copy could be served.
+			breaker.onFailure("cache plane down");
+			takeMemoryDown(w);
+			const served = await w.substrate.briefDetailed(request);
+			expect(served.state).toBe("degraded");
+			expect(served.snapshotAt).toBeNull();
+			expect(served.text).not.toContain("fence every handoff of the node lease");
 		});
 	});
 });
