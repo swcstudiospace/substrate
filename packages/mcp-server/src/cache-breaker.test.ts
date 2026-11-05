@@ -238,4 +238,22 @@ describe("the last-good brief is kept in process while the cache breaker is open
 		expect(degraded.state).toBe("degraded");
 		expect(degraded.snapshotAt).toBeNull();
 	});
+
+	test("a mark read that fails while the breaker is closed refuses the last-good copy: a mark that cannot be read is not 'no forget'", async () => {
+		const { breaker, cache, store } = closedGate(3_600_000);
+		const state = { status: "active", down: false };
+		const substrate = new Substrate(loadConfig({}), { index: briefSource(state) as never, greptime: null, cache });
+		expect((await substrate.briefDetailed(request)).state).toBe("complete");
+		store.values.clear();
+		const get = store.get.bind(store);
+		store.get = async (key: string) => {
+			if (key === FORGET_MARK_KEY) throw new Error("cache command timed out");
+			return get(key);
+		};
+		state.down = true;
+		const degraded = await substrate.briefDetailed(request);
+		expect(breaker.state()).toBe("closed");
+		expect(degraded.state).toBe("degraded");
+		expect(degraded.snapshotAt).toBeNull();
+	});
 });

@@ -882,9 +882,10 @@ export class ReadThroughCache {
 
 	/**
 	 * What the forget mark says about a saved brief composed at `at` (the snapshot's own ISO timestamp). `clear`: no forget was
-	 * recorded at or after it. `forgotten`: one was, or the mark may be set but cannot be read back (the last mark write failed),
-	 * or `at` is not a time. `unreadable`: the cache cannot answer now. `quiet` counts and degrades nothing, for the
-	 * stale-while-revalidate probe, which is an optimisation; the degraded fallback is not quiet, like `peek`.
+	 * recorded at or after it. `forgotten`: one was, `at` is not a time, or the mark cannot be read back (a timeout, a dropped
+	 * connection, a failed mark write): a mark that may be set is not "no forget". `unreadable`: the breaker refused the read (or the
+	 * cache is off), so the cache cannot answer by policy. `quiet` counts and degrades nothing, for the stale-while-revalidate probe,
+	 * which is an optimisation; the degraded fallback is not quiet, like `peek`.
 	 */
 	async forgetVerdict(at: string, quiet: boolean): Promise<"clear" | "forgotten" | "unreadable"> {
 		if (!this.enabled || !this.redis) return "unreadable";
@@ -900,7 +901,8 @@ export class ReadThroughCache {
 			return Number.isFinite(markedMs) && atMs > markedMs ? "clear" : "forgotten";
 		} catch (cause) {
 			if (!quiet) this.fail(cause, true, "gen");
-			return "unreadable";
+			// Only the breaker's refusal makes the cache unreadable by policy; any other failure leaves the mark unknown, which refuses.
+			return cause instanceof BreakerOpenError ? "unreadable" : "forgotten";
 		}
 	}
 
