@@ -9,7 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { RECONCILE_MAX_ITEMS } from "@substrate/corpus";
-import { type CacheKeyClass, classOf, FORGET_MARK_KEY, type ReadThroughCache } from "./cache.ts";
+import { CACHE_PREFIX, type CacheKeyClass, classOf, FORGET_MARK_KEY, type ReadThroughCache } from "./cache.ts";
 import { type ReconcileDeps, runReport } from "./reconcile-run.ts";
 import type { Finding, Report } from "./reconcile.ts";
 import { redact } from "./redact.ts";
@@ -96,14 +96,16 @@ export function failedRepair(error: string): RepairResult {
 }
 
 /**
- * sha256 hex over the findings, sorted by comparison then key, each as `comparison|key`, joined by newline. The detail is
- * not hashed: the digest pins which mismatches exist, so any change in them refuses a stale plan.
+ * sha256 hex over the findings and the counter keys. Findings sort by comparison then key, each as `comparison|key`; counter
+ * keys sort by name, each as `counter|key`; all joined by newline. The detail is not hashed: the digest pins which mismatches
+ * exist and which counters are cached, so any change in them refuses a stale plan.
  */
-export function findingsDigest(findings: readonly Finding[]): string {
-	const lines = [...findings]
+export function planDigest(findings: readonly Finding[], counters: readonly string[]): string {
+	const findingLines = [...findings]
 		.sort((a, b) => (a.comparison < b.comparison ? -1 : a.comparison > b.comparison ? 1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 		.map((finding) => `${finding.comparison}|${finding.key}`);
-	return createHash("sha256").update(lines.join("\n")).digest("hex");
+	const counterLines = [...counters].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).map((key) => `counter|${key}`);
+	return createHash("sha256").update([...findingLines, ...counterLines].join("\n")).digest("hex");
 }
 
 /**
@@ -119,10 +121,21 @@ export function failureReason(cause: unknown): string {
 }
 
 /**
- * The plan for a report. It lists one flush item when the report has generation findings, and none otherwise. The digest
- * is taken over every finding, so a plan goes stale when any comparison changes.
+ * The generation-class keys in the cache: the counters and the forget mark. A plan pins them and a repair re-reads them, so
+ * any counter cut changes the digest. One `substrate:v1:gen*` scan, filtered by class. `truncated` is true when the scan did
+ * not complete; a partial set is never pinned or compared.
  */
-export function planFromReport(report: Report, now: Date): Plan {
+export async function scanCounters(cache: Pick<ReadThroughCache, "scanKeys">): Promise<{ keys: string[]; truncated: boolean }> {
+	const scan = await cache.scanKeys(`${CACHE_PREFIX}:gen*`, FLUSH_SCAN_LIMIT);
+	const keys = scan.keys.filter((key) => classOf(key) === "gen").sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	return { keys, truncated: scan.truncated };
+}
+
+/**
+ * The plan for a report. It lists one flush item when the report has generation findings, and none otherwise. The digest
+ * is taken over every finding and every counter key, so a plan goes stale when any comparison changes or a counter is removed.
+ */
+export function planFromReport(report: Report, now: Date, counters: readonly string[]): Plan {
 	const orphans = report.findings.filter((finding) => finding.comparison === "generation").map((finding) => finding.key);
 	const items: PlanItem[] =
 		orphans.length === 0
@@ -139,7 +152,7 @@ export function planFromReport(report: Report, now: Date): Plan {
 		schema: "substrate.reconcile.plan.v1",
 		created_at: now.toISOString(),
 		window_hours: report.window_hours,
-		report_digest: findingsDigest(report.findings),
+		report_digest: planDigest(report.findings, counters),
 		items,
 	};
 }
@@ -192,7 +205,8 @@ function boundPasses(passes: readonly string[][], limit: number): string[][] {
 }
 
 /**
- * Run a plan. It re-runs the read-only report first, then refuses when the findings differ from the plan's digest, when no
+ * Run a plan. It re-runs the read-only report first, then refuses when the findings or the cache counters differ from the
+ * plan's digest, when no
  * generation orphan remains, or when any plan item is not the flush this repair runs: another action, another match than
  * `substrate:v1:*`, or an orphan the fresh report does not list as live. It then scans `substrate:v1:*` once and refuses when
  * the scan cannot complete, so a partial key list is never flushed. The scan is read-only and runs in every mode, so a dry run
@@ -207,11 +221,25 @@ export async function executePlan(
 	options: { execute: boolean; serverStopped: boolean },
 ): Promise<RepairResult> {
 	const live = await runReport(deps);
-	if (findingsDigest(live.findings) !== plan.report_digest) {
+	let liveCounters: { keys: string[]; truncated: boolean };
+	try {
+		liveCounters = await scanCounters(deps.cache);
+	} catch (cause) {
+		const error = failureReason(cause);
+		return repairOutcome({ executed: false, refused: false, reason: `failed: the cache counters could not be read: ${error}`, error });
+	}
+	if (liveCounters.truncated) {
 		return repairOutcome({
 			executed: false,
 			refused: true,
-			reason: "refused: the findings changed since the plan was made (digest mismatch); re-plan before repairing",
+			reason: "refused: the cache counters could not be read completely (the cache is off, or the prefix holds more than 1000000 keys); nothing was removed",
+		});
+	}
+	if (planDigest(live.findings, liveCounters.keys) !== plan.report_digest) {
+		return repairOutcome({
+			executed: false,
+			refused: true,
+			reason: "refused: the findings or the cache counters changed since the plan was made (digest mismatch); re-plan before repairing",
 		});
 	}
 	const orphans = live.findings.filter((finding) => finding.comparison === "generation");

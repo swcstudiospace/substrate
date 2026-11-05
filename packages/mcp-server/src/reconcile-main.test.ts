@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { AuditLog } from "@substrate/audit";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
-import { type Plan, planFromReport } from "./reconcile-repair.ts";
+import { type Plan, planFromReport, scanCounters } from "./reconcile-repair.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
 import { DEFAULT_RECONCILE_CAPS, runReport } from "./reconcile-run.ts";
 import { type ReconcileClients, type ReconcileIo, reconcileMain } from "./reconcile-main.ts";
@@ -69,10 +69,8 @@ function repairClients(initial: readonly string[]): { clients: ReconcileClients;
 
 /** The plan a report over these clients makes, with the text `plan` would write for it. */
 async function planOver(clients: ReconcileClients): Promise<{ plan: Plan; text: string }> {
-	const plan = planFromReport(
-		await runReport({ ledger: clients.ledger, index: clients.index, cache: clients.cache, now: NOW, windowHours: 24, caps: DEFAULT_RECONCILE_CAPS }),
-		NOW,
-	);
+	const report = await runReport({ ledger: clients.ledger, index: clients.index, cache: clients.cache, now: NOW, windowHours: 24, caps: DEFAULT_RECONCILE_CAPS });
+	const plan = planFromReport(report, NOW, (await scanCounters(clients.cache)).keys);
 	return { plan, text: `${JSON.stringify(plan, null, 2)}\n` };
 }
 
@@ -135,10 +133,8 @@ describe("reconcileMain", () => {
 			};
 			const clients: ReconcileClients = { ledger, index, cache, close: async () => {} };
 			const config = loadConfig(env);
-			const plan = planFromReport(
-				await runReport({ ledger, index, cache, now, windowHours: config.reconcile.windowHours, caps: DEFAULT_RECONCILE_CAPS }),
-				now,
-			);
+			const report = await runReport({ ledger, index, cache, now, windowHours: config.reconcile.windowHours, caps: DEFAULT_RECONCILE_CAPS });
+			const plan = planFromReport(report, now, (await scanCounters(cache)).keys);
 			const planPath = join(dir, "plan.json");
 			await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`);
 			const out: string[] = [];

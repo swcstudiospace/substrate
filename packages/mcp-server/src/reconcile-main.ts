@@ -22,7 +22,7 @@ import { IndexStore } from "./index-store.ts";
 import { openAuditLog } from "./observe.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
 import { DEFAULT_RECONCILE_CAPS, type ReconcileDeps, runReport } from "./reconcile-run.ts";
-import { executePlan, failedRepair, failureReason, planFromReport, type Plan, type RepairResult } from "./reconcile-repair.ts";
+import { executePlan, failedRepair, failureReason, planFromReport, type Plan, type RepairResult, scanCounters } from "./reconcile-repair.ts";
 import type { Report } from "./reconcile.ts";
 
 /** The three layers a run reads, and the call that releases the index socket once the run is over. */
@@ -232,7 +232,10 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 
 		if (command.command === "plan") {
 			const report = await runReport(deps);
-			const plan = planFromReport(report, now());
+			// The plan pins the counter keys too, so a counter cut after the plan is made refuses the repair (see planDigest).
+			const counters = await scanCounters(deps.cache);
+			if (counters.truncated) throw new Error("the cache counters could not be read completely, so the plan cannot pin them");
+			const plan = planFromReport(report, now(), counters.keys);
 			await writeFile(command.out, `${JSON.stringify(plan, null, 2)}\n`, { flag: "wx" });
 			io.out(`plan written to ${command.out}: ${plan.items.length} item(s) from ${report.findings.length} finding(s)`);
 			return 0;

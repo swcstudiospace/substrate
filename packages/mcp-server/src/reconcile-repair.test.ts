@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { RECONCILE_MAX_ITEMS } from "@substrate/corpus";
 import type { ReadThroughCache } from "./cache.ts";
-import { executePlan, findingsDigest, planFromReport } from "./reconcile-repair.ts";
+import { executePlan, type Plan, planDigest, planFromReport, scanCounters } from "./reconcile-repair.ts";
 import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
 import { DEFAULT_RECONCILE_CAPS, type ReconcileDeps, runReport } from "./reconcile-run.ts";
 
@@ -78,10 +78,16 @@ function fakeDeps(
 	return { ledger, index, cache: cache.cache, now: NOW, windowHours: 24, caps: DEFAULT_RECONCILE_CAPS };
 }
 
+/** The plan `plan` makes over these deps: one fresh report and one counter scan, pinned together. */
+async function planOver(deps: ReconcileDeps & { cache: Pick<ReadThroughCache, "scanKeys"> }): Promise<Plan> {
+	const counters = await scanCounters(deps.cache);
+	return planFromReport(await runReport(deps), NOW, counters.keys);
+}
+
 describe("planFromReport", () => {
 	test("lists one flush item naming the generation orphans", async () => {
 		const deps = fakeDeps(orphanCache(), []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		expect(plan.schema).toBe("substrate.reconcile.plan.v1");
 		expect(plan.items).toHaveLength(1);
 		expect(plan.items[0]?.match).toBe("substrate:v1:*");
@@ -90,16 +96,21 @@ describe("planFromReport", () => {
 
 	test("a clean report lists no items", async () => {
 		const deps = fakeDeps(fakeCache(["other:unrelated"]), []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		expect(plan.items).toEqual([]);
 	});
 });
 
-describe("findingsDigest", () => {
+describe("planDigest", () => {
 	test("does not depend on the order of the findings", () => {
 		const a = { comparison: "generation" as const, key: "gen:graph:a", detail: "x" };
 		const b = { comparison: "lease" as const, key: "g/n", detail: "y" };
-		expect(findingsDigest([a, b])).toBe(findingsDigest([b, a]));
+		expect(planDigest([a, b], [])).toBe(planDigest([b, a], []));
+	});
+
+	test("changes when a cache counter is present or removed", () => {
+		const a = { comparison: "generation" as const, key: "gen:graph:a", detail: "x" };
+		expect(planDigest([a], ["substrate:v1:gen:graph:live"])).not.toBe(planDigest([a], []));
 	});
 });
 
@@ -107,7 +118,7 @@ describe("executePlan", () => {
 	test("a dry run writes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const result = await executePlan(plan, deps, { execute: false, serverStopped: false });
 		expect(result).toEqual({
 			executed: false,
@@ -126,7 +137,7 @@ describe("executePlan", () => {
 	test("a digest mismatch refuses and writes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		cache.keys.add("substrate:v1:gen:graph:g-new");
 		const result = await executePlan(plan, deps, { execute: true, serverStopped: true });
 		expect(result.refused).toBe(true);
@@ -137,9 +148,30 @@ describe("executePlan", () => {
 		expect(cache.keys.size).toBe(FIXTURE_KEYS.length + 1);
 	});
 
+	test("a counter cut that removes only a live-graph counter refuses the next execute", async () => {
+		// 499 answers fill the first pass under the bound, so the counter pass gets one key: the live-graph counter sorts first
+		// and the orphan survives. The findings are unchanged; only the counter cut changes the digest.
+		const answers = Array.from({ length: RECONCILE_MAX_ITEMS - 1 }, (_, i) => `substrate:v1:brief:n${String(i).padStart(3, "0")}`);
+		const liveCounter = "substrate:v1:gen:graph:a-live";
+		const cache = fakeCache([...answers, liveCounter, ORPHAN_KEY, MEMORY_COUNTER_KEY, FORGET_MARK]);
+		const deps = fakeDeps(cache, ["a-live"]);
+		const plan = await planOver(deps);
+		const first = await executePlan(plan, deps, { execute: true, serverStopped: true });
+		expect(first).toMatchObject({ executed: true, refused: false, removed: RECONCILE_MAX_ITEMS, truncated: true });
+		expect(cache.removed).toContain(liveCounter);
+		expect(cache.keys.has(ORPHAN_KEY)).toBe(true);
+		const unlinksAfterFirst = cache.calls.filter((call) => call.startsWith("unlink")).length;
+		const second = await executePlan(plan, deps, { execute: true, serverStopped: true });
+		expect(second).toMatchObject({ executed: false, refused: true, removed: 0 });
+		expect(second.reason).toMatch(/digest mismatch/);
+		expect(cache.calls.filter((call) => call.startsWith("unlink"))).toHaveLength(unlinksAfterFirst);
+		expect(cache.keys.has(ORPHAN_KEY)).toBe(true);
+		expect(cache.keys.has(FORGET_MARK)).toBe(true);
+	});
+
 	test("an orphan that is gone refuses and writes nothing", async () => {
 		const cache = orphanCache();
-		const plan = planFromReport(await runReport(fakeDeps(cache, [])), NOW);
+		const plan = await planOver(fakeDeps(cache, []));
 		// The graph now exists in graph_index, so the orphan is gone.
 		const result = await executePlan(plan, fakeDeps(cache, ["g-gone"]), { execute: true, serverStopped: true });
 		expect(result.refused).toBe(true);
@@ -151,7 +183,7 @@ describe("executePlan", () => {
 	test("a plan with no generation orphans left to repair refuses", async () => {
 		const cache = fakeCache(["other:unrelated"]);
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const result = await executePlan(plan, deps, { execute: true, serverStopped: true });
 		expect(result).toEqual({
 			executed: false,
@@ -169,7 +201,7 @@ describe("executePlan", () => {
 	test("execute removes answers, then counters, then the forget mark, and only those", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const result = await executePlan(plan, deps, { execute: true, serverStopped: true });
 		expect(result).toEqual({
 			executed: true,
@@ -197,7 +229,7 @@ describe("executePlan", () => {
 	test("a second execute after the first finds nothing and is a no-op", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		await executePlan(plan, deps, { execute: true, serverStopped: true });
 		const second = await executePlan(plan, deps, { execute: true, serverStopped: true });
 		expect(second.refused).toBe(true);
@@ -209,7 +241,7 @@ describe("executePlan", () => {
 	test("a scan that cannot be completed removes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const unlinkKeys = mock(async (_keys: readonly string[], _onBatch?: (removed: number) => void) => 0);
 		const incomplete = {
 			...deps,
@@ -230,7 +262,7 @@ describe("executePlan", () => {
 	test("a failure in the answer pass leaves every counter and the mark in place", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const unlinkKeys = mock(async (_keys: readonly string[], _onBatch?: (removed: number) => void): Promise<number> => {
 			throw new Error("unlink failed");
 		});
@@ -249,7 +281,7 @@ describe("executePlan", () => {
 	test("a failure in the counter pass keeps the forget mark in place", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		let pass = 0;
 		const unlinkKeys = mock(async (keys: readonly string[], onBatch?: (removed: number) => void): Promise<number> => {
 			pass += 1;
@@ -271,7 +303,7 @@ describe("executePlan", () => {
 	test("a failure in the mark pass leaves the answers and counters removed and the mark in place", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const unlinkKeys = mock(async (keys: readonly string[], onBatch?: (removed: number) => void): Promise<number> => {
 			if (keys.includes(FORGET_MARK)) throw new Error("unlink failed");
 			return cache.cache.unlinkKeys(keys, onBatch);
@@ -291,7 +323,7 @@ describe("executePlan", () => {
 	test("execute without the server stopped refuses and removes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const result = await executePlan(plan, deps, { execute: true, serverStopped: false });
 		expect(result).toEqual({
 			executed: false,
@@ -312,7 +344,7 @@ describe("executePlan", () => {
 	test("a plan item that names another match is refused and writes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const widened = { ...plan, items: plan.items.map((item) => ({ ...item, match: "substrate:v1:brief:*" })) };
 		const result = await executePlan(widened, deps, { execute: true, serverStopped: true });
 		expect(result.refused).toBe(true);
@@ -324,7 +356,7 @@ describe("executePlan", () => {
 	test("a plan item with another action is refused and writes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const other = { ...plan, items: plan.items.map((item) => ({ ...item, action: "prune-ledger" as unknown as "flush-derived-cache" })) };
 		const result = await executePlan(other, deps, { execute: true, serverStopped: true });
 		expect(result.refused).toBe(true);
@@ -336,7 +368,7 @@ describe("executePlan", () => {
 	test("a plan item naming an orphan the fresh report does not list is refused and writes nothing", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const ghost = {
 			...plan,
 			items: [
@@ -354,7 +386,7 @@ describe("executePlan", () => {
 	test("a flush that fails after one batch reports the keys that batch removed", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const failing = {
 			...deps,
 			cache: {
@@ -376,7 +408,7 @@ describe("executePlan", () => {
 	test("a scan that fails removes nothing and reports the failure", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const unlinkKeys = mock(async (_keys: readonly string[], _onBatch?: (removed: number) => void) => 0);
 		const failing = {
 			...deps,
@@ -403,7 +435,7 @@ describe("executePlan", () => {
 		const briefs = Array.from({ length: 600 }, (_, i) => `substrate:v1:brief:k${String(i).padStart(3, "0")}`);
 		const cache = fakeCache([ORPHAN_KEY, ...briefs]);
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		const result = await executePlan(plan, deps, { execute: true, serverStopped: true });
 		expect(result).toEqual({
 			executed: true,
@@ -425,7 +457,7 @@ describe("executePlan", () => {
 		const briefs = Array.from({ length: 600 }, (_, i) => `substrate:v1:brief:k${String(i).padStart(3, "0")}`);
 		const cache = fakeCache([ORPHAN_KEY, ...briefs]);
 		const deps = fakeDeps(cache, []);
-		const plan = planFromReport(await runReport(deps), NOW);
+		const plan = await planOver(deps);
 		await executePlan(plan, deps, { execute: true, serverStopped: true });
 		const second = await executePlan(plan, deps, { execute: true, serverStopped: true });
 		expect(second).toMatchObject({ executed: true, planned: 601 - RECONCILE_MAX_ITEMS, removed: 601 - RECONCILE_MAX_ITEMS, remaining: 0, truncated: false, refused: false });
