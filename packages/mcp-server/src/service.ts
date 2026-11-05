@@ -51,6 +51,7 @@ import {
 	createReadThroughCache,
 	earliestRefreshAt,
 	graphGenerationKey,
+	snapshotKey,
 	type CacheHealth,
 	type CacheSample,
 	type ReadThroughCache,
@@ -539,6 +540,8 @@ function boundedSurface(surface: string | null | undefined): string {
 
 /** Keeps the section-shaped brief entry apart from the plain-text entries older processes wrote under the same cache class. */
 const BRIEF_CACHE_SHAPE = "sections-v1";
+/** The most in-process last-good briefs kept, one per snapshot key. A fixed cap: the cache holds no bound of its own for these keys. */
+const MAX_IN_PROCESS_BRIEF_SNAPSHOTS = 256;
 
 /**
  * The brief as `POST /brief` answers it (uplift-2 R1). `text` is what every
@@ -1636,6 +1639,13 @@ export class Substrate {
 	readonly desktop: DesktopDriver | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
+	/**
+	 * The last complete brief this process composed, per `brief-snapshot` key. Served by `inProcessLastGood` while the cache cannot be
+	 * read; at most `MAX_IN_PROCESS_BRIEF_SNAPSHOTS` keys, the least recently written dropped first.
+	 */
+	private readonly briefLastGood = new Map<string, BriefSnapshot>();
+	/** Epoch ms of the last forget this process made. An in-process snapshot saved at or before it is not served. */
+	private briefForgottenAtMs = Number.NEGATIVE_INFINITY;
 	/** Brief requests per repo over a sliding hour, for the cache preloader (phase 47). Written only while the preloader is on. */
 	readonly repoAccess = new RepoAccess();
 	/** The cache preloader (phase 47): started by `startRecall` while `SUBSTRATE_CACHE_PRELOAD=on`; null while it is off or stopped. */
@@ -2483,6 +2493,43 @@ export class Substrate {
 	}
 
 	/**
+	 * Keeps a brief this process just composed complete as the in-process last-good snapshot, under the key the cache stores it at.
+	 * Written whenever such a brief is built, whatever the breaker says; only while the window is not zero and the cache is on.
+	 */
+	private rememberLastGood(key: string, snapshot: BriefSnapshot): void {
+		if (this.config.briefSnapshotTtlS <= 0 || !this.cache.health().enabled) return;
+		// Re-inserted, so the Map's first key is always the least recently written.
+		this.briefLastGood.delete(key);
+		this.briefLastGood.set(key, snapshot);
+		while (this.briefLastGood.size > MAX_IN_PROCESS_BRIEF_SNAPSHOTS) {
+			const oldest = this.briefLastGood.keys().next().value;
+			if (oldest === undefined) break;
+			this.briefLastGood.delete(oldest);
+		}
+	}
+
+	/**
+	 * The in-process last-good brief for these arguments, or null, and only while the cache cannot be read (the breaker is open): a
+	 * cache that answers with no snapshot for the key is not an outage, and its answer stands. It is served on the cache snapshot's
+	 * terms: the snapshot is no older than `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` (the cache's own expiry), and it was saved after the last
+	 * forget this process made. A forget another process made cannot be seen while the cache is unreadable.
+	 */
+	private async inProcessLastGood(surface: string, args: unknown): Promise<BriefSnapshot | null> {
+		const windowMs = this.config.briefSnapshotTtlS * 1000;
+		if (windowMs <= 0 || !this.cache.health().enabled) return null;
+		const key = snapshotKey("brief-snapshot", surface, args);
+		const found = this.briefLastGood.get(key);
+		if (found === undefined) return null;
+		const atMs = Date.parse(found.at);
+		if (!(Date.now() - atMs < windowMs) || atMs <= this.briefForgottenAtMs) {
+			this.briefLastGood.delete(key);
+			return null;
+		}
+		// A readable mark decides: a forget another process made after this brief refuses it, and an absent key is not an outage.
+		return (await this.cache.forgetVerdict(found.at, false)) === "unreadable" ? found : null;
+	}
+
+	/**
 	 * The brief compose behind `briefDetailed`, with no preload count. `observed` is true for a caller's request, and only
 	 * then is its latency and recall metric recorded; the preloader passes false, so its warm-ups are neither demand nor a
 	 * caller's wait. It reads and writes the brief cache as a request does; a `refresh` warm-up skips the fresh read, so it composes and stores over a live entry.
@@ -2544,13 +2591,9 @@ export class Substrate {
 				// Without sections the fallback cannot strip recall later, so the text saved then is rendered
 				// without it: the stored snapshot never carries derived recall.
 				const saved = decodable ? text : renderFullBrief(sections.filter((section) => section.id !== "recall"));
-				return this.cache.put(
-					"brief-snapshot",
-					request.surface,
-					args,
-					{ text: saved, at: new Date().toISOString(), ...(decodable ? { sections } : {}), until },
-					this.config.briefSnapshotTtlS,
-				);
+				const snapshot: BriefSnapshot = { text: saved, at: new Date().toISOString(), ...(decodable ? { sections } : {}), until };
+				this.rememberLastGood(snapshotKey("brief-snapshot", request.surface, args), snapshot);
+				return this.cache.put("brief-snapshot", request.surface, args, snapshot, this.config.briefSnapshotTtlS);
 			};
 			// The expiry mode is part of the key for the same reason it is on a
 			// search (uplift-3 N4): a `report` brief carries expired advice, tagged,
@@ -2677,7 +2720,8 @@ export class Substrate {
 			const found =
 				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
 			// Refused like an absent snapshot (the degraded brief below) when it was saved at or before the last forget, or the mark cannot be read.
-			const snapshot = found !== null && (await this.cache.snapshotSurvivesForget(found.at, false)) ? found : null;
+			// When the cache cannot be read at all (the breaker is open) the last-good brief this process composed stands in for it, on the same terms.
+			const snapshot = found !== null ? ((await this.cache.snapshotSurvivesForget(found.at, false)) ? found : null) : await this.inProcessLastGood(request.surface, args);
 			if (snapshot === null) {
 				const detail = this.servedBrief(live, served, "degraded", failed, null, requestedProfile, profileSurface);
 				await noteRecall(served, detail);
@@ -4498,6 +4542,7 @@ export class Substrate {
 			// `bump` never throws: a failed bump marks the generation stale, which the cache reads as a bypass until a bump lands.
 			// A saved brief has no generation, so the forget is also marked by time; held past the longest snapshot it must refuse (the TTL a restart may have lowered included).
 			if (touched) {
+				this.briefForgottenAtMs = Date.now();
 				await Promise.all([
 					this.cache.bump(RECALL_GENERATION_KEY),
 					this.cache.bump(MEMORY_GENERATION_KEY),

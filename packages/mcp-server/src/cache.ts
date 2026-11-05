@@ -881,27 +881,35 @@ export class ReadThroughCache {
 	}
 
 	/**
-	 * Whether a saved brief composed at `at` (the snapshot's own ISO timestamp) may be served: it must be strictly later
-	 * than the last forget. False for a mark that cannot be checked (the read failed, the value is not a time, the last
-	 * mark write failed) and for an unreadable `at`. `quiet` counts and degrades nothing, for the stale-while-revalidate
-	 * probe, which is an optimisation; the degraded fallback is not quiet, like `peek`.
+	 * What the forget mark says about a saved brief composed at `at` (the snapshot's own ISO timestamp). `clear`: no forget was
+	 * recorded at or after it. `forgotten`: one was, or the mark may be set but cannot be read back (the last mark write failed),
+	 * or `at` is not a time. `unreadable`: the cache cannot answer now. `quiet` counts and degrades nothing, for the
+	 * stale-while-revalidate probe, which is an optimisation; the degraded fallback is not quiet, like `peek`.
 	 */
-	async snapshotSurvivesForget(at: string, quiet: boolean): Promise<boolean> {
-		if (!this.enabled || !this.redis) return false;
+	async forgetVerdict(at: string, quiet: boolean): Promise<"clear" | "forgotten" | "unreadable"> {
+		if (!this.enabled || !this.redis) return "unreadable";
 		const atMs = Date.parse(at);
-		if (!Number.isFinite(atMs)) return false;
-		if (this.staleGenerations.has(FORGET_MARK_KEY)) return false;
+		if (!Number.isFinite(atMs)) return "forgotten";
+		if (this.staleGenerations.has(FORGET_MARK_KEY)) return "forgotten";
 		const redis = this.redis;
 		try {
 			const raw = await this.attempt(() => redis.get(FORGET_MARK_KEY));
 			if (!quiet) this.noteConnected();
-			if (raw === null) return true;
+			if (raw === null) return "clear";
 			const markedMs = Number(raw);
-			return Number.isFinite(markedMs) && atMs > markedMs;
+			return Number.isFinite(markedMs) && atMs > markedMs ? "clear" : "forgotten";
 		} catch (cause) {
 			if (!quiet) this.fail(cause, true, "gen");
-			return false;
+			return "unreadable";
 		}
+	}
+
+	/**
+	 * Whether a saved brief composed at `at` may be served: strictly later than the last forget. False for every verdict but
+	 * `clear` (see {@link forgetVerdict}), so a mark that cannot be checked refuses the snapshot.
+	 */
+	async snapshotSurvivesForget(at: string, quiet: boolean): Promise<boolean> {
+		return (await this.forgetVerdict(at, quiet)) === "clear";
 	}
 
 	/**

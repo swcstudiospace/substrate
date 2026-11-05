@@ -4,10 +4,10 @@
  * declared policy. The breaker is the production one: `PlaneRegistry` gates every command through `callPlane`, and a refused
  * command is refused before a socket or a fake store is touched, so the breaker sees no outcome for it.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { PlaneRegistry, callPlane, type CircuitBreaker, type PlaneGate } from "@substrate/observability";
 import { Admission } from "./admission.ts";
-import { MEMORY_GENERATION_KEY, ReadThroughCache, bunRedis, type CacheRedis } from "./cache.ts";
+import { FORGET_MARK_KEY, MEMORY_GENERATION_KEY, ReadThroughCache, bunRedis, type CacheRedis } from "./cache.ts";
 import { loadAdmissionSettings, loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { Substrate } from "./service.ts";
@@ -151,5 +151,91 @@ describe("the cache breaker is open (phase 75)", () => {
 		expect(await admission.admit({ surface: "cursor", klass: "write", cost: 1 })).toMatchObject({ decision: "refused", tokensLeft: null });
 		expect(await admission.admit({ surface: "cursor", klass: "read", cost: 1 })).toMatchObject({ decision: "bypass" });
 		expect(breaker.snapshot().failures).toBe(1);
+	});
+});
+
+/** A breaker that is closed until the test opens it, and the gated in-memory store behind it. A long `openMs` keeps it open across a fake clock jump. */
+function closedGate(openMs: number): { breaker: CircuitBreaker; cache: ReadThroughCache; store: GatedMapRedis } {
+	const registry = new PlaneRegistry({ enabled: true, failureThreshold: 1, openMs });
+	const gate = registry.gate("cache");
+	const breaker = defined(gate.breaker, "cache breaker");
+	const store = new GatedMapRedis(gate);
+	return { breaker, cache: new ReadThroughCache({ redis: store, enabled: true, log: () => {} }), store };
+}
+
+/** A brief source the test can make fail: both graph and memory reads go through it. */
+function briefSource(state: { status: string; down: boolean }) {
+	return {
+		getGraph: async () => {
+			if (state.down) throw new Error("postgres is down");
+			return graphView(state.status);
+		},
+		openGraphs: async () => [],
+		memoryForBrief: async () => [],
+	};
+}
+
+describe("the last-good brief is kept in process while the cache breaker is open", () => {
+	const request = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
+
+	test("a brief composed with the breaker closed is served as the snapshot once the breaker opens and the source fails", async () => {
+		const { breaker, cache } = closedGate(3_600_000);
+		const state = { status: "active", down: false };
+		const substrate = new Substrate(loadConfig({}), { index: briefSource(state) as never, greptime: null, cache });
+
+		const complete = await substrate.briefDetailed(request);
+		expect(complete.state).toBe("complete");
+
+		breaker.onFailure("cache plane down");
+		state.down = true;
+		const served = await substrate.briefDetailed(request);
+		expect(served.state).toBe("snapshot");
+		expect(served.failed).toEqual(["graph"]);
+		expect(served.snapshotAt).not.toBeNull();
+		expect(served.text.split("\n")[0]).toBe(`_(substrate brief snapshot from ${served.snapshotAt}; live sources degraded: graph)_`);
+		expect(served.text.split("\n").slice(1).join("\n")).toBe(complete.text);
+	});
+
+	test("a snapshot older than the cache window is not served: the degraded brief answers", async () => {
+		const { breaker, cache } = closedGate(10 * 3_600_000);
+		const state = { status: "active", down: false };
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_SNAPSHOT_TTL_S: "60" }), { index: briefSource(state) as never, greptime: null, cache });
+
+		expect((await substrate.briefDetailed(request)).state).toBe("complete");
+		breaker.onFailure("cache plane down");
+		state.down = true;
+		try {
+			setSystemTime(new Date(Date.now() + 61_000));
+			const degraded = await substrate.briefDetailed(request);
+			expect(degraded.state).toBe("degraded");
+			expect(degraded.snapshotAt).toBeNull();
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("with the cache readable and no snapshot for the key, the last-good brief is not served: an answering cache is not an outage", async () => {
+		const { cache, store } = closedGate(3_600_000);
+		const state = { status: "active", down: false };
+		const substrate = new Substrate(loadConfig({}), { index: briefSource(state) as never, greptime: null, cache });
+		expect((await substrate.briefDetailed(request)).state).toBe("complete");
+		store.values.clear();
+		state.down = true;
+		const degraded = await substrate.briefDetailed(request);
+		expect(degraded.state).toBe("degraded");
+		expect(degraded.snapshotAt).toBeNull();
+	});
+
+	test("with the cache readable, a forget another process made after the brief refuses the last-good copy", async () => {
+		const { cache, store } = closedGate(3_600_000);
+		const state = { status: "active", down: false };
+		const substrate = new Substrate(loadConfig({}), { index: briefSource(state) as never, greptime: null, cache });
+		expect((await substrate.briefDetailed(request)).state).toBe("complete");
+		store.values.clear();
+		store.values.set(FORGET_MARK_KEY, String(Date.now() + 60_000));
+		state.down = true;
+		const degraded = await substrate.briefDetailed(request);
+		expect(degraded.state).toBe("degraded");
+		expect(degraded.snapshotAt).toBeNull();
 	});
 });
