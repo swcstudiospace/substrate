@@ -235,3 +235,21 @@ def test_ensure_worktree_creates_under_the_configured_root(tmp_path: Path, monke
     assert [c for c in calls if c[3:5] == ["worktree", "add"]] == [
         ["git", "-C", str(repo), "worktree", "add", "-b", f"substrate/{GID}", str(configured / GID), "HEAD"]
     ]
+
+
+def test_ensure_worktree_reuses_a_registered_worktree_under_the_second_root(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    second.mkdir()
+    monkeypatch.setenv("SUBSTRATE_WORKTREE_ROOTS", f"{first}:{second}")
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(second / GID), "main")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == second / GID
+    assert run.adds() == []
+    assert not first.exists()
+    assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
