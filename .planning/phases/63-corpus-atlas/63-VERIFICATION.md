@@ -1,10 +1,10 @@
 ---
 phase: 63-corpus-atlas
-verified: 2026-11-05T01:30:27Z
+verified: 2026-11-05T07:10:41Z
 status: human_needed
 score: 7/7 must-haves verified (criteria 1 to 7 VERIFIED against the criteria as amended by the owner decisions of 2026-11-04; 0 behavior-unverified)
 covered_files: [".env.example", ".planning/phases/63-corpus-atlas/63-SUMMARY.md", "bun.lock", "docs/config-reference.md", "docs/corpus.md", "docs/data-planes.md", "docs/docs-plane.md", "docs/event-vocabulary.md", "docs/mcp-audit.md", "docs/runbooks/corpus-ingest.md", "docs/runbooks/index-archive.md", "docs/runbooks/rollback-compat.md", "package.json", "packages/audit/src/policy.test.ts", "packages/audit/src/policy.ts", "packages/cli/package.json", "packages/cli/src/corpus/bodies.test.ts", "packages/cli/src/corpus/bodies.ts", "packages/cli/src/corpus/client.test.ts", "packages/cli/src/corpus/client.ts", "packages/cli/src/corpus/index.test.ts", "packages/cli/src/corpus/index.ts", "packages/cli/src/corpus/ingest.ts", "packages/cli/src/corpus/inventory.test.ts", "packages/cli/src/corpus/inventory.ts", "packages/cli/src/corpus/render.test.ts", "packages/cli/src/corpus/render.ts", "packages/cli/src/corpus/testkit.ts", "packages/cli/src/index.ts", "packages/corpus/package.json", "packages/corpus/src/adapters/github.test.ts", "packages/corpus/src/adapters/github.ts", "packages/corpus/src/adapters/greptile-export.test.ts", "packages/corpus/src/adapters/greptile-export.ts", "packages/corpus/src/classify.test.ts", "packages/corpus/src/classify.ts", "packages/corpus/src/discover.test.ts", "packages/corpus/src/discover.ts", "packages/corpus/src/guards.ts", "packages/corpus/src/index.ts", "packages/corpus/src/names.test.ts", "packages/corpus/src/names.ts", "packages/corpus/src/protocol.ts", "packages/corpus/src/scan.test.ts", "packages/corpus/src/scan.ts", "packages/corpus/src/similarity.test.ts", "packages/corpus/src/similarity.ts", "packages/corpus/src/test-support.ts", "packages/mcp-server/package.json", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/citations.test.ts", "packages/mcp-server/src/corpus/ingest.test.ts", "packages/mcp-server/src/corpus/ingest.ts", "packages/mcp-server/src/corpus/mutex.test.ts", "packages/mcp-server/src/corpus/mutex.ts", "packages/mcp-server/src/corpus/names.test.ts", "packages/mcp-server/src/corpus/names.ts", "packages/mcp-server/src/corpus/plan.test.ts", "packages/mcp-server/src/corpus/plan.ts", "packages/mcp-server/src/corpus/routes.test.ts", "packages/mcp-server/src/corpus/service.ts", "packages/mcp-server/src/corpus/settings.test.ts", "packages/mcp-server/src/corpus/store.test.ts", "packages/mcp-server/src/corpus/store.ts", "packages/mcp-server/src/corpus/testkit.ts", "packages/mcp-server/src/corpus/validate.test.ts", "packages/mcp-server/src/corpus/validate.ts", "packages/mcp-server/src/docs-datasets.ts", "packages/mcp-server/src/docs-ingest.test.ts", "packages/mcp-server/src/docs-ingest.ts", "packages/mcp-server/src/docs-search.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index-archive-spec.ts", "packages/mcp-server/src/index-archive-watch.ts", "packages/mcp-server/src/index-archive.test.ts", "packages/mcp-server/src/index-archive.ts", "packages/mcp-server/src/index-store.archive.test.ts", "packages/mcp-server/src/index-store.migrate-contract.test.ts", "packages/mcp-server/src/index-store.migrate-harness.test.ts", "packages/mcp-server/src/index-store.migrations.digests.json", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/planes/__fixtures__/lightrag-v1.5.7-routes.json", "packages/mcp-server/src/planes/lightrag-bulk.test.ts", "packages/mcp-server/src/planes/lightrag-bulk.ts", "packages/mcp-server/src/planes/lightrag.contract.test.ts", "packages/mcp-server/src/planes/lightrag.test.ts", "packages/mcp-server/src/planes/lightrag.ts", "packages/mcp-server/src/rollback-compat.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v3:sha256:04f9f593dcfc4d43aed2cdce623628de410e852601721cd034330db7590b6424"
+covered_digest: "v3:sha256:757f1c2e6a5dc64c4e122c8c5e36045f496be34db9ae32bc8f732f0e5c44aea0"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -31,17 +31,17 @@ human_verification:
 # 63-VERIFICATION: Corpus Atlas (v1.7 phase 63)
 
 **Phase Goal:** The documentation of every repository the owner keeps (the clones on the VPS, the GitHub organisations, the Greptile knowledge bases) is discovered, classified, de-duplicated and recorded in one manifest, and a bulk path puts new and changed documents into the docs plane with provenance and removes the ones that disappeared.
-**Verified:** 2026-11-05T01:30:27Z
+**Verified:** 2026-11-05T07:10:41Z
 **Status:** human_needed
-**Re-verification:** Yes. The previous record (head c40ffc9a, status human_needed, 7/7) is replaced. Each criterion was re-checked against the code at head 835a2742.
+**Re-verification:** Yes. The previous record (head 835a2742, status human_needed, 7/7, digest `v3:sha256:04f9f593…`) is replaced. Each corpus criterion was re-checked at head 42e3cf13: the changes in range touch no corpus code (see below), and the three Postgres-gated files and the non-PG set were re-run.
 
-**Head:** 835a2742 (integration worktree `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`)
-**Changes since the previous record (c40ffc9a) that touch covered files:** `42dcb4c6` (phase 65, SC5 owner decision) changes `service.ts` (`corpusFreshness`, the docs.freshness sync-lag row) and `flag-registry.ts` (one help string). `ca9d02ec` changes one line of `docs/config-reference.md`. Neither changes corpus scan, plan, ingest, routes, plane or manifest code, and the corpus test files pass at head (non-PG run below). SC1 to SC7 are therefore judged on the same corpus code as before, re-observed.
+**Head:** 42e3cf13 (integration worktree `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`)
+**Changes since the previous record (835a2742) that touch covered files:** `42e3cf13` range `835a2742..HEAD` changes three covered files: `packages/mcp-server/src/service.ts` (the in-process last-good brief and the brief-snapshot forget mark, `briefForgottenAtMs`), `packages/mcp-server/src/flag-registry.ts` (the `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` help text) and `docs/config-reference.md` (the same row). None of their hunks touches corpus scan, plan, ingest, routes, plane, manifest, migration or archive code (`git diff 835a2742..HEAD` over the three files, filtered for `corpus`, is empty). SC1 to SC7 are therefore carried forward on the same corpus code and re-observed by the runs below. The covered list is unchanged; the digest moves because the content of those three files changed.
 **Covered set:** 95 files, from `gsd_run query verification.fingerprint .planning/phases/63-corpus-atlas <files>`. The set is the 89 files of the replaced record plus six phase files changed by `ebabe6ef` and the runbook. The planning-root ROADMAP and REQUIREMENTS edits are inert for the fingerprint.
 
 ## Gates
 
-No repository gate was run here (the full suite, tsc, lint and formatters are out of scope for this record). Targeted runs only, observed at head 835a2742.
+No repository gate was run here (the full suite, tsc, lint and formatters are out of scope for this record). Targeted runs only, observed at head 42e3cf13 on 2026-11-05.
 
 | Run | Files | Result |
 |---|---|---|
@@ -50,7 +50,7 @@ No repository gate was run here (the full suite, tsc, lint and formatters are ou
 | same, `packages/mcp-server/src/index-archive.test.ts` | archive spec, verifier, gates | 65 pass, 0 fail, 1325 expect calls, 0 skip |
 | same, `packages/mcp-server/src/index-store.archive.test.ts` | archive round trip, whitelist test, corpus restore tests | 10 pass, 0 fail, 261 expect calls, 0 skip |
 
-Postgres: scratch Postgres 16.15 container on 127.0.0.1:5439, database `substrate_test_v63`. Not production. Each file ran in its own process. The connection string is held in a shell variable and not recorded here. No production database and no port 5432 was touched.
+Postgres: scratch Postgres 16.15 container on 127.0.0.1:5439, database `substrate_test_v63`. Not production. Each file ran in its own process, re-run at head 42e3cf13. The connection string is held in a shell variable and not recorded here. No production database and no port 5432 was touched.
 
 ## Success criteria
 
@@ -129,5 +129,5 @@ No gaps. Criteria 1 to 7 are VERIFIED against the criteria as amended by the own
 
 ---
 
-_Verified: 2026-11-05T01:30:27Z_
+_Verified: 2026-11-05T07:10:41Z_
 _Verifier: Claude (gsd-verifier)_

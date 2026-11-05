@@ -1,10 +1,10 @@
 ---
 phase: 73-ledger-tamper-evidence
-verified: 2026-11-05T01:26:19Z
+verified: 2026-11-05T07:11:11Z
 status: human_needed
 score: 8/8 must-haves verified (T2 counted as PASSED override)
 covered_files: [".planning/phases/73-ledger-tamper-evidence/73-01-PLAN.md", ".planning/phases/73-ledger-tamper-evidence/73-01-SUMMARY.md", "docs/greptime-ledger.md", "packages/cli/src/capsule.ts", "packages/ledger/src/heads.test.ts", "packages/ledger/src/heads.ts", "packages/ledger/src/memo.test.ts", "packages/ledger/src/memo.ts", "packages/ledger/src/merkle.ts", "packages/mcp-server/src/anchor-verify-deps.ts", "packages/mcp-server/src/anchor.test.ts", "packages/mcp-server/src/anchor.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/checkpoint-verify.test.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/index-store.test.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/memory-policy.test.ts", "packages/mcp-server/src/memory-policy.ts", "packages/mcp-server/src/memory-record.ts", "packages/mcp-server/src/memory-retain.ts", "packages/mcp-server/src/memory-verify.ts", "packages/mcp-server/src/memory-write.test.ts", "packages/mcp-server/src/memory-write.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/session-context.ts", "packages/mcp-server/src/session-rollback.ts", "packages/mcp-server/src/types.ts"]
-covered_digest: "v3:sha256:3a115587b0f7b64c36084413f66ea695a60155b3dd84bbd6ab2adc4cb5f617be"
+covered_digest: "v3:sha256:ec6a146fb8b0a5e9703d52c994d38bc17e8e5e7978fc30759d5f5541a5d3343b"
 behavior_unverified: 0
 overrides_applied: 1
 overrides:
@@ -15,9 +15,9 @@ overrides:
 re_verification:
   previous_status: human_needed
   previous_score: 8/8 (T2 counted as PASSED override)
-  previous_verified: 2026-11-05T00:14:00Z
-  previous_scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD c40ffc9a (covered_digest v3:sha256:c7a1858e)"
-  scope: "worktree /root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD 835a2742. Covered paths changed since c40ffc9a: packages/mcp-server/src/service.ts only (one hunk at 7476-7494, the docs.freshness corpusFreshness route for SUBSTRATE_DOCS_SLO_SYNC_LAG_S; commits 42dcb4c6 and related wave 7 work). Its changed lines are not on the ledger write, chain tip, memo, graph_chain_leaves, verifyGraph or trustHour path. covered_files is unchanged (31 paths, verbatim). covered_digest moved from v3:sha256:c7a1858e to v3:sha256:3a115587 because of that one file. Non-covered wave 7 changes (flag-registry.ts, docs-freshness.ts, reconcile-*.ts, dispatcher test_worktree.py, docs/config-reference.md, docs/corpus-eval.md, docs/runbooks/corpus-sync.md, the phase 63-78 VERIFICATION records, ROADMAP.md, REQUIREMENTS.md) were checked for phase 73 criteria: none touches a phase 73 claim. The phase 73 text in ROADMAP and REQUIREMENTS is unchanged; HARD-S3 remains open (REQUIREMENTS.md:114 and :135, STATE.md:846)."
+  previous_verified: 2026-11-05T01:26:19Z
+  previous_scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD 835a2742 (covered_digest v3:sha256:3a115587)"
+  scope: "worktree /root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD 42e3cf13. Covered paths changed since 835a2742: packages/mcp-server/src/service.ts only (commits 9e6fa1f2 and 9c86ffab: the in-process last-good brief served while the cache cannot be read, and the forget mark; 53 lines added, 8 removed). Its changed lines are not on the ledger write (appendChained), handoff refusal, chain tip, memo, graph_chain_leaves, verifyGraph or trustHour path. covered_files is unchanged (31 paths, verbatim). covered_digest moved from v3:sha256:3a115587 to v3:sha256:ec6a146f because of that one file. Every service.ts line this record cites was re-located at 42e3cf13 (+44 and +45 lines); the code at each is unchanged. Non-covered changes in this range (cache.ts, flag-registry.ts, the two H-1 tests, docs/observability.md, docs/config-reference.md) touch no phase 73 claim."
   gaps_closed: []
   gaps_remaining:
     - "W-L3b: branch, node_id and linear_identifier still take the 512-unit cut without the dangling-high trim (event.ts:437, :438, :442, unchanged). Accepted limit, per the orchestrator's binding list and docs/greptime-ledger.md 'Not covered'. Stays open."
@@ -57,9 +57,9 @@ human_verification:
 # Phase 73: Ledger tamper evidence Verification Report
 
 **Phase Goal:** A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from stored rows, and the verified head is anchored. Criterion 1 is proven by tests against a head saved before the change. Criterion 2 requires each graph's chain head to be recorded in the hourly anchor, and that recorded head is the only trusted proof.
-**Verified:** 2026-11-05T01:26:19Z
+**Verified:** 2026-11-05T07:11:11Z
 **Status:** human_needed
-**Re-verification:** Yes, after the c40ffc9a record. Scope is HEAD 835a2742. Prior status human_needed, score 8/8. Line numbers below are at 835a2742.
+**Re-verification:** Yes, after the 835a2742 record. Scope is HEAD 42e3cf13. Prior status human_needed, score 8/8. Line numbers below are at 42e3cf13.
 
 ## Goal Achievement
 
@@ -67,14 +67,14 @@ human_verification:
 
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
-| T1 | SC1: an edited payload, a deleted middle event, truncated last events and a full rewrite are each compared with the saved head; the first differing or first missing id is named | ✓ VERIFIED | Run this pass (`service.test.ts`, targeted run 2 below): "a full rewrite with every hash and prev recalculated parts at the first event, and the verdict fails" (line 5641) and "sessions verify one by one" (5662) pass. Earlier passes: "an edited payload parts the chain at that event", "a deleted middle event is first_missing_event_id", "truncated last events are first_missing_event_id". `event.test.ts` in full passes (run 1). Code: `compareToAnchoredHead` event.ts:587, `trustHour` service.ts:8500. |
+| T1 | SC1: an edited payload, a deleted middle event, truncated last events and a full rewrite are each compared with the saved head; the first differing or first missing id is named | ✓ VERIFIED | Run this pass (`service.test.ts`, targeted run 2 below): "a full rewrite with every hash and prev recalculated parts at the first event, and the verdict fails" (line 5641) and "sessions verify one by one" (5662) pass. Earlier passes: "an edited payload parts the chain at that event", "a deleted middle event is first_missing_event_id", "truncated last events are first_missing_event_id". `event.test.ts` in full passes (run 1). Code: `compareToAnchoredHead` event.ts:587, `trustHour` service.ts:8545. |
 | T2 | SC2: each graph's chain head is recorded in the hourly anchor and the recorded head is the trusted proof | ✓ PASSED (override) | Memo v2 `heads_root` present: `packages/ledger/src/memo.ts:11-12` (`MEMO_PREFIX_V2`, `MEMO_V2_RE`); `formatMemoV2` used by `anchor.ts` (`anchorRow`, ~line 501); `graph_chain_leaves` written before the anchor row (`anchor.ts:506`). `memo.test.ts`, `heads.test.ts` and `anchor.test.ts` pass (run 1). Owner override 2026-11-02, commitment reading only; carried, acceptance not re-obtained here. |
 | T3 | G1: an anchored hour removed from `agent_events`, `event_ingest` and `graph_chain_leaves` fails the verdict and is named | ✓ VERIFIED for pointer-listed hours (Q8 and N5 accepted limits) | Run this pass: "G1Probe, variant 1a", "variant 1b", the single-anchored-hour pointer test, and "with no pointer either, a graph whose only hour is gone has no events on chain: ok, untrusted, no events" (line 5971) pass in run 2. Q8 (no pointer) and N5 (RPC depth) stay open as accepted limits. The pre-index v2 hour (`:5981`) is carried from the 504da465 pass. |
-| T4 | The hourly job sends every closed hour's pointers for every graph id the write path accepts, so the job does not halt on a valid event | ✓ VERIFIED | Graph id refusals: NUL `event.ts` (`graph_id_nul`, ~line 230-235) and over-cap `graph_id_too_long` (~line 221-225); both run before the chain tip read (`service.ts:3095` graph id refusal, after `assertWriteTextFields` at `:3094`, both at the top of `appendChained`, service.ts:3092; and the handoff refusal near `:7617-7637`). Run this pass: "refuses a NUL in the graph id before it reads the chain tip" and "refuses a lone surrogate in the handoff summary before it reads the chain tip" (`service.test.ts`, run 2). |
+| T4 | The hourly job sends every closed hour's pointers for every graph id the write path accepts, so the job does not halt on a valid event | ✓ VERIFIED | Graph id refusals: NUL `event.ts` (`graph_id_nul`, ~line 230-235) and over-cap `graph_id_too_long` (~line 221-225); both run before the chain tip read (`service.ts:3140` graph id refusal, after `assertWriteTextFields` at `:3138`, both at the top of `appendChained`, service.ts:3136; and the handoff refusal near `:7675-7684`). Run this pass: "refuses a NUL in the graph id before it reads the chain tip" and "refuses a lone surrogate in the handoff summary before it reads the chain tip" (`service.test.ts`, run 2). |
 | T5 | N1/W2: the hour is sent, then pointers, then the row; a pointer failure stores no row; an unanchored mismatch stores no row | ✓ VERIFIED | Run 1: `anchor.test.ts` in full passes. Code: `anchor.ts` anchor sequence (hour, pointers, row) unchanged since 504da465 except POINTER_REFUSED_RE. |
 | T6 | N2: the adoption window covers the lookback's newer transactions | ✓ VERIFIED | `anchor.test.ts` in full (run 1); `ADOPT_LOOKBACK_HOURS` `anchor.ts` unchanged in this range. |
 | T7 | N3: verify counts only job-key pointers that succeeded; other entries are ignored; a job-key pointer naming another hour still fails | ✓ VERIFIED (verify side) | Run 2: "a pointer the job key did not sign, or that failed on chain, is ignored", "a pointer signed by another key is ignored", "a foreign-payer pointer", "an errored pointer", "a job-key pointer whose hour transaction names another hour". Anchor side (`anchor.ts` adoption pointer filter) still untested: W-N3c. |
-| T8 | Refused `SOLANA_RPC_URL`: no chain read, `ok` false, `trusted` false, a named reason | ✓ VERIFIED | Run 2 ("SOLANA_RPC_URL", "refused"). Code: `service.ts:8053` (guard message at 8053), refusal before any RPC call. |
+| T8 | Refused `SOLANA_RPC_URL`: no chain read, `ok` false, `trusted` false, a named reason | ✓ VERIFIED | Run 2 ("SOLANA_RPC_URL", "refused"). Code: `service.ts:8098` (guard message at 8098), refusal before any RPC call. |
 
 **Score:** 8/8 truths verified (T2 counted as PASSED override). Behavior unverified: 0. Presence-only truths: none.
 
@@ -82,15 +82,15 @@ human_verification:
 
 | #  | Check | Status | Evidence |
 | -- | ----- | ------ | -------- |
-| R1 | Six-field refusal: a lone surrogate in summary, session_id, repo, branch, node_id or linear_identifier is refused at write by name, before any hash or store write | ✓ VERIFIED | `assertWriteTextFields` event.ts:310 (calls `assertRepoLength` as its last check); called from `normalizeEvent` (event.ts:426) and as the first statement of `appendChained` (service.ts:3094). `event.test.ts` in full passes (run 1). |
-| R2 | The refusal runs before the sessioned chain-tip read, the replay lookup, the buffer and the append-mode probe | ✓ VERIFIED | `service.ts:3094` (assert) and `:3095` (graph id) are the first statements of `appendChained` (declared :3092), before the buffer stores and the tip read. Handoff refuses before `placeOf` and the tip read (service.ts ~7617-7637). Unchanged logic; the wave 7 `+1` line shift at 7479 is the only change in this range that reaches it. |
+| R1 | Six-field refusal: a lone surrogate in summary, session_id, repo, branch, node_id or linear_identifier is refused at write by name, before any hash or store write | ✓ VERIFIED | `assertWriteTextFields` event.ts:310 (calls `assertRepoLength` as its last check); called from `normalizeEvent` (event.ts:426) and as the first statement of `appendChained` (service.ts:3138). `event.test.ts` in full passes (run 1). |
+| R2 | The refusal runs before the sessioned chain-tip read, the replay lookup, the buffer and the append-mode probe | ✓ VERIFIED | `service.ts:3138` (assert) and `:3140` (graph id) are the first statements of `appendChained` (declared :3136), before the buffer stores and the tip read. Handoff refuses before `placeOf` and the tip read (service.ts ~7675-7684). Unchanged logic; the H-1 hunks at 42e3cf13 move these lines and reach neither path. |
 | R3 | normalizeKey read and write parity for the LEDGER (session_id and repo) | ✓ VERIFIED | Write: `event.ts:435` (session_id) and `:441` (repo), both `normalizeKey`. Checkpoint lookup: `anchor-verify-deps.ts` findCheckpoint `normalizeKey(lookup.sessionId)` (bb428f94). Named test "a checkpoint written under a straddling session id is found by that id and verifies as anchored" (`checkpoint-verify.test.ts`) passes (run 1). |
 | R4 | A session_id that straddles 512 units round-trips: stored, looked up and read back in one form | ✓ VERIFIED | "a session id straddling the cap is stored, looked up and read back in one form" and "a repo longer than the cap is refused at write, naming the rule, and nothing is stored" (`service.test.ts`, 504da465 pass; not in this range's changed code). |
 | R5 | 4b84e50c regression test: a row with repo `owner/name` plus a lone high surrogate is not visible to a caller granted `owner/name`; a scope spelled with a surrogate keeps it | ✓ VERIFIED (carried) | "a repo keeps its exact spelling for visibility ..." (`memory-policy.test.ts`). Not re-run this pass; `memory-policy.ts` unchanged in this range. |
 
 ### Judgement 1: the six-field refusal and the repo cap (8a604455, 4b84e50c, f1138c65)
 
-**Code.** `assertWriteTextFields` (event.ts:310) checks the six fields by name, then the repo length (`assertRepoLength` event.ts:290, `RepoTooLongError`, `repo_too_long`, 512 code units, measured on the redacted text before any cap). It runs in `normalizeEvent` and as the first statement of `appendChained` (service.ts:3094). The index store (`index-store.ts:1175`, `:2448`) and the memory write (`memory-write.ts` decide(), `repoOverCap` plus `repoScopeOverCap`) refuse the same length before any store write.
+**Code.** `assertWriteTextFields` (event.ts:310) checks the six fields by name, then the repo length (`assertRepoLength` event.ts:290, `RepoTooLongError`, `repo_too_long`, 512 code units, measured on the redacted text before any cap). It runs in `normalizeEvent` and as the first statement of `appendChained` (service.ts:3138). The index store (`index-store.ts:1175`, `:2448`) and the memory write (`memory-write.ts` decide(), `repoOverCap` plus `repoScopeOverCap`) refuse the same length before any store write.
 
 **Verdict:** VERIFIED for caller-supplied lone surrogates in all six fields and for an over-512 repo on every write path read. The memory-plane refusal is code-verified only; `memory-write.test.ts` was not run in this pass or the prior one.
 
@@ -114,7 +114,7 @@ Unchanged by this range. Rows whose session_id, repo, branch, node_id or linear_
 
 Closed by refusal. A repo over 512 code units is refused at write (f1138c65), so `parseScope` and the memory write no longer store a cut repo, and the entry hash reproduces. Reads still cut a repo filter to fit (`parseScope`), which can miss a row whose repo was refused; no such row can be stored.
 
-### Schema hash dependence (ebabe6ef): re-checked at 835a2742
+### Schema hash dependence (ebabe6ef): re-checked at 835a2742, carried at 42e3cf13
 
 Question: does the ledger archive, or any phase 73 verify claim, depend on the index archive's `schemaHash` value?
 
@@ -122,33 +122,29 @@ Question: does the ledger archive, or any phase 73 verify claim, depend on the i
 
 - `schemaHash()` (`index-archive-spec.ts:266`) is consumed by `index-archive.ts` only: written into the index manifest (`index-archive.ts:502`) and compared by verify (`index-archive.ts:694-695`, kind `schema`). A new table or column changes it, so earlier index archives fail `verify-archive` (the accepted consequence, owner decision 3). The other occurrence, `event-sources.ts:1021`, is a `HEX_64` literal inside a sample `index.archive` event, not a check.
 - The ledger archive (`ledger-archive.ts`, `ledger-run.ts`, `substrate ledger verify-archive`) does not import `index-archive-spec.ts` and does not contain `schemaHash` (grep at 835a2742: no match). Its `ManifestSchema` (`ledger-archive.ts:554`) has no schema or version field. Its verify checks per-file SHA-256, line counts, event hashes, the chain, the hourly RFC 6962 roots and the anchors. No index schema change can alter its verdict.
-- The phase 73 verify claims (`verifyGraph` service.ts:8003, `trustHour` service.ts:8500, `compareToAnchoredHead` event.ts:587, memo v2, heads, checkpoint verify) reference no schema hash. Their inputs are `agent_events`, `event_ingest` and `graph_chain_leaves` in Greptime, plus the on-chain memo. `graph_chain_leaves` is not in `ARCHIVE_TABLES` (0 matches in `index-archive-spec.ts`), so the index schema hash does not cover the ledger leaves table, and the index archive does not archive ledger data.
+- The phase 73 verify claims (`verifyGraph` service.ts:8048, `trustHour` service.ts:8545, `compareToAnchoredHead` event.ts:587, memo v2, heads, checkpoint verify) reference no schema hash. Their inputs are `agent_events`, `event_ingest` and `graph_chain_leaves` in Greptime, plus the on-chain memo. `graph_chain_leaves` is not in `ARCHIVE_TABLES` (0 matches in `index-archive-spec.ts`), so the index schema hash does not cover the ledger leaves table, and the index archive does not archive ledger data.
 - The only covered file that imports the spec is `index-store.ts` (line 23: `exportedColumns`, `tableSpec` and types). Its ebabe6ef-era edits (`PG_TYPE` gains `smallint` and `jsonb`, `advanceIdentity`) are restore-path code. They do not change the hash inputs (table names, column names and types, keys, withheld lists). `index-store.ts` and `index-archive-spec.ts` have no change since c40ffc9a.
 
 **Consequence:** the index archive's pre-ebabe6ef archives fail `verify-archive` (kind `schema`), which is the accepted behavior. No ledger archive or phase 73 verdict is affected. Note, not a gap: the ledger manifest records no schema or version, so the ledger archive has no schema-level compatibility check. That is a property of the ledger archive as built in uplift-3, not a phase 73 criterion, and nothing in this change made it worse.
 
-## Re-verification at 835a2742
+## Re-verification at 42e3cf13
 
-Scope check. `git diff c40ffc9a 835a2742` over the 31 covered paths lists one file:
+Scope check. `git diff 835a2742..HEAD` over the 31 covered paths lists one file: `packages/mcp-server/src/service.ts` (+53 −8). Its hunks are the H-1 in-process last-good brief (`briefLastGood`, `briefForgottenAtMs`, `rememberLastGood`, `inProcessLastGood`, and the degraded-brief read that calls it) and the forget mark in `memoryForget` (commits 9e6fa1f2 and 9c86ffab). None of them is on the `appendChained` path, the handoff refusal, `placeOf`, the chain tip read, `verifyGraph`, `trustHour`, the Solana guard or the `compareToAnchoredHead` call. The added lines carry no TODO, FIXME, XXX, HACK or PLACEHOLDER.
 
-- `packages/mcp-server/src/service.ts` (+4 −3, one hunk at 7476-7494): `corpusFreshness` (service.ts:7483) now also runs when `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` is set and passes `syncLagS` and `syncLagMaxS` into `corpusFreshnessRow`. This is the docs.freshness sync-lag route (v1.7 phase 65 SC5). It reads `this.corpusSlo.readings(now)` and writes nothing to the ledger. It is not on T1 to T8, R1 to R5, the appendChained path (3092 to 3095), the recordSyncLag call (2961), the handoff refusal (~7617-7637), `verifyGraph` (8003), `trustHour` (8500), the Solana guard (8053) or the `compareToAnchoredHead` call (8587). The net `+1` line shift applies to every service.ts line after 7479; each line cited in this record has been re-read at 835a2742 and carries the shifted number.
+Line moves, each re-located by grep at 42e3cf13 with the code unchanged: recordSyncLag 2961 to 3005; appendChained 3092 to 3136; its assert 3094 to 3138; its graph id refusal 3095 to 3140; handoff refusal (~7617-7637) to 7675-7684 (normalizeGraphId 7675, placeOf 7684); verifyGraph 8003 to 8048; Solana guard 8053 to 8098; trustHour 8500 to 8545; headsRoot comparison 8550 to 8595; compareToAnchoredHead call 8587 to 8632.
 
-Added lines in that hunk: no TODO, FIXME, XXX, HACK or PLACEHOLDER.
+Non-covered changes in this range (`cache.ts`, where `forgetVerdict` is added and `snapshotSurvivesForget` keeps its boolean behaviour; `flag-registry.ts`; `cache-breaker.test.ts`; `service-forget.test.ts`; `docs/observability.md`; `docs/config-reference.md`) touch no phase 73 claim. `brief.ts` imports only `earliestRefreshAt` from `cache.ts`, which is unchanged. Other covered paths are unchanged since 835a2742: `event.ts`, `anchor.ts`, `greptime.ts`, `memo.ts`, `heads.ts`, `merkle.ts`, `anchor-verify-deps.ts`, `index-store.ts`, `brief.ts`, `docs/greptime-ledger.md` and `checkpoint-verify.test.ts`.
 
-Other covered paths: unchanged since c40ffc9a. `event.ts`, `anchor.ts`, `greptime.ts`, `memo.ts`, `heads.ts`, `merkle.ts`, `anchor-verify-deps.ts`, `index-store.ts`, `docs/greptime-ledger.md` and `checkpoint-verify.test.ts` have no change in this range.
+Targeted runs this pass (non-Postgres, two commands, from `packages/mcp-server`, `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`):
 
-Non-covered wave 7 changes, checked against phase 73 criteria: `flag-registry.ts` (age-limit flag and worktree-roots text), `docs-freshness.ts` and its test, `reconcile-*.ts` and tests (phase 78), `packages/dispatcher/tests/test_worktree.py`, `docs/config-reference.md`, `docs/corpus-eval.md`, `docs/runbooks/corpus-sync.md`, the phase 63 to 78 VERIFICATION records, `ROADMAP.md` and `REQUIREMENTS.md`. None touches a phase 73 claim. The phase 73 entries in ROADMAP and REQUIREMENTS are unchanged; HARD-S3 remains open at REQUIREMENTS.md:114 and :135 and STATE.md:846.
+1. `bun test --timeout 30000 src/event.test.ts src/anchor.test.ts src/checkpoint-verify.test.ts src/ledger-archive.test.ts src/ledger-chain.test.ts`. Result: 248 pass, 0 fail, 1436 expect() calls, 5 files. Same counts as 835a2742.
+2. `bun test --timeout 30000 src/service.test.ts -t "verif|trust|first_differing|first_missing|anchored|straddl|NUL|surrogate|SOLANA_RPC_URL|pointer|G1Probe|ledger|rewrite|truncat|edited payload"`. Result: 145 pass, 0 fail, 488 expect() calls, 1 file. Same counts as 835a2742. This run executes the changed service.ts. `service.test.ts` is unchanged, so its cited lines (5641, 5662, 5678, 5686, 5971) are unchanged; the pre-index v2 hour (`service.test.ts:5981`) is carried from the 504da465 pass.
 
-Targeted runs this pass (non-Postgres, two commands, `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`):
+Not run this pass: `memory-policy.test.ts`, `memory-write.test.ts`, `packages/ledger` tests (carried; their files are unchanged in this range), full `bun test`, tsc, lint and formatters (out of assignment).
 
-1. From `packages/mcp-server`: `bun test --timeout 30000 src/event.test.ts src/anchor.test.ts src/checkpoint-verify.test.ts src/ledger-archive.test.ts src/ledger-chain.test.ts`. Result: 248 pass, 0 fail, 1436 expect() calls, 5 files. Same counts as c40ffc9a. The last two files are adjacent ledger tests, not covered files.
-2. From `packages/mcp-server`: `bun test --timeout 30000 src/service.test.ts -t "verif|trust|first_differing|first_missing|anchored|straddl|NUL|surrogate|SOLANA_RPC_URL|pointer|G1Probe|ledger|rewrite|truncat|edited payload"`. Result: 145 pass, 0 fail, 488 expect() calls, 1 file. Same counts as c40ffc9a. This run is the one that executes the changed service.ts, and it covers the four service-level checks carried from the prior record (the full rewrite at service.test.ts:5641, "sessions verify one by one" at 5662, "an unanchored hour is untrusted" at 5678, "a v1-only anchored hour is untrusted" at 5686) and the no-pointer case at 5971. All passed. `service.test.ts` itself is unchanged, so its line numbers are unchanged.
+Postgres: no covered test file references `SUBSTRATE_TEST_PG_URL` (grep over the nine covered `.test.ts` files finds none). No Postgres counts are claimed. W-K3 stays narrowed and open and was not re-probed.
 
-Not run this pass: `memory-policy.test.ts`, `memory-write.test.ts`, `packages/ledger` tests (carried from the prior pass, unchanged files), full `bun test`, tsc, lint and formatters (out of assignment). "pre-index v2 hour" (`service.test.ts:5981`) is carried from the 504da465 pass.
-
-Postgres: no covered test file references `SUBSTRATE_TEST_PG_URL` (grep over the covered `.test.ts` files finds none). `index-store.test.ts` uses a local probe socket and fake `postgres://` URLs for refusal checks; it has no env gate. The scratch database `substrate_test_v73` was therefore not used, and no Postgres counts are claimed. W-K3 stays narrowed and open and was not re-probed.
-
-Fingerprint: `covered_files` is the prior 31 paths, verbatim, from `gsd_run query verification.fingerprint .planning/phases/73-ledger-tamper-evidence` with the 31 paths listed (the command adds the phase's own PLAN and SUMMARY, which are already in the list). `covered_digest` is `v3:sha256:3a115587b0f7b64c36084413f66ea695a60155b3dd84bbd6ab2adc4cb5f617be` (previously `v3:sha256:c7a1858e`). The change is from the `service.ts` content change above, not from a change to the covered list.
+Fingerprint: `covered_files` is the 31 paths, verbatim, from `gsd_run query verification.fingerprint .planning/phases/73-ledger-tamper-evidence` given the 29 non-PLAN/SUMMARY paths (the command adds the phase's own PLAN and SUMMARY). `covered_digest` is `v3:sha256:ec6a146fb8b0a5e9703d52c994d38bc17e8e5e7978fc30759d5f5541a5d3343b` (previously `v3:sha256:3a115587...`). The change is from the `service.ts` content change above, not from a change to the covered list.
 
 Status stays human_needed. No truth is FAILED. The open items, W-L3b, Q8, N5, W-K3, O-S1 and HARD-S3, remain as recorded: open, not closed by this pass.
 
@@ -161,7 +157,7 @@ Status stays human_needed. No truth is FAILED. The open items, W-L3b, Q8, N5, W-
 | `packages/mcp-server/src/anchor.ts` | buildGraphHeads, v2 anchorRow, leaves before row | ✓ VERIFIED | `anchor.test.ts` in full passes (run 1); POINTER_REFUSED_RE at `anchor.ts:91` narrowed (42cddae0). Unchanged. |
 | `packages/mcp-server/src/greptime.ts` | graph_chain_leaves DDL, insertGraphChainLeaves, hourChainLeaves | ✓ VERIFIED | DDL line ~1024; insert ~1842; read ~1853. Unchanged in this range. |
 | `packages/mcp-server/src/event.ts` | compareToAnchoredHead, orderedLeaves, headRecordsFromLeaves, refusals | ✓ VERIFIED | `event.test.ts` in full passes (run 1). Unchanged in this range. |
-| `packages/mcp-server/src/service.ts` | verifyGraph trusted verdict, trustHour | ✓ VERIFIED | Targeted run 2 passes (145). `verifyGraph` :8003, `trustHour` :8500. The one changed hunk (7476-7494, docs.freshness sync-lag route) is outside the ledger path. |
+| `packages/mcp-server/src/service.ts` | verifyGraph trusted verdict, trustHour | ✓ VERIFIED | Targeted run 2 passes (145). `verifyGraph` :8048, `trustHour` :8545. The H-1 hunks (in-process last-good brief, forget mark) are outside the ledger path. |
 | `docs/greptime-ledger.md` | memo v2, graph_chain_leaves, v3 memo, "Identifiers at the 512-unit cut" | ✓ VERIFIED | Section at line 370; memo v2 and graph_chain_leaves sections as read in the prior pass. Unchanged in this range. |
 
 ## Key Link Verification
@@ -170,9 +166,9 @@ Status stays human_needed. No truth is FAILED. The open items, W-L3b, Q8, N5, W-
 | ---- | -- | --- | ------ | ------- |
 | anchor.ts anchorRow | memo v2 | formatMemoV2 | ✓ WIRED | anchor.ts:501 |
 | anchor.ts | graph_chain_leaves | insertGraphChainLeaves before the anchor row | ✓ WIRED | anchor.ts:506 |
-| service.ts trustHour | stored leaves | greptime.hourChainLeaves | ✓ WIRED | service.ts:8500 onward |
-| service.ts trustHour | on-chain heads root | headsRoot(records) === onChainHeadsRoot | ✓ WIRED | service.ts:8550 |
-| service.ts per-session | compareToAnchoredHead | per (graph, session) pair | ✓ WIRED | service.ts:8582-8591 (call at 8587) |
+| service.ts trustHour | stored leaves | greptime.hourChainLeaves | ✓ WIRED | service.ts:8545 onward |
+| service.ts trustHour | on-chain heads root | headsRoot(records) === onChainHeadsRoot | ✓ WIRED | service.ts:8595 |
+| service.ts per-session | compareToAnchoredHead | per (graph, session) pair | ✓ WIRED | service.ts:8632 (call) |
 | checkpoint verify | ledger write form | normalizeKey(lookup.sessionId) | ✓ WIRED | anchor-verify-deps.ts findCheckpoint |
 
 ## Data-Flow Trace (Level 4)
@@ -184,7 +180,7 @@ Status stays human_needed. No truth is FAILED. The open items, W-L3b, Q8, N5, W-
 
 ## Behavioral Spot-Checks
 
-Two targeted `bun test` runs at 835a2742, both with `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`. No full suite. No Postgres evidence is claimed.
+Two targeted `bun test` runs at 42e3cf13, both with `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`. No full suite. No Postgres evidence is claimed.
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
@@ -208,7 +204,7 @@ No orphaned phase 73 requirements.
 
 | File | Line | Pattern | Severity | Impact |
 | ---- | ---- | ------- | -------- | ------ |
-| (added lines, c40ffc9a..835a2742, service.ts) | - | TBD / FIXME / XXX / TODO / HACK / PLACEHOLDER scan | ℹ️ Info | None found in added lines. |
+| (added lines, 835a2742..42e3cf13, service.ts) | - | TBD / FIXME / XXX / TODO / HACK / PLACEHOLDER scan | ℹ️ Info | None found in added lines. |
 
 ## Human Verification Required
 
@@ -269,5 +265,5 @@ Closed since 4b84e50c: W-M1 (repo over the cap refused), W-K1 for session_id, th
 
 ---
 
-_Verified: 2026-11-05T01:26:19Z_
+_Verified: 2026-11-05T07:11:11Z_
 _Verifier: Claude (gsd-verifier)_
