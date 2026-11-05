@@ -310,20 +310,23 @@ export class EventBuffer {
 	}
 
 	/**
-	 * Give every remaining entry up as `abandoned`. A memory-only buffer calls this at shutdown, so none vanishes unrecorded. A pending
-	 * entry already has its record with the store, so it is not recorded twice. The entry a delivery is working on is not recorded yet:
-	 * it stays in the buffer as pending, and `drain` records it once that delivery settles without landing (a landed event needs no
-	 * record). Returns how many entries were given up now.
+	 * Give every remaining entry up as `abandoned`, each with its dead-letter record now. A memory-only buffer calls this at shutdown, and
+	 * the process may exit before a delivery in flight settles, so that entry is recorded now too: the earlier rule kept it pending, and an
+	 * exit then lost it. A pending entry already has its record with the store, so it is not recorded twice. A delivery in flight is never
+	 * retried. If it lands after this, the event is in the ledger and in the dead-letter store under the same id and hash: at-least-once,
+	 * and the duplicate is detectable. Returns how many entries were given up now.
 	 */
 	abandonAll(): number {
-		const flying = this.flying === null ? undefined : this.entries.get(this.flying);
-		const dropped = [...this.entries.values()].filter((entry) => entry !== flying);
+		const dropped = [...this.entries.values()];
 		for (const entry of dropped) {
 			this.entries.delete(entry.event.id);
 			this.recordedIds.delete(entry.event.id);
 		}
-		for (const entry of dropped) if (entry.given_up == null) this.onDeadLetter(entry, "abandoned");
-		if (flying !== undefined) flying.given_up = "abandoned";
+		for (const entry of dropped) {
+			if (entry.given_up != null) continue;
+			entry.given_up = "abandoned";
+			this.onDeadLetter(entry, "abandoned");
+		}
 		return dropped.length;
 	}
 

@@ -242,39 +242,42 @@ describe("EventBuffer delivery", () => {
 		expect(buffer.size()).toBe(0);
 	});
 
-	test("abandoning the buffer during a delivery keeps the in-flight entry pending until that delivery fails", async () => {
+	test("abandoning the buffer during a delivery records the in-flight entry at once, so an exit before that delivery settles keeps it", async () => {
 		const { buffer, dead } = harness();
 		buffer.enqueue(request("s-1", "a"));
 		buffer.enqueue(request("s-2", "b"));
 		const gate = Promise.withResolvers<EventDelivery>();
 		const running = buffer.drain(() => gate.promise, { all: true });
 
-		expect(buffer.abandonAll()).toBe(1);
-		expect(dead).toEqual([{ summary: "b", reason: "abandoned" }]);
-		expect(buffer.list()).toMatchObject([{ given_up: "abandoned" }]);
+		expect(buffer.abandonAll()).toBe(2);
+		expect(dead).toEqual([
+			{ summary: "a", reason: "abandoned" },
+			{ summary: "b", reason: "abandoned" },
+		]);
+		expect(buffer.size()).toBe(0);
 
 		gate.resolve({ transient: "down" });
 		await running;
 		expect(buffer.size()).toBe(0);
-		expect(dead).toEqual([
-			{ summary: "b", reason: "abandoned" },
-			{ summary: "a", reason: "abandoned" },
-		]);
+		expect(dead).toHaveLength(2);
 	});
 
-	test("an in-flight entry that lands after the buffer was abandoned is not recorded as abandoned", async () => {
+	test("an in-flight entry that lands after the buffer was abandoned was recorded at the abandon, once", async () => {
 		const { buffer, dead } = harness();
 		buffer.enqueue(request("s-1", "a"));
 		buffer.enqueue(request("s-2", "b"));
 		const gate = Promise.withResolvers<EventDelivery>();
 		const running = buffer.drain(() => gate.promise, { all: true });
 
-		expect(buffer.abandonAll()).toBe(1);
+		expect(buffer.abandonAll()).toBe(2);
 		gate.resolve("landed");
 		await running;
 
 		expect(buffer.size()).toBe(0);
-		expect(dead).toEqual([{ summary: "b", reason: "abandoned" }]);
+		expect(dead).toEqual([
+			{ summary: "a", reason: "abandoned" },
+			{ summary: "b", reason: "abandoned" },
+		]);
 	});
 });
 
