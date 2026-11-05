@@ -16,7 +16,7 @@
 
 - [ ] **ATLAS-01**: A scan of the repositories on the VPS lists every documentation file with repo, path, kind, tier, sha256 and size, and collapses clones, linked worktrees and byte-identical copies into one canonical entry; a rename is recognised only within one repository, and a copy that moves a document to another collection is recorded as an add plus a tombstone (owner decision, 2026-11-04).
 - [ ] **ATLAS-02**: `substrate corpus plan` reports what a bulk ingest would add, change, rename or tombstone against the server's manifest, without sending a document body.
-- [ ] **ATLAS-03**: A bulk ingest route puts new and changed documents into the docs plane with repo and path provenance (kind, tier and commit stay in the manifest; the plane document carries name and text; owner decision, 2026-11-04) and without a serial wait per page, and refuses secrets the way `docs_ingest` does.
+- [ ] **ATLAS-03**: A bulk ingest route puts new and changed documents into the docs plane with repo, path and commit provenance (the citation URL carries the commit; kind and tier stay in the manifest, which also records the commit; the plane document carries name and text; owner decision, 2026-11-04) and without a serial wait per page, and refuses secrets the way `docs_ingest` does.
 - [ ] **ATLAS-04**: A document removed or renamed in its repository is tombstoned: its docs-plane document is deleted (unless another active row shares it) and its manifest row says so; a scan that is narrower than the manifest, or that failed on a repository, never tombstones anything outside what it covered.
 - [ ] **ATLAS-05**: Running the same scan and ingest again changes nothing, and an interrupted run resumes where it stopped.
 - [ ] **ATLAS-06**: Greptile knowledge-base documents and GitHub repositories with no local clone enter the same manifest through documented source adapters.
@@ -65,15 +65,15 @@
 ### Doc Proofs (phase 69)
 
 - [ ] **PROOF-01**: The corpus manifest has a deterministic Merkle root over (repo, path, sha256) leaves.
-- [ ] **PROOF-02**: Each changing ingest records the root as a ledger event, coalesced in a 5 s window (not one per sync), so the existing hourly anchor covers it without a new memo format. Amended 2026-11-04 by owner decision (d): one event per changing ingest, coalesced in a 5 s window, not one per sync.
+- [ ] **PROOF-02**: Each changing ingest records the root as a ledger event, coalesced in a 5 s window (not one per sync), so the existing hourly anchor covers it without a new memo format. Amended 2026-11-05 by owner decision: one event per changing ingest, coalesced in a 5 s window, not one per sync.
 - [ ] **PROOF-03**: `substrate corpus prove` gives an inclusion proof for one document and `substrate corpus verify` checks it offline and against the anchored hour when chain evidence exists.
-- [ ] **PROOF-04**: `docs_search` replies carry the short corpus root of what the session saw, read from the cache, so an uncached reply carries none. Amended 2026-11-04 by owner decision (d): `corpus_root` comes from the cache.
+- [ ] **PROOF-04**: `docs_search` replies carry the short corpus root of what the session saw, read from the cache, so an uncached reply carries none. Amended 2026-11-05 by owner decision: `corpus_root` comes from the cache.
 
 ### Docs SLO and eval (phase 70)
 
 - [ ] **EVAL-01**: A self-supervised golden set generated from the corpus is scored for recall at k, MRR and latency.
 - [ ] **EVAL-02**: A deterministic offline harness guards ranking, dedupe and re-rank regressions in CI.
-- [ ] **EVAL-03**: Freshness, ingest throughput and retrieval quality are metrics with SLO thresholds visible in `fabric_status`, which is the contract for sync lag, and the docs canary judges retrieval recall only. Amended 2026-11-04 by owner decision (c): the canary clause is amended; `fabric_status` is the contract for sync lag.
+- [ ] **EVAL-03**: Freshness, ingest throughput and retrieval quality are metrics with SLO thresholds visible in `fabric_status`, which is the contract for sync lag, and the docs canary judges retrieval recall only. Amended 2026-11-05 by owner decision: `fabric_status` is the contract for sync lag and the canary judges recall only.
 - [ ] **EVAL-04**: A broken relative link in `docs/` or `.planning/`, or a missing level-1 title in `docs/` or the live planning files, fails a test.
 - [ ] **EVAL-05**: An operator runbook covers deploy, first ingest, timers, rollback and the check that proves each.
 

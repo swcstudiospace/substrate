@@ -180,8 +180,8 @@ No gaps. Criteria 2 and 3 are judged against the owner-amended text and match it
 ### Open Items
 
 1. Operator install of the staged units, timers and hooks (WATCH-03 opt-in, WATCH-04). Not verifier-closable.
-2. `SUBSTRATE_PLANNING_HASH_STORE` defaults to `off` (`flag-registry.ts` line 882). In the default configuration a restart re-ingests unchanged planning pages (`planning-hash-store.test.ts`, the non-Postgres restart test runs with the flag on). Criterion 3 holds with the flag on. Owner decision needed on enabling it by default.
-3. The Postgres-gated block of `planning-hash-store.test.ts` (3 tests, `describeLive`) did not run: no database was assigned to this item (item: "Database for SUBSTRATE_TEST_PG_URL: none"). The table persistence leg is verified only through the memory adapter. Live counts this pass: 0 pass, 3 skip, with the variable unset.
+2. `SUBSTRATE_PLANNING_HASH_STORE` defaults to `off` (`flag-registry.ts` line 882). In the default configuration a restart re-ingests unchanged planning pages (`planning-hash-store.test.ts`, the non-Postgres restart test runs with the flag on). Criterion 3 holds with the flag on. Owner decision 2026-11-05: keep the default off.
+3. The Postgres-gated block of `planning-hash-store.test.ts` ran on scratch Postgres 16 (database `substrate_test_p65`, 127.0.0.1:5439, not production): the whole file, 8 pass and 0 fail, with the URL set. The table persistence leg is therefore observed against Postgres, not only through the memory adapter.
 4. `docs.sync` is not in `RESERVED_NOTE_ACTIONS` (`reserved-actions.ts`). Owner decision recorded as "reservation held", so the status quo stands. Consequence: a `docs.sync` note with a large `lag_s` posted by any authenticated caller raises the corpus warning.
 5. `covered_files` lists the phase's SUMMARY first, as the fingerprint command emits it; the digest is recomputed over this list at HEAD 42e3cf13 (`v3:sha256:972ef79c…`). The prior digest `v3:sha256:b738b1fe…` is stale because of the H-1 edits to `service.ts` and `flag-registry.ts`.
 6. Carried forward, not re-run in this pass: `reconcile.test.ts`, `view.test.ts`, `mirror.test.ts`. Their code is unchanged since 835a2742.
@@ -189,7 +189,7 @@ No gaps. Criteria 2 and 3 are judged against the owner-amended text and match it
 
 ### PG counts per file
 
-- `packages/mcp-server/src/planning-hash-store.test.ts`: Postgres-gated (`describeLive` when `SUBSTRATE_TEST_PG_URL` is set). No database assigned: 0 pass, 3 skip, with the variable unset. The non-gated tests in the file, including the two-server restart test, pass within the 87 pass.
+- `packages/mcp-server/src/planning-hash-store.test.ts`: Postgres-gated (`describeLive` when `SUBSTRATE_TEST_PG_URL` is set). With the variable unset: 0 pass, 3 skip. With the URL set on scratch Postgres 16: 8 pass, 0 fail. The non-gated tests in the file, including the two-server restart test, pass within the 87 pass.
 - `scripts/doctor-units.test.ts`, `scripts/doctor-sandbox.test.ts`, `scripts/sandbox-dropins.test.ts`: no PG gate. Ran with the variable unset: pass.
 - `packages/cli/src/corpus/sync.test.ts`: no PG gate. Ran with the variable unset: pass.
 

@@ -306,6 +306,7 @@ A request with tombstones carries `scope`, `{coverage, maxTier}` in the plan's s
 A tombstone request without `scope` is refused `400` with `reason` `tombstone-scope-required`; a request with a tombstone naming a row
 outside the scope is refused `403` with `reason` `tombstone-out-of-scope`. Both are whole-request refusals, checked before any plane write,
 so nothing is removed.
+The `scope` is the caller's own declaration: the server checks each tombstone against it so that a request is consistent with itself. It is not an access control. The grant that bounds a caller is the repo grant (`SUBSTRATE_REPO_SCOPES`), which is off by default.
 
 Response: `{protocol, results, counts, manifestVersion}`. Each result is
 `{repo, path, status: "ingested"|"updated"|"unchanged"|"tombstoned"|"refused"|"failed", reason?, documentId?}`; `reason` is a closed
