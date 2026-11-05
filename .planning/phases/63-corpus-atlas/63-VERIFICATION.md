@@ -1,79 +1,98 @@
 ---
 phase: 63-corpus-atlas
-verified: 2026-11-05T07:10:41Z
-status: human_needed
-score: 7/7 must-haves verified (criteria 1 to 7 VERIFIED against the criteria as amended by the owner decisions of 2026-11-04; 0 behavior-unverified)
+verified: 2026-11-05T08:00:44Z
+status: gaps_found
+score: 6/7 must-haves verified (SC4 as amended 2026-11-05 FAILED: the commit does not reach the citation URL; 0 behavior-unverified)
 covered_files: [".env.example", ".planning/phases/63-corpus-atlas/63-SUMMARY.md", "bun.lock", "docs/config-reference.md", "docs/corpus.md", "docs/data-planes.md", "docs/docs-plane.md", "docs/event-vocabulary.md", "docs/mcp-audit.md", "docs/runbooks/corpus-ingest.md", "docs/runbooks/index-archive.md", "docs/runbooks/rollback-compat.md", "package.json", "packages/audit/src/policy.test.ts", "packages/audit/src/policy.ts", "packages/cli/package.json", "packages/cli/src/corpus/bodies.test.ts", "packages/cli/src/corpus/bodies.ts", "packages/cli/src/corpus/client.test.ts", "packages/cli/src/corpus/client.ts", "packages/cli/src/corpus/index.test.ts", "packages/cli/src/corpus/index.ts", "packages/cli/src/corpus/ingest.ts", "packages/cli/src/corpus/inventory.test.ts", "packages/cli/src/corpus/inventory.ts", "packages/cli/src/corpus/render.test.ts", "packages/cli/src/corpus/render.ts", "packages/cli/src/corpus/testkit.ts", "packages/cli/src/index.ts", "packages/corpus/package.json", "packages/corpus/src/adapters/github.test.ts", "packages/corpus/src/adapters/github.ts", "packages/corpus/src/adapters/greptile-export.test.ts", "packages/corpus/src/adapters/greptile-export.ts", "packages/corpus/src/classify.test.ts", "packages/corpus/src/classify.ts", "packages/corpus/src/discover.test.ts", "packages/corpus/src/discover.ts", "packages/corpus/src/guards.ts", "packages/corpus/src/index.ts", "packages/corpus/src/names.test.ts", "packages/corpus/src/names.ts", "packages/corpus/src/protocol.ts", "packages/corpus/src/scan.test.ts", "packages/corpus/src/scan.ts", "packages/corpus/src/similarity.test.ts", "packages/corpus/src/similarity.ts", "packages/corpus/src/test-support.ts", "packages/mcp-server/package.json", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/citations.test.ts", "packages/mcp-server/src/corpus/ingest.test.ts", "packages/mcp-server/src/corpus/ingest.ts", "packages/mcp-server/src/corpus/mutex.test.ts", "packages/mcp-server/src/corpus/mutex.ts", "packages/mcp-server/src/corpus/names.test.ts", "packages/mcp-server/src/corpus/names.ts", "packages/mcp-server/src/corpus/plan.test.ts", "packages/mcp-server/src/corpus/plan.ts", "packages/mcp-server/src/corpus/routes.test.ts", "packages/mcp-server/src/corpus/service.ts", "packages/mcp-server/src/corpus/settings.test.ts", "packages/mcp-server/src/corpus/store.test.ts", "packages/mcp-server/src/corpus/store.ts", "packages/mcp-server/src/corpus/testkit.ts", "packages/mcp-server/src/corpus/validate.test.ts", "packages/mcp-server/src/corpus/validate.ts", "packages/mcp-server/src/docs-datasets.ts", "packages/mcp-server/src/docs-ingest.test.ts", "packages/mcp-server/src/docs-ingest.ts", "packages/mcp-server/src/docs-search.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index-archive-spec.ts", "packages/mcp-server/src/index-archive-watch.ts", "packages/mcp-server/src/index-archive.test.ts", "packages/mcp-server/src/index-archive.ts", "packages/mcp-server/src/index-store.archive.test.ts", "packages/mcp-server/src/index-store.migrate-contract.test.ts", "packages/mcp-server/src/index-store.migrate-harness.test.ts", "packages/mcp-server/src/index-store.migrations.digests.json", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/planes/__fixtures__/lightrag-v1.5.7-routes.json", "packages/mcp-server/src/planes/lightrag-bulk.test.ts", "packages/mcp-server/src/planes/lightrag-bulk.ts", "packages/mcp-server/src/planes/lightrag.contract.test.ts", "packages/mcp-server/src/planes/lightrag.test.ts", "packages/mcp-server/src/planes/lightrag.ts", "packages/mcp-server/src/rollback-compat.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v3:sha256:757f1c2e6a5dc64c4e122c8c5e36045f496be34db9ae32bc8f732f0e5c44aea0"
+covered_digest: "v3:sha256:700ebbbdfeb131154d9cad2bd9907bb6a2a0849b4225f48b55d4bb96f6b134f5"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: human_needed
   previous_score: 7/7
   gaps_closed: []
-  gaps_remaining: []
+  gaps_remaining:
+    - "SC4 and ATLAS-03 as amended 2026-11-05: the commit reaches the citation URL (not met by the code at 6e5d766e)"
   regressions: []
-human_verification:
-  - test: "Live ingest. Run `substrate corpus ingest --execute` against the live corpus with the server on SUBSTRATE_CORPUS=on and a LightRAG backend, after the dry-run plan."
-    expected: "Batches report `ingested`; a repeat run reports `unchanged` and sends nothing; no secret refusals on the real corpus."
-    why_human: "Operator-gated: needs the live server, the LightRAG backend and the real corpus. Not run here."
-  - test: "Greptile export. Ingest a real Greptile knowledge-base export directory."
-    expected: "The `<owner>/<repo>/<path>.md` layout is read as tier-2 greptile-kb entries."
-    why_human: "The layout is confirmed only against a real export, which is not available to the verifier. The fixture test (greptile-export.test.ts:20) pins the layout as the code reads it."
-  - test: "GitHub through gh. Ingest repositories that have no local clone through a logged-in gh."
-    expected: "The same entry shape as the Greptile source; bounded by --max-repos and --tier."
-    why_human: "Needs a logged-in gh and network access to GitHub. The adapter is tested with a fake gh runner (github.test.ts:150)."
-  - test: "Migration step 35 and the archive on production. Apply step 35 to a restored dump and run the rollback check in docs/runbooks/rollback-compat.md. Take a new index archive on this release: the schema hash changed, so an archive written before ebabe6ef fails verify-archive (kind schema)."
-    expected: "The step applies and reverses; the new archive passes verify-archive; restoring it reproduces corpus_documents with its manifest_seq values."
-    why_human: "Operator action on the production index. Not run here; the scratch round trip is covered by the Postgres tests below."
+gaps:
+  - truth: "SC4 (amended 2026-11-05): the bulk path carries repo, path and commit into the document source (its citation URL)"
+    status: failed
+    reason: "The commit is recorded in the manifest and scanned for secrets, but no citation URL a search returns carries it. Plane documents are named corpus:<repo>:<path>@<sha12> (no commit), and every corpus citation is rebuilt with no commit argument, so it names blob/HEAD/<path>."
+    artifacts:
+      - path: "packages/mcp-server/src/docs-search.ts"
+        issue: "withCorpusProvenance (:522-531, called at :1117) sets source_url = corpusSourceUrl(parsed.repo, parsed.path) with no commit; commit field is the constant dataset-pin:corpus:unrecorded."
+      - path: "packages/corpus/src/protocol.ts"
+        issue: "sourceUrl (:429-437) accepts a commit and emits blob/<commit>/<path>, but its only callers that pass one are the secret scan in ingest.ts (:197, :251)."
+      - path: "packages/mcp-server/src/corpus/ingest.ts"
+        issue: "toBulk (:259-261) sends {name, text} only; name is corpusDocumentName(repo, path, sha256) (names.ts:125), which holds no commit."
+      - path: "packages/mcp-server/src/planes/lightrag-bulk.ts"
+        issue: "insertBatch sends file_sources = doc.name (:234), so the plane source carries no commit."
+    missing:
+      - "Carry the commit to the citation: either the plane source/name includes it (decide the name format; parseCorpusDocumentName and isSafeCorpusName pin it today) or withCorpusProvenance looks up the active manifest row's commit and calls sourceUrl(repo, path, commit)."
+      - "A test that a docs_search citation for a GitHub-origin corpus document with a recorded commit names blob/<commit>/<path>. Today names.test.ts:116, citations.test.ts:36 and rank.test.ts:16 pin blob/HEAD, and no test asserts a commit in the citation."
+      - "The gate r33 JUnit is green (0 failures) but does not exercise this claim; the criterion is not met even though the suite passes."
+  - truth: "ATLAS-03 (amended 2026-11-05): repo, path and commit provenance; the citation URL carries the commit"
+    status: failed
+    reason: "Same root cause as SC4. The route, bounded concurrency, one poll per batch and secret refusal are present and wired; the commit-in-citation part is not."
+    artifacts:
+      - path: "packages/mcp-server/src/docs-search.ts"
+        issue: "Citation source_url built at HEAD (see SC4)."
+    missing:
+      - "Same change as SC4."
 ---
 
 # 63-VERIFICATION: Corpus Atlas (v1.7 phase 63)
 
 **Phase Goal:** The documentation of every repository the owner keeps (the clones on the VPS, the GitHub organisations, the Greptile knowledge bases) is discovered, classified, de-duplicated and recorded in one manifest, and a bulk path puts new and changed documents into the docs plane with provenance and removes the ones that disappeared.
-**Verified:** 2026-11-05T07:10:41Z
-**Status:** human_needed
-**Re-verification:** Yes. The previous record (head 835a2742, status human_needed, 7/7, digest `v3:sha256:04f9f593…`) is replaced. Each corpus criterion was re-checked at head 42e3cf13: the changes in range touch no corpus code (see below), and the three Postgres-gated files and the non-PG set were re-run.
+**Verified:** 2026-11-05T08:00:44Z
+**Status:** gaps_found
+**Re-verification:** Yes. The previous record (head 42e3cf13, status human_needed, 7/7, digest `v3:sha256:757f1c2e…`) is replaced. The criteria were re-checked at head 6e5d766e because commit 6e5d766e amended SC4 and ATLAS-03 (the commit reaches the citation URL). That amendment is not met by the code, so the status moves to gaps_found.
 
-**Head:** 42e3cf13 (integration worktree `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`)
-**Changes since the previous record (835a2742) that touch covered files:** `42e3cf13` range `835a2742..HEAD` changes three covered files: `packages/mcp-server/src/service.ts` (the in-process last-good brief and the brief-snapshot forget mark, `briefForgottenAtMs`), `packages/mcp-server/src/flag-registry.ts` (the `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` help text) and `docs/config-reference.md` (the same row). None of their hunks touches corpus scan, plan, ingest, routes, plane, manifest, migration or archive code (`git diff 835a2742..HEAD` over the three files, filtered for `corpus`, is empty). SC1 to SC7 are therefore carried forward on the same corpus code and re-observed by the runs below. The covered list is unchanged; the digest moves because the content of those three files changed.
-**Covered set:** 95 files, from `gsd_run query verification.fingerprint .planning/phases/63-corpus-atlas <files>`. The set is the 89 files of the replaced record plus six phase files changed by `ebabe6ef` and the runbook. The planning-root ROADMAP and REQUIREMENTS edits are inert for the fingerprint.
+**Head:** 6e5d766e (integration worktree `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`)
+
+## Changes since the previous record (42e3cf13) that were checked
+
+- `6e5d766e` (docs): ROADMAP SC4 and REQUIREMENTS ATLAS-03 now say the commit reaches the citation URL. Re-audited: NOT MET (SC4 and ATLAS-03 failed, see gaps). Also added a `docs/corpus.md` sentence (line 309): the tombstone `scope` is the caller's declaration, not an access control, and the bounding grant is `SUBSTRATE_REPO_SCOPES`, off by default. Re-audited: consistent with `service.ts:99,116,192-193` (`tombstone-scope-required`, `tombstone-out-of-scope`) and with `flag-registry.ts:326` (default `none`); SC5 holds. The other edits in 6e5d766e (phase 65 and 75 records, `docs/reconcile.md`, the planning-hash default) do not touch phase 63 claims.
+- `packages/mcp-server/src/service.ts` (`b4bdd0fc`, docs.sync sync-lag reading): the only hunk is the emit path for docs.sync notes. Its corpus-named lines are the existing `corpusSlo` calls; no corpus scan, plan, ingest, route or archive hunk. Not a phase 63 criterion; carried forward.
+- `49b9aece`, `d1a5e89b`, `b4fe6bfe` (phases 76, 75, 68) and `bd5c287a`, `457b2e07` (record refreshes): no phase 63 covered file changed. Checked against `git diff --name-only 42e3cf13 HEAD` intersected with the covered set: only `docs/corpus.md` and `packages/mcp-server/src/service.ts`.
+- Owner decisions in force (2026-11-04 and 2026-11-05) applied as written: SC1 rename within one repository; a copy elsewhere is add plus tombstone; the commit reaches the citation URL (SC4, ATLAS-03).
+
+**Covered set:** 95 files, from `gsd_run query verification.fingerprint .planning/phases/63-corpus-atlas <files>` (the 95 files of the replaced record; the set is unchanged, the digest moves because `docs/corpus.md` and `service.ts` changed). The planning-root ROADMAP and REQUIREMENTS are inert for the fingerprint. `covered_files` and `covered_digest` are the command's output, copied verbatim.
 
 ## Gates
 
-No repository gate was run here (the full suite, tsc, lint and formatters are out of scope for this record). Targeted runs only, observed at head 42e3cf13 on 2026-11-05.
+No repository gate was run here (full suite, tsc, lint and formatters are out of scope). Targeted runs only.
 
 | Run | Files | Result |
 |---|---|---|
-| `env -u SUBSTRATE_TEST_PG_URL bun test` (non-PG, one command) | 31 phase test files: `packages/audit/src/policy.test.ts`; `packages/cli/src/corpus/{bodies,client,index,inventory,render}.test.ts`; `packages/corpus/src/adapters/{github,greptile-export}.test.ts`; `packages/corpus/src/{classify,discover,names,scan,similarity}.test.ts`; `packages/mcp-server/src/corpus/{citations,ingest,mutex,names,plan,routes,settings,validate}.test.ts`; `packages/mcp-server/src/{docs-ingest,observe,rollback-compat,index-store.migrate-contract,index-store.migrate-harness,index-archive,index-store.archive}.test.ts`; `packages/mcp-server/src/planes/{lightrag-bulk,lightrag.contract,lightrag}.test.ts` | 947 pass, 12 skip, 0 fail (959 tests, 31 files, 4894 expect calls, 14.3 s). The 12 skips are the PG-gated tests, which the Postgres runs below cover. |
-| `SUBSTRATE_TEST_PG_URL=<scratch>/substrate_test_v63 bun test packages/mcp-server/src/corpus/store.test.ts` | manifest store (`corpus_documents` reads and writes) | 15 pass, 0 fail, 61 expect calls, 0 skip |
-| same, `packages/mcp-server/src/index-archive.test.ts` | archive spec, verifier, gates | 65 pass, 0 fail, 1325 expect calls, 0 skip |
-| same, `packages/mcp-server/src/index-store.archive.test.ts` | archive round trip, whitelist test, corpus restore tests | 10 pass, 0 fail, 261 expect calls, 0 skip |
-
-Postgres: scratch Postgres 16.15 container on 127.0.0.1:5439, database `substrate_test_v63`. Not production. Each file ran in its own process, re-run at head 42e3cf13. The connection string is held in a shell variable and not recorded here. No production database and no port 5432 was touched.
+| `env -u SUBSTRATE_TEST_PG_URL TMPDIR=…/gate-tmpfs bun test --timeout 30000 <33 covered *.test.ts files + docs-search.test.ts>` at 6e5d766e | 33 files, 1065 tests | 1039 pass, 26 skip, 0 fail. All 26 skips are Postgres-gated suites ("index archive against a live index", "the corpus manifest against a live index") with no PG URL set. |
+| Postgres-gated suites, named passes in gate r33 JUnit (`/root/src/worktrees/backups/gate-r33-junit.xml`, head 6e5d766e gate) | `index-store.archive.test.ts` 10/10; `index-archive.test.ts` 65/65; `corpus/store.test.ts` 15/15 (manifest suite 12); `planes/lightrag-bulk.test.ts` 33/33 | 0 failures, no `<skipped/>` in these suites. Scratch Postgres was not started in this run. |
 
 ## Success criteria
 
 | # | Criterion (as amended) | Status | Evidence |
 |---|---|---|---|
-| 1 | Scan returns sorted, deterministic entries; clones and worktrees collapse; byte-identical copies collapse with the scan report listing them (bounded); the next copy becomes canonical; a rename is reported only within one repository, and a copy that moves to another collection is an add plus a tombstone; exclusions and size caps hold | VERIFIED | Three levels. Artifact: `packages/mcp-server/src/corpus/plan.ts:68-85` pairs a removed row with a new entry only on `keyOf(repo, sha256)`; a moved copy in another repository is never paired, so it is an add plus a tombstone. Scan side: `packages/corpus/src/scan.ts:80-96` (`IdenticalGroup`, bounded `collapsed` report), `:423` `collapseIdentical`, `:177` `inspectBytes` (empty, too-large, binary rules); `classify.ts:26` `EXCLUDED_SEGMENTS`. Wiring: `planCorpus` is the function behind `POST /corpus/plan`. Behaviour: `plan.test.ts:42` (same text at a new path is one rename), `:49` (renames pair one to one), `:59` "a rename never crosses repositories", `:66` (a change is not a rename candidate). Scan fixtures in `scan.test.ts` and `classify.test.ts` pass in the non-PG run. |
-| 2 | `substrate corpus scan`, `plan`, `ingest` and `status` work against a server; `plan` sends entries without bodies and prints counts; `ingest` is a dry run until `--execute` | VERIFIED | CLI: `packages/cli/src/corpus/index.ts:4-13` (usage: `scan`, `plan`, `ingest [--execute]`, `status`), `:730` the dry-run print ends "add --execute to ingest this plan". Server doors: `server.ts:1741` `POST /corpus/plan`, `:1766` `POST /corpus/ingest`, `:1794` `GET /corpus/status`. Behaviour: `routes.test.ts:217` "a plan counts add, change, rename and tombstone against the manifest and writes nothing", `:179` tombstone-only request, `cli/src/corpus/index.test.ts` and `ingest.test.ts` (non-PG and PG run). Not exercised against a live deployed server (see human items). |
-| 3 | A migration step creates `corpus_documents` (additive, reversible, digest fixture and rollback-compat doc updated); `POST /corpus/plan`, `POST /corpus/ingest`, `GET /corpus/status`, MCP `corpus_status` (read, fail-open) and `corpus_ingest` (write, fail-closed) are audited and admitted; the table is covered by the index archive and restore spec and its restore is tested | VERIFIED | Three levels. Artifacts: step 35 `index-store.ts:701-727` (`expand`, `create table if not exists`, `down` drops the table, identity `manifest_seq`, three indexes). Digest: `index-store.migrations.digests.json:36` `"35": "afc41214…"`. Rollback doc: `docs/runbooks/rollback-compat.md:48` row for step 35; test pin `rollback-compat.test.ts:636`. Doors and admission: `admission.ts:205-208` (`/corpus/plan` read, `/corpus/status` read, `/corpus/ingest` write), `:252-253` (`corpus_status` read, `corpus_ingest` write); `mcp.ts:1683` `corpus_status`, `:1700` `corpus_ingest`; audit `packages/audit/src/policy.ts:48` (`corpus_ingest` fail-closed) and `:131` (`corpus_status` fail-open). Archive: `index-archive-spec.ts:216` `corpus_documents` (17 columns, primary key `(repo, path)`), listed in the closed whitelist. Restore: `index-store.ts:3062-3063` `advanceIdentity` contract, `:3134` implementation moves each identity sequence past the restored maximum. Tests: `index-archive.test.ts` (whitelist equals `migrate()`, PG 65/65), `index-store.archive.test.ts` (round trip and restored sequence, PG 10/10), `corpus/store.test.ts` (PG 15/15), `rollback-compat.test.ts` and `index-store.migrate-harness.test.ts` (non-PG, pass). |
-| 4 | The LightRAG bulk path sends batches through `POST /documents/texts` with bounded concurrency and one pipeline poll per batch, redacts and refuses secrets as `docs_ingest` does, and carries repo and path into the document source; kind, tier and commit stay in the manifest, and the plane document carries name and text | VERIFIED | Three levels. Artifact: `planes/lightrag-bulk.ts:231-236` sends `POST /documents/texts` with `{texts, file_sources}`, one `bulkTimeoutMs` budget; `:276-278` `waitIdle` once per batch; `:92-95` batch bounds (100 documents, 4 MB). Bounded concurrency: `ingest.ts:485` `runBounded(batches, deps.settings.concurrency, …)`. Plane document: `ingest.ts:105-106` and `:260` `toBulk` carries `{name, text}` only; kind, tier, commit and `supersededBy` are recorded in the manifest row (`ingest.ts:303-304`). Secrets: a secret finding refuses that document alone (`ingest.test.ts:70`), and the body must hash to its entry's sha256 before it leaves (`ingest.ts:17-18`). Wiring: `ingestCorpus` is called from the `POST /corpus/ingest` route and the `corpus_ingest` tool. Tests: `lightrag-bulk.test.ts` and `ingest.test.ts` (non-PG); the route fixture `planes/__fixtures__/lightrag-v1.5.7-routes.json` carries `texts`. |
-| 5 | A removed or renamed document is tombstoned: its plane document is deleted through `delete_document` only when no other active row shares it; its row says `tombstoned`; a rename (same sha, new path) is a rename only within one repository; a copy that moves to another collection is an add plus a tombstone; a tombstone is created only for a repository the scan covered completely, at the declared scope; narrower scans leave earlier documents untouched | VERIFIED (carried forward, re-observed) | Artifact: `ingest.ts:367-411` phase T: `activeReferences(id) > 0` keeps a shared plane document (`:273`), `deleteDocuments` for the rest (`:396`), row marked `tombstoned` only after confirmed deletion (`:406-411`, `delete-failed` otherwise). Scope: `plan.ts:12-14` and `:65` (a row is a candidate only when its `(repo, source)` is covered and its tier is within `scope.maxTier`; empty coverage tombstones nothing); the server refuses an out-of-scope tombstone with 403 `tombstone-out-of-scope` (`routes.test.ts:203`). Behaviour: `ingest.test.ts:294` (tombstone deletes and marks the row), `:313` (shared plane document never deleted), `:351` (rename leaves one plane document under the new name), `plan.test.ts:59`. |
-| 6 | A second identical run reports `unchanged` for every document and sends nothing; a run killed half way resumes without re-sending recorded documents | VERIFIED (carried forward, re-observed) | `ingest.ts:240-243`: a row at the same sha, source, kind, tier and marker is `unchanged` and not sent. Behaviour: `ingest.test.ts:103` (a second identical run sends nothing), `:198` (a run killed after the first batch resumes with only the documents not recorded). Batches record each accepted document (`ingest.ts:296-315`), so a crash between batches leaves only unrecorded documents to send. |
-| 7 | Source adapters for a Greptile export directory and for GitHub repositories through `gh` produce the same entries; both are bounded by `--max-repos` and `--tier` | VERIFIED (carried forward, re-observed) | `packages/corpus/src/adapters/greptile-export.ts` reads `<owner>/<repo>/<path>.md` as tier-2 `greptile-kb` entries (`greptile-export.test.ts:20`); a tier bound below 2 reads nothing (`:97`). `adapters/github.ts:29` `DEFAULT_GITHUB_MAX_REPOS = 50`, `:30` `DEFAULT_GITHUB_CONCURRENCY = 4`, `:139-171` bounded limiter; the tier bound drops research before fetching it (`github.test.ts:150`). CLI bounds: `cli/src/corpus/index.ts:211-216` (`--max-repos` positive integer), tier 1 to 3 at `:203`. Both adapters run in the non-PG run. No live Greptile export and no `gh` run (see human items). |
+| 1 | Scan deterministic; clones and worktrees collapse; identical copies collapse with bounded report; a rename only within one repository; a copy in another collection is an add plus a tombstone; exclusions and size caps | VERIFIED | `packages/mcp-server/src/corpus/plan.ts:68-85` pairs a removed row with a new entry only on `keyOf(repo, sha256)`, so a moved copy in another repository is never paired. JUnit (gate r33): "a rename never crosses repositories" (`plan.test.ts:59`), "the same text at a new path is one rename…" (`:42`), "renames pair one to one…" (`:49`). Scan side: `packages/corpus/src/scan.ts` (`collapseIdentical`, `inspectBytes`), re-observed in the non-PG batch. |
+| 2 | `scan`, `plan`, `ingest`, `status` work against a server; `plan` sends no bodies and prints counts; `ingest` is a dry run until `--execute` | VERIFIED | Server doors `server.ts` (`POST /corpus/plan`, `POST /corpus/ingest`, `GET /corpus/status`); JUnit "a plan counts add, change, rename and tombstone against the manifest and writes nothing" (`routes.test.ts:217`); "a tombstone-only request (no documents) is accepted…" (`routes.test.ts:179`). CLI dry run: `packages/cli/src/corpus/index.ts`. Not exercised against a live server (human item 1). |
+| 3 | Migration step creates `corpus_documents` (additive, reversible, digest fixture, rollback-compat doc); `POST /corpus/plan`, `POST /corpus/ingest`, `GET /corpus/status`, MCP `corpus_status` (read, fail-open) and `corpus_ingest` (write, fail-closed) audited and admitted; the table is in the index archive and restore spec with its restore tested | VERIFIED | Step 35 `packages/mcp-server/src/index-store.ts` (create table, down drops it, identity `manifest_seq`); digest `index-store.migrations.digests.json` `"35": "afc41214…"` (matches). Archive spec `index-archive-spec.ts:216` (`corpus_documents`). Commit `ebabe6ef` added the table to the archive with the restored sequence. JUnit (gate r33, no `<skipped/>`): "archive → verify → restore into a scratch database: counts and hashes equal…" (`index-store.archive.test.ts:205`); "after a restore, a plain insert into corpus_documents takes a manifest_seq above every restored one" (`:263`); "the closed whitelist is exactly what migrate() created…" (`:162`). Audit/admission: `corpus_ingest` and `corpus_status` in `packages/audit/src/policy.ts` (carried forward). |
+| 4 | LightRAG bulk path: batches through `POST /documents/texts` with bounded concurrency and one poll per batch; redacts and refuses secrets as `docs_ingest` does; carries repo, path and **commit** into the document source (its citation URL); kind and tier stay in the manifest, which also records the commit; the plane document carries name and text | **FAILED** (amended wording) | Holds: `packages/mcp-server/src/planes/lightrag-bulk.ts:231-236` (`POST /documents/texts`, one `bulkTimeoutMs` budget), `:276-278` (one `waitIdle` per batch), `:92-95` batch bounds; `ingest.ts:485` `runBounded(batches, deps.settings.concurrency, …)`; secret refusal `ingest.ts:251`; manifest commit `ingest.test.ts:58`. JUnit: `lightrag-bulk.test.ts` 33/33 named passes. **Does not hold:** the commit is not in the document source or in any citation URL. `ingest.ts:259-261` `toBulk` sends `{name, text}`; `name` is `corpus:<repo>:<path>@<sha12>` (`names.ts:125`, no commit); `lightrag-bulk.ts:234` sends `file_sources: docs.map(d => d.name)`. The search citation is rebuilt by `docs-search.ts:522-531` (called `:1117`) as `corpusSourceUrl(repo, path)` with no commit, which `protocol.ts:435` renders as `blob/HEAD/<path>`. Tests pin HEAD: `names.test.ts:116`, `citations.test.ts:36`, `rank.test.ts:16`. |
+| 5 | Removed or renamed document tombstoned: plane document deleted through `delete_document` only when no other active row shares it; row `tombstoned`; rename only within one repository; a copy in another collection is an add plus a tombstone; tombstone only for a repository the scan covered completely, at the declared scope; narrower scans leave earlier documents untouched | VERIFIED (carried forward, re-observed) | `ingest.ts:367-411` phase T (`activeReferences(id) > 0` keeps a shared plane document, `deleteDocuments`, row `tombstoned` only after confirmed deletion); scope `plan.ts:12-14`. Refusals `service.ts:99,116,192-193` (`tombstone-scope-required`, `tombstone-out-of-scope`); JUnit "a tombstone outside the request's scope is refused 403 tombstone-out-of-scope and deletes nothing" (`routes.test.ts:203`). `docs/corpus.md:309` (declaration, not access control) matches the code. |
+| 6 | Second identical run reports `unchanged` and sends nothing; a killed run resumes without re-sending recorded documents | VERIFIED (carried forward, re-observed) | `ingest.ts:240-243` (same sha, source, kind, tier and marker → `unchanged`, not sent); `ingest.ts:296-315` records each accepted document per batch. Tests `ingest.test.ts:103` and `:198` (named in the previous record; ingest suite in the 0-fail non-PG batch). |
+| 7 | Source adapters for a Greptile export directory and for GitHub through `gh` produce the same entries; both bounded by `--max-repos` and `--tier` | VERIFIED (carried forward, re-observed) | `packages/corpus/src/adapters/greptile-export.ts` (`<owner>/<repo>/<path>.md` as tier-2 `greptile-kb`; `greptile-export.test.ts:20`, `:97`); `adapters/github.ts:29-30` defaults, `:139-171` bounded limiter, `github.test.ts:150`. CLI bounds `cli/src/corpus/index.ts:203, :211-216`. Real Greptile export and live `gh` not run (human items 2 and 3). |
+
+**Score:** 6/7 truths verified (0 behavior-unverified). SC4 is FAILED under its amended wording, and ATLAS-03 is BLOCKED on the same point.
 
 ## Required artifacts
 
 | Artifact | Expected | Status | Details |
 |---|---|---|---|
-| `packages/corpus/src/{protocol,scan,classify}.ts` | closed enums, bounds, scan, collapse, caps | VERIFIED | `protocol.ts:57-101` (`DOC_TIERS`, `CORPUS_SOURCES`, `PLAN_ACTIONS`, `MAX_PLAN_ENTRIES`, `MAX_COVERAGE_PAIRS`, `MAX_INGEST_DOCUMENTS` 200, `MAX_INGEST_TOMBSTONES` 500). Scan and classify tests pass. |
-| `packages/mcp-server/src/corpus/{plan,ingest,service,store,validate,routes}.ts` | server doors and ingest | VERIFIED | plan, ingest, validate and routes tests pass; `corpus/store.test.ts` 15/15 on scratch Postgres. |
-| `packages/cli/src/corpus/{index,ingest,client,inventory}.ts` | CLI commands and client | VERIFIED | `index.ts` usage and flag parsing; `ingest.ts:98-165` tombstones in their own requests, then bounded batches. Tests pass. |
-| `packages/mcp-server/src/index-store.ts` step 35 | additive `corpus_documents` | VERIFIED | `:701-727`; digest `index-store.migrations.digests.json:36`; `advanceIdentity` `:3134`. |
-| `packages/mcp-server/src/index-archive-spec.ts` `corpus_documents` | archive spec, closed list | VERIFIED | `:216`; whitelist test equals `migrate()`; round trip and restored sequence pass on scratch Postgres. |
-| `packages/mcp-server/src/planes/lightrag-bulk.ts` | bulk insert, wait, map, delete | VERIFIED | `:231-236` insert, `:276-278` one wait per batch, `:448-455` delete confirmed only by an idle pipeline. |
+| `packages/corpus/src/{protocol,scan,classify}.ts` | closed enums, bounds, scan, collapse, caps | VERIFIED | `protocol.ts:57-101` bounds; `sourceUrl` at `:429-437` accepts a commit but no plane path passes one (see SC4). |
+| `packages/mcp-server/src/corpus/{plan,ingest,service,store,validate,routes}.ts` | server doors and ingest | VERIFIED | plan, ingest, validate and routes tests pass; `corpus/store.test.ts` 15/15 (PG, gate r33). |
+| `packages/cli/src/corpus/{index,ingest,client,inventory}.ts` | CLI commands and client | VERIFIED | `index.ts` usage and flags; `ingest.ts:98-165` tombstones, then bounded batches. |
+| `packages/mcp-server/src/index-store.ts` step 35 | additive `corpus_documents` | VERIFIED | `:701-727`; digest `…digests.json:36`. |
+| `packages/mcp-server/src/index-archive-spec.ts` `corpus_documents` | archive spec, closed list | VERIFIED | `:216`; whitelist test equals `migrate()`; restored sequence passes (gate r33 JUnit). |
+| `packages/mcp-server/src/planes/lightrag-bulk.ts` | bulk insert, wait, map, delete | VERIFIED for insert, wait and delete (`:231-236`, `:276-278`, `:448-455`); commit-in-source part FAILED (SC4). |
+| `packages/mcp-server/src/docs-search.ts` `withCorpusProvenance` | corpus citation with commit | FAILED | `:522-531`: `source_url` built with no commit (HEAD). |
 
 ## Key link verification
 
@@ -84,23 +103,24 @@ Postgres: scratch Postgres 16.15 container on 127.0.0.1:5439, database `substrat
 | `ingest.ts` | `planes/lightrag-bulk.ts` | `plane.insertBatch` / `plane.deleteDocuments` | WIRED | `ingest.ts:274-276`, `:396`. |
 | `ingest.ts` | `corpus_documents` | `CorpusStore` writes, `manifest_seq` identity | WIRED | `store.ts`; PG tests write and read the table. |
 | `index-archive-spec.ts` | `index-store.ts` step 35 | closed whitelist vs `information_schema` | WIRED | `index-archive.test.ts` compares columns on a live database (PG 65/65). |
+| `ingest.ts` commit | citation URL (`docs_search`) | `sourceUrl(repo, path, commit)` | NOT_WIRED | The commit reaches only the secret scan (`ingest.ts:197, :251`). `docs-search.ts:528` passes no commit. |
 
 ## Requirements coverage
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| ATLAS-01 (scan, collapse, rename within one repository, copy as add plus tombstone) | SATISFIED | SC1 evidence; owner decision of 2026-11-04 applied (`plan.ts:68-85`, `plan.test.ts:59`). |
-| ATLAS-02 (`plan` reports add, change, rename, tombstone without bodies) | SATISFIED | SC2 evidence; `routes.test.ts:217`. |
-| ATLAS-03 (bulk ingest route, repo and path provenance, no serial wait per page, secrets refused) | SATISFIED | SC4 evidence; plane document carries name and text (owner decision of 2026-11-04). |
-| ATLAS-04 (tombstone only within a completely covered scan) | SATISFIED | SC5 evidence; `plan.ts:12-14`, `routes.test.ts:203`. |
-| ATLAS-05 (second run unchanged, resume after kill) | SATISFIED | SC6 evidence; `ingest.test.ts:103`, `:198`. |
-| ATLAS-06 (Greptile and GitHub adapters into the same manifest) | SATISFIED | SC7 evidence; adapter tests pass. Real Greptile export and live `gh` not run: human items. |
+| ATLAS-01 (scan, collapse, rename within one repository, copy as add plus tombstone) | SATISFIED | SC1; `plan.ts:68-85`; JUnit `plan.test.ts:59`. |
+| ATLAS-02 (`plan` reports add, change, rename, tombstone without bodies) | SATISFIED | SC2; `routes.test.ts:217`. |
+| ATLAS-03 (bulk route, repo, path and commit provenance with the citation URL carrying the commit; no serial wait; secrets refused) | BLOCKED | Route, wait and secret refusal satisfied (SC4). The commit-in-citation part is not met (`docs-search.ts:528`). |
+| ATLAS-04 (tombstone only within a completely covered scan) | SATISFIED | SC5; `plan.ts:12-14`; `routes.test.ts`. |
+| ATLAS-05 (second run unchanged, resume after kill) | SATISFIED | SC6; `ingest.test.ts:103`, `:198`. |
+| ATLAS-06 (Greptile and GitHub adapters into the same manifest) | SATISFIED | SC7; adapter tests pass. Real export and live `gh` not run. |
 
-**Orphaned requirements:** none. REQUIREMENTS.md maps ATLAS-01 to ATLAS-06 to phase 63, and all six appear in the plan.
+**Orphaned requirements:** none. ATLAS-01 to ATLAS-06 map to phase 63 and all appear in the plans.
 
 ## Anti-patterns found
 
-Grep of `packages/corpus/src`, `packages/cli/src/corpus`, `packages/mcp-server/src/corpus` and `planes/lightrag-bulk.ts` for TODO, FIXME, XXX, not-implemented and placeholder. The only match is a test fixture name (`classify.test.ts`, `.planning/TODO.md`). Stub returns were not separately searched beyond the cited code paths, which are real implementations.
+Carried forward from the previous record (grep of the phase's source areas for TODO, FIXME, XXX, not-implemented and placeholder; the only match was a test fixture name). None of the 6e5d766e or later hunks adds a marker.
 
 | File | Line | Pattern | Severity | Impact |
 |---|---|---|---|---|
@@ -108,26 +128,28 @@ Grep of `packages/corpus/src`, `packages/cli/src/corpus`, `packages/mcp-server/s
 
 ## Deferred items
 
-None. Step 9b: later phases do not defer any gap of this phase. Phases 64 to 66, 69 and 70 build on this manifest (per the SUMMARY), which is not a deferral of a phase-63 criterion.
+None. Phases 64 to 66, 69 and 70 build on this manifest; that is not a deferral of a phase 63 criterion.
 
-## Advisory (New Scope, Unevidenced)
+## Advisory (info, not a new-scope finding)
 
 - The single-flight lock (`mutex.ts`, `ingest.ts:50`) is per server process; two server processes would not exclude each other (SUMMARY "What remains").
 
-## Human verification required
+## Human verification required (after the gaps close)
 
-Status is `human_needed` because all seven criteria are verified and the operator-gated items below remain. They are listed in the `human_verification` frontmatter.
+These remain open and are not counted in the status while gaps_found governs.
 
-1. **Live ingest.** Run `substrate corpus ingest --execute` against the live corpus with the server on `SUBSTRATE_CORPUS=on` and a LightRAG backend. Expected: a dry-run plan first, then batches that report `ingested`, `unchanged` on a repeat, and no secret refusals on the real corpus.
-2. **Greptile export.** Ingest a real Greptile knowledge-base export directory. The `<owner>/<repo>/<path>.md` layout is what the code reads and is unconfirmed against a real export.
+1. **Live ingest.** Run `substrate corpus ingest --execute` against the live corpus with the server on `SUBSTRATE_CORPUS=on` and a LightRAG backend, after the dry-run plan. Expected: batches report `ingested`; a repeat run reports `unchanged` and sends nothing; no secret refusals on the real corpus.
+2. **Greptile export.** Ingest a real Greptile knowledge-base export directory. Expected: the `<owner>/<repo>/<path>.md` layout is read as tier-2 `greptile-kb` entries. (`greptile-export.test.ts:20` pins the layout as the code reads it.)
 3. **GitHub through `gh`.** Ingest repositories with no local clone through a logged-in `gh`. Expected: the same entry shape as the Greptile source.
-4. **Migration step 35 and the archive on production.** Apply step 35 to a restored dump and run the rollback check (`docs/runbooks/rollback-compat.md`). Take a new index archive on this release: the schema hash changed, so an archive written before `ebabe6ef` fails `verify-archive` (kind `schema`). Accepted by owner decision 3.
+4. **Migration step 35 and the archive on production.** Apply step 35 to a restored dump and run the rollback check (`docs/runbooks/rollback-compat.md`). Take a new index archive on this release: the schema hash changed, so an archive written before `ebabe6ef` fails `verify-archive` (kind `schema`). Expected: the step applies and reverses; the new archive passes `verify-archive`; restoring it reproduces `corpus_documents` with its `manifest_seq` values.
 
 ## Gaps summary
 
-No gaps. Criteria 1 to 7 are VERIFIED against the criteria as amended by the owner decisions of 2026-11-04 (SC1, SC4) and the amended ATLAS-01 and ATLAS-03. The earlier SC3 archive gap is closed by `ebabe6ef` and re-observed on scratch Postgres (`index-store.archive.test.ts` 10/10, `index-archive.test.ts` 65/65, `corpus/store.test.ts` 15/15).
+Criteria 1, 2, 3, 5, 6 and 7 are VERIFIED. Criterion 4 (SC4) is FAILED under the wording amended in `6e5d766e` on 2026-11-05: the commit does not reach the citation URL. ATLAS-03 is BLOCKED on the same point. Root cause: `withCorpusProvenance` (`packages/mcp-server/src/docs-search.ts:522-531`) rebuilds corpus citations with `sourceUrl(repo, path)` and no commit, and the bulk path names plane documents without a commit. The commit reaches the manifest row and the secret scan only. The gate r33 JUnit is green, but no test asserts a commit in a citation, so the green gate does not show this criterion.
+
+The fix is a code change (out of scope for this record): carry the commit to the citation (see `missing` in the frontmatter), add a test that pins `blob/<commit>/<path>`, and re-verify. The other criteria carry forward unchanged.
 
 ---
 
-_Verified: 2026-11-05T07:10:41Z_
+_Verified: 2026-11-05T08:00:44Z_
 _Verifier: Claude (gsd-verifier)_

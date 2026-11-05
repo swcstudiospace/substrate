@@ -1,10 +1,10 @@
 ---
 phase: 75-dragonfly-degradation
-verified: 2026-11-05T07:12:19Z
+verified: 2026-11-05T07:59:06Z
 status: human_needed
 score: 8/8 truths verified (2/2 ROADMAP success criteria verified as declared; live proofs H-2, H-3, H-4a and owner items H-4b (O1), H-5 (O2) remain; HARD-R2 unowned)
 covered_files: ["packages/mcp-server/src/admission.test.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/cache-breaker.test.ts", "packages/mcp-server/src/cache.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/http.admission.test.ts", "packages/mcp-server/src/live-session-consumer.test-support.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts", "packages/observability/src/instruments.ts", "packages/observability/src/slo.test.ts", "packages/observability/src/slo.ts"]
-covered_digest: "v3:sha256:d0472d76141b59a92b5fda40c0db09a0427efe2025c1306e1320d25ef1c87c04"
+covered_digest: "v3:sha256:d980c84e0ea9a24c9f57b56cda7f025a19ada1659dc42e3e577af60c4c39341f"
 behavior_unverified: 0
 overrides_applied: 0
 overrides: []
@@ -28,41 +28,40 @@ human_verification:
 # Phase 75: DragonflyDB degradation Verification Report
 
 **Phase Goal:** When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
-**Verified:** 2026-11-05T07:12:19Z
+**Verified:** 2026-11-05T07:59:06Z
 **Status:** human_needed
-**Re-verification:** Yes. Prior record at HEAD `ca9d02ec` (covered digest `v3:sha256:f3e885d1...`) is stale by digest because the H-1 change (commits `9e6fa1f2`, `9c86ffab`, `e185cd8a`, `42e3cf13`) touched covered files. Audit scoped to `git diff ca9d02ec..HEAD` (equivalently `835a2742..HEAD` for covered files; the two agree). Overwritten in the worktree only; nothing committed.
+**Re-verification:** Yes. Prior record at HEAD `42e3cf13` (covered digest `v3:sha256:d0472d76...`) is stale by digest: `d1a5e89b` changed `cache.ts` and `cache-breaker.test.ts`, and `b4bdd0fc` changed `service.ts`. Audit scoped to `git diff 42e3cf13..6e5d766e` on covered files and on the phase 75 paths. Overwritten in the worktree only; nothing committed.
 
 ## Inputs and Scope
 
-- Worktree: `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`, HEAD `42e3cf13`. Worktree clean for this phase (peer edits to other phases' records are not part of this record).
+- Worktree: `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`, HEAD `6e5d766e`. Worktree clean for this phase.
 - Must-haves: the two ROADMAP phase 75 success criteria (`.planning/ROADMAP.md:1298-1312`):
   1. With the cache breaker open, brief and recall return authoritative results. A test proves it.
   2. Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags.
+- Owner decision in force (H-1, closed; recorded dated 2026-11-05 in `6e5d766e`, earlier record said 2026-11-04): the in-process last-good brief serves only while the cache breaker is open. A readable forget mark decides. Any other failed mark read, with the breaker closed, refuses the copy. The trade-off (a forget by another process is not seen during an outage) is documented.
 - No PLAN.md or SUMMARY.md exists in the phase directory (`75-CONTEXT.md`, `75-VERIFICATION.md`). Step 4/5 artifact and link checks are manual, below.
 - Requirement: HARD-R2 (`.planning/REQUIREMENTS.md:119`, unchecked `[ ]`, mapped to phase 75). Unowned.
-- Covered-file fingerprint: `node /root/.agents/gsd-core/bin/gsd-tools.cjs query verification.fingerprint .planning/phases/75-dragonfly-degradation <13 covered files>` run at `42e3cf13`. `covered_files` and `covered_digest` above are copied verbatim from that output (digest changed from `f3e885d1` because `cache.ts`, `service.ts`, `flag-registry.ts`, `cache-breaker.test.ts` changed).
-- Postgres: none. No Postgres-gated file in phase 75. `SUBSTRATE_TEST_PG_URL` is absent from the five covered test files and from `service-forget.test.ts` (grep, exit 1). No PG run was made; no scratch-database counts to cite.
-- Commands run (non-PG targeted only, two `bun test` commands, `env -u SUBSTRATE_TEST_PG_URL`, `TMPDIR=/root/src/worktrees/backups/gate-tmpfs`): T1 and T2 below. Plus read-only `git diff`/`git show`, grep, and the fingerprint query. Not run: full suite, `tsc`, lint, formatters, any edit or commit.
+- Covered-file fingerprint: `gsd_run query verification.fingerprint .planning/phases/75-dragonfly-degradation <13 covered files>` run at `6e5d766e`. `covered_files` and `covered_digest` above are copied verbatim from that output. The covered list is the same 13 files as the prior record; the digest changed because `cache.ts`, `cache-breaker.test.ts` and `service.ts` changed.
+- Postgres: none. `SUBSTRATE_TEST_PG_URL` is absent from the five test files run in T1 (grep, no match). No Postgres-gated test is named in phase 75. No database was started.
+- Commands run (non-PG only, one `bun test` command, `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`): T1 below. Plus read-only `git diff`/`git show`/`git log`, grep, sed reads, JUnit grep of `/root/src/worktrees/backups/gate-r33-junit.xml`, and the fingerprint query. Not run: full suite, `tsc`, lint, formatters, any code edit, any commit, any mutation run.
 
-### Drift since the `ca9d02ec` record
+### Changes since the `42e3cf13` record (checked)
 
-`git diff ca9d02ec..HEAD` touches four covered files and no others (the other nine covered files are byte-identical since `ca9d02ec`: `admission.test.ts`, `admission.ts`, `config.ts`, `http.admission.test.ts`, `live-session-consumer.test-support.ts`, `server.ts`, `instruments.ts`, `slo.test.ts`, `slo.ts`).
+Commits on `gsd/v18-int-all` after `42e3cf13`: `49b9aece` (fix 76), `b4bdd0fc` (fix 70), `d1a5e89b` (fix 75), `b4fe6bfe` (fix 68), `6e5d766e` (docs).
 
-- `cache.ts` (+8 net, hunk at `:881`): `snapshotSurvivesForget` (`:911`) is now a wrapper over the new `forgetVerdict` (`:889`, returns `clear | forgotten | unreadable`). Boolean behaviour of `snapshotSurvivesForget` is unchanged (true only for `clear`). Lines before `:881` are unchanged (so `bunRedis :341`, `CACHE_CONNECT_COOLDOWN_MS :250`, `getOrLoad :545/:576/:586-588`, `bump :852`, `markForget :870` keep their anchors). Lines after `:881` shift by +8 (`peek` now `:920`, `peekQuiet` `:951`, `writeKey` `:1019`).
-- `service.ts` (+53/-8): imports `snapshotKey`; `MAX_IN_PROCESS_BRIEF_SNAPSHOTS = 256` (`:543`); fields `briefLastGood` and `briefForgottenAtMs` (`:1643-1648`); `rememberLastGood` (`:2499`); `inProcessLastGood` (`:2517`, async); `briefUncounted` writes `rememberLastGood` before `cache.put` (`:2595-2596`); the degraded path consults `inProcessLastGood` only when `peek` returned null (`:2721-2726`); `memoryForget` sets `briefForgottenAtMs = Date.now()` when `touched` (`:4545`). The `corpusFreshness` hunk from the earlier drift is now at `:7528-7540` (not re-audited here, not on the brief/recall/admission/breaker paths; carried forward as before).
-- `flag-registry.ts` (1 line, same line count): the `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` row (`:632`) text now describes the in-process last-good window. The `SUBSTRATE_BUDGET_<CLASS>_BREAKER` family (`:189`, `:219-228`) is unchanged.
-- `cache-breaker.test.ts` (+89 at end, imports changed in place): four new tests at `:181`, `:199`, `:217`, `:229`. Existing tests at `:73`, `:98`, `:117`, `:145` unchanged.
-- Outside the covered list (not in the 13-file digest): `service-forget.test.ts` (new test `:688`), `docs/observability.md` (+2 lines), `docs/config-reference.md` (regenerated row). Audited below as part of truth 4.
+- `d1a5e89b` (fix 75, in scope). `cache.ts` `forgetVerdict` (`:890`): a failed mark read now returns `unreadable` only when `cause instanceof BreakerOpenError`; any other failure (a timeout from `attempt`, a dropped connection, a failed mark write) returns `forgotten`, which refuses. `snapshotSurvivesForget` (`:913`) keeps its boolean (`clear` only). `cache-breaker.test.ts:242` adds "a mark read that fails while the breaker is closed refuses the last-good copy". Audited against truths 4 and 5 below. The breaker refusal is a `BreakerOpenError` thrown by `callPlane` before `fn` runs; `attempt` (`cache.ts:1161`) rejects with the original cause, so the instanceof test sees it unchanged.
+- `b4bdd0fc` (fix 70, `service.ts:3002`). Sync-lag reading after a docs.sync note: `recordSyncLag` now also runs for `buffered` and `deadLettered` results. It sits in the docs.sync emit path, not on brief, recall, admission or breaker paths. Not a phase 75 truth; checked only for interference (none found, `service.ts` lines after `:3002` shift by +1, so `:4546` is the forget stamp now). Its test is `service-event-buffer.test.ts`, outside the covered list.
+- `49b9aece` (fix 76, `event-buffer.ts`), `b4fe6bfe` (fix 68, `worktree.py`): outside the covered list and not on phase 75 paths. Not audited beyond the stat.
+- `6e5d766e` (docs): changes the prior 75 record (H-1 row dated), `docs/corpus.md`, `docs/reconcile.md`. Not phase 75 truths.
+- Outside-digest files named by the record (`service-forget.test.ts`, `docs/observability.md`, `docs/config-reference.md`, `flag-registry.ts` snapshot-TTL row text): unchanged since `42e3cf13` (not in the stat), except the flag row text, which is in the covered `flag-registry.ts` and unchanged since `42e3cf13` as well.
 
-Wave-7 and later commits outside the covered list (other phases' records, planning docs) do not touch any covered file. Carried forward; not re-audited.
+### Correction to the `42e3cf13` record
 
-### Context drift (Info, not a gap)
+The prior truth 4 row stated that a mark read that fails with the breaker closed refuses the copy, and it was marked VERIFIED without a test for that case. At `42e3cf13` the code did not do that: `forgetVerdict` returned `unreadable` for every failure, so the copy was served. The failed-mark-read rule was made true by `d1a5e89b` and is now test-backed (`cache-breaker.test.ts:242`). Truth 4 is VERIFIED at `6e5d766e` on that evidence, not on the earlier claim.
 
-- `75-CONTEXT.md` line 23 says that in `shadow`, a `fail-closed` breaker refusal records `shadow_limited`. The code does not: commit `c71d4409` changed it. `admission.ts:386` returns `refused` only in `enforce` and otherwise falls through to `bypass`. `admission.test.ts:341` asserts the new behaviour. Code and tests are correct; CONTEXT is stale. CONTEXT not edited.
-- CONTEXT line 46 (R2) and 35 anchors are stale: `loadAdmissionSettings` is `config.ts:1874`, `breakerPolicyOf` `config.ts:1929`. CONTEXT's `config.ts:1849`/`:1794` are wrong.
-- CONTEXT D75-4 / Residual R1 (cross-process generation staleness) is unchanged by this phase's H-1 work.
-- `docs/config-reference.md` row for `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` reads "...at once.. See `docs/observability.md`" (double period: the flag text ends in `.` and the row renderer appends `. See`). Cosmetic. Not edited (no edits in this pass).
-- `ROADMAP.md:1298-1312` still reads "5 of 6 truths verified". Not edited; orchestrator's file.
+### Carried forward, not re-audited
+
+Lines of `cache.ts`, `service.ts`, `admission.ts`, `config.ts`, `server.ts` on brief, recall and admission paths not touched by the `d1a5e89b` or `b4bdd0fc` hunks were carried forward from the `42e3cf13` record. The `corpusFreshness` hunk (`service.ts` `:7528-7540` in the earlier record, now one line later) is not on these paths.
 
 ## Goal Achievement
 
@@ -70,16 +69,16 @@ Wave-7 and later commits outside the covered list (other phases' records, planni
 
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
-| 1 | SC1 (brief): with the cache breaker open, brief is answered from the index on every call and the cache never answers | ✓ VERIFIED | `cache-breaker.test.ts:73` passes (T1). Unchanged test; code path `getOrLoad` (`cache.ts:545`, gated reads, catch `:586-588`) and live `load()` unchanged since `ca9d02ec`. Carried forward, re-run at `42e3cf13`. |
-| 2 | SC1 (recall): with the cache breaker open, recall returns the same reply as a substrate with no cache | ✓ VERIFIED | `cache-breaker.test.ts:98` passes (T1). Carried forward. Recall path (`recallMemories` `service.ts:3781`, `recallUncounted` `:3809`) is not in the H-1 diff. |
-| 3 | Generation keys: a bump the breaker refused keeps reads on the source after it closes, until a bump lands | ✓ VERIFIED | `cache-breaker.test.ts:117` passes (T1). Code: `bump` (`cache.ts:852`) adds the key to `staleGenerations` on failure (`:857-860`); `getOrLoad` bypasses it (`:576`). Unchanged. Residual R1. |
-| 4 | Degraded brief, H-1 (owner decision 2026-11-05): with the cache breaker open and the live source failing, (a) if this process holds a last-good brief for the arguments that is inside the window and not forgotten, it is served as state `snapshot`, with a header naming the failed sources and the body equal to the complete brief; (b) otherwise state is `degraded`, no snapshot text is served, and the brief does not throw. A readable forget mark, an answering cache with no snapshot, or a mark read that fails while the breaker is closed refuses the copy. | ✓ VERIFIED | (a) `cache-breaker.test.ts:181` (breaker opened, `getGraph` throws: `state` `snapshot`, `failed` `["graph"]`, header line and body checked). (b) `cache-breaker.test.ts:199` (window elapsed, breaker open, source down: `degraded`, `snapshotAt` null, no throw). (c) `cache-breaker.test.ts:217` (cache readable, key absent: copy not served). (d) `cache-breaker.test.ts:229` (cache readable, a forget mark newer than the brief: copy refused). (e) `cache-breaker.test.ts:242` (the mark read fails with the breaker closed: copy refused, state `degraded`). (f) `service-forget.test.ts:688` (a forget that deletes a plane document refuses the in-process copy while the breaker is open; with the forget clause removed for one run on 2026-11-05 this test failed with Expected `degraded`, Received `snapshot`, and the clause was restored). Code: `briefUncounted` (degraded branch), `inProcessLastGood`, `memoryForget`, and `ReadThroughCache.forgetVerdict` in `cache.ts` (only `BreakerOpenError` is `unreadable`). Owner note: the earlier restated expectation "no brief-snapshot text is served" is superseded for case (a) by the in-force decision that the in-process copy serves while the cache cannot be read. Case (b) keeps that expectation. |
-| 5 | SC2: per class, a fail-closed admission class is refused in `enforce` (503 `cache_unavailable`, `Retry-After`), a fail-open class admits as `bypass`, and neither reaches the plane. With no flag set every class is fail-open (D75-1) | ✓ VERIFIED | `admission.test.ts:325` (default all fail-open), `:334` (fail-closed refused in enforce, others fail-open), `cache-breaker.test.ts:145` (refused fail-closed, admitted fail-open, neither reaches the plane, no breaker failure for the refusals), `http.admission.test.ts:274` (fail-open 200 as bypass, fail-closed 503 with integer `Retry-After`). All pass in T1. Enforcement: `server.ts:978` (REST `admission.admit`), `server.ts:2758` (MCP `admitBatch`), `sendBudgetRefusal` `server.ts:633`. Unchanged files. |
-| 6 | A breaker refusal of a fail-closed class is a `bypass` in `shadow` and a `refused` in `enforce` | ✓ VERIFIED | `admission.test.ts:341` passes (T1). Code: `admission.ts:386-390` (breaker-refusal branch, `enforce` only). Commit `c71d4409`. See CONTEXT drift note. |
-| 7 | Only a breaker refusal is policed: another cache failure (timeout, connect error, malformed reply) stays `bypass` in a fail-closed class | ✓ VERIFIED | `admission.test.ts:350` and `:243` pass (T1). `outcome.breakerRetryAfterMs` gates the refusal branch (`admission.ts:386`). |
+| 1 | SC1 (brief): with the cache breaker open, brief is answered from the index on every call and the cache never answers | ✓ VERIFIED | `cache-breaker.test.ts:73` passes (T1). Code path `getOrLoad` (`cache.ts:545`, gated reads, catch `:586-588`) and live `load()` unchanged since `42e3cf13`. |
+| 2 | SC1 (recall): with the cache breaker open, recall returns the same reply as a substrate with no cache | ✓ VERIFIED | `cache-breaker.test.ts:98` passes (T1). Recall path (`recallMemories` `service.ts:3782`, `recallUncounted` `:3810`) not in the `d1a5e89b` or `b4bdd0fc` diff. |
+| 3 | Generation keys: a bump the breaker refused keeps reads on the source after it closes, until a bump lands | ✓ VERIFIED | `cache-breaker.test.ts:117` passes (T1). `bump` (`cache.ts:852`) adds the key to `staleGenerations` on failure (`:857-860`); `getOrLoad` bypasses it (`:576`). Unchanged. Residual R1. |
+| 4 | Degraded brief, H-1 (owner decision): with the cache breaker open and the live source failing, (a) if this process holds a last-good brief for the arguments that is inside the window and not forgotten, it is served as state `snapshot`, with a header naming the failed sources and the body equal to the complete brief; (b) otherwise state is `degraded`, no snapshot text is served, and the brief does not throw. A readable forget mark, an answering cache with no snapshot, or a mark read that fails while the breaker is closed refuses the copy. | ✓ VERIFIED | (a) `cache-breaker.test.ts:181` (breaker opened, `getGraph` throws: `state` `snapshot`, `failed` `["graph"]`, header and body checked). (b) `cache-breaker.test.ts:199` (window elapsed: `degraded`, no throw). (c) `:217` (readable cache, key absent: copy not served). (d) `:229` (readable cache, newer forget mark: copy refused). (e) `:242` (mark read throws with the breaker closed: state `degraded`, `snapshotAt` null, breaker still `closed`). (f) `service-forget.test.ts:688` (a forget that deletes a plane document refuses the copy while the breaker is open). Code: `inProcessLastGood` (`service.ts:2517-2529`) serves only when `forgetVerdict` returns `unreadable` (`cache.ts:890`, breaker refusal only). Forget stamp `service.ts:4546` (`briefForgottenAtMs`). All pass in T1 and as named passes in gate r33. |
+| 5 | SC2: per class, a fail-closed admission class is refused in `enforce` (503 `cache_unavailable`, `Retry-After`), a fail-open class admits as `bypass`, and neither reaches the plane. With no flag set every class is fail-open (D75-1) | ✓ VERIFIED | `admission.test.ts:325` (default all fail-open), `:334` (fail-closed refused in enforce, others fail-open), `cache-breaker.test.ts:145` (refused fail-closed, admitted fail-open, neither reaches the plane, no breaker failure for the refusals), `http.admission.test.ts:274` (fail-open 200 as bypass, fail-closed 503 with integer `Retry-After`). All pass in T1. Enforcement: `server.ts:978` (REST `admission.admit`), `server.ts:2758` (MCP `admitBatch`), `sendBudgetRefusal` `server.ts:633`. Admission and server files unchanged since `42e3cf13`. |
+| 6 | A breaker refusal of a fail-closed class is a `bypass` in `shadow` and a `refused` in `enforce` | ✓ VERIFIED | `admission.test.ts:341` passes (T1). Code: `admission.ts:386-390` (breaker-refusal branch, `enforce` only). See CONTEXT drift note. |
+| 7 | Only a breaker refusal is policed: another cache failure (timeout, connect error, malformed reply) stays `bypass` in a fail-closed class | ✓ VERIFIED | `admission.test.ts:350` and `:243` pass (T1). `outcome.breakerRetryAfterMs` gates the refusal branch (`admission.ts:386`). The same instanceof rule now also governs the mark read (truth 4), in `cache.ts:905`. |
 | 8 | Flags: `SUBSTRATE_BUDGET_<CLASS>_BREAKER` parses trimmed and case-insensitively, blank is `fail-open`, and any other value refuses boot with a `ConfigError` naming the variable | ✓ VERIFIED | `admission.test.ts:365` and `:375` pass (T1); `:378` asserts `loadConfig` throws. Code: `loadAdmissionSettings` (`config.ts:1874`) calls `breakerPolicyOf` (`config.ts:1909`), which throws at `:1933`. Registry: `flag-registry.ts:189`, `:219-228`. Unchanged files. |
 
-**Score:** 8/8 truths verified. Truth 4 moved from PRESENT_BEHAVIOR_UNVERIFIED to VERIFIED under the owner-decided H-1 form (case (a) and case (b) both have a passing test).
+**Score:** 8/8 truths verified. Truth 4 is verified on the `d1a5e89b` change and its test (see Correction above).
 
 ### Deferred Items
 
@@ -89,44 +88,49 @@ None. No gaps found, so nothing deferred.
 
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
-| `packages/mcp-server/src/admission.ts` | admission decision, breaker policy | ✓ VERIFIED | Unchanged since `ca9d02ec`. Decision branch `:386-390`; wired `server.ts:978`, `:2758`. |
-| `packages/mcp-server/src/cache.ts` | gated read-through, stale generations, peek/put, forget verdict | ✓ VERIFIED | Changed (H-1). `forgetVerdict` `:889`, `snapshotSurvivesForget` `:911` (boolean kept), `getOrLoad` `:545`, `bump` `:852`, `markForget` `:870`, `peek` `:920`, `peekQuiet` `:951`, `writeKey` `:1019`, `snapshotKey` `:299`, `bunRedis` `:341`, connect cooldown `:250`. |
+| `packages/mcp-server/src/admission.ts` | admission decision, breaker policy | ✓ VERIFIED | Unchanged since `42e3cf13`. Decision branch `:386-390`; wired `server.ts:978`, `:2758`. |
+| `packages/mcp-server/src/cache.ts` | gated read-through, stale generations, peek/put, forget verdict | ✓ VERIFIED | Changed (`d1a5e89b`). `forgetVerdict` `:890` (instanceof rule `:905`), `snapshotSurvivesForget` `:913`, `getOrLoad` `:545`, `bump` `:852`, `markForget` `:870`, `peek` `:922`, `peekQuiet` `:953`, `writeKey` `:1021`, `snapshotKey` `:299`, `bunRedis` `:341`, connect cooldown `:250`, `attempt` `:1161`. |
 | `packages/mcp-server/src/config.ts` | `loadAdmissionSettings`, `breakerPolicyOf` | ✓ VERIFIED | Unchanged. `:1874`, `:1909`, `:1929-1933`. |
-| `packages/mcp-server/src/flag-registry.ts` | `SUBSTRATE_BUDGET_<CLASS>_BREAKER` family; snapshot TTL row | ✓ VERIFIED | Family `:189`, `:219-228` unchanged. Snapshot TTL row `:632` text changed (in-process window). `flag-registry.test.ts` and `scripts/config-reference.test.ts` pass (T2). |
+| `packages/mcp-server/src/flag-registry.ts` | `SUBSTRATE_BUDGET_<CLASS>_BREAKER` family; snapshot TTL row | ✓ VERIFIED | Family `:189`, `:219-228` unchanged. Snapshot TTL row text (`:632`) unchanged since `42e3cf13`. |
 | `packages/observability/src/instruments.ts` | `ADMISSION_CLASSES` | ✓ VERIFIED | `:170`. Unchanged. |
 | `packages/observability/src/slo.ts` | numerator excludes `refused` | ✓ VERIFIED | `:360`, numerator `decision: "limited"`. Unchanged. |
-| `packages/mcp-server/src/service.ts` | in-process last-good brief, cache gate, brief snapshot read | ✓ VERIFIED | Changed (H-1). Gate `:1945` `planes.gate("cache")`; fields `:1643-1648`; `rememberLastGood` `:2499`; `inProcessLastGood` `:2517`; `briefDetailed` `:2472`; snapshot peek `:2720-2721`; forget stamp `:4545`. |
-| `packages/mcp-server/src/service-forget.test.ts` (outside digest) | forget refuses the in-process copy | ✓ VERIFIED | New test `:688`; file passes 150/150 in T1. |
+| `packages/mcp-server/src/service.ts` | in-process last-good brief, cache gate, brief snapshot read | ✓ VERIFIED | Changed (`b4bdd0fc`, `:3002`, off the brief path). Gate `:1945` `planes.gate("cache")`; fields `:1646-1648`; `rememberLastGood` `:2499`; `inProcessLastGood` `:2517`; `briefDetailed` `:2472`; snapshot peek and degraded path `:2721-2724`; write `:2595`; forget stamp `:4546`. |
+| `packages/mcp-server/src/service-forget.test.ts` (outside digest) | forget refuses the in-process copy | ✓ VERIFIED | Test `:688` present and named as passed in gate r33 JUnit. File unchanged since `42e3cf13`. |
 
 ### Key Link Verification (manual)
 
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
 | `service.ts:1945` | `cache.ts:341` `bunRedis` → `breaker.ts` `callPlane` | `planes.gate("cache")` | ✓ WIRED | Every cache command is refused before `fn` runs when the breaker is open. |
-| `service.ts:2720-2721` | `cache.ts:920` `peek` | `brief-snapshot` read | ✓ WIRED | A refused read returns null, so the in-process copy path is taken. A readable cache's verdict (`snapshotSurvivesForget`, `forgetVerdict`) decides when the snapshot exists. |
-| `service.ts:2517` `inProcessLastGood` | `cache.ts:889` `forgetVerdict` | `=== "unreadable"` | ✓ WIRED | The copy is served only when the verdict is `unreadable`. `clear` and `forgotten` refuse it. |
+| `service.ts:2721-2724` | `cache.ts:922` `peek` | `brief-snapshot` read | ✓ WIRED | A refused read returns null, so the in-process copy path is taken. A readable cache's verdict (`snapshotSurvivesForget`) decides when the snapshot exists. |
+| `service.ts:2529` `inProcessLastGood` | `cache.ts:890` `forgetVerdict` | `=== "unreadable"` | ✓ WIRED | The copy is served only for `unreadable`, which is the breaker's refusal alone (`cache.ts:905`). `clear`, `forgotten`, and any non-breaker failure refuse. |
 | `service.ts:2595-2596` | `service.ts:2499` `rememberLastGood` | written before `cache.put` | ✓ WIRED | Written whatever the breaker says; gated by window > 0 and cache enabled. |
-| `service.ts:4545` | `service.ts:2524` | `briefForgottenAtMs` | ✓ WIRED | A copy saved at or before this process's last forget is not served. Set only when `touched`. |
+| `service.ts:4546` | `service.ts:2524` | `briefForgottenAtMs` | ✓ WIRED | A copy saved at or before this process's last forget is not served. Set only when `touched`. |
 | `server.ts:978` / `:2758` | `admission.ts` `admit` / `admitBatch` | per-request and batch admission | ✓ WIRED | `sendBudgetRefusal` (`server.ts:633`) renders 429 or 503. |
 | `config.ts:1909` | `config.ts:1929` `breakerPolicyOf` | `loadAdmissionSettings` ← `loadConfig` | ✓ WIRED | A bad value throws `ConfigError` and refuses boot. |
 
 ### Data-Flow Trace (Level 4)
 
-Not applicable to admission. For the brief under an open breaker, the answer is the index composition (cases in truth 1) or the in-process last-good text (truth 4a). Both are asserted by the tests above; no static fallback is involved beyond the process-local copy, which is a bounded map (`MAX_IN_PROCESS_BRIEF_SNAPSHOTS = 256`).
+Not applicable to admission. For the brief under an open breaker, the answer is the index composition (truth 1) or the in-process last-good text (truth 4a). Both are asserted by the tests above. The process-local copy is a bounded map (`MAX_IN_PROCESS_BRIEF_SNAPSHOTS = 256`, `service.ts:544`).
 
 ### Behavioral Spot-Checks
 
-T1 (non-PG, `SUBSTRATE_TEST_PG_URL` unset), run at `42e3cf13`:
+T1 (non-PG, `SUBSTRATE_TEST_PG_URL` unset), run at `6e5d766e`:
 
 `cd /root/src/worktrees/as-gsd-v18-all && env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs bun test --timeout 30000 packages/mcp-server/src/cache-breaker.test.ts packages/mcp-server/src/admission.test.ts packages/mcp-server/src/http.admission.test.ts packages/observability/src/slo.test.ts packages/mcp-server/src/service-forget.test.ts`
 
-Result: **312 pass, 0 fail, 4108 expect() calls, 5 files, 3.17 s.** (Prior record: 158 pass over four files. 158 + 4 new cache-breaker tests + 150 in service-forget = 312.)
+Result: **313 pass, 0 fail, 4112 expect() calls, 5 files, 2.27 s.** (Prior record at `42e3cf13`: 312 pass. The difference is the new test at `cache-breaker.test.ts:242`.)
 
-T2 (non-PG, `SUBSTRATE_TEST_PG_URL` unset), run at `42e3cf13`:
+Mutation of the forget guard: the commit `6e5d766e` message records that the guard was observed by mutation. That mutation was not re-run in this pass (no code edits permitted). It is cited as the author's record, not as an observation here.
 
-`cd /root/src/worktrees/as-gsd-v18-all && env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs bun test --timeout 30000 packages/mcp-server/src/flag-registry.test.ts scripts/config-reference.test.ts`
-
-Result: **38 pass, 0 fail, 298 expect() calls, 2 files, 947 ms.**
+JUnit cross-check, gate r33 (`/root/src/worktrees/backups/gate-r33-junit.xml`, at `6e5d766e`, 0 failures): the testcases below are named passes, with no `<skipped/>` child:
+- "a mark read that fails while the breaker is closed refuses the last-good copy: a mark that cannot be read is not 'no forget'" (`cache-breaker.test.ts`, line 242)
+- "a brief composed with the breaker closed is served as the snapshot once the breaker opens and the source fails" (line 181)
+- "a snapshot older than the cache window is not served: the degraded brief answers" (line 199)
+- "with the cache readable and no snapshot for the key, the last-good brief is not served: an answering cache is not an outage" (line 217)
+- "with the cache readable, a forget another process made after the brief refuses the last-good copy" (line 229)
+- "a forget that deletes a plane document refuses the in-process last-good brief while the cache breaker is open" (`service-forget.test.ts`, line 688)
+- "an open cache breaker is a bypass for a fail-open class and a 503 for a fail-closed one" (`http.admission.test.ts`, line 274)
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
@@ -134,16 +138,17 @@ Result: **38 pass, 0 fail, 298 expect() calls, 2 files, 947 ms.**
 | T1b recall equals uncached reply | T1, `:98` | pass | ✓ PASS |
 | T1c refused bump keeps reads on source until a bump lands | T1, `:117` | pass | ✓ PASS |
 | T1d fail-closed refused, fail-open admits, neither reaches plane | T1, `:145` | pass | ✓ PASS |
-| T4a breaker open + source down + in-process copy → `snapshot` | T1, `cache-breaker.test.ts:181` | pass | ✓ PASS |
+| T4a breaker open + source down + in-process copy → `snapshot` | T1, `:181` | pass | ✓ PASS |
 | T4b breaker open + source down + window elapsed → `degraded`, no throw | T1, `:199` | pass | ✓ PASS |
 | T4c readable cache, key absent → copy not served | T1, `:217` | pass | ✓ PASS |
 | T4d readable cache, newer forget mark → copy refused | T1, `:229` | pass | ✓ PASS |
-| T4e forget that deletes a plane document refuses the copy | T1, `service-forget.test.ts:688` | pass | ✓ PASS |
+| T4e mark read fails, breaker closed → copy refused | T1, `:242` | pass | ✓ PASS |
+| T4f forget that deletes a plane document refuses the copy | T1, `service-forget.test.ts:688` | pass | ✓ PASS |
 | T5 default fail-open; fail-closed in enforce; HTTP 503 with integer Retry-After | T1, `admission.test.ts:325,:334`, `http.admission.test.ts:274` | pass | ✓ PASS |
 | T6 shadow bypass / enforce refusal | T1, `admission.test.ts:341` | pass | ✓ PASS |
 | T7 only a breaker refusal is policed | T1, `admission.test.ts:350`, `:243` | pass | ✓ PASS |
 | T8 flag parse and boot refusal | T1, `admission.test.ts:365,:375,:378` | pass | ✓ PASS |
-| T9 flag registry and config reference match | T2 | 38 pass | ✓ PASS |
+| T9 flag registry and config reference match | Not re-run at `6e5d766e`; `flag-registry.ts` and `docs/config-reference.md` unchanged since `42e3cf13`, where T2 gave 38 pass | carried forward | ✓ PASS (carried) |
 
 ### Probe Execution
 
@@ -159,13 +164,14 @@ No `scripts/*/tests/probe-*.sh` exists, and the phase declares none. Not a migra
 
 | File | Line | Pattern | Severity | Impact |
 | ---- | ---- | ------- | -------- | ------ |
-| (added lines, covered and outside-digest files) | - | `TODO`, `FIXME`, `XXX`, `HACK`, `PLACEHOLDER`, `TBD` | - | None in the added lines of `cache.ts`, `service.ts`, `flag-registry.ts`, the two test files and the docs. |
+| (added lines, covered files and tests) | - | `TODO`, `FIXME`, `XXX`, `HACK`, `PLACEHOLDER`, `TBD` | - | None in the `d1a5e89b` and `b4bdd0fc` added lines. |
+| `docs/observability.md:230`, flag row `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` | - | Window described as "while the cache cannot be read (the breaker is open)" with no statement that a failed mark read with the breaker closed refuses the copy | ℹ️ Info | Documentation omits the `d1a5e89b` rule. The code and test are correct. Wording change is for the owner; not edited here. |
 | `docs/config-reference.md` | snapshot TTL row | double period "at once.." | ℹ️ Info | Cosmetic; generator appends `. See` to a text ending in `.`. Not a gap. |
-| `75-CONTEXT.md` | 23, 35, 46 | stale statements and anchors | ℹ️ Info | Documentation drift only. |
+| `75-CONTEXT.md` | 23, 35, 46 | stale statements and anchors | ℹ️ Info | Documentation drift only (shadow refusal wording; `config.ts` anchors now `:1874`/`:1909`). Not edited. |
 
 ### Human Verification Required
 
-H-1 is CLOSED by commits `9e6fa1f2` (feat), `9c86ffab` (test), `e185cd8a` and `42e3cf13` (docs), and is no longer a human item. Its restated expectation is decided by the in-force owner decision of 2026-11-04 (the in-process copy serves only while the cache cannot be read; a readable forget mark decides; the trade-off is documented in `docs/observability.md`).
+H-1 is CLOSED by the owner decision and the commits `9e6fa1f2`, `9c86ffab`, `e185cd8a`, `42e3cf13`, and `d1a5e89b` (failed-mark-read rule and test). It is no longer a human item.
 
 Open human items (none verifiable by grep or targeted tests):
 
@@ -184,15 +190,15 @@ No FAILED truth, no MISSING or STUB artifact, no NOT_WIRED link, no blocker anti
 ### Residual Risks
 
 - **R1** (carried, predates phase 75 H-1 work): `staleGenerations` lives in the writing process. After a restart or on another replica, a generation key can still hold its old value, and a brief written before the write can be served until its TTL (`CACHE_TTL["brief"]`, 5 minutes). Tests cover one process only. Follow-up.
-- **R4** (new, documented owner trade-off): while the cache cannot be read, this process's in-process last-good brief can outlive a forget made by another process. It is bounded by `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` (default 3600 s), held at most 256 argument sets, and refused at once for this process's own forgets. Once the cache is readable again its forget mark decides. Stated in `docs/observability.md` and the flag row.
+- **R4** (owner trade-off): while the cache cannot be read (breaker open), this process's in-process last-good brief can outlive a forget made by another process. It is bounded by `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` (default 3600 s), held at most 256 argument sets, and refused at once for this process's own forgets. Once the cache is readable again its forget mark decides. Stated in `docs/observability.md` and the flag row.
 - The recall-snapshot leg (`SUBSTRATE_BRIEF_RECALL` enforced) has no in-process copy and no cache-breaker-open test in the tree as far as grep shows. Not claimed as covered.
 
 ### Self-check
 
-- Covered list and digest copied verbatim from `verification.fingerprint` at `42e3cf13`.
-- Frontmatter `status: human_needed`; self-check command `gsd_run query verification.status <phase dir> --pick status` is run after writing (see the report).
+- Covered list and digest copied verbatim from `verification.fingerprint` at `6e5d766e`.
+- Frontmatter `status: human_needed`. The self-check `gsd_run query verification.status <phase dir> --pick status` and a fingerprint recompute are run after writing (see report).
 
 ---
 
-_Verified: 2026-11-05T07:12:19Z_
+_Verified: 2026-11-05T07:59:06Z_
 _Verifier: Claude (gsd-verifier)_
