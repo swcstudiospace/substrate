@@ -65,7 +65,7 @@ export class CorpusSloState {
 		this.sinks.goldenRecall?.(recall);
 	}
 
-	/** A stored `docs.sync` note: its `lag_s` is read by `syncLagSeconds`, and a note without a usable lag leaves the last one in place. */
+	/** A `docs.sync` note the server took (stored, held for a later write, or dead-lettered): its `lag_s` is read by `syncLagSeconds`, and a note without a usable lag leaves the last one in place. */
 	recordSyncLag(payload: Record<string, unknown>): void {
 		const lag = syncLagSeconds(payload);
 		if (lag !== null) this.syncLag = lag;

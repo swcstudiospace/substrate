@@ -4,8 +4,8 @@ A dispatched session works in ``<root>/<graph_id>`` on branch ``substrate/<graph
 is the first of ``SUBSTRATE_WORKTREE_ROOTS`` (default ``/var/lib/substrate/worktrees``). The worktree is
 reused when git already has it registered under any configured root, created from the existing branch when
 only the branch exists, and created with a new branch otherwise.
-Creation is refused when ``/`` has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``,
-default 5 GiB), and no git command runs in that case.
+Creation is refused when the filesystem it lands on (the nearest existing directory at or above the first root)
+has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB); no git command runs then.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
 checks out a branch in the main checkout.
 """

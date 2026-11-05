@@ -193,7 +193,7 @@ function refuse(tally: Tally, document: CorpusDocument, reason: (typeof REFUSAL_
  * active row at that sha256 vanished meanwhile, so the document takes the full path.
  */
 async function refreshMetadata(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument, prior: ManifestRow): Promise<boolean> {
-	// The commit lands in the manifest and in citation URLs, so it gets the scan the full path gives a name and a URL.
+	// The commit is stored in the manifest, so the source URL built with it is scanned the way the full path scans a name and a URL.
 	const rules = findingRules(`${sourceUrl(document.repo, document.path, document.commit)}\n${document.commit ?? ""}`);
 	if (rules.length > 0) {
 		refuse(tally, document, "secret-findings", rules);
