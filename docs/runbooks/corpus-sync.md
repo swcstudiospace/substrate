@@ -114,7 +114,7 @@ it into a `docs.sync` note with `trigger: hook`.
 
 ## 5. Drift repair, day to day
 
-- A `docs.freshness` warning with `dataset: corpus` means the last ingest is older than `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`.
+- A `docs.freshness` warning with `dataset: corpus` means the last ingest is older than `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`, or the newest `docs.sync` lag is over `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` (when that is set). `payload.breaches` says which: `ingest_age`, `sync_lag`, or both; `sync_lag_seconds` and `sync_threshold_seconds` give the lag and its objective.
   Check `substrate corpus status` (`lagSeconds`, `lastIngestAt`), the units' journal, and run `substrate corpus sync --execute`. If the
   documentation really did not change, raise the limit; the note when it clears is the end of the episode.
 - Scheduled reconcile: `substrate-corpus-reconcile.timer` runs `substrate-corpus-reconcile.service` daily at 04:43 UTC, which runs `substrate corpus reconcile --json` as a dry run. The units are staged in `infra/vps`, not installed: an operator copies them and runs `systemctl enable --now substrate-corpus-reconcile.timer` (the server needs `SUBSTRATE_CORPUS=on`, or the pass reports `corpus.disabled`). A non-empty report means the manifest and the plane disagreed (a plane restore, a killed run between the plane write and the manifest write). Running `substrate corpus reconcile --execute` to repair it is an operator choice, taken by hand after reading the report.

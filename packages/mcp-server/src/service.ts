@@ -7476,18 +7476,19 @@ export class Substrate {
 
 	/**
 	 * The corpus's freshness verdict for the lag pass (v1.7 phase 65), or null when it is not judged: the corpus is off,
-	 * `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` is 0, there is no manifest, or nothing was ever ingested. A manifest that cannot be
+	 * `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` is 0 and no `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` is set, there is no manifest, or nothing was ever ingested. A manifest that cannot be
 	 * read in time says nothing about freshness, so it repeats the state a marker already holds (a corpus already warned about
 	 * stays lagging) instead of reading as recovered, which would clear the marker and warn again on the next pass.
 	 */
 	private async corpusFreshness(now: number): Promise<DatasetFreshness | null> {
 		const { enabled, freshMaxAgeS } = this.config.corpus;
-		if (!enabled || freshMaxAgeS === 0) return null;
+		const syncLagMaxS = this.config.docsSlo.syncLagS;
+		if (!enabled || (freshMaxAgeS === 0 && syncLagMaxS === undefined)) return null;
 		const store = this.corpusSeam?.store ?? this.index?.corpusStore() ?? null;
 		if (store === null) return null;
 		try {
 			const status = await withDeadline(store.status(), CORPUS_STATUS_DEADLINE_MS);
-			return corpusFreshnessRow({ lastIngestAt: status.lastIngestAt, now, maxAgeS: freshMaxAgeS });
+			return corpusFreshnessRow({ lastIngestAt: status.lastIngestAt, now, maxAgeS: freshMaxAgeS, syncLagS: this.corpusSlo.readings(now).syncLagS, syncLagMaxS: syncLagMaxS });
 		} catch {
 			const marker = this.docsFreshnessState.lag.get(CORPUS_FRESHNESS_DATASET);
 			if (marker === undefined) return null;
