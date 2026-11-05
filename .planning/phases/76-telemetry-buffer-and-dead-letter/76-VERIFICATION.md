@@ -4,7 +4,7 @@ verified: 2026-11-05T07:59:10Z
 status: human_needed
 score: "2/2 must-haves verified (SC1 VERIFIED within the owner-accepted pre-send scope, PLAN D76-10, with the buffer enabled per D76-15; SC2 PASSED by owner override, not verified). No gap open in code. The R-3 shutdown residual and SYNC-LAG-BUFFERED-NOT-RECORDED, open at 42e3cf13, are closed in code at 49b9aece and b4bdd0fc. W-L2-TIP-ORDER for handoff() is closed in code at a9e477e2; its owner ratification is not recorded."
 covered_files: [".env.example", ".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-PLAN.md", ".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-SUMMARY.md", "docs/config-reference.md", "docs/greptime-ledger.md", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/event-buffer.test.ts", "packages/mcp-server/src/event-buffer.ts", "packages/mcp-server/src/event-dead-letter.test.ts", "packages/mcp-server/src/event-dead-letter.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/handoff.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/reanchor-run.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service-event-buffer.test.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v3:sha256:24b18bd369d321b456c94ef4abb39a08f23c06b9db8674a7cc653b4198dfc87d"
+covered_digest: "v3:sha256:02633fdb70dbe2a997f78e06763565c7dfeeab88c37ada1cdf35b57e29d33398"
 behavior_unverified: 0
 overrides_applied: 1
 overrides:

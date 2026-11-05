@@ -35,7 +35,7 @@ covered_files:
   - "packages/mcp-server/src/server.steering.test.ts"
   - "packages/mcp-server/src/server.ts"
   - "packages/mcp-server/src/service.ts"
-covered_digest: "v3:sha256:4ba114fc23d34ef82297101ee396bcd28bf816c7a2e106c821fa80f49b42a883"
+covered_digest: "v3:sha256:3a7fe63cb8e9396dd87df0f76ab37739bfe59aff3035336784d981ee970322be"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:

@@ -4,7 +4,7 @@ verified: 2026-11-05T07:59:06Z
 status: human_needed
 score: 8/8 truths verified (2/2 ROADMAP success criteria verified as declared; live proofs H-2, H-3, H-4a and owner items H-4b (O1), H-5 (O2) remain; HARD-R2 unowned)
 covered_files: ["packages/mcp-server/src/admission.test.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/cache-breaker.test.ts", "packages/mcp-server/src/cache.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/http.admission.test.ts", "packages/mcp-server/src/live-session-consumer.test-support.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts", "packages/observability/src/instruments.ts", "packages/observability/src/slo.test.ts", "packages/observability/src/slo.ts"]
-covered_digest: "v3:sha256:d980c84e0ea9a24c9f57b56cda7f025a19ada1659dc42e3e577af60c4c39341f"
+covered_digest: "v3:sha256:0abff5c87c017e5757bd2427626f19f055f8eaa3f2e01d3d0afb048cb2c063ad"
 behavior_unverified: 0
 overrides_applied: 0
 overrides: []

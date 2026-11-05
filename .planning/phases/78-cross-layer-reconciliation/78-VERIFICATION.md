@@ -6,7 +6,7 @@ score: "9/9 must-haves verified; behavior_unverified 0; 4 live proofs open (huma
 tree: "/root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD 6e5d766e"
 criteria_source: "this tree's ROADMAP Phase 78 success criteria (SC1, SC2)"
 covered_files: [".planning/phases/78-cross-layer-reconciliation/78-01-PLAN.md", ".planning/phases/78-cross-layer-reconciliation/78-SUMMARY.md", "docs/reconcile.md", "packages/mcp-server/src/cache.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/reconcile.test.ts", "packages/mcp-server/src/corpus/reconcile.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/reconcile-main.test.ts", "packages/mcp-server/src/reconcile-main.ts", "packages/mcp-server/src/reconcile-read.test.ts", "packages/mcp-server/src/reconcile-read.ts", "packages/mcp-server/src/reconcile-repair.test.ts", "packages/mcp-server/src/reconcile-repair.ts", "packages/mcp-server/src/reconcile-run.ts", "packages/mcp-server/src/reconcile.test.ts", "packages/mcp-server/src/reconcile.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "scripts/reconcile.ts"]
-covered_digest: "v3:sha256:d4d0c5e959f489d154e3b03c09a3420daa30ef22f2b1146f77c8e910f99e9117"
+covered_digest: "v3:sha256:a6ac5f85711e3695535079c42f4f8ef238c54df2fd14f6b7ec26c0cca280b7f7"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:

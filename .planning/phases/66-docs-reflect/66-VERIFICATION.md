@@ -4,7 +4,7 @@ verified: 2026-11-05T07:58:55Z
 status: human_needed
 score: 5/5 must-haves verified
 covered_files: [".planning/phases/66-docs-reflect/66-SUMMARY.md", "packages/audit/src/policy.ts", "packages/cli/src/corpus/index.ts", "packages/cli/src/corpus/reflect.ts", "packages/corpus/src/authority.test.ts", "packages/corpus/src/authority.ts", "packages/corpus/src/reflect.ts", "packages/corpus/src/supersession.test.ts", "packages/corpus/src/supersession.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/authority-index.test.ts", "packages/mcp-server/src/corpus/authority-index.ts", "packages/mcp-server/src/corpus/digest-retain.ts", "packages/mcp-server/src/corpus/rank.test.ts", "packages/mcp-server/src/corpus/rank.ts", "packages/mcp-server/src/corpus/reflect-routes.test.ts", "packages/mcp-server/src/corpus/reflect-service.test.ts", "packages/mcp-server/src/corpus/reflect-service.ts", "packages/mcp-server/src/corpus/reflect-store.test.ts", "packages/mcp-server/src/corpus/reflect-store.ts", "packages/mcp-server/src/corpus/telemetry.test.ts", "packages/mcp-server/src/corpus/telemetry.ts", "packages/mcp-server/src/docs-search.reflect.test.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/planes/hindsight.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v3:sha256:254e41ae4855056b09a961a793586c0c1e93586f5f5a201b8a357fb17ae03a54"
+covered_digest: "v3:sha256:525150198c0098ea793496fced527b557e978a90fc78b8d7356232a5a65bc708"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
