@@ -1056,6 +1056,8 @@ export interface SubstrateObserver {
 	}): void;
 	/** One idempotent `POST /events` outcome (U5-4a): a lookup's result, or a refusal on the idempotency rules. Silent while `SUBSTRATE_EVENT_IDEMPOTENCY` is `off`. */
 	eventReplay?(sample: { result: EventReplayResult }): void;
+	/** A `docs.sync` note the server took (stored, held or dead-lettered) and the lag it reported: the reading `fabric_status` shows, and the `substrate.corpus.sync_lag_seconds` gauge (v1.7 phase 70 W-1). */
+	syncLag?(sample: { seconds: number }): void;
 	cached?(sample: CacheSample): void;
 	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
 	plane?(sample: PlaneSample): void;
@@ -3003,7 +3005,10 @@ export class Substrate {
 		this.planningEvent(input);
 		if (result.stored) this.noteDocsCanary(result.event);
 		// The sync-lag reading follows a note the server took: stored, held in the buffer for a later write, or given up with a dead-letter record. A note the server did not take leaves the reading as it was.
-		if (result.stored || result.buffered === true || result.deadLettered === true) this.corpusSlo.recordSyncLag(result.event.payload);
+		if (result.stored || result.buffered === true || result.deadLettered === true) {
+			const seconds = this.corpusSlo.recordSyncLag(result.event.payload);
+			if (seconds !== null) this.observer.syncLag?.({ seconds });
+		}
 		if (result.stored) this.publishHint(result.event);
 		return result;
 	}

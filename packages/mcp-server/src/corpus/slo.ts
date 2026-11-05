@@ -65,10 +65,14 @@ export class CorpusSloState {
 		this.sinks.goldenRecall?.(recall);
 	}
 
-	/** A `docs.sync` note the server took (stored, held for a later write, or dead-lettered): its `lag_s` is read by `syncLagSeconds`, and a note without a usable lag leaves the last one in place. */
-	recordSyncLag(payload: Record<string, unknown>): void {
+	/**
+	 * A `docs.sync` note the server took (stored, held for a later write, or dead-lettered): its `lag_s` is read by
+	 * `syncLagSeconds`, and a note without a usable lag leaves the last one in place. Returns the lag it recorded, or null.
+	 */
+	recordSyncLag(payload: Record<string, unknown>): number | null {
 		const lag = syncLagSeconds(payload);
 		if (lag !== null) this.syncLag = lag;
+		return lag;
 	}
 
 	/** The readings at `nowMs`. */

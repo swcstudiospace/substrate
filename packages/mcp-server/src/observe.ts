@@ -395,6 +395,9 @@ export function createObservability(
 		eventReplay(sample) {
 			instruments.recordEventReplay(sample);
 		},
+		syncLag(sample) {
+			instruments.setCorpusSyncLag(sample.seconds);
+		},
 		cached(sample) {
 			instruments.recordCache(sample);
 		},

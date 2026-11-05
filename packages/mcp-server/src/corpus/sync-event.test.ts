@@ -1,6 +1,6 @@
 /**
  * The `docs.sync` note's lag (v1.7 phase 65): what is read from an untrusted payload, and that the server records it as the
- * `substrate.corpus.sync_lag_seconds` gauge only when the ledger stored the note.
+ * `substrate.corpus.sync_lag_seconds` gauge whenever it takes the note (stored, held or dead-lettered), from REST and from MCP alike.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import type { Server } from "node:http";
@@ -10,6 +10,7 @@ import { loadConfig } from "../config.ts";
 import { createObservability, type Observability } from "../observe.ts";
 import { createHttpServer } from "../server.ts";
 import { Substrate } from "../service.ts";
+import { connectAs } from "../session-rollback.testkit.ts";
 import { SYNC_LAG_MAX_SECONDS, syncLagSeconds } from "./sync-event.ts";
 
 describe("syncLagSeconds", () => {
@@ -76,7 +77,7 @@ describe("POST /events with a docs.sync note", () => {
 			const point = metric?.kind === "gauge" ? metric.points[0] : undefined;
 			return point === undefined ? null : point.value;
 		};
-		return { send, gauge };
+		return { substrate, send, gauge };
 	}
 
 	test("a stored sync note sets the gauge to its lag, and the newest one wins", async () => {
@@ -99,5 +100,14 @@ describe("POST /events with a docs.sync note", () => {
 		await open.send({ action: "docs.sync", lag_s: -4 });
 		await open.send({ action: "docs.sync", lag_s: "soon" });
 		expect(open.gauge()).toBe(7);
+	});
+
+	test("an MCP events_emit of a stored sync note sets the same gauge, and the reply reports it stored", async () => {
+		const { substrate, gauge } = await serve();
+		const mcp = await connectAs(substrate, { surface: "omp", isOperator: false });
+		const reply = await mcp.call("events_emit", { kind: "note", summary: "docs sync", payload: { action: "docs.sync", repo: "acme/docs", trigger: "watch", outcome: "ok", lag_s: 12.4 } });
+		expect(reply.isError).toBe(false);
+		expect(reply.json["stored"]).toBe(true);
+		expect(gauge()).toBe(12);
 	});
 });

@@ -72,7 +72,6 @@ import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISA
 import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
-import { syncLagSeconds } from "./corpus/sync-event.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
@@ -1357,11 +1356,6 @@ export function createHttpServer(
 					} as Parameters<Substrate["emit"]>[0],
 					{ replay: req.headers["x-substrate-replay"] === "1" },
 				);
-				// The sync lag the CLI reports, as a gauge: bounded and sanitised, read only from a stored `docs.sync` note.
-				if (result.stored) {
-					const lag = syncLagSeconds(body.payload);
-					if (lag !== null) observability.instruments.setCorpusSyncLag(lag);
-				}
 				// 503 when the ledger did not take it. The `substrate` CLI ignores the
 				// status and exits 0 either way — failing open is the client's job, and
 				// this surface owes its caller the truth about durability.

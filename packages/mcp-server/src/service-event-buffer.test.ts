@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, loadConfig } from "./config.ts";
 import { GreptimeBreakerOpen } from "./greptime.ts";
-import { Substrate } from "./service.ts";
+import { Substrate, type SubstrateObserver } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 /**
@@ -54,8 +54,8 @@ function telemetry(extra: Record<string, string> = {}) {
 /** Every substrate a test built: each is abandoned after its test, which stops its timer and keeps a durable buffer for the next boot. */
 const opened: Substrate[] = [];
 
-function substrateFor(env: Record<string, string>, greptime: unknown): Substrate {
-	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+function substrateFor(env: Record<string, string>, greptime: unknown, observer?: SubstrateObserver): Substrate {
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never }, observer);
 	opened.push(substrate);
 	return substrate;
 }
@@ -115,17 +115,20 @@ describe("the telemetry buffer", () => {
 	test("a docs.sync note the ledger could not take still sets the sync-lag reading, and lands once when the ledger is back", async () => {
 		const t = telemetry({ SUBSTRATE_CORPUS: "on" });
 		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
+		const observed: number[] = [];
+		const substrate = substrateFor(t.env, greptime, { syncLag: ({ seconds }) => { observed.push(seconds); } });
 		state.down = true;
 
 		const held = await substrate.emit({ surface: "omp", kind: "note", summary: "docs sync", session_id: "docs-sync:t", payload: { action: "docs.sync", runtime: "corpus-sync", lag_s: 4000 } });
 		expect(held).toMatchObject({ stored: false, buffered: true });
 		expect((await substrate.fabricSources().corpus()).readings.syncLagS).toBe(4000);
+		expect(observed).toEqual([4000]);
 
 		state.down = false;
 		await substrate.drainEventBuffer({ all: true });
 		expect(state.rows.map((row) => row.id)).toEqual([held.event.id]);
 		expect((await substrate.fabricSources().corpus()).readings.syncLagS).toBe(4000);
+		expect(observed).toEqual([4000]);
 	});
 
 	test("a write that landed but lost its reply is not stored a second time on retry", async () => {

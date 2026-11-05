@@ -945,7 +945,7 @@ describe("the corpus's freshness (v1.7 phase 65)", () => {
 	const LIMIT_S = 2 * DAY_S;
 	const ago = (seconds: number): string => new Date(NOW - seconds * 1000).toISOString();
 	const judged = (lastIngestAt: string | null, maxAgeS = LIMIT_S) => corpusFreshnessRow({ lastIngestAt, now: NOW, maxAgeS });
-	/** The service's corpus readings, reached through the seam the lag pass reads: a stored `docs.sync` note sets the lag. */
+	/** The service's corpus readings, reached through the seam the lag pass reads: a `docs.sync` note the server took sets the lag. */
 	interface SyncSeam {
 		corpusSlo: { recordSyncLag(payload: Record<string, unknown>): void };
 	}

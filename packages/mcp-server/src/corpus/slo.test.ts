@@ -60,7 +60,7 @@ describe("CorpusSloState", () => {
 		expect(seen).toEqual([0.75]);
 	});
 
-	test("the sync lag is the lag of the newest stored docs.sync note that carries a usable one, and any other note leaves it in place", () => {
+	test("the sync lag is the lag of the newest docs.sync note the server took that carries a usable one, and any other note leaves it in place", () => {
 		const state = new CorpusSloState();
 		state.recordSyncLag({ action: "docs.sync", lag_s: 42 });
 		expect(state.readings(0).syncLagS).toBe(42);
