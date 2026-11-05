@@ -3002,7 +3002,8 @@ export class Substrate {
 		}
 		this.planningEvent(input);
 		if (result.stored) this.noteDocsCanary(result.event);
-		if (result.stored) this.corpusSlo.recordSyncLag(result.event.payload);
+		// The sync-lag reading follows a note the server took: stored, held in the buffer for a later write, or given up with a dead-letter record. A note the server did not take leaves the reading as it was.
+		if (result.stored || result.buffered === true || result.deadLettered === true) this.corpusSlo.recordSyncLag(result.event.payload);
 		if (result.stored) this.publishHint(result.event);
 		return result;
 	}

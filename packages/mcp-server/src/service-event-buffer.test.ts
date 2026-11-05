@@ -112,6 +112,22 @@ describe("the telemetry buffer", () => {
 		expect(state.rows[1]?.prev).toBe(state.rows[0]?.hash);
 	});
 
+	test("a docs.sync note the ledger could not take still sets the sync-lag reading, and lands once when the ledger is back", async () => {
+		const t = telemetry({ SUBSTRATE_CORPUS: "on" });
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(t.env, greptime);
+		state.down = true;
+
+		const held = await substrate.emit({ surface: "omp", kind: "note", summary: "docs sync", session_id: "docs-sync:t", payload: { action: "docs.sync", runtime: "corpus-sync", lag_s: 4000 } });
+		expect(held).toMatchObject({ stored: false, buffered: true });
+		expect((await substrate.fabricSources().corpus()).readings.syncLagS).toBe(4000);
+
+		state.down = false;
+		await substrate.drainEventBuffer({ all: true });
+		expect(state.rows.map((row) => row.id)).toEqual([held.event.id]);
+		expect((await substrate.fabricSources().corpus()).readings.syncLagS).toBe(4000);
+	});
+
 	test("a write that landed but lost its reply is not stored a second time on retry", async () => {
 		const t = telemetry();
 		const { state, greptime } = fakeLedger();
