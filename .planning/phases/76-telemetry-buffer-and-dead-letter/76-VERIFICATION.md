@@ -1,10 +1,10 @@
 ---
 phase: 76-telemetry-buffer-and-dead-letter
-verified: 2026-11-05T00:14:18Z
+verified: 2026-11-05T01:26:32Z
 status: human_needed
 score: "2/2 must-haves verified (SC1 VERIFIED within the owner-accepted pre-send scope, PLAN D76-10, with the buffer enabled per D76-15; SC2 PASSED by owner override, not verified). No gap open in code. W-L2-TIP-ORDER for handoff() is closed in code at a9e477e2; its owner ratification is not recorded."
 covered_files: [".env.example", ".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-PLAN.md", ".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-SUMMARY.md", "docs/config-reference.md", "docs/greptime-ledger.md", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/event-buffer.test.ts", "packages/mcp-server/src/event-buffer.ts", "packages/mcp-server/src/event-dead-letter.test.ts", "packages/mcp-server/src/event-dead-letter.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/handoff.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/reanchor-run.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service-event-buffer.test.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v3:sha256:c9305bec6e4400e2b28d88f658993c4b0b3bca13c70adddec25b81823071ed40"
+covered_digest: "v3:sha256:2785820887153110e87dfe37d20f7fa3cfd906933ac8fc2bb701bb73eece4bf9"
 behavior_unverified: 0
 overrides_applied: 1
 overrides:
@@ -14,27 +14,24 @@ overrides:
     accepted_at: "2026-11-02"
 re_verification:
   previous_status: human_needed
-  previous_score: "2/2 (prior record 76-VERIFICATION.md at 9e71f263, verified 2026-11-04T23:05:04Z)"
-  mode: "initial mode: the prior record has no gaps: section. Re-checked at c40ffc9a (wave 6, head of gsd/v18-int-all). Changes are listed under Changed Since Prior Record."
-  gaps_closed:
-    - "R-2: drain(all) during an in-flight pass dropped the all flag (a0572cf7; event-buffer.ts:287-305; tests event-buffer.test.ts:226), carried from the 504da465 record"
-    - "R-3: abandonAll() cleared the in-flight entry (a0572cf7; event-buffer.ts:318-327; tests event-buffer.test.ts:245, :265), carried from the 504da465 record"
-    - "W-L2-TIP-ORDER for handoff(): the chain-tip read preceded the surrogate refusal (a9e477e2; service.ts:7629-7638 before the read at 7647; test service.test.ts:1669), carried from the 504da465 record"
+  previous_score: "2/2 (prior record 76-VERIFICATION.md verified 2026-11-05T00:14:18Z at c40ffc9a)"
+  mode: "re-verification at 835a2742 (branch gsd/v18-int-all). The prior record's digest was stale after wave 7. Each changed covered file was checked against this phase's criteria; no truth changed. Changes are listed under Changed Since Prior Record."
+  gaps_closed: []
   gaps_remaining: []
   regressions: []
 warnings:
   - id: HARD-R3-ORPHANED
     truth: "REQUIREMENTS.md HARD-R3 maps to Phase 76."
-    status: "ORPHANED. No plan frontmatter declares requirements for 76-01-PLAN.md. REQUIREMENTS.md line 138 still reads 'Not started' while the code is delivered (re-read at c40ffc9a, unchanged)."
+    status: "ORPHANED. No plan frontmatter declares requirements for 76-01-PLAN.md. REQUIREMENTS.md line 138 still reads 'Not started' and line 120 is unchecked at 835a2742 (the wave-7 REQUIREMENTS edits do not touch HARD-R3)."
   - id: HANDOFF-TIP-OUTSIDE-TURN
     truth: "Chain-tip reads for a session run inside that session's turn, so no append interleaves with them."
-    status: "OPEN (info). handoff() reads lastHash at service.ts:7647 outside withSessionTurn; its emit at service.ts:7678 takes the turn later. A concurrent emit for the same session can land between the two, so the packet's prev_event_hash can differ from the stored event's prev. [INFERENCE from code read; not exercised.]"
+    status: "OPEN (info). handoff() reads lastHash at service.ts:7648 outside withSessionTurn; its emit at service.ts:7679 takes the turn later. A concurrent emit for the same session can land between the two, so the packet's prev_event_hash can differ from the stored event's prev. [INFERENCE from code read; not exercised.]"
   - id: R-3-UNSETTLED-AT-EXIT
     truth: "An entry given up by abandonAll() while its delivery is in flight is recorded once that delivery settles."
     status: "Residual (info). If the process exits before the in-flight delivery settles and the buffer's file was not saved, that entry gets no record in this process. A durable file keeps it as live for the next boot. [INFERENCE; not exercised.]"
   - id: SYNC-LAG-BUFFERED-NOT-RECORDED
     truth: "A stored docs.sync note updates the corpus sync-lag gauge (phase 70 SC3)."
-    status: "OPEN (info, new at c40ffc9a). The hook service.ts:2961 (corpusSlo.recordSyncLag) runs only in emit() on the stored branch, as noteDocsCanary does (D76-14). A docs.sync note that is buffered and later drained by deliverBuffered does not reach the hook, so the gauge keeps its previous value until the next stored docs.sync note. grep finds one call site (service.ts:2961). [INFERENCE from code read; not exercised. Owner decision whether it matters.]"
+    status: "OPEN (info, since c40ffc9a). The hook service.ts:2961 (corpusSlo.recordSyncLag) runs only in emit() on the stored branch, as noteDocsCanary does (D76-14). A docs.sync note that is buffered and later drained by deliverBuffered does not reach the hook, so the gauge keeps its previous value until the next stored docs.sync note. grep finds one call site (service.ts:2961). Unchanged at 835a2742. [INFERENCE from code read; not exercised. Owner decision whether it matters.]"
 human_verification:
   - test: "Operator item 1. Live GreptimeDB rehearsal of the accepted outage limit: block the ledger and emit for one session; restore. Cover (a) a session whose tip is cached, first write fails; (b) that session's next write while the outage lasts; (c) a write for a session with no cached tip; (d) the same run with SUBSTRATE_LEDGER_CHAIN_CACHE=0, sessioned writes, including a write whose tip read succeeds and whose insert fails; (e) a sessionless write during the outage in a process that confirmed append-mode before the outage; (f) a sessionless write in a process whose first ledger contact is during the outage."
     expected: "(a) answers 503 with buffered true and stored false; /healthz eventBuffer.depth rises. (b) and (c) answer stored false with buffered absent, refused at the tip read (service.ts:3122-3132). (d) a sessioned write whose tip read fails is refused; one whose tip read succeeds and whose insert fails is buffered when append mode is confirmed; without that confirmation and without SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=1|true|yes it is refused as APPEND_MODE_UNKNOWN before the insert (gate at service.ts:3137-3141). (e) is buffered. (f) is refused as APPEND_MODE_UNKNOWN unless the allow flag is set. After restore each buffered event lands once."
@@ -78,11 +75,11 @@ human_verification:
 
 **Phase Goal:** An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently. (ROADMAP.md, Phase 76)
 
-**Verified:** 2026-11-05T00:14:18Z
+**Verified:** 2026-11-05T01:26:32Z
 **Status:** human_needed
-**Re-verification:** No: initial mode (the prior record has no `gaps:` section). Prior frontmatter is carried for continuity.
-**Worktree / HEAD:** `/root/src/worktrees/as-gsd-v18-all` (branch gsd/v18-int-all) at c40ffc9a. Prior record at 9e71f263 (verified 2026-11-04T23:05:04Z). Sibling phases' VERIFICATION files in the worktree are modified by other workers and were not touched.
-**Line references:** service.ts lines above 2958 are unchanged since the 9e71f263 record. From 2961 on they are one higher than that record (the new `recordSyncLag` hook). Line numbers below are at c40ffc9a.
+**Re-verification:** Yes. Prior record at c40ffc9a (verified 2026-11-05T00:14:18Z). The prior digest was stale after wave 7. Prior verdicts carried forward where the changes do not touch them.
+**Worktree / HEAD:** `/root/src/worktrees/as-gsd-v18-all` (branch gsd/v18-int-all) at 835a2742. Working tree clean at verification time.
+**Line references:** service.ts lines up to 7478 are as at c40ffc9a. The wave-7 hunk at 7476 adds one line, so from 7479 on each line is one higher than in the c40ffc9a record (handoff refusal, lastHash, emit, and health now at 7630, 7648, 7679, 8942). Lines before 2961 are unchanged. config.ts, event-buffer.ts, event-dead-letter.ts, greptime.ts, server.ts, index.ts and reanchor-run.ts are unchanged in the range.
 
 ## Goal Achievement
 
@@ -90,39 +87,37 @@ human_verification:
 
 | #   | Truth   | Status     | Evidence       |
 | --- | ------- | ---------- | -------------- |
-| 1   | SC1: A failed event write enters a bounded buffer, is retried with backoff, and after the retry budget is written to a dead-letter store with its hash. | ✓ VERIFIED (within the owner-accepted pre-send scope, D76-10; with the buffer enabled, D76-15) | Write failure → `appendChained` catch → `bufferEvent` (call sites service.ts:3149 and 3182; definition 3190). Bound: `EventBuffer.enqueue` evicts or refuses past `max` (event-buffer.ts:~229-263). Backoff: base×2^n capped, ±20 % jitter (event-buffer.ts:40-44). Ceiling: `runDrain` dead-letters with `exhausted` at `attempts >= maxAttempts`. Record: `DeadLetterStore.record` writes `event_hash` (event-dead-letter.ts record()). Retries use `insertEvent(entry.event, { mayExist: true })` (service.ts:3219; greptime.ts:1248-1270), so an ambiguous write is not inserted twice. Unchanged in the 9e71f263 to c40ffc9a range. |
-| 2   | SC2: Buffer and dead-letter depth are reported in `/healthz` and bounded by a flag. | ✓ PASSED (override), not verified | `health().eventBuffer` is `{ enabled: false }` when off, else `{ enabled: true, ...stats, deadLetter: { depth, durable } }` (service.ts:8941). `server.ts` spreads `health` into the `/healthz` body (server.ts:1002). Buffer bound by `SUBSTRATE_EVENT_BUFFER_MAX` (config.ts:2623, default 256). Dead-letter store is not bounded (D76-13). The health body test and the overflow test pass. The literal SC2 is not met for the dead-letter half. Override carried forward, owner-accepted 2026-11-02. This verifier did not re-accept it. |
+| 1   | SC1: A failed event write enters a bounded buffer, is retried with backoff, and after the retry budget is written to a dead-letter store with its hash. | ✓ VERIFIED (within the owner-accepted pre-send scope, D76-10; with the buffer enabled, D76-15) | Write failure → `appendChained` catch → `bufferEvent` (call sites service.ts:3149 and 3182; definition 3190). Bound: `EventBuffer.enqueue` evicts or refuses past `max` (event-buffer.ts:~229-263). Backoff: base×2^n capped, ±20 % jitter (event-buffer.ts:40-44). Ceiling: `runDrain` dead-letters with `exhausted` at `attempts >= maxAttempts`. Record: `DeadLetterStore.record` writes `event_hash` (event-dead-letter.ts record()). Retries use `insertEvent(entry.event, { mayExist: true })` (service.ts:3219; greptime.ts:1248). |
+| 2   | SC2: Buffer and dead-letter depth are reported in `/healthz` and bounded by a flag. | ✓ PASSED (override), not verified | `health().eventBuffer` is `{ enabled: false }` when off, else `{ enabled: true, ...stats, deadLetter: { depth, durable } }` (service.ts:8942). `server.ts` spreads `health` into the `/healthz` body (server.ts:995-1002). Buffer bound by `SUBSTRATE_EVENT_BUFFER_MAX` (config.ts:2623, default 256). Dead-letter store is not bounded (D76-13). The health body test and the overflow test pass. The literal SC2 is not met for the dead-letter half. Override carried forward, owner-accepted 2026-11-02. This verifier did not re-accept it. |
 
 **Score:** 2/2 truths counted (1 VERIFIED, 1 PASSED by override). behavior_unverified: 0. Warnings above do not change the score.
 
-### Changed Since Prior Record (9e71f263 to c40ffc9a)
+### Changed Since Prior Record (c40ffc9a to 835a2742)
 
-Five covered files changed in this range (`git diff 9e71f263 c40ffc9a`, covered paths only):
+Every covered file was compared with `git diff c40ffc9a 835a2742`. Three covered files changed:
 
 | File | Change | Phase 76 effect |
 | ---- | ------ | --------------- |
-| `packages/mcp-server/src/service.ts` | +1 line at 2961: `if (result.stored) this.corpusSlo.recordSyncLag(result.event.payload);` in `emit()`, after `noteDocsCanary`. Steering `docs_search` (about 6396 to 6425): `recordRetrieval` takes an `isPrivate` argument. | None on the buffer, drain, dead-letter, or chain-tip paths. The new hook runs only on the stored branch and is a pure read (`syncLagSeconds` returns null for any payload that is not a `docs.sync` note with a finite non-negative `lag_s`). The steering change is outside phase 76. |
-| `packages/mcp-server/src/flag-registry.ts` | The `SUBSTRATE_WORKTREE_ROOTS` row text changed (about 325); a comment at about 894 changed; one row for `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` added (about 895). | Phase 76 rows (`SUBSTRATE_EVENT_*`, flag-registry.ts:358-363) are unchanged. |
-| `packages/mcp-server/src/config.ts` | One comment line (683) changed. | None. Line count unchanged, so config.ts:2600-2627 are as cited before. |
-| `.env.example` | Sync-lag flag lines added (about 1034); the worktree-roots comment changed (+3 -1 lines in total). | Phase 76 entries (about 38-46) unchanged. |
-| `docs/config-reference.md` | Three lines: the sync-lag row added; the worktree-roots row changed. | None. `docs/greptime-ledger.md` is not in the range. |
+| `packages/mcp-server/src/service.ts` | One hunk at 7476 (wave 7, commit 42dcb4c6 phase-65 SC5 and ca9d02ec). `corpusFreshness()` (about 7479-7491) now also judges when `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` is set, with `freshMaxAgeS` at 0; it passes `syncLagS` from `corpusSlo.readings(now)` and `syncLagMaxS` into `corpusFreshnessRow`. The doc comment is updated. Net +1 line. | None on phase 76. This is the corpus freshness verdict for the phase 65 lag pass. It does not touch the buffer, drain, dead-letter, chain-tip, emit, or health paths. The stored-branch hook at 2961 (`corpusSlo.recordSyncLag`) is unchanged, so the SYNC-LAG-BUFFERED-NOT-RECORDED item is unchanged. |
+| `packages/mcp-server/src/flag-registry.ts` | One row changed, `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` (line 878, phase 65 text: a set sync-lag objective is judged at 0). | None. The phase 76 rows (`SUBSTRATE_EVENT_*`, lines 358-363) are unchanged. |
+| `docs/config-reference.md` | One row changed, the same `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` row (line 257, regenerated in ca9d02ec). | None. The phase 76 rows are unchanged. `docs/greptime-ledger.md` is not in the range. |
 
-Commits in range touching covered files: 75d2ce56 (66), a4a9a8f0 and db4f98f6 (70), 3c5dcfa0 (68), c40ffc9a (docs regeneration). The fingerprint digest changed because these five files' content changed. The covered file list is unchanged (23 entries, identical to the 9e71f263 list).
+Other changes in the range are not in the covered list and do not bear on phase 76: ROADMAP.md and REQUIREMENTS.md (phase 65, 69 and 70 amendments; HARD-R3 at REQUIREMENTS.md lines 120 and 138 is unchanged; the phase 76 row at ROADMAP.md line 1424 is unchanged), docs-freshness.ts and its test, reconcile-main/-repair files and their tests (phase 65 and 78), `packages/dispatcher/tests/test_worktree.py` (phase 68), the `docs/corpus-eval.md` and `docs/runbooks/corpus-sync.md` one-line edits, and the phase 63, 64, 65, 66, 68, 69, 70, 71, 72, 73, 75, 77 and 78 VERIFICATION files.
 
-Carried forward unchanged: the 504da465 and 9e71f263 verdicts for every phase 76 source and test file, since none of them changed in the range.
+Carried forward unchanged: every phase 76 source and test file's verdict from the 504da465, 9e71f263 and c40ffc9a records. None of those files changed in the range.
 
-### W-L2 Write-Path Ordering (re-checked at c40ffc9a)
+### W-L2 Write-Path Ordering (re-checked at 835a2742)
 
 Question: does the surrogate refusal of the six write text fields, and the graph id check, happen before any chain-tip read, buffer or insert on a sessioned write?
 
 | Write shape | Refusal reached at | Tip read before refusal? | Verdict |
 | ----------- | ------------------ | ------------------------ | ------- |
-| Keyed, replay lookup, via `emit` | service.ts:3094 (`assertWriteTextFields`), 3096 (`normalizeGraphId`), before `replayOutcome` | No | ✓ refused before lookup, tip, buffer, insert |
-| Sessioned, via `emit` / `appendChained`, keyed or unkeyed | service.ts:3094, 3096, before `lastHash` at 3122 | No | ✓ CONFIRMED (named tests, passing at 9e71f263; code unchanged) |
+| Keyed, replay lookup, via `emit` | service.ts:3094 (`assertWriteTextFields`), 3096 (`normalizeGraphId`), before `replayOutcome` (3103) | No | ✓ refused before lookup, tip, buffer, insert |
+| Sessioned, via `emit` / `appendChained`, keyed or unkeyed | service.ts:3094, 3096, before `lastHash` at 3122 | No | ✓ CONFIRMED (named tests passing in the run below; code unchanged) |
 | Sessionless, keyed or unkeyed | service.ts:3094 | No tip read exists | ✓ |
-| Sessioned, via `handoff()`, then `emit` | service.ts:7629 (`normalizeGraphId(probe)`) and the `assertWriteTextFields` call at 7630-7638, before `placeOf` (7638) and `lastHash` (7647) | No | ✓ CONFIRMED (test "refuses a lone surrogate in the handoff summary before it reads the chain tip", service.test.ts:1669, passing at 9e71f263; test file unchanged) |
+| Sessioned, via `handoff()`, then `emit` | service.ts:7630 (`normalizeGraphId(probe)`) and the `assertWriteTextFields` call at 7631-7638, before `placeOf` (7639) and `lastHash` (7648) | No | ✓ CONFIRMED (test "refuses a lone surrogate in the handoff summary before it reads the chain tip", service.test.ts:1669, passing in the run below) |
 
-Coverage note (info): `handoff()` runs its refusal on the probe built from the caller's input. A `repo` that the place lookup fills in (`place.repo`, service.ts:7638) is not in the probe. That value comes from a graph row written under the same rules, so it cannot hold a lone surrogate. [INFERENCE]
+Coverage note (info): `handoff()` runs its refusal on the probe built from the caller's input. A `repo` that the place lookup fills in (`place.repo`, service.ts:7639) is not in the probe. That value comes from a graph row written under the same rules, so it cannot hold a lone surrogate. [INFERENCE]
 
 Result: the W-L2 rule holds for every sessioned write path. The W-L2-TIP-ORDER warning is closed in code. Ratification is a human item.
 
@@ -141,14 +136,14 @@ Result: the W-L2 rule holds for every sessioned write path. The W-L2-TIP-ORDER w
 
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
-| `packages/mcp-server/src/event-buffer.ts` | Bounded per-session FIFO, backoff, drop causes, in-flight protection, file persistence | ✓ VERIFIED | Changed at a0572cf7 (follow-up pass, abandon in-flight). Unchanged since. Wired from service.ts (`EventBuffer` at 2098). Tests pass. |
-| `packages/mcp-server/src/event-dead-letter.ts` | Append-only JSONL dead-letter store with hash, reason, depth, durability | ✓ VERIFIED | Unchanged since 4b84e50c. Wired from service.ts:2097. 0600 on create. |
-| `packages/mcp-server/src/service.ts` | Turn helper, buffering, drain, health, shutdown | ✓ VERIFIED | `appendChained` 3092, `bufferEvent` 3190, `deliverBuffered` 3209, `drainPendingEvents` 3253, `ensureEventDrainTimer` 3261, `eventBuffer` in health 8941. Wave-6 edit adds the stored-branch hook at 2961 only. |
-| `packages/mcp-server/src/greptime.ts` | `insertEvent(event, { mayExist })` | ✓ VERIFIED | greptime.ts:1248-1270. Default path unchanged. Tests in greptime.test.ts pass at 9e71f263. |
-| `packages/mcp-server/src/config.ts` | Six flags, boot refusal when the dead-letter path is missing | ✓ VERIFIED | config.ts:2600-2627 (line count unchanged in range). |
+| `packages/mcp-server/src/event-buffer.ts` | Bounded per-session FIFO, backoff, drop causes, in-flight protection, file persistence | ✓ VERIFIED | Changed at a0572cf7 (follow-up pass, abandon in-flight). Unchanged since. Wired from service.ts (`EventBuffer` at 2098). Tests pass (787-pass run below). |
+| `packages/mcp-server/src/event-dead-letter.ts` | Append-only JSONL dead-letter store with hash, reason, depth, durability | ✓ VERIFIED | Unchanged since 4b84e50c. Wired from service.ts:2097. 0600 on create and on append (lines 149-150). |
+| `packages/mcp-server/src/service.ts` | Turn helper, buffering, drain, health, shutdown | ✓ VERIFIED | `appendChained` 3092, `bufferEvent` 3190, `deliverBuffered` 3209, `drainPendingEvents` 3253, `ensureEventDrainTimer` 3261, `eventBuffer` in health 8942. The wave-7 edit at 7476 is in `corpusFreshness` (phase 65) and does not touch phase 76 paths. |
+| `packages/mcp-server/src/greptime.ts` | `insertEvent(event, { mayExist })` | ✓ VERIFIED | greptime.ts:1243-1270. Default path unchanged. greptime.test.ts passes in the run below. |
+| `packages/mcp-server/src/config.ts` | Six flags, boot refusal when the dead-letter path is missing | ✓ VERIFIED | config.ts:2600-2627 (unchanged in range). |
 | `packages/mcp-server/src/index.ts` | Shutdown calls `drainPendingEvents` | ✓ VERIFIED | index.ts:260. |
-| `packages/mcp-server/src/server.ts` | `/healthz` spreads `health()` | ✓ VERIFIED | server.ts:995-1002. |
-| `packages/mcp-server/src/flag-registry.ts`, `.env.example`, `docs/config-reference.md` | Six flags documented | ✓ VERIFIED | flag-registry.ts:358-363; .env.example:38-46; docs/config-reference.md row set re-checked by `scripts/config-reference.test.ts` (12 pass at c40ffc9a). |
+| `packages/mcp-server/src/server.ts` | `/healthz` spreads `health()` | ✓ VERIFIED | server.ts:995-1002 (unchanged). |
+| `packages/mcp-server/src/flag-registry.ts`, `.env.example`, `docs/config-reference.md` | Six flags documented | ✓ VERIFIED | flag-registry.ts:358-363; .env.example:38-46; docs/config-reference.md re-checked by `scripts/config-reference.test.ts` (12 pass at 835a2742). The age-limit row changed in the range and still matches the registry. |
 
 ### Key Link Verification
 
@@ -159,7 +154,7 @@ Result: the W-L2 rule holds for every sessioned write path. The W-L2-TIP-ORDER w
 | `deliverBuffered` | `insertEvent(…, { mayExist: true })` | direct call | ✓ WIRED | service.ts:3219; greptime.ts:1262 |
 | `drainPendingEvents` | `abandonAll` | `options.abandon && !durable` | ✓ WIRED | service.ts:3253-3258; index.ts:260 |
 | `onDeadLetter` | `DeadLetterStore.record` | constructor closure | ✓ WIRED | service.ts:2105-2108 |
-| `health()` | `/healthz` body | spread | ✓ WIRED | service.ts:8941; server.ts:1002 |
+| `health()` | `/healthz` body | spread | ✓ WIRED | service.ts:8942; server.ts:1002 |
 
 ### Data-Flow Trace (Level 4)
 
@@ -167,20 +162,19 @@ Not applicable to a UI. The buffered event's data path is the real `insertEvent`
 
 ### Behavioral Spot-Checks
 
-Run at c40ffc9a, with `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`.
+Run at 835a2742 with `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs`.
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
-| Service emit path (incl. the wave-6 hook), service-level buffering, config flags, flag-registry lock | `cd packages/mcp-server && bun test --timeout 30000 src/service.test.ts src/service-event-buffer.test.ts src/config.test.ts src/flag-registry.test.ts` | 451 pass, 0 fail, 1741 expect() calls, 4 files, 7.67 s | ✓ PASS |
-| Config reference document vs registry | `bun test --timeout 30000 scripts/config-reference.test.ts` (repo root) | 12 pass, 0 fail, 77 expect() calls | ✓ PASS |
-| `appendChained` tip-order refusal, handoff tip-order refusal | named tests in service.test.ts (covered by the first row) | passed | ✓ PASS |
-| R-2 (`all` during a pass) | named test "a drain with all during a running pass still delivers the entries that pass skipped as not yet due" (9e71f263 run; event-buffer.test.ts untouched) | passed at 9e71f263 | ✓ PASS (carried) |
-| R-3 (abandon during delivery) | named tests "abandoning the buffer during a delivery keeps the in-flight entry pending until that delivery fails" and "an in-flight entry that lands after the buffer was abandoned is not recorded as abandoned" (9e71f263 run) | passed at 9e71f263 | ✓ PASS (carried) |
-| Handoff surrogate refused before tip read | "refuses a lone surrogate in the handoff summary before it reads the chain tip" (covered by the first row) | passed | ✓ PASS |
-| Not re-run at c40ffc9a | `event-buffer.test.ts`, `event-dead-letter.test.ts`, `event.test.ts`, `greptime.test.ts` (sources unchanged in range; 323 pass at 9e71f263); `handoff.test.ts` (handoff.ts unchanged; 354 pass with service.test.ts at 9e71f263) | carried from 9e71f263 | ? SKIP for this record. `handoff.test.ts` runs the handoff-to-emit path through the changed service.ts, so the orchestrator gate should run it once. |
-| Not run here | tsc, lint, the full suite, `config:reference --check` (the test file above ran; the script was not run) | not run, by assignment or outside the two targeted runs | ? SKIP (routed to the orchestrator gate) |
+| Phase 76 covered mcp-server suites (service emit path incl. the wave-6 hook, service-level buffering, config flags, flag-registry lock, handoff tip-order refusal, event-buffer incl. R-2 and R-3 named tests, event-dead-letter, event, greptime `mayExist`) | `cd packages/mcp-server && bun test --timeout 30000 src/service.test.ts src/service-event-buffer.test.ts src/config.test.ts src/flag-registry.test.ts src/handoff.test.ts src/event-buffer.test.ts src/event-dead-letter.test.ts src/event.test.ts src/greptime.test.ts` | 787 pass, 0 fail, 3060 expect() calls, 9 files, 11.34 s | ✓ PASS |
+| Config reference document vs registry (the age-limit row changed in the range) | `bun test --timeout 30000 scripts/config-reference.test.ts` (repo root) | 12 pass, 0 fail, 77 expect() calls | ✓ PASS |
+| `appendChained` tip-order refusal, handoff tip-order refusal | named tests in service.test.ts (inside the 787-pass run) | passed | ✓ PASS |
+| R-2 (`all` during a pass) | named test "a drain with all during a running pass still delivers the entries that pass skipped as not yet due" (event-buffer.test.ts, inside the 787-pass run) | passed | ✓ PASS |
+| R-3 (abandon during delivery) | named tests "abandoning the buffer during a delivery keeps the in-flight entry pending until that delivery fails" and "an in-flight entry that lands after the buffer was abandoned is not recorded as abandoned" (inside the 787-pass run) | passed | ✓ PASS |
+| Handoff surrogate refused before tip read | "refuses a lone surrogate in the handoff summary before it reads the chain tip" (service.test.ts:1669, inside the 787-pass run) | passed | ✓ PASS |
+| Not run here | tsc, lint, the full suite, `config:reference --check` script, the orchestrator gate | not run, by assignment | ? SKIP (routed to the orchestrator gate) |
 
-Postgres evidence: none. No covered test file gates on `SUBSTRATE_TEST_PG_URL`. Checked at c40ffc9a in every covered test file on this path (`service.test.ts`, `service-event-buffer.test.ts`, `config.test.ts`, `flag-registry.test.ts`, `event-buffer.test.ts`, `event-dead-letter.test.ts`, `event.test.ts`, `greptime.test.ts`, `handoff.test.ts`) and in `scripts/config-reference.test.ts`. The `postgres` strings in `service.test.ts` and `config.test.ts` are error-text fixtures and literal URLs. So no scratch Postgres run was made, and database `substrate_test_v76` was neither used nor created. PG counts per file: none.
+Postgres evidence: none. No covered test file gates on `SUBSTRATE_TEST_PG_URL`. Checked at 835a2742 by grep over every covered test file on this path (`service.test.ts`, `service-event-buffer.test.ts`, `config.test.ts`, `flag-registry.test.ts`, `handoff.test.ts`, `event-buffer.test.ts`, `event-dead-letter.test.ts`, `event.test.ts`, `greptime.test.ts`) and `scripts/config-reference.test.ts`: no match. Both runs above unset the variable. No scratch Postgres run was made, and database `substrate_test_v76` was neither used nor created. PG counts per file: none.
 
 ### Probe Execution
 
@@ -190,17 +184,17 @@ No conventional probes exist (`find scripts -path '*/tests/probe-*.sh'` returns 
 
 | Requirement | Source Plan | Description | Status | Evidence |
 | ----------- | ----------- | ----------- | ------ | -------- |
-| HARD-R3 | none | Bounded queue, backoff with jitter, durable dead-letter with payload and error, per-record dedupe, depth metrics, chain ordering, truthful acks | ORPHANED | REQUIREMENTS.md line 120 is unchecked and line 138 reads "Not started" (unchanged at c40ffc9a). 76-01-PLAN.md declares no `requirements:`. The delivered code covers most of the description: bounded buffer, backoff, dead-letter with the payload, `mayExist` dedupe, depths in /healthz, chain ordering through the per-session FIFO, and truthful `stored: false` replies. The dead-letter bound is not covered (override). |
+| HARD-R3 | none | Bounded queue, backoff with jitter, durable dead-letter with payload and error, per-record dedupe, depth metrics, chain ordering, truthful acks | ORPHANED | REQUIREMENTS.md line 120 is unchecked and line 138 reads "Not started" (unchanged at 835a2742). 76-01-PLAN.md declares no `requirements:`. The delivered code covers most of the description: bounded buffer, backoff, dead-letter with the payload, `mayExist` dedupe, depths in /healthz, chain ordering through the per-session FIFO, and truthful `stored: false` replies. The dead-letter bound is not covered (override). |
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 | ---- | ---- | ------- | -------- | ------ |
-| all phase 76 source, test and doc files | — | TBD / FIXME / XXX / TODO / HACK / PLACEHOLDER | none | Debt-marker scan over the files and over the lines added in 9e71f263 to c40ffc9a (the five changed covered files): 0 matches. |
+| all phase 76 source, test and doc files | — | TBD / FIXME / XXX / TODO / HACK / PLACEHOLDER | none | Debt-marker scan over the files and over the lines changed in c40ffc9a to 835a2742 (the three changed covered files): 0 matches. |
 
 ### Human Verification Required
 
-See the `human_verification` frontmatter: operator items 1 to 8 (live GreptimeDB outage, dead-letter exhaustion, torn-line restart, shutdown under the service manager, live steering session, live replay, the enablement decision, /healthz staleness), plus owner items for the handoff reorder ratification, the D76-14/19 ratification, the two doc sentences, HARD-R3 traceability, and the new SYNC-LAG-BUFFERED-NOT-RECORDED decision.
+See the `human_verification` frontmatter: operator items 1 to 8 (live GreptimeDB outage, dead-letter exhaustion, torn-line restart, shutdown under the service manager, live steering session, live replay, the enablement decision, /healthz staleness), plus owner items for the handoff reorder ratification, the D76-14/19 ratification, the two doc sentences, HARD-R3 traceability, and the SYNC-LAG-BUFFERED-NOT-RECORDED decision.
 
 ### Gaps Summary
 
@@ -211,17 +205,17 @@ Open items that remain (carried from the prior record, updated):
 - D76-15: operator decision to enable the buffer.
 - D76-14 and D76-19: a buffered `session.end` closes steering before its note lands; PLAN says it should stay open. Owner ratification open.
 - R-1: live keyed replay after a dead-letter record. Code path tested, live not.
-- R-2 and R-3: closed in code (a0572cf7). Shutdown behaviour under the service manager is still operator item 4. R-3 residual above.
+- R-2 and R-3: closed in code (a0572cf7), tests pass at 835a2742. Shutdown behaviour under the service manager is still operator item 4. R-3 residual above.
 - Dead-letter cap: a tracked follow-up under the override. SC2's literal dead-letter bound is not met.
 - HARD-R3: orphaned in REQUIREMENTS.md; status line stale.
-- Handoff tip read outside the session turn (info): service.ts:7647 vs the turn at 3020/3241. Not exercised.
+- Handoff tip read outside the session turn (info): service.ts:7648 vs the turn at 3021/3237. Not exercised.
 - Doc precision points (human item 10).
-- New at c40ffc9a (info): a buffered `docs.sync` note does not reach the sync-lag hook when drained (human item 12).
-- `handoff.test.ts` was not re-run at c40ffc9a (see Behavioral Spot-Checks); the orchestrator gate should run it once.
+- Buffered `docs.sync` note does not reach the sync-lag hook when drained (human item 12).
+- `handoff.test.ts` is now run at 835a2742 (inside the 787-pass run); the orchestrator gate still runs tsc, lint and the full suite.
 
 Deferred items (Step 9b): none taken. The dead-letter bound is an owner override, not a deferral to a later phase.
 
 ---
 
-_Verified: 2026-11-05T00:14:18Z_
+_Verified: 2026-11-05T01:26:32Z_
 _Verifier: Claude (gsd-verifier)_

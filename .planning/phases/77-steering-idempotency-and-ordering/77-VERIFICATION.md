@@ -1,6 +1,6 @@
 ---
 phase: 77-steering-idempotency-and-ordering
-verified: 2026-11-05T00:13:45Z
+verified: 2026-11-05T01:26:07Z
 status: human_needed
 score: 7/8 must-haves verified
 covered_files:
@@ -35,13 +35,13 @@ covered_files:
   - "packages/mcp-server/src/server.steering.test.ts"
   - "packages/mcp-server/src/server.ts"
   - "packages/mcp-server/src/service.ts"
-covered_digest: "v3:sha256:30aaf2b0f9d5ce9759a2bbc96e9a646dd6a943dfc6ef770577ce251fc6a14b68"
+covered_digest: "v3:sha256:076835c0c992c778c4ce3f7b1ac41f18a68f775f643969fc344430df3c421032"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: human_needed
   previous_score: 7/8
-  previous_verification: "77-VERIFICATION.md at 9e71f263 (verified 2026-11-04T23:00:41Z, digest v3:sha256:641ff4b1505e68df6fb61a48110aa074e51fde9c335a1558cc4afa35e8bb5097); earlier records at 504da465, 4b84e50c, 8a604455, 97defd59, 9ab6f111, c7788f9d and 749e97e3"
+  previous_verification: "77-VERIFICATION.md at c40ffc9a (verified 2026-11-05T00:13:45Z, digest v3:sha256:30aaf2b0f9d5ce9759a2bbc96e9a646dd6a943dfc6ef770577ce251fc6a14b68); earlier records at 9e71f263 (verified 2026-11-04T23:00:41Z, digest v3:sha256:641ff4b1505e68df6fb61a48110aa074e51fde9c335a1558cc4afa35e8bb5097), 504da465, 4b84e50c, 8a604455, 97defd59, 9ab6f111, c7788f9d and 749e97e3"
   gaps_closed: []
   gaps_remaining:
     - "T8: the documented per-session order (docs/live-steering.md:35) holds for the wait cursor only. steering_list, GET /steering/directives and the docs_search notice order by priority. Open decision H5."
@@ -66,25 +66,23 @@ human_verification:
 # Phase 77: Steering idempotency and ordering Verification Report
 
 **Phase Goal:** A steering command carrying an idempotency key applies once across retries and carries a sequence number, so the reader sees delivery order.
-**Verified:** 2026-11-05T00:13:45Z
+**Verified:** 2026-11-05T01:26:07Z
 **Status:** human_needed
-**Re-verification:** Yes. The prior record at 9e71f263 (human_needed, 7/8) carries no `gaps:` block. This run re-audits the covered set at HEAD c40ffc9a, runs the Postgres file again on scratch PostgreSQL 16.15, and re-runs the phase's non-PG test files. T8 and HARD-H1 remain open.
+**Re-verification:** Yes. The prior record at c40ffc9a (human_needed, 7/8, digest `v3:sha256:30aaf2b0…4b68`) is replaced. This run re-audits the covered set at HEAD 835a2742, re-runs the two Postgres files on scratch PostgreSQL 16.15, and re-runs the phase's non-PG test files. T8 and HARD-H1 remain open.
 
-**Scope:** integration worktree `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`, HEAD `c40ffc9a`. No code was edited, nothing was committed, and the full suite, tsc, lint and formatters were not run. Postgres was used only for the two PG-gated files in the covered set, on scratch PostgreSQL 16.15 (127.0.0.1:5439, database `substrate_test_v77`). Production and port 5432 were not touched. Only `.planning/phases/77-steering-idempotency-and-ordering/77-VERIFICATION.md` was written, in the worktree.
+**Scope:** integration worktree `/root/src/worktrees/as-gsd-v18-all`, branch `gsd/v18-int-all`, HEAD `835a2742`. No code was edited, nothing was committed, and the full suite, tsc, lint and formatters were not run. Postgres was used only for the two PG-gated files in the covered set, on scratch PostgreSQL 16.15 (127.0.0.1:5439, database `substrate_test_v77`). Production and port 5432 were not touched. Only `.planning/phases/77-steering-idempotency-and-ordering/77-VERIFICATION.md` was written, in the worktree.
 
 **Criteria source:** worktree `.planning/ROADMAP.md`, `### Phase 77` (Goal and Success Criteria 1 to 3, lines 1328 to 1340). They match PLAN 77-01. The ROADMAP Status line (:1332) still reads `human_needed: 4 of 8` and is stale against this record (H6).
 
-**Change since the prior record (9e71f263 to c40ffc9a):**
-- The covered set (29 entries, PLAN and SUMMARY included) is the same list as before. The covered-set digest changed from `v3:sha256:641ff4b1…5097` to `v3:sha256:30aaf2b0…4b68`, recomputed at HEAD by `verification.fingerprint`. The digest moved because five covered files changed in wave 6, all outside phase 77's steering logic:
-  - `config.ts` (a4a9a8f0): one doc comment and the sync-lag objective name. The steering settings are unchanged.
-  - `flag-registry.ts` (a4a9a8f0, db4f98f6, 3c5dcfa0): a new `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` row, a comment, and the dispatcher roots text. The `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S` and `..._CAP` rows are unchanged.
-  - `service.ts` (75d2ce56 at :6392 and :6418, a4a9a8f0 at :2958): a steering-session docs_search row change, and a `recordSyncLag` call. Both lie outside the steering wiring block at `service.ts:1988-2017`, which is unchanged in content.
-  - `index-store.ts` (ebabe6ef): archive-only changes at :3043 and later (`PG_TYPE`, `advanceIdentity`, `jsonb` export). Migration 43 (`:912-937`, `version: 43` at `:913`, `down` at `:917`) and `steeringIdempotency()` (`:1034`) are unchanged.
-  - `index-store.migrate-contract.test.ts` (ebabe6ef): one line removed, the `corpus_documents` allowlist entry. The two phase 77 allowlist entries (`planning_steering_sequence`, `planning_steering_replay`, `:68-69`) are intact.
-- `index-store.migrations.digests.json` is unchanged. Digests 1 to 43 are as recorded.
-- No file under `packages/mcp-server/src/planning/` or `docs/live-steering.md` changed since 9e71f263. The steering line citations below hold at HEAD, except where a line is re-cited.
-- Planning docs: `ROADMAP.md` and `REQUIREMENTS.md` changed in wave 6 only for phases 63 and 68 (1e17db11, bdc1dc1a). The phase 77 Status text at ROADMAP `:1332` and the HARD-H1 row at REQUIREMENTS `:139` are unchanged.
-- Observed in this run: T5 to T7 and the Postgres file's four tests pass on scratch PostgreSQL 16.15 at HEAD c40ffc9a (see the PG counts below). Nothing moved from the prior record's status.
+**Change since the prior record (c40ffc9a to 835a2742):**
+- The covered set (31 entries, PLAN and SUMMARY included) is the same list as before. The covered-set digest changed from `v3:sha256:30aaf2b0…4b68` to `v3:sha256:076835c0…1032`, recomputed at HEAD by `verification.fingerprint`. `git diff c40ffc9a HEAD` shows three covered files changed in wave 7; each was checked against phase 77's criteria:
+  - `service.ts` (`:7475-7491`, `corpusFreshness`): the docs.freshness corpus route now also reads `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` and `this.corpusSlo.readings(now).syncLagS`. No steering code changed. The steering wiring block `:1988-2017` and the lines `:2958`, `:6392` and `:6418` are unchanged in content and line number.
+  - `flag-registry.ts`: the `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` allowed and unset text only. The `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S` and `..._CAP` rows are unchanged.
+  - `docs/config-reference.md`: the same `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S` row text. Documentation only.
+- Not covered, not phase 77 evidence: the wave-7 `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` and worktree-roots text in `.env.example`, and the phase 78 reconcile files (`reconcile-main.ts`, `reconcile-repair.ts` and their tests). None is in the covered set and no truth cites them.
+- No other covered file changed since c40ffc9a: `index-store.ts`, `index-store.migrate-contract.test.ts`, `index-store.migrations.digests.json`, `config.ts`, `mcp.ts`, `server.ts`, `docs/live-steering.md` and every file under `packages/mcp-server/src/planning/`. Migration 43 (`index-store.ts:912-937`) and `steeringIdempotency()` (`:1034`) are at the cited lines.
+- Planning docs: the `ROADMAP.md` and `REQUIREMENTS.md` changes since c40ffc9a touch other phases' lines only. The phase 77 Status text (ROADMAP `:1332`, Plans `:1342`) and the HARD-H1 rows (REQUIREMENTS `:124`, `:139`) are unchanged.
+- Re-observed at HEAD 835a2742: the two Postgres files (4 pass; 16 pass) on scratch PostgreSQL 16.15, and the nine-file non-PG targeted run (269 pass, 0 fail). Truths marked "observed at c40ffc9a" are carried forward: the code they cite is unchanged and the re-run counts match the prior record.
 
 ## Goal Achievement
 
@@ -157,9 +155,9 @@ Run from `packages/mcp-server`. Non-PG runs used `env -u SUBSTRATE_TEST_PG_URL T
 
 | Run | Command | Result | Status |
 | --- | ------- | ------ | ------ |
-| A (PG, per file) | `bun test src/planning/steering-idempotency.pg.test.ts` | 4 pass, 0 fail, 12 expect() calls, 303 ms, on scratch PostgreSQL 16.15, `substrate_test_v77` | ✓ PASS |
-| B (PG, per file) | `bun test src/live-session-restart.pg.test.ts` | 16 pass, 0 fail, 148 expect() calls, 2.99 s, on scratch PostgreSQL 16.15, `substrate_test_v77`. One stderr line from the live-session expiry path (`live session expiry pass failed ... ERR_POSTGRES_SERVER_ERROR`) is printed during a passing run; the same message format is asserted by `live-session-authority.test.ts:90`, so it is an expected-failure path, not a test failure. | ✓ PASS |
-| C (non-PG, targeted, one command) | `bun test` on `index-store.migrate-contract.test.ts`, `index-store.migrate-harness.test.ts`, `planning/steering.test.ts`, `planning/steering-durable.test.ts`, `planning/steering-tools.test.ts`, `planning/steering-rest.test.ts`, `planning/steering-waiters.test.ts`, `server.steering.test.ts`, `mcp.steering.test.ts` | 269 pass, 0 fail, 2245 expect() calls, 3.98 s across 9 files | ✓ PASS |
+| A (PG, per file) | `bun test src/planning/steering-idempotency.pg.test.ts` | 4 pass, 0 fail, 12 expect() calls, 661 ms, on scratch PostgreSQL 16.15, `substrate_test_v77`, re-run at 835a2742 | ✓ PASS |
+| B (PG, per file) | `bun test src/live-session-restart.pg.test.ts` | 16 pass, 0 fail, 148 expect() calls, 3.64 s, on scratch PostgreSQL 16.15, `substrate_test_v77`, re-run at 835a2742. One stderr line from the live-session expiry path (`live session expiry pass failed ... ERR_POSTGRES_SERVER_ERROR`) is printed during a passing run; the same message format is asserted by `live-session-authority.test.ts:90`, so it is an expected-failure path, not a test failure. | ✓ PASS |
+| C (non-PG, targeted, one command) | `bun test` on `index-store.migrate-contract.test.ts`, `index-store.migrate-harness.test.ts`, `planning/steering.test.ts`, `planning/steering-durable.test.ts`, `planning/steering-tools.test.ts`, `planning/steering-rest.test.ts`, `planning/steering-waiters.test.ts`, `server.steering.test.ts`, `mcp.steering.test.ts`, re-run at 835a2742 | 269 pass, 0 fail, 2245 expect() calls, 5.79 s across 9 files | ✓ PASS |
 
 Run C covers the non-PG covered test files for this phase. The migrate-harness file has no PG gate; its PG counterpart is `index-store.migrate.test.ts`, which is not in the covered set and was not run.
 
@@ -216,5 +214,5 @@ Post-verification: nothing was committed. The change set is limited to the VERIF
 
 ---
 
-_Verified: 2026-11-05T00:13:45Z_
+_Verified: 2026-11-05T01:26:07Z_
 _Verifier: Claude (gsd-verifier)_
