@@ -15,6 +15,7 @@
 import { createHash } from "node:crypto";
 import { decodeEmbeddingBytes, type ReadThroughCache } from "./cache.ts";
 import { MAX_TEXTS_PER_CALL, clampText, type TeiClient, type TeiEmbedOptions, type TeiEmbedResult } from "./planes/tei.ts";
+import { reportSilent } from "./silent-failures.ts";
 
 /** The cache surface the service uses; the production `ReadThroughCache` has it. */
 export type EmbeddingCacheStore = Pick<ReadThroughCache, "peekMany" | "putEntry">;
@@ -84,7 +85,10 @@ export function createEmbeddingService(deps: EmbeddingServiceDeps): EmbeddingSer
 					"emb",
 					unique.map((text) => embeddingDigest(knownModel, text)),
 				)
-				.catch((): Array<StoredVector | null> => []);
+				.catch((cause: unknown): Array<StoredVector | null> => {
+					reportSilent("embed.cache-peek", cause);
+					return [];
+				});
 			unique.forEach((text, index) => {
 				const entry = stored[index];
 				const vector = entry === null || entry === undefined ? null : decodeVector(entry, knownDim);

@@ -948,7 +948,10 @@ export class EventSpool {
 			let lines = 0;
 			for (let at = buffer.indexOf(0x0a); at !== -1; at = buffer.indexOf(0x0a, at + 1)) lines += 1;
 			return lines;
-		} catch {
+		} catch (cause) {
+			// A missing spool file holds no lines; any other read error also counts as none.
+			const code = (cause as NodeJS.ErrnoException | null)?.code;
+			if (code !== "ENOENT") process.stderr.write(`[collectors] event spool line count failed (${code ?? "EIO"})\n`);
 			return 0;
 		}
 	}

@@ -118,6 +118,7 @@ function proseFromLine(line: string): string | null {
 		if ((role === "user" || role === "human" || role === "system") && !LABELED_FACT.test(text)) return null;
 		return text;
 	} catch {
+		// Not a JSON message: the line is skipped, and extractDurableFacts counts it in dropped.
 		return null;
 	}
 }
@@ -1062,6 +1063,7 @@ function currentMilestone(deps: LessonsDeps): string | undefined {
 	try {
 		return milestoneFromState(readFileSync(join(deps.root, ".planning", "STATE.md"), "utf8"));
 	} catch {
+		// No readable STATE.md: no milestone comes from it.
 		return undefined;
 	}
 }

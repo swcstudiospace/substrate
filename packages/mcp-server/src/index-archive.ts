@@ -68,6 +68,7 @@ import {
 	type DfRunner,
 	type NoteOutcome,
 } from "./ledger-archive.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { redact } from "./redact.ts";
 import type { EventInput } from "./types.ts";
 
@@ -366,6 +367,7 @@ export function sweepStaleSnapshots(outDir: string, now: number, minAgeMs: numbe
 	try {
 		names = readdirSync(outDir);
 	} catch {
+		// An unreadable directory holds no stale snapshot this sweep can remove; the export into it reports its own failure.
 		return [];
 	}
 	const ours = new Set<string>([`${MANIFEST_FILE}.part`]);
@@ -915,6 +917,7 @@ export function normalizePgUrl(raw: string): PgTarget | null {
 	try {
 		url = new URL(raw);
 	} catch {
+		// Not a URL at all: not a plain postgres URL, so null, as the doc above states.
 		return null;
 	}
 	if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return null;
@@ -928,6 +931,7 @@ export function normalizePgUrl(raw: string): PgTarget | null {
 		if (!Number.isInteger(port) || port < 1 || port > 65535 || database === "") return null;
 		return { host, port, database };
 	} catch {
+		// A malformed percent-escape is not a plain postgres URL either: null, as the doc above states.
 		return null;
 	}
 }
@@ -1187,7 +1191,8 @@ export function readPendingIndexNote(dir: string, snapshot: string): PendingInde
 	try {
 		const parsed = PendingNoteSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
 		return parsed.success ? { ...parsed.data, note: parsed.data.note as unknown as EventInput } : null;
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("index-archive.pending-note", cause);
 		return null;
 	}
 }

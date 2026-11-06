@@ -74,6 +74,7 @@ export function sameContent(a: string, b: string): boolean {
 		if (left.size !== right.size || left.size > MAX_COMPARE_BYTES) return false;
 		return readFileSync(a).equals(readFileSync(b));
 	} catch {
+		// Any stat or read failure: not known to be identical, so false.
 		return false;
 	}
 }

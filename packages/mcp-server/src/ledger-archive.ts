@@ -45,6 +45,7 @@ import { redact } from "./redact.ts";
 import type { AnchorCoverage, ExportCursor, ExportPage, ExportWindowQuery } from "./greptime.ts";
 import { ARCHIVE_NOTE_PREFIX, INGEST_LAG_MS } from "./greptime.ts";
 import { rowToEvent } from "./service.ts";
+import { reportSilent } from "./silent-failures.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const DAY_MS = 24 * HOUR_MS;
@@ -96,6 +97,7 @@ export const dfRunner: DfRunner = (path) => {
 	try {
 		return execFileSync("df", ["-Pk", "--", path], { encoding: "utf8", timeout: 10_000 });
 	} catch {
+		// null is the documented unreadable answer: freeKbOf and the floor gate refuse on it (fail closed).
 		return null;
 	}
 };
@@ -246,6 +248,7 @@ export const devReader: DevReader = (path) => {
 	try {
 		return statSync(path).dev;
 	} catch {
+		// null is the documented unreadable answer: refusedMount refuses with the reason.
 		return null;
 	}
 };
@@ -299,6 +302,7 @@ export function releaseShaOf(cwd: string): string | undefined {
 	try {
 		real = realpathSync(cwd);
 	} catch {
+		// An unresolvable cwd is not a releases tree: undefined, as for a checkout (see above).
 		return undefined;
 	}
 	const match = /\/releases\/([0-9a-f]{7,40})$/.exec(real);
@@ -933,7 +937,8 @@ export function readPendingNote(dir: string, day: string): PendingNote | null {
 		const parsed = PendingNoteSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
 		// The marker was written from an `EventInput`; the schema checks the three fields every event has.
 		return parsed.success ? { ...parsed.data, note: parsed.data.note as unknown as EventInput } : null;
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("ledger-archive.pending-note", cause);
 		return null;
 	}
 }

@@ -95,6 +95,7 @@ function firstLine(path: string): string | null {
 		const line = readFileSync(path, "utf8").split("\n")[0]?.trim() ?? "";
 		return line === "" ? null : line;
 	} catch {
+		// A missing or unreadable file has no first line.
 		return null;
 	}
 }

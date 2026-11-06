@@ -260,6 +260,7 @@ export class HindsightInventory {
 			this.interval = null;
 		}
 		const flight = this.flight;
+		// The flight never rejects (refresh's catch answers the last report), so only the stop deadline can reject here, and that bounded wait is the design.
 		if (flight !== null) await withDeadline(flight, STOP_WAIT_MS, this.timers, "hindsight inventory stop").catch(() => undefined);
 	}
 

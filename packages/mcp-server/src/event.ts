@@ -74,6 +74,7 @@ export function parseStoredLine<T>(line: string, schema: z.ZodType<T>): T | null
 	try {
 		json = JSON.parse(line);
 	} catch {
+		// A line that is not JSON is counted as malformed by its caller (event-buffer.ts, event-dead-letter.ts), not reported here.
 		return null;
 	}
 	const parsed = schema.safeParse(json);

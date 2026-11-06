@@ -314,6 +314,7 @@ function isJsonText(text: string): boolean {
 		JSON.parse(text);
 		return true;
 	} catch {
+		// Text that does not parse is not JSON: the predicate answers false, which is its whole answer.
 		return false;
 	}
 }

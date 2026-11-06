@@ -56,6 +56,7 @@ import {
 import type { MetricsHistorySeriesMode, MetricsHistorySettings } from "./config.ts";
 import type { GreptimeClient, MetricHistoryPoint } from "./greptime.ts";
 import { TRANSITION_OUTCOMES } from "./planning/telemetry.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { SURFACES } from "./types.ts";
 
 /** The counter a dropped batch is counted on, by closed reason. */
@@ -215,6 +216,7 @@ export function readLabels(series: string, raw: unknown): Record<string, string>
 		const value = (parsed as Record<string, unknown>)[spec.label];
 		return typeof value === "string" && spec.values?.has(value) === true ? { [spec.label]: value } : {};
 	} catch {
+		// A row whose labels do not parse reads back as no labels, as the doc above states.
 		return {};
 	}
 }
@@ -621,6 +623,7 @@ export class MetricsHistorySampler {
 	flush(): Promise<void> {
 		if (!this.deps.settings.enabled) return Promise.resolve();
 		this.flushing ??= (async () => {
+			// run() catches its own failures, so this wait only orders the two samples; the fresh sample below is what flush records.
 			if (this.inFlight !== null) await this.inFlight.catch(() => undefined);
 			await this.sample();
 		})().finally(() => {
@@ -632,7 +635,7 @@ export class MetricsHistorySampler {
 	private async run(): Promise<void> {
 		let rows: MetricSampleRow[] = [];
 		try {
-			await this.deps.beforeSample?.().catch(() => undefined);
+			await this.deps.beforeSample?.().catch((cause: unknown) => reportSilent("metrics-history.before-sample", cause));
 			rows = this.collector.collect(this.deps.snapshot(), this.deps.runwayDays(), this.clock());
 			if (rows.length === 0) return;
 			const result = await this.deps.record(rows);

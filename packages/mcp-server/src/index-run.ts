@@ -113,6 +113,7 @@ if (command.command === "restore") {
 			code = 1;
 		}
 	}
+	// The restore has finished and its outcome is decided; a pool close at exit cannot change it.
 	await target.close({ timeout: 1 }).catch(() => undefined);
 	process.exit(code);
 }
@@ -181,6 +182,7 @@ try {
 		code = 1;
 	}
 }
+// The archive outcome is decided above; a pool close at exit cannot change it.
 await index.close({ timeout: 1 }).catch(() => undefined);
 // A note the ledger has not taken is reported above and left as a marker for the next run; the archive itself succeeded, so it does not fail the run.
 if (unrecorded.length > 0) process.stderr.write(`[index] ${unrecorded.length} archive note(s) still pending: ${unrecorded.join(", ")}\n`);

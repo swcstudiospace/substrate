@@ -13,6 +13,7 @@ export function parseFrontmatter(text: string): Record<string, unknown> | null {
 	try {
 		parsed = Bun.YAML.parse(match[1] ?? "");
 	} catch {
+		// YAML that does not parse is no frontmatter: the header says so, and the proposal is refused on null.
 		return null;
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;

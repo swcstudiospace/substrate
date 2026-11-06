@@ -96,6 +96,7 @@ export function parsePrList(text: string): PrInfo | null {
 	try {
 		parsed = JSON.parse(text);
 	} catch {
+		// Not JSON is not the gh list shape: null, as the doc above says.
 		return null;
 	}
 	if (!Array.isArray(parsed) || !parsed.every(isRawPr)) return null;

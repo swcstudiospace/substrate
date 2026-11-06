@@ -262,6 +262,7 @@ async function skippedOfCheckpoint(
 	try {
 		return await readPinnedSkipped({ worktree: params.worktree, ref: checkpoint.ref, now: params.now, run });
 	} catch {
+		// null: the pin cannot be read; the callers skip that checkpoint or count it as skipping nothing.
 		return null;
 	}
 }

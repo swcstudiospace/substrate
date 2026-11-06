@@ -8,6 +8,7 @@
 import { epochMsAnyUnit, MAX_QUERY_LIMIT, type GreptimeClient } from "./greptime.ts";
 import type { IndexStore, ReconcileNodeHold } from "./index-store.ts";
 import type { LeaseHold } from "./reconcile.ts";
+import { reportSilent } from "./silent-failures.ts";
 
 /** The ledger reads: `queryEvents` only, so a fake needs one method. */
 export type LedgerReader = Pick<GreptimeClient, "queryEvents">;
@@ -73,7 +74,8 @@ function payloadOf(row: Row): Record<string, unknown> | null {
 	if (typeof raw === "string") {
 		try {
 			raw = JSON.parse(raw);
-		} catch {
+		} catch (cause: unknown) {
+			reportSilent("reconcile-read.payload", cause);
 			return null;
 		}
 	}

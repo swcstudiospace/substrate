@@ -123,6 +123,7 @@ export class DurableCompletionStore implements CompletionStore {
 			}
 			await rename(temp, target);
 		} catch {
+			// A stray temporary file is inert, and the write-failed error below is the one reported.
 			await rm(temp, { force: true }).catch(() => undefined);
 			throw new CheckpointStoreError("write-failed", null);
 		}

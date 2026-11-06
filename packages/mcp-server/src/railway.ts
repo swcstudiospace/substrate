@@ -848,6 +848,7 @@ function parseJson(text: string): unknown {
 		const value: unknown = JSON.parse(text);
 		return value;
 	} catch {
+		// Unparseable JSON is undefined; dataOf then refuses the reply as a shape error.
 		return undefined;
 	}
 }

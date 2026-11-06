@@ -281,6 +281,7 @@ export function substrateProxyLoopback(url: string = SUBSTRATE_MCP_URL): boolean
 	try {
 		host = new URL(url).hostname.toLowerCase();
 	} catch {
+		// An unparseable URL is not a loopback host.
 		return false;
 	}
 	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);

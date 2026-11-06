@@ -450,6 +450,7 @@ function filesFromText(value: unknown): string[] | null {
 		const parsed: unknown = JSON.parse(value);
 		return Array.isArray(parsed) ? normalizeWorktreeFiles(parsed) : null;
 	} catch {
+		// Text that does not parse holds no array: null, the same answer as a column that is not one, as the doc above says.
 		return null;
 	}
 }

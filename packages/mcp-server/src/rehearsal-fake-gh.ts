@@ -196,6 +196,7 @@ export function lockIsStale(lock: string): boolean {
 	try {
 		age = Date.now() - statSync(lock).mtimeMs;
 	} catch {
+		// A lock that cannot be stat'ed is treated as fresh, so it is never reclaimed.
 		return false;
 	}
 	return age > OWNERLESS_LOCK_GRACE_MS;
@@ -212,6 +213,7 @@ function takeStaleLock(lock: string): boolean {
 	try {
 		renameSync(lock, stale);
 	} catch {
+		// The rename failed: the lock was released or moved by another process, so nothing is taken here.
 		return false;
 	}
 	if (!lockIsStale(stale)) {

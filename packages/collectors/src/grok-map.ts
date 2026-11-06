@@ -63,6 +63,7 @@ export function decodeSessionCwd(dirName: string): string | null {
 		const decoded = decodeURIComponent(dirName);
 		return decoded.startsWith("/") ? decoded.replace(/\/+$/, "") || "/" : null;
 	} catch {
+		// Not percent-encoded: not a session directory name, so there is no cwd.
 		return null;
 	}
 }

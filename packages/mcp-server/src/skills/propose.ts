@@ -28,6 +28,7 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { redact, redactSkillContent, type SkillDocExampleRule, type SkillFileHit, scanSkillFiles } from "../redact.ts";
 import { SURFACES, type Surface } from "../types.ts";
+import { reportSilent } from "../silent-failures.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 
 /** September's library: the production default. Config overrides it (D21-13). */
@@ -474,7 +475,8 @@ export function mirrorOriginUrl(mirror: string): string | null {
 	let config: string;
 	try {
 		config = readFileSync(join(mirror, "config"), "utf8");
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("skills.mirror-origin", cause);
 		return null;
 	}
 	let inOrigin = false;
@@ -656,6 +658,7 @@ async function takeStaleLock(path: string, waitMs: number): Promise<boolean> {
 	try {
 		renameSync(path, stale);
 	} catch {
+		// The rename failed because the lock was released or moved by another process; nothing is taken here.
 		return false;
 	}
 	if (!lockIsStale(stale, waitMs)) {

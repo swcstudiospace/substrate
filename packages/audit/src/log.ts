@@ -574,6 +574,7 @@ export class AuditLog {
 			const parsed: unknown = JSON.parse(newline < 0 ? text : text.slice(0, newline));
 			return isAuditRecord(parsed) ? parsed : null;
 		} catch {
+			// A torn or corrupt head line has no readable seq; open() falls back to the newest closed segment.
 			return null;
 		}
 	}

@@ -526,6 +526,7 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				try {
 					await container.start();
 				} catch (error) {
+					// A failed removal must not mask the start error, which is rethrown below.
 					await container.remove({ force: true }).catch(() => undefined);
 					throw error;
 				}
@@ -569,11 +570,15 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 							// Rollback is best-effort; the refusal below is what fails the start.
 						}
 					}
+					// A failed disconnect is not kept: the forced removal below takes the container off every network.
 					await docker()
 						.getNetwork(EGRESS_NETWORK)
 						.disconnect({ Container: container.id })
 						.catch(() => undefined);
-					await container.remove({ force: true }).catch(() => undefined);
+					await container.remove({ force: true }).catch((error: unknown) => {
+						const status = (error as { statusCode?: unknown } | null)?.statusCode;
+						process.stderr.write(`[substrate-host] refused sandbox not removed (status ${String(status ?? "none")})\n`);
+					});
 					refuse(String(cause));
 				}
 			}
@@ -604,6 +609,7 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				throw error;
 			}
 			const container = docker().getContainer(sandboxId);
+			// A failed stop is not kept: the forced removal below stops the container too.
 			await container.stop({ t: 5 }).catch(() => undefined);
 			await container.remove({ force: true }).catch((error: unknown) => {
 				// 404: already gone; 409: AutoRemove started removing it when stop() returned.

@@ -434,6 +434,7 @@ export function decodeSections(raw: unknown): BriefSection[] | null {
 		const parsed = EncodedSchema.safeParse(JSON.parse(raw));
 		return parsed.success ? (parsed.data.sections as BriefSection[]) : null;
 	} catch {
+		// A value that is not an encoded profile is a miss by contract (see above), not a fault.
 		return null;
 	}
 }

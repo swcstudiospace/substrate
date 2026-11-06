@@ -131,5 +131,6 @@ if (report) {
 	});
 }
 
+// The sweep report is decided above; a pool close at exit cannot change it.
 await index.close().catch(() => undefined);
 process.exit(report ? 0 : 1);

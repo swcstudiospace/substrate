@@ -47,6 +47,7 @@ import { DocsLagTimer } from "./docs-lag-timer.ts";
 import { createWatchdog, livezUrlFor } from "./watchdog.ts";
 import { MentalModelRefresh } from "./mental-model-refresh.ts";
 import { hindsightFromEnv, hindsightOp } from "./planes/hindsight.ts";
+import { reportSilent } from "./silent-failures.ts";
 
 let config: SubstrateConfig;
 try {
@@ -269,7 +270,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// what lets the next epoch pick the series up where this one left them.
 			await Promise.race([
 				Promise.all([
-					observability.exporter?.flush().catch(() => undefined) ?? Promise.resolve(),
+					observability.exporter?.flush().catch((cause: unknown) => reportSilent("shutdown.exporter-flush", cause)) ?? Promise.resolve(),
 					observability.flush(),
 					metricsHistory.flush(),
 					docsLagTimer.flush(),

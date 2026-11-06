@@ -717,6 +717,7 @@ export class Gauge {
 			const observed = this.observe();
 			return observed !== null && Number.isFinite(observed) ? observed : null;
 		} catch {
+			// A throwing observer reads as null: no point, as the doc above says.
 			return null;
 		}
 	}

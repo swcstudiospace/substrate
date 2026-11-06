@@ -186,6 +186,7 @@ function instructionMemo(ix: ParsedInstruction): string | null {
 	try {
 		return new TextDecoder().decode(bs58decode(ix.data));
 	} catch {
+		// Not base58 or not UTF-8: no memo.
 		return null;
 	}
 }

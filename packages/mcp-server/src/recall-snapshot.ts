@@ -732,6 +732,7 @@ export class RecallPrefetcher {
 		}
 		this.pendingSurfaces.clear();
 		const flight = this.running;
+		// The flight catches its own failures (exclusive), so only the stop deadline can reject here, and that bounded wait is the design.
 		if (flight !== null) await withDeadline(flight, STOP_WAIT_MS, this.timers, "recall prefetch stop").catch(() => undefined);
 	}
 
@@ -795,6 +796,7 @@ export class RecallPrefetcher {
 				if (this.now() - startedAt >= this.deps.config.intervalS * 1000 * TICK_TIME_SHARE) break;
 				const bank = this.deps.bankFor(pair.surface);
 				if (bank !== null && !this.deps.breakerOpen()) {
+					// A failed peek counts as a miss: the pair is refetched below.
 					const held = await this.deps.peek(pair.surface, pair.repo, bank).catch(() => null);
 					if (held !== null) {
 						const age = now - Date.parse(held.at);

@@ -257,6 +257,7 @@ function readWarned(file: string): Record<string, string> {
 		const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
 	} catch {
+		// An unreadable or unparseable warned-state file reads as empty: warnings may be sent again.
 		return {};
 	}
 }
@@ -423,7 +424,9 @@ export async function postWarning(event: WarningEvent, env: NodeJS.ProcessEnv = 
 			signal: AbortSignal.timeout(3000),
 		});
 		return response.ok;
-	} catch {
+	} catch (cause) {
+		const code = (cause as { code?: unknown } | null)?.code;
+		process.stderr.write(`[projector] warning post failed (${String(code ?? "none")})\n`);
 		return false;
 	}
 }

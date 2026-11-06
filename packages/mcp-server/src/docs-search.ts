@@ -51,6 +51,7 @@ import {
 	type RetrievalKnobs,
 	type RetrievalOutcome,
 } from "./planes/ragflow.ts";
+import { reportSilent } from "./silent-failures.ts";
 /**
  * LightRAG cutover, import-ready: the LightRAG retriever resolves to a
  * `LightragQueryOutcome` (the `RagflowChunk` list plus the graph detail), so the
@@ -1026,7 +1027,8 @@ async function hindsightRecall(deps: SearchDeps, question: string): Promise<read
 	if (deps.lightragHindsight === undefined) return [];
 	try {
 		return await deps.lightragHindsight(question);
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("docs-search.hindsight-recall", cause);
 		return [];
 	}
 }
@@ -1059,7 +1061,7 @@ async function lightragFallback(
 			...(degradedDatasets !== undefined ? { degraded_datasets: degradedDatasets } : {}),
 			fallback: "hindsight",
 		},
-	}).catch(() => undefined);
+	}).catch((cause: unknown) => reportSilent("docs-search.emit-fallback", cause));
 	return reply;
 }
 

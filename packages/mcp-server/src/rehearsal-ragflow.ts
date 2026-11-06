@@ -277,6 +277,7 @@ export async function checkFixtureReady(endpoint: string, timeoutMs: number): Pr
 		const body = (await res.json()) as unknown;
 		return body !== null && typeof body === "object" && (body as Record<string, unknown>)["ok"] === true;
 	} catch {
+		// Any error, a transport failure included, is not ready: the doc above says so and the harness polls again.
 		return false;
 	}
 }

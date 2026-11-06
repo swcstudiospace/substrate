@@ -2782,6 +2782,7 @@ export class IndexStore implements MemoryStore {
 			await this.plane("ping", () => withTimeout(this.sql`select 1`.then(() => undefined), timeoutMs, "index ping"));
 			return true;
 		} catch {
+			// Any failure, a timeout included, is false: the cause is not kept here, and /healthz reports the boolean.
 			return false;
 		}
 	}

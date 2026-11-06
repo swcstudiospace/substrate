@@ -46,6 +46,7 @@ import {
 	reverifyAfter,
 	type MemoryGrant,
 } from "./memory-policy.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { redact } from "./redact.ts";
 import {
 	MEMORY_TTLS,
@@ -795,7 +796,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		if (reviewed && scope.class === "global") {
 			await releaseCompatibleReviews(store, entryHash, priorEntry, orphan.id, writer);
 		}
-		await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
+		await store.finishWrite(key, holder, "accepted", orphan.id).catch((cause: unknown) => reportSilent("memory-write.finish-orphan", cause));
 		return {
 			outcome: "accepted",
 			reason: "recovered.orphan",
@@ -853,7 +854,10 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		// nothing for this.
 		const sourceEventVerified =
 			request.trust === "verified-by-test" && !reviewed && sourceEvent
-				? await (deps.verifySourceEvent?.(sourceEvent) ?? Promise.resolve(false)).catch(() => false)
+				? await (deps.verifySourceEvent?.(sourceEvent) ?? Promise.resolve(false)).catch((cause: unknown) => {
+					reportSilent("memory-write.verify-source", cause);
+					return false;
+				})
 				: false;
 		const trust = resolveTrust({ ...(request.trust === undefined ? {} : { requested: request.trust }), reviewed, sourceEventVerified });
 		const actor = resolveActor(request.actor, reviewed);

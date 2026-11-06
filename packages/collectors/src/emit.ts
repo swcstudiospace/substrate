@@ -223,6 +223,7 @@ async function serverError(response: Response): Promise<string | undefined> {
 		const body = (await response.json()) as { error?: unknown };
 		return typeof body.error === "string" ? body.error : undefined;
 	} catch {
+		// Not JSON: no server message; the caller reports the HTTP status.
 		return undefined;
 	}
 }
@@ -787,6 +788,7 @@ export function countSpoolDrops(dir: string = stateDir()): Record<string, number
 		try {
 			text = readFileSync(join(dir, name), "utf8");
 		} catch {
+			// A missing journal is the normal state before any drop; any other read error also counts as nothing.
 			continue;
 		}
 		for (const line of text.split("\n")) {

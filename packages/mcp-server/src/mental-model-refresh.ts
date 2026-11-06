@@ -17,6 +17,7 @@
 import type { MentalModelRef } from "./config.ts";
 import type { TimerApi } from "./metrics-history.ts";
 import { send, type FetchLike, type HindsightConfig } from "./planes/hindsight.ts";
+import { reportSilent } from "./silent-failures.ts";
 import type { EventInput } from "./types.ts";
 
 /** Seven days, no jitter: the job's one cadence. */
@@ -119,7 +120,8 @@ export class MentalModelRefresh {
 	private plane(): HindsightConfig | null {
 		try {
 			return this.deps.hindsight();
-		} catch {
+		} catch (cause: unknown) {
+			reportSilent("mental-model.plane", cause);
 			return null;
 		}
 	}

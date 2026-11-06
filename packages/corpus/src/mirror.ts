@@ -184,6 +184,7 @@ function portlessIdentity(origin: string): string | null {
 	try {
 		url = new URL(strippedOrigin(origin));
 	} catch {
+		// An unparseable origin has no explicit port, so no portless identity.
 		return null;
 	}
 	if (url.hostname === "" || url.port === "") return null;

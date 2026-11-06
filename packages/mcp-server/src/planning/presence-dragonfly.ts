@@ -190,6 +190,7 @@ function heldChangeTime(value: string | null): number | null {
 	try {
 		json = JSON.parse(value);
 	} catch {
+		// Unparseable text is not a session record, so there is no change time, as the doc above states.
 		return null;
 	}
 	const parsed = SessionRecordSchema.safeParse(json);

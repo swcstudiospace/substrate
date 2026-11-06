@@ -16,6 +16,7 @@ export async function repoSlugOfWorktree(worktree: string, run: Runner): Promise
 		if (result.code !== 0) return undefined;
 		return repoSlugFromRemote(result.stdout.toString("utf8"));
 	} catch {
+		// git could not run or there is no origin remote: the slug is unknown.
 		return undefined;
 	}
 }

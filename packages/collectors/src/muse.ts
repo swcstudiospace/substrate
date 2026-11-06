@@ -177,6 +177,7 @@ export async function ledgerAvailable(): Promise<boolean> {
 		const body = (await response.json()) as { greptime?: unknown };
 		return body.greptime === true;
 	} catch {
+		// A failed probe is an unavailable ledger; the error itself is not kept.
 		return false;
 	}
 }

@@ -1995,6 +1995,7 @@ export class GreptimeClient {
 			await this.sql("SELECT 1", timeoutMs, "ping");
 			return true;
 		} catch {
+			// Any failure, a timeout included, is false: /healthz reports the boolean, and the cause is not kept.
 			return false;
 		}
 	}
@@ -2232,6 +2233,7 @@ export class GreptimeClient {
 	 */
 	async exportWindow(query: ExportWindowQuery): Promise<ExportPage> {
 		const { fromMs, toMs } = assertIsoWindow(query.from, query.to);
+		// A failed probe leaves the safe default in place, as probeDialect states; the read goes on without it.
 		await this.probeDialect().catch(() => undefined);
 		const at = (ms: number): string => this.q(new Date(ms).toISOString());
 		const limit = queryLimit(query.limit);

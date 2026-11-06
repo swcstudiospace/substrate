@@ -115,6 +115,7 @@ function readJson(path: string): unknown {
 	try {
 		return JSON.parse(readFileSync(path, "utf8")) as unknown;
 	} catch {
+		// An unreadable or unparseable file is no state: its counters read as zero.
 		return undefined;
 	}
 }
@@ -123,6 +124,7 @@ function readLines(path: string): string[] {
 	try {
 		return readFileSync(path, "utf8").split("\n");
 	} catch {
+		// A missing or unreadable refused journal has no lines.
 		return [];
 	}
 }

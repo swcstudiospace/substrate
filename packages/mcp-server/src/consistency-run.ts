@@ -73,6 +73,7 @@ import {
 	type FetchLike,
 	type HindsightConfig,
 } from "./planes/hindsight.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { SURFACES, type MemoryEntry } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -493,7 +494,7 @@ export async function runConsistency(argv: readonly string[], deps: RunnerDeps):
 		}
 		return { code: exitCodeOf(report), stdout, stderr: repairNote !== null && args.json ? `${repairNote}\n` : "" };
 	} finally {
-		await context.close().catch(() => undefined);
+		await context.close().catch((cause: unknown) => reportSilent("consistency.close", cause));
 	}
 }
 
@@ -572,7 +573,8 @@ function writeEventOf(row: Record<string, unknown>): LedgerWriteEvent | null {
 	let payload: unknown;
 	try {
 		payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("consistency.payload", cause);
 		return null;
 	}
 	if (payload === null || typeof payload !== "object") return null;

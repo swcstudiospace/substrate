@@ -23,6 +23,7 @@
  */
 import { CORPUS_NAME_PREFIX, CORPUS_PROTOCOL, RECONCILE_MAX_ITEMS, corpusDocumentName, type CorpusReconcileResponse } from "@substrate/corpus";
 import type { LightragBulkPlane, PlaneListedDocument } from "../planes/lightrag-bulk.ts";
+import { reportSilent } from "../silent-failures.ts";
 import { withCorpusLock } from "./ingest.ts";
 import type { CorpusStore, ManifestRow } from "./store.ts";
 
@@ -117,7 +118,8 @@ async function deleteOrphans(deps: ReconcileDeps, orphans: readonly PlaneListedD
 		if (!orphan.name.startsWith(CORPUS_NAME_PREFIX)) continue;
 		try {
 			if ((await deps.store.activeReferences(orphan.id)) > 0) continue;
-		} catch {
+		} catch (cause: unknown) {
+			reportSilent("reconcile.reference-check", cause);
 			continue;
 		}
 		ids.push(orphan.id);

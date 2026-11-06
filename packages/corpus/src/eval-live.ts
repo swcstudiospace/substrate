@@ -69,6 +69,7 @@ export function documentKeyOfUrl(url: string): string | null {
 				.map((segment) => decodeURIComponent(segment))
 				.join("/");
 		} catch {
+			// A malformed percent-escape names no document: null.
 			return null;
 		}
 	};

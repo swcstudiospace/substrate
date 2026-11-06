@@ -188,6 +188,7 @@ function ownerAlive(path: string): boolean {
 	try {
 		owner = Number(readFileSync(path, "utf8"));
 	} catch {
+		// An unreadable owner file means no live owner; the caller reclaims the lock.
 		return false;
 	}
 	if (!Number.isInteger(owner) || owner <= 0) return false;

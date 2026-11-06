@@ -96,6 +96,7 @@ export function parseStopInput(raw: string): StopInput | null {
 		const value: unknown = JSON.parse(raw.replace(/^\ufeff/, ""));
 		return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as StopInput) : null;
 	} catch {
+		// Not JSON: null, which runStop records as a malformed envelope.
 		return null;
 	}
 }
@@ -302,7 +303,9 @@ async function readStdin(timeoutMs: number): Promise<string> {
 	const timer = setTimeout(() => resolveTimeout(""), timeoutMs);
 	try {
 		return await Promise.race([Bun.stdin.text(), timeout]);
-	} catch {
+	} catch (cause) {
+		const code = (cause as { code?: unknown } | null)?.code;
+		process.stderr.write(`[substrate] cursor-stop stdin read failed (${String(code ?? "none")})\n`);
 		return "";
 	} finally {
 		clearTimeout(timer);

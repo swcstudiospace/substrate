@@ -101,6 +101,7 @@ function hasGitEntry(dir: string): boolean {
 		lstatSync(join(dir, ".git"));
 		return true;
 	} catch {
+		// Missing or uninspectable: no .git entry to refuse a placement on, the answer a plain directory gets.
 		return false;
 	}
 }
@@ -229,6 +230,7 @@ export function realDirectoryOrNull(dir: string): string | null {
 	try {
 		return realpathSync(dir);
 	} catch {
+		// A directory that is absent or unresolvable has no real location; callers treat it as unregistered.
 		return null;
 	}
 }

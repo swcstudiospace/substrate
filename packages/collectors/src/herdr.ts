@@ -220,7 +220,7 @@ export class HerdrCollector {
 		this.drainTimer = setInterval(() => {
 			if (this.stopped || this.draining) return;
 			this.draining = drain()
-				.catch(() => undefined)
+				.catch((cause: unknown) => this.journal(`spool drain failed (${String((cause as { code?: unknown } | null)?.code ?? "none")})`))
 				.finally(() => {
 					this.draining = null;
 				});
@@ -341,6 +341,7 @@ export class HerdrCollector {
 			try {
 				msg = JSON.parse(line) as RpcMessage;
 			} catch {
+				this.journal(`malformed ${method} reply dropped`);
 				return;
 			}
 			if (msg.id !== id) return;
@@ -411,6 +412,7 @@ export class HerdrCollector {
 			try {
 				msg = JSON.parse(line) as RpcMessage;
 			} catch {
+				this.journal("malformed subscription reply dropped");
 				return;
 			}
 			if (msg.error) {
