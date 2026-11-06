@@ -964,7 +964,23 @@ async function readPointerChecks(args: {
 			readout.unreadable ??= `pointer ${signature} could not be confirmed on devnet`;
 			continue;
 		}
-		const judged = await judgePointer(answer.value, args.graphId, args.pubkey, args.signers, args.now);
+		// The whole judgement (candidacy, memo, signer) runs under the budget that is left, like the reads that feed it.
+		const judgeLeft = args.allowanceMs();
+		if (judgeLeft <= 0) {
+			readout.unreadable ??= "budget exhausted";
+			break;
+		}
+		const confirmed = answer.value;
+		const judgedWithin = await outcomeWithin(() => judgePointer(confirmed, args.graphId, args.pubkey, args.signers, args.now), judgeLeft);
+		if (judgedWithin.kind === "timeout") {
+			readout.unreadable ??= "budget exhausted";
+			break;
+		}
+		if (judgedWithin.kind === "failed") {
+			readout.unreadable ??= `pointer ${signature} could not be judged`;
+			continue;
+		}
+		const judged = judgedWithin.value;
 		if (judged.kind === "verified") verified.push(judged.pointer);
 		else if (judged.kind === "failed") readout.failures.push({ signature, periodStartMs: judged.periodStartMs, reason: judged.reason });
 		else if (judged.kind === "unverified") readout.unreadable ??= `pointer ${signature}: ${judged.reason}`;
