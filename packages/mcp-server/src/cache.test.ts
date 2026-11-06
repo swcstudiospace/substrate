@@ -1279,6 +1279,43 @@ describe("Bun RedisClient", () => {
 		expect(gated.cooldownUntil?.()).toBeNull();
 	});
 
+	test("during the connect cooldown a fail-closed read is refused without a connect attempt", async () => {
+		// Each accepted socket is one connect attempt, and each is dropped, so the connect fails and starts the cooldown.
+		let now = 2_000_000;
+		let connects = 0;
+		const server = net.createServer((socket) => {
+			connects += 1;
+			socket.destroy();
+		});
+		const listening = Promise.withResolvers<void>();
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const port = (server.address() as AddressInfo).port;
+		try {
+			const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: `redis://127.0.0.1:${port}` }), { record: () => {}, now: () => now });
+			// The admission bucket step a fail-closed class reads: a refusal carries `breakerRetryAfterMs`; a fail-open class reads any other failure as a bypass.
+			const bucket = ["substrate:v1:budget:cursor:read"];
+			const args = ["1", "1", "0", "1"];
+			// The connect that starts the cooldown is an ordinary failure, not a refusal.
+			const first = await cache.script("return 1", bucket, args);
+			expect(first.ok).toBe(false);
+			expect(first).not.toHaveProperty("breakerRetryAfterMs");
+			const attempts = connects;
+			expect(attempts).toBeGreaterThan(0);
+			expect(cache.health().cooldownUntil).toBe(now + CACHE_CONNECT_COOLDOWN_MS);
+			// Inside the cooldown the read is refused with the remaining wait, and no socket is opened.
+			now += 1_000;
+			expect(await cache.script("return 1", bucket, args)).toEqual({ ok: false, reason: expect.stringContaining("cooling down for 4 s"), breakerRetryAfterMs: 4_000 });
+			expect(connects).toBe(attempts);
+			// Once the cooldown has lapsed the next command connects again.
+			now += 4_000;
+			expect((await cache.script("return 1", bucket, args)).ok).toBe(false);
+			expect(connects).toBeGreaterThan(attempts);
+		} finally {
+			server.close();
+		}
+	});
+
 	test("a connected server that stops replying is a gate timeout, and the connection is dropped", async () => {
 		// Greptile round 1: the command deadline used to sit outside `callPlane`, so a
 		// wedged server left the command pending — the breaker saw nothing and the

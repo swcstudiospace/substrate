@@ -12,7 +12,7 @@
  * 250 ms each for the loopback redis production runs), no offline queue and no
  * reconnect retries, so one request never waits on a second attempt. A failed
  * connect also starts a `CACHE_CONNECT_COOLDOWN_MS` cooldown during which every
- * command is refused before any socket is touched. Each command goes through the
+ * command is refused before any socket is touched (`script` reports that refusal as `breakerRetryAfterMs`). Each command goes through the
  * cache's plane gate (uplift-2 R2) *together with the connect it needed*, so the
  * breaker sees exactly one outcome per request and a dead Dragonfly costs one
  * timeout, not one per request.
@@ -162,7 +162,7 @@ export interface CacheSample {
 	cacheClass?: CacheKeyClass;
 }
 
-/** What `ReadThroughCache.script` answers. `ok: false` is a bounded, redacted reason the caller treats as cache-off; `breakerRetryAfterMs` is set only when the plane's breaker refused the command, so nothing was sent: the wait until its next probe. */
+/** What `ReadThroughCache.script` answers. `ok: false` is a bounded, redacted reason the caller treats as cache-off; `breakerRetryAfterMs` is set only when the command was refused before it was sent: the plane breaker's wait, or the connect cooldown's remaining time. */
 export type ScriptOutcome = { ok: true; value: unknown } | { ok: false; reason: string; breakerRetryAfterMs?: number };
 
 /** The commands the cache uses. Tests pass a fake; production uses Bun. */
@@ -338,6 +338,17 @@ function deadline<T>(run: Promise<T>, ms: number, what: string): Promise<T> {
 	return promise;
 }
 
+/** A command refused while the connect cooldown is active: nothing was sent, and `retryAfterMs` is the wait until the next connect. */
+class CacheCooldownError extends Error {
+	readonly retryAfterMs: number;
+
+	constructor(retryAfterMs: number) {
+		super(`cache connect cooling down for ${Math.ceil(retryAfterMs / 1000)} s`);
+		this.name = "CacheCooldownError";
+		this.retryAfterMs = retryAfterMs;
+	}
+}
+
 /** Bun's client behind the three commands; exported for the socket-level tests only. */
 export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis {
 	const gate = options.gate ?? null;
@@ -407,7 +418,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval" | "scan" | "unlink", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
 		if (cooldownUntil !== null && now() < cooldownUntil) {
-			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
+			return Promise.reject(new CacheCooldownError(cooldownUntil - now()));
 		}
 		return callPlane(gate, op, async () => {
 			const redis = await open();
@@ -1046,7 +1057,7 @@ export class ReadThroughCache {
 	 * a bypass, so the reason is bounded and redacted and never the answer.
 	 * A failure degrades the cache like any other failed command; not a counted
 	 * bypass, because no read was served from the source in its place.
-	 * A breaker refusal also carries `breakerRetryAfterMs`: no command was sent.
+	 * A refusal before the command was sent (the breaker open, or the connect cooldown) also carries `breakerRetryAfterMs`.
 	 */
 	async script(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
 		if (!this.enabled || !this.redis) return { ok: false, reason: "cache off" };
@@ -1060,7 +1071,8 @@ export class ReadThroughCache {
 		} catch (cause) {
 			this.fail(cause, false, "budget");
 			const reason = redact(stripRedisUrl(cause instanceof Error ? cause.message : String(cause)));
-			return cause instanceof BreakerOpenError ? { ok: false, reason, breakerRetryAfterMs: cause.retryAfterMs } : { ok: false, reason };
+			const waitMs = cause instanceof BreakerOpenError || cause instanceof CacheCooldownError ? cause.retryAfterMs : undefined;
+			return waitMs === undefined ? { ok: false, reason } : { ok: false, reason, breakerRetryAfterMs: waitMs };
 		}
 	}
 
