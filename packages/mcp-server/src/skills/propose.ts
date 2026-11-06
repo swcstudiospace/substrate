@@ -28,7 +28,6 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { redact, redactSkillContent, type SkillDocExampleRule, type SkillFileHit, scanSkillFiles } from "../redact.ts";
 import { SURFACES, type Surface } from "../types.ts";
-import { reportSilent } from "../silent-failures.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 
 /** September's library: the production default. Config overrides it (D21-13). */
@@ -466,18 +465,21 @@ export function originMatches(url: string, slug: string): boolean {
 }
 
 /**
- * The `url` of the mirror's `origin` remote, read from its git config — null when the
- * mirror has no origin or its config cannot be read. The mirror is bootstrapped once by
- * the operator (`git clone --bare`), so a missing origin means hand-built state, not a
- * second library: only a present-but-foreign URL refuses the proposal.
+ * The `url` of the mirror's `origin` remote, read from its git config: null when the config is
+ * readable and names no origin. The mirror is bootstrapped once by the operator (`git clone
+ * --bare`), so a missing origin means hand-built state, not a second library: only a
+ * present-but-foreign URL refuses the proposal. A config that cannot be read refuses too,
+ * because without it the origin cannot be checked and the mirror could belong to another library.
  */
 export function mirrorOriginUrl(mirror: string): string | null {
 	let config: string;
 	try {
 		config = readFileSync(join(mirror, "config"), "utf8");
 	} catch (cause: unknown) {
-		reportSilent("skills.mirror-origin", cause);
-		return null;
+		const code = typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string" ? cause.code : "unknown";
+		throw new ProposeFailed(
+			`mirror ${mirror} config cannot be read (${code}); its origin cannot be checked, so the proposal is refused`,
+		);
 	}
 	let inOrigin = false;
 	for (const line of config.split("\n")) {

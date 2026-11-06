@@ -79,6 +79,7 @@ beforeEach(() => {
 	state = mkdtempSync(join(tmpdir(), "propose-test-"));
 	mkdirSync(join(state, "mirror.git"), { recursive: true });
 	writeFileSync(join(state, "mirror.git", "HEAD"), "ref: refs/heads/main\n");
+	writeFileSync(join(state, "mirror.git", "config"), "[core]\n\trepositoryformatversion = 0\n");
 });
 afterEach(() => {
 	rmSync(state, { recursive: true, force: true });
@@ -1106,10 +1107,13 @@ describe("mirror origin", () => {
 		expect(mirrorOriginUrl(join(state, "mirror.git"))).toBe("https://github.com/swcstudiospace/agent-skills.git");
 	});
 
-	test("mirrorOriginUrl is null without a config or an origin", () => {
+	test("mirrorOriginUrl is null for a readable config that names no origin", () => {
 		expect(mirrorOriginUrl(join(state, "mirror.git"))).toBeNull();
-		writeFileSync(join(state, "mirror.git", "config"), '[core]\n\trepositoryformatversion = 0\n');
-		expect(mirrorOriginUrl(join(state, "mirror.git"))).toBeNull();
+	});
+
+	test("mirrorOriginUrl throws when the config cannot be read, so the origin cannot be checked", () => {
+		rmSync(join(state, "mirror.git", "config"));
+		expect(() => mirrorOriginUrl(join(state, "mirror.git"))).toThrow("cannot be read");
 	});
 
 	test("a mirror naming the configured library proceeds", async () => {
@@ -1125,6 +1129,16 @@ describe("mirror origin", () => {
 		expect(error).toBeInstanceOf(ProposeFailed);
 		expect((error as Error).message).toContain("points at");
 		expect((error as Error).message).toContain(LIBRARY_REPO);
+		expect(f.calls).toEqual([]);
+		expect(ledgerLines()).toEqual([]);
+	});
+
+	test("a mirror whose config cannot be read is refused before any Runner call", async () => {
+		rmSync(join(state, "mirror.git", "config"));
+		const f = fake();
+		const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toContain("cannot be read");
 		expect(f.calls).toEqual([]);
 		expect(ledgerLines()).toEqual([]);
 	});
