@@ -46,7 +46,8 @@ covered_files:
   - "packages/mcp-server/src/service.ts"
   - "packages/mcp-server/src/silent-failures.ts"
   - "scripts/code-ratchet.test.ts"
-covered_digest: "v3:sha256:ba7ce0ebae1fd4f7856265eb329437b44303b16c028895a57cbe7fedaffbad24"
+covered_digest: "v3:sha256:8e55d02e9ed20e21e9f0b3ba6d5a571f899d299012d1713bce59a5013df5d359"
+head_refresh: "c37d194a: text-only changes in covered files (packages/cli/src/index.ts emit stderr wording; packages/mcp-server/src/reconcile-run.ts comment; packages/mcp-server/src/flag-registry.ts readBy; docs/config-reference.md regenerated from the registry). covered_digest refreshed from verification.fingerprint; verdict, title list and behaviour unchanged; gate r45 on c37d194a is the run of record for the tests."
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:

@@ -3,10 +3,11 @@ phase: 78-cross-layer-reconciliation
 verified: 2026-11-06T06:12:46Z
 status: human_needed
 score: "8 of 9 truths verified; truth 7 partial (owner item: no result file on the unreadable-plan path); behavior_unverified 0; new residuals R-1 to R-4 (warnings, not owner items); 4 live proofs open (human); HARD-H2 ORPHANED in REQUIREMENTS.md (orchestrator)"
-tree: "/root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD df31c749"
+tree: "/root/src/worktrees/as-gsd-v18-all, branch gsd/v18-int-all, HEAD c37d194a"
 criteria_source: "this tree's ROADMAP Phase 78 success criteria (SC1, SC2)"
 covered_files: [".planning/phases/78-cross-layer-reconciliation/78-01-PLAN.md", ".planning/phases/78-cross-layer-reconciliation/78-SUMMARY.md", "docs/reconcile.md", "packages/mcp-server/src/cache.test.ts", "packages/mcp-server/src/cache.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/consistency-run.test.ts", "packages/mcp-server/src/consistency-run.ts", "packages/mcp-server/src/consistency-verify.test.ts", "packages/mcp-server/src/consistency-verify.ts", "packages/mcp-server/src/corpus/reconcile.test.ts", "packages/mcp-server/src/corpus/reconcile.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/memory-write.ts", "packages/mcp-server/src/reconcile-main.test.ts", "packages/mcp-server/src/reconcile-main.ts", "packages/mcp-server/src/reconcile-read.test.ts", "packages/mcp-server/src/reconcile-read.ts", "packages/mcp-server/src/reconcile-repair.test.ts", "packages/mcp-server/src/reconcile-repair.ts", "packages/mcp-server/src/reconcile-run.ts", "packages/mcp-server/src/reconcile.test.ts", "packages/mcp-server/src/reconcile.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/silent-failures.ts", "scripts/deploy-preflight.test.ts", "scripts/reconcile.ts"]
-covered_digest: "v3:sha256:c36ff34ab9b94b82f2a97d212e0596344a5030ca8808fa27957225bbd4642a3b"
+covered_digest: "v3:sha256:26a2a1c5a09a4b083acd7a24895a1894dc8dd490f40c93872da327209424c838"
+head_refresh: "c37d194a: text-only changes in covered files (packages/cli/src/index.ts emit stderr wording; packages/mcp-server/src/reconcile-run.ts comment; packages/mcp-server/src/flag-registry.ts readBy; docs/config-reference.md regenerated from the registry). covered_digest refreshed from verification.fingerprint; verdict, title list and behaviour unchanged; gate r45 on c37d194a is the run of record for the tests."
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:

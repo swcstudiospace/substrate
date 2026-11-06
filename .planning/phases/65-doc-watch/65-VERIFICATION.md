@@ -62,7 +62,8 @@ covered_files:
   - "packages/observability/src/recall-metrics.test.ts"
   - "scripts/doctor-units.test.ts"
   - "scripts/sandbox-dropins.test.ts"
-covered_digest: "v3:sha256:439c98dc3c3ed3c98d2f877bc9cac688e2750813a021a5fe3557227302b2a1bc"
+covered_digest: "v3:sha256:98e5ea557bf10ff65b5b5931dccb04dcb035dc5c271ed5824e0a3370f16082eb"
+head_refresh: "c37d194a: text-only changes in covered files (packages/cli/src/index.ts emit stderr wording; packages/mcp-server/src/reconcile-run.ts comment; packages/mcp-server/src/flag-registry.ts readBy; docs/config-reference.md regenerated from the registry). covered_digest refreshed from verification.fingerprint; verdict, title list and behaviour unchanged; gate r45 on c37d194a is the run of record for the tests."
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
