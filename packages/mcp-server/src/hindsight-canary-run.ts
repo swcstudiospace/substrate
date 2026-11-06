@@ -104,7 +104,7 @@ interface CanaryLimits {
 	drainMs: number;
 }
 
-export const DEFAULT_CANARY_LIMITS: CanaryLimits = { callTimeoutMs: 8000, recallBudgetMs: DEFAULT_RECALL_BUDGET_MS, deadlineMs: 120_000, drainMs: 2000 };
+const DEFAULT_CANARY_LIMITS: CanaryLimits = { callTimeoutMs: 8000, recallBudgetMs: DEFAULT_RECALL_BUDGET_MS, deadlineMs: 120_000, drainMs: 2000 };
 
 /**
  * The client's own recall budget (`HINDSIGHT_RECALL_BUDGET_MS`): a positive decimal integer, else the default. Same parse as

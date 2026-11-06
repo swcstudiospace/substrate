@@ -2,7 +2,7 @@
 	"_generated_by": "bun scripts/code-ratchet.ts --write",
 	"source": {
 		"explicit_any": 0,
-		"as_unknown_as": 23,
+		"as_unknown_as": 22,
 		"ts_suppressions": 0,
 		"lint_suppressions": 9,
 		"non_null_assertions": 0,

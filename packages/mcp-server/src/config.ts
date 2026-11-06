@@ -166,7 +166,7 @@ export function resolveDocsBackend(env: Record<string, string | undefined> = pro
 /** Default ms between LightRAG planning polls (SPE-19385). */
 const DEFAULT_LIGHTRAG_POLL_MS = 5_000;
 /** Default roots a LightRAG planning poll sweeps. */
-export const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
+const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
 
 /**
  * LightRAG hosting on Railway, in the same project that already runs RAGFlow.
