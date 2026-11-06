@@ -5,13 +5,16 @@
  * deadline's own, which is the thing under test (the same exception `brief-fast-path.test.ts` makes).
  */
 import { describe, expect, test } from "bun:test";
+import { utf8Bytes } from "./brief-profile.ts";
 import { loadConfig } from "./config.ts";
 import { normalizeEvent } from "./event.ts";
 import { buildHandoff, type HandoffPacket } from "./handoff.ts";
+import { auditToolCalls, createObservability } from "./observe.ts";
 import type { EventQuery } from "./greptime.ts";
 import { HANDOFF_READ_LIMIT } from "./session-context.ts";
 import { Substrate } from "./service.ts";
-import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
+import type { LiveSessionCaller } from "./planning/steering-sessions-store.ts";
+import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
 
@@ -247,5 +250,171 @@ describe("public digest metadata does not require a private proof", () => {
 		expect(digest.sessions).toEqual([]);
 		expect(digest.notes).toContain("steering: unavailable");
 		expect(digest.repo_id).toBe("owner/name");
+	});
+});
+
+// ── the brief's live sections: the compact byte cap, and the sessions flag ───
+
+const AGE = /(just now|\d+ min ago|\d+h ago|\d+d ago)/;
+const SESSIONS_TITLE = "Other live sessions in this repo";
+const HANDOFFS_TITLE = "Open handoff packets";
+const STEERING_TITLE = "Steering: 1 queued directive";
+const LIVE_REPO = "acme/app";
+const LIVE_GRAPH = "ut-1";
+
+/** The graph the brief reads: active, on no branch, with no nodes, so the live sections are the only ones that vary. */
+const liveGraph = () => ({
+	graph_id: LIVE_GRAPH,
+	notion_task_page: null,
+	repo: LIVE_REPO,
+	branch: null,
+	surface: "cursor",
+	status: "active",
+	pr_url: null,
+	created: null,
+	updated: null,
+	nodes: [],
+	steps: [],
+	edges: [],
+});
+
+/** The fixtures one live brief test reads: the authority, the caller's own session, another surface's session, and the reads. */
+interface LiveWorld {
+	authority: TestLiveSessionAuthority;
+	caller: LiveSessionCaller;
+	own: { sessionId: string; sessionBinding: string };
+	other: { sessionId: string };
+	greptime: unknown;
+	index: object;
+}
+
+/**
+ * The live world: the caller's own session and another surface's session in the repository, one handoff packet of the graph the
+ * brief names (five minutes old), and the index and ledger the brief reads. Every read is a fake.
+ */
+async function liveWorld(): Promise<LiveWorld> {
+	const authority = createTestLiveSessionAuthority({ nowMs: Date.now() });
+	const caller = { surface: "cursor", isOperator: false } as const;
+	const own = await issueLiveSession(authority, { caller, repoId: LIVE_REPO });
+	const other = await issueLiveSession(authority, { caller: { surface: "hermes", isOperator: false }, repoId: LIVE_REPO });
+	const { fake, greptime } = ledger();
+	fake.rowsByGraph.set(LIVE_GRAPH, [{ ...handoffRow("e-live", "ship the parser", LIVE_GRAPH), ts: Date.now() - 5 * 60_000 }]);
+	const index = { ...indexWith([]), getGraph: async () => liveGraph() };
+	return { authority, caller, own, other, greptime, index };
+}
+
+/** A substrate over the world with `env`. The caller stops `observability` when done. */
+function liveSubstrate(env: Record<string, string>, world: LiveWorld, liveSessions: TestLiveSessionAuthority | null = world.authority) {
+	const config = loadConfig(env);
+	const observability = createObservability(config, {});
+	const substrate = new Substrate(
+		config,
+		{ index: world.index as never, greptime: world.greptime as never, steering: { liveSessions, history: { append: async (): Promise<void> => undefined } } },
+		observability.observer,
+		{ auditCalls: (principal, calls, transport) => auditToolCalls(observability, principal.surface, calls, transport) },
+	);
+	return { substrate, observability };
+}
+
+/** Queue one directive for the caller's own session, so the steering section has a pending line with an age. */
+async function queueDirective(substrate: Substrate, sessionId: string): Promise<void> {
+	const queued = await substrate.steering.inbox?.enqueue({
+		id: "d-live",
+		author: { principalId: "omp", kind: "human" },
+		createdAtMs: Date.now(),
+		priority: "normal",
+		targetSessionId: sessionId,
+		action: "annotate",
+		body: "Check the parser plan before you merge.",
+		conflictsWithActivePlan: false,
+	});
+	expect(queued?.ok).toBe(true);
+}
+
+/** The compact brief for the caller's own session, with all three live sections present, held to `cap` bytes. */
+async function compactLiveBrief(world: LiveWorld, cap: number): Promise<string> {
+	const { substrate, observability } = liveSubstrate(
+		{ SUBSTRATE_BRIEF_SESSIONS: "on", SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp", SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_BRIEF_COMPACT_BYTES: String(cap) },
+		world,
+	);
+	try {
+		await queueDirective(substrate, world.own.sessionId);
+		const request = { surface: "cursor" as const, repo: LIVE_REPO, graph_id: LIVE_GRAPH, session_id: world.own.sessionId, steering_session_id: world.own.sessionId };
+		const detail = await substrate.briefDetailed(request, "compact", "cursor", { caller: world.caller, sessionBinding: world.own.sessionBinding });
+		expect(detail.state).toBe("complete");
+		expect(detail.profile).toBe("compact");
+		return detail.text;
+	} finally {
+		observability.stop();
+	}
+}
+
+/**
+ * A compact brief under a cap, checked against the uncapped brief's lines. It is within the cap; every line is one the uncapped brief
+ * printed (a cut line would not be), apart from the state and omitted lines; each live section is whole (its title with an item, or
+ * neither); and every live item names its source and its age.
+ */
+function expectWholeAndAged(text: string, cap: number, uncapped: ReadonlySet<string>): void {
+	expect(utf8Bytes(text)).toBeLessThanOrEqual(cap);
+	const lines = text.split("\n");
+	for (const line of lines) {
+		if (line.startsWith("[brief: ") || line.startsWith("...omitted:")) continue;
+		expect(uncapped.has(line)).toBe(true);
+	}
+	const sessions = lines.filter((line) => line.includes("[steering, hermes]"));
+	const handoffs = lines.filter((line) => /^- (verified|UNVERIFIED), /.test(line));
+	const pending = lines.filter((line) => /^- \S+ \S+ \(\w+, /.test(line));
+	const steering = [...lines.filter((line) => line.startsWith("- session ")), ...pending];
+	expect(text.includes(SESSIONS_TITLE)).toBe(sessions.length > 0);
+	expect(text.includes(HANDOFFS_TITLE)).toBe(handoffs.length > 0);
+	expect(text.includes(STEERING_TITLE)).toBe(steering.length > 0);
+	for (const line of [...sessions, ...handoffs, ...pending]) expect(line).toMatch(AGE);
+}
+
+describe("the brief's live sections under the compact byte cap", () => {
+	test("under a tight compact byte cap, live sections stay within the bound, whole, naming their source and age", async () => {
+		const world = await liveWorld();
+		const uncapped = await compactLiveBrief(world, 65_536);
+		for (const title of [SESSIONS_TITLE, HANDOFFS_TITLE, STEERING_TITLE]) expect(uncapped).toContain(title);
+		const everything = new Set(uncapped.split("\n"));
+
+		const tight: string[] = [];
+		for (const cap of [512, 640, 800, 1024]) {
+			const text = await compactLiveBrief(world, cap);
+			expectWholeAndAged(text, cap, everything);
+			expect(text.split("\n")[0]).toBe("[brief: complete]");
+			tight.push(text);
+		}
+		// The floor cannot hold the uncapped live sections, so the bound was tested against a brief that had to drop some.
+		expect(tight.some((text) => !text.includes(SESSIONS_TITLE) || !text.includes(HANDOFFS_TITLE))).toBe(true);
+	});
+});
+
+describe("the sessions flag off leaves the brief untouched", () => {
+	test("with the sessions flag off, live sessions do not change a byte of the brief", async () => {
+		const world = await liveWorld();
+		const request = { surface: "cursor" as const, repo: LIVE_REPO, graph_id: LIVE_GRAPH, session_id: world.own.sessionId };
+		const off = liveSubstrate({}, world);
+		const absent = liveSubstrate({}, world, null);
+		const enabled = liveSubstrate({ SUBSTRATE_BRIEF_SESSIONS: "on" }, world);
+		try {
+			const withSource = await off.substrate.briefDetailed(request);
+			const withoutSource = await absent.substrate.briefDetailed(request);
+			expect(withSource.state).toBe("complete");
+			expect(withSource.text).toBe(withoutSource.text);
+			expect(withSource.etag).toBe(withoutSource.etag);
+			expect(withSource.text).not.toContain(SESSIONS_TITLE);
+			expect(withSource.text).not.toContain("[steering, hermes]");
+			expect(withSource.text).not.toContain(HANDOFFS_TITLE);
+			// The control: the same world with the flag on shows both sections, so the flag is what hides them.
+			const shown = await enabled.substrate.briefDetailed(request);
+			expect(shown.text).toContain(SESSIONS_TITLE);
+			expect(shown.text).toContain("[steering, hermes]");
+			expect(shown.text).toContain(HANDOFFS_TITLE);
+		} finally {
+			off.observability.stop();
+			absent.observability.stop();
+			enabled.observability.stop();
+		}
 	});
 });

@@ -11,11 +11,13 @@ import pytest
 from substrate_dispatcher.worktree import (
     DEFAULT_MIN_FREE_GB,
     MIN_FREE_ENV,
+    ROOTS_ENV,
     WorktreeRefused,
     ensure_worktree,
     min_free_bytes,
     repo_checkout,
     validate_graph_id,
+    worktree_roots,
 )
 
 MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
@@ -275,3 +277,26 @@ def test_ensure_worktree_reuses_a_registered_worktree_under_the_second_root(
     assert run.adds() == []
     assert not first.exists()
     assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
+
+
+def test_worktree_roots_defaults_when_env_unset(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv(ROOTS_ENV, raising=False)
+    assert worktree_roots() == [Path("/var/lib/substrate/worktrees")]
+
+
+def test_worktree_roots_single_entry():
+    assert worktree_roots({ROOTS_ENV: "/srv/wt"}) == [Path("/srv/wt")]
+
+
+def test_worktree_roots_two_entries_keep_their_order():
+    assert worktree_roots({ROOTS_ENV: "/srv/b:/srv/a"}) == [Path("/srv/b"), Path("/srv/a")]
+
+
+def test_worktree_roots_trims_entries_and_drops_empty_or_relative_segments():
+    raw = "  /a  :  ::/b/c/ : relative :/x/../y:/a"
+    assert worktree_roots({ROOTS_ENV: raw}) == [Path("/a"), Path("/b/c"), Path("/y")]
+
+
+@pytest.mark.parametrize("raw", ["", "   ", " : : "])
+def test_worktree_roots_blank_value_falls_back_to_default(raw: str):
+    assert worktree_roots({ROOTS_ENV: raw}) == [Path("/var/lib/substrate/worktrees")]
