@@ -167,7 +167,7 @@ This evidence does not satisfy SC1 to SC3. It has no operation, no step state, n
 
 ### Deferred Items
 
-None for SC1 to SC3. HARD-R1 is passed by owner override for v1.8 (2026-11-06) and deferred to after v1.8, as the owner decided. The override is not a phase deferral of SC1 to SC3.
+None for SC1 to SC3. HARD-R1 is passed by owner override for v1.8 (2026-11-06) and deferred to after v1.8, as the owner decided. SC1 to SC3 fall under the owner's whole-phase deferral past v1.8 (2026-11-06), and their overrides are recorded in the frontmatter.
 
 ### Required Artifacts
 
@@ -257,7 +257,6 @@ Gate r38's only failing testcase is "the ratchet is tight: no source counter sit
 
 ## Owner items open
 
-- Scope of the 2026-11-06 HARD-R1 waiver relative to SC1 to SC3 (the decision as given names HARD-R1 only).
 - Corpus ingest classification as a cross-repo write path.
 - Prune ledger ruling: a removed worktree whose ledger note was not recorded.
 - The two behavior-unverified tests above (work item; no owner ruling needed).

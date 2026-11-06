@@ -195,7 +195,7 @@ Step 7c: SKIPPED (phase is not a migration or tooling phase and declares no prob
 | ---- | ---- | ------- | -------- | ------ |
 | `packages/mcp-server/src/corpus/root.ts` | 400 | `owed && writers === 0` drops the owed root when an ingest is writing at shutdown | ℹ️ Info | Owner-open; human item 3 |
 | `packages/mcp-server/src/corpus/service.ts` | 240-256 | scope-refused tombstone request enters the ingest bracket and invalidates the root cache for one reply | ℹ️ Info | Uncached reply only; no event; no stale root; no test asserts it |
-| `packages/mcp-server/src/corpus/root.ts` | 370-374 | dead-lettered branch has no test | ℹ️ Info | Code-verified only |
+| `packages/mcp-server/src/corpus/root.ts` | 370-374 | dead-lettered branch recorded as emitted, now tested (`corpus/proofs.test.ts`) | ℹ️ Info | Test added in 4ffeb7de |
 | `packages/mcp-server/src/corpus/root.ts` | 344 | identical root after a buffered-then-given-up write is skipped (see Edge) | ℹ️ Info | Consistent with owner rule; no test |
 | `.planning/phases/69-doc-proofs/69-SUMMARY.md` | "Deviations", "What remains" | states a failed root is not retried | ℹ️ Info | Stale after e3914640; not evidence |
 

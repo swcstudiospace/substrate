@@ -53,7 +53,7 @@ human_verification:
 - Requirement: HARD-R2 (`.planning/REQUIREMENTS.md:119`, unchecked `[ ]`, mapped to phase 75). Unowned.
 - Covered-file fingerprint: `gsd_run query verification.fingerprint /root/src/worktrees/as-gsd-v18-all/.planning/phases/75-dragonfly-degradation` run read-only at `df31c749`, with the 16 covered files of the prior record plus `packages/mcp-server/src/service.test.ts` (cited for the brief-grant evidence, `:6415`, which the prior list lacked). `covered_files` and `covered_digest` in the frontmatter are copied verbatim from that output.
 - Evidence: gate r38 JUnit `/root/src/worktrees/backups/gate-r38-junit.xml`, run on `66fa97bd`. That run contains `f1266a9c` (an ancestor of `66fa97bd`), so the O2 test is covered by it. Its one failure is `scripts/code-ratchet.test.ts` (the ratchet check), outside phase 75, and the code head fixes it. Every title cited below as "pass in r38" was checked by parsing the XML: one testcase with that name, in that file and at that line (r38 line numbers, which are one lower for `cache.test.ts` than at the current head), with no `failure`, `error` or `skipped` child.
-- Run of record for this head: `/root/src/worktrees/backups/gate-r43-junit.xml`, written by the r43 gate run on `df31c749`. It did not exist when this draft was made, and no result is claimed for it. Two titles first appear after `66fa97bd` and are not in r38: `cache.test.ts:2174` (scan round bound, `0556dfd3`) and `service.test.ts:6415` (brief grant, `3ce87f63`). They are cited as passes in r43 only. If r43 disagrees for any cited title, this record is revisited.
+- Run of record for this head: `/root/src/worktrees/backups/gate-r43-junit.xml`, written by the r43 gate run on `df31c749`. It did not exist when this draft was made; it passes (12,332 pass, 0 fail, 2 skipped). Two titles first appear after `66fa97bd` and are not in r38: `cache.test.ts:2174` (scan round bound, `0556dfd3`) and `service.test.ts:6415` (brief grant, `3ce87f63`). They are cited as passes in r43 only. If r43 disagrees for any cited title, this record is revisited.
 - Each cited title was also grepped in source: the title text is at the cited `file:line` in the worktree (current lines; the `cache.test.ts` lines moved by +1 after `0556dfd3` added an import).
 - Postgres: none. No Postgres-gated test is named in phase 75.
 - Not run in this pass, by assignment: any test, `tsc`, lint, formatters, docker, databases, any edit, any commit. Read-only git and read-only `gsd_run` queries only.
@@ -142,7 +142,7 @@ Not applicable to admission. For the brief under an open breaker, the answer is 
 
 ### Behavioral Spot-Checks
 
-No test was run in this pass. Each "pass in r38" row is the r38 JUnit testcase (`gate-r38-junit.xml`, run on `66fa97bd`), checked for one testcase at that file and line with no `failure`, `error` or `skipped` child. Rows marked "passes in r43" have no r38 result: they were added after `66fa97bd`, and no result is claimed for them.
+No test was run in this pass. Each "pass in r38" row is the r38 JUnit testcase (`gate-r38-junit.xml`, run on `66fa97bd`), checked for one testcase at that file and line with no `failure`, `error` or `skipped` child. Rows marked "passes in r43" have no r38 result: they were added after `66fa97bd`, so their result is the r43 run of record.
 
 | Behavior | Testcase (file:line) | Result | Status |
 | -------- | -------------------- | ------ | ------ |

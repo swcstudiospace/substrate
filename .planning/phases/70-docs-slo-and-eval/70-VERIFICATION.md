@@ -94,7 +94,7 @@ The must-haves are the five ROADMAP success criteria for phase 70.
 | 4 | Test fails on a broken relative link in `docs/` and `.planning/` (archives included) and on a missing level-1 title in `docs/` and live `.planning/` files | ✓ VERIFIED (carried forward) | `scripts/docs-lint.ts`, `scripts/docs-lint.test.ts`, `scripts/planning-integrity.test.ts` unchanged since 5e304ef8. The read-only scan of the markdown changed in range found no broken link and one H1 per file (Changes item 7). `docs-lint.test.ts` itself has not run at df31c749. |
 | 5 | `docs/runbooks/docs-rag-operations.md` covers deploy, first ingest, timers, rollback and the proving command for each step, and the golden set has a case for each new runbook and the eval finds it | ? UNCERTAIN (operator-gated) | The runbook is unchanged since 5e304ef8. Clause 2 (the eval finds the runbook) needs a live plane; see Human Verification item 1. The canary install is operator-gated and open; see Human Verification item 2. |
 
-**Score:** 4/5 must-haves verified on code and the r38 run (SC1, SC2, SC4 carried forward; SC3 for its unchanged clauses). SC3's ingest-throughput behaviour at df31c749 passes in r43. SC5 UNCERTAIN (operator-gated). `behavior_unverified: 1`.
+**Score:** 4/5 must-haves verified on code and the r38 run (SC1, SC2, SC4 carried forward; SC3 for its unchanged clauses). SC3's ingest-throughput behaviour at df31c749 passes in r43. SC5 UNCERTAIN (operator-gated, not a behavior-unverified item). `behavior_unverified: 0`.
 
 ### SC3 clause by clause (amended text)
 
