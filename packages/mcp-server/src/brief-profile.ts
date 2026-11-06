@@ -24,7 +24,7 @@ import {
 import { z } from "zod";
 import { SURFACES } from "./types.ts";
 
-export { BRIEF_PROFILE_MODES, BRIEF_PROFILES, type BriefProfile, type BriefProfileMode };
+export type { BriefProfile, BriefProfileMode };
 
 /**
  * Section ids and their compact priority, lower is kept longer. `heading` is
@@ -94,8 +94,8 @@ export interface BriefSection {
 	unlisted?: number;
 }
 
-export const DEFAULT_COMPACT_NODES = 12;
-export const DEFAULT_COMPACT_MEMORY_CHARS = 240;
+const DEFAULT_COMPACT_NODES = 12;
+const DEFAULT_COMPACT_MEMORY_CHARS = 240;
 export const DEFAULT_COMPACT_BYTES = 3500;
 /**
  * The smallest cap that still holds the state line, a clipped heading and the
@@ -114,7 +114,7 @@ const MIN_BODY_CHARS = 24;
 const DEFAULT_NODE_RANK = 2;
 const ELLIPSIS = "…";
 
-export const DEFAULT_COMPACT_SURFACES: readonly string[] = ["grok-bot", "grok-build"];
+const DEFAULT_COMPACT_SURFACES: readonly string[] = ["grok-bot", "grok-build"];
 
 export interface CompactLimits {
 	nodes: number;
@@ -258,7 +258,7 @@ function clipPoints(text: string, max: number): string {
 }
 
 /** The longest prefix of `text` that fits `maxBytes` UTF-8 bytes, ending in an ellipsis when anything was cut. */
-export function clipBytes(text: string, maxBytes: number): string {
+function clipBytes(text: string, maxBytes: number): string {
 	if (utf8Bytes(text) <= maxBytes) return text;
 	const room = maxBytes - utf8Bytes(ELLIPSIS);
 	if (room <= 0) return "";
@@ -434,6 +434,7 @@ export function decodeSections(raw: unknown): BriefSection[] | null {
 		const parsed = EncodedSchema.safeParse(JSON.parse(raw));
 		return parsed.success ? (parsed.data.sections as BriefSection[]) : null;
 	} catch {
+		// A value that is not an encoded profile is a miss by contract (see above), not a fault.
 		return null;
 	}
 }

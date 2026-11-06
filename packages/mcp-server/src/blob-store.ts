@@ -31,7 +31,7 @@ export interface BlobStore {
 	remove(digest: string): Promise<boolean>;
 }
 
-export type BlobStoreRule = "bad_digest" | "bad_path" | "too_large" | "corrupt" | "unsafe_path" | "io";
+type BlobStoreRule = "bad_digest" | "bad_path" | "too_large" | "corrupt" | "unsafe_path" | "io";
 
 /** A blob-store failure. `rule` names what was refused; the message says what to do. */
 export class BlobStoreError extends Error {
@@ -58,7 +58,7 @@ export function assertDigest(digest: unknown): asserts digest is string {
 	}
 }
 
-export interface LocalBlobStoreOptions {
+interface LocalBlobStoreOptions {
 	/** Refuse a put larger than this. Default `DEFAULT_MAX_BLOB_BYTES`. */
 	maxBytes?: number;
 	/** Names the temp file. Injected so a test is deterministic; default is random. */

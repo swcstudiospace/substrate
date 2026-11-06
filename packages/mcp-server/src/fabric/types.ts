@@ -36,10 +36,10 @@ export const RESOURCE_OF_PLANE: Readonly<Record<DbPlane, FabricResourceName>> = 
 };
 
 export type FabricState = "ok" | "degraded" | "unavailable" | "unconfigured";
-export type FabricEndpointClass = EndpointClass | "unset" | "not-applicable";
+type FabricEndpointClass = EndpointClass | "unset" | "not-applicable";
 export type FabricSeverity = "info" | "attention";
 export type BreakerReading = "closed" | "open" | "half-open" | "off";
-export type CostReading = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured" | "unknown";
+type CostReading = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured" | "unknown";
 
 /** The MCP tools this module serves. Each one is read-only and fail-open. */
 export const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
@@ -49,24 +49,25 @@ export const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_complia
  * Never a URL or a key. `model` is the pin, else the model learned from an embed, else the last one `/info` named;
  * `modelSource` says which, and is `none` only while `model` is null.
  */
-export interface FabricTeiDetail {
+interface FabricTeiDetail {
 	model: string | null;
 	modelSource: TeiModelSource;
 	dimension: number | null;
 	latencyMs: number | null;
 }
 
-/** One objective of the corpus row: the reading (`null` while nobody has measured it) against the threshold it is judged by. */
-export interface SloLine {
+/** One objective of the corpus row: the reading (`null` while nobody has measured it) against the threshold it is judged by (`null` when the objective is not set). */
+interface SloLine {
 	reading: number | null;
-	threshold: number;
+	threshold: number | null;
 }
 
-/** The corpus row's detail (phase 70): the three readings with their thresholds, and the objectives that are breached. Numbers and names only. */
+/** The corpus row's detail (phase 70): the readings with their thresholds, and the objectives that are breached. Numbers and names only. */
 export interface CorpusDetail {
 	freshnessS: SloLine;
 	recall5: SloLine;
 	ingestDocsPerS: SloLine;
+	syncLag: SloLine;
 	breaches: SloBreach[];
 }
 
@@ -77,6 +78,8 @@ export interface FabricResourceStatus {
 	/** A fixed phrase naming where the reading came from. Never an error text. */
 	source: string;
 	checkedAt: string;
+	/** Present on the `tei` row only when TEI is configured: the embedding client's breaker, read at the status call. Folded into `state` by {@link serviceState}; never shown as an error. */
+	breaker?: BreakerReading;
 	/** Present on the `tei` row (only when TEI is configured) and on the `corpus` row. */
 	detail?: FabricTeiDetail | CorpusDetail;
 }
@@ -125,7 +128,7 @@ export interface ServiceReading {
 }
 
 /** What the corpus row judges: the three readings against the thresholds, and why the readings are missing when they could not be read in time. */
-export interface CorpusSloFacts {
+interface CorpusSloFacts {
 	/** `SUBSTRATE_CORPUS=on`. */
 	enabled: boolean;
 	readings: SloReadings;
@@ -195,7 +198,7 @@ export interface FabricCostView {
 }
 
 /** The configuration the fabric reads. Classes and presence only: no URL is in this view. */
-export interface FabricConfigView {
+interface FabricConfigView {
 	endpointPolicy: "warn" | "enforce";
 	endpointClasses: Partial<Record<DbPlane, EndpointClass>>;
 	configured: Record<ServiceName, boolean>;

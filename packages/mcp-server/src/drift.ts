@@ -69,14 +69,14 @@ export interface DriftClaim {
 	lease: LeaseSnapshot;
 }
 
-export interface DriftNode {
+interface DriftNode {
 	graph_id: string;
 	node_id: string;
 	linear_identifier: string | null;
 	state: NodeState | null;
 }
 
-export type DriftKind =
+type DriftKind =
 	/** git's HEAD has no `commit` event: something committed outside the substrate. */
 	| "git.tip_unlogged"
 	/** The newest commit in the trail is not in this checkout: behind, or history was rewritten. */
@@ -96,7 +96,7 @@ export type DriftKind =
 	/** A held node is gated on something that has not happened. */
 	| "edge.gate_open";
 
-export interface DriftFinding {
+interface DriftFinding {
 	kind: DriftKind;
 	severity: "warn" | "info";
 	/** One line, for a brief or a terminal. */

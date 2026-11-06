@@ -14,16 +14,16 @@ import type { TaskRecord } from "./tasks.ts";
 
 /** The only Notion properties sync may write (ultrathink-sync's "PR opened" row, nothing terminal). */
 export const SYNC_WRITABLE = ["PR URL", "PR #", "PR State", "Repo", "Branch"] as const;
-export type SyncWritable = (typeof SYNC_WRITABLE)[number];
+type SyncWritable = (typeof SYNC_WRITABLE)[number];
 
 export const DEFAULT_TASK_GRAPH_DS = "be3418f0-d2d8-411b-8677-fa8a95ee63be";
-export const NOTION_VERSION = "2025-09-03";
+const NOTION_VERSION = "2025-09-03";
 const NOTION_BASE_URL = "https://api.notion.com/v1";
 const LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const BODY_LIMIT = 200;
 
-export class SyncError extends Error {
+class SyncError extends Error {
 	/** HTTP status, or null when no response arrived. */
 	readonly status: number | null;
 
@@ -54,7 +54,7 @@ export function syncProperty(name: SyncWritable, value: string | number): Record
 	}
 }
 
-export type TaskRow = { id: string; prUrl: string | null };
+type TaskRow = { id: string; prUrl: string | null };
 
 /** Notion data-source query + page PATCH, limited to SYNC_WRITABLE. */
 export class NotionSync {
@@ -120,7 +120,7 @@ export class NotionSync {
 	}
 }
 
-export type AttachMutation = "attachmentLinkURL" | "attachmentCreate";
+type AttachMutation = "attachmentLinkURL" | "attachmentCreate";
 
 /** Linear GraphQL: attach a link to an issue; read its attachments. Never issueUpdate, never a state. */
 export class LinearLink {
@@ -215,11 +215,11 @@ export class LinearLink {
 	}
 }
 
-export type NotionSyncResult = "updated" | "no_task_row" | `failed:${string}`;
-export type LinearSyncResult = "attached" | "no_issue_ref" | `failed:${string}`;
-export type SyncResult = { notion: NotionSyncResult; linear: LinearSyncResult };
+type NotionSyncResult = "updated" | "no_task_row" | `failed:${string}`;
+type LinearSyncResult = "attached" | "no_issue_ref" | `failed:${string}`;
+type SyncResult = { notion: NotionSyncResult; linear: LinearSyncResult };
 
-export type SyncPrInput = {
+type SyncPrInput = {
 	graphId: string;
 	nodeId: string;
 	prUrl: string;
@@ -229,7 +229,7 @@ export type SyncPrInput = {
 	node: Pick<GraphNodeView, "linear_issue_id" | "linear_identifier">;
 };
 
-export type VerifyInput = { graphId: string; node: Pick<GraphNodeView, "linear_issue_id" | "linear_identifier">; prUrl: string };
+type VerifyInput = { graphId: string; node: Pick<GraphNodeView, "linear_issue_id" | "linear_identifier">; prUrl: string };
 
 function failure(cause: unknown): `failed:${string}` {
 	if (cause instanceof SyncError && cause.status !== null) return `failed:${cause.status}`;
@@ -317,7 +317,7 @@ export class HostSync {
 	}
 }
 
-export type SyncTaskInput = {
+type SyncTaskInput = {
 	graphId: string;
 	nodeId: string;
 	prUrl: string;
@@ -327,7 +327,7 @@ export type SyncTaskInput = {
 	now?: () => Date;
 };
 
-export type SyncTaskResult = (SyncResult & { synced_at: string; sync_by: "model" }) | { error: string };
+type SyncTaskResult = (SyncResult & { synced_at: string; sync_by: "model" }) | { error: string };
 
 /**
  * `agentos-substrate sync --node <nid> --pr-url <url>` (tracker_route host, b:hooks or

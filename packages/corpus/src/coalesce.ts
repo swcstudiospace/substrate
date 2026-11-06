@@ -11,9 +11,9 @@ import type { SyncTrigger } from "./protocol.ts";
 
 /** The key of a full sweep: a sync of every registered repository. */
 export const FULL_SWEEP = "*";
-export const MAX_TRACKED_REPOS = 4096;
+const MAX_TRACKED_REPOS = 4096;
 
-export interface CoalescerOptions {
+interface CoalescerOptions {
 	debounceMs: number;
 	/** Never below `debounceMs`. */
 	maxWaitMs: number;
@@ -21,7 +21,7 @@ export interface CoalescerOptions {
 }
 
 /** A burst handed out by `due`. */
-export interface DueSync {
+interface DueSync {
 	repo: string;
 	/** The trigger of the burst's first signal. */
 	trigger: SyncTrigger;

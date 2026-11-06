@@ -63,6 +63,7 @@ export interface ScratchLedger {
 		readEvents: (column: string, value: string) => Promise<Array<Record<string, unknown>>>;
 		graphIngest: (graphId: string) => Promise<IngestRecord[]>;
 		firstIngestMs: () => Promise<number>;
+		graphChainLeafHours: (graphId: string) => Promise<number[]>;
 		hourLeaves: (hour: number) => Promise<Array<{ event_id: string; hash: string }>>;
 		anchorForPeriod: (hour: number) => Promise<Record<string, unknown> | null>;
 	};
@@ -112,6 +113,7 @@ function scratchLedger(): ScratchLedger {
 			return records.filter((record) => ids.has(record.event_id));
 		},
 		firstIngestMs: async () => H,
+		graphChainLeafHours: async () => [],
 		hourLeaves: async (hour: number) => (hour === H ? leaves() : []),
 		anchorForPeriod: async (hour: number) => (hour === H ? anchored : null),
 	};
@@ -153,6 +155,7 @@ export interface ScratchWorld {
 			slot: number;
 			blockTime: number;
 		}>;
+		addressSignaturePage: () => Promise<never[]>;
 	};
 }
 
@@ -162,7 +165,7 @@ function scratchWorld(): ScratchWorld {
 	const base = loadConfig({});
 	const substrate = new Substrate(
 		{ ...base, solana: { ...base.solana, pubkey: PUBKEY } },
-		{ index: index as never, greptime: ledger.greptime as never },
+		{ index: index as never, greptime: ledger.greptime as never, steering: { history: null, liveSessions: null } },
 	);
 	const rpc = {
 		getGenesisHash: async () => DEVNET_GENESIS_HASH,
@@ -175,6 +178,7 @@ function scratchWorld(): ScratchWorld {
 			slot: 42,
 			blockTime: 1_790_000_000,
 		}),
+		addressSignaturePage: async () => [],
 	};
 	return { ledger, substrate, rpc };
 }

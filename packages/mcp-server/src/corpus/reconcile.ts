@@ -23,6 +23,7 @@
  */
 import { CORPUS_NAME_PREFIX, CORPUS_PROTOCOL, RECONCILE_MAX_ITEMS, corpusDocumentName, type CorpusReconcileResponse } from "@substrate/corpus";
 import type { LightragBulkPlane, PlaneListedDocument } from "../planes/lightrag-bulk.ts";
+import { reportSilent } from "../silent-failures.ts";
 import { withCorpusLock } from "./ingest.ts";
 import type { CorpusStore, ManifestRow } from "./store.ts";
 
@@ -32,13 +33,13 @@ export const RECONCILE_MAX_ROWS = 100_000;
 const RECONCILE_LOOKUP_BUDGET_MS = 8_000;
 
 /** The plane documents a listing named, as `diffPlane` reads them: `PlaneListing` without its failure arm. */
-export interface PlaneSnapshot {
+interface PlaneSnapshot {
 	documents: readonly PlaneListedDocument[];
 	otherDocumentIds: readonly string[];
 	truncated: boolean;
 }
 
-export interface PlaneDrift {
+interface PlaneDrift {
 	/** Active rows whose plane document the (complete) listing does not hold. */
 	missing: ManifestRow[];
 	/** `corpus:` plane documents no active row owns, by id and name, ordered by name. */
@@ -78,15 +79,15 @@ export function diffPlane(rows: readonly ManifestRow[], plane: PlaneSnapshot, ro
 	return { missing, orphans, checked };
 }
 
-export interface ReconcileDeps {
+interface ReconcileDeps {
 	store: CorpusStore;
 	plane: LightragBulkPlane;
 	signal?: AbortSignal | undefined;
 }
 
-export type ReconcileFailure = { ok: false; reason: "corpus.index-unavailable" | "corpus.plane-unreachable"; detail?: string };
+type ReconcileFailure = { ok: false; reason: "corpus.index-unavailable" | "corpus.plane-unreachable"; detail?: string };
 
-export type ReconcileResult = { ok: true; body: CorpusReconcileResponse } | ReconcileFailure;
+type ReconcileResult = { ok: true; body: CorpusReconcileResponse } | ReconcileFailure;
 
 /**
  * Marks each reported row removed so the next plan offers it as an `add`. The row is read again first: it is marked only
@@ -117,7 +118,8 @@ async function deleteOrphans(deps: ReconcileDeps, orphans: readonly PlaneListedD
 		if (!orphan.name.startsWith(CORPUS_NAME_PREFIX)) continue;
 		try {
 			if ((await deps.store.activeReferences(orphan.id)) > 0) continue;
-		} catch {
+		} catch (cause: unknown) {
+			reportSilent("reconcile.reference-check", cause);
 			continue;
 		}
 		ids.push(orphan.id);
@@ -167,9 +169,11 @@ async function run(deps: ReconcileDeps, execute: boolean): Promise<ReconcileResu
 		if (looked === "absent") gone.push(row);
 		else if (looked === "unknown") lookupFailed = true;
 	}
+	// One bound for the whole run: RECONCILE_MAX_ITEMS keys in total, missing rows and orphans together. Missing rows take first
+	// (marking one removed needs no plane delete); orphans take what is left. Whatever the bound cuts is reported truncated.
 	const missing = gone.slice(0, RECONCILE_MAX_ITEMS);
-	const orphans = drift.orphans.slice(0, RECONCILE_MAX_ITEMS);
-	const truncated = listing.truncated || !rowsComplete || gone.length > RECONCILE_MAX_ITEMS || drift.orphans.length > RECONCILE_MAX_ITEMS || lookupFailed || unlooked;
+	const orphans = drift.orphans.slice(0, RECONCILE_MAX_ITEMS - missing.length);
+	const truncated = listing.truncated || !rowsComplete || gone.length + drift.orphans.length > RECONCILE_MAX_ITEMS || lookupFailed || unlooked;
 
 	// Rows first: marking one removed needs no plane delete, so a slow or failing plane delete cannot hold that repair back.
 	// The lookup above already confirmed the id is gone; a failed lookup never reaches here.

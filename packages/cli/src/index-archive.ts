@@ -67,7 +67,7 @@ export function indexArchiveRunnerArgs(argv: readonly string[], args: Args): str
 	return out;
 }
 
-export interface IndexArchiveDeps {
+interface IndexArchiveDeps {
 	/** Run the runner with these arguments and return its exit status. */
 	spawn: (runnerArgs: string[]) => number;
 	err: (text: string) => void;

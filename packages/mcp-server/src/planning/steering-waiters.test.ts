@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { SteeringInbox, type SteeringAuditEntry, type SteeringHistorySink } from "./steering.ts";
-import { STEERING_WAIT_PER_SESSION_MAX, SteeringWaiters, nextQueuedDirective, type QueuedSteeringRecord, type SteeringWaitTimers } from "./steering-waiters.ts";
+import { STEERING_WAIT_PER_SESSION_MAX, SteeringWaiters, nextQueuedDirective, type QueuedDelivery, type SteeringWaitTimers } from "./steering-waiters.ts";
 import { defined } from "../test-support.ts";
 
 class MemorySink implements SteeringHistorySink {
@@ -64,7 +64,7 @@ async function queueAt(inbox: SteeringInbox, id: string, atMs: number): Promise<
 	await queue(inbox, id);
 }
 
-const idsOf = (record: QueuedSteeringRecord | null): string | null => record?.directive.id ?? null;
+const idsOf = (delivery: QueuedDelivery | null): string | null => delivery?.record.directive.id ?? null;
 
 describe("nextQueuedDirective", () => {
 	test("the oldest queued directive for the session, whatever its priority", async () => {
@@ -289,5 +289,57 @@ describe("SteeringWaiters.wait", () => {
 		expect((await broken).status).toBe("closed");
 		expect((await healthy).status).toBe("directive");
 		expect(waiters.size).toBe(0);
+	});
+
+	test("closeSession cancels only matching waits, once, without closing the registry", async () => {
+		const timers = new FakeTimers();
+		const waiters = new SteeringWaiters({ timers });
+		const abort = new AbortController();
+		const a = waiters.wait({ sessionId: "session-a", timeoutMs: 1000, signal: abort.signal, check: () => null });
+		const b = waiters.wait({ sessionId: "session-b", timeoutMs: 1000, check: () => null });
+		expect(waiters.closeSession("session-a")).toBe(1);
+		expect(await a).toEqual({ status: "closed" });
+		expect(waiters.closeSession("session-a")).toBe(0);
+		abort.abort();
+		expect(waiters.size).toBe(1);
+		expect(timers.live.size).toBe(1);
+		const fresh = waiters.wait({ sessionId: "session-a", timeoutMs: 1000, check: () => null });
+		expect(waiters.size).toBe(2);
+		waiters.closeAll();
+		expect(await b).toEqual({ status: "closed" });
+		expect(await fresh).toEqual({ status: "closed" });
+		expect(waiters.size).toBe(0);
+		expect(timers.live.size).toBe(0);
+	});
+
+	test("synchronous and throwing timer seams cannot leak a waiter or abort listener", async () => {
+		for (const throws of [false, true]) {
+			const cleared: unknown[] = [];
+			const waiters = new SteeringWaiters({ timers: {
+				set: run => { if (throws) throw new Error("test timer unavailable"); run(); return "timer"; },
+				clear: handle => { cleared.push(handle); },
+			} });
+			const abort = new AbortController();
+			const response = await waiters.wait({ sessionId: "session-a", timeoutMs: 1, signal: abort.signal, check: () => null });
+			expect(response.status).toBe(throws ? "closed" : "timeout");
+			expect(waiters.size).toBe(0);
+			expect(cleared).toEqual(throws ? [] : ["timer"]);
+			abort.abort();
+			expect(waiters.size).toBe(0);
+		}
+	});
+});
+
+describe("the delivery sequence a wait hands back", () => {
+	test("each directive carries its sequence in its own session, and an after cursor walks one session in queue order", async () => {
+		const inbox = inboxOf();
+		await queue(inbox, "d1");
+		await queue(inbox, "d2");
+		await queue(inbox, "other", "sess-b");
+		const first = nextQueuedDirective(inbox, "sess-a", null);
+		expect([first?.record.directive.id, first?.sequence]).toEqual(["d1", 1]);
+		const second = nextQueuedDirective(inbox, "sess-a", "d1");
+		expect([second?.record.directive.id, second?.sequence]).toEqual(["d2", 2]);
+		expect(nextQueuedDirective(inbox, "sess-b", null)?.sequence).toBe(1);
 	});
 });

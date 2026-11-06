@@ -12,21 +12,17 @@
 import { scopeRepoId } from "../event.ts";
 import { redact } from "../redact.ts";
 import { SESSION_ID_RE } from "./presence.ts";
-import type { SteeringSessionRegistry } from "./session-state.ts";
 import { compareDirectives, type SteeringInbox, type SteeringRecord } from "./steering.ts";
 import type { SteeringAcknowledgeReply } from "./steering-delivery.ts";
-import { steeringSessionWithoutSecrets } from "./steering-sessions-store.ts";
-import { STEERING_ACKNOWLEDGE_INPUT, STEERING_QUEUE_INPUT, type SteeringAcknowledgeInput, type SteeringCaller, type SteeringQueueInput, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
+import { STEERING_ACKNOWLEDGE_INPUT, STEERING_QUEUE_INPUT, type SteeringAcknowledgeInput, type SteeringQueueInput, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
 
 /** `GET /steering/sessions` lists at most this many sessions per call. */
 export const STEERING_SESSIONS_LIMIT_MAX = 100;
 export const STEERING_SESSIONS_LIMIT_DEFAULT = 50;
 
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-/** A session id the inbox accepts, used for a directive id that names no directive so the inbox answers `not-found`, not a shape error. */
-const UNKNOWN_DIRECTIVE_SESSION = "unknown";
 
-export type RestParse<T> = { ok: true; value: T } | { ok: false; error: string };
+type RestParse<T> = { ok: true; value: T } | { ok: false; error: string };
 
 /** A whole number inside `[min, max]`, from a query value. Anything else (a sign, a fraction, an exponent, empty) is refused. */
 function wholeNumber(raw: string, min: number, max: number): number | null {
@@ -42,20 +38,10 @@ function requiredSession(params: URLSearchParams): RestParse<string> {
 
 // ── GET /steering/sessions ─────────────────────────────────────────────────────
 
-export interface RestSteeringSession {
-	session_id: string;
-	surface: string;
-	repo_id: string;
-	state: string;
-	updated_at: string;
-	planning_hash: string | null;
-	steering: string | null;
-	pending_directives: number;
-}
-
 export interface SessionsQuery {
 	repoId: string | null;
 	limit: number;
+	cursor?: string;
 }
 
 export function parseSessionsQuery(params: URLSearchParams): RestParse<SessionsQuery> {
@@ -65,45 +51,11 @@ export function parseSessionsQuery(params: URLSearchParams): RestParse<SessionsQ
 	const rawLimit = params.get("limit");
 	const limit = rawLimit === null ? STEERING_SESSIONS_LIMIT_DEFAULT : wholeNumber(rawLimit, 1, STEERING_SESSIONS_LIMIT_MAX);
 	if (limit === null) return { ok: false, error: `limit must be a whole number from 1 to ${STEERING_SESSIONS_LIMIT_MAX}` };
-	return { ok: true, value: { repoId, limit } };
+	const cursor = params.get("cursor");
+	if (cursor !== null && !/^ls_[a-f0-9]{64}$/.test(cursor)) return { ok: false, error: "invalid cursor" };
+	return { ok: true, value: { repoId, limit, ...(cursor === null ? {} : { cursor }) } };
 }
 
-/**
- * The live steering sessions the caller may see, newest first: an operator's token sees every surface's sessions, any other
- * surface only its own. A read: it changes nothing. `truncated` says more matched than `limit`.
- */
-export function listSteeringSessions(
-	registry: Pick<SteeringSessionRegistry, "entries">,
-	inbox: SteeringInbox | null,
-	caller: SteeringCaller,
-	query: SessionsQuery,
-): { sessions: RestSteeringSession[]; truncated: boolean } {
-	const visible = registry
-		.entries()
-		.filter((entry) => caller.isOperator || (caller.surface !== null && entry.surface === caller.surface))
-		.filter((entry) => query.repoId === null || entry.session.repo_id === query.repoId)
-		.sort(
-			(a, b) =>
-				(a.session.updated_at < b.session.updated_at ? 1 : a.session.updated_at > b.session.updated_at ? -1 : 0) ||
-				(a.surface < b.surface ? -1 : a.surface > b.surface ? 1 : 0) ||
-				(a.session.session_id < b.session.session_id ? -1 : a.session.session_id > b.session.session_id ? 1 : 0),
-		);
-	const sessions = visible.slice(0, query.limit).map((entry): RestSteeringSession => {
-		// The directions are caller-supplied text: they pass the redactor on the way out as they do on the way into the table.
-		const session = steeringSessionWithoutSecrets(entry.session);
-		return {
-			session_id: session.session_id,
-			surface: entry.surface,
-			repo_id: session.repo_id,
-			state: session.state,
-			updated_at: session.updated_at,
-			planning_hash: session.planning_hash ?? null,
-			steering: session.steering ?? null,
-			pending_directives: inbox === null ? 0 : inbox.pendingFor(session.session_id).length,
-		};
-	});
-	return { sessions, truncated: visible.length > query.limit };
-}
 
 // ── directives ────────────────────────────────────────────────────────────────
 
@@ -118,6 +70,8 @@ export interface RestDirective {
 	created_at: string;
 	acknowledged_at: string | null;
 	outcome: string | null;
+	/** The directive's delivery sequence in its target session. Null when the inbox does not hold it (restored only from the audit history). */
+	sequence: number | null;
 	/** Present for an acknowledged directive whose outcome moves the session: the session may take a steering checkpoint. */
 	checkpoint_hint: { trigger: string; directive_id: string } | null;
 }
@@ -131,7 +85,7 @@ const isoOf = (ms: number): string => new Date(ms).toISOString();
  * from the audit history after a restart, which holds no transition result) all give null: a hint is never made from
  * the directive's action and outcome alone.
  */
-export function restDirective(record: SteeringRecord): RestDirective {
+export function restDirective(record: SteeringRecord, sequence: number | null): RestDirective {
 	const { directive } = record;
 	const base = {
 		id: directive.id,
@@ -141,6 +95,7 @@ export function restDirective(record: SteeringRecord): RestDirective {
 		priority: directive.priority,
 		author: directive.author.principalId,
 		created_at: isoOf(directive.createdAtMs),
+		sequence,
 	};
 	if (record.state === "queued") return { ...base, status: "queued", acknowledged_at: null, outcome: null, checkpoint_hint: null };
 	return {
@@ -152,8 +107,8 @@ export function restDirective(record: SteeringRecord): RestDirective {
 	};
 }
 
-export const DIRECTIVE_STATUSES = ["queued", "acknowledged", "all"] as const;
-export type DirectiveStatusFilter = (typeof DIRECTIVE_STATUSES)[number];
+const DIRECTIVE_STATUSES = ["queued", "acknowledged", "all"] as const;
+type DirectiveStatusFilter = (typeof DIRECTIVE_STATUSES)[number];
 
 export interface DirectivesQuery {
 	sessionId: string;
@@ -188,14 +143,17 @@ export function listRestDirectives(inbox: SteeringInbox, query: DirectivesQuery,
 	return merged
 		.sort((a, b) => compareDirectives(a.directive, b.directive))
 		.filter((record) => query.status === "all" || record.state === query.status)
-		.map(restDirective);
+		.map((record) => restDirective(record, inbox.sequenceOf(record.directive.id)));
 }
 
 /** Why the steering inbox cannot answer, as the tools answer it: invalid settings are `misconfigured` (naming the keys, never the values), no audit sink is `not-configured`. */
-export interface SteeringUnavailable {
+interface SteeringUnavailable {
 	status: "misconfigured" | "not-configured";
 	error: string;
 	keys?: string[];
+}
+export class SteeringReadUnavailableError extends Error {
+	constructor(readonly result: SteeringUnavailable) { super("steering unavailable"); }
 }
 
 /** Null when the inbox can answer. The settings check comes first, like every steering tool. */
@@ -209,7 +167,7 @@ export function steeringUnavailable(wiring: SteeringWiring): SteeringUnavailable
 
 // ── POST bodies ───────────────────────────────────────────────────────────────
 
-const QUEUE_FIELDS: readonly string[] = ["session_id", "action", "body", "priority", "conflicts_with_active_plan"];
+const QUEUE_FIELDS: readonly string[] = ["session_id", "action", "body", "priority", "conflicts_with_active_plan", "idempotency_key"];
 const ACKNOWLEDGE_FIELDS: readonly string[] = ["directive_id", "outcome", "confirm"];
 
 function plainObject(body: unknown): Record<string, unknown> | null {
@@ -243,22 +201,21 @@ export function parseQueueBody(body: unknown): RestParse<SteeringQueueInput> {
 		priority: fields.priority ?? "normal",
 		body: fields.body,
 		conflicts_with_active_plan: fields.conflicts_with_active_plan === undefined ? false : fields.conflicts_with_active_plan,
+		...(fields.idempotency_key === undefined ? {} : { idempotency_key: fields.idempotency_key }),
 	});
 	return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: `invalid ${issuePaths(parsed.error.issues).replace("target_session_id", "session_id")}` };
 }
 
 /** `{ directive_id, outcome, confirm? }`. The session is the directive's own target, read from the inbox, so the caller names no session. */
-export function parseAcknowledgeBody(body: unknown, inbox: SteeringInbox | null): RestParse<SteeringAcknowledgeInput> {
+export function parseAcknowledgeBody(body: unknown): RestParse<SteeringAcknowledgeInput> {
 	const fields = plainObject(body);
 	if (fields === null) return { ok: false, error: "request body must be a JSON object" };
 	const extra = unknownField(fields, ACKNOWLEDGE_FIELDS);
 	if (extra !== null) return { ok: false, error: `unknown field: ${extra}` };
 	const directiveId = typeof fields.directive_id === "string" && DIRECTIVE_ID_RE.test(fields.directive_id) ? fields.directive_id : null;
 	if (directiveId === null) return { ok: false, error: "invalid directive_id" };
-	const target = inbox?.get(directiveId)?.directive.targetSessionId ?? UNKNOWN_DIRECTIVE_SESSION;
-	const parsed = STEERING_ACKNOWLEDGE_INPUT.safeParse({
+	const parsed = STEERING_ACKNOWLEDGE_INPUT.omit({ session_id: true }).safeParse({
 		directive_id: directiveId,
-		session_id: target,
 		outcome: fields.outcome,
 		...(fields.confirm === undefined ? {} : { confirm: fields.confirm }),
 	});
@@ -313,10 +270,15 @@ export function steeringHttpStatus(result: SteeringWriteResult | SteeringAcknowl
 					return 403;
 				case "not-found":
 					return 404;
+				case "session-unavailable":
+					return 503;
+				case "principal-rate-limited":
+					return 429;
 				case "duplicate-directive":
 				case "wrong-session":
 				case "already-acknowledged":
 				case "confirmation-required":
+				case "idempotency-conflict":
 					return 409;
 				case "rate-limited":
 					return 429;
@@ -331,5 +293,7 @@ export function steeringHttpStatus(result: SteeringWriteResult | SteeringAcknowl
 
 /** `Retry-After` in whole seconds for a rate-limited refusal, else null. */
 export function steeringRetryAfterS(result: SteeringWriteResult | SteeringAcknowledgeReply): number | null {
-	return result.status === "refused" && result.error.code === "rate-limited" ? Math.max(1, Math.ceil(result.error.retryAfterMs / 1000)) : null;
+	if (result.status !== "refused") return null;
+	if (result.error.code === "principal-rate-limited") return result.error.retry_after_s;
+	return result.error.code === "rate-limited" ? Math.max(1, Math.ceil(result.error.retryAfterMs / 1000)) : null;
 }

@@ -13,7 +13,7 @@ import type { Attributes } from "./metrics.ts";
 import type { OtlpConfig } from "./otlp.ts";
 import type { SloOverrides } from "./slo.ts";
 
-export interface ObservabilityConfig {
+interface ObservabilityConfig {
 	/** True when an OTLP endpoint is configured, so the periodic exporter runs. */
 	exportEnabled: boolean;
 	otlp: OtlpConfig;

@@ -9,9 +9,9 @@ import { type Route, SUBSTRATE_MCP_URL, TRACKER_PROXY_PORT, type TestsRoute, tra
 import type { GraphNodeView, GraphView } from "./substrate.ts";
 
 /** launcher.py NODE_ID_RE / IDENTIFIER_RE, worktree.py REPO_SLUG_RE. */
-export const NODE_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
-export const IDENTIFIER_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
-export const REPO_SLUG_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const NODE_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
+const IDENTIFIER_RE = /^[A-Z][A-Z0-9]*-[0-9]+$/;
+const REPO_SLUG_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 export function isValidNodeId(value: unknown): value is string {
 	return typeof value === "string" && NODE_ID_RE.test(value);
@@ -25,9 +25,9 @@ export function isValidRepoSlug(value: unknown): value is string {
 	return typeof value === "string" && REPO_SLUG_RE.test(value) && !value.includes("..");
 }
 
-export const VM_HOME = "/home/agentos";
+const VM_HOME = "/home/agentos";
 export const VM_WORK = `${VM_HOME}/work`;
-export const VM_SANDBOX = "/mnt/sandbox";
+const VM_SANDBOX = "/mnt/sandbox";
 
 /** Static session instructions: environment facts only, no issue content, no ids. */
 export const ADDITIONAL_INSTRUCTIONS = `You run inside an agentOS virtual machine managed by substrate-host.
@@ -58,12 +58,12 @@ function requireIds(input: RenderPromptInput): void {
 }
 
 /** Where the kickoff state (SessionRecord) and its .xml spec live in the VM (D-10, tracker_route vm_mcp). */
-export const VM_STATE_DIR = `${VM_HOME}/.substrate`;
-export const VM_STATE_FILE = `${VM_STATE_DIR}/ultrathink-state.json`;
-export const VM_STATE_SPEC = `${VM_STATE_DIR}/ultrathink-state.xml`;
-export const VM_KICKOFF_SKILL = `${VM_HOME}/.claude/skills/ultrathink-kickoff/SKILL.md`;
+const VM_STATE_DIR = `${VM_HOME}/.substrate`;
+const VM_STATE_FILE = `${VM_STATE_DIR}/ultrathink-state.json`;
+const VM_STATE_SPEC = `${VM_STATE_DIR}/ultrathink-state.xml`;
+const VM_KICKOFF_SKILL = `${VM_HOME}/.claude/skills/ultrathink-kickoff/SKILL.md`;
 /** The b:hooks shim's scratch file inside the worktree; 03-07 refuses it in every commit. */
-export const HOOK_INPUT_FILE = `${VM_WORK}/.substrate-hook-input.json`;
+const HOOK_INPUT_FILE = `${VM_WORK}/.substrate-hook-input.json`;
 
 function testsStep(testsRoute: TestsRoute, nodeId: string): string {
 	switch (testsRoute) {
@@ -93,7 +93,7 @@ function pushAndPrStep(nodeId: string): string {
 }
 
 /** ultrathink-sync's skill file in the VM; the model applies it after the PR opens (D-10). */
-export const VM_SYNC_SKILL = `${VM_HOME}/.claude/skills/ultrathink-sync/SKILL.md`;
+const VM_SYNC_SKILL = `${VM_HOME}/.claude/skills/ultrathink-sync/SKILL.md`;
 
 const SYNC_FIELDS_ONLY =
 	"sync writes only PR URL, PR #, PR State (Open), Repo and Branch on the Notion Task row and the PR link on the Linear issue — no Linear state change and never Done; Done comes only from graph_complete in step (5)";
@@ -148,7 +148,7 @@ export function renderPrompt(input: RenderPromptInput): string {
 `;
 }
 
-export type SkillFile = { rel: string; content: string };
+type SkillFile = { rel: string; content: string };
 export type Skill = { name: string; files: SkillFile[] };
 export type TrackerLocators = { notionDataSourceUrl: string; linearTeam: string };
 
@@ -281,6 +281,7 @@ export function substrateProxyLoopback(url: string = SUBSTRATE_MCP_URL): boolean
 	try {
 		host = new URL(url).hostname.toLowerCase();
 	} catch {
+		// An unparseable URL is not a loopback host.
 		return false;
 	}
 	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);

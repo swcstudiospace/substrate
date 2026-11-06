@@ -31,7 +31,7 @@ import type { ClientError, CorpusClient } from "./client.ts";
 import type { Inventory } from "./inventory.ts";
 import type { IngestProblem, IngestSummary } from "./render.ts";
 
-export interface IngestInput {
+interface IngestInput {
 	plan: CorpusPlanResponse;
 	inventory: Inventory;
 	client: CorpusClient;
@@ -44,7 +44,7 @@ export interface IngestInput {
 	batchBytes: number;
 }
 
-export interface IngestOutcome {
+interface IngestOutcome {
 	summary: IngestSummary;
 	/** Set when a request failed as a whole (transport, auth, protocol); the rest of the run was not attempted. */
 	fatal: ClientError | null;
@@ -153,7 +153,8 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 	const pending = [...tombstones.values()];
 	for (let start = 0; start < pending.length && state.fatal === null; start += MAX_INGEST_TOMBSTONES) {
 		const chunk = pending.slice(start, start + MAX_INGEST_TOMBSTONES);
-		const response = await input.client.ingest({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: chunk });
+		// The scope the plan was built with: the server refuses a tombstone request without it, and judges each tombstone against it.
+		const response = await input.client.ingest({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: chunk, scope: input.inventory.scope });
 		if (response.ok) absorb(response.value, chunk);
 		else failAll(chunk, response.error);
 	}

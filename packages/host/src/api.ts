@@ -32,7 +32,7 @@ export type ApiService = {
 	kill(graphId: string, nodeId: string): Promise<boolean>;
 };
 
-export type ApiOptions = {
+type ApiOptions = {
 	/** Bearer secret every route but GET /healthz requires (SUBSTRATE_HOST_API_TOKEN). */
 	token: string;
 	/** Reports whether the rivet engine finished starting; defaults to true. */

@@ -122,7 +122,7 @@ export interface CorpusStore {
 }
 
 /** The most repositories `status()` lists, ordered by name, so a reply stays bounded. */
-export const STATUS_MAX_REPOS = 1000;
+const STATUS_MAX_REPOS = 1000;
 
 function numberOf(value: unknown): number {
 	const parsed = Number(value);

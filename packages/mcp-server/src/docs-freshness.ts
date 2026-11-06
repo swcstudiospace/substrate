@@ -28,12 +28,6 @@
 import { DATASET_TRIGGERS, DATASET_VERSION_RETENTION, triggersFromJson, triggersToJson, type DatasetVersion, type TriggerStore, type VersionStore } from "./docs-datasets.ts";
 import type { EventInput } from "./types.ts";
 
-/** Report-only staleness threshold, hours (`SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H`); a week. */
-export const DEFAULT_FRESHNESS_MAX_AGE_H = 168;
-
-/** Minutes an accepted trigger may wait for its version (`SUBSTRATE_DOCS_TRIGGER_LAG_MIN`). */
-export const DEFAULT_TRIGGER_LAG_MIN = 15;
-
 /** Metric names of the two gauges, served on `GET /metrics` under `gauges`. */
 export const GAUGE_FRESHNESS_SECONDS = "substrate.docs.freshness_seconds";
 export const GAUGE_TRIGGER_LAG_SECONDS = "substrate.docs.trigger_lag_seconds";
@@ -48,6 +42,15 @@ export interface FreshnessSettings {
 	triggerLagMinutes: number;
 	/** Seconds the corpus may go without an ingest (`SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`), named in the corpus's own events. Absent where the corpus is not judged. */
 	corpusMaxAgeS?: number | undefined;
+}
+
+/** A corpus objective the row breaches: `ingest_age` past the age limit, `sync_lag` over the sync objective (`SUBSTRATE_DOCS_SLO_SYNC_LAG_S`). */
+type CorpusBreach = "ingest_age" | "sync_lag";
+
+/** The corpus row beyond a dataset row: its breaches and, when the sync lag is one, the lag and the objective it is over. */
+interface CorpusVerdict {
+	breaches: CorpusBreach[];
+	sync?: { lag_seconds: number; threshold_seconds: number };
 }
 
 /** One dataset's verdict; `dataset` is always a name of the trigger table. */
@@ -66,9 +69,11 @@ export interface DatasetFreshness {
 	lagging: boolean;
 	/** Triggers on record for this dataset. */
 	triggers: number;
+	/** The corpus row only: the objectives it breaches, and the sync lag when that is one of them. */
+	corpus?: CorpusVerdict;
 }
 
-export interface FreshnessInput {
+interface FreshnessInput {
 	versions: VersionStore;
 	triggers: TriggerStore;
 	/** Epoch ms. */
@@ -154,17 +159,27 @@ export function evaluateFreshness(input: FreshnessInput): DatasetFreshness[] {
 
 /**
  * The corpus's verdict, judged apart from the datasets (v1.7 phase 65): stale when its newest ingest is older than
- * `maxAgeS`. It reuses the dataset breach machinery (one marker, one warning per breach, one note when it clears), so the
- * row stands in a dataset row: `trigger_lag_seconds` is the age and `lagging_commit` the newest ingest's instant. `null`
- * (judge nothing) when `maxAgeS` is 0 or the manifest has never ingested anything or its instant cannot be read. A corpus
- * whose documents do not change is as old as its last change, so this warns for a quiet one too; the threshold is the knob.
+ * `maxAgeS` (0 judges no age), and lagging when the newest `docs.sync` lag is strictly over `syncLagMaxS` (unset judges no
+ * sync). It reuses the dataset breach machinery (one marker, one warning per breach, one note when it clears), so the row
+ * stands in a dataset row: `trigger_lag_seconds` is the age and `lagging_commit` the newest ingest's instant; `corpus` names
+ * the objectives it breaches. `null` (judge nothing) when neither objective is on, the manifest has never ingested anything
+ * or its instant cannot be read. A corpus whose documents do not change is as old as its last change, so this warns for a
+ * quiet one too; the threshold is the knob.
  */
-export function corpusFreshnessRow(input: { lastIngestAt: string | null; now: number; maxAgeS: number }): DatasetFreshness | null {
-	if (input.maxAgeS === 0 || input.lastIngestAt === null) return null;
+export function corpusFreshnessRow(input: { lastIngestAt: string | null; now: number; maxAgeS: number; syncLagS?: number | null | undefined; syncLagMaxS?: number | undefined }): DatasetFreshness | null {
+	const ageJudged = input.maxAgeS > 0;
+	const syncMax = input.syncLagMaxS;
+	if (!ageJudged && syncMax === undefined) return null;
+	if (input.lastIngestAt === null) return null;
 	const ms = parseMs(input.lastIngestAt);
 	if (ms === null) return null;
 	const age = Math.max(0, Math.round((input.now - ms) / 1000));
-	const stale = age > input.maxAgeS;
+	const stale = ageJudged && age > input.maxAgeS;
+	const syncLag = input.syncLagS ?? null;
+	const syncOver = syncMax !== undefined && syncLag !== null && syncLag > syncMax;
+	const breaches: CorpusBreach[] = [];
+	if (stale) breaches.push("ingest_age");
+	if (syncOver) breaches.push("sync_lag");
 	return {
 		dataset: CORPUS_FRESHNESS_DATASET,
 		freshness_seconds: age,
@@ -172,13 +187,14 @@ export function corpusFreshnessRow(input: { lastIngestAt: string | null; now: nu
 		stale,
 		trigger_lag_seconds: age,
 		lagging_commit: input.lastIngestAt,
-		lagging: stale,
+		lagging: breaches.length > 0,
 		triggers: 0,
+		corpus: { breaches, ...(syncOver ? { sync: { lag_seconds: syncLag, threshold_seconds: syncMax } } : {}) },
 	};
 }
 
 /** One gauge point; `dataset` is the only label and comes from the trigger table. */
-export interface GaugeSample {
+interface GaugeSample {
 	name: string;
 	unit: "s";
 	description: string;
@@ -267,8 +283,8 @@ export function freshnessStateFromJson(parsed: unknown): FreshnessState {
 	return state;
 }
 
-export type LagAction =
-	| { type: "breach"; dataset: string; commit: string; lagSeconds: number }
+type LagAction =
+	| { type: "breach"; dataset: string; commit: string; lagSeconds: number; corpus?: CorpusVerdict }
 	| { type: "recover"; dataset: string; commit: string; warned: boolean };
 
 /**
@@ -285,7 +301,7 @@ export function planLagTransitions(rows: readonly DatasetFreshness[], markers: L
 		lagging.add(row.dataset);
 		const marker = markers.get(row.dataset);
 		if (marker === undefined || !marker.warned) {
-			actions.push({ type: "breach", dataset: row.dataset, commit: row.lagging_commit, lagSeconds: row.trigger_lag_seconds });
+			actions.push({ type: "breach", dataset: row.dataset, commit: row.lagging_commit, lagSeconds: row.trigger_lag_seconds, ...(row.corpus === undefined ? {} : { corpus: row.corpus }) });
 		}
 	}
 	for (const [dataset, marker] of markers) {
@@ -300,10 +316,15 @@ const COMMIT_MAX = 64;
 /** The `warning` for one dataset entering the breach: the commit, the wait and the threshold, never content. */
 export function lagWarningEvent(action: Extract<LagAction, { type: "breach" }>, settings: FreshnessSettings): EventInput {
 	if (action.dataset === CORPUS_FRESHNESS_DATASET) {
+		const verdict: CorpusVerdict = action.corpus ?? { breaches: ["ingest_age"] };
+		const ageOver = verdict.breaches.includes("ingest_age");
+		const parts: string[] = [];
+		if (ageOver) parts.push(`last ingest ${Math.round(action.lagSeconds / 3600)} h ago${settings.corpusMaxAgeS === undefined ? "" : `, over the ${Math.round(settings.corpusMaxAgeS / 3600)} h limit`}`);
+		if (verdict.sync !== undefined) parts.push(`sync lag ${verdict.sync.lag_seconds} s, over the ${verdict.sync.threshold_seconds} s objective`);
 		return {
 			surface: "substrate",
 			kind: "warning",
-			summary: `docs corpus: last ingest ${Math.round(action.lagSeconds / 3600)} h ago${settings.corpusMaxAgeS === undefined ? "" : `, over the ${Math.round(settings.corpusMaxAgeS / 3600)} h limit`}`,
+			summary: `docs corpus: ${parts.join("; ")}`,
 			session_id: `docs-freshness:${CORPUS_FRESHNESS_DATASET}`,
 			payload: {
 				action: "docs.freshness",
@@ -311,7 +332,9 @@ export function lagWarningEvent(action: Extract<LagAction, { type: "breach" }>, 
 				state: "lagging",
 				dataset: CORPUS_FRESHNESS_DATASET,
 				lag_seconds: action.lagSeconds,
-				...(settings.corpusMaxAgeS === undefined ? {} : { threshold_seconds: settings.corpusMaxAgeS }),
+				breaches: verdict.breaches,
+				...(ageOver && settings.corpusMaxAgeS !== undefined ? { threshold_seconds: settings.corpusMaxAgeS } : {}),
+				...(verdict.sync === undefined ? {} : { sync_lag_seconds: verdict.sync.lag_seconds, sync_threshold_seconds: verdict.sync.threshold_seconds }),
 			},
 		};
 	}
@@ -339,7 +362,7 @@ export function lagRecoveryEvent(action: Extract<LagAction, { type: "recover" }>
 		return {
 			surface: "substrate",
 			kind: "note",
-			summary: "docs corpus: ingest is fresh again",
+			summary: "docs corpus: back within its freshness and sync objectives",
 			session_id: `docs-freshness:${CORPUS_FRESHNESS_DATASET}`,
 			payload: { action: "docs.freshness", runtime: "docs-freshness", state: "recovered", dataset: CORPUS_FRESHNESS_DATASET, ...(settings.corpusMaxAgeS === undefined ? {} : { threshold_seconds: settings.corpusMaxAgeS }) },
 		};
@@ -362,7 +385,7 @@ export function lagRecoveryEvent(action: Extract<LagAction, { type: "recover" }>
 }
 
 /** The side effects a lag transition needs, injected so tests supply their own. */
-export interface LagEffects {
+interface LagEffects {
 	/** Persist the markers; called after each marker change and never throws. */
 	persist(): Promise<void>;
 	/** The existing event path; a rejection is caught here. */
@@ -372,7 +395,7 @@ export interface LagEffects {
 }
 
 /** What one pass did: the transitions that completed, and those that failed and stay owed. */
-export interface LagOutcome {
+interface LagOutcome {
 	applied: LagAction[];
 	failed: LagAction[];
 }
@@ -432,15 +455,15 @@ export async function applyLagActions(
 }
 
 /** Least time between two attempts to deliver the same dataset's transition after a failure. */
-export const LAG_RETRY_MS = 60_000;
+const LAG_RETRY_MS = 60_000;
 
 /** Longest `startDocsRefresh` waits for the accepted-trigger record before answering anyway. */
 export const TRIGGER_RECORD_DEADLINE_MS = 500;
 
 /** Longest an emit may take before it counts as a failure; a hung ledger must not pin the settler. */
-export const LAG_EMIT_DEADLINE_MS = 5_000;
+const LAG_EMIT_DEADLINE_MS = 5_000;
 
-export interface LagSettlerOptions {
+interface LagSettlerOptions {
 	retryMs?: number;
 	emitDeadlineMs?: number;
 }

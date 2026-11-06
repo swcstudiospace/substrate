@@ -22,7 +22,7 @@ export const MAX_REPO_LENGTH = 200;
 export const CORPUS_NAME_PREFIX = "corpus:";
 
 /** Hex digits of the content hash kept in the name. Twelve is 48 bits: collisions inside one path's history are not a concern. */
-export const NAME_SHA_LENGTH = 12;
+const NAME_SHA_LENGTH = 12;
 
 /** The prefix of a repository label for a directory that has no GitHub origin. */
 const LOCAL_PREFIX = "local/";
@@ -170,7 +170,7 @@ export function stripRemoteImages(body: string): { body: string; stripped: numbe
  * server adds `sha-mismatch` and `secret-findings`, which need the body hashed and scanned. Closed.
  */
 export const DOCUMENT_REFUSALS = ["bad-repo", "bad-path", "too-large", "unsafe-name", "empty-document"] as const;
-export type DocumentRefusal = (typeof DOCUMENT_REFUSALS)[number];
+type DocumentRefusal = (typeof DOCUMENT_REFUSALS)[number];
 
 /**
  * The first rule a document breaks, or null when it may be sent: a well-formed repository and path (the server refuses a

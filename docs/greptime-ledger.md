@@ -226,15 +226,19 @@ patterns are in `redact.ts`, ported from `grok-hermes-connector`'s
 append-only log.
 
 **Caps, so one collector cannot flood a log nothing will ever reclaim.** Summary
-2000 chars; each other text field 512; each string in the payload 4000; the
+2000 chars; `session_id`, `branch`, `node_id` and `linear_identifier` 512 code units,
+cut; `repo` 512 code units, refused above that instead of cut (see
+[Identifiers at the 512-unit cut](#identifiers-at-the-512-unit-cut)); each string in
+the payload 4000; the
 whole payload 16 KB, above which it is replaced by a marker rather than
 half-written.
 
 **Consistent identifiers.** `session_id`, `graph_id` and `repo` are query keys as
 well as stored values — `emit` finds the previous hash by session, `verifyGraph`
 reads by graph, the brief reads by repo. Because the write path redacts and caps
-them, every read goes through the same `normalizeIdentifier`, so the stored and
-queried forms agree by construction. Cleaning on write while querying the raw
+them, every read goes through the same normaliser: `normalizeKey` for `session_id` and
+`repo`, `normalizeIdentifier` for the rest (`packages/mcp-server/src/event.ts`). The
+stored and queried forms agree by construction. Cleaning on write while querying the raw
 value would mean a lookup that never matches: every event would restart its
 session's chain, and verification would find no rows at all.
 
@@ -362,6 +366,77 @@ landed quickly. A timeout is not proof the write was lost, so the warning does n
 say the hour will be uncovered.
 There is **no backfill**: events stored before this table first existed belong to no
 hour, and the first anchored hour is Phase 28's decision.
+
+### Identifiers at the 512-unit cut
+
+Before commit `8a604455`, a `session_id`, `repo`, `branch`, `node_id` or
+`linear_identifier` longer than 512 code units was cut at 512. A cut that fell inside
+a surrogate pair left a lone high surrogate at the end, which the transport encodes
+as U+FFFD. These rows are the **straddled rows**. Their failure mode is recorded in
+`.planning/phases/73-ledger-tamper-evidence/73-VERIFICATION.md`.
+
+A straddled row:
+
+- fails `verifyChain` with `hash does not match contents`, because the stored form is
+  not the form that was hashed. It fails closed; it is not evidence of tampering.
+- is not found by a read of the same identifier, for `session_id` and `repo`, which now
+  read through `normalizeKey` (`packages/mcp-server/src/event.ts`) and so no longer
+  carry the dangling high. Reads of `branch`, `node_id` and `linear_identifier` have not
+  been probed against a live store.
+- cannot be repaired in place. `assertAppendOnly` (`packages/mcp-server/src/greptime.ts`)
+  refuses any statement that is not a read or an append.
+
+**Owner decision, 2026-11-04:** straddled rows are left as they are. No live store was
+read for this section, so no ids are listed here; the scan below finds them.
+
+**Write rules now.**
+
+- A lone UTF-16 surrogate in any of the six text fields (`summary`, `session_id`,
+  `repo`, `branch`, `node_id`, `linear_identifier`) is refused with a named error,
+  `<field>_lone_surrogate` (`assertWriteTextFields`, `packages/mcp-server/src/event.ts`).
+- A graph id over 512 UTF-8 bytes is refused with `graph_id_too_long`.
+- A repo over 512 code units is refused with `repo_too_long: a repo may not exceed 512
+  code units; got N`. A repo is never cut at write.
+- **Not covered.** `branch`, `node_id` and `linear_identifier` are still cut at 512 code
+  units without the dangling-high trim (`normalizeIdentifier` and `clean`). A new write
+  whose cut falls inside a pair is still stored with U+FFFD in those fields.
+  `session_id` and `repo` are trimmed, so the cut stores no U+FFFD for them.
+- **Reads are unchanged.** A filter longer than 512 code units is still cut to 512 before
+  it is compared (`normalizeIdentifier`, `normalizeKey`). This is a residual of the
+  refusal, which applies at write only.
+
+**Detection rule.** A row is affected when a field's length is 512 code units and its
+last unit is U+FFFD (bytes `EF BF BD`). **NOT RUN against a live store.** Check
+`character_length` and `substring` against the store's SQL functions before use.
+
+```sql
+-- NOT RUN against a live store. Verify character_length and substring against the
+-- store's SQL functions before use. Column names are from the agent_events schema
+-- above; "id" is quoted because it is reserved.
+SELECT "id", "ts", 'session_id' AS "field" FROM "agent_events"
+ WHERE character_length("session_id") = 512 AND substring("session_id", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'repo' FROM "agent_events"
+ WHERE character_length("repo") = 512 AND substring("repo", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'branch' FROM "agent_events"
+ WHERE character_length("branch") = 512 AND substring("branch", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'node_id' FROM "agent_events"
+ WHERE character_length("node_id") = 512 AND substring("node_id", 512, 1) = '�'
+UNION ALL
+SELECT "id", "ts", 'linear_identifier' FROM "agent_events"
+ WHERE character_length("linear_identifier") = 512 AND substring("linear_identifier", 512, 1) = '�';
+```
+
+- `character_length` counts code points, not UTF-16 code units. A value that is 512 code
+  units long and holds an astral character has fewer code points, so this query misses
+  it. To catch those, select rows whose field ends in U+FFFD without the length test, and
+  check `value.length === 512` in application code.
+- The scan cannot tell a straddle from a collector that wrote U+FFFD itself at 512 units.
+  Each hit needs an owner decision.
+- Run it from Greptime's console, not through `substrate-mcp`, which offers no statement
+  route (see [Reading the ledger](#reading-the-ledger)).
 
 ## Idempotent replay (U5-4a)
 
@@ -542,6 +617,56 @@ hour forever, so the rehearsal harness never carries `SOLANA_*` names.
 
 The signer set is the bootstrap set (`SUBSTRATE_ANCHOR_SIGNER_SET` when set, else the configured anchor key `SOLANA_ANCHOR_PUBKEY` alone) plus the `anchor.signer.rotate` notes an operator surface wrote (read by paging each operator surface's notes, 500 a page, at most 50 pages, keeping only the rotation action); when that read is cut by the cap, cannot advance or fails, a signer is not provably current: the answer carries `signer_set_complete: false` and an anchor that would verify, or a mismatch that only the signer set explains, is reported `unverified` with reason `rotation-read-incomplete`, never `anchored`. A signer whose window closed at or before the anchored hour started is a `mismatch` with reason `signer-retired` (the read was complete, so the signature is known to be by a key that no longer spoke for the ledger; `substrate session rollback` refuses on it unless `--force`). A malformed `SUBSTRATE_ANCHOR_SIGNER_SET` answers `unverified` with a fixed reason (the boot warning names the rule and field, never the value). Every answer that judged a signer carries `signer_set: {source, entries, rotation_notes_applied, rotation_issues, read_gap}` (`checkpoint_verify` and `memory_verify`), so an ignored rotation note or a truncated read is visible; see `docs/runbooks/anchor-signer-rotation.md`. A `ckpt_id` is found in the newest 500 notes of `session_id`, else of the caller's surface in the last seven days (the ledger has no read by payload); an older or foreign checkpoint needs its `event_id`. The evidence is hashes, the proof path, public keys and the transaction signature only, never event contents.
 
+### Memo v2 and per-graph heads
+
+From phase 73 a new hour is anchored with memo v2:
+
+```
+substrate:v2:<hour start>:<root>:<count>:<headsRoot>
+```
+
+- `<root>` and `<count>` are the v1 commitment, unchanged: the RFC 6962 root over the hour's event hashes, in ingest order.
+- `<headsRoot>` is the RFC 6962 root over one head record per `(graph_id, session_id)` pair that wrote events in the hour, sorted by that pair (`packages/ledger/src/heads.ts`). A record hashes the canonical JSON of `[graphId, sessionId, periodStartMs, count, leavesRootHex, headEventId, headHashHex]` with SHA-256. `leavesRootHex` is the RFC 6962 root over one leaf per event of the pair, in chain order, where each leaf is the SHA-256 (lowercase hex) of the JSON `[event_id, hash]` for that event. Each leaf commits to the event id as well as its hash, so a stored `event_id` cannot change unseen. The head is the pair's last event in chain order. A missing `session_id` is `""`.
+
+**`graph_chain_leaves`** holds one row per event: `period_start`, `graph_id`, `session_id`, `seq` (the chain position from 0), `event_id`, `hash`. It is append-only with no primary key, so a retried write can store a row twice. Reads collapse exact duplicates; two rows that disagree about one `seq` make the stored chain invalid. The job writes an hour's leaves before its `anchors` row, so no row exists without its leaves.
+
+**Trust.** `substrate verify` trusts an anchored v2 hour only when:
+
+1. the stored leaves of every graph in that hour, rebuilt into head records, reproduce the on-chain `headsRoot`; and
+2. for each `(graph_id, session_id)` pair of the graph being verified, every stored leaf names an event of that pair whose recomputed content hash and stored hash both equal the leaf's hash, and no event of the pair lies outside the stored leaves.
+
+Only the on-chain root is trusted. A head recomputed from the ledger's rows is never trusted. If (1) fails, the whole hour is untrusted, with no localisation. If (2) fails, the verdict names the first event where the chain parts from its leaves, walking the stored order: `first_differing_event_id` (an edited or rewritten event, or the first event past the stored end) or `first_missing_event_id` (a deleted or truncated event). Any contradiction of an anchored head makes `ok` false, even when the local chain check passes; a full rewrite passes that check.
+
+**v1 hours.** Hours anchored before phase 73 carry memo v1 and no per-graph heads. They still verify for root and count, and are reported `trusted: false` with the reason `anchored with a v1 memo: no heads commitment on chain`. `ok` is unchanged for them.
+
+**Trust reasons.** `trusted` is false, with the reason, when:
+
+- the graph holds no events: `no events`;
+- no hour of the graph is anchored: `no anchored hour`;
+- an hour is pending or unanchored: `hour is <status>: no anchored head to trust`;
+- the stored-leaves read outlasts the verify budget: `budget exhausted`;
+- the stored-leaves read fails: `store-failed`.
+
+`budget exhausted` and `store-failed` make `ok` false and the hour untrusted, because the chain could not be checked. They claim no tampering: the reason says what could not be read.
+
+### Memo v3 pointers
+
+Each graph with events in an hour also gets one pointer per hour, sent as its own transaction. The hour transaction stays v1 or v2, unchanged. The pointer memo is:
+
+```
+substrate:v3:<graph_id>:<period_start_iso>:<count>:<graph_heads_root>:<hour_tx_sig>
+```
+
+It is sent to the graph's index address: base58 of SHA-256 over `substrate:graph-index:v1\n` followed by the graph id (`packages/ledger/src/graph-index.ts`). One pointer per (graph, hour).
+
+- **Only job-key pointers that succeeded count.** Verify counts a pointer only when the job key signed it and it succeeded on chain. A pointer the job key did not sign, or one that failed on chain, is ignored: it neither verifies nor fails the hour.
+- **Graph id cap.** A graph id over 512 UTF-8 bytes is refused at write with `graph_id_too_long` (`packages/mcp-server/src/event.ts`).
+- **Pre-index v2 hours.** A v2 hour that holds the graph's events but has no pointer for that graph is `ok` false, with the reason `pre-index v2 hour`: its pointer is missing, so it is not proven.
+- **Unreadable chain.** An unreadable chain is `ok` false. Verify fails closed and does not read the hour as proven.
+- **Alarm, no row.** An unanchored hour whose root differs from the chain's memo alarms and stores no row.
+
+A graph id that contains a NUL byte or a lone UTF-16 surrogate is refused at write, with a named error (`graph_id_nul` and `graph_id_lone_surrogate`, `packages/mcp-server/src/event.ts`), so it never reaches a pointer. Owner-accepted, 2026-11-03, two limits remain: (a) a graph lost before its first pointer has landed verifies `ok` true and `trusted` false with the reason `no events` (Q8, pinned by `packages/mcp-server/src/service.test.ts`); (b) a pointer for an old hour is found through the RPC's transaction history for the index address, so if that history is pruned the hour passes, and detection of old hours depends on the RPC's history depth (N5).
+
 ## Reading the ledger
 
 `events_query` is the read counterpart of `events_emit`, and the reason a desk seat
@@ -564,11 +689,12 @@ hold this shape: only `greptime.ts` and `brief.ts` may compose a statement, and 
 tool or route may take one. A `sql` tool would have made the read path an arbitrary
 door onto every row in the ledger, redaction and chain notwithstanding.
 
-**Query keys are normalised like stored ones.** `Substrate.queryEvents` runs every
-identifier filter through `normalizeIdentifier`, for the same reason `emit` looks up
-a session's chain tip that way. Querying the raw value would match nothing for any
-identifier that redaction or the 512-character cap touched — and an empty window
-reads exactly like an empty ledger.
+**Query keys are normalised like stored ones.** `Substrate.queryEvents` runs the
+`session_id` and `repo` filters through `normalizeKey`, and every other identifier
+filter through `normalizeIdentifier` (`packages/mcp-server/src/service.ts`), for the
+same reason `emit` looks up a session's chain tip that way. Querying the raw value
+would match nothing for any identifier that redaction or the 512-code-unit cut
+touched — and an empty window reads exactly like an empty ledger.
 
 **`payload` is excluded unless asked for.** It is the one unbounded column, up to
 16 KB an event, so a 500-row reply carrying it would be megabytes of MCP response
@@ -910,6 +1036,26 @@ run by the operator against the store, with `SUBSTRATE_LEDGER_TTL` unset in
 unsetting stops further deletion but does not restore rows already removed — which
 is what the export step above is for.
 
+## Telemetry buffer and dead-letter (phase 76)
+
+The buffer is **off by default**. With `SUBSTRATE_EVENT_BUFFER_PATH` unset, a failed write answers `stored: false` exactly as it always has, and nothing is queued. With the path set, an event whose ledger write fails is not dropped: it waits in a bounded buffer and is retried with exponential backoff. When its retry budget is spent it is written to the dead-letter store: one record per event, carrying the event's hash and the reason. Nothing is discarded without a record.
+
+- **Buffer.** `SUBSTRATE_EVENT_BUFFER_MAX` (default 256) bounds it. A session's events stay in chain order: while one of its events waits, a later event of that session waits behind it, and its `prev` is the hash of the event ahead of it. Hashes are never rewritten.
+- **No duplicates.** Each retry first looks for the event's row by id inside its cell. A row already in `agent_events` is not inserted again, and only a missing ingest record is repaired.
+- **Budget and backoff.** `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` (default 10) counts the live write. The first retry waits `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` (default 1000), doubles per attempt up to `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` (default 60000), with ±20 % jitter. With the defaults the nine waits between the ten attempts total 243 s nominal (1, 2, 4, 8, 16, 32, 60, 60, 60 seconds). An outage of about four minutes, 195 to 292 s with jitter, is ridden out; a longer one spends the budget and dead-letters the event.
+- **Overflow.** When the buffer is full, the oldest waiting event that is not being delivered is dead-lettered. Later events of its session are dead-lettered with it (`predecessor-dead-lettered`): they could never chain once it is missing.
+- **Dead letters.** `SUBSTRATE_EVENT_DEAD_LETTER_PATH` names an append-only 0600 JSONL file, and it is required while the buffer is on: boot refuses without it, and the message names the variable. Each record holds `event_id`, `event_hash`, `reason` (`exhausted`, `overflow`, `buffer-full`, `predecessor-dead-lettered` or `abandoned`), `attempts`, `last_reason` and the whole event, so an operator can replay it by hand.
+- **Durability.** Each file reports its own `durable` flag, shown in `/healthz`. The buffer's is false while its last save failed or its file could not be read at boot. The dead-letter store's is false while a record is held in memory, or while its file could not be counted at boot. A restart re-reads the buffer and retries what was waiting. At shutdown a durable buffer keeps its entries for the next boot. A buffer that is not durable gives its entries up as `abandoned`, each with a record, except pending entries (below), whose records the dead-letter store already holds. When the dead-letter file cannot be written at shutdown, each held record is reported on stderr as one JSON line of identifiers (record id, event id, hash, reason, session id and recorded time), never the summary or payload.
+- **Write-ahead give-up.** An entry given up while its dead-letter record is not on disk stays in the buffer file as pending. A pending entry is never attempted, holds its place in the bound, and leaves once the store writes its record. A keyed replay of a pending entry is answered as a give-up, not as queued. When the buffer is full and nothing can be given up, the new event is refused with `stored: false` and nothing is recorded, so the caller keeps its copy.
+- **Unreadable files are never rewritten.** A buffer or dead-letter file that exists but cannot be read at boot is left as it is. Its store is not durable until a boot reads it. A new dead-letter record starts on its own line after a torn tail, so the torn line is skipped and the record is kept.
+- **Boot refusal.** Boot refuses when `SUBSTRATE_EVENT_BUFFER_PATH` and `SUBSTRATE_EVENT_DEAD_LETTER_PATH` name one file, because each store would rewrite the other's records.
+- **Standalone jobs.** The anchor, backfill, index, index-sweep and ledger jobs run with the buffer off, as the re-anchor job does. The server alone owns the buffer files.
+- **At-least-once.** A dead-letter record can be written twice when a write fails partway, or when a crash falls between a dead-letter write and the buffer's compaction. Both copies carry the same event id and hash, so the duplicate is detectable.
+- **Responses.** A buffered event answers `stored: false` with `buffered: true`, and `/events` answers 503 as for any unstored event. A keyed event that is still queued answers that same queued event when replayed, so a client that resends it with its idempotency key (`SUBSTRATE_EVENT_IDEMPOTENCY` `accept` or `enforce`) does not create a second row. A given-up event answers `deadLettered: true`. Only a landed event is `stored: true`.
+- **Not buffered.** A write whose chain tip cannot be read answers `stored: false` without queueing. That holds for any failure of the read, not only a breaker refusal: the event has no hash without its tip, so the caller keeps its copy. During an outage, for a session whose tip is not cached, the buffer does not hold the event. An append-mode refusal also answers `stored: false` without queueing. Queueing either would hide a configuration or read failure. With `SUBSTRATE_LEDGER_CHAIN_CACHE=0` every session write reads the tip first (a keyed replay answered from the ledger before the tip read appends no event), and a failed tip read refuses that write rather than buffering it. Once append mode is confirmed in this process, or `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER` is set to `1`, `true` or `yes`, a session write whose tip is readable but whose insert fails is still buffered; a session write reaches its insert only under one of those two conditions (service.ts around line 3133). With the cache on (code read, not tested), a session's first write during an outage can be buffered and its next write is refused until the tip is readable. A sessionless write reads no tip; it is buffered during an outage once append mode is confirmed in this process, or when `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER` is set to `1`, `true` or `yes`, with the cache on or off. (The switch is `chainCache` in `packages/mcp-server/src/config.ts`; the tip cache `chainTips` is null when the switch is off, in `packages/mcp-server/src/greptime.ts`; the refusal is the `chain tip unreadable` branch in `packages/mcp-server/src/service.ts`.) Owner-accepted, 2026-11-03.
+- **`/healthz`.** `eventBuffer` is `{ enabled: false }` while the buffer is off. When on it reports `depth`, `max`, `oldestAt`, `durable`, `pending` (given-up entries whose dead-letter record is not yet on disk) and `deadLetter: { depth, durable }`. Depth never changes the status code. The dead-letter store is not bounded, because a bound would have to discard records; alert on its depth.
+- **Residuals.** A buffered `session.end` does not wait for the ledger to close its steering session. The session is closed first, in the live store, and only then is the `session.end` note emitted (`service.ts`, `closeLiveSession`). The close does not depend on the ledger write, which may be down. While the note is buffered, `event_stored` is false, and the docs-canary note runs only for stored events. Sessionless buffered events have no chain, so they are independent entries with no ordering promise.
+
 ## Configuration
 
 Four variables, read from the environment and never from this repo:
@@ -934,6 +1080,12 @@ Plus switches, none of which is a credential:
 | `SUBSTRATE_EVENT_IDEMPOTENCY` | `off` (default), `accept` or `enforce`. Anything else is `off` with a boot warning. See *Idempotent replay*. |
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2, 0..100000; default 2. Report-only on `/healthz`. See *Coverage and archive*. |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
+| `SUBSTRATE_EVENT_BUFFER_MAX` | events the buffer holds, positive integer; default 256; read only while the buffer is on. Over it, the oldest waiting event is dead-lettered. See *Telemetry buffer*. |
+| `SUBSTRATE_EVENT_BUFFER_PATH` | the buffer's file, and the switch: unset (the default) keeps the buffer off, so a failed write answers `stored: false` as before. Set, it requires `SUBSTRATE_EVENT_DEAD_LETTER_PATH`. |
+| `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` | write attempts per event, the live one included, positive integer; default 10; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` | delay before the first retry, positive integer ms; default 1000, doubling per attempt; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` | ceiling on one retry delay, positive integer ms; default 60000; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_DEAD_LETTER_PATH` | the dead-letter records' file, append-only. Required while `SUBSTRATE_EVENT_BUFFER_PATH` is set; boot refuses without it. |
 
 Out-of-range numbers clamp and unparseable ones fall back, as the breaker settings do.
 

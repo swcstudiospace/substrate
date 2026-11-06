@@ -16,7 +16,7 @@ import type { PresenceBackend } from "./presence-dragonfly.ts";
 
 /** The whole command set this client may send. */
 export const PRESENCE_COMMANDS = ["GET", "SET", "SCAN", "TIME"] as const;
-export type PresenceCommand = (typeof PRESENCE_COMMANDS)[number];
+type PresenceCommand = (typeof PRESENCE_COMMANDS)[number];
 
 /** Keys requested per SCAN round. The server may return more or fewer; the caller's limit still holds. */
 export const SCAN_COUNT = 100;
@@ -30,7 +30,7 @@ export interface PresenceRedisClient {
 	close(): void;
 }
 
-export type MakePresenceClient = (url: string, connectTimeoutMs: number) => PresenceRedisClient;
+type MakePresenceClient = (url: string, connectTimeoutMs: number) => PresenceRedisClient;
 
 /** A failed presence command or connection. The message is redacted: a connection error can quote the URL. */
 export class PresenceBackendError extends Error {

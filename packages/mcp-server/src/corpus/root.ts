@@ -24,11 +24,32 @@ export const CORPUS_ROOT_SESSION = "corpus-root";
 /** At most one root event per this many milliseconds; a change that lands inside the window is coalesced into the next event. */
 export const ROOT_EMIT_MIN_INTERVAL_MS = 5_000;
 
+/** The longest wait before an attempt at a root the ledger refused. The backoff doubles from the window up to this. */
+const ROOT_RETRY_MAX_MS = 60_000;
+
+/** The wait before the attempt that follows `failures` refusals in a row: 5 s, 10 s, 20 s, 40 s, then {@link ROOT_RETRY_MAX_MS}. */
+function rootRetryMs(failures: number): number {
+	return Math.min(ROOT_EMIT_MIN_INTERVAL_MS * 2 ** (failures - 1), ROOT_RETRY_MAX_MS);
+}
+
+/** The code a root write the ledger refused is reported under: the ledger's own reason, never its message. */
+function refusalCode(answer: RootEmitAnswer): string {
+	if (answer.lookupFailed === true) return "lookup-failed";
+	return "not-stored";
+}
+
+/** The code a thrown root write is reported under: the error's `code` when it is a plain token, else `threw`. */
+function thrownCode(error: unknown): string {
+	if (typeof error !== "object" || error === null || !("code" in error)) return "threw";
+	const { code } = error;
+	return typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : "threw";
+}
+
 /**
  * The most active rows one root is made from. A manifest past this has no root and says so (`too-large`) instead of a root over
  * a prefix that would look complete. The store reads one row more than this to know.
  */
-export const MAX_CORPUS_LEAVES = 100_000;
+const MAX_CORPUS_LEAVES = 100_000;
 
 /** A row the root may cover. A row whose `state` is not `active` is left out. */
 export type RootRow = ManifestLeaf & { state?: ManifestState };
@@ -38,7 +59,7 @@ interface TreeLeaf extends ManifestLeaf {
 }
 
 /** The active rows as leaves in tree order, and how many active rows could not be encoded. */
-export interface CorpusTree {
+interface CorpusTree {
 	ordered: TreeLeaf[];
 	/** One bad row never fails the root: a malformed sha256 or an ill-formed name is skipped and counted here. */
 	skipped: number;
@@ -71,7 +92,7 @@ export function corpusRoot(rows: readonly RootRow[]): { root: string; count: num
 }
 
 /** One document's inclusion proof against the root of the tree it was taken from. */
-export interface CorpusInclusion {
+interface CorpusInclusion {
 	sha256: string;
 	leaf: string;
 	index: number;
@@ -98,17 +119,17 @@ export function corpusProof(rows: readonly RootRow[], repo: string, path: string
 }
 
 /** The root of one manifest version. */
-export interface CorpusRootSnapshot {
+interface CorpusRootSnapshot {
 	root: string;
 	count: number;
 	manifestVersion: number;
 	skipped: number;
 }
 
-export type CorpusRootAnswer = { ok: true; snapshot: CorpusRootSnapshot } | { ok: false; reason: "too-large" };
+type CorpusRootAnswer = { ok: true; snapshot: CorpusRootSnapshot } | { ok: false; reason: "too-large" };
 
 /** One read of the manifest: the snapshot and the tree it was made from (what a proof needs). */
-export type CorpusRootRead = { ok: true; snapshot: CorpusRootSnapshot; tree: CorpusTree } | { ok: false; reason: "too-large" };
+type CorpusRootRead = { ok: true; snapshot: CorpusRootSnapshot; tree: CorpusTree } | { ok: false; reason: "too-large" };
 
 /** The keeper's clock; a test passes a manual one. */
 export interface RootClock {
@@ -117,19 +138,33 @@ export interface RootClock {
 }
 
 /** The real clock. The timer is unref'd, so a pending root event never holds the process open (one still waiting at shutdown is dropped). */
-export const systemRootClock: RootClock = {
+const systemRootClock: RootClock = {
 	now: () => Date.now(),
 	setTimer: (run, ms) => {
 		setTimeout(run, ms).unref();
 	},
 };
 
-export interface CorpusRootKeeperDeps {
+/**
+ * What the ledger answered for a root event. `stored: false` leaves the root owed, unless `buffered` or `deadLettered` says the server
+ * has taken responsibility for it: a buffered note will be written, and a dead-lettered one is recorded as given up. Only the code of
+ * a refusal is logged.
+ */
+interface RootEmitAnswer {
+	stored: boolean;
+	buffered?: true;
+	deadLettered?: true;
+	lookupFailed?: true;
+}
+
+interface CorpusRootKeeperDeps {
 	/** The manifest, or null while the corpus is off or there is no index. Read on each use. */
 	store: () => CorpusStore | null;
 	/** Resolves with `stored: false` when the ledger could not take the event (it does not always throw). */
-	emit: (event: EventInput) => Promise<{ stored: boolean }>;
+	emit: (event: EventInput) => Promise<RootEmitAnswer>;
 	clock?: RootClock | undefined;
+	/** Where a failure line goes; stderr in production. */
+	log?: ((line: string) => void) | undefined;
 }
 
 /**
@@ -145,7 +180,9 @@ export interface CorpusRootKeeperDeps {
  * - `manifestChanged()` bumps the generation and schedules one root event. Events are coalesced: at most one per
  *   {@link ROOT_EMIT_MIN_INTERVAL_MS}, and the one that goes out reads the manifest when its timer fires, so the latest state wins.
  *   The timer runs after the request that noted the change has answered, and a failure of any kind is swallowed: a root event
- *   never fails an ingest. A root event lost to a failure is written by the next change.
+ *   never fails an ingest. A root the ledger did not store stays owed and is retried with backoff ({@link rootRetryMs}): the wait
+ *   runs 5 s, 10 s, 20 s, 40 s, then {@link ROOT_RETRY_MAX_MS}, and a stored write sets it back. A buffered or dead-lettered answer
+ *   clears the owed root instead: the server has it, so it is not written again. Each distinct failure code is reported once.
  * - `peek()` never reads: it is what `docs_search` uses.
  */
 export class CorpusRootKeeper {
@@ -154,6 +191,8 @@ export class CorpusRootKeeper {
 	private cached: (CorpusRootSnapshot & { generation: number }) | null = null;
 	private reading: { generation: number; promise: Promise<CorpusRootRead> } | null = null;
 	private timerPending = false;
+	/** Identifies the armed timer; flush advances it so a timer it disarmed does nothing when it fires. */
+	private timerToken = 0;
 	/** When the last root write was attempted: the five-second window runs from there, rerun or not. */
 	private lastWriteMs: number | null = null;
 	/** The root the ledger holds last. A root is compared, not its version: concurrent batches may commit out of order, so a final state can share the version of an earlier read. */
@@ -165,9 +204,15 @@ export class CorpusRootKeeper {
 	/** The one root write in flight, and whether another was asked for while it ran. */
 	private emitting: Promise<void> | null = null;
 	private emitAgain = false;
+	/** Consecutive root writes the ledger did not store: the wait before the next attempt. A stored write sets it back to zero. */
+	private failures = 0;
+	/** The failure codes already reported to stderr: each distinct code is reported once. */
+	private readonly reportedCodes = new Set<string>();
+	private readonly log: (line: string) => void;
 
 	constructor(private readonly deps: CorpusRootKeeperDeps) {
 		this.clock = deps.clock ?? systemRootClock;
+		this.log = deps.log ?? ((line: string) => process.stderr.write(line));
 	}
 
 	/** The cached root of the current manifest, or null when none is cached. Never reads the manifest. */
@@ -247,12 +292,24 @@ export class CorpusRootKeeper {
 		this.scheduleEmit();
 	}
 
-	/** Arms the one timer a root event waits on: at once, or when the window since the last write attempt has passed. */
+	/**
+	 * Arms the one timer a root event waits on: at once, or when the window since the last write attempt has passed. After a refused
+	 * write it is never sooner than that write's backoff.
+	 */
 	private scheduleEmit(): void {
-		if (this.deps.store() === null || this.timerPending) return;
-		const wait = this.lastWriteMs === null ? 0 : Math.max(0, this.lastWriteMs + ROOT_EMIT_MIN_INTERVAL_MS - this.clock.now());
+		if (this.timerPending) return;
+		const windowLeft = this.lastWriteMs === null ? 0 : Math.max(0, this.lastWriteMs + ROOT_EMIT_MIN_INTERVAL_MS - this.clock.now());
+		this.arm(this.failures === 0 ? windowLeft : Math.max(windowLeft, rootRetryMs(this.failures)));
+	}
+
+	/** Replaces the armed timer, so a refused write's backoff holds even when a change armed one meanwhile. Does nothing without a manifest. */
+	private arm(wait: number): void {
+		if (this.deps.store() === null) return;
 		this.timerPending = true;
+		this.timerToken += 1;
+		const token = this.timerToken;
 		this.clock.setTimer(() => {
+			if (token !== this.timerToken) return;
 			this.timerPending = false;
 			void this.emitRoot();
 		}, wait);
@@ -285,19 +342,61 @@ export class CorpusRootKeeper {
 			if (this.writers > 0) return;
 			this.owed = false;
 			if (!read.ok || read.snapshot.count === 0 || read.snapshot.root === this.lastEmittedRoot) return;
-			const { root, count, manifestVersion } = read.snapshot;
-			this.lastWriteMs = this.clock.now();
-			const written = await this.deps.emit({
+			await this.writeRoot(read);
+		} catch {
+			// A read that rejects leaves the root owed as it was: the next change, or the shutdown drain, writes it.
+		}
+	}
+
+	/**
+	 * One root write. Stored, it becomes the root the ledger holds and the backoff resets. Buffered or dead-lettered, the server has
+	 * taken the note: nothing is owed and the backoff resets. Refused or thrown, the root stays owed and the next attempt waits out the
+	 * backoff. Never throws.
+	 */
+	private async writeRoot(read: { snapshot: CorpusRootSnapshot; tree: CorpusTree }): Promise<void> {
+		const { root, count, manifestVersion } = read.snapshot;
+		this.lastWriteMs = this.clock.now();
+		let code: string;
+		try {
+			const answer = await this.deps.emit({
 				surface: "substrate",
 				kind: "note",
 				summary: `corpus root ${shortRoot(root)} over ${count} documents (manifest ${manifestVersion})`,
 				session_id: CORPUS_ROOT_SESSION,
 				payload: { action: CORPUS_ROOT_ACTION, root, count, manifest_version: manifestVersion },
 			});
-			// A write the ledger refused is not a root it holds: the next event for this state must go out again.
-			if (written.stored) this.lastEmittedRoot = root;
-		} catch {
-			// The ingest this follows already answered; a root that did not reach the ledger is written by the next change.
+			// Buffered or dead-lettered, the server has taken the note, so it is not owed and is not written again. `owed` was cleared
+			// before this write, and a change noted during it stays owed.
+			if (answer.stored || answer.buffered === true || answer.deadLettered === true) {
+				this.lastEmittedRoot = root;
+				this.failures = 0;
+				return;
+			}
+			code = refusalCode(answer);
+		} catch (error) {
+			code = thrownCode(error);
 		}
+		this.owed = true;
+		this.failures += 1;
+		this.reportOnce(code, new Set(read.tree.ordered.map((leaf) => leaf.repo)).size);
+		this.arm(rootRetryMs(this.failures));
+	}
+
+	/** One stderr line per distinct code, with the repository count and the code. Never the document text, a path or the payload. */
+	private reportOnce(code: string, repositories: number): void {
+		if (this.reportedCodes.has(code)) return;
+		this.reportedCodes.add(code);
+		this.log(`[substrate] corpus root not stored: code=${code} repositories=${repositories}\n`);
+	}
+
+	/**
+	 * Shutdown: the owed root event is written now, not when its timer fires. An emission in flight is awaited first, and the armed
+	 * timer is disarmed so it cannot write again. Never throws.
+	 */
+	async flush(): Promise<void> {
+		while (this.emitting !== null) await this.emitting;
+		this.timerToken += 1;
+		this.timerPending = false;
+		if (this.owed && this.writers === 0) await this.emitRoot();
 	}
 }

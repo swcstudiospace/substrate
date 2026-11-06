@@ -9,8 +9,9 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
-import { GRAPH_LABEL, isValidGraphId } from "./sandbox-options.ts";
+import { errorLabel } from "./error-label.ts";
+import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute } from "./options.ts";
+import { GRAPH_LABEL, isValidGraphId, WORKTREES_ROOT, worktreeFor, worktreeRule, worktreeUnderRoot } from "./sandbox-options.ts";
 import {
 	ADDITIONAL_INSTRUCTIONS,
 	isValidIdentifier,
@@ -35,7 +36,7 @@ import {
 	type LeaseStoreLike,
 } from "./substrate.ts";
 
-export type PendingApproval = { request_id: string; tool: string; at: string; deadlineMs?: number };
+type PendingApproval = { request_id: string; tool: string; at: string; deadlineMs?: number };
 /** Default approval deadline (D33-05): 900 s, the same ladder as the lease TTL and the claim timeout. */
 export const APPROVAL_TIMEOUT_MS = 900_000;
 
@@ -52,13 +53,15 @@ export function parseApprovalTimeoutMs(raw: string | undefined, log?: (line: str
 	return Math.floor(seconds * 1000);
 }
 
-export type SeededFile = { path: string; sha256: string; bytes: number };
+type SeededFile = { path: string; sha256: string; bytes: number };
 
 export type TaskRecord = {
 	graph_id: string;
 	node_id: string;
 	identifier: string;
 	repo: string;
+	/** The worktree this graph's tasks are bound to: the one the first accepted open named. Absent on records written before the field. */
+	worktree?: string | null;
 	session_id: string;
 	prompt_count: number;
 	turn_in_flight: boolean;
@@ -86,13 +89,13 @@ export type TaskRecord = {
 };
 
 /** model: the sync host function; model_mcp: in-VM ultrathink-sync verified read-only; host: the turn-settle backstop. */
-export type SyncBy = "model" | "model_mcp" | "host";
+type SyncBy = "model" | "model_mcp" | "host";
 
 /**
  * Records written by earlier plans lack later fields: resume counters read as 0 (T-03-06-01: the
  * key must stay numeric), PR and sync fields as null.
  */
-export function withRecordDefaults(record: TaskRecord): TaskRecord {
+function withRecordDefaults(record: TaskRecord): TaskRecord {
 	record.resumes = Number.isInteger(record.resumes) ? record.resumes : 0;
 	record.stale_approvals = Number.isInteger(record.stale_approvals) ? record.stale_approvals : 0;
 	record.pr_url = typeof record.pr_url === "string" ? record.pr_url : null;
@@ -113,9 +116,7 @@ export function interruptedTasks(records: readonly TaskRecord[]): TaskRecord[] {
 export const RESUME_TEXT =
 	"substrate-host restarted during your last turn. Continue the same task from the files in /home/agentos/work and the numbered steps of your first prompt; do not repeat steps that already succeeded.";
 
-export type OpenRequest = { graph_id: string; node_id: string; identifier: string; repo: string; worktree: string };
-
-export type SessionStatus = "idle" | "running" | "waiting" | "failed";
+type OpenRequest = { graph_id: string; node_id: string; identifier: string; repo: string; worktree: string };
 
 /**
  * The dispatcher's poll(): null while the turn runs or waits on an approval, 0 after a clean
@@ -133,25 +134,42 @@ export function pollCode(
 	return record.last_stop_reason === "end_turn" ? 0 : 1;
 }
 
-export type Validation = { ok: true; request: OpenRequest } | { ok: false; error: string };
+type Validation = { ok: true; request: OpenRequest } | { ok: false; error: string };
 
-/** POST /tasks body: every id checked with the dispatcher's patterns, worktree pinned to the graph's. */
-export function validateOpenRequest(body: unknown): Validation {
+/**
+ * POST /tasks body: every id checked with the dispatcher's patterns, worktree pinned to the graph's: the one
+ * `<root>/<graph_id>` under the configured root that holds it (see worktreeRootFor).
+ */
+export function validateOpenRequest(body: unknown, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): Validation {
 	if (typeof body !== "object" || body === null) return { ok: false, error: "body must be a JSON object" };
 	const b = body as Record<string, unknown>;
 	if (!isValidGraphId(b.graph_id)) return { ok: false, error: "graph_id is missing or invalid" };
 	if (!isValidNodeId(b.node_id)) return { ok: false, error: "node_id is missing or invalid" };
 	if (!isValidIdentifier(b.identifier)) return { ok: false, error: "identifier is missing or invalid" };
 	if (!isValidRepoSlug(b.repo)) return { ok: false, error: "repo is missing or invalid" };
-	const worktree = worktreeFor(b.graph_id);
-	if (b.worktree !== worktree) return { ok: false, error: `worktree must be ${worktree}` };
+	// The dispatcher reuses a graph's worktree under whichever configured root holds it, so any configured root may name it.
+	const worktree = worktreeUnderRoot(b.graph_id, b.worktree, worktreeRoots) ? b.worktree : null;
+	if (worktree === null) return { ok: false, error: worktreeRule(b.graph_id, worktreeRoots) };
 	return {
 		ok: true,
 		request: { graph_id: b.graph_id, node_id: b.node_id, identifier: b.identifier, repo: b.repo, worktree },
 	};
 }
 
-export type HostCallTarget = { graphId: string; nodeId: string; sessionId: string } | { error: string };
+/** The worktree an accepted open bound this graph to, while it still sits under a configured root: a root removed from the config binds nothing. */
+export function boundWorktree(store: Pick<TaskStoreLike, "forGraph">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string | null {
+	for (const record of store.forGraph(graphId)) {
+		if (worktreeUnderRoot(graphId, record.worktree, worktreeRoots)) return record.worktree;
+	}
+	return null;
+}
+
+/** The worktree a graph's tasks run in: the bound one, else the derived `<root>/<graph_id>`. */
+export function boundWorktreeOf(store: Pick<TaskStoreLike, "forGraph">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string {
+	return boundWorktree(store, graphId, worktreeRoots) ?? worktreeFor(graphId, worktreeRoots);
+}
+
+type HostCallTarget = { graphId: string; nodeId: string; sessionId: string } | { error: string };
 
 /**
  * The one guard every VM host function runs first (T-03-03-02): the graph comes from the actor
@@ -188,6 +206,7 @@ export type TaskStoreLike = {
 	get(graphId: string, nodeId: string): TaskRecord | null;
 	save(record: TaskRecord): void;
 	list(): TaskRecord[];
+	forGraph(graphId: string): TaskRecord[];
 };
 
 /** One JSON file per task under <dir>/<gid>--<nid>.json, mode 0600, written via temp + rename. */
@@ -226,9 +245,19 @@ export class TaskStore implements TaskStoreLike {
 	}
 
 	list(): TaskRecord[] {
+		return this.readMatching("");
+	}
+
+	/** One graph's records: only that graph's files are read, by name, so the rest of the directory is never parsed. */
+	forGraph(graphId: string): TaskRecord[] {
+		return this.readMatching(`${graphId}--`).filter((record) => record.graph_id === graphId);
+	}
+
+	/** Every stored task whose file name starts with `prefix`: the one place a task file is parsed. */
+	private readMatching(prefix: string): TaskRecord[] {
 		const records: TaskRecord[] = [];
 		for (const name of readdirSync(this.dir).sort()) {
-			if (!name.endsWith(".json")) continue;
+			if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
 			records.push(withRecordDefaults(JSON.parse(readFileSync(join(this.dir, name), "utf8")) as TaskRecord));
 		}
 		return records;
@@ -253,6 +282,10 @@ export class MemoryTaskStore implements TaskStoreLike {
 
 	list(): TaskRecord[] {
 		return [...this.records.values()];
+	}
+
+	forGraph(graphId: string): TaskRecord[] {
+		return [...this.records.values()].filter((record) => record.graph_id === graphId);
 	}
 }
 
@@ -369,7 +402,7 @@ export function isHostSandboxLabel(labels: Record<string, string> | undefined): 
 	return labels !== undefined && (GRAPH_LABEL in labels || TEST_RUN_LABEL in labels);
 }
 
-export type SandboxReconcileDeps = {
+type SandboxReconcileDeps = {
 	/** Live containers from the provider: everything on the daemon, host-owned by label, foreign unlabeled. */
 	enumerate: () => Promise<SandboxListing[]>;
 	/** The durable sandbox→task map (the U2 state file). */
@@ -392,7 +425,7 @@ export type SandboxReconcileDeps = {
 	stderr?: (line: string) => void;
 };
 
-export type SandboxReconcileResult = {
+type SandboxReconcileResult = {
 	ok: boolean;
 	/** Live sandboxes of still-claimed tasks, left running for their continuation (re-attach). */
 	reattached: string[];
@@ -559,16 +592,18 @@ export type TaskServiceDeps = {
 	heartbeatIntervalMs?: number;
 	/** Approval deadline in ms; the 900 s default stands in production, tests inject short values. */
 	approvalTimeoutMs?: number;
+	/** The host's configured worktree roots (SUBSTRATE_WORKTREE_ROOTS); absent is the default root alone. */
+	worktreeRoots?: readonly string[] | undefined;
 };
 
 /** The DoD summary cap, matching the `graph_complete` tool schema. */
-export const DOD_SUMMARY_MAX = 2000;
+const DOD_SUMMARY_MAX = 2000;
 
 /** One heartbeat-or-reclaim tick's outcome (D32-02). */
-export type HeartbeatTick = "ok" | "not-due" | "reclaimed" | "failed-closed" | "idle";
+type HeartbeatTick = "ok" | "not-due" | "reclaimed" | "failed-closed" | "idle";
 
-export type CompleteInput = { summary: string; tests_pass: boolean; review_pass?: boolean };
-export type CompleteResult = { completed: boolean; reason?: string };
+type CompleteInput = { summary: string; tests_pass: boolean; review_pass?: boolean };
+type CompleteResult = { completed: boolean; reason?: string };
 
 export type TaskStatus = TaskRecord & {
 	state: string;
@@ -640,7 +675,9 @@ export class TaskService {
 		const key = `${graphId}/${nodeId}`;
 		this.clearHeartbeat(graphId, nodeId);
 		const timer = setInterval(() => {
-			void this.heartbeatTick(graphId, nodeId);
+			void this.heartbeatTick(graphId, nodeId).catch((cause: unknown) => {
+				process.stderr.write(`[substrate-host] host.heartbeat ${errorLabel(cause)}\n`);
+			});
 		}, this.deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
 		timer.unref?.();
 		this.heartbeats.set(key, timer);
@@ -763,11 +800,14 @@ export class TaskService {
 
 	/** Research Pattern 2: validate → existing? → graph_get → graph_claim → brief → seed → open → prompt (not awaited). */
 	async openTask(body: unknown): Promise<OpenResult> {
-		const validation = validateOpenRequest(body);
+		const validation = validateOpenRequest(body, this.deps.worktreeRoots);
 		if (!validation.ok) return { status: 400, body: { error: validation.error } };
 		const req = validation.request;
 		const { graph_id: gid, node_id: nid } = req;
 
+		// One worktree per graph: an open naming another worktree than the graph's bound one is refused before any claim.
+		const bound = boundWorktree(this.deps.store, gid, this.deps.worktreeRoots ?? [WORKTREES_ROOT]);
+		if (bound !== null && bound !== req.worktree) return { status: 409, body: { error: `graph ${gid} is bound to worktree ${bound}` } };
 		const existing = this.deps.store.get(gid, nid);
 		if (existing) return { status: 200, body: await this.statusOf(existing) };
 
@@ -842,6 +882,7 @@ export class TaskService {
 				node_id: nid,
 				identifier: req.identifier,
 				repo: req.repo,
+				worktree: req.worktree,
 				session_id: nid,
 				prompt_count: 1,
 				turn_in_flight: true,

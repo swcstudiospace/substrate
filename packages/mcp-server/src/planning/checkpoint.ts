@@ -18,7 +18,7 @@ import { z } from "zod";
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const HEX_SHA256_RE = /^[0-9a-f]{64}$/;
 
-export const CompletionInputSchema = z
+const CompletionInputSchema = z
 	.object({
 		phase: z.string().regex(ID_RE),
 		step: z.string().regex(ID_RE),
@@ -27,7 +27,7 @@ export const CompletionInputSchema = z
 	})
 	.strict();
 
-export type CompletionInput = z.infer<typeof CompletionInputSchema>;
+type CompletionInput = z.infer<typeof CompletionInputSchema>;
 
 export const CompletionRecordSchema = CompletionInputSchema.extend({
 	key: z.string().regex(HEX_SHA256_RE),
@@ -62,7 +62,7 @@ export class InMemoryCompletionStore implements CompletionStore {
 	}
 }
 
-export interface RecordCompletionResult {
+interface RecordCompletionResult {
 	outcome: "inserted" | "exists";
 	key: string;
 }
@@ -75,13 +75,13 @@ export async function recordCompletion(store: CompletionStore, input: Completion
 	return { outcome, key };
 }
 
-export interface PlannedStep {
+interface PlannedStep {
 	step: string;
 	/** The sha256 of the file this step works on, as it is now. */
 	fileHash: string;
 }
 
-export interface ResumeInput {
+interface ResumeInput {
 	phase: string;
 	/** In execution order. Each step name appears once. */
 	steps: readonly PlannedStep[];
@@ -89,7 +89,7 @@ export interface ResumeInput {
 	lastCheckpoint: readonly CompletionRecord[];
 }
 
-export interface ResumeRun {
+interface ResumeRun {
 	step: string;
 	fileHash: string;
 	key: string;
@@ -97,12 +97,12 @@ export interface ResumeRun {
 	fileChanged: boolean;
 }
 
-export interface ResumeSkip {
+interface ResumeSkip {
 	step: string;
 	key: string;
 }
 
-export interface ResumePlan {
+interface ResumePlan {
 	/** Steps to execute, in order. */
 	run: ResumeRun[];
 	/** Steps already complete against their current file hash, in order. Not to be re-run. */

@@ -239,3 +239,11 @@ describe("the in-memory registry satisfies the store contract", () => {
 		repo: (label) => `ut-wt/${label}`,
 	}));
 });
+
+describe("the repo cap in a worktree report", () => {
+	test("refuses a repo over 512 code units by name, before the owner/name pattern", () => {
+		const result = validateWorktreeReport(report({}, [worktree({ repo: `owner/${"r".repeat(507)}` })]));
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.problem).toContain("repo_too_long: a repo may not exceed 512 code units; got 513");
+	});
+});

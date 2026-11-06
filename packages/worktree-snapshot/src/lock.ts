@@ -34,19 +34,19 @@ import { join } from "node:path";
 import { WorktreeBusyError } from "./errors.ts";
 import { parseProcStatStartTicks } from "./proc-stat.ts";
 
-export const LOCK_FILE = "substrate-restore.lock";
+const LOCK_FILE = "substrate-restore.lock";
 
 /** The lock that serialises checkpoint sequence allocation (list, number, pin) of one worktree. */
 export const CHECKPOINT_LOCK_FILE = "substrate-checkpoint.lock";
 
 /** Which lock file to take and what to call its holder in messages; the default is the restore lock. */
-export type LockOptions = { file?: string; label?: string };
+type LockOptions = { file?: string; label?: string };
 
 /** How long `acquireWorktreeLockWithin` waits for a busy lock: `attempts` tries, `delayMs` apart. `sleep` is injectable for tests. */
 export type LockWait = { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> };
 
-export const DEFAULT_LOCK_ATTEMPTS = 100;
-export const DEFAULT_LOCK_DELAY_MS = 50;
+const DEFAULT_LOCK_ATTEMPTS = 100;
+const DEFAULT_LOCK_DELAY_MS = 50;
 
 function realSleep(ms: number): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
@@ -56,10 +56,10 @@ function realSleep(ms: number): Promise<void> {
 
 type LockContent = { pid: number; startedAt: string; procStart: string | null; host: string; token: string };
 
-export type WorktreeLock = { token: string; release: () => void };
+type WorktreeLock = { token: string; release: () => void };
 
 /** The process start time in clock ticks (the identity token kept in the lock), or null where unavailable. */
-export function processStartTicks(pid: number): string | null {
+function processStartTicks(pid: number): string | null {
 	try {
 		const ticks = parseProcStatStartTicks(readFileSync(`/proc/${pid}/stat`, "utf8"));
 		return ticks === null ? null : String(ticks);

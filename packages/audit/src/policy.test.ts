@@ -68,12 +68,17 @@ describe("auditMode", () => {
 		}
 	});
 
-	test("the steering writes are fail-closed", () => {
-		// A directive changes what a planning session does next, so each write is recorded before it takes effect.
-		expect({ queue: auditMode("steering_queue"), acknowledge: auditMode("steering_acknowledge") }).toEqual({
-			queue: "fail-closed",
-			acknowledge: "fail-closed",
-		});
+	test("every live mutation explicitly requires audit; discovery and private reads do not", () => {
+		for (const tool of ["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_queue", "steering_acknowledge"]) {
+			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(true);
+			expect(FAIL_OPEN_TOOLS.has(tool)).toBe(false);
+			expect(auditMode(tool)).toBe("fail-closed");
+		}
+		for (const tool of ["live_session_discovery", "steering_list", "steering_wait"]) {
+			expect(FAIL_OPEN_TOOLS.has(tool)).toBe(true);
+			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(false);
+			expect(auditMode(tool)).toBe("fail-open");
+		}
 	});
 
 	test("the worktree report is an explicit fail-closed write and the registry read an explicit fail-open read", () => {

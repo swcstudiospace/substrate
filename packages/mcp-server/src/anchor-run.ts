@@ -16,6 +16,7 @@ import type { AnchorCliOptions } from "./anchor.ts";
 import { loadConfig } from "./config.ts";
 import { GreptimeClient, INGEST_LAG_MS } from "./greptime.ts";
 import { Substrate } from "./service.ts";
+import { diskDestination } from "./destination.ts";
 
 /** Devnet reads: one slow call each, three tries, room to breathe between. */
 const RPC_TIMEOUT_MS = 15_000;
@@ -34,7 +35,7 @@ try {
 	exitUsage(cause instanceof UsageError ? cause.message : String(cause));
 }
 
-const config = loadConfig();
+const config = loadConfig(process.env, { realDestination: diskDestination });
 if (!config.greptime) exitUsage("GREPTIME_URL is not set");
 // Before any CLI or request: a refused URL (mainnet/testnet host, userinfo, non-http scheme) never anchors.
 if (config.solana.problem) exitUsage(config.solana.problem);
@@ -45,7 +46,8 @@ if (flags.onlyPeriodMs !== undefined && !isClosed(flags.onlyPeriodMs, Date.now()
 }
 
 const greptime = new GreptimeClient(config.greptime);
-const substrate = new Substrate(config, { greptime });
+// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+const substrate = new Substrate({ ...config, eventBuffer: null }, { greptime });
 const rpc = createRpc({ url: rpcUrl, timeoutMs: RPC_TIMEOUT_MS, attempts: RPC_ATTEMPTS, backoffMs: RPC_BACKOFF_MS });
 
 const result = await runAnchorJob({

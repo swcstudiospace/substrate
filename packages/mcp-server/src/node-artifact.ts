@@ -13,7 +13,7 @@ export interface ArtifactEvent {
 	payload?: unknown;
 }
 
-export type MirrorStatus = "ok" | "failed";
+type MirrorStatus = "ok" | "failed";
 
 export interface NodeArtifact {
 	node_id: string;

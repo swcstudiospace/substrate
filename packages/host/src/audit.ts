@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GRAPH_LABEL, SANDBOX_NETWORK, type SandboxNetwork, WORKTREES_ROOT } from "./sandbox-options.ts";
+import { GRAPH_LABEL, SANDBOX_NETWORK, type SandboxNetwork, WORKTREES_ROOT, worktreeRootsOf } from "./sandbox-options.ts";
 
 const SECRET_SEGMENTS: Record<string, true> = {
 	KEY: true,
@@ -30,7 +30,7 @@ const SECRET_SEGMENTS: Record<string, true> = {
 };
 
 /** Values shorter than this are not scanned: too likely to occur in unrelated bytes. */
-export const MIN_SECRET_LENGTH = 12;
+const MIN_SECRET_LENGTH = 12;
 
 /** A name is secret-bearing when one of its underscore-delimited segments is a credential word (D-08). */
 export function secretKey(name: string): boolean {
@@ -83,7 +83,7 @@ function asArray(value: unknown): unknown[] {
  * network), not privileged, no docker socket, only the graph's own worktree writable, token auth on.
  * Returns one `<name>[:detail]` string per violation.
  */
-export function containerViolations(inspect: Record<string, unknown>, network: SandboxNetwork): string[] {
+export function containerViolations(inspect: Record<string, unknown>, network: SandboxNetwork, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string[] {
 	const violations: string[] = [];
 	const config = asRecord(inspect.Config);
 	const host = asRecord(inspect.HostConfig);
@@ -91,7 +91,7 @@ export function containerViolations(inspect: Record<string, unknown>, network: S
 	const labels = asRecord(config.Labels);
 	const graphId = labels[GRAPH_LABEL];
 	if (typeof graphId !== "string" || graphId === "") violations.push("label");
-	const ownWorktree = typeof graphId === "string" && graphId !== "" ? `${WORKTREES_ROOT}/${graphId}` : null;
+	const ownWorktrees = typeof graphId === "string" && graphId !== "" ? worktreeRoots.map((root) => `${root}/${graphId}`) : null;
 
 	const bindings = asRecord(host.PortBindings);
 	let published = 0;
@@ -130,7 +130,8 @@ export function containerViolations(inspect: Record<string, unknown>, network: S
 		}
 		if (mode === "ro") continue;
 		// The graph's own worktree is the one writable mount; without a label the root is all that can be checked.
-		const worktreeBind = containerPath === "/work" && (ownWorktree !== null ? hostPath === ownWorktree : hostPath.startsWith(`${WORKTREES_ROOT}/`));
+		const worktreeBind =
+			containerPath === "/work" && (ownWorktrees !== null ? ownWorktrees.includes(hostPath) : worktreeRoots.some((root) => hostPath.startsWith(`${root}/`)));
 		if (worktreeBind) continue;
 		violations.push(`writable_bind:${bind}`);
 	}
@@ -145,7 +146,7 @@ export function containerViolations(inspect: Record<string, unknown>, network: S
 	return violations;
 }
 
-export type AuditReport = {
+type AuditReport = {
 	storageMode: string;
 	/** Hits per secret-bearing name, sanctioned names included. */
 	secretHits: Record<string, number>;
@@ -250,7 +251,7 @@ function runCli(): void {
 	for (const id of ids) {
 		const parsed: unknown = JSON.parse(execFileSync("docker", ["inspect", id], { encoding: "utf8" }));
 		const inspect = asRecord(asArray(parsed)[0]);
-		containers.push({ id, violations: containerViolations(inspect, network) });
+		containers.push({ id, violations: containerViolations(inspect, network, worktreeRootsOf(process.env)) });
 	}
 
 	for (const line of formatAudit({ storageMode, secretHits: secret, configHits: config, sanctioned, containers })) {

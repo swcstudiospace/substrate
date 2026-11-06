@@ -59,7 +59,7 @@ import {
 } from "./spool.ts";
 
 /** Long-running collectors wait this long for one emit (D19-06). */
-export const COLLECTOR_TIMEOUT_MS = 3000;
+const COLLECTOR_TIMEOUT_MS = 3000;
 /** Hooks never wait past this (D19-06). */
 export const HOOK_TIMEOUT_MS = 1500;
 /** Long-running collectors replay the spool on this cadence. */
@@ -88,7 +88,7 @@ export type EmitOutcome =
 	/** `spooled` is set when the event was parked for replay: the live attempt failed, the event is not lost. */
 	| { kind: "failed"; status?: number; error?: string | undefined; spooled?: true };
 
-export interface PostEventOptions {
+interface PostEventOptions {
 	/** Per-call bound; collectors pass 3000, hooks at most 1500. */
 	timeoutMs?: number;
 	/** Collector name for the refused line, e.g. "grok". */
@@ -184,7 +184,7 @@ function stderrLine(text: string): void {
 	}
 }
 
-export interface RefusalInput {
+interface RefusalInput {
 	event: EventInput;
 	collector: string;
 	source: string;
@@ -223,6 +223,7 @@ async function serverError(response: Response): Promise<string | undefined> {
 		const body = (await response.json()) as { error?: unknown };
 		return typeof body.error === "string" ? body.error : undefined;
 	} catch {
+		// Not JSON: no server message; the caller reports the HTTP status.
 		return undefined;
 	}
 }
@@ -304,7 +305,7 @@ export function eventSpool(env: NodeJS.ProcessEnv = process.env): EventSpool | n
 }
 
 /** An event as it is fixed at its first attempt: redacted, stamped, keyed, and serialized once. */
-export interface PreparedEvent {
+interface PreparedEvent {
 	event: EventInput;
 	key: string;
 	body: string;
@@ -605,7 +606,7 @@ async function replayEntry(entry: SpoolEntry, base: string, timeoutMs: number, t
 	}
 }
 
-export interface DrainOptions {
+interface DrainOptions {
 	/** Replay entries that are not yet due (`substrate spool flush`). */
 	all?: boolean;
 	/** Total time one pass may start new replays for. */
@@ -787,6 +788,7 @@ export function countSpoolDrops(dir: string = stateDir()): Record<string, number
 		try {
 			text = readFileSync(join(dir, name), "utf8");
 		} catch {
+			// A missing journal is the normal state before any drop; any other read error also counts as nothing.
 			continue;
 		}
 		for (const line of text.split("\n")) {

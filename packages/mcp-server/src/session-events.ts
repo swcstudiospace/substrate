@@ -137,7 +137,7 @@ export interface RefusedPayload {
 	detail?: string;
 }
 
-export type SessionEventPayload = CheckpointPayload | RollbackPayload | RefusedPayload;
+type SessionEventPayload = CheckpointPayload | RollbackPayload | RefusedPayload;
 
 /** What a builder returns: the part of an `EventInput` this contract owns. `surface`, `session_id` and `ts` stay the caller's. */
 export type SessionEventDraft<P extends SessionEventPayload> = Pick<EventInput, "summary"> & {

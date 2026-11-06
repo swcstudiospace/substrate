@@ -35,11 +35,21 @@ function stateFile(): string {
 
 type Offsets = Record<string, number | EmitCounters>;
 
+/** A fixed short label for a caught error: its code or constructor name, never its message. */
+function errorTag(error: unknown): string {
+	const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+	if (typeof code === "string" && /^[A-Za-z0-9._-]{1,40}$/.test(code)) return code;
+	const name = error instanceof Error ? error.constructor.name : "";
+	return /^[A-Za-z0-9._-]{1,40}$/.test(name) ? name : "unknown";
+}
+
 function loadOffsets(): Offsets {
 	let raw: unknown;
 	try {
 		raw = JSON.parse(readFileSync(stateFile(), "utf8")) as unknown;
-	} catch {
+	} catch (error) {
+		const tag = errorTag(error);
+		if (tag !== "ENOENT") process.stderr.write(`collectors.grok.offsets ${tag}\n`);
 		return {};
 	}
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};

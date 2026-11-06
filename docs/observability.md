@@ -53,7 +53,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.trace.spans_dropped` | counter | — |
 | `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
 | `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
-| `substrate.admission.decisions` | counter | `surface` (a known surface or `anonymous`), `class` = `read` \| `write` \| `coordination`, `decision` = `allowed` \| `limited` \| `shadow_limited` \| `bypass` |
+| `substrate.admission.decisions` | counter | `surface` (a known surface or `anonymous`), `class` = `read` \| `write` \| `coordination`, `decision` = `allowed` \| `limited` \| `shadow_limited` \| `bypass` \| `refused` |
 | `substrate.metrics.history.dropped` | counter | `reason` = `breaker_open` \| `unavailable` \| `rejected` \| `ddl` \| `schema` \| `invalid` \| `capped` \| `internal` (rows not stored; registered only with `SUBSTRATE_METRICS_HISTORY=on` and a ledger) |
 | `substrate.docs.search` | counter | `surface`, `outcome` = `hit` \| `empty` \| `degraded`, `cached` = `true` \| `false` |
 | `substrate.docs.citations` | counter | `provenance` = `recorded` \| `unrecorded` \| `unpinned` |
@@ -170,6 +170,8 @@ reason: "ragflow circuit open"}`, and the fail-closed paths (emit, claim) stay
 closed. The cache additionally refuses to reconnect for `CACHE_CONNECT_COOLDOWN_MS`
 (5 s) after a failed connect, reported as `cache.cooldownUntil` in `/healthz`.
 
+The cache's admission buckets follow a declared policy while that breaker refuses them: `SUBSTRATE_BUDGET_<CLASS>_BREAKER=fail-open` (the default) admits the request and counts a `bypass`; `fail-closed` answers `503` with `{"error":"cache_unavailable"}` and the breaker's `Retry-After` in `enforce`, and in `shadow` admits the request and counts a `bypass`, since shadow never refuses. The brief and recall never depend on the cache: a refused cache read falls through to the source, so the answer is the source's.
+
 `bun scripts/cache-stats.ts` (uplift-4 S4) is the operator-run, read-only census of the cache's key classes and value bytes and the `maxmemory` they justify: bounded `SCAN`, `TYPE` and `STRLEN`, no value read, loopback URLs only unless `--allow-remote`. The hit, stale and coalesced ratios come from the running service's `/healthz`, which needs the bearer: set `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE` (first entry of a list; it is sent only as an `Authorization` header and never printed); a 401/403 is reported by name in the output.
 
 `GET /healthz` carries one row per plane, **report-only** — the status code still
@@ -224,6 +226,8 @@ text; since uplift-3 N7 its `structuredContent` carries the same facts (`etag`,
 answers `not_modified: true` with no text by the same matcher — see
 `docs/grok-bot.md` § The brief contract over MCP. Every answer at either door counts
 once in `substrate.brief.result`.
+
+While the cache cannot be read (its breaker is open) and a live source is down, the brief is served as `snapshot` from this process's own last complete brief for the same arguments: at most 256 argument sets, held in memory, for the same `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` window and on the same terms. A forget another process made is not seen while the cache is unreadable; once it can be read again its forget mark decides, and a forget this process made refuses the copy at once. A forget mark that cannot be read while the breaker is closed refuses the copy too. A cache that answers with no snapshot for the key is not an outage, and the brief stays `degraded`.
 
 `GET /healthz` is memoised for `SUBSTRATE_HEALTHZ_CACHE_MS` (5000 ms; `0` recomputes
 on every call): the body gains `cachedAt` (ISO time it was computed) and `stale`
@@ -313,11 +317,15 @@ same reason the plane and burn objectives are:
 | `admission.limited_rate` | `limited / (allowed + limited + shadow_limited)` of `substrate.admission.decisions` ≤ **1 %**; `insufficient-data` under 100 decisions |
 
 A `bypass` — the cache plane not answering the bucket, which admits the caller —
-is not a decision and sits in neither the numerator nor the denominator, so a
-cache outage can neither breach this objective nor dilute it into `ok`. Only an
-enforced refusal (`limited`) is a refusal; in the default `shadow` mode the
-rate is 0 whatever `shadow_limited` counts, and that series is what the budgets
-are tuned from before `SUBSTRATE_BUDGETS=enforce`. The identity label is the
+and a `refused` — a class set `fail-closed` by `SUBSTRATE_BUDGET_<CLASS>_BREAKER`,
+answered 503 while the cache plane is open, in `enforce` mode — are not decisions. In `shadow` the same fail-closed answer is recorded as a `bypass`, so the tuning series holds only the bucket's own decisions.
+Both sit in neither the numerator nor the denominator, so a cache outage can
+neither breach this objective nor dilute it into `ok`. The numerator is `limited`
+alone. In the default `shadow` mode the rate is 0 whatever `shadow_limited`
+counts, and that series is what the budgets are tuned from before
+`SUBSTRATE_BUDGETS=enforce`. Fewer than 100 decided requests is `insufficient-data`,
+so an outage that refuses most traffic can read as insufficient data, not a
+breach; the `refused` series is what shows it. The identity label is the
 bearer's surface, never one a body named, so the series are bounded by the
 surface list plus `anonymous`. The bucket and the 429 a refused caller sees are
 described in [`data-planes.md`](data-planes.md) and [`grok-bot.md`](grok-bot.md);
@@ -978,6 +986,7 @@ substrate-specific spelling.
 | `SUBSTRATE_BUDGET_COORDINATION_RPS` / `_BURST` | `30` / `60` | `graph_claim`, `graph_heartbeat`, `graph_release`, `graph_complete`, `coord_reap_leases`: its own bucket, so reads never starve a heartbeat. |
 | `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST` | `2` / `4` | Every class of the bucket all accepted untokened bridge callers share. |
 | `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` | — | Per-surface override (`GROK_BOT`, `SWARM_A01_ORCH`, …, the `SUBSTRATE_TOKEN_*` spelling); a half left unset is the class value. |
+| `SUBSTRATE_BUDGET_<CLASS>_BREAKER` | `fail-open` | What an open cache breaker does to that class: `fail-open` admits the request (a `bypass`); `fail-closed` answers `503` in `enforce`, and in `shadow` admits the request and counts a `bypass`. Blank is `fail-open`; any other value refuses to boot (`SUBSTRATE_BUDGETS` keeps its older fallback to `shadow`). |
 | `SUBSTRATE_METRICS_HISTORY` | off | `on` samples the registry into `metric_samples` and serves `/slo/history`; anything else is off. It also needs the ledger: with no ledger configured it stays off, the route answers `404 {"enabled":false}` and boot says why. |
 | `SUBSTRATE_METRICS_HISTORY_INTERVAL_S` | `60` | Seconds between samples; floor 15, ceiling 3600. |
 | `SUBSTRATE_METRICS_HISTORY_TTL` | `14d` | Whole days `1d`–`90d`, applied when the table is **created**; anything else falls back to `14d`. An existing table keeps the retention it was created with, so a raised value needs an operator `ALTER TABLE "metric_samples" SET 'ttl'='<n>d'` on it; until then `/slo/history` accepts windows up to the configured value (`retentionDays`) but the table holds no more than its own TTL. |

@@ -78,11 +78,13 @@ export type DockerClient = {
 	modem: { followProgress(stream: unknown, onFinished: (error: Error | null, output: unknown) => void): void };
 };
 
-export type SubstrateDockerOptions = {
+type SubstrateDockerOptions = {
 	graphId: string;
 	worktree: string;
 	network: SandboxNetwork;
 	readOnlyBinds?: string[];
+	/** The host's configured worktree roots; the spec accepts only the graph's worktree under one of them. */
+	worktreeRoots?: readonly string[] | undefined;
 	image?: string;
 	/** Injected for tests; defaults to dockerode on /var/run/docker.sock. */
 	docker?: DockerClient;
@@ -119,7 +121,7 @@ export type SubstrateDockerOptions = {
 /** LANEA-05: image builds and pulls are refused below 10 GiB free (D31-07). */
 export const DISK_FLOOR_BYTES = 10_737_418_240;
 
-export type DiskGate = { ok: true; availBytes: number } | { ok: false; availBytes: number | null };
+type DiskGate = { ok: true; availBytes: number } | { ok: false; availBytes: number | null };
 
 function parseDfAvail(dfStdout: string): number | null {
 	const lines = dfStdout.trim().split("\n");
@@ -149,7 +151,7 @@ export function checkDiskFloor(runDf?: () => string | null): DiskGate {
 	return { ok: true, availBytes };
 }
 
-export type SubstrateSandboxProvider = SandboxProvider & {
+type SubstrateSandboxProvider = SandboxProvider & {
 	getToken(sandboxId: string): Promise<string>;
 	/**
 	 * U1 seed burst: run `work` with the seeder's bootstrap destinations (seed.ts SEED_EGRESS)
@@ -400,10 +402,10 @@ async function reserveEgressAddress(docker: DockerClient): Promise<string> {
 }
 
 export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxProvider {
-	const { graphId, worktree, network, readOnlyBinds } = opts;
+	const { graphId, worktree, network, readOnlyBinds, worktreeRoots } = opts;
 	const image = opts.image ?? SANDBOX_IMAGE;
 	// Validate once up front so a bad graph id or worktree fails before any Docker call.
-	buildContainerSpec({ graphId, worktree, token: "validate", image, network, readOnlyBinds });
+	buildContainerSpec({ graphId, worktree, token: "validate", image, network, readOnlyBinds, worktreeRoots });
 	let client: DockerClient | undefined = opts.docker;
 	const docker = (): DockerClient => (client ??= defaultDocker());
 	// U2: durable sandbox→task records; the provider learns only the graph, so node/task stay null.
@@ -508,7 +510,7 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				}
 			}
 			const token = randomBytes(32).toString("base64url");
-			const body = buildContainerSpec({ graphId, worktree, token, image, network, readOnlyBinds });
+			const body = buildContainerSpec({ graphId, worktree, token, image, network, readOnlyBinds, worktreeRoots });
 			if (resolved !== null) {
 				// buildContainerSpec always returns the HostConfig object it just built.
 				const hostConfig = body.HostConfig as Record<string, unknown>;
@@ -526,6 +528,7 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				try {
 					await container.start();
 				} catch (error) {
+					// A failed removal must not mask the start error, which is rethrown below.
 					await container.remove({ force: true }).catch(() => undefined);
 					throw error;
 				}
@@ -569,11 +572,15 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 							// Rollback is best-effort; the refusal below is what fails the start.
 						}
 					}
+					// A failed disconnect is not kept: the forced removal below takes the container off every network.
 					await docker()
 						.getNetwork(EGRESS_NETWORK)
 						.disconnect({ Container: container.id })
 						.catch(() => undefined);
-					await container.remove({ force: true }).catch(() => undefined);
+					await container.remove({ force: true }).catch((error: unknown) => {
+						const status = (error as { statusCode?: unknown } | null)?.statusCode;
+						process.stderr.write(`[substrate-host] refused sandbox not removed (status ${String(status ?? "none")})\n`);
+					});
 					refuse(String(cause));
 				}
 			}
@@ -604,6 +611,7 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				throw error;
 			}
 			const container = docker().getContainer(sandboxId);
+			// A failed stop is not kept: the forced removal below stops the container too.
 			await container.stop({ t: 5 }).catch(() => undefined);
 			await container.remove({ force: true }).catch((error: unknown) => {
 				// 404: already gone; 409: AutoRemove started removing it when stop() returned.

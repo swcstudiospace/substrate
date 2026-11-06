@@ -8,7 +8,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export const SPOOL_TEST_ENV_KEYS = [
+const SPOOL_TEST_ENV_KEYS = [
 	"SUBSTRATE_EVENT_SPOOL",
 	"SUBSTRATE_EVENT_SPOOL_MAX",
 	"SUBSTRATE_EVENT_SPOOL_MAX_BYTES",

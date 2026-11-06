@@ -17,16 +17,17 @@
 import type { MentalModelRef } from "./config.ts";
 import type { TimerApi } from "./metrics-history.ts";
 import { send, type FetchLike, type HindsightConfig } from "./planes/hindsight.ts";
+import { reportSilent } from "./silent-failures.ts";
 import type { EventInput } from "./types.ts";
 
 /** Seven days, no jitter: the job's one cadence. */
 export const REFRESH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Bound on one refresh request. The plane answers at once; the rebuild is async on its side. */
-export const REFRESH_TIMEOUT_MS = 8_000;
+const REFRESH_TIMEOUT_MS = 8_000;
 /** The ledger action every per-model note carries (`payload.action`). */
 export const REFRESH_ACTION = "memory.mental_model.refresh";
 
-export interface MentalModelRefreshDeps {
+interface MentalModelRefreshDeps {
 	/** The named models, already validated by `loadConfig`. */
 	models: readonly MentalModelRef[];
 	/** The Hindsight plane's config, or null when the plane is unconfigured (or this process is a guest). */
@@ -119,7 +120,8 @@ export class MentalModelRefresh {
 	private plane(): HindsightConfig | null {
 		try {
 			return this.deps.hindsight();
-		} catch {
+		} catch (cause: unknown) {
+			reportSilent("mental-model.plane", cause);
 			return null;
 		}
 	}

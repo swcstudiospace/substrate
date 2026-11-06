@@ -29,17 +29,17 @@ import { type DragonflyPresenceStore, PRESENCE_MAX_SESSIONS } from "./presence-d
 import { classifySessions, type SessionStatus, type UnknownViewReason } from "./presence.ts";
 import { deriveSessionState, type SessionViewState } from "./states.ts";
 
-export interface PlanningDisabled {
+interface PlanningDisabled {
 	state: "disabled";
 	reason: "root-unset";
 }
 
-export interface PlanningMisconfigured {
+interface PlanningMisconfigured {
 	state: "misconfigured";
 	errors: PlanningConfigError[];
 }
 
-export interface PlanningHashRow {
+interface PlanningHashRow {
 	path: string;
 	kind: PlanningKind;
 	sha256: string;
@@ -48,7 +48,7 @@ export interface PlanningHashRow {
 	plan?: string;
 }
 
-export interface PlanningErrorRow {
+interface PlanningErrorRow {
 	path: string;
 	kind?: PlanningKind;
 	sha256: string | null;
@@ -57,7 +57,7 @@ export interface PlanningErrorRow {
 	detail: string;
 }
 
-export type PlanningStatusView =
+type PlanningStatusView =
 	| PlanningDisabled
 	| PlanningMisconfigured
 	| { state: "unavailable"; code: PlanningIndexFailure }
@@ -75,9 +75,9 @@ export type PlanningStatusView =
 	  };
 
 /** A session's planning view as a row shows it: the scan time when its report is known, or the reason it is not. */
-export type PlanningRowState = { state: "known"; scannedAtMs: number } | { state: "unknown"; reason: UnknownViewReason };
+type PlanningRowState = { state: "known"; scannedAtMs: number } | { state: "unknown"; reason: UnknownViewReason };
 
-export interface PlanningSessionRow {
+interface PlanningSessionRow {
 	sessionId: string;
 	worktree: string;
 	branch: string;
@@ -90,7 +90,7 @@ export interface PlanningSessionRow {
 	planning: PlanningRowState;
 }
 
-export type PlanningSessionsBody =
+type PlanningSessionsBody =
 	| PlanningDisabled
 	| PlanningMisconfigured
 	| { state: "unavailable"; code: "presence-backend-unset" | "presence-listing-failed"; detail?: string }
@@ -107,7 +107,7 @@ export type PlanningSessionsBody =
 /** Every sessions answer carries the session view's state and its line, whatever the body is. */
 export type PlanningSessionsView = PlanningSessionsBody & { view: SessionViewState };
 
-export interface PlanningReaderDeps {
+interface PlanningReaderDeps {
 	settings: PlanningConfigResult;
 	fs: PlanningFs;
 	/** Null when the cache endpoint is unset or refused by the endpoint policy. */
@@ -116,7 +116,7 @@ export interface PlanningReaderDeps {
 	checkpoints?: CompletionStoreView;
 }
 
-export type ResolvedSettings = { ready: true; root: string; limits: PlanningLimits } | { ready: false; view: PlanningDisabled | PlanningMisconfigured };
+type ResolvedSettings = { ready: true; root: string; limits: PlanningLimits } | { ready: false; view: PlanningDisabled | PlanningMisconfigured };
 
 /** The settings a plane runs with, or the typed view that says why it does not run. Shared by the reader and the observer. */
 export function resolveSettings(result: PlanningConfigResult): ResolvedSettings {

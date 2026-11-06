@@ -64,19 +64,19 @@ import {
 } from "./planes/lightrag.ts";
 import { redact, redactKnown } from "./redact.ts";
 
-export const SMOKE_SCHEMA = 1;
+const SMOKE_SCHEMA = 1;
 
-export const SMOKE_USAGE =
+const SMOKE_USAGE =
 	"usage: lightrag-smoke-run.ts --confirm-live [--no-auth-expected] [--json]\n" +
 	"  --confirm-live      required: the run uploads one synthetic document to the live server and deletes it\n" +
 	"  --no-auth-expected  skip the anonymous-access check for a deployment that is deliberately keyless\n" +
 	"  --json              print one JSON object instead of the summary\n" +
 	"  LIGHTRAG_URL (required) and LIGHTRAG_API_KEY name the server; exit 0 ok, 1 a check failed, 2 usage or config, 3 unreachable\n";
 
-export type SmokeCheckName = "health" | "auth-negative" | "ingest" | "query" | "delete" | "clear-all-guard";
-export type SmokeCheckStatus = "pass" | "fail" | "skip";
+type SmokeCheckName = "health" | "auth-negative" | "ingest" | "query" | "delete" | "clear-all-guard";
+type SmokeCheckStatus = "pass" | "fail" | "skip";
 
-export interface SmokeCheck {
+interface SmokeCheck {
 	name: SmokeCheckName;
 	status: SmokeCheckStatus;
 	/** Short and redacted: never the URL, the key or any document content. */
@@ -84,7 +84,7 @@ export interface SmokeCheck {
 	durationMs: number;
 }
 
-export interface SmokeReport {
+interface SmokeReport {
 	schema: typeof SMOKE_SCHEMA;
 	/** The server's core version as `/health` reported it, or null. */
 	version: string | null;
@@ -92,7 +92,7 @@ export interface SmokeReport {
 	ok: boolean;
 }
 
-export type SmokeExitCode = 0 | 1 | 3;
+type SmokeExitCode = 0 | 1 | 3;
 
 export interface SmokeResult {
 	report: SmokeReport;
@@ -109,7 +109,7 @@ export class SmokeUsageError extends Error {
 	}
 }
 
-export interface SmokeArgs {
+interface SmokeArgs {
 	json: boolean;
 	noAuthExpected: boolean;
 }
@@ -179,7 +179,7 @@ interface Budget {
 /** An explicit HTTP 4xx answer (`lightrag 409`, `lightrag 422`, ...): the server saw the request and refused it. */
 const KNOWN_REFUSAL = /^lightrag 4\d\d\b/;
 
-export interface Outcome {
+interface Outcome {
 	status: SmokeCheckStatus;
 	reason: string;
 }
@@ -540,7 +540,7 @@ export function formatSmoke(result: SmokeResult): string {
 	return `${lines.join("\n")}\n`;
 }
 
-export interface SmokeMainIo {
+interface SmokeMainIo {
 	env?: Record<string, string | undefined>;
 	fetchImpl?: FetchLike;
 	now?: () => number;

@@ -30,15 +30,26 @@
  */
 import {
 	AMOUNT_ZERO,
+	formatMemo,
+	formatMemoV2,
+	formatMemoV3,
+	graphHeadsRoot,
+	graphIndexAddress,
+	headsRoot,
 	HOUR_MS,
 	hourIso,
 	hourStart,
 	isClosed,
 	keygenPath,
+	merkleRootHex,
 	parseMemo,
+	parseMemoV3,
 	parseSignature,
+	pointerTransferArgv,
 	pubkeyArgv,
+	SIGNATURE_PAGE_MAX,
 	transferMemoArgv,
+	type GraphHeadRecord,
 	type AddressMemo,
 	type Rpc,
 	type RunResult,
@@ -46,10 +57,11 @@ import {
 	type TransactionMemo,
 } from "@substrate/ledger";
 import { isAbsolute as isAbsPath } from "node:path";
-import { InvalidEventError } from "./event.ts";
-import { GreptimeError, INGEST_LAG_MS, type GreptimeClient, type NewAnchor } from "./greptime.ts";
+import { chainLeafCommitment, InvalidEventError, inChainOrder, normalizeIdentifier } from "./event.ts";
+import { GreptimeError, INGEST_LAG_MS, type GraphChainLeafRow, type GreptimeClient, type NewAnchor } from "./greptime.ts";
 import { redact } from "./redact.ts";
 import type { HourDigest, Substrate } from "./service.ts";
+import type { PointerEntry, PointerListing } from "./anchor-verify-deps.ts";
 
 export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 
@@ -59,9 +71,6 @@ export const MAX_HOURS_PER_RUN = 24;
 /** How far back a run looks for unanchored hours; older ones are verify's `unanchored`. */
 export const ANCHOR_LOOKBACK_MS = 7 * 24 * HOUR_MS;
 
-/** Recent signatures scanned for an adoptable memo per candidate hour. */
-export const ADDRESS_MEMO_LIMIT = 100;
-
 /**
  * What the key must hold: the rent-exempt minimum for a bare account plus one
  * send's fee. The rent figure is the well-known ~0.00089 SOL for 0 bytes; the
@@ -69,8 +78,29 @@ export const ADDRESS_MEMO_LIMIT = 100;
  */
 export const REQUIRED_BALANCE_LAMPORTS = 890_880 + 5_000;
 
+/** Lamports an index account is funded with when the cluster refuses its 0-lamport pointer: the rent-exempt minimum of an empty account (design Q3). */
+const INDEX_FUND_LAMPORTS = 890_880;
+
+/**
+ * The cluster's refusal of a 0-lamport pointer to an unfunded index account (design Q3). The rent wording is the solana CLI's
+ * transaction-error text, "Transaction results in an account (N) with insufficient funds for rent", present in the local solana-cli 4.2.2
+ * binary; `InsufficientFundsForRent` is that error's variant name, as its Debug form prints it. The "Transaction simulation failed:"
+ * prefix is added by the RPC preflight, so it is not matched: an unrelated simulation failure must not fund the index account. The full
+ * line the devnet node returns is [INFERENCE] until the devnet probe confirms it.
+ */
+const POINTER_REFUSED_RE = /insufficient funds for rent|InsufficientFundsForRent/i;
+
+/** Hours the adoption walk covers; it reads (1 + lookback graphs) signatures for each: every signature the job key signed over the lookback (design Q6). */
+const ADOPT_LOOKBACK_HOURS = 168;
+
+/** Signatures per adoption page: the node's own cap (design Q6). */
+const ADOPT_PAGE_SIZE = SIGNATURE_PAGE_MAX;
+
+/** Pages one graph's full pointer listing may read before it is reported incomplete: 100,000 signatures. */
+const POINTER_LISTING_MAX_PAGES = 100;
+
 /** Closed `anchor.failed` reasons, exactly as EVENT_SOURCES samples them. */
-export type AnchorFailReason =
+type AnchorFailReason =
 	| "digest-failed"
 	| "root-mismatch"
 	| "unfunded"
@@ -138,15 +168,17 @@ export function parseAnchorArgs(argv: readonly string[]): AnchorCliOptions {
 	return options;
 }
 
-export interface AnchorResult {
+interface AnchorResult {
 	code: 0 | 1;
 	anchored: number;
 	adopted: number;
 	failed: number;
+	/** Index accounts funded this run: a pointer the cluster refused at 0 lamports, then sent once more with INDEX_FUND_LAMPORTS (design Q3). */
+	funded: number;
 }
 
 /** A systemic failure: stop the run before the next send. */
-class SystemicError extends Error {
+export class SystemicError extends Error {
 	constructor(readonly reason: AnchorFailReason, detail: string) {
 		super(detail);
 	}
@@ -266,10 +298,9 @@ type AdoptVerdict =
 	| { kind: "none" };
 
 /**
- * D28-08 adopt-before-send: the address listing is hint-only; adoption needs
- * the `transactionMemo` confirm (memo program, payer, signature, err null,
- * v1 parse, this period). Same root+count adopts, a different root+count
- * alarms, no memo sends.
+ * D28-08 adopt-before-send: the job key's listing is hint-only; adoption needs the `transactionMemo` confirm (memo program, payer,
+ * signature, err null, v1 or v2 parse, this period), and a different root+count alarms with no memo sent. v3 pointers are never hour
+ * memos: an adopted hour's pointers are checked and completed before its row is stored.
  */
 async function assertDevnetCluster(rpc: Rpc): Promise<void> {
 	let genesis: string;
@@ -283,11 +314,11 @@ async function assertDevnetCluster(rpc: Rpc): Promise<void> {
 	}
 }
 
-async function checkAdopt(deps: AnchorDeps, periodStartMs: number, digest: HourDigest): Promise<AdoptVerdict> {
+async function checkAdopt(deps: AnchorDeps, periodStartMs: number, digest: HourDigest, lookbackGraphs: number): Promise<AdoptVerdict> {
 	const { rpc, env } = deps;
 	let listing: AddressMemo[];
 	try {
-		listing = await rpc.addressMemos(env.pubkey, ADDRESS_MEMO_LIMIT);
+		listing = await listJobMemos(rpc, env.pubkey, (1 + lookbackGraphs) * ADOPT_LOOKBACK_HOURS);
 	} catch (cause) {
 		throw new SystemicError("rpc-unreadable", `getSignaturesForAddress failed: ${redact(String(cause).slice(0, 200))}`);
 	}
@@ -348,6 +379,288 @@ function anchorRow(
 	};
 }
 
+/** The chain fields one event row contributes to the heads commitment (D73-02). */
+export interface ChainMember {
+	id: string;
+	hash: string;
+	prev: string | null;
+	graph_id: string | null;
+	session_id: string | null;
+}
+
+/** The head records and chain leaves of one hour, and the heads root over its records (D73-01). */
+export interface HourHeads {
+	headsRootHex: string;
+	records: GraphHeadRecord[];
+	leaves: GraphChainLeafRow[];
+}
+
+/** Event ids one hour-read statement carries. */
+const HEADS_READ_BATCH = 500;
+
+/** Code-unit order: the order every reader reproduces without a locale. */
+function compareText(a: string, b: string): number {
+	if (a === b) return 0;
+	return a < b ? -1 : 1;
+}
+
+function byEventId<T extends ChainMember>(a: T, b: T): number {
+	return compareText(a.id, b.id);
+}
+
+function byGroup(a: { graphId: string; sessionId: string }, b: { graphId: string; sessionId: string }): number {
+	return compareText(a.graphId, b.graphId) || compareText(a.sessionId, b.sessionId);
+}
+
+/**
+ * The hour's head records and chain leaves (D73-01, D73-02). An event with no graph_id belongs to no
+ * graph and gets no head; it stays in the hour root. Each (graph_id, session_id) group is ordered by
+ * chain, a missing session_id being "" as verifyGraph buckets it. Members are sorted by id before
+ * inChainOrder, which takes its start and resolves forks by input order, so every read order gives the
+ * same chain.
+ */
+export function buildGraphHeads<T extends ChainMember>(
+	members: readonly T[],
+	periodStartMs: number,
+): { records: GraphHeadRecord[]; leaves: GraphChainLeafRow[] } {
+	const periodStart = new Date(periodStartMs).toISOString();
+	const groups = new Map<string, { graphId: string; sessionId: string; members: T[] }>();
+	for (const member of members) {
+		if (member.graph_id === null) continue;
+		const sessionId = member.session_id ?? "";
+		const key = JSON.stringify([member.graph_id, sessionId]);
+		const group = groups.get(key);
+		if (group) group.members.push(member);
+		else groups.set(key, { graphId: member.graph_id, sessionId, members: [member] });
+	}
+	const records: GraphHeadRecord[] = [];
+	const leaves: GraphChainLeafRow[] = [];
+	for (const group of [...groups.values()].sort(byGroup)) {
+		const chain = inChainOrder(group.members.sort(byEventId));
+		const head = chain.at(-1);
+		if (head === undefined) throw new Error("buildGraphHeads: empty chain");
+		records.push({
+			graphId: group.graphId,
+			sessionId: group.sessionId,
+			periodStartMs,
+			count: chain.length,
+			leavesRootHex: merkleRootHex(chain.map((member) => chainLeafCommitment(member.id, member.hash))),
+			headEventId: head.id,
+			headHashHex: head.hash,
+		});
+		for (const [seq, member] of chain.entries()) {
+			leaves.push({
+				period_start: periodStart,
+				graph_id: group.graphId,
+				session_id: group.sessionId,
+				seq,
+				event_id: member.id,
+				hash: member.hash,
+			});
+		}
+	}
+	return { records, leaves };
+}
+
+/** The chain fields of one `agent_events` row, as `eventsByIds` returns it. */
+function chainMemberOf(row: Record<string, unknown>): ChainMember {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	return {
+		id: String(row.id),
+		hash: String(row.hash),
+		prev: text(row.prev),
+		graph_id: text(row.graph_id),
+		session_id: text(row.session_id),
+	};
+}
+
+/**
+ * Reads the member rows of one hour and returns its heads, or null when no graph owns one of its
+ * events. A member row that does not come back throws: the leaves would otherwise be partial.
+ */
+export async function readHourHeads(greptime: Pick<GreptimeClient, "eventsByIds">, periodStartMs: number, eventIds: readonly string[]): Promise<HourHeads | null> {
+	const members: ChainMember[] = [];
+	for (let i = 0; i < eventIds.length; i += HEADS_READ_BATCH) {
+		const rows = await greptime.eventsByIds(eventIds.slice(i, i + HEADS_READ_BATCH));
+		for (const row of rows) members.push(chainMemberOf(row));
+	}
+	if (members.length !== eventIds.length) {
+		throw new GreptimeError(`hour ${hourIso(periodStartMs)} read ${members.length} of ${eventIds.length} member rows`);
+	}
+	const { records, leaves } = buildGraphHeads(members, periodStartMs);
+	if (records.length === 0) return null;
+	return { headsRootHex: headsRoot(records), records, leaves };
+}
+
+/**
+ * The memo an hour is anchored with: v2 once a graph owns one of its events (D73-01), else the v1
+ * memo every hour has always carried.
+ */
+export function anchorMemo(periodStartMs: number, rootHex: string, count: number, heads: HourHeads | null): string {
+	if (heads === null) return formatMemo({ periodStartMs, rootHex, count });
+	return formatMemoV2({ periodStartMs, rootHex, count, headsRootHex: heads.headsRootHex });
+}
+
+/** One hour's chain leaves, then its anchors row: a row is never stored without its leaves (D73-02). */
+async function storeAnchor(greptime: GreptimeClient, heads: HourHeads | null, row: NewAnchor): Promise<void> {
+	await greptime.insertGraphChainLeaves(heads?.leaves ?? []);
+	await greptime.insertAnchor(row);
+}
+
+/**
+ * The job key's newest signatures, at least `window` of them, read a page of {@link ADOPT_PAGE_SIZE} at a time. Only an empty page ends the
+ * walk early: a node may answer a page shorter than the one asked, and the listing goes on past it.
+ */
+async function listJobMemos(rpc: Rpc, pubkey: string, window: number): Promise<AddressMemo[]> {
+	const out: AddressMemo[] = [];
+	let before: string | undefined;
+	while (out.length < window) {
+		const page = await rpc.addressMemos(pubkey, ADOPT_PAGE_SIZE, before);
+		if (page.length === 0) break;
+		out.push(...page);
+		before = page.at(-1)?.signature;
+	}
+	return out;
+}
+
+/**
+ * One graph's v3 pointers: its index address listed newest first at `confirmed`, a page of SIGNATURE_PAGE_MAX at a time. The listing is
+ * complete only when a page comes back empty; the page cap or the budget stops it earlier, and the entries read so far are kept.
+ */
+export async function readGraphPointers(rpc: Pick<Rpc, "addressSignaturePage">, graphId: string, opts: { budgetMs: number; nowMs: () => number; maxPages?: number }): Promise<PointerListing> {
+	const address = graphIndexAddress(graphId);
+	const maxPages = opts.maxPages ?? POINTER_LISTING_MAX_PAGES;
+	const started = opts.nowMs();
+	const entries: PointerEntry[] = [];
+	let before: string | undefined;
+	for (let pages = 0; pages < maxPages; pages++) {
+		if (opts.nowMs() - started >= opts.budgetMs) return { entries, complete: false };
+		const page = await rpc.addressSignaturePage(address, { limit: SIGNATURE_PAGE_MAX, commitment: "confirmed", ...(before === undefined ? {} : { before }) });
+		if (page.length === 0) return { entries, complete: true };
+		for (const row of page) entries.push({ signature: row.signature, memo: row.memo });
+		before = page.at(-1)?.signature;
+	}
+	return { entries, complete: false };
+}
+
+/** One graph's pointer for an hour: the memo its transaction must carry, and the graph it names. */
+interface PointerPlan {
+	graphId: string;
+	memo: string;
+}
+
+/** A stand-in hour transaction signature of the longest length the memo parser takes (88 base58 characters), for validating a pointer plan before its hour transaction exists. */
+const PLACEHOLDER_HOUR_TX_SIG = "1".repeat(88);
+
+/**
+ * The pointers an hour owes, one per graph with events in it, in graph-id order (design 3.2). Each names the hour transaction's signature,
+ * so the hour transaction is sent first. A graph id not in its stored, normalised form, or with a NUL byte, is refused before any send.
+ */
+function pointerPlans(periodStartMs: number, heads: HourHeads, hourTxSig: string): PointerPlan[] {
+	const graphIds = [...new Set(heads.records.map((record) => record.graphId))].sort(compareText);
+	return graphIds.map((graphId) => {
+		if (graphId.includes("\0")) throw new Error("pointer: graph id contains a NUL byte");
+		if (normalizeIdentifier(graphId) !== graphId) throw new Error("pointer: graph id is not in its normalised form");
+		const count = heads.records.reduce((sum, record) => (record.graphId === graphId ? sum + record.count : sum), 0);
+		return {
+			graphId,
+			memo: formatMemoV3({ graphId, periodStartMs, count, graphHeadsRootHex: graphHeadsRoot(heads.records, graphId), hourTxSig }),
+		};
+	});
+}
+
+/**
+ * One graph's pointer: sent with 0 lamports to its index address, then read back. A refusal of that transfer (POINTER_REFUSED_RE) takes
+ * the funded path once: the same memo with INDEX_FUND_LAMPORTS, which funds the index account and carries the pointer in one transaction.
+ * Returns whether the account was funded. Every failure is a send-failed SystemicError; nothing here stores a row.
+ */
+async function sendPointer(deps: Pick<AnchorDeps, "runner" | "rpc" | "env" | "clock">, periodIso: string, plan: PointerPlan): Promise<boolean> {
+	const { runner, rpc, env } = deps;
+	const recipient = graphIndexAddress(plan.graphId);
+	const argvFor = (lamports: number): string[] =>
+		pointerTransferArgv({ cli: env.cli, recipient, memo: plan.memo, rpcUrl: env.rpcUrl, keypairPath: env.keypairPath, lamports });
+	let funded = false;
+	let sent: RunResult;
+	try {
+		sent = await runner(argvFor(0));
+		if (sent.code !== 0 && POINTER_REFUSED_RE.test(`${sent.stdout}\n${sent.stderr}`)) {
+			sent = await runner(argvFor(INDEX_FUND_LAMPORTS));
+			funded = true;
+		}
+	} catch (cause) {
+		throw new SystemicError("send-failed", `pointer send failed: ${redact(String(cause).slice(0, 200))}`);
+	}
+	if (sent.code !== 0) throw new SystemicError("send-failed", `pointer send exited ${String(sent.code)}: ${redact(sent.stderr.slice(0, 200))}`);
+	let signature: string;
+	try {
+		signature = parseSignature(sent.stdout);
+	} catch (cause) {
+		throw new SystemicError("send-failed", `pointer send: ${redact(String(cause).slice(0, 200))}`);
+	}
+	let readBack: TransactionMemo | null;
+	try {
+		readBack = await rpc.transactionMemo(signature, "confirmed");
+	} catch (cause) {
+		throw new SystemicError("send-failed", `pointer read-back failed: ${redact(String(cause).slice(0, 200))}`);
+	}
+	if (readBack === null || readBack.memo !== plan.memo || readBack.payer !== env.pubkey || !readBack.payerSigned || readBack.err !== null) {
+		throw new SystemicError("send-failed", `pointer ${signature} read-back does not match the plan`);
+	}
+	if (funded) process.stdout.write(`[anchor] ${periodIso} index account ${recipient} funded with ${INDEX_FUND_LAMPORTS} lamports\n`);
+	return funded;
+}
+
+/**
+ * The adopt path's pointer check (design 3.5). For each graph of the hour, the index listing must hold this hour's pointer: a listed
+ * pointer the job key paid for, confirmed with the planned memo, counts. A valid pointer for the same graph and hour with other content is
+ * a fork and stops the run before any send. A missing pointer goes out through the same path as a fresh hour's. Returns the funded count.
+ */
+export async function completePointers(
+	deps: Pick<AnchorDeps, "runner" | "rpc" | "env" | "clock">,
+	periodStartMs: number,
+	periodIso: string,
+	heads: HourHeads,
+	hourTxSig: string,
+	ensure: () => Promise<void>,
+): Promise<number> {
+	const { rpc, env } = deps;
+	const nowMs = deps.clock ?? Date.now;
+	let funded = 0;
+	for (const plan of pointerPlans(periodStartMs, heads, hourTxSig)) {
+		let listing: PointerListing;
+		try {
+			listing = await readGraphPointers(rpc, plan.graphId, { budgetMs: Number.POSITIVE_INFINITY, nowMs });
+		} catch (cause) {
+			throw new SystemicError("rpc-unreadable", `pointer listing for ${periodIso} failed: ${redact(String(cause).slice(0, 200))}`);
+		}
+		if (!listing.complete) throw new SystemicError("rpc-unreadable", `pointer listing for ${periodIso} is incomplete`);
+		let present = false;
+		for (const entry of listing.entries) {
+			const hint = entry.memo === null ? null : parseMemoV3(entry.memo);
+			if (hint === null || hint.graphId !== plan.graphId || hint.periodStartMs !== periodStartMs) continue;
+			let confirmed: TransactionMemo | null;
+			try {
+				confirmed = await rpc.transactionMemo(entry.signature, "confirmed");
+			} catch (cause) {
+				throw new SystemicError("rpc-unreadable", `pointer ${entry.signature} read failed: ${redact(String(cause).slice(0, 200))}`);
+			}
+			// A hinted pointer whose transaction cannot be read may already be on chain: stop and retry later, never send a second one.
+			if (confirmed === null) throw new SystemicError("rpc-unreadable", `pointer ${entry.signature} for ${periodIso} could not be read`);
+			// A failed transaction, or one the job key did not pay for, never counts.
+			if (confirmed.payer !== env.pubkey || !confirmed.payerSigned || confirmed.err !== null || confirmed.memo === null) continue;
+			if (confirmed.memo === plan.memo) {
+				present = true;
+				break;
+			}
+			throw new SystemicError("root-mismatch", `pointer ${entry.signature} for ${periodIso} names other content for the same graph`);
+		}
+		if (present) continue;
+		await ensure();
+		if (await sendPointer(deps, periodIso, plan)) funded += 1;
+	}
+	return funded;
+}
+
 /**
  * Anchor every closed, non-empty, unanchored hour. Returns the process exit
  * code the entry point exits with: 0 when every candidate anchored or was
@@ -356,7 +669,7 @@ function anchorRow(
 export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 	const now = (deps.clock ?? Date.now)();
 	const { greptime, substrate, runner, rpc, env } = deps;
-	const result: AnchorResult = { code: 0, anchored: 0, adopted: 0, failed: 0 };
+	const result: AnchorResult = { code: 0, anchored: 0, adopted: 0, failed: 0, funded: 0 };
 
 	const failHour = async (periodStartIso: string, reason: AnchorFailReason): Promise<boolean> => {
 		// Reports one hour as failed, and whether its `anchor.failed` warning
@@ -491,6 +804,14 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 	}
 
 	let preconditionsOk = false;
+	// D28-07 runs once, before the first send of the run. A pointer is a send too, so the adopt path runs it as well.
+	const ensurePreconditions = async (): Promise<void> => {
+		if (preconditionsOk) return;
+		await checkPreconditions(deps);
+		preconditionsOk = true;
+	};
+	// The lookback's distinct graphs, read once the first hour needs an adopt walk: each walk reads (1 + this) x ADOPT_LOOKBACK_HOURS signatures.
+	let lookbackGraphs: number | null = null;
 	for (const hour of candidates) {
 		const periodIso = hourIso(hour);
 		let digest = peeked.get(hour);
@@ -519,9 +840,31 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		}
 		if (digest.root === null || digest.event_count === 0 || digest.memo === null) continue;
 
+		// Heads are read before the adopt check: a v2 adopt is checked against them.
+		// An anchored hour skips the read, as its row already settles it.
+		let heads: HourHeads | null = null;
+		if (anchored[periodIso] !== true) {
+			try {
+				heads = await readHourHeads(greptime, hour, digest.event_ids);
+			} catch (cause) {
+				await failHour(periodIso, "store-failed");
+				process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+				return result;
+			}
+		}
+		if (lookbackGraphs === null) {
+			try {
+				lookbackGraphs = await greptime.lookbackGraphCount(windowStart);
+			} catch (cause) {
+				await failHour(periodIso, "store-failed");
+				process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+				return result;
+			}
+		}
+
 		let verdict: AdoptVerdict;
 		try {
-			verdict = await checkAdopt(deps, hour, digest);
+			verdict = await checkAdopt(deps, hour, digest, lookbackGraphs);
 		} catch (cause) {
 			const reason = cause instanceof SystemicError ? cause.reason : "rpc-unreadable";
 			await failHour(periodIso, reason);
@@ -530,50 +873,64 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		}
 
 		if (verdict.kind === "alarm") {
-			// A `--period` re-run over an anchored hour keeps its row: the
-			// alarm is reported, never rewritten over the original.
-			if (anchored[periodIso] !== true) {
-				try {
-					await greptime.insertAnchor(anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
-				} catch {
-					await failHour(periodIso, "store-failed");
-					return result;
-				}
+			// A root mismatch stores no row and no chain leaves: the alarm is raised and the next run alarms again until the mismatch is
+			// resolved.
+			const warned = await failHour(periodIso, "root-mismatch");
+			process.stderr.write(`[anchor] ALARM ${periodIso}: chain root ${verdict.root} != recomputed ${digest.root}\n`);
+			// The alarm is reported, but a later hour still anchors — unless the
+			// warning itself was not stored, which stops the run like the
+			// adopted-note path below.
+			if (!warned) {
+				process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
+				return result;
 			}
-		const warned = await failHour(periodIso, "root-mismatch");
-		process.stderr.write(`[anchor] ALARM ${periodIso}: chain root ${verdict.root} != recomputed ${digest.root}\n`);
-		// The alarm is reported, but a later hour still anchors — unless the
-		// warning itself was not stored, which stops the run like the
-		// adopted-note path below.
-		if (!warned) {
-			process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
-			return result;
-		}
-		continue;
+			continue;
 		}
 
 		if (verdict.kind === "adopt") {
 			// A `--period` re-run over an anchored hour: the memo confirms,
 			// so the row stays untouched and only the adopted event is emitted.
 			if (anchored[periodIso] !== true) {
+				const chainHeads = parseMemo(verdict.memo)?.headsRootHex;
+				// A v2 memo commits to the heads root: a local root that differs alarms, and no pointer is sent for it.
+				if (chainHeads !== undefined && (heads === null || heads.headsRootHex !== chainHeads)) {
+					const warned = await failHour(periodIso, "root-mismatch");
+					process.stderr.write(`[anchor] ALARM ${periodIso}: chain heads root ${chainHeads} != recomputed ${heads?.headsRootHex ?? "none"}\n`);
+					if (!warned) {
+						process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
+						return result;
+					}
+					continue;
+				}
+				// The pointers come before the row: a pointer that fails stops the run with no row, and the next run completes them.
+				if (heads !== null && chainHeads !== undefined) {
+					try {
+						result.funded += await completePointers(deps, hour, periodIso, heads, verdict.signature, ensurePreconditions);
+					} catch (cause) {
+						const reason = cause instanceof SystemicError ? cause.reason : "send-failed";
+						await failHour(periodIso, reason);
+						process.stderr.write(`[anchor] ${periodIso} ${reason}: pointer ${redact(String(cause).slice(0, 200))}\n`);
+						return result;
+					}
+				}
 				try {
-					await greptime.insertAnchor(anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
+					await storeAnchor(greptime, heads, anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
 				} catch {
 					await failHour(periodIso, "store-failed");
 					return result;
 				}
 			}
-		const note = await emitWritten(substrate, digest, verdict.signature, true).catch(() => null);
-		if (note?.stored !== true) {
-			// The store already failed one write: a later hour must not send
-			// a new transaction after that. Report and stop like the send path.
-			await failHour(periodIso, "store-failed");
-			process.stderr.write(`[anchor] ${periodIso} adopted but the anchor note was not stored\n`);
-			return result;
-		}
-		result.adopted += 1;
-		process.stdout.write(`[anchor] ${periodIso} adopted ${verdict.signature}\n`);
-		continue;
+			const note = await emitWritten(substrate, digest, verdict.signature, true).catch(() => null);
+			if (note?.stored !== true) {
+				// The store already failed one write: a later hour must not send
+				// a new transaction after that. Report and stop like the send path.
+				await failHour(periodIso, "store-failed");
+				process.stderr.write(`[anchor] ${periodIso} adopted but the anchor note was not stored\n`);
+				return result;
+			}
+			result.adopted += 1;
+			process.stdout.write(`[anchor] ${periodIso} adopted ${verdict.signature}\n`);
+			continue;
 		}
 
 		// An anchored hour whose memo fell out of the listing window is left
@@ -602,24 +959,35 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			return result;
 		}
 
-		if (!preconditionsOk) {
+		// The pointer plans are formed before the hour transaction is sent. A graph id the memo cannot carry (over 512 UTF-8 bytes, not in its
+		// normalised form, or with a NUL byte) is refused here: no transaction goes out for the hour, it gets no row, and the run sends nothing later. The
+		// placeholder is the longest signature the memo takes; the real one exists only after the send.
+		if (heads !== null) {
 			try {
-				await checkPreconditions(deps);
+				pointerPlans(hour, heads, PLACEHOLDER_HOUR_TX_SIG);
 			} catch (cause) {
-				const reason = cause instanceof SystemicError ? cause.reason : "send-failed";
-				await failHour(periodIso, reason);
-				process.stderr.write(`[anchor] ${periodIso} ${reason}: ${redact(String(cause).slice(0, 200))}\n`);
+				await failHour(periodIso, "send-failed");
+				process.stderr.write(`[anchor] ${periodIso} send-failed: pointer plan refused before the hour transaction: ${redact(String(cause).slice(0, 200))}\n`);
 				return result;
 			}
-			preconditionsOk = true;
 		}
 
+		try {
+			await ensurePreconditions();
+		} catch (cause) {
+			const reason = cause instanceof SystemicError ? cause.reason : "send-failed";
+			await failHour(periodIso, reason);
+			process.stderr.write(`[anchor] ${periodIso} ${reason}: ${redact(String(cause).slice(0, 200))}\n`);
+			return result;
+		}
+
+		const sendMemo = anchorMemo(hour, digest.root, digest.event_count, heads);
 		let argv: string[];
 		try {
 			argv = transferMemoArgv({
 				cli: env.cli,
 				pubkey: env.pubkey,
-				memo: digest.memo,
+				memo: sendMemo,
 				rpcUrl: env.rpcUrl,
 				keypairPath: env.keypairPath,
 				amountSol: AMOUNT_ZERO,
@@ -666,6 +1034,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			back.periodStartMs !== hour ||
 			back.rootHex !== digest.root ||
 			back.count !== digest.event_count ||
+			back.headsRootHex !== heads?.headsRootHex ||
 			readBack.payer !== env.pubkey ||
 			!readBack.payerSigned ||
 			readBack.err !== null
@@ -675,9 +1044,26 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			return result;
 		}
 
+		// The hour transaction is read back, then each graph's pointer follows it, one by one. A pointer that fails stops the run before the
+		// row is stored: the next run adopts this hour and completes its pointers before anything new (design 3.5).
+		if (heads !== null) {
+			try {
+				for (const plan of pointerPlans(hour, heads, signature)) {
+					if (await sendPointer(deps, periodIso, plan)) result.funded += 1;
+				}
+			} catch (cause) {
+				const reason = cause instanceof SystemicError ? cause.reason : "send-failed";
+				await failHour(periodIso, reason);
+				process.stderr.write(`[anchor] ${periodIso} ${reason}: pointer ${redact(String(cause).slice(0, 200))}\n`);
+				return result;
+			}
+		}
+
 		try {
-			await greptime.insertAnchor(
-				anchorRow(digest, signature, env.pubkey, readBack.slot ?? 0, digest.memo, digest.root, digest.event_count, now),
+			await storeAnchor(
+				greptime,
+				heads,
+				anchorRow(digest, signature, env.pubkey, readBack.slot ?? 0, sendMemo, digest.root, digest.event_count, now),
 			);
 		} catch {
 			await failHour(periodIso, "store-failed");

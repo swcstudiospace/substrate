@@ -8,8 +8,8 @@
  */
 import type { SyncOutcome, SyncTrigger } from "@substrate/corpus";
 
-export const DOCS_SYNC_ACTION = "docs.sync";
-export const DOCS_SYNC_RUNTIME = "corpus-sync";
+const DOCS_SYNC_ACTION = "docs.sync";
+const DOCS_SYNC_RUNTIME = "corpus-sync";
 /** The `repo` of an event that covers more than one repository. */
 export const ALL_REPOS = "*";
 /** Bounded: an event is a note, not a log. */
@@ -60,7 +60,7 @@ export function docsSyncBody(sync: DocsSync): Record<string, unknown> {
 	};
 }
 
-export interface EmitterConfig {
+interface EmitterConfig {
 	/** The substrate's base URL, without a trailing slash. */
 	url: string;
 	token: string | undefined;

@@ -13,9 +13,9 @@ import { resolvePolicy } from "./policy.ts";
 import type { RepoContext } from "./runner.ts";
 import type { ResolvedPolicy, SkippedPath } from "./types.ts";
 
-export const JOURNAL_FILE = "restore-journal.json";
+const JOURNAL_FILE = "restore-journal.json";
 
-export type JournalState = "applying" | "rolling-back";
+type JournalState = "applying" | "rolling-back";
 
 export type Journal = {
 	version: 1;

@@ -6,8 +6,8 @@
  * is inspected, never ignored, since one of the subcommands deletes directories.
  */
 
-export const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "provision", "disk", "guard", "merge-back"] as const;
-export type Subcommand = (typeof SUBCOMMANDS)[number];
+const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "provision", "disk", "guard", "merge-back"] as const;
+type Subcommand = (typeof SUBCOMMANDS)[number];
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(["root", "repo", "idle-days", "branch", "base", "path", "session"]);
 const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json", "report", "execute"]);
@@ -39,7 +39,7 @@ export interface WorktreeArgs {
 	execute: boolean;
 }
 
-export type ParseResult = { ok: true; args: WorktreeArgs } | { ok: false; error: string };
+type ParseResult = { ok: true; args: WorktreeArgs } | { ok: false; error: string };
 
 export function parseWorktreeArgs(argv: readonly string[]): ParseResult {
 	const [first, ...rest] = argv;

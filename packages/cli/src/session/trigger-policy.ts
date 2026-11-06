@@ -49,7 +49,7 @@ export interface PolicyCheckpoint {
 	trigger?: CheckpointTrigger;
 }
 
-export interface PolicyInput {
+interface PolicyInput {
 	trigger: CheckpointTrigger;
 	nowMs: number;
 	/** The session's newest checkpoint of any trigger: the baseline and unchanged-tree rules read it. */
@@ -69,7 +69,7 @@ export interface PolicyInput {
 	seenDirectiveKeys?: ReadonlySet<string>;
 }
 
-export interface PolicyDecision {
+interface PolicyDecision {
 	take: boolean;
 	reason: string;
 }

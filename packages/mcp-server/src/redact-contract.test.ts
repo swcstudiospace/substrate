@@ -1,8 +1,7 @@
 /**
  * Phase 18 contract pins the corpus in `redact.test.ts` leaves open: the event
- * rule order (D18-01), the skill pass staying line-local for `api-key-lower`
- * (D18-08), and `docs/redaction.md` naming exactly the rules the module holds
- * (D18-18). Each one is a promise `docs/redaction.md` makes ("structural
+ * rule order (D18-01) and the skill pass staying line-local for `api-key-lower`
+ * (D18-08). Each one is a promise the redaction contract makes ("structural
  * patterns first, provider shapes before the JWT rule, and keep the skill pass
  * line-local") that no other test would notice breaking.
  *
@@ -10,9 +9,7 @@
  * or tag shape.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { REDACTED, REDACTION_RULES, SKILL_EXCLUSIONS, SKILL_RULE_NAMES, redact, redactSkillContent } from "./redact.ts";
+import { REDACTED, REDACTION_RULES, redact, redactSkillContent } from "./redact.ts";
 import type { RedactionRuleName } from "./redact.ts";
 
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -61,40 +58,5 @@ describe("skill api-key-lower stays line-local (D18-08)", () => {
 			redactions: [{ line: 1, rule: "api-key-lower" }],
 			findings: [],
 		});
-	});
-});
-
-describe("docs/redaction.md matches the module (D18-18)", () => {
-	const DOCS = join(import.meta.dir, "..", "..", "..", "docs");
-	const doc = readFileSync(join(DOCS, "redaction.md"), "utf8");
-	const section = doc.slice(doc.indexOf("## The rule table"), doc.indexOf("\n## ", doc.indexOf("## The rule table") + 1));
-	const rows = [...section.matchAll(/^\| `([a-z0-9-]+)` \| ([^|]+?) \|/gm)].map((match) => ({
-		name: match[1] ?? "",
-		family: (match[2] ?? "").trim(),
-	}));
-
-	test("the rule table lists every event rule, in table order", () => {
-		expect(rows.map((row) => row.name)).toEqual(REDACTION_RULES.map((entry) => entry.name));
-	});
-
-	test("excluded rows are exactly the skill exclusions; every other row has a same-name skill rule", () => {
-		const excluded = rows.filter((row) => /excluded/.test(row.family)).map((row) => row.name);
-		expect(excluded.sort()).toEqual(Object.keys(SKILL_EXCLUSIONS).sort());
-		for (const row of rows.filter((entry) => !/excluded/.test(entry.family))) {
-			expect({ name: row.name, skill: SKILL_RULE_NAMES.some((name) => name === row.name) }).toEqual({
-				name: row.name,
-				skill: true,
-			});
-			expect({ name: row.name, family: /^`[a-z0-9-]+`$/.test(row.family) }).toEqual({ name: row.name, family: true });
-		}
-	});
-
-	test("greptime-ledger, memory-governance and observability point at it", () => {
-		for (const file of ["greptime-ledger.md", "memory-governance.md", "observability.md"]) {
-			expect({ file, points: readFileSync(join(DOCS, file), "utf8").includes("](redaction.md)") }).toEqual({
-				file,
-				points: true,
-			});
-		}
 	});
 });

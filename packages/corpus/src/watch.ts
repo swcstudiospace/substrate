@@ -13,7 +13,7 @@ import { watch } from "node:fs";
 import { hasDocExtension } from "./classify.ts";
 
 /** The upper bound of the watch cap a caller may pass; the setting layer clamps below it. */
-export const MAX_WATCH_DIRS = 20_000;
+const MAX_WATCH_DIRS = 20_000;
 
 export interface WatchTarget {
 	/** The repository label a change in `dir` marks dirty. */
@@ -21,7 +21,7 @@ export interface WatchTarget {
 	dir: string;
 }
 
-export interface WatchHandle {
+interface WatchHandle {
 	close(): void;
 }
 
@@ -34,7 +34,7 @@ export const defaultWatchFactory: WatchFactory = (dir, listener, onError) => {
 	return handle;
 };
 
-export interface WatcherOptions {
+interface WatcherOptions {
 	dirs: readonly WatchTarget[];
 	/** Called with the repository label of every relevant change; it must not read files. */
 	onChange: (repo: string, atMs: number) => void;
@@ -44,10 +44,10 @@ export interface WatcherOptions {
 	max: number;
 }
 
-export const WATCH_DEGRADED = ["inotify-limit"] as const;
-export type WatchDegraded = (typeof WATCH_DEGRADED)[number];
+const WATCH_DEGRADED = ["inotify-limit"] as const;
+type WatchDegraded = (typeof WATCH_DEGRADED)[number];
 
-export interface WatcherState {
+interface WatcherState {
 	/** Directories with a live watch. */
 	watching: number;
 	/** Directories left unwatched because of the cap or a watch that failed to start. */

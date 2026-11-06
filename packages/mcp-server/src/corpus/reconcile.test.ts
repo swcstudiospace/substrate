@@ -247,20 +247,26 @@ describe("reconcileCorpus", () => {
 		expect(store.row(REPO, "a.md")?.state).toBe("active");
 	});
 
-	test("more drift than one reply may list is cut at the shared item bound, reported truncated, and execute repairs only what it reported", async () => {
+	test("missing rows and orphans share one bound in total: more drift than RECONCILE_MAX_ITEMS is cut, reported truncated, and execute repairs only what it reported", async () => {
 		const store = new FakeStore();
 		const plane = new FakePlane();
-		const extra = 5;
-		for (let index = 0; index < RECONCILE_MAX_ITEMS + extra; index += 1) plane.plant(corpusDocumentName(REPO, `stray-${String(index).padStart(4, "0")}.md`, sha256Hex(String(index))));
+		const missing = 300;
+		const stray = 300;
+		for (let index = 0; index < missing; index += 1) store.seed(rowOf(`gone-${index}.md`, `doc-gone-${index}`));
+		for (let index = 0; index < stray; index += 1) plane.plant(corpusDocumentName(REPO, `stray-${String(index).padStart(4, "0")}.md`, sha256Hex(String(index))));
 		const dry = await reconcileCorpus({ store, plane }, false);
 		if (!dry.ok) throw new Error("expected a result");
-		expect(dry.body.drift.orphansInPlane).toHaveLength(RECONCILE_MAX_ITEMS);
+		expect(dry.body.drift.missingInPlane).toHaveLength(missing);
+		expect(dry.body.drift.orphansInPlane).toHaveLength(RECONCILE_MAX_ITEMS - missing);
 		expect(dry.body.drift.truncated).toBe(true);
+		expect(dry.body.repaired).toEqual({ requeued: 0, deleted: 0 });
 
 		const executed = await reconcileCorpus({ store, plane }, true);
 		if (!executed.ok) throw new Error("expected a result");
-		expect(executed.body.repaired.deleted).toBe(RECONCILE_MAX_ITEMS);
-		expect(plane.documents.size).toBe(extra);
+		expect(executed.body.repaired).toEqual({ requeued: missing, deleted: RECONCILE_MAX_ITEMS - missing });
+		expect(executed.body.repaired.requeued + executed.body.repaired.deleted).toBe(RECONCILE_MAX_ITEMS);
+		expect(plane.documents.size).toBe(stray - (RECONCILE_MAX_ITEMS - missing));
+		expect(store.row(REPO, "gone-0.md")?.state).toBe("tombstoned");
 	});
 
 	test("a manifest larger than the read bound is judged for missing documents only: no orphan is asserted and none is deleted", async () => {

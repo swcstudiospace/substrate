@@ -31,8 +31,8 @@ export const DIGEST_MAX_DECISIONS = 10;
 export const DIGEST_MAX_OPEN_ITEMS = 20;
 export const DIGEST_MAX_DECISION_CHARS = 300;
 export const DIGEST_MAX_ITEM_CHARS = 200;
-export const DIGEST_MAX_FIELD_CHARS = 200;
-export const DIGEST_MAX_STATUS_CHARS = 300;
+const DIGEST_MAX_FIELD_CHARS = 200;
+const DIGEST_MAX_STATUS_CHARS = 300;
 
 export const DIGEST_KEY_PREFIX = "corpus-digest:";
 

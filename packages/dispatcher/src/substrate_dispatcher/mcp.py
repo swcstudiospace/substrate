@@ -71,6 +71,7 @@ def resolve_substrate_bearer(
                 line = fh.readline().strip()
                 return line or None
         except OSError:
+            # Absent or unreadable: None, as the docstring says.
             return None
 
     reader = read or first_line
@@ -167,6 +168,7 @@ class McpClient:
         try:
             return json.loads(first)
         except (TypeError, ValueError):
+            # Not JSON: the tool's text is returned as it is, as the docstring says.
             return first
 
     def graph_find(

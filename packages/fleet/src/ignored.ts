@@ -15,16 +15,16 @@ import { join, resolve, sep } from "node:path";
 import type { GitRunner } from "./git.ts";
 
 /** Directory names whose contents are rebuilt by a command, wherever they appear in a path. */
-export const REGENERABLE_DIRS: ReadonlySet<string> = new Set(["node_modules", "dist", "build", "target", ".cache", "coverage", "__pycache__", ".venv", "venv", ".next", "vendor"]);
+const REGENERABLE_DIRS: ReadonlySet<string> = new Set(["node_modules", "dist", "build", "target", ".cache", "coverage", "__pycache__", ".venv", "venv", ".next", "vendor"]);
 
 /** Files compared byte for byte are read in full only up to this size; a larger one counts as different. */
-export const MAX_COMPARE_BYTES = 4 * 1024 * 1024;
+const MAX_COMPARE_BYTES = 4 * 1024 * 1024;
 /** Files examined inside ignored directories before the rest are assumed to be work. */
-export const MAX_IGNORED_FILES = 5000;
+const MAX_IGNORED_FILES = 5000;
 /** Entries (files and directories) visited inside ignored directories before the rest are assumed to be work. */
-export const MAX_IGNORED_VISITED = 50_000;
+const MAX_IGNORED_VISITED = 50_000;
 /** Milliseconds one scan may take before the rest is assumed to be work. */
-export const MAX_IGNORED_MS = 10_000;
+const MAX_IGNORED_MS = 10_000;
 
 export const UNKNOWN_IGNORED = "(ignored files could not be listed)";
 
@@ -65,7 +65,7 @@ function regenerable(path: string, isDirectory: boolean): boolean {
 }
 
 /** True when `path` holds the same bytes (or the same link target) in both checkouts. */
-export function sameContent(a: string, b: string): boolean {
+function sameContent(a: string, b: string): boolean {
 	try {
 		const left = lstatSync(a);
 		const right = lstatSync(b);
@@ -74,6 +74,7 @@ export function sameContent(a: string, b: string): boolean {
 		if (left.size !== right.size || left.size > MAX_COMPARE_BYTES) return false;
 		return readFileSync(a).equals(readFileSync(b));
 	} catch {
+		// Any stat or read failure: not known to be identical, so false.
 		return false;
 	}
 }

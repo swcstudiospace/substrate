@@ -43,7 +43,7 @@ const MAX_ATTEMPTS = 1_000_000;
 /** Times `sync` sends a recorded commit again while the server still reports pending plane deletes, before it gives up and says so. */
 export const MAX_PLANE_RETRIES = 5;
 
-export type PendingKind = "checkpoint" | "rollback";
+type PendingKind = "checkpoint" | "rollback";
 export type CheckpointRecord = Omit<CheckpointPayload, "action">;
 
 interface PendingBase {
@@ -63,7 +63,7 @@ export interface PendingCheckpoint extends PendingBase {
 	record: CheckpointRecord;
 }
 
-export type PendingCommit = { target_ckpt_id: string; plan_digest: string | null } & CommittedRollbackFields;
+type PendingCommit = { target_ckpt_id: string; plan_digest: string | null } & CommittedRollbackFields;
 
 /**
  * `id` is the rollback id. `commit.plan_digest` is null when no plan was ever obtained. `restoring` marks an item
@@ -85,7 +85,7 @@ export interface PendingRollback extends PendingBase {
 
 export type PendingItem = PendingCheckpoint | PendingRollback;
 
-export type PendingErrorCode = "full" | "too-large" | "invalid" | "io";
+type PendingErrorCode = "full" | "too-large" | "invalid" | "io";
 
 export class PendingJournalError extends Error {
 	readonly code: PendingErrorCode;
@@ -190,7 +190,7 @@ function parseCommit(value: unknown): PendingCommit {
 }
 
 /** Parse one journal item exactly; throws `PendingJournalError("invalid")` naming the field. */
-export function parsePendingItem(value: unknown): PendingItem {
+function parsePendingItem(value: unknown): PendingItem {
 	const item = rec(value, "item");
 	if (item.version !== 1) fail("version must be 1");
 	if (item.kind === "checkpoint") {
@@ -308,12 +308,12 @@ export function settleInterruptedRestores(dir: string, recovered: { id: string; 
 	return settled;
 }
 
-export interface CorruptPending {
+interface CorruptPending {
 	file: string;
 	reason: string;
 }
 
-export interface PendingListing {
+interface PendingListing {
 	items: PendingItem[];
 	corrupt: CorruptPending[];
 }
@@ -364,13 +364,13 @@ export function listPending(dir: string): PendingListing {
 // Replay
 // ---------------------------------------------------------------------------
 
-export interface DeliveredPending {
+interface DeliveredPending {
 	kind: PendingKind;
 	id: string;
 	event_id: string;
 }
 
-export interface FailedPending {
+interface FailedPending {
 	kind: PendingKind;
 	id: string;
 	code: string;
@@ -378,7 +378,7 @@ export interface FailedPending {
 	retryable: boolean;
 }
 
-export interface ReplayOutcome {
+interface ReplayOutcome {
 	delivered: DeliveredPending[];
 	failed: FailedPending[];
 	/** Items not attempted because an earlier call showed the server unreachable. */
@@ -392,7 +392,7 @@ export interface ReplayOutcome {
 	warnings: string[];
 }
 
-export interface ReplayParams {
+interface ReplayParams {
 	dir: string;
 	/** The client for one surface: the bearer is per surface. */
 	clientFor: (surface: string) => RollbackServerClient;

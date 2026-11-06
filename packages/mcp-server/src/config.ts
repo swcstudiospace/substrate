@@ -5,11 +5,12 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
+import { resolve } from "node:path";
 import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
 import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
-import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
+import { ADMISSION_BREAKER_POLICIES, ADMISSION_MODES, type AdmissionBreakerPolicy, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
 import { classifyEndpoint, parseProxyAllow, type DbPlane, type EndpointClass, type ProxyAllow } from "./db-endpoints.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { loadInventoryConfig, type InventoryConfig } from "./hindsight-inventory.ts";
@@ -26,18 +27,20 @@ import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
 import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
-import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
+import { loadSteeringExpirySettings, loadSteeringIdempotencySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult, type SteeringIdempotencyConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
 import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
+import { DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
+import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV, repoScopeFromEnv, type RepoScope } from "./repo-scope.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
-export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
+const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
 /** Default DoD gate wait: above the connector's own 30 s Linear call (D23-15.4). */
-export const DEFAULT_DOD_GATE_TIMEOUT_MS = 35000;
+const DEFAULT_DOD_GATE_TIMEOUT_MS = 35000;
 
 /** Positive finite milliseconds, floored; anything else is the default. */
 function parseDodGateTimeoutMs(raw: string | undefined): number {
@@ -46,7 +49,7 @@ function parseDodGateTimeoutMs(raw: string | undefined): number {
 }
 
 /** The docs plane that serves `docs_search` / `docs_ingest`: RAGFlow or LightRAG. */
-export const DOCS_BACKENDS = ["ragflow", "lightrag"] as const;
+const DOCS_BACKENDS = ["ragflow", "lightrag"] as const;
 export type DocsBackend = (typeof DOCS_BACKENDS)[number];
 
 /**
@@ -70,7 +73,7 @@ export interface LightragConfig {
  * is no default (`mode` null); an unrecognised value is no default too, and is
  * carried back as `rejected` so a typo never silently picks a mode.
  */
-export function resolveLightragQueryMode(env: Record<string, string | undefined> = process.env): { mode: LightragQueryMode | null; rejected: boolean } {
+function resolveLightragQueryMode(env: Record<string, string | undefined> = process.env): { mode: LightragQueryMode | null; rejected: boolean } {
 	const raw = env.SUBSTRATE_LIGHTRAG_QUERY_MODE?.trim().toLowerCase();
 	if (!raw) return { mode: null, rejected: false };
 	return isLightragQueryMode(raw) ? { mode: raw, rejected: false } : { mode: null, rejected: true };
@@ -90,11 +93,11 @@ export function lightragFromEnv(env: Record<string, string | undefined> = proces
 }
 
 /** Default per-request timeout of the TEI client, ms (`SUBSTRATE_TEI_TIMEOUT_MS`). */
-export const DEFAULT_TEI_TIMEOUT_MS = 10_000;
+const DEFAULT_TEI_TIMEOUT_MS = 10_000;
 /** Default most texts per `/embed` request (`SUBSTRATE_TEI_BATCH`); the server's own limit can only lower it. */
-export const DEFAULT_TEI_BATCH = 32;
+const DEFAULT_TEI_BATCH = 32;
 /** Default seconds a cached embedding lives (`SUBSTRATE_EMBED_CACHE_TTL_S`): one week. */
-export const DEFAULT_EMBED_CACHE_TTL_S = 604_800;
+const DEFAULT_EMBED_CACHE_TTL_S = 604_800;
 
 /**
  * The TEI (text-embeddings-inference) reach. `TEI_URL` names it; `TEI_API_KEY` is sent as a bearer token when set and
@@ -130,7 +133,7 @@ export function teiFromEnv(env: Record<string, string | undefined> = process.env
 }
 
 /** The embedding cache switch and TTL: `SUBSTRATE_EMBED_CACHE` is `on` or off (anything else is off), the TTL is seconds. */
-export interface EmbedCacheSettings {
+interface EmbedCacheSettings {
 	enabled: boolean;
 	ttlS: number;
 }
@@ -161,9 +164,9 @@ export function resolveDocsBackend(env: Record<string, string | undefined> = pro
 }
 
 /** Default ms between LightRAG planning polls (SPE-19385). */
-export const DEFAULT_LIGHTRAG_POLL_MS = 5_000;
+const DEFAULT_LIGHTRAG_POLL_MS = 5_000;
 /** Default roots a LightRAG planning poll sweeps. */
-export const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
+const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
 
 /**
  * LightRAG hosting on Railway, in the same project that already runs RAGFlow.
@@ -330,8 +333,8 @@ export interface SubstrateConfig {
 	 * Ms between LightRAG planning polls (SPE-19385).
 	 *
 	 * From `SUBSTRATE_LIGHTRAG_POLL_MS`, default 5000. The poller sleeps
-	 * this long between `pollPlanningRefresh` ticks; the module only
-	 * scans once per call, so this never changes tick cost.
+	 * this long between planning refresh ticks (`service.ts`); each tick
+	 * scans once, so this never changes tick cost.
 	 */
 	lightragPollMs: number;
 	/**
@@ -502,6 +505,12 @@ export interface SubstrateConfig {
 	 */
 	worktreeRegistry: { mode: WorktreeRegistryMode; ttlS: number; idleDays: number };
 	/**
+	 * Phase 72: which repositories each surface may address and where each lives, from `SUBSTRATE_REPO_SCOPES` and
+	 * `SUBSTRATE_REPO_REGISTRY`. Scoping is off unless the scopes variable is set; a malformed value refuses the boot, and a
+	 * registry set without a non-empty scopes variable refuses it too ({@link RepoScopesRequiredError}).
+	 */
+	repoScope: RepoScope;
+	/**
 	 * Surfaces allowed to call `desktop_run`, from `SUBSTRATE_DESKTOP_SURFACES`.
 	 *
 	 * The operator allowlist is the only gate (D30-01): unset or empty means
@@ -648,6 +657,11 @@ export interface SubstrateConfig {
 	 */
 	retainOutbox: { path: string | null; max: number; maxAttempts: number; drainMs: number };
 	/**
+	 * The telemetry buffer (phase 76). `null` unless `SUBSTRATE_EVENT_BUFFER_PATH` is set: then a failed event write is buffered,
+	 * and the buffer refuses to boot without its dead-letter file. Unset, a failed write answers `stored: false` as it always has.
+	 */
+	eventBuffer: EventBufferSettings | null;
+	/**
 	 * Which Hindsight routing keys were present, for the boot warnings only:
 	 * the legacy single-bank key is unread, and a URL without a bank list means
 	 * recall reads the caller's own bank only. Presence, never a value.
@@ -664,7 +678,9 @@ export interface SubstrateConfig {
 	corpus: CorpusSettings;
 	/** The docs learning loop (v1.7 phase 66): telemetry, the authority re-rank and the gap threshold. Every switch is off by default. */
 	docsReflect: DocsReflectSettings;
-	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
+	/** The scheduled reconcile (Phase 78, D78-7): `SUBSTRATE_RECONCILE_INTERVAL_S` and `SUBSTRATE_RECONCILE_WINDOW_HOURS`. Off by default. */
+	reconcile: ReconcileSettings;
+	/** The docs plane's objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S` and, once set, `SUBSTRATE_DOCS_SLO_SYNC_LAG_S`. */
 	docsSlo: SloThresholds;
 	/**
 	 * `SUBSTRATE_PLANNING_HASH_STORE=on` (v1.7 phase 65): the planning refresh keeps its per-page hashes in a store (the index
@@ -684,7 +700,7 @@ export interface SubstrateConfig {
 	 * `SUBSTRATE_BUDGETS` (`off` | `shadow` | `enforce`, default `shadow`) and
 	 * the per-class buckets from `SUBSTRATE_BUDGET_<CLASS>_RPS` / `_BURST`, with
 	 * per-surface `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` overrides
-	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`. See `admission.ts`.
+	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`, and each class's `SUBSTRATE_BUDGET_<CLASS>_BREAKER` (what an open cache breaker does to it). See `admission.ts`.
 	 */
 	admission: AdmissionSettings;
 	/**
@@ -754,10 +770,10 @@ export interface SubstrateConfig {
 	steering: SteeringConfigResult;
 	/** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` (phase 53, SOTA-09): on lets `migrate()` create `planning_steering_audit`. Off by default. */
 	steeringAuditTable: boolean;
-	/** `SUBSTRATE_STEERING_SESSIONS_TABLE` (phase 67): on persists the steering session registry to `steering_sessions` and loads it at boot. Off by default; nothing changes while it is off. */
+	/** Historical migration-37 selection only; no runtime session cache or live authorization role. */
 	steeringSessionsTable: boolean;
-	/** `SUBSTRATE_STEERING_SESSION_TTL_S` (phase 67): sessions older than this are dropped when the durable registry loads. Default 604800. */
-	steeringSessionTtlS: number;
+	/** `SUBSTRATE_LIVE_SESSION_LEASE_S` (phase 71): authoritative live-session lease, whole seconds 60..86400; default 3600. */
+	liveSessionLeaseS: number;
 	/** `SUBSTRATE_STEERING_WAIT_MAX_MS` (phase 67): the longest `GET /steering/wait` holds a request. Default 30000, bound 1000..120000. */
 	steeringWaitMaxMs: number;
 	/** `SUBSTRATE_BRIEF_SESSIONS` (phase 67): on adds the `sessions`, `steering` and `handoffs` sections to the brief. Off by default: the brief is exactly what it was. */
@@ -766,6 +782,8 @@ export interface SubstrateConfig {
 	steeringRegistered: boolean;
 	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
 	steeringExpiry: SteeringExpiryConfigResult;
+	/** `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S` and `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP` (phase 77): how long a keyed queue replays and how many keyed queues are kept. A bad value is a typed result. See `planning/steering.ts`. */
+	steeringIdempotency: SteeringIdempotencyConfigResult;
 	/** `SUBSTRATE_PLANNING_BASELINE_DIR` (phase 58): where the observer keeps its publish baseline durably. Unset keeps it in memory. See `planning/baseline-store.ts`. */
 	planningBaseline: BaselineDirectoryResult;
 	/** `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` (phase 58): how often a quiet checkout refreshes its presence record. See `planning/observer.ts`. */
@@ -837,15 +855,17 @@ export interface SloNotifySettings {
 }
 
 /** Where the SLO checkpoint lives when `SUBSTRATE_SLO_CHECKPOINT` is unset and the state directory exists. */
-export const DEFAULT_SLO_CHECKPOINT_PATH = "/var/lib/substrate/slo-checkpoint.json";
+const DEFAULT_SLO_CHECKPOINT_PATH = "/var/lib/substrate/slo-checkpoint.json";
 
 /**
  * What `loadConfig` may ask the host. Only the entry point supplies a probe;
  * everything else gets the fail-safe answer, so no test harness discovers a
  * state directory on the machine it runs on.
  */
-export interface ConfigProbes {
+interface ConfigProbes {
 	directoryExists?: (path: string) => boolean;
+	/** The file a path names once symlinks are followed: the event buffer's alias check. Absent, the check compares resolved paths and reads no filesystem. */
+	realDestination?: (path: string) => string;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -938,6 +958,27 @@ export class ConfigError extends Error {
 		super(message);
 		this.name = "ConfigError";
 	}
+}
+
+/**
+ * `SUBSTRATE_REPO_REGISTRY` is set and `SUBSTRATE_REPO_SCOPES` is unset or empty. Scoping is enforced only by the scopes
+ * variable, so a registry alone would leave every surface free to address every repository it names; the boot refuses
+ * rather than run in that state. Not a {@link ConfigError}: the entry point exits 1 for it, not 78. The message names
+ * variables only.
+ */
+export class RepoScopesRequiredError extends Error {
+	constructor() {
+		super(`${REPO_REGISTRY_ENV} is set but ${REPO_SCOPES_ENV} is unset or empty; set ${REPO_SCOPES_ENV} to the surfaces' grants, or unset ${REPO_REGISTRY_ENV}`);
+		this.name = "RepoScopesRequiredError";
+	}
+}
+
+/** The repository scope from the environment. A problem is a boot refusal: a scope that cannot be read must not default to open. */
+function repoScopeOrRefuse(env: Record<string, string | undefined>): RepoScope {
+	if (env[REPO_REGISTRY_ENV]?.trim() && !env[REPO_SCOPES_ENV]?.trim()) throw new RepoScopesRequiredError();
+	const parsed = repoScopeFromEnv(env);
+	if (!parsed.ok) throw new ConfigError(`${parsed.problem}; fix it or unset it (unset scoping is off)`);
+	return parsed.value;
 }
 
 /**
@@ -1065,7 +1106,7 @@ export const DEFAULT_RAG_MACHINE_SETTINGS: RagMachineSettings = {
  * back to the defaults, so a typo cannot disable retries or pin the
  * breaker open.
  */
-export function loadRagMachineSettings(env: Record<string, string | undefined> = process.env): RagMachineSettings {
+function loadRagMachineSettings(env: Record<string, string | undefined> = process.env): RagMachineSettings {
 	return {
 		maxRetries: nonNegativeOr(env.SUBSTRATE_RAG_MAX_RETRIES, DEFAULT_RAG_MACHINE_SETTINGS.maxRetries),
 		retryBaseMs: positiveOr(env.SUBSTRATE_RAG_RETRY_BASE_MS, DEFAULT_RAG_MACHINE_SETTINGS.retryBaseMs),
@@ -1200,6 +1241,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			maxAttempts: positiveIntOr(env.SUBSTRATE_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_MAX_ATTEMPTS),
 			drainMs: positiveIntOr(env.SUBSTRATE_RETAIN_DRAIN_MS, DEFAULT_RETAIN_DRAIN_MS),
 		},
+		eventBuffer: loadEventBufferSettings(env, probes),
 		hindsightEnv: {
 			legacyBankSet: (env.HINDSIGHT_BANK?.trim() ?? "") !== "",
 			urlSet: (env.HINDSIGHT_URL?.trim() ?? "") !== "",
@@ -1210,6 +1252,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		corpus: loadCorpusSettings(env),
 		planningHashStore: (env.SUBSTRATE_PLANNING_HASH_STORE?.trim().toLowerCase() ?? "") === "on",
 		docsReflect: loadDocsReflectSettings(env),
+		reconcile: loadReconcileSettings(env),
 		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
@@ -1229,6 +1272,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...memoryLifecycleFromEnv(env.SUBSTRATE_MEMORY_LIFECYCLE),
 		// uplift-5 S5a
 		...skillsGovernanceFromEnv(env.SUBSTRATE_SKILLS_GOVERNANCE),
+		// Phase 72
+		repoScope: repoScopeOrRefuse(env),
 		// Phase 68
 		worktreeRegistry: {
 			mode: (env.SUBSTRATE_WORKTREE_REGISTRY?.trim().toLowerCase() ?? "") === "on" ? "on" : "off",
@@ -1271,13 +1316,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.
 		steeringAuditTable: steeringAuditTableEnabled(env),
 		steeringRegistered: steeringToolsRegistered(env),
-		// Phase 67 (live steering GA): the durable session registry, its TTL, the long-poll bound and the brief sections. Environment only.
+		// Historical schema selection, authoritative live lease, long-poll bound and public brief sections.
 		steeringSessionsTable: toggleOn(env.SUBSTRATE_STEERING_SESSIONS_TABLE),
-		steeringSessionTtlS: boundedInt(env.SUBSTRATE_STEERING_SESSION_TTL_S, 604_800, 60, 31_536_000),
+		liveSessionLeaseS: clampedIntOr(env.SUBSTRATE_LIVE_SESSION_LEASE_S, { min: 60, max: 86_400, fallback: 3_600 }),
 		steeringWaitMaxMs: boundedInt(env.SUBSTRATE_STEERING_WAIT_MAX_MS, 30_000, 1_000, 120_000),
 		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
 		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
 		steeringExpiry: loadSteeringExpirySettings(env),
+		// Phase 77 (steering idempotency): the keyed-queue replay retention and capacity. Environment only; a bad value is a typed result.
+		steeringIdempotency: loadSteeringIdempotencySettings(env),
 		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
 		planningBaseline: loadBaselineDirectory(env),
 		planningLiveness: loadLivenessSettings(env),
@@ -1343,8 +1390,8 @@ export function memoryExpiryConfigWarnings(config: SubstrateConfig): string[] {
 	];
 }
 
-export const HASH_VERSIONS = ["v1", "v2"] as const;
-export type HashVersion = (typeof HASH_VERSIONS)[number];
+const HASH_VERSIONS = ["v1", "v2"] as const;
+type HashVersion = (typeof HASH_VERSIONS)[number];
 
 /**
  * `v1` or `v2`, case- and space-insensitive. Unset, blank, and anything else
@@ -1374,8 +1421,8 @@ export function hashVersionConfigWarnings(config: SubstrateConfig): string[] {
 	];
 }
 
-export const MEMORY_LIFECYCLE_MODES = ["report", "off"] as const;
-export type MemoryLifecycleMode = (typeof MEMORY_LIFECYCLE_MODES)[number];
+const MEMORY_LIFECYCLE_MODES = ["report", "off"] as const;
+type MemoryLifecycleMode = (typeof MEMORY_LIFECYCLE_MODES)[number];
 
 /**
  * `report` or `off`, case- and space-insensitive. Unset or blank is `report`.
@@ -1433,8 +1480,8 @@ export function eventIdempotencyConfigWarnings(config: SubstrateConfig): string[
 	];
 }
 
-export const SKILLS_GOVERNANCE_MODES = ["off", "report", "enforce"] as const;
-export type SkillsGovernanceMode = (typeof SKILLS_GOVERNANCE_MODES)[number];
+const SKILLS_GOVERNANCE_MODES = ["off", "report", "enforce"] as const;
+type SkillsGovernanceMode = (typeof SKILLS_GOVERNANCE_MODES)[number];
 
 /**
  * uplift-5 S5a: `off`, `report` or `enforce`, case- and space-insensitive; anything else keeps
@@ -1514,11 +1561,11 @@ export interface CorpusSettings {
 	freshMaxAgeS: number;
 }
 
-export const CORPUS_CONCURRENCY_BOUNDS = { min: 1, max: 16, fallback: 4 } as const;
-export const CORPUS_BATCH_DOCS_BOUNDS = { min: 1, max: 200, fallback: 20 } as const;
-export const CORPUS_BATCH_BYTES_BOUNDS = { min: 10_000, max: 5_000_000, fallback: 1_000_000 } as const;
+const CORPUS_CONCURRENCY_BOUNDS = { min: 1, max: 16, fallback: 4 } as const;
+const CORPUS_BATCH_DOCS_BOUNDS = { min: 1, max: 200, fallback: 20 } as const;
+const CORPUS_BATCH_BYTES_BOUNDS = { min: 10_000, max: 5_000_000, fallback: 1_000_000 } as const;
 /** Seconds a corpus may go without an ingest before the freshness warning (`0` judges nothing); two days by default, at most a year. */
-export const CORPUS_FRESH_MAX_AGE_BOUNDS = { min: 0, max: 31_536_000, fallback: 172_800 } as const;
+const CORPUS_FRESH_MAX_AGE_BOUNDS = { min: 0, max: 31_536_000, fallback: 172_800 } as const;
 
 /** A whole number clamped into `[min, max]`; a value that is not a whole number is the fallback, so junk never widens a bound. */
 function clampedIntOr(raw: string | undefined, bounds: { min: number; max: number; fallback: number }): number {
@@ -1538,7 +1585,7 @@ export function loadCorpusSettings(env: Record<string, string | undefined>): Cor
 }
 
 /** The docs learning loop's switches (v1.7 phase 66): retrieval telemetry, the authority re-rank and the gap threshold. */
-export interface DocsReflectSettings {
+interface DocsReflectSettings {
 	/** `SUBSTRATE_DOCS_TELEMETRY=on`. Off by default: a `docs_search` writes no `corpus_retrievals` row and no sweep runs. */
 	telemetry: boolean;
 	/** `SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS`: how long a retrieval row is kept. */
@@ -1549,13 +1596,13 @@ export interface DocsReflectSettings {
 	gapScore: number;
 }
 
-export const DOCS_RERANK_MODES = ["off", "shadow", "on"] as const;
+const DOCS_RERANK_MODES = ["off", "shadow", "on"] as const;
 export type DocsRerankMode = (typeof DOCS_RERANK_MODES)[number];
 
-export const DOCS_TELEMETRY_RETENTION_BOUNDS = { min: 1, max: 365, fallback: 30 } as const;
-export const DOCS_GAP_SCORE_DEFAULT = 0.2;
+const DOCS_TELEMETRY_RETENTION_BOUNDS = { min: 1, max: 365, fallback: 30 } as const;
+const DOCS_GAP_SCORE_DEFAULT = 0.2;
 
-export function loadDocsReflectSettings(env: Record<string, string | undefined>): DocsReflectSettings {
+function loadDocsReflectSettings(env: Record<string, string | undefined>): DocsReflectSettings {
 	const rerank = env.SUBSTRATE_DOCS_RERANK?.trim().toLowerCase() ?? "";
 	return {
 		telemetry: (env.SUBSTRATE_DOCS_TELEMETRY?.trim().toLowerCase() ?? "") === "on",
@@ -1563,6 +1610,41 @@ export function loadDocsReflectSettings(env: Record<string, string | undefined>)
 		rerank: rerank === "shadow" || rerank === "on" ? rerank : "off",
 		gapScore: unitIntervalOr(env.SUBSTRATE_DOCS_GAP_SCORE, DOCS_GAP_SCORE_DEFAULT),
 	};
+}
+
+/** The scheduled reconcile's two knobs (Phase 78, D78-7). */
+interface ReconcileSettings {
+	/** Seconds between scheduled runs (`SUBSTRATE_RECONCILE_INTERVAL_S`); `0` is off, and a value above 0 is at least 60. */
+	intervalS: number;
+	/** Hours of ledger and index history each run compares (`SUBSTRATE_RECONCILE_WINDOW_HOURS`), from 1 to 168. */
+	windowHours: number;
+}
+
+/** The default window in hours (`SUBSTRATE_RECONCILE_WINDOW_HOURS`). */
+const DEFAULT_RECONCILE_WINDOW_HOURS = 24;
+/** The longest interval `setInterval` can hold: its delay is a signed 32-bit count of milliseconds, and a longer one fires at once. */
+const RECONCILE_MAX_INTERVAL_S = 2_147_483;
+
+/**
+ * `SUBSTRATE_RECONCILE_*` as the server reads them. An unset or blank interval is 0 (off); a value above 0 is clamped into
+ * 60 to `RECONCILE_MAX_INTERVAL_S` seconds. The window is clamped into 1 to 168 hours, 24 by default. A value that is not a
+ * whole number, a negative one included, refuses boot with a ConfigError that names the variable.
+ */
+function loadReconcileSettings(env: Record<string, string | undefined> = process.env): ReconcileSettings {
+	const interval = wholeNumberOrRefuse("SUBSTRATE_RECONCILE_INTERVAL_S", env.SUBSTRATE_RECONCILE_INTERVAL_S);
+	const hours = wholeNumberOrRefuse("SUBSTRATE_RECONCILE_WINDOW_HOURS", env.SUBSTRATE_RECONCILE_WINDOW_HOURS);
+	return {
+		intervalS: interval === null || interval === 0 ? 0 : Math.min(RECONCILE_MAX_INTERVAL_S, Math.max(60, interval)),
+		windowHours: hours === null ? DEFAULT_RECONCILE_WINDOW_HOURS : Math.min(168, Math.max(1, hours)),
+	};
+}
+
+/** A whole number, or null when the variable is unset or blank. Anything else, a negative number included, refuses boot. */
+function wholeNumberOrRefuse(name: string, raw: string | undefined): number | null {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return null;
+	if (!/^\d+$/.test(trimmed)) throw new ConfigError(`${name}=${JSON.stringify(trimmed)} is not a whole number; set one, or unset it for the default`);
+	return Number(trimmed);
 }
 
 /**
@@ -1596,8 +1678,8 @@ export interface CachePreloadSettings {
 	intervalS: number;
 }
 
-export const DEFAULT_CACHE_PRELOAD_TOP = 3;
-export const DEFAULT_CACHE_PRELOAD_S = 300;
+const DEFAULT_CACHE_PRELOAD_TOP = 3;
+const DEFAULT_CACHE_PRELOAD_S = 300;
 
 /** A whole number in `[min, max]`, or `fallback` when unset. Anything else is a ConfigError naming the variable, so boot refuses it. */
 function cacheWholeNumberOr(name: string, raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -1632,7 +1714,7 @@ export function loadCachePreloadSettings(env: Record<string, string | undefined>
  * `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): whether the Dragonfly wake-up hints run. `enabled` is what the
  * bus is built from. `offReason` names why an operator's `on` did not turn it on, and is logged once at boot.
  */
-export interface EventBusSettings {
+interface EventBusSettings {
 	enabled: boolean;
 	offReason: string | null;
 }
@@ -1659,7 +1741,7 @@ export function loadEventBusSettings(
 }
 
 /** The three uplift-5 U5-3 request-path flags, parsed. */
-export interface RequestPathSettings {
+interface RequestPathSettings {
 	/** `lite` reads the brief's graph with two concurrent statements (nodes only); `full` is `getGraph`. */
 	briefGraphRead: "full" | "lite";
 	/** `narrow` bumps the recall generation (not memory) after a retain and drops the graph key from briefs. */
@@ -1670,7 +1752,7 @@ export interface RequestPathSettings {
 }
 
 /** The most seconds a capacity report may be reused: a database that grows must show on `/healthz` within five minutes. */
-export const MAX_HEALTHZ_INDEX_CAPACITY_MEMO_S = 300;
+const MAX_HEALTHZ_INDEX_CAPACITY_MEMO_S = 300;
 
 /**
  * uplift-5 U5-3: an unset or empty flag is the default silently. A value outside the vocabulary
@@ -1714,7 +1796,7 @@ export function requestPathConfigWarnings(config: SubstrateConfig): string[] {
 }
 
 /** v1.6 phase 57c: the two off-by-default recall flags, parsed. */
-export interface ContextualRecallSettings {
+interface ContextualRecallSettings {
 	/** `SUBSTRATE_DOCS_TANDEM` (`off` | `on`), `_LIMIT` (1..10, default 5) and `_BUDGET_MS` (50..10000, default 1500): LightRAG and Hindsight in one docs answer. */
 	tandem: TandemOptions;
 	/** `SUBSTRATE_BRIEF_RECALL_SCOPE` (`off` | `graph`): the brief's recall also shows the claimed node's graph. */
@@ -1823,6 +1905,12 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			};
 		}
 	}
+	const breakerPolicy = Object.fromEntries(
+		ADMISSION_CLASSES.map((klass) => {
+			const name = `SUBSTRATE_BUDGET_${klass.toUpperCase()}_BREAKER`;
+			return [klass, breakerPolicyOf(name, env[name])];
+		}),
+	) as Record<AdmissionClass, AdmissionBreakerPolicy>;
 	return {
 		mode,
 		classes,
@@ -1831,7 +1919,20 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			burst: positiveOr(env.SUBSTRATE_BUDGET_ANONYMOUS_BURST, DEFAULT_BUDGETS.anonymous.burst),
 		},
 		overrides,
+		breakerPolicy,
 	};
+}
+
+/**
+ * `SUBSTRATE_BUDGET_<CLASS>_BREAKER`, trimmed and lowercased. Unset or blank is `fail-open`, the default. `fail-open` and
+ * `fail-closed` are the only other values; anything else refuses boot, so a typo for `fail-closed` cannot silently admit.
+ * (`SUBSTRATE_BUDGETS` keeps its older fallback to `shadow`.)
+ */
+function breakerPolicyOf(name: string, raw: string | undefined): AdmissionBreakerPolicy {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "") return "fail-open";
+	if ((ADMISSION_BREAKER_POLICIES as readonly string[]).includes(value)) return value as AdmissionBreakerPolicy;
+	throw new ConfigError(`${name}=${JSON.stringify(raw)} is not fail-open or fail-closed; set one of those, or unset it for fail-open`);
 }
 
 /**
@@ -1839,13 +1940,13 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
  * Unset or blank is `warn`. Anything else is a ConfigError at boot: a typo must not change what a
  * deployment accepts.
  */
-export type DbEndpointPolicy = "warn" | "enforce";
+type DbEndpointPolicy = "warn" | "enforce";
 
 /**
  * The data-plane endpoint settings (phase 48). `classes` has an entry only for each plane whose URL
  * is configured. A class names the path to the plane, never the URL.
  */
-export interface DbEndpointSettings {
+interface DbEndpointSettings {
 	policy: DbEndpointPolicy;
 	allow: ProxyAllow;
 	classes: Partial<Record<DbPlane, EndpointClass>>;
@@ -2352,7 +2453,7 @@ export function loadLedgerSettings(env: Record<string, string | undefined> = pro
 // uplift-4 S2 — index disaster-recovery archive
 
 /** The knobs behind `SUBSTRATE_INDEX_ARCHIVE_*` and `SUBSTRATE_INDEX_TUNE` (uplift-4 S2). */
-export interface IndexArchiveSettings {
+interface IndexArchiveSettings {
 	/** Where `substrate index archive` writes when `--out` is omitted (`SUBSTRATE_INDEX_ARCHIVE_DIR`); `null` refuses by name, and the health row is absent. */
 	dir: string | null;
 	/** Hours the newest archive may be old before `index.archive.age` is breached (`SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H`); `null` keeps the row report-only. */
@@ -2413,9 +2514,9 @@ export interface MetricsHistorySettings {
 export type MetricsHistorySeriesMode = "core" | "extended";
 
 export const DEFAULT_METRICS_HISTORY_TTL = "14d";
-export const MIN_METRICS_HISTORY_TTL_DAYS = 1;
-export const MAX_METRICS_HISTORY_TTL_DAYS = 90;
-export const MIN_METRICS_HISTORY_INTERVAL_S = 15;
+const MIN_METRICS_HISTORY_TTL_DAYS = 1;
+const MAX_METRICS_HISTORY_TTL_DAYS = 90;
+const MIN_METRICS_HISTORY_INTERVAL_S = 15;
 
 /**
  * A metrics-history retention, or `null`. Strictly `<1-3 digits>d` inside the
@@ -2487,6 +2588,52 @@ function positiveIntOr(raw: string | undefined, fallback: number): number {
 	return value > 0 ? value : fallback;
 }
 
+/** The telemetry buffer's settings, present only while the buffer is on. */
+interface EventBufferSettings {
+	path: string;
+	deadLetterPath: string;
+	max: number;
+	maxAttempts: number;
+	backoffMs: number;
+	backoffCapMs: number;
+}
+
+/**
+ * The telemetry buffer's settings (phase 76). The buffer is opt-in: with no `SUBSTRATE_EVENT_BUFFER_PATH` there is nothing to read,
+ * and a failed write answers `stored: false` as it always has. A buffer with no dead-letter file is refused at boot, because a
+ * buffered event that exhausts its retries would have no record to be kept in.
+ */
+function loadEventBufferSettings(env: Record<string, string | undefined>, probes: ConfigProbes): EventBufferSettings | null {
+	const path = env.SUBSTRATE_EVENT_BUFFER_PATH?.trim() ?? "";
+	if (path === "") return null;
+	const deadLetterPath = env.SUBSTRATE_EVENT_DEAD_LETTER_PATH?.trim() ?? "";
+	if (deadLetterPath === "") {
+		throw new ConfigError(
+			"SUBSTRATE_EVENT_BUFFER_PATH is set, so SUBSTRATE_EVENT_DEAD_LETTER_PATH must be set too: a buffered event that exhausts its " +
+				"retries needs a file to be recorded in. Set SUBSTRATE_EVENT_DEAD_LETTER_PATH, or unset SUBSTRATE_EVENT_BUFFER_PATH",
+		);
+	}
+	if (destinationOf(path, probes) === destinationOf(deadLetterPath, probes)) {
+		throw new ConfigError(
+			"SUBSTRATE_EVENT_BUFFER_PATH and SUBSTRATE_EVENT_DEAD_LETTER_PATH name one file, so each store would rewrite the other's records. " +
+				"Give them two different files",
+		);
+	}
+	return {
+		path,
+		deadLetterPath,
+		max: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX),
+		maxAttempts: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS),
+		backoffMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS),
+		backoffCapMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS),
+	};
+}
+
+/** The file a path names: the destination probe's answer, or the resolved path when no probe is supplied (no filesystem read). */
+function destinationOf(path: string, probes: ConfigProbes): string {
+	return probes.realDestination?.(path) ?? resolve(path);
+}
+
 /**
  * Hindsight routing keys that do not do what their presence suggests,
  * reported at boot (uplift-2 R3). A sibling of `desktopConfigWarnings`, not
@@ -2511,7 +2658,7 @@ export function hindsightConfigWarnings(config: SubstrateConfig): string[] {
 }
 
 /** The most mental models the weekly refresh names, across every bank. */
-export const MAX_MENTAL_MODELS = 20;
+const MAX_MENTAL_MODELS = 20;
 
 /** A mental model the weekly refresh names: the bank it lives in, and its id. */
 export interface MentalModelRef {
@@ -2520,7 +2667,7 @@ export interface MentalModelRef {
 }
 
 /** `HINDSIGHT_MENTAL_MODELS` as the refresh reads it. Fail-open: a dropped entry is named in `warnings`, and the rest still apply. */
-export interface MentalModelSettings {
+interface MentalModelSettings {
 	models: MentalModelRef[];
 	/** What the parse dropped, for the boot warning. Entries are named by position, never by value. */
 	warnings: string[];
@@ -2535,7 +2682,7 @@ const MENTAL_MODEL_ID = /^[A-Za-z0-9_-]{1,80}$/;
  * still apply. A repeated model, and any model past `MAX_MENTAL_MODELS`, is dropped
  * the same way. Unset names nothing. Never throws.
  */
-export function loadMentalModelConfig(env: Record<string, string | undefined>): MentalModelSettings {
+function loadMentalModelConfig(env: Record<string, string | undefined>): MentalModelSettings {
 	const models: MentalModelRef[] = [];
 	const warnings: string[] = [];
 	const raw = env.HINDSIGHT_MENTAL_MODELS?.trim() ?? "";

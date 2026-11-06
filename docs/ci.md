@@ -138,6 +138,25 @@ gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            #
 
 **Status on 2026-10-09: off.** The first run on pull request 27 failed before any step started, with the annotation "The job was not started because recent account payments have failed or your spending limit needs to be increased". The organisation's Actions usage for the month is already large (other repositories), so enabling this is the operator's decision about spend, not a code change. After the account can run jobs: fix billing, run the workflow once by hand (`gh workflow run CI --ref main` after setting the variable, or open a pull request), confirm `verify` is green, and optionally require `CI / Typecheck, lint, tests and repo locks` in branch protection when the repository's plan supports it. The first run on a real runner may expose a setup detail this repository could not test (for example the Postgres service health check); fix it in a small pull request, or clear the variable while you do.
 
+### Architecture ratchets
+
+Some tests read source text on purpose, to enforce an architecture rule: which package may import or construct a client, which module may send, which call may change state, and which route or tool must carry an audit decision. They are ratchets, not behaviour tests. A new source-scan test needs the same justification, stated in its title or a comment. Behaviour tests stay behaviour tests: they run the code and assert on the result.
+
+The ratchets live in these files (repository paths):
+
+- `packages/audit/src/policy.test.ts`: every served tool and REST route has an audit decision; `skills_propose`, `skills_approve` and `skills_list` are served on both doors.
+- `packages/mcp-server/src/admission.test.ts`: every route the server matches on is classified, exempt or the MCP door.
+- `packages/mcp-server/src/desktop/tool.test.ts`: `bufferRunner` reaches docker only through the driver and the entry point.
+- `packages/mcp-server/src/flag-registry.test.ts`: every environment read in `packages/**` and `scripts/**` is registered, and every registered flag is read.
+- `packages/mcp-server/src/index-archive-watch.test.ts`: the index alteration sits only in `tuneGraphNodes`, is reached only under apply, and no code drops an index.
+- `packages/mcp-server/src/memory-forget.test.ts`: no source file follows `superseded_by` as a pointer.
+- `packages/mcp-server/src/memory-recall.test.ts`: the brief's compose path, its profiles and the recall snapshot never import the Hindsight client.
+- `packages/mcp-server/src/redact-lock.test.ts`: one shared redactor, one marker, no hand-rolled credential detector, and the injected seams accept the shared redactor.
+- `packages/mcp-server/src/reanchor-plan.test.ts`: the plan module imports no transport, RPC, CLI or process API.
+- `packages/mcp-server/src/reanchor-plan-run.test.ts`: the plan runner cannot sign, spawn, open a socket or call `fetch`, and its chain and ledger calls are reads only.
+- `packages/mcp-server/src/reanchor-run.test.ts`: the orchestrator's imports are fixed, only its two runner calls can change anything, and only the entry constructs the real executor.
+- `packages/mcp-server/src/store-lock.test.ts`: Greptime, the events table, `GREPTIME_` settings, the memory tables, the memory gate, RAGFlow, Hindsight and TEI are reachable only from their allowed packages and files.
+
 ## Editing the workflow
 
 - Pin every third-party action by full commit SHA with the version in a comment; resolve a tag with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and dereference an annotated tag through `git/tags/<sha>`.

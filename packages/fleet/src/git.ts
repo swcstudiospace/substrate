@@ -22,8 +22,8 @@ export const EXIT_TIMEOUT = 124;
 export const EXIT_OUTPUT_LIMIT = 125;
 export const EXIT_SPAWN_FAILED = 127;
 
-export const DEFAULT_TIMEOUT_MS = 30_000;
-export const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 
 /** Variables that would redirect git to another repository or index, or change committer identity. */
@@ -70,7 +70,7 @@ async function drain(stream: ReadableStream<Uint8Array>, cap: number, onOverflow
 	return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
-export interface SpawnOptions {
+interface SpawnOptions {
 	timeoutMs?: number;
 	maxOutputBytes?: number;
 }

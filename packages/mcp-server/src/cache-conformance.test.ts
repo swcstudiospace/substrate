@@ -1,7 +1,7 @@
 /**
  * Cache key-class and Redis command conformance.
  *
- * Static cases read `cache.ts` and `docs/data-planes.md` and need no server.
+ * Static cases read `cache.ts` and need no server.
  * Live cases run only when `SUBSTRATE_CONFORMANCE_REDIS_URL` is a loopback URL
  * (`conformance-loopback`). A Dragonfly URL, when set, must be loopback too.
  */
@@ -16,8 +16,6 @@ const EXPECTED_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapsho
 const FORBIDDEN_CLASSES = ["idempotency", "idem", "mirror"];
 
 const REDIS_OPS = '"get" | "mget" | "set" | "incr" | "eval"';
-
-const DOCS_SENTENCE = "An idempotency mirror stays a target, not a current key";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
@@ -113,11 +111,6 @@ describe("cache conformance", () => {
 		expect(code).not.toContain(`${CACHE_PREFIX}:mirror`);
 		expect(code).not.toMatch(/["'`]idempotency:/);
 		expect(code).not.toMatch(/["'`]mirror:/);
-	});
-
-	test("docs keep the idempotency mirror as a target, not a current key", () => {
-		const docs = readFileSync(fileURLToPath(new URL("../../../docs/data-planes.md", import.meta.url)), "utf8");
-		expect(docs).toContain(DOCS_SENTENCE);
 	});
 
 	const redisUrl = process.env.SUBSTRATE_CONFORMANCE_REDIS_URL;

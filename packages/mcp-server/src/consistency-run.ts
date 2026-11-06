@@ -73,6 +73,7 @@ import {
 	type FetchLike,
 	type HindsightConfig,
 } from "./planes/hindsight.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { SURFACES, type MemoryEntry } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -97,7 +98,7 @@ export class ConsistencyUsageError extends Error {
 	}
 }
 
-export interface ConsistencyArgs {
+interface ConsistencyArgs {
 	json: boolean;
 	bank: string | null;
 	limit: number | null;
@@ -193,9 +194,9 @@ export interface RepairPorts {
 	deleteDocument(bank: string, documentId: string): Promise<"deleted" | "absent">;
 }
 
-export type RepairOutcomeKind = "repaired" | "already_consistent" | "skipped" | "failed";
+type RepairOutcomeKind = "repaired" | "already_consistent" | "skipped" | "failed";
 
-export interface RepairOutcome {
+interface RepairOutcome {
 	action: RepairActionName;
 	finding: FindingCode;
 	finding_id: string;
@@ -203,7 +204,7 @@ export interface RepairOutcome {
 	reason?: string;
 }
 
-export interface RepairRun {
+interface RepairRun {
 	orphans_enabled: boolean;
 	/** The plan covered every finding the run had; false when the findings list was cut or a store was unreachable. */
 	plan_complete: boolean;
@@ -397,12 +398,12 @@ export interface RunnerContext {
 	close(): Promise<void>;
 }
 
-export interface RunnerDeps {
+interface RunnerDeps {
 	now(): number;
 	open(): Promise<RunnerContext | { refused: string }>;
 }
 
-export interface RunResult {
+interface RunResult {
 	code: 0 | 1 | 2 | 3;
 	stdout: string;
 	stderr: string;
@@ -493,7 +494,7 @@ export async function runConsistency(argv: readonly string[], deps: RunnerDeps):
 		}
 		return { code: exitCodeOf(report), stdout, stderr: repairNote !== null && args.json ? `${repairNote}\n` : "" };
 	} finally {
-		await context.close().catch(() => undefined);
+		await context.close().catch((cause: unknown) => reportSilent("consistency.close", cause));
 	}
 }
 
@@ -562,15 +563,18 @@ export async function listBankDocuments(
 /** The ledger's accepted memory-write notes, newest-window first read in ascending order, from `queryEvents`. */
 const WRITE_KINDS = ["note", "warning"] as const;
 
+const ACCEPTED_WRITE_SUMMARY = "memory.write accepted";
+
 function writeEventOf(row: Record<string, unknown>): LedgerWriteEvent | null {
 	if (typeof row.id !== "string" || typeof row.surface !== "string" || typeof row.summary !== "string") return null;
-	if (!row.summary.startsWith("memory.write accepted")) return null;
+	if (!row.summary.startsWith(ACCEPTED_WRITE_SUMMARY)) return null;
 	const tsMs = Number(row.ts);
 	if (!Number.isFinite(tsMs)) return null;
 	let payload: unknown;
 	try {
 		payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("consistency.payload", cause);
 		return null;
 	}
 	if (payload === null || typeof payload !== "object") return null;
@@ -585,8 +589,11 @@ function writeEventOf(row: Record<string, unknown>): LedgerWriteEvent | null {
  * A verified accepted write is a `note`; an accepted one the read-back could not verify is a `warning`
  * (`auditMemoryWrite`). Both are read, notes first. The cursor is `<kind index>|<ISO ts>`: it resumes inclusively
  * at the last timestamp (the verifier de-duplicates by event id) and moves to the next kind when a read comes back short.
+ * `skipped` counts the rows that claim to be an accepted write but cannot be read as one, so no event is invented for them.
+ * A resumed page can return the same such row again; each row is counted once per reader.
  */
 export function ledgerWriteReader(greptime: Pick<GreptimeClient, "queryEvents">): LedgerReader {
+	const countedSkips = new Set<string>();
 	return {
 		memoryWrites: async ({ since, until, limit, cursor }) => {
 			let kindIndex = 0;
@@ -599,10 +606,20 @@ export function ledgerWriteReader(greptime: Pick<GreptimeClient, "queryEvents">)
 			}
 			const kind = WRITE_KINDS[kindIndex] as (typeof WRITE_KINDS)[number];
 			const rows = await greptime.queryEvents({ match: { kind }, since: from, until, limit, order: "asc", includePayload: true });
-			const events = rows.flatMap((row) => {
+			const events: LedgerWriteEvent[] = [];
+			let skipped = 0;
+			for (const row of rows) {
 				const event = writeEventOf(row);
-				return event === null ? [] : [event];
-			});
+				if (event !== null) {
+					events.push(event);
+					continue;
+				}
+				if (typeof row.summary !== "string" || !row.summary.startsWith(ACCEPTED_WRITE_SUMMARY)) continue;
+				const key = typeof row.id === "string" ? `id:${row.id}` : `row:${JSON.stringify(row)}`;
+				if (countedSkips.has(key)) continue;
+				countedSkips.add(key);
+				skipped += 1;
+			}
 			let next: string | null;
 			if (rows.length >= limit) {
 				const last = Number(rows[rows.length - 1]?.ts);
@@ -613,7 +630,7 @@ export function ledgerWriteReader(greptime: Pick<GreptimeClient, "queryEvents">)
 			} else {
 				next = null;
 			}
-			return { events, next };
+			return { events, next, skipped };
 		},
 	};
 }
@@ -664,7 +681,7 @@ export function configuredBanks(plane: HindsightConfig, env: Record<string, stri
 }
 
 /** Open the real stores from the server's environment. Credentials are read here and only here. */
-export async function openRealContext(): Promise<RunnerContext | { refused: string }> {
+async function openRealContext(): Promise<RunnerContext | { refused: string }> {
 	const config = loadConfig();
 	if (!config.postgresUrl) return { refused: "SUBSTRATE_PG_URL is not set" };
 	if (!config.greptime) return { refused: "GREPTIME_URL is not set" };

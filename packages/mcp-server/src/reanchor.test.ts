@@ -7,9 +7,9 @@
  * answers only `solana-keygen pubkey` and `solana transfer`; any other argv is a TypeError.
  */
 import { describe, expect, test } from "bun:test";
-import { type Commitment, formatMemo, HOUR_MS, hourIso, type AddressMemo, type Rpc, type RunResult, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { type Commitment, formatMemo, formatMemoV2, formatMemoV3, graphHeadsRoot, graphIndexAddress, headsRoot, HOUR_MS, hourIso, parseMemoV3, type AddressMemo, type Rpc, type RunResult, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import type { ReanchorNotes, ReanchorRecord } from "./anchor-verify-deps.ts";
-import { DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
+import { buildGraphHeads, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
 import type { AnchorRow } from "./greptime.ts";
 import {
 	DISCOVERY_MAX_PAGES,
@@ -54,15 +54,16 @@ const countFor = (n: number): number => 3 + n;
 interface Planned {
 	hourMs: number;
 	n: number;
+	memo?: string;
 }
 
-function hourEntry({ hourMs, n }: Planned): Record<string, unknown> {
+function hourEntry({ hourMs, n, memo }: Planned): Record<string, unknown> {
 	const root = rootFor(n);
 	return {
 		period_start: hourIso(hourMs),
 		period_start_ms: hourMs,
 		why: "signature missing after a suspected devnet reset",
-		memo: formatMemo({ periodStartMs: hourMs, rootHex: root, count: countFor(n) }),
+		memo: memo ?? formatMemo({ periodStartMs: hourMs, rootHex: root, count: countFor(n) }),
 		root,
 		event_count: countFor(n),
 		previous_tx_sig: oldSig(n),
@@ -101,7 +102,7 @@ const TX_TEMPLATE: TransactionMemo = { memo: null, payer: PUBKEY, payerSigned: t
 class World {
 	rows = new Map<number, AnchorRow>();
 	/** What the substrate recomputes per hour; defaults to the stored row's own root and count. */
-	digestOverride = new Map<number, { root: string | null; count: number; memo: string | null }>();
+	digestOverride = new Map<number, { root: string | null; count: number; memo: string | null; eventIds?: string[] }>();
 	genesis: string | Error = GENESIS;
 	balance = 10_000_000;
 	keygenOut = PUBKEY;
@@ -122,6 +123,8 @@ class World {
 	/** The send is killed at the runner's timeout: no exit code, no output, and the transaction may still land. */
 	sendTimesOut = false;
 	readBackMemo: string | null | undefined = undefined;
+	/** The exit code of a pointer send (a v3 memo); 0 unless a test makes the pointer send fail. */
+	pointerSendCode = 0;
 	emitStored = true;
 	/** The recorded notes the ledger would answer, per hour; `emit` adds the notes the executor writes. */
 	noteRecords = new Map<number, ReanchorRecord[]>();
@@ -172,12 +175,19 @@ class World {
 		return this.runnerCalls.filter((argv) => argv[1] === "transfer");
 	}
 
-	/** Only `anchorForPeriod` exists: the executor cannot write the `anchors` table through this object. */
+	/** The member rows `eventsByIds` answers with; empty by default, so an hour with no member rows gives no heads. */
+	eventRows: (ids: readonly string[]) => Array<Record<string, unknown>> = () => [];
+	/** Each graph's index address and the pointer listing it answers with, newest first (`addressSignaturePage`). */
+	pointerListings = new Map<string, AddressMemo[]>();
+	/** The index addresses listed, in call order. */
+	pointerListAddresses: string[] = [];
+	/** Only the two reads exist: the executor cannot write the `anchors` table through this object. */
 	readonly ledger = {
 		anchorForPeriod: async (ms: number): Promise<AnchorRow | null> => {
 			this.ledgerCalls.push(ms);
 			return this.rows.get(ms) ?? null;
 		},
+		eventsByIds: async (ids: ReadonlyArray<string | { id: string }>) => this.eventRows(ids.map((id) => (typeof id === "string" ? id : id.id))),
 	};
 
 	readonly rpc: Rpc = {
@@ -200,6 +210,13 @@ class World {
 			const start = before === undefined ? 0 : source.findIndex((hint) => hint.signature === before) + 1;
 			return source.slice(start, start + limit);
 		},
+		addressSignaturePage: async (address, { limit, before }) => {
+			this.rpcCalls.push(`pointers:${address.slice(0, 4)}`);
+			this.pointerListAddresses.push(address);
+			const source = this.pointerListings.get(address) ?? [];
+			const start = before === undefined ? 0 : source.findIndex((hint) => hint.signature === before) + 1;
+			return source.slice(start, start + limit);
+		},
 		getGenesisHash: async () => {
 			this.rpcCalls.push("genesis");
 			if (this.genesis instanceof Error) throw this.genesis;
@@ -217,13 +234,14 @@ class World {
 		if (argv[1] !== "transfer") throw new TypeError(`the fake runner answers only pubkey and transfer, got ${String(argv[1])}`);
 		if (this.sendTimesOut) return { code: null, stdout: "", stderr: "" };
 		if (this.sendCode !== 0) return { code: this.sendCode, stdout: "", stderr: "Error: RPC response error -32002 at https://rpc.example.invalid/v1/key-4411" };
+		if (this.pointerSendCode !== 0 && parseMemoV3(argv[5] as string) !== null) return { code: this.pointerSendCode, stdout: "", stderr: "Error: pointer refused" };
 		if (this.sendGate !== null) {
 			this.sendReached.resolve();
 			await this.sendGate;
 		}
 		const signature = newSig(++this.sends);
 		const memo = argv[5] as string;
-		this.chain.set(signature, { ...TX_TEMPLATE, blockTime: NOW / 1000, memo: this.readBackMemo === undefined ? memo : this.readBackMemo });
+		this.chain.set(signature, { ...TX_TEMPLATE, blockTime: NOW / 1000, memo: this.readBackMemo === undefined || parseMemoV3(memo) !== null ? memo : this.readBackMemo });
 		this.listing.unshift({ signature, memo, err: null, slot: 7 });
 		return { code: 0, stdout: JSON.stringify({ signature }), stderr: "" };
 	};
@@ -236,7 +254,7 @@ class World {
 			const root = over !== undefined ? over.root : row.root;
 			const count = over !== undefined ? over.count : row.event_count;
 			const memo = over !== undefined ? over.memo : root === null ? null : formatMemo({ periodStartMs: ms, rootHex: root, count });
-			return { period_start: hourIso(ms), period_end: hourIso(ms + HOUR_MS), event_count: count, root, memo, event_ids: [] };
+		return { period_start: hourIso(ms), period_end: hourIso(ms + HOUR_MS), event_count: count, root, memo, event_ids: over?.eventIds ?? [] };
 		},
 		emit: async (input: EventInput) => {
 			this.emitted.push(input);
@@ -321,8 +339,9 @@ describe("the saved plan", () => {
 		const planned = await runReanchorPlan(["--json"], {
 			now: () => NOW,
 			open: async () => ({
-				ledger: { anchorsBetween: async () => [] },
+				ledger: { anchorsBetween: async () => [], hourChainLeaves: async () => [] },
 				rpc: {
+					addressSignaturePage: async () => [],
 					getGenesisHash: async () => {
 						throw new Error("an empty window reads no chain");
 					},
@@ -363,7 +382,7 @@ describe("the saved plan", () => {
 	test("an hour that is not self-consistent is refused, never repaired", () => {
 		const good = hourEntry(ONE[0] as Planned);
 		const bad = (change: Record<string, unknown>): string => planText(ONE, { plan: { dry_run: true, hours: [{ ...good, ...change }] } });
-		expect(() => parseSavedPlan(bad({ memo: "substrate:v1:nope" }))).toThrow("memo is not the v1 memo");
+		expect(() => parseSavedPlan(bad({ memo: "substrate:v1:nope" }))).toThrow("memo is not a v1 or v2 memo");
 		expect(() => parseSavedPlan(bad({ root: "A".repeat(64) }))).toThrow("root is not 64 lowercase hex");
 		expect(() => parseSavedPlan(bad({ event_count: 0 }))).toThrow("event_count");
 		expect(() => parseSavedPlan(bad({ period_start_ms: H1 + 1 }))).toThrow("whole UTC hour");
@@ -375,6 +394,13 @@ describe("the saved plan", () => {
 	test("the same hour twice is refused", () => {
 		const entry = hourEntry(ONE[0] as Planned);
 		expect(() => parseSavedPlan(planText(ONE, { plan: { dry_run: true, hours: [entry, entry] } }))).toThrow("twice");
+	});
+
+	test("a plan whose hour carries a v2 memo parses, and keeps the memo", () => {
+		const entry = hourEntry(ONE[0] as Planned);
+		const memo = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(5) });
+		const plan = parseSavedPlan(planText(ONE, { plan: { dry_run: true, hours: [{ ...entry, memo }] } }));
+		expect(plan.hours.map((hour) => hour.memo)).toEqual([memo]);
 	});
 });
 
@@ -926,8 +952,229 @@ describe("the one send", () => {
 	test("the ledger fake has no write method: the anchors table is never touched by the executor", async () => {
 		const w = new World(ONE);
 		await w.run(ONE);
-		expect(Object.keys(w.ledger)).toEqual(["anchorForPeriod"]);
+		expect(Object.keys(w.ledger).sort()).toEqual(["anchorForPeriod", "eventsByIds"]);
 		expect(w.ledgerCalls.every((ms) => ms === H1)).toBe(true);
+	});
+});
+
+describe("a v2 hour's memo is checked against the heads its members give", () => {
+	type Member = { id: string; hash: string; prev: string | null; graph_id: string; session_id: string };
+	const IDS = ["evt_1", "evt_2", "evt_3", "evt_4"];
+	const hashOf = (id: string): string => new Bun.CryptoHasher("sha256").update(id).digest("hex");
+
+	/** The four events of hour H1 in chain order, one graph and one session; `edited` names one whose content hash differs. */
+	function members(edited: string | null = null): Member[] {
+		return IDS.map((id, i) => ({
+			id,
+			hash: id === edited ? hashOf(`${id}:edited`) : hashOf(id),
+			prev: i === 0 ? null : hashOf(IDS[i - 1] ?? ""),
+			graph_id: "ut-1",
+			session_id: "s1",
+		}));
+	}
+
+	/** The v2 memo the anchor job writes for hour H1 over these members. */
+	function v2Over(events: Member[]): string {
+		return formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: headsRoot(buildGraphHeads(events, H1).records) });
+	}
+
+	test("a stored v2 memo whose heads match the ones its members give passes the check", async () => {
+		const memo = v2Over(members());
+		const w = new World();
+		w.rows.set(H1, { ...(w.rows.get(H1) as AnchorRow), memo });
+		w.digestOverride.set(H1, { root: rootFor(1), count: countFor(1), memo, eventIds: IDS });
+		w.eventRows = () => members();
+		expect(await w.run([{ hourMs: H1, n: 1, memo }])).toMatchObject({ code: 0, refused: null, sent: 1 });
+	});
+
+	test("a stored v2 memo whose heads root differs from its members' is refused as root-mismatch, and nothing is sent", async () => {
+		const memo = v2Over(members());
+		const w = new World();
+		w.rows.set(H1, { ...(w.rows.get(H1) as AnchorRow), memo });
+		w.digestOverride.set(H1, { root: rootFor(1), count: countFor(1), memo, eventIds: IDS });
+		w.eventRows = () => members("evt_2");
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0 });
+		expect(result.stderr).toContain("do not reproduce the stored memo");
+		w.expectUntouched();
+	});
+
+	test("a v1 hour still passes byte for byte, even when its members would give heads", async () => {
+		const memo = formatMemo({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1) });
+		const w = new World();
+		w.digestOverride.set(H1, { root: rootFor(1), count: countFor(1), memo, eventIds: IDS });
+		w.eventRows = () => members();
+		expect(await w.run(ONE)).toMatchObject({ code: 0, refused: null, sent: 1 });
+	});
+
+	/** The v2 hour H1 as a saved plan: its stored row and digest carry `memo`, and its members give it. */
+	function savedV2(memo: string): World {
+		const w = new World();
+		w.rows.set(H1, { ...(w.rows.get(H1) as AnchorRow), memo });
+		w.digestOverride.set(H1, { root: rootFor(1), count: countFor(1), memo, eventIds: IDS });
+		w.eventRows = () => members();
+		return w;
+	}
+
+	/** One memo by the signer on chain for H1, listed as an earlier send would be. Returns its signature. */
+	function listOnChain(w: World, memo: string): string {
+		const signature = newSig(7);
+		w.listing = [{ signature, memo, err: null, slot: 5 }];
+		w.chain.set(signature, { ...TX_TEMPLATE, memo });
+		return signature;
+	}
+
+	test("a v2 memo on chain with the saved period, root, count and heads root is adopted: no hour transfer, its pointer sent, one note", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const adopted = listOnChain(w, memo);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(result.stdout).toContain(`${hourIso(H1)} adopted ${adopted}`);
+		// The hour is not sent again; its graph has no pointer yet, so that pointer is the only send.
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([pointerFor(members(), adopted)]);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: adopted, previous_tx_sig: oldSig(1) });
+	});
+
+	test("a v2 memo on chain with the same period, root and count but another heads root is refused, never adopted", async () => {
+		const memo = v2Over(members());
+		const rival = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(9) });
+		const w = savedV2(memo);
+		listOnChain(w, rival);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		expect(result.stderr).toContain(`heads root ${rootFor(9)}`);
+		w.expectUntouched();
+	});
+
+	test("a v1 memo on chain for the same period, root and count is refused for a v2 hour, never adopted", async () => {
+		const memo = v2Over(members());
+		const v1 = formatMemo({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1) });
+		const w = savedV2(memo);
+		listOnChain(w, v1);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		expect(result.stderr).toContain("no heads root (a v1 memo)");
+		w.expectUntouched();
+	});
+
+	test("a rerun after a refused heads-root conflict refuses again and records no success", async () => {
+		const memo = v2Over(members());
+		const rival = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(9) });
+		const w = savedV2(memo);
+		listOnChain(w, rival);
+		const planned: Planned[] = [{ hourMs: H1, n: 1, memo }];
+		expect(await w.run(planned)).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		const rerun = await w.run(planned);
+		expect(rerun).toMatchObject({ code: 1, refused: "root-mismatch", sent: 0, adopted: 0 });
+		expect(rerun.stdout).not.toContain("adopted");
+		w.expectUntouched();
+	});
+
+	test("a read-back with the same period, root and count but another heads root is refused as send-failed", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.readBackMemo = formatMemoV2({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1), headsRootHex: rootFor(9) });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
+		expect(w.sendCalls).toHaveLength(1);
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("a read-back of a v1 memo for a v2 hour is refused as send-failed", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.readBackMemo = formatMemo({ periodStartMs: H1, rootHex: rootFor(1), count: countFor(1) });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "send-failed", sent: 0 });
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("a read-back that is the exact stored memo is accepted: the send is recorded", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.readBackMemo = memo;
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.emitted).toHaveLength(1);
+	});
+
+	/** The pointer the executor owes `graphId` for hour H1 over `events`, naming the hour transaction `hourTxSig` (design 3.2). */
+	function pointerFor(events: Member[], hourTxSig: string, graphId = "ut-1"): string {
+		const records = buildGraphHeads(events, H1).records;
+		return formatMemoV3({ graphId, periodStartMs: H1, count: events.filter((event) => event.graph_id === graphId).length, graphHeadsRootHex: graphHeadsRoot(records, graphId), hourTxSig });
+	}
+
+	test("the hour is sent, then its pointer names the new hour transaction byte for byte, and the hour is then recorded", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo, pointerFor(members(), newSig(1))]);
+		expect(w.pointerListAddresses).toEqual([graphIndexAddress("ut-1")]);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: newSig(1), previous_tx_sig: oldSig(1) });
+	});
+
+	test("a pointer the index listing already holds for the new hour is not sent again", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const held = pointerFor(members(), newSig(1));
+		w.pointerListings.set(graphIndexAddress("ut-1"), [{ signature: newSig(8), memo: held, err: null, slot: 3 }]);
+		w.chain.set(newSig(8), { ...TX_TEMPLATE, memo: held });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo]);
+	});
+
+	test("another pointer of the same graph and hour, paid by the job key, is a fork: the hour is sent, the run refuses, and no note is written", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const fork = pointerFor(members(), newSig(5));
+		w.pointerListings.set(graphIndexAddress("ut-1"), [{ signature: newSig(8), memo: fork, err: null, slot: 3 }]);
+		w.chain.set(newSig(8), { ...TX_TEMPLATE, memo: fork });
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 1, refused: "root-mismatch", sent: 1 });
+		expect(result.stderr).toContain("names other content for the same graph");
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("a pointer send that fails is send-failed and records nothing; a re-run adopts the hour and completes its pointer without sending the hour again", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		w.pointerSendCode = 1;
+		const first = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(first).toMatchObject({ code: 1, refused: "send-failed", sent: 1 });
+		expect(w.emitted).toEqual([]);
+		w.pointerSendCode = 0;
+		const second = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(second).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo, pointerFor(members(), newSig(1)), pointerFor(members(), newSig(1))]);
+		expect(w.emitted).toHaveLength(1);
+		expect(w.emitted[0]?.payload).toMatchObject({ new_tx_sig: newSig(1) });
+	});
+
+	test("a recorded hour whose pointer is missing gets it: the note stands, nothing is recorded again, and only the pointer is sent", async () => {
+		const memo = v2Over(members());
+		const w = savedV2(memo);
+		const done = newSig(7);
+		w.chain.set(done, { ...TX_TEMPLATE, memo });
+		w.noteRecords.set(H1, [noteRecord(1, H1, done)]);
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 0, adopted: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([pointerFor(members(), done)]);
+		expect(w.emitted).toEqual([]);
+	});
+
+	test("one pointer goes out for each graph with events in the hour, in graph-id order", async () => {
+		const two = members().map((event, i) => ({ ...event, graph_id: i < 2 ? "ut-1" : "ut-2" }));
+		const memo = v2Over(two);
+		const w = savedV2(memo);
+		w.eventRows = () => two;
+		const result = await w.run([{ hourMs: H1, n: 1, memo }]);
+		expect(result).toMatchObject({ code: 0, refused: null, sent: 1 });
+		expect(w.sendCalls.map((argv) => argv[5])).toEqual([memo, pointerFor(two, newSig(1), "ut-1"), pointerFor(two, newSig(1), "ut-2")]);
 	});
 });
 

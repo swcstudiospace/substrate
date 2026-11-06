@@ -12,7 +12,7 @@ reconcile are read-only, and git hooks are an opt-in you install for repositorie
 
 | Trigger | What it is | Writes into a repository? |
 | --- | --- | --- |
-| `hook` | A git hook (post-merge, post-checkout, post-rewrite) leaves a bounded `docs.changed` hint in the spool and always exits 0. | Yes: the hook file in that repository's `.git/hooks`, installed only by `substrate corpus hook install`, never over a foreign hook |
+| `hook` | A git hook (post-merge, post-checkout, post-rewrite) leaves a bounded hint in the spool, a small file holding the repository's directory and a timestamp (`{v, dir, at}`; it carries no action name), and always exits 0. | Yes: the hook file in that repository's `.git/hooks`, installed only by `substrate corpus hook install`, never over a foreign hook |
 | `watch` | `substrate corpus watch` watches the registered roots, waits for quiet (`SUBSTRATE_CORPUS_DEBOUNCE_MS`, at most `SUBSTRATE_CORPUS_MAX_WAIT_MS`) and runs one sync per repository however many edits there were. | No |
 | `sweep` | The same command on a timer (`--once`, or the watcher's own interval `SUBSTRATE_CORPUS_SWEEP_S`): reads each repository's Substrate-managed blobless mirror, so a push made from another machine is found although the local checkout has not pulled. | No (it fetches into the mirror directory, never into your clone) |
 | `manual` | `substrate corpus sync --repo R`. | No |
@@ -51,8 +51,8 @@ substrate corpus reconcile
 ```
 
 It reports `missingInPlane` (active manifest rows whose plane document is gone), `orphansInPlane` (names of `corpus:` plane
-documents no active row owns; never their text) and `checked` (rows compared). The reply is `truncated` when a list was cut at
-500 or the read was incomplete (the plane listing hit its page or time bound, or the manifest has more than 100,000 active rows);
+documents no active row owns; never their text) and `checked` (rows compared). The reply is `truncated` when the drift is cut at
+500 keys in total (missing rows and orphans together) or the read was incomplete (the plane listing hit its page or time bound, or the manifest has more than 100,000 active rows);
 the server does not claim a document missing from a cut listing, nor an orphan when it did not read every row, so a truncated
 report can under-report but never invents drift. It never names or touches a plane document whose name does not start with
 `corpus:`.
@@ -67,13 +67,13 @@ substrate corpus reconcile --execute
 the path as an `add` and the next `substrate corpus sync --execute` puts the document back. It deletes each orphan from the plane with
 the ingest's rules: the delete is confirmed by the plane, an orphan an active row holds at that moment is kept, and a delete that
 failed or was not confirmed is not counted as repaired (`repaired.deleted` is smaller than the orphans listed; run it again).
-At most 500 of each are repaired per run.
+At most 500 keys are repaired per run, in total.
 
 The route is `POST /corpus/reconcile` with `{protocol: 1, execute}`. It needs a bearer (401 without one), answers
 `503 corpus.disabled` while the corpus is off, `503 corpus.backend-unavailable` without a LightRAG plane,
 `503 corpus.index-unavailable` when the manifest does not answer and `503 corpus.plane-unreachable` when the plane cannot list.
 A dry run is audited under `corpus_status` (fail-open); `execute` is audited under `corpus_ingest` (fail-closed: an audit chain that
-cannot take the record refuses it). It takes the same lock as the ingest, so a repair never overlaps an insert.
+cannot take the record refuses it). It takes the same lock as the ingest, so a repair never overlaps an insert. The cache repair, `reconcile repair --execute` (docs/reconcile.md), is a different execute: it appends its audit record after its flush, and a failed append exits 1 with the flush already run (owner-accepted, 2026-11-03; docs/mcp-audit.md).
 
 **Proof.** Run the dry run again after `--execute` and then a `substrate corpus sync --execute`: `missingInPlane` and the repaired
 orphans are gone from the report.
@@ -114,11 +114,10 @@ it into a `docs.sync` note with `trigger: hook`.
 
 ## 5. Drift repair, day to day
 
-- A `docs.freshness` warning with `dataset: corpus` means the last ingest is older than `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`.
+- A `docs.freshness` warning with `dataset: corpus` means the last ingest is older than `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`, or the newest `docs.sync` lag is over `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` (when that is set). `payload.breaches` says which: `ingest_age`, `sync_lag`, or both; `sync_lag_seconds` and `sync_threshold_seconds` give the lag and its objective.
   Check `substrate corpus status` (`lagSeconds`, `lastIngestAt`), the units' journal, and run `substrate corpus sync --execute`. If the
   documentation really did not change, raise the limit; the note when it clears is the end of the episode.
-- Scheduled reconcile: run `substrate corpus reconcile` (dry run) weekly; a non-empty report means the manifest and the plane
-  disagreed (a plane restore, a killed run between the plane write and the manifest write). Repair with `--execute`.
+- Scheduled reconcile: `substrate-corpus-reconcile.timer` runs `substrate-corpus-reconcile.service` daily at 04:43 UTC, which runs `substrate corpus reconcile --json` as a dry run. The units are staged in `infra/vps`, not installed: an operator copies them and runs `systemctl enable --now substrate-corpus-reconcile.timer` (the server needs `SUBSTRATE_CORPUS=on`, or the pass reports `corpus.disabled`). A non-empty report means the manifest and the plane disagreed (a plane restore, a killed run between the plane write and the manifest write). Running `substrate corpus reconcile --execute` to repair it is an operator choice, taken by hand after reading the report.
 
 ## 6. Rollback
 

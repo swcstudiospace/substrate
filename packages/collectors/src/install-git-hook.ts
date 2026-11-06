@@ -15,10 +15,16 @@
  * `post-checkout` and `post-rewrite` hooks. Each one drops a tiny hint for the corpus watcher into the hint spool (outside
  * the repository), in the background with a hard timeout, and always exits 0. `substrate corpus hook install|uninstall|status`
  * uses the functions below; uninstalling removes only our block.
+ *
+ * With a repository registry (`SUBSTRATE_REPO_REGISTRY`; unset means no check) a hooks directory outside the repository's own
+ * worktree or git directory is refused before anything is written, so a `core.hooksPath` cannot place a hook outside the registration. The strict rule refuses any nested `.git` under a registered root; the server, unlike this installer, requires `SUBSTRATE_REPO_SCOPES` when the registry is set.
  */
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, type Stats, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { LOCAL_SURFACE } from "../../cli/src/worktree/scope.ts";
+import { redact } from "../../mcp-server/src/redact.ts";
+import { localPathGate, localRegistryScope, REPO_REFUSAL_MESSAGES, resolveContained } from "../../mcp-server/src/repo-scope.ts";
 
 const MARKER = "Agent Substrate — git post-commit collector";
 const SOURCE = join(import.meta.dir, "git", "post-commit");
@@ -32,6 +38,9 @@ const SRC_PLACEHOLDER = "__SUBSTRATE_COLLECTORS_SRC__";
 
 /** A directory with shell metacharacters is never written into a script: the placeholder stays. */
 const SAFE_PATH = /^[A-Za-z0-9._/@+-]+$/;
+
+/** A failure reason is printed on one line and capped to this many characters. */
+const MAX_REASON_CHARS = 200;
 
 function writeHook(path: string): void {
 	const safeDir = SAFE_PATH.test(import.meta.dir) ? import.meta.dir : SRC_PLACEHOLDER;
@@ -47,12 +56,91 @@ function hooksDir(repo: string): string | null {
 	return resolve(repo, relative);
 }
 
-type Status = "installed" | "already-ours" | "foreign-hook" | "not-a-repo";
+type Status = "installed" | "already-ours" | "foreign-hook" | "not-a-repo" | "refused";
 
-function inspect(repo: string): { status: Status; path?: string } {
+/** The environment the registry is read from. Callers may pass their own; the default is the process environment. */
+type Env = Readonly<Record<string, string | undefined>>;
+
+/** The real locations git reports for `repo`: its worktree, its git directory and its common git directory. */
+function ownLocations(repo: string): string[] {
+	const found: string[] = [];
+	const top = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+	if (top.status === 0) found.push(resolve(repo, top.stdout.trim()));
+	const dirs = spawnSync("git", ["-C", repo, "rev-parse", "--git-dir", "--git-common-dir"], { encoding: "utf8" });
+	if (dirs.status === 0) {
+		for (const line of dirs.stdout.split("\n")) {
+			if (line.trim() !== "") found.push(resolve(repo, line.trim()));
+		}
+	}
+	return found.map((dir) => resolveContained(dir) ?? dir);
+}
+
+/** The common git directory git reports for `repo`, resolved. Its hooks directory is shared by every worktree of the repository. */
+function commonGitDir(repo: string): string | null {
+	const result = spawnSync("git", ["-C", repo, "rev-parse", "--git-common-dir"], { encoding: "utf8" });
+	if (result.status !== 0) return null;
+	const dir = resolve(repo, result.stdout.trim());
+	return resolveContained(dir) ?? dir;
+}
+
+/** The primary checkout of `repo`: the first worktree git lists, which is the main checkout whichever linked worktree asks. */
+function primaryCheckout(repo: string): string | null {
+	const result = spawnSync("git", ["-C", repo, "worktree", "list", "--porcelain"], { encoding: "utf8" });
+	if (result.status !== 0) return null;
+	const line = result.stdout.split("\n").find((text) => text.startsWith("worktree "));
+	if (line === undefined) return null;
+	const path = line.slice("worktree ".length);
+	return resolveContained(path) ?? path;
+}
+
+/** Whether `target` is `root` or lies beneath it. Both are real, absolute paths. */
+function within(root: string, target: string): boolean {
+	const rel = relative(root, target);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Where `repo` may be written, decided in the order that keeps git away from an unregistered repository. Unset registry: no
+ * check, as before. Set: `repo` must lie in a registration (the lookup the corpus CLI gates on) before any git call runs. Only
+ * then is the hooks directory asked for, and it must lie in the repository's own worktree or git directory, so a `core.hooksPath`
+ * that points elsewhere is refused before anything is written there. A hooks directory in the common git directory is shared
+ * by every linked worktree, so the primary checkout that owns that directory must be registered too.
+ */
+type Located = { status: "refused"; detail: string } | { status: "not-a-repo" } | { status: "ok"; dir: string };
+
+function locate(repo: string, env: Env): Located {
+	const parsed = localRegistryScope(env);
+	if (!parsed.ok) return { status: "refused", detail: parsed.problem };
+	const scope = parsed.value;
+	if (scope !== null) {
+		const gate = localPathGate(scope, LOCAL_SURFACE, resolve(repo));
+		if (!gate.ok) return { status: "refused", detail: REPO_REFUSAL_MESSAGES[gate.reason] };
+	}
 	const dir = hooksDir(repo);
-	if (!dir) return { status: "not-a-repo" };
-	const path = join(dir, "post-commit");
+	if (dir === null) return { status: "not-a-repo" };
+	if (scope !== null) {
+		const target = resolveContained(dir) ?? dir;
+		if (!ownLocations(repo).some((root) => within(root, target))) {
+			return { status: "refused", detail: `hooks directory ${dir} is outside the repository's own worktree and git directory` };
+		}
+		const common = commonGitDir(repo);
+		if (common !== null && within(common, target)) {
+			const primary = primaryCheckout(repo);
+			if (primary === null) {
+				return { status: "refused", detail: `the primary checkout of ${repo} cannot be determined, and hooks directory ${dir} is shared through it` };
+			}
+			if (!localPathGate(scope, LOCAL_SURFACE, primary).ok) {
+				return { status: "refused", detail: `primary checkout ${primary} is not registered, and hooks directory ${dir} is shared through it` };
+			}
+		}
+	}
+	return { status: "ok", dir };
+}
+
+function inspect(repo: string, env: Env): { status: Status; path?: string; detail?: string } {
+	const located = locate(repo, env);
+	if (located.status !== "ok") return located;
+	const path = join(located.dir, "post-commit");
 	if (!existsSync(path)) return { status: "installed", path };
 	const existing = readFileSync(path, "utf8");
 	return { status: existing.includes(MARKER) ? "already-ours" : "foreign-hook", path };
@@ -60,7 +148,7 @@ function inspect(repo: string): { status: Status; path?: string } {
 
 /** The hooks that carry a corpus hint: a merge, a checkout and a rebase or amend move the documentation under a checkout. */
 export const CORPUS_HOOKS = ["post-merge", "post-checkout", "post-rewrite"] as const;
-export type CorpusHook = (typeof CORPUS_HOOKS)[number];
+type CorpusHook = (typeof CORPUS_HOOKS)[number];
 
 export const CORPUS_BLOCK_BEGIN = "# >>> substrate corpus hint >>>";
 export const CORPUS_BLOCK_END = "# <<< substrate corpus hint <<<";
@@ -105,8 +193,8 @@ export function corpusHookBlock(hook: CorpusHook, cliPath: string): string {
 	].join("\n");
 }
 
-export const HOOK_STATES = ["installed", "refreshed", "present", "absent", "removed", "foreign", "not-a-repo"] as const;
-export type HookState = (typeof HOOK_STATES)[number];
+const HOOK_STATES = ["installed", "refreshed", "present", "absent", "removed", "foreign", "not-a-repo", "refused"] as const;
+type HookState = (typeof HOOK_STATES)[number];
 
 export interface HookReport {
 	hook: string;
@@ -163,9 +251,14 @@ function isShebangOnly(text: string): boolean {
 }
 
 /** Installs (or with `check` only reports) the three corpus hint hooks. A hook file that is not ours is reported and left alone. */
-export function installCorpusHooks(repo: string, options: { check: boolean; cliPath?: string | undefined }): HookReport[] {
-	const dir = hooksDir(repo);
-	if (!dir) return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+export function installCorpusHooks(repo: string, options: { check: boolean; cliPath?: string | undefined; env?: Env | undefined }): HookReport[] {
+	const located = locate(repo, options.env ?? process.env);
+	if (located.status === "not-a-repo") return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+	if (located.status === "refused") {
+		const detail = located.detail;
+		return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail }));
+	}
+	const dir = located.dir;
 	const cliPath = options.cliPath ?? resolve(import.meta.dir, "..", "..", "cli", "src", "index.ts");
 	return CORPUS_HOOKS.map((hook): HookReport => {
 		const path = join(dir, hook);
@@ -187,9 +280,14 @@ export function installCorpusHooks(repo: string, options: { check: boolean; cliP
 }
 
 /** Removes only our block from each hook; a file left with nothing but a shebang is deleted, any other line is kept. */
-export function uninstallCorpusHooks(repo: string): HookReport[] {
-	const dir = hooksDir(repo);
-	if (!dir) return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+export function uninstallCorpusHooks(repo: string, env: Env = process.env): HookReport[] {
+	const located = locate(repo, env);
+	if (located.status === "not-a-repo") return CORPUS_HOOKS.map((hook) => ({ hook, state: "not-a-repo" as const }));
+	if (located.status === "refused") {
+		const detail = located.detail;
+		return CORPUS_HOOKS.map((hook): HookReport => ({ hook, state: "refused", detail }));
+	}
+	const dir = located.dir;
 	return CORPUS_HOOKS.map((hook): HookReport => {
 		const path = join(dir, hook);
 		const existing = readExisting(path);
@@ -206,6 +304,89 @@ export function uninstallCorpusHooks(repo: string): HookReport[] {
 	});
 }
 
+/** A repository whose install threw: its path and a redacted one-line reason. */
+interface RepoFailure {
+	repo: string;
+	reason: string;
+}
+
+interface InstallOptions {
+	checkOnly?: boolean | undefined;
+	corpus?: boolean | undefined;
+	/** The environment the registry is read from. Defaults to the process environment. */
+	env?: Env | undefined;
+	/** Where the per-repository lines go. Defaults to stdout. */
+	write?: ((text: string) => void) | undefined;
+}
+
+/** `failures` counts the distinct repositories with a problem and decides the exit code; `errors` names the repositories whose install threw (each is also in `failures`). */
+interface InstallOutcome {
+	failures: number;
+	errors: RepoFailure[];
+}
+
+/** A reason fit to print: redacted, first line only, no URL, short. */
+function oneLineReason(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	const firstLine = redact(message).split("\n")[0] ?? "";
+	const reason = firstLine.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>").replace(/\s+/g, " ").trim().slice(0, MAX_REASON_CHARS);
+	return reason === "" ? "install failed" : reason;
+}
+
+/** Installs the post-commit collector (and the corpus hooks when asked) into each repository. A repository whose install throws is recorded and the loop goes on. */
+export function installRepos(repos: readonly string[], options: InstallOptions = {}): InstallOutcome {
+	const checkOnly = options.checkOnly ?? false;
+	const corpus = options.corpus ?? false;
+	const env = options.env ?? process.env;
+	const write = options.write ?? ((text: string) => process.stdout.write(text));
+	let failures = 0;
+	const errors: RepoFailure[] = [];
+	for (const repo of repos) {
+		let problem = false;
+		try {
+			const { status, path, detail } = inspect(repo, env);
+			if (status === "not-a-repo") {
+				write(`✗ ${repo} — not a git repository\n`);
+				problem = true;
+				continue;
+			}
+			if (status === "refused") {
+				write(`✗ ${repo} — refused: ${detail}; nothing was written\n`);
+				problem = true;
+				continue;
+			}
+			if (status === "foreign-hook") {
+				write(`⚠ ${repo} — a different post-commit hook is already installed; left alone\n`);
+				problem = true;
+			} else if (status === "already-ours") {
+				if (!checkOnly && path) {
+					writeHook(path);
+				}
+				write(`✓ ${repo} — ${checkOnly ? "present" : "refreshed"}\n`);
+			} else if (checkOnly) {
+				write(`○ ${repo} — not installed\n`);
+			} else if (path) {
+				writeHook(path);
+				write(`✓ ${repo} — installed\n`);
+			}
+			if (!corpus) continue;
+			for (const report of installCorpusHooks(repo, { check: checkOnly, env })) {
+				const mark = report.state === "foreign" ? "⚠" : report.state === "absent" ? "○" : "✓";
+				write(`${mark} ${repo} — ${report.hook} ${report.state}${report.detail === undefined ? "" : ` (${report.detail}; left alone)`}\n`);
+				if (report.state === "foreign") problem = true;
+			}
+		} catch (error) {
+			const reason = oneLineReason(error);
+			errors.push({ repo, reason });
+			problem = true;
+			write(`✗ ${repo} — install failed: ${reason}\n`);
+		} finally {
+			if (problem) failures++;
+		}
+	}
+	return { failures, errors };
+}
+
 function main(): void {
 	const args = process.argv.slice(2);
 	const checkOnly = args.includes("--check");
@@ -217,37 +398,8 @@ function main(): void {
 		process.exit(2);
 	}
 
-	let failures = 0;
-	for (const repo of repos) {
-		const { status, path } = inspect(repo);
-		if (status === "not-a-repo") {
-			process.stdout.write(`✗ ${repo} — not a git repository\n`);
-			failures++;
-			continue;
-		}
-		if (status === "foreign-hook") {
-			process.stdout.write(`⚠ ${repo} — a different post-commit hook is already installed; left alone\n`);
-			failures++;
-		} else if (status === "already-ours") {
-			if (!checkOnly && path) {
-				writeHook(path);
-			}
-			process.stdout.write(`✓ ${repo} — ${checkOnly ? "present" : "refreshed"}\n`);
-		} else if (checkOnly) {
-			process.stdout.write(`○ ${repo} — not installed\n`);
-		} else if (path) {
-			writeHook(path);
-			process.stdout.write(`✓ ${repo} — installed\n`);
-		}
-		if (!corpus) continue;
-		for (const report of installCorpusHooks(repo, { check: checkOnly })) {
-			const mark = report.state === "foreign" ? "⚠" : report.state === "absent" ? "○" : "✓";
-			process.stdout.write(`${mark} ${repo} — ${report.hook} ${report.state}${report.detail === undefined ? "" : ` (${report.detail}; left alone)`}\n`);
-			if (report.state === "foreign") failures++;
-		}
-	}
-
-	process.exit(failures > 0 ? 1 : 0);
+	const outcome = installRepos(repos, { checkOnly, corpus });
+	process.exit(outcome.failures > 0 ? 1 : 0);
 }
 
 if (import.meta.main) main();

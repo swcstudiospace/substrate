@@ -41,9 +41,14 @@
  *   carries a small `signer_set` summary (source, size, rotation notes applied, rotation notes ignored and why, the read gap), so
  *   an ignored rotation note is not silent.
  * - `expectedGenesis`: devnet's (`DEVNET_GENESIS_HASH`).
+ * - `listGraphPointers` / `confirmPointer`: `readGraphPointers` and `confirmGraphPointer`. A graph's v3 pointers are listed at its index
+ *   address (confirmed, paged, within a budget), and each listed pointer is confirmed through its transaction (design 5, steps 2 and 3).
  *
- * Solana unconfigured (no anchor public key, or a refused RPC URL) or no ledger: the answer is `unverified` with the reason,
- * decided BEFORE any read, so no network call is made. Nothing here sends a transaction.
+ * Solana unconfigured (no anchor public key, or a refused RPC URL) or no ledger: `anchorVerifyBlocker` answers `unverified` with the reason,
+ * decided BEFORE any read, so the checkpoint and event verify make no network call. The graph pointer ports are not behind that gate:
+ * `verifyGraph` refuses to read the chain at all when `SOLANA_RPC_URL` was refused by the devnet guard (its verdict is `ok` false with the
+ * named reason, and no RPC call is made); otherwise it lists a graph's index address through the configured RPC URL. With no key the confirmed
+ * pointers cannot be told apart by payer, so they are judged `unverified`. Nothing here sends a transaction.
  */
 import {
 	ANCHOR_SIGNER_ROTATE_ACTION,
@@ -53,7 +58,7 @@ import {
 	type RotationEventInput,
 	type SignerSet,
 } from "@substrate/ledger";
-import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { DEVNET_GENESIS_HASH, readGraphPointers } from "./anchor.ts";
 import {
 	CheckpointVerifyError,
 	DEFAULT_ANCHOR_LAG_MS,
@@ -67,6 +72,7 @@ import {
 	type CheckpointVerifyResult,
 	type EventAnchorResult,
 } from "./checkpoint-verify.ts";
+import { normalizeKey } from "./event.ts";
 import { MAX_QUERY_LIMIT, type AnchorRow, type GreptimeClient } from "./greptime.ts";
 import { parseReanchorPayload, type ReanchorPayload } from "./reanchor-plan.ts";
 import { redact } from "./redact.ts";
@@ -86,6 +92,30 @@ const SIGNATURE_LEVELS = ["finalized", "confirmed"] as const;
 
 /** The ledger reads verification uses. `GreptimeClient` satisfies it; a test passes a fake. */
 export type AnchorLedger = Pick<GreptimeClient, "queryEvents" | "eventsByIds" | "cursorPosition" | "hourLeaves" | "anchorForPeriod">;
+
+/** One entry of a graph's index listing: the signature and the memo text the listing hints. The hint is confirmed before it counts. */
+export interface PointerEntry {
+	signature: string;
+	memo: string | null;
+}
+
+/** A graph's index listing. `complete` is false when the page cap or the budget stopped it before the listing ended. */
+export interface PointerListing {
+	entries: PointerEntry[];
+	complete: boolean;
+}
+
+/** One pointer transaction's fields, as the verifier reads a transaction (`confirmGraphPointer`). */
+export interface PointerConfirmation {
+	signature: string;
+	memo: string;
+	payer: string;
+	payerSigned: boolean;
+	err: unknown;
+	slot: number;
+	/** Block time in seconds, as the RPC reports it; null when the node has none. The signer is judged at this time. */
+	blockTime: number | null;
+}
 
 export interface AnchorVerifyPorts {
 	/** The event ledger, or null when it is not configured. */
@@ -107,23 +137,27 @@ export interface AnchorVerifyPorts {
 	operatorSurfaces: ReadonlySet<string>;
 	/** Epoch milliseconds. */
 	nowMs: () => number;
+	/** One graph's v3 pointers, listed at its index address within `budgetMs` (`readGraphPointers`; design 5, step 2). */
+	listGraphPointers: (graphId: string, opts: { budgetMs: number }) => Promise<PointerListing>;
+	/** One pointer transaction's fields, or null when the node cannot answer (`confirmGraphPointer`; design 5, step 3). */
+	confirmPointer: (signature: string) => Promise<PointerConfirmation | null>;
 }
 
 /** Where a checkpoint id is searched: the caller's session, else the caller's surface. */
-export interface CheckpointLookup {
+interface CheckpointLookup {
 	sessionId?: string;
 	surface?: string;
 }
 
 /** The answer when verification could not even start. A status, never an error. */
-export interface UnverifiedResult {
+interface UnverifiedResult {
 	status: "unverified";
 	ref: string;
 	reasons: string[];
 }
 
 /** Rotation notes the summary names when they were ignored; the rest are counted by the size of the set alone. */
-export const MAX_REPORTED_ROTATION_ISSUES = 10;
+const MAX_REPORTED_ROTATION_ISSUES = 10;
 
 /** What a verification says about the signer set it judged against. Small by construction; public keys and ids only. */
 export interface SignerSetSummary {
@@ -180,7 +214,7 @@ async function findById(ports: AnchorVerifyPorts, ledger: AnchorLedger, id: stri
 async function findCheckpoint(ports: AnchorVerifyPorts, ledger: AnchorLedger, ckptId: string, lookup: CheckpointLookup): Promise<CheckpointEventRecord | null> {
 	const match =
 		lookup.sessionId !== undefined
-			? { kind: "note", session_id: lookup.sessionId }
+			? { kind: "note", session_id: normalizeKey(lookup.sessionId) ?? lookup.sessionId }
 			: lookup.surface !== undefined
 				? { kind: "note", surface: lookup.surface }
 				: null;
@@ -299,6 +333,27 @@ async function fetchTransaction(rpc: Rpc, signature: string): Promise<AnchorTran
 }
 
 /**
+ * The two pointer ports over the devnet RPC, for `AnchorVerifyPorts`. `rpc` is read lazily, as `ports.rpc` is; the listing budget runs
+ * on `nowMs`.
+ */
+export function graphPointerPorts(rpc: () => Rpc, nowMs: () => number): Pick<AnchorVerifyPorts, "listGraphPointers" | "confirmPointer"> {
+	return {
+		listGraphPointers: (graphId, opts) => readGraphPointers(rpc(), graphId, { budgetMs: opts.budgetMs, nowMs }),
+		confirmPointer: (signature) => confirmGraphPointer(rpc(), signature),
+	};
+}
+
+/**
+ * One pointer transaction's fields, read as the hour transaction is (finalized, then confirmed). Null when the node does not know the
+ * signature, or the transaction carries no memo or no payer: the verifier then cannot confirm the pointer, which fails closed.
+ */
+async function confirmGraphPointer(rpc: Rpc, signature: string): Promise<PointerConfirmation | null> {
+	const found = await fetchTransaction(rpc, signature);
+	if (found === null || found.memo === null || found.signer === null) return null;
+	return { signature, memo: found.memo, payer: found.signer, payerSigned: found.signerSigned, err: found.err, slot: found.slot ?? 0, blockTime: found.blockTimeMs === null ? null : found.blockTimeMs / 1000 };
+}
+
+/**
  * The session the `anchor.reanchor` event of an hour is written in: the anchor job's own per-hour session
  * (`anchor:<YYYY-MM-DDTHH>`), so the verifier reads one small session instead of paging a surface's notes.
  */
@@ -327,10 +382,10 @@ export class ReanchorReadIncomplete extends Error {
 }
 
 /** What a note must be bound to: the stored row's root, event count and signature (the note's `previous_tx_sig`). */
-export type ReanchorBinding = Pick<AnchorRow, "root" | "event_count" | "tx_sig">;
+type ReanchorBinding = Pick<AnchorRow, "root" | "event_count" | "tx_sig">;
 
 /** Whether `record` is bound to `binding`: same root, same event count, and `previous_tx_sig` equal to the row's signature. */
-export function isBoundNote(record: ReanchorRecord, binding: ReanchorBinding): boolean {
+function isBoundNote(record: ReanchorRecord, binding: ReanchorBinding): boolean {
 	return record.payload.root === binding.root && record.payload.event_count === binding.event_count && record.payload.previous_tx_sig === binding.tx_sig;
 }
 

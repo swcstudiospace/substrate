@@ -14,6 +14,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import claude from "@agentos-software/claude-code";
 import { agentOS, getSandboxDisposeHooks, type HostFunctionCollections, resolveSandboxOptions, setup } from "@rivet-dev/agentos";
 import { sandboxAgentProvider } from "@rivet-dev/agentos-sandbox";
@@ -35,18 +36,19 @@ import {
 	skillMounts,
 	type TestsRoute,
 	testRunArgv,
-	worktreeFor,
 } from "./options.ts";
 import type { SandboxNetwork } from "./sandbox-options.ts";
 import { substrateDocker } from "./sandbox-provider.ts";
-import { hostCallTarget, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
+import { boundWorktreeOf, hostCallTarget, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
 import type { ApprovalBroker } from "./telegram.ts";
 import type { Dod, LeaseStoreLike, SubstrateClient } from "./substrate.ts";
 import { HOST_SURFACE } from "./substrate.ts";
 
-export type HostVmConfig = {
+type HostVmConfig = {
 	route: Route;
 	sandboxNet: SandboxNetwork;
+	/** The configured worktree roots (SUBSTRATE_WORKTREE_ROOTS); each graph's worktree is `<root>/<graph_id>` under one of them. */
+	worktreeRoots: readonly string[];
 	/** 03-01's tests_route: on oneshot the substrate collection gains run-tests. */
 	testsRoute: TestsRoute;
 	/** The sandbox host-function collection name 03-01 recorded (hostfn_sandbox_collection). */
@@ -206,7 +208,8 @@ function runTestsCollection(key: readonly unknown[], config: HostVmConfig) {
 				try {
 					argv = testRunArgv({
 						graphId: t.graphId,
-						worktree: worktreeFor(t.graphId),
+						worktree: boundWorktreeOf(config.store, t.graphId, config.worktreeRoots),
+						worktreeRoots: config.worktreeRoots,
 						nodeModules: existsSync(config.checkoutNodeModules) ? config.checkoutNodeModules : null,
 						paths: input.path,
 					});
@@ -246,7 +249,15 @@ function gitCollection(key: readonly unknown[], config: HostVmConfig) {
 	const context = (node: string) => {
 		const t = hostCallTarget(key, ["--node", node], lookup);
 		if ("error" in t) return t;
-		return { graphId: t.graphId, nodeId: t.nodeId, store: config.store, substrate: config.substrate, run: execFileRunner, log: config.log };
+		return {
+			graphId: t.graphId,
+			nodeId: t.nodeId,
+			store: config.store,
+			substrate: config.substrate,
+			run: execFileRunner,
+			log: config.log,
+			worktreeRoot: dirname(boundWorktreeOf(config.store, t.graphId, config.worktreeRoots)),
+		};
 	};
 	const functions: HostFunctionCollections[string] = {
 		"git-push": {
@@ -422,7 +433,7 @@ export function createHostVm(config: HostVmConfig) {
 
 		resolveOptions: async (c) => {
 			const gid = graphIdOf(c.key);
-			const worktree = worktreeFor(gid);
+			const worktree = boundWorktreeOf(config.store, gid, config.worktreeRoots);
 			const hostFunctions: HostFunctionCollections = {};
 			if (config.route.s === "hostfn") hostFunctions.substrate = substrateCollection(c.key, config);
 			if (config.route.a === "hostfn_proxy") hostFunctions.substrate = { ...hostFunctions.substrate, ...modelFetchCollection() };
@@ -434,7 +445,9 @@ export function createHostVm(config: HostVmConfig) {
 				mounts: [{ path: "/home/agentos/work", plugin: { id: "host_dir", config: { hostPath: worktree } } }, ...libraryMounts(gid, config)],
 				sandbox: {
 					// No `token` option: SandboxAgent.start reads it through substrateDocker.getToken() (sandbox-provider.ts).
-					provider: sandboxAgentProvider(substrateDocker({ graphId: gid, worktree, network: config.sandboxNet, readOnlyBinds })),
+					provider: sandboxAgentProvider(
+						substrateDocker({ graphId: gid, worktree, network: config.sandboxNet, readOnlyBinds, worktreeRoots: config.worktreeRoots }),
+					),
 					mountPath: "/mnt/sandbox",
 				},
 				hostFunctions,

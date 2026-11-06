@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { formatMemo, HOUR_MS, type TransactionMemo } from "@substrate/ledger";
+import { formatMemo, formatMemoV3, graphIndexAddress, HOUR_MS, type AddressMemo, type TransactionMemo } from "@substrate/ledger";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import type { AnchorRow } from "./greptime.ts";
 import {
@@ -77,6 +77,14 @@ class World {
 	confirmedOnly = new Set<string>();
 	failLookup: (signature: string) => boolean = () => false;
 	failure = new Error("fetch failed: https://rpc.example.invalid/v1/key-4411");
+	/** The graphs with a chain leaf in each hour, by hour start in epoch ms; an hour with none is a v1 hour. */
+	leafGraphs = new Map<number, string[]>();
+	/** Each index address's pointer listing, newest first. */
+	pointers = new Map<string, AddressMemo[]>();
+	/** The index addresses read, in call order. */
+	pointerReads: string[] = [];
+	/** When set, every listing read throws it. */
+	pointerFailure: Error | null = null;
 
 	constructor(rows: AnchorRow[]) {
 		this.rows = rows;
@@ -88,6 +96,8 @@ class World {
 			if (this.ledgerDown) throw new Error("greptime unreachable at http://10.0.0.9:4000");
 			return this.rows.filter((r) => Date.parse(r.period_start) >= since && Date.parse(r.period_start) < until).map((r) => ({ ...r }));
 		},
+		hourChainLeaves: async (periodStartMs: number) =>
+			(this.leafGraphs.get(periodStartMs) ?? []).map((graph_id) => ({ graph_id, session_id: "s", seq: 1, event_id: `e-${graph_id}`, hash: "h" })),
 	};
 
 	readonly chain: ChainReader = {
@@ -102,6 +112,14 @@ class World {
 			if (this.finalized.has(signature)) return TX;
 			if (level === "confirmed" && this.confirmedOnly.has(signature)) return TX;
 			return null;
+		},
+		addressSignaturePage: async (address, { limit, before }) => {
+			this.chainCalls.push("getSignaturesForAddress");
+			this.pointerReads.push(address);
+			if (this.pointerFailure !== null) throw this.pointerFailure;
+			const listing = this.pointers.get(address) ?? [];
+			const start = before === undefined ? 0 : listing.findIndex((entry) => entry.signature === before) + 1;
+			return listing.slice(start, start + limit);
 		},
 	};
 
@@ -483,7 +501,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 				sleep: async () => {},
 				ledgerFor: () => {
 					ledgers += 1;
-					return { anchorsBetween: async () => [] };
+					return { anchorsBetween: async () => [], hourChainLeaves: async () => [] };
 				},
 			});
 			expect(opened).toHaveProperty("refused");
@@ -507,7 +525,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 
 	test("the default endpoint is devnet's and the expected genesis is the job's constant; opening makes no request", async () => {
 		const { requests, fetchImpl } = spies();
-		const opened = await openRealContext({ env: { [GREPTIME_URL_KEY]: GREPTIME }, fetchImpl, sleep: async () => {}, ledgerFor: () => ({ anchorsBetween: async () => [] }) });
+		const opened = await openRealContext({ env: { [GREPTIME_URL_KEY]: GREPTIME }, fetchImpl, sleep: async () => {}, ledgerFor: () => ({ anchorsBetween: async () => [], hourChainLeaves: async () => [] }) });
 		expect("refused" in opened).toBe(false);
 		expect(contextOf(opened).expectedGenesis).toBe(DEVNET_GENESIS_HASH);
 		expect(requests).toEqual([]);
@@ -520,7 +538,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 			env: { [GREPTIME_URL_KEY]: GREPTIME, SOLANA_RPC_URL: "https://rpc.devnet.example.invalid/path" },
 			fetchImpl,
 			sleep: async () => {},
-			ledgerFor: () => ({ anchorsBetween: async () => rows }),
+			ledgerFor: () => ({ anchorsBetween: async () => rows, hourChainLeaves: async () => [] }),
 		});
 		const result = await runReanchorPlan(["--json"], { now: () => NOW, open: async () => opened });
 		expect(result.code).toBe(1);
@@ -544,7 +562,7 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 			sleep: async (ms) => {
 				sleeps.push(ms);
 			},
-			ledgerFor: () => ({ anchorsBetween: async () => [row(3)] }),
+			ledgerFor: () => ({ anchorsBetween: async () => [row(3)], hourChainLeaves: async () => [] }),
 		});
 		const result = await runReanchorPlan([], { now: () => NOW, open: async () => opened });
 		expect(result.code).toBe(3);
@@ -552,6 +570,97 @@ describe("openRealContext: the devnet guard and the read-only requests", () => {
 		expect(result.stderr).not.toContain("203.0.113.7");
 		expect(attempts).toBeGreaterThan(1);
 		expect(sleeps).toHaveLength(attempts - 1);
+	});
+});
+
+describe("runReanchorPlan: the index listing of a reset hour", () => {
+	const GRAPH = "ut-1";
+	const OTHER = "ut-2";
+	const H3 = hourAgo(3);
+	const memoFor = (graphId: string, hourTxSig: string, periodStartMs = H3): string => formatMemoV3({ graphId, periodStartMs, count: 2, graphHeadsRootHex: rootFor(9), hourTxSig });
+	const listed = (signature: string, memo: string): AddressMemo => ({ signature, memo, err: null, slot: 1, blockTime: null });
+
+	test("a reset hour is planned, and the index address of each graph with a leaf in it is listed", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH, OTHER]);
+		const result = await world.run(["--json"]);
+		expect(result.code).toBe(1);
+		expect(reportOf(result).plan.hours.map((h) => h.period_start)).toEqual([iso(H3)]);
+		expect(world.pointerReads).toEqual([graphIndexAddress(GRAPH), graphIndexAddress(OTHER)]);
+	});
+
+	test("a v1 hour has no leaf, so no index address is read", async () => {
+		const world = new World([row(3)]);
+		const result = await world.run(["--json"]);
+		expect(result.code).toBe(1);
+		expect(world.pointerReads).toEqual([]);
+	});
+
+	test("an hour already on the observed cluster is not planned, so its listings are not read", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH]);
+		world.finalized.add(sigFor(3));
+		const report = reportOf(await world.run(["--json"]));
+		expect(report.summary.skipped_by_code).toEqual({ "present-on-observed-cluster": 1 });
+		expect(world.pointerReads).toEqual([]);
+	});
+
+	test("a pointer that names the hour's stored transaction is not a mismatch: the hour is planned", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH]);
+		world.pointers.set(graphIndexAddress(GRAPH), [listed("p-own", memoFor(GRAPH, sigFor(3)))]);
+		const report = reportOf(await world.run(["--json"]));
+		expect(report.plan.hours.map((h) => h.period_start)).toEqual([iso(H3)]);
+		expect(report.summary.skipped_by_code).toEqual({});
+	});
+
+	test("a pointer that names another hour's transaction refuses the hour: nothing is planned and a human is told", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH]);
+		world.pointers.set(graphIndexAddress(GRAPH), [listed("p-bad", memoFor(GRAPH, sigFor(9)))]);
+		const result = await world.run(["--json"]);
+		expect(result.code).toBe(0);
+		const report = reportOf(result);
+		expect(report.plan.hours).toEqual([]);
+		expect(report.summary).toMatchObject({ to_reanchor: 0, skipped_by_code: { "pointer-mismatch": 1 }, needs_attention: 1 });
+		expect(report.plan.skipped[0]?.detail).toContain("pointer p-bad");
+		expect((await world.run()).stdout).toContain("ATTENTION");
+	});
+
+	test("a mismatch on any graph of the hour refuses the hour, not only the first graph listed", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH, OTHER]);
+		world.pointers.set(graphIndexAddress(OTHER), [listed("p-late", memoFor(OTHER, sigFor(9)))]);
+		const report = reportOf(await world.run(["--json"]));
+		expect(report.plan.hours).toEqual([]);
+		expect(report.summary.skipped_by_code).toEqual({ "pointer-mismatch": 1 });
+	});
+
+	test("a pointer of another hour does not refuse this hour", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH]);
+		world.pointers.set(graphIndexAddress(GRAPH), [listed("p-other-hour", memoFor(GRAPH, sigFor(9), hourAgo(4)))]);
+		const report = reportOf(await world.run(["--json"]));
+		expect(report.plan.hours.map((h) => h.period_start)).toEqual([iso(H3)]);
+	});
+
+	test("a pointer listed under one graph but naming another refuses the hour", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH]);
+		world.pointers.set(graphIndexAddress(GRAPH), [listed("p-swap", memoFor(OTHER, sigFor(3)))]);
+		const report = reportOf(await world.run(["--json"]));
+		expect(report.plan.hours).toEqual([]);
+		expect(report.summary.skipped_by_code).toEqual({ "pointer-mismatch": 1 });
+	});
+
+	test("a listing that cannot be read is an outage: exit 3, no plan, no URL in the message", async () => {
+		const world = new World([row(3)]);
+		world.leafGraphs.set(H3, [GRAPH]);
+		world.pointerFailure = new Error("fetch failed https://rpc.example.invalid/v1/key-9");
+		const result = await world.run(["--json"]);
+		expect(result).toMatchObject({ code: 3, stdout: "" });
+		expect(result.stderr).toContain("index listing of a reset hour could not be read");
+		expect(result.stderr).not.toContain("key-9");
 	});
 });
 
@@ -577,13 +686,13 @@ describe("the module cannot send", () => {
 		}));
 	}
 
-	test("it imports a fixed set of modules, and from the anchor job only the genesis constant", () => {
+	test("it imports a fixed set of modules, and from the anchor job only the genesis constant and the index read", () => {
 		const source = code("./reanchor-plan-run.ts");
 		expect(source).not.toMatch(/^import\s+"/m);
 		expect(source).not.toMatch(/\bimport\s*\(|\brequire\s*\(/);
 		const found = imports(source);
 		expect(found.map((entry) => entry.from).sort()).toEqual(["./anchor.ts", "./config.ts", "./greptime.ts", "./reanchor-plan.ts", "./redact.ts", "@substrate/ledger"]);
-		expect(found.find((entry) => entry.from === "./anchor.ts")?.names).toEqual(["DEVNET_GENESIS_HASH"]);
+		expect(found.find((entry) => entry.from === "./anchor.ts")?.names).toEqual(["DEVNET_GENESIS_HASH", "readGraphPointers"]);
 		const fromLedger = found.find((entry) => entry.from === "@substrate/ledger")?.names ?? [];
 		expect(fromLedger.join(" ")).not.toMatch(FORBIDDEN);
 		expect(fromLedger).not.toContain("AMOUNT_ZERO");
@@ -605,7 +714,7 @@ describe("the module cannot send", () => {
 		const rpcCalls = new Set([...source.matchAll(/\brpc\.(\w+)/g)].map((match) => match[1]));
 		expect(rpcCalls).toEqual(new Set(["getGenesisHash", "transactionMemo"]));
 		const ledgerCalls = new Set([...source.matchAll(/\bledger\.(\w+)\s*\(/g)].map((match) => match[1]));
-		expect(ledgerCalls).toEqual(new Set(["anchorsBetween"]));
+		expect(ledgerCalls).toEqual(new Set(["anchorsBetween", "hourChainLeaves"]));
 	});
 });
 

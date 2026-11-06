@@ -253,6 +253,18 @@ describe("the registry's defaults are the code's defaults", () => {
 			expect({ name, default: FLAGS.find((flag) => flag.name === name)?.default }).toEqual({ name, default: value });
 		}
 	});
+
+	test("the live lease is registered, documented and agrees with the real loader", () => {
+		const name = "SUBSTRATE_LIVE_SESSION_LEASE_S";
+		const row = defined(FLAGS.find((flag) => flag.name === name), "live lease row");
+		expect(row.kind).toBe("number");
+		expect(row.documented).toBe(true);
+		expect(Number(row.default)).toBe(loadConfig({}).liveSessionLeaseS);
+		expect(loadConfig({ [name]: "60" }).liveSessionLeaseS).toBe(60);
+		expect(loadConfig({ [name]: "86400" }).liveSessionLeaseS).toBe(86_400);
+		const example = readFileSync(join(ROOT, ".env.example"), "utf8");
+		expect(example.split("\n").some((line) => /^#?\s*SUBSTRATE_LIVE_SESSION_LEASE_S=/.test(line))).toBe(true);
+	});
 });
 
 describe("promotion policies", () => {

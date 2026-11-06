@@ -18,8 +18,8 @@
 import { entryHashFor, isForgottenMarker, matchEntryHash, contentOf, toNexusRecord } from "./memory-record.ts";
 import type { MemoryEntry } from "./types.ts";
 
-export const ANCHOR_STATUSES = ["anchored", "pending", "unanchored", "unverified", "mismatch"] as const;
-export type AnchorStatus = (typeof ANCHOR_STATUSES)[number];
+const ANCHOR_STATUSES = ["anchored", "pending", "unanchored", "unverified", "mismatch"] as const;
+type AnchorStatus = (typeof ANCHOR_STATUSES)[number];
 
 /**
  * What the anchor reader reports for one ledger event.
@@ -49,7 +49,7 @@ export interface MemoryVerifyDeps {
 	sleep?: (ms: number) => Promise<void>;
 }
 
-export const DEFAULT_ANCHOR_TIMEOUT_MS = 5_000;
+const DEFAULT_ANCHOR_TIMEOUT_MS = 5_000;
 
 export const VERIFY_STATUSES = ["verified", "hash-mismatch", "pending", "unanchored", "unverified", "anchor-mismatch"] as const;
 export type VerifyStatus = (typeof VERIFY_STATUSES)[number];
@@ -69,7 +69,7 @@ export interface MemoryVerifyResult {
 	anchor: { status: AnchorStatus; proof_ref: string | null } | null;
 }
 
-export type MemoryVerifyRule = "bad_id" | "not_found";
+type MemoryVerifyRule = "bad_id" | "not_found";
 
 /** The id is malformed or names no entry. This is a caller error, unlike a record that fails to verify. */
 export class MemoryVerifyError extends Error {

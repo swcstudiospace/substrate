@@ -35,14 +35,14 @@
  */
 import type { RagflowChunk } from "./planes/ragflow.ts";
 
-export interface FakeDataset {
+interface FakeDataset {
 	id: string;
 	name: string;
 	embedding_model: string;
 	chunk_method?: string;
 }
 
-export interface RecordedRequest {
+interface RecordedRequest {
 	method: string;
 	path: string;
 	/** JSON bodies as parsed; multipart bodies as `{multipart: {file: [{name, text}]}}`. */
@@ -50,7 +50,7 @@ export interface RecordedRequest {
 	query: Record<string, string>;
 }
 
-export type FakeChunkShape = "full" | "minimal";
+type FakeChunkShape = "full" | "minimal";
 
 /**
  * A chunk the fake serves. `document_name`, `chunk_id` and `score` go out
@@ -63,7 +63,7 @@ export interface FakeChunk extends RagflowChunk {
 }
 
 /** One document on the fake plane, with its documented `run` state. */
-export interface FakeDocument {
+interface FakeDocument {
 	id: string;
 	dataset_id: string;
 	name: string;

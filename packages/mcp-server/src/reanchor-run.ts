@@ -27,7 +27,7 @@ import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "no
 import { dirname, isAbsolute, join } from "node:path";
 import { createRpc, execFileRunner, RpcError, type Rpc } from "@substrate/ledger";
 import { loadConfig, operatorSurfaces, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
-import { readReanchorNotes, resolveSignerSet } from "./anchor-verify-deps.ts";
+import { graphPointerPorts, readReanchorNotes, resolveSignerSet } from "./anchor-verify-deps.ts";
 import { GreptimeClient } from "./greptime.ts";
 import {
 	dryRunReanchor,
@@ -46,13 +46,14 @@ import {
 } from "./reanchor.ts";
 import { rowToEvent, Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
+import { diskDestination } from "./destination.ts";
 
 /** Devnet reads and the send's read-back: one slow call each, three tries, room to breathe between (the anchor job's figures). */
 const RPC_TIMEOUT_MS = 15_000;
 const RPC_ATTEMPTS = 3;
 const RPC_BACKOFF_MS = 2_000;
 
-export interface ReanchorCliResult {
+interface ReanchorCliResult {
 	code: 0 | 1 | 2;
 	stdout: string;
 	stderr: string;
@@ -94,7 +95,7 @@ export async function runReanchorCli(argv: readonly string[], deps: ReanchorCliD
 	return { code: result.code, stdout: result.stdout, stderr: result.stderr };
 }
 
-export interface OpenOptions {
+interface OpenOptions {
 	/** The environment to read; `process.env` by default. */
 	env?: Record<string, string | undefined>;
 	fetchImpl?: typeof fetch;
@@ -108,7 +109,7 @@ export interface OpenOptions {
 /** An unreadable lock file (garbage, a half-written file) older than this is broken; a lock with a live pid never is. */
 export const LOCK_STALE_MS = 30 * 60_000;
 
-export interface LockFileOptions {
+interface LockFileOptions {
 	pid?: number;
 	now?: () => number;
 	/** Whether the process of a pid is alive; the real one signals it with signal 0. */
@@ -156,10 +157,10 @@ function readHolder(path: string): { raw: string; pid: number | null; startedMs:
  * The registry default of `SUBSTRATE_STATE_DIR` (`flag-registry.ts`, entry `SUBSTRATE_STATE_DIR`: default and unset value
  * `/var/lib/substrate`). Keep the two in step.
  */
-export const DEFAULT_STATE_DIR = "/var/lib/substrate";
+const DEFAULT_STATE_DIR = "/var/lib/substrate";
 
 /** The lock's file name: fixed, so two runs with different signer keys (around a rotation, say) still exclude each other. */
-export const REANCHOR_LOCK_NAME = "substrate-reanchor.lock";
+const REANCHOR_LOCK_NAME = "substrate-reanchor.lock";
 
 /**
  * The one lock file of re-anchor runs on this host: `substrate-reanchor.lock` in `SUBSTRATE_STATE_DIR` (a blank value counts as unset),
@@ -244,7 +245,7 @@ export function fileLock(path: string, options: LockFileOptions = {}): ReanchorL
 export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}): ReanchorDeps | { refused: string } {
 	let config: SubstrateConfig;
 	try {
-		config = loadConfig(open.env ?? process.env);
+		config = loadConfig(open.env ?? process.env, { realDestination: diskDestination });
 	} catch (cause) {
 		return { refused: `the configuration is not valid: ${reasonOf(cause)}` };
 	}
@@ -272,7 +273,12 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 	// The server's retain outbox file (SUBSTRATE_RETAIN_OUTBOX_PATH) belongs to the running server: constructing a Substrate with it would
 	// hydrate and rewrite that file and start a second drain timer. This process needs only the ledger, so the outbox is memory-only (and,
 	// never fed, empty and timer-less), and the Postgres index and the event bus the re-anchor never uses are not built either.
-	const isolated: SubstrateConfig = { ...config, retainOutbox: { ...config.retainOutbox, path: null } };
+	// The telemetry buffer belongs to the running server, for the same reason: this process holds nothing to retry, so it is off here.
+	const isolated: SubstrateConfig = {
+		...config,
+		retainOutbox: { ...config.retainOutbox, path: null },
+		eventBuffer: null,
+	};
 	const substrate = open.substrateFor !== undefined ? open.substrateFor(isolated, greptime) : new Substrate(isolated, { greptime, index: null, eventBus: () => null });
 	const operators = operatorSurfaces(config);
 	// An explicit --surface is judged by the executor against the operator set; with none, a single operator surface is the answer.
@@ -302,6 +308,7 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 				solana: { pubkey, problem: null, signerSet: config.solana.signerSet, signerSetProblem: config.solana.signerSetProblem },
 				operatorSurfaces: operators,
 				nowMs: () => Date.now(),
+				...graphPointerPorts(() => rpc, () => Date.now()),
 			}),
 		// One lock per host and state directory, not per signer or plan file: a copy of the plan elsewhere, or a run under another key, must not be a second lock.
 		lock: fileLock(lockPath.path),

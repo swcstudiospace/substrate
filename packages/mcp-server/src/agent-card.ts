@@ -27,13 +27,13 @@ export const AGENT_CARD_VERSION = "1.0.0";
  * precedent). Re-passed through shared `redact.ts` defensively: the gate
  * already redacted on write, but a card is a second publication surface.
  */
-export const CARD_SKILL_DESCRIPTION_MAX = 1200;
+const CARD_SKILL_DESCRIPTION_MAX = 1200;
 
 /** The tag every teachable skill entry carries (F-D1 literal). */
 export const TEACHABLE_SKILL_TAG = "teachable-moment";
 
 /** One `skills[]` entry: a single accepted teachable (F-D1 shape, `examples` omitted — no source data exists). */
-export interface AgentSkill {
+interface AgentSkill {
 	id: string;
 	name: string;
 	description: string;

@@ -76,7 +76,7 @@ export interface LocalCheckpoint {
 }
 
 /** A pinned ref under `refs/substrate/checkpoints/` that is not a usable checkpoint (no or corrupt metadata). */
-export interface InvalidCheckpoint {
+interface InvalidCheckpoint {
 	id: string;
 	reason: string;
 }
@@ -87,7 +87,7 @@ export interface LocalCheckpoints {
 	invalid: InvalidCheckpoint[];
 }
 
-export type CheckpointErrorCode = "invalid-input" | "seq-conflict";
+type CheckpointErrorCode = "invalid-input" | "seq-conflict";
 
 export class CheckpointError extends Error {
 	readonly code: CheckpointErrorCode;
@@ -182,21 +182,21 @@ export interface CheckpointResult {
 }
 
 /** What `admit` decides under the checkpoint lock. */
-export type CheckpointAdmission = { take: true } | { take: false; reason: string };
+type CheckpointAdmission = { take: true } | { take: false; reason: string };
 
 /** `existing` is the session's checkpoints (ascending by seq) as listed under the lock; `tree` is the tree id of the snapshot about to be pinned. */
-export interface CheckpointAdmitContext {
+interface CheckpointAdmitContext {
 	existing: readonly LocalCheckpoint[];
 	tree: string;
 }
 
 /** `createCheckpoint` declined by `admit`: nothing was pinned and the server was not contacted. */
-export interface CheckpointSkipped {
+interface CheckpointSkipped {
 	status: "skipped";
 	reason: string;
 }
 
-export interface CreateCheckpointParams {
+interface CreateCheckpointParams {
 	worktree: string;
 	sessionId: string;
 	trigger: CheckpointTrigger;

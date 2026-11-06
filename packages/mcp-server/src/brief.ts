@@ -11,7 +11,7 @@
 import { MAX_ENCODED_CHARS, foldLine, renderFullBrief, type BriefItem, type BriefSection, type BriefSectionId } from "./brief-profile.ts";
 import { earliestRefreshAt } from "./cache.ts";
 import { sharedDeadline } from "./deadline.ts";
-import { normalizeIdentifier } from "./event.ts";
+import { normalizeKey } from "./event.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
 import { leaseSnapshot, type IndexStore } from "./index-store.ts";
@@ -23,15 +23,14 @@ export interface BriefRequest {
 	repo?: string | undefined;
 	branch?: string | undefined;
 	graph_id?: string | undefined;
-	/**
-	 * The asking session (phase 67). Used only by the live session sections (`SUBSTRATE_BRIEF_SESSIONS`): its own pending
-	 * directives, and the sessions listed leave it out. It is in no cache key and changes nothing while the flag is off.
-	 */
+	/** Historical self-exclusion and worktree attribution only; never private authority. */
 	session_id?: string | undefined;
+	/** Explicit private live handle; proof travels separately in trusted service options. */
+	steering_session_id?: string | undefined;
 	surface: Surface;
 }
 
-export interface BriefSources {
+interface BriefSources {
 	index: IndexStore | null;
 	greptime: GreptimeClient | null;
 }
@@ -75,7 +74,7 @@ export const MAX_BRIEF_NODES = 1000;
 /** The longest node label (id and tracker identifier) a brief prints, in code points; a longer one is cut with an ellipsis. */
 export const MAX_NODE_LABEL_CHARS = Math.floor(MAX_ENCODED_CHARS / (8 * MAX_BRIEF_NODES));
 const RECENT_ACTION_LIMIT = 5;
-export const DEFAULT_RECENT_WINDOW_DAYS = 30;
+const DEFAULT_RECENT_WINDOW_DAYS = 30;
 const DAY_MS = 86_400_000;
 
 /**
@@ -289,7 +288,7 @@ export async function composeBriefSections(
 			? start("graph", () => (options.graphRead === "lite" ? index.getGraphForBrief(graphId) : index.getGraph(graphId)), null as GraphView | null)
 			: null;
 	// Recent actions in this repo, from any surface. The repo is matched in the form
-	// the write path stores it, not as the caller spelled it — see normalizeIdentifier.
+	// the write path stores it, not as the caller spelled it — see normalizeKey.
 	// Bounded in time so an uncached brief never scans the repo's whole history,
 	// and in wall time by the same budget the deadline enforces, so a stalled
 	// ledger is released by the client itself rather than left running. With no
@@ -446,7 +445,7 @@ export async function composeBriefSections(
  */
 export function recentActionsSql(repo: string, sinceMs: number): string {
 	return `SELECT "ts", "surface", "summary", "node_id", "step" FROM "agent_events"
-				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
+				 WHERE "repo" = ${quote(normalizeKey(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
 				 AND "ts" >= ${quote(new Date(sinceMs).toISOString())}
 				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`;
 }

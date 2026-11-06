@@ -2,7 +2,7 @@
  * Graph attribution from a worktree path. The dispatcher gives each graph one
  * worktree at `<root>/<graph_id>` (dispatcher worktree.py), so a path inside a
  * configured root names its graph. The roots are `SUBSTRATE_WORKTREE_ROOTS`
- * (colon separated), defaulting to the dispatcher's own directory. This is
+ * (colon separated), defaulting to `WORKTREE_ROOT`, the directory the dispatcher uses when the variable is unset. This is
  * string work only: nothing here touches the disk, so a symlink is read as the
  * path it was written under.
  */
@@ -18,7 +18,7 @@ const GRAPH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
  * The configured roots: absolute entries of `SUBSTRATE_WORKTREE_ROOTS` in the order written, or
  * `[WORKTREE_ROOT]` when it is unset or holds no usable entry. A relative entry is dropped, not guessed at.
  * Unlike the worktree commands and the doctor (`worktreeRootsFromEnv` in the fleet package), which treat an unset
- * variable as "no root configured", attribution always has a location to try: the dispatcher's own directory.
+ * variable as "no root configured", attribution always has a location to try: `WORKTREE_ROOT`.
  */
 export function worktreeRoots(env: Record<string, string | undefined> = process.env): string[] {
 	const roots: string[] = [];

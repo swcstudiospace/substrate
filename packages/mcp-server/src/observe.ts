@@ -18,7 +18,6 @@ import {
 	AuditLog,
 	AuditUnavailableError,
 	auditMode,
-	auditStats,
 	type ClaimDecision,
 	type AuditTransport,
 } from "@substrate/audit";
@@ -69,11 +68,12 @@ import type { IncomingMessage } from "node:http";
 import type { SubstrateConfig } from "./config.ts";
 import { registerMetricsHistoryMetrics } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
+import { reportSilent } from "./silent-failures.ts";
 import type { GraphTeachable, HourReport, Substrate, SubstrateObserver, VerifyOptions, VerifyVerdict } from "./service.ts";
 import type { Surface } from "./types.ts";
 
 /** Kept in step with `packages/mcp-server/package.json`. Reported as `service.version`. */
-export const SUBSTRATE_VERSION = "0.1.0";
+const SUBSTRATE_VERSION = "0.1.0";
 
 /** Routes that exist. Anything else is `other`, so the attribute stays bounded. */
 const KNOWN_ROUTES = [
@@ -99,6 +99,8 @@ const KNOWN_ROUTES = [
 	"/slo/history",
 	"/livez",
 	"/steering/sessions",
+	"/steering/sessions/heartbeat",
+	"/steering/sessions/close",
 	"/steering/directives",
 	"/steering/wait",
 	"/steering/queue",
@@ -181,7 +183,7 @@ export async function recordClaimWithdrawal(
 }
 
 /** `/slo.history` (uplift-3 N2): how far back the merged series reach, and how often they are saved. */
-export interface SloHistory {
+interface SloHistory {
 	/** Restarts so far, this process included: 1 on a fresh start, the checkpoint's epoch + 1 after a restore. */
 	epoch: number;
 	/** ISO time of the oldest sample the merged series reach back to. */
@@ -191,7 +193,7 @@ export interface SloHistory {
 }
 
 /** What one checkpoint write did. Never throws: a checkpoint that could not be saved is a line, not an outage. */
-export interface CheckpointWrite {
+interface CheckpointWrite {
 	/** `false` when no path is configured or the write failed (`error` says why). */
 	written: boolean;
 	bytes: number;
@@ -288,6 +290,11 @@ export interface CheckpointFiles {
 	rename(from: string, to: string): Promise<void>;
 }
 
+/** The MCP audit chain, opened with the shared redaction. Every construction of it is in this module (the redaction lock). */
+export function openAuditLog(config: SubstrateConfig): AuditLog {
+	return new AuditLog({ path: config.audit.path, redact });
+}
+
 export function createObservability(
 	config: SubstrateConfig,
 	env: Record<string, string | undefined> = process.env,
@@ -317,7 +324,7 @@ export function createObservability(
 	let checkpointAt: string | null = restored?.writtenAt ?? null;
 	const notifyRecords: Record<string, NotifyRecord> = { ...(restored?.notify ?? {}) };
 	const tracer = new Tracer({ maxSpans: settings.maxSpans, sampleRatio: settings.sampleRatio });
-	const audit = new AuditLog({ path: config.audit.path, redact });
+	const audit = openAuditLog(config);
 	const slos = sloCatalogue(settings.slo);
 	/** One window per process: successive `/slo` reads are its samples; restored buckets seed it. */
 	const planeWindow = new PlaneWindow(undefined, undefined, restored?.planes ?? {});
@@ -388,6 +395,9 @@ export function createObservability(
 		eventReplay(sample) {
 			instruments.recordEventReplay(sample);
 		},
+		syncLag(sample) {
+			instruments.setCorpusSyncLag(sample.seconds);
+		},
 		cached(sample) {
 			instruments.recordCache(sample);
 		},
@@ -416,7 +426,9 @@ export function createObservability(
 			// A withdrawal is a decision the audit has to carry, and the pre-dispatch gate
 			// cannot know about it yet: see `recordClaimWithdrawal`.
 			if (sample.decision === "revoked") {
-				void recordClaimWithdrawal(audit, instruments, sample);
+				void recordClaimWithdrawal(audit, instruments, sample).catch((cause: unknown) => {
+					reportSilent("claim.withdrawal", cause);
+				});
 			}
 		},
 		docsSearch(sample) {
@@ -671,6 +683,9 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"skills_list",
 	"docs_search",
 	"docs_ingest",
+	"docs_steering_session",
+	"steering_session_heartbeat",
+	"steering_session_close",
 	"docs_feedback",
 	"desktop_run",
 	"railway_list",
@@ -687,6 +702,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_queue",
 	"steering_acknowledge",
 	"steering_list",
+	"steering_wait",
+	"live_session_discovery",
 	"session_context",
 	"worktree_list",
 	"worktree_report",
@@ -705,6 +722,21 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 export function toolLabel(tool: string): string {
 	return KNOWN_TOOLS.has(tool) ? tool : "unrecognized";
 }
+
+/**
+ * Here session_id is a private live target, not historical attribution.
+ * Omit it from plaintext context even on denied batches; args stay canonical
+ * and are still digested by the audit chain without storing their values.
+ */
+const PRIVATE_LIVE_TARGET_TOOLS: Readonly<Record<string, true>> = {
+	docs_steering_session: true,
+	steering_session_heartbeat: true,
+	steering_session_close: true,
+	steering_list: true,
+	steering_queue: true,
+	steering_acknowledge: true,
+	steering_wait: true,
+};
 
 /**
  * Record each tool call, and report the ones that must not run.
@@ -746,7 +778,7 @@ export async function auditToolCalls(
 			transport,
 			graph_id: stringAt(call.args, "graph_id"),
 			node_id: stringAt(call.args, "node_id"),
-			session_id: stringAt(call.args, "session_id"),
+			session_id: Object.hasOwn(PRIVATE_LIVE_TARGET_TOOLS, call.tool) ? null : stringAt(call.args, "session_id"),
 		};
 		// Once the batch is refused, nothing else will be dispatched, so nothing else is
 		// recorded as allowed either.
@@ -865,7 +897,7 @@ export function auditRefusal(body: unknown, denials: Map<string, string>): unkno
 
 // ── request instrumentation ──────────────────────────────────────────────────
 
-export function traceparentOf(req: IncomingMessage): SpanContext | null {
+function traceparentOf(req: IncomingMessage): SpanContext | null {
 	const header = req.headers.traceparent;
 	return parseTraceparent(Array.isArray(header) ? header[0] : header);
 }
@@ -1023,6 +1055,16 @@ export async function buildGraphEvidence(
 function appChainOf(verdict: VerifyVerdict): ChainEvidence {
 	// `greptime not configured` is a deployment with no ledger, not a ledger that would not answer.
 	const notConfigured = verdict.chain.reason === "greptime not configured";
+	// An intact chain is attested only over the hours it names. When those could not all be read the bundle must not claim the chain verified: it is
+	// unverifiable, with `ok` null, not broken. The chain verdict itself is unchanged.
+	if (!notConfigured && verdict.chain.ok && verdict.hours_unreadable !== undefined) {
+		return {
+			state: "unverifiable",
+			ok: null,
+			records: verdict.events,
+			reason: `the hours of this chain could not be read in full: ${verdict.hours_unreadable}`,
+		};
+	}
 	return {
 		state: notConfigured ? "not-configured" : chainState(verdict.chain.ok),
 		ok: notConfigured ? null : verdict.chain.ok,
@@ -1048,6 +1090,8 @@ function anchorEvidenceOf(hour: HourReport): AnchorEvidence {
 		...(hour.tx_sig ? { tx_sig: hour.tx_sig, explorer_url: devnetExplorerTxUrl(hour.tx_sig) } : {}),
 		...(hour.slot === undefined ? {} : { slot: hour.slot }),
 		...(hour.reason ? { reason: hour.reason } : {}),
+		...(hour.head_failed ? { head_failed: true } : {}),
+		...(hour.pointer === undefined ? {} : { pointer: hour.pointer }),
 	};
 }
 
@@ -1081,4 +1125,4 @@ export function chainState(ok: boolean | null): "verified" | "broken" | "unverif
 	return "unverifiable";
 }
 
-export { auditStats, renderEvidenceHtml };
+export { renderEvidenceHtml };

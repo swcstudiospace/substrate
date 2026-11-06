@@ -33,19 +33,19 @@ import { SURFACES } from "./types.ts";
 
 // ── settings ────────────────────────────────────────────────────────────────
 
-export const DEFAULT_RECALL_INTERVAL_S = 120;
-export const MIN_RECALL_INTERVAL_S = 30;
+const DEFAULT_RECALL_INTERVAL_S = 120;
+const MIN_RECALL_INTERVAL_S = 30;
 const MAX_RECALL_INTERVAL_S = 3600;
 export const DEFAULT_RECALL_TTL_S = 900;
 const MIN_RECALL_TTL_S = 60;
 export const MAX_RECALL_TTL_S = 86_400;
-export const DEFAULT_RECALL_BUDGET_MS = 1500;
+const DEFAULT_RECALL_BUDGET_MS = 1500;
 const MIN_RECALL_BUDGET_MS = 100;
 const MAX_RECALL_BUDGET_MS = 10_000;
 /** The brief's wait for its recall read in `enforce`: outside the brief budget, and never longer than this. Not an env knob. */
 export const BRIEF_RECALL_CAP_MS = 3000;
 /** The fan-out's own abort budget ends this far inside the brief's cap, so a bank still running at the budget is cut before the cap fires. Not an env knob. */
-export const BRIEF_RECALL_BANK_MARGIN_MS = 250;
+const BRIEF_RECALL_BANK_MARGIN_MS = 250;
 /** The shared abort budget of the brief's fan-out: the configured budget, never past the cap less the margin. */
 export function briefRecallBudgetMs(budgetMs: number, capMs = BRIEF_RECALL_CAP_MS): number {
 	return Math.min(budgetMs, capMs - BRIEF_RECALL_BANK_MARGIN_MS);
@@ -146,7 +146,7 @@ const FUTURE_SKEW_MS = 60_000;
 const ELLIPSIS = "…";
 
 /** One recalled line, already single-line, redacted and clipped. `type` is the plane's own tag (world, experience, observation), kept only when it is a plain word. */
-export interface RecallLine {
+interface RecallLine {
 	text: string;
 	type?: string;
 }
@@ -210,7 +210,7 @@ export function recallKey(mode: BriefRecallMode, bank: string | null = null): { 
 	return bank === null ? { recall: mode } : { recall: mode, recallBank: bank };
 }
 
-export type SnapshotState = "fresh" | "stale" | "cold";
+type SnapshotState = "fresh" | "stale" | "cold";
 
 /**
  * Cold: none, empty or from the future, or older than twice the TTL (the entry
@@ -334,7 +334,7 @@ export function buildRecallLines(hits: readonly RecallHitInput[], bank: string, 
  * tag, so this is a post-filter). Text is folded, redacted, clipped to 240
  * characters and deduplicated; at most three survive, in recall order.
  */
-export function buildFanoutLines(hits: readonly RecallHitInput[], banks: readonly string[], repo: string): RecallLine[] {
+function buildFanoutLines(hits: readonly RecallHitInput[], banks: readonly string[], repo: string): RecallLine[] {
 	const wanted = repoScope(repo);
 	const lines: RecallLine[] = [];
 	const seen = new Set<string>();
@@ -476,7 +476,7 @@ export function recallPerTick(config: Pick<RecallConfig, "intervalS" | "ttlS"> &
 export const WANTED_EXPIRY_MS = 3_600_000;
 
 /** One (surface, repo) a brief asked about. */
-export interface WantedPair {
+interface WantedPair {
 	surface: string;
 	repo: string;
 	/** Decision/warning subjects of the last composed brief, for the query. At most three, each at most 80 characters, not yet redacted. */
@@ -599,10 +599,10 @@ export interface TimerSeam {
 
 export const SYSTEM_TIMERS: TimerSeam = {
 	setInterval: (handler, ms) => setInterval(handler, ms),
-	// A handle only comes from the matching `set*` below; the cast narrows the seam's structural type back to the runtime's.
-	clearInterval: (handle) => clearInterval(handle as unknown as Parameters<typeof clearInterval>[0]),
+	// A handle only comes from the matching `set*` above, so it is the runtime's own timer type.
+	clearInterval: (handle: ReturnType<typeof setInterval>) => clearInterval(handle),
 	setTimeout: (handler, ms) => setTimeout(handler, ms),
-	clearTimeout: (handle) => clearTimeout(handle as unknown as Parameters<typeof clearTimeout>[0]),
+	clearTimeout: (handle: ReturnType<typeof setTimeout>) => clearTimeout(handle),
 };
 
 /** Race `work` against `ms`; the timer is unref'd and always cleared. A lost race is a rejection. */
@@ -622,7 +622,7 @@ export async function withDeadline<T>(work: Promise<T>, ms: number, timers: Time
 // ── the prefetcher ───────────────────────────────────────────────────────────
 
 /** Pairs one post-retain flush refreshes, at most. */
-export const PREFETCH_PER_RETAIN = 8;
+const PREFETCH_PER_RETAIN = 8;
 /** No pair is recalled again sooner than this, whichever path (tick or post-retain flush) asks. */
 export const MIN_RECALL_REFRESH_S = 30;
 /** The post-retain refresh waits this long, so a burst of retains is one refresh. */
@@ -636,7 +636,7 @@ const STOP_WAIT_MS = 2000;
 /** What the injected recall answers: the surface's own bank's hits, or a failure. */
 export type RecallOutcome = { ok: true; hits: RecallHitInput[] } | { ok: false };
 
-export interface RecallPrefetcherDeps {
+interface RecallPrefetcherDeps {
 	config: Pick<RecallConfig, "mode" | "intervalS" | "ttlS" | "budgetMs">;
 	/** The bank the surface's recall reads, or null when Hindsight is unconfigured or the surface has no bank. */
 	bankFor: (surface: string) => string | null;
@@ -732,6 +732,7 @@ export class RecallPrefetcher {
 		}
 		this.pendingSurfaces.clear();
 		const flight = this.running;
+		// The flight catches its own failures (exclusive), so only the stop deadline can reject here, and that bounded wait is the design.
 		if (flight !== null) await withDeadline(flight, STOP_WAIT_MS, this.timers, "recall prefetch stop").catch(() => undefined);
 	}
 
@@ -795,6 +796,7 @@ export class RecallPrefetcher {
 				if (this.now() - startedAt >= this.deps.config.intervalS * 1000 * TICK_TIME_SHARE) break;
 				const bank = this.deps.bankFor(pair.surface);
 				if (bank !== null && !this.deps.breakerOpen()) {
+					// A failed peek counts as a miss: the pair is refetched below.
 					const held = await this.deps.peek(pair.surface, pair.repo, bank).catch(() => null);
 					if (held !== null) {
 						const age = now - Date.parse(held.at);

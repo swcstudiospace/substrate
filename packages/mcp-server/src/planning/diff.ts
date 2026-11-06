@@ -18,7 +18,7 @@
  */
 
 /** The fields the diff reads from a record. Every `PlanningRecord` satisfies it. */
-export interface IndexedDocument {
+interface IndexedDocument {
 	path: string;
 	sha256: string | null;
 }

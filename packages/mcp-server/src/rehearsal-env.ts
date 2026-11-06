@@ -61,7 +61,7 @@ export class RehearsalEnvError extends Error {}
  * - `SUBSTRATE_SLO_MIN_SAMPLES` lets a short outage window (the release gate's) reach the
  *   observation count an SLO needs before it is judged; the production default is 20.
  */
-export const EXTRA_ENV_ALLOWLIST: Readonly<Record<string, RegExp>> = {
+const EXTRA_ENV_ALLOWLIST: Readonly<Record<string, RegExp>> = {
 	SUBSTRATE_METRICS_HISTORY: /^(on|off)$/,
 	SUBSTRATE_BRIEF_PROFILE: /^(off|shadow|enforce)$/,
 	SUBSTRATE_CACHE_SWR: /^(off|shadow|enforce)$/,
@@ -104,7 +104,7 @@ export function parseExtraEnv(entries: readonly string[]): Record<string, string
 	return out;
 }
 
-export interface ScratchPorts {
+interface ScratchPorts {
 	/** Scratch MCP server port. */
 	mcp: number;
 	/** Host port Docker published for the scratch ledger HTTP. */
@@ -156,7 +156,7 @@ export interface BuildRehearsalEnvInput {
 }
 
 /** Loopback tracker endpoints plus scratch keys, for one mirror rehearsal. */
-export interface TrackerBlockInput {
+interface TrackerBlockInput {
 	hermesLinearUrl: string;
 	linearApiUrl: string;
 	notionApiUrl: string;
@@ -348,12 +348,12 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 	return env;
 }
 
-export interface ScratchStoresInput {
+interface ScratchStoresInput {
 	ports: ScratchPorts;
 	secrets: ScratchSecrets;
 }
 
-export interface ConsumerEnvInput {
+interface ConsumerEnvInput {
 	/** Scratch MCP port the twin listens on. */
 	mcpPort: number;
 	/** Bearer value of the first non-swarm surface; the client's whole credential. */

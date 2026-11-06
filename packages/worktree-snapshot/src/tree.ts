@@ -21,7 +21,7 @@ import type { EntryMode, ResolvedPolicy, Snapshot, SnapshotEntry, SkippedPath } 
 const ENTRY_MODES: readonly string[] = ["100644", "100755", "120000"];
 const GITLINK_MODE = "160000";
 
-export function splitNul(buffer: Buffer): Buffer[] {
+function splitNul(buffer: Buffer): Buffer[] {
 	const parts: Buffer[] = [];
 	let start = 0;
 	for (let i = 0; i < buffer.length; i++) {
@@ -155,7 +155,7 @@ function parentsAreDirectories(root: string, path: string, cache: Map<string, bo
 	return true;
 }
 
-export type BuiltTree = { tree: string; skipped: SkippedPath[]; included: string[] };
+type BuiltTree = { tree: string; skipped: SkippedPath[]; included: string[] };
 
 /**
  * Store every included path as its RAW bytes and return the `update-index --index-info -z` records.

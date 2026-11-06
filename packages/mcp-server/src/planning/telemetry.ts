@@ -33,7 +33,7 @@ export type TransitionOutcome = (typeof TRANSITION_OUTCOMES)[number];
 
 const PHASE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-export interface TransitionInput {
+interface TransitionInput {
 	/** The phase the view belongs to, for example `54`. */
 	phaseId: string;
 	from: SessionState;
@@ -65,7 +65,7 @@ export function transitionRecord(input: TransitionInput, clock: TransitionClock)
 }
 
 /** Why a sink did not deliver: refused by the sink, or its emit threw. */
-export type SinkFailureReason = "refused" | "threw";
+type SinkFailureReason = "refused" | "threw";
 
 export type SinkResult = { ok: true } | { ok: false; reason: SinkFailureReason; detail: string };
 
@@ -76,7 +76,7 @@ export interface MetricSink {
 }
 
 /** The writer the GreptimeDB sink uses: `GreptimeClient.recordMetricSamples`, bound by the caller. */
-export type TransitionRecordSamples = (rows: MetricSampleRow[]) => Promise<MetricWriteResult>;
+type TransitionRecordSamples = (rows: MetricSampleRow[]) => Promise<MetricWriteResult>;
 
 /** Only the error's class name crosses into a result, so a message from a store never reaches a log line here. */
 function threwResult(cause: unknown): { ok: false; reason: "threw"; detail: string } {
@@ -111,7 +111,7 @@ export function greptimeMetricSink(recordSamples: TransitionRecordSamples, name 
 }
 
 /** The fields a stdout line carries. Nothing else is written. */
-export interface TransitionLine {
+interface TransitionLine {
 	metric: typeof TRANSITION_SERIES;
 	phaseId: string;
 	from: SessionState;
@@ -147,7 +147,7 @@ export function stdoutMetricSink(write: (line: string) => void = (line) => proce
 }
 
 /** One sink that did not deliver: which sink, why, and the detail. */
-export interface DeliveryFailure {
+interface DeliveryFailure {
 	sink: string;
 	reason: SinkFailureReason;
 	detail: string;
@@ -159,7 +159,7 @@ export interface DeliveryFailure {
  *   - `fallback`: the primary failed and the fallback delivered; `primary` says why.
  *   - `failed`: both failed; both reasons are returned, so nothing is swallowed.
  */
-export type TransitionEmitResult =
+type TransitionEmitResult =
 	| { status: "primary"; sink: string }
 	| { status: "fallback"; sink: string; primary: DeliveryFailure }
 	| { status: "failed"; primary: DeliveryFailure; fallback: DeliveryFailure };

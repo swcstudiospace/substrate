@@ -35,7 +35,7 @@ import {
 	type HindsightConfig,
 	type HindsightResult,
 } from "./planes/hindsight.ts";
-import { canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
+import { canonicalJson, normalizeIdentifier, normalizeKey, sha256Hex } from "./event.ts";
 import { memoryExpiry, type GraphLifetime, type MemoryExpiry } from "./memory-policy.ts";
 import { applyRule, redact, REDACTION_RULES } from "./redact.ts";
 import { isTransientRetainReason, type RetainOutboxCandidate } from "./retain-outbox.ts";
@@ -124,36 +124,37 @@ export async function emitRetainWarning(
  * subject — kinds stay separate, so a fact never shares a document with a
  * warning), while subject-less appends keep the idempotency key.
  */
-export function retainDocumentId(entry: MemoryEntry, idempotencyKey: string): string {
+export function retainDocumentId(entry: { scope: string; kind: unknown; subject?: string | undefined }, idempotencyKey: string): string {
 	const subject = typeof entry.subject === "string" && entry.subject.length > 0 ? entry.subject : undefined;
 	if (subject === undefined) return idempotencyKey;
 	return `subj_${sha256Hex(canonicalJson({ scope: entry.scope, kind: entry.kind, subject })).slice(0, 32)}`;
 }
 
 /** The metadata keys that tie a plane document back to the graph, session and node that wrote it. */
-export const RETAIN_JOIN_KEYS = ["graph_id", "session_id", "node_id"] as const;
+const RETAIN_JOIN_KEYS = ["graph_id", "session_id", "node_id"] as const;
 
 /**
  * The join keys one entry can carry. An identifier is kept only when it is a
- * string that `normalizeIdentifier` (the form the ledger and index store it
+ * string that `normalizeIdentifier` (`normalizeKey` for a session id; the form the ledger and index store it
  * in) returns unchanged: an absent, empty, over-long or redactable one is
  * dropped rather than sent, and never fails the write. `node_id` is read
  * structurally because `MemoryEntry` does not declare it yet; an entry
  * without one simply carries none.
  */
-export function retainJoinKeys(entry: MemoryEntry): Record<string, string> {
+function retainJoinKeys(entry: MemoryEntry): Record<string, string> {
 	const source: Record<string, unknown> = { ...entry };
 	const keys: Record<string, string> = {};
 	for (const key of RETAIN_JOIN_KEYS) {
 		const value = source[key];
 		if (typeof value !== "string") continue;
-		if (normalizeIdentifier(value) === value) keys[key] = value;
+		const normalize = key === "session_id" ? normalizeKey : normalizeIdentifier;
+		if (normalize(value) === value) keys[key] = value;
 	}
 	return keys;
 }
 
 /** What the live forward and the outbox replay both hand to `forwardEntry`. */
-export interface RetainTarget {
+interface RetainTarget {
 	entry: MemoryEntry;
 	writer: string;
 	bank: string;

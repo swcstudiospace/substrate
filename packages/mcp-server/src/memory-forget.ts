@@ -39,7 +39,7 @@ import type { Actor, EventKind, MemoryEntry } from "./types.ts";
 
 export const FORGET_ACTION = "memory.forget";
 export const FORGET_REASONS = ["rollback", "expiry", "operator"] as const;
-export type ForgetReason = (typeof FORGET_REASONS)[number];
+type ForgetReason = (typeof FORGET_REASONS)[number];
 
 /** What `superseded_by` starts with on a forgotten entry. An entry id never does (`parseEntryId` refuses it). */
 export const FORGET_MARKER_PREFIX = "forgotten:";
@@ -47,7 +47,7 @@ export const FORGET_MARKER_PREFIX = "forgotten:";
 /** Entries one `forgetEntries` call may name, after de-duplication. */
 export const MAX_FORGET_ENTRIES = 200;
 /** The raw list is refused above this before it is de-duplicated, so a hostile list costs a bounded walk. */
-export const MAX_FORGET_RAW_ENTRIES = 1000;
+const MAX_FORGET_RAW_ENTRIES = 1000;
 /** Plane deletions (and index reads) in flight at once. */
 export const FORGET_PLANE_CONCURRENCY = 4;
 /** Entry ids the ledger note carries; `entry_count` is the full count. */
@@ -230,7 +230,7 @@ export interface ForgetRequest {
 	rollback_id?: string;
 }
 
-export type ForgetRequestParse = { ok: true; request: ForgetRequest } | { ok: false; error: ForgetError };
+type ForgetRequestParse = { ok: true; request: ForgetRequest } | { ok: false; error: ForgetError };
 
 /**
  * Parse an untrusted request. Strict: an unknown key, a wrong type, a malformed id, an empty list, more than
@@ -278,11 +278,11 @@ function parseRequestOrThrow(input: unknown): ForgetRequest {
 // Ledger payload
 // ---------------------------------------------------------------------------
 
-export const FORGET_ENTRY_OUTCOMES = ["marked", "already_forgotten", "already_superseded", "missing"] as const;
-export type ForgetEntryOutcome = (typeof FORGET_ENTRY_OUTCOMES)[number];
+const FORGET_ENTRY_OUTCOMES = ["marked", "already_forgotten", "already_superseded", "missing"] as const;
+type ForgetEntryOutcome = (typeof FORGET_ENTRY_OUTCOMES)[number];
 
-export const FORGET_PLANE_STATUSES = ["deleted", "absent", "pending", "skipped"] as const;
-export type ForgetPlaneStatus = (typeof FORGET_PLANE_STATUSES)[number];
+const FORGET_PLANE_STATUSES = ["deleted", "absent", "pending", "skipped"] as const;
+type ForgetPlaneStatus = (typeof FORGET_PLANE_STATUSES)[number];
 
 export interface ForgetPayload {
 	action: typeof FORGET_ACTION;
@@ -303,7 +303,7 @@ export interface ForgetPayload {
 }
 
 /** What a builder returns: the part of an `EventInput` this contract owns. `surface`, `session_id` and `ts` stay the caller's. */
-export interface ForgetEventDraft {
+interface ForgetEventDraft {
 	kind: Extract<EventKind, "note">;
 	summary: string;
 	payload: ForgetPayload;
@@ -441,13 +441,13 @@ export interface ForgetDeps {
 	now(): number;
 }
 
-export type ForgetPlaneOutcome =
+type ForgetPlaneOutcome =
 	| { status: "deleted" }
 	| { status: "absent" }
 	| { status: "pending"; reason: string; retryable: boolean }
 	| { status: "skipped"; reason: string };
 
-export interface ForgetEntryReport {
+interface ForgetEntryReport {
 	id: string;
 	outcome: ForgetEntryOutcome;
 	/** `already_forgotten`: the forget id on the marker (this call's own, or another call's). */
@@ -628,7 +628,7 @@ export async function forgetEntries(deps: ForgetDeps, request: ForgetRequest): P
 // selectForRollback
 // ---------------------------------------------------------------------------
 
-export interface RollbackSelectDeps {
+interface RollbackSelectDeps {
 	/**
 	 * Entries of `sessionId` (and, when given, `graphId`) created strictly after `afterIso` (and, when `untilIso` is
 	 * not null, at or before it) that are not superseded, ordered by created then id, at most `limit`, with `truncated`

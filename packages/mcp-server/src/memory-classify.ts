@@ -20,7 +20,7 @@
 import { redact } from "./redact.ts";
 import type { MemoryKind, QuarantineReason } from "./types.ts";
 
-export interface Classification {
+interface Classification {
 	reason: QuarantineReason;
 	/** Names the pattern that fired. Never quotes the match — that is the point. */
 	detail: string;

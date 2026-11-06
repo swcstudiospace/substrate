@@ -1,9 +1,13 @@
-// Pure container spec for the substrate sandbox (D-01). No imports: bun:test loads this file
-// without rivet, and sandbox-provider.ts builds every container body from buildContainerSpec.
+// Pure container spec for the substrate sandbox (D-01). Imports: node builtins and the fleet's worktree-root parse only.
+// bun:test loads this file without rivet, and sandbox-provider.ts builds every container body from buildContainerSpec.
 //
 // Why not upstream sandbox-agent@0.4.2 providers/docker.js: it publishes the command server on
 // every host interface (PortBindings without HostIp) with token auth switched off, and a caller
 // HostConfig replaces its HostConfig wholesale. This builder owns the whole body instead.
+
+import { statSync } from "node:fs";
+import { join } from "node:path";
+import { worktreeRootsFromEnv } from "../../fleet/src/config.ts";
 
 export const SANDBOX_IMAGE = "substrate-sandbox:0.1";
 export const SANDBOX_NETWORK = "substrate-sandbox";
@@ -12,7 +16,7 @@ export const GRAPH_LABEL = "substrate.graph_id";
 export const WORKTREES_ROOT = "/var/lib/substrate/worktrees";
 
 /** Same rule as packages/dispatcher/src/substrate_dispatcher/worktree.py GRAPH_ID_RE. */
-export const GRAPH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const GRAPH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export type SandboxNetwork = "published_loopback" | "internal";
 
@@ -23,6 +27,8 @@ export type ContainerSpecOptions = {
 	image?: string;
 	network: SandboxNetwork;
 	readOnlyBinds?: string[] | undefined;
+	/** The host's configured worktree roots (SUBSTRATE_WORKTREE_ROOTS); unset is the default root alone. */
+	worktreeRoots?: readonly string[] | undefined;
 };
 
 export function isValidGraphId(graphId: unknown): graphId is string {
@@ -35,10 +41,41 @@ export function isValidGraphId(graphId: unknown): graphId is string {
 	);
 }
 
-/** The only worktree a graph may bind: the dispatcher's `<WORKTREES_ROOT>/<graph_id>`. */
-export function worktreeFor(graphId: string): string {
+/** Where a graph's worktree lives: the first configured root already holding `<graph_id>` (the dispatcher reuses one under any root), else the first root, where it is created. */
+export function worktreeRootFor(graphId: string, roots: readonly string[] = [WORKTREES_ROOT]): string {
 	if (!isValidGraphId(graphId)) throw new Error(`invalid graph id ${JSON.stringify(graphId)}`);
-	return `${WORKTREES_ROOT}/${graphId}`;
+	const first = roots[0];
+	if (first === undefined) throw new Error("no worktree root is configured");
+	return roots.find((root) => isDirectory(join(root, graphId))) ?? first;
+}
+
+/** The only worktree a graph may bind: `<root>/<graph_id>` under the root worktreeRootFor picks. */
+export function worktreeFor(graphId: string, roots: readonly string[] = [WORKTREES_ROOT]): string {
+	return join(worktreeRootFor(graphId, roots), graphId);
+}
+
+/** True when `worktree` is `<root>/<graph_id>` for one of the configured roots: the only shape a graph's worktree may take. */
+export function worktreeUnderRoot(graphId: string, worktree: unknown, roots: readonly string[]): worktree is string {
+	return typeof worktree === "string" && roots.some((root) => worktree === join(root, graphId));
+}
+
+/** The refusal for any other worktree: it names the rule, so a caller sees what is accepted. */
+export function worktreeRule(graphId: string, roots: readonly string[]): string {
+	return `worktree must be a configured worktree root plus the graph id: ${roots.map((root) => join(root, graphId)).join(" or ")}`;
+}
+
+function isDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/** The worktree roots a host serves: SUBSTRATE_WORKTREE_ROOTS through the fleet's parse, the default root when none usable. */
+export function worktreeRootsOf(env: Record<string, string | undefined>): string[] {
+	const roots = worktreeRootsFromEnv(env);
+	return roots.length > 0 ? roots : [WORKTREES_ROOT];
 }
 
 const BIND_PATH_RE = /^\/[A-Za-z0-9._/-]*$/;
@@ -67,9 +104,8 @@ function readOnlyBind(entry: string): string {
 export function buildContainerSpec(opts: ContainerSpecOptions): Record<string, unknown> {
 	const { graphId, worktree, token, network } = opts;
 	if (!isValidGraphId(graphId)) throw new Error(`invalid graph id ${JSON.stringify(graphId)}`);
-	if (worktree !== worktreeFor(graphId)) {
-		throw new Error(`worktree must be ${WORKTREES_ROOT}/${graphId}, got ${JSON.stringify(worktree)}`);
-	}
+	const roots = opts.worktreeRoots ?? [WORKTREES_ROOT];
+	if (!worktreeUnderRoot(graphId, worktree, roots)) throw new Error(`${worktreeRule(graphId, roots)}, got ${JSON.stringify(worktree)}`);
 	if (typeof token !== "string" || !/^[A-Za-z0-9._~-]{1,256}$/.test(token)) {
 		throw new Error("sandbox token must be 1-256 URL-safe characters");
 	}
@@ -117,7 +153,7 @@ export type EgressDestination = { readonly host: string; readonly port: number }
 
 export type EgressPolicy = { readonly allow: readonly EgressDestination[] };
 
-export const EGRESS_DENY_ALL: EgressPolicy = { allow: [] };
+const EGRESS_DENY_ALL: EgressPolicy = { allow: [] };
 
 /** A hostname or IPv4 address: alnum lead (no `:`, no `[`, no option dash), then dot or dash. */
 const EGRESS_HOST_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*$/;
@@ -173,7 +209,7 @@ export function egressConflict(policy: EgressPolicy, network: SandboxNetwork): s
 	return null;
 }
 
-export type EgressRules = { apply: string[][]; remove: string[][] };
+type EgressRules = { apply: string[][]; remove: string[][] };
 
 const IPTABLES = "iptables";
 /** Docker reserves this chain for exactly this kind of operator rule: consulted before its own. */

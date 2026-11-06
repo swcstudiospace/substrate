@@ -24,8 +24,8 @@
 import { bankConfig, bankStats, listBanks, type FetchLike, type HindsightBankSummary, type HindsightConfig, type HindsightErrorKind } from "./planes/hindsight.ts";
 import { SYSTEM_TIMERS, withDeadline, type TimerHandle, type TimerSeam } from "./recall-snapshot.ts";
 
-export const DEFAULT_INVENTORY_INTERVAL_S = 60;
-export const MIN_INVENTORY_INTERVAL_S = 30;
+const DEFAULT_INVENTORY_INTERVAL_S = 60;
+const MIN_INVENTORY_INTERVAL_S = 30;
 const MAX_INVENTORY_INTERVAL_S = 3600;
 /** Per-bank calls only for this many configured banks. */
 export const MAX_INVENTORY_BANKS = 16;
@@ -33,7 +33,7 @@ export const MAX_INVENTORY_BANKS = 16;
 export const MAX_DRIFT_NAMES = 20;
 const MAX_NAME_CHARS = 64;
 /** One probe's deadline, shared by every call in it. */
-export const INVENTORY_BUDGET_MS = 10_000;
+const INVENTORY_BUDGET_MS = 10_000;
 /** A probe younger than this is served again instead of repeated. */
 export const INVENTORY_MEMO_MS = 60_000;
 const STOP_WAIT_MS = 2000;
@@ -91,7 +91,7 @@ export function safeBankName(name: string): string {
 }
 
 /** One configured bank as the probe found it. Numbers are null when the plane did not say. */
-export interface InventoryBank {
+interface InventoryBank {
 	/** A name from the configured list, never from the plane. */
 	bank: string;
 	/** The deployment lists it. */
@@ -107,7 +107,7 @@ export interface InventoryBank {
 	error: string | null;
 }
 
-export interface InventoryDrift {
+interface InventoryDrift {
 	/** Configured banks the deployment does not list. */
 	missing: string[];
 	/** `sub-*` banks the deployment lists that are not configured. */
@@ -260,6 +260,7 @@ export class HindsightInventory {
 			this.interval = null;
 		}
 		const flight = this.flight;
+		// The flight never rejects (refresh's catch answers the last report), so only the stop deadline can reject here, and that bounded wait is the design.
 		if (flight !== null) await withDeadline(flight, STOP_WAIT_MS, this.timers, "hindsight inventory stop").catch(() => undefined);
 	}
 

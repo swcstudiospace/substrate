@@ -41,7 +41,8 @@ if (plans.length === 0) {
 	process.exit(0);
 }
 
-const substrate = new Substrate(loadConfig());
+// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+const substrate = new Substrate({ ...loadConfig(), eventBuffer: null });
 if (!substrate.index) {
 	process.stderr.write("SUBSTRATE_PG_URL is not set; nowhere to write the index\n");
 	process.exit(1);

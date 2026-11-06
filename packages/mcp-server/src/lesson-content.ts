@@ -70,12 +70,12 @@ export function lessonContentIssue(text: string | null | undefined): string | nu
 }
 
 /** A lesson marker. `[lessonbankdigest]` and `[lessonbankoutcome]` are not lessons. */
-export function isLessonHeader(text: string): boolean {
+function isLessonHeader(text: string): boolean {
 	return /^\[lessonbank\](?:\r?\n|$)/.test(text);
 }
 
 /** A `lesson:` subject. `lesson-digest:` and `lesson-outcome:` are not lessons. */
-export function isLessonSubject(subject: string | null | undefined): boolean {
+function isLessonSubject(subject: string | null | undefined): boolean {
 	return typeof subject === "string" && /^lesson:/i.test(subject.trim());
 }
 
@@ -84,7 +84,7 @@ export function isLessonWrite(text: string, subject: string | null | undefined):
 }
 
 /** The prose under a `[lessonbank]` header, or the whole text when there is no header. */
-export function lessonProse(text: string): string {
+function lessonProse(text: string): string {
 	if (!isLessonHeader(text)) return text;
 	const lines = text.split("\n");
 	let index = 1;

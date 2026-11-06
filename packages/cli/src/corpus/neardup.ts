@@ -16,7 +16,7 @@ export const NEARDUP_EXCERPT_BYTES = MAX_NEARDUP_TEXT_CHARS * 4;
  * Reads at most `maxBytes` from the start of a file. A reader may return fewer only at the end of the file. `expectedSize` is the
  * size the scan recorded: a reader that can check it refuses a file that is not that size any more.
  */
-export type PrefixReader = (path: string, maxBytes: number, expectedSize?: number) => Uint8Array;
+type PrefixReader = (path: string, maxBytes: number, expectedSize?: number) => Uint8Array;
 
 /**
  * The first `maxBytes` of a file and no more: the descriptor is closed on every path and the buffer is never larger than the

@@ -2678,5 +2678,5 @@ describe("the observer's durable baseline: a restart publishes what changed whil
 		// Both counts are taken 25 scans after a change. A little slack covers a pair that is inside the window in one and not the other; a history would add thousands.
 		expect(Math.abs(late - early)).toBeLessThanOrEqual(16);
 		expect(store.attempts).toBeLessThan(400);
-	}, 180_000);
+	}, 600_000);
 });

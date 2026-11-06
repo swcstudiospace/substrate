@@ -13,9 +13,9 @@ import type { MemoryWriteRequest, MemoryWriteResult } from "../types.ts";
 import type { RetainOutcome } from "./reflect-service.ts";
 
 /** How long one digest's Hindsight forward is waited for when the caller sets no bound, ms. */
-export const RETAIN_LEG_WAIT_MS = 5000;
+const RETAIN_LEG_WAIT_MS = 5000;
 /** The memory-write text cap. A retain part must fit in this, trailer included. */
-export const DIGEST_RETAIN_TEXT_MAX = 4000;
+const DIGEST_RETAIN_TEXT_MAX = 4000;
 const DIGEST_SUBJECT_PREFIX = "corpus-digest:";
 const DECISIONS_SUFFIX = ":decisions";
 const OPEN_SUFFIX = ":open";
@@ -25,7 +25,7 @@ const PROJECT_HEADING = "## Project";
 const CUT_AT = 3990;
 const CUT_TRAILER = "\n[cut]\n";
 
-export interface DigestRetainPart {
+interface DigestRetainPart {
 	subject: string;
 	text: string;
 	/** True when this part was longer than the memory text cap and was cut. */

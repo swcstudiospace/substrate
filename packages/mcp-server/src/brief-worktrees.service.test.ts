@@ -78,7 +78,7 @@ async function seeded(host: string, rows: ReportedWorktree[], store = new Memory
 
 function substrateWith(env: Record<string, string>, store: WorktreeRegistryStore | null, redis: CacheRedis = new MapRedis()): Substrate {
 	const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-	return new Substrate(loadConfig(env), { index: index as never, greptime: null, cache, worktrees: store });
+	return new Substrate(loadConfig(env), { index: index as never, greptime: null, cache, worktrees: store, steering: { history: null, liveSessions: null } });
 }
 
 const request = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1", session_id: ME };

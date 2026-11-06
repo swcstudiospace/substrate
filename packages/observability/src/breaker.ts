@@ -32,9 +32,9 @@ export type PlaneName = (typeof PLANES)[number];
  * metric series label. The embedding service (phase 64) is the first; its state is read through the fabric.
  */
 export const AUX_PLANES = ["tei"] as const;
-export type AuxPlaneName = (typeof AUX_PLANES)[number];
+type AuxPlaneName = (typeof AUX_PLANES)[number];
 /** Every plane that can have a gate. */
-export type GatePlaneName = PlaneName | AuxPlaneName;
+type GatePlaneName = PlaneName | AuxPlaneName;
 
 export type BreakerState = "closed" | "open" | "half-open";
 
@@ -52,9 +52,9 @@ export const DEFAULT_BREAKER_SETTINGS: BreakerSettings = {
 	openMs: 30_000,
 };
 
-export const BREAKER_ENV = "SUBSTRATE_BREAKER";
-export const BREAKER_FAILURES_ENV = "SUBSTRATE_BREAKER_FAILURES";
-export const BREAKER_OPEN_MS_ENV = "SUBSTRATE_BREAKER_OPEN_MS";
+const BREAKER_ENV = "SUBSTRATE_BREAKER";
+const BREAKER_FAILURES_ENV = "SUBSTRATE_BREAKER_FAILURES";
+const BREAKER_OPEN_MS_ENV = "SUBSTRATE_BREAKER_OPEN_MS";
 
 /** A plain decimal integer inside `[min, max]`, or the fallback. A typo must never crash-loop the service. */
 function intInRange(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -182,7 +182,7 @@ export class BreakerOpenError extends Error {
 	}
 }
 
-export type PlaneOutcome = "ok" | "error" | "timeout" | "open";
+type PlaneOutcome = "ok" | "error" | "timeout" | "open";
 
 export interface PlaneSample {
 	plane: GatePlaneName;
@@ -193,7 +193,7 @@ export interface PlaneSample {
 	reason?: string;
 }
 
-export type PlaneObserver = (sample: PlaneSample) => void;
+type PlaneObserver = (sample: PlaneSample) => void;
 
 export interface PlaneGate {
 	plane: GatePlaneName;

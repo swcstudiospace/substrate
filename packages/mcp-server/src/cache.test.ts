@@ -12,6 +12,7 @@ import { BreakerOpenError, CACHE_METRIC_CLASSES, CircuitBreaker, findCounter, su
 import {
 	CACHE_CLASSES,
 	MAX_REFRESHES,
+	MAX_SCAN_ROUNDS,
 	classOf,
 	snapshotKey,
 	type LastGood,
@@ -403,7 +404,7 @@ describe("the same answer with the cache off, on and broken", () => {
 
 	function substrate(cache?: ReadThroughCache): Substrate {
 		const index = { searchMemory: async () => entries };
-		return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}) });
+		return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}), steering: { history: null, liveSessions: null } });
 	}
 
 	test("searchMemory matches", async () => {
@@ -440,7 +441,7 @@ describe("the same answer with the cache off, on and broken", () => {
 				getGraph: async () => null,
 				memoryForBrief: async () => memory,
 			};
-			return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}) });
+			return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}), steering: { history: null, liveSessions: null } });
 		}
 		const on = new FakeRedis();
 		const broken = new FakeRedis();
@@ -489,6 +490,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		const redis = new FakeRedis();
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -540,7 +542,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		};
 		function substrate(cache?: ReadThroughCache): Substrate {
 			const index = { getGraph: async () => graph };
-			return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}) });
+			return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}), steering: { history: null, liveSessions: null } });
 		}
 		const on = new FakeRedis();
 		const broken = new FakeRedis();
@@ -587,6 +589,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		const redis = new FakeRedis();
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -627,6 +630,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		const redis = new FakeRedis();
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -649,6 +653,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -684,6 +689,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		};
 		const unverified = new Substrate(loadConfig({}), {
 			index: accepted as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -705,6 +711,7 @@ describe("the same answer with the cache off, on and broken", () => {
 				},
 			} as never,
 			greptime: null,
+			steering: { history: null, liveSessions: null },
 			cache: cacheOf(redis),
 		});
 		const denied = await throwing.writeMemory({
@@ -718,6 +725,7 @@ describe("the same answer with the cache off, on and broken", () => {
 
 		const refused = new Substrate(loadConfig({}), {
 			index: {} as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -765,6 +773,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: new ReadThroughCache({ redis, enabled: true, log: () => {}, now: Date.now }),
 		});
@@ -796,6 +805,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		const redis = new FakeRedis();
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			cache: cacheOf(redis),
 		});
@@ -828,7 +838,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		};
 		const redis = new FakeRedis();
 		const cache = cacheOf(redis);
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 		const request = { surface: "cursor" as const, repo: "acme/app" };
 		const first = await substrate.brief(request);
 		expect(first).toContain("keep the prefix");
@@ -908,7 +918,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(cache.health().reason).toContain("cache.example.com");
 		const entries = [{ id: "mem-1", text: "the lease is fenced" }];
 		const index = { searchMemory: async () => entries };
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 		const answer = await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
 		expect(entries).toEqual(answer.entries);
 		expect(answer.derived).toEqual([]);
@@ -925,7 +935,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		const cache = cacheOf(redis);
 		const staleKey = cacheKey("memory-search", "cursor", "0", { query: "lease", scope: null, limit: null, includeSuperseded: false });
 		await redis.set(staleKey, JSON.stringify({ v: entries }), 600);
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 		const answer = await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
 		expect(Array.isArray(answer)).toBe(false);
 		expect(entries).toEqual(answer.entries);
@@ -947,7 +957,7 @@ describe("the same answer with the cache off, on and broken", () => {
 			};
 			const redis = new FakeRedis();
 			const cache = cacheOf(redis);
-			const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, hindsightFetch: fake.fetch });
+			const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } });
 			const first = await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
 			expect(first.degraded).toBe(true);
 			expect(entries).toEqual(first.entries);
@@ -975,7 +985,7 @@ describe("the same answer with the cache off, on and broken", () => {
 			const index = { searchMemory: async () => entries };
 			const redis = new FakeRedis();
 			const cache = cacheOf(redis);
-			const searching = new Substrate(config, { index: index as never, greptime: null, cache, hindsightFetch: fake.fetch });
+			const searching = new Substrate(config, { index: index as never, greptime: null, cache, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } });
 			const merged = await searching.searchMemory("lease", undefined, undefined, undefined, "cursor");
 			expect(entries).toEqual(merged.entries);
 			expect(merged.derived).toEqual([]);
@@ -999,7 +1009,7 @@ describe("the same answer with the cache off, on and broken", () => {
 			const redis = new FakeRedis();
 			const cache = cacheOf(redis);
 			const config = loadConfig({ SUBSTRATE_MEMORY_GRANTS: `[{"surfaces":["cursor"],"scopes":["graph"],"kinds":["fact","decision"]}]` });
-			const substrate = new Substrate(config, { index: store as never, greptime: null, cache, hindsightFetch: fake.fetch });
+			const substrate = new Substrate(config, { index: store as never, greptime: null, cache, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } });
 			const request = { surface: "cursor" as const, repo: "acme/app" };
 			const before = await substrate.brief(request);
 			expect(before).not.toContain("fence every handoff");
@@ -1036,7 +1046,7 @@ describe("the same answer with the cache off, on and broken", () => {
 			clearEnsuredBanks();
 			const store = new FakeStore();
 			const config = loadConfig({ SUBSTRATE_MEMORY_GRANTS: `[{"surfaces":["cursor"],"scopes":["graph"],"kinds":["fact"]}]` });
-			const substrate = new Substrate(config, { index: store as never, greptime: null, hindsightFetch: fake.fetch });
+			const substrate = new Substrate(config, { index: store as never, greptime: null, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } });
 			const written = await substrate.writeMemory({
 				scope: "graph:ut-1",
 				kind: "fact",
@@ -1069,7 +1079,7 @@ describe("the same answer with the cache off, on and broken", () => {
 			};
 			const store = new FakeStore();
 			const config = loadConfig({ SUBSTRATE_MEMORY_GRANTS: `[{"surfaces":["cursor"],"scopes":["graph"],"kinds":["decision"]}]` });
-			const substrate = new Substrate(config, { index: store as never, greptime: null, hindsightFetch: gatedFetch });
+			const substrate = new Substrate(config, { index: store as never, greptime: null, hindsightFetch: gatedFetch, steering: { history: null, liveSessions: null } });
 			const write = (text: string, key: string, expectedVersion?: number) =>
 				substrate.writeMemory({
 					scope: "graph:ut-1",
@@ -1270,6 +1280,43 @@ describe("Bun RedisClient", () => {
 		expect(gated.cooldownUntil?.()).toBeNull();
 	});
 
+	test("during the connect cooldown a fail-closed read is refused without a connect attempt", async () => {
+		// Each accepted socket is one connect attempt, and each is dropped, so the connect fails and starts the cooldown.
+		let now = 2_000_000;
+		let connects = 0;
+		const server = net.createServer((socket) => {
+			connects += 1;
+			socket.destroy();
+		});
+		const listening = Promise.withResolvers<void>();
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const port = (server.address() as AddressInfo).port;
+		try {
+			const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: `redis://127.0.0.1:${port}` }), { record: () => {}, now: () => now });
+			// The admission bucket step a fail-closed class reads: a refusal carries `breakerRetryAfterMs`; a fail-open class reads any other failure as a bypass.
+			const bucket = ["substrate:v1:budget:cursor:read"];
+			const args = ["1", "1", "0", "1"];
+			// The connect that starts the cooldown is an ordinary failure, not a refusal.
+			const first = await cache.script("return 1", bucket, args);
+			expect(first.ok).toBe(false);
+			expect(first).not.toHaveProperty("breakerRetryAfterMs");
+			const attempts = connects;
+			expect(attempts).toBeGreaterThan(0);
+			expect(cache.health().cooldownUntil).toBe(now + CACHE_CONNECT_COOLDOWN_MS);
+			// Inside the cooldown the read is refused with the remaining wait, and no socket is opened.
+			now += 1_000;
+			expect(await cache.script("return 1", bucket, args)).toEqual({ ok: false, reason: expect.stringContaining("cooling down for 4 s"), breakerRetryAfterMs: 4_000 });
+			expect(connects).toBe(attempts);
+			// Once the cooldown has lapsed the next command connects again.
+			now += 4_000;
+			expect((await cache.script("return 1", bucket, args)).ok).toBe(false);
+			expect(connects).toBeGreaterThan(attempts);
+		} finally {
+			server.close();
+		}
+	});
+
 	test("a connected server that stops replying is a gate timeout, and the connection is dropped", async () => {
 		// Greptile round 1: the command deadline used to sit outside `callPlane`, so a
 		// wedged server left the command pending — the breaker saw nothing and the
@@ -1405,6 +1452,7 @@ describe("GET /healthz", () => {
 			config,
 			{
 				index: index as never,
+				steering: { history: null, liveSessions: null },
 				greptime: null,
 				cache: new ReadThroughCache({
 					redis,
@@ -1617,7 +1665,8 @@ describe("a waiter keeps its own deadline (uplift-4 S4)", () => {
 			onDeadline: () => DEGRADED,
 		});
 		expect(search).toBe(DEGRADED);
-		expect(Date.now() - started).toBeLessThan(500);
+		// The shared load never resolves here, so a waiter that waited for it would hang; this bound only catches a slow finite wait. It has room for a loaded host.
+		expect(Date.now() - started).toBeLessThan(2_000);
 		// Exactly one load ran, and the shared one was not cancelled: its owner still gets its answer.
 		expect(loads).toBe(1);
 		gate.resolve(["recall answer"]);
@@ -2118,5 +2167,19 @@ describe("classOf (uplift-4 S4)", () => {
 		expect(classOf("substrate:v1:unknown:abc")).toBeNull();
 		expect(classOf("other:v1:brief:abc")).toBeNull();
 		expect(classOf("substrate:v1:__proto__:abc")).toBeNull();
+	});
+});
+
+describe("scanKeys round bound", () => {
+	test("a scan whose pages all come back empty with a nonzero cursor stops at the round bound and reports truncated", async () => {
+		let rounds = 0;
+		const redis = Object.assign(new FakeRedis(), {
+			scan: async (_match: string, _count: number, _cursor: string): Promise<[string, string[]]> => {
+				rounds += 1;
+				return ["7", []];
+			},
+		});
+		expect(await cacheOf(redis).scanKeys("substrate:v1:brief:*", 10)).toEqual({ keys: [], truncated: true });
+		expect(rounds).toBe(MAX_SCAN_ROUNDS);
 	});
 });

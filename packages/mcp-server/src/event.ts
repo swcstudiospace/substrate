@@ -6,6 +6,8 @@
  * append-only log. So `hash` and `prev` are computed here, on ingest, from day one.
  */
 import { randomUUID } from "node:crypto";
+import { merkleRootHex, MEMO_GRAPH_ID_MAX, type GraphHeadRecord } from "@substrate/ledger";
+import { z } from "zod";
 import { redact, redactValue } from "./redact.ts";
 import { EVENT_KINDS, SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
 
@@ -43,6 +45,42 @@ function isKind(value: string): value is SubstrateEvent["kind"] {
 	return (EVENT_KINDS as readonly string[]).includes(value);
 }
 
+/**
+ * An event as the substrate writes it to a local file: the telemetry buffer and the dead-letter store. A file is read back
+ * by the same process that wrote it, so every field is checked, and a line that does not match is skipped, never half-trusted.
+ */
+export const StoredEvent: z.ZodType<SubstrateEvent> = z.object({
+	id: z.string(),
+	ts: z.string(),
+	surface: z.custom<SubstrateEvent["surface"]>((value) => typeof value === "string" && isSurface(value)),
+	session_id: z.string().nullable(),
+	graph_id: z.string().nullable(),
+	node_id: z.string().nullable(),
+	linear_identifier: z.string().nullable(),
+	step: z.number().nullable(),
+	repo: z.string().nullable(),
+	branch: z.string().nullable(),
+	actor: z.enum(["agent", "human"]),
+	kind: z.custom<SubstrateEvent["kind"]>((value) => typeof value === "string" && isKind(value)),
+	summary: z.string(),
+	payload: z.record(z.string(), z.unknown()),
+	hash: z.string(),
+	prev: z.string().nullable(),
+});
+
+/** One JSONL line parsed against `schema`, or null when it is not JSON or does not match. */
+export function parseStoredLine<T>(line: string, schema: z.ZodType<T>): T | null {
+	let json: unknown;
+	try {
+		json = JSON.parse(line);
+	} catch {
+		// A line that is not JSON is counted as malformed by its caller (event-buffer.ts, event-dead-letter.ts), not reported here.
+		return null;
+	}
+	const parsed = schema.safeParse(json);
+	return parsed.success ? parsed.data : null;
+}
+
 export class InvalidEventError extends Error {}
 
 /**
@@ -57,7 +95,7 @@ export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 export const IDEMPOTENCY_PAYLOAD_KEY = "_ik";
 
 /** A replay stamped further than this past the server's clock is refused: a client clock that far ahead is a bug, not a late replay. */
-export const REPLAY_MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
+const REPLAY_MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The closed set of rule names an idempotency refusal carries, so a client (and the replay
@@ -65,7 +103,7 @@ export const REPLAY_MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
  * value: an invalid key is arbitrary text.
  */
 export const IDEMPOTENCY_RULES = ["idempotency_key_type", "idempotency_key_format", "replay_ts_missing", "replay_ts_future"] as const;
-export type IdempotencyRule = (typeof IDEMPOTENCY_RULES)[number];
+type IdempotencyRule = (typeof IDEMPOTENCY_RULES)[number];
 
 /** A 400 on the idempotency rules. Still an `InvalidEventError`, so every existing 400 path handles it. */
 export class IdempotencyRefusal extends InvalidEventError {
@@ -119,7 +157,7 @@ export function checkReplayTs(ts: unknown, now: number, keyed: boolean): void {
 }
 
 /** What `normalizeEvent` needs when the idempotency mode is not `off`: the validated key, or `null` for none. */
-export interface EventIdempotency {
+interface EventIdempotency {
 	key: string | null;
 }
 
@@ -147,18 +185,158 @@ function clean(value: string | null | undefined, limit: number): string | null {
 }
 
 /**
+ * A summary cut at MAX_SUMMARY can end on a high surrogate whose low half the cut dropped. Drop it, so the stored summary never ends in a
+ * lone surrogate. Only the summary uses this: the other capped fields keep their cut unchanged.
+ */
+function withoutDanglingHigh(text: string | null): string | null {
+	if (text === null) return null;
+	const last = text.charCodeAt(text.length - 1);
+	if (last < 0xd800 || last > 0xdbff) return text;
+	const trimmed = text.slice(0, -1);
+	return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
  * Normalise an identifier the same way `normalizeEvent` stores it.
  *
- * `session_id`, `graph_id` and `repo` are query keys as well as stored values —
- * `emit` looks up the previous hash by session, `verifyGraph` reads by graph, the
- * brief reads by repo. Cleaning them on the write path but querying with the raw
- * value would mean a lookup that never matches: every event would restart its
- * session's chain, and verification would find no rows at all. Anything that
- * reads by one of these columns goes through here, so the two agree by
- * construction rather than by both remembering to.
+ * `graph_id`, `node_id` and the other identifiers are query keys as well as stored values: `verifyGraph` reads by graph.
+ * Cleaning them on the write path but querying with the raw value would mean a lookup that never matches. Anything that
+ * reads by one of these columns goes through here, so the two agree by construction rather than by both remembering
+ * to. `session_id` and `repo` use {@link normalizeKey} instead. The write path does not cap a graph id to MAX_FIELD:
+ * normalizeGraphId refuses one over the memo cap instead, so the stored graph id is always whole.
  */
 export function normalizeIdentifier(value: string | null | undefined): string | null {
 	return clean(value, MAX_FIELD);
+}
+
+/**
+ * `normalizeIdentifier`, with a dangling high surrogate dropped from the end. This is the form `session_id` and `repo`
+ * are stored in, so every read or filter on either goes through it too. A cap at MAX_FIELD can cut a surrogate pair in half,
+ * and the stored value must not end in a lone surrogate. A repo over MAX_REPO is refused on write, so only a session id is cut.
+ */
+export function normalizeKey(value: string | null | undefined): string | null {
+	return withoutDanglingHigh(normalizeIdentifier(value));
+}
+
+/**
+ * A graph id over the memo cap, refused on write. Named, so a client and the tests can tell it from the other 400s.
+ */
+export class GraphIdTooLongError extends InvalidEventError {
+	constructor(readonly bytes: number) {
+		super(`graph_id_too_long: a graph id may be at most ${MEMO_GRAPH_ID_MAX} UTF-8 bytes; this one is ${bytes}`);
+	}
+}
+
+/**
+ * A graph id with a NUL byte, refused on write. The pointer transfer passes the memo to execFile as an argument, and execFile refuses a
+ * NUL there only after the hour transaction has gone out, which would strand the hour.
+ */
+export class GraphIdNulError extends InvalidEventError {
+	constructor() {
+		super("graph_id_nul: a graph id may not contain a NUL byte");
+	}
+}
+
+/** A high or low UTF-16 surrogate without its pair. Matches the first such code unit; well-formed text (a pair) never matches. */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * A graph id with a lone UTF-16 surrogate, refused on write. The message names the code unit, so the refusal says which surrogate it is.
+ */
+class GraphIdLoneSurrogateError extends InvalidEventError {
+	constructor(readonly codeUnit: number) {
+		super(`graph_id_lone_surrogate: a graph id may not contain a lone UTF-16 surrogate; found U+${codeUnit.toString(16).toUpperCase()}`);
+	}
+}
+
+/**
+ * A lone UTF-16 surrogate in a write text field other than the graph id, refused by name: the field and the code unit. Same reason as
+ * GraphIdLoneSurrogateError, and the message says which field it was.
+ */
+class FieldLoneSurrogateError extends InvalidEventError {
+	constructor(readonly field: string, readonly codeUnit: number) {
+		super(
+			`${field}_lone_surrogate: ${field} may not contain a lone UTF-16 surrogate; found U+${codeUnit.toString(16).toUpperCase()}`,
+		);
+	}
+}
+
+/** The most code units a repo may have once redacted. A longer repo is refused on write, never cut: a cut can leave a dangling high surrogate. */
+const MAX_REPO = 512;
+
+/** The message for a repo over {@link MAX_REPO}. Its code is `repo_too_long`, so a client can tell it from the other 400s. */
+export function repoTooLongMessage(units: number): string {
+	return `repo_too_long: a repo may not exceed ${MAX_REPO} code units; got ${units}`;
+}
+
+/** A repo over {@link MAX_REPO} code units, refused on write, by name, with its length. */
+class RepoTooLongError extends InvalidEventError {
+	constructor(readonly units: number) {
+		super(repoTooLongMessage(units));
+	}
+}
+
+/**
+ * The redacted repo's length in code units when it is over {@link MAX_REPO}, else null. Measured on the redacted text, which is what would
+ * be stored, and before any cap: a repo over the cap is refused, not cut. Every write path that stores a repo calls this (or
+ * {@link assertRepoLength}), so they all refuse the same length.
+ */
+export function repoOverCap(value: string | null | undefined): number | null {
+	if (typeof value !== "string") return null;
+	const units = redact(value).length;
+	return units > MAX_REPO ? units : null;
+}
+
+/** Throw {@link RepoTooLongError} when a repo is over {@link MAX_REPO}. For the write paths that refuse by throwing. */
+export function assertRepoLength(value: string | null | undefined): void {
+	const units = repoOverCap(value);
+	if (units !== null) throw new RepoTooLongError(units);
+}
+
+/**
+ * Refuse a lone surrogate in a write text field, by field name. Checked on the redacted text, which is what gets stored, and before the
+ * length cap: a pair the cap splits was whole in the caller's text, so it is not refused here.
+ */
+function refuseLoneSurrogate(field: string, text: string | null | undefined): void {
+	if (typeof text !== "string") return;
+	const lone = LONE_SURROGATE_RE.exec(redact(text));
+	if (lone) throw new FieldLoneSurrogateError(field, lone[0].charCodeAt(0));
+}
+
+/**
+ * Refuse a lone surrogate in any of the six write text fields (summary, session_id, repo, branch, node_id, linear_identifier), by field
+ * name, and a repo over the cap ({@link assertRepoLength}). Pure: it stores nothing. The sessioned write path calls it before it reads the
+ * chain tip, so a refused event costs no read.
+ */
+export function assertWriteTextFields(
+	input: Pick<EventInput, "summary" | "session_id" | "repo" | "branch" | "node_id" | "linear_identifier">,
+): void {
+	refuseLoneSurrogate("summary", input.summary);
+	refuseLoneSurrogate("session_id", input.session_id);
+	refuseLoneSurrogate("repo", input.repo);
+	refuseLoneSurrogate("branch", input.branch);
+	refuseLoneSurrogate("node_id", input.node_id);
+	refuseLoneSurrogate("linear_identifier", input.linear_identifier);
+	assertRepoLength(input.repo);
+}
+
+/**
+ * The graph id a write stores: redacted, and empty is absent, as for every identifier. Unlike the others it is refused over the cap
+ * rather than cut to it: the hour's pointer memo carries the stored id whole (ledger memo.ts formatMemoV3), and an id cut to fit would
+ * name a different graph. The cap is measured on the stored form, in UTF-8 bytes.
+ * A NUL byte is refused too (GraphIdNulError): the memo reaches execFile as an argument, and a NUL there throws after the hour is sent.
+ * A lone UTF-16 surrogate (a high or low surrogate without its pair) is refused too (GraphIdLoneSurrogateError): argv encodes it as U+FFFD,
+ * so the memo would name a different id than the stored row.
+ */
+export function normalizeGraphId(value: string | null | undefined): string | null {
+	if (value === undefined || value === null) return null;
+	const stored = redact(value);
+	if (stored.includes("\0")) throw new GraphIdNulError();
+	const lone = LONE_SURROGATE_RE.exec(stored);
+	if (lone) throw new GraphIdLoneSurrogateError(lone[0].charCodeAt(0));
+	const bytes = new TextEncoder().encode(stored).byteLength;
+	if (bytes > MEMO_GRAPH_ID_MAX) throw new GraphIdTooLongError(bytes);
+	return stored.length > 0 ? stored : null;
 }
 
 /** Cap every string inside a JSON-shaped value. */
@@ -176,6 +354,17 @@ function capStrings(value: unknown, limit: number): unknown {
 }
 
 /**
+ * The payload as a record. The wire types it as one, but the HTTP route does not check that, so a scalar or an array arrives as
+ * given. It is kept under `_payload`: the buffer and the dead-letter store read every stored event back as a record, and a line
+ * that is not one is dropped at restart. Keyed and unkeyed events are stored the same way.
+ */
+function asPayloadRecord(payload: unknown): Record<string, unknown> {
+	if (payload === undefined || payload === null) return {};
+	if (typeof payload !== "object" || Array.isArray(payload)) return { _payload: payload };
+	return payload as Record<string, unknown>;
+}
+
+/**
  * Redact the payload, cap each string in it, then cap the whole thing.
  *
  * A collector that attaches a full diff or a command's entire stdout writes it
@@ -183,8 +372,8 @@ function capStrings(value: unknown, limit: number): unknown {
  * intact; if the result is still oversized the payload is replaced outright,
  * because a silently half-written object reads as complete and a marker does not.
  */
-function normalizePayload(payload: Record<string, unknown> | undefined): Record<string, unknown> {
-	const capped = capStrings(redactValue(payload ?? {}), MAX_PAYLOAD_STRING) as Record<string, unknown>;
+function normalizePayload(payload: unknown): Record<string, unknown> {
+	const capped = capStrings(redactValue(asPayloadRecord(payload)), MAX_PAYLOAD_STRING) as Record<string, unknown>;
 	const bytes = Buffer.byteLength(JSON.stringify(capped) ?? "{}");
 	if (bytes <= MAX_PAYLOAD_BYTES) return capped;
 	return { _dropped: `payload exceeded ${MAX_PAYLOAD_BYTES} bytes`, _bytes: bytes };
@@ -212,8 +401,6 @@ function normalizedPayload(input: EventInput, idempotency: EventIdempotency | un
 	if (idempotency === undefined) return normalizePayload(input.payload);
 	const payload = normalizePayload(withoutReservedKey(input.payload));
 	if (idempotency.key === null) return payload;
-	// A scalar or array payload is wrong on the wire but stored today as given; spreading it would scramble it.
-	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return { _payload: payload, [IDEMPOTENCY_PAYLOAD_KEY]: idempotency.key };
 	return { ...payload, [IDEMPOTENCY_PAYLOAD_KEY]: idempotency.key };
 }
 
@@ -237,6 +424,7 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
 	if (typeof input.summary !== "string" || input.summary.length === 0) {
 		throw new InvalidEventError("summary is required");
 	}
+	assertWriteTextFields(input);
 
 	const ts = input.ts ? new Date(input.ts) : new Date();
 	if (Number.isNaN(ts.getTime())) throw new InvalidEventError(`invalid ts: ${String(input.ts)}`);
@@ -245,17 +433,17 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
 		id: `evt_${randomUUID().replace(/-/g, "")}`,
 		ts: ts.toISOString(),
 		surface: input.surface,
-		session_id: normalizeIdentifier(input.session_id),
-		graph_id: normalizeIdentifier(input.graph_id),
+		session_id: normalizeKey(input.session_id),
+		graph_id: normalizeGraphId(input.graph_id),
 		node_id: normalizeIdentifier(input.node_id),
 		linear_identifier: normalizeIdentifier(input.linear_identifier),
 		// A fractional or infinite step would reach a BIGINT column.
 		step: typeof input.step === "number" && Number.isFinite(input.step) ? Math.trunc(input.step) : null,
-		repo: normalizeIdentifier(input.repo),
+		repo: normalizeKey(input.repo),
 		branch: clean(input.branch, MAX_FIELD),
 		actor: input.actor === "human" ? "human" : "agent",
 		kind: input.kind,
-		summary: clean(input.summary, MAX_SUMMARY) ?? "",
+		summary: withoutDanglingHigh(clean(input.summary, MAX_SUMMARY)) ?? "",
 		payload: normalizedPayload(input, idempotency),
 		prev,
 	};
@@ -279,10 +467,10 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
  * branch unlinked and is reported. What it stops reporting is a database's
  * arbitrary tie-break, which was never an integrity property.
  */
-export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
+export function inChainOrder<T extends { hash: string; prev: string | null }>(events: T[]): T[] {
 	if (events.length < 2) return events;
 
-	const next = new Map<string | null, SubstrateEvent>();
+	const next = new Map<string | null, T>();
 	for (const event of events) if (!next.has(event.prev)) next.set(event.prev, event);
 	const present = new Set(events.map((event) => event.hash));
 
@@ -292,9 +480,9 @@ export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
 		events.find((event) => event.prev === null) ?? events.find((event) => !present.has(event.prev ?? ""));
 	if (!start) return events; // every event is claimed: a cycle, for verifyChain to report
 
-	const ordered: SubstrateEvent[] = [];
+	const ordered: T[] = [];
 	const seen = new Set<string>();
-	let current: SubstrateEvent | undefined = start;
+	let current: T | undefined = start;
 	while (current && !seen.has(current.hash)) {
 		ordered.push(current);
 		seen.add(current.hash);
@@ -304,6 +492,129 @@ export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
 	// than quietly dropped from the count.
 	for (const event of events) if (!seen.has(event.hash)) ordered.push(event);
 	return ordered;
+}
+
+/** One stored chain leaf of an hour, as `graph_chain_leaves` holds it (D73-02). */
+export interface StoredLeaf {
+	graph_id: string;
+	session_id: string;
+	seq: number;
+	event_id: string;
+	hash: string;
+}
+
+/** What a ledger row contributes to a chain walk: its id, the hash its content gives, the hash its row stores, and its predecessor. */
+export interface ChainLink {
+	id: string;
+	hash: string;
+	storedHash: string;
+	prev: string | null;
+}
+
+const HASH_HEX_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The commitment one chain position contributes to the leaves root: the SHA-256 of the JSON `[event_id, hash]`. Committing to the id as
+ * well as the hash means a stored `event_id` cannot change without changing the root (D73-02). `buildGraphHeads` uses the same function.
+ */
+export function chainLeafCommitment(eventId: string, hash: string): string {
+	return sha256Hex(JSON.stringify([eventId, hash]));
+}
+
+/**
+ * The leaves in seq order. The table is append-only with no key, so exact duplicates collapse. Two rows that disagree about one
+ * seq, an event id that is not a non-empty string, a hash that is not 64 lowercase hex, or seqs that are not 0 … n-1 make the
+ * stored chain invalid: null.
+ */
+function orderedLeaves(leaves: readonly StoredLeaf[]): StoredLeaf[] | null {
+	const bySeq = new Map<number, StoredLeaf>();
+	for (const leaf of leaves) {
+		if (typeof leaf.event_id !== "string" || leaf.event_id === "") return null;
+		if (!HASH_HEX_RE.test(leaf.hash)) return null;
+		const prior = bySeq.get(leaf.seq);
+		if (prior === undefined) bySeq.set(leaf.seq, leaf);
+		else if (prior.event_id !== leaf.event_id || prior.hash !== leaf.hash) return null;
+	}
+	const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+	return ordered.every((leaf, i) => leaf.seq === i) ? ordered : null;
+}
+
+/**
+ * The head record each (graph, session) pair's stored leaves give for one hour (D73-01), or null when any pair's leaves do not form
+ * one chain. The records come out in input order; `headsRoot` sorts them. With `graphId`, only that graph's leaves are read, so one
+ * graph's records rebuild whatever another graph's chain holds (a v3 pointer commits to one graph's heads, design 5 step 8).
+ */
+export function headRecordsFromLeaves(leaves: readonly StoredLeaf[], periodStartMs: number, graphId?: string): GraphHeadRecord[] | null {
+	const pairs = new Map<string, { graphId: string; sessionId: string; leaves: StoredLeaf[] }>();
+	for (const leaf of leaves) {
+		if (graphId !== undefined && leaf.graph_id !== graphId) continue;
+		const key = JSON.stringify([leaf.graph_id, leaf.session_id]);
+		const pair = pairs.get(key);
+		if (pair) pair.leaves.push(leaf);
+		else pairs.set(key, { graphId: leaf.graph_id, sessionId: leaf.session_id, leaves: [leaf] });
+	}
+	const records: GraphHeadRecord[] = [];
+	for (const pair of pairs.values()) {
+		const ordered = orderedLeaves(pair.leaves);
+		const last = ordered?.at(-1);
+		if (ordered === null || last === undefined || pair.graphId === "") return null;
+		records.push({
+			graphId: pair.graphId,
+			sessionId: pair.sessionId,
+			periodStartMs,
+			count: ordered.length,
+			leavesRootHex: merkleRootHex(ordered.map((leaf) => chainLeafCommitment(leaf.event_id, leaf.hash))),
+			headEventId: last.event_id,
+			headHashHex: last.hash,
+		});
+	}
+	return records;
+}
+
+/** Where one (graph, session) pair's chain stands against its anchored leaves (D73-03). */
+type HeadComparison =
+	| { ok: true }
+	| { ok: false; kind: "stored-leaves-mismatch"; reason: string }
+	| { ok: false; kind: "first-differing"; eventId: string }
+	| { ok: false; kind: "first-missing"; eventId: string };
+
+/**
+ * D73-03 for one pair. `events` are the pair's ledger rows for the hour: `hash` is each one's recomputed content hash, `storedHash` the
+ * hash its row holds. `leaves` are its stored leaves and `head` the anchored head. The stored leaves must reproduce the head first.
+ * Then the committed order is walked: a leaf whose event is absent is first-missing; a leaf whose event's recomputed hash or stored
+ * hash differs from the leaf hash is first-differing. Events the leaves do not name come after the chain's end, and the first of them,
+ * in chain order, is first-differing too.
+ */
+export function compareToAnchoredHead(events: readonly ChainLink[], leaves: readonly StoredLeaf[], head: GraphHeadRecord): HeadComparison {
+	const stored = orderedLeaves(leaves);
+	const last = stored?.at(-1);
+	if (
+		stored === null ||
+		last === undefined ||
+		stored.length !== head.count ||
+		merkleRootHex(stored.map((leaf) => chainLeafCommitment(leaf.event_id, leaf.hash))) !== head.leavesRootHex ||
+		last.event_id !== head.headEventId ||
+		last.hash !== head.headHashHex
+	) {
+		return { ok: false, kind: "stored-leaves-mismatch", reason: "the stored leaves do not reproduce the anchored head" };
+	}
+	const byId = new Map<string, ChainLink>();
+	for (const event of events) {
+		// Two rows under one id: the ledger holds an event the anchored chain does not.
+		if (byId.has(event.id)) return { ok: false, kind: "first-differing", eventId: event.id };
+		byId.set(event.id, event);
+	}
+	for (const leaf of stored) {
+		const event = byId.get(leaf.event_id);
+		if (event === undefined) return { ok: false, kind: "first-missing", eventId: leaf.event_id };
+		if (event.hash !== leaf.hash || event.storedHash !== leaf.hash) return { ok: false, kind: "first-differing", eventId: leaf.event_id };
+	}
+	const committed = new Set(stored.map((leaf) => leaf.event_id));
+	const extras = events.filter((event) => !committed.has(event.id)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	// The committed chain goes on from its last hash, so the extra linked to that hash is the first event past the anchored end. Only when none
+	// is linked is an order taken from the extras themselves, and their hashes may be the edited ones.
+	const extra = extras.find((event) => event.prev === last.hash) ?? inChainOrder(extras)[0];
+	return extra === undefined ? { ok: true } : { ok: false, kind: "first-differing", eventId: extra.id };
 }
 
 /**
@@ -350,7 +661,7 @@ export interface SteeringSession {
 }
 
 /** Whether `next` may follow `current`. Unknown states never transition. */
-export function steeringStateTransition(current: SteeringSessionState, next: SteeringSessionState): boolean {
+function steeringStateTransition(current: SteeringSessionState, next: SteeringSessionState): boolean {
 	if (current === next) return true;
 	switch (current) {
 		case "ACTIVE":
@@ -384,10 +695,8 @@ export function repoScopePrefix(repoId: string): string {
 }
 
 /**
- * The non-blocking context payload a steering transition carries on its
- * event: the action, the repo scope, both states and — on a planning
- * trigger — the old and new planning hashes. Emitting it never throws;
- * callers that cannot read it ignore unknown payload keys as before.
+ * Public metadata only: live events remain readable through historical queries.
+ * Private directions, planning hashes and proof material never belong here.
  */
 export function steeringSessionPayload(session: SteeringSession, previous?: SteeringSessionState): Record<string, unknown> {
 	return {
@@ -395,9 +704,8 @@ export function steeringSessionPayload(session: SteeringSession, previous?: Stee
 		repo_id: session.repo_id,
 		session_id: session.session_id,
 		state: session.state,
+		updated_at: session.updated_at,
 		...(previous !== undefined ? { previous_state: previous } : {}),
-		...(session.planning_hash !== undefined ? { planning_hash: session.planning_hash } : {}),
-		...(session.steering !== undefined ? { steering: session.steering.slice(0, 2000) } : {}),
 		non_blocking: true,
 	};
 }
@@ -450,10 +758,10 @@ export function nextSteeringSession(
  * one observable line per trigger, so the refresh is visible in the log
  * — or in a test — without running the ingest.
  */
-export const PLANNING_INGEST_ROOTS: readonly string[] = [".planning/"];
+const PLANNING_INGEST_ROOTS: readonly string[] = [".planning/"];
 
 /** What a planning change asks the docs plane to re-ingest. */
-export interface PlanningIngestTrigger {
+interface PlanningIngestTrigger {
 	triggered: boolean;
 	roots: readonly string[];
 	paths: string[];
@@ -496,15 +804,10 @@ function collectPlanningPaths(payload: Record<string, unknown>, into: string[]):
 }
 
 /** The `.planning/` paths an event's payload names, deduplicated in order. */
-export function planningPathsOf(input: Pick<EventInput, "payload">): string[] {
+function planningPathsOf(input: Pick<EventInput, "payload">): string[] {
 	const paths: string[] = [];
 	if (input.payload !== undefined) collectPlanningPaths(input.payload, paths);
 	return paths;
-}
-
-/** Whether an event names any planning path — the `planning.updated` signal, without a new kind. */
-export function isPlanningUpdate(input: Pick<EventInput, "payload">): boolean {
-	return planningPathsOf(input).length > 0;
 }
 
 /** The targeted re-ingest a planning change asks for; logs the one observable line when triggered. */

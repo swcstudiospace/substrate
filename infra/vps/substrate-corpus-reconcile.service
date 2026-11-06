@@ -1,0 +1,48 @@
+[Unit]
+Description=Agent Substrate corpus reconcile: compares the manifest with the docs plane and reports drift (substrate-corpus-reconcile.timer; staged, opt-in; dry run, read-only against every repository)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+ConditionPathExists=/opt/agent-substrate/current/packages/cli/src/index.ts
+
+[Service]
+Type=oneshot
+# `substrate corpus reconcile --json` reads every registered repository (fetching the Substrate-managed mirrors, never a
+# checkout), then asks the server where the manifest and the docs plane disagree and prints the drift. Without `--execute`
+# it is a dry run: nothing is requeued, deleted or ingested. Acting on the drift (`reconcile --execute`) is an operator
+# decision, taken by hand after reading the report (docs/corpus-watch.md, "corpus reconcile"). A failed reconcile is a
+# failed oneshot (exit 1: a request failed, or a document was refused or failed), and the next timer tick tries again.
+# Staged, not installed; copying this file and `systemctl enable --now` are operator steps (docs/runbooks/corpus-sync.md).
+EnvironmentFile=-/etc/substrate/substrate-corpus.env
+WorkingDirectory=/opt/agent-substrate/current
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts corpus reconcile --json
+
+StateDirectory=substrate/corpus-mirrors
+StateDirectory=substrate/corpus-hints
+StateDirectoryMode=0700
+Environment=SUBSTRATE_CORPUS_MIRROR_DIR=/var/lib/substrate/corpus-mirrors
+Environment=SUBSTRATE_CORPUS_SPOOL=/var/lib/substrate/corpus-hints
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-corpus-reconcile
+
+# Same resource ceilings as the doc watch sweep: the reconcile fetches the mirrors, so it is as heavy as a sync.
+Slice=substrate.slice
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=25%
+MemoryMax=512M
+TasksMax=256
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/substrate/corpus-mirrors /var/lib/substrate/corpus-hints
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

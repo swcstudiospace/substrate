@@ -13,10 +13,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
+import { errorLabel } from "./error-label.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
 import { defaultSandboxStatePath, destroySandbox, listSandboxes, runEgressCleanup, setEgressWarnSink } from "./sandbox-provider.ts";
-import type { SandboxNetwork } from "./sandbox-options.ts";
+import { type SandboxNetwork, worktreeRootsOf } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { LeaseStore, SubstrateClient } from "./substrate.ts";
 import { HostSync, LinearLink, NotionSync } from "./sync.ts";
@@ -85,6 +86,9 @@ try {
 }
 const ultrathinkConfig = env("SUBSTRATE_ULTRATHINK_CONFIG") ?? "/root/.config/ultrathink/config.json";
 const directKey = route.a === "anthropic_key" ? env("SUBSTRATE_VM_ANTHROPIC_API_KEY") : undefined;
+// SUBSTRATE_WORKTREE_ROOTS: the roots a graph's worktree may live under (the default root when unset).
+const worktreeRoots = worktreeRootsOf(process.env);
+log(`[substrate-host] worktree roots: ${worktreeRoots.join(", ")}`);
 
 // Storage: root only (rivet keeps session env and history in plaintext, D-08).
 for (const dir of [storageDir, join(storageDir, "tasks")]) {
@@ -160,6 +164,7 @@ const service = new TaskService({
 	sync: sync ?? undefined,
 	log,
 	approvalTimeoutMs,
+	worktreeRoots,
 });
 
 const broker = createApprovals(process.env, {
@@ -173,6 +178,7 @@ let approvalTimer: NodeJS.Timeout | undefined;
 const { registry } = createHostVm({
 	route,
 	sandboxNet,
+	worktreeRoots,
 	testsRoute,
 	sandboxCollection,
 	checkoutNodeModules: join(checkout, "node_modules"),
@@ -284,7 +290,7 @@ if (broker.enabled) {
 	try {
 		const username = await broker.whoami();
 		log(`[substrate-host] telegram approvals on (bot @${username})`);
-		void pollApprovals();
+		void pollApprovals().catch((cause: unknown) => warn(`host.approvals ${errorLabel(cause)}`));
 	} catch (cause) {
 		const message = cause instanceof TelegramError ? cause.message : "telegram getMe: request failed (Error)";
 		log(`[substrate-host] ${message}`);

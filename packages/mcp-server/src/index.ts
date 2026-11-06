@@ -17,6 +17,7 @@ import { existsSync, statSync } from "node:fs";
 import { gatedFetch } from "@substrate/observability";
 import {
 	ConfigError,
+	RepoScopesRequiredError,
 	configWarnings,
 	contextualRecallConfigWarnings,
 	desktopConfigWarnings,
@@ -32,12 +33,13 @@ import {
 	swarmTokenWarnings,
 } from "./config.ts";
 import type { SubstrateConfig } from "./config.ts";
+import { diskDestination } from "./destination.ts";
 import { briefProfileConfigWarnings } from "./brief-profile.ts";
 import { planningConfigWarnings } from "./planning/config.ts";
 import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
 import { briefRecallConfigWarnings } from "./recall-snapshot.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
-import { createObservability } from "./observe.ts";
+import { auditToolCalls, createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SloNotifier } from "./slo-notify.ts";
@@ -46,13 +48,14 @@ import { DocsLagTimer } from "./docs-lag-timer.ts";
 import { createWatchdog, livezUrlFor } from "./watchdog.ts";
 import { MentalModelRefresh } from "./mental-model-refresh.ts";
 import { hindsightFromEnv, hindsightOp } from "./planes/hindsight.ts";
+import { reportSilent } from "./silent-failures.ts";
 
 let config: SubstrateConfig;
 try {
 	// The one host probe `loadConfig` takes: whether the state directory exists,
 	// so an unset SUBSTRATE_SLO_CHECKPOINT lands in it on a deployed host and
 	// nowhere on a bare local run (uplift-3 N2).
-	config = loadConfig(process.env, { directoryExists: (path) => existsSync(path) && statSync(path).isDirectory() });
+	config = loadConfig(process.env, { directoryExists: (path) => existsSync(path) && statSync(path).isDirectory(), realDestination: diskDestination });
 } catch (error) {
 	// A contradictory identity config refuses boot: exit 78 (EX_CONFIG) so the
 	// unit stops instead of crash-looping. The message names variables only —
@@ -61,6 +64,11 @@ try {
 		process.stderr.write(`[substrate] refused — ${error.message}\n`);
 		process.exit(78);
 	}
+	if (error instanceof RepoScopesRequiredError) {
+		// The registry is set without its scopes: a boot refusal with exit 1, not 78. The message names variables only.
+		process.stderr.write(`[substrate] refused — ${error.message}\n`);
+		process.exit(1);
+	}
 	throw error;
 }
 const observability = createObservability(config);
@@ -68,6 +76,7 @@ const substrate = new Substrate(
 	config,
 	{ desktop: createDesktopDriver({ run: bufferRunner, dir: config.desktopDir }) },
 	observability.observer,
+	{ auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) },
 );
 substrate.startPlanningPoll();
 
@@ -246,6 +255,11 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// answered before its forward landed must not lose that forward
 			// silently on restart (the durable outbox keeps the rest).
 			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
+			// The corpus root event still owed is written inside the same bound, so a manifest change made just before shutdown is recorded.
+			await substrate.drainCorpusRoots(SHUTDOWN_RETAIN_MS);
+			// The telemetry buffer, when it is on, gets the same bound: events the ledger did not take get one pass. A buffer whose file
+			// could not be saved gives up what is left with a dead-letter record each; a saved buffer keeps its entries for the next boot.
+			await substrate.drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true });
 			// Planning transition records in flight are awaited within their own bound, after the retains and before the flush below.
 			await substrate.planningObserver.settleTransitions(Bun.sleep(SHUTDOWN_TRANSITION_MS));
 			// The last export before shutdown, so the counters a restart resets are not
@@ -257,7 +271,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// what lets the next epoch pick the series up where this one left them.
 			await Promise.race([
 				Promise.all([
-					observability.exporter?.flush().catch(() => undefined) ?? Promise.resolve(),
+					observability.exporter?.flush().catch((cause: unknown) => reportSilent("shutdown.exporter-flush", cause)) ?? Promise.resolve(),
 					observability.flush(),
 					metricsHistory.flush(),
 					docsLagTimer.flush(),

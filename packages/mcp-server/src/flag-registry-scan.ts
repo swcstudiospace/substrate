@@ -42,7 +42,7 @@ import { join } from "node:path";
 const DECLARATION_FILES: ReadonlySet<string> = new Set(["packages/mcp-server/src/flag-registry.ts"]);
 
 /** Prefixes under which a whole string literal counts as an environment name. */
-export const ENV_NAME_PREFIXES: readonly string[] = [
+const ENV_NAME_PREFIXES: readonly string[] = [
 	"SUBSTRATE",
 	"HINDSIGHT",
 	"RAGFLOW",
@@ -63,7 +63,7 @@ export const ENV_NAME_PREFIXES: readonly string[] = [
 	"CLAUDE",
 ].map((word) => `${word}_`);
 
-export type EnvReadForm = "access" | "literal" | "template";
+type EnvReadForm = "access" | "literal" | "template";
 
 export interface EnvRead {
 	/** The variable name, or for `template` the prefix that is completed at run time. */
@@ -75,7 +75,7 @@ export interface EnvRead {
 }
 
 /** Blanks comments, keeping line numbers. Heuristic and line-based: a `//` or `/*` inside a string is not a comment. */
-export function stripComments(source: string): string {
+function stripComments(source: string): string {
 	const out: string[] = [];
 	let inBlock = false;
 	for (const raw of source.split("\n")) {

@@ -3,9 +3,10 @@
  *
  * A file rather than a table, and a local file rather than a remote one, because
  * the audit's job is to still be there when the stores are not. `substrate-mcp` is
- * the only process that writes it — the same property that makes `agent_events`
- * redacted and chained makes this chain single-writer, so `seq` and `prev` need no
- * coordination.
+ * the writer. A repair execute (`reconcile repair --execute`) is an approved second
+ * writer: it runs only with the server stopped (`--server-stopped`, an operator
+ * assertion the code does not check), and it appends one record after the flush
+ * (`docs/mcp-audit.md`). `seq` and `prev` need no coordination only while that holds.
  *
  * With no path configured the chain lives in memory: verifiable, bounded, and gone
  * at restart. That is the local-dev shape, and `/healthz` reports `auditDurable:
@@ -52,8 +53,6 @@ import {
 	sanitizeField,
 } from "./record.ts";
 
-export { NO_POSITION };
-
 /** Thrown when a fail-closed call could not be recorded, so it must not proceed. */
 export class AuditUnavailableError extends Error {
 	constructor(
@@ -65,7 +64,7 @@ export class AuditUnavailableError extends Error {
 	}
 }
 
-export interface AuditAppend {
+interface AuditAppend {
 	record: AuditRecord;
 	/** False when the sink refused. For a fail-open call, the call still proceeds. */
 	written: boolean;
@@ -87,7 +86,7 @@ export interface AuditAppend {
  * overwrote the checkpoint with the impostor's hash. The checkpoint stores the
  * committed *hash*, so it can and now does anchor the contents too.
  */
-export interface MissingHistory {
+interface MissingHistory {
 	kind: "missing" | "rewritten";
 	/** The `seq` the checkpoint last committed. */
 	checkpointSeq: number;
@@ -95,7 +94,7 @@ export interface MissingHistory {
 	foundSeq: number;
 }
 
-export interface AuditLogOptions {
+interface AuditLogOptions {
 	/** `null` keeps the chain in memory only. */
 	path: string | null;
 	redact?: (text: string) => string;
@@ -122,7 +121,7 @@ export interface AuditLogOptions {
 }
 
 /** A closed segment of the chain: `<path>.<firstSeq>-<lastSeq>.jsonl` beside the active file. */
-export interface AuditSegment {
+interface AuditSegment {
 	path: string;
 	firstSeq: number;
 	lastSeq: number;
@@ -573,6 +572,7 @@ export class AuditLog {
 			const parsed: unknown = JSON.parse(newline < 0 ? text : text.slice(0, newline));
 			return isAuditRecord(parsed) ? parsed : null;
 		} catch {
+			// A torn or corrupt head line has no readable seq; open() falls back to the newest closed segment.
 			return null;
 		}
 	}

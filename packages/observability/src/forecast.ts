@@ -23,9 +23,9 @@ export const FORECAST_STEP_S = 300;
 export type ForecastDirection = "maximum" | "minimum";
 
 /** `service`: the history is service-wide. `worst-surface`: the history is the largest surface value per bucket. */
-export type ForecastBasis = "service" | "worst-surface";
+type ForecastBasis = "service" | "worst-surface";
 
-export type ForecastStatus = "predicted-breach" | "ok" | "insufficient-data" | "history-off";
+type ForecastStatus = "predicted-breach" | "ok" | "insufficient-data" | "history-off";
 
 /** One objective's forecast; `predicted` is the value at the horizon, or `null` when none is made. `basis` says what the history measures. */
 export interface ForecastRow {
@@ -37,7 +37,7 @@ export interface ForecastRow {
 	basis: ForecastBasis;
 }
 
-export interface HoltFit {
+interface HoltFit {
 	level: number;
 	trend: number;
 	/** The value `horizonSteps` after the last point: `level + trend * horizonSteps`. */

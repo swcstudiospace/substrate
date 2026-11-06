@@ -31,9 +31,9 @@ import type { CorpusServiceDeps } from "./service.ts";
 import { isRecord } from "./validate.ts";
 
 /** The tier a digest is stored at: the classifier gives the virtual digest path tier 1, and the server writes the same. */
-export const DIGEST_TIER = 1;
+const DIGEST_TIER = 1;
 /** The longest session id a feedback row keeps. */
-export const FEEDBACK_SESSION_CHARS = 200;
+const FEEDBACK_SESSION_CHARS = 200;
 /** The longest repository name a digest result echoes when the name itself was not valid. */
 const ECHO_CHARS = 80;
 /** The longest closed reason the Hindsight leg adds to a result. */
@@ -43,26 +43,26 @@ export const REFLECT_RETAIN_BUDGET_MS = 8_000;
 /** How many stored digests one reflect reply retains at once. */
 export const REFLECT_RETAIN_CONCURRENCY = 4;
 
-export const REFLECT_REQUEST_REFUSALS = ["bad-request", "bad-protocol", "empty-request", "too-many-digests"] as const;
-export const FEEDBACK_REFUSALS = ["bad-request", "bad-document", "bad-verdict", "unknown-document"] as const;
+const REFLECT_REQUEST_REFUSALS = ["bad-request", "bad-protocol", "empty-request", "too-many-digests"] as const;
+const FEEDBACK_REFUSALS = ["bad-request", "bad-document", "bad-verdict", "unknown-document"] as const;
 /** Why one digest of a reflect request is refused before the ingest sees it. Closed; the ingest adds its own reasons after. */
-export const DIGEST_REFUSALS = ["bad-digest", "bad-repo", "bad-sha256", "too-large", "duplicate-entry"] as const;
+const DIGEST_REFUSALS = ["bad-digest", "bad-repo", "bad-sha256", "too-large", "duplicate-entry"] as const;
 
 type DigestRefusal = (typeof DIGEST_REFUSALS)[number];
 
-export type ReflectRefusalReason =
+type ReflectRefusalReason =
 	| GateReason
 	| "corpus.index-unavailable"
 	| (typeof REFLECT_REQUEST_REFUSALS)[number]
 	| (typeof FEEDBACK_REFUSALS)[number];
 
-export interface ReflectRefusal {
+interface ReflectRefusal {
 	error: string;
 	reason: ReflectRefusalReason;
 	detail?: string | undefined;
 }
 
-export interface ReflectFailure {
+interface ReflectFailure {
 	ok: false;
 	status: 400 | 401 | 403 | 404 | 503;
 	body: ReflectRefusal;
@@ -74,7 +74,7 @@ export type ReflectReply<T> = { ok: true; status: 200; body: T } | ReflectFailur
 export type RetainOutcome = { ok: true; truncated?: true } | { ok: false; reason: string };
 
 /** One stored digest handed to the Hindsight leg. `waitMs` is what remains of {@link REFLECT_RETAIN_BUDGET_MS}. */
-export interface RetainDigestInput {
+interface RetainDigestInput {
 	repo: string;
 	text: string;
 	surface: Surface;
@@ -122,7 +122,7 @@ function gateOf(deps: CorpusServiceDeps, surface: Surface | null, needsPlane: bo
 
 // ── feedback ─────────────────────────────────────────────────────────────────
 
-export interface FeedbackRequest {
+interface FeedbackRequest {
 	repo: string;
 	path: string;
 	verdict: FeedbackVerdict;
@@ -130,7 +130,7 @@ export interface FeedbackRequest {
 	sessionId: string | null;
 }
 
-export type ParsedFeedback = { ok: true; value: FeedbackRequest } | { ok: false; reason: (typeof FEEDBACK_REFUSALS)[number]; detail?: string | undefined };
+type ParsedFeedback = { ok: true; value: FeedbackRequest } | { ok: false; reason: (typeof FEEDBACK_REFUSALS)[number]; detail?: string | undefined };
 
 /** `{document, verdict, session_id?, note?}`; the note is ignored and never stored. */
 export function parseFeedbackRequest(raw: unknown): ParsedFeedback {

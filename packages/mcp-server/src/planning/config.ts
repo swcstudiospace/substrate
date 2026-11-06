@@ -38,9 +38,9 @@ export interface PlanningLimits {
 	scanIntervalMs: number;
 }
 
-export type PlanningSettings = (PlanningLimits & { enabled: false }) | (PlanningLimits & { enabled: true; root: string });
+type PlanningSettings = (PlanningLimits & { enabled: false }) | (PlanningLimits & { enabled: true; root: string });
 
-export type PlanningConfigReason = "not-absolute" | "invalid-characters" | "not-integer" | "out-of-range";
+type PlanningConfigReason = "not-absolute" | "invalid-characters" | "not-integer" | "out-of-range";
 
 export interface PlanningConfigError {
 	key: string;

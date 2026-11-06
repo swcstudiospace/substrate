@@ -58,7 +58,7 @@ export interface DiskPressure {
 	worktrees: Array<{ path: string; bytes: number | null }>;
 }
 
-export interface PressureOptions extends Omit<InventoryOptions, "git" | "measure"> {
+interface PressureOptions extends Omit<InventoryOptions, "git" | "measure"> {
 	git: GitRunner;
 	free?: FreeBytesFn;
 }

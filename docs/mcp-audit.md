@@ -34,6 +34,8 @@ One JSON object per line, opened `O_APPEND`, **single writer**. `substrate-mcp` 
 the only process that writes it, which is what lets `seq` and `prev` need no
 coordination — the same property that makes `agent_events` redacted and chained.
 
+A repair execute (`reconcile repair --execute`) is an approved second writer. It runs only with the server stopped (`--server-stopped`), and it appends one record after the flush. A failed append after the flush exits 1; the flush has already run (see `docs/reconcile.md`). Owner-approved, 2026-11-03.
+
 A local file rather than a remote one, for reason 1 above.
 
 ```

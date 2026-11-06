@@ -6,10 +6,10 @@
 import { SnapshotPolicyError } from "./errors.ts";
 import type { ResolvedPolicy, SkipReason, SnapshotPolicy } from "./types.ts";
 
-export const DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024;
+const DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 /** Directory names excluded at any depth: VCS metadata, dependency trees and build output. */
-export const DEFAULT_EXCLUDE_DIRS: readonly string[] = [
+const DEFAULT_EXCLUDE_DIRS: readonly string[] = [
 	".git",
 	"node_modules",
 	".venv",
@@ -21,7 +21,7 @@ export const DEFAULT_EXCLUDE_DIRS: readonly string[] = [
 	"__pycache__",
 ];
 
-export const DEFAULT_EXCLUDE_GLOBS: readonly string[] = ["*.log"];
+const DEFAULT_EXCLUDE_GLOBS: readonly string[] = ["*.log"];
 
 /** Basename globs for files that commonly hold credentials. */
 export const DEFAULT_SECRET_PATTERNS: readonly string[] = [
@@ -36,7 +36,7 @@ export const DEFAULT_SECRET_PATTERNS: readonly string[] = [
 	"*.keystore",
 ];
 
-export const DEFAULT_IGNORED_ALLOWLIST: readonly string[] = [".planning/"];
+const DEFAULT_IGNORED_ALLOWLIST: readonly string[] = [".planning/"];
 
 function assertPatterns(name: string, patterns: readonly string[]): void {
 	for (const pattern of patterns) {

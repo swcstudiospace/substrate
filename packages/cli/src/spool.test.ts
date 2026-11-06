@@ -298,4 +298,19 @@ describe("the CLI end to end", () => {
 		expect(bad.stderr).toContain("usage: substrate spool status");
 		expect(help.stdout).toContain("substrate spool status [--json] | flush");
 	});
+
+	test("an emit the server does not answer, with the spool off, exits 0 and names its kind on stderr without the summary", async () => {
+		const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+		const url = `http://127.0.0.1:${closed.port}`;
+		closed.stop(true);
+		const emitted = await cli(["emit", "--kind", "note", "--summary", `${MARKER} unanswered`, "--repo", "o/r", "--branch", "b", "--surface", "claude-code"], {
+			SUBSTRATE_URL: url,
+			SUBSTRATE_STATE_DIR: stateDir,
+			SUBSTRATE_EVENT_SPOOL: "off",
+		});
+		expect(emitted.code).toBe(0);
+		expect(emitted.stdout).toBe("");
+		expect(emitted.stderr).toContain('emit "note" storage not confirmed: the server did not answer and the event spool is off');
+		expect(emitted.stderr).not.toContain(MARKER);
+	});
 });

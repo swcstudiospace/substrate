@@ -17,11 +17,11 @@ import { cleanAttributes } from "./metrics.ts";
 
 /** OTLP span kinds. Only the three the substrate produces are named. */
 export const SPAN_KIND = { internal: 1, server: 2, client: 3 } as const;
-export type SpanKind = (typeof SPAN_KIND)[keyof typeof SPAN_KIND];
+type SpanKind = (typeof SPAN_KIND)[keyof typeof SPAN_KIND];
 
 /** OTLP status codes. */
 export const SPAN_STATUS = { unset: 0, ok: 1, error: 2 } as const;
-export type SpanStatusCode = (typeof SPAN_STATUS)[keyof typeof SPAN_STATUS];
+type SpanStatusCode = (typeof SPAN_STATUS)[keyof typeof SPAN_STATUS];
 
 export interface SpanContext {
 	traceId: string;
@@ -45,11 +45,11 @@ export interface SpanRecord {
 const ALL_ZERO_TRACE = "0".repeat(32);
 const ALL_ZERO_SPAN = "0".repeat(16);
 
-export function newTraceId(random: (bytes: number) => Buffer = randomBytes): string {
+function newTraceId(random: (bytes: number) => Buffer = randomBytes): string {
 	return random(16).toString("hex");
 }
 
-export function newSpanId(random: (bytes: number) => Buffer = randomBytes): string {
+function newSpanId(random: (bytes: number) => Buffer = randomBytes): string {
 	return random(8).toString("hex");
 }
 
@@ -101,7 +101,7 @@ export interface Span {
 	end(): void;
 }
 
-export interface TracerOptions {
+interface TracerOptions {
 	/** Spans held for the next export before the oldest are dropped. */
 	maxSpans?: number;
 	/** Head-sampling ratio for traces this process starts. Inherited traces obey their flag. */

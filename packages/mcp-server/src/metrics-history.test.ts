@@ -957,11 +957,12 @@ function extendedActivity(instruments: SubstrateInstruments): void {
 	activateCorpusGauges(instruments);
 }
 
-/** The three corpus gauges (phase 70): freshness read from a manifest change, the last ingest rate and the canary's recall. */
+/** The four corpus gauges (phase 70): freshness read from a manifest change, the last ingest rate, the canary's recall and the sync lag the newest docs.sync note reported. */
 function activateCorpusGauges(instruments: SubstrateInstruments): void {
 	instruments.observeCorpusFreshness(() => 1_000, () => 91_000);
 	instruments.setCorpusIngestRate(2);
 	instruments.setCorpusGoldenRecall5(0.8);
+	instruments.setCorpusSyncLag(120);
 }
 
 /** The boot-time call `createObservability` makes (observe.ts), with the count the empty environment configures. */
@@ -1091,6 +1092,7 @@ describe("the extended series (uplift-5 S6)", () => {
 			{ tsMs: 2000, series: "corpus.freshness_seconds", labels: {}, value: 90, count: 1 },
 			{ tsMs: 2000, series: "corpus.ingest_docs_per_s", labels: {}, value: 2, count: 1 },
 			{ tsMs: 2000, series: "corpus.golden_recall5", labels: {}, value: 0.8, count: 1 },
+			{ tsMs: 2000, series: "corpus.sync_lag_seconds", labels: {}, value: 120, count: 1 },
 		]);
 		instruments.setCorpusIngestRate(0);
 		expect(seriesRows(collector.collect(instruments.snapshot(), null, 3000), "corpus.ingest_docs_per_s")[0]?.value).toBe(0);

@@ -67,6 +67,8 @@ export interface RecallDeps {
 	fetchImpl?: FetchLike;
 	/** The one abort budget the whole fan-out shares. */
 	budgetMs?: number;
+	/** Under repository scope, whether the caller is granted a repository; a hit from an ungranted repository is not returned. */
+	granted?: ((repo: string) => boolean) | undefined;
 	/** A guest instance never sends queries to the plane. */
 	vmGuest?: boolean;
 	/**
@@ -163,7 +165,7 @@ export interface BankAnswer {
 }
 
 /** Options a fan-out adds to the caller's visibility. Both are optional. */
-export interface FanOutOptions {
+interface FanOutOptions {
 	/** Keeps a hit only when true. A dropped hit never counts against its bank's cap, and cannot hide a copy of the same text on another bank. */
 	keep?: (hit: RecallHit) => boolean;
 	/** Called once per bank as its answer settles, so a caller that stops waiting still holds the banks that answered. */
@@ -184,7 +186,7 @@ export interface FanOutOptions {
  * caller may not see is dropped inside its bank, before the bank's cap counts it.
  * A bank that fails or misses the budget answers with `failure`; nothing throws.
  */
-export async function recallAcrossBanks(
+async function recallAcrossBanks(
 	config: HindsightConfig,
 	banks: readonly string[],
 	query: string,
@@ -305,7 +307,7 @@ export async function recallMemories(
 	}
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
-	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
+	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo, granted: deps.granted };
 	const budgetMs = deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS;
 	// One deadline for the whole recall: the forgotten-entry lookup spends what the fan-out left, never more.
 	const deadline = Date.now() + budgetMs;
@@ -331,7 +333,7 @@ export async function recallMemories(
 }
 
 /** What the brief's recall read takes from one fan-out: the banks that answered and their hits. */
-export interface BriefFanout {
+interface BriefFanout {
 	/** The banks that answered, in the order they were asked. */
 	answered: string[];
 	/** The answering banks' hits, best first, derived as `memory_recall` derives them. */

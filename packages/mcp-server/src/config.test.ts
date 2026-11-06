@@ -16,8 +16,10 @@
 import { describe, expect, test } from "bun:test";
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { diskDestination } from "./destination.ts";
 import {
 	ConfigError,
 	DEFAULT_SKILLS_GH,
@@ -700,5 +702,211 @@ describe("TEI and the embedding cache (phase 64)", () => {
 		}
 		expect(message).toContain("TEI_URL");
 		expect(message).not.toContain("example.test");
+	});
+});
+
+describe("authoritative live-session lease", () => {
+	test("the loader supplies the default independently of optional historical storage", () => {
+		expect(loadConfig({}).liveSessionLeaseS).toBe(3_600);
+		expect(loadConfig({ SUBSTRATE_STEERING_SESSIONS_TABLE: "off" }).liveSessionLeaseS).toBe(3_600);
+		expect(loadConfig({ SUBSTRATE_STEERING_SESSIONS_TABLE: "on", SUBSTRATE_LIVE_SESSION_LEASE_S: "600" }).liveSessionLeaseS).toBe(600);
+	});
+
+	test("whole-second bounds are inclusive and out-of-range integers clamp", () => {
+		for (const [raw, expected] of [["60", 60], ["86400", 86_400], ["59", 60], ["86401", 86_400], ["0", 60], [" 300 ", 300]] as const) {
+			expect(loadConfig({ SUBSTRATE_LIVE_SESSION_LEASE_S: raw }).liveSessionLeaseS).toBe(expected);
+		}
+	});
+
+	test("missing, blank, fractional and nonnumeric leases use the default", () => {
+		for (const raw of [undefined, "", " ", "-1", "60.5", "NaN", "Infinity", "forever"]) {
+			expect(loadConfig({ SUBSTRATE_LIVE_SESSION_LEASE_S: raw }).liveSessionLeaseS).toBe(3_600);
+		}
+	});
+});
+
+describe("SUBSTRATE_RECONCILE_* (phase 78, D78-7)", () => {
+	test("the scheduled reconcile is off when the interval is unset, blank or 0", () => {
+		expect(loadConfig({}).reconcile.intervalS).toBe(0);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "" }).reconcile.intervalS).toBe(0);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "   " }).reconcile.intervalS).toBe(0);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "0" }).reconcile.intervalS).toBe(0);
+	});
+
+	test("a valid interval is kept in whole seconds", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "300" }).reconcile.intervalS).toBe(300);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: " 3600 " }).reconcile.intervalS).toBe(3600);
+	});
+
+	test("an interval above 0 but under 60 is clamped to 60", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "1" }).reconcile.intervalS).toBe(60);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "59" }).reconcile.intervalS).toBe(60);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "60" }).reconcile.intervalS).toBe(60);
+	});
+
+	test("an interval too long for a timer is clamped to the longest one a timer holds", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "99999999999" }).reconcile.intervalS).toBe(2_147_483);
+	});
+
+	test("an interval that is not a whole number, or is negative, refuses boot and names the variable", () => {
+		for (const value of ["1.5", "-5", "5s", "every hour", "1e3"]) {
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: value })).toThrow(ConfigError);
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: value })).toThrow("SUBSTRATE_RECONCILE_INTERVAL_S");
+		}
+	});
+
+	test("the window defaults to 24 hours when unset or blank", () => {
+		expect(loadConfig({}).reconcile.windowHours).toBe(24);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "" }).reconcile.windowHours).toBe(24);
+	});
+
+	test("a valid window is kept in whole hours", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "6" }).reconcile.windowHours).toBe(6);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "1" }).reconcile.windowHours).toBe(1);
+	});
+
+	test("a window outside 1 to 168 hours is clamped into that range", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "0" }).reconcile.windowHours).toBe(1);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "168" }).reconcile.windowHours).toBe(168);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "169" }).reconcile.windowHours).toBe(168);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "100000" }).reconcile.windowHours).toBe(168);
+	});
+
+	test("a window that is not a whole number, or is negative, refuses boot and names the variable", () => {
+		for (const value of ["1.5", "-1", "a day", "24h"]) {
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: value })).toThrow(ConfigError);
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: value })).toThrow("SUBSTRATE_RECONCILE_WINDOW_HOURS");
+		}
+	});
+});
+
+describe("SUBSTRATE_REPO_REGISTRY needs SUBSTRATE_REPO_SCOPES (phase 72)", () => {
+	const REGISTRY = JSON.stringify({ "owner/a": { checkouts: ["/srv/repo-a"], worktrees: [] } });
+	const SCOPES = JSON.stringify({ "claude-code": ["owner/a"] });
+
+	function refusalOf(env: Record<string, string | undefined>): Error {
+		try {
+			loadConfig(env);
+		} catch (error) {
+			return error as Error;
+		}
+		throw new Error("loadConfig did not throw");
+	}
+
+	test("a registry with no scopes variable refuses the load, naming both variables and never the registry value", () => {
+		const error = refusalOf({ SUBSTRATE_REPO_REGISTRY: REGISTRY });
+
+		expect(error.name).toBe("RepoScopesRequiredError");
+		expect(error.message).toContain("SUBSTRATE_REPO_REGISTRY");
+		expect(error.message).toContain("SUBSTRATE_REPO_SCOPES");
+		expect(error.message).not.toContain("owner/a");
+		expect(error.message).not.toContain("/srv/repo-a");
+	});
+
+	test("an empty or blank scopes variable is the same refusal", () => {
+		for (const scopes of ["", "   "]) {
+			const error = refusalOf({ SUBSTRATE_REPO_REGISTRY: REGISTRY, SUBSTRATE_REPO_SCOPES: scopes });
+
+			expect(error.name).toBe("RepoScopesRequiredError");
+			expect(error.message).toContain("SUBSTRATE_REPO_SCOPES");
+		}
+	});
+
+	test("both variables set loads, with scoping enforced", () => {
+		const config = loadConfig({ SUBSTRATE_REPO_REGISTRY: REGISTRY, SUBSTRATE_REPO_SCOPES: SCOPES });
+
+		expect(config.repoScope.enforced).toBe(true);
+		expect(config.repoScope.registry.has("owner/a")).toBe(true);
+	});
+
+	test("neither variable set loads, with scoping off", () => {
+		const config = loadConfig({});
+
+		expect(config.repoScope.enforced).toBe(false);
+		expect(config.repoScope.registry.size).toBe(0);
+	});
+
+	test("a blank registry is unset, so it loads without a scopes variable", () => {
+		const config = loadConfig({ SUBSTRATE_REPO_REGISTRY: "  " });
+
+		expect(config.repoScope.enforced).toBe(false);
+	});
+});
+
+describe("the server entry point refuses a registry without scopes (phase 72)", () => {
+	const ROOT = join(import.meta.dir, "..", "..", "..");
+	const ENTRY = join(import.meta.dir, "index.ts");
+
+	test("the process prints the refusal naming both variables and exits 1", async () => {
+		const env: Record<string, string> = { SUBSTRATE_REPO_REGISTRY: JSON.stringify({ "owner/a": { checkouts: ["/srv/repo-a"], worktrees: [] } }), SUBSTRATE_PORT: "0" };
+		for (const key of ["PATH", "HOME"]) {
+			const value = process.env[key];
+			if (value !== undefined) env[key] = value;
+		}
+		const child = Bun.spawn([process.execPath, "--no-env-file", ENTRY], { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" });
+		// Read stdout until the process exits (stream closes) or it reports it is listening, which only a booted server does.
+		const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+		const decoder = new TextDecoder();
+		let out = "";
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (value) out += decoder.decode(value, { stream: true });
+			if (done || out.includes("listening on")) break;
+		}
+		reader.releaseLock();
+		child.kill();
+		const exitCode = await child.exited;
+		const stderr = await new Response(child.stderr).text();
+
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("[substrate] refused");
+		expect(stderr).toContain("SUBSTRATE_REPO_REGISTRY");
+		expect(stderr).toContain("SUBSTRATE_REPO_SCOPES");
+	});
+});
+
+describe("the telemetry buffer and its dead-letter file name two files (phase 76)", () => {
+	/** Runs `body` in a fresh directory, removed afterwards. */
+	function inTempDir<T>(body: (dir: string) => T): T {
+		const dir = mkdtempSync(join(tmpdir(), "event-buffer-paths-"));
+		try {
+			return body(dir);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+
+	test("a dead-letter path reaching the buffer's file through a symlinked directory is refused at load", () => {
+		inTempDir((dir) => {
+			mkdirSync(join(dir, "real"));
+			symlinkSync(join(dir, "real"), join(dir, "alias"), "dir");
+			expect(() =>
+				loadConfig({
+					SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "real", "events.jsonl"),
+					SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "alias", "events.jsonl"),
+				}, { realDestination: diskDestination }),
+			).toThrow("name one file");
+		});
+	});
+
+	test("a dead-letter symlink to the buffer file, not yet created, is refused at load", () => {
+		inTempDir((dir) => {
+			const buffer = join(dir, "events.jsonl");
+			symlinkSync(buffer, join(dir, "dead.jsonl"));
+			expect(() => loadConfig({ SUBSTRATE_EVENT_BUFFER_PATH: buffer, SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "dead.jsonl") }, { realDestination: diskDestination })).toThrow("name one file");
+		});
+	});
+
+	test("distinct files are accepted, even when one of their directories is a symlink", () => {
+		inTempDir((dir) => {
+			mkdirSync(join(dir, "real"));
+			writeFileSync(join(dir, "real", "events.jsonl"), "");
+			symlinkSync(join(dir, "real"), join(dir, "alias"), "dir");
+			const env = {
+				SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "real", "events.jsonl"),
+				SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "alias", "dead.jsonl"),
+			};
+			expect(loadConfig(env, { realDestination: diskDestination }).eventBuffer).toMatchObject({ path: env.SUBSTRATE_EVENT_BUFFER_PATH, deadLetterPath: env.SUBSTRATE_EVENT_DEAD_LETTER_PATH });
+		});
 	});
 });

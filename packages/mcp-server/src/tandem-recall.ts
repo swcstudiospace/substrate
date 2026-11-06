@@ -27,7 +27,7 @@ export const TANDEM_RRF_K = 60;
 /** The most characters one merged item's content carries (the docs snippet cap). */
 export const TANDEM_CONTENT_CAP = 1200;
 /** Items of each origin the cap never squeezes out while both origins exist. */
-export const TANDEM_ORIGIN_FLOOR = 2;
+const TANDEM_ORIGIN_FLOOR = 2;
 /** The most items one merge returns, whatever the caller asks. */
 export const TANDEM_MAX_CAP = 50;
 
@@ -104,7 +104,7 @@ export interface TandemProvenance {
 	chunk_id?: string;
 }
 
-export interface TandemItem {
+interface TandemItem {
 	origin: TandemOrigin;
 	/** Stable within its origin: the chunk id, else the document id, else the source URL. */
 	id: string;
@@ -136,7 +136,7 @@ export interface TandemMerge {
 	at: string;
 }
 
-export interface MergeTandemInput {
+interface MergeTandemInput {
 	lightrag: readonly TandemLightragInput[];
 	hindsight: readonly TandemHindsightInput[];
 	/** The most items returned; clamped to 0..50. Not an integer or not finite: 0. */

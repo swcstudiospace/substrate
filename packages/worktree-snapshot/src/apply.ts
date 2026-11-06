@@ -46,7 +46,7 @@ import {
 import { git, type RepoContext } from "./runner.ts";
 import type { EntryMode, RestoreHooks, RestoreOperation, WriteOperation } from "./types.ts";
 
-export type ApplyContext = {
+type ApplyContext = {
 	repo: RepoContext;
 	/** The restore id; part of every temporary file name. */
 	id: string;

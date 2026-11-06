@@ -8,14 +8,14 @@
  */
 import type { EvidenceBundle } from "@substrate/evidence";
 
-export type JsonObject = Record<string, unknown>;
+type JsonObject = Record<string, unknown>;
 
 export function isRecord(value: unknown): value is JsonObject {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** What `emit --payload` parsed to. Only an object is a payload; anything else is dropped by the caller. */
-export type PayloadParse = { kind: "ok"; payload: JsonObject } | { kind: "invalid-json" } | { kind: "not-object" };
+type PayloadParse = { kind: "ok"; payload: JsonObject } | { kind: "invalid-json" } | { kind: "not-object" };
 
 export function parseEmitPayload(raw: string): PayloadParse {
 	let parsed: unknown;
@@ -181,7 +181,7 @@ const validateBundle: Validator = object({
  * server could not build it (an unreadable or unconfigured ledger). Mirrors `NodeArtifact` in the server's
  * `node-artifact.ts`; every field the document carries is checked, so nothing reaches the output unchecked.
  */
-export type EvidenceNode =
+type EvidenceNode =
 	| { error: string }
 	| {
 			node_id: string;
@@ -227,7 +227,7 @@ const validateEvidenceNode: Validator = (value, path) => {
  * What the server's `/evidence` body parsed to: the bundle (with the `node` member when the server sent one),
  * text that is not JSON, or JSON of the wrong shape.
  */
-export type EvidenceParse =
+type EvidenceParse =
 	| { ok: true; bundle: EvidenceBundle; node?: EvidenceNode }
 	| { ok: false; reason: "invalid-json" }
 	| { ok: false; reason: "malformed"; detail: string };

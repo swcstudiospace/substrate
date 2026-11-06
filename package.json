@@ -41,6 +41,7 @@
     "verify": "bun scripts/verify.ts",
     "audit:verify": "bun scripts/audit-verify.ts",
     "parity:check": "bun scripts/parity-check.ts",
+    "reconcile": "bun scripts/reconcile.ts",
     "doctor:runtime": "bun scripts/doctor-runtime.ts",
     "advisor:promote": "bun scripts/promote-advisor.ts",
     "config:reference": "bun scripts/config-reference.ts",

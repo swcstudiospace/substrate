@@ -42,12 +42,12 @@ export const OPEN_GRAPHS_READ_LIMIT = 10;
 export const SESSION_CONTEXT_DISABLED = "session-context.disabled";
 export const SESSION_CONTEXT_DISABLED_MESSAGE = "session context is off (SUBSTRATE_BRIEF_SESSIONS)";
 
-export type SessionContextList = keyof typeof SESSION_CONTEXT_LIMITS;
+type SessionContextList = keyof typeof SESSION_CONTEXT_LIMITS;
 
 // ── what a source hands over ──────────────────────────────────────────────────
 
 /** A list a source returned, and whether the source itself cut it before this module saw it. */
-export interface SourceResult<T> {
+interface SourceResult<T> {
 	items: readonly T[];
 	truncated?: boolean;
 	/** A line for `notes` when the source answered only in part (some of its reads failed). Such a list is also `truncated`. */
@@ -125,7 +125,7 @@ export interface ContextSession {
 	age_s: number;
 }
 
-export interface ContextClaim {
+interface ContextClaim {
 	graph_id: string;
 	node_id: string;
 	holder: string;
@@ -135,7 +135,7 @@ export interface ContextClaim {
 	age_s: number;
 }
 
-export interface ContextEvent {
+interface ContextEvent {
 	ts: string;
 	surface: string;
 	session_id: string | null;
@@ -145,7 +145,7 @@ export interface ContextEvent {
 	age_s: number;
 }
 
-export interface ContextHandoff {
+interface ContextHandoff {
 	graph_id: string;
 	goal: string;
 	created_at: string;
@@ -154,7 +154,7 @@ export interface ContextHandoff {
 	age_s: number;
 }
 
-export interface ContextPlanning {
+interface ContextPlanning {
 	ts: string;
 	repo: string;
 	changed: number;
@@ -185,7 +185,7 @@ export interface SessionContextRequest {
 	limit?: number | undefined;
 }
 
-export interface SessionContextOptions {
+interface SessionContextOptions {
 	nowMs: number;
 	/** Test seam; defaults to {@link SESSION_CONTEXT_BUDGET_MS}. */
 	budgetMs?: number;
@@ -391,7 +391,7 @@ function fitBytes(digest: SessionContext): SessionContext {
 
 // ── request parsing ───────────────────────────────────────────────────────────
 
-export type ContextRequestParse = { ok: true; value: SessionContextRequest } | { ok: false; error: string };
+type ContextRequestParse = { ok: true; value: SessionContextRequest } | { ok: false; error: string };
 
 /** The one place `repo_id`, `session_id` and `limit` are validated, so the tool and the route refuse the same inputs. */
 export function parseSessionContextArgs(args: { repo_id?: unknown; session_id?: unknown; limit?: unknown }): ContextRequestParse {

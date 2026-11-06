@@ -107,11 +107,17 @@ describe("parsePlanRequest", () => {
 describe("parseIngestRequest", () => {
 	const document = makeDocument(REPO, "docs/a.md", "text");
 	const base = { protocol: CORPUS_PROTOCOL, documents: [document], tombstones: [] };
+	const scope = { coverage: [{ repo: REPO, source: "fs" as const }], maxTier: 3 as const };
 
 	test("documents and tombstones parse; a missing list is empty", () => {
-		const parsed = parseIngestRequest({ protocol: CORPUS_PROTOCOL, tombstones: [{ repo: REPO, path: "docs/old.md" }] });
-		expect(parsed.ok && parsed.value).toEqual({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: REPO, path: "docs/old.md" }] });
+		const parsed = parseIngestRequest({ protocol: CORPUS_PROTOCOL, tombstones: [{ repo: REPO, path: "docs/old.md" }], scope });
+		expect(parsed.ok && parsed.value).toEqual({ protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: REPO, path: "docs/old.md" }], scope });
 		expect(parseIngestRequest(base).ok).toBe(true);
+	});
+
+	test("tombstones without a scope are refused tombstone-scope-required", () => {
+		expect(refusedReason(parseIngestRequest({ protocol: CORPUS_PROTOCOL, tombstones: [{ repo: REPO, path: "docs/old.md" }] }))).toBe("tombstone-scope-required");
+		expect(refusedReason(parseIngestRequest({ ...base, tombstones: [{ repo: REPO, path: "docs/old.md" }] }))).toBe("tombstone-scope-required");
 	});
 
 	test("an empty request, another protocol and a body that is not text are refused", () => {
@@ -125,7 +131,7 @@ describe("parseIngestRequest", () => {
 		const tombstones = (count: number) => Array.from({ length: count }, (_, index) => ({ repo: REPO, path: `old/${index}.md` }));
 		expect(parseIngestRequest({ ...base, documents: documents(MAX_INGEST_DOCUMENTS) }).ok).toBe(true);
 		expect(refusedReason(parseIngestRequest({ ...base, documents: documents(MAX_INGEST_DOCUMENTS + 1) }))).toBe("too-many-documents");
-		expect(parseIngestRequest({ ...base, documents: [], tombstones: tombstones(MAX_INGEST_TOMBSTONES) }).ok).toBe(true);
+		expect(parseIngestRequest({ ...base, documents: [], tombstones: tombstones(MAX_INGEST_TOMBSTONES), scope }).ok).toBe(true);
 		expect(refusedReason(parseIngestRequest({ ...base, documents: [], tombstones: tombstones(MAX_INGEST_TOMBSTONES + 1) }))).toBe("too-many-tombstones");
 	});
 

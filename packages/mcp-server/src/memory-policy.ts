@@ -12,7 +12,7 @@
  * writer gets nothing rather than the benefit of the doubt. `events.emit` keeps
  * failing open; this does not.
  */
-import { normalizeIdentifier } from "./event.ts";
+import { normalizeIdentifier, repoOverCap } from "./event.ts";
 import { redact } from "./redact.ts";
 import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import {
@@ -65,9 +65,22 @@ export function parseScope(raw: unknown): MemoryScope | null {
 	// has to be the same scope rather than a denial nobody can explain. A `repo:` id
 	// is left alone: GitHub slugs can carry case, and lowercasing the write while the
 	// brief reads the original spelling is the lookup-that-never-matches bug.
-	const id = normalizeIdentifier(family === "agent" ? rawId.toLowerCase() : rawId);
+	const spelled = family === "agent" ? rawId.toLowerCase() : rawId;
+	const id = normalizeIdentifier(spelled);
 	if (!id) return null;
 	return { class: family as MemoryScopeClass, id, canonical: `${family}:${id}` };
+}
+
+/**
+ * The redacted id of a `repo:` scope when it is over the repo cap, else null. The memory write refuses such a scope. `parseScope` caps
+ * the id to fit, which a read needs and a write must not do: a write would store a repo cut to fit. Reads never call this.
+ */
+export function repoScopeOverCap(raw: unknown): number | null {
+	if (typeof raw !== "string") return null;
+	const trimmed = raw.trim();
+	const split = trimmed.indexOf(":");
+	if (split < 1 || trimmed.slice(0, split).toLowerCase() !== "repo") return null;
+	return repoOverCap(trimmed.slice(split + 1).trim());
 }
 
 export function isMemoryKind(value: unknown): value is MemoryKind {
@@ -233,7 +246,7 @@ export function parseGrants(raw: string | undefined, warn: (message: string) => 
 
 // ── conflict strategy ────────────────────────────────────────────────────────
 
-export interface ConflictPlan {
+interface ConflictPlan {
 	/** How a collision is resolved once the write is allowed to land. */
 	resolve: Exclude<ConflictStrategy, "require-review">;
 	/** True where the write is a proposal until a reviewer releases it. */
@@ -334,7 +347,7 @@ export function resolveActor(requested: Actor | undefined, reviewed: boolean): A
 export const MEMORY_TTL_30D_MS = 30 * DAY_MS;
 
 /** Why an entry is past its lifetime; null while it is not. */
-export type MemoryExpiryReason = "30d" | "graph-terminal" | "graph-unindexed";
+type MemoryExpiryReason = "30d" | "graph-terminal" | "graph-unindexed";
 
 export interface MemoryExpiry {
 	expired: boolean;
@@ -416,6 +429,22 @@ export function memoryExpiry(
 export interface MemoryCaller {
 	surface: string;
 	repo: string | null;
+	/** Under repository scope, whether the caller is granted a repository. Absent while scoping is off, which grants every row. */
+	granted?: ((repo: string) => boolean) | undefined;
+}
+
+/**
+ * Whether a row kept at `scope` and retained for `repo` names only repositories the caller is granted. A row's `repo`, and the
+ * `repo:` in its scope, must both be granted. A `graph:` row with no repository is not granted: its repository cannot be read from
+ * the row. Absent `granted` (scoping off) grants every row.
+ */
+export function grantedToCaller(scope: string | undefined, repo: string | null | undefined, granted: ((repo: string) => boolean) | undefined): boolean {
+	if (granted === undefined) return true;
+	const rowRepo = normalizeIdentifier(repo);
+	if (rowRepo !== null && !granted(rowRepo)) return false;
+	const normalized = scope?.trim().toLowerCase();
+	if (normalized?.startsWith("repo:") && !granted(normalized.slice("repo:".length))) return false;
+	return !(normalized?.startsWith("graph:") && rowRepo === null);
 }
 
 /**
@@ -427,6 +456,7 @@ export interface MemoryCaller {
  * The index query and the derived-hit merge both apply this rule, so they cannot disagree.
  */
 export function visibleToCaller(scope: string | undefined, repo: string | null | undefined, caller: MemoryCaller): boolean {
+	if (!grantedToCaller(scope, repo, caller.granted)) return false;
 	if (scope === undefined) return true;
 	const normalized = scope.trim().toLowerCase();
 	if (!normalized.startsWith("agent:")) return true;

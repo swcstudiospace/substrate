@@ -1,15 +1,15 @@
 /**
- * The Postgres index.
+ * The Postgres coordination index and durable live-session authority.
  *
- * A cache over Notion and Linear so the brief does not call either API on every
- * prompt. It is written by ultrathink's kickoff/sync skills (via graph.register),
- * by hermes-linear-poller events and by substrate-dispatcher. It is never the
- * source of truth — a disagreement is resolved by refreshing from Notion/Linear.
+ * Graph and tracker projections cache Notion/Linear state and are refreshed
+ * when they disagree with those sources. Live-session bindings are different:
+ * their immutable ownership, credential hashes, leases and terminal identities
+ * are authoritative and cannot be reconstructed from tracker or cache rows.
  */
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
 import { callPlane, type PlaneGate } from "@substrate/observability";
-import { normalizeIdentifier } from "./event.ts";
+import { assertRepoLength, normalizeIdentifier, normalizeKey } from "./event.ts";
 import {
 	TERMINAL_GRAPH_STATUSES,
 	executeSweep,
@@ -51,8 +51,9 @@ import type {
 	Surface,
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
-import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
-import { bunSteeringSessionsStore, type SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
+import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql, bunSteeringIdempotencyStore } from "./planning/steering-store.ts";
+import type { SteeringIdempotencyStore } from "./planning/steering.ts";
+import { bunLiveSessionAuthority, type LiveSessionAuthority } from "./planning/steering-sessions-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
 import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
 import { bunReflectStore, type ReflectStore } from "./corpus/reflect-store.ts";
@@ -113,7 +114,7 @@ export const INDEX_APPLICATION_NAME = "substrate-mcp";
 export const INDEX_MAX_LIFETIME_S = 3600;
 
 /** How long `ping` waits for `select 1` before calling the index unhealthy. */
-export const INDEX_PING_TIMEOUT_MS = 1000;
+const INDEX_PING_TIMEOUT_MS = 1000;
 
 /**
  * How long `migrate` waits to take its session advisory lock. Two boots creating
@@ -131,7 +132,7 @@ export const INDEX_MIGRATE_STATEMENT_TIMEOUT_MS = 120000;
  * `statement_timeout`, no name — and production showed 19 idle connections with
  * an empty `application_name` and a server-side `statement_timeout` of 0.
  */
-export interface IndexPoolSettings {
+interface IndexPoolSettings {
 	/** Pool size per process. */
 	max: number;
 	/** How long one connect may take. */
@@ -178,7 +179,7 @@ export function indexPoolSettingsFromEnv(env: Record<string, string | undefined>
 }
 
 /** The options object handed to Bun's `SQL`, as the constructor composes it. */
-export interface IndexSqlOptions {
+interface IndexSqlOptions {
 	max: number;
 	/** Seconds: Bun's unit for every pool timeout. */
 	connectionTimeout: number;
@@ -225,12 +226,12 @@ export interface MemoryExpiredSample {
  * `report` serves them tagged; `enforce` leaves them out unless the read asked
  * for them. `observe` is called once per expired entry met, in either mode.
  */
-export interface MemoryExpirySettings {
+interface MemoryExpirySettings {
 	mode: MemoryExpiryMode;
 	observe?: (sample: MemoryExpiredSample) => void;
 }
 
-export interface IndexStoreOptions {
+interface IndexStoreOptions {
 	/** Overrides on top of `indexPoolSettingsFromEnv(process.env)`. */
 	pool?: Partial<IndexPoolSettings>;
 	/** The index plane's breaker and observer. Absent means every call runs unwrapped, as before. */
@@ -340,7 +341,7 @@ export const FIRST_REVERSIBLE_VERSION = 33;
  * A migration that runs only when its named opt-in is on. While the opt-in is off, `migrate()` neither runs
  * nor ledgers the step, so turning the opt-in on later applies it on the next boot.
  */
-export type MigrationOptIn = "steering-audit" | "steering-sessions";
+type MigrationOptIn = "steering-audit" | "steering-sessions";
 
 /** Which opt-in migrations run. A missing key is off. */
 export type MigrationOptIns = Readonly<Partial<Record<MigrationOptIn, boolean>>>;
@@ -874,6 +875,66 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 		sql: `
 			create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)`,
 	},
+	// Security authority, not restart cache: retain terminal identities permanently. Native PostgreSQL backups must
+	// include this table. Documentary down destroys non-reuse evidence and is never an automatic rollback action.
+	{
+		version: 42,
+		name: "live_session_bindings",
+		phase: "expand",
+		down: `drop table if exists live_session_bindings`,
+		sql: `
+			create table if not exists live_session_bindings (
+				session_id text primary key,
+				owner_surface text not null,
+				repo_id text not null,
+				binding_proof_hash text not null,
+				issued_at timestamptz not null,
+				last_seen_at timestamptz not null,
+				expires_at timestamptz not null,
+				updated_at timestamptz not null,
+				closed_at timestamptz,
+				close_reason text,
+				state text not null,
+				steering text,
+				planning_hash text
+			);
+			create index if not exists live_session_bindings_owner_repo_id_idx
+				on live_session_bindings (owner_surface, repo_id, session_id) where closed_at is null;
+			create index if not exists live_session_bindings_repo_id_idx
+				on live_session_bindings (repo_id, session_id) where closed_at is null`,
+	},
+	// Durable steering idempotency (v1.8 phase 77): the per-session delivery sequence counter and the keyed-queue replay records.
+	// Opt-in with the audit table (step 33): with SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE off this step is skipped and not ledgered.
+	// Additive: two new tables and one nullable column on planning_steering_audit (the sequence a queued directive was given).
+	// No existing row is touched, and a NULL sequence keeps a row's payload hash. The replay table is pruned by the store (expired
+	// records, then the oldest beyond the configured cap). The audit log itself is never pruned.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 43,
+		name: "planning_steering_idempotency",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `alter table planning_steering_audit drop column if exists delivery_sequence; drop table if exists planning_steering_replay; drop table if exists planning_steering_sequence`,
+		sql: `
+			create table if not exists planning_steering_sequence (
+				target_session_id text primary key,
+				last_sequence     bigint not null check (last_sequence >= 0)
+			);
+			create table if not exists planning_steering_replay (
+				scope_key         text primary key,
+				target_session_id text not null,
+				fingerprint       text not null,
+				directive_json    text not null,
+				sequence          bigint not null check (sequence >= 1),
+				queued_at_ms      bigint not null,
+				expires_at_ms     bigint not null,
+				constraint planning_steering_replay_window_check check (expires_at_ms > queued_at_ms)
+			);
+			create index if not exists planning_steering_replay_recency_idx on planning_steering_replay (queued_at_ms desc, scope_key desc);
+			alter table planning_steering_audit
+				add column if not exists delivery_sequence bigint
+				constraint planning_steering_audit_delivery_sequence_check check (delivery_sequence is null or delivery_sequence >= 1)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -914,6 +975,24 @@ export const PLANNING_HASH_TABLE_REPAIR = `
 	create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path);
 `;
 
+/** One `graph_nodes` row's lease columns, as the reconcile reads them. A free node has a null `claimed_by`. */
+export interface ReconcileNodeHold {
+	graph_id: string;
+	node_id: string;
+	claimed_by: string | null;
+	claim_session: string | null;
+	lease_epoch: number;
+}
+
+function toReconcileHold(row: Record<string, unknown>): ReconcileNodeHold {
+	return {
+		graph_id: String(row.graph_id),
+		node_id: String(row.node_id),
+		claimed_by: row.claimed_by == null ? null : String(row.claimed_by),
+		claim_session: row.claim_session == null ? null : String(row.claim_session),
+		lease_epoch: Number(row.lease_epoch),
+	};
+}
 
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
@@ -949,6 +1028,14 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * The steering idempotency store over this store's pool (v1.8 phase 77): the durable delivery sequence counter and the keyed-queue
+	 * replay records. It only builds the adapter; the tables exist after migration step 43, under the same opt-in as the audit table.
+	 */
+	steeringIdempotency(): SteeringIdempotencyStore {
+		return bunSteeringIdempotencyStore(this.sql);
+	}
+
+	/**
 	 * The corpus manifest over this store's pool (v1.7 phase 63). It only builds the store; no statement runs until the
 	 * corpus service uses it, and the table exists after migration step 35.
 	 */
@@ -956,13 +1043,9 @@ export class IndexStore implements MemoryStore {
 		return bunCorpusStore(this.sql);
 	}
 
-	/**
-	 * The durable steering session store over this store's pool (phase 67): the upsert and the boot read behind the registry.
-	 * It only builds the adapter; no statement runs until the registry uses it, and the table exists only when the
-	 * `steering-sessions` opt-in ran its migration step.
-	 */
-	steeringSessions(): SteeringSessionsStore {
-		return bunSteeringSessionsStore(this.sql);
+	/** Mandatory durable security authority over this pool; historical restart-cache rows cannot grant access. */
+	liveSessions(options: { leaseSeconds: number }): LiveSessionAuthority {
+		return bunLiveSessionAuthority(this.sql, options);
 	}
 
 	/**
@@ -1088,6 +1171,8 @@ export class IndexStore implements MemoryStore {
 		steps?: Array<{ [K in keyof GraphStep]?: GraphStep[K] | undefined } & { node_id: string; step: number }> | undefined;
 		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }> | undefined;
 	}): Promise<GraphView> {
+		// Refused before any statement runs, so an over-long repo writes no row and no node.
+		assertRepoLength(plan.repo);
 		await this.sql`
 			insert into graph_index (graph_id, notion_task_page, repo, branch, surface, status, pr_url, updated)
 			values (${plan.graph_id}, ${plan.notion_task_page ?? null}, ${plan.repo ?? null}, ${plan.branch ?? null},
@@ -2105,7 +2190,7 @@ export class IndexStore implements MemoryStore {
 	 *
 	 * The instant and `created` are compared in whole milliseconds (`created` is truncated to the millisecond, the
 	 * precision of an event `ts`), so a tie keeps the entry: one written in the same millisecond as the rollback point
-	 * is not selected. `session` and `graphId` go through `normalizeIdentifier`, the form the gate stores them in.
+	 * is not selected. `session` goes through `normalizeKey` and `graphId` through `normalizeIdentifier`, the form the gate stores them in.
 	 * There is no index on `session_id`; the scan is bounded by the session's own rows being few, and the limit.
 	 *
 	 * `untilIso`, when not null, is an INCLUSIVE upper bound (whole milliseconds): an entry created after it belongs to
@@ -2122,7 +2207,7 @@ export class IndexStore implements MemoryStore {
 		untilIso: string | null = null,
 		writer: string | null = null,
 	): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
-		const sessionId = normalizeIdentifier(session);
+		const sessionId = normalizeKey(session);
 		if (sessionId === null) throw new Error("memoryEntriesCreatedAfter: session is required");
 		const graph = graphId === null ? null : normalizeIdentifier(graphId);
 		if (graphId !== null && graph === null) throw new Error("memoryEntriesCreatedAfter: graphId is empty after normalisation");
@@ -2359,6 +2444,8 @@ export class IndexStore implements MemoryStore {
 		content_sha256: string;
 		proposed_by: string;
 	}): Promise<void> {
+		// Refused before the plane wraps the write, so the refusal is not reported as a degraded plane.
+		assertRepoLength(input.repo);
 		await this.plane("skills.propose", async () =>
 			this.sql.begin(async (tx: SQL) => {
 				// Serialised with decisions on the same (repo, name), so the version a new row takes is the true next one.
@@ -2415,6 +2502,7 @@ export class IndexStore implements MemoryStore {
 		decided_by: string;
 		reason: string | null;
 	}): Promise<SkillDecisionResult> {
+		assertRepoLength(input.repo);
 		return this.plane("skills.decide", async () =>
 			this.sql.begin(async (tx: SQL) => {
 				// How many approved rows the name has once this decision stands, in the same transaction.
@@ -2694,6 +2782,7 @@ export class IndexStore implements MemoryStore {
 			await this.plane("ping", () => withTimeout(this.sql`select 1`.then(() => undefined), timeoutMs, "index ping"));
 			return true;
 		} catch {
+			// Any failure, a timeout included, is false: the cause is not kept here, and /healthz reports the boolean.
 			return false;
 		}
 	}
@@ -2834,6 +2923,69 @@ export class IndexStore implements MemoryStore {
 		return typeof body === "string" ? body : null;
 	}
 
+	/**
+	 * The lease columns of the `(graph_id, node_id)` keys, read-only. A free node comes back with a null `claimed_by`; a key
+	 * with no row is absent. Graphs are read in one statement and the pairs are matched here, so callers pass bounded batches.
+	 */
+	async reconcileHolds(keys: ReadonlyArray<{ graph_id: string; node_id: string }>): Promise<ReconcileNodeHold[]> {
+		if (keys.length === 0) return [];
+		const wanted = new Set(keys.map((key) => `${key.graph_id}\u0000${key.node_id}`));
+		const graphIds = [...new Set(keys.map((key) => key.graph_id))];
+		return this.plane("reconcile.holds", async () => {
+			const rows = (await this.sql`
+				select graph_id, node_id, claimed_by, claim_session, lease_epoch from graph_nodes
+				where graph_id in ${this.sql(graphIds)}`) as Array<Record<string, unknown>>;
+			return rows.map(toReconcileHold).filter((hold) => wanted.has(`${hold.graph_id}\u0000${hold.node_id}`));
+		});
+	}
+
+	/** Every node that currently has a hold, up to `cap`; `truncated` is true when more exist. Read-only. */
+	async reconcileHeldNodes(cap: number): Promise<{ rows: ReconcileNodeHold[]; truncated: boolean }> {
+		const limit = Math.max(1, Math.floor(cap));
+		return this.plane("reconcile.held", async () => {
+			const found = (await this.sql`
+				select graph_id, node_id, claimed_by, claim_session, lease_epoch from graph_nodes
+				where claimed_by is not null
+				order by graph_id, node_id
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { rows: found.slice(0, limit).map(toReconcileHold), truncated: found.length > limit };
+		});
+	}
+
+	/** The ids of `memory_entries` rows created at or after `sinceIso`, newest first, up to `cap`. Read-only. */
+	async reconcileMemoryIds(sinceIso: string, cap: number): Promise<{ rows: string[]; truncated: boolean }> {
+		const limit = Math.max(1, Math.floor(cap));
+		return this.plane("reconcile.memory", async () => {
+			const found = (await this.sql`
+				select id from memory_entries
+				where created >= ${sinceIso}::timestamptz
+				order by created desc, id desc
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { rows: found.slice(0, limit).map((row) => String(row.id)), truncated: found.length > limit };
+		});
+	}
+
+	/** The graph ids in `graph_index`, in id order, up to `cap`; `truncated` is true when more exist. Read-only. */
+	async reconcileGraphIds(cap: number): Promise<{ rows: string[]; truncated: boolean }> {
+		const limit = Math.max(1, Math.floor(cap));
+		return this.plane("reconcile.graphs", async () => {
+			const found = (await this.sql`
+				select graph_id from graph_index
+				order by graph_id
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { rows: found.slice(0, limit).map((row) => String(row.graph_id)), truncated: found.length > limit };
+		});
+	}
+
+	/** How many `memory_entries` rows were created before `sinceIso`: the rows a reconcile window does not check. Read-only. */
+	async reconcileMemoryRowsBefore(sinceIso: string): Promise<number> {
+		return this.plane("reconcile.memory_rows", async () => {
+			const rows = (await this.sql`
+				select count(*) as n from memory_entries where created < ${sinceIso}::timestamptz`) as Array<Record<string, unknown>>;
+			return Number(rows[0]?.n ?? 0);
+		});
+	}
+
 	async memoryLifecycleCandidates(options: { now?: number; policy?: SweepPolicy } = {}): Promise<Array<Record<string, unknown>>> {
 		const policy = options.policy ?? sweepPolicyFromEnv();
 		const now = options.now ?? Date.now();
@@ -2886,13 +3038,13 @@ export class IndexStore implements MemoryStore {
 // ── archive (uplift-4 S2) ────────────────────────────────────────────────────
 
 /** Rows one export page may carry at most; the archive asks for far fewer. */
-export const MAX_ARCHIVE_PAGE_ROWS = 5000;
+const MAX_ARCHIVE_PAGE_ROWS = 5000;
 
 /** The most rows one restore `insert` carries, so the statement stays under the driver's parameter limit. */
 const RESTORE_BATCH_ROWS = 200;
 
 /** The Postgres type a column type is cast to when a restore binds it. */
-const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz" };
+const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", smallint: "smallint", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz", jsonb: "jsonb" };
 
 /** One REPEATABLE READ READ ONLY view of the archived tables: every read through it sees the same instant. */
 export interface IndexSnapshotReader {
@@ -2908,6 +3060,8 @@ export interface IndexSnapshotReader {
 export interface IndexRestoreTx extends IndexSnapshotReader {
 	/** Insert rows of a whitelisted table; withheld columns are refilled from the spec's placeholders. */
 	insert(table: string, rows: readonly ArchiveRow[]): Promise<void>;
+	/** After a table's rows are in: move each identity column's sequence past the largest value loaded, so the next write takes a value above every restored one. */
+	advanceIdentity(table: string): Promise<void>;
 }
 
 /**
@@ -2922,6 +3076,7 @@ function exportSelectList(spec: ArchiveTableSpec): string {
 			const quoted = `"${column.name}"`;
 			if (column.type === "timestamptz") return `to_char(${quoted} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as ${quoted}`;
 			if (column.type === "bigint") return `${quoted}::text as ${quoted}`;
+			if (column.type === "jsonb") return `${quoted}::text as ${quoted}`;
 			return quoted;
 		})
 		.join(", ");
@@ -2973,8 +3128,17 @@ function archiveAccess(sql: SQL): IndexRestoreTx {
 			for (let from = 0; from < rows.length; from += RESTORE_BATCH_ROWS) {
 				const batch = rows.slice(from, from + RESTORE_BATCH_ROWS);
 				const params: Array<string | number | boolean | null> = [];
-				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${PG_TYPE[column.type]}`).join(", ")})`);
+				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${column.type === "jsonb" ? "text::jsonb" : PG_TYPE[column.type]}`).join(", ")})`);
 				await sql.unsafe(`insert into "${spec.name}" (${columns.map((column) => `"${column.name}"`).join(", ")}) values ${tuples.join(", ")}`, params);
+			}
+		},
+		async advanceIdentity(table) {
+			const spec = tableSpec(table);
+			for (const column of spec.columns) {
+				if (column.identity !== true) continue;
+				// `max` is null for an empty table: setval(seq, 1, false) makes the first nextval return 1, as on a fresh table.
+				const max = `max("${column.name}")`;
+				await sql.unsafe(`select setval(pg_get_serial_sequence($1, $2), coalesce(${max}, 1), ${max} is not null) from "${spec.name}"`, [spec.name, column.name]);
 			}
 		},
 	};

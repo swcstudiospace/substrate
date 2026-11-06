@@ -12,7 +12,7 @@
  * The tailscale-proxy row reads only the phase-48 endpoint classes: unconfigured when no data-plane
  * endpoint is set, degraded when any endpoint is direct, ok otherwise. No network probe backs it.
  *
- * The corpus row (phase 70) judges the docs plane's three objectives and reads nothing but the facts: unconfigured when
+ * The corpus row (phase 70) judges the docs plane's objectives, the sync lag only once it has a threshold, and reads nothing but the facts: unconfigured when
  * `SUBSTRATE_CORPUS` is off, degraded when a reading breaches its threshold or the readings could not be read in time,
  * ok otherwise. A reading nobody has taken yet is not a breach, so a corpus that has not ingested or been evaluated is ok.
  */
@@ -30,7 +30,7 @@ import {
 } from "./types.ts";
 
 /** The state of one service row. Pure. */
-export function serviceState(reading: ServiceReading): FabricState {
+function serviceState(reading: ServiceReading): FabricState {
 	if (!reading.configured) return "unconfigured";
 	if (reading.held) return "degraded";
 	if (reading.breaker === "open" || reading.answered !== true) return "unavailable";
@@ -49,7 +49,7 @@ export function configuredEndpointClasses(facts: FabricFacts): EndpointClass[] {
 }
 
 /** The Tailscale layer: the phase-48 endpoint classes, worst first. Pure. */
-export function proxyRow(facts: FabricFacts): FabricResourceStatus {
+function proxyRow(facts: FabricFacts): FabricResourceStatus {
 	const classes = configuredEndpointClasses(facts);
 	if (classes.length === 0) {
 		return {
@@ -81,6 +81,7 @@ export function corpusRow(facts: FabricFacts): FabricResourceStatus {
 		freshnessS: { reading: readings.freshnessS, threshold: thresholds.freshnessS },
 		recall5: { reading: readings.recall5, threshold: thresholds.recall5 },
 		ingestDocsPerS: { reading: readings.ingestDocsPerS, threshold: thresholds.ingestDocsPerS },
+		syncLag: { reading: readings.syncLagS ?? null, threshold: thresholds.syncLagS ?? null },
 		breaches,
 	};
 	if (unread !== null) return { ...base, state: "degraded", source: `corpus.slo: ${unread}`, detail };
@@ -107,12 +108,12 @@ export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 	return { checkedAt: at, resources, counts };
 }
 
-/** The embedding service's row: its class is `TEI_URL`'s, and a configured one carries the model, its source, the dimension and the latency the client saw. */
+/** The embedding service's row: its class is `TEI_URL`'s; a configured one carries its breaker, and the model, its source, the dimension and the latency the client saw. */
 function teiRow(facts: FabricFacts, checkedAt: string): FabricResourceStatus {
 	const row = serviceRow("tei", facts.tei.endpointClass ?? "unset", facts.services.tei, checkedAt);
 	if (!facts.services.tei.configured) return row;
 	const { model, modelSource, dimension, latencyMs } = facts.tei;
-	return { ...row, detail: { model, modelSource, dimension, latencyMs } };
+	return { ...row, breaker: facts.services.tei.breaker, detail: { model, modelSource, dimension, latencyMs } };
 }
 
 function serviceRow(

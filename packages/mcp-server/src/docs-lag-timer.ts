@@ -11,7 +11,7 @@
  */
 import type { TimerApi } from "./metrics-history.ts";
 
-export interface DocsLagTimerDeps {
+interface DocsLagTimerDeps {
 	/** `Substrate.settleDocsLag`: hydrate, evaluate, start the background settle; never throws. */
 	settle: () => Promise<void>;
 	/** Resolves when no settle pass is in flight (`Substrate.docsLagIdle`). */

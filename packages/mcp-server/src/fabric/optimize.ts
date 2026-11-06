@@ -22,7 +22,7 @@ import {
 /** A hit ratio needs this many reads behind it before it is evidence rather than noise. */
 export const CACHE_MIN_READS = 50;
 /** A hit ratio below this is worth a suggestion. */
-export const CACHE_LOW_HIT_RATIO = 0.5;
+const CACHE_LOW_HIT_RATIO = 0.5;
 
 const RESOURCE_RANK: readonly string[] = [...FABRIC_RESOURCES, "railway"];
 const SEVERITY_RANK: Readonly<Record<FabricSeverity, number>> = { attention: 0, info: 1 };

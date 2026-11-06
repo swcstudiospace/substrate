@@ -88,10 +88,11 @@ Whole request, `4xx` or `5xx` with `reason` and a sentence in `error`:
 | --- | --- | --- |
 | 401 | `unauthenticated` | The caller has no authenticated surface. |
 | 403 | `vm-guest` | The server is a VM guest. |
+| 403 | `tombstone-out-of-scope` | A tombstone names a row outside the request's `scope`: its `(repo, source)` pair is not in `coverage`, or its tier is above `maxTier`. Nothing was removed. |
 | 503 | `corpus.disabled` | `SUBSTRATE_CORPUS` is not `on`. |
 | 503 | `corpus.backend-unavailable` | The docs backend is not a configured LightRAG. Nothing was sent. |
 | 503 | `corpus.index-unavailable` | There is no index, or it did not answer. |
-| 400 | `bad-request`, `bad-protocol`, `too-many-entries`, `too-many-documents`, `too-many-tombstones`, `empty-request`, `bad-scope`, `bad-repo`, `bad-path`, `bad-kind`, `bad-tier`, `bad-sha256`, `bad-bytes`, `bad-source`, `bad-commit`, `bad-body`, `duplicate-entry` | The request is malformed; nothing in it was read further or sent. A plan holds at most 20000 entries and at most 4000 coverage pairs (an empty coverage is valid: the entries are planned and nothing is tombstoned). An ingest holds at most 200 documents and 500 tombstones; it may hold tombstones only (`documents: []`), but not nothing at all (`empty-request`). |
+| 400 | `bad-request`, `bad-protocol`, `too-many-entries`, `too-many-documents`, `too-many-tombstones`, `empty-request`, `tombstone-scope-required`, `bad-scope`, `bad-repo`, `bad-path`, `bad-kind`, `bad-tier`, `bad-sha256`, `bad-bytes`, `bad-source`, `bad-commit`, `bad-body`, `duplicate-entry` | The request is malformed; nothing in it was read further or sent. A plan holds at most 20000 entries and at most 4000 coverage pairs (an empty coverage is valid: the entries are planned and nothing is tombstoned). An ingest holds at most 200 documents and 500 tombstones; it may hold tombstones only (`documents: []`), but not nothing at all (`empty-request`). A request with tombstones must carry `scope` (`{coverage, maxTier}`); without it the reason is `tombstone-scope-required`. |
 | 413 | | The body is over 6,000,000 bytes. |
 
 One document, status `refused` (never sent, never recorded; fix the file, then run again):

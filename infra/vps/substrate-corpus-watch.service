@@ -19,7 +19,7 @@ Type=simple
 EnvironmentFile=-/etc/substrate/substrate-corpus.env
 WorkingDirectory=/opt/agent-substrate/current
 # Machine-specific: `command -v bun`. The binary on this host is under /root/.local, which is why the unit still runs as root
-# (no User=) and why ProtectHome=false stays.
+# (no User=). ProtectHome=read-only makes /root unwritable and leaves that binary executable.
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts corpus watch
 Restart=on-failure
 RestartSec=30
@@ -45,13 +45,13 @@ MemoryMax=512M
 TasksMax=256
 
 # Read-only against every repository: ProtectSystem=strict makes the whole tree read-only, and ReadWritePaths opens exactly the
-# mirror and spool directories. ProtectHome=false stays only because bun lives under /root/.local; the checkouts it reads are
-# not writable for it.
+# mirror and spool directories. ProtectHome=read-only makes /root read-only as well, where this host keeps its checkouts;
+# bun under /root/.local stays executable.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/substrate/corpus-mirrors /var/lib/substrate/corpus-hints
-ProtectHome=false
+ProtectHome=read-only
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

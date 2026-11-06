@@ -15,6 +15,8 @@ import { FakeStore, makeRow, sha256Hex } from "./corpus/testkit.ts";
 import type { SearchReply } from "./docs-search.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { Substrate } from "./service.ts";
+import type { LiveSessionAuthority } from "./planning/steering-sessions-store.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
 import { defined } from "./test-support.ts";
 
 const REPO = "swcstudiospace/agent-substrate";
@@ -73,7 +75,7 @@ interface World {
 	clock: { now: number };
 }
 
-function world(env: Record<string, string>, answer: PlaneChunk[], options: { reflect?: FakeReflectStore | null } = {}): World {
+function world(env: Record<string, string>, answer: PlaneChunk[], options: { reflect?: FakeReflectStore | null; liveSessions?: LiveSessionAuthority } = {}): World {
 	const queries: string[] = [];
 	const fetch: FetchLike = async (input, init) => {
 		const url = new URL(String(input));
@@ -91,6 +93,7 @@ function world(env: Record<string, string>, answer: PlaneChunk[], options: { ref
 		lightragFetch: fetch,
 		corpus: { store },
 		...(reflect === null ? {} : { reflect }),
+		...(options.liveSessions === undefined ? {} : { steering: { history: null, liveSessions: options.liveSessions } }),
 	});
 	return { substrate, reflect: reflect ?? new FakeReflectStore(), queries, clock };
 }
@@ -234,11 +237,30 @@ describe("SUBSTRATE_DOCS_TELEMETRY", () => {
 		expect(defined(defined(built.reflect.retrievals[0], "the telemetry row").row.queryText, "the cut text")).toHaveLength(RETRIEVAL_QUERY_TEXT_CHARS);
 	});
 
-	test("an empty question writes no row", async () => {
+	test("an empty question writes one row with no text and the hash of the empty string", async () => {
 		const built = world({ SUBSTRATE_DOCS_TELEMETRY: "on" }, MIXED);
 		await ask(built, "   ");
 		await settle();
-		expect(built.reflect.retrievals).toEqual([]);
+		expect(built.reflect.retrievals).toHaveLength(1);
+		const stored = defined(built.reflect.retrievals[0], "the telemetry row").row;
+		expect(stored.queryText).toBeNull();
+		expect(stored.queryHash).toBe(createHash("sha256").update("", "utf8").digest("hex"));
+	});
+
+	test("a steering-session search writes exactly one row: no query text, only the hash of the question", async () => {
+		const liveSessions = createTestLiveSessionAuthority();
+		const caller = { surface: "omp", isOperator: false } as const;
+		const session = await issueLiveSession(liveSessions, { caller, repoId: REPO });
+		const built = world({ SUBSTRATE_DOCS_TELEMETRY: "on" }, MIXED, { liveSessions });
+		const reply = await built.substrate.searchDocs({ question: QUESTION, steering_session_id: session.sessionId }, caller.surface, { caller, sessionBinding: session.sessionBinding });
+		await settle();
+		expect(reply.degraded).toBeUndefined();
+		expect(built.reflect.retrievals).toHaveLength(1);
+		const stored = defined(built.reflect.retrievals[0], "the telemetry row").row;
+		expect(stored.queryText).toBeNull();
+		expect(stored.queryHash).toBe(createHash("sha256").update("where is the data plane described?", "utf8").digest("hex"));
+		expect(stored.surface).toBe("omp");
+		expect(JSON.stringify(stored)).not.toContain("Data Plane");
 	});
 
 	test("with the flag off nothing is written, counted or swept", async () => {

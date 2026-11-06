@@ -6,9 +6,9 @@
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { SANDBOX_IMAGE, WORKTREES_ROOT, worktreeFor } from "./sandbox-options.ts";
+import { SANDBOX_IMAGE, WORKTREES_ROOT, worktreeFor, worktreeRule, worktreeUnderRoot } from "./sandbox-options.ts";
 
-export { WORKTREES_ROOT, worktreeFor };
+export { worktreeFor };
 
 export type Route = {
 	a: "loopback" | "hostfn_proxy" | "anthropic_key";
@@ -65,7 +65,7 @@ export function parseTestsRoute(value: string): TestsRoute {
  * adapter fires its hooks (b:hooks) and the session holds MCP servers (s:mcp) — the rule 03-01
  * used for its `tracker_route=` line. Every other combination leaves the tracker writes to the host.
  */
-export type TrackerRoute = "vm_mcp" | "host";
+type TrackerRoute = "vm_mcp" | "host";
 
 export function trackerRoute(route: Route): TrackerRoute {
 	return route.b === "hooks" && route.s === "mcp" ? "vm_mcp" : "host";
@@ -74,14 +74,14 @@ export function trackerRoute(route: Route): TrackerRoute {
 /** D-12 egress allowlist (dns + tcp:443 each). Anthropic itself only on a:anthropic_key. */
 export const D12_HOSTS = ["mcp.notion.com", "mcp.linear.app", "api.greptile.com", "github.com", "api.github.com"] as const;
 
-export const SUBSTRATE_MCP_PORT = 7410;
+const SUBSTRATE_MCP_PORT = 7410;
 export const MODEL_RELAY_PORT = 3001;
 /** The host's tracker MCP proxy (notion, linear) — served and reachable only on tracker_route vm_mcp. */
 export const TRACKER_PROXY_PORT = 7412;
 export const SUBSTRATE_MCP_URL = `http://127.0.0.1:${SUBSTRATE_MCP_PORT}/mcp`;
 /** Where the session's Anthropic client connects on a:loopback (host shunt) and a:hostfn_proxy (in-VM relay). */
 export const MODEL_RELAY_URL = `http://127.0.0.1:${MODEL_RELAY_PORT}`;
-export const ANTHROPIC_DIRECT_URL = "https://api.anthropic.com";
+const ANTHROPIC_DIRECT_URL = "https://api.anthropic.com";
 
 /**
  * Host loopback ports the VM may reach (the sidecar's SSRF exemption list): only on a:loopback,
@@ -94,8 +94,8 @@ export function loopbackPorts(route: Route): number[] {
 	return ports;
 }
 
-export type PatternRule = { mode: "allow" | "deny"; operations: string[]; patterns: string[] };
-export type RulePermissions = { default: "deny"; rules: PatternRule[] };
+type PatternRule = { mode: "allow" | "deny"; operations: string[]; patterns: string[] };
+type RulePermissions = { default: "deny"; rules: PatternRule[] };
 
 export function networkPermissions(route: Route): RulePermissions {
 	const patterns: string[] = [];
@@ -128,7 +128,7 @@ export function hostFunctionPermissions(sandboxCollection: string): RulePermissi
 	};
 }
 
-export type SessionEnvInput = {
+type SessionEnvInput = {
 	route: Route;
 	model: string;
 	graphId: string;
@@ -156,10 +156,12 @@ export function sessionEnv(input: SessionEnvInput): Record<string, string> {
 	};
 }
 
-export type TestRunInput = {
+type TestRunInput = {
 	graphId: string;
-	/** Must be worktreeFor(graphId): the only tree a one-shot test container may see. */
+	/** Must be <root>/<graphId> for a configured root (the graph's bound worktree): the only tree a one-shot test container may see. */
 	worktree: string;
+	/** The host's configured worktree roots; unset is the default root alone. */
+	worktreeRoots?: readonly string[] | undefined;
 	/** The graph repo checkout's node_modules, bound read-only; null when the checkout has none. */
 	nodeModules: string | null;
 	/** Worktree-relative *.test.ts files, at most 8. */
@@ -167,7 +169,7 @@ export type TestRunInput = {
 };
 
 export const TEST_RUN_LABEL = "substrate.test_run";
-export const TEST_RUN_MAX_PATHS = 8;
+const TEST_RUN_MAX_PATHS = 8;
 
 /**
  * tests_route oneshot (T-03-04-06): one network-less container over a read-only worktree, no
@@ -176,7 +178,8 @@ export const TEST_RUN_MAX_PATHS = 8;
  */
 export function testRunArgv(input: TestRunInput): string[] {
 	const { graphId, worktree, nodeModules, paths } = input;
-	if (worktree !== worktreeFor(graphId)) throw new Error(`worktree must be ${worktreeFor(graphId)}`);
+	const roots = input.worktreeRoots ?? [WORKTREES_ROOT];
+	if (!worktreeUnderRoot(graphId, worktree, roots)) throw new Error(worktreeRule(graphId, roots));
 	if (paths.length === 0) throw new Error("at least one test path is required");
 	if (paths.length > TEST_RUN_MAX_PATHS) throw new Error(`at most ${TEST_RUN_MAX_PATHS} test paths per run`);
 	for (const path of paths) {
@@ -272,7 +275,7 @@ export function libraryCopyPlan(input: { libraryDir: string; files: readonly str
 }
 
 /** The slice of rivet's `vm.filesystem` the copy uses (structural: no rivet import). */
-export type LibraryCopyTarget = {
+type LibraryCopyTarget = {
 	readFile(path: string): Promise<Uint8Array>;
 	writeFile(path: string, content: string | Uint8Array): Promise<void>;
 	writeFiles(entries: { path: string; content: Uint8Array }[]): Promise<{ path: string; success: boolean; error?: string }[]>;

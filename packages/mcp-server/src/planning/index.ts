@@ -28,11 +28,11 @@ import { parseFrontmatter } from "../skills/frontmatter.ts";
 import type { PlanningSnapshot } from "./diff.ts";
 import { composePosition, parseRoadmapPart, parseStatePart, type PartOutcome, type PositionError, type PositionResult, type RoadmapPart, type StatePart } from "./position.ts";
 
-export const PLANNING_DIR = ".planning";
+const PLANNING_DIR = ".planning";
 
 export type PlanningKind = "roadmap" | "state" | "project" | "config" | "milestone" | "phase";
 
-export type PlanningRecordErrorCode = "outside-root" | "too-large" | "unreadable" | "malformed-frontmatter";
+type PlanningRecordErrorCode = "outside-root" | "too-large" | "unreadable" | "malformed-frontmatter";
 
 /** A described document, as a record view shows it: its path facts and the size and frontmatter of its content. */
 export interface PlanningFileRecord {
@@ -45,7 +45,7 @@ export interface PlanningFileRecord {
 	frontmatter?: Record<string, unknown>;
 }
 
-export interface PlanningErrorRecord {
+interface PlanningErrorRecord {
 	path: string;
 	kind?: PlanningKind;
 	/** Null when the document was never read, or when it could not be hashed. */
@@ -61,7 +61,7 @@ export function isErrorRecord(record: PlanningRecord): record is PlanningErrorRe
 }
 
 /** The facts of one content, held under its sha256 in `PlanningIndex.contents`. */
-export interface PlanningContent {
+interface PlanningContent {
 	bytes: number;
 	/** Parsed from the text when the text opens with a `---` fence. Absent otherwise. */
 	frontmatter?: Record<string, unknown>;
@@ -70,7 +70,7 @@ export interface PlanningContent {
 }
 
 /** One described document, held under its path in `PlanningIndex.documents`. */
-export interface PlanningDocument {
+interface PlanningDocument {
 	kind: PlanningKind;
 	/** The key of the document's content in `PlanningIndex.contents`. */
 	sha256: string;
@@ -81,13 +81,13 @@ export interface PlanningDocument {
 }
 
 /** A parsed position part and the sha256 of the bytes it came from, so an unchanged document keeps its part. */
-export interface PositionPartEntry<T> {
+interface PositionPartEntry<T> {
 	outcome: PartOutcome<T>;
 	sha256: string;
 }
 
 /** The parsed position parts of the two documents the position reads. Fields only, never text; see `position.ts`. */
-export interface PositionParts {
+interface PositionParts {
 	roadmap?: PositionPartEntry<RoadmapPart>;
 	state?: PositionPartEntry<StatePart>;
 }
@@ -152,7 +152,7 @@ export interface PlanningFs {
 	sha256(bytes: Uint8Array): string;
 }
 
-export interface PlanningIndexDeps {
+interface PlanningIndexDeps {
 	fs: PlanningFs;
 	limits: { maxFiles: number; maxBytes: number };
 }
@@ -224,7 +224,7 @@ type Described =
 	| { ok: true; document: PlanningDocument; sha256: string; bytes: number; frontmatter: Record<string, unknown> | undefined; part: PositionPart | null }
 	| { ok: false; record: PlanningErrorRecord };
 
-export type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
+type Frontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
 
 /** The full rebuild of `<root>/.planning`. The root must be absolute; the config layer guarantees it. */
 export async function buildPlanningIndex(root: string, deps: PlanningIndexDeps): Promise<PlanningIndexResult> {

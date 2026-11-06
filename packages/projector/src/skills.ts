@@ -117,20 +117,20 @@ export const ROOTS: readonly Root[] = [
 	},
 ];
 export const LIBRARY_DIR = "/root/agent-skills";
-export const EXPORTS_DIR = "/root/.openclaw/workspace/projects/docs-scraper/data/exports/skills";
-export const BACKUP_ROOT = "/var/lib/substrate/phase4-baseline/projector";
-export const WARNED_STATE = "/var/lib/substrate/skills/projector-warned.json";
+const EXPORTS_DIR = "/root/.openclaw/workspace/projects/docs-scraper/data/exports/skills";
+const BACKUP_ROOT = "/var/lib/substrate/phase4-baseline/projector";
+const WARNED_STATE = "/var/lib/substrate/skills/projector-warned.json";
 const TMP_SUFFIX = ".substrate-tmp";
 const OLD_SUFFIX = ".substrate-old";
 const SUBSTRATE_URL = (process.env.SUBSTRATE_URL ?? "http://127.0.0.1:7410").replace(/\/+$/, "");
 
-export type Entry = { type: "link"; target: string } | { type: "dir" } | { type: "other" };
-export interface Inventory {
+type Entry = { type: "link"; target: string } | { type: "dir" } | { type: "other" };
+interface Inventory {
 	root: Root;
 	exists: boolean;
 	entries: Map<string, Entry>;
 }
-export type SkipReason = "real-dir-differs" | "foreign-link" | "stray-real-dir";
+type SkipReason = "real-dir-differs" | "foreign-link" | "stray-real-dir";
 export type Action =
 	| { kind: "link-new"; root: Root; name: string; target: string }
 	| { kind: "repoint"; root: Root; name: string; target: string; from: string }
@@ -147,7 +147,7 @@ export interface ApplyContext {
 	log: (line: string) => void;
 	emitWarning: EmitWarning;
 }
-export interface ApplyResult {
+interface ApplyResult {
 	actions: number;
 	warnings: number;
 }
@@ -257,6 +257,7 @@ function readWarned(file: string): Record<string, string> {
 		const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
 	} catch {
+		// An unreadable or unparseable warned-state file reads as empty: warnings may be sent again.
 		return {};
 	}
 }
@@ -423,7 +424,9 @@ export async function postWarning(event: WarningEvent, env: NodeJS.ProcessEnv = 
 			signal: AbortSignal.timeout(3000),
 		});
 		return response.ok;
-	} catch {
+	} catch (cause) {
+		const code = (cause as { code?: unknown } | null)?.code;
+		process.stderr.write(`[projector] warning post failed (${String(code ?? "none")})\n`);
 		return false;
 	}
 }

@@ -230,6 +230,7 @@ function world(
 	options.config?.(config);
 	const substrate = new Substrate(config, {
 		index: options.noIndex ? null : (registry as never),
+		steering: { history: null, liveSessions: null },
 		greptime: greptime as never,
 		skills: proposer,
 		skillRun: run,
@@ -1046,7 +1047,7 @@ describe("the REST doors", () => {
 		// The service the doors serve is the world's own stores under this config.
 		const substrate = new Substrate(
 			config,
-			{ index: w.registry as never, greptime: { ensureAppendMode: async () => true, lastHash: async () => null, insertEvent: async (event: SubstrateEvent) => void w.events.push(event) } as never, skillRun: async (argv) => {
+			{ index: w.registry as never, steering: { history: null, liveSessions: null }, greptime: { ensureAppendMode: async () => true, lastHash: async () => null, insertEvent: async (event: SubstrateEvent) => void w.events.push(event) } as never, skillRun: async (argv) => {
 				w.gh.push([...argv]);
 				return { code: 0, stdout: ghView(), stderr: "" };
 			} },

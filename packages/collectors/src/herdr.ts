@@ -25,13 +25,13 @@ import {
 	type TransitionOutcome,
 } from "./herdr-state.ts";
 
-export const POLL_MS = 5000;
-export const DEBOUNCE_MS = 150;
+const POLL_MS = 5000;
+const DEBOUNCE_MS = 150;
 const CALL_TIMEOUT_MS = 5000;
 const JOURNAL_INTERVAL_MS = 60_000;
 
 /** Repo and branch for a pane, from its working directory. Runs Git: call it only where a transition needs it. */
-export function attributePane(pane: HerdrPane): { repo?: string | undefined; branch?: string | undefined } {
+function attributePane(pane: HerdrPane): { repo?: string | undefined; branch?: string | undefined } {
 	const cwd = pane.cwd ?? pane.foreground_cwd;
 	if (!cwd) return {};
 	return { repo: repoSlug(cwd), branch: branchFor(cwd) };
@@ -46,7 +46,7 @@ export const GLOBAL_SUBSCRIPTIONS = [
 ] as const;
 
 /** The only per-pane subscription. `pane.output_matched` is intentionally absent. */
-export function paneSubscription(paneId: string): [{ type: "pane.agent_status_changed"; pane_id: string }] {
+function paneSubscription(paneId: string): [{ type: "pane.agent_status_changed"; pane_id: string }] {
 	return [{ type: "pane.agent_status_changed", pane_id: paneId }];
 }
 
@@ -65,7 +65,7 @@ export function resolveSocketPath(argv: readonly string[], env: NodeJS.ProcessEn
 }
 
 /** Split newline-delimited JSON off a growing buffer. */
-export function makeLineReader(onLine: (line: string) => void): (chunk: Buffer | string) => void {
+function makeLineReader(onLine: (line: string) => void): (chunk: Buffer | string) => void {
 	let buf = "";
 	return (chunk) => {
 		buf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
@@ -98,7 +98,7 @@ interface RpcMessage {
 	data?: unknown;
 }
 
-export interface HerdrCollectorOptions {
+interface HerdrCollectorOptions {
 	socketPath: string;
 	statePath: string;
 	debounceMs?: number;
@@ -220,7 +220,7 @@ export class HerdrCollector {
 		this.drainTimer = setInterval(() => {
 			if (this.stopped || this.draining) return;
 			this.draining = drain()
-				.catch(() => undefined)
+				.catch((cause: unknown) => this.journal(`spool drain failed (${String((cause as { code?: unknown } | null)?.code ?? "none")})`))
 				.finally(() => {
 					this.draining = null;
 				});
@@ -341,6 +341,7 @@ export class HerdrCollector {
 			try {
 				msg = JSON.parse(line) as RpcMessage;
 			} catch {
+				this.journal(`malformed ${method} reply dropped`);
 				return;
 			}
 			if (msg.id !== id) return;
@@ -411,6 +412,7 @@ export class HerdrCollector {
 			try {
 				msg = JSON.parse(line) as RpcMessage;
 			} catch {
+				this.journal("malformed subscription reply dropped");
 				return;
 			}
 			if (msg.error) {

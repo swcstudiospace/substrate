@@ -20,6 +20,7 @@
 import { spawn as spawnProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createInterface } from "node:readline";
+import { errorLabel } from "./error-label.ts";
 import { TRACKER_PROXY_PORT } from "./options.ts";
 
 export const TRACKERS = ["notion", "linear"] as const;
@@ -27,11 +28,11 @@ export type Tracker = (typeof TRACKERS)[number];
 
 /** Same bound as api.ts: one MCP message is never near it. */
 export const MAX_BODY_BYTES = 1_000_000;
-export const DEFAULT_TIMEOUT_MS = 120_000;
-export const DEFAULT_ULTRATHINK_MCP = "/root/.claude/plugins/cache/ultrathink/ultrathink/0.3.0/bin/ultrathink-mcp";
+const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_ULTRATHINK_MCP = "/root/.claude/plugins/cache/ultrathink/ultrathink/0.3.0/bin/ultrathink-mcp";
 
 /** JSON-RPC error the guards answer with; the message names the only path to Done. */
-export const REFUSED_CODE = -32001;
+const REFUSED_CODE = -32001;
 
 const LINEAR_STATE_KEYS = ["state", "stateId", "statusId"];
 const NOTION_TERMINAL_STATUS = ["merged", "done", "failed", "blocked"];
@@ -101,12 +102,12 @@ export type TrackerChild = {
 	kill(): void;
 };
 
-export type SpawnTrackerChild = (tracker: Tracker) => TrackerChild;
+type SpawnTrackerChild = (tracker: Tracker) => TrackerChild;
 
-export type JsonRpcId = string | number;
-export type JsonRpcMessage = { jsonrpc?: unknown; id?: JsonRpcId | null; method?: unknown; params?: unknown; [key: string]: unknown };
+type JsonRpcId = string | number;
+type JsonRpcMessage = { jsonrpc?: unknown; id?: JsonRpcId | null; method?: unknown; params?: unknown; [key: string]: unknown };
 
-export class BridgeError extends Error {
+class BridgeError extends Error {
 	status: number;
 	constructor(status: number, message: string) {
 		super(message);
@@ -121,7 +122,7 @@ function idKey(id: JsonRpcId): string {
 	return typeof id === "number" ? `n:${id}` : `s:${id}`;
 }
 
-export type StdioBridgeOptions = { spawn: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number | undefined };
+type StdioBridgeOptions = { spawn: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number | undefined };
 
 /**
  * Lazy single child per tracker, pending replies matched by JSON-RPC id, respawn after exit. A
@@ -219,7 +220,7 @@ export class StdioBridge {
  * path), HOME=/root so bin/run-bun finds bun and the relay finds the host's login store; stdin and
  * stdout piped, stderr ignored (it may name the account). No shell.
  */
-export function spawnUltrathinkMcp(tracker: Tracker): TrackerChild {
+function spawnUltrathinkMcp(tracker: Tracker): TrackerChild {
 	const bin = process.env.SUBSTRATE_ULTRATHINK_MCP?.trim() || DEFAULT_ULTRATHINK_MCP;
 	const child = spawnProcess(bin, ["serve", tracker], {
 		env: { HOME: "/root", PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" },
@@ -243,7 +244,7 @@ export function spawnUltrathinkMcp(tracker: Tracker): TrackerChild {
 	};
 }
 
-export type TrackerProxyOptions = { spawn?: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number | undefined };
+type TrackerProxyOptions = { spawn?: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number | undefined };
 
 type Body = { ok: true; text: string } | { ok: false; status: 413 };
 
@@ -294,7 +295,14 @@ export function createTrackerProxy(options: TrackerProxyOptions): Server {
 			res.end(JSON.stringify({ error: "POST only" }));
 			return;
 		}
-		const body = await readBody(req);
+		let body: Body;
+		try {
+			body = await readBody(req);
+		} catch (cause) {
+			process.stderr.write(`[substrate-host] host.mcp-proxy.body ${errorLabel(cause)}\n`);
+			sendJson(res, 400, rpcError(null, -32600, "Invalid Request"));
+			return;
+		}
 		if (!body.ok) {
 			res.writeHead(413, { "content-type": "application/json", connection: "close" });
 			res.end(JSON.stringify({ error: "request body too large" }));
@@ -348,7 +356,7 @@ export function createTrackerProxy(options: TrackerProxyOptions): Server {
 	return server;
 }
 
-export type StartTrackerProxyOptions = TrackerProxyOptions & {
+type StartTrackerProxyOptions = TrackerProxyOptions & {
 	/** Injected by the test to assert the bind address; defaults to server.listen. */
 	listen?: (server: Server, port: number, host: string, cb: () => void) => void;
 };

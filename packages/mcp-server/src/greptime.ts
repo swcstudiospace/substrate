@@ -25,7 +25,7 @@
 import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import { DEFAULT_LEDGER_SETTINGS, isGreptimeDuration, type GreptimeConfig, type LedgerSettings } from "./config.ts";
 import { redact, redactKnown } from "./redact.ts";
-import { IDEMPOTENCY_KEY_PATTERN, IDEMPOTENCY_PAYLOAD_KEY } from "./event.ts";
+import { IDEMPOTENCY_KEY_PATTERN, IDEMPOTENCY_PAYLOAD_KEY, type StoredLeaf } from "./event.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { HOUR_MS, hourEnd, hourIso, hourStart, isClosed } from "@substrate/ledger";
 import { DEFAULT_METRICS_HISTORY_TTL, parseMetricsHistoryTtl } from "./config.ts";
@@ -75,7 +75,7 @@ export function sqlOp(statement: string): "select" | "insert" | "show" | "create
 	return verb === "select" || verb === "insert" || verb === "show" || verb === "create" || verb === "alter" ? verb : "other";
 }
 
-export interface GreptimeClientOptions {
+interface GreptimeClientOptions {
 	timeoutMs?: number;
 	clock?: () => number;
 	/** The ledger's plane gate; null runs every call unwrapped, as before breakers existed. */
@@ -149,7 +149,7 @@ export const EVENT_COLUMNS = [
 ] as const satisfies ReadonlyArray<keyof SubstrateEvent>;
 
 /** `"ts", "id", …` — the column list as SQL, quoted because Greptime reserves `id`. */
-export const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).join(", ");
+const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).join(", ");
 
 /**
  * Columns a caller may narrow a ledger read by.
@@ -159,7 +159,7 @@ export const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).jo
  * reach another table or add a clause of its own. What a caller supplies is only
  * ever a *value*, and every value goes through {@link quote}.
  */
-export const QUERYABLE_COLUMNS = [
+const QUERYABLE_COLUMNS = [
 	"session_id",
 	"graph_id",
 	"node_id",
@@ -244,7 +244,7 @@ export interface LedgerProbe {
 }
 
 /** One table's share of the ledger, from `information_schema.region_statistics`. */
-export interface LedgerTableCapacity {
+interface LedgerTableCapacity {
 	name: string;
 	rows: number;
 	diskBytes: number;
@@ -260,8 +260,8 @@ export interface LedgerCapacity {
 }
 
 /** Tables whose TTL `SUBSTRATE_LEDGER_TTL` governs — the two the retention policy names, and only these. */
-export const TTL_TABLES = ["agent_events", "event_ingest"] as const;
-export type TtlTable = (typeof TTL_TABLES)[number];
+const TTL_TABLES = ["agent_events", "event_ingest"] as const;
+type TtlTable = (typeof TTL_TABLES)[number];
 
 /**
  * Upper bound on the ids one batched hour-read statement carries.
@@ -513,6 +513,20 @@ export interface NewAnchor {
 	anchored_at: string;
 }
 
+/** One row of `graph_chain_leaves`: an event's place in its (graph, session) chain for one hour (D73-02). */
+export interface GraphChainLeafRow {
+	period_start: string;
+	graph_id: string;
+	session_id: string;
+	/** Position in chain order, from 0. */
+	seq: number;
+	event_id: string;
+	hash: string;
+}
+
+/** Leaf rows one `graph_chain_leaves` INSERT carries. */
+const LEAF_INSERT_BATCH = 500;
+
 /** The SELECT list every anchors read uses, in DDL column order. */
 const ANCHOR_COLUMNS =
 	`"period_start", "period_end", "root", "event_count", "memo", "tx_sig", ` +
@@ -548,7 +562,7 @@ function parseAnchorRow(row: Record<string, unknown>): AnchorRow {
  *
  * Epoch milliseconds, parsed the same way as every other TIMESTAMP cell.
  */
-export interface GraphIngestRecord {
+interface GraphIngestRecord {
 	event_id: string;
 	event_ts: number;
 	ingested_at: number;
@@ -561,7 +575,7 @@ export interface GraphIngestRecord {
  * gaps are `substrate verify`'s `unanchored`, and a coverage read must stay
  * one bounded statement rather than a scan of the whole ingest history.
  */
-export const COVERAGE_LOOKBACK_MS = 7 * 24 * HOUR_MS;
+const COVERAGE_LOOKBACK_MS = 7 * 24 * HOUR_MS;
 
 /** Uncovered hours one coverage report lists; beyond this `more` is set and the oldest are dropped. */
 export const COVERAGE_MAX_UNCOVERED = 48;
@@ -572,7 +586,7 @@ export const COVERAGE_MAX_UNCOVERED = 48;
  * hourly anchor timer has had its tick. The steady-state lag is therefore 1,
  * never 0 — the current hour cannot be anchored yet.
  */
-export const COVERAGE_ELIGIBLE_AGE_MS = HOUR_MS;
+const COVERAGE_ELIGIBLE_AGE_MS = HOUR_MS;
 
 /**
  * How far back `anchorCoverage` looks for the newest `ledger archive` note.
@@ -580,7 +594,7 @@ export const COVERAGE_ELIGIBLE_AGE_MS = HOUR_MS;
  * archive written before a TTL was switched on is still found; bounded, so the
  * read never scans the whole `substrate`/`note` series.
  */
-export const ARCHIVE_NOTE_LOOKBACK_MS = 400 * 24 * HOUR_MS;
+const ARCHIVE_NOTE_LOOKBACK_MS = 400 * 24 * HOUR_MS;
 
 /** The `summary` prefix every archive note carries; `anchorCoverage` reads the newest by it. */
 export const ARCHIVE_NOTE_PREFIX = "ledger archive ";
@@ -590,7 +604,7 @@ export const ARCHIVE_NOTE_PREFIX = "ledger archive ";
  * refuses to archive, see `GreptimeClient.readExportIngest`): ~100 MB of
  * entries, inside the archive unit's 512M ceiling.
  */
-export const EXPORT_INGEST_CAP = 500_000;
+const EXPORT_INGEST_CAP = 500_000;
 
 /**
  * How far before the first ingest read of an export window the fallback lookup
@@ -635,7 +649,7 @@ export interface ExportWindowQuery {
 }
 
 /** One event's first ingest record, ISO-stamped for the archive file. */
-export interface ExportIngestRow {
+interface ExportIngestRow {
 	event_id: string;
 	ingested_at: string;
 	event_ts: string;
@@ -899,21 +913,27 @@ export class GreptimeClient {
 			throw new GreptimeError(`greptime ${status}: ${this.clippedBody(text, 500)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 500)) });
 		}
 
-		let body: GreptimeResponse;
+		let parsed: unknown;
 		try {
-			body = JSON.parse(text) as GreptimeResponse;
+			parsed = JSON.parse(text);
 		} catch {
 			throw new GreptimeError(`greptime returned non-JSON: ${this.clippedBody(text, 200)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 200)) });
 		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new GreptimeError("greptime returned a non-object body");
+		}
+		const body = parsed as GreptimeResponse;
 		if (body.error) {
 			const reported = `greptime: ${body.error}`;
 			throw new GreptimeError(this.scrub(reported), { missingTable: MISSING_TABLE.test(reported) });
 		}
 
 		const records = body.output?.[0]?.records;
-		if (!records?.rows) return [];
-		const columns = records.schema?.column_schemas?.map((c) => c.name) ?? [];
-		return records.rows.map((row) => {
+		const rows = records?.rows;
+		if (rows === undefined || rows === null) return [];
+		if (!Array.isArray(rows)) throw new GreptimeError("greptime returned records.rows that is not an array");
+		const columns = records?.schema?.column_schemas?.map((c) => c.name) ?? [];
+		return rows.map((row) => {
 			const out: Record<string, unknown> = {};
 			columns.forEach((name, i) => {
 				out[name] = row[i];
@@ -1000,6 +1020,17 @@ export class GreptimeClient {
 			// the time index alone, so two events ingested in the same millisecond
 			// would silently lose a record. A warning is cheaper than that loss.
 			warnings.push(`event_ingest not created in append_mode: ${String(cause)}`);
+		}
+
+		// Chain leaves of each closed hour (D73-02), read back by the heads check. Append-only, as the
+		// ledger requires: without append_mode two leaves that share a period and a timestamp would be
+		// merged. No plain-CREATE fallback, for the same reason as event_ingest above.
+		try {
+			await this.sql(
+				`CREATE TABLE IF NOT EXISTS "graph_chain_leaves" ("period_start" TIMESTAMP TIME INDEX, "graph_id" STRING, "session_id" STRING, "seq" BIGINT, "event_id" STRING, "hash" STRING) WITH ('append_mode' = 'true')`,
+			);
+		} catch (cause) {
+			warnings.push(`graph_chain_leaves not created in append_mode: ${String(cause)}`);
 		}
 
 		await this.sql(`
@@ -1214,7 +1245,13 @@ export class GreptimeClient {
 		return /append_mode'?\s*=\s*'?true/i.test(ddl);
 	}
 
-	async insertEvent(event: SubstrateEvent): Promise<void> {
+	/**
+	 * Store one event's row and its ingest record. With `mayExist`, a row this event already stored is not stored again:
+	 * an earlier attempt may have landed the row and lost its reply (a timeout is not a refusal), and a retry that inserted
+	 * again would be a second row for one event. The row stands; only its ingest record may be missing, and that is repaired.
+	 * The buffer's retries pass `mayExist`; the direct write does not, so it adds no read.
+	 */
+	async insertEvent(event: SubstrateEvent, options: { mayExist?: boolean } = {}): Promise<void> {
 		// Retried until it succeeds, because until the dialect is known a backslash
 		// cannot be quoted safely. The probe is one small SELECT and its answer is
 		// cached for the process.
@@ -1227,6 +1264,19 @@ export class GreptimeClient {
 			throw new GreptimeError(
 				"refusing to append an event containing a backslash before the server's quoting dialect is known",
 			);
+		}
+		if (options.mayExist === true && (await this.eventRowPresent(event))) {
+			if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
+			// The row stands. A membership read that fails leaves only its ingest unconfirmed, which is what `IngestNotRecorded` reports:
+			// the event is stored, and a buffered retry must not count it as a failed write.
+			let membership: unknown;
+			try {
+				membership = await this.cursorPosition(event.id);
+			} catch (cause) {
+				throw new IngestNotRecorded(event.id, cause);
+			}
+			if (membership === null) await this.recordIngest(event);
+			return;
 		}
 		const cell = (column: (typeof EVENT_COLUMNS)[number]): string => {
 			if (column === "payload") return this.q(JSON.stringify(event.payload));
@@ -1249,6 +1299,22 @@ export class GreptimeClient {
 
 		// The ingest record goes second: it must never name an event that does not exist.
 		await this.recordIngest(event);
+	}
+
+	/** Whether this event's row is already in `agent_events`, looked up inside its cell so the read stays bounded (see `findByIdempotencyKey`). */
+	private async eventRowPresent(event: SubstrateEvent): Promise<boolean> {
+		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE ${this.cellWhere(event)} AND "id" = ${this.q(event.id)} LIMIT 1`);
+		return rows.length > 0;
+	}
+
+	/** The predicate that names one event's cell: the columns a replay lookup and a presence check both key on, with `ts` exact. */
+	private cellWhere(cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind" | "ts">): string {
+		const equals = (column: "surface" | "repo" | "graph_id" | "kind", value: string | null): string =>
+			value === null ? `"${column}" IS NULL` : `"${column}" = ${this.q(value)}`;
+		return (
+			`${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} AND ${equals("graph_id", cell.graph_id)} ` +
+			`AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)}`
+		);
 	}
 
 	/**
@@ -1363,12 +1429,8 @@ export class GreptimeClient {
 			// safely, so a lookup could silently miss the row the original attempt stored.
 			throw new GreptimeError("refusing an idempotency lookup on a value containing a backslash before the server's quoting dialect is known");
 		}
-		const equals = (column: "surface" | "repo" | "graph_id" | "kind", value: string | null): string =>
-			value === null ? `"${column}" IS NULL` : `"${column}" = ${this.q(value)}`;
 		const suffix = `"${IDEMPOTENCY_PAYLOAD_KEY}":"${key}"}`;
-		const cellWhere =
-			`${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} AND ${equals("graph_id", cell.graph_id)} ` +
-			`AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)}`;
+		const cellWhere = this.cellWhere(cell);
 		let after: string | null = null;
 		for (let page = 0; page < IDEMPOTENCY_LOOKUP_MAX_PAGES; page++) {
 			const rows = await this.sql(
@@ -1771,6 +1833,57 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * Write one hour's chain leaves (D73-02): one row per event, at its place in its (graph, session)
+	 * chain. Append-only, like every ledger write. The anchor job calls this before the anchors row, so no
+	 * anchors row exists for an hour whose leaves were not stored.
+	 */
+	async insertGraphChainLeaves(rows: readonly GraphChainLeafRow[]): Promise<void> {
+		const v = (value: string | number): string => this.q(value);
+		for (let i = 0; i < rows.length; i += LEAF_INSERT_BATCH) {
+			const values = rows
+				.slice(i, i + LEAF_INSERT_BATCH)
+				.map((row) => `(${v(row.period_start)}, ${v(row.graph_id)}, ${v(row.session_id)}, ${v(row.seq)}, ${v(row.event_id)}, ${v(row.hash)})`)
+				.join(", ");
+			await this.sql(
+				`INSERT INTO "graph_chain_leaves" ("period_start", "graph_id", "session_id", "seq", "event_id", "hash") VALUES ${values}`,
+			);
+		}
+	}
+
+	/**
+	 * Every stored chain leaf of one hour, across graphs, in the order the table returns them. The verifier orders and dedupes
+	 * them; nothing here decides which rows count (D73-03, D73-04).
+	 */
+	async hourChainLeaves(periodStartMs: number): Promise<StoredLeaf[]> {
+		const rows = await this.sql(
+			`SELECT "graph_id", "session_id", "seq", "event_id", "hash" FROM "graph_chain_leaves" ` +
+				`WHERE "period_start" = ${this.q(new Date(periodStartMs).toISOString())}`,
+		);
+		return rows.map((row) => ({
+			graph_id: row.graph_id === null || row.graph_id === undefined ? "" : String(row.graph_id),
+			session_id: row.session_id === null || row.session_id === undefined ? "" : String(row.session_id),
+			seq: Number(row.seq),
+			event_id: String(row.event_id),
+			hash: String(row.hash),
+		}));
+	}
+
+	/**
+	 * The distinct hours that hold one graph's chain leaves, ascending. Verify reads these as well as the event and ingest rows, so an
+	 * hour whose rows were deleted but whose leaves remain is still checked. Quoted by the stored graph id, as every graph read is.
+	 */
+	async graphChainLeafHours(storedGraphId: string): Promise<number[]> {
+		const rows = await this.sql(`SELECT DISTINCT "period_start" FROM "graph_chain_leaves" WHERE "graph_id" = ${this.q(storedGraphId)}`);
+		return rows
+			.map((row) => {
+				const at = epochMs(row.period_start);
+				if (!Number.isFinite(at)) throw new GreptimeError(`a chain leaf of ${storedGraphId} has a period that is not a number`);
+				return at;
+			})
+			.sort((a, b) => a - b);
+	}
+
+	/**
 	 * The hour of the earliest `event_ingest` record — the coverage start.
 	 *
 	 * No hour before this is ever anchored (D28-05): the deploy hour is
@@ -1783,6 +1896,18 @@ export class GreptimeClient {
 		if (rows.length === 0) return null;
 		const at = epochMs(rows[0]?.ingested_at);
 		return Number.isFinite(at) ? at : null;
+	}
+
+	/**
+	 * The distinct graphs with an `event_ingest` record at or after `sinceMs`. An hour's members are its ingest records, so this covers
+	 * every graph an hour from `sinceMs` on can hold a pointer for: the adoption window (anchor.ts) counts the job key's signatures over
+	 * the lookback with it. Read-only, one DISTINCT column; a graph with no records in those hours only widens the window.
+	 */
+	async lookbackGraphCount(sinceMs: number): Promise<number> {
+		const rows = await this.sql(
+			`SELECT DISTINCT "graph_id" FROM "event_ingest" WHERE "ingested_at" >= ${this.q(new Date(sinceMs).toISOString())} AND "graph_id" IS NOT NULL`,
+		);
+		return rows.length;
 	}
 
 	/**
@@ -1870,6 +1995,7 @@ export class GreptimeClient {
 			await this.sql("SELECT 1", timeoutMs, "ping");
 			return true;
 		} catch {
+			// Any failure, a timeout included, is false: /healthz reports the boolean, and the cause is not kept.
 			return false;
 		}
 	}
@@ -2107,6 +2233,7 @@ export class GreptimeClient {
 	 */
 	async exportWindow(query: ExportWindowQuery): Promise<ExportPage> {
 		const { fromMs, toMs } = assertIsoWindow(query.from, query.to);
+		// A failed probe leaves the safe default in place, as probeDialect states; the read goes on without it.
 		await this.probeDialect().catch(() => undefined);
 		const at = (ms: number): string => this.q(new Date(ms).toISOString());
 		const limit = queryLimit(query.limit);
@@ -2451,7 +2578,7 @@ export interface MetricWriteResult {
 	drops: Partial<Record<MetricDropReason, number>>;
 }
 
-export interface MetricHistoryQuery {
+interface MetricHistoryQuery {
 	series: string;
 	fromMs: number;
 	toMs: number;
@@ -2469,7 +2596,7 @@ export interface MetricHistoryPoint {
 }
 
 /** What a readback returns: the points, oldest first, and the step the read actually ran at. */
-export interface MetricHistoryResult {
+interface MetricHistoryResult {
 	points: MetricHistoryPoint[];
 	stepS: number;
 }
@@ -2478,7 +2605,7 @@ export interface MetricHistoryResult {
 export class MetricHistoryInputError extends GreptimeError {}
 
 /** The live `metric_samples` table is not in append_mode; only an operator can fix it (drop and recreate). */
-export class MetricSamplesSchemaError extends GreptimeError {}
+class MetricSamplesSchemaError extends GreptimeError {}
 
 /** The labels JSON of a row that may be stored, or `null`: outside the allow-list, or a number the column cannot hold. */
 function validMetricRow(row: MetricSampleRow): string | null {

@@ -40,7 +40,7 @@ export interface NotionRow {
 	"PR URL"?: string | null;
 }
 
-export interface GraphPlan {
+interface GraphPlan {
 	graph_id: string;
 	notion_task_page?: string | null;
 	repo?: string | null;

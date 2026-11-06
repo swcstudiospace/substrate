@@ -11,11 +11,13 @@ import pytest
 from substrate_dispatcher.worktree import (
     DEFAULT_MIN_FREE_GB,
     MIN_FREE_ENV,
+    ROOTS_ENV,
     WorktreeRefused,
     ensure_worktree,
     min_free_bytes,
     repo_checkout,
     validate_graph_id,
+    worktree_roots,
 )
 
 MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
@@ -168,7 +170,7 @@ def test_ensure_worktree_disk_floor(repo: Path, tmp_path: Path, free, refused):
         return subprocess.run(argv, **kwargs)
 
     def usage(path: str) -> Usage:
-        assert path == "/"
+        assert path == str(tmp_path)
         return Usage(100 * 1024**3, 0, free)
 
     root = tmp_path / "wt"
@@ -213,3 +215,106 @@ def test_ensure_worktree_floor_follows_env(repo: Path, tmp_path: Path, monkeypat
     assert err.value.marker == "low-disk"
     assert "20 GB" in str(err.value)
     assert calls == []
+
+
+def test_ensure_worktree_reads_free_space_where_the_worktree_goes(repo: Path, tmp_path: Path):
+    probed: list[str] = []
+
+    def probe(path: str) -> Usage:
+        probed.append(path)
+        return PLENTY
+
+    ensure_worktree(repo, GID, "main", root=tmp_path / "not-yet" / "wt", run=Recorder(), disk_usage=probe)
+
+    assert probed == [str(tmp_path)]
+
+
+def test_low_disk_refusal_names_the_filesystem_it_checked(repo: Path, tmp_path: Path):
+    low = Usage(100 * 1024**3, 99 * 1024**3, 1 * 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=tmp_path / "wt", run=Recorder(), disk_usage=lambda _path: low)
+
+    assert err.value.marker == "low-disk"
+    assert f"free on {tmp_path};" in str(err.value)
+
+
+def test_ensure_worktree_creates_under_the_configured_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    configured = tmp_path / "configured"
+    monkeypatch.setenv("SUBSTRATE_WORKTREE_ROOTS", str(configured))
+    repo = tmp_path / "repo"
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[3:5] == ["worktree", "list"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[3] == "rev-parse":
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == configured / GID
+    assert [c for c in calls if c[3:5] == ["worktree", "add"]] == [
+        ["git", "-C", str(repo), "worktree", "add", "-b", f"substrate/{GID}", str(configured / GID), "HEAD"]
+    ]
+
+
+def test_ensure_worktree_reuses_a_registered_worktree_under_the_second_root(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    second.mkdir()
+    monkeypatch.setenv("SUBSTRATE_WORKTREE_ROOTS", f"{first}:{second}")
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(second / GID), "main")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == second / GID
+    assert run.adds() == []
+    assert not first.exists()
+    assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
+
+
+def test_ensure_worktree_refuses_a_configured_root_entry_that_resolves_outside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (configured / GID).symlink_to(outside / GID)
+    monkeypatch.setenv("SUBSTRATE_WORKTREE_ROOTS", str(configured))
+
+    def run(argv, **kwargs):
+        raise AssertionError(f"git must not run for a refused path: {argv}")
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(tmp_path / "repo", GID, "main", run=run, disk_usage=plenty)
+    assert err.value.marker == "invalid-graph-id"
+
+
+def test_worktree_roots_defaults_when_env_unset(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv(ROOTS_ENV, raising=False)
+    assert worktree_roots() == [Path("/var/lib/substrate/worktrees")]
+
+
+def test_worktree_roots_single_entry():
+    assert worktree_roots({ROOTS_ENV: "/srv/wt"}) == [Path("/srv/wt")]
+
+
+def test_worktree_roots_two_entries_keep_their_order():
+    assert worktree_roots({ROOTS_ENV: "/srv/b:/srv/a"}) == [Path("/srv/b"), Path("/srv/a")]
+
+
+def test_worktree_roots_trims_entries_and_drops_empty_or_relative_segments():
+    raw = "  /a  :  ::/b/c/ : relative :/x/../y:/a"
+    assert worktree_roots({ROOTS_ENV: raw}) == [Path("/a"), Path("/b/c"), Path("/y")]
+
+
+@pytest.mark.parametrize("raw", ["", "   ", " : : "])
+def test_worktree_roots_blank_value_falls_back_to_default(raw: str):
+    assert worktree_roots({ROOTS_ENV: raw}) == [Path("/var/lib/substrate/worktrees")]

@@ -16,9 +16,9 @@ import {
 import type { EventInput, Surface } from "../../mcp-server/src/types.ts";
 import { graphIdForWorktree } from "./worktree-graph.ts";
 
-export const HERDR_STATE_VERSION = 2 as const;
+const HERDR_STATE_VERSION = 2 as const;
 
-export interface HerdrPaneRecord {
+interface HerdrPaneRecord {
 	agent: string;
 	surface: Surface;
 	/** Last status that was actually emitted. Stays put across an `unknown` gap. */
@@ -35,7 +35,7 @@ export interface HerdrPaneRecord {
 	terminal_id: string;
 }
 
-export interface HerdrCounters {
+interface HerdrCounters {
 	stored: number;
 	refused: number;
 	failed: number;
@@ -50,7 +50,7 @@ export interface HerdrStateFile {
 	seen_unmapped: Record<string, string>;
 }
 
-export interface PlannedTransition {
+interface PlannedTransition {
 	identity: string;
 	rowId: HerdrTransition["rowId"];
 	event: EventInput;
@@ -58,7 +58,7 @@ export interface PlannedTransition {
 	pane?: HerdrPaneRecord | undefined;
 }
 
-export interface ReconcileResult {
+interface ReconcileResult {
 	transitions: PlannedTransition[];
 	/** Bookkeeping that emits nothing (unknown gaps, return to the same status). */
 	silent: Array<{ identity: string; pane: HerdrPaneRecord }>;
@@ -68,7 +68,7 @@ export interface ReconcileResult {
 	seeded?: HerdrStateFile;
 }
 
-export interface ReconcileOptions {
+interface ReconcileOptions {
 	/** First run: write state for the current snapshot and emit nothing. */
 	seed?: boolean;
 	now?: string;

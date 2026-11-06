@@ -1,10 +1,11 @@
 """Per-Graph-ID git worktrees (D-12).
 
-A dispatched session works in ``/var/lib/substrate/worktrees/<graph_id>`` on branch
-``substrate/<graph_id>``. The worktree is reused when git already has it registered, created
-from the existing branch when only the branch exists, and created with a new branch otherwise.
-Creation is refused when ``/`` has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``,
-default 5 GiB), and no git command runs in that case.
+A dispatched session works in ``<root>/<graph_id>`` on branch ``substrate/<graph_id>``, where ``<root>``
+is the first of ``SUBSTRATE_WORKTREE_ROOTS`` (default ``/var/lib/substrate/worktrees``). The worktree is
+reused when git already has it registered under any configured root, created from the existing branch when
+only the branch exists, and created with a new branch otherwise.
+Creation is refused when the filesystem it lands on (the nearest existing directory at or above the first root)
+has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB); no git command runs then.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
 checks out a branch in the main checkout.
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -26,6 +28,7 @@ WORKTREES_ROOT = Path("/var/lib/substrate/worktrees")
 REPOS_ROOT = Path("/root/src/repos")
 DEFAULT_MIN_FREE_GB = 5
 MIN_FREE_ENV = "SUBSTRATE_WORKTREE_MIN_FREE_GB"
+ROOTS_ENV = "SUBSTRATE_WORKTREE_ROOTS"
 BRANCH_PREFIX = "substrate/"
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -54,6 +57,25 @@ def min_free_gb(env: Mapping[str, str] | None = None) -> float:
 def min_free_bytes(env: Mapping[str, str] | None = None) -> int:
     """The floor in bytes, read from the environment at call time."""
     return int(min_free_gb(env) * 1024**3)
+
+
+def worktree_roots(env: Mapping[str, str] | None = None) -> list[Path]:
+    """The directories that hold worktrees, in the order ``SUBSTRATE_WORKTREE_ROOTS`` gives them.
+
+    Parsed as the fleet parses it (``worktreeRootsFromEnv``): colon separated, each entry trimmed, entries
+    that are empty or not absolute dropped, the rest normalised and de-duplicated. Unset, or with no usable
+    entry, the single default ``WORKTREES_ROOT`` is returned.
+    """
+    raw = (os.environ if env is None else env).get(ROOTS_ENV) or ""
+    roots: list[str] = []
+    for part in raw.split(":"):
+        entry = part.strip()
+        if not entry.startswith("/"):
+            continue
+        normal = "/" + posixpath.normpath(entry).lstrip("/")
+        if normal not in roots:
+            roots.append(normal)
+    return [Path(root) for root in roots] or [WORKTREES_ROOT]
 
 
 class WorktreeRefused(Exception):
@@ -128,42 +150,60 @@ def _ref_exists(run: Runner, repo: Path, ref: str) -> bool:
     return _git(run, repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0
 
 
+def _existing_ancestor(path: Path) -> Path:
+    """The nearest directory at or above ``path`` that exists: the filesystem a worktree created there lands on."""
+    probe = Path(path)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return probe
+
+
 def ensure_worktree(
     repo: Path,
     graph_id: str,
     base_branch: str | None,
     *,
-    root: Path = WORKTREES_ROOT,
+    root: Path | None = None,
     run: Runner = subprocess.run,
     disk_usage: Callable[[str], Any] = shutil.disk_usage,
 ) -> Path:
-    """Return the graph's worktree, creating it only with at least the free-disk floor free on /."""
-    gid = validate_graph_id(graph_id)
-    root = Path(root)
-    path = root / gid
-    if path.resolve().parent != root.resolve():
-        raise WorktreeRefused(f"worktree path {path} escapes {root}", "invalid-graph-id")
+    """Return the graph's worktree, creating it only with at least the free-disk floor free under the root it lands in.
 
-    free = disk_usage("/").free
+    ``root`` pins one directory. Unset, the configured roots are used: a worktree git already has under any
+    of them is returned, and a new one is created under the first.
+    """
+    gid = validate_graph_id(graph_id)
+    roots = [Path(root)] if root is not None else worktree_roots()
+    for candidate_root in roots:
+        candidate = candidate_root / gid
+        if candidate.resolve().parent != candidate_root.resolve():
+            raise WorktreeRefused(f"worktree path {candidate} escapes {candidate_root}", "invalid-graph-id")
+
+    # The worktree is created under roots[0], so the floor is read where it will land: the nearest directory above it that exists.
+    probe = _existing_ancestor(roots[0])
+    free = disk_usage(str(probe)).free
     floor = min_free_bytes()
     if free < floor:
         raise WorktreeRefused(
-            f"only {free / 1024**3:.1f} GB free on /; a worktree needs at least {floor / 1024**3:g} GB",
+            f"only {free / 1024**3:.1f} GB free on {probe}; a worktree needs at least {floor / 1024**3:g} GB",
             "low-disk",
         )
 
     repo = Path(repo)
-    if _registered(run, repo, path):
-        if path.is_dir():
-            return path
-        raise WorktreeRefused(
-            f"{path} is registered with git but missing on disk (git worktree prune needed)",
-            "path-conflict",
-        )
+    for candidate_root in roots:
+        candidate = candidate_root / gid
+        if _registered(run, repo, candidate):
+            if candidate.is_dir():
+                return candidate
+            raise WorktreeRefused(
+                f"{candidate} is registered with git but missing on disk (git worktree prune needed)",
+                "path-conflict",
+            )
+    path = roots[0] / gid
     if path.exists():
         raise WorktreeRefused(f"{path} exists but is not a registered worktree", "path-conflict")
 
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    roots[0].mkdir(mode=0o700, parents=True, exist_ok=True)
     branch = BRANCH_PREFIX + gid
     if _ref_exists(run, repo, f"refs/heads/{branch}"):
         add = _git(run, repo, "worktree", "add", str(path), branch)

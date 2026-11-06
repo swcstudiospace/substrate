@@ -28,7 +28,7 @@ export const COMPLETIONS_FILE = "completions.jsonl";
  */
 const directoryQueues = new Map<string, Promise<unknown>>();
 
-export type CheckpointStoreErrorCode = "corrupt-record" | "write-failed";
+type CheckpointStoreErrorCode = "corrupt-record" | "write-failed";
 
 export class CheckpointStoreError extends Error {
 	constructor(
@@ -123,6 +123,7 @@ export class DurableCompletionStore implements CompletionStore {
 			}
 			await rename(temp, target);
 		} catch {
+			// A stray temporary file is inert, and the write-failed error below is the one reported.
 			await rm(temp, { force: true }).catch(() => undefined);
 			throw new CheckpointStoreError("write-failed", null);
 		}

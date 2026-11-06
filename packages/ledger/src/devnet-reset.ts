@@ -37,7 +37,7 @@ export interface ChainEvidenceInput {
 	nowMs: number;
 }
 
-export interface ChainEvidence {
+interface ChainEvidence {
 	verdict: ChainVerdict;
 	reason: string;
 }

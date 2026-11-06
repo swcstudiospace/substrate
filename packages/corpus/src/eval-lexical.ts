@@ -10,7 +10,7 @@
  */
 import { outlineOf, wordsOf } from "./eval.ts";
 
-export interface LexicalDocument {
+interface LexicalDocument {
 	/** The `repo:path` key. */
 	key: string;
 	text: string;
@@ -24,7 +24,7 @@ export interface LexicalHit {
 /** A re-rank step: the collapsed, scored hits in, the order to answer in out. The authority scores plug in here. */
 export type Rerank = (hits: readonly LexicalHit[]) => readonly LexicalHit[];
 
-export interface LexicalSearchOptions {
+interface LexicalSearchOptions {
 	/** Applied after exact duplicates collapse and before the limit. */
 	rerank?: Rerank | undefined;
 	/** The most hits returned, default {@link LEXICAL_DEFAULT_LIMIT}. */
@@ -32,11 +32,11 @@ export interface LexicalSearchOptions {
 }
 
 /** BM25 term-frequency saturation. */
-export const BM25_K1 = 1.2;
+const BM25_K1 = 1.2;
 /** BM25 length normalisation. */
-export const BM25_B = 0.75;
+const BM25_B = 0.75;
 /** The title's tokens are counted this many extra times, so a document titled for a query outranks one that merely mentions it. */
-export const TITLE_EXTRA_WEIGHT = 2;
+const TITLE_EXTRA_WEIGHT = 2;
 /** The default number of hits a search returns. */
 export const LEXICAL_DEFAULT_LIMIT = 10;
 
@@ -58,7 +58,7 @@ interface IndexedDocument {
 	group: string;
 }
 
-export interface LexicalIndex {
+interface LexicalIndex {
 	readonly size: number;
 	search(query: string, options?: LexicalSearchOptions): LexicalHit[];
 }

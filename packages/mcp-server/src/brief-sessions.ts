@@ -28,7 +28,7 @@ export const BRIEF_SESSIONS_SECTION_MAX_CHARS = 1_200;
 const LINE_MAX_CHARS = 160;
 const DIRECTIVE_BODY_CHARS = 120;
 /** The most handoff packets the brief's handoffs section lists. */
-export const BRIEF_HANDOFFS_MAX = 10;
+const BRIEF_HANDOFFS_MAX = 10;
 
 /** Coarse and stable: whole minutes, hours or days, so the brief's text does not change between two calls a second apart. */
 export function coarseAge(ageS: number): string {
@@ -170,9 +170,9 @@ export function handoffsSection(handoffs: readonly BriefHandoffInput[], nowMs: n
 }
 
 /** The most other sessions' worktrees the worktrees section lists. */
-export const BRIEF_WORKTREES_MAX = 5;
+const BRIEF_WORKTREES_MAX = 5;
 /** The most overlapping files one listed worktree names; the rest are counted. */
-export const BRIEF_WORKTREE_FILES_MAX = 5;
+const BRIEF_WORKTREE_FILES_MAX = 5;
 /** A worktree the registry has not heard from for longer than this is not a session still at work. */
 export const BRIEF_WORKTREE_WINDOW_MS = 24 * 3_600_000;
 
@@ -317,7 +317,7 @@ export function worktreesSection(input: BriefWorktreesInput, nowMs: number): Bri
  * What the live sections are read from. Each is optional: `null` means the request does not ask for that section (no
  * repository, no session, no graph). The service builds them, so this module reads no store and no clock.
  */
-export interface LiveBriefSources {
+interface LiveBriefSources {
 	/** The digest of the repository's other sessions. Asked to finish inside the brief's deadline by the service that builds it. */
 	context: (() => Promise<SessionContext>) | null;
 	/** The caller's own directives and state, from memory. May throw; the section is then left out. */

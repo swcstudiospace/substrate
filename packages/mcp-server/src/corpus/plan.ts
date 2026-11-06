@@ -16,7 +16,7 @@
 import type { CorpusEntry, CorpusScope, PlanAction, PlanItem } from "@substrate/corpus";
 import type { ManifestRow } from "./store.ts";
 
-export interface CorpusPlan {
+interface CorpusPlan {
 	items: PlanItem[];
 	counts: Record<PlanAction, number>;
 }
