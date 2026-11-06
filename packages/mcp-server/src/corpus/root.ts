@@ -368,7 +368,7 @@ export class CorpusRootKeeper {
 			// Buffered or dead-lettered, the server has taken the note, so it is not owed and is not written again. `owed` was cleared
 			// before this write, and a change noted during it stays owed.
 			if (answer.stored || answer.buffered === true || answer.deadLettered === true) {
-				if (answer.stored || answer.buffered === true) this.lastEmittedRoot = root;
+				this.lastEmittedRoot = root;
 				this.failures = 0;
 				return;
 			}

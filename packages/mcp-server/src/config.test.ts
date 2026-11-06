@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { diskDestination } from "./destination.ts";
 import {
 	ConfigError,
 	DEFAULT_SKILLS_GH,
@@ -883,7 +884,7 @@ describe("the telemetry buffer and its dead-letter file name two files (phase 76
 				loadConfig({
 					SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "real", "events.jsonl"),
 					SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "alias", "events.jsonl"),
-				}),
+				}, { realDestination: diskDestination }),
 			).toThrow("name one file");
 		});
 	});
@@ -892,7 +893,7 @@ describe("the telemetry buffer and its dead-letter file name two files (phase 76
 		inTempDir((dir) => {
 			const buffer = join(dir, "events.jsonl");
 			symlinkSync(buffer, join(dir, "dead.jsonl"));
-			expect(() => loadConfig({ SUBSTRATE_EVENT_BUFFER_PATH: buffer, SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "dead.jsonl") })).toThrow("name one file");
+			expect(() => loadConfig({ SUBSTRATE_EVENT_BUFFER_PATH: buffer, SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "dead.jsonl") }, { realDestination: diskDestination })).toThrow("name one file");
 		});
 	});
 
@@ -905,7 +906,7 @@ describe("the telemetry buffer and its dead-letter file name two files (phase 76
 				SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "real", "events.jsonl"),
 				SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "alias", "dead.jsonl"),
 			};
-			expect(loadConfig(env).eventBuffer).toMatchObject({ path: env.SUBSTRATE_EVENT_BUFFER_PATH, deadLetterPath: env.SUBSTRATE_EVENT_DEAD_LETTER_PATH });
+			expect(loadConfig(env, { realDestination: diskDestination }).eventBuffer).toMatchObject({ path: env.SUBSTRATE_EVENT_BUFFER_PATH, deadLetterPath: env.SUBSTRATE_EVENT_DEAD_LETTER_PATH });
 		});
 	});
 });

@@ -1451,3 +1451,23 @@ describe("TaskService approval deadlines (33-02, D33-04/D33-05)", () => {
 		expect((await h.service.status(GID, NID))?.approvals_allowed).toBe(1);
 	});
 });
+
+describe("TaskStore.forGraph (the file-backed store the host runs)", () => {
+	test("reads only the graph's own files, so another graph's unparseable file is never parsed", async () => {
+		const first = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const second = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const dir = mkdtempSync(join(tmpdir(), "task-store-"));
+		try {
+			const store = new TaskStore(dir);
+			const h = harness({ store, worktreeRoots: [first, second] });
+			expect((await h.service.openTask(openBody({ worktree: join(second, GID) }))).status).toBe(202);
+			writeFileSync(join(dir, "ut-other-99999999--n1.json"), "{ not json");
+			expect(store.forGraph(GID)).toHaveLength(1);
+			expect(boundWorktreeOf(store, GID, [first, second])).toBe(join(second, GID));
+		} finally {
+			rmSync(first, { recursive: true, force: true });
+			rmSync(second, { recursive: true, force: true });
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

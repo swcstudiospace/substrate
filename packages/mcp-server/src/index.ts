@@ -33,6 +33,7 @@ import {
 	swarmTokenWarnings,
 } from "./config.ts";
 import type { SubstrateConfig } from "./config.ts";
+import { diskDestination } from "./destination.ts";
 import { briefProfileConfigWarnings } from "./brief-profile.ts";
 import { planningConfigWarnings } from "./planning/config.ts";
 import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
@@ -54,7 +55,7 @@ try {
 	// The one host probe `loadConfig` takes: whether the state directory exists,
 	// so an unset SUBSTRATE_SLO_CHECKPOINT lands in it on a deployed host and
 	// nowhere on a bare local run (uplift-3 N2).
-	config = loadConfig(process.env, { directoryExists: (path) => existsSync(path) && statSync(path).isDirectory() });
+	config = loadConfig(process.env, { directoryExists: (path) => existsSync(path) && statSync(path).isDirectory(), realDestination: diskDestination });
 } catch (error) {
 	// A contradictory identity config refuses boot: exit 78 (EX_CONFIG) so the
 	// unit stops instead of crash-looping. The message names variables only —

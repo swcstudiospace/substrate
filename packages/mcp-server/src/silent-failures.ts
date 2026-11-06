@@ -1,12 +1,12 @@
 /**
  * One stderr line for a failure the server deliberately carries on past. A catch that drops a rejection
- * (an emit, a write, a bump) would otherwise leave no trace; this names the site and a code, once per site
+ * (an emit, a write, a bump) would otherwise leave no trace; this names the site and a code, once per site and code
  * per process, and never the error's message, which can carry a payload, a URL or a credential.
  */
 
 const CODE_PATTERN = /^[A-Za-z0-9._-]{1,40}$/;
 
-/** Sites already reported in this process. A repeat at the same site is silent. */
+/** Site and code pairs already reported in this process. A repeat of a pair is silent; a new code at a reported site is named. */
 const reported = new Set<string>();
 
 /**
@@ -25,11 +25,13 @@ function codeOf(error: unknown): string {
 	return "object";
 }
 
-/** Write `[substrate] <site> failed (<code>)` to stderr the first time `site` fails in this process. */
+/** Write `[substrate] <site> failed (<code>)` to stderr the first time `site` fails with that code in this process. */
 export function reportSilent(site: string, error: unknown): void {
-	if (reported.has(site)) return;
-	reported.add(site);
-	process.stderr.write(`[substrate] ${site} failed (${codeOf(error)})\n`);
+	const code = codeOf(error);
+	const key = JSON.stringify([site, code]);
+	if (reported.has(key)) return;
+	reported.add(key);
+	process.stderr.write(`[substrate] ${site} failed (${code})\n`);
 }
 
 /** Forget which sites were reported. For tests only; production never resets the set. */

@@ -593,13 +593,17 @@ function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation, com
 	};
 }
 
+/** A commit a citation may link: a full 40- or 64-character lower-case hex object name, so nothing stored can steer the citation URL. */
+const CITABLE_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 /**
  * The commit a corpus chunk is cited at, or undefined for HEAD. The manifest's commit is used only when the row is `active` and the
  * chunk's name carries the row's content: the chunk's sha12 is a prefix of the row's sha256 (lower-case hex). A chunk indexed from an older
  * version of a document, and any chunk of a tombstoned row, is cited at HEAD: never at a commit whose content it is not.
  */
-function citableCommit(parsed: ParsedCorpusName, record: ManifestCommitRecord | undefined): string | undefined {
+export function citableCommit(parsed: ParsedCorpusName, record: ManifestCommitRecord | undefined): string | undefined {
 	if (record === undefined || record.state !== "active" || record.commit === null) return undefined;
+	if (!CITABLE_COMMIT.test(record.commit)) return undefined;
 	return record.sha256.toLowerCase().startsWith(parsed.sha12) ? record.commit : undefined;
 }
 

@@ -13,7 +13,7 @@ import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } fro
 import { corpusDocumentName } from "@substrate/corpus";
 import { FakePlane, FakeStore, makeRow, sha256Hex } from "./corpus/testkit.ts";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
-import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchCitation, type SearchReply } from "./docs-search.ts";
+import { attachGraphHints, citableCommit, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchCitation, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
@@ -545,6 +545,22 @@ describe("docs_search outcome metrics (uplift-3 N5)", () => {
 				{ ...citation, commit: "dataset-pin:agent-skills:unpinned" },
 			]),
 		).toEqual({ recorded: 1, unrecorded: 1, unpinned: 2 });
+	});
+});
+
+describe("citableCommit (a citation links a full commit, or HEAD)", () => {
+	const parsed = { repo: "owner/repo", path: "docs/plan.md", sha12: "abcdef123456" };
+	const row = (commit: string | null) => ({ commit, sha256: "abcdef1234567890abcdef1234567890", state: "active" as const });
+
+	test("cites a full 40- or 64-character commit whose content the chunk carries", () => {
+		expect(citableCommit(parsed, row("a".repeat(40)))).toBe("a".repeat(40));
+		expect(citableCommit(parsed, row("b".repeat(64)))).toBe("b".repeat(64));
+	});
+
+	test("refuses anything else, so a stored value cannot steer the citation URL", () => {
+		for (const commit of ["x/../../other/repo/blob/y", "ABC123", "a".repeat(39), "a".repeat(41)]) {
+			expect(citableCommit(parsed, row(commit))).toBeUndefined();
+		}
 	});
 });
 

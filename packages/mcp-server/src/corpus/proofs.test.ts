@@ -77,7 +77,7 @@ const UNUSED_PORTS: AnchorVerifyPorts = {
 	},
 };
 
-type RootOutcome = "stored" | "refused" | "throw" | "buffered";
+type RootOutcome = "stored" | "refused" | "throw" | "buffered" | "deadLettered";
 
 function world(options: { enabled?: boolean; verify?: AnchorVerifier; rootOutcome?: (attempt: number) => RootOutcome } = {}) {
 	const store = new FakeStore();
@@ -104,6 +104,7 @@ function world(options: { enabled?: boolean; verify?: AnchorVerifier; rootOutcom
 				buffer.push(event);
 				return { stored: false, buffered: true };
 			}
+			if (result === "deadLettered") return { stored: false, deadLettered: true };
 			landed.push(event);
 			return { stored: true };
 		},
@@ -373,5 +374,28 @@ describe("a root the ledger refused is retried with backoff (v1.7 phase 69, PROO
 		expect(clock.timers).toEqual([]);
 		expect(landed).toHaveLength(1);
 		expect(defined(landed[0]).payload).toMatchObject({ action: CORPUS_ROOT_ACTION, root: corpusRoot([DOC_A, DOC_B]).root, count: 2 });
+	});
+
+	test("a root the server buffered is not written again when the same root is read again", async () => {
+		const { clock, rootEvents, roots, ingest } = world({ rootOutcome: () => "buffered" });
+		const start = clock.at;
+		await ingest([DOC_A, DOC_B]);
+		await clock.runUntil(start + 120_000);
+		// A later change that leaves the corpus root as it was: the keeper reads the same root again and must not write it again.
+		roots.manifestChanged();
+		await clock.runUntil(start + 240_000);
+		expect(rootEvents).toHaveLength(1);
+		expect(clock.timers).toEqual([]);
+	});
+
+	test("a root the server dead-lettered is not written again when the same root is read again", async () => {
+		const { clock, rootEvents, roots, ingest } = world({ rootOutcome: () => "deadLettered" });
+		const start = clock.at;
+		await ingest([DOC_A, DOC_B]);
+		await clock.runUntil(start + 120_000);
+		roots.manifestChanged();
+		await clock.runUntil(start + 240_000);
+		expect(rootEvents).toHaveLength(1);
+		expect(clock.timers).toEqual([]);
 	});
 });

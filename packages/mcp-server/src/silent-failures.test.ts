@@ -36,13 +36,18 @@ describe("reportSilent", () => {
 		expect(lines).toEqual(["[substrate] emit.test-bad-code failed (TypeError)\n"]);
 	});
 
-	test("a second call for the same site writes nothing", () => {
+	test("a repeat of a site with the same code writes nothing; a new code at that site is named", () => {
 		const lines = stderrDuring(() => {
 			reportSilent("emit.test-once", new Error("first"));
 			reportSilent("emit.test-once", new Error("second"));
-			reportSilent("emit.test-other", new Error("third"));
+			reportSilent("emit.test-once", Object.assign(new Error("third"), { code: "ECONNREFUSED" }));
+			reportSilent("emit.test-other", new Error("fourth"));
 		});
-		expect(lines).toEqual(["[substrate] emit.test-once failed (Error)\n", "[substrate] emit.test-other failed (Error)\n"]);
+		expect(lines).toEqual([
+			"[substrate] emit.test-once failed (Error)\n",
+			"[substrate] emit.test-once failed (ECONNREFUSED)\n",
+			"[substrate] emit.test-other failed (Error)\n",
+		]);
 	});
 
 	test("a non-object error reports its typeof", () => {

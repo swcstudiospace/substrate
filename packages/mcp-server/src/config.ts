@@ -5,8 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readlinkSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
 import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
@@ -865,6 +864,8 @@ const DEFAULT_SLO_CHECKPOINT_PATH = "/var/lib/substrate/slo-checkpoint.json";
  */
 interface ConfigProbes {
 	directoryExists?: (path: string) => boolean;
+	/** The file a path names once symlinks are followed: the event buffer's alias check. Absent, the check compares resolved paths and reads no filesystem. */
+	realDestination?: (path: string) => string;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -1240,7 +1241,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			maxAttempts: positiveIntOr(env.SUBSTRATE_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_MAX_ATTEMPTS),
 			drainMs: positiveIntOr(env.SUBSTRATE_RETAIN_DRAIN_MS, DEFAULT_RETAIN_DRAIN_MS),
 		},
-		eventBuffer: loadEventBufferSettings(env),
+		eventBuffer: loadEventBufferSettings(env, probes),
 		hindsightEnv: {
 			legacyBankSet: (env.HINDSIGHT_BANK?.trim() ?? "") !== "",
 			urlSet: (env.HINDSIGHT_URL?.trim() ?? "") !== "",
@@ -2602,7 +2603,7 @@ interface EventBufferSettings {
  * and a failed write answers `stored: false` as it always has. A buffer with no dead-letter file is refused at boot, because a
  * buffered event that exhausts its retries would have no record to be kept in.
  */
-function loadEventBufferSettings(env: Record<string, string | undefined>): EventBufferSettings | null {
+function loadEventBufferSettings(env: Record<string, string | undefined>, probes: ConfigProbes): EventBufferSettings | null {
 	const path = env.SUBSTRATE_EVENT_BUFFER_PATH?.trim() ?? "";
 	if (path === "") return null;
 	const deadLetterPath = env.SUBSTRATE_EVENT_DEAD_LETTER_PATH?.trim() ?? "";
@@ -2612,7 +2613,7 @@ function loadEventBufferSettings(env: Record<string, string | undefined>): Event
 				"retries needs a file to be recorded in. Set SUBSTRATE_EVENT_DEAD_LETTER_PATH, or unset SUBSTRATE_EVENT_BUFFER_PATH",
 		);
 	}
-	if (destinationOf(path) === destinationOf(deadLetterPath)) {
+	if (destinationOf(path, probes) === destinationOf(deadLetterPath, probes)) {
 		throw new ConfigError(
 			"SUBSTRATE_EVENT_BUFFER_PATH and SUBSTRATE_EVENT_DEAD_LETTER_PATH name one file, so each store would rewrite the other's records. " +
 				"Give them two different files",
@@ -2628,32 +2629,9 @@ function loadEventBufferSettings(env: Record<string, string | undefined>): Event
 	};
 }
 
-/** Hops followed before a symlink chain counts as a loop (the kernel's SYMLOOP_MAX). */
-const MAX_LINK_HOPS = 40;
-
-/**
- * The file a path names once symlinks are followed. A path that does not exist yet is placed under its real parent directory;
- * a dangling link is followed to its target. A chain longer than `MAX_LINK_HOPS` is a loop, and the path is kept as written.
- */
-function destinationOf(path: string, hops = 0): string {
-	const absolute = resolve(path);
-	try {
-		return realpathSync(absolute);
-	} catch {
-		if (hops >= MAX_LINK_HOPS) return absolute;
-		const target = linkTargetOf(absolute);
-		if (target !== null) return destinationOf(resolve(dirname(absolute), target), hops + 1);
-		const parent = dirname(absolute);
-		return parent === absolute ? absolute : join(destinationOf(parent, hops), basename(absolute));
-	}
-}
-
-function linkTargetOf(path: string): string | null {
-	try {
-		return readlinkSync(path);
-	} catch {
-		return null;
-	}
+/** The file a path names: the destination probe's answer, or the resolved path when no probe is supplied (no filesystem read). */
+function destinationOf(path: string, probes: ConfigProbes): string {
+	return probes.realDestination?.(path) ?? resolve(path);
 }
 
 /**

@@ -412,10 +412,24 @@ async function configFindings(releaseDir: string): Promise<{ findings: Finding[]
 	const loadConfig = config.loadConfig;
 	const ConfigError = config.ConfigError;
 	if (!isFn(loadConfig)) return refused("the release's config.ts exports no loadConfig");
+	// A release from before the alias check has no destination.ts, and its loadConfig takes no such probe: none is supplied then.
+	const destinationPath = `${releaseDir}/packages/mcp-server/src/destination.ts`;
+	let diskDestination: ((path: string) => string) | null = null;
+	if (existsSync(destinationPath)) {
+		let destination: Namespace;
+		try {
+			destination = await importFrom(releaseDir, "packages/mcp-server/src/destination.ts");
+		} catch (cause) {
+			return refused(`destination.ts could not be loaded from the release: ${messageOf(cause)}`);
+		}
+		const probe = destination.diskDestination;
+		if (!isFn(probe)) return refused("the release's destination.ts exports no diskDestination");
+		diskDestination = (path: string) => String(probe(path));
+	}
 	let loaded: Record<string, unknown>;
 	try {
-		// The one host probe index.ts passes: whether the state directory exists (uplift-3 N2).
-		loaded = loadConfig(process.env, { directoryExists: (path: string) => existsSync(path) && statSync(path).isDirectory() }) as Record<string, unknown>;
+		// The probes index.ts passes: whether the state directory exists (uplift-3 N2), and the file an event-buffer path names.
+		loaded = loadConfig(process.env, { directoryExists: (path: string) => existsSync(path) && statSync(path).isDirectory(), ...(diskDestination === null ? {} : { realDestination: diskDestination }) }) as Record<string, unknown>;
 	} catch (cause) {
 		if (isFn(ConfigError) && cause instanceof ConfigError) return refused(`refused, the unit would exit 78: ${messageOf(cause)}`);
 		return refused(`threw ${messageOf(cause)}`);
