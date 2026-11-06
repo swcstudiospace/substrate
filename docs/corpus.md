@@ -25,9 +25,9 @@ Every documentation file is described by one entry. The contract is `packages/co
 | `source` | `fs`, `github` or `greptile` |
 | `commit` | the commit the content was read at, when known (the checkout HEAD, or the branch head for GitHub) |
 
-A GitHub-origin document is cited as `https://github.com/<owner>/<repo>/blob/HEAD/<path>`, and a repository with no origin as
-`corpus://<repo>/<path>`. The manifest records the commit the content was read at, but the citation does not carry it yet, so a
-citation can drift after a later commit (ATLAS-03, open).
+A GitHub-origin document is cited as `https://github.com/<owner>/<repo>/blob/<commit>/<path>`, where `<commit>` is the full commit the
+manifest records for it; a document whose manifest row records no full commit name is cited as `blob/HEAD/<path>`, and a repository
+with no origin as `corpus://<repo>/<path>`. A citation to a recorded commit does not drift when the repository moves on (ATLAS-03).
 
 ## Kinds and tiers
 

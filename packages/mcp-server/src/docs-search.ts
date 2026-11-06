@@ -36,6 +36,7 @@ import type { BreakerState, CitationProvenance } from "@substrate/observability"
 import { DeadlineError, type SharedDeadline, sharedDeadline } from "./deadline.ts";
 import { repoScopePrefix } from "./event.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
+import { withDeadline } from "./docs-freshness.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { DEFAULT_TANDEM_OPTIONS, mergeTandem, type TandemCounts, type TandemOptions, type TandemOrigin, type TandemProvenance } from "./tandem-recall.ts";
@@ -64,6 +65,7 @@ import { redact, redactValue } from "./redact.ts";
 import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
 import type { DocumentProvenance } from "./docs-ingest.ts";
 import { CORPUS_DATASET, parseCorpusDocumentName, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
+import type { ParsedCorpusName } from "@substrate/corpus";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
 export const UNTRUSTED_DOCS_NOTICE =
@@ -344,6 +346,11 @@ export interface SearchDeps {
 	/** The ingest record of a document id — source URL and the commit it was uploaded under (uplift-2 R6). */
 	provenanceOf?: (documentId: string) => DocumentProvenance | undefined;
 	/**
+	 * The commit the corpus manifest records for a document, read by its repository and path (`CorpusStore.rowFor`). Read once
+	 * per distinct corpus document a reply cites; a null answer, a throw or rejection, or no answer within `MANIFEST_COMMIT_DEADLINE_MS` cites HEAD and never fails the search.
+	 */
+	manifestCommit?: (repo: string, path: string) => Promise<string | null>;
+	/**
 	 * One shared deadline for every dataset's retrieval, ms (uplift-3 N5;
 	 * `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`). `0` or unset: no shared deadline,
 	 * each retrieval bounded only by the plane client's own per-call timeout.
@@ -513,20 +520,64 @@ function cite(
 	};
 }
 
+/** A full git commit name: the only form a citation's `blob/<commit>` path takes from the manifest. */
+const FULL_COMMIT = /^[0-9a-f]{40}$/i;
+
+/** Longest a manifest lookup may take before its document is cited at HEAD; a hung store read must not hang the search. */
+const MANIFEST_COMMIT_DEADLINE_MS = 500;
+
+/** The key of one corpus document: its repository and its path together, so one path in two repositories stays two documents. */
+function documentKey(repo: string, path: string): string {
+	return JSON.stringify([repo, path]);
+}
+
+/** The corpus document a chunk is, by its source URL or its document name; null for every other result. */
+function corpusDocumentOf(chunk: RagflowChunk): ParsedCorpusName | null {
+	return parseCorpusDocumentName(chunk.source_url ?? "") ?? parseCorpusDocumentName(chunk.document_name);
+}
+
+/**
+ * The commit the manifest records for each corpus document the chunks name, keyed by `documentKey`. One lookup per distinct
+ * document, so a reply's lookups are bounded by its documents, not its chunks. A lookup that throws or rejects, records no
+ * commit, records one that is not a full commit name, or does not answer within `MANIFEST_COMMIT_DEADLINE_MS` leaves its document out: it is cited at HEAD.
+ */
+async function manifestCommits(deps: SearchDeps, chunks: readonly RagflowChunk[]): Promise<ReadonlyMap<string, string>> {
+	const commits = new Map<string, string>();
+	const lookup = deps.manifestCommit;
+	if (lookup === undefined) return commits;
+	const documents = new Map<string, ParsedCorpusName>();
+	for (const chunk of chunks) {
+		const parsed = corpusDocumentOf(chunk);
+		if (parsed !== null) documents.set(documentKey(parsed.repo, parsed.path), parsed);
+	}
+	await Promise.all(
+		[...documents].map(async ([key, { repo, path }]) => {
+			try {
+				const commit = await withDeadline(lookup(repo, path), MANIFEST_COMMIT_DEADLINE_MS);
+				if (commit !== null && FULL_COMMIT.test(commit)) commits.set(key, commit);
+			} catch {
+				// The citation falls back to HEAD; a failed lookup never fails the search.
+			}
+		}),
+	);
+	return commits;
+}
+
 /**
  * A LightRAG result whose file path is a corpus document name (`corpus:<repo>:<path>@<sha>`) cites the document's own
- * repository and path: `source_url` from the corpus URL rule, `title` as `repo:path`, `dataset: "corpus"`. LightRAG holds
- * one workspace, so without this the result would be attributed to the first dataset searched. `heading_path` keeps what
- * LightRAG returned and every other result is returned as it was.
+ * repository and path: `source_url` and `commit` at the commit the manifest records for it (`commit` is the unrecorded marker at HEAD), `title` as `repo:path`,
+ * `dataset: "corpus"`. LightRAG holds one workspace, so without this the result would be attributed to the first dataset
+ * searched. `heading_path` keeps what LightRAG returned and every other result is returned as it was.
  */
-function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation): SearchCitation {
-	const parsed = parseCorpusDocumentName(chunk.source_url ?? "") ?? parseCorpusDocumentName(chunk.document_name);
+function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation, commits: ReadonlyMap<string, string>): SearchCitation {
+	const parsed = corpusDocumentOf(chunk);
 	if (parsed === null) return citation;
+	const recorded = commits.get(documentKey(parsed.repo, parsed.path));
 	return {
 		...citation,
 		title: redact(`${parsed.repo}:${parsed.path}`),
-		source_url: redact(corpusSourceUrl(parsed.repo, parsed.path)),
-		commit: `dataset-pin:${CORPUS_DATASET}:unrecorded`,
+		source_url: redact(corpusSourceUrl(parsed.repo, parsed.path, recorded)),
+		commit: recorded ?? `dataset-pin:${CORPUS_DATASET}:unrecorded`,
 		dataset: CORPUS_DATASET,
 	};
 }
@@ -572,13 +623,6 @@ export function normalizeRepoId(repoId: string | null | undefined): string | nul
 export function scopedDatasetName(repoId: string | null | undefined, dataset: string): string {
 	const scoped = normalizeRepoId(repoId);
 	return scoped === null ? dataset : `repo:${scoped}:${dataset}`;
-}
-
-/** Split a scoped name back into its repo scope and dataset. */
-export function parseScopedDataset(scoped: string): { repo_id: string | null; dataset: string } {
-	const match = /^repo:([a-z0-9._-]+\/[a-z0-9._-]+):(.+)$/.exec(scoped);
-	if (!match) return { repo_id: null, dataset: scoped };
-	return { repo_id: match[1] ?? null, dataset: match[2] ?? scoped };
 }
 
 /** One LightRAG REST/JSON hit: content plus whatever locator the endpoint returned. */
@@ -644,38 +688,6 @@ export function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitat
 		document_id: hit.document_id ?? "",
 		chunk_id: `hindsight:${index}`,
 	};
-}
-
-/**
- * The local circuit breaker one search consults before paying for the
- * plane (SPE-19390). Closed calls pass; `failureThreshold` consecutive
- * failures open it for `resetTimeoutMs`, during which calls refuse fast
- * with `docs circuit open`; the next call after the window is the
- * half-open probe, whose outcome closes or re-opens the breaker. Small
- * and in-memory on purpose: the plane gate in `planes/ragflow.ts` stays
- * the authority, this only stops a hot loop from paying per search.
- */
-export type DocsBreakerState = "closed" | "open" | "half-open";
-
-export class DocsSearchBreaker {
-	private failures = 0;
-	private openedAt = 0;
-	constructor(private readonly failureThreshold: number = 3, private readonly resetTimeoutMs: number = 30_000) {}
-	state(nowMs: number = Date.now()): DocsBreakerState {
-		if (this.failures < this.failureThreshold) return "closed";
-		return nowMs - this.openedAt >= this.resetTimeoutMs ? "half-open" : "open";
-	}
-	canUse(nowMs: number = Date.now()): boolean {
-		return this.state(nowMs) !== "open";
-	}
-	recordSuccess(): void {
-		this.failures = 0;
-		this.openedAt = 0;
-	}
-	recordFailure(nowMs: number = Date.now()): void {
-		this.failures += 1;
-		if (this.failures >= this.failureThreshold) this.openedAt = nowMs;
-	}
 }
 
 /**
@@ -1114,7 +1126,8 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
 	}
 	const { detail } = outcome.value;
-	const citations = outcome.value.chunks.map((chunk) => withCorpusProvenance(chunk, cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf)));
+	const commits = await manifestCommits(deps, outcome.value.chunks);
+	const citations = outcome.value.chunks.map((chunk) => withCorpusProvenance(chunk, cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf), commits));
 	citations.sort((left, right) => right.score - left.score);
 	const lightragChunks = citations.slice(0, 10);
 	attachGraphHints(lightragChunks, deps.graphHints);

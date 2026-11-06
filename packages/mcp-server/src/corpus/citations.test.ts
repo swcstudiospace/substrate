@@ -11,8 +11,13 @@ import { sha256Hex } from "./testkit.ts";
 
 const NO_GRAPH = { mode: "hybrid" as const, counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } };
 const NAME = corpusDocumentName("swcstudiospace/agent-substrate", "docs/data planes.md", sha256Hex("body"));
+const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const HEAD_URL = "https://github.com/swcstudiospace/agent-substrate/blob/HEAD/docs/data%20planes.md";
 
-async function search(chunks: Array<{ content: string; document_name: string; source_url?: string; heading_path?: string; score: number }>) {
+async function search(
+	chunks: Array<{ content: string; document_name: string; source_url?: string; heading_path?: string; score: number }>,
+	manifestCommit?: (repo: string, path: string) => Promise<string | null>,
+) {
 	return searchDocs(
 		{
 			config: null,
@@ -22,6 +27,7 @@ async function search(chunks: Array<{ content: string; document_name: string; so
 			lightragRetrieve: async () => ({ ok: true, chunks, detail: NO_GRAPH }),
 			emit: async () => ({ stored: false }),
 			surface: "omp",
+			...(manifestCommit === undefined ? {} : { manifestCommit }),
 		},
 		"where are the data planes described?",
 	);
@@ -51,6 +57,86 @@ describe("corpus citations", () => {
 		const citation = defined(reply.chunks[0], "the citation");
 		expect(citation.source_url).toBe("https://example.com/plan");
 		expect("dataset" in citation).toBe(false);
+	});
+
+	test("a corpus document whose manifest row records a commit cites that commit, not HEAD", async () => {
+		const lookups: string[] = [];
+		const reply = await search([{ content: "The planes are described here.", document_name: NAME, source_url: NAME, score: 0.9 }], async (repo, path) => {
+			lookups.push(`${repo}:${path}`);
+			return COMMIT;
+		});
+		expect(defined(reply.chunks[0], "the citation")).toMatchObject({
+			title: "swcstudiospace/agent-substrate:docs/data planes.md",
+			source_url: `https://github.com/swcstudiospace/agent-substrate/blob/${COMMIT}/docs/data%20planes.md`,
+			dataset: "corpus",
+			commit: COMMIT,
+		});
+		expect(lookups).toEqual(["swcstudiospace/agent-substrate:docs/data planes.md"]);
+	});
+
+	test("a corpus document whose manifest row records no commit cites HEAD", async () => {
+		const reply = await search([{ content: "The planes are described here.", document_name: NAME, source_url: NAME, score: 0.9 }], async () => null);
+		expect(defined(reply.chunks[0], "the citation").source_url).toBe(HEAD_URL);
+	});
+
+	test("a recorded value that is not a full 40-character commit name cites HEAD", async () => {
+		for (const recorded of ["0123456", "g".repeat(40), `${COMMIT}0`]) {
+			const reply = await search([{ content: "The planes are described here.", document_name: NAME, source_url: NAME, score: 0.9 }], async () => recorded);
+			expect(defined(reply.chunks[0], "the citation").source_url).toBe(HEAD_URL);
+		}
+	});
+
+	test("a manifest lookup that throws or rejects still answers the search, with the document cited at HEAD", async () => {
+		const throwing = (): Promise<string | null> => {
+			throw new Error("manifest unreachable");
+		};
+		for (const lookup of [throwing, () => Promise.reject(new Error("manifest unreachable"))]) {
+			const reply = await search([{ content: "The planes are described here.", document_name: NAME, source_url: NAME, heading_path: "Intro > Planes", score: 0.9 }], lookup);
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.chunks).toHaveLength(1);
+			expect(defined(reply.chunks[0], "the citation")).toMatchObject({ source_url: HEAD_URL, dataset: "corpus", heading_path: "Intro > Planes", snippet: "The planes are described here." });
+		}
+	});
+
+	test("the same path in another repository is not cited at this repository's commit", async () => {
+		const other = corpusDocumentName("someone-else/agent-substrate", "docs/data planes.md", sha256Hex("body"));
+		const reply = await search(
+			[
+				{ content: "Ours.", document_name: NAME, source_url: NAME, score: 0.9 },
+				{ content: "Theirs.", document_name: other, source_url: other, score: 0.8 },
+			],
+			async (repo) => (repo === "swcstudiospace/agent-substrate" ? COMMIT : null),
+		);
+		expect(reply.chunks).toMatchObject([
+			{ title: "swcstudiospace/agent-substrate:docs/data planes.md", source_url: `https://github.com/swcstudiospace/agent-substrate/blob/${COMMIT}/docs/data%20planes.md` },
+			{ title: "someone-else/agent-substrate:docs/data planes.md", source_url: "https://github.com/someone-else/agent-substrate/blob/HEAD/docs/data%20planes.md" },
+		]);
+	});
+
+	test("a document with several chunks is looked up once per reply", async () => {
+		const lookups: string[] = [];
+		const other = corpusDocumentName("swcstudiospace/agent-substrate", "docs/other.md", sha256Hex("other"));
+		const reply = await search(
+			[
+				{ content: "First.", document_name: NAME, source_url: NAME, score: 0.9 },
+				{ content: "Second.", document_name: NAME, source_url: NAME, score: 0.8 },
+				{ content: "Other.", document_name: other, source_url: other, score: 0.7 },
+			],
+			async (repo, path) => {
+				lookups.push(`${repo}:${path}`);
+				return COMMIT;
+			},
+		);
+		expect(reply.chunks).toHaveLength(3);
+		expect(lookups.sort()).toEqual(["swcstudiospace/agent-substrate:docs/data planes.md", "swcstudiospace/agent-substrate:docs/other.md"]);
+	});
+
+	test("a manifest lookup that never answers is abandoned at its deadline, and the document is cited at HEAD", async () => {
+		const started = performance.now();
+		const reply = await search([{ content: "The planes are described here.", document_name: NAME, source_url: NAME, score: 0.9 }], () => new Promise<string | null>(() => undefined));
+		expect(performance.now() - started).toBeLessThan(5_000);
+		expect(reply.degraded).toBeUndefined();
+		expect(defined(reply.chunks[0], "the citation")).toMatchObject({ source_url: HEAD_URL, commit: "dataset-pin:corpus:unrecorded", dataset: "corpus" });
 	});
 });
 
