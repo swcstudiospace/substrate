@@ -14,6 +14,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import claude from "@agentos-software/claude-code";
 import { agentOS, getSandboxDisposeHooks, type HostFunctionCollections, resolveSandboxOptions, setup } from "@rivet-dev/agentos";
 import { sandboxAgentProvider } from "@rivet-dev/agentos-sandbox";
@@ -35,11 +36,10 @@ import {
 	skillMounts,
 	type TestsRoute,
 	testRunArgv,
-	worktreeFor,
 } from "./options.ts";
-import { type SandboxNetwork, worktreeRootFor } from "./sandbox-options.ts";
+import type { SandboxNetwork } from "./sandbox-options.ts";
 import { substrateDocker } from "./sandbox-provider.ts";
-import { hostCallTarget, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
+import { boundWorktreeOf, hostCallTarget, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
 import type { ApprovalBroker } from "./telegram.ts";
 import type { Dod, LeaseStoreLike, SubstrateClient } from "./substrate.ts";
 import { HOST_SURFACE } from "./substrate.ts";
@@ -208,7 +208,7 @@ function runTestsCollection(key: readonly unknown[], config: HostVmConfig) {
 				try {
 					argv = testRunArgv({
 						graphId: t.graphId,
-						worktree: worktreeFor(t.graphId, config.worktreeRoots),
+						worktree: boundWorktreeOf(config.store, t.graphId, config.worktreeRoots),
 						worktreeRoots: config.worktreeRoots,
 						nodeModules: existsSync(config.checkoutNodeModules) ? config.checkoutNodeModules : null,
 						paths: input.path,
@@ -256,7 +256,7 @@ function gitCollection(key: readonly unknown[], config: HostVmConfig) {
 			substrate: config.substrate,
 			run: execFileRunner,
 			log: config.log,
-			worktreeRoot: worktreeRootFor(t.graphId, config.worktreeRoots),
+			worktreeRoot: dirname(boundWorktreeOf(config.store, t.graphId, config.worktreeRoots)),
 		};
 	};
 	const functions: HostFunctionCollections[string] = {
@@ -433,7 +433,7 @@ export function createHostVm(config: HostVmConfig) {
 
 		resolveOptions: async (c) => {
 			const gid = graphIdOf(c.key);
-			const worktree = worktreeFor(gid, config.worktreeRoots);
+			const worktree = boundWorktreeOf(config.store, gid, config.worktreeRoots);
 			const hostFunctions: HostFunctionCollections = {};
 			if (config.route.s === "hostfn") hostFunctions.substrate = substrateCollection(c.key, config);
 			if (config.route.a === "hostfn_proxy") hostFunctions.substrate = { ...hostFunctions.substrate, ...modelFetchCollection() };

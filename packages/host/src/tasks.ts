@@ -11,7 +11,7 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, wr
 import { dirname, join } from "node:path";
 import { errorLabel } from "./error-label.ts";
 import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute } from "./options.ts";
-import { GRAPH_LABEL, isValidGraphId, WORKTREES_ROOT, worktreeFor, worktreeRule } from "./sandbox-options.ts";
+import { GRAPH_LABEL, isValidGraphId, WORKTREES_ROOT, worktreeFor, worktreeRule, worktreeUnderRoot } from "./sandbox-options.ts";
 import {
 	ADDITIONAL_INSTRUCTIONS,
 	isValidIdentifier,
@@ -60,6 +60,8 @@ export type TaskRecord = {
 	node_id: string;
 	identifier: string;
 	repo: string;
+	/** The worktree this graph's tasks are bound to: the one the first accepted open named. Absent on records written before the field. */
+	worktree?: string | null;
 	session_id: string;
 	prompt_count: number;
 	turn_in_flight: boolean;
@@ -145,12 +147,26 @@ export function validateOpenRequest(body: unknown, worktreeRoots: readonly strin
 	if (!isValidNodeId(b.node_id)) return { ok: false, error: "node_id is missing or invalid" };
 	if (!isValidIdentifier(b.identifier)) return { ok: false, error: "identifier is missing or invalid" };
 	if (!isValidRepoSlug(b.repo)) return { ok: false, error: "repo is missing or invalid" };
-	const worktree = worktreeFor(b.graph_id, worktreeRoots);
-	if (b.worktree !== worktree) return { ok: false, error: worktreeRule(b.graph_id, worktreeRoots) };
+	// The dispatcher reuses a graph's worktree under whichever configured root holds it, so any configured root may name it.
+	const worktree = worktreeUnderRoot(b.graph_id, b.worktree, worktreeRoots) ? b.worktree : null;
+	if (worktree === null) return { ok: false, error: worktreeRule(b.graph_id, worktreeRoots) };
 	return {
 		ok: true,
 		request: { graph_id: b.graph_id, node_id: b.node_id, identifier: b.identifier, repo: b.repo, worktree },
 	};
+}
+
+/** The worktree an accepted open bound this graph to, while it still sits under a configured root: a root removed from the config binds nothing. */
+export function boundWorktree(store: Pick<TaskStoreLike, "list">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string | null {
+	for (const record of store.list()) {
+		if (record.graph_id === graphId && worktreeUnderRoot(graphId, record.worktree, worktreeRoots)) return record.worktree;
+	}
+	return null;
+}
+
+/** The worktree a graph's tasks run in: the bound one, else the derived `<root>/<graph_id>`. */
+export function boundWorktreeOf(store: Pick<TaskStoreLike, "list">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string {
+	return boundWorktree(store, graphId, worktreeRoots) ?? worktreeFor(graphId, worktreeRoots);
 }
 
 type HostCallTarget = { graphId: string; nodeId: string; sessionId: string } | { error: string };
@@ -774,6 +790,9 @@ export class TaskService {
 		const req = validation.request;
 		const { graph_id: gid, node_id: nid } = req;
 
+		// One worktree per graph: an open naming another worktree than the graph's bound one is refused before any claim.
+		const bound = boundWorktree(this.deps.store, gid, this.deps.worktreeRoots ?? [WORKTREES_ROOT]);
+		if (bound !== null && bound !== req.worktree) return { status: 409, body: { error: `graph ${gid} is bound to worktree ${bound}` } };
 		const existing = this.deps.store.get(gid, nid);
 		if (existing) return { status: 200, body: await this.statusOf(existing) };
 
@@ -848,6 +867,7 @@ export class TaskService {
 				node_id: nid,
 				identifier: req.identifier,
 				repo: req.repo,
+				worktree: req.worktree,
 				session_id: nid,
 				prompt_count: 1,
 				turn_in_flight: true,

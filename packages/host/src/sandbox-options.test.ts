@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	buildContainerSpec,
 	egressConflict,
@@ -72,6 +75,23 @@ describe("buildContainerSpec — published_loopback", () => {
 		expect(hc.Privileged ?? false).toBe(false);
 		expect(hc.AutoRemove).toBe(true);
 		expect(hc.Binds.some((b) => b.includes("docker.sock"))).toBe(false);
+	});
+});
+
+describe("buildContainerSpec — worktree roots", () => {
+	test("accepts the graph's worktree under a configured root that is not the first, when the first holds a stray directory", () => {
+		const stray = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const real = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			mkdirSync(join(stray, graphId));
+			mkdirSync(join(real, graphId));
+			const binds = spec({ worktree: join(real, graphId), worktreeRoots: [stray, real] }).HostConfig.Binds;
+			expect(binds.some((bind) => bind.startsWith(`${join(real, graphId)}:`))).toBe(true);
+			expect(() => spec({ worktree: join(stray, "other"), worktreeRoots: [stray, real] })).toThrow(/worktree/);
+		} finally {
+			rmSync(stray, { recursive: true, force: true });
+			rmSync(real, { recursive: true, force: true });
+		}
 	});
 });
 

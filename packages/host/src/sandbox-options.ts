@@ -54,9 +54,14 @@ export function worktreeFor(graphId: string, roots: readonly string[] = [WORKTRE
 	return join(worktreeRootFor(graphId, roots), graphId);
 }
 
+/** True when `worktree` is `<root>/<graph_id>` for one of the configured roots: the only shape a graph's worktree may take. */
+export function worktreeUnderRoot(graphId: string, worktree: unknown, roots: readonly string[]): worktree is string {
+	return typeof worktree === "string" && roots.some((root) => worktree === join(root, graphId));
+}
+
 /** The refusal for any other worktree: it names the rule, so a caller sees what is accepted. */
 export function worktreeRule(graphId: string, roots: readonly string[]): string {
-	return `worktree must be ${worktreeFor(graphId, roots)} (a configured worktree root plus the graph id)`;
+	return `worktree must be a configured worktree root plus the graph id: ${roots.map((root) => join(root, graphId)).join(" or ")}`;
 }
 
 function isDirectory(path: string): boolean {
@@ -100,7 +105,7 @@ export function buildContainerSpec(opts: ContainerSpecOptions): Record<string, u
 	const { graphId, worktree, token, network } = opts;
 	if (!isValidGraphId(graphId)) throw new Error(`invalid graph id ${JSON.stringify(graphId)}`);
 	const roots = opts.worktreeRoots ?? [WORKTREES_ROOT];
-	if (worktree !== worktreeFor(graphId, roots)) throw new Error(`${worktreeRule(graphId, roots)}, got ${JSON.stringify(worktree)}`);
+	if (!worktreeUnderRoot(graphId, worktree, roots)) throw new Error(`${worktreeRule(graphId, roots)}, got ${JSON.stringify(worktree)}`);
 	if (typeof token !== "string" || !/^[A-Za-z0-9._~-]{1,256}$/.test(token)) {
 		throw new Error("sandbox token must be 1-256 URL-safe characters");
 	}

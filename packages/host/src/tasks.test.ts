@@ -22,6 +22,7 @@ import {
 	type TaskServiceDeps,
 	TaskStore,
 	type TaskStoreLike,
+	boundWorktreeOf,
 	validateOpenRequest,
 	type VmHandle,
 } from "./tasks.ts";
@@ -56,6 +57,7 @@ function harness(opts: {
 	/** sessions.prompt rejects at once when the idempotency key contains this text. */
 	promptRejectsFor?: string;
 	sessionState?: string;
+	worktreeRoots?: readonly string[];
 	store?: TaskStoreLike;
 	leases?: LeaseStoreLike;
 	/** Lease id the fake claim grants (default fixed test value; plant high-entropy for log scans). */
@@ -173,6 +175,7 @@ function harness(opts: {
 			return handle;
 		},
 		store: opts.store ?? new MemoryTaskStore(),
+		worktreeRoots: opts.worktreeRoots,
 		leases,
 		ensureModelRoute: async (_handle, graphId) => {
 			record("ensureModelRoute", graphId);
@@ -250,7 +253,7 @@ describe("validateOpenRequest", () => {
 			const accepted = validateOpenRequest(openBody({ worktree: join(configured, GID) }), roots);
 			expect(accepted.ok).toBe(true);
 			if (accepted.ok) expect(accepted.request.worktree).toBe(join(configured, GID));
-			for (const worktree of [join(other, GID), `${WORKTREES_ROOT}/${GID}`, join(tmpdir(), "elsewhere", GID)]) {
+			for (const worktree of [`${WORKTREES_ROOT}/${GID}`, join(tmpdir(), "elsewhere", GID)]) {
 				const refused = validateOpenRequest(openBody({ worktree }), roots);
 				expect(refused.ok).toBe(false);
 				if (!refused.ok) expect(refused.error).toContain(join(configured, GID));
@@ -258,6 +261,20 @@ describe("validateOpenRequest", () => {
 		} finally {
 			rmSync(configured, { recursive: true, force: true });
 			rmSync(other, { recursive: true, force: true });
+		}
+	});
+	test("accepts the worktree a later configured root holds when an earlier root has a stray directory for the graph", () => {
+		const stray = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const real = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			mkdirSync(join(stray, GID));
+			mkdirSync(join(real, GID));
+			const accepted = validateOpenRequest(openBody({ worktree: join(real, GID) }), [stray, real]);
+			expect(accepted.ok).toBe(true);
+			if (accepted.ok) expect(accepted.request.worktree).toBe(join(real, GID));
+		} finally {
+			rmSync(stray, { recursive: true, force: true });
+			rmSync(real, { recursive: true, force: true });
 		}
 	});
 	test.each([
@@ -386,6 +403,49 @@ describe("TaskService.openTask", () => {
 		const after = await h.service.status(GID, NID);
 		expect(after?.last_error).toContain("adapter exited");
 		expect(after?.exit_code).toBe(1);
+	});
+	test("a graph's tasks share one worktree: an open naming another than the graph's bound one is refused before any claim", async () => {
+		const first = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const second = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			const h = harness({ worktreeRoots: [first, second] });
+			expect((await h.service.openTask(openBody({ worktree: join(second, GID) }))).status).toBe(202);
+			const refused = await h.service.openTask(openBody({ node_id: "n2", worktree: join(first, GID) }));
+			expect(refused).toEqual({ status: 409, body: { error: `graph ${GID} is bound to worktree ${join(second, GID)}` } });
+			expect(h.named("claimAndPersist")).toHaveLength(1);
+		} finally {
+			rmSync(first, { recursive: true, force: true });
+			rmSync(second, { recursive: true, force: true });
+		}
+	});
+
+	test("a graph's worktree is the one its first open named, else the derived one", async () => {
+		const first = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const second = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			const store = new MemoryTaskStore();
+			expect(boundWorktreeOf(store, GID, [first, second])).toBe(join(first, GID));
+			const h = harness({ store, worktreeRoots: [first, second] });
+			expect((await h.service.openTask(openBody({ worktree: join(second, GID) }))).status).toBe(202);
+			expect(boundWorktreeOf(store, GID, [first, second])).toBe(join(second, GID));
+		} finally {
+			rmSync(first, { recursive: true, force: true });
+			rmSync(second, { recursive: true, force: true });
+		}
+	});
+	test("a bound worktree under a root removed from the config binds nothing: the graph's next open is not refused", async () => {
+		const first = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const second = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			const store = new MemoryTaskStore();
+			expect((await harness({ store, worktreeRoots: [first, second] }).service.openTask(openBody({ worktree: join(second, GID) }))).status).toBe(202);
+			const h = harness({ store, worktreeRoots: [first] });
+			expect(boundWorktreeOf(store, GID, [first])).toBe(join(first, GID));
+			expect((await h.service.openTask(openBody({ worktree: join(first, GID) }))).status).toBe(200);
+		} finally {
+			rmSync(first, { recursive: true, force: true });
+			rmSync(second, { recursive: true, force: true });
+		}
 	});
 });
 
