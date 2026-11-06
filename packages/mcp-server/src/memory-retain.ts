@@ -124,7 +124,7 @@ export async function emitRetainWarning(
  * subject — kinds stay separate, so a fact never shares a document with a
  * warning), while subject-less appends keep the idempotency key.
  */
-export function retainDocumentId(entry: MemoryEntry, idempotencyKey: string): string {
+export function retainDocumentId(entry: { scope: string; kind: unknown; subject?: string | undefined }, idempotencyKey: string): string {
 	const subject = typeof entry.subject === "string" && entry.subject.length > 0 ? entry.subject : undefined;
 	if (subject === undefined) return idempotencyKey;
 	return `subj_${sha256Hex(canonicalJson({ scope: entry.scope, kind: entry.kind, subject })).slice(0, 32)}`;

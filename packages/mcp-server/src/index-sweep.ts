@@ -48,7 +48,7 @@ import { DEFAULT_LEASE_TTL_SECONDS } from "./lease.ts";
 import { FORGET_MARKER_PREFIX } from "./memory-forget.ts";
 import { retainDocumentId } from "./memory-retain.ts";
 import { bankForSurface, type HindsightConfig } from "./planes/hindsight.ts";
-import type { MemoryEntry, MemoryExpiryMode } from "./types.ts";
+import type { MemoryExpiryMode } from "./types.ts";
 
 /** Statuses that mean a graph is finished — exactly Notion's `complete` status group on the Agent Task Graph. */
 export const TERMINAL_GRAPH_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"] as const;
@@ -696,26 +696,13 @@ export function memoryLifecycleReport(
 		truncated[ttl] = full > listed.length;
 		for (const row of listed) {
 			const subject = typeof row.subject === "string" && row.subject.length > 0 ? row.subject : undefined;
-			const entry = {
-				id: String(row.id ?? ""),
-				scope: String(row.scope ?? ""),
-				kind: row.kind,
-				text: "",
-				writer: String(row.writer ?? ""),
-				...(subject !== undefined ? { subject } : {}),
-				ttl: String(row.ttl ?? ""),
-				created: String(row.created ?? ""),
-				actor: "agent",
-				trust: "unverified",
-				version: 1,
-			} as unknown as MemoryEntry;
 			const writer = String(row.writer ?? "");
 			rows.push({
 				id: String(row.id ?? ""),
 				ttl,
 				writer,
 				bank: options.hindsight === null ? null : bankForSurface(options.hindsight, writer),
-				document_id: retainDocumentId(entry, String(row.idempotency_key ?? "")),
+				document_id: retainDocumentId({ scope: String(row.scope ?? ""), kind: row.kind, subject }, String(row.idempotency_key ?? "")),
 			});
 		}
 	}
