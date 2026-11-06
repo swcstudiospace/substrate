@@ -1,15 +1,27 @@
 ---
 phase: 74-cross-repo-compensating-actions
 verified: 2026-11-06T02:55:41Z
-status: gaps_found
-score: 0/3 roadmap success criteria verified (SC1, SC2, SC3 failed); HARD-R1 passed by owner override (2026-11-06, for v1.8), not delivered
+status: human_needed
+score: "4 of 4 roadmap criteria PASSED (override); status human_needed: the whole phase is deferred past v1.8 by owner decision 2026-11-06; two human items and two behavior-unverified items remain open"
 covered_files: [".planning/REQUIREMENTS.md", ".planning/ROADMAP.md", ".planning/phases/74-cross-repo-compensating-actions/74-SUMMARY.md", "packages/cli/src/corpus/ingest.ts", "packages/cli/src/worktree/command.ts", "packages/cli/src/worktree/scope.ts", "packages/collectors/src/install-git-hook.test.ts", "packages/collectors/src/install-git-hook.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/repo-executor.ts", "packages/mcp-server/src/repo-scope.ts"]
 covered_digest: "v3:sha256:2d0964ae2d1c1ce08893e189b2a6a984f83a534bbfe3fe255c1bd9278116b44b"
 behavior_unverified: 2
-overrides_applied: 1
+overrides_applied: 4
 overrides:
   - must_have: "HARD-R1: Execute a real operation across at least two registered repositories with a durable per-step transaction log and idempotent retries. Forced failure leaves compensated state or explicit needs-attention state; no silent partial success. Absence of an existing transaction path is not delivery. (REQUIREMENTS.md:118)"
     reason: "HARD-R1 waived for v1.8 and deferred to after v1.8 (owner decision 2026-11-06). SC1, SC2 and SC3 are not waived."
+    accepted_by: "owner"
+    accepted_at: "2026-11-06T00:00:00Z"
+  - must_have: "SC1: a real operation across at least two registered repositories persists operation and per-step state before effects, with stable dedupe keys and idempotent per-step retry"
+    reason: "Deferred past v1.8: the whole phase is deferred by owner decision 2026-11-06. SC1 is accepted as an override and is not delivered."
+    accepted_by: "owner"
+    accepted_at: "2026-11-06T00:00:00Z"
+  - must_have: "SC2: a forced failure at step N leaves compensated pre-operation state or a durable needs-attention result naming unfinished or failed compensation steps"
+    reason: "Deferred past v1.8: the whole phase is deferred by owner decision 2026-11-06. SC2 is accepted as an override and is not delivered."
+    accepted_by: "owner"
+    accepted_at: "2026-11-06T00:00:00Z"
+  - must_have: "SC3: failure and compensation failure are exercised against temporary real repositories; recovery or status exposes the parked result and never overwrites an outside ref change or silently repeats a completed effect"
+    reason: "Deferred past v1.8: the whole phase is deferred by owner decision 2026-11-06. SC3 is accepted as an override and is not delivered."
     accepted_by: "owner"
     accepted_at: "2026-11-06T00:00:00Z"
 re_verification:
@@ -23,7 +35,8 @@ re_verification:
   regressions: []
 gaps:
   - truth: "SC1: a real operation across at least two registered repositories persists operation and per-step state before effects, with stable dedupe keys and idempotent per-step retry"
-    status: failed
+    status: passed
+    override_ref: "overrides[1]"
     reason: "No multi-repo operation persists step state. Prune removes each worktree and only then emits its ledger note; no operation id or dedupe key exists. The installer refuses unregistered paths when SUBSTRATE_REPO_REGISTRY is set, but it still iterates argv paths and writes no step record. Ingest keeps results in memory apart from the server's own row skip. scopedGit, reserved for phase 74, still has no production caller. Re-verified at HEAD 5e304ef8: no change in these facts."
     artifacts:
       - path: "packages/cli/src/worktree/command.ts"
@@ -39,7 +52,8 @@ gaps:
       - "A durable operation and step record written before each effect, with stable dedupe keys"
       - "Idempotent per-step retry that consults the step record"
   - truth: "SC2: a forced failure at step N leaves compensated pre-operation state or a durable needs-attention result naming unfinished or failed compensation steps"
-    status: failed
+    status: passed
+    override_ref: "overrides[2]"
     reason: "On failure prune stops and returns 1 with earlier removals kept; its message goes to stderr only. The installer's named failure is stdout only and isolates each repository rather than compensating. Ingest's failed items are printed counts. Nothing compensates and nothing is durable. Re-verified at HEAD 5e304ef8."
     artifacts:
       - path: "packages/cli/src/worktree/command.ts"
@@ -50,7 +64,8 @@ gaps:
       - "Compensation for each completed step of a failed operation"
       - "A durable needs-attention record naming unfinished or failed compensation steps"
   - truth: "SC3: failure and compensation failure are exercised against temporary real repositories; recovery or status exposes the parked result and never overwrites an outside ref change or silently repeats a completed effect"
-    status: failed
+    status: passed
+    override_ref: "overrides[3]"
     reason: "No recovery or status surface for a parked operation exists. git grep -il compensat over non-markdown tracked files returns no files. The temporary-repository tests cover hook installation, registry refusal and linked-worktree gating; none exercises forced failure, compensation or compensation failure. Re-verified at HEAD 5e304ef8."
     artifacts:
       - path: "packages/collectors/src/install-git-hook.test.ts"
@@ -78,9 +93,6 @@ behavior_unverified_items:
     why_human: "The finally block in installRepos (lines 383-385) applies the once-count rule. The once-count test (title cited below) combines several foreign hooks and no throw; no test combines a foreign hook with a throw. 74-SUMMARY.md section 4 records the same gap"
 coincidental_reliance_items: []
 human_verification:
-  - test: "Scope of the 2026-11-06 waiver: confirm whether it extends to the roadmap success criteria SC1 to SC3, or only to the HARD-R1 requirement text"
-    expected: "A recorded ruling. As given, the waiver names HARD-R1 only. This record does not extend it to SC1 to SC3, so the status is gaps_found"
-    why_human: "The waiver is owner text; the scope of SC1 to SC3 relative to it is the owner's to state"
   - test: "Rule whether corpus ingest (one remote target, but a plan that can span several registered repositories) counts as a cross-repo write path"
     expected: "A recorded ruling. It does not change the verdict: SC2 and SC3 fail for ingest either way, since no compensation or durable needs-attention record exists"
     why_human: "Classification question for the owner; not decided by the 2026-11-06 waiver"
@@ -94,21 +106,21 @@ human_verification:
 
 # Phase 74: Cross-repo compensating actions Verification Report
 
-**Phase Goal:** A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent. (ROADMAP.md, phase 74 section, build wording; status line: gaps_found; HARD-R1 passed by owner override for v1.8, 2026-11-06.)
+**Phase Goal:** A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent. (ROADMAP.md, phase 74 section, build wording; status line: human_needed, deferred past v1.8 by owner decision 2026-11-06; SC1 to SC3 and HARD-R1 pass by override and are not delivered.)
 **Requirement:** HARD-R1 (`.planning/REQUIREMENTS.md:118`, owner-approved text, commit 23bd0733): "Execute a real operation across at least two registered repositories with a durable per-step transaction log and idempotent retries. Forced failure leaves compensated state or explicit needs-attention state; no silent partial success. Absence of an existing transaction path is not delivery." **Passed by structured owner override for v1.8 (accepted_by owner, accepted_at 2026-11-06; deferred to after v1.8). Not delivered.**
 **Verified:** 2026-11-06T02:55:41Z
-**Status:** gaps_found
+**Status:** human_needed
 **Re-verification:** Yes. The prior record (2026-11-05T08:00:19Z, gaps_found, 0/4, HEAD 6e5d766e) is superseded. This re-verification is at code HEAD 5e304ef8. `covered_files` and `covered_digest` are the verbatim output of `gsd_run query verification.fingerprint` at HEAD 5e304ef8 over the six prior covered files plus the code and planning files this record now cites (`repo-scope.ts`, `redact.ts`, `cli/src/worktree/scope.ts`, `ROADMAP.md`, `REQUIREMENTS.md`).
 
 ## Decision basis
 
 - **Owner decision, 2026-11-06 (binding; accepted by owner): HARD-R1 is accepted for v1.8 by structured override (`overrides:` in frontmatter; accepted_by "owner"; accepted_at "2026-11-06T00:00:00Z"). HARD-R1 is PASSED (override).** Owner text: "HARD-R1 is waived for v1.8 (accepted by owner, 2026-11-06). HARD-R1 is deferred to after v1.8, as the owner decided." The requirement text is not amended in this record, and the override does not mark HARD-R1 delivered. No transaction path exists on this tree.
-- **Scope of the override.** The owner's decision names HARD-R1 only. SC1, SC2 and SC3 are phase 74's roadmap success criteria. They are not covered by this record's override, because the decision as given does not name them and no `overrides:` entry exists for them. Status is therefore `gaps_found`. Whether the owner intends the decision to reach SC1 to SC3 is an open owner item (see Human Verification Required).
+- **Scope of the override.** Owner decision 2026-11-06 (accepted by owner): the whole phase 74 is deferred past v1.8. SC1, SC2 and SC3 are accepted by structured override (`overrides` entries 1 to 3, accepted_by "owner", accepted_at "2026-11-06T00:00:00Z"), and HARD-R1 by entry 0. Nothing is delivered: no transaction path exists on this tree. The question whether the decision reaches SC1 to SC3 is answered, so it is no longer a human item.
 - **Earlier owner scheduling decision, 2026-11-03** (ROADMAP.md:1286, STATE.md): "scheduled after v1.8 closes". It is superseded as to HARD-R1 status by the 2026-11-06 override. It is not, by itself, an override.
 - **D74-1 is withdrawn** in the committed 74-CONTEXT.md ("## Withdrawn"). Withdrawal is not closure, and it did not waive HARD-R1.
 - **Plans:** none exist in the phase directory, so PLAN `must_haves` are absent. The roadmap success criteria (SC1 to SC3) and HARD-R1 are the must-haves (Step 2a).
 - **Separate evidence:** the install-git-hook robustness fix (d65d74fb) and the phase 72 installer gate are evaluated below as their own rows. They are excluded from the score.
-- **Deferred items.** No roadmap criterion is deferred by a phase. HARD-R1 is passed by owner override for v1.8, as above.
+- **Deferred items.** The whole phase 74 is deferred past v1.8 by owner decision (2026-11-06). Its four criteria (SC1 to SC3, HARD-R1) pass by structured override only; none is delivered.
 
 ## Changes since the prior record checked
 
@@ -132,9 +144,9 @@ The prior record's "installer reads no registry" finding stands as corrected in 
 
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
-| 1   | SC1: an actual operation across at least two registered repositories persists operation and step state before effects, with stable dedupe keys and idempotent per-step retry | ✗ FAILED | No multi-repo operation persists state at HEAD 5e304ef8. Prune (`packages/cli/src/worktree/command.ts`, `commandPrune`, lines 321-395) runs `git worktree remove` at line 374 and `deps.emit` at line 379; nothing is recorded before the effect and no operation id or dedupe key exists. Prune reads no repository registry (no `SUBSTRATE_REPO_REGISTRY` or `localRegistryScope` reference in `command.ts`). The installer (`install-git-hook.ts`, `installRepos` at 337, `main` at 390-404) calls `localRegistryScope` and `localPathGate` in `locate()` (lines 112 and 116) and refuses an unregistered path before any git call. It still processes argv paths and keeps no step state. Ingest (`executeIngest`, line 98) keeps results in memory. `scopedGit` (`repo-executor.ts:74`) has no production caller. |
-| 2   | SC2: a forced failure at step N yields compensated pre-operation state or a durable needs-attention result naming unfinished or failed compensation steps; never success for a partial operation | ✗ FAILED | Prune stops at the failing worktree, keeps every earlier removal, returns 1 (line 392), and prints "stopped; nothing further was removed and nothing was retried" to stderr only (line 391). No compensation runs. The installer's named failure (`✗ <repo> — install failed: <reason>`, line 382) goes through `options.write`, which defaults to `process.stdout` (line 341). The `refused` line is a pre-effect refusal, not compensation. Each repository is isolated, so no multi-step operation exists to compensate. Ingest's failed items are printed counts. None is a durable needs-attention record. |
-| 3   | SC3: failure and compensation failure exercised against temporary real repositories; recovery/status exposes the parked result; never overwrites an outside ref change or silently repeats a completed effect | ✗ FAILED | No recovery or status surface for a parked operation exists. `git grep -il compensat -- ':!*.md'` returns no files at HEAD. The temporary-repository tests in `install-git-hook.test.ts` cover installation, the registry refusal and linked-worktree gating; none covers forced failure, compensation or compensation failure. |
+| 1   | SC1: an actual operation across at least two registered repositories persists operation and step state before effects, with stable dedupe keys and idempotent per-step retry | ✓ PASSED (override, owner 2026-11-06: whole phase deferred past v1.8). Not delivered | No multi-repo operation persists state at HEAD 5e304ef8. Prune (`packages/cli/src/worktree/command.ts`, `commandPrune`, lines 321-395) runs `git worktree remove` at line 374 and `deps.emit` at line 379; nothing is recorded before the effect and no operation id or dedupe key exists. Prune reads no repository registry (no `SUBSTRATE_REPO_REGISTRY` or `localRegistryScope` reference in `command.ts`). The installer (`install-git-hook.ts`, `installRepos` at 337, `main` at 390-404) calls `localRegistryScope` and `localPathGate` in `locate()` (lines 112 and 116) and refuses an unregistered path before any git call. It still processes argv paths and keeps no step state. Ingest (`executeIngest`, line 98) keeps results in memory. `scopedGit` (`repo-executor.ts:74`) has no production caller. |
+| 2   | SC2: a forced failure at step N yields compensated pre-operation state or a durable needs-attention result naming unfinished or failed compensation steps; never success for a partial operation | ✓ PASSED (override, owner 2026-11-06: whole phase deferred past v1.8). Not delivered | Prune stops at the failing worktree, keeps every earlier removal, returns 1 (line 392), and prints "stopped; nothing further was removed and nothing was retried" to stderr only (line 391). No compensation runs. The installer's named failure (`✗ <repo> — install failed: <reason>`, line 382) goes through `options.write`, which defaults to `process.stdout` (line 341). The `refused` line is a pre-effect refusal, not compensation. Each repository is isolated, so no multi-step operation exists to compensate. Ingest's failed items are printed counts. None is a durable needs-attention record. |
+| 3   | SC3: failure and compensation failure exercised against temporary real repositories; recovery/status exposes the parked result; never overwrites an outside ref change or silently repeats a completed effect | ✓ PASSED (override, owner 2026-11-06: whole phase deferred past v1.8). Not delivered | No recovery or status surface for a parked operation exists. `git grep -il compensat -- ':!*.md'` returns no files at HEAD. The temporary-repository tests in `install-git-hook.test.ts` cover installation, the registry refusal and linked-worktree gating; none covers forced failure, compensation or compensation failure. |
 | 4   | HARD-R1: durable per-step transaction log and idempotent retries; forced failure leaves compensated or needs-attention state; "absence of an existing transaction path is not delivery" | ✓ PASSED (override, owner 2026-11-06, for v1.8) | Not delivered: same evidence as truths 1 to 3. `REQUIREMENTS.md:118` is unchecked and `:136` reads "Not started; earlier no-op was not delivery" at HEAD. Passed by structured override (accepted_by owner, accepted_at 2026-11-06T00:00:00Z) for v1.8; deferred to after v1.8 as the owner decided. The override does not extend to truths 1 to 3. |
 
 **Score:** 0/3 roadmap success criteria verified (SC1, SC2, SC3 failed). HARD-R1 passes by owner override (2026-11-06, for v1.8); it is not delivered. The two separate-evidence rows marked present-behavior-unverified below are not roadmap truths and are excluded from the score.
@@ -252,14 +264,13 @@ Gate r38's only failing testcase is "the ratchet is tight: no source counter sit
 
 ## Human Verification Required
 
-Status is gaps_found, so these are follow-ups, not the routing decision:
+Status is human_needed. These open items remain; the owner's 2026-11-06 scope question is answered (the whole phase is deferred past v1.8), so it is not listed:
 
-1. **Scope of the HARD-R1 override.** The owner accepted HARD-R1 for v1.8 on 2026-11-06 (structured override). The decision as given names HARD-R1 only. SC1 to SC3 are the roadmap success criteria of this phase, and this record does not treat them as overridden. Owner to state whether the decision extends to them; if it does, the owner says so in writing and the record is re-issued. It is not extended here.
-2. **Corpus ingest classification.** Rule whether ingest (one remote target, with a plan that can span several registered repositories) counts as a cross-repo write path. It does not change the verdict: SC2 and SC3 fail for ingest either way.
-3. **Prune ledger gap.** Rule whether a removed worktree whose ledger note was not recorded (spool off, the default) is acceptable under "a failed undo is recorded, not dropped", or must be tracked.
-4. **Behavior-unverified items.** Add the two tests in `behavior_unverified_items`. They cover only the separate install fix.
+1. **Corpus ingest classification.** Rule whether ingest (one remote target, with a plan that can span several registered repositories) counts as a cross-repo write path. It does not change the verdict: SC2 and SC3 fail for ingest either way.
+2. **Prune ledger gap.** Rule whether a removed worktree whose ledger note was not recorded (spool off, the default) is acceptable under "a failed undo is recorded, not dropped", or must be tracked.
+3. **Behavior-unverified items.** Add the two tests in `behavior_unverified_items`. They cover only the separate install fix.
 
-Orchestrator actions after the gate (not made in this draft; the worktree is read-only for this verification): the HARD-R1 override is recorded here as a structured `overrides:` entry. The requirement text in `.planning/REQUIREMENTS.md` (line 118 checkbox; line 136 "Not started" row) and the ROADMAP phase 74 status line (line 1286, which still reads "scheduled after v1.8 closes (owner decision, 2026-11-03)") are not amended in this draft; the orchestrator applies that amendment with accepted_by "owner" and accepted_at "2026-11-06T00:00:00Z". The progress row (line 1422) reads `gaps_found` and matches this record.
+Planning documents: the HARD-R1 override is a structured `overrides:` entry in this record (accepted_by "owner", accepted_at "2026-11-06T00:00:00Z"). The ROADMAP phase 74 status line and progress row are amended in the same commit to human_needed, deferred past v1.8 by owner decision. The REQUIREMENTS.md lines (118 checkbox, 136 "Not started" row) are unchanged: HARD-R1 is not delivered.
 
 ## Gaps Summary
 
