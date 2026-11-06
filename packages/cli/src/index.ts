@@ -232,7 +232,12 @@ async function cmdEmit(args: Record<string, string | true>): Promise<void> {
 		});
 		return;
 	}
-	await post("/events", body, surface);
+	const response = await post("/events", body, surface);
+	if (response === null) {
+		// No answer and no spool to park the event: name its kind on stderr so the loss is visible.
+		// The summary and payload are never printed, and the exit status stays 0 for hooks.
+		process.stderr.write(`[substrate] emit ${JSON.stringify(kind.slice(0, 64))} not recorded: the server did not answer and the event spool is off\n`);
+	}
 }
 
 /** Write the brief to disk, then exec the agent. For surfaces with no hook API. */
