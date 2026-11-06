@@ -80,8 +80,9 @@ export async function runReport(deps: ReconcileDeps): Promise<Report> {
 	counts["index.graphs"] = indexGraphs.value.size;
 	truncated["index.graphs"] = indexGraphs.truncated;
 
-	// The cache layer. An off cache scans nothing: every scan comes back empty and truncated. A live scan that truncates
-	// holds keys past its cap, so it always has at least one key. Empty and truncated is therefore the off cache's answer.
+	// The cache layer. An off cache scans nothing: every scan comes back empty and truncated. A live cache whose scans the
+	// round bound (MAX_SCAN_ROUNDS, cache.ts) stops before any key looks the same. Both read as cache-off below: the run is
+	// never clean and the cache layer is named unchecked.
 	const scans: Array<[string, { keys: string[]; truncated: boolean }]> = [];
 	for (const klass of CACHE_CLASSES) {
 		scans.push([`cache.${klass}`, await deps.cache.scanKeys(`${CACHE_PREFIX}:${klass}:*`, caps.cacheKeys)]);
