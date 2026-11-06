@@ -3,8 +3,8 @@ phase: 73-ledger-tamper-evidence
 verified: 2026-11-06T02:56:10Z
 status: human_needed
 score: 8/8 must-haves verified (T2 counted as PASSED override)
-covered_files: [".planning/phases/73-ledger-tamper-evidence/73-01-PLAN.md", ".planning/phases/73-ledger-tamper-evidence/73-01-SUMMARY.md", "docs/greptime-ledger.md", "packages/cli/src/capsule.ts", "packages/ledger/src/heads.test.ts", "packages/ledger/src/heads.ts", "packages/ledger/src/memo.test.ts", "packages/ledger/src/memo.ts", "packages/ledger/src/merkle.ts", "packages/mcp-server/src/anchor-verify-deps.ts", "packages/mcp-server/src/anchor.test.ts", "packages/mcp-server/src/anchor.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/checkpoint-verify.test.ts", "packages/mcp-server/src/corpus/slo.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/index-store.test.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/memory-policy.test.ts", "packages/mcp-server/src/memory-policy.ts", "packages/mcp-server/src/memory-record.ts", "packages/mcp-server/src/memory-retain.ts", "packages/mcp-server/src/memory-verify.ts", "packages/mcp-server/src/memory-write.test.ts", "packages/mcp-server/src/memory-write.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/session-context.ts", "packages/mcp-server/src/session-rollback.ts", "packages/mcp-server/src/silent-failures.ts", "packages/mcp-server/src/skills/propose.ts", "packages/mcp-server/src/types.ts", "packages/observability/src/instruments.ts"]
-covered_digest: "v3:sha256:4364a8f00002a8dac07e5d77ecfca8c9f6b0fcdd2560bd81e5680e7b9b7121f7"
+covered_files: [".planning/phases/73-ledger-tamper-evidence/73-01-PLAN.md", ".planning/phases/73-ledger-tamper-evidence/73-01-SUMMARY.md", "docs/greptime-ledger.md", "packages/cli/src/capsule.ts", "packages/cli/src/index.ts", "packages/ledger/src/heads.test.ts", "packages/ledger/src/heads.ts", "packages/ledger/src/memo.test.ts", "packages/ledger/src/memo.ts", "packages/ledger/src/merkle.ts", "packages/mcp-server/src/anchor-verify-deps.ts", "packages/mcp-server/src/anchor.test.ts", "packages/mcp-server/src/anchor.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/checkpoint-verify.test.ts", "packages/mcp-server/src/corpus/slo.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/index-store.test.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/memory-policy.test.ts", "packages/mcp-server/src/memory-policy.ts", "packages/mcp-server/src/memory-record.ts", "packages/mcp-server/src/memory-retain.ts", "packages/mcp-server/src/memory-verify.ts", "packages/mcp-server/src/memory-write.test.ts", "packages/mcp-server/src/memory-write.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/session-context.ts", "packages/mcp-server/src/session-rollback.ts", "packages/mcp-server/src/silent-failures.ts", "packages/mcp-server/src/skills/propose.test.ts", "packages/mcp-server/src/skills/propose.ts", "packages/mcp-server/src/types.ts", "packages/observability/src/instruments.ts"]
+covered_digest: "v3:sha256:ef7fa28bbc7e8d8824ca6a151085d045974a0cfa53bd976af20f880dc4cbc1b7"
 behavior_unverified: 0
 overrides_applied: 1
 overrides:
@@ -15,10 +15,11 @@ overrides:
 re_verification:
   previous_status: human_needed
   previous_score: 8/8 (T2 counted as PASSED override)
-  previous_verified: 2026-11-06T00:43:54Z
-  previous_scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD a46d42c3 (clean). Range 6e5d766e..a46d42c3. Covered paths changed in range: packages/mcp-server/src/service.ts (884e0753, f0f3c04e), packages/mcp-server/src/greptime.ts (f0f3c04e), packages/mcp-server/src/event.ts (a46d42c3), packages/cli/src/capsule.ts (9b793653)."
-  scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD 5e304ef8 (clean). Range a46d42c3..5e304ef8. Covered paths changed in range (18): docs/greptime-ledger.md, packages/cli/src/capsule.ts, packages/ledger/src/memo.ts, packages/mcp-server/src/{anchor-verify-deps,anchor,brief,event,greptime,index-store,memory-policy,memory-record,memory-retain,memory-verify,memory-write,service,session-context,session-rollback,types}.ts. Changes: export keywords removed (no behaviour), comment lines, reportSilent at memory-write.ts catch sites, a retainDocumentId signature narrowing, the phase 63 manifestCommit lookup in service.ts, one docs sentence. No chain write, verify, memo or anchor logic changed. covered_files now also names five files the record cites (corpus/slo.ts, observe.ts, silent-failures.ts, observability/src/instruments.ts, skills/propose.ts); covered_digest is from verification.fingerprint at this head."
-  gaps_closed: []
+  previous_verified: 2026-11-06T02:56:10Z
+  previous_scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD 5e304ef8 (clean). Range a46d42c3..5e304ef8. Covered paths changed in range (18): docs/greptime-ledger.md, packages/cli/src/capsule.ts, packages/ledger/src/memo.ts, and fifteen packages/mcp-server/src files. Changes: export keywords removed, comment lines, reportSilent at memory-write.ts catch sites, a retainDocumentId narrowing, the phase 63 manifestCommit lookup, one docs sentence. No chain write, verify, memo or anchor logic changed."
+  scope: "worktree /root/src/worktrees/as-gsd-v18-all, HEAD 4637a9b7 (clean). Range 5e304ef8..4637a9b7. Covered paths changed in range: packages/mcp-server/src/skills/propose.ts (e2e4cba4). Cited and added to covered_files in this pass: packages/mcp-server/src/skills/propose.test.ts (e2e4cba4), packages/cli/src/index.ts (4ac770af). Changes: mirrorOriginUrl throws ProposeFailed when the mirror config cannot be read (fail closed; owner decision 4, 2026-11-06), with tests; the reportSilent import is removed from propose.ts; cmdEmit writes one stderr line when a dropped emit has no answer and the spool is off. No chain write, verify, memo or anchor logic changed."
+  gaps_closed:
+    - "propose.ts mirror origin, fail-open: closed as a recorded fix. Owner decision 4 (2026-11-06): an unreadable mirror config refuses the skill proposal. Implemented in e2e4cba4 with its tests; not an override. See the 4637a9b7 section."
   gaps_remaining:
     - "W-L3: session_id and repo at the 512-unit cut (event.ts:436, :442 use normalizeKey). Owner item, open as listed."
     - "W-L4: branch, node_id and linear_identifier accept a lone surrogate on write, per the owner list. Code now refuses them (assertWriteTextFields, event.ts:311-321). Owner item, open as listed; the decision is not re-taken here."
@@ -31,7 +32,6 @@ re_verification:
     - "Stored graph ids over 512 bytes, containing NUL, or with a lone surrogate: operator scan, then owner repair decision. Blocks live anchoring on such a store. Open as listed."
     - "O-S1: pre-change straddled rows. docs/greptime-ledger.md records the 2026-11-04 owner decision to leave them (line 389). The live count is not run. Stays open."
     - "Q8 and N5: no pointer, and RPC history depth. Accepted limits; stay open as recorded."
-    - "propose.ts mirror origin, fail-open: mirrorOriginUrl (skills/propose.ts:474-496) returns null when the mirror config cannot be read, and the origin check at :994-999 is then skipped, so an unreadable mirror config passes. Awaiting owner decision. Not a phase 73 criterion; no verdict depends on it."
   gaps_new: []
   regressions: []
 human_verification:
@@ -64,11 +64,11 @@ human_verification:
 # Phase 73: Ledger tamper evidence Verification Report
 
 **Phase Goal:** A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from stored rows, and the verified head is anchored. Criterion 1 is proven by tests against a head saved before the change. Criterion 2 requires each graph's chain head to be recorded in the hourly anchor, and that recorded head is the only trusted proof.
-**Verified:** 2026-11-06T02:56:10Z
+**Verified:** 2026-11-06T04:09:31Z
 **Status:** human_needed
-**Re-verification:** Yes, after the a46d42c3 record. Scope is HEAD 5e304ef8. Prior status human_needed, score 8/8. Line numbers below are at 5e304ef8.
+**Re-verification:** Yes, after the 5e304ef8 record. Scope is HEAD 4637a9b7. Prior status human_needed, score 8/8. Line numbers in the chain sections are unchanged at 4637a9b7. Covered code changed since 5e304ef8: `skills/propose.ts` (e2e4cba4); its cited lines are in the 4637a9b7 section.
 
-Evidence base: gate r38. `/root/src/worktrees/backups/gate-r38-junit.xml` (run on 66fa97bd). Its one failure is the `repository ratchet` check ("the ratchet is tight: no source counter sits below its baseline", scripts/code-ratchet.test.ts), which the head 5e304ef8 addresses (`as_unknown_as` ratchet lowered to 22). Its two skips are outside this phase (redact.test.ts, cache-conformance.test.ts). Every test title cited below is a passing testcase in that file and is a `test(...)` or `describe(...)` title in source at 5e304ef8 (grep under `packages/`). The r39 gate on the current head is in progress and writes `/root/src/worktrees/backups/gate-r39-junit.xml`; this record claims no pass count from either file. No test was run by this pass, and no live or operator-gated behaviour is claimed as observed.
+Evidence base: gate r38, `/root/src/worktrees/backups/gate-r38-junit.xml` (run on 66fa97bd). Its one failure is the `repository ratchet` check ("the ratchet is tight: no source counter sits below its baseline", scripts/code-ratchet.test.ts), which head 5e304ef8 addresses (`as_unknown_as` ratchet lowered to 22). Its two skips are outside this phase (redact.test.ts, cache-conformance.test.ts). Every test title cited in the 5e304ef8 sections is a passing testcase in that file and a `test(...)` or `describe(...)` title in source. The three `propose.test.ts` titles added by e2e4cba4 are not in that file (r38 ran before the commit); they are cited from source only, in the 4637a9b7 section. The gate r42 on 4637a9b7 is in progress and writes `/root/src/worktrees/backups/gate-r42-junit.xml`; this record claims no pass count from it. No live or operator check was run, and this pass ran no tests.
 
 ## Goal Achievement
 
@@ -97,7 +97,7 @@ Evidence base: gate r38. `/root/src/worktrees/backups/gate-r38-junit.xml` (run o
 | R4 | A session_id that straddles 512 units round-trips: stored, looked up and read back in one form | ✓ VERIFIED (carried) | r38: "a session id straddling the cap is stored, looked up and read back in one form"; "a repo longer than the cap is refused at write, naming the rule, and nothing is stored" (service.test.ts). |
 | R5 | 4b84e50c regression test: a row with repo `owner/name` plus a lone high surrogate is not visible to a caller granted `owner/name`; a scope spelled with a surrogate keeps it | ✓ VERIFIED (carried) | r38: "a repo keeps its exact spelling for visibility: a lone high surrogate is not trimmed into the granted repo" (memory-policy.test.ts). `memory-policy.ts` changed in range only by export removal (b8cbdeac). |
 
-## Re-audit of the chain and anchor paths at 5e304ef8 (this pass)
+## Re-audit of the chain and anchor paths at 5e304ef8 (prior pass)
 
 **Scope check.** `git diff --name-only a46d42c3..5e304ef8` intersected with the covered paths gives 18 files: `docs/greptime-ledger.md`, `packages/cli/src/capsule.ts`, `packages/ledger/src/memo.ts`, `packages/mcp-server/src/{anchor-verify-deps,anchor,brief,event,greptime,index-store,memory-policy,memory-record,memory-retain,memory-verify,memory-write,service,session-context,session-rollback,types}.ts`. Commits in range that touch them: `66fa97bd`, `d9d0a401`, `b8cbdeac` (export keyword removal), `e62bc17b` (comments and `reportSilent` sites in `event.ts`, `greptime.ts`, `index-store.ts`, `memory-write.ts`), `a2176f96` (`memory-retain.ts`), `0947001e` (`service.ts`, phase 63), `5041193f` (`docs/greptime-ledger.md`). Changed paths outside the covered set, and not cited by this record, are not evaluated here: `cache.ts` (f1266a9c), `server.ts` and `cli/src/index.ts` (14ac787a), `index-sweep.ts` (a2176f96).
 
@@ -122,7 +122,28 @@ Evidence base: gate r38. `/root/src/worktrees/backups/gate-r38-junit.xml` (run o
 
 **Sync-lag negative branch.** A note the server did not take leaves the gauge as it was: code-read at service.ts:3016 and tested at the slo level by "the sync lag is the lag of the newest docs.sync note the server took that carries a usable one, and any other note leaves it in place" (corpus/slo.test.ts). There is no named test of the emit gate's negative branch.
 
-**Fingerprint.** `covered_files` and `covered_digest` are the output of `gsd_run query verification.fingerprint .planning/phases/73-ledger-tamper-evidence` with the 29 implementation paths (31 covered paths less the two `.planning` files, as in the prior record) plus the five cited files not in that list (`packages/mcp-server/src/corpus/slo.ts`, `observe.ts`, `silent-failures.ts`, `packages/observability/src/instruments.ts`, `skills/propose.ts`), run from the worktree at 5e304ef8. Value: `v3:sha256:4364a8f00002a8dac07e5d77ecfca8c9f6b0fcdd2560bd81e5680e7b9b7121f7`.
+**Fingerprint.** `covered_files` and `covered_digest` are the output of `gsd_run query verification.fingerprint .planning/phases/73-ledger-tamper-evidence` with the 36 paths of the 5e304ef8 record plus `packages/mcp-server/src/skills/propose.test.ts` and `packages/cli/src/index.ts`, which the re-audit section below cites. Run from the worktree at 4637a9b7 (read-only). Value: `v3:sha256:ef7fa28bbc7e8d8824ca6a151085d045974a0cfa53bd976af20f880dc4cbc1b7`.
+
+## Re-audit at 4637a9b7 (this pass): mirror origin fix and stderr emit line
+
+**Scope check.** `git diff --name-only 5e304ef8..4637a9b7` lists the phase records and `.planning/ROADMAP.md` (none is a covered path) and three code paths: `packages/mcp-server/src/skills/propose.ts` and `propose.test.ts` (e2e4cba4), and `packages/cli/src/index.ts` (4ac770af). The covered path changed in the window is `propose.ts`. `propose.test.ts` and `index.ts` are not in the 5e304ef8 `covered_files`; they are added in this pass because this section cites them.
+
+**Hunk classification.**
+1. `propose.ts`, e2e4cba4. The `reportSilent` import is removed; the file has no other use. `mirrorOriginUrl` (:474-498) throws `ProposeFailed` on a config read failure, where it returned null. Its only caller in the proposal path is the origin check at :996-1001. The proposal path writes its own proposal ledger (`ledgerPath`), not `agent_events`, and `propose.ts` imports only Node modules and `redact.ts`, `types.ts` and `frontmatter.ts`. `proposeSkill` (service.ts:4937) is called by the MCP tool (mcp.ts:2068) and the HTTP route (server.ts:2168); no chain, verify, memo or anchor function calls it. Verdict: not on `appendChained` (:3150-3242), `verifyGraph`, `hourReport`, `trustHour` or the anchor path. The behaviour change is on the skills route only.
+2. `propose.test.ts`, e2e4cba4. The fixture writes a readable config with no origin, and the mirror-origin tests listed below are added or renamed. Test only.
+3. `packages/cli/src/index.ts`, 4ac770af. In `cmdEmit`, the `post("/events")` reply is kept. When it is null (no answer) and the spool is off, one stderr line names the event kind (JSON-quoted, first 64 units). The summary and payload are not printed, and the exit status is unchanged. The chain write is server-side (`POST /events`, `appendChained` at service.ts:3150). `index.ts` holds no chain, verify, memo or anchor code. Verdict: stderr only; no criterion is touched. No test cites the new line; it is code-read only.
+4. `packages/cli/src/index.ts`, 14ac787a (before this window; the 5e304ef8 pass left it unevaluated, and it is evaluated here because the file is now covered). The CLI `handoff` exits 1 when the server refuses the packet and 0 when the server cannot be reached; `post` gains a comment. The refusal and the chain write are server-side: `handoff` refuses before `placeOf` and the tip read (service.ts:7705-7723). Verdict: client exit status only; no criterion is touched.
+
+**Is `propose.ts` a covered file for any criterion?** No. None of T1-T8, R1-R5, or the W, N, HARD and operator items depends on `skills/propose.ts`. It is listed in `covered_files` because the record cites it for the mirror origin item, as in the prior record, and that item is now closed. It is a fingerprint entry only.
+
+**Mirror origin fix, recorded (not an override).** Owner decision 4 of 2026-11-06 (an unreadable mirror config refuses the skill proposal, fail closed) is implemented in e2e4cba4. It closes the phase 73 open item on the mirror origin. Cited tests, all in `packages/mcp-server/src/skills/propose.test.ts`, describe "mirror origin":
+- "mirrorOriginUrl is null for a readable config that names no origin" (:1110)
+- "mirrorOriginUrl throws when the config cannot be read, so the origin cannot be checked" (:1114)
+- "a mirror whose config cannot be read is refused before any Runner call" (:1136)
+
+Source grep at 4637a9b7 finds all three titles. They are not in the r38 JUnit, which ran on 66fa97bd, before e2e4cba4. A targeted run on the content of 4637a9b7, reported to this pass by the orchestrator, ran `propose.test.ts` with 110 pass and 0 fail; this pass did not re-run it. The gate r42 on 4637a9b7 is in progress and writes `/root/src/worktrees/backups/gate-r42-junit.xml`. That file was absent when this pass ran, and this record claims no result from it.
+
+**Verdicts at this head.** Changed verdicts: none. T1-T8 and R1-R5 stand as written. The T2 override is unchanged. Status stays `human_needed`, because the owner and operator items in the Human Verification section remain open.
 
 ## Judgement notes (carried, unchanged in substance)
 
@@ -136,13 +157,13 @@ Evidence base: gate r38. `/root/src/worktrees/backups/gate-r38-junit.xml` (run o
 
 **Judgement 5 (memory-plane straddle, W-M1).** Refused at write, code-read only in r38 (memory-write.test.ts has no testcase in the JUnit). Reads still cut a repo filter to fit (`parseScope`), which can miss a refused row, but no such row can be stored. Owner item, open as listed.
 
-**Owner list in force, kept open as listed.** STATE.md's Needs-Human table, row 73, is the owner list. Several of its rows describe code that now refuses (W-L4, W-M1, and part of W-K1). This record notes that code state. It does not close any owner item, and it does not re-take an owner decision.
+**Owner list in force.** STATE.md's Needs-Human table, row 73, is the owner list. Several of its rows describe code that now refuses (W-L4, W-M1, and part of W-K1). This record notes that code state. Apart from the mirror origin item, decided on 2026-11-06 (see the decisions paragraph below), it does not close any owner item and does not re-take an owner decision.
 
-**Owner decisions for this phase, 2026-11-06.** The owner's 2026-11-06 decisions cover phases 67, 74 and 75 only. None exists for phase 73, so none is recorded here, and no acceptance is written as an override. Every item in the owner list above, including the propose.ts mirror origin item, is open and awaiting an owner decision. Code changes made in this range are recorded as fixes with their tests, not as decisions.
+**Owner decisions for this phase, 2026-11-06.** The owner's 2026-11-06 decisions cover phases 67, 74 and 75, and for this phase decision 4: an unreadable mirror config refuses the skill proposal, fail closed. That closes the mirror origin item (judgement note below); it is recorded as a fix with its tests, not as an override. The only override in this record stays T2, unchanged. No other phase 73 owner item was decided. W-L3, W-L4, W-M1, W-L3b, W-K1, W-K3, HARD-S3, N6, N8, W3, W4, W5, O-S1, Q8 and N5 stay open as listed. Code changes made in this range are recorded as fixes with their tests, not as decisions.
 
 **Schema hash dependence (ebabe6ef).** Carried. Nothing in a46d42c3..5e304ef8 touches `index-archive-spec.ts`; `index-store.ts` changed only by a comment and export removal. The ledger archive does not depend on `schemaHash`.
 
-**Out-of-list observation: propose.ts mirror origin (fail-open).** `skills/propose.ts` `mirrorOriginUrl` (:474-496) returns null when the mirror's `config` cannot be read (the read failure is reported to stderr by `reportSilent`). The origin check at :994-999 only refuses a present, foreign origin, so an unreadable mirror config passes. The file is listed in `covered_files` for this pass because the brief names it; it is not a phase 73 criterion, and no verdict here depends on it. Open, awaiting owner decision.
+**Mirror origin (propose.ts): recorded fix, formerly an open owner item.** The owner decided on 2026-11-06 that an unreadable mirror config refuses the skill proposal, fail closed. Commit e2e4cba4 implements it: `mirrorOriginUrl` (`skills/propose.ts:474-498`) throws `ProposeFailed` when the mirror's `config` cannot be read, and the origin check at :996-1001 is reached only after that, before any Runner call. A readable config that names no origin still proceeds (hand-built state). Tests in `packages/mcp-server/src/skills/propose.test.ts`, describe "mirror origin": "mirrorOriginUrl throws when the config cannot be read, so the origin cannot be checked", "a mirror whose config cannot be read is refused before any Runner call", "mirrorOriginUrl is null for a readable config that names no origin". This is a recorded fix, not an override. The `overrides` frontmatter is unchanged.
 
 ## Human Verification Required
 
@@ -156,7 +177,6 @@ Owner and operator items, all open. The verifier does not run them.
 6. **Owner decision on stored graph ids over 512 bytes, NUL, or lone surrogate, and on pre-fix rows (owner).** Until decided, a live anchor run against such rows halts at the first such hour.
 7. **O-S1 sizing (operator).** Count straddled rows per field against the 2026-11-04 decision.
 8. **W-L3b owner decision (owner).** Trim the dangling high for branch, node_id and linear_identifier, or record the fail-closed verdict as accepted.
-9. **propose.ts mirror origin (owner).** Decide whether an unreadable mirror config refuses the proposal (fail-closed) or stays a pass with a recorded reason.
 
 ## Gaps Summary
 
@@ -166,11 +186,10 @@ Warnings carried, not blocking:
 - W-L3, W-L4, W-M1, W-L3b, W-K1, W-K3, HARD-S3, N6, N8, W3, W4 (label), W5: owner items, open as listed.
 - Stored graph ids over 512 bytes, NUL, or lone surrogate: operator scan and owner repair decision, open.
 - O-S1, Q8, N5: recorded decisions or accepted limits, open as recorded.
-- propose.ts mirror origin fail-open (skills/propose.ts:474-496, :994-999): owner decision, open. Outside the phase 73 criteria.
 
-Changed since a46d42c3: export keyword removals (no behaviour), comment lines (event.ts:77 shifts later event.ts lines by +1), `reportSilent` at memory-write.ts catch sites (same return values), `retainDocumentId` signature narrowed (memory-retain.ts), the phase 63 `manifestCommit` lookup (service.ts:6421, docs citation path), and one docs sentence (docs/greptime-ledger.md). None changes the chain write, the verify logic, the memo or anchor logic, or a truth. No new gap.
+Changed since 5e304ef8 (this pass): `skills/propose.ts` and `propose.test.ts` (e2e4cba4, mirror config refusal) and `packages/cli/src/index.ts` (4ac770af, stderr line on a dropped emit). None changes the chain write, the verify logic, the memo or anchor logic, or a truth. No new gap. Earlier, a46d42c3..5e304ef8: export keyword removals (no behaviour), comment lines (event.ts:77 shifts later event.ts lines by +1), `reportSilent` at memory-write.ts catch sites (same return values), `retainDocumentId` signature narrowed (memory-retain.ts), the phase 63 `manifestCommit` lookup (service.ts:6421, docs citation path), and one docs sentence (docs/greptime-ledger.md).
 
 ---
 
-_Verified: 2026-11-06T02:56:10Z_
+_Verified: 2026-11-06T04:09:31Z_
 _Verifier: V73b (gsd-verifier procedure; read-only; draft, not committed)_

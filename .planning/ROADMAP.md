@@ -1142,7 +1142,7 @@ Plans:
 
 **Goal**: Live Steering is something an operator can see and use, and a session can learn what the other sessions of its repository are doing.
 
-**Status**: Shipped in PRs #180 (2026-10-29) and #192 (2026-10-30). passed (record 2026-11-06): 6 of 6 success criteria; criterion 4 PASSED (override), superseded by phase 71 and accepted by the owner on 2026-11-06 (no session cap is reinstated). The steering and context hooks are not installed; delivery to a real session has not been shown. Record: [67-VERIFICATION.md](phases/67-live-steering-ga/67-VERIFICATION.md).
+**Status**: Shipped in PRs #180 (2026-10-29) and #192 (2026-10-30). human_needed (record 2026-11-06): 6 of 6 success criteria verified or passed by override; criterion 4 is superseded by phase 71 (owner decision 2026-11-06; no session cap reinstated). Open: delivery to a real session through the installed hooks is operator-gated and not observed; the steering and context hooks are not installed. Record: [67-VERIFICATION.md](phases/67-live-steering-ga/67-VERIFICATION.md).
 
 **Depends on**: none (v1.6 steering and planning planes on main).
 
@@ -1412,7 +1412,7 @@ Plans:
 | 64. Embedding fabric | v1.7 | 0/0 | Shipped (PRs #179, #183); human_needed: TEI never contacted live | 2026-10-29 |
 | 65. Doc Watch | v1.7 | 0/0 | Shipped (PR #186); human_needed (5 of 5 must-haves, record 2026-11-06): reconcile timer staged, not installed; operator installs the triggers | 2026-10-30 |
 | 66. Docs Reflect | v1.7 | 0/0 | Shipped (PR #184); human_needed (5 of 5 must-haves verified, record 2026-11-06) | 2026-10-30 |
-| 67. Live Steering GA | v1.7 | 0/0 | Shipped (PRs #180, #192); passed (record 2026-11-06, 6 of 6: criterion 4 superseded by phase 71, owner decision 2026-11-06); hooks not installed | 2026-10-30 |
+| 67. Live Steering GA | v1.7 | 0/0 | Shipped (PRs #180, #192); human_needed (record 2026-11-06, 6 of 6: criterion 4 superseded by phase 71, owner decision 2026-11-06); real-session delivery not observed; hooks not installed | 2026-10-30 |
 | 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); passed (record 2026-11-06, 8 of 8 truths); no report scheduler | 2026-10-30 |
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); human_needed: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); human_needed: baseline self-supervised, reads 1.0 | 2026-10-30 |
