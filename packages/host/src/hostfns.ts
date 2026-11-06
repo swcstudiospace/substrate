@@ -167,7 +167,7 @@ type HostFnContext = {
 	store: HostFnStore;
 	substrate: { graphGet(graphId: string): Promise<GraphView | null> };
 	run: Runner;
-	/** Where worktrees live. Unset in production (worktreeFor); tests point it at a temp root. */
+	/** The configured root holding the graph's worktree (vm.ts sets it); unset is the default root (tests point it at a temp root). */
 	worktreeRoot?: string;
 	log?: (line: string) => void;
 };

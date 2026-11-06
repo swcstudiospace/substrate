@@ -241,6 +241,25 @@ describe("validateOpenRequest", () => {
 		const result = validateOpenRequest(openBody());
 		expect(result.ok).toBe(true);
 	});
+	test("accepts a graph's worktree under a configured non-default root and refuses a path outside every configured root", () => {
+		const configured = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const other = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			mkdirSync(join(configured, GID));
+			const roots = [other, configured];
+			const accepted = validateOpenRequest(openBody({ worktree: join(configured, GID) }), roots);
+			expect(accepted.ok).toBe(true);
+			if (accepted.ok) expect(accepted.request.worktree).toBe(join(configured, GID));
+			for (const worktree of [join(other, GID), `${WORKTREES_ROOT}/${GID}`, join(tmpdir(), "elsewhere", GID)]) {
+				const refused = validateOpenRequest(openBody({ worktree }), roots);
+				expect(refused.ok).toBe(false);
+				if (!refused.ok) expect(refused.error).toContain(join(configured, GID));
+			}
+		} finally {
+			rmSync(configured, { recursive: true, force: true });
+			rmSync(other, { recursive: true, force: true });
+		}
+	});
 	test.each([
 		["graph_id", { graph_id: "../x" }],
 		["node_id", { node_id: "n 1" }],

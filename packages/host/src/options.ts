@@ -6,7 +6,7 @@
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { SANDBOX_IMAGE, worktreeFor } from "./sandbox-options.ts";
+import { SANDBOX_IMAGE, WORKTREES_ROOT, worktreeFor, worktreeRule } from "./sandbox-options.ts";
 
 export { worktreeFor };
 
@@ -158,8 +158,10 @@ export function sessionEnv(input: SessionEnvInput): Record<string, string> {
 
 type TestRunInput = {
 	graphId: string;
-	/** Must be worktreeFor(graphId): the only tree a one-shot test container may see. */
+	/** Must be worktreeFor(graphId, worktreeRoots): the only tree a one-shot test container may see. */
 	worktree: string;
+	/** The host's configured worktree roots; unset is the default root alone. */
+	worktreeRoots?: readonly string[] | undefined;
 	/** The graph repo checkout's node_modules, bound read-only; null when the checkout has none. */
 	nodeModules: string | null;
 	/** Worktree-relative *.test.ts files, at most 8. */
@@ -176,7 +178,8 @@ const TEST_RUN_MAX_PATHS = 8;
  */
 export function testRunArgv(input: TestRunInput): string[] {
 	const { graphId, worktree, nodeModules, paths } = input;
-	if (worktree !== worktreeFor(graphId)) throw new Error(`worktree must be ${worktreeFor(graphId)}`);
+	const roots = input.worktreeRoots ?? [WORKTREES_ROOT];
+	if (worktree !== worktreeFor(graphId, roots)) throw new Error(worktreeRule(graphId, roots));
 	if (paths.length === 0) throw new Error("at least one test path is required");
 	if (paths.length > TEST_RUN_MAX_PATHS) throw new Error(`at most ${TEST_RUN_MAX_PATHS} test paths per run`);
 	for (const path of paths) {

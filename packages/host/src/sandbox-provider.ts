@@ -83,6 +83,8 @@ type SubstrateDockerOptions = {
 	worktree: string;
 	network: SandboxNetwork;
 	readOnlyBinds?: string[];
+	/** The host's configured worktree roots; the spec accepts only the graph's worktree under one of them. */
+	worktreeRoots?: readonly string[] | undefined;
 	image?: string;
 	/** Injected for tests; defaults to dockerode on /var/run/docker.sock. */
 	docker?: DockerClient;
@@ -400,10 +402,10 @@ async function reserveEgressAddress(docker: DockerClient): Promise<string> {
 }
 
 export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxProvider {
-	const { graphId, worktree, network, readOnlyBinds } = opts;
+	const { graphId, worktree, network, readOnlyBinds, worktreeRoots } = opts;
 	const image = opts.image ?? SANDBOX_IMAGE;
 	// Validate once up front so a bad graph id or worktree fails before any Docker call.
-	buildContainerSpec({ graphId, worktree, token: "validate", image, network, readOnlyBinds });
+	buildContainerSpec({ graphId, worktree, token: "validate", image, network, readOnlyBinds, worktreeRoots });
 	let client: DockerClient | undefined = opts.docker;
 	const docker = (): DockerClient => (client ??= defaultDocker());
 	// U2: durable sandbox→task records; the provider learns only the graph, so node/task stay null.
@@ -508,7 +510,7 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				}
 			}
 			const token = randomBytes(32).toString("base64url");
-			const body = buildContainerSpec({ graphId, worktree, token, image, network, readOnlyBinds });
+			const body = buildContainerSpec({ graphId, worktree, token, image, network, readOnlyBinds, worktreeRoots });
 			if (resolved !== null) {
 				// buildContainerSpec always returns the HostConfig object it just built.
 				const hostConfig = body.HostConfig as Record<string, unknown>;

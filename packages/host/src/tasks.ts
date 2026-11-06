@@ -10,8 +10,8 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { errorLabel } from "./error-label.ts";
-import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
-import { GRAPH_LABEL, isValidGraphId } from "./sandbox-options.ts";
+import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute } from "./options.ts";
+import { GRAPH_LABEL, isValidGraphId, WORKTREES_ROOT, worktreeFor, worktreeRule } from "./sandbox-options.ts";
 import {
 	ADDITIONAL_INSTRUCTIONS,
 	isValidIdentifier,
@@ -134,16 +134,19 @@ export function pollCode(
 
 type Validation = { ok: true; request: OpenRequest } | { ok: false; error: string };
 
-/** POST /tasks body: every id checked with the dispatcher's patterns, worktree pinned to the graph's. */
-export function validateOpenRequest(body: unknown): Validation {
+/**
+ * POST /tasks body: every id checked with the dispatcher's patterns, worktree pinned to the graph's: the one
+ * `<root>/<graph_id>` under the configured root that holds it (see worktreeRootFor).
+ */
+export function validateOpenRequest(body: unknown, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): Validation {
 	if (typeof body !== "object" || body === null) return { ok: false, error: "body must be a JSON object" };
 	const b = body as Record<string, unknown>;
 	if (!isValidGraphId(b.graph_id)) return { ok: false, error: "graph_id is missing or invalid" };
 	if (!isValidNodeId(b.node_id)) return { ok: false, error: "node_id is missing or invalid" };
 	if (!isValidIdentifier(b.identifier)) return { ok: false, error: "identifier is missing or invalid" };
 	if (!isValidRepoSlug(b.repo)) return { ok: false, error: "repo is missing or invalid" };
-	const worktree = worktreeFor(b.graph_id);
-	if (b.worktree !== worktree) return { ok: false, error: `worktree must be ${worktree}` };
+	const worktree = worktreeFor(b.graph_id, worktreeRoots);
+	if (b.worktree !== worktree) return { ok: false, error: worktreeRule(b.graph_id, worktreeRoots) };
 	return {
 		ok: true,
 		request: { graph_id: b.graph_id, node_id: b.node_id, identifier: b.identifier, repo: b.repo, worktree },
@@ -558,6 +561,8 @@ export type TaskServiceDeps = {
 	heartbeatIntervalMs?: number;
 	/** Approval deadline in ms; the 900 s default stands in production, tests inject short values. */
 	approvalTimeoutMs?: number;
+	/** The host's configured worktree roots (SUBSTRATE_WORKTREE_ROOTS); absent is the default root alone. */
+	worktreeRoots?: readonly string[] | undefined;
 };
 
 /** The DoD summary cap, matching the `graph_complete` tool schema. */
@@ -764,7 +769,7 @@ export class TaskService {
 
 	/** Research Pattern 2: validate → existing? → graph_get → graph_claim → brief → seed → open → prompt (not awaited). */
 	async openTask(body: unknown): Promise<OpenResult> {
-		const validation = validateOpenRequest(body);
+		const validation = validateOpenRequest(body, this.deps.worktreeRoots);
 		if (!validation.ok) return { status: 400, body: { error: validation.error } };
 		const req = validation.request;
 		const { graph_id: gid, node_id: nid } = req;
