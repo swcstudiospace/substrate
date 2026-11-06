@@ -4,7 +4,7 @@ verified: 2026-11-05T08:00:19Z
 status: gaps_found
 score: 0/4 must-haves verified
 covered_files: [".planning/phases/74-cross-repo-compensating-actions/74-SUMMARY.md", "packages/cli/src/corpus/ingest.ts", "packages/cli/src/worktree/command.ts", "packages/collectors/src/install-git-hook.test.ts", "packages/collectors/src/install-git-hook.ts", "packages/mcp-server/src/repo-executor.ts"]
-covered_digest: "v3:sha256:7e3cd450f8a019002c6dcf89af34b9ffd56c4668a679415c662da0f8914aba4c"
+covered_digest: "v3:sha256:bb49ab8607cbcd4ee17b4325c119914ab7fa3ceecf04013b88098c5884065f88"
 behavior_unverified: 2
 overrides_applied: 0
 re_verification:

@@ -1,8 +1,8 @@
 ---
 phase: 65-doc-watch
-verified: 2026-11-05T08:43:31Z
+verified: 2026-11-06T00:45:14Z
 status: human_needed
-score: 5/5 must-haves verified (success criteria 1-5; SC2 and SC3 against the owner-amended text dated 2026-11-05; SC5 after 42dcb4c6, b4bdd0fc and 884e0753)
+score: 5/5 must-haves verified (success criteria 1-5; SC2 and SC3 against the owner-amended text dated 2026-11-05; SC5 after 884e0753, f0f3c04e and a46d42c3)
 covered_files:
   - ".planning/phases/65-doc-watch/65-SUMMARY.md"
   - "docs/corpus-eval.md"
@@ -45,20 +45,23 @@ covered_files:
   - "packages/observability/src/instruments.ts"
   - "scripts/doctor-units.test.ts"
   - "scripts/sandbox-dropins.test.ts"
-covered_digest: "v3:sha256:6f4e85716d7415bea1f0a59562571509a754aa77fec40297244b0df17a333289"
+covered_digest: "v3:sha256:ae02c2cfee5de017c2888203faf36e1c27c5a96ed83dfa9ff7dd24a603d41b8d"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: human_needed
   previous_score: 5/5
-  previous_head: 6e5d766e
-  reason: "Head 884e0753 (W-1, phase 70). The change that touches phase 65 claims is the sync-lag gauge. Before: server.ts POST /events set substrate.corpus.sync_lag_seconds only for a stored note (6e5d766e server.ts 1362-1363), so the gauge and the in-process reading differed for a held or dead-lettered note (prior Open Item 5). After: Substrate.emit (service.ts 3005-3011) sets the reading and calls the new observer hook syncLag (service.ts 1059-1060) in the same branch; observe.ts 398-400 maps the hook to setCorpusSyncLag; the REST block and its import are deleted from server.ts. Prior Open Item 5 is closed by this change. Rows that cited server.ts 1362-1363 or said the gauge was stored-only are rewritten. Files added to covered_files because the change or its docs/tests cite them: corpus/slo.ts, corpus/slo.test.ts, corpus/sync-event.test.ts, observe.ts, server.ts, docs/corpus-eval.md, docs/runbooks/docs-rag-operations.md. Other commits in 6e5d766e..HEAD (403e45f7, bb6b38b7 docs and comments; c71a539d, aef8a351 verification records) touch no file in the covered list. aef8a351 did not refresh this record; this pass does. service.ts anchors after line 3006 moved by +5 between 6e5d766e and 884e0753 (planning refresh 7382 -> 7387); the commit message says two lines, the anchors here were measured at HEAD."
+  previous_head: 884e0753
+  reason: "Head a46d42c3. Window 884e0753..a46d42c3 changed six covered files: service.ts (f0f3c04e reportSilent conversions, a46d42c3 dead-code removal), server.ts (f0f3c04e null-body guards, handleMcp close catch), observe.ts (f0f3c04e claim-withdrawal catch), docs-freshness.ts (a46d42c3 removed two unused constants), event-buffer.ts (7a1d923a abandonAll reports held records on stderr), service-event-buffer.test.ts (7a1d923a new test). None of these changes touches the sync-lag reading, the gauge, or the docs.sync row. The sync-lag block in Substrate.emit is textually unchanged. Line references are re-anchored; Truth 5 is re-audited. Two new advisory items (dead-letter branch untested; keyed replay re-applies a held note's lag)."
   gaps_closed: []
   gaps_remaining: []
   regressions: []
 gaps: []
 deferred: []
-advisory: []
+advisory:
+  - "A1: The dead-lettered branch of the hook (service.ts 3016, `result.deadLettered === true`) has no test that asserts the reading or the observer for a dead-lettered docs.sync note. Code-verified only. No test title in the gate r36 JUnit covers it."
+  - "A2: A keyed replay of a held note (service.ts 3168 buffered return, 3171 deadLettered return) passes the held event's own payload to the hook, so the replay re-applies that note's lag. If a newer docs.sync note has been stored meanwhile, the reading and the gauge move back to the older lag. Reachable only for a request that carries idempotency_key under SUBSTRATE_EVENT_IDEMPOTENCY accept or enforce. The corpus CLI sends no idempotency_key for docs.sync. Owner decision needed; not fixed here."
+  - "A3 (carried, prior open item 4): `docs.sync` is not in RESERVED_NOTE_ACTIONS (reserved-actions.ts 23-33; file unchanged since 884e0753). Any authenticated caller can set the reading and the gauge."
 behavior_unverified_items: []
 coincidental_reliance_items: []
 human_verification:
@@ -67,16 +70,16 @@ human_verification:
     why_human: "Operator install (WATCH-03 opt-in hooks, WATCH-04 timers). No unit or hook is installed on any host and no live sync was observed in this pass"
   - test: "On a running server, post one docs.sync note with lag_s through POST /events and one through events_emit, then read fabric_status (the corpus row's syncLag) and the substrate.corpus.sync_lag_seconds series. Post one more while the ledger is down so the note is held, then read both again"
     expected: "Each read shows the same lag for the same note, including the held one; the gauge and fabric_status agree at every step"
-    why_human: "The agreement is shown by code and by tests at 884e0753, not by a live server. No live sync-lag reading and no live dashboard were observed in this pass"
+    why_human: "The agreement is shown by code and by tests at a46d42c3, not by a live server. No live sync-lag reading and no live dashboard were observed in this pass"
 ---
 
 # Phase 65: Doc Watch Verification Report
 
 **Phase Goal:** When documentation changes in a registered repository, the docs plane follows without anyone running a command, and a restart never re-ingests what has not changed.
-**Verified:** 2026-11-05T08:43:31Z
-**Head:** 884e0753 (integration branch gsd/v18-int-all, worktree /root/src/worktrees/as-gsd-v18-all)
+**Verified:** 2026-11-06T00:45:14Z
+**Head:** a46d42c3 (integration branch gsd/v18-int-all, worktree /root/src/worktrees/as-gsd-v18-all; clean at start of pass)
 **Status:** human_needed
-**Re-verification:** Yes. Prior record: 6e5d766e, human_needed, 5/5. This pass re-audits the sync-lag path changed by 884e0753 (the gauge now follows the reading through `Substrate.emit`), re-anchors every line reference in the record, and closes prior Open Item 5. Criteria 2 and 3 are judged against the owner-amended text (wording unchanged; amendment date 2026-11-05). Criterion 5 is judged after 42dcb4c6, b4bdd0fc and 884e0753. Tests: no test was run in this pass. The targeted non-Postgres results and the mutation check at 884e0753 are the ones the main agent reported; the test titles cited below are read from the test files at HEAD.
+**Re-verification:** Yes. Prior record: 884e0753, human_needed, 5/5. This pass re-audits the sync-lag path after the emit-adjacent changes in f0f3c04e (reportSilent) and the other covered-file changes in the window 884e0753..a46d42c3. No test was run (read-only assignment). Test titles were checked as testcases in `/root/src/worktrees/backups/gate-r36-junit.xml` (12,317 testcases, 0 failures, 0 errors, 2 skipped).
 
 ## Goal Achievement
 
@@ -84,76 +87,100 @@ human_verification:
 
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
-| 1 | `corpus sync --repo R` plans and ingests only R; `corpus watch` debounces and coalesces a burst into one sync per repository | ✓ VERIFIED | `packages/corpus/src/coalesce.ts` (trailing debounce, maximum wait, one running sync per repository); `watch.ts` marks repositories dirty and reads nothing. Run 2 at 6e5d766e (carried; these files have no diff at 884e0753): `coalesce.test.ts` 8/8, `watch.test.ts` 8/8, `watch-loop.test.ts`, `sync.test.ts`, `watch-commands.test.ts` 20/20 (`substrate corpus sync` 7, `substrate corpus watch --once` 3) all pass. Gate JUnit names "a dry run sends nothing to the plane and emits no event" (`sync.test.ts`, line 14480 of `gate-r33-junit.xml`, not skipped) and "a dry run plans only the named repository, with coverage for it alone, and sends nothing else" (`watch-commands.test.ts`) |
-| 2 | (amended) Default triggers write nothing into any repository; the git hooks are an opt-in installer adding post-merge, post-checkout and post-rewrite hints beside the post-commit collector; a hook writes a bounded hint `{v, dir, at}` with no action name, always exits 0, and never overwrites a foreign hook | ✓ VERIFIED (amended text) | `install-git-hook.ts` line 150: `CORPUS_HOOKS = post-merge, post-checkout, post-rewrite`; the marked block (lines 170–190) runs `timeout 10 "$@" corpus hint --repo "$top"` in the background by default (in the foreground only under `SUBSTRATE_HOOK_WAIT=1`, the test seam) and ends `return 0`; a foreign hook is refused and left alone. `hints.ts` `writeHint` (line 107) writes `{v, dir, at}`. Run 2 at 6e5d766e (carried): `install-git-hook.test.ts` 24/24 (including "the installed hook runs the hint command for the repository's top level, in the foreground under SUBSTRATE_HOOK_WAIT, and exits 0 whatever the command does"), `hints.test.ts` 10/10, `watch-commands.test.ts` "substrate corpus hook" 3/3 and "the default triggers are read-only toward every repository" 1/1 |
-| 3 | (amended) The server's planning refresh keeps its state in `planning_page_hashes`, not the manifest, so a restart re-ingests nothing unchanged (test with two server instances over one store) | ✓ VERIFIED (amended text; flag on) | `service.ts` `runPlanningRefresh` 7387–7421: `loadPlanningHashes` (7393), `planningIngestTrigger` (7394), `savePlanningHashes` (7410). `planningHashStore()` 7427–7432 returns the index's `planning_page_hashes` store when `SUBSTRATE_PLANNING_HASH_STORE` is on and memory otherwise. Migration step 39 creates `planning_page_hashes` (`index-store.ts`); `planning-hash-store.ts` holds the port, the memory adapter and the Postgres adapter. Run 2 at 6e5d766e (carried; `planning-hash-store.test.ts` has no diff at 884e0753): 10 entries, 7 pass, 3 skipped with the URL unset: "a second server over the same store ingests nothing unchanged, and exactly the changed page after an edit", "a page the plane failed is not stored, so the next process sends it again and only it", "with the flag off nothing is read or written: a restart ingests every page again and the store stays empty" and "a store that cannot be read costs one full ingest and the pass still completes" all pass. Note: the two-server test runs over the memory adapter; the Postgres leg is the store round trip (see Postgres section). Default is off (`flag-registry.ts` 882, owner decision: keep the default off), so the restart guarantee holds with the flag on |
-| 4 | Units `substrate-corpus-watch.service`, `substrate-corpus-sync.service` and `substrate-corpus-sync.timer` are staged with Nice, an idle I/O class, CPUQuota and MemoryMax; the watcher drops to sweep-only at the inotify limit; `corpus reconcile` reports a missing row and re-ingests only with `--execute`; reconcile fetches a managed mirror and reads its default-branch tree; one view per repository per sync | ✓ VERIFIED (staged, not installed) | Units: all three base units carry `Nice=15`, `IOSchedulingClass=idle`, `CPUQuota=25%`, `MemoryMax=512M`, and `ProtectHome=read-only` (watch line 54, sync line 39, reconcile line 42; the unit files have no diff since 835a2742). Sweep-only fallback: `watch.test.ts` "the inotify limit closes every watch and leaves the command in sweep-only mode" and "EMFILE counts as the limit too, and a limit error raised later by a live watch degrades the watcher" pass (run 2 at 6e5d766e). **WATCH-04 reconcile dry run:** `watch-commands.test.ts` "a dry run plans, reports the drift and the problems, and repairs nothing" (3/3 "substrate corpus reconcile" pass in run 2; gate JUnit line 14825, not skipped) and `reconcile.test.ts` "a dry run reports the missing row and the orphan and changes nothing" (gate JUnit line 17525, not skipped; the file passes in run 1 at 6e5d766e, which also covers "execute marks the missing row removed without calling the plane, deletes the orphan …"). Mirror and view: `view.test.ts` "shows a remote-only push although the checkout did not move, and writes nothing into the checkout", "alternating local edits and remote pushes without pulling never flips a path that did not change", "a failed fetch changes nothing and keeps reading the stale mirror; recovery brings the push in" (gate JUnit lines 3034, 3037, 3038; `view.test.ts` 16/16 in run 2); `mirror.test.ts` "a failed fetch leaves the mirror as it was and says stale; recovery fetches again" (gate JUnit line 3154; `mirror.test.ts` 16/16 in run 2). **ProtectHome:** `scripts/sandbox-dropins.test.ts` "corpus units" (run 2: 1/1; the gate JUnit names "the three corpus units ship ProtectHome=read-only in the base unit file, not only in their class A drop-ins", line 453, and "Class B keeps ProtectHome=false; Class A is read-only home; both end up with ProtectSystem=strict", line 452) |
-| 5 | Each sync emits a `docs.sync` note (event-sources row, vocabulary lock unchanged) and a lag metric; a breach raises the existing `docs.freshness` warning | ✓ VERIFIED (re-anchored at 884e0753; the gauge follows the reading on every route) | **Note:** `event-sources.ts` row `docs.sync` (line 1551, action `docs.sync`); `cli/corpus/events.ts` line 51 emits `lag_s: sync.lagS`; lag is measured from the first change signal to the end of the sync (`cli/corpus/sync.ts` line 312). **Reading and gauge, one site:** `service.ts` `Substrate.emit` lines 3005–3011: `corpusSlo.recordSyncLag(result.event.payload)` runs when `result.stored`, `result.buffered === true` or `result.deadLettered === true` (the comment is on 3005), and returns `seconds` from `recordSyncLag`; only a non-null lag calls `this.observer.syncLag?.({ seconds })` (3010). A note the server did not take never reaches that branch, so the reading is unchanged. `corpus/slo.ts` `recordSyncLag` (72–76) keeps the last `lag_s` and returns the lag it recorded, or null. The hook is declared at `service.ts` 1059–1060 (`SubstrateObserver.syncLag`). The production observer maps it at `observe.ts` 398–400 to `instruments.setCorpusSyncLag`; the setter is `observability/src/instruments.ts` 679–681 and the gauge name is `CORPUS_SYNC_LAG_METRIC` (734, `substrate.corpus.sync_lag_seconds`). **No route sets the gauge any more:** the REST block in `server.ts` (the `syncLagSeconds` import and the stored-only `setCorpusSyncLag` call at 6e5d766e 1362–1363) is deleted at 884e0753; `POST /events` (`server.ts` 1352) and MCP `events_emit` (`mcp.ts` 1190) both call `substrate.emit`, so every route sets the reading and the gauge in the same place. A keyed replay of a held or dead-lettered note returns the original buffered event (`service.ts` 3160, 3163), so the reading takes that event's lag, not the replay's. **Asymmetry closed:** a held note and a dead-lettered note reach the same branch (3008) as a stored one, so the reading and the gauge move together; the drain does not re-run this branch (`deliverBuffered`, 3259, does not call `recordSyncLag`), so both stay put when the held note lands. **Breach:** `docs-freshness.ts` `corpusFreshnessRow` (175) adds `sync_lag` when the newest lag is strictly over `syncLagMaxS` (185–188); `lagWarningEvent` (323) emits `kind: warning`; `service.ts` `settleDocsLag` 7516–7526 and `corpusFreshness` 7534–7557 (reading passed as `this.corpusSlo.readings(now).syncLagS`, line 7542). **Tests** (titles as they appear in the files at HEAD; results as reported by the main agent at 884e0753, not re-run here): `corpus/sync-event.test.ts`, describe "POST /events with a docs.sync note": "a stored sync note sets the gauge to its lag, and the newest one wins"; "a note the ledger did not store, another action, or a lag that is not a number leaves the gauge alone"; "an MCP events_emit of a stored sync note sets the same gauge, and the reply reports it stored". `service-event-buffer.test.ts`, describe "the telemetry buffer": "a docs.sync note the ledger could not take still sets the sync-lag reading, and lands once when the ledger is back" (asserts the observed hook values `[4000]` while held and again after the drain; the gate r33 JUnit line 9015 for this test predates the 884e0753 edit to its body). `docs-freshness.test.ts`, describe "the corpus's freshness (v1.7 phase 65)": "a sync lag over its objective raises the warning and names the sync breach; on the objective, under it or with no objective it does not". This test sets the reading through `corpusSlo.recordSyncLag` directly, so it covers the reading-to-warning path, not the emit-to-gauge link. `corpus/slo.test.ts`, describe "CorpusSloState": "the sync lag is the lag of the newest docs.sync note the server took that carries a usable one, and any other note leaves it in place". `event-idempotency.test.ts` passes in the reported run; no title from it is relied on here. **Mutation check** (reported): with the hook call removed, the REST stored case, the REST not-stored case, the MCP case and the held-note case failed; restored, they pass |
+| 1 | `corpus sync --repo R` plans and ingests only R; `corpus watch` debounces and coalesces a burst into one sync per repository | ✓ VERIFIED (carried) | `packages/corpus/src/coalesce.ts`, `watch.ts`, `packages/cli/src/corpus/sync.ts`, `watch-commands.ts`, `watch-loop.ts`: none in the window (41-file covered diff, `git diff --stat 884e0753 a46d42c3`, lists only the six files in the re-verification reason). Carried from the 884e0753 record (6e5d766e run, no diff since): `coalesce.test.ts` 8/8, `watch.test.ts` 8/8, `watch-commands.test.ts` 20/20. Gate r36 testcases (no child element): "a dry run sends nothing to the plane and emits no event", "a dry run plans only the named repository, with coverage for it alone, and sends nothing else" (`sync.test.ts`, `watch-commands.test.ts`). |
+| 2 | (amended) Default triggers write nothing into any repository; the git hooks are an opt-in installer adding post-merge, post-checkout and post-rewrite hints beside the post-commit collector; a hook writes a bounded hint `{v, dir, at}` with no action name, always exits 0, and never overwrites a foreign hook | ✓ VERIFIED (amended text, carried) | `packages/collectors/src/install-git-hook.ts` and `packages/corpus/src/hints.ts` have no diff in the window. `CORPUS_HOOKS` at line 150; background block 170–190 ends `return 0`; `writeHint` at `hints.ts` 107. |
+| 3 | (amended) The server's planning refresh keeps its state in `planning_page_hashes`, not the manifest, so a restart re-ingests nothing unchanged (test with two server instances over one store) | ✓ VERIFIED (amended text; flag on, carried) | `service.ts` `runPlanningRefresh` 7411; `planningHashStore()` 7451 (moved from 7427, +24 from the window's edits above it); `loadPlanningHashes` 7459; `savePlanningHashes` 7471. No hunk falls inside 7387–7432 of the 884e0753 numbering, so the body is unchanged. `planning-hash-store.ts` has no diff. Migration step 39 (`index-store.ts`) unchanged. |
+| 4 | Units `substrate-corpus-watch.service`, `substrate-corpus-sync.service` and `substrate-corpus-sync.timer` are staged with Nice, idle I/O, CPUQuota and MemoryMax; the watcher drops to sweep-only at the inotify limit; `corpus reconcile` reports a missing row and re-ingests only with `--execute`; reconcile fetches a managed mirror and reads its default-branch tree; one view per repository per sync | ✓ VERIFIED (staged, not installed, carried) | `infra/vps/*` and `packages/corpus/src/mirror.ts`, `view.ts`: no diff in the window. Units: `Nice=15`, `IOSchedulingClass=idle`, `CPUQuota=25%`, `MemoryMax=512M`, `ProtectHome=read-only` (watch 54, sync 39, reconcile 42). |
+| 5 | Each sync emits a `docs.sync` note (event-sources row, vocabulary lock unchanged) and a lag metric; a breach raises the existing `docs.freshness` warning | ✓ VERIFIED (re-audited at a46d42c3; the reading, the hook and the gauge are unchanged; the hook runs for stored, buffered and dead-lettered notes, see the hook table) | **Note:** `event-sources.ts` row `docs.sync` at 1551–1555 (unchanged). `packages/cli/src/corpus/events.ts` line 51 emits `lag_s: sync.lagS`. **Reading:** `corpus/sync-event.ts` `syncLagSeconds` 17–25 (unchanged; returns null or a whole number in [0, 31536000]); `corpus/slo.ts` `recordSyncLag` 72–76 and `readings` 79 (unchanged file). **Hook and gauge:** `service.ts` `Substrate.emit` 2988; sync-lag block 3015–3019 (`if` at 3016, `recordSyncLag` at 3017, `observer.syncLag` at 3018); hook type 1061; `observe.ts` 399–401 maps it to `instruments.setCorpusSyncLag` (400); `instruments.ts` 679–682 sets the gauge; metric name `CORPUS_SYNC_LAG_METRIC` 734 = `substrate.corpus.sync_lag_seconds`. **Warning:** `service.ts` `corpusFreshness` 7558 reads `corpusSlo.readings(now).syncLagS` (call at 7566); `docs-freshness.ts` `corpusFreshnessRow` 169 judges it at 178–179; `settleDocsLag` 7540 settles through `lagWarningEvent` 317 / `lagRecoveryEvent` 360. The `docs.freshness` breach path is unchanged. |
 
 **Score:** 5/5 truths verified (0 partial, 0 failed); behavior_unverified 0
 
-### H-1 and this window's change audit (6e5d766e..884e0753)
+### Re-verification of the sync-lag path (884e0753..a46d42c3)
 
-| Changed commit and file | Phase 65 claim affected? | Result |
-| ----------------------- | ------------------------ | ------ |
-| `884e0753` `service.ts` `Substrate.emit` 3005–3011 and the `SubstrateObserver.syncLag` hook 1059–1060 | Yes: Truth 5 (the reading and the gauge that the `docs.freshness` breach reads) | Re-audited. The reading and the hook call share one branch; the held and dead-lettered returns (3160, 3163, 3247, 3251) feed it; the drain (`deliverBuffered`, 3259) does not |
-| `884e0753` `observe.ts` 398–400 (`syncLag` → `setCorpusSyncLag`) | Yes: Truth 5 (the production gauge) | Re-audited; the only production caller of `setCorpusSyncLag` |
-| `884e0753` `server.ts` (REST block and `syncLagSeconds` import deleted) | Yes: the prior record's wiring row, anti-pattern row and Open Item 5 | Removed. `POST /events` still calls `substrate.emit` (1352) and sends 202 or 503 (1362); no gauge write remains in `server.ts` |
-| `884e0753` `corpus/slo.ts` `recordSyncLag` now returns `number \| null` | Yes: the hook's input | Re-read. The reading behaves as before (a null lag leaves the last one in place) |
-| `884e0753` `corpus/slo.test.ts`, `corpus/sync-event.test.ts`, `service-event-buffer.test.ts`, `docs-freshness.test.ts` (one-line title and seam edits) | Evidence only | Added to covered_files (the first three); cited under Truth 5 |
-| `884e0753` `docs/corpus-eval.md` lines 103 and 105, `docs/runbooks/docs-rag-operations.md` line 146 | Yes: the docs describe the gauge | Now say the gauge is set for each `docs.sync` note the server took (stored, held or dead-lettered) and is the reading `fabric_status` shows. The 6e5d766e text said stored-only; corrected |
-| `403e45f7`, `bb6b38b7` (docs and code comments, phases 63, 68, 70) | No: no file in the covered list (`git diff --stat 6e5d766e..HEAD` over the covered list lists only the 884e0753 files) | Out of scope |
-| `aef8a351` (covered-digest refresh for 13 records; phase 65 is not among them) and `c71a539d` (the 6e5d766e re-verification) | No | This record is re-verified in this pass and replaces the 6e5d766e record |
-| `flag-registry.ts` (881, 882, 898), unit files, `coalesce.ts`, `watch.ts`, `hints.ts`, `install-git-hook.ts`, `view.ts`, `mirror.ts`, `docs-freshness.ts`, `event-sources.ts`, `instruments.ts`, `event-buffer.ts`, `planning-hash-store.ts` | Unchanged in the window (no diff in `6e5d766e..HEAD`) | Carried forward; their test runs at 6e5d766e are carried where the test file also has no diff |
+**Scope of the window for covered files.** `git diff --stat 884e0753 a46d42c3 -- <the 41 covered files>` lists six files: `service.ts`, `server.ts`, `observe.ts`, `docs-freshness.ts`, `event-buffer.ts`, `service-event-buffer.test.ts`. The changing commits are `f0f3c04e`, `a46d42c3` and `7a1d923a`. Other window commits (`c371cece`, `9b793653`, `e3914640`, `e958e8b1`, `885e73ce`) touch no covered file.
 
-### Deferred Items
+| Changed file (window) | Commit | Sync-lag reading, gauge or docs.sync row touched? | Result |
+| --- | --- | --- | --- |
+| `service.ts` `Substrate.emit` 2988–3022 | f0f3c04e | No. The `deduplicated` return (2992–2997), the sync-lag block (3015–3019) and the `emitted`/`eventReplay` calls are textually identical to 884e0753. The f0f3c04e hunk nearest the emit body is the `publishHint` catch (3033), which runs after the hook. | Confirmed unchanged |
+| `service.ts` `appendChained`, `bufferEvent`, `deliverBuffered`, `drainPendingEvents` | f0f3c04e, a46d42c3 | No hunk in these ranges. The only buffer-related change is the `EventBuffer` constructor option `deadLetters` (2121–2123), which is not a branch. | Confirmed unchanged |
+| `service.ts` `corpusFreshness`, `settleDocsLag`, `runPlanningRefresh` | a46d42c3 (none here) | No hunk in 884e0753 numbering 7387–7552. Moved +24 by the edits above. | Confirmed unchanged |
+| `service.ts` docs telemetry retention sweep (884e0753 6583–6609), `queryEventsFor` (6845), lease expiry (7601), handover release (7762) | f0f3c04e, a46d42c3 | Not on the path (retention sweep, repo refusal, lease expiry, handover release). | Not related |
+| `server.ts` `POST /events` 1304–1368 | f0f3c04e (hunks at 1211, 1497, 1582, 1617, 2776 only) | No. The handler still calls `substrate.emit` at 1358 and answers `result.stored ? 202 : 503` at 1368. | Confirmed unchanged |
+| `server.ts` `handleMcp` close | f0f3c04e | Not on the path. | Not related |
+| `observe.ts` import (69) and `recordClaimWithdrawal` catch (~429) | f0f3c04e | No. `syncLag` (399–401) and the `instruments.setCorpusSyncLag` call are unchanged. | Confirmed unchanged |
+| `docs-freshness.ts` lines 28–33 | a46d42c3 | Two unused constants removed (`DEFAULT_FRESHNESS_MAX_AGE_H`, `DEFAULT_TRIGGER_LAG_MIN`). Grep finds no remaining reference. `corpusFreshnessRow` (169) is unchanged. | Confirmed unchanged for this path |
+| `event-buffer.ts` `abandonAll` 327, `reportHeldDeadLetters` 347 | 7a1d923a | No. Adds a stderr report of held dead-letter records at shutdown (identifiers only). Does not call the observer and does not change the reading. | Not on the reading path |
+| `service-event-buffer.test.ts` | 7a1d923a | Adds one test (234). Line 115 test body is unchanged. | Evidence only |
 
-None.
+**Result: the docs.sync reading, the gauge and the docs.sync row are unchanged across the window. The sync-lag block in `Substrate.emit` is unchanged. The hook runs for the same three outcomes as at 884e0753.**
+
+**reportSilent.** f0f3c04e changed no statement inside `Substrate.emit` or the sync-lag block. The sync-lag hook itself is not wrapped in `reportSilent` and has no catch, and the record does not claim it is. It cannot throw on this path: `recordSyncLag` returns null or a whole number of seconds in [0, 31536000] (`sync-event.ts` 17–25), and `setCorpusSyncLag` also drops a non-finite or negative value (`instruments.ts` 680). The emit neighbours that f0f3c04e converted are `publishHint` (`emit.bus-hint`, 3033) and the callers of `emit` (for example `emit.steering-session` 2253, `emit.retain-warning` 3606, `emit.mirror-failed` 5514). Two `.catch(() => …)` sites inside the emit path remain: `ensureAppendMode().catch(() => null)` at 3196 and 3271. Each turns a probe failure into an `APPEND_MODE_UNKNOWN` error result that the reply reports, so no rejection is dropped. `hasEvent(…).catch(() => false)` at 3463 belongs to a memory trust read, not to `emit`.
+
+**`planningEvent` and `noteDocsCanary` cannot skip the hook for a `docs.sync` note.** Both run before the sync-lag block. `planningEvent` (7378) returns at once for any action beginning `docs.`. `noteDocsCanary` (7043) returns unless the surface and action are the canary pair. Neither can throw for this note.
+
+### Hook coverage by branch (HEAD a46d42c3)
+
+| Branch of `emit` / `appendChained` | Reading and gauge set? | Evidence | Status |
+| --- | --- | --- | --- |
+| Stored, REST `POST /events` (`stored: true`, 202) | Yes (3016 `result.stored`) | `sync-event.test.ts` "a stored sync note sets the gauge to its lag, and the newest one wins" (POST /events suite) | ✓ TEST |
+| Stored, MCP `events_emit` (`mcp.ts` 1191) | Yes | `sync-event.test.ts` "an MCP events_emit of a stored sync note sets the same gauge, and the reply reports it stored" | ✓ TEST |
+| Not stored, buffer off (`stored: false`, 503; `service.ts` 3236) | No (not in the condition) | `sync-event.test.ts` "a note the ledger did not store, another action, or a lag that is not a number leaves the gauge alone" | ✓ TEST |
+| Buffered at write (`bufferEvent` 3259, `buffered: true`) | Yes (3016 `result.buffered`) | `service-event-buffer.test.ts` "a docs.sync note the ledger could not take still sets the sync-lag reading, and lands once when the ledger is back" (line 115): reading 4000 and `observed` `[4000]` before the drain | ✓ TEST |
+| Buffered, then drained to the ledger (`deliverBuffered` 3267) | No (the drain never calls the hook) | Same test: `observed` still `[4000]` after `drainEventBuffer` | ✓ TEST |
+| Dead-lettered at enqueue (`bufferEvent` 3255, `deadLettered: true`) | Yes (3016 `result.deadLettered`) | Code only. No test asserts the reading or the observer for a dead-lettered `docs.sync` note. | ⚠ CODE ONLY (advisory A1) |
+| Keyed replay of a queued note (`waiting`, 3168, `buffered: true`) | Yes, with the held note's payload (advisory A2) | Code only for the hook. "a keyed replay of a queued event answers that event and writes nothing" (line 183) asserts no append, not the hook. | ⚠ CODE ONLY (advisory A2) |
+| Keyed replay of a given-up note (`given`, 3171, `deadLettered: true`) | Yes, with the given-up note's payload (advisory A2) | Code only. "a keyed replay of a pending give-up is refused as a give-up, not answered as buffered, and appends nothing" (line 391) asserts no hook. | ⚠ CODE ONLY (advisory A2) |
+| Waits behind an earlier buffered event of the session (3207, `buffered: true`) | Yes | Code. "a later event of the session waits behind the buffered one, and both land once, in order" (line 97) does not assert the hook. | ✓ CODE (buffered branch covered by line 115) |
+| Keyed replay of a stored note (`deduplicated`, 2992) | No (returns first; the original attempt already set the reading) | Code. | ✓ CODE |
+| Replay lookup fails (`lookupFailed`, 3173) | No | Code. | ✓ CODE |
+| Idempotency refusal (throws, 3054–3055) | No (throws before the append) | Code. | ✓ CODE |
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
-| `infra/vps/substrate-corpus-watch.service` | staged watcher, idle I/O, limits, read-only home | ✓ VERIFIED | Lines 41–54; `ProtectHome=read-only` at 54 |
-| `infra/vps/substrate-corpus-sync.service` | staged sweep unit | ✓ VERIFIED | Lines 29–39; `ProtectHome=read-only` at 39 |
-| `infra/vps/substrate-corpus-reconcile.service` | staged dry-run unit | ✓ VERIFIED | Lines 32–42; `ProtectHome=read-only` at 42; dry run unless `--execute` |
+| `infra/vps/substrate-corpus-watch.service` | staged watcher, idle I/O, limits, read-only home | ✓ VERIFIED | `ProtectHome=read-only` at 54; no diff in the window |
+| `infra/vps/substrate-corpus-sync.service` | staged sweep unit | ✓ VERIFIED | `ProtectHome=read-only` at 39 |
+| `infra/vps/substrate-corpus-reconcile.service` | staged dry-run unit | ✓ VERIFIED | `ProtectHome=read-only` at 42; dry run unless `--execute` |
 | `infra/vps/substrate-corpus-sync.timer` / `…-reconcile.timer` | staged timers | ✓ VERIFIED | Not installed |
-| `…-reconcile.service.d/30-sandbox.conf.example` | class A drop-in example | ✓ VERIFIED | Example only; matches `ProtectHome=read-only` |
-| `packages/collectors/src/install-git-hook.ts` | opt-in hook installer | ✓ VERIFIED | `CORPUS_HOOKS` 150; background block 170–190, `return 0` |
-| `packages/corpus/src/hints.ts` | bounded hint spool | ✓ VERIFIED | `writeHint` 107 writes `{v, dir, at}` |
-| `packages/corpus/src/view.ts`, `mirror.ts` | mirror tree read | ✓ VERIFIED | Tests pass in run 2 at 6e5d766e (view 16/16, mirror 16/16); no diff at 884e0753 |
-| `packages/corpus/src/watch.ts`, `coalesce.ts` | watcher and coalescer | ✓ VERIFIED | Tests pass in run 2 at 6e5d766e (watch 8/8, coalesce 8/8); no diff at 884e0753 |
-| `packages/mcp-server/src/docs-freshness.ts` | corpus sync-lag breach in the docs.freshness warning | ✓ VERIFIED | `corpusFreshnessRow` 175, `lagWarningEvent` 323, `lagRecoveryEvent` 366; no diff at 884e0753 |
-| `packages/mcp-server/src/service.ts` | emit reading and hook, planning refresh, `settleDocsLag`, `corpusFreshness` | ✓ VERIFIED | 1059–1060 (`syncLag` hook), 3005–3011 (reading and hook call), 7387–7421 (refresh), 7427–7432 (store), 7516–7526 (settle), 7534–7557 (corpus row) |
-| `packages/mcp-server/src/corpus/slo.ts` | sync-lag reading | ✓ VERIFIED | `recordSyncLag` 72–76 keeps the last lag and returns it or null |
-| `packages/mcp-server/src/observe.ts` | production observer | ✓ VERIFIED | `syncLag` → `instruments.setCorpusSyncLag` at 398–400 |
-| `packages/mcp-server/src/server.ts` | REST `POST /events` | ✓ VERIFIED | Calls `substrate.emit` at 1352; sets no gauge (the 6e5d766e block is deleted) |
-| `packages/mcp-server/src/event-buffer.ts` | buffer that holds a note the ledger did not take | ✓ VERIFIED | `abandonAll` 319–331 after 49b9aece; no diff at 884e0753 |
-| `packages/mcp-server/src/flag-registry.ts` | flag text for `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`, `SUBSTRATE_PLANNING_HASH_STORE`, `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` | ✓ VERIFIED | Lines 881, 882, 898; unchanged in the window; `SUBSTRATE_PLANNING_HASH_STORE` default `off` |
-| `packages/mcp-server/src/event-sources.ts` | `docs.sync` and `docs.planning` rows | ✓ VERIFIED | 1551, 1584; unchanged in the window |
-| `packages/mcp-server/src/planning-hash-store.ts` | planning state adapter | ✓ VERIFIED | Table `planning_page_hashes`, not the manifest (as amended) |
-| `packages/observability/src/instruments.ts` | lag gauge | ✓ VERIFIED | `setCorpusSyncLag` 679–681; `CORPUS_SYNC_LAG_METRIC` 734 |
+| `…-reconcile.service.d/30-sandbox.conf.example` | class A drop-in example | ✓ VERIFIED | Example only |
+| `packages/collectors/src/install-git-hook.ts` | opt-in hook installer | ✓ VERIFIED | `CORPUS_HOOKS` 150; background block 170–190 |
+| `packages/corpus/src/hints.ts` | bounded hint spool | ✓ VERIFIED | `writeHint` 107 |
+| `packages/corpus/src/view.ts`, `mirror.ts` | mirror tree read | ✓ VERIFIED | No diff in the window |
+| `packages/corpus/src/watch.ts`, `coalesce.ts` | watcher and coalescer | ✓ VERIFIED | No diff in the window |
+| `packages/mcp-server/src/docs-freshness.ts` | corpus sync-lag breach in the docs.freshness warning | ✓ VERIFIED | `corpusFreshnessRow` 169; `lagWarningEvent` 317; `lagRecoveryEvent` 360 (two unused constants removed in a46d42c3) |
+| `packages/mcp-server/src/service.ts` | emit reading and hook, planning refresh, `settleDocsLag`, `corpusFreshness` | ✓ VERIFIED | Emit 2988; sync-lag block 3015–3019; hook type 1061; planning refresh 7411–7471; settle 7540; corpus row 7558 |
+| `packages/mcp-server/src/corpus/slo.ts` | sync-lag reading | ✓ VERIFIED | `recordSyncLag` 72–76; `readings` 79 (unchanged file) |
+| `packages/mcp-server/src/corpus/sync-event.ts` | reading parser | ✓ VERIFIED | `syncLagSeconds` 17–25 (unchanged file) |
+| `packages/mcp-server/src/observe.ts` | production observer | ✓ VERIFIED | `syncLag` → `instruments.setCorpusSyncLag` at 399–401 |
+| `packages/mcp-server/src/server.ts` | REST `POST /events` | ✓ VERIFIED | Calls `substrate.emit` at 1358; 202/503 at 1368; no gauge write |
+| `packages/mcp-server/src/event-buffer.ts` | buffer that holds a note the ledger did not take | ✓ VERIFIED | `abandonAll` 327; `reportHeldDeadLetters` 347 (a46d42c3 stderr report, not on the reading path) |
+| `packages/mcp-server/src/flag-registry.ts` | flag text for `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`, `SUBSTRATE_PLANNING_HASH_STORE`, `SUBSTRATE_DOCS_SLO_SYNC_LAG_S` | ✓ VERIFIED | Unchanged in the window; `SUBSTRATE_PLANNING_HASH_STORE` default `off` |
+| `packages/mcp-server/src/event-sources.ts` | `docs.sync` and `docs.planning` rows | ✓ VERIFIED | `docs.sync` at 1551; unchanged |
+| `packages/mcp-server/src/planning-hash-store.ts` | planning state adapter | ✓ VERIFIED | Table `planning_page_hashes`; no diff |
+| `packages/observability/src/instruments.ts` | lag gauge | ✓ VERIFIED | `setCorpusSyncLag` 679–682; `CORPUS_SYNC_LAG_METRIC` 734; unchanged file |
+| `packages/cli/src/corpus/events.ts` | docs.sync note payload | ✓ VERIFIED | `lag_s: sync.lagS` at 51; no diff |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
-| `watch-commands.ts` | `runSync` | `repos: [R]` | ✓ WIRED | `watch-commands.test.ts` "a dry run plans only the named repository" passes (run 2 at 6e5d766e) |
-| `install-git-hook.ts` | `corpus hint` | background `timeout 10` block, `return 0` | ✓ WIRED | Test "the installed hook runs the hint command … and exits 0 whatever the command does" passes (run 2 at 6e5d766e) |
-| `hints.ts` | spool read by the watch loop | `readHints` | ✓ WIRED | `hints.test.ts` 10/10; `watch-loop.test.ts` passes (run 2 at 6e5d766e) |
-| `service.ts` planning refresh | `planning_page_hashes` store | `loadPlanningHashes` / `savePlanningHashes` (flag on) | ✓ WIRED | `service.ts` 7393, 7410; off by default (Open Item 2) |
-| `event-sources.ts` `docs.sync` | ledger note | `POST /events` (`server.ts` 1352) or MCP `events_emit` (`mcp.ts` 1190) → `Substrate.emit` → `recordSyncLag` on stored, buffered or deadLettered | ✓ WIRED | `service.ts` 3005–3011 |
-| `Substrate.emit` (sync lag set) | gauge `substrate.corpus.sync_lag_seconds` | `observer.syncLag` (`service.ts` 3010) → `observe.ts` 398–400 → `setCorpusSyncLag` | ✓ WIRED (every route) | Replaces the 6e5d766e row that set the gauge in `server.ts` for stored notes only (closed at 884e0753) |
-| `service.ts` `emit` held note | buffer drain | `buffered: true` → `EventBuffer` → `drainEventBuffer` | ✓ WIRED | `service-event-buffer.test.ts` "a docs.sync note the ledger could not take still sets the sync-lag reading, and lands once when the ledger is back" asserts the reading before and after the drain |
-| `corpusSlo.readings` (sync lag) | `corpusFreshnessRow` | `service.ts` 7542 | ✓ WIRED | Judged against `config.docsSlo.syncLagS` |
-| `corpusFreshnessRow` breach | `docs.freshness` warning | `settleDocsLag` (7516–7526) → `LagSettler.settle` → `lagWarningEvent` | ✓ WIRED | `service.ts` 7516–7526 |
+| `watch-commands.ts` | `runSync` | `repos: [R]` | ✓ WIRED | Carried from 884e0753 (no diff) |
+| `install-git-hook.ts` | `corpus hint` | background `timeout 10` block, `return 0` | ✓ WIRED | Carried |
+| `hints.ts` | spool read by the watch loop | `readHints` | ✓ WIRED | Carried |
+| `service.ts` planning refresh | `planning_page_hashes` store | `loadPlanningHashes` 7459 / `savePlanningHashes` 7471 (flag on) | ✓ WIRED | Off by default (Open Item 2) |
+| `event-sources.ts` `docs.sync` | ledger note | `POST /events` (`server.ts` 1358) or MCP `events_emit` (`mcp.ts` 1191) → `Substrate.emit` → sync-lag block 3015–3019 on stored, buffered or deadLettered | ✓ WIRED | Code; stored and buffered covered by tests (hook table) |
+| `Substrate.emit` (sync lag set) | gauge `substrate.corpus.sync_lag_seconds` | `observer.syncLag` (`service.ts` 3018) → `observe.ts` 399–401 → `setCorpusSyncLag` (`instruments.ts` 679) | ✓ WIRED | Stored: "a stored sync note sets the gauge…" and the MCP case; buffered: observer array in line 115 test. Dead-lettered: code only (A1). |
+| `service.ts` emit held note | buffer drain | `buffered: true` → `EventBuffer` → `drainEventBuffer` (3299) → `deliverBuffered` 3267 | ✓ WIRED | Drain does not call the hook; test line 115 asserts `observed` unchanged after drain |
+| `corpusSlo.readings` (sync lag) | `corpusFreshnessRow` | `service.ts` 7566 | ✓ WIRED | Judged against `config.docsSlo.syncLagS` |
+| `corpusFreshnessRow` breach | `docs.freshness` warning | `settleDocsLag` 7540 → `LagSettler.settle` → `lagWarningEvent` 317 | ✓ WIRED | Carried |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 | -------- | ------------- | ------ | ------------------ | ------ |
 | `view.ts` | repository tree | mirror `git ls-tree` | Yes | ✓ FLOWING |
-| `docs-freshness.ts` corpus row | `syncLagS` | newest `docs.sync` note's `lag_s` that the server stored, held or dead-lettered, recorded by `corpusSlo` in `Substrate.emit` | Yes, when a note exists; no note means no sync breach | ✓ FLOWING |
+| `docs-freshness.ts` corpus row | `syncLagS` | newest `docs.sync` note's `lag_s` the server stored, held or dead-lettered, recorded by `corpusSlo` in `Substrate.emit` | Yes, when a note exists; no note means no sync breach | ✓ FLOWING |
 | `observe.ts` gauge | `substrate.corpus.sync_lag_seconds` | the same `recordSyncLag` return value as `syncLagS` | Yes, when a note exists; unset until the first such note | ✓ FLOWING |
 | `docs-freshness.ts` corpus row | `lastIngestAt` | manifest `status()` | Yes | ✓ FLOWING |
 
@@ -161,80 +188,72 @@ None.
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
-| Targeted non-Postgres set at 884e0753 (sync-event, service-event-buffer, corpus/slo, docs-freshness, event-idempotency) | Reported by the main agent; not re-run in this pass | 94 + 75 passes, 0 failures; `SUBSTRATE_TEST_PG_URL` unset | ✓ REPORTED |
-| Mutation check at 884e0753 (observer call removed, then restored) | Reported by the main agent | Removed: REST stored, REST not-stored, MCP and held-note cases fail. Restored: they pass | ✓ REPORTED |
-| Run 1 at 6e5d766e (prior record; superseded for the files changed at 884e0753) | `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs bun test --timeout 30000 packages/mcp-server/src/service-event-buffer.test.ts packages/mcp-server/src/planning-hash-store.test.ts packages/mcp-server/src/docs-freshness.test.ts packages/mcp-server/src/corpus/slo.test.ts packages/mcp-server/src/corpus/sync-event.test.ts packages/mcp-server/src/corpus/reconcile.test.ts packages/mcp-server/src/event-buffer.test.ts scripts/doctor-units.test.ts scripts/sandbox-dropins.test.ts` | 230 tests, 9 files: 227 pass, 3 skip (the `describeLive` block of `planning-hash-store.test.ts`, see PG counts), 0 fail | ✓ PASS (6e5d766e) |
-| Run 2 at 6e5d766e (SC1–SC4 files, none changed at 884e0753) | `env -u SUBSTRATE_TEST_PG_URL TMPDIR=/root/src/worktrees/backups/gate-tmpfs bun test --timeout 30000 --reporter=junit --reporter-outfile=/root/src/worktrees/backups/gate-tmpfs/p65-run2-junit.xml packages/mcp-server/src/planning-hash-store.test.ts scripts/sandbox-dropins.test.ts packages/cli/src/corpus/sync.test.ts packages/cli/src/corpus/watch-commands.test.ts packages/corpus/src/view.test.ts packages/corpus/src/mirror.test.ts packages/collectors/src/install-git-hook.test.ts packages/corpus/src/watch.test.ts packages/corpus/src/coalesce.test.ts packages/corpus/src/hints.test.ts packages/cli/src/corpus/watch-loop.test.ts` | 199 tests, 11 files: 196 pass, 3 skip, 0 fail (41.5 s); `sandbox-dropins.test.ts` 53/53 (0 skipped in this run) | ✓ PASS (6e5d766e) |
+| No test or command was run in this pass (read-only assignment) | — | — | — |
+| Gate r36 JUnit contains every test title relied on below as a testcase with no `failure`, `error` or `skipped` child, and each enclosing suite reports `failures="0" skipped="0"` (`the telemetry buffer`, `POST /events with a docs.sync note`, `syncLagSeconds`, `silent-failures.test.ts`) | JUnit parse of `/root/src/worktrees/backups/gate-r36-junit.xml` | All present, none failing or skipped (list below) | ✓ JUNIT |
+| Covered-digest computed at HEAD over the 41 covered files | `gsd_run query verification.fingerprint .planning/phases/65-doc-watch <41 files>` run from the worktree | `v3:sha256:7911674a0fe4fcec397cf93ed83c55965af29ac6f21a0110718cf89821fe0e84` | ✓ COMPUTED |
 
-Only the reported 884e0753 run and the two 6e5d766e runs are cited. Every command used `SUBSTRATE_TEST_PG_URL` unset, so no database was contacted.
+**Test titles relied on (each a testcase in gate r36 with no child element):**
+
+- `service-event-buffer.test.ts`, suite "the telemetry buffer": "a docs.sync note the ledger could not take still sets the sync-lag reading, and lands once when the ledger is back"; "a failed write is buffered, not dropped, and lands once the ledger is back"; "a later event of the session waits behind the buffered one, and both land once, in order"; "a keyed replay of a queued event answers that event and writes nothing"; "a write that exhausts its budget is dead-lettered with its hash and its reason"; "a service that shuts down while a dead-letter file cannot be written reports each held record on stderr, and no summary text"
+- `service-event-buffer.test.ts`, suite "the telemetry buffer's refusals, replays and config": "a keyed replay of a pending give-up is refused as a give-up, not answered as buffered, and appends nothing"
+- `corpus/sync-event.test.ts`, suite "POST /events with a docs.sync note": "a stored sync note sets the gauge to its lag, and the newest one wins"; "a note the ledger did not store, another action, or a lag that is not a number leaves the gauge alone"; "an MCP events_emit of a stored sync note sets the same gauge, and the reply reports it stored"
+- `corpus/sync-event.test.ts`, suite "syncLagSeconds": "reads a whole number of seconds from a docs.sync payload, rounding a fraction"; "reads nothing from any other action, a missing or non-numeric lag, a negative or non-finite one, or a payload that is not an object"; "a lag past a year is clamped to it, so one note cannot make the series meaningless"
+- `silent-failures.test.ts`: "reports a token code once for a site"; "the message text never appears in the output"; "a second call for the same site writes nothing"; "a non-object error reports its typeof"
+
+Not cited, because no testcase in gate r36 covers it: a dead-lettered `docs.sync` note's reading or observer call (advisory A1), and a keyed replay's effect on the reading (advisory A2).
 
 ### Probe Execution
 
-No probe declared for this phase (no `scripts/*/tests/probe-*.sh` referenced in the PLAN, SUMMARY or CONTEXT). Skipped.
+No probe declared for this phase. Skipped.
 
 ### Requirements Coverage
 
-No PLAN file exists for this phase (`Plans: none written`). Requirement IDs are taken from ROADMAP and REQUIREMENTS.md text, so each row names its criterion.
+No PLAN file exists for this phase (`Plans: none written`). Requirement IDs are taken from ROADMAP and REQUIREMENTS.md text.
 
 | Requirement | Source Plan | Description | Status | Evidence |
 | ----------- | ---------- | ----------- | ------ | -------- |
 | WATCH-01 | none | a change in a registered repository reaches the docs plane with no manual command | ✓ SATISFIED | SC1 (watch, coalesce, sync) |
-| WATCH-02 | none | a burst costs one sync per repository; a restart re-ingests nothing unchanged | ✓ SATISFIED | SC1 (coalesce) and SC3 (two-server restart test; flag on) |
+| WATCH-02 | none | a burst costs one sync per repository; a restart re-ingests nothing unchanged | ✓ SATISFIED | SC1 (coalesce) and SC3 (restart test; flag on) |
 | WATCH-03 | none | default triggers write nothing; git hooks opt-in; hooks and watcher never block or fail a git command | ✓ SATISFIED | SC2 (amended text) |
-| WATCH-04 | none | reconcile timer finds changes no trigger saw, through a managed mirror | ✓ SATISFIED (staged, not installed) | SC4 (reconcile dry run, mirror and view tests) |
-| WATCH-05 | none | a sync reports outcome, lag and failures as events and metrics; a freshness breach raises `docs.freshness` | ✓ SATISFIED | SC5 (note, reading, gauge, warning); outcome event in `cli/corpus/events.ts` |
-
-No orphaned requirements: REQUIREMENTS.md maps WATCH-01 to WATCH-05 to phase 65 and all five appear above.
+| WATCH-04 | none | reconcile timer finds changes no trigger saw, through a managed mirror | ✓ SATISFIED (staged, not installed) | SC4 |
+| WATCH-05 | none | a sync reports outcome, lag and failures as events and metrics; a freshness breach raises `docs.freshness` | ✓ SATISFIED | SC5 (note, reading, gauge, warning) |
 
 ### Anti-Patterns Found
 
-Scan of the covered implementation files for `TODO|FIXME|XXX|HACK|PLACEHOLDER|not implemented`: the only hits are `SRC_PLACEHOLDER` and `CLI_PLACEHOLDER` in `install-git-hook.ts` (lines 37, 46–47, 155, 164), which are substitution tokens in the baked hook template, not stubs. No debt marker blocks this phase.
+- `packages/collectors/src/install-git-hook.ts` lines 37, 155: `*_PLACEHOLDER` tokens are template substitution, not stubs (carried).
+- `packages/mcp-server/src/reserved-actions.ts` 23–33: `docs.sync` is not reserved (advisory A3; file unchanged since 884e0753).
+- The sync-lag hook call (`service.ts` 3018) has no catch of its own. Safe on this path (see above), but any future change that lets `recordSyncLag` return a non-finite value would make `emit` reject after the append.
 
-| File | Line | Pattern | Severity | Impact |
-| ---- | ---- | ------- | -------- | ------ |
-| `packages/collectors/src/install-git-hook.ts` | 37, 155 | `*_PLACEHOLDER` tokens | ℹ️ Info | Template substitution; not a stub |
-| `packages/mcp-server/src/reserved-actions.ts` (`RESERVED_NOTE_ACTIONS`, 23–33) | — | `docs.sync` is not in the set | ⚠️ Warning | Any authenticated caller can post a `docs.sync` note through `POST /events` or `events_emit` and move the lag reading, the gauge and the warning (Open Item 4) |
+### Deferred Items
 
-The 6e5d766e row for `server.ts` 1362–1363 (gauge set only on a stored note) is removed: the gauge now follows the reading on every route (Open Item 5, closed).
-
-### Human Verification Required
-
-1. **Install the staged triggers and run one sync and one reconcile dry run**
-   - **Test:** Install the three units and two timers, the opt-in hooks (`corpus hook install --corpus` for chosen repositories), then run `corpus watch --once` and `corpus reconcile`.
-   - **Expected:** Units start; hints spool under the corpus-hints directory and are consumed; the reconcile prints a dry-run plan with no writes; a `docs.sync` note reaches the ledger.
-   - **Why human:** Operator installation (WATCH-03 opt-in, WATCH-04). Nothing is installed on any host and no live sync was observed.
-
-2. **Read the live sync-lag reading and gauge for a stored and a held note**
-   - **Test:** On a running server, post one `docs.sync` note with `lag_s` through `POST /events` and one through `events_emit`; then post one while the ledger is down so the note is held; read `fabric_status` (the `corpus` row's `syncLag`) and the `substrate.corpus.sync_lag_seconds` series after each.
-   - **Expected:** The reading and the gauge show the same lag at every step, including for the held note.
-   - **Why human:** The agreement is established by code and tests at 884e0753. No live server, no live sync-lag reading and no live dashboard were observed in this pass.
+None.
 
 ### Gaps Summary
 
-No gaps. Criteria 2 and 3 are judged against the owner-amended text and match it (the amendment date is 2026-11-05; the words are unchanged). Criterion 5 routes the sync-lag breach to `docs.freshness`; the held-note reading is covered by a named test; the gauge now follows the reading on every route (884e0753), so the asymmetry recorded at 6e5d766e is closed. Status is `human_needed` only because the operator install and the live reading are human steps.
+No gaps. Criterion 5 holds at a46d42c3: the reading, the hook and the gauge are unchanged across the window, and the hook runs for stored, buffered and dead-lettered notes (code for all three; tests for stored and buffered). The dead-lettered branch has no test (A1). The keyed-replay case re-applies a held note's lag (A2). Neither changes the verdict on Truth 5 for the stated behaviour. Status stays `human_needed` because the operator install and the live reading are human steps.
 
 ### Open Items
 
 1. Operator install of the staged units, timers and hooks (WATCH-03 opt-in, WATCH-04), and the live sync-lag check in Human Verification 2. Not verifier-closable.
-2. `SUBSTRATE_PLANNING_HASH_STORE` defaults to `off` (`flag-registry.ts` line 882). In the default configuration a restart re-ingests unchanged planning pages (the non-Postgres restart tests run with the flag on). Criterion 3 holds with the flag on. Owner decision 2026-11-05: keep the default off.
-3. Postgres-gated test: `packages/mcp-server/src/planning-hash-store.test.ts`, suite "the Postgres adapter against a live index", testcase "save upserts by path and load reads it back, so a second store object sees what the first wrote". Cited by name from the gate r33 JUnit report `/root/src/worktrees/backups/gate-r33-junit.xml`, lines 5032–5048: suite `tests="8" failures="0" skipped="0"`, and the named testcase is self-closing (no `<skipped/>` child). No Postgres run was made in this pass (none assigned). The file has no diff at 884e0753.
-4. `docs.sync` is not in `RESERVED_NOTE_ACTIONS` (`reserved-actions.ts`). Owner decision recorded as "reservation held", so the status quo stands. Consequence: a `docs.sync` note with a large `lag_s` posted by any authenticated caller raises the corpus warning and sets the gauge.
-5. **Closed at 884e0753.** The prior record noted that the gauge `substrate.corpus.sync_lag_seconds` was set only for a stored note while the in-process reading also followed held and dead-lettered notes. The gauge now follows the reading: `Substrate.emit` sets both in one branch (`service.ts` 3005–3011), the production observer maps the hook to the gauge (`observe.ts` 398–400), and the REST-only write in `server.ts` is removed. The docs (`docs/corpus-eval.md` 103 and 105, `docs/runbooks/docs-rag-operations.md` 146) say the same. Evidence and test titles: Truth 5.
-6. `covered_files` now also lists `corpus/slo.ts`, `corpus/slo.test.ts`, `corpus/sync-event.test.ts`, `observe.ts`, `server.ts`, `docs/corpus-eval.md` and `docs/runbooks/docs-rag-operations.md` (changed at 884e0753 on the sync-lag path). `covered_digest` is computed over this list at HEAD 884e0753 with `gsd_run query verification.fingerprint`.
-7. Information: the sync-lag reading is the last reported lag and does not age. If syncs stop, a breach stays until a sync reports within the objective. This matches the phase 70 SLO semantics. A sync breach is also not raised while the manifest has never ingested (`corpusFreshnessRow` returns null).
+2. `SUBSTRATE_PLANNING_HASH_STORE` defaults to `off` (`flag-registry.ts` 882). Owner decision 2026-11-05: keep the default off. Criterion 3 holds with the flag on.
+3. Postgres-gated test: `packages/mcp-server/src/planning-hash-store.test.ts`, suite "the Postgres adapter against a live index", testcase "save upserts by path and load reads it back, so a second store object sees what the first wrote". Cited from gate r33 JUnit (`gate-r33-junit.xml`, suite `tests="8" failures="0" skipped="0"`). No Postgres run in this pass. The file has no diff in the window.
+4. `docs.sync` is not in `RESERVED_NOTE_ACTIONS` (`reserved-actions.ts` 23–33). Owner decision recorded as "reservation held", so the status quo stands (advisory A3).
+5. **Closed at 884e0753 and still closed.** The gauge follows the reading on every route. Re-audited at a46d42c3: the sync-lag block is unchanged and `server.ts` sets no gauge.
+6. `covered_files` unchanged (41 entries). `covered_digest` recomputed at HEAD a46d42c3 with `gsd_run query verification.fingerprint`, because six covered files changed in the window.
+7. Information: the sync-lag reading is the last reported lag and does not age (`corpus/slo.ts` 72–76). If syncs stop, a breach stays until a sync reports within the objective. This matches the phase 70 SLO semantics. A sync breach is not raised while the manifest has never ingested (`corpusFreshnessRow` returns null).
+8. Advisory A1 (new): no test covers the dead-lettered branch of the hook (`service.ts` 3016 with `deadLettered`). A test that posts a `docs.sync` note with the buffer's give-up path and asserts `syncLagS` and the observer would close it. Not written here (read-only assignment).
+9. Advisory A2 (new): a keyed replay of a held or given-up `docs.sync` note (`service.ts` 3168, 3171) re-applies that note's lag. The reading and the gauge can therefore move back to an older lag after a newer note was stored. Reachable only with an `idempotency_key` under `SUBSTRATE_EVENT_IDEMPOTENCY` accept or enforce; the corpus CLI sends no key. Decide whether a replay should set the reading (for example, only on first buffering). Not fixed here.
 
 ### PG counts per file
 
-- `packages/mcp-server/src/planning-hash-store.test.ts`: the Postgres-gated block is `describeLive` (`SUBSTRATE_TEST_PG_URL`, line 190), with one named test and two unnamed hook entries. With the variable unset (run 1 and run 2 at 6e5d766e): 7 pass and 3 skipped entries (the named test plus the two `beforeAll`/`afterAll` entries reported as `(unnamed)`). With the URL set in the gate r33 run: 8 of 8 pass, 0 skipped (`gate-r33-junit.xml` line 5032).
-- `scripts/doctor-units.test.ts`, `scripts/sandbox-dropins.test.ts`: no PG gate. Ran with the variable unset at 6e5d766e: pass (run 1: part of 227 pass, 0 fail; run 2: `sandbox-dropins.test.ts` 53/53, 0 skipped).
-- `packages/cli/src/corpus/sync.test.ts`, `watch-commands.test.ts`, `packages/corpus/src/*.test.ts` and `packages/collectors/src/install-git-hook.test.ts` in the covered set: no PG gate. Ran with the variable unset at 6e5d766e: pass (run 2).
-- `packages/mcp-server/src/service-event-buffer.test.ts`, `event-buffer.test.ts`, `docs-freshness.test.ts`, `corpus/slo.test.ts`, `corpus/sync-event.test.ts`, `corpus/reconcile.test.ts`: no PG gate (in-memory ledger fakes; `sync-event.test.ts` uses a stub ledger that throws on refusal). Reported pass at 884e0753 (the first five) and at 6e5d766e (`reconcile.test.ts`).
+- `packages/mcp-server/src/planning-hash-store.test.ts`: the Postgres-gated block is `describeLive` (`SUBSTRATE_TEST_PG_URL`). With the variable unset: 7 pass and 3 skipped entries. With the URL set in the gate r33 run: 8 of 8 pass.
+- `scripts/doctor-units.test.ts`, `scripts/sandbox-dropins.test.ts`, `packages/mcp-server/src/service-event-buffer.test.ts`, `event-buffer.test.ts`, `docs-freshness.test.ts`, `corpus/slo.test.ts`, `corpus/sync-event.test.ts`, `silent-failures.test.ts`: no PG gate. Their titles above are gate r36 passes.
 
 ### Scope of this pass
 
-HEAD 884e0753 (prior record head 6e5d766e). Re-audited: the sync-lag path through `packages/mcp-server/src/service.ts` (the `syncLag` hook at 1059–1060, `Substrate.emit` at 3005–3011, the held and dead-lettered returns, `deliverBuffered`), `packages/mcp-server/src/observe.ts` (398–400), `packages/mcp-server/src/server.ts` (the deleted REST block; `POST /events` at 1352), `packages/mcp-server/src/corpus/slo.ts` (`recordSyncLag`), `packages/mcp-server/src/mcp.ts` (`events_emit` at 1190, to confirm it reaches `emit`), and the docs-freshness settle and corpus row. Re-anchored every line reference in the record. Tests: the test titles above were read from the files at HEAD; no test was run in this pass. The 884e0753 results and mutation check are the main agent's report. The Postgres-gated test is cited from the gate r33 JUnit report, not re-run. No code edits; no commits; no full suite; no tsc, lint or formatters; no Docker or database started. Only this record file was written.
+HEAD a46d42c3 (prior record head 884e0753). Re-audited: `packages/mcp-server/src/service.ts` (`Substrate.emit` 2988–3022; `appendChained` 3150–3242 buffer and replay returns; `bufferEvent` 3248–3260; `deliverBuffered` 3267; `drainPendingEvents` 3311; `corpusFreshness` 7558; `settleDocsLag` 7540; `planningEvent` 7378; `noteDocsCanary` 7043), `packages/mcp-server/src/observe.ts` (399–401), `packages/mcp-server/src/server.ts` (`POST /events` 1304–1368), `packages/mcp-server/src/mcp.ts` (`events_emit` 1191), `packages/mcp-server/src/corpus/slo.ts`, `corpus/sync-event.ts`, `docs-freshness.ts`, `event-buffer.ts`, `silent-failures.ts`, `packages/observability/src/instruments.ts`, `packages/cli/src/corpus/events.ts`. Test titles were read from the test files at HEAD and checked in the gate r36 JUnit. No test, build, lint or Postgres run was made. No file under the worktree was written.
 
 ---
 
-_Verified: 2026-11-05T08:43:31Z_
-_Verifier: Claude (gsd-verifier), worker Verify65W1, worktree /root/src/worktrees/as-gsd-v18-all, head 884e0753_
+_Verified: 2026-11-06T00:45:14Z_
+_Verifier: Claude (gsd-verifier), worker V65, worktree /root/src/worktrees/as-gsd-v18-all, head a46d42c3_
