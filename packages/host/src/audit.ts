@@ -30,7 +30,7 @@ const SECRET_SEGMENTS: Record<string, true> = {
 };
 
 /** Values shorter than this are not scanned: too likely to occur in unrelated bytes. */
-export const MIN_SECRET_LENGTH = 12;
+const MIN_SECRET_LENGTH = 12;
 
 /** A name is secret-bearing when one of its underscore-delimited segments is a credential word (D-08). */
 export function secretKey(name: string): boolean {
@@ -145,7 +145,7 @@ export function containerViolations(inspect: Record<string, unknown>, network: S
 	return violations;
 }
 
-export type AuditReport = {
+type AuditReport = {
 	storageMode: string;
 	/** Hits per secret-bearing name, sanctioned names included. */
 	secretHits: Record<string, number>;

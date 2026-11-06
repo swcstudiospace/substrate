@@ -25,7 +25,7 @@ export interface GrokEvent {
 	[key: string]: unknown;
 }
 
-export interface GrokContext {
+interface GrokContext {
 	/** Session UUID — the directory name, which is more reliable than the field. */
 	sessionId: string;
 	repo?: string | undefined;

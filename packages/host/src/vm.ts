@@ -44,7 +44,7 @@ import type { ApprovalBroker } from "./telegram.ts";
 import type { Dod, LeaseStoreLike, SubstrateClient } from "./substrate.ts";
 import { HOST_SURFACE } from "./substrate.ts";
 
-export type HostVmConfig = {
+type HostVmConfig = {
 	route: Route;
 	sandboxNet: SandboxNetwork;
 	/** 03-01's tests_route: on oneshot the substrate collection gains run-tests. */

@@ -31,13 +31,13 @@ import { HOOK_TIMEOUT_MS, postEvent } from "./emit.ts";
 
 export const TRANSCRIPTS_DIR = "/var/lib/substrate/transcripts/cursor";
 export const CURSOR_ROOT = "/root/.cursor";
-export const MAX_TRANSCRIPT_BYTES = 20_000_000;
+const MAX_TRANSCRIPT_BYTES = 20_000_000;
 
 const STDIN_TIMEOUT_MS = 5000;
 const CONVERSATION_ID = /^[A-Za-z0-9-]{8,128}$/;
 
 /** The fields of Cursor's stop envelope this hook reads; the rest pass through untouched. */
-export interface StopInput {
+interface StopInput {
 	conversation_id?: unknown;
 	transcript_path?: unknown;
 	status?: unknown;
@@ -45,7 +45,7 @@ export interface StopInput {
 }
 
 /** Result of a copy attempt: the destination path, or null and why. */
-export interface CopyResult {
+interface CopyResult {
 	ref: string | null;
 	reason?: string;
 }
@@ -61,7 +61,7 @@ export function sessionLessonText(transcript: string, limit = 3000): string {
 	return body;
 }
 
-export interface StopDeps {
+interface StopDeps {
 	/** Post `session.end`. `timeoutMs` is the fetch bound still left in the hook. The promise includes the spool park after a timeout, and the hook awaits it. */
 	emit: (event: EventInput, timeoutMs: number) => Promise<unknown>;
 	/** Transcripts outside this directory (after realpath) are refused. */

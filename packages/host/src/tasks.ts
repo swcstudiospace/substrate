@@ -36,7 +36,7 @@ import {
 	type LeaseStoreLike,
 } from "./substrate.ts";
 
-export type PendingApproval = { request_id: string; tool: string; at: string; deadlineMs?: number };
+type PendingApproval = { request_id: string; tool: string; at: string; deadlineMs?: number };
 /** Default approval deadline (D33-05): 900 s, the same ladder as the lease TTL and the claim timeout. */
 export const APPROVAL_TIMEOUT_MS = 900_000;
 
@@ -53,7 +53,7 @@ export function parseApprovalTimeoutMs(raw: string | undefined, log?: (line: str
 	return Math.floor(seconds * 1000);
 }
 
-export type SeededFile = { path: string; sha256: string; bytes: number };
+type SeededFile = { path: string; sha256: string; bytes: number };
 
 export type TaskRecord = {
 	graph_id: string;
@@ -87,13 +87,13 @@ export type TaskRecord = {
 };
 
 /** model: the sync host function; model_mcp: in-VM ultrathink-sync verified read-only; host: the turn-settle backstop. */
-export type SyncBy = "model" | "model_mcp" | "host";
+type SyncBy = "model" | "model_mcp" | "host";
 
 /**
  * Records written by earlier plans lack later fields: resume counters read as 0 (T-03-06-01: the
  * key must stay numeric), PR and sync fields as null.
  */
-export function withRecordDefaults(record: TaskRecord): TaskRecord {
+function withRecordDefaults(record: TaskRecord): TaskRecord {
 	record.resumes = Number.isInteger(record.resumes) ? record.resumes : 0;
 	record.stale_approvals = Number.isInteger(record.stale_approvals) ? record.stale_approvals : 0;
 	record.pr_url = typeof record.pr_url === "string" ? record.pr_url : null;
@@ -114,7 +114,7 @@ export function interruptedTasks(records: readonly TaskRecord[]): TaskRecord[] {
 export const RESUME_TEXT =
 	"substrate-host restarted during your last turn. Continue the same task from the files in /home/agentos/work and the numbered steps of your first prompt; do not repeat steps that already succeeded.";
 
-export type OpenRequest = { graph_id: string; node_id: string; identifier: string; repo: string; worktree: string };
+type OpenRequest = { graph_id: string; node_id: string; identifier: string; repo: string; worktree: string };
 
 /**
  * The dispatcher's poll(): null while the turn runs or waits on an approval, 0 after a clean
@@ -132,7 +132,7 @@ export function pollCode(
 	return record.last_stop_reason === "end_turn" ? 0 : 1;
 }
 
-export type Validation = { ok: true; request: OpenRequest } | { ok: false; error: string };
+type Validation = { ok: true; request: OpenRequest } | { ok: false; error: string };
 
 /** POST /tasks body: every id checked with the dispatcher's patterns, worktree pinned to the graph's. */
 export function validateOpenRequest(body: unknown): Validation {
@@ -150,7 +150,7 @@ export function validateOpenRequest(body: unknown): Validation {
 	};
 }
 
-export type HostCallTarget = { graphId: string; nodeId: string; sessionId: string } | { error: string };
+type HostCallTarget = { graphId: string; nodeId: string; sessionId: string } | { error: string };
 
 /**
  * The one guard every VM host function runs first (T-03-03-02): the graph comes from the actor
@@ -368,7 +368,7 @@ export function isHostSandboxLabel(labels: Record<string, string> | undefined): 
 	return labels !== undefined && (GRAPH_LABEL in labels || TEST_RUN_LABEL in labels);
 }
 
-export type SandboxReconcileDeps = {
+type SandboxReconcileDeps = {
 	/** Live containers from the provider: everything on the daemon, host-owned by label, foreign unlabeled. */
 	enumerate: () => Promise<SandboxListing[]>;
 	/** The durable sandbox→task map (the U2 state file). */
@@ -391,7 +391,7 @@ export type SandboxReconcileDeps = {
 	stderr?: (line: string) => void;
 };
 
-export type SandboxReconcileResult = {
+type SandboxReconcileResult = {
 	ok: boolean;
 	/** Live sandboxes of still-claimed tasks, left running for their continuation (re-attach). */
 	reattached: string[];
@@ -561,13 +561,13 @@ export type TaskServiceDeps = {
 };
 
 /** The DoD summary cap, matching the `graph_complete` tool schema. */
-export const DOD_SUMMARY_MAX = 2000;
+const DOD_SUMMARY_MAX = 2000;
 
 /** One heartbeat-or-reclaim tick's outcome (D32-02). */
-export type HeartbeatTick = "ok" | "not-due" | "reclaimed" | "failed-closed" | "idle";
+type HeartbeatTick = "ok" | "not-due" | "reclaimed" | "failed-closed" | "idle";
 
-export type CompleteInput = { summary: string; tests_pass: boolean; review_pass?: boolean };
-export type CompleteResult = { completed: boolean; reason?: string };
+type CompleteInput = { summary: string; tests_pass: boolean; review_pass?: boolean };
+type CompleteResult = { completed: boolean; reason?: string };
 
 export type TaskStatus = TaskRecord & {
 	state: string;

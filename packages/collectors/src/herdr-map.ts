@@ -31,7 +31,7 @@ export const HERDR_AGENT_SURFACES = {
  * The rest of the 0.9.1 enum. These, and any id outside the enum, are
  * counted as unmapped and never emitted.
  */
-export const HERDR_UNMAPPED_AGENTS = [
+const HERDR_UNMAPPED_AGENTS = [
 	"copilot",
 	"devin",
 	"droid",
@@ -72,7 +72,7 @@ export interface HerdrPane {
 }
 
 /** One push envelope field set. Lifecycle pushes are not mapped from this. */
-export interface HerdrEvent {
+interface HerdrEvent {
 	type?: string;
 	event?: string;
 	pane_id?: string;
@@ -84,7 +84,7 @@ export interface HerdrEvent {
 	[key: string]: unknown;
 }
 
-export type HerdrRowId = "herdr.agent_detected" | "herdr.status_changed" | "herdr.pane_exited";
+type HerdrRowId = "herdr.agent_detected" | "herdr.status_changed" | "herdr.pane_exited";
 
 /** One reconciled transition, ready to become an event. */
 export interface HerdrTransition {

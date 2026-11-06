@@ -148,7 +148,7 @@ function inspect(repo: string, env: Env): { status: Status; path?: string; detai
 
 /** The hooks that carry a corpus hint: a merge, a checkout and a rebase or amend move the documentation under a checkout. */
 export const CORPUS_HOOKS = ["post-merge", "post-checkout", "post-rewrite"] as const;
-export type CorpusHook = (typeof CORPUS_HOOKS)[number];
+type CorpusHook = (typeof CORPUS_HOOKS)[number];
 
 export const CORPUS_BLOCK_BEGIN = "# >>> substrate corpus hint >>>";
 export const CORPUS_BLOCK_END = "# <<< substrate corpus hint <<<";
@@ -193,8 +193,8 @@ export function corpusHookBlock(hook: CorpusHook, cliPath: string): string {
 	].join("\n");
 }
 
-export const HOOK_STATES = ["installed", "refreshed", "present", "absent", "removed", "foreign", "not-a-repo", "refused"] as const;
-export type HookState = (typeof HOOK_STATES)[number];
+const HOOK_STATES = ["installed", "refreshed", "present", "absent", "removed", "foreign", "not-a-repo", "refused"] as const;
+type HookState = (typeof HOOK_STATES)[number];
 
 export interface HookReport {
 	hook: string;
@@ -305,12 +305,12 @@ export function uninstallCorpusHooks(repo: string, env: Env = process.env): Hook
 }
 
 /** A repository whose install threw: its path and a redacted one-line reason. */
-export interface RepoFailure {
+interface RepoFailure {
 	repo: string;
 	reason: string;
 }
 
-export interface InstallOptions {
+interface InstallOptions {
 	checkOnly?: boolean | undefined;
 	corpus?: boolean | undefined;
 	/** The environment the registry is read from. Defaults to the process environment. */
@@ -320,7 +320,7 @@ export interface InstallOptions {
 }
 
 /** `failures` counts the distinct repositories with a problem and decides the exit code; `errors` names the repositories whose install threw (each is also in `failures`). */
-export interface InstallOutcome {
+interface InstallOutcome {
 	failures: number;
 	errors: RepoFailure[];
 }

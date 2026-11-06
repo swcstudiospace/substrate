@@ -25,8 +25,8 @@
 import { parseTranscriptRef, SessionEventError, type TranscriptRef } from "../../mcp-server/src/session-events.ts";
 import { SURFACES, type Surface } from "../../mcp-server/src/types.ts";
 
-export const TRANSCRIPT_REF_NULL_REASONS = ["no-session-id", "no-turn-id", "invalid-field", "locator-mismatch", "unsupported-surface"] as const;
-export type TranscriptRefNullReason = (typeof TRANSCRIPT_REF_NULL_REASONS)[number];
+const TRANSCRIPT_REF_NULL_REASONS = ["no-session-id", "no-turn-id", "invalid-field", "locator-mismatch", "unsupported-surface"] as const;
+type TranscriptRefNullReason = (typeof TRANSCRIPT_REF_NULL_REASONS)[number];
 
 export type TranscriptRefResult =
 	| { ref: TranscriptRef }

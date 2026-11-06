@@ -43,23 +43,23 @@ function same(a: unknown, b: unknown): boolean {
 	return canonical(a) === canonical(b);
 }
 
-export function cursorHome(env: Record<string, string | undefined> = process.env): string {
+function cursorHome(env: Record<string, string | undefined> = process.env): string {
 	const fromEnv = env.HOME?.trim();
 	return fromEnv ? fromEnv : homedir();
 }
 
-export function defaultMcpPath(env: Record<string, string | undefined> = process.env): string {
+function defaultMcpPath(env: Record<string, string | undefined> = process.env): string {
 	return join(cursorHome(env), ".cursor", "mcp.json");
 }
 
 /** The entry written under mcpServers.substrate. Placeholders only. */
-export function substrateEntry(): Record<string, unknown> {
+function substrateEntry(): Record<string, unknown> {
 	return jsonEntry();
 }
 
-export class ProjectionRefused extends Error {}
+class ProjectionRefused extends Error {}
 
-export interface Plan {
+interface Plan {
 	status: "create" | "append" | "current" | "remove";
 	after: string;
 }
@@ -68,7 +68,7 @@ export interface Plan {
  * Decide the next file body. `before` null means the file is absent.
  * `remove` drops the substrate key and leaves every other server.
  */
-export function planMcp(path: string, before: string | null, remove: boolean): Plan {
+function planMcp(path: string, before: string | null, remove: boolean): Plan {
 	const entry = substrateEntry();
 	if (before === null) {
 		if (remove) return { status: "current", after: "" };

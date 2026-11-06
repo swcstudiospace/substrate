@@ -12,7 +12,7 @@ export const GRAPH_LABEL = "substrate.graph_id";
 export const WORKTREES_ROOT = "/var/lib/substrate/worktrees";
 
 /** Same rule as packages/dispatcher/src/substrate_dispatcher/worktree.py GRAPH_ID_RE. */
-export const GRAPH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const GRAPH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export type SandboxNetwork = "published_loopback" | "internal";
 
@@ -117,7 +117,7 @@ export type EgressDestination = { readonly host: string; readonly port: number }
 
 export type EgressPolicy = { readonly allow: readonly EgressDestination[] };
 
-export const EGRESS_DENY_ALL: EgressPolicy = { allow: [] };
+const EGRESS_DENY_ALL: EgressPolicy = { allow: [] };
 
 /** A hostname or IPv4 address: alnum lead (no `:`, no `[`, no option dash), then dot or dash. */
 const EGRESS_HOST_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*$/;
@@ -173,7 +173,7 @@ export function egressConflict(policy: EgressPolicy, network: SandboxNetwork): s
 	return null;
 }
 
-export type EgressRules = { apply: string[][]; remove: string[][] };
+type EgressRules = { apply: string[][]; remove: string[][] };
 
 const IPTABLES = "iptables";
 /** Docker reserves this chain for exactly this kind of operator rule: consulted before its own. */

@@ -34,7 +34,7 @@ export type RunResult = { code: number | null; stdout: string; stderr: string };
 export type Runner = (argv: readonly string[]) => Promise<RunResult>;
 
 /** The substrate's merge-trigger door, with the projector's own surface token. */
-export interface RefreshTarget {
+interface RefreshTarget {
 	url: string;
 	token: string;
 }
@@ -55,7 +55,7 @@ export function refreshTarget(env: NodeJS.ProcessEnv = process.env): RefreshTarg
 	return { url: (env.SUBSTRATE_URL ?? "http://127.0.0.1:7410").replace(/\/+$/, ""), token };
 }
 
-export type RefreshPostOutcome = { ok: true } | { ok: false; reason: string };
+type RefreshPostOutcome = { ok: true } | { ok: false; reason: string };
 
 /**
  * Fire the dataset refresh at the substrate's merge-trigger route. A refusal
@@ -165,7 +165,7 @@ export function childEnv(env: NodeJS.ProcessEnv = process.env): Record<string, s
 }
 
 /** hostfns' runner shape: execFile with an argv (never a shell), 120 s, allowlisted env, no prompts. */
-export function execFileRunner(argv: readonly string[]): Promise<RunResult> {
+function execFileRunner(argv: readonly string[]): Promise<RunResult> {
 	const { promise, resolve } = Promise.withResolvers<RunResult>();
 	execFile(
 		argv[0] as string,
@@ -184,7 +184,7 @@ export function execFileRunner(argv: readonly string[]): Promise<RunResult> {
 	return promise;
 }
 
-export interface SyncFacts {
+interface SyncFacts {
 	porcelain: string;
 	branch: string;
 	/** `merge-base --is-ancestor HEAD origin/main`; undefined until fetched. */
@@ -192,7 +192,7 @@ export interface SyncFacts {
 	head?: string;
 	originMain?: string;
 }
-export type Decision = "refuse-dirty" | "refuse-branch" | "refuse-diverged" | "fetch" | "current" | "ff";
+type Decision = "refuse-dirty" | "refuse-branch" | "refuse-diverged" | "fetch" | "current" | "ff";
 
 export function decide(facts: SyncFacts): Decision {
 	if (facts.porcelain.trim() !== "") return "refuse-dirty";
@@ -225,7 +225,7 @@ export interface SyncContext {
 	/** Persist the payload to retry, or clear it on success; the sync's state file, written tmp+rename. */
 	savePendingRefresh?: (pending: PendingRefresh | null) => void;
 }
-export interface SyncResult {
+interface SyncResult {
 	decision: Decision | "error";
 	code: number;
 }

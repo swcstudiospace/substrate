@@ -27,14 +27,14 @@ const HOOK_ID = "post-tool-use";
 const REDACT_SOURCE = join(import.meta.dir, "..", "..", "mcp-server", "src", "redact.ts");
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
-export class ProjectionRefused extends Error {
+class ProjectionRefused extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "ProjectionRefused";
 	}
 }
 
-export interface SubstrateConfig {
+interface SubstrateConfig {
 	url: string;
 	tokenFile: string;
 	stateDir: string;
@@ -53,11 +53,11 @@ interface BundleFiles {
 	config: string;
 }
 
-export function sha256Hex(input: string): string {
+function sha256Hex(input: string): string {
 	return new Bun.CryptoHasher("sha256").update(input).digest("hex");
 }
 
-export function substrateConfig(env: NodeJS.ProcessEnv = process.env): SubstrateConfig {
+function substrateConfig(env: NodeJS.ProcessEnv = process.env): SubstrateConfig {
 	return {
 		url: env.SUBSTRATE_URL?.trim() || DEFAULT_URL,
 		tokenFile: env.SUBSTRATE_MUSE_TOKEN_FILE?.trim() || DEFAULT_TOKEN_FILE,
@@ -254,7 +254,7 @@ const HOOK_LINES = [
 	"",
 ];
 
-export function hookSource(): string {
+function hookSource(): string {
 	return HOOK_LINES.join("\n");
 }
 
@@ -280,7 +280,7 @@ function sourceCommit(): string {
 	return commit;
 }
 
-export function assembleBundle(env: NodeJS.ProcessEnv = process.env): BundleFiles {
+function assembleBundle(env: NodeJS.ProcessEnv = process.env): BundleFiles {
 	const source = readFileSync(REDACT_SOURCE, "utf8");
 	assertCopyable(source);
 	const commit = sourceCommit();
@@ -299,7 +299,7 @@ export function assembleBundle(env: NodeJS.ProcessEnv = process.env): BundleFile
 	return files;
 }
 
-export function writeBundle(dir: string, files: BundleFiles = assembleBundle()): void {
+function writeBundle(dir: string, files: BundleFiles = assembleBundle()): void {
 	mkdirSync(join(dir, ".muse-plugin"), { recursive: true });
 	mkdirSync(join(dir, "hooks"), { recursive: true });
 	writeFileSync(join(dir, ".muse-plugin", "plugin.json"), files.manifest);
@@ -341,7 +341,7 @@ function stringField(value: unknown, key: string): string | undefined {
 	return typeof found === "string" ? found : undefined;
 }
 
-export interface ValidateReport {
+interface ValidateReport {
 	valid: unknown;
 	diagnosticCount: number;
 }
@@ -356,7 +356,7 @@ export function parseValidateReport(value: unknown): ValidateReport | null {
 	return { valid: field(report, "valid"), diagnosticCount: diagnostics.length };
 }
 
-export interface InstalledPlugin {
+interface InstalledPlugin {
 	id: string | undefined;
 	cachePath: string | undefined;
 }

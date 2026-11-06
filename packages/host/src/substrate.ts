@@ -15,14 +15,14 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_LEASE_TTL_SECONDS } from "../../mcp-server/src/lease.ts";
 
-export const DEFAULT_SUBSTRATE_BASE = "http://127.0.0.1:7410";
+const DEFAULT_SUBSTRATE_BASE = "http://127.0.0.1:7410";
 const ACCEPT = "application/json, text/event-stream";
 export const HOST_SURFACE = "claude-code";
-export const BRIEF_UNAVAILABLE = "substrate brief unavailable";
+const BRIEF_UNAVAILABLE = "substrate brief unavailable";
 
 /** The tokens-dir file holding the surface-`substrate` bearer (Phase 20 order). */
-export const DEFAULT_TOKENS_DIR = "/etc/substrate/tokens";
-export const SUBSTRATE_SURFACE = "substrate";
+const DEFAULT_TOKENS_DIR = "/etc/substrate/tokens";
+const SUBSTRATE_SURFACE = "substrate";
 
 export class SubstrateError extends Error {}
 
@@ -47,9 +47,9 @@ export type GraphView = {
 };
 
 export type ClaimReply = { claimed: boolean; reason?: string; node?: GraphNodeView; lease_id?: string | null };
-export type ReleaseReply = { released: boolean; reason?: string; node?: GraphNodeView };
+type ReleaseReply = { released: boolean; reason?: string; node?: GraphNodeView };
 export type CompleteReply = { completed: boolean; reason?: string; node?: GraphNodeView };
-export type IssueReply =
+type IssueReply =
 	| { found: true; graph_id: string; node_id: string; identifier: string; title: string; description: string; untrusted: string }
 	| { found: false; reason: string };
 
@@ -72,7 +72,7 @@ export type HeartbeatReply = { ok: boolean; reason?: string };
 
 export type Dod = { summary: string; tests_pass: boolean; review_pass?: boolean };
 
-export type SubstrateClientOptions = {
+type SubstrateClientOptions = {
 	baseUrl?: string;
 	fetchImpl?: typeof fetch;
 	timeoutMs?: number;
@@ -202,7 +202,7 @@ export class MemoryLeaseStore implements LeaseStoreLike {
 	}
 }
 /** JSON payloads of every SSE event; multi-line `data:` fields are joined per the SSE spec. */
-export function sseMessages(text: string): unknown[] {
+function sseMessages(text: string): unknown[] {
 	const messages: unknown[] = [];
 	let dataLines: string[] = [];
 	const flush = () => {

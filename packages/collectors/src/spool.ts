@@ -61,12 +61,12 @@ import {
 import { basename, dirname, join } from "node:path";
 import type { EventInput } from "../../mcp-server/src/types.ts";
 
-export const DEFAULT_SPOOL_MAX = 5000;
-export const DEFAULT_SPOOL_MAX_BYTES = 8 * 1024 * 1024;
-export const DEFAULT_SPOOL_TTL_H = 48;
-export const DEFAULT_SPOOL_MAX_ATTEMPTS = 12;
+const DEFAULT_SPOOL_MAX = 5000;
+const DEFAULT_SPOOL_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_SPOOL_TTL_H = 48;
+const DEFAULT_SPOOL_MAX_ATTEMPTS = 12;
 /** The smallest byte cap: below it one ordinary entry would not fit. The parser enforces it, with a warning. */
-export const MIN_SPOOL_MAX_BYTES = 1024;
+const MIN_SPOOL_MAX_BYTES = 1024;
 
 /** Hard ceilings: a typo cannot turn a bounded spool into an unbounded one (Greptile checklist 11). */
 const CEILING_MAX = 100_000;
@@ -75,7 +75,7 @@ const CEILING_TTL_H = 720;
 const CEILING_MAX_ATTEMPTS = 100;
 
 /** The server's `POST /events` body cap (`server.ts` `MAX_BODY_BYTES`). A larger body is a 413 there and is never spooled here. */
-export const SPOOL_BODY_CAP_BYTES = 1_000_000;
+const SPOOL_BODY_CAP_BYTES = 1_000_000;
 
 const BACKOFF_BASE_MS = 30_000;
 const BACKOFF_CAP_MS = 3_600_000;
@@ -93,7 +93,7 @@ const TMP_SWEEP_LIMIT = 5;
 /** 8–128 chars from `[A-Za-z0-9._:-]`: the wire contract's key alphabet. */
 export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 
-export type SpoolMode = "off" | "on";
+type SpoolMode = "off" | "on";
 
 export interface SpoolConfig {
 	mode: SpoolMode;
@@ -205,7 +205,7 @@ export interface SpoolCandidate {
 	reason: string;
 }
 
-export type SpoolDropCause = "overflow" | "bytes" | "ttl" | "attempts" | "oversize" | "write_failed";
+type SpoolDropCause = "overflow" | "bytes" | "ttl" | "attempts" | "oversize" | "write_failed";
 
 export interface SpoolDropReport {
 	cause: SpoolDropCause;
@@ -253,7 +253,7 @@ export interface SpoolDrainReport {
 }
 
 /** What a local sweep of expired and exhausted entries did. */
-export interface SweepResult {
+interface SweepResult {
 	/** Entries actually removed (0 when the rewrite did not reach the disk). */
 	dropped: number;
 	failure: "read" | "write" | null;
@@ -277,7 +277,7 @@ export interface SpoolStats {
 }
 
 /** The disk writes a failing disk can interrupt; injectable so tests can fail them deterministically. */
-export interface SpoolIo {
+interface SpoolIo {
 	/** Whole-file text read; throws on any failure (the caller tells ENOENT from the rest). */
 	readFile: (path: string) => string;
 	writeFile: (path: string, body: string, options: { mode: number }) => void;
@@ -286,7 +286,7 @@ export interface SpoolIo {
 	write: (fd: number, data: Buffer, offset: number, length: number) => number;
 }
 
-export interface EventSpoolOptions {
+interface EventSpoolOptions {
 	path: string;
 	max?: number;
 	maxBytes?: number;
@@ -305,7 +305,7 @@ export interface EventSpoolOptions {
 	io?: Partial<SpoolIo>;
 }
 
-export type AppendResult = { ok: true; id: string } | { ok: false; error: string };
+type AppendResult = { ok: true; id: string } | { ok: false; error: string };
 
 /**
  * What a pass learned about one entry, as a DELTA to merge against the row that is in the file when the

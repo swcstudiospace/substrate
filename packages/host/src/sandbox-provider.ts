@@ -78,7 +78,7 @@ export type DockerClient = {
 	modem: { followProgress(stream: unknown, onFinished: (error: Error | null, output: unknown) => void): void };
 };
 
-export type SubstrateDockerOptions = {
+type SubstrateDockerOptions = {
 	graphId: string;
 	worktree: string;
 	network: SandboxNetwork;
@@ -119,7 +119,7 @@ export type SubstrateDockerOptions = {
 /** LANEA-05: image builds and pulls are refused below 10 GiB free (D31-07). */
 export const DISK_FLOOR_BYTES = 10_737_418_240;
 
-export type DiskGate = { ok: true; availBytes: number } | { ok: false; availBytes: number | null };
+type DiskGate = { ok: true; availBytes: number } | { ok: false; availBytes: number | null };
 
 function parseDfAvail(dfStdout: string): number | null {
 	const lines = dfStdout.trim().split("\n");
@@ -149,7 +149,7 @@ export function checkDiskFloor(runDf?: () => string | null): DiskGate {
 	return { ok: true, availBytes };
 }
 
-export type SubstrateSandboxProvider = SandboxProvider & {
+type SubstrateSandboxProvider = SandboxProvider & {
 	getToken(sandboxId: string): Promise<string>;
 	/**
 	 * U1 seed burst: run `work` with the seeder's bootstrap destinations (seed.ts SEED_EGRESS)
