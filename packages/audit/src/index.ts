@@ -6,16 +6,12 @@
  * `docs/mcp-audit.md`.
  */
 export {
-	type AuditDecision,
 	type AuditMode,
 	type AuditRecord,
 	type AuditRecordInput,
 	type AuditStats,
 	type AuditTransport,
 	type ChainVerdict,
-	type VerifyChainOptions,
-	AUDIT_DECISIONS,
-	AUDIT_TRANSPORTS,
 	ChainWalker,
 	MAX_ARG_KEY,
 	MAX_ARG_KEYS,
@@ -37,11 +33,7 @@ export {
 } from "./record.ts";
 
 export {
-	type AuditAppend,
-	type AuditLogOptions,
 	type AuditReport,
-	type AuditSegment,
-	type MissingHistory,
 	AuditLog,
 	AuditUnavailableError,
 	listAuditSegments,
@@ -56,7 +48,6 @@ export {
 
 export {
 	type ClaimDecision,
-	type ClaimVerdict,
 	FAIL_CLOSED_TOOLS,
 	FAIL_OPEN_TOOLS,
 	auditMode,

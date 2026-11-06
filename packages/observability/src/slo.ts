@@ -42,7 +42,7 @@ import { METRIC } from "./instruments.ts";
 import { sharedBurnLedger, thresholdFrom, warnOnce, type BurnLedger } from "./burn.ts";
 import { PLANES, type PlaneName } from "./breaker.ts";
 
-export interface CounterSelector {
+interface CounterSelector {
 	metric: string;
 	/** Attribute equalities every counted series must satisfy. */
 	where?: Record<string, string>;
@@ -167,7 +167,7 @@ function stripUndefined(value: SloOverrides): SloThresholds {
 	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as SloThresholds;
 }
 
-export type SloStatus = "ok" | "breached" | "insufficient-data" | "unmeasurable";
+type SloStatus = "ok" | "breached" | "insufficient-data" | "unmeasurable";
 
 export interface SloResult {
 	id: string;
@@ -491,7 +491,7 @@ export const PLANE_WINDOW_MS = 60 * 60 * 1000;
  */
 export const PLANE_BUCKET_MS = 10_000;
 
-export type PlaneSloStatus = "ok" | "breached" | "insufficient-data" | "unconfigured";
+type PlaneSloStatus = "ok" | "breached" | "insufficient-data" | "unconfigured";
 
 /** One plane verdict; the field shape mirrors `SloResult` so `/slo` reads alike. */
 export interface PlaneSloResult {
@@ -526,7 +526,7 @@ export interface PlaneCountSample {
 }
 
 /** What one `PlaneWindow.observe` answers: the calls that fell inside the window. */
-export interface PlaneWindowReading {
+interface PlaneWindowReading {
 	ok: number;
 	total: number;
 	spanMs: number;
@@ -599,12 +599,12 @@ export class PlaneWindow {
 
 let sharedWindow: PlaneWindow | null = null;
 /** The process-wide window the default evaluator feeds; `/slo` scrapes are its samples. */
-export function sharedPlaneWindow(): PlaneWindow {
+function sharedPlaneWindow(): PlaneWindow {
 	sharedWindow ??= new PlaneWindow();
 	return sharedWindow;
 }
 
-export interface PlaneEvalOptions {
+interface PlaneEvalOptions {
 	/** Which planes have configuration; an unconfigured plane is reported, never judged. */
 	configured: Partial<Record<PlaneName, boolean>>;
 	/** Sample history; defaults to the process-wide window every evaluation feeds. */
@@ -685,14 +685,14 @@ export const CAPACITY_RUNWAY_ID = "capacity.index.runway_days";
  * dragging the newest sample forward and the ring never spanned a day
  * (Greptile round 1, PR #61).
  */
-export const CAPACITY_BUCKET_MS = 60_000;
+const CAPACITY_BUCKET_MS = 60_000;
 /**
  * The span the samples must cover before a growth rate is fitted. A day, so
  * the daily vacuum and a single bulk ingest cannot read as a trend: the
  * objective is about weeks of runway, and a slope taken over an hour of the
  * sweeper deleting rows would report an index that is shrinking forever.
  */
-export const CAPACITY_MIN_SPAN_MS = 24 * 60 * 60 * 1000;
+const CAPACITY_MIN_SPAN_MS = 24 * 60 * 60 * 1000;
 /**
  * Samples the ring keeps: the minute buckets of the required span plus an
  * hour of margin. N samples in consecutive buckets span at least
@@ -756,7 +756,7 @@ export class CapacityRing {
 	}
 }
 
-export type CapacitySloStatus = "ok" | "breached" | "insufficient-data";
+type CapacitySloStatus = "ok" | "breached" | "insufficient-data";
 
 /** One capacity verdict; the field shape mirrors `SloResult` so `/slo` reads alike. */
 export interface CapacitySloResult {
@@ -779,7 +779,7 @@ export interface CapacitySloResult {
 	volumeBytes: number | null;
 }
 
-export interface CapacityEvalOptions {
+interface CapacityEvalOptions {
 	/** The index volume's size in bytes; `null` leaves the objective `insufficient-data` and the detail says why. */
 	volumeBytes: number | null;
 	/** The runway floor in days; defaults to `DEFAULT_THRESHOLDS.runwayDays`. */
@@ -897,10 +897,10 @@ export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOp
 
 // ── estimated served tokens per surface (uplift-4 S1) ────────────────────────
 
-export const SERVED_TOKENS_ID = "served.tokens_est";
+const SERVED_TOKENS_ID = "served.tokens_est";
 export const SERVED_TOKENS_ENV = "SUBSTRATE_SERVED_TOKENS_PER_HOUR";
 
-export type ServedTokensStatus = "ok" | "breached" | "unconfigured" | "insufficient-data";
+type ServedTokensStatus = "ok" | "breached" | "unconfigured" | "insufficient-data";
 
 /** One surface's estimated spend verdict; the field shape mirrors `BurnResult` so `/slo` reads alike. */
 export interface ServedTokensResult {
@@ -918,7 +918,7 @@ export interface ServedTokensResult {
 	detail: string;
 }
 
-export interface ServedTokensEvalOptions {
+interface ServedTokensEvalOptions {
 	/** Environment the ceiling is read from; defaults to `process.env`. */
 	env?: Record<string, string | undefined>;
 	/** Sample history; defaults to the process-wide burn ledger, which keys these series apart from the burn ones. */
@@ -1013,7 +1013,7 @@ export interface DocsFreshnessReading {
 	lagging: boolean;
 }
 
-export interface DocsFreshnessSloResult {
+interface DocsFreshnessSloResult {
 	id: string;
 	title: string;
 	statement: string;
@@ -1029,7 +1029,7 @@ export interface DocsFreshnessSloResult {
 	datasets: Array<{ dataset: string; freshness_seconds: number | null; trigger_lag_seconds: number | null; stale: boolean; lagging: boolean }>;
 }
 
-export interface DocsFreshnessEvalOptions {
+interface DocsFreshnessEvalOptions {
 	/** `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H`; `0` leaves freshness unjudged. */
 	maxAgeHours: number;
 	/** `SUBSTRATE_DOCS_TRIGGER_LAG_MIN`; `0` means lag is not detected. */

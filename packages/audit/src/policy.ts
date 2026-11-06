@@ -148,7 +148,7 @@ export function auditMode(tool: string): AuditMode {
 
 export type ClaimDecision = "granted" | "contended" | "revoked";
 
-export interface ClaimVerdict {
+interface ClaimVerdict {
 	decision: ClaimDecision;
 	/** Why, for a `contended` or `revoked` verdict. Null when granted. */
 	reason: string | null;

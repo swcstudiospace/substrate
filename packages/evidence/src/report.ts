@@ -26,10 +26,10 @@ import { METRIC, findCounter, sumCounter } from "@substrate/observability";
  * it no way to distinguish the two. `ok` is kept beside it: it is what the HTML renders
  * and what the older readers of this schema check.
  */
-export type ChainState = "verified" | "broken" | "unverifiable" | "not-configured";
+type ChainState = "verified" | "broken" | "unverifiable" | "not-configured";
 
 /** Whether a bundle's audit section is about one graph only. See `EvidenceInput.audit`. */
-export type AuditAttribution = "exact" | "ambiguous";
+type AuditAttribution = "exact" | "ambiguous";
 
 export interface ChainEvidence {
 	ok: boolean | null;
@@ -164,7 +164,7 @@ export interface EvidenceInput {
 	notes?: string[];
 }
 
-export interface EvidenceUsage {
+interface EvidenceUsage {
 	inputTokens: number;
 	outputTokens: number;
 	costUsd: number;

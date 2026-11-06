@@ -53,8 +53,6 @@ import {
 	sanitizeField,
 } from "./record.ts";
 
-export { NO_POSITION };
-
 /** Thrown when a fail-closed call could not be recorded, so it must not proceed. */
 export class AuditUnavailableError extends Error {
 	constructor(
@@ -66,7 +64,7 @@ export class AuditUnavailableError extends Error {
 	}
 }
 
-export interface AuditAppend {
+interface AuditAppend {
 	record: AuditRecord;
 	/** False when the sink refused. For a fail-open call, the call still proceeds. */
 	written: boolean;
@@ -88,7 +86,7 @@ export interface AuditAppend {
  * overwrote the checkpoint with the impostor's hash. The checkpoint stores the
  * committed *hash*, so it can and now does anchor the contents too.
  */
-export interface MissingHistory {
+interface MissingHistory {
 	kind: "missing" | "rewritten";
 	/** The `seq` the checkpoint last committed. */
 	checkpointSeq: number;
@@ -96,7 +94,7 @@ export interface MissingHistory {
 	foundSeq: number;
 }
 
-export interface AuditLogOptions {
+interface AuditLogOptions {
 	/** `null` keeps the chain in memory only. */
 	path: string | null;
 	redact?: (text: string) => string;
@@ -123,7 +121,7 @@ export interface AuditLogOptions {
 }
 
 /** A closed segment of the chain: `<path>.<firstSeq>-<lastSeq>.jsonl` beside the active file. */
-export interface AuditSegment {
+interface AuditSegment {
 	path: string;
 	firstSeq: number;
 	lastSeq: number;

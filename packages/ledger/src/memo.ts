@@ -6,10 +6,10 @@
 
 import { HOUR_MS, hourIso } from "./period.ts";
 
-export const MEMO_PREFIX = "substrate:v1:";
-export const MEMO_RE = /^substrate:v1:(\d{4}-\d\d-\d\dT\d\d:00:00\.000Z):([0-9a-f]{64}):([1-9]\d*)$/;
-export const MEMO_PREFIX_V2 = "substrate:v2:";
-export const MEMO_V2_RE = /^substrate:v2:(\d{4}-\d\d-\d\dT\d\d:00:00\.000Z):([0-9a-f]{64}):([1-9]\d*):([0-9a-f]{64})$/;
+const MEMO_PREFIX = "substrate:v1:";
+const MEMO_RE = /^substrate:v1:(\d{4}-\d\d-\d\dT\d\d:00:00\.000Z):([0-9a-f]{64}):([1-9]\d*)$/;
+const MEMO_PREFIX_V2 = "substrate:v2:";
+const MEMO_V2_RE = /^substrate:v2:(\d{4}-\d\d-\d\dT\d\d:00:00\.000Z):([0-9a-f]{64}):([1-9]\d*):([0-9a-f]{64})$/;
 
 /** Memo v4 (what solana-cli 4.2.2 writes), v3 and v1; readers accept any of them. */
 export const MEMO_PROGRAM_IDS: ReadonlySet<string> = new Set([
@@ -18,9 +18,9 @@ export const MEMO_PROGRAM_IDS: ReadonlySet<string> = new Set([
 	"Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",
 ]);
 
-export type Memo = { periodStartMs: number; rootHex: string; count: number };
+type Memo = { periodStartMs: number; rootHex: string; count: number };
 
-export type MemoV2 = Memo & { headsRootHex: string };
+type MemoV2 = Memo & { headsRootHex: string };
 
 const ROOT_RE = /^[0-9a-f]{64}$/;
 
@@ -73,7 +73,7 @@ export const MEMO_PREFIX_V3 = "substrate:v3:";
  * Tail-anchored. The graph id is free text and may hold ':', so the graph id is the greedy rest of the body and the
  * fields after the period (count, root, signature) hold no colon, which fixes where the period sits.
  */
-export const MEMO_V3_RE =
+const MEMO_V3_RE =
 	/^substrate:v3:([\s\S]+):(\d{4}-\d\d-\d\dT\d\d:00:00\.000Z):([1-9]\d*):([0-9a-f]{64}):([1-9A-HJ-NP-Za-km-z]{64,88})$/;
 /**
  * The longest graph id a v3 memo carries, in UTF-8 bytes: the cap the event write path enforces (mcp-server event.ts
@@ -82,7 +82,7 @@ export const MEMO_V3_RE =
 export const MEMO_GRAPH_ID_MAX = 512;
 const HOUR_TX_SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/;
 
-export type MemoV3 = {
+type MemoV3 = {
 	graphId: string;
 	periodStartMs: number;
 	count: number;

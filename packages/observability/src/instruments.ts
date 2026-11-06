@@ -99,11 +99,11 @@ export function estimateTokens(bytes: number): number {
  */
 export const CACHE_METRIC_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
 export const CACHE_METRIC_RESULTS = ["hit", "miss", "bypass", "error", "coalesced", "stale", "refresh", "would_serve_stale"] as const;
-export type CacheMetricResult = (typeof CACHE_METRIC_RESULTS)[number];
+type CacheMetricResult = (typeof CACHE_METRIC_RESULTS)[number];
 
 /** What one docs search answered with. One series each, so the label stays bounded. */
 export const DOCS_SEARCH_OUTCOMES = ["hit", "empty", "degraded"] as const;
-export type DocsSearchOutcome = (typeof DOCS_SEARCH_OUTCOMES)[number];
+type DocsSearchOutcome = (typeof DOCS_SEARCH_OUTCOMES)[number];
 
 /**
  * Where a citation's commit came from (uplift-3 N5): the document's own
@@ -136,11 +136,11 @@ export interface DocsSearchSample {
 
 /** What a read did with an expired memory entry: served it tagged (`report`) or left it out (`enforce`). */
 export const MEMORY_EXPIRED_MODES = ["served", "hidden"] as const;
-export type MemoryExpiredMode = (typeof MEMORY_EXPIRED_MODES)[number];
+type MemoryExpiredMode = (typeof MEMORY_EXPIRED_MODES)[number];
 
 /** Why a plane call failed. One series each, so the reason stays bounded. */
 export const PLANE_ERROR_REASONS = ["timeout", "network", "server", "open", "other"] as const;
-export type PlaneErrorReason = (typeof PLANE_ERROR_REASONS)[number];
+type PlaneErrorReason = (typeof PLANE_ERROR_REASONS)[number];
 
 /**
  * The bounded reason for one failed plane sample.
@@ -180,7 +180,7 @@ export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "byp
 export type AdmissionDecision = (typeof ADMISSION_DECISIONS)[number];
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
-export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "graph_id"] as const;
+const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "graph_id"] as const;
 export type EventRefusalReason = (typeof EVENT_REFUSAL_REASONS)[number];
 
 /**
@@ -189,7 +189,7 @@ export type EventRefusalReason = (typeof EVENT_REFUSAL_REASONS)[number];
  * `refused`: a 400 on the idempotency rules (bad key, replay stamped past the clock bound).
  * `lookup_failed`: the ledger read errored, so the request was answered 503 and nothing written.
  */
-export const EVENT_REPLAY_RESULTS = ["deduplicated", "appended", "refused", "lookup_failed"] as const;
+const EVENT_REPLAY_RESULTS = ["deduplicated", "appended", "refused", "lookup_failed"] as const;
 export type EventReplayResult = (typeof EVENT_REPLAY_RESULTS)[number];
 
 /**
@@ -215,7 +215,7 @@ export function classifyEventRefusal(status: number, error: string | undefined):
 }
 
 /** Why a claim ended the way it did. Drives both the lease-steal and quarantine SLOs. */
-export const CLAIM_OUTCOMES = ["granted", "contended", "stolen", "revoked"] as const;
+const CLAIM_OUTCOMES = ["granted", "contended", "stolen", "revoked"] as const;
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
 /**
@@ -227,7 +227,7 @@ export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
  * the connector's own `tokens_in` — and rewriting all of them is not this ticket.
  * Normalising on read costs one function and no coordination.
  */
-export interface Usage {
+interface Usage {
 	inputTokens: number;
 	outputTokens: number;
 	costUsd: number;

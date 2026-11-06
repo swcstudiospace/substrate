@@ -117,7 +117,7 @@ export type AddressMemo = {
 /** The node's own cap on getSignaturesForAddress. */
 export const SIGNATURE_PAGE_MAX = 1000;
 
-export type SignaturePageOptions = {
+type SignaturePageOptions = {
 	/** Clamped to SIGNATURE_PAGE_MAX; must be a positive integer. */
 	limit: number;
 	/** The last signature of the previous page; the page starts just older than it. */
@@ -125,7 +125,7 @@ export type SignaturePageOptions = {
 	commitment: Commitment;
 };
 
-export type RpcOptions = {
+type RpcOptions = {
 	url: string;
 	timeoutMs: number;
 	attempts: number;

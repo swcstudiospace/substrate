@@ -28,7 +28,7 @@ const BASE58_PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const EVENT_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
-export type SignerSetRule =
+type SignerSetRule =
 	| "not_json"
 	| "not_array"
 	| "not_object"
@@ -53,7 +53,7 @@ export class SignerSetError extends Error {
 	}
 }
 
-export interface SignerEntry {
+interface SignerEntry {
 	/** Base58 ed25519 public key (32 bytes). */
 	pubkey: string;
 	/** Inclusive start of the window, epoch ms. */
@@ -177,7 +177,7 @@ export function parseSignerSet(json: unknown): SignerSet {
 	return validateEntries(entries);
 }
 
-export type SignerAcceptance = { ok: true; entry: SignerEntry } | { ok: false; reason: string };
+type SignerAcceptance = { ok: true; entry: SignerEntry } | { ok: false; reason: string };
 
 /** Is `pubkey` a valid anchor signer at `blockTimeMs` (the anchor transaction's block time)? */
 export function acceptsSigner(set: SignerSet, pubkey: string, blockTimeMs: number): SignerAcceptance {
@@ -200,7 +200,7 @@ export function acceptsSigner(set: SignerSet, pubkey: string, blockTimeMs: numbe
 // Rotation events (`anchor.signer.rotate`)
 // ---------------------------------------------------------------------------
 
-export interface RotationPayload {
+interface RotationPayload {
 	action: typeof ANCHOR_SIGNER_ROTATE_ACTION;
 	/** The key being retired from `effective_from_ms`; absent when a key is only added. */
 	old_pubkey?: string;
@@ -242,7 +242,7 @@ export function parseRotationPayload(input: unknown, options: { stored?: boolean
 }
 
 /** The part of an `EventInput` this contract owns; `surface`, `session_id` and `ts` stay the caller's. */
-export interface SignerRotateEventDraft {
+interface SignerRotateEventDraft {
 	kind: "note";
 	summary: string;
 	payload: RotationPayload;
@@ -271,7 +271,7 @@ export interface RotationEventInput {
 	payload: unknown;
 }
 
-export type RotationIssueReason =
+type RotationIssueReason =
 	| "unauthorized"
 	| "invalid-event"
 	| "invalid-payload"
@@ -281,13 +281,13 @@ export type RotationIssueReason =
 	| "new-key-overlaps"
 	| "set-full";
 
-export interface RotationIssue {
+interface RotationIssue {
 	event_id: string;
 	reason: RotationIssueReason;
 	detail: string;
 }
 
-export interface DerivedSignerSet {
+interface DerivedSignerSet {
 	set: SignerSet;
 	/** Rotation event ids folded into the set, in the order they were applied. */
 	applied: string[];
@@ -295,7 +295,7 @@ export interface DerivedSignerSet {
 	issues: RotationIssue[];
 }
 
-export interface RotationOptions {
+interface RotationOptions {
 	/**
 	 * REQUIRED. True only for an event an operator wrote. The ledger accepts events from any
 	 * authenticated caller, so an unauthorised rotation would let an attacker's key sign anchors;
