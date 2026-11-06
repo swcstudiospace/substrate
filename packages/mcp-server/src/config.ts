@@ -333,8 +333,8 @@ export interface SubstrateConfig {
 	 * Ms between LightRAG planning polls (SPE-19385).
 	 *
 	 * From `SUBSTRATE_LIGHTRAG_POLL_MS`, default 5000. The poller sleeps
-	 * this long between `pollPlanningRefresh` ticks; the module only
-	 * scans once per call, so this never changes tick cost.
+	 * this long between planning refresh ticks (`service.ts`); each tick
+	 * scans once, so this never changes tick cost.
 	 */
 	lightragPollMs: number;
 	/**

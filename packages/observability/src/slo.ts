@@ -480,7 +480,6 @@ export function briefBySurfaceObjectives(snapshot: MetricSnapshot[], overrides: 
 
 // ── per-plane availability, over a rolling hour ──────────────────────────────
 
-export const PLANE_AVAILABILITY_ENV = "SUBSTRATE_SLO_PLANE_AVAILABILITY";
 /** The rolling window every plane objective is judged over: one hour. */
 export const PLANE_WINDOW_MS = 60 * 60 * 1000;
 /**

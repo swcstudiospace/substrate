@@ -1220,39 +1220,6 @@ export function planningContentHash(pages: readonly IngestPage[], maxPages: numb
 	return sha256(pairs.join("\n"));
 }
 
-/** Compare one tick against the last served hash. */
-export function planningPollTick(
-	previousHash: string | null,
-	pages: readonly IngestPage[],
-	config: PlanningPollConfig = {},
-): { hash: string; changed: boolean } {
-	const hash = planningContentHash(pages, config.maxPages ?? PLANNING_POLL_DEFAULTS.maxPages);
-	return { hash, changed: previousHash === null ? pages.length > 0 : previousHash !== hash };
-}
-
-/**
- * One non-blocking poll tick: scan the roots and report whether the
- * planning content moved. A scan failure is not a change — the next tick
- * retries — and the previous hash is returned so the caller keeps serving it.
- */
-export async function pollPlanningRefresh(
-	baseDir: string,
-	roots: readonly string[],
-	previousHash: string | null,
-	config: PlanningPollConfig = {},
-	io: ScanIo = nodeIo,
-): Promise<{ hash: string; changed: boolean; pages: IngestPage[]; error?: string }> {
-	let pages: IngestPage[];
-	try {
-		pages = await scanIngestPages(baseDir, roots, io);
-	} catch (cause) {
-		const reason = cause instanceof Error ? cause.message : String(cause);
-		return { hash: previousHash ?? "", changed: false, pages: [], error: redact(reason).slice(0, 200) };
-	}
-	const { hash, changed } = planningPollTick(previousHash, pages, config);
-	return { hash, changed, pages };
-}
-
 /**
  * Roots a planning scrape sweeps. The whole `.planning/` tree — phase
  * plans ride the same refresh as the project brief — narrowed from the
@@ -1291,13 +1258,6 @@ export function sanitizePlanningBody(body: string): { body: string; stripped: nu
  */
 export function planningPageSha(page: Pick<IngestPage, "body">): string {
 	return sha256(sanitizePlanningBody(page.body).body);
-}
-
-/** One path's last indexed hash, for the incremental update. */
-export function hashPlanningPages(pages: readonly IngestPage[]): Map<string, string> {
-	const hashes = new Map<string, string>();
-	for (const page of pages) hashes.set(page.path, planningPageSha(page));
-	return hashes;
 }
 
 /**
@@ -1343,72 +1303,6 @@ export function planningScrapeStateForOutcome(total: number, failed: number): Pl
 	if (total === 0 || failed === 0) return "SUCCESS";
 	if (failed < total) return "PARTIAL";
 	return "ERROR";
-}
-
-/** One file the `PROCESSING` step could not sanitize: isolated, never fatal. */
-export interface PlanningScrapeError {
-	path: string;
-	error: string;
-}
-
-/** The settled result of a planning scrape: terminal state, pages and per-file errors. */
-export interface PlanningScrapeResult {
-	state: PlanningScrapeState;
-	pages: IngestPage[];
-	/** Sanitized bodies by path, for the `INDEXING` step; pages that failed are absent. */
-	sanitized: Map<string, string>;
-	errors: PlanningScrapeError[];
-	hash: string;
-	changed: boolean;
-}
-
-/**
- * Scrape the planning roots through `SCANNING` → `PROCESSING`, reporting
- * each transition via `onState` (the initial `IDLE` is reported too, so a
- * poller can log the full lifecycle). Per-file isolation: a page that
- * cannot be sanitized is recorded in `errors` and excluded from
- * `sanitized`, while the rest of the sweep still settles `SUCCESS` (no
- * errors) or `PARTIAL`. A scan that throws settles `ERROR` with no pages.
- * Never throws: the poller calls this on a timer and must not crash on it.
- */
-export async function scrapePlanningPages(
-	baseDir: string,
-	roots: readonly string[] = PLANNING_SCAN_ROOTS,
-	previousHash: string | null = null,
-	opts: { io?: ScanIo; maxPages?: number; onState?: (state: PlanningScrapeState) => void } = {},
-): Promise<PlanningScrapeResult> {
-	const io = opts.io ?? nodeIo;
-	const report = (state: PlanningScrapeState): void => {
-		try {
-			opts.onState?.(state);
-		} catch {
-			// A logging callback must never fail the scrape.
-		}
-	};
-	report("IDLE");
-	report("SCANNING");
-	let pages: IngestPage[];
-	try {
-		pages = await scanIngestPages(baseDir, roots, io);
-	} catch {
-		report("ERROR");
-		return { state: "ERROR", pages: [], sanitized: new Map(), errors: [], hash: previousHash ?? "", changed: false };
-	}
-	report("PROCESSING");
-	const sanitized = new Map<string, string>();
-	const errors: PlanningScrapeError[] = [];
-	for (const page of pages) {
-		try {
-			sanitized.set(page.path, sanitizePlanningBody(page.body).body);
-		} catch (cause) {
-			const reason = cause instanceof Error ? cause.message : String(cause);
-			errors.push({ path: page.path, error: redact(reason).slice(0, 200) });
-		}
-	}
-	const { hash, changed } = planningPollTick(previousHash, pages, opts.maxPages === undefined ? {} : { maxPages: opts.maxPages });
-	const state = errors.length === 0 ? "SUCCESS" : pages.length - errors.length > 0 ? "PARTIAL" : "ERROR";
-	report(state);
-	return { state, pages, sanitized, errors, hash, changed };
 }
 
 /**

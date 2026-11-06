@@ -321,9 +321,11 @@ against the old one, switch, keep the old one for a retention window.
   parse poll have all succeeded (`docs-ingest.ts:1002-1058`), so a page that
   did not finish is retried. Whether a crash between the server's acceptance
   and the record write produces a duplicate upload is UNVERIFIED.
-- Planning pages are re-scanned by a poller that keeps one stored hash
-  (`pollPlanningRefresh`, `docs-ingest.ts:1247`), so a restarted poller
-  resumes from one string.
+- Planning pages are re-scanned by the server's planning refresh
+  (`Substrate.runPlanningRefresh`, `service.ts`), which keeps one hash per
+  page. With `SUBSTRATE_PLANNING_HASH_STORE=on` those hashes are stored, so a
+  restarted server resumes from them. With it off they live in memory only,
+  and a restart re-indexes every planning page.
 
 **Consequence the operator must plan for.** The record table says `unchanged`
 for every page it has stored. The client sends no dataset id and no workspace

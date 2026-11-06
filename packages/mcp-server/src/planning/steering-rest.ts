@@ -38,15 +38,6 @@ function requiredSession(params: URLSearchParams): RestParse<string> {
 
 // ── GET /steering/sessions ─────────────────────────────────────────────────────
 
-export interface RestSteeringSession {
-	session_id: string;
-	surface: string;
-	repo_id: string;
-	state: string;
-	updated_at: string;
-	expires_at: string;
-}
-
 export interface SessionsQuery {
 	repoId: string | null;
 	limit: number;

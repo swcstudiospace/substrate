@@ -28,12 +28,6 @@
 import { DATASET_TRIGGERS, DATASET_VERSION_RETENTION, triggersFromJson, triggersToJson, type DatasetVersion, type TriggerStore, type VersionStore } from "./docs-datasets.ts";
 import type { EventInput } from "./types.ts";
 
-/** Report-only staleness threshold, hours (`SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H`); a week. */
-export const DEFAULT_FRESHNESS_MAX_AGE_H = 168;
-
-/** Minutes an accepted trigger may wait for its version (`SUBSTRATE_DOCS_TRIGGER_LAG_MIN`). */
-export const DEFAULT_TRIGGER_LAG_MIN = 15;
-
 /** Metric names of the two gauges, served on `GET /metrics` under `gauges`. */
 export const GAUGE_FRESHNESS_SECONDS = "substrate.docs.freshness_seconds";
 export const GAUGE_TRIGGER_LAG_SECONDS = "substrate.docs.trigger_lag_seconds";

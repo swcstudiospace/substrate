@@ -104,9 +104,6 @@ function unreachable(cause: unknown): string {
 // optional). This plane never defines its own reader — one reader, no
 // drift — and the key never appears in a reason string.
 
-/** Drop-in chunk shape: exactly the RAGFlow plane's chunk. */
-export type LightragChunk = RagflowChunk;
-
 export interface LightragRetrievalRequest {
 	question: string;
 	/**

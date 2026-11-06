@@ -809,11 +809,6 @@ export function planningPathsOf(input: Pick<EventInput, "payload">): string[] {
 	return paths;
 }
 
-/** Whether an event names any planning path — the `planning.updated` signal, without a new kind. */
-export function isPlanningUpdate(input: Pick<EventInput, "payload">): boolean {
-	return planningPathsOf(input).length > 0;
-}
-
 /** The targeted re-ingest a planning change asks for; logs the one observable line when triggered. */
 export function planningIngestTrigger(
 	input: Pick<EventInput, "kind" | "summary" | "payload">,

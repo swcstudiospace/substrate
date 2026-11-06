@@ -60,9 +60,6 @@ export function withCorpusLock<T>(work: () => Promise<T>): Promise<T> {
 /** Why a document is refused before anything is sent. Closed. */
 export const REFUSAL_REASONS = [...DOCUMENT_REFUSALS, "sha-mismatch", "secret-findings"] as const;
 
-/** Why a document or tombstone failed after it was accepted for work; a retry sends only these. Closed. */
-export const FAILURE_REASONS = ["plane-unavailable", "timeout", "rejected", "conflict", "pipeline-failed", "duplicate-content", "manifest-unavailable", "delete-failed"] as const;
-
 const PLANE_FAILURES: readonly string[] = ["plane-unavailable", "timeout", "rejected", "conflict", "pipeline-failed", "duplicate-content"];
 
 /** Why the whole request is refused before any work. The HTTP status is the route's answer. Closed. */

@@ -12,7 +12,6 @@
  *
  * Phase 74 calls this entry point for cross-repository steps. It does not re-implement the checks.
  */
-import { spawnSync } from "node:child_process";
 import { dirname } from "node:path";
 import { isGranted, locateRepoPath, realDirectoryOrNull, type RepoRefusalReason, type RepoScope, scopeRepoId } from "./repo-scope.ts";
 import type { Surface } from "./types.ts";
@@ -45,17 +44,6 @@ export interface ScopedLocation {
 }
 
 export type ScopedGitOutcome = ({ ok: true; result: ScopedGitResult } & ScopedLocation) | { ok: false; reason: RepoRefusalReason };
-
-/** The default runner: argv, no shell, git's own locks and prompts off. */
-export const defaultScopedGitRunner: ScopedGitRunner = (args, cwd, env) => {
-	const run = spawnSync("git", [...args], {
-		cwd,
-		env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", ...env },
-		stdio: ["ignore", "pipe", "pipe"],
-		encoding: "utf8",
-	});
-	return { code: run.status ?? 1, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
-};
 
 /** The registered checkout of `repo` that exists on this host. Refused when the repository is unregistered or none of its checkouts exist. */
 function checkoutOf(scope: RepoScope, repo: string): { ok: true; location: ScopedLocation } | { ok: false; reason: RepoRefusalReason } {

@@ -54,7 +54,6 @@ export type SkillDecision = (typeof SKILL_DECISIONS)[number];
 
 /** The `skills_list` filter: one state, or every row. */
 export const SKILL_LIST_STATES = ["all", ...SKILL_STATES] as const;
-export type SkillListState = (typeof SKILL_LIST_STATES)[number];
 
 export const REASON_MAX = 500;
 /** `skills_list` never answers with more rows than this; a longer registry sets `truncated`. */

@@ -45,7 +45,6 @@ import type {
 } from "./steering.ts";
 import { SteeringDirectiveSchema } from "./steering.ts";
 
-export const STEERING_AUDIT_TABLE = "planning_steering_audit";
 /** The opt-in that makes `migrate()` create the audit table. Off creates nothing. */
 export const STEERING_AUDIT_TABLE_ENV = "SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE";
 
