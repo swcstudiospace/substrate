@@ -191,7 +191,8 @@ export async function readLedgerLatestLeases(ledger: LedgerReader, nodes: readon
 
 /**
  * The entry ids of accepted memory writes since `sinceIso`: audit events of the memory kinds whose payload says
- * `outcome: "accepted"` and names an `entry_id`. An event without an entry id is not a write and is ignored.
+ * `outcome: "accepted"` and names an `entry_id`. An event without an entry id is not a write and is ignored. A replay
+ * (`reason: "idempotent.replay"`) re-reports an entry an earlier write stored, which may be older than the window, so it is ignored too.
  */
 export async function readLedgerMemoryIds(ledger: LedgerReader, sinceIso: string, cap: number): Promise<LedgerRead<Set<string>>> {
 	const { rows, truncated } = await windowRows(ledger, MEMORY_KINDS, sinceIso, cap);
@@ -200,6 +201,7 @@ export async function readLedgerMemoryIds(ledger: LedgerReader, sinceIso: string
 	for (const row of rows) {
 		const payload = payloadOf(row);
 		if (payload === null || payload.outcome !== "accepted") continue;
+		if (payload.reason === "idempotent.replay") continue;
 		if (typeof payload.entry_id !== "string" || payload.entry_id.length === 0) continue;
 		events += 1;
 		value.add(payload.entry_id);

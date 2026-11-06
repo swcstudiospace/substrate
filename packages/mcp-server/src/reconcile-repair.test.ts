@@ -99,6 +99,26 @@ describe("planFromReport", () => {
 		const plan = await planOver(deps);
 		expect(plan.items).toEqual([]);
 	});
+
+	test("a truncated graph list does not produce a repair plan that flushes the cache", async () => {
+		// The cap holds one graph, so the healthy counter of g-b reads as an orphan unless the truncated list is refused.
+		const cache = fakeCache([...FIXTURE_KEYS, "substrate:v1:gen:graph:g-b"]);
+		const deps = { ...fakeDeps(cache, ["g-a", "g-b"]), caps: { ...DEFAULT_RECONCILE_CAPS, indexRows: 1 } };
+		const plan = await planOver(deps);
+		expect(plan.items).toEqual([]);
+		// A plan pinned to the same findings, as one made before this guard, is refused at execution and removes nothing.
+		const report = await runReport(deps);
+		const counters = await scanCounters(deps.cache);
+		const stale: Plan = {
+			...plan,
+			report_digest: planDigest(report.findings, counters.keys),
+			items: [{ action: "flush-derived-cache", match: "substrate:v1:*", reason: "stale", orphans: ["substrate:v1:gen:graph:g-b"] }],
+		};
+		const result = await executePlan(stale, deps, { execute: true, serverStopped: true });
+		expect(result.refused).toBe(true);
+		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
+		expect(cache.keys.has("substrate:v1:gen:graph:g-b")).toBe(true);
+	});
 });
 
 describe("planDigest", () => {

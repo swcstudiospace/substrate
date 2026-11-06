@@ -132,11 +132,20 @@ export async function scanCounters(cache: Pick<ReadThroughCache, "scanKeys">): P
 }
 
 /**
+ * The generation orphans a plan may act on. A truncated graph list cannot confirm that a counter's graph is absent from
+ * `graph_index`, so no orphan is named: a healthy counter past the cap would otherwise read as one.
+ */
+function confirmedOrphans(report: Report): string[] {
+	if (report.truncated["index.graphs"]) return [];
+	return report.findings.filter((finding) => finding.comparison === "generation").map((finding) => finding.key);
+}
+
+/**
  * The plan for a report. It lists one flush item when the report has generation findings, and none otherwise. The digest
  * is taken over every finding and every counter key, so a plan goes stale when any comparison changes or a counter is removed.
  */
 export function planFromReport(report: Report, now: Date, counters: readonly string[]): Plan {
-	const orphans = report.findings.filter((finding) => finding.comparison === "generation").map((finding) => finding.key);
+	const orphans = confirmedOrphans(report);
 	const items: PlanItem[] =
 		orphans.length === 0
 			? []
@@ -205,7 +214,7 @@ function boundPasses(passes: readonly string[][], limit: number): string[][] {
 }
 
 /**
- * Run a plan. It re-runs the read-only report first, then refuses when the findings or the cache counters differ from the
+ * Run a plan. It re-runs the read-only report first, then refuses when the graph list is truncated, when the findings or the cache counters differ from the
  * plan's digest, when no
  * generation orphan remains, or when any plan item is not the flush this repair runs: another action, another match than
  * `substrate:v1:*`, or an orphan the fresh report does not list as live. It then scans `substrate:v1:*` once and refuses when
@@ -233,6 +242,13 @@ export async function executePlan(
 			executed: false,
 			refused: true,
 			reason: "refused: the cache counters could not be read completely (the cache is off, or the prefix holds more than 1000000 keys); nothing was removed",
+		});
+	}
+	if (live.truncated["index.graphs"]) {
+		return repairOutcome({
+			executed: false,
+			refused: true,
+			reason: "refused: the index's graph list is truncated, so a generation counter cannot be confirmed as an orphan; nothing was removed",
 		});
 	}
 	if (planDigest(live.findings, liveCounters.keys) !== plan.report_digest) {

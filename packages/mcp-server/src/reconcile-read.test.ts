@@ -378,6 +378,15 @@ describe("runReport", () => {
 		expect(report.first.generation?.key).toBe("substrate:v1:gen:graph:g9");
 	});
 
+	test("a replay of an entry created before the window does not report drift", async () => {
+		const world = cleanWorld();
+		// The gate answers a repeated write with the entry it first stored, created 30 hours ago, and audits the replay under that id.
+		world.ledgerRows.push(row("r0", 1, { kind: "note", graph_id: "g1", payload: { outcome: "accepted", reason: "idempotent.replay", entry_id: "m0" } }));
+		const report = await runWith(world, [], [], []);
+		expect(report.findings).toEqual([]);
+		expect(report.clean).toBe(true);
+	});
+
 	test("a capped cache scan makes the run unclean", async () => {
 		const world = cleanWorld();
 		// Two brief keys against a cap of one: the scan of that class stops at its cap.
