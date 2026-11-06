@@ -1,8 +1,9 @@
 name: Scratch Postgres 16
 description: >
-  Start (or stop) a throwaway PostgreSQL 16 cluster as the job user, from the binaries in the
-  Omega CI runner image (initdb and pg_ctl on PATH). It replaces the old `postgres:16` service
-  container: the pool has no Docker. The cluster lives in RUNNER_TEMP, listens on 127.0.0.1 only,
+  Start (or stop) a throwaway PostgreSQL 16 cluster as the job user, from its binaries. On a
+  GitHub-hosted runner they are not on PATH: `start` adds /usr/lib/postgresql/16/bin to PATH (and to
+  GITHUB_PATH for later steps), installing postgresql-16 only when it is missing. It replaces the old
+  `postgres:16` service container. The cluster lives in RUNNER_TEMP, listens on 127.0.0.1 only,
   on a port the kernel picks free at start, so parallel jobs on one runner host never clash.
   `start` exports SUBSTRATE_TEST_PG_URL; `stop` shuts the cluster down and is safe to run when
   start never got that far.
@@ -30,9 +31,17 @@ runs:
         dir="$RUNNER_TEMP/scratch-pg"
         case "$MODE" in
           start)
+            if ! command -v initdb >/dev/null; then
+              if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
+                sudo apt-get update
+                sudo apt-get install -y postgresql-16
+              fi
+              echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+              export PATH="/usr/lib/postgresql/16/bin:$PATH"
+            fi
             for tool in initdb pg_ctl pg_isready createdb; do
               if ! command -v "$tool" >/dev/null; then
-                echo "::error::$tool is not on PATH; the Omega CI runner image ships PostgreSQL 16 in /usr/lib/postgresql/16/bin" >&2
+                echo "::error::$tool is not on PATH and PostgreSQL 16 is not in /usr/lib/postgresql/16/bin" >&2
                 exit 1
               fi
             done

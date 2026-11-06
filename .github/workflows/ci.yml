@@ -4,22 +4,21 @@ name: CI
 # (docs/ci.md) and scripts/verify.test.ts fails if the two drift apart. CI adds the
 # Postgres-backed tests that skip on a machine without a database.
 #
-# Every job runs on the Omega CI runner pool ([self-hosted, linux, x64, omega-ci],
-# swcstudiospace/Omega-Prime docs/ci-runners.md), never on GitHub-hosted runners. CI_ENABLED is still the switch: while the repository variable is unset every job is
+# Every job runs on a GitHub-hosted runner (ubuntu-latest). CI_ENABLED is still the switch: while the repository variable is unset every job is
 # skipped, which GitHub reports as a skipped (not failed) check.
 # `gh variable set CI_ENABLED --body true` turns the gate on; `gh variable delete CI_ENABLED`
 # is the kill switch.
 #
-# Pull requests from forks never reach the runner: a fork's code would otherwise run on the shared pool.
+# Pull requests from forks never reach the runner: a fork's code would otherwise run on this repository's runners.
 #
-# The pool has no Docker, so the scratch Postgres 16 is not a service container: the local
+# The scratch Postgres 16 is not a service container: the local
 # `scratch-postgres` action starts a throwaway cluster from the runner image's PostgreSQL 16 binaries
 # (initdb, pg_ctl) in RUNNER_TEMP, on 127.0.0.1 and a port picked free per job, so parallel jobs on one
 # runner host never clash. It exports SUBSTRATE_TEST_PG_URL.
 #
 # The third job, `boot-gate`, is report-only and opt-in twice over: it needs CI_ENABLED and its own
-# repository variable BOOT_GATE. Its rehearsal harness still starts Docker containers, which the pool
-# does not have, so keep BOOT_GATE unset until the harness has a native-process store backend.
+# repository variable BOOT_GATE. Its rehearsal harness starts Docker containers. Whether that works on the
+# GitHub-hosted runner is unverified, so keep BOOT_GATE unset until the harness has a native-process store backend.
 on:
   pull_request:
   push:
@@ -39,7 +38,7 @@ jobs:
   verify:
     name: Typecheck, lint, tests and repo locks
     if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, linux, x64, omega-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Check out the repository
@@ -100,7 +99,7 @@ jobs:
     # Advisories appear without any change here, so this never gates a pull request. It runs
     # on main, on demand and weekly; a red run is the signal to upgrade.
     if: vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'
-    runs-on: [self-hosted, linux, x64, omega-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Check out the repository
@@ -122,7 +121,7 @@ jobs:
   boot-gate:
     name: Boot and prove (report-only)
     # Boots this commit against scratch Postgres and GreptimeDB containers on the runner's Docker
-    # (not on the Omega CI pool yet: it has no Docker, so leave BOOT_GATE unset until the harness
+    # (not run on the hosted runner yet: its Docker preflight is unverified there, so leave BOOT_GATE unset until the harness
     # gains a native-process backend)
     # (the rehearsal harness), proves it over HTTP, freezes the scratch ledger for a real outage,
     # and removes everything. `continue-on-error` keeps it advisory: a red run is a report, never a
@@ -130,7 +129,7 @@ jobs:
     # does not run on the weekly schedule. No `services:` block: the harness owns its own stores.
     if: vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     continue-on-error: true
-    runs-on: [self-hosted, linux, x64, omega-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Check out the repository
