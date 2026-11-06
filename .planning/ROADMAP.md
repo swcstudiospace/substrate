@@ -1142,7 +1142,7 @@ Plans:
 
 **Goal**: Live Steering is something an operator can see and use, and a session can learn what the other sessions of its repository are doing.
 
-**Status**: Shipped in PRs #180 (2026-10-29) and #192 (2026-10-30). gaps_found: 5 of 6 success criteria verified; criterion 4 FAILED as written (superseded by phase 71; owner decision open). The steering and context hooks are not installed; delivery to a real session has not been shown. Record: [67-VERIFICATION.md](phases/67-live-steering-ga/67-VERIFICATION.md).
+**Status**: Shipped in PRs #180 (2026-10-29) and #192 (2026-10-30). passed (record 2026-11-06): 6 of 6 success criteria; criterion 4 PASSED (override), superseded by phase 71 and accepted by the owner on 2026-11-06 (no session cap is reinstated). The steering and context hooks are not installed; delivery to a real session has not been shown. Record: [67-VERIFICATION.md](phases/67-live-steering-ga/67-VERIFICATION.md).
 
 **Depends on**: none (v1.6 steering and planning planes on main).
 
@@ -1155,7 +1155,7 @@ Plans:
   1. `substrate steer sessions|status|queue|ack|list|listen` work over REST routes that carry the same audit, admission and operator guard as the MCP tools; agents still cannot author directives.
   2. `session_context` (MCP tool and `GET /session/context`) returns a bounded, redacted digest of the other live sessions of the caller's repository: presence, worktree and branch, claims, recent events, handoffs and planning changes, each with its source and age.
   3. `memory_brief` gains `sessions`, `steering` and `handoffs` sections behind `SUBSTRATE_BRIEF_SESSIONS`, within the existing size bound.
-  4. With `SUBSTRATE_STEERING_SESSIONS_TABLE` on, session state lives in `steering_sessions` (its own migration step, opt-in like the audit table) and survives a restart; TTL and cap are enforced.
+  4. Superseded by phase 71 (multi-session boundary): live session authority is `live_session_bindings` (migration 42), not `steering_sessions`. Accepted by the owner on 2026-11-06 (recorded in 67-VERIFICATION.md); no session cap is reinstated. Original wording: "With `SUBSTRATE_STEERING_SESSIONS_TABLE` on, session state lives in `steering_sessions` (its own migration step, opt-in like the audit table) and survives a restart; TTL and cap are enforced."
   5. `substrate session hook` reads `checkpoint_hint` from an acknowledged directive and writes the named checkpoint; a `context` trigger prints the digest; `hook-config` prints all five triggers.
   6. `GET /steering/wait` long-polls for a directive for one session with a bounded timeout; `steer listen` uses it.
 
@@ -1231,7 +1231,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: human_needed: 5 of 5 roadmap success criteria verified at a46d42c3 (record 2026-11-06; the PostgreSQL restart, authority and idempotency clauses are re-cited by suite name from gate r36, not re-run by the verifier). The only human item is the PR 199 Greptile gate, which the verifier did not observe. Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data.
+**Status**: human_needed: 5 of 5 roadmap success criteria verified at 5e304ef8 (record 2026-11-06; the PostgreSQL restart, authority and idempotency clauses are re-cited by suite name from gate r38, not re-run by the verifier). Operator-only, not exercised: deployed migration 42, full PostgreSQL backup and restore including tombstones, real host hooks and timers, real credential enablement. Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data.
 
 **Depends on**: none
 
@@ -1283,7 +1283,7 @@ Plans:
 
 **Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: gaps_found: HARD-R1 not built; scheduled after v1.8 closes (owner decision, 2026-11-03).
+**Status**: gaps_found: SC1 to SC3 not built. HARD-R1 is an owner override for v1.8 (accepted by the owner on 2026-11-06, deferred until after v1.8 closes). Whether that decision reaches SC1 to SC3 is an open owner question.
 
 **Depends on**: none
 
@@ -1299,7 +1299,7 @@ Plans:
 
 **Goal**: When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
 
-**Status**: human_needed: 8 of 8 truths verified; 2 of 2 criteria as declared; O1 (fail-closed read policy) and O2 (connect cooldown) open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4.
+**Status**: human_needed: 8 of 8 truths verified; 2 of 2 criteria as declared; O1 accepted by the owner (2026-11-06, override); O2 fixed in f1266a9c (cooldown refusal, with its test); the second H-5 question (whether the in-process last-good brief stays refused during the cooldown) is open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4.
 
 **Depends on**: none
 
@@ -1412,15 +1412,15 @@ Plans:
 | 64. Embedding fabric | v1.7 | 0/0 | Shipped (PRs #179, #183); human_needed: TEI never contacted live | 2026-10-29 |
 | 65. Doc Watch | v1.7 | 0/0 | Shipped (PR #186); human_needed (5 of 5 must-haves, record 2026-11-06): reconcile timer staged, not installed; operator installs the triggers | 2026-10-30 |
 | 66. Docs Reflect | v1.7 | 0/0 | Shipped (PR #184); human_needed (5 of 5 must-haves verified, record 2026-11-06) | 2026-10-30 |
-| 67. Live Steering GA | v1.7 | 0/0 | Shipped (PRs #180, #192); gaps_found: criterion 4 open (owner decision); hooks not installed | 2026-10-30 |
+| 67. Live Steering GA | v1.7 | 0/0 | Shipped (PRs #180, #192); passed (record 2026-11-06, 6 of 6: criterion 4 superseded by phase 71, owner decision 2026-11-06); hooks not installed | 2026-10-30 |
 | 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); passed (record 2026-11-06, 8 of 8 truths); no report scheduler | 2026-10-30 |
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); human_needed: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); human_needed: baseline self-supervised, reads 1.0 | 2026-10-30 |
-| 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 5 of 5 roadmap criteria verified at a46d42c3 (record 2026-11-06). Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data. | - |
+| 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 5 of 5 roadmap criteria verified at 5e304ef8 (record 2026-11-06). Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data. | - |
 | 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | human_needed: 26 of 27 truth rows verified (record 2026-11-06). 6c (strict nested refusal, 500e4fb3), the refuse-to-start rule (500e4fb3), 5d and 6b (a28ecac8) closed by code and named tests; the memory repo visibility regression from the key change is closed by exact spelling (4b84e50c). Accepted as documented (owner, 2026-11-03): the server-only refusal. Open: decision 1 (corpus proof disclosure), decision 3 (allowlist unit surface vs session), row 18 (service gate under scope not reached), row 8 (Postgres filter, orchestrator evidence only), legacy row repair (owner data decision). | - |
 | 73. Ledger tamper evidence | v1.8 | 1/1 local | human_needed: 8 of 8 truths verified at 4b84e50c. G1 closed by memo v3 (9ab6f111); B1 byte cap, B2 NUL refusal, W-L1, W-L2 (summary, session_id, repo refused at write, and before the tip read on the sessioned path), W-L4 (branch, node_id, linear_identifier refused at write), N1, N2, N3, W2 and the RPC guard closed. Q8 and N5 are owner-accepted limits (2026-11-03), documented. Open: W-M1 (a repo straddling the 512-unit cut makes a memory entry fail its hash, which verify reports as a mismatch; owner decision), W-L3b (session_id, repo, branch, node_id and linear_identifier straddling a 512-unit cut can store a lone high surrogate; a data decision for pre-existing rows), W-K1, W-K3, W-O1, the stored-id decision, W3, W4 (label), W5, HARD-S3, N4 (fail closed, decided), N6, N8, the live devnet probe and live store scan (operator). | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/0 | gaps_found: HARD-R1 not built; scheduled after v1.8 closes (owner decision, 2026-11-03). | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: 8 of 8 truths verified; 2 of 2 criteria as declared; O1 (fail-closed read policy) and O2 (connect cooldown) open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4. | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/0 | gaps_found: SC1 to SC3 not built; HARD-R1 owner override for v1.8 (2026-11-06), deferred until after v1.8 closes. | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: 8 of 8 truths verified; 2 of 2 criteria as declared; O1 accepted by the owner (2026-11-06, override); O2 fixed (f1266a9c, cooldown refusal with its test); H-5 second question open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4. | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | human_needed: SC1 verified within the owner-accepted pre-send scope (D76-10; applies with the buffer enabled, D76-15 open); SC2 by owner override (D76-13), not verified. The cache-off wording is ratified (owner, 2026-11-03) and matches the code. The surrogate refusal runs before the sessioned tip read. Open: handoff() reads the tip before its emit (W-L2-TIP-ORDER, owner decision), D76-15, D76-14/19, R-1, R-2, a held record behind a durable buffer (R-3 is closed for a non-durable buffer by 7a1d923a, which reports identifiers at abandon; an owner item), the dead-letter bound (D76-13), operator items 1 to 8, HARD-R3 orphaned. | - |
-| 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 7 of 8 must-haves verified; T8 (the documented ordering rule) uncertain: the wait path holds, the pull reads order by priority (H5); T5 to T7 are named gate passes at a46d42c3. H3, H5, H6 and migration 43 open. | - |
-| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 9 of 9 must-haves verified; SC1 verified by named tests; SC2 uncertain (warning): the bound is total per run (d05ae871); the post-flush policy is ratified (exit 1 after the flush) and documented; open: the unreadable-plan audit gap (reconcile-main.ts around 246 to 247), the counter-cut and unwritable-path test gaps, the post-flush append-failure test, node_id straddle (a pre-existing data class), operator items 1 to 4, HARD-H2 orphaned. | - |
+| 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 7 of 8 must-haves verified; T8 (the documented ordering rule) uncertain: the wait path holds, the pull reads order by priority (H5); T5 to T7 are named gate passes at the r38 gate (head 5e304ef8). H3, H5, H6 and migration 43 open. | - |
+| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 8 of 9 must-haves verified; SC1 verified by named tests; SC2 plan-record clause partial: the result file is not written on the unreadable- or missing-plan path (reconcile-main.ts 253 to 291); the bound is total per run (d05ae871); the post-flush policy is ratified (exit 1 after the flush) and documented; open: the counter-cut and unwritable-path test gaps, the post-flush append-failure test, node_id straddle (a pre-existing data class), operator items 1 to 4, HARD-H2 orphaned. | - |
