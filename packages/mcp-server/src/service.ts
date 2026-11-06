@@ -847,6 +847,19 @@ async function judgeSigner(memo: Pick<TransactionMemo, "payer" | "blockTime">, s
 	return verdict.ok ? null : { status: "mismatch", reason: redact(verdict.reason).slice(0, 300) };
 }
 
+/**
+ * Whether the signer set names `payer` in some window. A payer it does not name is unrelated to the anchor, so its pointer is ignored. A set
+ * that cannot be read, or whose rotation read may be incomplete, cannot rule a payer out, so the payer is judged and `judgeSigner` answers unverified.
+ */
+async function namedBySignerSet(payer: string, signers: () => Promise<{ set: SignerSet; gap: string | null }>): Promise<boolean> {
+	try {
+		const read = await signers();
+		return read.gap !== null || read.set.some((entry) => entry.pubkey === payer);
+	} catch {
+		return true;
+	}
+}
+
 /** One of a graph's pointers, confirmed on chain: the hour it names and the fields it commits to (design 5, steps 2 to 4). */
 interface VerifiedPointer {
 	signature: string;
@@ -872,8 +885,9 @@ type PointerJudgement = { kind: "verified"; pointer: VerifiedPointer } | { kind:
 
 /**
  * The checks on one confirmed pointer (design 5, step 3), in the order that names its hour as early as the memo allows. Candidacy comes first:
- * with a key configured, only a pointer the job key signed that succeeded on chain is judged; any other listed entry is `ignored`, never a
- * mismatch. Then the v3 memo, its graph, a closed hour, and the signer judged at block time as `checkHour` judges an hour's transaction.
+ * with a key configured, only a pointer that succeeded on chain and was signed by a key the signer set names (the job key, or an earlier key the
+ * set still names) is judged; any other listed entry is `ignored`, never a mismatch. Then the v3 memo, its graph, a closed hour, and the signer
+ * judged at block time as `checkHour` judges an hour's transaction.
  * A missing key or an unverifiable signer is `unverified`; a proven fault is `failed`.
  */
 async function judgePointer(
@@ -883,7 +897,8 @@ async function judgePointer(
 	signers: () => Promise<{ set: SignerSet; gap: string | null }>,
 	now: number,
 ): Promise<PointerJudgement> {
-	if (pubkey !== null && (confirmed.payer !== pubkey || !confirmed.payerSigned || (confirmed.err !== null && confirmed.err !== undefined))) return { kind: "ignored" };
+	if (pubkey !== null && (!confirmed.payerSigned || (confirmed.err !== null && confirmed.err !== undefined))) return { kind: "ignored" };
+	if (pubkey !== null && confirmed.payer !== pubkey && !(await namedBySignerSet(confirmed.payer, signers))) return { kind: "ignored" };
 	const parsed = parseMemoV3(confirmed.memo);
 	if (parsed === null) return { kind: "failed", periodStartMs: null, reason: "is not a v3 pointer" };
 	const periodStartMs = parsed.periodStartMs;
@@ -901,8 +916,8 @@ async function judgePointer(
 /**
  * One graph's pointers (design 5, steps 2 to 4): its index address listed within `allowanceMs`, every candidate whose listing hint names the v3
  * prefix confirmed through its own transaction, and the verified ones grouped by hour. Identical pointers for an hour collapse; different ones
- * are a fork. A listing that stops early, or a pointer that cannot be confirmed, is `unreadable`: fail closed. A confirmed pointer the job key did not
- * sign, or that failed on chain, is not this graph's pointer: it is ignored, neither verified nor a failure.
+ * are a fork. A listing that stops early, or a pointer that cannot be confirmed, is `unreadable`: fail closed. A confirmed pointer that failed on chain,
+ * or that no key the signer set names signed, is not this graph's pointer: it is ignored, neither verified nor a failure.
  */
 async function readPointerChecks(args: {
 	graphId: string;
@@ -2577,7 +2592,7 @@ export class Substrate {
 			const compose = (into: Array<number | null>, lost: BriefSource[]): Promise<BriefSection[]> =>
 				composeBriefSections(
 					request,
-					{ index: this.index, greptime: this.greptime },
+					{ index: this.briefIndex(request.surface), greptime: this.greptime },
 					(at) => {
 						into.push(at);
 					},
@@ -6916,6 +6931,18 @@ export class Substrate {
 		const scope = this.config.repoScope;
 		if (!scope.enforced) return undefined;
 		return (repo) => isSurfaceName(surface) && authorizeRepo(scope, surface, repo).ok;
+	}
+
+	/**
+	 * The index a brief composes from. Under scope its memory read keeps the rows `surface` may see, by the rule `memory_search` applies
+	 * (`memoryReplyInGrant`), so a brief never carries another repository's decision or warning. Scoping off returns the index itself.
+	 */
+	private briefIndex(surface: Surface): IndexStore | null {
+		const index = this.index;
+		if (index === null || !this.config.repoScope.enforced) return index;
+		const reads: IndexStore = Object.create(index);
+		reads.memoryForBrief = async (repo, graphId, limit, read) => (await this.memoryReplyInGrant({ entries: await index.memoryForBrief(repo, graphId, limit, read) }, surface)).entries;
+		return reads;
 	}
 
 	/**

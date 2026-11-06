@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type GraphHeadRecord, formatMemo, formatMemoV2, formatMemoV3, graphHeadsRoot, graphIndexAddress, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
@@ -10,6 +13,7 @@ import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
 import { createEventBus, MAX_HINT_BYTES, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
 import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type EmitResult, type SkillProposalRequest } from "./service.ts";
+import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV } from "./repo-scope.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
@@ -6023,6 +6027,23 @@ describe("verifyGraph hour report", () => {
 				expect(verdict.hours[0]?.reason).not.toContain(POINTER_SIG);
 			});
 
+			test("a rotation keeps an hour anchored by its old-key pointer: the old key is still in the signer set and was valid at the pointer's block time", async () => {
+				const OLD_KEY = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+				const NEW_KEY = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
+				const rotatedAt = H + 2 * HOUR;
+				const world = v2World([{ session: "s1", count: 2 }]);
+				const pointers = [{ ...defined(world.pointers[0], "the pointer"), tx: { payer: OLD_KEY } } as PointerFixture];
+				const signerSet = JSON.stringify([
+					{ pubkey: OLD_KEY, valid_from_ms: 0, valid_until_ms: rotatedAt },
+					{ pubkey: NEW_KEY, valid_from_ms: rotatedAt, valid_until_ms: null },
+				]);
+				const substrate = substrateWith(stubOf(world), { SOLANA_ANCHOR_PUBKEY: NEW_KEY, SUBSTRATE_ANCHOR_SIGNER_SET: signerSet });
+				const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo, { payer: OLD_KEY }, pointers) as never });
+				expect(verdict.ok).toBe(true);
+				expect(verdict.trusted).toBe(true);
+				expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true, pointer: "verified" });
+			});
+
 			test("a foreign-payer pointer does not fail a valid hour: the job key's own pointer verifies it", async () => {
 				const world = v2World([{ session: "s1", count: 2 }]);
 				const foreign: PointerFixture = { ...defined(world.pointers[0], "the pointer"), signature: THIRD_POINTER_SIG, tx: { payer: "SomeoneElse11111111111111111111111111111" } };
@@ -6374,6 +6395,35 @@ describe("private reads under the request budget and the docs steering precedenc
 			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
 			expect(askedWith(h.ragflow)).toBe("[]");
 		});
+	});
+});
+
+describe("a brief carries only the memory its caller is granted (phase 72)", () => {
+	function scopeEnv(): Record<string, string | undefined> {
+		const dirA = mkdtempSync(join(tmpdir(), "brief-a-"));
+		const dirB = mkdtempSync(join(tmpdir(), "brief-b-"));
+		return {
+			[REPO_REGISTRY_ENV]: JSON.stringify({ "owner/a": { checkouts: [dirA], worktrees: [] }, "owner/b": { checkouts: [dirB], worktrees: [] } }),
+			[REPO_SCOPES_ENV]: JSON.stringify({ "claude-code": ["owner/a"] }),
+		};
+	}
+
+	function memoryRow(id: string, text: string, repo: string) {
+		return { id, kind: "decision", text, scope: "global", repo, writer: "hermes", trust: "human-confirmed", version: 1, needs_reverification: false, created: new Date().toISOString() };
+	}
+
+	test("a caller granted only owner/a gets no global decision whose repository is owner/b", async () => {
+		// The index answers every global row whatever its repository, as the store does; the brief must keep only the granted ones.
+		const index = {
+			getGraph: async () => null,
+			openGraphs: async () => [],
+			memoryForBrief: async () => [memoryRow("m-a", "OWNER-A-DECISION", "owner/a"), memoryRow("m-b", "OWNER-B-DECISION", "owner/b")],
+			liveSessions: () => null,
+		};
+		const substrate = new Substrate(loadConfig(scopeEnv()), { index: index as never, greptime: null });
+		const text = await substrate.brief({ surface: "claude-code", repo: "owner/a" });
+		expect(text).toContain("OWNER-A-DECISION");
+		expect(text).not.toContain("OWNER-B-DECISION");
 	});
 });
 
