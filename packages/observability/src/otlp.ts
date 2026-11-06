@@ -294,7 +294,8 @@ export class PeriodicExporter {
 
 	start(): void {
 		if (this.timer) return;
-		this.timer = setInterval(() => void this.flush(), this.deps.intervalMs);
+		// A failed export is retried on the next tick.
+		this.timer = setInterval(() => void this.flush().catch(() => undefined), this.deps.intervalMs);
 		this.timer.unref?.();
 	}
 

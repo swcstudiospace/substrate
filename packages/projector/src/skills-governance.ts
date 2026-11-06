@@ -404,6 +404,14 @@ interface WarnedEntry {
 	at: number;
 }
 
+/** A fixed short label for a caught error: its code or constructor name, never its message. */
+function errorTag(error: unknown): string {
+	const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+	if (typeof code === "string" && /^[A-Za-z0-9._-]{1,40}$/.test(code)) return code;
+	const name = error instanceof Error ? error.constructor.name : "";
+	return /^[A-Za-z0-9._-]{1,40}$/.test(name) ? name : "unknown";
+}
+
 function readWarned(file: string): Record<string, WarnedEntry> {
 	try {
 		const stat = lstatSync(file);
@@ -418,7 +426,9 @@ function readWarned(file: string): Record<string, WarnedEntry> {
 			if (typeof digest === "string" && typeof at === "number" && Number.isFinite(at)) out[key] = { digest, at };
 		}
 		return out;
-	} catch {
+	} catch (error) {
+		const tag = errorTag(error);
+		if (tag !== "ENOENT") process.stderr.write(`projector.skills-governance.state ${tag}\n`);
 		return {};
 	}
 }

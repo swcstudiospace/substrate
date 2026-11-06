@@ -93,6 +93,14 @@ export interface PendingRefresh {
 
 const PENDING_TMP_SUFFIX = ".substrate-tmp";
 
+/** A fixed short label for a caught error: its code or constructor name, never its message. */
+function errorTag(error: unknown): string {
+	const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+	if (typeof code === "string" && /^[A-Za-z0-9._-]{1,40}$/.test(code)) return code;
+	const name = error instanceof Error ? error.constructor.name : "";
+	return /^[A-Za-z0-9._-]{1,40}$/.test(name) ? name : "unknown";
+}
+
 /**
  * The payload an earlier tick left pending, or null when none is stored.
  *
@@ -114,7 +122,8 @@ export function readPendingRefresh(file: string = REFRESH_PENDING_FILE): Pending
 		const content_sha256 = (parsed as Record<string, unknown>).content_sha256;
 		if (typeof commit !== "string" || commit === "" || typeof content_sha256 !== "string" || content_sha256 === "") return null;
 		return { commit, content_sha256 };
-	} catch {
+	} catch (error) {
+		process.stderr.write(`projector.skills-sync.pending ${errorTag(error)}\n`);
 		return null;
 	}
 }

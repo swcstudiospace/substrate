@@ -412,6 +412,14 @@ function requireValid(result: MuseResult): void {
 	if (parsed.valid !== true || parsed.diagnosticCount > 0) fail("validate (diagnostics present)", result);
 }
 
+/** A fixed short label for a caught error: its code or constructor name, never its message. */
+function errorTag(error: unknown): string {
+	const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+	if (typeof code === "string" && /^[A-Za-z0-9._-]{1,40}$/.test(code)) return code;
+	const name = error instanceof Error ? error.constructor.name : "";
+	return /^[A-Za-z0-9._-]{1,40}$/.test(name) ? name : "unknown";
+}
+
 function installedPluginIds(): string[] {
 	const result = runMuse(["plugins", "list", "--json"]);
 	if (result.status !== 0) return [];
@@ -419,7 +427,8 @@ function installedPluginIds(): string[] {
 		const plugins = parseInstalledPlugins(JSON.parse(result.stdout));
 		if (plugins === null) return [];
 		return plugins.flatMap((plugin) => (plugin.id === undefined ? [] : [plugin.id]));
-	} catch {
+	} catch (error) {
+		process.stderr.write(`projector.muse.inventory ${errorTag(error)}\n`);
 		return [];
 	}
 }

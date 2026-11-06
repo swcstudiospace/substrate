@@ -515,7 +515,7 @@ async function recordNote(deps: CapsuleDeps, surface: string, draft: CapsuleEven
 		surface: surface as EventInput["surface"],
 		kind: draft.kind,
 		summary: draft.summary,
-		payload: draft.payload as unknown as Record<string, unknown>,
+		payload: { ...draft.payload },
 		idempotency_key: draft.idempotency_key,
 	});
 	const action = draft.payload.action;
