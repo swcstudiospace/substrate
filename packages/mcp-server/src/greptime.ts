@@ -913,21 +913,27 @@ export class GreptimeClient {
 			throw new GreptimeError(`greptime ${status}: ${this.clippedBody(text, 500)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 500)) });
 		}
 
-		let body: GreptimeResponse;
+		let parsed: unknown;
 		try {
-			body = JSON.parse(text) as GreptimeResponse;
+			parsed = JSON.parse(text);
 		} catch {
 			throw new GreptimeError(`greptime returned non-JSON: ${this.clippedBody(text, 200)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 200)) });
 		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new GreptimeError("greptime returned a non-object body");
+		}
+		const body = parsed as GreptimeResponse;
 		if (body.error) {
 			const reported = `greptime: ${body.error}`;
 			throw new GreptimeError(this.scrub(reported), { missingTable: MISSING_TABLE.test(reported) });
 		}
 
 		const records = body.output?.[0]?.records;
-		if (!records?.rows) return [];
-		const columns = records.schema?.column_schemas?.map((c) => c.name) ?? [];
-		return records.rows.map((row) => {
+		const rows = records?.rows;
+		if (rows === undefined || rows === null) return [];
+		if (!Array.isArray(rows)) throw new GreptimeError("greptime returned records.rows that is not an array");
+		const columns = records?.schema?.column_schemas?.map((c) => c.name) ?? [];
+		return rows.map((row) => {
 			const out: Record<string, unknown> = {};
 			columns.forEach((name, i) => {
 				out[name] = row[i];

@@ -230,6 +230,7 @@ import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import { DeadLetterStore } from "./event-dead-letter.ts";
 import { EVENT_BUFFER_TICK_MS, EventBuffer, type EventBufferEntry, type EventBufferStats, type EventDelivery, type EventEnqueue } from "./event-buffer.ts";
+import { reportSilent } from "./silent-failures.ts";
 import {
 	RecallPrefetcher,
 	BRIEF_RECALL_CAP_MS,
@@ -2119,6 +2120,7 @@ export class Substrate {
 					return deadLetters.durable;
 				},
 				flushDeadLetters: () => deadLetters.writeHeld(),
+				deadLetters,
 			});
 			this.eventBufferStores = { buffer, deadLetters };
 			if (buffer.size() > 0) this.ensureEventDrainTimer();
@@ -2247,7 +2249,10 @@ export class Substrate {
 				if (result.error.code === "invalid-transition") return { status: "refused", error: { code: "invalid-transition" } };
 				throw new LiveSessionBoundaryError({ status: "refused", error: { code: result.error.code } });
 			}
-			const eventStored = await this.emit(steeringSessionEvent(result.snapshot.ownerSurface, result.snapshot.session, "previous" in result ? result.previous : undefined)).then((written) => written.stored, () => false);
+			const eventStored = await this.emit(steeringSessionEvent(result.snapshot.ownerSurface, result.snapshot.session, "previous" in result ? result.previous : undefined)).then((written) => written.stored, (cause: unknown) => {
+				reportSilent("emit.steering-session", cause);
+				return false;
+			});
 			const session = result.snapshot.session;
 			const receipt = { session_id: session.session_id, repo_id: session.repo_id, state: session.state, updated_at: session.updated_at, expires_at: result.snapshot.expiresAt, event_stored: eventStored };
 			// This is the committed mutation receipt, not a private read of potentially revoked state.
@@ -2275,7 +2280,10 @@ export class Substrate {
 			const result = await this.liveSessions.close(checked.access);
 			if (!result.ok) throw new LiveSessionBoundaryError({ status: "refused", error: result.error });
 			this.steeringWaiters.closeSession(input.session_id);
-			const eventStored = await this.emit({ surface: caller.surface ?? "substrate", kind: "note", summary: "live steering session ended", session_id: input.session_id, repo: result.snapshot.session.repo_id, payload: { action: STEERING_SESSION_ENDED_ACTION, session_id: input.session_id, repo_id: result.snapshot.session.repo_id, closed_at: result.closedAt, non_blocking: true } }).then((written) => written.stored, () => false);
+			const eventStored = await this.emit({ surface: caller.surface ?? "substrate", kind: "note", summary: "live steering session ended", session_id: input.session_id, repo: result.snapshot.session.repo_id, payload: { action: STEERING_SESSION_ENDED_ACTION, session_id: input.session_id, repo_id: result.snapshot.session.repo_id, closed_at: result.closedAt, non_blocking: true } }).then((written) => written.stored, (cause: unknown) => {
+				reportSilent("emit.steering-ended", cause);
+				return false;
+			});
 			return { status: "closed", session_id: input.session_id, closed_at: result.closedAt, event_stored: eventStored };
 		}, options?.preparedLiveDispatch);
 	}
@@ -3022,7 +3030,7 @@ export class Substrate {
 		const bus = this.eventBus;
 		if (bus === null) return;
 		const hint: EventHint = { v: 1, id: event.id, kind: event.kind, surface: event.surface, graph_id: event.graph_id, ts: event.ts };
-		void bus.publish(hint).catch(() => false);
+		void bus.publish(hint).catch((cause: unknown) => reportSilent("emit.bus-hint", cause));
 	}
 
 
@@ -3489,7 +3497,7 @@ export class Substrate {
 			isTeachable(result.entry.kind, result.entry.subject) &&
 			(SURFACES as readonly string[]).includes(result.writer)
 		) {
-			await this.emit(teachableEvent(result.writer as Surface, request, result)).catch(() => undefined);
+			await this.emit(teachableEvent(result.writer as Surface, request, result)).catch((cause: unknown) => reportSilent("emit.teachable", cause));
 		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		// The Hindsight forward runs after the accepted reply is decided and never
@@ -3519,7 +3527,10 @@ export class Substrate {
 						}
 						return outcome;
 					})
-					.catch((): ForwardOutcome => ({ forwarded: false, bank: "", document_id: "", reason: "retain-error" }));
+					.catch((cause: unknown): ForwardOutcome => {
+						reportSilent("retain.forward", cause);
+						return { forwarded: false, bank: "", document_id: "", reason: "retain-error" };
+					});
 			};
 			if (!hindsight) {
 				const leg = run();
@@ -3592,7 +3603,7 @@ export class Substrate {
 				...(result.review_id ? { review_id: result.review_id } : {}),
 				...(result.quarantine_id ? { quarantine_id: result.quarantine_id } : {}),
 			},
-		}).catch(() => undefined);
+		}).catch((cause: unknown) => reportSilent("emit.retain-warning", cause));
 	}
 
 	/**
@@ -3862,12 +3873,13 @@ export class Substrate {
 	 */
 	private trackRetain(task: Promise<unknown>): void {
 		this.pendingRetains += 1;
-		void task.finally(() => {
+		const settle = (): void => {
 			this.pendingRetains -= 1;
 			if (this.pendingRetains === 0) {
 				for (const wake of this.retainWaiters.splice(0)) wake();
 			}
-		});
+		};
+		void task.then(settle, settle);
 	}
 
 	/**
@@ -4887,7 +4899,7 @@ export class Substrate {
 					session_id: `bind:${result.graph_id}:${correlationId}`,
 					actor: "agent",
 					payload: { correlation_id: correlationId, bound_by: boundBy },
-				}).catch(() => undefined);
+				}).catch((cause: unknown) => reportSilent("emit.bind-correlation", cause));
 			}
 			return result;
 		}
@@ -5017,7 +5029,7 @@ export class Substrate {
 						content_sha256: result.content_sha256,
 						redactions: result.redactions.length,
 					},
-				}).catch(() => undefined);
+				}).catch((cause: unknown) => reportSilent("emit.skill-proposed", cause));
 			}
 			return result;
 		} catch (cause) {
@@ -5032,7 +5044,7 @@ export class Substrate {
 					summary: `refused skill proposal ${name ?? "(invalid name)"}: ${reason}`,
 					...where,
 					payload: { action: "skill.propose", status: "refused", ...(name ? { name } : {}), reason, rules },
-				}).catch(() => undefined);
+				}).catch((cause: unknown) => reportSilent("emit.skill-refused", cause));
 			} else if (!dryRun && cause instanceof ProposeFailed) {
 				const reason = redact(cause.message).slice(0, 400);
 				await this.emit({
@@ -5041,7 +5053,7 @@ export class Substrate {
 					summary: `skill proposal ${name ?? "(invalid name)"} failed: ${reason}`,
 					...where,
 					payload: { action: "skill.propose", status: "failed", ...(name ? { name } : {}), reason },
-				}).catch(() => undefined);
+				}).catch((cause: unknown) => reportSilent("emit.skill-failed", cause));
 			}
 			throw cause;
 		}
@@ -5087,7 +5099,7 @@ export class Substrate {
 			summary: `refused skill approval ${name ?? "(invalid name)"}: ${rule}`,
 			session_id: sessionId,
 			payload: { action: "skill.approve.refused", rule, ...(decision ? { decision } : {}), ...(name ? { name } : {}) },
-		}).catch(() => undefined);
+		}).catch((cause: unknown) => reportSilent("emit.approval-refused", cause));
 	}
 
 	/**
@@ -5200,7 +5212,10 @@ export class Substrate {
 					...(row.merge_sha !== null && decision !== "decline" ? { merge_sha: row.merge_sha } : {}),
 					decided_by: surface,
 				},
-			}).catch(() => null);
+			}).catch((cause: unknown) => {
+				reportSilent("emit.skill-decision", cause);
+				return null;
+			});
 			result.noted = emitted?.stored === true;
 			if (!result.noted) {
 				process.stderr.write(
@@ -5253,7 +5268,10 @@ export class Substrate {
 	private async placeOf(graphId: string): Promise<{ repo?: string; branch?: string }> {
 		// A claim event without a repo is invisible to every repo-scoped brief, which
 		// is exactly where a claim most needs to be seen.
-		const graph = await this.index?.getGraph(graphId).catch(() => null);
+		const graph = await this.index?.getGraph(graphId).catch((cause: unknown) => {
+			reportSilent("place.graph", cause);
+			return null;
+		});
 		return { ...(graph?.repo ? { repo: graph.repo } : {}), ...(graph?.branch ? { branch: graph.branch } : {}) };
 	}
 
@@ -5307,7 +5325,7 @@ export class Substrate {
 			summary: `worktree report from ${report.host}: ${counts.stored} stored, ${counts.removed} removed`,
 			session_id: `worktrees:${report.host}`,
 			payload: { action: "worktrees.report", stored: counts.stored, removed: counts.removed },
-		}).catch(() => undefined);
+		}).catch((cause: unknown) => reportSilent("emit.worktree-report", cause));
 		return { ok: true, ...counts };
 	}
 
@@ -5412,7 +5430,7 @@ export class Substrate {
 					status: outcome.status === "created" ? "ok" : "failed",
 					...(outcome.reason ? { reason: outcome.reason } : {}),
 				},
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.linear-relation", cause));
 		}
 	}
 
@@ -5493,7 +5511,7 @@ export class Substrate {
 				node_id: ctx.nodeId,
 				session_id: ctx.sessionId,
 				payload: { action: "mirror", target: failure.target, op: failure.op, reason: failure.reason },
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.mirror-failed", cause));
 		}
 	}
 
@@ -5511,7 +5529,7 @@ export class Substrate {
 				node_id: ctx.nodeId,
 				session_id: `mirror:${ctx.graphId}:${ctx.nodeId}`,
 				payload: { action: "mirror", target: success.target, op: success.op, status: "ok" },
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.mirror-ok", cause));
 		}
 	}
 
@@ -5630,7 +5648,10 @@ export class Substrate {
 					...(evicted ? { evicted } : {}),
 				},
 				...(await this.placeOf(graphId)),
-			}).catch(() => null);
+			}).catch((cause: unknown) => {
+				reportSilent("emit.claim", cause);
+				return null;
+			});
 			recorded = emitted?.stored === true;
 		}
 
@@ -5737,7 +5758,7 @@ export class Substrate {
 		// invalidated every brief on the host once per heartbeat, which is why the
 		// cache hit ratio measured 1 %. Claims, releases, completions and
 		// registrations still bump both, because those do change that text.
-		if (result.ok) await this.cache.bump(graphGenerationKey(graphId));
+		if (result.ok) await this.cache.bump(graphGenerationKey(graphId)).catch((cause: unknown) => reportSilent("claim.bump", cause));
 		return {
 			ok: result.ok,
 			lease: result.lease,
@@ -5822,7 +5843,7 @@ export class Substrate {
 					: {}),
 			},
 				...(await this.placeOf(graphId)),
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.lease-released", cause));
 		}
 		if (result.released && decision.ok && decision.action !== "noop") {
 			await this.bumpGraph(graphId);
@@ -6106,7 +6127,7 @@ export class Substrate {
 				session_id: `dod:${graphId}:${nodeId}`,
 				payload: { action: "dod", status: "approved", already_done: gate.alreadyDone },
 				...place,
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.dod-approved", cause));
 		}
 		if (gate.gate === "refused") {
 			await this.emit({
@@ -6118,7 +6139,7 @@ export class Substrate {
 				session_id: ctx.sessionId,
 				payload: { action: "dod", reason: gate.reason },
 				...place,
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.dod-refused", cause));
 			return {
 				completed: false,
 				released: false,
@@ -6163,7 +6184,7 @@ export class Substrate {
 				session_id: ctx.sessionId,
 				payload: { action: "dod", reason: "linear-changed" },
 				...place,
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.dod-relinked", cause));
 		}
 		// Notion records Done whether or not the fence below held: Linear is
 		// Done, and the row must say so.
@@ -6178,7 +6199,7 @@ export class Substrate {
 				session_id: ctx.sessionId,
 				payload: { action: "dod", reason: released.reason ?? "unknown" },
 				...place,
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.dod-failed", cause));
 			return { completed: false, ...reply };
 		}
 		if (released.action === "noop") {
@@ -6397,6 +6418,7 @@ export class Substrate {
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
+					manifestCommit: async (repo, path) => (await this.corpusStore()?.rowFor(repo, path))?.commit ?? null,
 					budgetMs: this.config.docsSearchBudgetMs,
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
 					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
@@ -6583,9 +6605,9 @@ export class Substrate {
 	 * waits for the next hour). Fail-open; returns how many rows it deleted.
 	 */
 	async sweepRetrievals(): Promise<number> {
-		const store = this.reflectStore();
-		if (store === null) return 0;
 		try {
+			const store = this.reflectStore();
+			if (store === null) return 0;
 			return await sweepExpiredRetrievals(store, { retentionDays: this.config.docsReflect.retentionDays, batch: RETRIEVAL_SWEEP_BATCH });
 		} catch (cause) {
 			process.stderr.write(`[substrate] docs telemetry: retention sweep failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
@@ -6842,7 +6864,9 @@ export class Substrate {
 	 * refused: the store reads one repository at a time, so a scoped caller never reads another repository's rows. The rows that remain
 	 * are filtered again before the reply.
 	 */
-	async queryEventsFor(input: EventQueryInput = {}, surface: Surface | null): Promise<{ ok: true; result: EventQueryResult } | RepoScopeRefusal> {
+	async queryEventsFor(raw: EventQueryInput | null = {}, surface: Surface | null): Promise<{ ok: true; result: EventQueryResult } | RepoScopeRefusal> {
+		// The default covers only `undefined`: a body that parsed to `null` reaches here unchanged.
+		const input: EventQueryInput = raw ?? {};
 		const scope = this.config.repoScope;
 		const named = await this.scopedRepoRefusal("events_query", surface, input.repo ?? null, true);
 		if (named !== null) return named;
@@ -6900,7 +6924,7 @@ export class Substrate {
 	 */
 	private async repoRefusal(route: string, surface: Surface | null, reason: RepoRefusalReason, requested: string): Promise<RepoScopeRefusal> {
 		if (surface !== null) {
-			await this.emit({ surface, kind: "warning", summary: `repo request refused: ${reason}`, payload: repoRefusalPayload(route, reason, requested) }).catch(() => undefined);
+			await this.emit({ surface, kind: "warning", summary: `repo request refused: ${reason}`, payload: repoRefusalPayload(route, reason, requested) }).catch((cause: unknown) => reportSilent("emit.repo-refusal", cause));
 		}
 		return { ok: false, status: 403, body: { error: reason, problem: REPO_REFUSAL_MESSAGES[reason] } };
 	}
@@ -7598,7 +7622,7 @@ export class Substrate {
 				...(lease.holder?.session_id ? { session_id: lease.holder.session_id } : {}),
 				payload: { action: "expired", lease_epoch: lease.lease_epoch, expired_at: lease.expired_at, ...(lease.holder ? { evicted: lease.holder } : {}) },
 				...(await this.placeOf(lease.graph_id)),
-			}).catch(() => undefined);
+			}).catch((cause: unknown) => reportSilent("emit.lease-expired", cause));
 
 			// Mirror each reaped lease as expired, using the tracker refs the
 			// reaper CTE already carried — no second read. A reaped row always
@@ -7759,7 +7783,10 @@ export class Substrate {
 					input.node_id,
 					{ lease_id: input.handover_lease_id },
 					caller,
-				).catch(() => null);
+				).catch((cause: unknown) => {
+					reportSilent("handover.release", cause);
+					return null;
+				});
 				leaseReleased = released?.released === true;
 			}
 		}

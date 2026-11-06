@@ -4,12 +4,13 @@
  * over a real socket with every store down. Nothing here reads the host: no
  * NOTIFY_SOCKET, no systemd-notify binary, no /etc/substrate.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import type { AddressInfo } from "node:net";
 import { loadConfig } from "./config.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { resetSilentFailures } from "./silent-failures.ts";
 import {
 	createLoopbackProbe,
 	createSystemdNotifier,
@@ -501,6 +502,24 @@ describe("createSystemdNotifier", () => {
 		controller.abort();
 		expect(await never("READY=1", controller.signal)).toBe(false);
 		expect(spawned).toBe(0);
+	});
+
+	test("a notifier that fails to start reports watchdog.notify once and still reports false", async () => {
+		resetSilentFailures();
+		const notify = createSystemdNotifier({
+			timeoutMs: 1000,
+			spawn: () => {
+				throw Object.assign(new Error("spawn systemd-notify failed"), { code: "ENOENT" });
+			},
+		});
+		const spy = spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			expect(await notify("READY=1", live)).toBe(false);
+			expect(await notify("WATCHDOG=1", live)).toBe(false);
+			expect(spy.mock.calls.map((call) => String(call[0]))).toEqual(["[substrate] watchdog.notify failed (ENOENT)\n"]);
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	test("aborting while the child runs kills it", async () => {

@@ -38,6 +38,7 @@ import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observab
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { MAX_RECALL_TTL_S } from "./recall-snapshot.ts";
+import { reportSilent } from "./silent-failures.ts";
 
 export const CACHE_PREFIX = "substrate:v1";
 
@@ -702,7 +703,7 @@ export class ReadThroughCache {
 	private async withDeadline<V>(work: Promise<V>, canAnswer: boolean, ms: number | undefined): Promise<V | typeof TIMED_OUT> {
 		if (ms === undefined || !canAnswer) return work;
 		if (ms <= 0) {
-			work.catch(() => {});
+			work.catch((cause: unknown) => reportSilent("cache.deadline-load", cause));
 			return TIMED_OUT;
 		}
 		const expired = Promise.withResolvers<typeof TIMED_OUT>();

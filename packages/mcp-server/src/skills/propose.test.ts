@@ -973,6 +973,34 @@ describe("non-default library", () => {
 		expect(f.steps()).toEqual(["gh pr list"]);
 	});
 
+	test("a ledger line whose fields are not strings is skipped, not passed to gh", async () => {
+		const sha256 = sha();
+		const bad = [
+			{ ts: "t", content_sha256: sha256, name: NAME, surface: "claude-code", branch: "b1", state: "opened", repo: LIBRARY_REPO, pr_url: 42, pr_number: 7 },
+			{ ts: "t", content_sha256: sha256, name: NAME, surface: "claude-code", branch: 42, state: "pushed", repo: LIBRARY_REPO },
+		];
+		writeFileSync(join(state, "proposals.jsonl"), bad.map((line) => `${JSON.stringify(line)}\n`).join(""), { mode: 0o600 });
+		const f = fake();
+		const result = await proposeSkill(input(), options(f.run));
+		expect(result).toMatchObject({ status: "opened", ledger_skipped: 2 });
+		expect(f.calls.some((argv) => argv.some((arg) => typeof arg !== "string"))).toBe(false);
+		expect(f.steps()).not.toContain("gh pr view");
+		expect(f.steps()).not.toContain("gh pr list");
+		expect(f.steps()).toContain("push");
+	});
+
+	test("a gh reply that is not an array is refused without a TypeError", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
+		for (const stdout of ["{}", "null", '"text"', "42"]) {
+			const f = fake({ replies: { "gh pr list": { stdout } } });
+			const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(ProposeFailed);
+			expect(error).not.toBeInstanceOf(TypeError);
+			expect((error as Error).message).toContain("gh pr list did not print a JSON array");
+			expect(f.steps()).toEqual(["gh pr list"]);
+		}
+	});
+
 	test("the default library is September's slug and remote", () => {
 		expect(DEFAULT_LIBRARY).toEqual({ repo: LIBRARY_REPO, remoteUrl: LIBRARY_URL });
 	});

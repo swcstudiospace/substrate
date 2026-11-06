@@ -599,10 +599,10 @@ export interface TimerSeam {
 
 export const SYSTEM_TIMERS: TimerSeam = {
 	setInterval: (handler, ms) => setInterval(handler, ms),
-	// A handle only comes from the matching `set*` below; the cast narrows the seam's structural type back to the runtime's.
-	clearInterval: (handle) => clearInterval(handle as unknown as Parameters<typeof clearInterval>[0]),
+	// A handle only comes from the matching `set*` above, so it is the runtime's own timer type.
+	clearInterval: (handle: ReturnType<typeof setInterval>) => clearInterval(handle),
 	setTimeout: (handler, ms) => setTimeout(handler, ms),
-	clearTimeout: (handle) => clearTimeout(handle as unknown as Parameters<typeof clearTimeout>[0]),
+	clearTimeout: (handle: ReturnType<typeof setTimeout>) => clearTimeout(handle),
 };
 
 /** Race `work` against `ms`; the timer is unref'd and always cleared. A lost race is a rejection. */

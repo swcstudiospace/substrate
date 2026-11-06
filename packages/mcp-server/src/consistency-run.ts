@@ -562,9 +562,11 @@ export async function listBankDocuments(
 /** The ledger's accepted memory-write notes, newest-window first read in ascending order, from `queryEvents`. */
 const WRITE_KINDS = ["note", "warning"] as const;
 
+const ACCEPTED_WRITE_SUMMARY = "memory.write accepted";
+
 function writeEventOf(row: Record<string, unknown>): LedgerWriteEvent | null {
 	if (typeof row.id !== "string" || typeof row.surface !== "string" || typeof row.summary !== "string") return null;
-	if (!row.summary.startsWith("memory.write accepted")) return null;
+	if (!row.summary.startsWith(ACCEPTED_WRITE_SUMMARY)) return null;
 	const tsMs = Number(row.ts);
 	if (!Number.isFinite(tsMs)) return null;
 	let payload: unknown;
@@ -585,8 +587,11 @@ function writeEventOf(row: Record<string, unknown>): LedgerWriteEvent | null {
  * A verified accepted write is a `note`; an accepted one the read-back could not verify is a `warning`
  * (`auditMemoryWrite`). Both are read, notes first. The cursor is `<kind index>|<ISO ts>`: it resumes inclusively
  * at the last timestamp (the verifier de-duplicates by event id) and moves to the next kind when a read comes back short.
+ * `skipped` counts the rows that claim to be an accepted write but cannot be read as one, so no event is invented for them.
+ * A resumed page can return the same such row again; each row is counted once per reader.
  */
 export function ledgerWriteReader(greptime: Pick<GreptimeClient, "queryEvents">): LedgerReader {
+	const countedSkips = new Set<string>();
 	return {
 		memoryWrites: async ({ since, until, limit, cursor }) => {
 			let kindIndex = 0;
@@ -599,10 +604,20 @@ export function ledgerWriteReader(greptime: Pick<GreptimeClient, "queryEvents">)
 			}
 			const kind = WRITE_KINDS[kindIndex] as (typeof WRITE_KINDS)[number];
 			const rows = await greptime.queryEvents({ match: { kind }, since: from, until, limit, order: "asc", includePayload: true });
-			const events = rows.flatMap((row) => {
+			const events: LedgerWriteEvent[] = [];
+			let skipped = 0;
+			for (const row of rows) {
 				const event = writeEventOf(row);
-				return event === null ? [] : [event];
-			});
+				if (event !== null) {
+					events.push(event);
+					continue;
+				}
+				if (typeof row.summary !== "string" || !row.summary.startsWith(ACCEPTED_WRITE_SUMMARY)) continue;
+				const key = typeof row.id === "string" ? `id:${row.id}` : `row:${JSON.stringify(row)}`;
+				if (countedSkips.has(key)) continue;
+				countedSkips.add(key);
+				skipped += 1;
+			}
 			let next: string | null;
 			if (rows.length >= limit) {
 				const last = Number(rows[rows.length - 1]?.ts);
@@ -613,7 +628,7 @@ export function ledgerWriteReader(greptime: Pick<GreptimeClient, "queryEvents">)
 			} else {
 				next = null;
 			}
-			return { events, next };
+			return { events, next, skipped };
 		},
 	};
 }

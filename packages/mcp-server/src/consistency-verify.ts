@@ -179,9 +179,10 @@ export interface LedgerWriteEvent {
  * `[since, until]` (inclusive ISO), oldest first, at most `limit` per page.
  * `next` is opaque; the verifier de-duplicates by event id, so a reader may
  * resume inclusively at the last `ts` it saw.
+ * `skipped` counts the rows in this page the reader could not read as an event; they are not in `events`.
  */
 export interface LedgerReader {
-	memoryWrites(request: { since: string; until: string; limit: number; cursor: string | null }): Promise<{ events: readonly LedgerWriteEvent[]; next: string | null }>;
+	memoryWrites(request: { since: string; until: string; limit: number; cursor: string | null }): Promise<{ events: readonly LedgerWriteEvent[]; next: string | null; skipped: number }>;
 }
 
 /** The retain outbox's parked entry ids; `null` when they cannot be known (a memory-only outbox lives in the server process). */
@@ -1045,10 +1046,11 @@ export async function verifyConsistency(readers: ConsistencyReaders, options: Co
 		let partial = false;
 		let ledgerPages = 0;
 		for (;;) {
-			const page: { events: readonly LedgerWriteEvent[]; next: string | null } = await call("ledger", "memoryWrites", () =>
+			const page: { events: readonly LedgerWriteEvent[]; next: string | null; skipped: number } = await call("ledger", "memoryWrites", () =>
 				readers.ledger.memoryWrites({ since: new Date(windowFrom - cfg.ledgerSkewMs).toISOString(), until: nowIso, limit: LEDGER_PAGE_SIZE, cursor }),
 			);
 			ledgerPages += 1;
+			counts.ledger_events_malformed += page.skipped;
 			for (const event of page.events) {
 				if (typeof event.id !== "string" || seen.has(event.id)) continue;
 				seen.add(event.id);

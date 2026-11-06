@@ -302,6 +302,12 @@ describe("sql", () => {
 		expect(await new GreptimeClient(config).sql("SELECT 1")).toEqual([]);
 	});
 
+	test("a reply that is not an object is refused with the module error, not a TypeError", async () => {
+		stubFetch(() => null);
+		const error = await new GreptimeClient(config).sql("SELECT 1").catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(GreptimeError);
+	});
+
 	test("refuses a mutating statement before it reaches the network", async () => {
 		const { sql } = stubFetch();
 		await expect(new GreptimeClient(config).sql('DELETE FROM "agent_events"')).rejects.toThrow(AppendOnlyViolation);

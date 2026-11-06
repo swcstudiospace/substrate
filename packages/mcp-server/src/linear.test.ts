@@ -148,6 +148,13 @@ describe("error redaction (D23-05)", () => {
 		expect(error.message).toContain("linear unreachable");
 		expect(error.message).not.toContain(KEY);
 	});
+
+	test("a reply that is not an object is refused with the module error, not a TypeError", async () => {
+		const { client } = fakeLinear(() => reply(null));
+		const error = await client.issueState("SWC-1").catch((e: unknown) => e);
+		if (!(error instanceof LinearError)) throw new Error(`expected LinearError, got ${String(error)}`);
+		expect(error.message).toContain("graphql");
+	});
 });
 
 describe("updateIssue is additive only", () => {

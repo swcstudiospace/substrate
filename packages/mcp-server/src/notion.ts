@@ -161,7 +161,11 @@ export class NotionClient {
 	private async taskGraphPage(pageId: string): Promise<PageResponse & { id: string }> {
 		const id = notionPageId(pageId);
 		if (!id) throw new NotionError(`not a Notion page id: ${pageId.slice(0, 100)}`);
-		const page = (await this.request("GET", id)) as PageResponse;
+		const reply = await this.request("GET", id);
+		if (typeof reply !== "object" || reply === null || Array.isArray(reply)) {
+			throw new NotionError("notion GET /pages returned a non-object reply");
+		}
+		const page = reply as PageResponse;
 		const parent = page.parent?.type === "data_source_id" ? page.parent.data_source_id : undefined;
 		if (parent?.replaceAll("-", "").toLowerCase() !== this.dataSourceId) {
 			const where = parent ? `data source ${parent}` : `a ${page.parent?.type ?? "missing"} parent`;

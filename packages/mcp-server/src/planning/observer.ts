@@ -50,6 +50,7 @@
  * also runs on its own timer (`livenessPeriodMs`, at most a third of the freshness window), independent of the scan interval.
  */
 import type { EventInput } from "../types.ts";
+import { reportSilent } from "../silent-failures.ts";
 import { BaselineStoreError, type BaselineLoad, type BaselineStore, type StoredBaseline } from "./baseline-store.ts";
 import { branchOf, gitLayout, planningSessionId, repoOf, type OriginUrlRunner, type RepoLookup } from "./checkout.ts";
 import { conflictEvent, conflictOriginMs, conflictSignature, detectConflicts, repoKey } from "./conflicts.ts";
@@ -278,7 +279,7 @@ export class PlanningObserver {
 		if (liveness !== undefined && liveness !== null && this.deps.presence !== null) {
 			this.livenessTimer = this.timers.setInterval(() => this.livenessTick(), livenessPeriodMs(liveness, resolved.limits.scanIntervalMs, resolved.limits.presenceTtlS * 1000));
 		}
-		this.timer = this.timers.setInterval(() => this.tick(), resolved.limits.scanIntervalMs);
+		this.timer = this.timers.setInterval(() => this.tick().catch((cause: unknown) => reportSilent("planning.observer.tick", cause)), resolved.limits.scanIntervalMs);
 		return true;
 	}
 
@@ -814,7 +815,10 @@ export class PlanningObserver {
 		const presence = this.deps.presence;
 		if (presence === null) return;
 		const sessionId = planningSessionId(this.deps.fs, root);
-		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS).catch(() => null);
+		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS).catch((cause: unknown) => {
+			reportSilent("planning.observer.listing", cause);
+			return null;
+		});
 		if (listing === null) return;
 		// The clock is read after the listing, which takes time: a peer that passed its freshness window while the scan ran is expired.
 		const clock = await readClock(presence);

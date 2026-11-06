@@ -69,6 +69,7 @@ import type { IncomingMessage } from "node:http";
 import type { SubstrateConfig } from "./config.ts";
 import { registerMetricsHistoryMetrics } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
+import { reportSilent } from "./silent-failures.ts";
 import type { GraphTeachable, HourReport, Substrate, SubstrateObserver, VerifyOptions, VerifyVerdict } from "./service.ts";
 import type { Surface } from "./types.ts";
 
@@ -426,7 +427,9 @@ export function createObservability(
 			// A withdrawal is a decision the audit has to carry, and the pre-dispatch gate
 			// cannot know about it yet: see `recordClaimWithdrawal`.
 			if (sample.decision === "revoked") {
-				void recordClaimWithdrawal(audit, instruments, sample);
+				void recordClaimWithdrawal(audit, instruments, sample).catch((cause: unknown) => {
+					reportSilent("claim.withdrawal", cause);
+				});
 			}
 		},
 		docsSearch(sample) {

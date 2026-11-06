@@ -30,6 +30,7 @@ import { reservedEmitRefusal } from "./reserved-actions.ts";
 import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISABLED_MESSAGE } from "./session-context.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact, redactValue } from "./redact.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
 import {
 	CORRELATION_ID_PATTERN,
@@ -2212,7 +2213,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					session_id: `${action.replace(".", "-")}:${randomUUID()}`,
 					payload: { ...base, status, ...detail },
 				})
-				.catch(() => undefined);
+				.catch((cause: unknown) => reportSilent("railway.write-note", cause));
 		let outcome: WriteOutcome;
 		try {
 			outcome = await write(gate);

@@ -35,10 +35,6 @@ export const LIBRARY_REPO = "swcstudiospace/agent-skills";
 export const LIBRARY_URL = "https://github.com/swcstudiospace/agent-skills.git";
 export const SKILLS_STATE = "/var/lib/substrate/skills";
 export const MIRROR = `${SKILLS_STATE}/mirror.git`;
-export const PROPOSE_ROOT = `${SKILLS_STATE}/propose`;
-export const LOCK_DIR = `${SKILLS_STATE}/mirror.lock`;
-export const CONTENT_LOCKS = `${SKILLS_STATE}/locks`;
-export const LEDGER = `${SKILLS_STATE}/proposals.jsonl`;
 
 /** Which library a proposal targets: the repo slug plus the remote the clone is checked against. */
 export interface SkillsLibrary {
@@ -115,6 +111,8 @@ export interface ProposeResult {
 	diff_added?: number;
 	diff_changed?: number;
 	diff_deleted?: number;
+	/** Ledger lines this proposal's replay skipped (torn, or fields not what a record holds); present only when at least one was. */
+	ledger_skipped?: number;
 }
 
 export interface ValidatedProposal {
@@ -738,19 +736,44 @@ type LedgerLine = {
 	pr_number?: number;
 };
 
-function ledgerMatches(path: string, sha: string): LedgerLine[] {
-	if (!existsSync(path)) return [];
-	const found: LedgerLine[] = [];
-	for (const line of readFileSync(path, "utf8").split("\n")) {
-		if (!line.includes(sha)) continue;
-		try {
-			const parsed = JSON.parse(line) as LedgerLine;
-			if (parsed.content_sha256 === sha) found.push(parsed);
-		} catch {
-			// a torn line never decides anything
-		}
+/** A ledger record: the strings the replay reads, and the optional fields only when they hold the right type. */
+function isLedgerLine(value: unknown): value is LedgerLine {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const line = value as Record<string, unknown>;
+	for (const key of ["ts", "content_sha256", "name", "surface", "branch", "state"]) {
+		if (typeof line[key] !== "string") return false;
 	}
-	return found;
+	if (line.repo !== undefined && typeof line.repo !== "string") return false;
+	if (line.pr_url !== undefined && typeof line.pr_url !== "string") return false;
+	return line.pr_number === undefined || typeof line.pr_number === "number";
+}
+
+/** Every well-formed record in the ledger, and how many non-blank lines were skipped: a torn line, or one whose fields are not what a record holds. */
+function readLedger(path: string): { lines: LedgerLine[]; skipped: number } {
+	if (!existsSync(path)) return { lines: [], skipped: 0 };
+	const lines: LedgerLine[] = [];
+	let skipped = 0;
+	for (const raw of readFileSync(path, "utf8").split("\n")) {
+		if (raw.trim().length === 0) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw);
+		} catch {
+			skipped++;
+			continue;
+		}
+		if (isLedgerLine(parsed)) lines.push(parsed);
+		else skipped++;
+	}
+	return { lines, skipped };
+}
+
+/** What the ledger replay leaves for proposeSkill: the merged PR, and how many ledger lines it skipped. */
+type Replay = { mergedPrUrl: string | null; ledgerSkipped: number };
+
+/** The result's `ledger_skipped`: present only when the replay skipped at least one line. */
+function ledgerSkippedOf(replay: Replay): { ledger_skipped?: number } {
+	return replay.ledgerSkipped > 0 ? { ledger_skipped: replay.ledgerSkipped } : {};
 }
 
 function ledgerAppend(path: string, line: Omit<LedgerLine, "ts">): void {
@@ -825,10 +848,12 @@ async function fromLedger(
 	input: ProposeInput,
 	opts: ProposeOptions,
 	ledger: string,
-	replay: { mergedPrUrl: string | null },
+	replay: Replay,
 ): Promise<ProposeResult | null> {
 	const library = opts.library ?? DEFAULT_LIBRARY;
-	let knownLines = ledgerMatches(ledger, v.content_sha256);
+	const ledgerRead = readLedger(ledger);
+	replay.ledgerSkipped = ledgerRead.skipped;
+	let knownLines = ledgerRead.lines.filter((line) => line.content_sha256 === v.content_sha256);
 	if (knownLines.length === 0) {
 		// A line written before `file`/`delete` tags hashes the same content
 		// differently. Fall back to that hash so September's proposals are still
@@ -836,7 +861,7 @@ async function fromLedger(
 		// collision cannot decide a different proposal.
 		const legacy = legacyContentSha256(v.mode, v.files, v.remove);
 		if (legacy !== v.content_sha256) {
-			knownLines = ledgerMatches(ledger, legacy).filter((line) => line.name === v.name && line.surface === v.surface);
+			knownLines = ledgerRead.lines.filter((line) => line.content_sha256 === legacy && line.name === v.name && line.surface === v.surface);
 		}
 	}
 	if (knownLines.length === 0) return null;
@@ -875,16 +900,19 @@ async function fromLedger(
 	}
 	if (known.state !== "pushed") return null;
 	const listed = await must(run, "gh pr list", prListHeadArgv(known.branch, library.repo));
-	let prs: Array<{ url?: unknown; number?: unknown; state?: unknown }>;
+	let reply: unknown;
 	try {
-		prs = JSON.parse(listed.stdout) as Array<{ url?: unknown; number?: unknown; state?: unknown }>;
+		reply = JSON.parse(listed.stdout);
 	} catch {
 		throw new ProposeFailed("gh pr list printed no JSON");
 	}
-	const rows = prs.flatMap((p) => {
-		if (typeof p.url !== "string" || typeof p.state !== "string") return [];
-		const located = prUrlOf(p.url, library.repo);
-		return located ? [{ ...located, state: p.state }] : [];
+	if (!Array.isArray(reply)) throw new ProposeFailed("gh pr list did not print a JSON array");
+	const rows = reply.flatMap((p: unknown) => {
+		if (typeof p !== "object" || p === null) return [];
+		const { url, state } = p as { url?: unknown; state?: unknown };
+		if (typeof url !== "string" || typeof state !== "string") return [];
+		const located = prUrlOf(url, library.repo);
+		return located ? [{ ...located, state }] : [];
 	});
 	const open = rows.find((row) => row.state === "OPEN");
 	if (open) {
@@ -972,10 +1000,10 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 	const releaseContent = opts.dryRun ? null : await acquireLock(join(paths.contentLocks, v.content_sha256), "proposal", waitMs);
 	let clone: string | null = null;
 	try {
-		const replay: { mergedPrUrl: string | null } = { mergedPrUrl: null };
+		const replay: Replay = { mergedPrUrl: null, ledgerSkipped: 0 };
 		if (!opts.dryRun) {
 			const known = await fromLedger(run, v, input, opts, paths.ledger, replay);
-			if (known) return known;
+			if (known) return { ...known, ...ledgerSkippedOf(replay) };
 		}
 		const gate = opts.beforeWork ? await opts.beforeWork(replay.mergedPrUrl) : null;
 
@@ -1010,7 +1038,7 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 			return { status: "dry_run", ...base, ...countNameStatus(status.stdout) };
 		}
 		const diff = await run(diffQuietArgv(clone));
-		if (diff.code === 0) return { status: "unchanged", ...base };
+		if (diff.code === 0) return { status: "unchanged", ...base, ...ledgerSkippedOf(replay) };
 		if (diff.code !== 1) throw new ProposeFailed(`git diff exited ${String(diff.code)}: ${tail(diff)}`);
 		// A merged retry the library no longer confirms is refused here: no commit, branch push or PR.
 		if (gate) throw gate.unlessUnchanged;
@@ -1026,7 +1054,7 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 			const code = (cause as NodeJS.ErrnoException).code ?? "EIO";
 			throw new ProposeFailed(`could not record the pushed branch in the proposal ledger (${code}); recover with \`gh pr create --repo ${library.repo} --head ${branch} --base main\` or delete the branch`);
 		}
-		return await openPr(run, v, input, branch, paths.ledger, library);
+		return { ...(await openPr(run, v, input, branch, paths.ledger, library)), ...ledgerSkippedOf(replay) };
 	} finally {
 		if (clone) rmSync(clone, { recursive: true, force: true });
 		releaseContent?.();

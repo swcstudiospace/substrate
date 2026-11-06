@@ -1211,7 +1211,13 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/evidence") {
 				const raw = await readBody(req);
-				const body = raw ? (JSON.parse(raw) as { graph_id?: unknown; format?: unknown; node_id?: unknown }) : {};
+				const parsed: unknown = raw ? JSON.parse(raw) : {};
+				// A `null` body used to reach `body.graph_id` after the claim and answer 500; refused here instead.
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as { graph_id?: unknown; format?: unknown; node_id?: unknown };
 				rememberClaim(claim, body);
 				if (typeof body.graph_id !== "string" || body.graph_id.length === 0) {
 					sendJson(res, 400, { error: "graph_id is required" });
@@ -1491,7 +1497,13 @@ export function createHttpServer(
 			// Hooks get the coordination paths over REST for the same reason they get
 			// the brief: a hook process has no MCP client. Same service code beneath.
 			if (req.method === "POST" && url.pathname === "/handoff") {
-				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				// A `null` body used to answer 500 on `body.surface`; a non-object is refused before anything reads it.
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
 				rememberClaim(claim, body);
 				// A tokened caller hands off as its own surface. A body naming another is refused, never re-attributed.
 				const handoffRefusal = surfaceClaimRefusal(surface, body.surface);
@@ -1570,7 +1582,12 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/drift") {
 				const raw = await readBody(req);
-				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				const parsed: unknown = raw ? JSON.parse(raw) : {};
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
 				rememberClaim(claim, body);
 				if (typeof body.repo !== "string") {
 					sendJson(res, 400, { error: "drift needs `repo`" });
@@ -1600,7 +1617,12 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/verify") {
 				const raw = await readBody(req);
-				const body = JSON.parse(raw) as { graph_id?: unknown };
+				const parsed: unknown = JSON.parse(raw);
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as { graph_id?: unknown };
 				rememberClaim(claim, body);
 				if (typeof body.graph_id !== "string") {
 					sendJson(res, 400, { error: "graph_id is required" });
@@ -2776,8 +2798,9 @@ async function handleMcp(
 	const server = createMcpServer(substrate, caller, { preparedLiveDispatch });
 	const transport = new StatelessHttpTransport();
 	res.on("close", () => {
-		void transport.close();
-		void server.close();
+		// A close failure on a connection that is already gone is expected.
+		void transport.close().catch(() => undefined);
+		void server.close().catch(() => undefined);
 	});
 	await server.connect(transport);
 	await transport.inner.handleRequest(req, res, body);

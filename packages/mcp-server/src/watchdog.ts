@@ -26,6 +26,7 @@
  * timer, no child and no request. This module never reads `/healthz`.
  */
 import { spawn as spawnProcess } from "node:child_process";
+import { reportSilent } from "./silent-failures.ts";
 
 /** What the watchdog says to systemd. Closed: nothing user-controlled is ever sent. */
 export type NotifyMessage = "READY=1" | "WATCHDOG=1";
@@ -207,7 +208,7 @@ export function watchdogSettings(env: Record<string, string | undefined>, pid: n
 // ── Notifier: the `systemd-notify` child ─────────────────────────────────────
 
 export interface NotifyChild {
-	exited: Promise<number>;
+	exited: Promise<number | null>;
 	kill(): void;
 }
 
@@ -217,9 +218,9 @@ export type SpawnNotify = (argv: readonly string[]) => NotifyChild;
 const spawnSystemdNotify: SpawnNotify = (argv) => {
 	const [command, ...args] = argv;
 	const child = spawnProcess(command ?? "systemd-notify", args, { stdio: "ignore" });
-	const { promise: exited, resolve, reject } = Promise.withResolvers<number>();
+	const { promise: exited, resolve, reject } = Promise.withResolvers<number | null>();
 	child.once("error", reject);
-	child.once("exit", (code) => resolve(code ?? -1));
+	child.once("exit", (code) => resolve(code));
 	return {
 		exited,
 		kill: () => {
@@ -233,6 +234,9 @@ export interface SystemdNotifierOptions {
 	timeoutMs: number;
 	spawn?: SpawnNotify;
 }
+
+/** The `reportSilent` site for a notifier that failed to start or exited non-zero. */
+const NOTIFY_SITE = "watchdog.notify";
 
 /**
  * `systemd-notify <message>` as a child with a deadline. The timer is unref'd
@@ -268,13 +272,21 @@ export function createSystemdNotifier(options: SystemdNotifierOptions): Notifier
 		signal.addEventListener("abort", onAbort, { once: true });
 		try {
 			child = start(["systemd-notify", message]);
-		} catch {
+		} catch (error: unknown) {
+			reportSilent(NOTIFY_SITE, error);
 			finish(false);
 			return promise;
 		}
 		child.exited.then(
-			(code) => finish(code === 0),
-			() => finish(false),
+			(code) => {
+				// Only an exit that decides the result is reported; one that lands after a deadline or abort already did.
+				if (code !== 0 && !done) reportSilent(NOTIFY_SITE, { code: `exit-${code ?? "unknown"}` });
+				finish(code === 0);
+			},
+			(error: unknown) => {
+				if (!done) reportSilent(NOTIFY_SITE, error);
+				finish(false);
+			},
 		);
 		return promise;
 	};
@@ -474,7 +486,8 @@ export class Watchdog {
 	private async send(message: NotifyMessage, signal: AbortSignal): Promise<boolean> {
 		try {
 			return await this.deps.notify(message, signal);
-		} catch {
+		} catch (cause: unknown) {
+			reportSilent("watchdog.notify", cause);
 			return false;
 		}
 	}

@@ -127,12 +127,16 @@ export class LinearClient {
 		const text = await response.text();
 		if (!response.ok) throw new LinearError(`linear ${response.status}: ${text.slice(0, 200)}`);
 
-		let body: GraphqlResponse<T>;
+		let parsed: unknown;
 		try {
-			body = JSON.parse(text) as GraphqlResponse<T>;
+			parsed = JSON.parse(text);
 		} catch {
 			throw new LinearError(`linear returned non-JSON: ${text.slice(0, 200)}`);
 		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new LinearError("linear POST graphql returned a non-object reply");
+		}
+		const body = parsed as GraphqlResponse<T>;
 		if (body.errors?.length) {
 			const messages = body.errors.map((e) => e.message ?? "unknown error").join("; ");
 			throw new LinearError(`linear: ${messages.slice(0, 200)}`);

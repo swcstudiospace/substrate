@@ -175,6 +175,12 @@ describe("NotionClient.getPage", () => {
 		await expect(client.getPage("../users/me")).rejects.toBeInstanceOf(NotionError);
 		expect(requests).toEqual([]);
 	});
+
+	test("a reply that is not an object is refused with the module error, not a TypeError", async () => {
+		const { client } = fakeNotion({ [PAGE]: { status: 200, text: "null" } });
+		const error = await client.getPage(PAGE).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(NotionError);
+	});
 });
 
 describe("NotionClient — Agent Task Graph parent check (the key is a workspace-wide PAT)", () => {
