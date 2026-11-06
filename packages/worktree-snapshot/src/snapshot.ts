@@ -5,7 +5,7 @@ import { openRepo, type Runner } from "./runner.ts";
 import { buildSnapshot } from "./tree.ts";
 import type { Clock, PinResult, Snapshot, SkippedPath, SnapshotPolicy } from "./types.ts";
 
-export type SnapshotParams = { worktree: string; policy?: SnapshotPolicy; now?: Clock; run?: Runner };
+type SnapshotParams = { worktree: string; policy?: SnapshotPolicy; now?: Clock; run?: Runner };
 
 /**
  * Snapshot the exact file state of a worktree: tracked, modified and untracked files, executable
@@ -17,7 +17,7 @@ export async function snapshot(params: SnapshotParams): Promise<Snapshot> {
 	return buildSnapshot(ctx, resolvePolicy(params.policy));
 }
 
-export type PinParams = {
+type PinParams = {
 	worktree: string;
 	snapshot: Snapshot;
 	id: string;
@@ -42,7 +42,7 @@ export async function pinSnapshot(params: PinParams): Promise<PinResult> {
 	return pinTree(ctx, "checkpoints", params.id, tree, metadata, skippedOf(params.snapshot), params.snapshot.skippedTruncated?.total);
 }
 
-export type ListPinnedParams = { worktree: string; now?: Clock; run?: Runner };
+type ListPinnedParams = { worktree: string; now?: Clock; run?: Runner };
 
 /**
  * The pinned checkpoints of THIS worktree with their id, commit, tree and parsed metadata: its own
@@ -55,7 +55,7 @@ export async function listPinned(params: ListPinnedParams): Promise<PinnedCheckp
 	return listPinnedIn(await openRepo(params));
 }
 
-export type ReadPinnedParams = { worktree: string; ref: string; now?: Clock; run?: Runner };
+type ReadPinnedParams = { worktree: string; ref: string; now?: Clock; run?: Runner };
 
 /** Rebuild a Snapshot from a pinned ref such as `refs/substrate/safety/<id>`. */
 export async function readPinnedSnapshot(params: ReadPinnedParams): Promise<Snapshot> {
@@ -68,7 +68,7 @@ export async function readPinnedSkipped(params: ReadPinnedParams): Promise<Skipp
 	return readPinnedSkippedIn(await openRepo(params), params.ref);
 }
 
-export type SameTreeParams = {
+type SameTreeParams = {
 	worktree: string;
 	left: string;
 	right: string;

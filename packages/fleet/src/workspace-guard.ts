@@ -16,9 +16,9 @@ import { findIgnoredWork, type IgnoredOptions, UNKNOWN_IGNORED } from "./ignored
 import { discoverRepos, listWorktrees } from "./inventory.ts";
 import { mapLimit } from "./pool.ts";
 
-export const PLANNING_REFUSAL = "workspace .planning is outside git: copy it out first";
-export const PRIMARY_REFUSAL = "primary checkout inside the workspace: never removed by a workspace removal";
-export const LOOSE_REFUSAL = "outside every git worktree, so removing the workspace would delete it unchecked: copy it out first";
+const PLANNING_REFUSAL = "workspace .planning is outside git: copy it out first";
+const PRIMARY_REFUSAL = "primary checkout inside the workspace: never removed by a workspace removal";
+const LOOSE_REFUSAL = "outside every git worktree, so removing the workspace would delete it unchecked: copy it out first";
 
 const GUARD_CONCURRENCY = 4;
 /** Ignored paths named in one refusal before the rest are counted. */
@@ -26,12 +26,12 @@ const SHOWN_IGNORED = 10;
 /** `git ls-files --stage` prints a submodule (a gitlink) with this mode. */
 const GITLINK_MODE = "160000 ";
 
-export interface WorkspaceGuardOptions {
+interface WorkspaceGuardOptions {
 	/** Budgets for the ignored-work scan. */
 	ignored?: IgnoredOptions;
 }
 
-export interface WorkspaceGuardResult {
+interface WorkspaceGuardResult {
 	/** True only when every member was probed and none holds work. */
 	ok: boolean;
 	/** One line per reason to refuse, naming the path it concerns. */

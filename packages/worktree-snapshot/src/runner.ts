@@ -13,7 +13,7 @@ import { resolve } from "node:path";
 import { GitCommandError, SnapshotPolicyError } from "./errors.ts";
 import type { Clock } from "./types.ts";
 
-export type RunOptions = {
+type RunOptions = {
 	cwd?: string;
 	/** Merged over the sanitised process environment. */
 	env?: Record<string, string>;
@@ -24,7 +24,7 @@ export type RunOptions = {
 	stdoutMode?: number;
 };
 
-export type RunResult = { code: number | null; stdout: Buffer; stderr: string };
+type RunResult = { code: number | null; stdout: Buffer; stderr: string };
 export type Runner = (argv: readonly string[], options?: RunOptions) => Promise<RunResult>;
 
 const RUN_TIMEOUT_MS = 120_000;
@@ -158,7 +158,7 @@ export type RepoContext = {
 	now: Clock;
 };
 
-export type GitOptions = Omit<RunOptions, "cwd">;
+type GitOptions = Omit<RunOptions, "cwd">;
 
 function excerpt(stderr: string): string {
 	return stderr.trim().replace(/\s+/g, " ").slice(0, STDERR_EXCERPT_CHARS);

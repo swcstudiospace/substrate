@@ -191,7 +191,7 @@ export interface CorpusNeardupRequest {
 	maxPairs?: number | undefined;
 }
 
-export interface NeardupKey {
+interface NeardupKey {
 	repo: string;
 	path: string;
 }
@@ -270,7 +270,7 @@ export interface CorpusReconcileRequest {
 }
 
 /** What the docs plane and the manifest disagree about. */
-export interface ReconcileDrift {
+interface ReconcileDrift {
 	/** Active manifest rows whose plane document is gone. */
 	missingInPlane: Array<{ repo: string; path: string }>;
 	/** Plane documents named `corpus:` that no active row owns. */
@@ -290,11 +290,11 @@ export interface CorpusReconcileResponse {
 }
 
 /** Why a sync ran. Closed: the `docs.sync` event carries it. */
-export const SYNC_TRIGGERS = ["manual", "watch", "hook", "sweep", "reconcile"] as const;
+const SYNC_TRIGGERS = ["manual", "watch", "hook", "sweep", "reconcile"] as const;
 export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
 
 /** How a sync ended. Closed: the `docs.sync` event carries it. */
-export const SYNC_OUTCOMES = ["ok", "partial", "failed", "skipped"] as const;
+const SYNC_OUTCOMES = ["ok", "partial", "failed", "skipped"] as const;
 export type SyncOutcome = (typeof SYNC_OUTCOMES)[number];
 /** Bounds of `POST /corpus/reflect`: the CLI keeps inside them and the server refuses a request outside them. */
 export const MAX_REFLECT_DIGESTS = 200;
@@ -303,7 +303,7 @@ export const MAX_DIGEST_CHARS = 20_000;
 /** The virtual path a repository digest is stored under: it is not a file of the repository. */
 export const DIGEST_PATH = ".substrate/digest.md";
 
-export interface CorpusDigestPayload {
+interface CorpusDigestPayload {
 	repo: string;
 	text: string;
 	/** sha256 of `text` (UTF-8), lowercase hex. */
@@ -336,7 +336,7 @@ export const MAX_GAPS_LIMIT = 200;
 export const DEFAULT_GAPS_LIMIT = 50;
 
 /** A query the corpus could not answer well, aggregated by the hash of the query. */
-export interface CorpusGap {
+interface CorpusGap {
 	queryHash: string;
 	/** The redacted, capped text of the query, when the server kept it. */
 	text: string | null;

@@ -19,8 +19,8 @@ import { githubSlug, stripCredentials } from "./discover.ts";
 import { type GitBytesRunner, outputText } from "./gitio.ts";
 
 /** A clone moves the whole history without its file contents. */
-export const MIRROR_CLONE_TIMEOUT_MS = 600_000;
-export const MIRROR_FETCH_TIMEOUT_MS = 120_000;
+const MIRROR_CLONE_TIMEOUT_MS = 600_000;
+const MIRROR_FETCH_TIMEOUT_MS = 120_000;
 /** A read of the checkout's configuration is instant; the bound only guards against a wedged process. */
 const CONFIG_TIMEOUT_MS = 30_000;
 
@@ -28,11 +28,11 @@ const CONFIG_TIMEOUT_MS = 30_000;
 const NAME_HASH_LENGTH = 12;
 const NAME_SLUG_LENGTH = 60;
 
-export const MIRROR_STALE_REASONS = ["fetch-failed", "fetch-timeout"] as const;
-export type MirrorStaleReason = (typeof MIRROR_STALE_REASONS)[number];
+const MIRROR_STALE_REASONS = ["fetch-failed", "fetch-timeout"] as const;
+type MirrorStaleReason = (typeof MIRROR_STALE_REASONS)[number];
 
-export const MIRROR_ABSENT_REASONS = ["no-origin", "not-created", "clone-failed", "clone-timeout", "mirror-dir-unusable", "mirror-unmatched"] as const;
-export type MirrorAbsentReason = (typeof MIRROR_ABSENT_REASONS)[number];
+const MIRROR_ABSENT_REASONS = ["no-origin", "not-created", "clone-failed", "clone-timeout", "mirror-dir-unusable", "mirror-unmatched"] as const;
+type MirrorAbsentReason = (typeof MIRROR_ABSENT_REASONS)[number];
 
 /**
  * - `fetched`: the mirror was created or updated by this run.
@@ -46,7 +46,7 @@ export type MirrorState =
 	| { status: "stale"; mirrorDir: string; reason: MirrorStaleReason }
 	| { status: "absent"; reason: MirrorAbsentReason };
 
-export interface MirrorOptions {
+interface MirrorOptions {
 	/** False reads an existing mirror as it is and never touches the network (no clone, no fetch). */
 	fetch: boolean;
 	cloneTimeoutMs?: number | undefined;

@@ -12,7 +12,7 @@
  */
 import { isAbsolute, resolve } from "node:path";
 
-export type EnvLike = Record<string, string | undefined>;
+type EnvLike = Record<string, string | undefined>;
 
 export const DEFAULT_MIN_FREE_GB = 5;
 export const DEFAULT_IDLE_DAYS = 14;

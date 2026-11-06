@@ -58,7 +58,7 @@ export interface Collection {
 	repo: string;
 }
 
-export interface CollapseRecord {
+interface CollapseRecord {
 	kind: "worktree" | "clone";
 	/** The directory that was folded away. */
 	dir: string;
@@ -68,13 +68,13 @@ export interface CollapseRecord {
 }
 
 /** One repository label that several directories under the selected roots yield. */
-export interface DuplicateLabel {
+interface DuplicateLabel {
 	repo: string;
 	/** Every directory that yields the label (checkouts and copy collections), in root order. */
 	dirs: string[];
 }
 
-export interface DiscoverOptions {
+interface DiscoverOptions {
 	/** How many directory levels below a root are searched for `.git`. Default 3. */
 	depth?: number | undefined;
 	run?: GitRunner | undefined;
@@ -82,7 +82,7 @@ export interface DiscoverOptions {
 	env?: Record<string, string | undefined> | undefined;
 }
 
-export interface DiscoverResult {
+interface DiscoverResult {
 	/** The canonical checkouts, sorted by repo then directory. */
 	checkouts: Checkout[];
 	/** Copy collections to scan by walking, sorted by directory. */
@@ -104,7 +104,7 @@ export function directoryLabel(dir: string): string {
 	return parent === "" ? basename(dir) : `${parent}/${basename(dir)}`;
 }
 
-export const DEFAULT_DISCOVER_DEPTH = 3;
+const DEFAULT_DISCOVER_DEPTH = 3;
 
 const GITHUB_NAME = /^[A-Za-z0-9_.-]+$/;
 

@@ -22,7 +22,7 @@ export interface ForecastWorktree {
 	base: string | null;
 }
 
-export type PairPrediction = "clean" | "conflict" | "unavailable" | "error";
+type PairPrediction = "clean" | "conflict" | "unavailable" | "error";
 
 export interface OverlapPair {
 	a: string;
@@ -35,26 +35,26 @@ export interface OverlapPair {
 	detail: string | null;
 }
 
-export interface ForecastEntry extends ForecastWorktree {
+interface ForecastEntry extends ForecastWorktree {
 	files: string[];
 	notes: string[];
 }
 
-export interface MergeStep {
+interface MergeStep {
 	position: number;
 	path: string;
 	changed_files: number;
 	overlaps_with: string[];
 }
 
-export interface RebaseNeed {
+interface RebaseNeed {
 	/** The worktree that merges later and must rebase onto the earlier one's result. */
 	path: string;
 	after: string;
 	files: string[];
 }
 
-export interface MergeOrder {
+interface MergeOrder {
 	order: MergeStep[];
 	rebase: RebaseNeed[];
 }
@@ -68,14 +68,14 @@ export interface ConflictForecast extends MergeOrder {
 	notes: string[];
 }
 
-export interface ForecastOptions {
+interface ForecastOptions {
 	git: GitRunner;
 	/** Pairs predicted before the rest are reported `unavailable`. Default 300. */
 	maxPairs?: number;
 	concurrency?: number;
 }
 
-export const MIN_MERGE_TREE_VERSION: readonly [number, number] = [2, 38];
+const MIN_MERGE_TREE_VERSION: readonly [number, number] = [2, 38];
 const DEFAULT_MAX_PAIRS = 300;
 const DEFAULT_CONCURRENCY = 4;
 

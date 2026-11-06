@@ -29,7 +29,7 @@ export const CORPUS_LEAF_DOMAIN = "substrate:corpus:leaf:v1";
 export const CORPUS_EMPTY_ROOT = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /** How many leading hex characters of a root the short form carries (what a `docs_search` reply names). */
-export const CORPUS_SHORT_ROOT_LENGTH = 12;
+const CORPUS_SHORT_ROOT_LENGTH = 12;
 
 /** The most sibling hashes a proof may carry (the depth of a tree of 2^64 leaves); the CLI refuses a proof file with a longer path. */
 export const MAX_PROOF_PATH_LENGTH = 64;
@@ -43,7 +43,7 @@ export function isSha256Hex(value: unknown): value is string {
 }
 
 /** Why a triple has no leaf, or null when it has one. Closed. */
-export type LeafRefusal = "bad-sha256" | "bad-text";
+type LeafRefusal = "bad-sha256" | "bad-text";
 
 /**
  * Whether `(repo, path, sha256)` can be encoded: the hash is 64 lowercase hex and the two names are well-formed Unicode. A

@@ -23,32 +23,20 @@ export {
 	WorktreeBusyError,
 	WorktreeSnapshotError,
 } from "./errors.ts";
-export { type PlanRestoreParams, planRestore } from "./plan.ts";
-export { acquireWorktreeLockWithin, CHECKPOINT_LOCK_FILE, type LockWait, type WorktreeLock } from "./lock.ts";
-export {
-	DEFAULT_EXCLUDE_DIRS,
-	DEFAULT_EXCLUDE_GLOBS,
-	DEFAULT_IGNORED_ALLOWLIST,
-	DEFAULT_MAX_FILE_BYTES,
-	DEFAULT_SECRET_PATTERNS,
-	resolvePolicy,
-} from "./policy.ts";
-export { type RecoverParams, type RestoreParams, recoverRestore, restore } from "./restore.ts";
-export type { GitOptions, RepoContext, RunOptions, RunResult, Runner } from "./runner.ts";
+export { planRestore } from "./plan.ts";
+export { acquireWorktreeLockWithin, CHECKPOINT_LOCK_FILE, type LockWait } from "./lock.ts";
+export { DEFAULT_SECRET_PATTERNS, resolvePolicy } from "./policy.ts";
+export { recoverRestore, restore } from "./restore.ts";
+export type { RepoContext, Runner } from "./runner.ts";
 export { spawnRunner } from "./runner.ts";
 export type { PinnedCheckpoint } from "./pin.ts";
 export { MAX_METADATA_BYTES, MAX_SKIPPED_BYTES, MAX_SKIPPED_ENTRIES, METADATA_TRAILER } from "./pin.ts";
 export {
-	type ListPinnedParams,
 	listPinned,
-	type PinParams,
 	pinSnapshot,
-	type ReadPinnedParams,
 	readPinnedSkipped,
 	readPinnedSnapshot,
-	type SameTreeParams,
 	sameTreeIgnoringSkipped,
-	type SnapshotParams,
 	snapshot,
 } from "./snapshot.ts";
 export { manifestOf } from "./tree.ts";
@@ -70,5 +58,4 @@ export type {
 	SnapshotEntry,
 	SnapshotPolicy,
 	WriteOperation,
-	DeleteOperation,
 } from "./types.ts";

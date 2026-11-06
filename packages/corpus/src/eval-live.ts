@@ -11,11 +11,11 @@ import { isRecord } from "./guards.ts";
 import { resultOf, type GoldenQuery, type QueryResult } from "./eval.ts";
 
 /** The route the live run asks. */
-export const LIVE_SEARCH_PATH = "/docs/search";
+const LIVE_SEARCH_PATH = "/docs/search";
 /** The dataset the corpus atlas ingests into. */
 export const LIVE_DEFAULT_DATASET = "corpus";
 /** One question's deadline. */
-export const LIVE_QUESTION_TIMEOUT_MS = 10_000;
+const LIVE_QUESTION_TIMEOUT_MS = 10_000;
 /** The whole run's deadline. */
 export const LIVE_RUN_DEADLINE_MS = 600_000;
 /** This many failures in a row end the run: the server, the token or the route is the problem, not the questions. */
@@ -92,7 +92,7 @@ export function documentKeyOfUrl(url: string): string | null {
  * corpus, so such a result still stands in front of the ones behind it; dropping it would let a document in sixth place read as
  * fourth.
  */
-export type SearchReply = { kind: "ranked"; keys: (string | null)[] } | { kind: "degraded" } | { kind: "invalid" };
+type SearchReply = { kind: "ranked"; keys: (string | null)[] } | { kind: "degraded" } | { kind: "invalid" };
 
 /**
  * The rank slots of a `POST /docs/search` answer in order (see {@link SearchReply}), or `degraded`, or `invalid` when the body is

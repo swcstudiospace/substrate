@@ -64,7 +64,7 @@ export type WriteOperation = {
 	previousMode?: EntryMode;
 };
 
-export type DeleteOperation = { op: "delete"; path: string; previousMode: EntryMode };
+type DeleteOperation = { op: "delete"; path: string; previousMode: EntryMode };
 
 export type RestoreOperation = WriteOperation | DeleteOperation;
 

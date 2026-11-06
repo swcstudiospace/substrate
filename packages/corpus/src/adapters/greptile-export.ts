@@ -24,11 +24,11 @@ import {
 import { entrySupersededBy } from "../supersession.ts";
 
 /** The tier of every Greptile knowledge-base document. */
-export const GREPTILE_TIER: DocTier = 2;
+const GREPTILE_TIER: DocTier = 2;
 
 const OWNER_OR_REPO = /^[A-Za-z0-9_.-]+$/;
 
-export interface GreptileScanOptions {
+interface GreptileScanOptions {
 	maxTier?: DocTier | undefined;
 	maxBytes?: number | undefined;
 	/** Only the first `maxRepos` repositories (sorted by `owner/repo`) are read. Default: all. */

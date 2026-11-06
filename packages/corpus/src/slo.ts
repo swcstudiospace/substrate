@@ -25,7 +25,7 @@ export interface SloReadings {
 	syncLagS?: number | null;
 }
 
-export const SLO_BREACHES = ["freshness", "recall5", "ingest", "sync"] as const;
+const SLO_BREACHES = ["freshness", "recall5", "ingest", "sync"] as const;
 export type SloBreach = (typeof SLO_BREACHES)[number];
 
 /** A whole number of 1 or more, rounded down; anything else is `undefined`. */
