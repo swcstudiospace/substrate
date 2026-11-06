@@ -19,10 +19,10 @@ import type { SteeringInbox, SteeringRecord } from "./steering.ts";
 /** Waiters one session may hold at once. */
 export const STEERING_WAIT_PER_SESSION_MAX = 4;
 /** Waiters the whole process may hold at once. */
-export const STEERING_WAIT_TOTAL_MAX = 256;
+const STEERING_WAIT_TOTAL_MAX = 256;
 
 /** A queued record: the shape a waiter is woken with. */
-export type QueuedSteeringRecord = Extract<SteeringRecord, { state: "queued" }>;
+type QueuedSteeringRecord = Extract<SteeringRecord, { state: "queued" }>;
 
 /** A queued directive with its delivery sequence in its target session: what a wait hands back. */
 export interface QueuedDelivery {
@@ -72,7 +72,7 @@ interface Waiter {
 	finish: (result: SteeringWaitResult) => void;
 }
 
-export interface SteeringWaitersDeps {
+interface SteeringWaitersDeps {
 	timers?: SteeringWaitTimers;
 	/** Test seams; default to {@link STEERING_WAIT_PER_SESSION_MAX} and {@link STEERING_WAIT_TOTAL_MAX}. */
 	perSessionMax?: number;

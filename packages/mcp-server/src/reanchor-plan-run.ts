@@ -86,7 +86,7 @@ export class ReanchorUsageError extends Error {
 	override name = "ReanchorUsageError";
 }
 
-export interface ReanchorArgs {
+interface ReanchorArgs {
 	json: boolean;
 	/** Epoch ms of a whole UTC hour, or null for the default. */
 	sinceMs: number | null;
@@ -152,7 +152,7 @@ export function parseReanchorArgs(argv: readonly string[]): ReanchorArgs {
 	};
 }
 
-export interface ReanchorWindow {
+interface ReanchorWindow {
 	sinceMs: number;
 	/** Exclusive. */
 	untilMs: number;
@@ -202,7 +202,7 @@ export interface ReanchorRunContext {
 	expectedGenesis: string;
 }
 
-export interface ReanchorRunDeps {
+interface ReanchorRunDeps {
 	/** Epoch ms; read once per run. */
 	now(): number;
 	open(): Promise<ReanchorRunContext | { refused: string }>;
@@ -489,7 +489,7 @@ const RPC_TIMEOUT_MS = 10_000;
 const RPC_ATTEMPTS = 2;
 const RPC_BACKOFF_MS = 1_000;
 
-export interface RealContextOptions {
+interface RealContextOptions {
 	/** The environment to read; `process.env` by default. */
 	env?: Record<string, string | undefined>;
 	fetchImpl?: typeof fetch;

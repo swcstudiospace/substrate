@@ -49,7 +49,7 @@ const MAX_PATH_CHARS = 1_024;
 const MAX_ROOT_CHARS = 4_096;
 
 /** A worktree key is a file name: no separator, no leading dot. The observer's session id (`wt-` and a hex digest) satisfies it. */
-export const WORKTREE_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const WORKTREE_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 const BASELINE_SUFFIX = ".baseline.json";
 
@@ -59,7 +59,7 @@ export interface StoredBaseline {
 	snapshot: PlanningSnapshot;
 }
 
-export type BaselineUnusableReason = "oversized" | "not-a-file" | "not-utf8" | "not-json" | "bad-shape" | "key-mismatch" | "duplicate-path" | "unreadable";
+type BaselineUnusableReason = "oversized" | "not-a-file" | "not-utf8" | "not-json" | "bad-shape" | "key-mismatch" | "duplicate-path" | "unreadable";
 
 export type BaselineLoad =
 	| { state: "none" }
@@ -74,7 +74,7 @@ export interface BaselineStore {
 	save(worktreeKey: string, baseline: StoredBaseline): Promise<void>;
 }
 
-export type BaselineStoreErrorCode = "invalid-key" | "too-large" | "write-failed";
+type BaselineStoreErrorCode = "invalid-key" | "too-large" | "write-failed";
 
 export class BaselineStoreError extends Error {
 	constructor(
@@ -101,7 +101,7 @@ const BaselineFileSchema = z
 	.strict();
 
 /** The file operations a save uses that a test replaces to fail one step. Production uses the real ones. */
-export interface BaselineFileOps {
+interface BaselineFileOps {
 	rename: typeof renameFile;
 }
 

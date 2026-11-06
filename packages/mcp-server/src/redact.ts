@@ -428,10 +428,10 @@ export const SKILL_HIGH_CONFIDENCE_RULES: readonly SkillRedactionRule[] = [
 ];
 /** The only high-confidence rules a caller may downgrade from finding to redaction. */
 export type SkillDocExampleRule = "pem" | "jwt";
-export interface SkillRedactionOptions {
+interface SkillRedactionOptions {
 	allowDocExamples?: ReadonlySet<SkillDocExampleRule>;
 }
-export interface SkillRedactionHit {
+interface SkillRedactionHit {
 	line: number;
 	rule: SkillRedactionRule;
 }

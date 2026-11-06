@@ -20,7 +20,7 @@ const REPORT_ID_MAX = 128;
 /** The reasons an incomplete observation opens a gap. */
 export type WatcherGap = "scan-truncated" | "scan-unlisted";
 
-export interface ObservedScan {
+interface ObservedScan {
 	report: PlanningReport;
 	/** The gap after this scan: a new one, the one held, or null once a complete scan has cleared it. */
 	gap: WatcherGap | null;

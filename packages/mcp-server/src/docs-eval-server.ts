@@ -35,12 +35,12 @@ import type { FetchLike } from "./planes/lightrag.ts";
 import { Substrate } from "./service.ts";
 
 /** The most candidates the fake plane returns for a question. Above the server's cap of ten, so the cap is the server's. */
-export const SERVER_EVAL_CANDIDATES = 30;
+const SERVER_EVAL_CANDIDATES = 30;
 
 /** A reserved example host (RFC 2606): the fake plane is never dialled. */
 const EVAL_PLANE_URL = "http://lightrag.example.test";
 
-export interface ServerEvalOptions {
+interface ServerEvalOptions {
 	/** The plane's own ranking step, applied to the collapsed hits before they are scored and sent. The artificial regressions of the tests plug in here. */
 	rerank?: Rerank | undefined;
 }
@@ -49,7 +49,7 @@ export interface ServerEvalOptions {
  * The server's answer to a question as rank slots, best first (`null` for a result that is no corpus document). A question the plane could not answer (no document shares a
  * word with it, or the server degraded) answers nothing: a miss for the scorer, never an exception.
  */
-export type ServerEvalSearch = (question: string) => Promise<(string | null)[]>;
+type ServerEvalSearch = (question: string) => Promise<(string | null)[]>;
 
 export function createServerEvalSearch(docs: readonly EvalDocument[], options: ServerEvalOptions = {}): ServerEvalSearch {
 	const byKey = new Map(docs.map((doc) => [documentKey(doc.repo, doc.path), doc]));

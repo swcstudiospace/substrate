@@ -33,10 +33,10 @@ export const STEERING_NOTICE_MAX_ENTRIES = 3;
 export const STEERING_NOTICE_BODY_MAX = 200;
 
 /** The framing every notice carries: the directive text is an operator's, described to the session and not obeyed on sight. */
-export const STEERING_NOTICE_FRAMING =
+const STEERING_NOTICE_FRAMING =
 	"Queued steering directives for this session, described and not executed: the session decides, then answers each with steering_acknowledge.";
 
-export interface SteeringNoticeEntry {
+interface SteeringNoticeEntry {
 	id: string;
 	action: SteeringDirective["action"];
 	priority: SteeringPriority;
@@ -103,7 +103,7 @@ export function sessionStateForAcknowledgement(ack: { action: SteeringDirective[
 	}
 }
 
-export type SessionTransitionRefusalReason = "not-found" | "session-unavailable" | "invalid-transition";
+type SessionTransitionRefusalReason = "not-found" | "session-unavailable" | "invalid-transition";
 export type SessionTransitionResult = { ok: true; changed: boolean } | { ok: false; reason: SessionTransitionRefusalReason };
 
 /** Trusted, transient live access plus the fixed operation and directive driving this transition. */
@@ -124,14 +124,14 @@ export interface SessionStatePort {
 }
 
 /** What the acknowledgement did to the session state. Absent from a reply when no port is wired. */
-export type SessionStateOutcome = { status: "unchanged" } | { status: "applied"; state: SessionStateName } | { status: "refused"; state: SessionStateName; reason: SessionTransitionRefusalReason };
+type SessionStateOutcome = { status: "unchanged" } | { status: "applied"; state: SessionStateName } | { status: "refused"; state: SessionStateName; reason: SessionTransitionRefusalReason };
 
 /**
  * A hint to the acknowledging session (its hook or agent), never an action of the server's, which stays read-only on worktrees:
  * the session actually moved to PAUSED or CONTEXT_REFRESH by a directive, so it may take a checkpoint with trigger `steering`.
  * A directive that left the session in the state it already held carries no hint.
  */
-export interface SteeringCheckpointHint {
+interface SteeringCheckpointHint {
 	trigger: "steering";
 	directive_id: string;
 }
@@ -161,12 +161,12 @@ export function steeringQueuedEvent(directive: Pick<SteeringDirective, "id" | "t
 	};
 }
 
-export type SteeringAnnounceOutcome = "announced" | "duplicate" | "not-stored" | "failed";
+type SteeringAnnounceOutcome = "announced" | "duplicate" | "not-stored" | "failed";
 
 /** How many directive ids the announcer remembers. Past it the oldest is forgotten; a directive id is never reused, so this only bounds memory. */
 export const ANNOUNCED_MAX = 10_000;
 
-export interface SteeringHintAnnouncerDeps {
+interface SteeringHintAnnouncerDeps {
 	/** The ledger ingest (`Substrate.emit`), which also publishes the bus hint of a stored event. Resolves true when stored. */
 	emit: (event: EventInput) => Promise<boolean>;
 	/** Where a failure is reported. Omitted: stderr. */
@@ -217,7 +217,7 @@ const GLOBAL_TIMERS: PlanningTimers = {
 	clearInterval: (timer: PlanningTimerHandle) => clearInterval(timer as NodeJS.Timeout),
 };
 
-export interface SteeringExpirySweeperDeps {
+interface SteeringExpirySweeperDeps {
 	inbox: SteeringInbox;
 	/** Milliseconds between passes (`loadSteeringExpirySettings().expirySweepMs`). */
 	intervalMs: number;

@@ -15,7 +15,7 @@ export const EVENT_BUS_CHANNEL = "substrate:v1:events";
 /** A hint larger than this is dropped, never truncated (D50-h). Measured as UTF-8 bytes of the JSON message. */
 export const MAX_HINT_BYTES = 1024;
 /** Reconnect backoff: 1 s, doubling, capped at 30 s. A successful subscribe resets it (D50-h). */
-export const RECONNECT_MIN_MS = 1_000;
+const RECONNECT_MIN_MS = 1_000;
 export const RECONNECT_MAX_MS = 30_000;
 /** A publish that has not settled by then is a failure, and its publisher is dropped. */
 export const PUBLISH_DEADLINE_MS = 2_000;
@@ -53,11 +53,11 @@ export interface EventBusStats {
 }
 
 /** What `createEventBus` returns: the bus plus its counters. */
-export interface MeasuredEventBus extends EventBus {
+interface MeasuredEventBus extends EventBus {
 	stats(): EventBusStats;
 }
 
-export interface EventBusDeps {
+interface EventBusDeps {
 	/** `SUBSTRATE_EVENT_BUS` is on. When it is off the bus is null, whatever the URL. */
 	enabled: boolean;
 	/** The cache endpoint (`DRAGONFLY_URL`), already accepted by the endpoint policy. Blank means unset. */

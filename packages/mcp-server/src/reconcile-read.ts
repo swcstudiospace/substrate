@@ -20,31 +20,31 @@ export type IndexReader = Pick<
 >;
 
 /** A lease key's node: the pair the index is read by. The key is `graph_id/node_id`. */
-export interface LeaseNode {
+interface LeaseNode {
 	graph_id: string;
 	node_id: string;
 }
 
 /** A ledger read: its value, whether it stopped at its cap, and how many matching events it saw. */
-export interface LedgerRead<T> {
+interface LedgerRead<T> {
 	value: T;
 	truncated: boolean;
 	events: number;
 }
 
 /** A ledger lease read: the latest transition per node, and the node behind each key. */
-export interface LedgerLeaseRead extends LedgerRead<Map<string, LeaseHold>> {
+interface LedgerLeaseRead extends LedgerRead<Map<string, LeaseHold>> {
 	nodes: Map<string, LeaseNode>;
 }
 
 /** An index read: its value and whether it stopped at its cap. */
-export interface IndexRead<T> {
+interface IndexRead<T> {
 	value: T;
 	truncated: boolean;
 }
 
 /** An index lease read: each ledger node's hold (null when free), and the nodes the index currently holds. */
-export interface IndexLeaseRead extends IndexRead<Map<string, LeaseHold>> {
+interface IndexLeaseRead extends IndexRead<Map<string, LeaseHold>> {
 	nodes: Map<string, LeaseNode>;
 }
 
@@ -64,7 +64,7 @@ const LOOKUP_LIMIT = 100;
 const HOLD_BATCH = 500;
 
 /** The `graph_id/node_id` key the lease comparison uses. */
-export function leaseKey(node: LeaseNode): string {
+function leaseKey(node: LeaseNode): string {
 	return `${node.graph_id}/${node.node_id}`;
 }
 

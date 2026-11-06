@@ -33,7 +33,7 @@ export const STEERING_RATE_PER_MIN_ENV = "SUBSTRATE_PLANNING_STEERING_RATE_PER_M
 
 export const DEFAULT_STEERING_RATE_PER_MIN = 10;
 /** Inclusive bounds. Outside them the value is refused, not clamped. */
-export const STEERING_RATE_BOUNDS = { min: 1, max: 1_000 } as const;
+const STEERING_RATE_BOUNDS = { min: 1, max: 1_000 } as const;
 /** The body limit applies to the input and again after redaction. */
 export const STEERING_BODY_MAX = 4_096;
 /** One attempt plus one retry for every audit write. */
@@ -43,11 +43,11 @@ export const STEERING_ACK_TTL_ENV = "SUBSTRATE_PLANNING_STEERING_ACK_TTL_S";
 export const STEERING_EXPIRY_SWEEP_ENV = "SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S";
 
 /** A queued directive nobody acknowledged within this many seconds expires as `declined:timeout`. One day. */
-export const DEFAULT_STEERING_ACK_TTL_S = 86_400;
+const DEFAULT_STEERING_ACK_TTL_S = 86_400;
 /** Inclusive bounds, in seconds: one minute to thirty days. Outside them the value is refused, not clamped. */
 export const STEERING_ACK_TTL_BOUNDS_S = { min: 60, max: 2_592_000 } as const;
 /** How often the owner of the inbox should call {@link SteeringInbox.expireStale}, in seconds. */
-export const DEFAULT_STEERING_EXPIRY_SWEEP_S = 60;
+const DEFAULT_STEERING_EXPIRY_SWEEP_S = 60;
 export const STEERING_EXPIRY_SWEEP_BOUNDS_S = { min: 1, max: 3_600 } as const;
 /** One expiry pass closes at most this many directives, so the inbox lock is never held for an unbounded run. */
 export const STEERING_EXPIRY_BATCH = 100;
@@ -56,12 +56,12 @@ export const STEERING_EXPIRY_BATCH = 100;
 export const STEERING_IDEMPOTENCY_TTL_ENV = "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S";
 export const DEFAULT_STEERING_IDEMPOTENCY_TTL_S = 86_400;
 /** Inclusive bounds, in seconds: one minute to thirty days. Outside them the value is refused, not clamped. */
-export const STEERING_IDEMPOTENCY_TTL_BOUNDS_S = { min: 60, max: 2_592_000 } as const;
+const STEERING_IDEMPOTENCY_TTL_BOUNDS_S = { min: 60, max: 2_592_000 } as const;
 /** The most keyed queues the replay store keeps, from `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP`. At the cap the oldest is forgotten first. */
 export const STEERING_IDEMPOTENCY_CAP_ENV = "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP";
 export const DEFAULT_STEERING_IDEMPOTENCY_CAP = 10_000;
 /** Inclusive bounds. Outside them the value is refused, not clamped. */
-export const STEERING_IDEMPOTENCY_CAP_BOUNDS = { min: 1, max: 1_000_000 } as const;
+const STEERING_IDEMPOTENCY_CAP_BOUNDS = { min: 1, max: 1_000_000 } as const;
 
 const RATE_WINDOW_MS = 60_000;
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -80,7 +80,7 @@ export type SteeringPriority = (typeof STEERING_PRIORITIES)[number];
 export type SteeringOutcome = (typeof STEERING_OUTCOMES)[number];
 
 /** Why a system closed a directive. A human acknowledgement carries no reason. */
-export const STEERING_ACK_REASONS = ["timeout"] as const;
+const STEERING_ACK_REASONS = ["timeout"] as const;
 export type SteeringAckReason = (typeof STEERING_ACK_REASONS)[number];
 
 const PRIORITY_RANK: Record<SteeringPriority, number> = { high: 0, normal: 1, low: 2 };
@@ -117,7 +117,7 @@ export const SteeringDirectiveSchema = z
 
 export type SteeringDirective = z.infer<typeof SteeringDirectiveSchema>;
 
-export const SteeringAcknowledgementSchema = z
+const SteeringAcknowledgementSchema = z
 	.object({
 		directiveId: z.string().regex(DIRECTIVE_ID_RE),
 		sessionId: z.string().regex(SESSION_ID_RE),
@@ -126,10 +126,10 @@ export const SteeringAcknowledgementSchema = z
 	})
 	.strict();
 
-export type SteeringAcknowledgement = z.infer<typeof SteeringAcknowledgementSchema>;
+type SteeringAcknowledgement = z.infer<typeof SteeringAcknowledgementSchema>;
 
 /** The stored form of an acknowledgement, as the audit log holds it. A human acknowledgement has no `reason`. */
-export const SteeringStoredAcknowledgementSchema = z
+const SteeringStoredAcknowledgementSchema = z
 	.object({
 		atMs: z.number().int().nonnegative(),
 		outcome: z.enum(STEERING_OUTCOMES),
@@ -148,7 +148,7 @@ const SteeringRestoreEntrySchema = z
 	})
 	.strict();
 
-export type SteeringStoredAcknowledgement = z.infer<typeof SteeringStoredAcknowledgementSchema>;
+type SteeringStoredAcknowledgement = z.infer<typeof SteeringStoredAcknowledgementSchema>;
 
 export type SteeringRecord =
 	| { state: "queued"; directive: SteeringDirective; queuedAtMs: number }
@@ -208,7 +208,7 @@ export interface SteeringClock {
 	nowMs(): number;
 }
 
-export interface SteeringPolicy {
+interface SteeringPolicy {
 	/** Principal ids allowed to author directives. Empty refuses everyone. */
 	allowlist: readonly string[];
 	/** Directives per minute per target session. */
@@ -220,7 +220,7 @@ export interface SteeringPolicy {
 	ackTtlMs?: number;
 }
 
-export interface SteeringInboxDeps {
+interface SteeringInboxDeps {
 	history: SteeringHistorySink;
 	clock: SteeringClock;
 	policy: SteeringPolicy;
@@ -246,12 +246,12 @@ export type SteeringError =
 	| { code: "audit-unavailable"; attempts: number; lastErrorCode: string }
 	| { code: SimpleSteeringCode };
 
-export type SteeringResult<T> = { ok: true; value: T } | { ok: false; error: SteeringError };
+type SteeringResult<T> = { ok: true; value: T } | { ok: false; error: SteeringError };
 
-export type SteeringRestoreSkipCode = "invalid-entry" | "agent-author-refused";
+type SteeringRestoreSkipCode = "invalid-entry" | "agent-author-refused";
 
 /** An entry `restore` did not load. `issues` are field paths only: a value, and so a secret, is never echoed. */
-export interface SteeringRestoreSkip {
+interface SteeringRestoreSkip {
 	index: number;
 	/** The entry's directive id when it has a well-formed one, else null. */
 	directiveId: string | null;
@@ -267,7 +267,7 @@ export interface SteeringRestoreReport {
 	skipped: SteeringRestoreSkip[];
 }
 
-export interface SteeringExpiryFailure {
+interface SteeringExpiryFailure {
 	directiveId: string;
 	/** The audit failure's code. `AUDIT_CONFLICT` means the key holds a different acknowledgement that could not be read back. */
 	lastErrorCode: string;
@@ -365,7 +365,7 @@ function fingerprintOf(directive: SteeringDirective): string {
 	return createHash("sha256").update(JSON.stringify([directive.action, directive.priority, directive.targetSessionId, directive.body, directive.planRef ?? null, directive.conflictsWithActivePlan])).digest("hex");
 }
 /** What a queue returns: the record, and whether the call replayed an earlier keyed queue. A replay wrote nothing, so it announces nothing. */
-export interface SteeringReceipt {
+interface SteeringReceipt {
 	record: SteeringRecord;
 	replayed: boolean;
 }
@@ -805,7 +805,7 @@ export class SteeringInbox {
 	}
 }
 
-export type SteeringConfigReason = "not-boolean" | "not-integer" | "out-of-range" | "invalid-principal" | "empty-principal";
+type SteeringConfigReason = "not-boolean" | "not-integer" | "out-of-range" | "invalid-principal" | "empty-principal";
 
 export interface SteeringConfigError {
 	key: string;
@@ -815,7 +815,7 @@ export interface SteeringConfigError {
 	max?: number;
 }
 
-export interface SteeringSettings extends SteeringPolicy {
+interface SteeringSettings extends SteeringPolicy {
 	/** The enable flag. Default off. Nothing in this module reads it; wiring does. */
 	enabled: boolean;
 }
@@ -837,7 +837,7 @@ export function loadSteeringSettings(env: Readonly<Record<string, string | undef
 	return { ok: true, settings: { enabled, allowlist, ratePerMin } };
 }
 
-export interface SteeringExpirySettings {
+interface SteeringExpirySettings {
 	/** Milliseconds a directive may stay queued before it expires as `declined:timeout`. */
 	ackTtlMs: number;
 	/** Milliseconds between {@link SteeringInbox.expireStale} passes, for the process that owns the timer. */
@@ -860,7 +860,7 @@ export function loadSteeringExpirySettings(env: Readonly<Record<string, string |
 }
 
 /** The keyed-queue replay retention and capacity the inbox runs with. */
-export interface SteeringIdempotencySettings {
+interface SteeringIdempotencySettings {
 	/** Milliseconds a keyed queue replays after it was queued. */
 	ttlMs: number;
 	/** The most keyed queues the store keeps. */

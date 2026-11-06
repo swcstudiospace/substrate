@@ -30,7 +30,7 @@ import {
 } from "./types.ts";
 
 /** The state of one service row. Pure. */
-export function serviceState(reading: ServiceReading): FabricState {
+function serviceState(reading: ServiceReading): FabricState {
 	if (!reading.configured) return "unconfigured";
 	if (reading.held) return "degraded";
 	if (reading.breaker === "open" || reading.answered !== true) return "unavailable";
@@ -49,7 +49,7 @@ export function configuredEndpointClasses(facts: FabricFacts): EndpointClass[] {
 }
 
 /** The Tailscale layer: the phase-48 endpoint classes, worst first. Pure. */
-export function proxyRow(facts: FabricFacts): FabricResourceStatus {
+function proxyRow(facts: FabricFacts): FabricResourceStatus {
 	const classes = configuredEndpointClasses(facts);
 	if (classes.length === 0) {
 		return {

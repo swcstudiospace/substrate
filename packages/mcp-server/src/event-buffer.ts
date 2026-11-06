@@ -44,7 +44,7 @@ export function eventBufferBackoffMs(attempt: number, baseMs: number, capMs: num
 }
 
 /** One buffered event. `event` is final: its hash covers the `prev` it was queued onto. */
-export const StoredEntry = z.object({
+const StoredEntry = z.object({
 	event: StoredEvent,
 	/** The `SUBSTRATE_EVENT_IDEMPOTENCY` key the caller sent, or null. */
 	key: z.string().nullable(),
@@ -79,7 +79,7 @@ export interface EventBufferStats {
 	pending: number;
 }
 
-export interface EventBufferOptions {
+interface EventBufferOptions {
 	/** JSONL file; null keeps the buffer in memory. */
 	path?: string | null;
 	max?: number;

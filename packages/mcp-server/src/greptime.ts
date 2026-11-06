@@ -75,7 +75,7 @@ export function sqlOp(statement: string): "select" | "insert" | "show" | "create
 	return verb === "select" || verb === "insert" || verb === "show" || verb === "create" || verb === "alter" ? verb : "other";
 }
 
-export interface GreptimeClientOptions {
+interface GreptimeClientOptions {
 	timeoutMs?: number;
 	clock?: () => number;
 	/** The ledger's plane gate; null runs every call unwrapped, as before breakers existed. */
@@ -149,7 +149,7 @@ export const EVENT_COLUMNS = [
 ] as const satisfies ReadonlyArray<keyof SubstrateEvent>;
 
 /** `"ts", "id", …` — the column list as SQL, quoted because Greptime reserves `id`. */
-export const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).join(", ");
+const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).join(", ");
 
 /**
  * Columns a caller may narrow a ledger read by.
@@ -159,7 +159,7 @@ export const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).jo
  * reach another table or add a clause of its own. What a caller supplies is only
  * ever a *value*, and every value goes through {@link quote}.
  */
-export const QUERYABLE_COLUMNS = [
+const QUERYABLE_COLUMNS = [
 	"session_id",
 	"graph_id",
 	"node_id",
@@ -244,7 +244,7 @@ export interface LedgerProbe {
 }
 
 /** One table's share of the ledger, from `information_schema.region_statistics`. */
-export interface LedgerTableCapacity {
+interface LedgerTableCapacity {
 	name: string;
 	rows: number;
 	diskBytes: number;
@@ -260,8 +260,8 @@ export interface LedgerCapacity {
 }
 
 /** Tables whose TTL `SUBSTRATE_LEDGER_TTL` governs — the two the retention policy names, and only these. */
-export const TTL_TABLES = ["agent_events", "event_ingest"] as const;
-export type TtlTable = (typeof TTL_TABLES)[number];
+const TTL_TABLES = ["agent_events", "event_ingest"] as const;
+type TtlTable = (typeof TTL_TABLES)[number];
 
 /**
  * Upper bound on the ids one batched hour-read statement carries.
@@ -562,7 +562,7 @@ function parseAnchorRow(row: Record<string, unknown>): AnchorRow {
  *
  * Epoch milliseconds, parsed the same way as every other TIMESTAMP cell.
  */
-export interface GraphIngestRecord {
+interface GraphIngestRecord {
 	event_id: string;
 	event_ts: number;
 	ingested_at: number;
@@ -575,7 +575,7 @@ export interface GraphIngestRecord {
  * gaps are `substrate verify`'s `unanchored`, and a coverage read must stay
  * one bounded statement rather than a scan of the whole ingest history.
  */
-export const COVERAGE_LOOKBACK_MS = 7 * 24 * HOUR_MS;
+const COVERAGE_LOOKBACK_MS = 7 * 24 * HOUR_MS;
 
 /** Uncovered hours one coverage report lists; beyond this `more` is set and the oldest are dropped. */
 export const COVERAGE_MAX_UNCOVERED = 48;
@@ -586,7 +586,7 @@ export const COVERAGE_MAX_UNCOVERED = 48;
  * hourly anchor timer has had its tick. The steady-state lag is therefore 1,
  * never 0 — the current hour cannot be anchored yet.
  */
-export const COVERAGE_ELIGIBLE_AGE_MS = HOUR_MS;
+const COVERAGE_ELIGIBLE_AGE_MS = HOUR_MS;
 
 /**
  * How far back `anchorCoverage` looks for the newest `ledger archive` note.
@@ -594,7 +594,7 @@ export const COVERAGE_ELIGIBLE_AGE_MS = HOUR_MS;
  * archive written before a TTL was switched on is still found; bounded, so the
  * read never scans the whole `substrate`/`note` series.
  */
-export const ARCHIVE_NOTE_LOOKBACK_MS = 400 * 24 * HOUR_MS;
+const ARCHIVE_NOTE_LOOKBACK_MS = 400 * 24 * HOUR_MS;
 
 /** The `summary` prefix every archive note carries; `anchorCoverage` reads the newest by it. */
 export const ARCHIVE_NOTE_PREFIX = "ledger archive ";
@@ -604,7 +604,7 @@ export const ARCHIVE_NOTE_PREFIX = "ledger archive ";
  * refuses to archive, see `GreptimeClient.readExportIngest`): ~100 MB of
  * entries, inside the archive unit's 512M ceiling.
  */
-export const EXPORT_INGEST_CAP = 500_000;
+const EXPORT_INGEST_CAP = 500_000;
 
 /**
  * How far before the first ingest read of an export window the fallback lookup
@@ -649,7 +649,7 @@ export interface ExportWindowQuery {
 }
 
 /** One event's first ingest record, ISO-stamped for the archive file. */
-export interface ExportIngestRow {
+interface ExportIngestRow {
 	event_id: string;
 	ingested_at: string;
 	event_ts: string;
@@ -2578,7 +2578,7 @@ export interface MetricWriteResult {
 	drops: Partial<Record<MetricDropReason, number>>;
 }
 
-export interface MetricHistoryQuery {
+interface MetricHistoryQuery {
 	series: string;
 	fromMs: number;
 	toMs: number;
@@ -2596,7 +2596,7 @@ export interface MetricHistoryPoint {
 }
 
 /** What a readback returns: the points, oldest first, and the step the read actually ran at. */
-export interface MetricHistoryResult {
+interface MetricHistoryResult {
 	points: MetricHistoryPoint[];
 	stepS: number;
 }
@@ -2605,7 +2605,7 @@ export interface MetricHistoryResult {
 export class MetricHistoryInputError extends GreptimeError {}
 
 /** The live `metric_samples` table is not in append_mode; only an operator can fix it (drop and recreate). */
-export class MetricSamplesSchemaError extends GreptimeError {}
+class MetricSamplesSchemaError extends GreptimeError {}
 
 /** The labels JSON of a row that may be stored, or `null`: outside the allow-list, or a number the column cannot hold. */
 function validMetricRow(row: MetricSampleRow): string | null {

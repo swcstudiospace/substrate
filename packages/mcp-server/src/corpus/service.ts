@@ -34,7 +34,7 @@ import type { CorpusStore, ManifestRow } from "./store.ts";
 import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type ParsedIngestRequest, type RequestRefusal } from "./validate.ts";
 
 /** Every reason a corpus door refuses: the gates, the request refusals, an index or plane or embedding service that does not answer, and the proof lookups. Closed. */
-export type CorpusRefusalReason =
+type CorpusRefusalReason =
 	| GateReason
 	| RequestRefusal
 	| "corpus.index-unavailable"
@@ -46,7 +46,7 @@ export type CorpusRefusalReason =
 	| "tombstone-out-of-scope"
 	| RepoRefusalReason;
 
-export interface CorpusRefusal {
+interface CorpusRefusal {
 	error: string;
 	reason: CorpusRefusalReason;
 	detail?: string | undefined;

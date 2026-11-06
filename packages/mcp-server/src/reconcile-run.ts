@@ -17,7 +17,7 @@ import {
 import { buildReport, compareGenerations, compareLeases, compareMemory, type Finding, type Layer, type Report } from "./reconcile.ts";
 
 /** Row caps for one run. A capped read reports `truncated`, and a truncated report is never clean. */
-export interface ReconcileCaps {
+interface ReconcileCaps {
 	/** Ledger events read per kind in the window. `queryEvents` itself stops at 500. */
 	ledgerRows: number;
 	/** Ledger lookups for held nodes the window did not see: one `queryEvents` each. Past the cap the read is truncated. */

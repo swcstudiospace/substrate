@@ -95,7 +95,7 @@ export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 export const IDEMPOTENCY_PAYLOAD_KEY = "_ik";
 
 /** A replay stamped further than this past the server's clock is refused: a client clock that far ahead is a bug, not a late replay. */
-export const REPLAY_MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
+const REPLAY_MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The closed set of rule names an idempotency refusal carries, so a client (and the replay
@@ -103,7 +103,7 @@ export const REPLAY_MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
  * value: an invalid key is arbitrary text.
  */
 export const IDEMPOTENCY_RULES = ["idempotency_key_type", "idempotency_key_format", "replay_ts_missing", "replay_ts_future"] as const;
-export type IdempotencyRule = (typeof IDEMPOTENCY_RULES)[number];
+type IdempotencyRule = (typeof IDEMPOTENCY_RULES)[number];
 
 /** A 400 on the idempotency rules. Still an `InvalidEventError`, so every existing 400 path handles it. */
 export class IdempotencyRefusal extends InvalidEventError {
@@ -157,7 +157,7 @@ export function checkReplayTs(ts: unknown, now: number, keyed: boolean): void {
 }
 
 /** What `normalizeEvent` needs when the idempotency mode is not `off`: the validated key, or `null` for none. */
-export interface EventIdempotency {
+interface EventIdempotency {
 	key: string | null;
 }
 
@@ -243,7 +243,7 @@ const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF
 /**
  * A graph id with a lone UTF-16 surrogate, refused on write. The message names the code unit, so the refusal says which surrogate it is.
  */
-export class GraphIdLoneSurrogateError extends InvalidEventError {
+class GraphIdLoneSurrogateError extends InvalidEventError {
 	constructor(readonly codeUnit: number) {
 		super(`graph_id_lone_surrogate: a graph id may not contain a lone UTF-16 surrogate; found U+${codeUnit.toString(16).toUpperCase()}`);
 	}
@@ -253,7 +253,7 @@ export class GraphIdLoneSurrogateError extends InvalidEventError {
  * A lone UTF-16 surrogate in a write text field other than the graph id, refused by name: the field and the code unit. Same reason as
  * GraphIdLoneSurrogateError, and the message says which field it was.
  */
-export class FieldLoneSurrogateError extends InvalidEventError {
+class FieldLoneSurrogateError extends InvalidEventError {
 	constructor(readonly field: string, readonly codeUnit: number) {
 		super(
 			`${field}_lone_surrogate: ${field} may not contain a lone UTF-16 surrogate; found U+${codeUnit.toString(16).toUpperCase()}`,
@@ -270,7 +270,7 @@ export function repoTooLongMessage(units: number): string {
 }
 
 /** A repo over {@link MAX_REPO} code units, refused on write, by name, with its length. */
-export class RepoTooLongError extends InvalidEventError {
+class RepoTooLongError extends InvalidEventError {
 	constructor(readonly units: number) {
 		super(repoTooLongMessage(units));
 	}
@@ -526,7 +526,7 @@ export function chainLeafCommitment(eventId: string, hash: string): string {
  * seq, an event id that is not a non-empty string, a hash that is not 64 lowercase hex, or seqs that are not 0 … n-1 make the
  * stored chain invalid: null.
  */
-export function orderedLeaves(leaves: readonly StoredLeaf[]): StoredLeaf[] | null {
+function orderedLeaves(leaves: readonly StoredLeaf[]): StoredLeaf[] | null {
 	const bySeq = new Map<number, StoredLeaf>();
 	for (const leaf of leaves) {
 		if (typeof leaf.event_id !== "string" || leaf.event_id === "") return null;
@@ -572,7 +572,7 @@ export function headRecordsFromLeaves(leaves: readonly StoredLeaf[], periodStart
 }
 
 /** Where one (graph, session) pair's chain stands against its anchored leaves (D73-03). */
-export type HeadComparison =
+type HeadComparison =
 	| { ok: true }
 	| { ok: false; kind: "stored-leaves-mismatch"; reason: string }
 	| { ok: false; kind: "first-differing"; eventId: string }
@@ -661,7 +661,7 @@ export interface SteeringSession {
 }
 
 /** Whether `next` may follow `current`. Unknown states never transition. */
-export function steeringStateTransition(current: SteeringSessionState, next: SteeringSessionState): boolean {
+function steeringStateTransition(current: SteeringSessionState, next: SteeringSessionState): boolean {
 	if (current === next) return true;
 	switch (current) {
 		case "ACTIVE":
@@ -758,10 +758,10 @@ export function nextSteeringSession(
  * one observable line per trigger, so the refresh is visible in the log
  * — or in a test — without running the ingest.
  */
-export const PLANNING_INGEST_ROOTS: readonly string[] = [".planning/"];
+const PLANNING_INGEST_ROOTS: readonly string[] = [".planning/"];
 
 /** What a planning change asks the docs plane to re-ingest. */
-export interface PlanningIngestTrigger {
+interface PlanningIngestTrigger {
 	triggered: boolean;
 	roots: readonly string[];
 	paths: string[];
@@ -804,7 +804,7 @@ function collectPlanningPaths(payload: Record<string, unknown>, into: string[]):
 }
 
 /** The `.planning/` paths an event's payload names, deduplicated in order. */
-export function planningPathsOf(input: Pick<EventInput, "payload">): string[] {
+function planningPathsOf(input: Pick<EventInput, "payload">): string[] {
 	const paths: string[] = [];
 	if (input.payload !== undefined) collectPlanningPaths(input.payload, paths);
 	return paths;

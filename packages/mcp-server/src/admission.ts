@@ -116,7 +116,7 @@ export interface BucketState {
 	at: number;
 }
 
-export interface BucketStep {
+interface BucketStep {
 	allowed: boolean;
 	/** Floored, as the script replies it. */
 	tokensLeft: number;
@@ -308,9 +308,9 @@ export function toolClass(tool: string): AdmissionClass {
 // ── the decision ─────────────────────────────────────────────────────────────
 
 /** Runs `BUDGET_SCRIPT` atomically on the cache plane. Production is `ReadThroughCache.script`. */
-export type ScriptRunner = (script: string, keys: readonly string[], args: readonly string[]) => Promise<ScriptOutcome>;
+type ScriptRunner = (script: string, keys: readonly string[], args: readonly string[]) => Promise<ScriptOutcome>;
 
-export interface AdmissionRequest {
+interface AdmissionRequest {
 	/** The bearer's surface; null is an accepted untokened caller. */
 	surface: Surface | null;
 	klass: AdmissionClass;
@@ -331,7 +331,7 @@ export interface AdmissionVerdict {
 	retryAfterS: number;
 }
 
-export interface AdmissionOptions {
+interface AdmissionOptions {
 	script: ScriptRunner;
 	now?: () => number;
 	/** Every decision the bucket or its absence produced. `off` records nothing. */

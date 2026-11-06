@@ -19,7 +19,7 @@ import { join } from "node:path";
 
 const GIT_TIMEOUT_MS = 3000;
 
-export interface GitTip {
+interface GitTip {
 	sha: string | null;
 	short_sha: string | null;
 	subject: string | null;

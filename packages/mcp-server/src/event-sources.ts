@@ -29,14 +29,14 @@ import type { EventInput, EventKind, Surface } from "./types.ts";
  * `substrate` (operator decision 2026-10-08), with `payload.runtime` naming
  * the job (`anchor`, `skills-sync`, `dispatcher`).
  */
-export type SurfaceRule =
+type SurfaceRule =
 	| { fixed: Surface }
 	| "herdr-agent"
 	| "caller"
 	| "memory-writer"
 	| "lease-holder";
 
-export interface EventSource {
+interface EventSource {
 	/** Stable key shared with `docs/event-vocabulary.md`. */
 	id: string;
 	/** The v1.3 phase that implements this source. */
@@ -57,7 +57,7 @@ export interface EventSource {
 }
 
 /** A source that deliberately emits nothing (a read, or a self-triggering write). */
-export interface SilentSource {
+interface SilentSource {
 	id: string;
 	phase: number;
 	/** Why it emits nothing — the trail it leaves instead. */

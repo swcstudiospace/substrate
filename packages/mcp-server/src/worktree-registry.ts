@@ -21,7 +21,7 @@ import type { SQL } from "bun";
 import { repoOverCap, repoTooLongMessage } from "./event.ts";
 
 /** The report's `protocol` member. A different value is refused, so a changed shape never half-parses. */
-export const WORKTREE_REPORT_PROTOCOL = 1;
+const WORKTREE_REPORT_PROTOCOL = 1;
 /** Most worktrees one report may carry. */
 export const WORKTREE_REPORT_MAX_ITEMS = 500;
 /** The request body cap for `POST /worktrees/report`, in bytes. The route reads under it and the CLI's report splitter packs under it (less a margin). */
@@ -48,14 +48,14 @@ export const WORKTREE_FILE_MAX_CHARS = 400;
 /** Most rows the brief's overlap section reads for one repository. */
 export const WORKTREE_BRIEF_CANDIDATES_MAX = 100;
 
-export const WORKTREE_REGISTRY_MODES = ["off", "on"] as const;
+const WORKTREE_REGISTRY_MODES = ["off", "on"] as const;
 export type WorktreeRegistryMode = (typeof WORKTREE_REGISTRY_MODES)[number];
 
-export const WORKTREE_PR_STATES = ["open", "merged", "closed", "none", "unknown"] as const;
+const WORKTREE_PR_STATES = ["open", "merged", "closed", "none", "unknown"] as const;
 export type WorktreePrState = (typeof WORKTREE_PR_STATES)[number];
 
 export const WORKTREE_LIST_STATES = ["all", "dirty", "stale"] as const;
-export type WorktreeListState = (typeof WORKTREE_LIST_STATES)[number];
+type WorktreeListState = (typeof WORKTREE_LIST_STATES)[number];
 
 /** One worktree as a reporter describes it. `session_id` and `graph_id` are present only when the reporter could attribute the worktree. */
 export interface WorktreeRecord {
@@ -306,7 +306,7 @@ export function validateWorktreeReport(body: unknown): Parsed<WorktreeReport> {
 }
 
 /** The arguments a listing accepts, as the two doors hand them over: strings from a URL, typed values from a tool call. */
-export interface RawWorktreeListQuery {
+interface RawWorktreeListQuery {
 	repo?: unknown;
 	host?: unknown;
 	state?: unknown;
@@ -342,7 +342,7 @@ export function staleCutoff(now: number, idleDays: number): Date {
 }
 
 /** Postgres adapter's way to run a call under the index plane's gate; `IndexStore` passes its own. */
-export type RunUnderGate = <T>(op: string, fn: () => Promise<T>) => Promise<T>;
+type RunUnderGate = <T>(op: string, fn: () => Promise<T>) => Promise<T>;
 
 /** The Postgres adapter. Constructed by `IndexStore.worktreeRegistry()`, over the index's own pool. */
 export class PgWorktreeRegistry implements WorktreeRegistryStore {

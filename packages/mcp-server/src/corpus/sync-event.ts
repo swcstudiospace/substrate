@@ -5,7 +5,7 @@
  */
 
 /** The action the CLI names its sync note with. */
-export const DOCS_SYNC_ACTION = "docs.sync";
+const DOCS_SYNC_ACTION = "docs.sync";
 
 /** The largest lag the gauge records, seconds: a year. A longer (or invented) value is clamped so one note cannot make the series meaningless. */
 export const SYNC_LAG_MAX_SECONDS = 31_536_000;

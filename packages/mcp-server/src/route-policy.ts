@@ -12,13 +12,13 @@
  * not declared at all.
  */
 
-export type Declaration = { kind: "repo-gated"; by: string } | { kind: "global"; reason: string };
+type Declaration = { kind: "repo-gated"; by: string } | { kind: "global"; reason: string };
 
 const GATED = (by: string): Declaration => ({ kind: "repo-gated", by });
 const GLOBAL = (reason: string): Declaration => ({ kind: "global", reason });
 
 /** REST routes, by path. The method is not part of the declaration: each path's handler gates every method it serves. */
-export const REST_ROUTE_POLICY: Readonly<Record<string, Declaration>> = {
+const REST_ROUTE_POLICY: Readonly<Record<string, Declaration>> = {
 	"/brief": GATED("scopedBriefRefusal: the named repository, and a named graph's repository, must be granted"),
 	"/memory/recall": GATED("scopedRepoRefusal: the named repository must be granted"),
 	"/session/context": GATED("scopedRepoRefusal: the named repository must be granted"),
@@ -45,7 +45,7 @@ export const REST_ROUTE_POLICY: Readonly<Record<string, Declaration>> = {
 };
 
 /** MCP tools, by registered name. Every tool not listed here is refused to a scoped caller. */
-export const MCP_TOOL_POLICY: Readonly<Record<string, Declaration>> = {
+const MCP_TOOL_POLICY: Readonly<Record<string, Declaration>> = {
 	memory_brief: GATED("scopedBriefRefusal: the named repository, and a named graph's repository, must be granted"),
 	memory_recall: GATED("scopedRepoRefusal: the named repository must be granted"),
 	memory_search: GATED("scopedRepoRefusal for a named repository; memoryReplyInGrant filters the entries before the reply (derived hits are not yet filtered, RS-07)"),

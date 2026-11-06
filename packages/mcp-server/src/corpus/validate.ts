@@ -39,7 +39,7 @@ const MAX_COMMIT_LENGTH = 100;
 const MAX_ENTRY_BYTES = 2_147_483_647;
 
 /** Why a whole request is refused. Closed: the CLI prints these and the tests pin them. */
-export const REQUEST_REFUSALS = [
+const REQUEST_REFUSALS = [
 	"bad-request",
 	"bad-protocol",
 	"too-many-entries",
@@ -66,7 +66,7 @@ export const REQUEST_REFUSALS = [
 ] as const;
 export type RequestRefusal = (typeof REQUEST_REFUSALS)[number];
 
-export type Parsed<T> = { ok: true; value: T } | { ok: false; reason: RequestRefusal; detail?: string | undefined };
+type Parsed<T> = { ok: true; value: T } | { ok: false; reason: RequestRefusal; detail?: string | undefined };
 
 function refuse(reason: RequestRefusal, detail?: string): { ok: false; reason: RequestRefusal; detail?: string | undefined } {
 	return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
@@ -100,7 +100,7 @@ export function parseEntry(raw: unknown): Parsed<CorpusEntry> {
  * well formed and each source known, de-duplicated. An empty coverage is valid: a scan with no complete read still has entries
  * worth planning, and it simply tombstones nothing.
  */
-export function parseScope(raw: unknown): Parsed<CorpusScope> {
+function parseScope(raw: unknown): Parsed<CorpusScope> {
 	if (!isRecord(raw)) return refuse("bad-scope", "scope must be an object");
 	const { coverage, maxTier } = raw;
 	if (!Array.isArray(coverage) || !isDocTier(maxTier)) return refuse("bad-scope", "scope needs coverage and maxTier");

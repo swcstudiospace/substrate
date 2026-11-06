@@ -31,7 +31,7 @@ const FLUSH_ANSWER_CLASSES: readonly CacheKeyClass[] = [
 ];
 
 /** One action a plan names. `orphans` are the generation finding keys (`gen:graph:<id>`) that justified it. */
-export interface PlanItem {
+interface PlanItem {
 	action: "flush-derived-cache";
 	match: string;
 	reason: string;

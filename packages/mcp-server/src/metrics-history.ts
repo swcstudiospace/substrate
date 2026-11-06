@@ -63,7 +63,7 @@ import { SURFACES } from "./types.ts";
 export const DROPPED_METRIC = "substrate.metrics.history.dropped";
 
 /** Why a batch (or part of one) was not stored. A closed set: it is a metric label. */
-export const METRIC_DROP_REASONS = ["breaker_open", "unavailable", "rejected", "ddl", "schema", "invalid", "capped", "internal"] as const;
+const METRIC_DROP_REASONS = ["breaker_open", "unavailable", "rejected", "ddl", "schema", "invalid", "capped", "internal"] as const;
 export type MetricDropReason = (typeof METRIC_DROP_REASONS)[number];
 
 /** Rows per `INSERT`. The sampler emits a few dozen, so this is a ceiling, not a target. */
@@ -71,9 +71,9 @@ export const MAX_METRIC_BATCH = 200;
 /** Points a readback may return, whatever the window and step. */
 export const MAX_METRIC_POINTS = 2000;
 /** Per-point baselines the delta tracker keeps; past it, further points are not sampled (stably, in snapshot order). */
-export const MAX_TRACKED_POINTS = 16_384;
+const MAX_TRACKED_POINTS = 16_384;
 
-export type SampleKind = "counter" | "gauge" | "histogram" | "ratio";
+type SampleKind = "counter" | "gauge" | "histogram" | "ratio";
 type LabelKey = "surface" | "plane" | "decision" | "outcome" | "result" | "mode";
 
 /**
@@ -82,7 +82,7 @@ type LabelKey = "surface" | "plane" | "decision" | "outcome" | "result" | "mode"
  * bucket, never an average that hides a spike), `wavg` for ratios weighted by
  * the sample count of each interval.
  */
-export type SampleAggregate = "sum" | "avg" | "max" | "wavg";
+type SampleAggregate = "sum" | "avg" | "max" | "wavg";
 
 export interface SeriesSpec {
 	/** What the registry value was: stored in the `kind` column. */
@@ -533,14 +533,14 @@ function rowsFrom(deltas: { counters: CounterDelta[]; histograms: HistogramDelta
 // ── the sampler ──────────────────────────────────────────────────────────────
 
 /** What the sampler needs from the client; `GreptimeClient.recordMetricSamples` is the production one. */
-export type RecordSamples = (rows: MetricSampleRow[]) => Promise<{ stored: number; drops: Partial<Record<MetricDropReason, number>> }>;
+type RecordSamples = (rows: MetricSampleRow[]) => Promise<{ stored: number; drops: Partial<Record<MetricDropReason, number>> }>;
 
 export interface TimerApi {
 	setInterval(handler: () => void, ms: number): { unref(): unknown };
 	clearInterval(handle: { unref(): unknown }): void;
 }
 
-export interface MetricsHistorySamplerDeps {
+interface MetricsHistorySamplerDeps {
 	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS"> & { series?: MetricsHistorySeriesMode };
 	/** The registry snapshot, as `/metrics` serves it. */
 	snapshot: () => MetricSnapshot[];
@@ -686,10 +686,10 @@ export function parseHistoryStep(raw: string): number | null {
 }
 
 /** How long an answer is served again, and how many are kept. The route scans the whole TTL window through the shared ledger gate, so it is memoised. */
-export const HISTORY_MEMO_MS = 15_000;
-export const HISTORY_MEMO_MAX = 64;
+const HISTORY_MEMO_MS = 15_000;
+const HISTORY_MEMO_MAX = 64;
 /** Reads that may run at once; each is a scan of the shared ledger, so this is the bound on the work a public route can add. */
-export const HISTORY_PENDING_MAX = 16;
+const HISTORY_PENDING_MAX = 16;
 const HISTORY_RETRY_AFTER_S = 5;
 
 /**
@@ -790,7 +790,7 @@ function metricHistoryBusy(): MetricHistoryAnswer {
 	};
 }
 
-export interface MetricHistoryDeps {
+interface MetricHistoryDeps {
 	/** `enabled` is the effective flag (switch on AND a ledger), see `loadMetricsHistorySettings`. */
 	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS" | "ttl" | "ttlDays"> & { series?: MetricsHistorySeriesMode };
 	greptime: Pick<GreptimeClient, "readMetricHistory"> | null;
@@ -799,7 +799,7 @@ export interface MetricHistoryDeps {
 	memo?: MetricHistoryMemo;
 }
 
-export interface MetricHistoryAnswer {
+interface MetricHistoryAnswer {
 	status: number;
 	body: Record<string, unknown>;
 	/** Extra response headers (`Retry-After` on a busy 503). */

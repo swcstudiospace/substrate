@@ -48,7 +48,7 @@ export interface Scheduler {
 	every(ms: number, fn: () => void): () => void;
 }
 
-export const realScheduler: Scheduler = {
+const realScheduler: Scheduler = {
 	every(ms, fn) {
 		const timer = setInterval(fn, ms);
 		timer.unref?.();
@@ -59,13 +59,13 @@ export const realScheduler: Scheduler = {
 // ── Event-loop lag ───────────────────────────────────────────────────────────
 
 /** Sampling period. 250 ms resolves a 1 s stall four times over and costs four wakeups a second. */
-export const LAG_SAMPLE_MS = 250;
+const LAG_SAMPLE_MS = 250;
 /** Default ring window: at least one default watchdog tick (WatchdogSec=30 → 10 s). */
-export const LAG_WINDOW_MS = 10_000;
+const LAG_WINDOW_MS = 10_000;
 /** Hard cap on the ring, whatever window was asked for. */
 const LAG_RING_MAX = 4096;
 
-export interface LoopLagOptions {
+interface LoopLagOptions {
 	intervalMs?: number;
 	/** The window `lagMs()` reports the worst lag over. Make it at least the slowest reader's period. */
 	windowMs?: number;
@@ -75,7 +75,7 @@ export interface LoopLagOptions {
 }
 
 /** What `Watchdog` needs from a lag source; `LoopLagMonitor` satisfies it. */
-export interface LagSource {
+interface LagSource {
 	start(): void;
 	stop(): void;
 	lagMs(): number;
@@ -134,7 +134,7 @@ export class LoopLagMonitor implements LagSource {
 
 // ── /livez ───────────────────────────────────────────────────────────────────
 
-export interface LivezBody {
+interface LivezBody {
 	ok: true;
 	uptime_s: number;
 	loop_lag_ms: number;
@@ -159,10 +159,10 @@ export function isLocalPeer(remoteAddress: string | undefined, localAddress: str
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 /** Gap between READY=1 attempts when systemd armed no watchdog (no WATCHDOG_USEC). */
-export const READY_RETRY_MS = 5000;
-export const DEFAULT_LAG_THRESHOLD_MS = 5000;
-export const DEFAULT_PROBE_TIMEOUT_MS = 2000;
-export const DEFAULT_NOTIFY_TIMEOUT_MS = 3000;
+const READY_RETRY_MS = 5000;
+const DEFAULT_LAG_THRESHOLD_MS = 5000;
+const DEFAULT_PROBE_TIMEOUT_MS = 2000;
+const DEFAULT_NOTIFY_TIMEOUT_MS = 3000;
 const MIN_PING_INTERVAL_MS = 1000;
 
 export interface WatchdogSettings {
@@ -213,7 +213,7 @@ export interface NotifyChild {
 }
 
 /** Starts `argv` with no stdio. Throws when the binary cannot be started. */
-export type SpawnNotify = (argv: readonly string[]) => NotifyChild;
+type SpawnNotify = (argv: readonly string[]) => NotifyChild;
 
 const spawnSystemdNotify: SpawnNotify = (argv) => {
 	const [command, ...args] = argv;
@@ -229,7 +229,7 @@ const spawnSystemdNotify: SpawnNotify = (argv) => {
 	};
 };
 
-export interface SystemdNotifierOptions {
+interface SystemdNotifierOptions {
 	/** Hard bound on one child; a child still running at this point is killed and counts as a failure. */
 	timeoutMs: number;
 	spawn?: SpawnNotify;
@@ -349,7 +349,7 @@ export function createLoopbackProbe(url: string, timeoutMs: number, fetchImpl: t
 
 // ── The watchdog ─────────────────────────────────────────────────────────────
 
-export interface WatchdogDeps {
+interface WatchdogDeps {
 	notify: Notifier;
 	probe: Probe;
 	lag: LagSource;
@@ -358,7 +358,7 @@ export interface WatchdogDeps {
 	log?: (line: string) => void;
 }
 
-export type TickReason =
+type TickReason =
 	| "pinged"
 	| "ready-only"
 	| "ready-failed"
@@ -368,7 +368,7 @@ export type TickReason =
 	| "busy"
 	| "stopped";
 
-export interface TickOutcome {
+interface TickOutcome {
 	reason: TickReason;
 	/** True when `WATCHDOG=1` was sent and the notifier reported success on this tick. */
 	pinged: boolean;

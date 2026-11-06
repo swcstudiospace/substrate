@@ -16,7 +16,7 @@ import { dirname } from "node:path";
 import { isGranted, locateRepoPath, realDirectoryOrNull, type RepoRefusalReason, type RepoScope, scopeRepoId } from "./repo-scope.ts";
 import type { Surface } from "./types.ts";
 
-export interface ScopedGitResult {
+interface ScopedGitResult {
 	code: number;
 	stdout: string;
 	stderr: string;
@@ -25,7 +25,7 @@ export interface ScopedGitResult {
 /** Runs one git call in `cwd` with `env` added. Injected so tests observe the call without spawning git. */
 export type ScopedGitRunner = (args: readonly string[], cwd: string, env: Record<string, string>) => ScopedGitResult;
 
-export interface ScopedGitRequest {
+interface ScopedGitRequest {
 	scope: RepoScope;
 	/** The caller's surface, or null for an anonymous caller. */
 	surface: Surface | null;
@@ -37,13 +37,13 @@ export interface ScopedGitRequest {
 }
 
 /** Where a git call runs: the resolved target, and the registered directory that contains it. */
-export interface ScopedLocation {
+interface ScopedLocation {
 	repo: string;
 	root: string;
 	target: string;
 }
 
-export type ScopedGitOutcome = ({ ok: true; result: ScopedGitResult } & ScopedLocation) | { ok: false; reason: RepoRefusalReason };
+type ScopedGitOutcome = ({ ok: true; result: ScopedGitResult } & ScopedLocation) | { ok: false; reason: RepoRefusalReason };
 
 /** The registered checkout of `repo` that exists on this host. Refused when the repository is unregistered or none of its checkouts exist. */
 function checkoutOf(scope: RepoScope, repo: string): { ok: true; location: ScopedLocation } | { ok: false; reason: RepoRefusalReason } {

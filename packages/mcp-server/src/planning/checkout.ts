@@ -7,7 +7,7 @@ import { join, resolve as resolvePath } from "node:path";
 import type { PlanningFs } from "./index.ts";
 
 /** Why a change could not be attributed to a repo. Each reason is a typed result, never an exception out of the observer. */
-export type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "origin-unresolved" | "config-unreadable" | "config-missing" | "origin-missing";
+type RepoUnknownReason = "no-git-entry" | "git-file-malformed" | "git-dir-unreadable" | "origin-unresolved" | "config-unreadable" | "config-missing" | "origin-missing";
 
 /** The session a checkout heartbeats as: stable for the path, and shaped to pass the session id rule. */
 export function planningSessionId(fs: PlanningFs, root: string): string {
@@ -21,7 +21,7 @@ async function textOf(fs: PlanningFs, path: string): Promise<string | null> {
 	return new TextDecoder().decode(await fs.readFile(path));
 }
 
-export type GitLayout = { ok: true; gitDir: string; commonDir: string } | { ok: false; reason: RepoUnknownReason };
+type GitLayout = { ok: true; gitDir: string; commonDir: string } | { ok: false; reason: RepoUnknownReason };
 
 /**
  * Where a checkout's git data lives. A `.git` directory is the git directory. A `.git` file (a linked worktree) names one
@@ -64,7 +64,7 @@ export type OriginUrlResult = { kind: "value"; url: string } | { kind: "none" } 
 export type OriginUrlRunner = (root: string) => Promise<OriginUrlResult>;
 
 /** The longest `git config` may take before the answer is `failed`. */
-export const ORIGIN_URL_TIMEOUT_MS = 3000;
+const ORIGIN_URL_TIMEOUT_MS = 3000;
 
 /** The only variables the git child sees: where to find git and the user's config, and no prompt. No repository-selecting variable (`GIT_DIR` and the like) and no secret passes. */
 const GIT_CHILD_ENV = ["PATH", "HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"];
@@ -73,10 +73,10 @@ const GIT_CHILD_ENV = ["PATH", "HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "
 export type GitRunResult = { kind: "exit"; code: number; stdout: string } | { kind: "failed" } | { kind: "unavailable" };
 
 /** Runs `git <args>` in `root`. It never throws. */
-export type GitRunner = (root: string, args: readonly string[]) => Promise<GitRunResult>;
+type GitRunner = (root: string, args: readonly string[]) => Promise<GitRunResult>;
 
 /** Runs git in `root` with a fixed argv, no shell, an allowlisted environment and a timeout. */
-export const spawnGit: GitRunner = async (root, args) => {
+const spawnGit: GitRunner = async (root, args) => {
 	const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
 	for (const name of GIT_CHILD_ENV) {
 		const value = process.env[name];

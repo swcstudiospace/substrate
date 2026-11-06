@@ -53,8 +53,8 @@ import type { MemoryExpiryMode } from "./types.ts";
 /** Statuses that mean a graph is finished — exactly Notion's `complete` status group on the Agent Task Graph. */
 export const TERMINAL_GRAPH_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"] as const;
 
-export const SWEEP_MODES = ["dry-run", "apply", "off"] as const;
-export type SweepMode = (typeof SWEEP_MODES)[number];
+const SWEEP_MODES = ["dry-run", "apply", "off"] as const;
+type SweepMode = (typeof SWEEP_MODES)[number];
 export const SWEEP_MODE_ENV = "SUBSTRATE_INDEX_SWEEP";
 
 /** Days each class waits before a row is a candidate. Every one is overridable by env. */
@@ -90,7 +90,7 @@ const MAX_DAYS = 3650;
 const MAX_BATCH = 5000;
 
 /** Env name per knob, read by {@link sweepPolicyFromEnv}. */
-export const SWEEP_POLICY_ENV = {
+const SWEEP_POLICY_ENV = {
 	derivedWritesDays: "SUBSTRATE_SWEEP_DERIVED_WRITES_DAYS",
 	explicitWritesDays: "SUBSTRATE_SWEEP_EXPLICIT_WRITES_DAYS",
 	reviewsDays: "SUBSTRATE_SWEEP_REVIEWS_DAYS",
@@ -169,7 +169,7 @@ export const SWEEP_CLASS_IDS = [
 	"entries-ttl-30d",
 	"entries-ttl-graph",
 ] as const;
-export type SweepClassId = (typeof SWEEP_CLASS_IDS)[number];
+type SweepClassId = (typeof SWEEP_CLASS_IDS)[number];
 
 /** One statement with positional `$n` parameters, for `sql.unsafe(text, params)`. */
 export interface SweepStatement {
@@ -193,7 +193,7 @@ export interface SweepStatement {
  * in one. The apply runs inside one transaction, so the locks `pick` and `lock`
  * take hold across every statement of the round.
  */
-export interface SweepBatch {
+interface SweepBatch {
 	pick: SweepStatement;
 	/** With `decide`: locks the rows `decide` decides on; its rows are `decide`'s second argument. */
 	lock?: (picked: Array<Record<string, unknown>>) => SweepStatement;
@@ -202,7 +202,7 @@ export interface SweepBatch {
 	skippedAs?: string;
 }
 
-export interface SweepClass {
+interface SweepClass {
 	id: SweepClassId;
 	/** `delete` removes candidates on apply; `report` only ever counts them. */
 	mode: "delete" | "report";
@@ -474,7 +474,7 @@ export const SWEEP_CLASSES: readonly SweepClass[] = [
 
 // ── planning and execution ──────────────────────────────────────────────────
 
-export interface SweepStep {
+interface SweepStep {
 	cls: SweepClass;
 	/** ISO instant: rows older than this are candidates. */
 	cutoff: string;
@@ -495,7 +495,7 @@ export function planSweep(policy: SweepPolicy, now: number, options: { expiry?: 
 	});
 }
 
-export interface SweepClassReport {
+interface SweepClassReport {
 	id: SweepClassId;
 	mode: "delete" | "report";
 	days: number;
@@ -517,7 +517,7 @@ export interface SweepReport {
 }
 
 /** Runs one statement and returns its rows. `IndexStore` binds this to `sql.unsafe`, tests to a fake. */
-export type SweepRunner = (statement: SweepStatement) => Promise<Array<Record<string, unknown>>>;
+type SweepRunner = (statement: SweepStatement) => Promise<Array<Record<string, unknown>>>;
 
 function int(value: unknown): number {
 	const n = Number(value ?? 0);
@@ -651,7 +651,7 @@ export function memoryLifecycleQuery(policy: SweepPolicy, now: number): SweepSta
 	return { text, params: [cutoff30, cutoffGraph, TERMINAL, policy.batch] };
 }
 
-export interface MemoryLifecyclePrintedRow {
+interface MemoryLifecyclePrintedRow {
 	id: string;
 	ttl: string;
 	writer: string;
@@ -659,7 +659,7 @@ export interface MemoryLifecyclePrintedRow {
 	document_id: string;
 }
 
-export interface MemoryLifecycleReport {
+interface MemoryLifecycleReport {
 	memoryLifecycle: "report";
 	batch: number;
 	counts: { "30d": number; graph: number };

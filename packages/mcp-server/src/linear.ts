@@ -22,7 +22,7 @@ export const LINEAR_API_URL = "https://api.linear.app/graphql";
 
 export class LinearError extends Error {}
 
-export interface LinearState {
+interface LinearState {
 	id: string;
 	name: string;
 	type: string;
@@ -87,7 +87,7 @@ interface LabelQueryResult {
 }
 
 /** An issue as `issueRelations` reads it: its UUID, identifier, and the relations it is the source of. */
-export interface IssueRelations {
+interface IssueRelations {
 	id: string;
 	identifier: string;
 	relations: Array<{ type: string; relatedIssueId: string }>;

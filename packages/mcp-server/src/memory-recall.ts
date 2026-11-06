@@ -165,7 +165,7 @@ export interface BankAnswer {
 }
 
 /** Options a fan-out adds to the caller's visibility. Both are optional. */
-export interface FanOutOptions {
+interface FanOutOptions {
 	/** Keeps a hit only when true. A dropped hit never counts against its bank's cap, and cannot hide a copy of the same text on another bank. */
 	keep?: (hit: RecallHit) => boolean;
 	/** Called once per bank as its answer settles, so a caller that stops waiting still holds the banks that answered. */
@@ -186,7 +186,7 @@ export interface FanOutOptions {
  * caller may not see is dropped inside its bank, before the bank's cap counts it.
  * A bank that fails or misses the budget answers with `failure`; nothing throws.
  */
-export async function recallAcrossBanks(
+async function recallAcrossBanks(
 	config: HindsightConfig,
 	banks: readonly string[],
 	query: string,
@@ -333,7 +333,7 @@ export async function recallMemories(
 }
 
 /** What the brief's recall read takes from one fan-out: the banks that answered and their hits. */
-export interface BriefFanout {
+interface BriefFanout {
 	/** The banks that answered, in the order they were asked. */
 	answered: string[];
 	/** The answering banks' hits, best first, derived as `memory_recall` derives them. */

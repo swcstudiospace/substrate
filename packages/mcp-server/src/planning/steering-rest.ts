@@ -22,7 +22,7 @@ export const STEERING_SESSIONS_LIMIT_DEFAULT = 50;
 
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export type RestParse<T> = { ok: true; value: T } | { ok: false; error: string };
+type RestParse<T> = { ok: true; value: T } | { ok: false; error: string };
 
 /** A whole number inside `[min, max]`, from a query value. Anything else (a sign, a fraction, an exponent, empty) is refused. */
 function wholeNumber(raw: string, min: number, max: number): number | null {
@@ -107,8 +107,8 @@ export function restDirective(record: SteeringRecord, sequence: number | null): 
 	};
 }
 
-export const DIRECTIVE_STATUSES = ["queued", "acknowledged", "all"] as const;
-export type DirectiveStatusFilter = (typeof DIRECTIVE_STATUSES)[number];
+const DIRECTIVE_STATUSES = ["queued", "acknowledged", "all"] as const;
+type DirectiveStatusFilter = (typeof DIRECTIVE_STATUSES)[number];
 
 export interface DirectivesQuery {
 	sessionId: string;
@@ -147,7 +147,7 @@ export function listRestDirectives(inbox: SteeringInbox, query: DirectivesQuery,
 }
 
 /** Why the steering inbox cannot answer, as the tools answer it: invalid settings are `misconfigured` (naming the keys, never the values), no audit sink is `not-configured`. */
-export interface SteeringUnavailable {
+interface SteeringUnavailable {
 	status: "misconfigured" | "not-configured";
 	error: string;
 	keys?: string[];

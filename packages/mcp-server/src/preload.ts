@@ -24,7 +24,7 @@ export const PRELOAD_REPO_CAP = 256;
 /** Longest branch or graph id kept in a remembered shape; a longer request is not remembered, since a truncated key would never match a real request. */
 export const PRELOAD_FIELD_CAP = 256;
 /** Most request times kept per repo; a repo past it ranks by its newest times, so one busy repo cannot grow the map. */
-export const PRELOAD_EVENTS_PER_REPO = 4_096;
+const PRELOAD_EVENTS_PER_REPO = 4_096;
 
 /** A brief request as a warm-up repeats it: the fields its cache key is built from, and the surface it names. */
 export type BriefShape = BriefRequest & { repo: string };
@@ -124,7 +124,7 @@ const SYSTEM_PRELOAD_TIMERS: PreloadTimers = {
 	},
 };
 
-export interface PreloaderDeps {
+interface PreloaderDeps {
 	settings: CachePreloadSettings;
 	access: RepoAccess;
 	/** Composes the brief one shape names and writes it through the cache. A rejection is counted, never thrown. */

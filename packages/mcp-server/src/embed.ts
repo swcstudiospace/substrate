@@ -20,7 +20,7 @@ import { reportSilent } from "./silent-failures.ts";
 /** The cache surface the service uses; the production `ReadThroughCache` has it. */
 export type EmbeddingCacheStore = Pick<ReadThroughCache, "peekMany" | "putEntry">;
 
-export interface EmbeddingServiceDeps {
+interface EmbeddingServiceDeps {
 	client: TeiClient;
 	/** Null with no Dragonfly: every call goes to TEI. */
 	cache: EmbeddingCacheStore | null;

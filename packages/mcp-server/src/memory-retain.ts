@@ -131,7 +131,7 @@ export function retainDocumentId(entry: { scope: string; kind: unknown; subject?
 }
 
 /** The metadata keys that tie a plane document back to the graph, session and node that wrote it. */
-export const RETAIN_JOIN_KEYS = ["graph_id", "session_id", "node_id"] as const;
+const RETAIN_JOIN_KEYS = ["graph_id", "session_id", "node_id"] as const;
 
 /**
  * The join keys one entry can carry. An identifier is kept only when it is a
@@ -141,7 +141,7 @@ export const RETAIN_JOIN_KEYS = ["graph_id", "session_id", "node_id"] as const;
  * structurally because `MemoryEntry` does not declare it yet; an entry
  * without one simply carries none.
  */
-export function retainJoinKeys(entry: MemoryEntry): Record<string, string> {
+function retainJoinKeys(entry: MemoryEntry): Record<string, string> {
 	const source: Record<string, unknown> = { ...entry };
 	const keys: Record<string, string> = {};
 	for (const key of RETAIN_JOIN_KEYS) {
@@ -154,7 +154,7 @@ export function retainJoinKeys(entry: MemoryEntry): Record<string, string> {
 }
 
 /** What the live forward and the outbox replay both hand to `forwardEntry`. */
-export interface RetainTarget {
+interface RetainTarget {
 	entry: MemoryEntry;
 	writer: string;
 	bank: string;

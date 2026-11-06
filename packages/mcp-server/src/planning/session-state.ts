@@ -22,7 +22,7 @@ export function steeringSessionEvent(surface: Surface, session: SteeringSession,
 	};
 }
 
-export interface LiveSessionStatePortDeps {
+interface LiveSessionStatePortDeps {
 	authority: LiveSessionAuthority | null;
 	emit: (event: EventInput) => Promise<unknown>;
 }

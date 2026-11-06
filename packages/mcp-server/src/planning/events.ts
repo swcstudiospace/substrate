@@ -24,7 +24,7 @@ export const MAX_EVENT_PATHS = 100;
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-export type PlanningChangePayload = {
+type PlanningChangePayload = {
 	kind: "planning.changed";
 	repo: string;
 	sessionId: string;
@@ -35,7 +35,7 @@ export type PlanningChangePayload = {
 	truncated?: Record<"added" | "removed" | "changed", number>;
 };
 
-export interface PlanningChangeInput {
+interface PlanningChangeInput {
 	/** `owner/name`. A malformed repo is a configuration error and throws. */
 	repo: string;
 	sessionId: string;
@@ -112,7 +112,7 @@ export interface PlanningPublisher {
 	publish(event: EventInput): Promise<boolean>;
 }
 
-export interface HintDeps {
+interface HintDeps {
 	newId: () => string;
 	nowIso: () => string;
 }
@@ -134,7 +134,7 @@ export function busPublisher(bus: Pick<EventBus, "publish">, deps: HintDeps): Pl
 	};
 }
 
-export type PlanningEmitOutcome = "unchanged" | "incomplete" | "published" | "not-published";
+type PlanningEmitOutcome = "unchanged" | "incomplete" | "published" | "not-published";
 
 /** Build the event for a diff and publish it. An unchanged diff publishes nothing; a partial one is never published, since its absences prove nothing. */
 export async function emitPlanningChange(publisher: PlanningPublisher, input: PlanningChangeInput): Promise<PlanningEmitOutcome> {
@@ -144,13 +144,13 @@ export async function emitPlanningChange(publisher: PlanningPublisher, input: Pl
 	return (await publisher.publish(event)) ? "published" : "not-published";
 }
 
-export interface ObservedPlanning {
+interface ObservedPlanning {
 	outcome: "baseline" | PlanningEmitOutcome;
 	/** What the next scan is compared with: this scan, except that a failed publish holds the previous baseline. See `observePlanningChange`. */
 	baseline: PlanningSnapshot;
 }
 
-export interface ObservePlanningInput {
+interface ObservePlanningInput {
 	previous: PlanningSnapshot | null;
 	next: PlanningSnapshot;
 	repo: string;

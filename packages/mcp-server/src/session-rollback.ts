@@ -72,22 +72,22 @@ import type { EventInput, Surface, SubstrateEvent } from "./types.ts";
 // ---------------------------------------------------------------------------
 
 /** Checkpoints listed as `later_checkpoints`; the list is informational. */
-export const MAX_LATER_CHECKPOINTS = 1_000;
+const MAX_LATER_CHECKPOINTS = 1_000;
 /** Entry ids a plan shows. */
 export const MAX_SAMPLE_IDS = 20;
 /** Reasons and characters of an anchor verdict a plan carries. */
-export const MAX_ANCHOR_REASONS = 20;
-export const MAX_ANCHOR_REASON_CHARS = 200;
+const MAX_ANCHOR_REASONS = 20;
+const MAX_ANCHOR_REASON_CHARS = 200;
 /** One forget call names at most this many entries, so its ledger note carries every id and a re-run can reproduce it. */
 export const FORGET_BATCH_SIZE = FORGET_PAYLOAD_ENTRY_IDS;
 /** Forget calls one commit may make: 100 batches cover the index's own selection cap (`MAX_ROLLBACK_SELECT_LIMIT`). */
-export const MAX_FORGET_BATCHES = 100;
+const MAX_FORGET_BATCHES = 100;
 /** Earlier forget notes whose plane deletions one run retries. */
-export const MAX_PLANE_RETRY_GROUPS = 20;
+const MAX_PLANE_RETRY_GROUPS = 20;
 /** The note a forget batch is recorded as, before its rows are marked: what lets a later plan finish a batch whose `memory.forget` note was never written. */
 export const FORGET_BATCH_ACTION = "session.rollback.forget_batch";
 /** Repeats of a forget call whose ledger note was not recorded, before the commit stops as incomplete. */
-export const FORGET_NOTE_RETRIES = 2;
+const FORGET_NOTE_RETRIES = 2;
 /** How long a plan waits for the anchor check before answering without it. */
 export const DEFAULT_ANCHOR_TIMEOUT_MS = 4_000;
 /** How far before its record time a checkpoint's `taken_at_ms` may lie and still be honoured (a checkpoint taken offline and synced late). */
@@ -115,7 +115,7 @@ export interface SessionNotes {
 }
 
 /** One memory entry a rollback could forget: its id and the surface that wrote it. */
-export interface RollbackEntryRef {
+interface RollbackEntryRef {
 	id: string;
 	writer: string;
 }
@@ -127,7 +127,7 @@ export interface EntrySelection {
 }
 
 /** What the ledger append answers (`Substrate.emit`'s shape, narrowed to what is read). */
-export interface EmitOutcome {
+interface EmitOutcome {
 	event: { id: string; hash: string };
 	stored: boolean;
 	error?: string;
@@ -165,7 +165,7 @@ export interface RollbackCaller {
 	isOperator: boolean;
 }
 
-export type RollbackErrorCode =
+type RollbackErrorCode =
 	| "invalid-request"
 	| "invalid-payload"
 	| "not-found"
@@ -186,7 +186,7 @@ export interface RollbackFailure {
 	};
 }
 
-export interface CheckpointOk {
+interface CheckpointOk {
 	ok: true;
 	ckpt_id: string;
 	event_id: string;
@@ -216,7 +216,7 @@ export interface RollbackPlan {
 }
 export type PlanResult = { ok: true; plan: RollbackPlan } | RollbackFailure;
 
-export interface CommitOk {
+interface CommitOk {
 	ok: true;
 	event_id: string;
 	memory?: { superseded_entries: number; forgotten_documents: number; plane_pending: boolean; truncated: boolean };

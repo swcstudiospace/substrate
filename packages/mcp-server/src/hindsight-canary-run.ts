@@ -39,7 +39,7 @@ import {
 } from "./planes/hindsight.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 
-export const CANARY_USAGE = `usage: bun packages/mcp-server/src/hindsight-canary-run.ts --confirm-throwaway [--json] [--mental-model-refresh]
+const CANARY_USAGE = `usage: bun packages/mcp-server/src/hindsight-canary-run.ts --confirm-throwaway [--json] [--mental-model-refresh]
   --confirm-throwaway      REQUIRED: the configured Hindsight is a candidate, never production
   --json                   print {schema, version, checks, ok} instead of the summary
   --mental-model-refresh   also probe POST mental-models/{id}/refresh (response shape recorded)
@@ -72,28 +72,28 @@ export function parseCanaryArgs(argv: readonly string[]): CanaryArgs {
 	return args;
 }
 
-export type CheckStatus = "pass" | "fail" | "skip";
+type CheckStatus = "pass" | "fail" | "skip";
 
-export interface CheckResult {
+interface CheckResult {
 	id: string;
 	status: CheckStatus;
 	ms: number;
 	reason?: string;
 }
 
-export interface CanaryReport {
+interface CanaryReport {
 	schema: 1;
 	version: string | null;
 	checks: CheckResult[];
 	ok: boolean;
 }
 
-export interface CanaryTimer {
+interface CanaryTimer {
 	promise: Promise<void>;
 	cancel: () => void;
 }
 
-export interface CanaryLimits {
+interface CanaryLimits {
 	/** One request's timeout. */
 	callTimeoutMs: number;
 	/** The recall's own budget: a longer wait is the 0.10.x hang, a FAIL. */
@@ -130,7 +130,7 @@ export interface CanaryDeps {
 	limits?: Partial<CanaryLimits>;
 }
 
-export interface CanaryOutcome {
+interface CanaryOutcome {
 	code: 0 | 1 | 2 | 3;
 	report: CanaryReport | null;
 }
@@ -147,7 +147,7 @@ function realDelay(ms: number): CanaryTimer {
 }
 
 /** The real-world deps for the entry point. */
-export function realCanaryDeps(args: CanaryArgs): CanaryDeps {
+function realCanaryDeps(args: CanaryArgs): CanaryDeps {
 	return {
 		args,
 		env: process.env,

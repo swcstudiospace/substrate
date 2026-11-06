@@ -11,7 +11,7 @@ import { sessionStateForAcknowledgement, type SessionStatePort, type SteeringAck
 import { STEERING_ACTIONS, STEERING_BODY_MAX, STEERING_OUTCOMES, STEERING_PRIORITIES, type SteeringAckReason, type SteeringClock, type SteeringConfigError, type SteeringError, type SteeringInbox, type SteeringOutcome } from "./steering.ts";
 
 export type SteeringCaller = LiveSessionCaller;
-export const STEERING_REFUSED_ACTION = "steering.refused";
+const STEERING_REFUSED_ACTION = "steering.refused";
 export const SESSION_BINDING_INPUT = z.string().regex(/^[a-f0-9]{64}$/).optional();
 export const STEERING_QUEUE_INPUT = z.object({
  target_session_id: z.string().regex(SESSION_ID_RE), action: z.enum(STEERING_ACTIONS), priority: z.enum(STEERING_PRIORITIES), body: z.string().min(1).max(STEERING_BODY_MAX),
@@ -32,10 +32,10 @@ export const DOCS_SEARCH_INPUT = z.object({
 export const STEERING_LIST_INPUT = z.object({ session_id: z.string().regex(SESSION_ID_RE), session_binding: SESSION_BINDING_INPUT }).strict();
 export type SteeringQueueInput = z.infer<typeof STEERING_QUEUE_INPUT>;
 export type SteeringAcknowledgeInput = Omit<z.infer<typeof STEERING_ACKNOWLEDGE_INPUT>, "session_id"> & { session_id?: string | undefined };
-export type SteeringListInput = z.infer<typeof STEERING_LIST_INPUT>;
-export type LiveSessionRefusal = { status: "refused"; error: { code: "not-found" | "session-unavailable" } } | { status: "refused"; error: { code: "principal-rate-limited"; retry_after_s: number } };
-export type LiveSessionAuditFailure = { status: "refused"; error: { code: "audit-unavailable" } };
-export interface SteeringForbidden { status: "forbidden"; reason: "operator-required" }
+type SteeringListInput = z.infer<typeof STEERING_LIST_INPUT>;
+type LiveSessionRefusal = { status: "refused"; error: { code: "not-found" | "session-unavailable" } } | { status: "refused"; error: { code: "principal-rate-limited"; retry_after_s: number } };
+type LiveSessionAuditFailure = { status: "refused"; error: { code: "audit-unavailable" } };
+interface SteeringForbidden { status: "forbidden"; reason: "operator-required" }
 export type LiveCallFailure = LiveSessionRefusal | LiveSessionAuditFailure | SteeringForbidden;
 export const liveSessionNotFound = (): LiveSessionRefusal => ({ status: "refused", error: { code: "not-found" } });
 export class LiveSessionBoundaryError extends Error {
@@ -134,8 +134,8 @@ export interface SteeringWiring {
  readonly executeLiveCall: <T>(invocation: LiveSessionInvocation, effect: (prepared: PreparedLiveCall) => Promise<T>, dispatch?: PreparedLiveDispatch) => Promise<T>;
 }
 export type SteeringWriteResult = { status: "queued"; directive_id: string; target_session_id: string; queued_at_ms: number; sequence?: number } | { status: "acknowledged"; directive_id: string; outcome: SteeringOutcome; confirmed: boolean } | LiveCallFailure | { status: "refused"; error: SteeringError } | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
-export interface ListedSteeringDirective { id: string; author_principal_id: string; priority: string; action: string; body: string; plan_ref: { phase: string; plan: string } | null; conflicts_with_active_plan: boolean; created_at_ms: number; state: "queued" | "acknowledged"; outcome: SteeringOutcome | null; confirmed: boolean; queued_at_ms: number; acknowledged_at_ms: number | null; reason: SteeringAckReason | null }
-export type SteeringListResult = { status: "listed"; target_session_id: string; directives: ListedSteeringDirective[]; session_state: { status: "held"; state: string } } | LiveCallFailure | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
+interface ListedSteeringDirective { id: string; author_principal_id: string; priority: string; action: string; body: string; plan_ref: { phase: string; plan: string } | null; conflicts_with_active_plan: boolean; created_at_ms: number; state: "queued" | "acknowledged"; outcome: SteeringOutcome | null; confirmed: boolean; queued_at_ms: number; acknowledged_at_ms: number | null; reason: SteeringAckReason | null }
+type SteeringListResult = { status: "listed"; target_session_id: string; directives: ListedSteeringDirective[]; session_state: { status: "held"; state: string } } | LiveCallFailure | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
 export function steeringFailed(result: SteeringWriteResult): boolean { return result.status !== "queued" && result.status !== "acknowledged"; }
 function settingsFailure(wiring: SteeringWiring): { status: "misconfigured"; errors: SteeringConfigError[] } | null { return wiring.settingsErrors.length ? { status: "misconfigured", errors: [...wiring.settingsErrors] } : null; }
 export async function queueSteering(wiring: SteeringWiring, caller: SteeringCaller, input: SteeringQueueInput, dispatch?: PreparedLiveDispatch, transport: AuditTransport = "mcp"): Promise<SteeringWriteResult> {

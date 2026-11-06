@@ -28,7 +28,7 @@ export const COMPLETIONS_FILE = "completions.jsonl";
  */
 const directoryQueues = new Map<string, Promise<unknown>>();
 
-export type CheckpointStoreErrorCode = "corrupt-record" | "write-failed";
+type CheckpointStoreErrorCode = "corrupt-record" | "write-failed";
 
 export class CheckpointStoreError extends Error {
 	constructor(

@@ -114,7 +114,7 @@ export interface RetrievalKnobs {
 
 export const DEFAULT_RETRIEVAL_KNOBS: Readonly<RetrievalKnobs> = { similarityThreshold: 0.2, vectorSimilarityWeight: 0.3, topK: 1024 };
 
-export interface RetrievalRequest {
+interface RetrievalRequest {
 	question: string;
 	/** Explicit dataset ids, resolved from configured names. Never empty. */
 	dataset_ids: string[];
@@ -130,7 +130,7 @@ export type RetrievalOutcome =
 	| { ok: false; reason: string };
 
 /** The most results one retrieval may ask for (D25-03). */
-export const MAX_RETRIEVAL_PAGE_SIZE = 10;
+const MAX_RETRIEVAL_PAGE_SIZE = 10;
 /**
  * The pinned embedding model for every dataset this phase creates (D25-06,
  * decided at 05-02). No chat model is registered; retrieval only. The
@@ -324,13 +324,13 @@ export async function listDatasets(
 }
 
 /** The ingest metadata every upload carries, so retrieval can echo it (U-03). */
-export interface UploadMetadata {
+interface UploadMetadata {
 	source_url: string;
 	commit: string;
 	heading_path: string;
 }
 
-export interface UploadRequest {
+interface UploadRequest {
 	dataset_id: string;
 	/** The document name on the plane: the page's repo path, flattened by `documentName`. */
 	name: string;
@@ -338,7 +338,7 @@ export interface UploadRequest {
 	metadata: UploadMetadata;
 }
 
-export type UploadOutcome =
+type UploadOutcome =
 	| { ok: true; document_id: string }
 	| { ok: false; reason: string };
 
@@ -411,7 +411,7 @@ export async function parseDocuments(
 	return answered.ok ? { ok: true } : answered;
 }
 
-export interface PollOptions {
+interface PollOptions {
 	maxPolls?: number;
 	intervalMs?: number;
 	timeoutMs?: number;
@@ -488,7 +488,7 @@ export async function deleteDocuments(
 	return answered.ok ? { ok: true } : answered;
 }
 
-export type CreateDatasetOutcome =
+type CreateDatasetOutcome =
 	| { ok: true; id: string }
 	| { ok: false; reason: string };
 

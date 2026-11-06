@@ -144,20 +144,20 @@ export interface AnchorVerifyPorts {
 }
 
 /** Where a checkpoint id is searched: the caller's session, else the caller's surface. */
-export interface CheckpointLookup {
+interface CheckpointLookup {
 	sessionId?: string;
 	surface?: string;
 }
 
 /** The answer when verification could not even start. A status, never an error. */
-export interface UnverifiedResult {
+interface UnverifiedResult {
 	status: "unverified";
 	ref: string;
 	reasons: string[];
 }
 
 /** Rotation notes the summary names when they were ignored; the rest are counted by the size of the set alone. */
-export const MAX_REPORTED_ROTATION_ISSUES = 10;
+const MAX_REPORTED_ROTATION_ISSUES = 10;
 
 /** What a verification says about the signer set it judged against. Small by construction; public keys and ids only. */
 export interface SignerSetSummary {
@@ -347,7 +347,7 @@ export function graphPointerPorts(rpc: () => Rpc, nowMs: () => number): Pick<Anc
  * One pointer transaction's fields, read as the hour transaction is (finalized, then confirmed). Null when the node does not know the
  * signature, or the transaction carries no memo or no payer: the verifier then cannot confirm the pointer, which fails closed.
  */
-export async function confirmGraphPointer(rpc: Rpc, signature: string): Promise<PointerConfirmation | null> {
+async function confirmGraphPointer(rpc: Rpc, signature: string): Promise<PointerConfirmation | null> {
 	const found = await fetchTransaction(rpc, signature);
 	if (found === null || found.memo === null || found.signer === null) return null;
 	return { signature, memo: found.memo, payer: found.signer, payerSigned: found.signerSigned, err: found.err, slot: found.slot ?? 0, blockTime: found.blockTimeMs === null ? null : found.blockTimeMs / 1000 };
@@ -382,10 +382,10 @@ export class ReanchorReadIncomplete extends Error {
 }
 
 /** What a note must be bound to: the stored row's root, event count and signature (the note's `previous_tx_sig`). */
-export type ReanchorBinding = Pick<AnchorRow, "root" | "event_count" | "tx_sig">;
+type ReanchorBinding = Pick<AnchorRow, "root" | "event_count" | "tx_sig">;
 
 /** Whether `record` is bound to `binding`: same root, same event count, and `previous_tx_sig` equal to the row's signature. */
-export function isBoundNote(record: ReanchorRecord, binding: ReanchorBinding): boolean {
+function isBoundNote(record: ReanchorRecord, binding: ReanchorBinding): boolean {
 	return record.payload.root === binding.root && record.payload.event_count === binding.event_count && record.payload.previous_tx_sig === binding.tx_sig;
 }
 

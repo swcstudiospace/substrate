@@ -45,10 +45,10 @@ export interface FreshnessSettings {
 }
 
 /** A corpus objective the row breaches: `ingest_age` past the age limit, `sync_lag` over the sync objective (`SUBSTRATE_DOCS_SLO_SYNC_LAG_S`). */
-export type CorpusBreach = "ingest_age" | "sync_lag";
+type CorpusBreach = "ingest_age" | "sync_lag";
 
 /** The corpus row beyond a dataset row: its breaches and, when the sync lag is one, the lag and the objective it is over. */
-export interface CorpusVerdict {
+interface CorpusVerdict {
 	breaches: CorpusBreach[];
 	sync?: { lag_seconds: number; threshold_seconds: number };
 }
@@ -73,7 +73,7 @@ export interface DatasetFreshness {
 	corpus?: CorpusVerdict;
 }
 
-export interface FreshnessInput {
+interface FreshnessInput {
 	versions: VersionStore;
 	triggers: TriggerStore;
 	/** Epoch ms. */
@@ -194,7 +194,7 @@ export function corpusFreshnessRow(input: { lastIngestAt: string | null; now: nu
 }
 
 /** One gauge point; `dataset` is the only label and comes from the trigger table. */
-export interface GaugeSample {
+interface GaugeSample {
 	name: string;
 	unit: "s";
 	description: string;
@@ -283,7 +283,7 @@ export function freshnessStateFromJson(parsed: unknown): FreshnessState {
 	return state;
 }
 
-export type LagAction =
+type LagAction =
 	| { type: "breach"; dataset: string; commit: string; lagSeconds: number; corpus?: CorpusVerdict }
 	| { type: "recover"; dataset: string; commit: string; warned: boolean };
 
@@ -385,7 +385,7 @@ export function lagRecoveryEvent(action: Extract<LagAction, { type: "recover" }>
 }
 
 /** The side effects a lag transition needs, injected so tests supply their own. */
-export interface LagEffects {
+interface LagEffects {
 	/** Persist the markers; called after each marker change and never throws. */
 	persist(): Promise<void>;
 	/** The existing event path; a rejection is caught here. */
@@ -395,7 +395,7 @@ export interface LagEffects {
 }
 
 /** What one pass did: the transitions that completed, and those that failed and stay owed. */
-export interface LagOutcome {
+interface LagOutcome {
 	applied: LagAction[];
 	failed: LagAction[];
 }
@@ -455,15 +455,15 @@ export async function applyLagActions(
 }
 
 /** Least time between two attempts to deliver the same dataset's transition after a failure. */
-export const LAG_RETRY_MS = 60_000;
+const LAG_RETRY_MS = 60_000;
 
 /** Longest `startDocsRefresh` waits for the accepted-trigger record before answering anyway. */
 export const TRIGGER_RECORD_DEADLINE_MS = 500;
 
 /** Longest an emit may take before it counts as a failure; a hung ledger must not pin the settler. */
-export const LAG_EMIT_DEADLINE_MS = 5_000;
+const LAG_EMIT_DEADLINE_MS = 5_000;
 
-export interface LagSettlerOptions {
+interface LagSettlerOptions {
 	retryMs?: number;
 	emitDeadlineMs?: number;
 }

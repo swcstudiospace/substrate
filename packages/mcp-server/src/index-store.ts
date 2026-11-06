@@ -114,7 +114,7 @@ export const INDEX_APPLICATION_NAME = "substrate-mcp";
 export const INDEX_MAX_LIFETIME_S = 3600;
 
 /** How long `ping` waits for `select 1` before calling the index unhealthy. */
-export const INDEX_PING_TIMEOUT_MS = 1000;
+const INDEX_PING_TIMEOUT_MS = 1000;
 
 /**
  * How long `migrate` waits to take its session advisory lock. Two boots creating
@@ -132,7 +132,7 @@ export const INDEX_MIGRATE_STATEMENT_TIMEOUT_MS = 120000;
  * `statement_timeout`, no name — and production showed 19 idle connections with
  * an empty `application_name` and a server-side `statement_timeout` of 0.
  */
-export interface IndexPoolSettings {
+interface IndexPoolSettings {
 	/** Pool size per process. */
 	max: number;
 	/** How long one connect may take. */
@@ -179,7 +179,7 @@ export function indexPoolSettingsFromEnv(env: Record<string, string | undefined>
 }
 
 /** The options object handed to Bun's `SQL`, as the constructor composes it. */
-export interface IndexSqlOptions {
+interface IndexSqlOptions {
 	max: number;
 	/** Seconds: Bun's unit for every pool timeout. */
 	connectionTimeout: number;
@@ -226,12 +226,12 @@ export interface MemoryExpiredSample {
  * `report` serves them tagged; `enforce` leaves them out unless the read asked
  * for them. `observe` is called once per expired entry met, in either mode.
  */
-export interface MemoryExpirySettings {
+interface MemoryExpirySettings {
 	mode: MemoryExpiryMode;
 	observe?: (sample: MemoryExpiredSample) => void;
 }
 
-export interface IndexStoreOptions {
+interface IndexStoreOptions {
 	/** Overrides on top of `indexPoolSettingsFromEnv(process.env)`. */
 	pool?: Partial<IndexPoolSettings>;
 	/** The index plane's breaker and observer. Absent means every call runs unwrapped, as before. */
@@ -341,7 +341,7 @@ export const FIRST_REVERSIBLE_VERSION = 33;
  * A migration that runs only when its named opt-in is on. While the opt-in is off, `migrate()` neither runs
  * nor ledgers the step, so turning the opt-in on later applies it on the next boot.
  */
-export type MigrationOptIn = "steering-audit" | "steering-sessions";
+type MigrationOptIn = "steering-audit" | "steering-sessions";
 
 /** Which opt-in migrations run. A missing key is off. */
 export type MigrationOptIns = Readonly<Partial<Record<MigrationOptIn, boolean>>>;
@@ -3038,7 +3038,7 @@ export class IndexStore implements MemoryStore {
 // ── archive (uplift-4 S2) ────────────────────────────────────────────────────
 
 /** Rows one export page may carry at most; the archive asks for far fewer. */
-export const MAX_ARCHIVE_PAGE_ROWS = 5000;
+const MAX_ARCHIVE_PAGE_ROWS = 5000;
 
 /** The most rows one restore `insert` carries, so the statement stays under the driver's parameter limit. */
 const RESTORE_BATCH_ROWS = 200;

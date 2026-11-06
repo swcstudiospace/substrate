@@ -15,7 +15,7 @@ export const DOCS_CANARY_SURFACE = "substrate";
 export type CorpusRefresh = "ok" | "timeout" | "failed";
 
 /** Where a reading is announced, so the registry's gauges follow it. Both are optional: a server without observability has none. */
-export interface CorpusSloSinks {
+interface CorpusSloSinks {
 	ingestRate?: ((docsPerSecond: number) => void) | undefined;
 	goldenRecall?: ((recall5: number) => void) | undefined;
 }

@@ -18,7 +18,7 @@ import { z } from "zod";
 export const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 /** Why a session's planning view cannot be trusted for conflicts (phase 53, D53-h). */
-export const UNKNOWN_VIEW_REASONS = [
+const UNKNOWN_VIEW_REASONS = [
 	"no-scan",
 	"scan-failed",
 	"scan-truncated",
@@ -37,7 +37,7 @@ export const MAX_REPORT_ENTRIES = 512;
 export const REPORT_ID_MAX = 128;
 const REPORT_ID = z.string().min(1).max(REPORT_ID_MAX);
 
-export const PhaseReportSchema = z.object({ phase: REPORT_ID, plans: z.array(REPORT_ID).max(MAX_REPORT_ENTRIES) }).strict();
+const PhaseReportSchema = z.object({ phase: REPORT_ID, plans: z.array(REPORT_ID).max(MAX_REPORT_ENTRIES) }).strict();
 export type PhaseReport = z.infer<typeof PhaseReportSchema>;
 
 /**
@@ -45,7 +45,7 @@ export type PhaseReport = z.infer<typeof PhaseReportSchema>;
  * rewritten by that checkout's reads. `known` lists the phases the index holds, with the plan ids under each. `unknown`
  * gives the reason. Every other reader judges the report against its own clock: an older report is stale.
  */
-export const PlanningReportSchema = z.discriminatedUnion("status", [
+const PlanningReportSchema = z.discriminatedUnion("status", [
 	z
 		.object({ status: z.literal("known"), scannedAtMs: z.number().int().nonnegative(), phases: z.array(PhaseReportSchema).max(MAX_REPORT_ENTRIES) })
 		.strict(),
@@ -58,11 +58,11 @@ export type PlanningReport = z.infer<typeof PlanningReportSchema>;
  * that names none. `observedAtMs` is the server's time of the complete observation that saw it. A pair counts only while it is
  * inside the presence TTL (`touchedWithin`).
  */
-export const TouchedPairSchema = z.object({ phase: REPORT_ID, plan: REPORT_ID.nullable(), observedAtMs: z.number().int().nonnegative() }).strict();
+const TouchedPairSchema = z.object({ phase: REPORT_ID, plan: REPORT_ID.nullable(), observedAtMs: z.number().int().nonnegative() }).strict();
 export type TouchedPair = z.infer<typeof TouchedPairSchema>;
 
 /** A repository's identity, `owner/name`. Two checkouts take part in one conflict only when they name the same repository. */
-export const REPO_ID = z
+const REPO_ID = z
 	.string()
 	.max(256)
 	.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
@@ -100,7 +100,7 @@ export interface ClassifiedSession extends SessionRecord {
 }
 
 /** A classified session with the time since its last planning change. `classifySessions` always returns it. */
-export interface LiveClassifiedSession extends ClassifiedSession {
+interface LiveClassifiedSession extends ClassifiedSession {
 	/** Milliseconds since the last planning change (`lastHeartbeatMs`). Not what makes a session stale: a live session can be idle for days. */
 	idleForMs: number;
 }
@@ -114,7 +114,7 @@ export interface PresenceStore {
 }
 
 /** Append-only. There is deliberately no method to remove or replace an entry. */
-export interface HistorySink {
+interface HistorySink {
 	append(record: SessionRecord): Promise<void>;
 }
 

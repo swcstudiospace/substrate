@@ -25,10 +25,10 @@ export const CORPUS_ROOT_SESSION = "corpus-root";
 export const ROOT_EMIT_MIN_INTERVAL_MS = 5_000;
 
 /** The longest wait before an attempt at a root the ledger refused. The backoff doubles from the window up to this. */
-export const ROOT_RETRY_MAX_MS = 60_000;
+const ROOT_RETRY_MAX_MS = 60_000;
 
 /** The wait before the attempt that follows `failures` refusals in a row: 5 s, 10 s, 20 s, 40 s, then {@link ROOT_RETRY_MAX_MS}. */
-export function rootRetryMs(failures: number): number {
+function rootRetryMs(failures: number): number {
 	return Math.min(ROOT_EMIT_MIN_INTERVAL_MS * 2 ** (failures - 1), ROOT_RETRY_MAX_MS);
 }
 
@@ -49,7 +49,7 @@ function thrownCode(error: unknown): string {
  * The most active rows one root is made from. A manifest past this has no root and says so (`too-large`) instead of a root over
  * a prefix that would look complete. The store reads one row more than this to know.
  */
-export const MAX_CORPUS_LEAVES = 100_000;
+const MAX_CORPUS_LEAVES = 100_000;
 
 /** A row the root may cover. A row whose `state` is not `active` is left out. */
 export type RootRow = ManifestLeaf & { state?: ManifestState };
@@ -59,7 +59,7 @@ interface TreeLeaf extends ManifestLeaf {
 }
 
 /** The active rows as leaves in tree order, and how many active rows could not be encoded. */
-export interface CorpusTree {
+interface CorpusTree {
 	ordered: TreeLeaf[];
 	/** One bad row never fails the root: a malformed sha256 or an ill-formed name is skipped and counted here. */
 	skipped: number;
@@ -92,7 +92,7 @@ export function corpusRoot(rows: readonly RootRow[]): { root: string; count: num
 }
 
 /** One document's inclusion proof against the root of the tree it was taken from. */
-export interface CorpusInclusion {
+interface CorpusInclusion {
 	sha256: string;
 	leaf: string;
 	index: number;
@@ -119,17 +119,17 @@ export function corpusProof(rows: readonly RootRow[], repo: string, path: string
 }
 
 /** The root of one manifest version. */
-export interface CorpusRootSnapshot {
+interface CorpusRootSnapshot {
 	root: string;
 	count: number;
 	manifestVersion: number;
 	skipped: number;
 }
 
-export type CorpusRootAnswer = { ok: true; snapshot: CorpusRootSnapshot } | { ok: false; reason: "too-large" };
+type CorpusRootAnswer = { ok: true; snapshot: CorpusRootSnapshot } | { ok: false; reason: "too-large" };
 
 /** One read of the manifest: the snapshot and the tree it was made from (what a proof needs). */
-export type CorpusRootRead = { ok: true; snapshot: CorpusRootSnapshot; tree: CorpusTree } | { ok: false; reason: "too-large" };
+type CorpusRootRead = { ok: true; snapshot: CorpusRootSnapshot; tree: CorpusTree } | { ok: false; reason: "too-large" };
 
 /** The keeper's clock; a test passes a manual one. */
 export interface RootClock {
@@ -138,7 +138,7 @@ export interface RootClock {
 }
 
 /** The real clock. The timer is unref'd, so a pending root event never holds the process open (one still waiting at shutdown is dropped). */
-export const systemRootClock: RootClock = {
+const systemRootClock: RootClock = {
 	now: () => Date.now(),
 	setTimer: (run, ms) => {
 		setTimeout(run, ms).unref();
@@ -150,14 +150,14 @@ export const systemRootClock: RootClock = {
  * has taken responsibility for it: a buffered note will be written, and a dead-lettered one is recorded as given up. Only the code of
  * a refusal is logged.
  */
-export interface RootEmitAnswer {
+interface RootEmitAnswer {
 	stored: boolean;
 	buffered?: true;
 	deadLettered?: true;
 	lookupFailed?: true;
 }
 
-export interface CorpusRootKeeperDeps {
+interface CorpusRootKeeperDeps {
 	/** The manifest, or null while the corpus is off or there is no index. Read on each use. */
 	store: () => CorpusStore | null;
 	/** Resolves with `stored: false` when the ledger could not take the event (it does not always throw). */

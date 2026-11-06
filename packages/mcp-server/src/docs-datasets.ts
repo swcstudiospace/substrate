@@ -186,7 +186,7 @@ export const TRIGGER_SCAN_MAX = 4 * DATASET_TRIGGER_RETENTION;
 export const TRIGGER_FIELD_MAX = 200;
 
 /** One accepted `POST /docs/merge-trigger`: what was asked for, and when this process accepted it. */
-export interface AcceptedTrigger {
+interface AcceptedTrigger {
 	commit: string;
 	content_sha256: string;
 	received_at: string;
@@ -323,13 +323,13 @@ export class DatasetListCache implements DatasetListSource {
 	}
 }
 
-export interface ResolvedDataset {
+interface ResolvedDataset {
 	name: string;
 	id: string | null;
 	created: boolean;
 }
 
-export interface ResolveDeps {
+interface ResolveDeps {
 	config: RagflowConfig;
 	fetchImpl?: FetchLike | undefined;
 	/** Create on a name-miss. False rehearses discovery without creating (G2 owns real creation). */
@@ -454,7 +454,7 @@ export function isSyncLive(tracker: SkillsSyncTracker): boolean {
 	return tracker.fastForwardObserved;
 }
 
-export interface DegradedServe {
+interface DegradedServe {
 	dataset: string;
 	pin: DatasetPin;
 	pin_age_ms: number;

@@ -89,10 +89,10 @@ export function bankForSurface(config: HindsightConfig, surface: string): string
 }
 
 /** The most results one bank contributes to a recall (D26-05). */
-export const MAX_RECALL_PER_BANK = 4;
+const MAX_RECALL_PER_BANK = 4;
 
 /** Recall types the ultrathink client tested (D26-05). */
-export const DEFAULT_RECALL_TYPES: readonly string[] = ["world", "experience", "observation"];
+const DEFAULT_RECALL_TYPES: readonly string[] = ["world", "experience", "observation"];
 
 /**
  * A fresh string-keyed record from an unknown object value; anything else is
@@ -120,7 +120,7 @@ export type HindsightErrorKind =
 	| "network"
 	| "invalid-response";
 
-export interface HindsightError {
+interface HindsightError {
 	kind: HindsightErrorKind;
 	/** Safe to log and to return: never carries the bearer, never an array-detail. */
 	message: string;
@@ -223,7 +223,7 @@ export async function send(
 	return { ok: true, value: { status: response.status, body: parsed.body } };
 }
 
-export interface HindsightHealth {
+interface HindsightHealth {
 	status: string;
 	database: string;
 }
@@ -249,7 +249,7 @@ export async function probeHealth(
 	};
 }
 
-export interface HindsightVersion {
+interface HindsightVersion {
 	api_version: string;
 	features: Record<string, unknown>;
 }
@@ -380,7 +380,7 @@ export interface HindsightBankSummary {
 export const BANK_LIST_PAGE = 50;
 export const MAX_LISTED_BANKS = 200;
 /** Requests one listing may make, whatever page size the server honours. */
-export const MAX_LIST_PAGES = 40;
+const MAX_LIST_PAGES = 40;
 const MAX_BANK_ID_CHARS = 200;
 
 function numberOrNull(value: unknown): number | null {
@@ -459,7 +459,7 @@ export async function listBanks(
 }
 
 /** `GET {bank}/stats`, read-only: the operation backlog and the last write the bank saw (each null when absent). */
-export interface HindsightBankStats {
+interface HindsightBankStats {
 	pending_operations: number | null;
 	failed_operations: number | null;
 	last_write_at: string | null;
@@ -517,7 +517,7 @@ export async function bankConfig(
 	return { ok: true, value: { retain_extraction_mode: extractionMode(got.value.body) } };
 }
 
-export interface RetainItem {
+interface RetainItem {
 	content: string;
 	context?: string;
 	tags: string[];
@@ -589,7 +589,7 @@ export interface RecallHit {
 	score?: number;
 }
 
-export interface RecallRequest {
+interface RecallRequest {
 	query: string;
 	types?: readonly string[];
 	budget?: string;
@@ -676,7 +676,7 @@ export async function recallBank(
 	return { ok: true, value: hits };
 }
 
-export interface HindsightDocument {
+interface HindsightDocument {
 	id: string;
 	document_id?: string;
 	text?: string;

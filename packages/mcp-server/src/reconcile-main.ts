@@ -77,7 +77,7 @@ function flagsOf(rest: readonly string[], valued: readonly string[], switches: r
 }
 
 /** The subcommand and its flags. A leading `--`, which `bun run reconcile -- …` may pass through, is dropped. */
-export function parseReconcileArgs(argv: readonly string[]): Command {
+function parseReconcileArgs(argv: readonly string[]): Command {
 	const args = argv[0] === "--" ? argv.slice(1) : argv;
 	const sub = args[0];
 	const rest = args.slice(1);
@@ -104,7 +104,7 @@ export function parseReconcileArgs(argv: readonly string[]): Command {
 }
 
 /** What this run needs from configuration and does not have, or null when it has all of it. */
-export function missingConfig(config: SubstrateConfig): string | null {
+function missingConfig(config: SubstrateConfig): string | null {
 	if (config.postgresUrl === undefined) return "SUBSTRATE_PG_URL is not set; the reconcile reads the index";
 	if (config.greptime === null) return "GREPTIME_URL is not set; the reconcile reads the ledger";
 	// A cache that is off scans nothing, so a report over it is incomplete and must not read clean; this check also makes the
@@ -114,7 +114,7 @@ export function missingConfig(config: SubstrateConfig): string | null {
 }
 
 /** The server's own constructors, with the pool bounds the index archive job uses: the reconcile is a short read. */
-export function openReconcileClients(config: SubstrateConfig): ReconcileClients {
+function openReconcileClients(config: SubstrateConfig): ReconcileClients {
 	const postgresUrl = config.postgresUrl;
 	const greptime = config.greptime;
 	if (postgresUrl === undefined || greptime === null) throw new Error("the reconcile clients need SUBSTRATE_PG_URL and GREPTIME_URL");
@@ -133,7 +133,7 @@ export function openReconcileClients(config: SubstrateConfig): ReconcileClients 
 }
 
 /** The MCP audit chain, the same file the server writes. A repair execute appends its one record here. */
-export function openRepairAudit(config: SubstrateConfig): AuditLog {
+function openRepairAudit(config: SubstrateConfig): AuditLog {
 	return openAuditLog(config);
 }
 

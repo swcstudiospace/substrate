@@ -26,7 +26,7 @@ export { scopeRepoId };
 export const REPO_REGISTRY_ENV = "SUBSTRATE_REPO_REGISTRY";
 export const REPO_SCOPES_ENV = "SUBSTRATE_REPO_SCOPES";
 
-export interface RepoRegistration {
+interface RepoRegistration {
 	readonly repo: string;
 	readonly checkouts: readonly string[];
 	readonly worktrees: readonly string[];
@@ -67,7 +67,7 @@ export interface RepoScopeRefusal {
 	body: { error: RepoRefusalReason; problem: string };
 }
 
-export type ParseOutcome<T> = { ok: true; value: T } | { ok: false; problem: string };
+type ParseOutcome<T> = { ok: true; value: T } | { ok: false; problem: string };
 
 function refuse(reason: RepoRefusalReason): { ok: false; reason: RepoRefusalReason } {
 	return { ok: false, reason };
@@ -236,10 +236,10 @@ export function realDirectoryOrNull(dir: string): string | null {
 }
 
 /** Where a directory of a registration sits: a checkout (a repository's root) or a worktrees directory (holds its linked worktrees). */
-export type LocatedRepoPath = { repo: string; root: string; target: string };
+type LocatedRepoPath = { repo: string; root: string; target: string };
 
 /** The located path, or why it has no place: outside every registration, or inside a nested checkout (see {@link locateRepoPath}). */
-export type LocateOutcome = { ok: true; located: LocatedRepoPath } | { ok: false; reason: "path-not-registered" | "nested-checkout" };
+type LocateOutcome = { ok: true; located: LocatedRepoPath } | { ok: false; reason: "path-not-registered" | "nested-checkout" };
 
 /**
  * The registration whose registered directory contains `path`, with that directory's real location. The deepest match wins. A

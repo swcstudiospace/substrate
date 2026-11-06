@@ -97,7 +97,7 @@ const STDERR_REPORT = (line: string): void => {
 	process.stderr.write(`${line}\n`);
 };
 
-export type PlanningHeartbeat =
+type PlanningHeartbeat =
 	| { state: "written" }
 	/** The scan saw no complete change in this checkout since the scan before, and nothing else is pending, so there is nothing to heartbeat. */
 	| { state: "not-due" }
@@ -105,7 +105,7 @@ export type PlanningHeartbeat =
 	| { state: "failed"; detail: string };
 
 /** What one scan did about the checkout's liveness. Present only when the liveness heartbeat is configured. `covered`: this scan's change heartbeat was the sign of life. */
-export type PlanningLiveness =
+type PlanningLiveness =
 	| { state: "written" }
 	| { state: "covered" }
 	| { state: "not-due" }
@@ -113,9 +113,9 @@ export type PlanningLiveness =
 	| { state: "failed"; detail: string };
 
 /** What one scan did with the change it saw. `repo-unknown` is a change that cannot be attributed to a repo, so it is not published. */
-export type ObserverOutcome = "baseline" | "unchanged" | "incomplete" | "published" | "not-published" | "repo-unknown";
+type ObserverOutcome = "baseline" | "unchanged" | "incomplete" | "published" | "not-published" | "repo-unknown";
 
-export type ObserverScan =
+type ObserverScan =
 	| { state: "disabled" }
 	| { state: "unavailable"; code: PlanningIndexFailure }
 	| { state: "failed"; detail: string }
@@ -160,12 +160,12 @@ export const PLANNING_LIVENESS_INTERVAL_ENV = "SUBSTRATE_PLANNING_LIVENESS_INTER
 /** 0 refreshes the record on every scan. */
 export const DEFAULT_LIVENESS_INTERVAL_MS = 0;
 /** Inclusive bounds. Outside them the value is refused, not clamped. */
-export const LIVENESS_INTERVAL_BOUNDS = { min: 0, max: 3_600_000 } as const;
+const LIVENESS_INTERVAL_BOUNDS = { min: 0, max: 3_600_000 } as const;
 
 /** The least time between baseline saves when `deps.baselineSaveIntervalMs` is omitted. */
-export const DEFAULT_BASELINE_SAVE_INTERVAL_MS = 5_000;
+const DEFAULT_BASELINE_SAVE_INTERVAL_MS = 5_000;
 
-export interface LivenessSettings {
+interface LivenessSettings {
 	/** The least time between liveness writes, in milliseconds. It never exceeds a third of the freshness window. */
 	intervalMs: number;
 }

@@ -193,7 +193,7 @@ function rememberClaim(claim: { surface: string }, body: unknown): void {
  * The counts themselves are in `/metrics` immediately. The line is the thing an
  * operator grepping the unit log sees without scraping, and it carries no payload.
  */
-export class AnonymousCallerLog {
+class AnonymousCallerLog {
 	private readonly counts = new Map<string, number>();
 	private windowStart: number;
 	private readonly intervalMs: number;
@@ -336,7 +336,7 @@ const JSON_BODY_ROUTES: Record<string, true> = {
  * request handler's catch answer it 413. Every other route still answers it
  * with the generic 500 it always has.
  */
-export class BodyTooLargeError extends Error {
+class BodyTooLargeError extends Error {
 	constructor() {
 		super("request body too large");
 		this.name = "BodyTooLargeError";
@@ -428,13 +428,13 @@ const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; noth
  */
 
 /** How often one connection polls the ledger for rows after its cursor. */
-export const STREAM_POLL_MS = 500;
+const STREAM_POLL_MS = 500;
 /** Close a connection that has delivered nothing for this long; the client reconnects with Last-Event-ID and resumes. */
-export const STREAM_IDLE_MS = 5 * 60_000;
+const STREAM_IDLE_MS = 5 * 60_000;
 /** Rows one poll may deliver: the ledger is the buffer, so no connection reads past this per tick. */
 export const STREAM_BATCH = 200;
 /** Unflushed bytes past which a slow consumer is cut off instead of buffered without limit. */
-export const STREAM_MAX_BACKLOG_BYTES = 1_000_000;
+const STREAM_MAX_BACKLOG_BYTES = 1_000_000;
 
 /**
  * The refusals a `/events/stream` connection is answered with before anything
@@ -465,7 +465,7 @@ export function streamRefusal(
  * either bare or v4-mapped; a DNS name never appears in `remoteAddress`.
  */
 /** Set by the public nginx vhost only. Local clients never send it, so the anonymous bridge stays on loopback. */
-export const PUBLIC_EDGE_HEADER = "x-substrate-edge";
+const PUBLIC_EDGE_HEADER = "x-substrate-edge";
 
 /**
  * A request that arrived through the public edge without a surface token.

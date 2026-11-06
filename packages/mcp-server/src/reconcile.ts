@@ -39,7 +39,7 @@ export interface Report {
 }
 
 /** Everything `buildReport` needs. `findings` may mix comparisons. */
-export interface ReportInput {
+interface ReportInput {
 	generated_at: string;
 	window_hours: number;
 	counts: Record<string, number>;

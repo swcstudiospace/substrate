@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 
 
 /** Most rows one `load` reads; a table that grew past it (pages removed over years) loads its first rows by path, and the rest are re-ingested once. */
-export const PLANNING_HASH_MAX_ROWS = 50_000;
+const PLANNING_HASH_MAX_ROWS = 50_000;
 
 /** A stable key for the docs plane. The URL itself is not stored. */
 export function planningDestinationKey(url: string): string {

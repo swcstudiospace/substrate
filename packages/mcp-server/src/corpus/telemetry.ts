@@ -24,7 +24,7 @@ import {
 } from "./reflect-store.ts";
 
 /** How long one telemetry write may take before it is given up, ms. */
-export const TELEMETRY_WRITE_BUDGET_MS = 2000;
+const TELEMETRY_WRITE_BUDGET_MS = 2000;
 /** The most telemetry writes in flight at once; a write past it is dropped and counted. */
 export const MAX_PENDING_WRITES = 50;
 /** A failure is logged on the first and on every this-many-th after. */
@@ -34,7 +34,7 @@ export const RETRIEVAL_SWEEP_INTERVAL_MS = 3_600_000;
 /** The most batches one sweep deletes before it leaves the rest for the next hour. */
 export const SWEEP_MAX_BATCHES = 50;
 /** The most wall time one sweep spends deleting, ms; a batch already running is let finish, so it can run a little over. */
-export const SWEEP_BUDGET_MS = 2000;
+const SWEEP_BUDGET_MS = 2000;
 
 /** Trim, lower-case and collapse every run of whitespace: two spellings of one question share a hash. */
 export function normalizeQuery(query: string): string {
@@ -64,14 +64,14 @@ export function queryTextOf(query: string): string | null {
 }
 
 /** The at most ten `{key, score}` entries of an answer's citations, in the order the answer gave them. */
-export function returnedOf(reply: Pick<SearchReply, "chunks">): RetrievedDocument[] {
+function returnedOf(reply: Pick<SearchReply, "chunks">): RetrievedDocument[] {
 	return reply.chunks.slice(0, RETRIEVAL_MAX_RETURNED).map((citation) => ({
 		key: (corpusKeyOf(citation) ?? citation.source_url).slice(0, RETRIEVAL_KEY_CHARS),
 		score: Number.isFinite(citation.score) ? citation.score : 0,
 	}));
 }
 
-export interface RetrievalInput {
+interface RetrievalInput {
 	surface: string;
 	/** The question as the caller asked it. */
 	question: string;
@@ -107,7 +107,7 @@ export interface RecorderCounters {
 	dropped: number;
 }
 
-export interface RecorderDeps {
+interface RecorderDeps {
 	/** The store, or null when there is no index: a row is then dropped and counted. */
 	store: () => ReflectStore | null;
 	/** Where a failure line goes; stderr in production. */
@@ -182,7 +182,7 @@ export class RetrievalRecorder {
 	}
 }
 
-export interface SweepOptions {
+interface SweepOptions {
 	retentionDays: number;
 	/** Rows one delete may take: the store's own bound, so no single statement holds a long lock. */
 	batch: number;

@@ -34,7 +34,7 @@ import { parseFrontmatter } from "./frontmatter.ts";
 /** September's library: the production default. Config overrides it (D21-13). */
 export const LIBRARY_REPO = "swcstudiospace/agent-skills";
 export const LIBRARY_URL = "https://github.com/swcstudiospace/agent-skills.git";
-export const SKILLS_STATE = "/var/lib/substrate/skills";
+const SKILLS_STATE = "/var/lib/substrate/skills";
 export const MIRROR = `${SKILLS_STATE}/mirror.git`;
 
 /** Which library a proposal targets: the repo slug plus the remote the clone is checked against. */
@@ -49,9 +49,9 @@ export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /** The HTTP route, the MCP tool and the CLI pre-flight share one cap (D21-08: body ≤ 1 MB). */
 export const ROUTE_MAX_BYTES = 1_000_000;
 
-export const PR_TITLE_MAX = 256;
+const PR_TITLE_MAX = 256;
 export const PR_BODY_MAX = 20_000;
-export const RATIONALE_MAX = 2_000;
+const RATIONALE_MAX = 2_000;
 const BODY_ID_MAX = 200;
 const COMMIT_USER_NAME = "substrate skills";
 const COMMIT_USER_EMAIL = "skills@substrate.local";
@@ -74,7 +74,7 @@ export interface ProposeInput {
 }
 
 /** The refusal a beforeWork hook may hand back. It applies only if the library no longer holds the content: the git diff finds a change, before any commit or push. */
-export interface ProposeGate {
+interface ProposeGate {
 	unlessUnchanged: Error;
 }
 
@@ -100,7 +100,7 @@ export interface ProposeOptions {
 	run: Runner;
 }
 
-export type ProposeStatus = "opened" | "existing" | "unchanged" | "declined" | "dry_run";
+type ProposeStatus = "opened" | "existing" | "unchanged" | "declined" | "dry_run";
 
 export interface ProposeResult {
 	status: ProposeStatus;
@@ -116,7 +116,7 @@ export interface ProposeResult {
 	ledger_skipped?: number;
 }
 
-export interface ValidatedProposal {
+interface ValidatedProposal {
 	name: string;
 	surface: Surface;
 	mode: TreeMode;
@@ -512,7 +512,7 @@ function oneLine(value: string): string {
 	return value.replace(/[\r\n\t]+/g, " ").slice(0, BODY_ID_MAX);
 }
 
-export function prTitle(name: string, surface: string): string {
+function prTitle(name: string, surface: string): string {
 	return `skill(${name}): proposal from ${surface}`.slice(0, PR_TITLE_MAX);
 }
 

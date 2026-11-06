@@ -54,7 +54,7 @@ export type ReanchorSkipCode =
 	| "invalid-row"
 	| "duplicate-row";
 
-export interface PlannedReanchor {
+interface PlannedReanchor {
 	/** ISO start of the hour. */
 	period_start: string;
 	period_start_ms: number;
@@ -71,7 +71,7 @@ export interface PlannedReanchor {
 	target_genesis: string;
 }
 
-export interface SkippedHour {
+interface SkippedHour {
 	period_start: string;
 	code: ReanchorSkipCode;
 	detail: string;
@@ -229,7 +229,7 @@ export function planReanchor(input: {
 // The `anchor.reanchor` ledger event
 // ---------------------------------------------------------------------------
 
-export type ReanchorEventRule = "not_object" | "unknown_key" | "missing" | "type" | "format" | "range" | "enum";
+type ReanchorEventRule = "not_object" | "unknown_key" | "missing" | "type" | "format" | "range" | "enum";
 
 /** A re-anchor payload that breaks a rule. `path` names the field, `rule` the rule broken. */
 export class ReanchorEventError extends Error {
@@ -312,7 +312,7 @@ export function parseReanchorPayload(input: unknown, options: { stored?: boolean
 }
 
 /** The part of an `EventInput` this contract owns; `surface`, `session_id` and `ts` stay the caller's. */
-export interface ReanchorEventDraft {
+interface ReanchorEventDraft {
 	kind: "note";
 	summary: string;
 	payload: ReanchorPayload;

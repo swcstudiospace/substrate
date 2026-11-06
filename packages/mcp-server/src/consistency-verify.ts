@@ -66,7 +66,7 @@ import { SURFACES, type MemoryEntry } from "./types.ts";
 // Constants
 // ---------------------------------------------------------------------------
 
-export const CONSISTENCY_SCHEMA = 1 as const;
+const CONSISTENCY_SCHEMA = 1 as const;
 
 export const FINDING_CODES = [
 	"duplicate_document",
@@ -81,34 +81,34 @@ export const FINDING_CODES = [
 export type FindingCode = (typeof FINDING_CODES)[number];
 
 export const STORES = ["index", "plane", "ledger"] as const;
-export type Store = (typeof STORES)[number];
+type Store = (typeof STORES)[number];
 
 export const DEFAULT_MAX_ENTRIES = 5000;
 /** A single run never examines more than this, however it is asked. */
 export const MAX_ENTRIES_CEILING = 50_000;
-export const DEFAULT_MAX_FINDINGS = 500;
-export const MAX_FINDINGS_CEILING = 5000;
+const DEFAULT_MAX_FINDINGS = 500;
+const MAX_FINDINGS_CEILING = 5000;
 /** Plane documents listed per run, all banks together. */
-export const DEFAULT_MAX_DOCUMENTS = 5000;
-export const MAX_DOCUMENTS_CEILING = 50_000;
-export const DEFAULT_MAX_LEDGER_EVENTS = 20_000;
-export const DEFAULT_PAGE_SIZE = 200;
+const DEFAULT_MAX_DOCUMENTS = 5000;
+const MAX_DOCUMENTS_CEILING = 50_000;
+const DEFAULT_MAX_LEDGER_EVENTS = 20_000;
+const DEFAULT_PAGE_SIZE = 200;
 /** The ledger read's own page ceiling (`MAX_QUERY_LIMIT` in greptime.ts). */
-export const LEDGER_PAGE_SIZE = 500;
-export const DEFAULT_READER_TIMEOUT_MS = 10_000;
-export const DEFAULT_DEADLINE_MS = 300_000;
-export const DEFAULT_CONCURRENCY = 4;
-export const MAX_CONCURRENCY = 16;
+const LEDGER_PAGE_SIZE = 500;
+const DEFAULT_READER_TIMEOUT_MS = 10_000;
+const DEFAULT_DEADLINE_MS = 300_000;
+const DEFAULT_CONCURRENCY = 4;
+const MAX_CONCURRENCY = 16;
 /** The ledger comparison covers this much recent time (the ledger's retention and the sweeper stay out of it). */
-export const DEFAULT_LEDGER_WINDOW_MS = 7 * 24 * 3_600_000;
+const DEFAULT_LEDGER_WINDOW_MS = 7 * 24 * 3_600_000;
 /** How long after its entry's `created` a write event's `ts` may fall and still pair with it (the audit runs right after the insert). */
-export const DEFAULT_LEDGER_LAG_MS = 120_000;
+const DEFAULT_LEDGER_LAG_MS = 120_000;
 /** How far BEFORE its entry's `created` an event's `ts` may fall (clock skew between the database and the service). */
-export const DEFAULT_LEDGER_SKEW_MS = 30_000;
+const DEFAULT_LEDGER_SKEW_MS = 30_000;
 /** Ledger pages one run reads at most, whatever the reader returns per page. */
-export const MAX_LEDGER_PAGES = 2000;
+const MAX_LEDGER_PAGES = 2000;
 /** Writes this recent are not judged: their event, or their entry, may still be in flight. */
-export const DEFAULT_LEDGER_GRACE_MS = 60_000;
+const DEFAULT_LEDGER_GRACE_MS = 60_000;
 /** Entries read per examined entry before the scan stops: a bank filter must not make one run walk the whole table. */
 const READ_FACTOR = 10;
 const MAX_REASON_CHARS = 200;
@@ -130,7 +130,7 @@ export interface IndexCursor {
  * `IndexStore.memoryDocumentShared`: another live entry owns this entry's
  * plane document.
  */
-export interface IndexReader {
+interface IndexReader {
 	page(request: { limit: number; cursor: IndexCursor | null }): Promise<{ entries: readonly MemoryEntry[]; next: IndexCursor | null }>;
 	entry(id: string): Promise<MemoryEntry | null>;
 	documentShared?(entry: MemoryEntry): Promise<boolean>;
@@ -334,7 +334,7 @@ function resolveOptions(options: ConsistencyOptions): ResolvedOptions {
 // Report
 // ---------------------------------------------------------------------------
 
-export interface Finding {
+interface Finding {
 	code: FindingCode;
 	/** The entry id, the document id or the event id the finding is about (see `entry_id`, `document_id`, `event_id`). */
 	id: string;
@@ -354,15 +354,15 @@ export interface Finding {
 	detail: string;
 }
 
-export type StoreState = "ok" | "store_unreachable" | "not_checked";
+type StoreState = "ok" | "store_unreachable" | "not_checked";
 
-export interface StoreStatus {
+interface StoreStatus {
 	state: StoreState;
 	/** Set when `state` is `store_unreachable`: the failed operation and a redacted reason. */
 	reason?: string;
 }
 
-export interface ConsistencyCounts {
+interface ConsistencyCounts {
 	entries_examined: number;
 	entries_current: number;
 	entries_superseded: number;
@@ -395,7 +395,7 @@ export interface ConsistencyCounts {
 }
 
 /** What the plane check covered, per bank. A bank in `skipped` was NOT checked for orphans or duplicates, whatever else the report says. */
-export interface BankCoverage {
+interface BankCoverage {
 	/** The configured banks the run was given (sorted); empty when it was given none. */
 	configured: string[];
 	/** Banks whose plane documents were listed and compared with the index (a truncated listing is also in `listing_truncated`). */
@@ -406,7 +406,7 @@ export interface BankCoverage {
 	listing_truncated: string[];
 }
 
-export interface ConsistencyCoverage {
+interface ConsistencyCoverage {
 	/** `known`: the parked set was read. `unknown`: no outbox reader, a memory-only outbox, or a read that failed. */
 	outbox: "known" | "unknown";
 	plane_listing: "complete" | "partial" | "unavailable" | "not_checked";
@@ -416,7 +416,7 @@ export interface ConsistencyCoverage {
 	skipped_checks: string[];
 }
 
-export interface ConsistencyScope {
+interface ConsistencyScope {
 	bank: string | null;
 	since: string | null;
 	max_entries: number;
@@ -1295,11 +1295,11 @@ export function formatReportText(report: ConsistencyReport): string {
 // Repair plan (data only)
 // ---------------------------------------------------------------------------
 
-export const REPAIR_ACTIONS = ["re_retain", "delete_forgotten_document", "delete_orphan_document"] as const;
+const REPAIR_ACTIONS = ["re_retain", "delete_forgotten_document", "delete_orphan_document"] as const;
 export type RepairActionName = (typeof REPAIR_ACTIONS)[number];
 
 /** `safe` actions are idempotent and leave the index alone; `orphan` deletes a document nothing in force owns and needs its own switch. */
-export type RepairClass = "safe" | "orphan";
+type RepairClass = "safe" | "orphan";
 
 export type RepairCondition =
 	| "entry_current"
@@ -1330,7 +1330,7 @@ export interface RepairAction {
 	steps: RepairStep[];
 }
 
-export interface Unrepairable {
+interface Unrepairable {
 	finding: FindingCode;
 	finding_id: string;
 	reason: string;

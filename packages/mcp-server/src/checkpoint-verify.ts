@@ -58,7 +58,7 @@ const HASH_RE = /^[0-9a-f]{64}$/;
 const SIGNATURE_RE = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
 const REASON_MAX = 300;
 
-export type CheckpointVerifyErrorCode = "invalid-ref" | "invalid-config" | "not-found" | "not-a-checkpoint" | "ref-mismatch";
+type CheckpointVerifyErrorCode = "invalid-ref" | "invalid-config" | "not-found" | "not-a-checkpoint" | "ref-mismatch";
 
 /** A caller error (bad ref, missing or foreign event, bad config). Distinct from a verification verdict. */
 export class CheckpointVerifyError extends Error {
@@ -100,7 +100,7 @@ export interface AnchorTransactionRead {
 	finality: "processed" | "confirmed" | "finalized";
 }
 
-export interface CheckpointVerifyConfig {
+interface CheckpointVerifyConfig {
 	/** The genesis hash of the cluster anchors must live on (devnet's). */
 	expectedGenesis: string;
 	/** How long after an hour ends its anchor may still land (default `DEFAULT_ANCHOR_LAG_MS`). */

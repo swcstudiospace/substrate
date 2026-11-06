@@ -52,7 +52,7 @@ const RPC_TIMEOUT_MS = 15_000;
 const RPC_ATTEMPTS = 3;
 const RPC_BACKOFF_MS = 2_000;
 
-export interface ReanchorCliResult {
+interface ReanchorCliResult {
 	code: 0 | 1 | 2;
 	stdout: string;
 	stderr: string;
@@ -94,7 +94,7 @@ export async function runReanchorCli(argv: readonly string[], deps: ReanchorCliD
 	return { code: result.code, stdout: result.stdout, stderr: result.stderr };
 }
 
-export interface OpenOptions {
+interface OpenOptions {
 	/** The environment to read; `process.env` by default. */
 	env?: Record<string, string | undefined>;
 	fetchImpl?: typeof fetch;
@@ -108,7 +108,7 @@ export interface OpenOptions {
 /** An unreadable lock file (garbage, a half-written file) older than this is broken; a lock with a live pid never is. */
 export const LOCK_STALE_MS = 30 * 60_000;
 
-export interface LockFileOptions {
+interface LockFileOptions {
 	pid?: number;
 	now?: () => number;
 	/** Whether the process of a pid is alive; the real one signals it with signal 0. */
@@ -156,10 +156,10 @@ function readHolder(path: string): { raw: string; pid: number | null; startedMs:
  * The registry default of `SUBSTRATE_STATE_DIR` (`flag-registry.ts`, entry `SUBSTRATE_STATE_DIR`: default and unset value
  * `/var/lib/substrate`). Keep the two in step.
  */
-export const DEFAULT_STATE_DIR = "/var/lib/substrate";
+const DEFAULT_STATE_DIR = "/var/lib/substrate";
 
 /** The lock's file name: fixed, so two runs with different signer keys (around a rotation, say) still exclude each other. */
-export const REANCHOR_LOCK_NAME = "substrate-reanchor.lock";
+const REANCHOR_LOCK_NAME = "substrate-reanchor.lock";
 
 /**
  * The one lock file of re-anchor runs on this host: `substrate-reanchor.lock` in `SUBSTRATE_STATE_DIR` (a blank value counts as unset),

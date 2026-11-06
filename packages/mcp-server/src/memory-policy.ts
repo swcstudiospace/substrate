@@ -246,7 +246,7 @@ export function parseGrants(raw: string | undefined, warn: (message: string) => 
 
 // ── conflict strategy ────────────────────────────────────────────────────────
 
-export interface ConflictPlan {
+interface ConflictPlan {
 	/** How a collision is resolved once the write is allowed to land. */
 	resolve: Exclude<ConflictStrategy, "require-review">;
 	/** True where the write is a proposal until a reviewer releases it. */
@@ -347,7 +347,7 @@ export function resolveActor(requested: Actor | undefined, reviewed: boolean): A
 export const MEMORY_TTL_30D_MS = 30 * DAY_MS;
 
 /** Why an entry is past its lifetime; null while it is not. */
-export type MemoryExpiryReason = "30d" | "graph-terminal" | "graph-unindexed";
+type MemoryExpiryReason = "30d" | "graph-terminal" | "graph-unindexed";
 
 export interface MemoryExpiry {
 	expired: boolean;

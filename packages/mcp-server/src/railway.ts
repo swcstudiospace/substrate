@@ -10,17 +10,17 @@ export type { PlanningGraphHint, PlanningGraphRelation } from "./types.ts";
 import type { PlanningGraphHint } from "./types.ts";
 
 /** The LightRAG image this Railway project hosts, next to RAGFlow. */
-export const LIGHTRAG_DOCKER_IMAGE = "ghcr.io/hkuds/lightrag:latest";
+const LIGHTRAG_DOCKER_IMAGE = "ghcr.io/hkuds/lightrag:latest";
 /** LightRAG's HTTP port inside its container. */
-export const LIGHTRAG_DEFAULT_PORT = 9621;
+const LIGHTRAG_DEFAULT_PORT = 9621;
 /** Service name used for Railway private DNS when none is pinned. */
-export const LIGHTRAG_DEFAULT_SERVICE_NAME = "lightrag";
+const LIGHTRAG_DEFAULT_SERVICE_NAME = "lightrag";
 
 /** The fetch surface the health probe needs: injectable for rehearsal fakes. */
-export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 /** Count every entity named across hints (additive; duplicates count once). */
-export function planningNodeCount(hints: readonly PlanningGraphHint[] | undefined): number {
+function planningNodeCount(hints: readonly PlanningGraphHint[] | undefined): number {
 	if (hints === undefined || hints.length === 0) return 0;
 	const seen = new Set<string>();
 	for (const hint of hints) {
@@ -38,11 +38,11 @@ export function planningNodeCount(hints: readonly PlanningGraphHint[] | undefine
  * - `UNAVAILABLE`: Railway (or the LightRAG service) is not configured, or
  *   the health endpoint is unreachable.
  */
-export const LIGHTRAG_HOSTING_STATES = ["PROVISIONING", "RUNNING", "DEGRADED", "UNAVAILABLE"] as const;
+const LIGHTRAG_HOSTING_STATES = ["PROVISIONING", "RUNNING", "DEGRADED", "UNAVAILABLE"] as const;
 export type LightragHostingState = (typeof LIGHTRAG_HOSTING_STATES)[number];
 
 /** Liveness path on the LightRAG server, polled by `monitor`/`lightragHosting`. */
-export const LIGHTRAG_HEALTH_PATH = "/health";
+const LIGHTRAG_HEALTH_PATH = "/health";
 
 /**
  * Map probe facts onto one hosting state. Pure (no I/O) so the fabric can
@@ -64,7 +64,7 @@ export interface RailwayComplianceCheck {
 	advisory?: boolean;
 }
 
-export interface RailwayComplianceSnapshot {
+interface RailwayComplianceSnapshot {
 	state: "success" | "unavailable";
 	reason?: string;
 	checks: RailwayComplianceCheck[];
@@ -80,7 +80,7 @@ export interface RailwayComplianceSnapshot {
 
 
 /** What the orchestrator would provision: one LightRAG service in this project. */
-export interface LightragServicePlan {
+interface LightragServicePlan {
 	image: string;
 	serviceName: string;
 	internalUrl: string;
@@ -90,7 +90,7 @@ export interface LightragServicePlan {
 }
 
 /** One hosted resource the orchestrator reports. */
-export interface RailwayResource {
+interface RailwayResource {
 	kind: "lightrag";
 	serviceId: string | null;
 	serviceName: string;
@@ -100,10 +100,10 @@ export interface RailwayResource {
 	status: "configured";
 }
 
-export type OrchestratorOutcome<T> = ({ state: "success" } & T) | ({ state: "unavailable"; reason: string } & Partial<T>);
+type OrchestratorOutcome<T> = ({ state: "success" } & T) | ({ state: "unavailable"; reason: string } & Partial<T>);
 
 /** The LightRAG `/health` probe result: transport failure is still `success` with `ok: false`. */
-export type LightragHealth =
+type LightragHealth =
 	| { state: "success"; ok: true; url: string }
 	| { state: "success"; ok: false; url: string; reason: string }
 	| { state: "unavailable"; reason: string };
@@ -412,13 +412,13 @@ export class RailwayResourceOrchestrator {
  */
 
 export const RAILWAY_API_URL = "https://backboard.railway.app/graphql/v2";
-export const RAILWAY_DEFAULT_BUDGET_USD = 50;
+const RAILWAY_DEFAULT_BUDGET_USD = 50;
 export const RAILWAY_COST_CACHE_MS = 900_000;
 export const RAILWAY_REQUEST_TIMEOUT_MS = 5_000;
-export const RAILWAY_SCALE_MIN_SAMPLES = 24;
-export const RAILWAY_SCALE_QUANTUM = 0.25;
-export const COST_MEASUREMENTS = ["CPU_USAGE", "MEMORY_USAGE_GB", "DISK_USAGE_GB", "NETWORK_TX_GB"] as const;
-export type CostMeasurement = (typeof COST_MEASUREMENTS)[number];
+const RAILWAY_SCALE_MIN_SAMPLES = 24;
+const RAILWAY_SCALE_QUANTUM = 0.25;
+const COST_MEASUREMENTS = ["CPU_USAGE", "MEMORY_USAGE_GB", "DISK_USAGE_GB", "NETWORK_TX_GB"] as const;
+type CostMeasurement = (typeof COST_MEASUREMENTS)[number];
 
 const SCALE_SAMPLE_RATE_SECONDS = 300;
 const SCALE_AVERAGING_WINDOW_SECONDS = 300;
@@ -437,7 +437,7 @@ const PRICE_ENV: Readonly<Record<CostMeasurement, string>> = {
 	NETWORK_TX_GB: "SUBSTRATE_RAILWAY_PRICE_NETWORK_TX_GB_USD",
 };
 
-export interface ScaleBounds {
+interface ScaleBounds {
 	readonly minVcpus: number;
 	readonly maxVcpus: number;
 	readonly minMemoryGb: number;
@@ -506,7 +506,7 @@ export interface ServiceRef {
 	readonly serviceId: string;
 }
 
-export interface RailwayResources {
+interface RailwayResources {
 	readonly projects: readonly {
 		readonly id: string;
 		readonly name: string;
@@ -516,7 +516,7 @@ export interface RailwayResources {
 	readonly truncated: boolean; // true when a page of RAILWAY_PAGE_SIZE items was full: later items may exist and were not read
 }
 
-export interface RailwayMonitor {
+interface RailwayMonitor {
 	readonly environmentId: string;
 	readonly serviceId: string;
 	readonly serviceName: string | null;
@@ -525,8 +525,8 @@ export interface RailwayMonitor {
 	readonly latestDeployment: { readonly id: string; readonly status: string; readonly createdAt: string } | null;
 }
 
-export type ScaleStatus = "ok" | "insufficient-data";
-export interface ScaleSuggestion {
+type ScaleStatus = "ok" | "insufficient-data";
+interface ScaleSuggestion {
 	readonly status: ScaleStatus;
 	readonly current: { readonly vCPUs: number | null; readonly memoryGB: number | null };
 	readonly p95: { readonly vCPUs: number | null; readonly memoryGB: number | null };
@@ -541,7 +541,7 @@ export interface WriteGate {
 	readonly isOperator: boolean;
 	readonly approvalRef: string | null;
 }
-export interface WriteLimits {
+interface WriteLimits {
 	readonly vCPUs: number;
 	readonly memoryGB: number;
 }
@@ -568,7 +568,7 @@ export function boundsRefusal(bounds: ScaleBounds, limits: WriteLimits): WriteRe
 }
 
 /** The first inverted scale pair, named by its environment variables; null when every minimum is at most its maximum. */
-export function scaleBoundsError(scale: ScaleBounds): string | null {
+function scaleBoundsError(scale: ScaleBounds): string | null {
 	if (scale.minVcpus > scale.maxVcpus) {
 		return `SUBSTRATE_RAILWAY_SCALE_MIN_VCPUS (${scale.minVcpus}) is above SUBSTRATE_RAILWAY_SCALE_MAX_VCPUS (${scale.maxVcpus}).`;
 	}
@@ -597,7 +597,7 @@ export function roundUpToQuantum(value: number, quantum = RAILWAY_SCALE_QUANTUM)
 	return steps === 0 ? 0 : steps * quantum;
 }
 
-export interface SuggestScaleInput {
+interface SuggestScaleInput {
 	readonly cpu: readonly number[]; // CPU_USAGE samples
 	readonly memoryGb: readonly number[]; // MEMORY_USAGE_GB samples
 	readonly currentVcpus: number | null; // newest CPU_LIMIT sample
@@ -642,14 +642,14 @@ export function suggestScale(input: SuggestScaleInput): ScaleSuggestion {
 	};
 }
 
-export type CostStatus = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured";
-export interface CostLine {
+type CostStatus = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured";
+interface CostLine {
 	readonly measurement: CostMeasurement;
 	readonly estimatedValue: number; // summed over projects
 	readonly unitPriceUsd: number | null;
 	readonly costUsd: number | null;
 }
-export interface CostReport {
+interface CostReport {
 	readonly status: CostStatus;
 	readonly budgetUsd: number;
 	readonly projectedMonthlyUsd: number | null;
@@ -705,7 +705,7 @@ export function buildCostReport(input: {
 	};
 }
 
-export type RailwayErrorKind = "not-configured" | "configuration" | "transport" | "graphql" | "shape";
+type RailwayErrorKind = "not-configured" | "configuration" | "transport" | "graphql" | "shape";
 
 export class RailwayRequestError extends Error {
 	readonly kind: RailwayErrorKind;

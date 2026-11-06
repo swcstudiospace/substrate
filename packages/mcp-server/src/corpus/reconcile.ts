@@ -33,13 +33,13 @@ export const RECONCILE_MAX_ROWS = 100_000;
 const RECONCILE_LOOKUP_BUDGET_MS = 8_000;
 
 /** The plane documents a listing named, as `diffPlane` reads them: `PlaneListing` without its failure arm. */
-export interface PlaneSnapshot {
+interface PlaneSnapshot {
 	documents: readonly PlaneListedDocument[];
 	otherDocumentIds: readonly string[];
 	truncated: boolean;
 }
 
-export interface PlaneDrift {
+interface PlaneDrift {
 	/** Active rows whose plane document the (complete) listing does not hold. */
 	missing: ManifestRow[];
 	/** `corpus:` plane documents no active row owns, by id and name, ordered by name. */
@@ -79,15 +79,15 @@ export function diffPlane(rows: readonly ManifestRow[], plane: PlaneSnapshot, ro
 	return { missing, orphans, checked };
 }
 
-export interface ReconcileDeps {
+interface ReconcileDeps {
 	store: CorpusStore;
 	plane: LightragBulkPlane;
 	signal?: AbortSignal | undefined;
 }
 
-export type ReconcileFailure = { ok: false; reason: "corpus.index-unavailable" | "corpus.plane-unreachable"; detail?: string };
+type ReconcileFailure = { ok: false; reason: "corpus.index-unavailable" | "corpus.plane-unreachable"; detail?: string };
 
-export type ReconcileResult = { ok: true; body: CorpusReconcileResponse } | ReconcileFailure;
+type ReconcileResult = { ok: true; body: CorpusReconcileResponse } | ReconcileFailure;
 
 /**
  * Marks each reported row removed so the next plan offers it as an `add`. The row is read again first: it is marked only

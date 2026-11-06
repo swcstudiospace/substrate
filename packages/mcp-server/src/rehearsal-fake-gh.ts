@@ -16,7 +16,7 @@
 import { mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export interface FakePr {
+interface FakePr {
 	number: number;
 	url: string;
 	head: string;
@@ -36,7 +36,7 @@ export interface FakeGhState {
 	origin?: string;
 }
 
-export interface FakeGhResult {
+interface FakeGhResult {
 	code: number;
 	stdout: string;
 	stderr: string;
@@ -45,7 +45,7 @@ export interface FakeGhResult {
 export const EMPTY_STATE: FakeGhState = { next: 1, prs: [], calls: [] };
 
 /** This module's own path, so the installed script can import the one implementation. */
-export const FAKE_GH_MODULE = import.meta.path;
+const FAKE_GH_MODULE = import.meta.path;
 
 function flag(argv: readonly string[], name: string): string | undefined {
 	const at = argv.indexOf(name);
@@ -164,7 +164,7 @@ let takeoverSeq = 0;
 export const OWNERLESS_LOCK_GRACE_MS = 2_000;
 
 /** The steps of acquisition a test needs to interleave with a concurrent recoverer. */
-export interface StateLockIo {
+interface StateLockIo {
 	/**
 	 * Create the owner's pid file in the freshly made lock directory. It MUST be an
 	 * exclusive create: EEXIST (a successor's directory that already has its owner) and

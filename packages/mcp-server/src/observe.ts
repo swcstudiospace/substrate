@@ -18,7 +18,6 @@ import {
 	AuditLog,
 	AuditUnavailableError,
 	auditMode,
-	auditStats,
 	type ClaimDecision,
 	type AuditTransport,
 } from "@substrate/audit";
@@ -74,7 +73,7 @@ import type { GraphTeachable, HourReport, Substrate, SubstrateObserver, VerifyOp
 import type { Surface } from "./types.ts";
 
 /** Kept in step with `packages/mcp-server/package.json`. Reported as `service.version`. */
-export const SUBSTRATE_VERSION = "0.1.0";
+const SUBSTRATE_VERSION = "0.1.0";
 
 /** Routes that exist. Anything else is `other`, so the attribute stays bounded. */
 const KNOWN_ROUTES = [
@@ -184,7 +183,7 @@ export async function recordClaimWithdrawal(
 }
 
 /** `/slo.history` (uplift-3 N2): how far back the merged series reach, and how often they are saved. */
-export interface SloHistory {
+interface SloHistory {
 	/** Restarts so far, this process included: 1 on a fresh start, the checkpoint's epoch + 1 after a restore. */
 	epoch: number;
 	/** ISO time of the oldest sample the merged series reach back to. */
@@ -194,7 +193,7 @@ export interface SloHistory {
 }
 
 /** What one checkpoint write did. Never throws: a checkpoint that could not be saved is a line, not an outage. */
-export interface CheckpointWrite {
+interface CheckpointWrite {
 	/** `false` when no path is configured or the write failed (`error` says why). */
 	written: boolean;
 	bytes: number;
@@ -898,7 +897,7 @@ export function auditRefusal(body: unknown, denials: Map<string, string>): unkno
 
 // ── request instrumentation ──────────────────────────────────────────────────
 
-export function traceparentOf(req: IncomingMessage): SpanContext | null {
+function traceparentOf(req: IncomingMessage): SpanContext | null {
 	const header = req.headers.traceparent;
 	return parseTraceparent(Array.isArray(header) ? header[0] : header);
 }
@@ -1126,4 +1125,4 @@ export function chainState(ok: boolean | null): "verified" | "broken" | "unverif
 	return "unverifiable";
 }
 
-export { auditStats, renderEvidenceHtml };
+export { renderEvidenceHtml };

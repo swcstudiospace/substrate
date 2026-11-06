@@ -30,7 +30,7 @@ export interface BriefRequest {
 	surface: Surface;
 }
 
-export interface BriefSources {
+interface BriefSources {
 	index: IndexStore | null;
 	greptime: GreptimeClient | null;
 }
@@ -74,7 +74,7 @@ export const MAX_BRIEF_NODES = 1000;
 /** The longest node label (id and tracker identifier) a brief prints, in code points; a longer one is cut with an ellipsis. */
 export const MAX_NODE_LABEL_CHARS = Math.floor(MAX_ENCODED_CHARS / (8 * MAX_BRIEF_NODES));
 const RECENT_ACTION_LIMIT = 5;
-export const DEFAULT_RECENT_WINDOW_DAYS = 30;
+const DEFAULT_RECENT_WINDOW_DAYS = 30;
 const DAY_MS = 86_400_000;
 
 /**

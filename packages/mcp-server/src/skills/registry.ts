@@ -46,7 +46,7 @@
 import { redact } from "../redact.ts";
 import { LIBRARY_BASE, SKILL_NAME_RE, type Runner } from "./propose.ts";
 
-export const SKILL_STATES = ["proposed", "approved", "declined", "retired"] as const;
+const SKILL_STATES = ["proposed", "approved", "declined", "retired"] as const;
 export type SkillState = (typeof SKILL_STATES)[number];
 
 export const SKILL_DECISIONS = ["approve", "decline", "retire"] as const;
@@ -200,7 +200,7 @@ export class SkillApprovalFailed extends Error {
 }
 
 /** What a failed approval or list answers with: the route's status and JSON body, and the tool's refusal payload. */
-export interface ApprovalFailure {
+interface ApprovalFailure {
 	status: 400 | 401 | 403 | 409 | 502 | 503;
 	body: { error: string; rule?: ApprovalRule };
 }
@@ -276,7 +276,7 @@ export function validateApproval(request: SkillApprovalRequest): ValidApproval {
 
 // ── the state machine ───────────────────────────────────────────────────────
 
-export type Transition =
+type Transition =
 	| { kind: "apply"; to: SkillState }
 	| { kind: "exists" }
 	| { kind: "refuse"; rule: "bad_transition" | "no_approved_row" };
@@ -312,7 +312,7 @@ export function prApprovalViewArgv(repo: string, prNumber: number): string[] {
 	return ["gh", "pr", "view", String(prNumber), "--repo", repo, "--json", "state,mergeCommit,url,headRefName,baseRefName,files"];
 }
 
-export type PrState = "OPEN" | "CLOSED" | "MERGED";
+type PrState = "OPEN" | "CLOSED" | "MERGED";
 
 /** The parts of `gh pr view` a decision reads. */
 export interface PrView {
@@ -386,7 +386,7 @@ export async function fetchPrView(run: Runner, repo: string, prNumber: number): 
 }
 
 /** True when `url` is exactly pull request `prNumber` of `repo` on github.com (case-insensitive slug). */
-export function prUrlMatches(url: string, repo: string, prNumber: number): boolean {
+function prUrlMatches(url: string, repo: string, prNumber: number): boolean {
 	return url.toLowerCase() === `https://github.com/${repo}/pull/${String(prNumber)}`.toLowerCase();
 }
 
@@ -411,7 +411,7 @@ export function proposalBranchSurface(headRef: string, name: string): string | n
  * (no `/`, no `..`) or nothing binds. `gh pr view` lists at most `GH_FILES_LIMIT` files: a longer
  * pull request whose `SKILL.md` fell past the cut is not bound (fail safe), never guessed.
  */
-export function prBindsToSkill(name: string, view: Pick<PrView, "head_ref" | "files">): boolean {
+function prBindsToSkill(name: string, view: Pick<PrView, "head_ref" | "files">): boolean {
 	if (!SKILL_NAME_RE.test(name)) return false;
 	if (proposalBranchSurface(view.head_ref, name) !== null) return true;
 	return view.files.includes(`${name}/SKILL.md`);
@@ -461,7 +461,7 @@ export function refusalMessage(rule: ApprovalRule): string {
 // ── what `skills_list` answers ──────────────────────────────────────────────
 
 /** The default entry: what a reader needs to project one approved skill. */
-export interface ApprovedSkillEntry {
+interface ApprovedSkillEntry {
 	name: string;
 	content_sha256: string;
 	merge_sha: string | null;
@@ -471,7 +471,7 @@ export interface ApprovedSkillEntry {
 }
 
 /** An entry of a non-default `state` query: the approved shape plus where the row stands. */
-export interface SkillEntry extends ApprovedSkillEntry {
+interface SkillEntry extends ApprovedSkillEntry {
 	state: SkillState;
 	pr_number: number;
 	decided_by: string | null;

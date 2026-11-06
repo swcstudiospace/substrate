@@ -98,7 +98,7 @@ export class ConsistencyUsageError extends Error {
 	}
 }
 
-export interface ConsistencyArgs {
+interface ConsistencyArgs {
 	json: boolean;
 	bank: string | null;
 	limit: number | null;
@@ -194,9 +194,9 @@ export interface RepairPorts {
 	deleteDocument(bank: string, documentId: string): Promise<"deleted" | "absent">;
 }
 
-export type RepairOutcomeKind = "repaired" | "already_consistent" | "skipped" | "failed";
+type RepairOutcomeKind = "repaired" | "already_consistent" | "skipped" | "failed";
 
-export interface RepairOutcome {
+interface RepairOutcome {
 	action: RepairActionName;
 	finding: FindingCode;
 	finding_id: string;
@@ -204,7 +204,7 @@ export interface RepairOutcome {
 	reason?: string;
 }
 
-export interface RepairRun {
+interface RepairRun {
 	orphans_enabled: boolean;
 	/** The plan covered every finding the run had; false when the findings list was cut or a store was unreachable. */
 	plan_complete: boolean;
@@ -398,12 +398,12 @@ export interface RunnerContext {
 	close(): Promise<void>;
 }
 
-export interface RunnerDeps {
+interface RunnerDeps {
 	now(): number;
 	open(): Promise<RunnerContext | { refused: string }>;
 }
 
-export interface RunResult {
+interface RunResult {
 	code: 0 | 1 | 2 | 3;
 	stdout: string;
 	stderr: string;
@@ -681,7 +681,7 @@ export function configuredBanks(plane: HindsightConfig, env: Record<string, stri
 }
 
 /** Open the real stores from the server's environment. Credentials are read here and only here. */
-export async function openRealContext(): Promise<RunnerContext | { refused: string }> {
+async function openRealContext(): Promise<RunnerContext | { refused: string }> {
 	const config = loadConfig();
 	if (!config.postgresUrl) return { refused: "SUBSTRATE_PG_URL is not set" };
 	if (!config.greptime) return { refused: "GREPTIME_URL is not set" };

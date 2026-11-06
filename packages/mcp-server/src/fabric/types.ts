@@ -36,10 +36,10 @@ export const RESOURCE_OF_PLANE: Readonly<Record<DbPlane, FabricResourceName>> = 
 };
 
 export type FabricState = "ok" | "degraded" | "unavailable" | "unconfigured";
-export type FabricEndpointClass = EndpointClass | "unset" | "not-applicable";
+type FabricEndpointClass = EndpointClass | "unset" | "not-applicable";
 export type FabricSeverity = "info" | "attention";
 export type BreakerReading = "closed" | "open" | "half-open" | "off";
-export type CostReading = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured" | "unknown";
+type CostReading = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured" | "unknown";
 
 /** The MCP tools this module serves. Each one is read-only and fail-open. */
 export const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
@@ -49,7 +49,7 @@ export const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_complia
  * Never a URL or a key. `model` is the pin, else the model learned from an embed, else the last one `/info` named;
  * `modelSource` says which, and is `none` only while `model` is null.
  */
-export interface FabricTeiDetail {
+interface FabricTeiDetail {
 	model: string | null;
 	modelSource: TeiModelSource;
 	dimension: number | null;
@@ -57,7 +57,7 @@ export interface FabricTeiDetail {
 }
 
 /** One objective of the corpus row: the reading (`null` while nobody has measured it) against the threshold it is judged by (`null` when the objective is not set). */
-export interface SloLine {
+interface SloLine {
 	reading: number | null;
 	threshold: number | null;
 }
@@ -128,7 +128,7 @@ export interface ServiceReading {
 }
 
 /** What the corpus row judges: the three readings against the thresholds, and why the readings are missing when they could not be read in time. */
-export interface CorpusSloFacts {
+interface CorpusSloFacts {
 	/** `SUBSTRATE_CORPUS=on`. */
 	enabled: boolean;
 	readings: SloReadings;
@@ -198,7 +198,7 @@ export interface FabricCostView {
 }
 
 /** The configuration the fabric reads. Classes and presence only: no URL is in this view. */
-export interface FabricConfigView {
+interface FabricConfigView {
 	endpointPolicy: "warn" | "enforce";
 	endpointClasses: Partial<Record<DbPlane, EndpointClass>>;
 	configured: Record<ServiceName, boolean>;

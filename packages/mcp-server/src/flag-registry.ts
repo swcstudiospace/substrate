@@ -40,7 +40,7 @@ import { ADMISSION_CLASSES } from "@substrate/observability";
 import type { EnvRead } from "./flag-registry-scan.ts";
 import { SURFACES } from "./types.ts";
 
-export type FlagKind = "mode" | "toggle" | "number" | "path" | "list" | "secret-ref" | "string";
+type FlagKind = "mode" | "toggle" | "number" | "path" | "list" | "secret-ref" | "string";
 
 /** One data plane or owner; the reference document has one table per entry, in this order. */
 export const FLAG_PLANES = [
@@ -59,7 +59,7 @@ export const FLAG_PLANES = [
 	"clients",
 	"harness",
 ] as const;
-export type FlagPlane = (typeof FLAG_PLANES)[number];
+type FlagPlane = (typeof FLAG_PLANES)[number];
 
 export const FLAG_PLANE_TITLES: Readonly<Record<FlagPlane, string>> = {
 	identity: "Identity, tokens and memory governance",
@@ -78,7 +78,7 @@ export const FLAG_PLANE_TITLES: Readonly<Record<FlagPlane, string>> = {
 	harness: "Smoke, rehearsal and test harness",
 };
 
-export type Comparator = "<=" | ">=" | "<" | ">" | "==";
+type Comparator = "<=" | ">=" | "<" | ">" | "==";
 
 /** A set of points of one history series: those whose closed label value is in `labels` (all of them when omitted). */
 export interface SeriesTerm {
@@ -87,7 +87,7 @@ export interface SeriesTerm {
 }
 
 /** `share`: sum of the numerator's values over sum of the denominator's values (the whole numerator series when there is no denominator). `ratio`: sum of the numerator's values over the sum of the denominator's sample counts. `max`: worst value. `sum`: total value. */
-export type EvidenceStat = "share" | "ratio" | "max" | "sum";
+type EvidenceStat = "share" | "ratio" | "max" | "sum";
 
 /**
  * The extended series that proves EXTENDED sampling covered a window: a gauge the extended sampler writes in
@@ -125,7 +125,7 @@ export interface Evidence {
 	proposed: true;
 }
 
-export interface PolicySpec {
+interface PolicySpec {
 	/** The value that preserves today's behaviour or only reports. */
 	safe: string;
 	/** The value that makes the policy bite. */
@@ -161,7 +161,7 @@ export interface FlagSpec {
 }
 
 /** A group of names the code composes at run time. The scan finds only the prefix, so the family names it. */
-export interface FlagFamily {
+interface FlagFamily {
 	/** Display form, e.g. `SUBSTRATE_TOKEN_<SURFACE>`. */
 	pattern: string;
 	/** The template prefix the scan reports. */

@@ -57,7 +57,7 @@ export const FIXTURE_READY_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_READY";
 export const FIXTURE_PID_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_PID";
 
 /** Loopback hosts a fixture endpoint or control URL may name. */
-export const FIXTURE_LOOPBACK_HOSTS: Record<string, true> = {
+const FIXTURE_LOOPBACK_HOSTS: Record<string, true> = {
 	"127.0.0.1": true,
 	"::1": true,
 	localhost: true,
@@ -74,7 +74,7 @@ export interface FixtureProcFacts {
 }
 
 /** Side-effect counts the control route reports: numbers only, never bodies. */
-export interface FixtureCounts {
+interface FixtureCounts {
 	requests: number;
 	retrievals: number;
 	uploads: number;
@@ -210,7 +210,7 @@ export function parseParseBehaviourBody(body: unknown): { behavior: "done" | "ne
 }
 
 /** One normalized seeded chunk: dataset resolved, score defaulted, bounds checked. */
-export interface SeedChunk {
+interface SeedChunk {
 	dataset: string;
 	content: string;
 	document_id: string;

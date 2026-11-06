@@ -60,7 +60,7 @@ export interface ArchiveTableSpec {
 }
 
 /** What restore writes where a withheld, NOT NULL column has nothing to restore from. */
-export const WITHHELD_PLACEHOLDER = "[withheld by index-archive]";
+const WITHHELD_PLACEHOLDER = "[withheld by index-archive]";
 
 const text = (name: string): ArchiveColumn => ({ name, type: "text" });
 const ts = (name: string): ArchiveColumn => ({ name, type: "timestamptz" });

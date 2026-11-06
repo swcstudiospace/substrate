@@ -47,7 +47,7 @@ export interface DodGateDeps {
 	timeoutMs: number;
 }
 
-export type DodGateResult =
+type DodGateResult =
 	| { gate: "approved"; alreadyDone: boolean; mirrorFailures: MirrorFailure[] }
 	| {
 			gate: "refused";

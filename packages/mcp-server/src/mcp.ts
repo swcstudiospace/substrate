@@ -104,7 +104,7 @@ function json(value: unknown) {
 }
 
 /** Who an `events_emit` / `graph_claim` is attributed to — or why it is refused. */
-export type Attribution = { surface: Surface } | { refused: string };
+type Attribution = { surface: Surface } | { refused: string };
 
 /**
  * The surface an event or a claim is attributed to, where the token may name the caller.
@@ -169,7 +169,7 @@ export function claimAttribution(callerSurface: Surface | null, supplied: string
 }
 
 /** A swarm session's replica: it can never carry the `@` or `:` that delimit the session. */
-export const SWARM_REPLICA_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const SWARM_REPLICA_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**
  * Why a swarm claim's `session_id` is refused, or null when it is well formed.
@@ -372,7 +372,7 @@ export class RagStateMachine {
  * Where a RAG outcome came from. The half-open probe reports its own attempt with `probe: true`: while the probe is in
  * flight, that report alone settles recovery.
  */
-export interface RagReport {
+interface RagReport {
 	probe?: boolean;
 }
 
@@ -488,7 +488,7 @@ function lightragReply(result: RagLightragResult) {
 
 
 /** Snippets are redacted and capped before reply, like docs_search (D25-04); the plane client applies the same cap. */
-export const RAG_SNIPPET_CAP = LIGHTRAG_SNIPPET_CAP;
+const RAG_SNIPPET_CAP = LIGHTRAG_SNIPPET_CAP;
 
 /**
  * Prompt augmentation for the STEERING state (directory hierarchy default):

@@ -16,14 +16,14 @@
  */
 import type { RecallHit } from "./planes/hindsight.ts";
 
-export interface RecordedRequest {
+interface RecordedRequest {
 	method: string;
 	path: string;
 	authed: boolean;
 	body: unknown;
 }
 
-export interface FakeBank {
+interface FakeBank {
 	mode: string;
 	memories: RecallHit[];
 }

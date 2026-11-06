@@ -19,7 +19,7 @@ export interface S3Like {
 	delete(key: string): Promise<void>;
 }
 
-export interface S3BlobStoreOptions {
+interface S3BlobStoreOptions {
 	/** Key prefix, for instance `memory-capsules/`. Letters, digits, `. _ -` and `/` only; a trailing `/` is added. */
 	prefix?: string;
 	/** Refuse a put larger than this. Default `DEFAULT_MAX_BLOB_BYTES`. */

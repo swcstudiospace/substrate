@@ -46,11 +46,11 @@ import type {
 import { SteeringDirectiveSchema } from "./steering.ts";
 
 /** The opt-in that makes `migrate()` create the audit table. Off creates nothing. */
-export const STEERING_AUDIT_TABLE_ENV = "SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE";
+const STEERING_AUDIT_TABLE_ENV = "SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE";
 
 export type SteeringAuditTransition = "queued" | "acknowledged";
-export type SteeringAuthorKind = "human" | "agent";
-export type SteeringAction = (typeof STEERING_ACTIONS)[number];
+type SteeringAuthorKind = "human" | "agent";
+type SteeringAction = (typeof STEERING_ACTIONS)[number];
 
 /**
  * One row as the SQL port writes it. An `acknowledged` row carries no author, body or directive fields: the
@@ -173,9 +173,9 @@ export class SteeringAuditConflictError extends Error {
 	}
 }
 
-export type SteeringAuditFailure = SteeringAuditError | SteeringAuditConflictError;
+type SteeringAuditFailure = SteeringAuditError | SteeringAuditConflictError;
 
-export type SteeringAuditResult = { ok: true; value: { inserted: boolean } } | { ok: false; error: SteeringAuditFailure };
+type SteeringAuditResult = { ok: true; value: { inserted: boolean } } | { ok: false; error: SteeringAuditFailure };
 
 /** A read that could not run. `code` is `INVALID_QUERY`, `READ_UNAVAILABLE` (no read port was supplied) or the driver's error code. */
 export class SteeringAuditReadError extends Error {
@@ -188,7 +188,7 @@ export class SteeringAuditReadError extends Error {
 	}
 }
 
-export interface SteeringReadOptions {
+interface SteeringReadOptions {
 	/** Only directives for this planning session. Absent reads every session. */
 	sessionId?: string;
 	/** 1..{@link STEERING_READ_LIMIT_MAX}. */
@@ -196,32 +196,32 @@ export interface SteeringReadOptions {
 }
 
 /** Where an open-directive page starts: strictly after the directive with this creation time and id, in the read's order. */
-export interface SteeringReadCursor {
+interface SteeringReadCursor {
 	createdAtMs: number;
 	directiveId: string;
 }
 
 /** The options of {@link SteeringAuditSink.readOpenDirectives}: the common ones, and the page's start. */
-export interface SteeringOpenReadOptions extends SteeringReadOptions {
+interface SteeringOpenReadOptions extends SteeringReadOptions {
 	/** Absent reads from the oldest open directive. */
 	after?: SteeringReadCursor;
 }
 
 /** One directive in the shape `SteeringInbox.restore` takes. Fields are as stored; `restore` validates them. */
-export interface SteeringRestoreCandidate {
+interface SteeringRestoreCandidate {
 	directive: Record<string, unknown>;
 	queuedAtMs: number;
 	acknowledgement?: { atMs: number; outcome: string | null; confirmed: boolean | null; reason?: string };
 	sequence?: number;
 }
 
-export interface SteeringReadPage {
+interface SteeringReadPage {
 	entries: SteeringRestoreCandidate[];
 	/** True when more rows matched than `limit`. The page holds the first `limit` of them in the stated order. */
 	truncated: boolean;
 }
 
-export type SteeringReadResult = { ok: true; value: SteeringReadPage } | { ok: false; error: SteeringAuditReadError };
+type SteeringReadResult = { ok: true; value: SteeringReadPage } | { ok: false; error: SteeringAuditReadError };
 
 export class SteeringAuditSink implements SteeringHistorySink {
 	constructor(
@@ -433,12 +433,12 @@ export const DEFAULT_STEERING_RESTORE_MAX_PAGES = 50;
 /** Why a paged restore stopped before the open directives were exhausted. `page-cap`: the cap was hit with more still open. `read-failed`: a later page could not be read. `no-cursor`: a page could not name where the next one starts. */
 export type SteeringRestoreStop = "page-cap" | "read-failed" | "no-cursor";
 
-export interface SteeringRestorePagedOptions extends SteeringReadOptions {
+interface SteeringRestorePagedOptions extends SteeringReadOptions {
 	/** The most pages read, 1 or more. Absent: {@link DEFAULT_STEERING_RESTORE_MAX_PAGES}. */
 	maxPages?: number;
 }
 
-export type SteeringRestorePagedResult =
+type SteeringRestorePagedResult =
 	| { ok: true; value: { report: SteeringRestoreReport; truncated: boolean; pages: number; stoppedBy: SteeringRestoreStop | null } }
 	| { ok: false; error: SteeringAuditReadError };
 

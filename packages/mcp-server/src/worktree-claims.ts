@@ -17,7 +17,7 @@ import type { Parsed, WorktreeRefusal } from "./worktree-registry.ts";
 /** The shape a graph id may take: also a directory name under a worktree root (keep in step with `worktree-graph.ts`). */
 const GRAPH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-export interface WorktreeClaim {
+interface WorktreeClaim {
 	node_id: string;
 	holder: { surface: string; session_id: string };
 	/** When the lease lapses, ISO 8601. */

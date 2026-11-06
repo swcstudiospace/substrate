@@ -33,7 +33,7 @@ export type DeadLetterReason = (typeof DEAD_LETTER_REASONS)[number];
 const COUNT_CHUNK_BYTES = 64 * 1024;
 
 /** What a record is made from: the event and what happened to it. */
-export interface DeadLetterCandidate {
+interface DeadLetterCandidate {
 	event: SubstrateEvent;
 	/** Write attempts made, the live one included. */
 	attempts: number;
@@ -44,7 +44,7 @@ export interface DeadLetterCandidate {
 }
 
 /** One line of the file. */
-export const StoredDeadLetter = z.object({
+const StoredDeadLetter = z.object({
 	id: z.string(),
 	reason: z.enum(DEAD_LETTER_REASONS),
 	event_id: z.string(),
@@ -58,9 +58,9 @@ export const StoredDeadLetter = z.object({
 	dead_lettered_at: z.string(),
 	event: StoredEvent,
 });
-export type DeadLetterRecord = z.infer<typeof StoredDeadLetter>;
+type DeadLetterRecord = z.infer<typeof StoredDeadLetter>;
 
-export interface DeadLetterOptions {
+interface DeadLetterOptions {
 	/** JSONL file; null keeps the records in memory. */
 	path?: string | null;
 	now?: () => number;

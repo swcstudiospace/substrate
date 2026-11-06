@@ -58,15 +58,15 @@ export function withCorpusLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /** Why a document is refused before anything is sent. Closed. */
-export const REFUSAL_REASONS = [...DOCUMENT_REFUSALS, "sha-mismatch", "secret-findings"] as const;
+const REFUSAL_REASONS = [...DOCUMENT_REFUSALS, "sha-mismatch", "secret-findings"] as const;
 
 const PLANE_FAILURES: readonly string[] = ["plane-unavailable", "timeout", "rejected", "conflict", "pipeline-failed", "duplicate-content"];
 
 /** Why the whole request is refused before any work. The HTTP status is the route's answer. Closed. */
-export const GATE_REASONS = ["unauthenticated", "vm-guest", "corpus.disabled", "corpus.backend-unavailable"] as const;
+const GATE_REASONS = ["unauthenticated", "vm-guest", "corpus.disabled", "corpus.backend-unavailable"] as const;
 export type GateReason = (typeof GATE_REASONS)[number];
 
-export interface CorpusGate {
+interface CorpusGate {
 	status: 401 | 403 | 503;
 	reason: GateReason;
 }
@@ -86,7 +86,7 @@ export interface CorpusIngestSettings {
 	batchBytes: number;
 }
 
-export interface CorpusIngestDeps {
+interface CorpusIngestDeps {
 	store: CorpusStore;
 	plane: LightragBulkPlane;
 	settings: CorpusIngestSettings;

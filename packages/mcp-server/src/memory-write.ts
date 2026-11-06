@@ -249,7 +249,7 @@ export interface MemoryStore {
 	findWrite?(key: string): Promise<WriteRecord | null>;
 }
 
-export interface GovernanceDeps {
+interface GovernanceDeps {
 	store: MemoryStore;
 	/** Checked against the operator's configured reviewer tokens. Never logged. */
 	isReviewToken: (token: string | undefined) => boolean;

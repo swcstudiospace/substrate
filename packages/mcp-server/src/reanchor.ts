@@ -181,7 +181,7 @@ export function parseReanchorRunArgs(argv: readonly string[]): ReanchorOptions {
 // ---------------------------------------------------------------------------
 
 /** What this executor needs from `reanchor-plan-run.ts --json`: the plan's hours and the genesis it observed. */
-export interface SavedPlanHour {
+interface SavedPlanHour {
 	period_start: string;
 	period_start_ms: number;
 	memo: string;
@@ -266,7 +266,7 @@ export function parseSavedPlan(text: string): SavedPlan {
 // ---------------------------------------------------------------------------
 
 /** Closed refusal names, the first word on a refusal line. */
-export type RefusalCode =
+type RefusalCode =
 	| "genesis-unconfirmed"
 	| "rpc-url-refused"
 	| "rpc-unreadable"
@@ -323,7 +323,7 @@ export function dryRunReanchor(plan: SavedPlan, options: ReanchorOptions): Reanc
 // Execute
 // ---------------------------------------------------------------------------
 
-export interface ReanchorEnv {
+interface ReanchorEnv {
 	rpcUrl: string;
 	keypairPath: string;
 	/** The configured anchor public key (`SOLANA_ANCHOR_PUBKEY`). */
@@ -707,7 +707,7 @@ async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly stri
 }
 
 /** Minutes an operator waits after a send that ended without a readable signature: a blockhash is valid for about 150 slots, so two minutes outlast it. */
-export const SEND_SETTLE_MINUTES = 2;
+const SEND_SETTLE_MINUTES = 2;
 
 /**
  * Said whenever a send's outcome is not proven: no signature to read back (a non-zero exit, a timeout or a signal: `code` null, an output with no

@@ -60,7 +60,6 @@ import { reportSilent } from "./silent-failures.ts";
  * unchanged.
  */
 import { retrieveForSearch as retrieveForSearchLightrag, type LightragGraphDetail, type LightragQueryOutcome } from "./planes/lightrag.ts";
-export { retrieveForSearchLightrag };
 import type { SteeringNotice } from "./planning/steering-delivery.ts";
 import { redact, redactValue } from "./redact.ts";
 import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
@@ -123,7 +122,7 @@ export interface SearchCitation {
  * budget), redacted and capped so no transport message grows past 200
  * characters.
  */
-export interface DegradedDataset {
+interface DegradedDataset {
 	dataset: string;
 	reason: string;
 }
@@ -275,7 +274,7 @@ export function planningGraphCounts(hints: readonly PlanningGraphHint[]): Search
  * accepted-ignored on this plane (one knowledge base per server) — scope
  * is a no-op, never an error.
  */
-export type LightragRetriever = (
+type LightragRetriever = (
 	config: LightragConfig,
 	question: string,
 	datasetIds: readonly string[],
@@ -290,10 +289,10 @@ export interface LightragDatasetList {
 }
 
 /** Limits of a `context` block; the budgets are enforced where the sources are read. */
-export const DOCS_CONTEXT_MEMORY_LIMIT = 3;
-export const DOCS_CONTEXT_EVENT_LIMIT = 5;
-export const DOCS_CONTEXT_MEMORY_CHARS = 400;
-export const DOCS_CONTEXT_SUMMARY_CHARS = 200;
+const DOCS_CONTEXT_MEMORY_LIMIT = 3;
+const DOCS_CONTEXT_EVENT_LIMIT = 5;
+const DOCS_CONTEXT_MEMORY_CHARS = 400;
+const DOCS_CONTEXT_SUMMARY_CHARS = 200;
 /** The ledger read's own budget, ms. The recall runs under `searchRecallBudgetMs`. */
 export const DOCS_CONTEXT_LEDGER_BUDGET_MS = 1000;
 
@@ -334,7 +333,7 @@ export interface ManifestCommitRecord {
 	state: ManifestState;
 }
 
-export interface SearchDeps {
+interface SearchDeps {
 	config: RagflowConfig | null;
 	datasetNames?: readonly string[];
 	pins?: Record<string, DatasetPin>;
@@ -615,7 +614,7 @@ function citableCommit(parsed: ParsedCorpusName, record: ManifestCommitRecord | 
  */
 
 /** The most steering characters that travel with a retrieval question. */
-export const STEERING_CAP = 2000;
+const STEERING_CAP = 2000;
 
 /**
  * The retrieval question with live steering appended. Null, undefined or
@@ -648,7 +647,7 @@ export function scopedDatasetName(repoId: string | null | undefined, dataset: st
 }
 
 /** One LightRAG REST/JSON hit: content plus whatever locator the endpoint returned. */
-export interface LightRagHit {
+interface LightRagHit {
 	content: string;
 	source_url?: string;
 	score?: number;
@@ -661,7 +660,7 @@ export interface LightRagHit {
  * shape, wrong types, unparseable — is zero hits, never a throw, so the
  * RAGFlow path simply serves without them.
  */
-export function parseLightRagJson(raw: unknown): LightRagHit[] {
+function parseLightRagJson(raw: unknown): LightRagHit[] {
 	const candidates: unknown = raw !== null && typeof raw === "object" && !Array.isArray(raw)
 		? ((raw as Record<string, unknown>).data ?? (raw as Record<string, unknown>).results ?? [])
 		: Array.isArray(raw) ? raw : [];
@@ -680,7 +679,7 @@ export function parseLightRagJson(raw: unknown): LightRagHit[] {
 }
 
 /** A LightRAG hit as a citation: redacted, capped, framed exactly like a RAGFlow one. */
-export function lightRagCite(hit: LightRagHit, datasetName: string, index: number): SearchCitation {
+function lightRagCite(hit: LightRagHit, datasetName: string, index: number): SearchCitation {
 	return {
 		title: redact(hit.source_url ?? datasetName),
 		source_url: hit.source_url !== undefined ? redact(hit.source_url) : `dataset:${datasetName}`,
@@ -698,7 +697,7 @@ export function lightRagCite(hit: LightRagHit, datasetName: string, index: numbe
  * retained under, so it never reads as a LightRAG source. A memory records no commit, so its commit is the
  * `unrecorded` marker.
  */
-export function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitation {
+function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitation {
 	const document = hit.document_id ?? hit.id;
 	return {
 		title: redact(document),
@@ -717,7 +716,7 @@ export function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitat
  * answered. Framed derived-untrusted like every other fallback. It is `degraded`, since the answer is not the
  * plane's and so is never stored, and `reason` names the plane failure it stands in for.
  */
-export function hindsightFallbackReply(chunks: SearchCitation[], reason: string): SearchReply {
+function hindsightFallbackReply(chunks: SearchCitation[], reason: string): SearchReply {
 	return {
 		chunks,
 		untrusted: `${UNTRUSTED_DOCS_NOTICE} Served from Hindsight fallback: ${reason}.`,
@@ -984,10 +983,10 @@ function backoffWithinDeadline(deadline: SharedDeadline, baseMs: number, retry: 
 }
 
 /** How the Hindsight leg of a tandem search ended. */
-export type TandemLegStatus = "ok" | "empty" | "timeout" | "failed";
+type TandemLegStatus = "ok" | "empty" | "timeout" | "failed";
 
 /** The structured note a tandem reply carries: the counts merged, and how the Hindsight leg ended. */
-export interface TandemNote extends TandemCounts {
+interface TandemNote extends TandemCounts {
 	leg: TandemLegStatus;
 }
 

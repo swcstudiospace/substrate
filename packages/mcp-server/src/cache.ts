@@ -58,8 +58,8 @@ export const CACHE_TTL = {
 } as const;
 
 export type CacheClass = keyof typeof CACHE_TTL;
-export type CacheMode = "off" | "on" | "degraded";
-export type CacheResult = "hit" | "miss" | "bypass" | "error" | "coalesced" | "stale" | "refresh" | "would_serve_stale";
+type CacheMode = "off" | "on" | "degraded";
+type CacheResult = "hit" | "miss" | "bypass" | "error" | "coalesced" | "stale" | "refresh" | "would_serve_stale";
 /** `SUBSTRATE_CACHE_SWR`: `off` never serves stale, `shadow` only counts `would_serve_stale`, `enforce` serves it. */
 export type CacheSwrMode = "off" | "shadow" | "enforce";
 
@@ -187,7 +187,7 @@ export interface CacheRedis {
 	unlink?(keys: readonly string[]): Promise<number>;
 }
 
-export interface ReadThroughOptions {
+interface ReadThroughOptions {
 	redis: CacheRedis | null;
 	enabled: boolean;
 	now?: (() => number) | undefined;
@@ -214,7 +214,7 @@ export interface LastGood<T> {
 }
 
 /** One load, with the same hooks a plain `getOrLoad` request has. */
-export interface RefreshLoad<T> {
+interface RefreshLoad<T> {
 	load: () => Promise<T>;
 	refreshAt?: (value: T) => number | null;
 	store?: (value: T) => boolean;
@@ -223,7 +223,7 @@ export interface RefreshLoad<T> {
 }
 
 /** How a call takes part in stale-while-revalidate; absent means single-flight only. */
-export interface StaleServing<T> {
+interface StaleServing<T> {
 	/** The generation-free last-good value or null. Must not count as a cache read (`peekQuiet`). */
 	lastGood: () => Promise<LastGood<T> | null>;
 	/** Called when a refresh starts: returns a load with its own state, so a refresh never touches the caller's closures. */
@@ -251,20 +251,20 @@ export const CONNECT_TIMEOUT_MS = 250;
 export const CACHE_CONNECT_COOLDOWN_MS = 5_000;
 const LOG_INTERVAL_MS = 60_000;
 /** Most registered loads at once (single-flight and refreshes share the map). */
-export const MAX_INFLIGHT = 256;
+const MAX_INFLIGHT = 256;
 /** Most background refreshes at once. */
 export const MAX_REFRESHES = 16;
 /** A registered load older than this is no longer joined, ms. Generous: the brief's own budget is 1.2 s. */
-export const FLIGHT_MAX_AGE_MS = 15_000;
-export const DEFAULT_SWR_WINDOW_S = 30;
-export const MAX_SWR_WINDOW_S = 300;
+const FLIGHT_MAX_AGE_MS = 15_000;
+const DEFAULT_SWR_WINDOW_S = 30;
+const MAX_SWR_WINDOW_S = 300;
 
 /**
  * Stable JSON: object keys sorted, `undefined` dropped. The hash input, so two
  * calls with the same arguments and surface share a key whatever order the
  * fields were written in.
  */
-export function canonical(value: unknown): string {
+function canonical(value: unknown): string {
 	return JSON.stringify(order(value));
 }
 
@@ -313,7 +313,7 @@ export function digestKey(klass: CacheClass, digest: string): string {
 /** The widest embedding the `emb` class accepts, a bound on what one entry can hold. */
 export const EMB_MAX_DIM = 8192;
 
-export interface BunRedisOptions {
+interface BunRedisOptions {
 	gate?: PlaneGate | null | undefined;
 	now?: (() => number) | undefined;
 	cooldownMs?: number;
@@ -446,7 +446,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	};
 }
 
-export interface CreateCacheOptions {
+interface CreateCacheOptions {
 	record?: (sample: CacheSample) => void;
 	/** The cache's plane gate (uplift-2 R2); null runs every command unwrapped. */
 	gate?: PlaneGate | null;
