@@ -26,7 +26,7 @@ import type { LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import type { EventInput, Surface } from "../types.ts";
 import { authorizeRepo, REPO_REFUSAL_MESSAGES, REPO_SCOPE_OFF, type RepoRefusalReason, type RepoScope } from "../repo-scope.ts";
 import { corpusAnchorStatus, type AnchorVerifier } from "./anchor.ts";
-import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
+import { corpusGate, runIngest, withCorpusLock, type GateReason } from "./ingest.ts";
 import { planCorpus, planRepos } from "./plan.ts";
 import { reconcileCorpus } from "./reconcile.ts";
 import { inclusionOf, type CorpusRootKeeper } from "./root.ts";
@@ -173,8 +173,8 @@ function allReposRefusal(deps: CorpusServiceDeps): CorpusFailure | null {
 /**
  * The tombstones a request may remove. Each active row a tombstone names must sit inside the scope the request declares, the bound
  * the plan puts on a tombstone: its (repo, source) pair is covered and its tier is at most `maxTier`. A digest row is never a plan
- * tombstone, so it is refused here too. A row that is absent or already tombstoned removes nothing and is not judged. Checked before
- * any plane write, so a refusal deletes nothing; the refusal names no repository or path.
+ * tombstone, so it is refused here too. A row that is absent or already tombstoned removes nothing and is not judged. Checked under
+ * the corpus lock, before any plane write, so a refusal deletes nothing; the refusal names no repository or path.
  */
 async function tombstoneScopeRefusal(deps: CorpusServiceDeps, surface: Surface, store: CorpusStore, request: ParsedIngestRequest): Promise<CorpusFailure | null> {
 	const scope = request.scope;
@@ -234,21 +234,24 @@ export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, s
 	}
 	const scoped = await repoRefusalOf(deps, surface, [...parsed.value.documents, ...parsed.value.tombstones].map((item) => item.repo));
 	if (scoped !== null) return scoped;
-	const outOfScope = await tombstoneScopeRefusal(deps, surface, store, parsed.value);
-	if (outOfScope !== null) return outOfScope;
 	// The root cache is unavailable from the first write to the last: each batch saves its rows before the later ones and the cleanup.
 	// A request that recorded, changed or removed anything (or failed part-way, or threw) moved the manifest: a root event is owed.
 	// The keeper coalesces and dedupes by manifest version, so a request that changed nothing writes nothing.
 	deps.roots.writeStarted();
 	let changed = true;
 	try {
-		const response = await ingestCorpus(
-			{ store, plane, settings: deps.settings, emit: deps.emit, surface, sessionId, signal: deps.signal },
-			parsed.value,
-		);
-		const { counts } = response;
-		changed = counts.ingested + counts.updated + counts.tombstoned + counts.failed > 0;
-		return { ok: true, status: 200, body: response };
+		// The scope check and the ingest share one hold of the lock, so a row another ingest changed while this one waited is judged as it now stands.
+		return await withCorpusLock(async (): Promise<CorpusReply<CorpusIngestResponse>> => {
+			const outOfScope = await tombstoneScopeRefusal(deps, surface, store, parsed.value);
+			if (outOfScope !== null) {
+				changed = false;
+				return outOfScope;
+			}
+			const response = await runIngest({ store, plane, settings: deps.settings, emit: deps.emit, surface, sessionId, signal: deps.signal }, parsed.value);
+			const { counts } = response;
+			changed = counts.ingested + counts.updated + counts.tombstoned + counts.failed > 0;
+			return { ok: true, status: 200, body: response };
+		});
 	} finally {
 		deps.roots.writeSettled(changed);
 	}

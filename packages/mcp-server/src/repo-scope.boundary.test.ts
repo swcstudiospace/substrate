@@ -7,6 +7,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { corpusIngestReply, corpusProofReply, corpusStatusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { withCorpusLock } from "./corpus/ingest.ts";
 import type { CorpusRootKeeper } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
 import { FakePlane, FakeStore, makeRow } from "./corpus/testkit.ts";
@@ -266,5 +267,23 @@ describe("corpus ingest tombstones (ATLAS-04: a tombstone removes only what the 
 		expect(reply).toMatchObject({ ok: true, status: 200, body: { results: [{ repo: "owner/a", path: "docs/a.md", status: "tombstoned" }] } });
 		expect(plane.deletes).toEqual([["doc-docs/a.md"]]);
 		expect(store.row("owner/a", "docs/a.md")?.state).toBe("tombstoned");
+	});
+
+	test("a tombstone whose row another ingest moves out of scope while it waits for the lock is refused, and the plane deletes nothing", async () => {
+		const repos = twoRepos();
+		const store = new FakeStore();
+		const plane = new FakePlane();
+		store.seed(makeRow({ repo: "owner/a", path: "docs/moved.md", tier: 1, documentId: "doc-moved" }));
+		const gate = Promise.withResolvers<void>();
+		const holder = withCorpusLock(() => gate.promise);
+		const reply = corpusIngestReply(ingestDeps(scoped(repos), store, plane), { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: "owner/a", path: "docs/moved.md" }], scope: { coverage: [fs("owner/a")], maxTier: 1 } }, "omp");
+		// The request's scope check runs while another ingest holds the lock; that ingest then moves the row to tier 3, out of scope.
+		for (let turn = 0; turn < 40; turn += 1) await Promise.resolve();
+		store.seed(makeRow({ repo: "owner/a", path: "docs/moved.md", tier: 3, documentId: "doc-moved" }));
+		gate.resolve();
+		await holder;
+		expect(await reply).toMatchObject({ ok: false, status: 403, body: { reason: "tombstone-out-of-scope" } });
+		expect(plane.deletes).toEqual([]);
+		expect(store.row("owner/a", "docs/moved.md")).toMatchObject({ state: "active", tier: 3 });
 	});
 });

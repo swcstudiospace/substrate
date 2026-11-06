@@ -467,7 +467,11 @@ export function ingestCorpus(deps: CorpusIngestDeps, request: CorpusIngestReques
 	return ingestLock.run(() => runIngest(deps, request));
 }
 
-async function runIngest(deps: CorpusIngestDeps, request: CorpusIngestRequest): Promise<CorpusIngestResponse> {
+/**
+ * The ingest body. `ingestCorpus` runs it under the corpus lock; the service runs it inside the same lock hold as the tombstone
+ * scope check, so a caller of this function holds `withCorpusLock`.
+ */
+export async function runIngest(deps: CorpusIngestDeps, request: CorpusIngestRequest): Promise<CorpusIngestResponse> {
 	const tally: Tally = { results: new Map(), rules: new Map(), orphaned: 0, batches: 0, superseded: new Set(), conflicts: [] };
 	// Phase T: every tombstone, deletes included, finishes before the first insert.
 	await tombstone(deps, tally, request.tombstones);
