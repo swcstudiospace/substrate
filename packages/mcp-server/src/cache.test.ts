@@ -12,6 +12,7 @@ import { BreakerOpenError, CACHE_METRIC_CLASSES, CircuitBreaker, findCounter, su
 import {
 	CACHE_CLASSES,
 	MAX_REFRESHES,
+	MAX_SCAN_ROUNDS,
 	classOf,
 	snapshotKey,
 	type LastGood,
@@ -2166,5 +2167,19 @@ describe("classOf (uplift-4 S4)", () => {
 		expect(classOf("substrate:v1:unknown:abc")).toBeNull();
 		expect(classOf("other:v1:brief:abc")).toBeNull();
 		expect(classOf("substrate:v1:__proto__:abc")).toBeNull();
+	});
+});
+
+describe("scanKeys round bound", () => {
+	test("a scan whose pages all come back empty with a nonzero cursor stops at the round bound and reports truncated", async () => {
+		let rounds = 0;
+		const redis = Object.assign(new FakeRedis(), {
+			scan: async (_match: string, _count: number, _cursor: string): Promise<[string, string[]]> => {
+				rounds += 1;
+				return ["7", []];
+			},
+		});
+		expect(await cacheOf(redis).scanKeys("substrate:v1:brief:*", 10)).toEqual({ keys: [], truncated: true });
+		expect(rounds).toBe(MAX_SCAN_ROUNDS);
 	});
 });

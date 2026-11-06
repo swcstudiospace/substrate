@@ -254,6 +254,8 @@ const LOG_INTERVAL_MS = 60_000;
 const MAX_INFLIGHT = 256;
 /** Most background refreshes at once. */
 export const MAX_REFRESHES = 16;
+/** Most SCAN rounds one walk issues. Pages can come back empty, so a walk is bounded by rounds as well as by keys found. */
+export const MAX_SCAN_ROUNDS = 200;
 /** A registered load older than this is no longer joined, ms. Generous: the brief's own budget is 1.2 s. */
 const FLIGHT_MAX_AGE_MS = 15_000;
 const DEFAULT_SWR_WINDOW_S = 30;
@@ -1077,9 +1079,10 @@ export class ReadThroughCache {
 	}
 
 	/**
-	 * Keys under `match`, read-only: a SCAN loop that stops at the end of the cursor or once `limit` keys are in hand.
-	 * `truncated` is true when keys remained past the limit, so a partial list is never read as a whole one. Empty when
-	 * the cache is off. A client without SCAN, or a failed command, throws: a scan that did not run must not read as clean.
+	 * Keys under `match`, read-only: a SCAN loop that stops at the end of the cursor, once `limit` keys are in hand, or after
+	 * `MAX_SCAN_ROUNDS` rounds. `truncated` is true when keys remained past the limit or the walk stopped before the cursor
+	 * ended, so a partial list is never read as a whole one. Empty when the cache is off. A client without SCAN, or a
+	 * failed command, throws: a scan that did not run must not read as clean.
 	 */
 	async scanKeys(match: string, limit: number): Promise<{ keys: string[]; truncated: boolean }> {
 		const redis = this.redis;
@@ -1091,11 +1094,13 @@ export class ReadThroughCache {
 		const scanCount = 500;
 		const found = new Set<string>();
 		let cursor = "0";
+		let rounds = 0;
 		do {
 			const [next, page] = await this.attempt(() => scan.call(redis, match, scanCount, cursor));
 			cursor = next;
+			rounds += 1;
 			for (const key of page) found.add(key);
-		} while (cursor !== "0" && found.size <= cap);
+		} while (cursor !== "0" && found.size <= cap && rounds < MAX_SCAN_ROUNDS);
 		this.noteConnected();
 		const keys = [...found];
 		return { keys: keys.slice(0, cap), truncated: cursor !== "0" || keys.length > cap };
