@@ -66,6 +66,7 @@ import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, ty
 import type { DocumentProvenance } from "./docs-ingest.ts";
 import { CORPUS_DATASET, parseCorpusDocumentName, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
 import type { ParsedCorpusName } from "@substrate/corpus";
+import type { ManifestState } from "./corpus/store.ts";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
 export const UNTRUSTED_DOCS_NOTICE =
@@ -325,6 +326,13 @@ export interface DatasetPin {
 	ingested_at?: string;
 }
 
+/** The corpus manifest's record of a document: the commit it was ingested at, the content hash it holds, and its state. */
+export interface ManifestCommitRecord {
+	commit: string | null;
+	sha256: string;
+	state: ManifestState;
+}
+
 export interface SearchDeps {
 	config: RagflowConfig | null;
 	datasetNames?: readonly string[];
@@ -346,10 +354,12 @@ export interface SearchDeps {
 	/** The ingest record of a document id — source URL and the commit it was uploaded under (uplift-2 R6). */
 	provenanceOf?: (documentId: string) => DocumentProvenance | undefined;
 	/**
-	 * The commit the corpus manifest records for a document, read by its repository and path (`CorpusStore.rowFor`). Read once
-	 * per distinct corpus document a reply cites; a null answer, a throw or rejection, or no answer within `MANIFEST_COMMIT_DEADLINE_MS` cites HEAD and never fails the search.
+	 * The corpus manifest's record of a document, read by its repository and path (`CorpusStore.rowFor`). A chunk is cited at the record's
+	 * commit only when the record is `active` and the chunk's name carries the record's content hash (`citableCommit`); every other chunk cites
+	 * HEAD. Read once per distinct corpus document a reply cites; a null answer, a throw or rejection, or no answer within
+	 * `MANIFEST_COMMIT_DEADLINE_MS` cites HEAD and never fails the search.
 	 */
-	manifestCommit?: (repo: string, path: string) => Promise<string | null>;
+	manifestCommit?: (repo: string, path: string) => Promise<ManifestCommitRecord | null>;
 	/**
 	 * One shared deadline for every dataset's retrieval, ms (uplift-3 N5;
 	 * `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`). `0` or unset: no shared deadline,
@@ -537,12 +547,13 @@ function corpusDocumentOf(chunk: RagflowChunk): ParsedCorpusName | null {
 }
 
 /**
- * The commit the manifest records for each corpus document the chunks name, keyed by `documentKey`. One lookup per distinct
- * document, so a reply's lookups are bounded by its documents, not its chunks. A lookup that throws or rejects, records no
- * commit, records one that is not a full commit name, or does not answer within `MANIFEST_COMMIT_DEADLINE_MS` leaves its document out: it is cited at HEAD.
+ * The manifest's record of each corpus document the chunks name, keyed by `documentKey`. One lookup per distinct document, so a reply's
+ * lookups are bounded by its documents, not its chunks. A record is kept only when it names a full commit. A lookup that throws or rejects,
+ * answers no record or one without a full commit name, or does not answer within `MANIFEST_COMMIT_DEADLINE_MS` leaves its document out, and
+ * its chunks are cited at HEAD. Whether a kept record is cited for a given chunk is decided by `citableCommit`.
  */
-async function manifestCommits(deps: SearchDeps, chunks: readonly RagflowChunk[]): Promise<ReadonlyMap<string, string>> {
-	const commits = new Map<string, string>();
+async function manifestCommits(deps: SearchDeps, chunks: readonly RagflowChunk[]): Promise<ReadonlyMap<string, ManifestCommitRecord>> {
+	const commits = new Map<string, ManifestCommitRecord>();
 	const lookup = deps.manifestCommit;
 	if (lookup === undefined) return commits;
 	const documents = new Map<string, ParsedCorpusName>();
@@ -553,8 +564,8 @@ async function manifestCommits(deps: SearchDeps, chunks: readonly RagflowChunk[]
 	await Promise.all(
 		[...documents].map(async ([key, { repo, path }]) => {
 			try {
-				const commit = await withDeadline(lookup(repo, path), MANIFEST_COMMIT_DEADLINE_MS);
-				if (commit !== null && FULL_COMMIT.test(commit)) commits.set(key, commit);
+				const record = await withDeadline(lookup(repo, path), MANIFEST_COMMIT_DEADLINE_MS);
+				if (record !== null && record.commit !== null && FULL_COMMIT.test(record.commit)) commits.set(key, record);
 			} catch {
 				// The citation falls back to HEAD; a failed lookup never fails the search.
 			}
@@ -565,14 +576,14 @@ async function manifestCommits(deps: SearchDeps, chunks: readonly RagflowChunk[]
 
 /**
  * A LightRAG result whose file path is a corpus document name (`corpus:<repo>:<path>@<sha>`) cites the document's own
- * repository and path: `source_url` and `commit` at the commit the manifest records for it (`commit` is the unrecorded marker at HEAD), `title` as `repo:path`,
- * `dataset: "corpus"`. LightRAG holds one workspace, so without this the result would be attributed to the first dataset
+ * repository and path: `source_url` and `commit` at the commit `citableCommit` allows for it (HEAD otherwise, with `commit` as the unrecorded marker),
+ * `title` as `repo:path`, `dataset: "corpus"`. LightRAG holds one workspace, so without this the result would be attributed to the first dataset
  * searched. `heading_path` keeps what LightRAG returned and every other result is returned as it was.
  */
-function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation, commits: ReadonlyMap<string, string>): SearchCitation {
+function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation, commits: ReadonlyMap<string, ManifestCommitRecord>): SearchCitation {
 	const parsed = corpusDocumentOf(chunk);
 	if (parsed === null) return citation;
-	const recorded = commits.get(documentKey(parsed.repo, parsed.path));
+	const recorded = citableCommit(parsed, commits.get(documentKey(parsed.repo, parsed.path)));
 	return {
 		...citation,
 		title: redact(`${parsed.repo}:${parsed.path}`),
@@ -580,6 +591,16 @@ function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation, com
 		commit: recorded ?? `dataset-pin:${CORPUS_DATASET}:unrecorded`,
 		dataset: CORPUS_DATASET,
 	};
+}
+
+/**
+ * The commit a corpus chunk is cited at, or undefined for HEAD. The manifest's commit is used only when the row is `active` and the
+ * chunk's name carries the row's content: the chunk's sha12 is a prefix of the row's sha256 (lower-case hex). A chunk indexed from an older
+ * version of a document, and any chunk of a tombstoned row, is cited at HEAD: never at a commit whose content it is not.
+ */
+function citableCommit(parsed: ParsedCorpusName, record: ManifestCommitRecord | undefined): string | undefined {
+	if (record === undefined || record.state !== "active" || record.commit === null) return undefined;
+	return record.sha256.toLowerCase().startsWith(parsed.sha12) ? record.commit : undefined;
 }
 
 /**

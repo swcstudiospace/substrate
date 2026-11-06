@@ -6418,7 +6418,7 @@ export class Substrate {
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
-					manifestCommit: async (repo, path) => (await this.corpusStore()?.rowFor(repo, path))?.commit ?? null,
+					manifestCommit: async (repo, path) => (await this.corpusStore()?.rowFor(repo, path)) ?? null,
 					budgetMs: this.config.docsSearchBudgetMs,
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
 					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",

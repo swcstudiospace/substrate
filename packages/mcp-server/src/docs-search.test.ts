@@ -10,6 +10,8 @@ import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
+import { corpusDocumentName } from "@substrate/corpus";
+import { FakePlane, FakeStore, makeRow, sha256Hex } from "./corpus/testkit.ts";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchCitation, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
@@ -595,14 +597,14 @@ describe("docs backend selection (LightRAG cutover)", () => {
 });
 
 describe("LightRAG search and the RAGFlow plane", () => {
-	/** A LightRAG `/query` stand-in: answers one chunk with `chunk` and records the raw body of every query it gets. */
-	function lightragServing(chunk: string) {
+	/** A LightRAG `/query` stand-in: answers one chunk with `chunk`, named `documentName`, and records the raw body of every query it gets. */
+	function lightragServing(chunk: string, documentName = "plan.md") {
 		const queries: string[] = [];
 		const fetch: FetchLike = async (input, init) => {
 			const url = new URL(String(input));
 			if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
 			queries.push(String(init.body));
-			return Response.json({ status: "success", data: { chunks: [{ content: chunk, document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
+			return Response.json({ status: "success", data: { chunks: [{ content: chunk, document_name: documentName, document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
 		};
 		return { fetch, queries };
 	}
@@ -661,6 +663,25 @@ describe("LightRAG search and the RAGFlow plane", () => {
 		expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
 		expect(lightrag.queries).toHaveLength(1);
 		expect(ragflowCalls).toBe(0);
+	});
+
+	test("a docs search through the service cites the commit the corpus manifest records", async () => {
+		const repo = "swcstudiospace/agent-substrate";
+		const path = "docs/data planes.md";
+		const body = "The planes are described here.";
+		const sha = sha256Hex(body);
+		const commit = "0123456789abcdef0123456789abcdef01234567";
+		const store = new FakeStore();
+		store.seed(makeRow({ repo, path, sha256: sha, commit, state: "active" }));
+		const lightrag = lightragServing(body, corpusDocumentName(repo, path, sha));
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", SUBSTRATE_CORPUS: "on" }),
+			{ index: null, greptime: null, lightragFetch: lightrag.fetch, corpus: { store, plane: new FakePlane() } },
+		);
+		const reply = await substrate.searchDocs({ question: "where are the data planes described?" }, "omp");
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.chunks).toHaveLength(1);
+		expect(reply.chunks[0]).toMatchObject({ source_url: `https://github.com/${repo}/blob/${commit}/docs/data%20planes.md`, commit, dataset: "corpus" });
 	});
 
 	test("Substrate.searchDocs: a RAGFlow answer in a shared cache is not served to the LightRAG backend", async () => {
