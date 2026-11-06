@@ -55,12 +55,12 @@
 
 ### Worktree Fleet (phase 68)
 
-- [ ] **FLEET-01**: Worktree locations are configurable, and every worktree of a repository is found through git, not through a path convention.
-- [ ] **FLEET-02**: A worktree registry records path, repo, branch, head, base, dirty state, ahead and behind, last activity, size and the attributed session or graph.
-- [ ] **FLEET-03**: `substrate worktree prune` removes only worktrees that are clean (ignored files that hold work count), pushed and whose current head is merged (not merely whose branch once was), never the primary checkout, and records each removal.
-- [ ] **FLEET-04**: `substrate worktree conflicts` predicts textual conflicts between the active worktrees of a repository and suggests a merge order.
-- [ ] **FLEET-05**: Worktree creation refuses below a configured free-disk floor, and the doctor reports disk pressure from worktrees.
-- [ ] **FLEET-06**: A session's brief names other sessions' worktrees that touch the same files.
+- [x] **FLEET-01**: Worktree locations are configurable, and every worktree of a repository is found through git, not through a path convention.
+- [x] **FLEET-02**: A worktree registry records path, repo, branch, head, base, dirty state, ahead and behind, last activity, size and the attributed session or graph.
+- [x] **FLEET-03**: `substrate worktree prune` removes only worktrees that are clean (ignored files that hold work count), pushed and whose current head is merged (not merely whose branch once was), never the primary checkout, and records each removal.
+- [x] **FLEET-04**: `substrate worktree conflicts` predicts textual conflicts between the active worktrees of a repository and suggests a merge order.
+- [x] **FLEET-05**: Worktree creation refuses below a configured free-disk floor, and the doctor reports disk pressure from worktrees.
+- [x] **FLEET-06**: A session's brief names other sessions' worktrees that touch the same files.
 
 ### Doc Proofs (phase 69)
 
@@ -96,7 +96,7 @@ Checkbox convention: a ticked requirement is satisfied or waived by the operator
 | WATCH-01 to WATCH-05 | 65 | Shipped (PR #186); audit: 3 MET, 2 PARTIAL |
 | REFLECT-01 to REFLECT-05 | 66 | Shipped (PR #184); audit: 2 MET, 3 PARTIAL |
 | STEER-01 to STEER-06 | 67 | Shipped (PRs #180, #192); audit: 5 MET, 1 PARTIAL |
-| FLEET-01 to FLEET-06 | 68 | Shipped (PRs #178, #185, #188 to #190, #193); audit: 4 MET, 2 PARTIAL |
+| FLEET-01 to FLEET-06 | 68 | Shipped (PRs #178, #185, #188 to #190, #193); audit: 6 MET; phase 68 passed (record 2026-11-06) |
 | PROOF-01 to PROOF-04 | 69 | Shipped (PR #181); audit: 1 MET, 3 PARTIAL |
 | EVAL-01 to EVAL-05 | 70 | Shipped (PR #182); audit: 4 MET, 1 PARTIAL |
 
@@ -130,11 +130,11 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 
 | Requirement | Category | Phase | Status |
 |-------------|----------|-------|--------|
-| HARD-S1 | Security | 71 | Human-needed: 3 of 5 criteria verified on gsd/v18-int-all; Postgres restart clauses pending |
+| HARD-S1 | Security | 71 | Human-needed (2026-11-06): 5 of 5 roadmap criteria verified at a46d42c3; PostgreSQL restart clauses re-cited from gate r36 JUnit, not re-run; PR 199 Greptile gate open |
 | HARD-S2 | Security | 72 | Identifier clause closed under SUBSTRATE_REPO_SCOPES; the server refuses to start with the registry set and no scopes (owner decision 2026-11-03); open: default-off posture of the corpus CLI and collector installer. |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
 | HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |
 | HARD-R3 | Redundancy | 76 | Not started |
-| HARD-H1 | Hardening | 77 | Human-needed (2026-11-03): 4 of 8 truths verified at 4b84e50c (T1 to T4); T5 to T7 Postgres proofs present and wired, not re-observed; open: T8 per-session ordering rule and HARD-H1 ownership, no plan claims it (STATE Needs Human, H5); see 77-VERIFICATION.md |
+| HARD-H1 | Hardening | 77 | Human-needed (2026-11-06): 7 of 8 truths verified at a46d42c3 (T1 to T7); T8 uncertain and not scored; T5 to T7 named gate passes; open: T8 per-session ordering rule and HARD-H1 ownership, no plan claims it (STATE Needs Human, H5); see 77-VERIFICATION.md |
 | HARD-H2 | Hardening | 78 | Not started |

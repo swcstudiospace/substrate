@@ -10,7 +10,7 @@
 - ⚠️ **v1.3.x Should-have hardening** — Phases 37-44; closed 2026-10-28 as an override closeout with accepted debt (audit status tech_debt): 44 passed; 37-43 verified in repo and still `human_needed` with live proofs pending; 40-43 accepted debt (2026-10-23); 37-39 closed by the operator's live-criteria waiver of 2026-10-25; D-D3 (restore drill and retirement of the old path) was never delivered in the repository. Archive: [milestones/v1.3.x-ROADMAP.md](milestones/v1.3.x-ROADMAP.md) · audit: [milestones/v1.3.x-MILESTONE-AUDIT.md](milestones/v1.3.x-MILESTONE-AUDIT.md)
 - ⚠️ **v1.5 SOTA enhancements** — Phases 45-54; closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Phase 46 (verified 2026-10-28, `human_needed`): criterion 1 met in the repository; criterion 3 performed live in naive mode in Run 11 (2026-10-28); criterion 4 NOT met (no parity comparator exists); criterion 5 partial (cutover done, RAGFlow code removal gated); criteria 2 and 6 and the LightRAG graph and hybrid modes need per-run operator approval and a real LLM route. The owner accepted phase 46's open criteria (2, 4, 5, 6 and the graph and hybrid modes of 3) as debt on 2026-10-28, superseding for those items the statement of 2026-10-23 that phase 46 is not accepted as debt; SOTA-02 stays unsatisfied. Phases 52-54 merged to main (PRs #104 and #134, #136, #135; the drafts #109, #110 and #111 were closed and replaced). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108). Archive: [milestones/v1.5-ROADMAP.md](milestones/v1.5-ROADMAP.md) · audit: [milestones/v1.5-MILESTONE-AUDIT.md](milestones/v1.5-MILESTONE-AUDIT.md)
 - ⚠️ **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1); closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Gap closure merged 2026-10-28: PR #147 (phase 58 criterion 2, verified passed 5/5), PR #150 (phase 59 criterion 5, verified human_needed 6/6 in the repository, live proofs operator-gated) and PRs #146 and #148 (phase 61: the checkpoint sequence lock, `substrate session hook`, trigger policy, printed host configuration); phase 61 criterion 3 stays partial because no host runs the hook until an operator installs the printed configuration (ADR 0007, D55-4), accepted as debt by the owner on 2026-10-28 together with phase 59's live proofs. Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Discovery record: [milestones/v1.6-phases/55-migration-safety/CONTEXT.md](milestones/v1.6-phases/55-migration-safety/CONTEXT.md). Archive: [milestones/v1.6-ROADMAP.md](milestones/v1.6-ROADMAP.md) · audit: [milestones/v1.6-MILESTONE-AUDIT.md](milestones/v1.6-MILESTONE-AUDIT.md)
-- 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); phases 66, 67 and 68 are PARTIAL, every phase with a VERIFICATION record records gaps, and the milestone is not complete. Requirements: [REQUIREMENTS.md](REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
+- 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); by the records of 2026-11-06, 63 and 67 are gaps_found (67: one owner decision on success criterion 4), 64, 65, 66, 69 and 70 are human_needed, 68 is passed, and the milestone is not complete. Requirements: [REQUIREMENTS.md](REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
 - 🚧 **v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** — Phases 71-78, defined 2026-10-30: eight features from the round-15 discovery; not started.
 
 ## Phases
@@ -125,14 +125,14 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 ### 🚧 v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet (defined 2026-10-29; phases shipped 2026-10-29 to 2026-10-30; not complete: owner decisions open)
 
-- [x] **Phase 63: Corpus Atlas** - scan, classify and de-duplicate the documentation of every repository on the VPS, in GitHub and in the Greptile knowledge bases, and ingest it in bulk with provenance, deletes and one manifest. Shipped in PR #177 (2026-10-29); gaps_found: no live ingest.
-- [x] **Phase 64: Embedding fabric** - a TEI client with a Dragonfly cache, a fabric resource and near-duplicate detection. Shipped in PRs #179 and #183 (2026-10-29); gaps_found: TEI never contacted live.
-- [x] **Phase 65: Doc Watch** - documentation changes reach the docs plane on their own: git hooks, a filesystem watcher, a reconcile timer and manifest-backed state. Shipped in PR #186 (2026-10-30); gaps_found: no reconcile timer exists, and the planning state is not yet in the manifest; operator installs the triggers (none is installed).
-- [x] **Phase 66: Docs Reflect** - retrieval telemetry, feedback, authority scores, supersession, digests and gap detection make the docs RAG learn from use. Shipped in PR #184 (2026-10-30); PARTIAL.
-- [x] **Phase 67: Live Steering GA** - a steering command and view, cross-session context digests, brief sections, durable session state, the `checkpoint_hint` reader and a long poll. Shipped in PRs #180 and #192 (2026-10-29 and 2026-10-30); PARTIAL in delivery: the steering and context hooks are not installed, so no session reads its hints.
-- [x] **Phase 68: Worktree Fleet** - a worktree registry found through git, safe pruning, conflict forecasts, a disk floor and brief warnings for overlapping sessions. Shipped in PRs #178, #185, #188, #189, #190 and #193 (2026-10-29 and 2026-10-30); gaps_found, PARTIAL: no scheduler runs the fleet report; the dispatcher ignores `SUBSTRATE_WORKTREE_ROOTS`; the guard has no caller.
-- [x] **Phase 69: Doc Proofs** - a Merkle root over the corpus recorded in the ledger so the hourly devnet anchor covers it, with inclusion proofs and verification. Shipped in PR #181 (2026-10-29); gaps_found: no anchored hour yet.
-- [x] **Phase 70: Docs SLO and eval** - a self-supervised golden set, an offline CI harness, SLO metrics, a docs lint and the operator runbook. Shipped in PR #182 (2026-10-30); gaps_found: the baseline is self-supervised and reads 1.0 on every metric, so it cannot show retrieval quality.
+- [x] **Phase 63: Corpus Atlas** - scan, classify and de-duplicate the documentation of every repository on the VPS, in GitHub and in the Greptile knowledge bases, and ingest it in bulk with provenance, deletes and one manifest. Shipped in PR #177 (2026-10-29); human_needed (2026-11-06, 7 of 7): SC4 verified at 0947001e; live ingest is a human item.
+- [x] **Phase 64: Embedding fabric** - a TEI client with a Dragonfly cache, a fabric resource and near-duplicate detection. Shipped in PRs #179 and #183 (2026-10-29); human_needed (4 of 4): TEI not yet contacted live.
+- [x] **Phase 65: Doc Watch** - documentation changes reach the docs plane on their own: git hooks, a filesystem watcher, a reconcile timer and manifest-backed state. Shipped in PR #186 (2026-10-30); human_needed (5 of 5): the reconcile timer is staged, not installed; the operator installs the triggers (none is installed).
+- [x] **Phase 66: Docs Reflect** - retrieval telemetry, feedback, authority scores, supersession, digests and gap detection make the docs RAG learn from use. Shipped in PR #184 (2026-10-30); human_needed (5 of 5): live behaviour is a human item.
+- [x] **Phase 67: Live Steering GA** - a steering command and view, cross-session context digests, brief sections, durable session state, the `checkpoint_hint` reader and a long poll. Shipped in PRs #180 and #192 (2026-10-29 and 2026-10-30); gaps_found (5 of 6): criterion 4 is an owner decision; the steering and context hooks are not installed.
+- [x] **Phase 68: Worktree Fleet** - a worktree registry found through git, safe pruning, conflict forecasts, a disk floor and brief warnings for overlapping sessions. Shipped in PRs #178, #185, #188, #189, #190 and #193 (2026-10-29 and 2026-10-30); passed (8 of 8, 2026-11-06); no scheduler runs the fleet report (operator).
+- [x] **Phase 69: Doc Proofs** - a Merkle root over the corpus recorded in the ledger so the hourly devnet anchor covers it, with inclusion proofs and verification. Shipped in PR #181 (2026-10-29); human_needed (5 of 7 truths): the anchored hour is operator-gated.
+- [x] **Phase 70: Docs SLO and eval** - a self-supervised golden set, an offline CI harness, SLO metrics, a docs lint and the operator runbook. Shipped in PR #182 (2026-10-30); human_needed (4 of 5): SC5 is operator-gated; the baseline is self-supervised and reads 1.0.
 
 ### 🚧 v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation (defined 2026-10-30; not started)
 
@@ -1051,7 +1051,7 @@ Plans:
 
 **Goal**: The documentation of every repository the owner keeps (the clones on the VPS, the GitHub organisations, the Greptile knowledge bases) is discovered, classified, de-duplicated and recorded in one manifest, and a bulk path puts new and changed documents into the docs plane with provenance and removes the ones that disappeared.
 
-**Status**: Shipped in PR #177 (2026-10-29). gaps_found: no live ingest; criteria 1, 3 and 4 partial. Record: [63-VERIFICATION.md](phases/63-corpus-atlas/63-VERIFICATION.md).
+**Status**: Shipped in PR #177 (2026-10-29). human_needed: 7 of 7 must-haves verified; SC4 verified at 0947001e under its amended wording (the manifest commit reaches the citation URL for an active, content-matched row); no live ingest. Record: [63-VERIFICATION.md](phases/63-corpus-atlas/63-VERIFICATION.md).
 
 **Depends on**: none (v1.6 docs plane on main). Phases 64-66, 69 and 70 build on its manifest.
 
@@ -1077,7 +1077,7 @@ Plans:
 
 **Goal**: Substrate itself can embed text with the owner's TEI service, cheaply and safely, and uses it to find near-duplicate documents.
 
-**Status**: Shipped in PRs #179 (2026-10-29) and #183 (2026-10-29). gaps_found: TEI never contacted live; criterion 3 partial. Record: [64-VERIFICATION.md](phases/64-embedding-fabric/64-VERIFICATION.md).
+**Status**: Shipped in PRs #179 (2026-10-29) and #183 (2026-10-29). human_needed: 4 of 4 must-haves verified; TEI never contacted live. Record: [64-VERIFICATION.md](phases/64-embedding-fabric/64-VERIFICATION.md).
 
 **Depends on**: none for the client; Phase 63 for the planner hook.
 
@@ -1098,7 +1098,7 @@ Plans:
 
 **Goal**: When documentation changes in a registered repository, the docs plane follows without anyone running a command, and a restart never re-ingests what has not changed.
 
-**Status**: Shipped in PR #186 (2026-10-30). gaps_found: criteria 2 and 3 PARTIAL; no reconcile timer exists. Operator-gated: installing the git hooks, the watch service and the sweep timer. Record: [65-VERIFICATION.md](phases/65-doc-watch/65-VERIFICATION.md).
+**Status**: Shipped in PR #186 (2026-10-30). human_needed: 5 of 5 must-haves verified. Operator-gated: installing the git hooks, the watch service and the sweep timer. Record: [65-VERIFICATION.md](phases/65-doc-watch/65-VERIFICATION.md).
 
 **Depends on**: Phase 63 (manifest, plan and ingest).
 
@@ -1120,7 +1120,7 @@ Plans:
 
 **Goal**: The docs RAG improves with use, the way Hindsight does: it remembers what was retrieved, learns what helped, prefers the current document to the one it replaced, writes digests of what it knows and reports what it could not answer.
 
-**Status**: Shipped in PR #184 (2026-10-30). PARTIAL; see the milestone audit.
+**Status**: Shipped in PR #184 (2026-10-30). human_needed: 5 of 5 must-haves verified; truth 5 is verified against fakes, and its live behaviour is a human item. Record: [66-VERIFICATION.md](phases/66-docs-reflect/66-VERIFICATION.md).
 
 **Depends on**: Phase 63 (manifest); Phase 64 (optional semantic signals).
 
@@ -1142,7 +1142,7 @@ Plans:
 
 **Goal**: Live Steering is something an operator can see and use, and a session can learn what the other sessions of its repository are doing.
 
-**Status**: Shipped in PRs #180 (2026-10-29) and #192 (2026-10-30). PARTIAL in delivery: the steering and context hooks are not installed; delivery to a real session has not been shown. Record: [67-VERIFICATION.md](phases/67-live-steering-ga/67-VERIFICATION.md).
+**Status**: Shipped in PRs #180 (2026-10-29) and #192 (2026-10-30). gaps_found: 5 of 6 success criteria verified; criterion 4 FAILED as written (superseded by phase 71; owner decision open). The steering and context hooks are not installed; delivery to a real session has not been shown. Record: [67-VERIFICATION.md](phases/67-live-steering-ga/67-VERIFICATION.md).
 
 **Depends on**: none (v1.6 steering and planning planes on main).
 
@@ -1165,7 +1165,7 @@ Plans:
 
 **Goal**: Many sessions can work in git worktrees of the same repository without filling the disk, losing track of which worktree is whose, or finding out about conflicts at merge time.
 
-**Status**: Shipped in PRs #178 (2026-10-29), #185, #188, #189, #190 and #193 (2026-10-30). PARTIAL (criterion 1): the dispatcher ignores `SUBSTRATE_WORKTREE_ROOTS`. Also open: no scheduler runs the fleet report; merge-back does not close the check-then-note race; a repository with no origin trusts local ancestry; the guard has no caller. Record: [68-VERIFICATION.md](phases/68-worktree-fleet/68-VERIFICATION.md).
+**Status**: passed (record 2026-11-06): 8 of 8 truths verified; criterion 1 is closed in code (the dispatcher honours `SUBSTRATE_WORKTREE_ROOTS`). Shipped in PRs #178 (2026-10-29), #185, #188, #189, #190 and #193 (2026-10-30). Carried open items: no scheduler runs `substrate worktree scan --report`; merge-back does not close the check-then-note race; a repository with no origin trusts local ancestry; the guard has no caller in removal paths. Record: [68-VERIFICATION.md](phases/68-worktree-fleet/68-VERIFICATION.md).
 
 **Depends on**: Phase 67 for the brief integration (criterion 6) only.
 
@@ -1188,7 +1188,7 @@ Plans:
 
 **Goal**: Which documents the corpus held, and when, can be proved from the Solana devnet anchor the ledger already writes every hour.
 
-**Status**: Shipped in PR #181 (2026-10-29). gaps_found: no anchored hour yet; the anchor job, its key and its timer are operator-gated. Record: [69-VERIFICATION.md](phases/69-doc-proofs/69-VERIFICATION.md).
+**Status**: Shipped in PR #181 (2026-10-29). human_needed: 5 of 7 truths verified (truths 4 and 7 present but behavior-unverified); owner item on the owed root at shutdown; no anchored hour yet; the anchor job, its key and its timer are operator-gated. Record: [69-VERIFICATION.md](phases/69-doc-proofs/69-VERIFICATION.md).
 
 **Depends on**: Phase 63 (manifest). The anchor job, its funded key and its timer stay operator-gated.
 
@@ -1209,7 +1209,7 @@ Plans:
 
 **Goal**: The docs plane's quality is measured, guarded in CI and operable by someone who did not build it.
 
-**Status**: Shipped in PR #182 (2026-10-30) and PR #176. gaps_found: criteria 3 and 5 PARTIAL; the baseline reads 1.0 on every metric. Record: [70-VERIFICATION.md](phases/70-docs-slo-and-eval/70-VERIFICATION.md). Operator runbook: `docs/runbooks/docs-rag-operations.md`.
+**Status**: Shipped in PR #182 (2026-10-30) and PR #176. human_needed: 4 of 5 must-haves verified (SC1 to SC4); SC5 is UNCERTAIN and operator-gated; the baseline reads 1.0 on every metric. Record: [70-VERIFICATION.md](phases/70-docs-slo-and-eval/70-VERIFICATION.md). Operator runbook: `docs/runbooks/docs-rag-operations.md`.
 
 **Depends on**: Phase 63; Phases 65 and 66 for the metrics they emit.
 
@@ -1231,7 +1231,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: human_needed: 3 of 5 criteria verified at 4b84e50c (1, 2 and 4 in code and tests; 3 and 5 in-process; Postgres restart clauses pending). Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data.
+**Status**: human_needed: 5 of 5 roadmap success criteria verified at a46d42c3 (record 2026-11-06; the PostgreSQL restart, authority and idempotency clauses are re-cited by suite name from gate r36, not re-run by the verifier). The only human item is the PR 199 Greptile gate, which the verifier did not observe. Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data.
 
 **Depends on**: none
 
@@ -1253,7 +1253,7 @@ Plans:
 
 **Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
 
-**Status**: human_needed: 24 of 27 truth rows verified at 4b84e50c. 6c (strict nested refusal, 500e4fb3), the refuse-to-start rule (500e4fb3), 5d and 6b (a28ecac8) closed by code and named tests; the memory repo visibility regression from the key change is closed by exact spelling (4b84e50c). Accepted as documented (owner, 2026-11-03): the server-only refusal. Open: decision 1 (corpus proof disclosure), decision 3 (allowlist unit surface vs session), row 18 (service gate under scope not reached), row 8 (Postgres filter, orchestrator evidence only), legacy row repair (owner data decision).
+**Status**: human_needed: 26 of 27 truth rows verified (record 2026-11-06). 6c (strict nested refusal, 500e4fb3), the refuse-to-start rule (500e4fb3), 5d and 6b (a28ecac8) closed by code and named tests; the memory repo visibility regression from the key change is closed by exact spelling (4b84e50c). Accepted as documented (owner, 2026-11-03): the server-only refusal. Open: decision 1 (corpus proof disclosure), decision 3 (allowlist unit surface vs session), row 18 (service gate under scope not reached), row 8 (Postgres filter, orchestrator evidence only), legacy row repair (owner data decision).
 
 **Depends on**: Phase 71
 
@@ -1299,7 +1299,7 @@ Plans:
 
 **Goal**: When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
 
-**Status**: human_needed: 5 of 6 truths verified; 2 of 2 criteria as declared; O1 (fail-closed read policy) and O2 (connect cooldown) open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4.
+**Status**: human_needed: 8 of 8 truths verified; 2 of 2 criteria as declared; O1 (fail-closed read policy) and O2 (connect cooldown) open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4.
 
 **Depends on**: none
 
@@ -1314,7 +1314,7 @@ Plans:
 
 **Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
 
-**Status**: human_needed: SC1 verified within the owner-accepted pre-send scope (D76-10; applies with the buffer enabled, D76-15 open); SC2 by owner override (D76-13), not verified. The cache-off wording is ratified (owner, 2026-11-03) and matches the code. The surrogate refusal runs before the sessioned tip read. Open: handoff() reads the tip before its emit (W-L2-TIP-ORDER, owner decision), D76-15, D76-14/19, R-1, R-2, R-3, the dead-letter bound (D76-13), operator items 1 to 8, HARD-R3 orphaned.
+**Status**: human_needed: SC1 verified within the owner-accepted pre-send scope (D76-10; applies with the buffer enabled, D76-15 open); SC2 by owner override (D76-13), not verified. The cache-off wording is ratified (owner, 2026-11-03) and matches the code. The surrogate refusal runs before the sessioned tip read. Open: handoff() reads the tip before its emit (W-L2-TIP-ORDER, owner decision), D76-15, D76-14/19, R-1, R-2, a held record behind a durable buffer (R-3 is closed for a non-durable buffer by 7a1d923a, which reports identifiers at abandon; an owner item), the dead-letter bound (D76-13), operator items 1 to 8, HARD-R3 orphaned.
 
 **Depends on**: Phase 73 (shared ledger write path)
 
@@ -1329,7 +1329,7 @@ Plans:
 
 **Goal**: A steering command carrying an idempotency key applies once across retries and carries a sequence number, so the reader sees delivery order.
 
-**Status**: human_needed: 4 of 8 must-haves verified; T8 (the documented ordering rule) uncertain: the wait path holds, the pull reads order by priority (H5); T5 to T7 are the orchestrator Postgres per-file evidence (steering-idempotency 4 of 4), not verifier-observed. H3, H5, H6 and migration 43 open.
+**Status**: human_needed: 7 of 8 must-haves verified; T8 (the documented ordering rule) uncertain: the wait path holds, the pull reads order by priority (H5); T5 to T7 are named gate passes at a46d42c3. H3, H5, H6 and migration 43 open.
 
 **Depends on**: Phase 71
 
@@ -1345,7 +1345,7 @@ Plans:
 
 **Goal**: The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
 
-**Status**: human_needed: 1 of 2 must-haves verified; SC1 verified by named tests; SC2 uncertain (warning): the bound is total per run (d05ae871); the post-flush policy is ratified (exit 1 after the flush) and documented; open: the unreadable-plan audit gap (reconcile-main.ts around 246 to 247), the counter-cut and unwritable-path test gaps, the post-flush append-failure test, node_id straddle (a pre-existing data class), operator items 1 to 4, HARD-H2 orphaned.
+**Status**: human_needed: 9 of 9 must-haves verified; SC1 verified by named tests; SC2 uncertain (warning): the bound is total per run (d05ae871); the post-flush policy is ratified (exit 1 after the flush) and documented; open: the unreadable-plan audit gap (reconcile-main.ts around 246 to 247), the counter-cut and unwritable-path test gaps, the post-flush append-failure test, node_id straddle (a pre-existing data class), operator items 1 to 4, HARD-H2 orphaned.
 
 **Depends on**: Phases 73, 75, 76
 
@@ -1408,19 +1408,19 @@ Plans:
 | 60. Eternal Memory Knowledge Nexus | v1.6 | 0/0 | Complete (PRs #128, #129); criteria 1-4 met in repo; bucket use operator-gated | 2026-10-28 |
 | 61. Session rollback to an exact chat moment with file revert | v1.6 | 0/0 | Merged (PRs #128, #129, #146, #148); criterion 3 partial: no host installs or fires the hook until an operator installs the printed configuration (ADR 0007, D55-4); criteria 1, 2, 4, 5, 6 met; no live rehearsal | - |
 | 62. Soak, runbooks and v1.6 close | v1.6 | 0/0 | Complete (PR #130); milestone completion is an operator decision | 2026-10-28 |
-| 63. Corpus Atlas | v1.7 | 0/0 | Shipped (PR #177); gaps_found: no live ingest | 2026-10-29 |
-| 64. Embedding fabric | v1.7 | 0/0 | Shipped (PRs #179, #183); gaps_found: TEI never contacted live | 2026-10-29 |
-| 65. Doc Watch | v1.7 | 0/0 | Shipped (PR #186); gaps_found: no reconcile timer; operator installs the triggers | 2026-10-30 |
-| 66. Docs Reflect | v1.7 | 0/0 | Shipped (PR #184); PARTIAL | 2026-10-30 |
-| 67. Live Steering GA | v1.7 | 0/0 | Shipped (PRs #180, #192); PARTIAL in delivery: hooks not installed | 2026-10-30 |
-| 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); PARTIAL: no report scheduler; dispatcher ignores roots variable | 2026-10-30 |
-| 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
-| 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
-| 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 3 of 5 criteria verified at 4b84e50c (1, 2 and 4 in code and tests; 3 and 5 in-process; Postgres restart clauses pending). Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data. | - |
-| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | human_needed: 24 of 27 truth rows verified at 4b84e50c. 6c (strict nested refusal, 500e4fb3), the refuse-to-start rule (500e4fb3), 5d and 6b (a28ecac8) closed by code and named tests; the memory repo visibility regression from the key change is closed by exact spelling (4b84e50c). Accepted as documented (owner, 2026-11-03): the server-only refusal. Open: decision 1 (corpus proof disclosure), decision 3 (allowlist unit surface vs session), row 18 (service gate under scope not reached), row 8 (Postgres filter, orchestrator evidence only), legacy row repair (owner data decision). | - |
+| 63. Corpus Atlas | v1.7 | 0/0 | Shipped (PR #177); human_needed: 7 of 7 must-haves verified (SC4 verified at 0947001e); no live ingest | 2026-10-29 |
+| 64. Embedding fabric | v1.7 | 0/0 | Shipped (PRs #179, #183); human_needed: TEI never contacted live | 2026-10-29 |
+| 65. Doc Watch | v1.7 | 0/0 | Shipped (PR #186); human_needed (5 of 5 must-haves, record 2026-11-06): reconcile timer staged, not installed; operator installs the triggers | 2026-10-30 |
+| 66. Docs Reflect | v1.7 | 0/0 | Shipped (PR #184); human_needed (5 of 5 must-haves verified, record 2026-11-06) | 2026-10-30 |
+| 67. Live Steering GA | v1.7 | 0/0 | Shipped (PRs #180, #192); gaps_found: criterion 4 open (owner decision); hooks not installed | 2026-10-30 |
+| 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); passed (record 2026-11-06, 8 of 8 truths); no report scheduler | 2026-10-30 |
+| 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); human_needed: no anchored hour | 2026-10-29 |
+| 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); human_needed: baseline self-supervised, reads 1.0 | 2026-10-30 |
+| 71. Multi-Session boundary | v1.8 | 4/4 local | human_needed: 5 of 5 roadmap criteria verified at a46d42c3 (record 2026-11-06). Owner items open: D71-08, malformed-ID 400 vs 404, argDigest, the owner unkeyed refusal, operator close, test-count reconciliation, straddling data. | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 local | human_needed: 26 of 27 truth rows verified (record 2026-11-06). 6c (strict nested refusal, 500e4fb3), the refuse-to-start rule (500e4fb3), 5d and 6b (a28ecac8) closed by code and named tests; the memory repo visibility regression from the key change is closed by exact spelling (4b84e50c). Accepted as documented (owner, 2026-11-03): the server-only refusal. Open: decision 1 (corpus proof disclosure), decision 3 (allowlist unit surface vs session), row 18 (service gate under scope not reached), row 8 (Postgres filter, orchestrator evidence only), legacy row repair (owner data decision). | - |
 | 73. Ledger tamper evidence | v1.8 | 1/1 local | human_needed: 8 of 8 truths verified at 4b84e50c. G1 closed by memo v3 (9ab6f111); B1 byte cap, B2 NUL refusal, W-L1, W-L2 (summary, session_id, repo refused at write, and before the tip read on the sessioned path), W-L4 (branch, node_id, linear_identifier refused at write), N1, N2, N3, W2 and the RPC guard closed. Q8 and N5 are owner-accepted limits (2026-11-03), documented. Open: W-M1 (a repo straddling the 512-unit cut makes a memory entry fail its hash, which verify reports as a mismatch; owner decision), W-L3b (session_id, repo, branch, node_id and linear_identifier straddling a 512-unit cut can store a lone high surrogate; a data decision for pre-existing rows), W-K1, W-K3, W-O1, the stored-id decision, W3, W4 (label), W5, HARD-S3, N4 (fail closed, decided), N6, N8, the live devnet probe and live store scan (operator). | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | gaps_found: HARD-R1 not built; scheduled after v1.8 closes (owner decision, 2026-11-03). | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: 5 of 6 truths verified; 2 of 2 criteria as declared; O1 (fail-closed read policy) and O2 (connect cooldown) open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4. | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | human_needed: SC1 verified within the owner-accepted pre-send scope (D76-10; applies with the buffer enabled, D76-15 open); SC2 by owner override (D76-13), not verified. The cache-off wording is ratified (owner, 2026-11-03) and matches the code. The surrogate refusal runs before the sessioned tip read. Open: handoff() reads the tip before its emit (W-L2-TIP-ORDER, owner decision), D76-15, D76-14/19, R-1, R-2, R-3, the dead-letter bound (D76-13), operator items 1 to 8, HARD-R3 orphaned. | - |
-| 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 4 of 8 must-haves verified; T8 (the documented ordering rule) uncertain: the wait path holds, the pull reads order by priority (H5); T5 to T7 are the orchestrator Postgres per-file evidence (steering-idempotency 4 of 4), not verifier-observed. H3, H5, H6 and migration 43 open. | - |
-| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 1 of 2 must-haves verified; SC1 verified by named tests; SC2 uncertain (warning): the bound is total per run (d05ae871); the post-flush policy is ratified (exit 1 after the flush) and documented; open: the unreadable-plan audit gap (reconcile-main.ts around 246 to 247), the counter-cut and unwritable-path test gaps, the post-flush append-failure test, node_id straddle (a pre-existing data class), operator items 1 to 4, HARD-H2 orphaned. | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | human_needed: 8 of 8 truths verified; 2 of 2 criteria as declared; O1 (fail-closed read policy) and O2 (connect cooldown) open; H-1 test gap (extended to the brief recall leg); operator items H-2 to H-4. | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 local | human_needed: SC1 verified within the owner-accepted pre-send scope (D76-10; applies with the buffer enabled, D76-15 open); SC2 by owner override (D76-13), not verified. The cache-off wording is ratified (owner, 2026-11-03) and matches the code. The surrogate refusal runs before the sessioned tip read. Open: handoff() reads the tip before its emit (W-L2-TIP-ORDER, owner decision), D76-15, D76-14/19, R-1, R-2, a held record behind a durable buffer (R-3 is closed for a non-durable buffer by 7a1d923a, which reports identifiers at abandon; an owner item), the dead-letter bound (D76-13), operator items 1 to 8, HARD-R3 orphaned. | - |
+| 77. Steering idempotency and ordering | v1.8 | 1/1 local | human_needed: 7 of 8 must-haves verified; T8 (the documented ordering rule) uncertain: the wait path holds, the pull reads order by priority (H5); T5 to T7 are named gate passes at a46d42c3. H3, H5, H6 and migration 43 open. | - |
+| 78. Cross-layer reconciliation | v1.8 | 1/1 local | human_needed: 9 of 9 must-haves verified; SC1 verified by named tests; SC2 uncertain (warning): the bound is total per run (d05ae871); the post-flush policy is ratified (exit 1 after the flush) and documented; open: the unreadable-plan audit gap (reconcile-main.ts around 246 to 247), the counter-cut and unwritable-path test gaps, the post-flush append-failure test, node_id straddle (a pre-existing data class), operator items 1 to 4, HARD-H2 orphaned. | - |
