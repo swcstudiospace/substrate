@@ -77,9 +77,9 @@ export const SESSION_USAGE =
 	"--omp-session FILE records where in that omp session file the checkpoint was taken (entry id, turn number, prefix digest; never content or the path). A file that cannot be read or parsed does not fail the checkpoint: it is made without a transcript reference and the output says why.\n";
 
 /** A plan can take the server longer than a hook's emit budget (it counts what a rollback would forget). */
-export const ROLLBACK_MIN_TIMEOUT_MS = 10_000;
+const ROLLBACK_MIN_TIMEOUT_MS = 10_000;
 /** `checkpoints` asks the server about at most this many of the newest checkpoints. */
-export const MAX_SERVER_STATUS_QUERIES = 20;
+const MAX_SERVER_STATUS_QUERIES = 20;
 const DEFAULT_SURFACE = "claude-code";
 const MAX_SKIPPED_SHOWN = 10;
 

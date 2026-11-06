@@ -113,7 +113,7 @@ function labelsOf(inventory: Inventory): string[] {
 	return [...labels].sort();
 }
 
-export interface Partition {
+interface Partition {
 	groups: Inventory[];
 	/** Labels too large for one plan: not planned, so no row of theirs is judged. */
 	oversized: string[];
@@ -123,7 +123,7 @@ export interface Partition {
  * The request bytes a plan group may carry. The server refuses a larger body with 413 (`DOCS_MAX_BODY_BYTES`, 6,000,000 bytes
  * in `server.ts`); the rest is headroom for the envelope and the scope.
  */
-export const PLAN_REQUEST_BUDGET_BYTES = 5_000_000;
+const PLAN_REQUEST_BUDGET_BYTES = 5_000_000;
 
 function jsonBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value)) + 1;

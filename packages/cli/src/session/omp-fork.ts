@@ -32,7 +32,7 @@ import { createHash } from "node:crypto";
 import { parseTranscriptRef, SessionEventError, type TranscriptRef } from "../../../mcp-server/src/session-events.ts";
 
 /** The only omp session version this module reads and writes (omp://session.md, "Versioning and Migration"). */
-export const OMP_SESSION_VERSION = 3;
+const OMP_SESSION_VERSION = 3;
 /** The fixed width, in bytes and newline included, of the `type:"title"` slot. */
 export const OMP_TITLE_SLOT_BYTES = 256;
 /** Hard cap on the session text this module will parse or fork: 32 MiB. */
@@ -40,7 +40,7 @@ export const OMP_SESSION_MAX_BYTES = 32 * 1024 * 1024;
 /** Canonicalisation depth cap, so a hostile deeply nested entry is a typed error and not a stack overflow. */
 const MAX_CANONICAL_DEPTH = 512;
 
-export const OMP_FORK_ERROR_CODES = [
+const OMP_FORK_ERROR_CODES = [
 	"entry-not-found",
 	"chain-broken",
 	"header-invalid",
@@ -50,7 +50,7 @@ export const OMP_FORK_ERROR_CODES = [
 	"unsupported-version",
 	"invalid-argument",
 ] as const;
-export type OmpForkErrorCode = (typeof OMP_FORK_ERROR_CODES)[number];
+type OmpForkErrorCode = (typeof OMP_FORK_ERROR_CODES)[number];
 
 /** `detail` never carries session content: only codes, counts and 1-based line numbers. */
 export class OmpForkError extends Error {
@@ -66,7 +66,7 @@ export class OmpForkError extends Error {
 	}
 }
 
-export interface OmpForkFailure {
+interface OmpForkFailure {
 	ok: false;
 	code: OmpForkErrorCode;
 	detail: string;
@@ -75,7 +75,7 @@ export interface OmpForkFailure {
 
 type Rec = Record<string, unknown>;
 
-export interface OmpSessionEntry {
+interface OmpSessionEntry {
 	id: string;
 	parentId: string | null;
 	type: string;
@@ -86,7 +86,7 @@ export interface OmpSessionEntry {
 	value: Rec;
 }
 
-export interface OmpSession {
+interface OmpSession {
 	header: Rec;
 	headerLine: number;
 	/** The slot's current title and source, or null for a legacy file with no slot. */
@@ -272,7 +272,7 @@ function checkEntryId(entryId: unknown): string {
 	return entryId;
 }
 
-export interface OmpTranscriptRefInput {
+interface OmpTranscriptRefInput {
 	sessionFileText: string;
 	/** An opaque id or file name for the session; never a path and never file content. */
 	sessionLocator: string;
@@ -333,7 +333,7 @@ export interface ForkOmpSessionInput {
 	maxBytes?: number;
 }
 
-export interface OmpForkLineage {
+interface OmpForkLineage {
 	session_locator: string;
 	entry_id: string;
 	turn_no: number;

@@ -23,8 +23,8 @@ export const STEER_ACTIONS = ["pause", "redirect", "annotate"] as const;
 export type SteerAction = (typeof STEER_ACTIONS)[number];
 export const STEER_PRIORITIES = ["low", "normal", "high"] as const;
 export type SteerPriority = (typeof STEER_PRIORITIES)[number];
-export const STEER_OUTCOMES = ["applied", "declined"] as const;
-export type SteerOutcome = (typeof STEER_OUTCOMES)[number];
+const STEER_OUTCOMES = ["applied", "declined"] as const;
+type SteerOutcome = (typeof STEER_OUTCOMES)[number];
 export const DIRECTIVE_STATUS_FILTERS = ["queued", "acknowledged", "all"] as const;
 export type DirectiveStatusFilter = (typeof DIRECTIVE_STATUS_FILTERS)[number];
 
@@ -42,10 +42,10 @@ export const STEER_LIMIT_MAX = 100;
 export const MAX_RESPONSE_CHARS = 2_000_000;
 /** Added to a long poll's wait so the client's own timeout never fires before the server's. */
 export const WAIT_MARGIN_MS = 5_000;
-export const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_DIAGNOSTIC_CHARS = 300;
 
-export type SteerFailureCode = "unreachable" | "timeout" | "unauthorized" | "not-found" | "session-not-found" | "session-unavailable" | "refused" | "server-error" | "bad-response";
+type SteerFailureCode = "unreachable" | "timeout" | "unauthorized" | "not-found" | "session-not-found" | "session-unavailable" | "refused" | "server-error" | "bad-response";
 
 export interface SteerFailure {
 	ok: false;
@@ -77,7 +77,7 @@ export interface SteerSessions {
 	truncated: boolean;
 }
 
-export interface SteerCheckpointHint {
+interface SteerCheckpointHint {
 	trigger: string;
 	directive_id: string;
 }
@@ -105,7 +105,7 @@ export interface DigestItem {
 }
 
 export const DIGEST_LISTS = ["sessions", "claims", "events", "handoffs", "planning"] as const;
-export type DigestList = (typeof DIGEST_LISTS)[number];
+type DigestList = (typeof DIGEST_LISTS)[number];
 
 export interface ContextDigest {
 	generated_at: Timestamp;
@@ -131,7 +131,7 @@ export interface WriteReply {
 	session_state?: unknown;
 }
 
-export interface SteerClientOptions {
+interface SteerClientOptions {
 	/** The server's base URL, without a trailing slash. */
 	url: string;
 	token?: string | undefined;
@@ -142,7 +142,7 @@ export interface SteerClientOptions {
 }
 
 /** One long poll's answer: the directive, or `null` when the wait ended with none, and the wait the server actually applied when it said so. */
-export interface SteerWait {
+interface SteerWait {
 	directive: SteerDirective | null;
 	/** The server's effective long-poll length (it clamps an oversized request): `wait_ms` of a 200, the `X-Steering-Wait-Ms` header of either answer. */
 	waitMs?: number;
@@ -157,8 +157,8 @@ export interface IssuedSession {
 	expires_at: string;
 	session_binding: string;
 }
-export interface RenewedSession { status: "renewed"; session_id: string; expires_at: string }
-export interface ClosedSession { status: "closed"; session_id: string; closed_at: string }
+interface RenewedSession { status: "renewed"; session_id: string; expires_at: string }
+interface ClosedSession { status: "closed"; session_id: string; closed_at: string }
 
 export interface SteerClient {
 	open(request: { repoId: string; state?: "ACTIVE" }): Promise<SteerResult<IssuedSession>>;

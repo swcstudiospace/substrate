@@ -15,10 +15,10 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const DEFAULT_DEBOUNCE_MS = 2000;
-export const DEFAULT_MAX_WAIT_MS = 30_000;
-export const DEFAULT_WATCH_MAX = 2000;
-export const DEFAULT_SWEEP_S = 900;
+const DEFAULT_DEBOUNCE_MS = 2000;
+const DEFAULT_MAX_WAIT_MS = 30_000;
+const DEFAULT_WATCH_MAX = 2000;
+const DEFAULT_SWEEP_S = 900;
 export const MIN_SWEEP_S = 30;
 export const MAX_SWEEP_S = 86_400;
 

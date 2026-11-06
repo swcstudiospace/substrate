@@ -19,7 +19,7 @@
 import { countSpoolDrops, drainEventSpool, openEventSpool, type DrainResult } from "../../collectors/src/emit.ts";
 import type { SpoolStats } from "../../collectors/src/spool.ts";
 
-export const SPOOL_USAGE = "usage: substrate spool status [--json]\n       substrate spool flush [--json] [--budget-ms N]\n";
+const SPOOL_USAGE = "usage: substrate spool status [--json]\n       substrate spool flush [--json] [--budget-ms N]\n";
 
 const DEFAULT_FLUSH_BUDGET_MS = 30_000;
 const MAX_FLUSH_BUDGET_MS = 600_000;
@@ -42,7 +42,7 @@ export interface SpoolStatusReport {
 	dropped: Record<string, number>;
 }
 
-export interface SpoolDeps {
+interface SpoolDeps {
 	out: (text: string) => void;
 	err: (text: string) => void;
 	/** Test seam; defaults to the shared replay. */
@@ -72,7 +72,7 @@ function parseFlags(sub: string, rest: readonly string[]): { json: boolean; budg
 	return { json, budgetMs };
 }
 
-export function spoolStatus(deps: SpoolDeps): SpoolStatusReport {
+function spoolStatus(deps: SpoolDeps): SpoolStatusReport {
 	const now = deps.now ?? Date.now;
 	const { spool, config } = openEventSpool();
 	const stats: SpoolStats = spool.stats();

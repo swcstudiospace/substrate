@@ -66,9 +66,9 @@ export const MAX_SCANNED_ENTRIES = 50_000;
 /** Records `verify --anchors` looks up. */
 export const MAX_ANCHOR_SAMPLE = 50;
 /** Ids one `redact` may name. */
-export const MAX_REDACT_IDS = 1000;
+const MAX_REDACT_IDS = 1000;
 /** The capsule `producer` the CLI stamps. */
-export const CAPSULE_PRODUCER = "substrate-cli";
+const CAPSULE_PRODUCER = "substrate-cli";
 /** A cursor later than any entry: the way to page a plain query from the top (`memory_search`'s own description). */
 const FAR_FUTURE = "9999-12-31T23:59:59Z";
 const FILE_MODE = 0o600;
@@ -94,7 +94,7 @@ export const CAPSULE_USAGE =
 
 export class CapsuleUsageError extends Error {}
 
-export interface ExportArgs {
+interface ExportArgs {
 	command: "export";
 	out: string;
 	session: string | null;
@@ -105,14 +105,14 @@ export interface ExportArgs {
 	surface: string;
 }
 
-export interface VerifyArgs {
+interface VerifyArgs {
 	command: "verify";
 	file: string;
 	anchors: boolean;
 	surface: string;
 }
 
-export interface RedactArgs {
+interface RedactArgs {
 	command: "redact";
 	file: string;
 	ids: string[];
@@ -121,7 +121,7 @@ export interface RedactArgs {
 	surface: string;
 }
 
-export type CapsuleArgs = ExportArgs | VerifyArgs | RedactArgs;
+type CapsuleArgs = ExportArgs | VerifyArgs | RedactArgs;
 
 const FLAGS = {
 	export: { bool: [], value: ["out", "session", "repo", "since", "limit", "store", "surface"] },
@@ -229,7 +229,7 @@ export interface CapsuleMcp {
 	call(tool: "memory_search" | "memory_verify", args: Record<string, unknown>): Promise<unknown>;
 }
 
-export type CapsuleMcpErrorKind = "unreachable" | "refused" | "invalid";
+type CapsuleMcpErrorKind = "unreachable" | "refused" | "invalid";
 
 /** `unreachable`: the server did not answer. `refused`: it answered with a refusal. `invalid`: it answered something that is not the contract. */
 export class CapsuleMcpError extends Error {
@@ -266,7 +266,7 @@ export interface CapsuleDeps {
 // MCP over HTTP (the `substrate lessons` call shape)
 // ---------------------------------------------------------------------------
 
-export interface HttpCapsuleMcpConnection {
+interface HttpCapsuleMcpConnection {
 	url: string;
 	token?: string | undefined;
 	timeoutMs: number;
@@ -392,7 +392,7 @@ export function entryFromReply(value: unknown): { ok: true; entry: MemoryEntry }
 	return { ok: true, entry };
 }
 
-export interface CollectedEntries {
+interface CollectedEntries {
 	entries: MemoryEntry[];
 	/** Entries the server returned that were not usable, with why (never content). */
 	unusable: Array<{ id: string; reason: string }>;

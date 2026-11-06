@@ -5,7 +5,7 @@
 import type { Runner } from "../../../worktree-snapshot/src/index.ts";
 
 /** `owner/name` from a remote URL (ssh or https, with or without `.git`), or undefined. */
-export function repoSlugFromRemote(url: string): string | undefined {
+function repoSlugFromRemote(url: string): string | undefined {
 	return url.trim().match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
 }
 

@@ -16,7 +16,7 @@ export interface LiveSessionBindingRecord {
 	session_binding: string;
 	expires_at: string;
 }
-export type BindingExpected = Pick<LiveSessionBindingRecord, "server_identity" | "surface" | "session_id">;
+type BindingExpected = Pick<LiveSessionBindingRecord, "server_identity" | "surface" | "session_id">;
 export interface BindingRecordOptions { directory?: string; path?: string }
 export class BindingRecordError extends Error {
 	constructor(readonly code: "missing" | "invalid" | "unavailable") {

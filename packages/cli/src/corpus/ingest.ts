@@ -31,7 +31,7 @@ import type { ClientError, CorpusClient } from "./client.ts";
 import type { Inventory } from "./inventory.ts";
 import type { IngestProblem, IngestSummary } from "./render.ts";
 
-export interface IngestInput {
+interface IngestInput {
 	plan: CorpusPlanResponse;
 	inventory: Inventory;
 	client: CorpusClient;
@@ -44,7 +44,7 @@ export interface IngestInput {
 	batchBytes: number;
 }
 
-export interface IngestOutcome {
+interface IngestOutcome {
 	summary: IngestSummary;
 	/** Set when a request failed as a whole (transport, auth, protocol); the rest of the run was not attempted. */
 	fatal: ClientError | null;

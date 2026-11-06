@@ -27,7 +27,7 @@ import { list, parseArgs, str, type Args } from "./args.ts";
 import { isRecord } from "./guards.ts";
 
 /** The gate's cap. A longer body would be cut silently, so it is refused here instead. */
-export const MAX_BODY = 4000;
+const MAX_BODY = 4000;
 /** `normalizeSubject`'s cap: a subject the server cut would not be the one computed here. */
 const MAX_SUBJECT = 200;
 const MAX_SLUG = 60;
@@ -63,13 +63,13 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  */
 const MARKERS = { lesson: "lessonbank", digest: "lessonbankdigest", outcome: "lessonbankoutcome" } as const;
 
-export const SUBJECT = { lesson: "lesson:", digest: "lesson-digest:", outcome: "lesson-outcome:" } as const;
+const SUBJECT = { lesson: "lesson:", digest: "lesson-digest:", outcome: "lesson-outcome:" } as const;
 
-export const LESSON_OUTCOMES = ["success", "partial", "blocked", "deferred"] as const;
-export type LessonOutcome = (typeof LESSON_OUTCOMES)[number];
+const LESSON_OUTCOMES = ["success", "partial", "blocked", "deferred"] as const;
+type LessonOutcome = (typeof LESSON_OUTCOMES)[number];
 
-export const OUTCOME_RESULTS = ["success", "partial", "failure"] as const;
-export type OutcomeResult = (typeof OUTCOME_RESULTS)[number];
+const OUTCOME_RESULTS = ["success", "partial", "failure"] as const;
+type OutcomeResult = (typeof OUTCOME_RESULTS)[number];
 const RESULT_WEIGHT: Record<OutcomeResult, number> = { success: 1, partial: 0.5, failure: 0 };
 
 /** Words that say nothing about what a lesson is about, in a slug or a query. */
@@ -86,7 +86,7 @@ export { lessonContentIssue } from "../../mcp-server/src/lesson-content.ts";
 const CHATTER = /^(?:session (?:ended|started)|(?:\S+\s+)?pane[- ]?\S* exited|idle to working|\(no output\)|no output)$/i;
 const LABELED_FACT = /^(?:goal|decision|preference|outcome|blocker|fact)\s*:\s*(.*)$/i;
 
-export interface DurableExtraction {
+interface DurableExtraction {
 	facts: string[];
 	dropped: number;
 }
@@ -151,7 +151,7 @@ export function sessionLessonKey(scope: string, sessionId: string, text: string)
 	return `${SUBJECT.lesson}${sha256(`${scope}\nsession\n${sessionId}\n${normalizeText(text)}`)}`;
 }
 
-export interface Lesson {
+interface Lesson {
 	milestone: string;
 	phase: string;
 	slug: string;
@@ -163,7 +163,7 @@ export interface Lesson {
 }
 
 /** The fields of a `memory_search` entry this module reads. */
-export interface StoredEntry {
+interface StoredEntry {
 	id: string;
 	kind?: string;
 	subject?: string | null;
@@ -222,7 +222,7 @@ function splitList(value: string | undefined): string[] {
  * Lowercase, and only characters a subject keeps as they are. The server lowercases
  * subjects, so this keeps the subject computed here and the one stored identical.
  */
-export function identifier(value: string): string {
+function identifier(value: string): string {
 	return value
 		.toLowerCase()
 		.replace(/[^a-z0-9._-]+/g, "-")
@@ -253,7 +253,7 @@ export function lessonSubject(milestone: string, phase: string, slug: string): s
 }
 
 /** Whitespace-collapsed, so re-wrapping a SUMMARY bullet does not make it a new lesson. */
-export function normalizeText(text: string): string {
+function normalizeText(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
 }
 
@@ -287,7 +287,7 @@ export function lessonBody(lesson: Lesson): string {
  * Generated per-lesson summaries must all fit. Otherwise an explicit summary is
  * required; ids without recall content must never retire the original lessons.
  */
-export function digestBody(milestone: string, lessons: ReadonlyArray<Citable | string>, text?: string): string | null {
+function digestBody(milestone: string, lessons: ReadonlyArray<Citable | string>, text?: string): string | null {
 	const ids = lessons.map((lesson) => (typeof lesson === "string" ? lesson : lesson.id));
 	const header = [`[${MARKERS.digest}]`, `milestone: ${milestone}`, `lessons: ${ids.join(", ")}`, ""];
 	const summary = normalizeText(text ?? "");
@@ -355,7 +355,7 @@ export function citableLesson(entry: StoredEntry): Citable | null {
 	};
 }
 
-export function citableDigest(entry: StoredEntry): Citable | null {
+function citableDigest(entry: StoredEntry): Citable | null {
 	const subject = entry.subject ?? "";
 	if ((entry.kind !== undefined && entry.kind !== "fact") || !subject.startsWith(SUBJECT.digest)) return null;
 	const body = parseBody(entry.text);
@@ -377,7 +377,7 @@ export function citableDigest(entry: StoredEntry): Citable | null {
 	};
 }
 
-export function outcomeRecord(entry: StoredEntry): OutcomeRecord | null {
+function outcomeRecord(entry: StoredEntry): OutcomeRecord | null {
 	const subject = entry.subject ?? "";
 	if ((entry.kind !== undefined && entry.kind !== "fact") || !subject.startsWith(SUBJECT.outcome)) return null;
 	const body = parseBody(entry.text);
@@ -420,7 +420,7 @@ export function scoreOf(outcomes: readonly OutcomeRecord[]): { score: number; co
 	return { score: (1 + sum) / (2 + latest.size), count: latest.size };
 }
 
-export function queryTerms(query: string): string[] {
+function queryTerms(query: string): string[] {
 	const terms = query
 		.toLowerCase()
 		.split(/[^a-z0-9]+/)
@@ -438,7 +438,7 @@ function stem(word: string): string {
  * found only in the subject or the text counts ½: a tag is the author saying what the
  * lesson is about, a word in passing is weaker evidence.
  */
-export function matchScore(terms: readonly string[], item: Citable): number {
+function matchScore(terms: readonly string[], item: Citable): number {
 	if (terms.length === 0) return 1;
 	const tagWords = item.tags.flatMap((tag) => tag.toLowerCase().split(/[^a-z0-9]+/));
 	const textWords = `${item.subject} ${item.text}`.toLowerCase().split(/[^a-z0-9]+/);
@@ -451,14 +451,14 @@ export function matchScore(terms: readonly string[], item: Citable): number {
 	return total / terms.length;
 }
 
-export interface RankOptions {
+interface RankOptions {
 	query: string;
 	now: number;
 	halfLifeDays: number;
 	limit: number;
 }
 
-export interface Ranked {
+interface Ranked {
 	item: Citable;
 	score: number;
 	outcomes: number;
@@ -516,7 +516,7 @@ export function rankLessons(items: readonly Citable[], outcomes: readonly Outcom
 }
 
 /** The block a GSD discuss step pastes into CONTEXT.md. Every line leads with the id to cite. */
-export function renderPriorLessons(ranked: readonly Ranked[], context: { scope: string; query: string }): string {
+function renderPriorLessons(ranked: readonly Ranked[], context: { scope: string; query: string }): string {
 	const about = context.query.trim() ? ` for "${context.query.trim()}"` : "";
 	const lines = ["## Prior Lessons", ""];
 	if (ranked.length === 0) {
@@ -546,14 +546,14 @@ export function renderPriorLessons(ranked: readonly Ranked[], context: { scope: 
 
 // ── SUMMARY.md extraction ────────────────────────────────────────────────────
 
-export interface ExtractedLesson {
+interface ExtractedLesson {
 	text: string;
 	slug?: string | undefined;
 	tags: string[];
 	outcome?: string | undefined;
 }
 
-export interface SummaryLessons {
+interface SummaryLessons {
 	milestone?: string | undefined;
 	phase?: string | undefined;
 	/** The SUMMARY's frontmatter tags, which every lesson in it inherits. */
@@ -694,13 +694,13 @@ export function placeOf(path: string): { milestone?: string | undefined; phase?:
 }
 
 /** `milestone:` from `.planning/STATE.md`: the milestone in progress, which a lesson added now belongs to. */
-export function milestoneFromState(state: string): string | undefined {
+function milestoneFromState(state: string): string | undefined {
 	return frontmatter(state).scalars.get("milestone");
 }
 
 // ── the gate's reply ─────────────────────────────────────────────────────────
 
-export interface WriteReply {
+interface WriteReply {
 	outcome?: string;
 	reason?: string;
 	remedy?: string;
@@ -714,7 +714,7 @@ export interface WriteReply {
 	error?: string;
 }
 
-export type WriteStatus =
+type WriteStatus =
 	| "recorded"
 	| "duplicate"
 	| "unverified"
@@ -728,7 +728,7 @@ export type WriteStatus =
 	| "invalid"
 	| "skipped";
 
-export interface WriteReport {
+interface WriteReport {
 	subject: string;
 	key: string;
 	status: WriteStatus;
@@ -741,14 +741,14 @@ export interface WriteReport {
 }
 
 /** The two statuses that carry an id anyone may cite. */
-export const USABLE: Partial<Record<WriteStatus, true>> = { recorded: true, duplicate: true };
+const USABLE: Partial<Record<WriteStatus, true>> = { recorded: true, duplicate: true };
 
 /**
  * What a gate reply means to the bank. A lesson counts only when the gate accepted
  * it *and* read it back — the gate's own contract for anything other agents act
  * on — so an accepted write that was not verified gets no id at all.
  */
-export function interpret(reply: WriteReply): Pick<WriteReport, "status" | "id" | "reason" | "remedy"> {
+function interpret(reply: WriteReply): Pick<WriteReport, "status" | "id" | "reason" | "remedy"> {
 	const reason = reply.reason ?? reply.error ?? null;
 	const remedy = reply.remedy ?? null;
 	switch (reply.outcome) {
@@ -771,25 +771,25 @@ export function interpret(reply: WriteReply): Pick<WriteReport, "status" | "id" 
 
 // ── transport ────────────────────────────────────────────────────────────────
 
-export interface Connection {
+interface Connection {
 	url: string;
 	token?: string | undefined;
 	timeoutMs: number;
 }
 
 /** The keyset pair a page hands back: the `(created, id)` of its last entry. */
-export interface SearchCursor {
+interface SearchCursor {
 	before: string;
 	before_id: string;
 }
 
 /** One page of a paged `memory_search`: the entries, and the cursor to the next page, or null at the end. */
-export interface SearchPage {
+interface SearchPage {
 	entries: StoredEntry[];
 	next: SearchCursor | null;
 }
 
-export interface PageRequest {
+interface PageRequest {
 	scope: string;
 	subject_prefix: string;
 	limit: number;
@@ -810,7 +810,7 @@ export interface MemoryApi {
 export class Unreachable extends Error {}
 
 /** A substrate whose `memory_search` predates `subject_prefix` and the cursor. */
-export class LegacySearch extends Error {}
+class LegacySearch extends Error {}
 
 export function lessonsTimeout(raw: string | undefined): number {
 	const value = Number(raw);

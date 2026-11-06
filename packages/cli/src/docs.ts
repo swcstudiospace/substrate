@@ -20,7 +20,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { parseArgs, str, type Args } from "./args.ts";
 
-export const USAGE =
+const USAGE =
 	"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n";
 
 /**
@@ -28,7 +28,7 @@ export const USAGE =
  * here, before it is posted. `docs-ingest.test.ts` pins it equal to the
  * engine's own cap by reading this file as text.
  */
-export const MAX_PAGE_BYTES = 1_000_000;
+const MAX_PAGE_BYTES = 1_000_000;
 
 /**
  * Past the server's parse budget on purpose: one page may poll for a
@@ -36,7 +36,7 @@ export const MAX_PAGE_BYTES = 1_000_000;
  * the user not knowing whether the page landed. The CLI ingests a single
  * page per call, so one budget covers it.
  */
-export const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_TIMEOUT_MS = 180_000;
 
 /** Overridable with `SUBSTRATE_DOCS_TIMEOUT_MS`; anything that is not a positive number is the default. */
 export function docsTimeout(raw: string | undefined): number {
@@ -51,7 +51,7 @@ export function docsTimeout(raw: string | undefined): number {
  * (duplicated because the CLI cannot import that module without breaking
  * the substrate-only door); the text test below pins the two together.
  */
-export function normalizePath(path: string): string | null {
+function normalizePath(path: string): string | null {
 	const slashed = path.replace(/\\/g, "/");
 	if (slashed.startsWith("/")) return null;
 	const parts: string[] = [];

@@ -255,7 +255,7 @@ export function renderGaps(response: CorpusGapsResponse): string {
 }
 
 /** Pairs listed in the near-duplicate section; the rest is a count. */
-export const NEARDUP_LIST_LIMIT = 50;
+const NEARDUP_LIST_LIMIT = 50;
 
 /** Why some planned documents were not compared, one line each; nothing when every one was. */
 function renderNotCompared(selection: NeardupSelection): string {
@@ -286,9 +286,9 @@ export function renderNeardup(selection: NeardupSelection, reply: CorpusNeardupR
 }
 
 /** The longest piece of server-supplied text a line shows. */
-export const TEXT_LIMIT = 300;
+const TEXT_LIMIT = 300;
 /** Reasons listed under an anchor status. */
-export const REASON_LIMIT = 10;
+const REASON_LIMIT = 10;
 
 /**
  * Server or file text for a verify line: `printable` (control characters escaped) and cut at {@link TEXT_LIMIT} characters, so a

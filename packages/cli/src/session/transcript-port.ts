@@ -43,7 +43,7 @@ export interface TranscriptPortFs {
 	writeFile(path: string, text: string, options: { flag: "wx"; mode: number }): Promise<void>;
 }
 
-export interface TranscriptPortOptions extends TranscriptPortFs {
+interface TranscriptPortOptions extends TranscriptPortFs {
 	/** The surface this invocation acts as. A rewind for another surface is `unsupported`: the wiring is wrong. */
 	surface: string;
 	/** The omp sessions bucket for the working directory. Absent: an omp rewind is `unsupported`. */
@@ -55,7 +55,7 @@ export interface TranscriptPortOptions extends TranscriptPortFs {
 }
 
 /** The file mode of a fork: private to the owner. */
-export const FORK_FILE_MODE = 0o600;
+const FORK_FILE_MODE = 0o600;
 
 /** How to resume the fork. UNVERIFIED for the installed omp version; the detail says so. */
 export function ompResumeCommand(newSessionId: string): string {
@@ -110,7 +110,7 @@ export function ompBucketName(canonicalCwd: string, homeDir: string, tmpRoot: st
 	return `--${dashed(canonicalCwd.replace(/^[\\/]+/, ""))}--`;
 }
 
-export interface OmpBucketLookup {
+interface OmpBucketLookup {
 	/** Directories omp may have been started in, most likely first: the working directory, then the git top level. */
 	candidates: readonly string[];
 	homeDir: string;

@@ -70,7 +70,7 @@ import { parseWorktreeArgs, type WorktreeArgs } from "./args.ts";
 import { provisionTarget, scopeRefusal } from "./scope.ts";
 import { commandMergeBack } from "./merge-back.ts";
 
-export const WORKTREE_USAGE =
+const WORKTREE_USAGE =
 	"usage: substrate worktree list|status [--root DIR]... [--repo R] [--json]\n" +
 	"       substrate worktree scan [--root DIR]... [--report [--session ID]] [--json]\n" +
 	"       substrate worktree prune [--root DIR]... [--idle-days N] [--execute] [--json]\n" +
@@ -581,7 +581,7 @@ export async function runWorktree(argv: readonly string[], deps: WorktreeDeps): 
 
 // ── the report route ────────────────────────────────────────────────────────
 
-export interface HttpPosterConfig {
+interface HttpPosterConfig {
 	url: string;
 	token: string | undefined;
 	timeoutMs: number;

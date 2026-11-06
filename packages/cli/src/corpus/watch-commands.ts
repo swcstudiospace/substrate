@@ -75,7 +75,7 @@ function syncDeps(ctx: WatchContext): SyncDeps {
 	};
 }
 
-export interface SyncCommand {
+interface SyncCommand {
 	repos: string[];
 	execute: boolean;
 	fetch: boolean;
@@ -95,7 +95,7 @@ export async function runSyncCommand(ctx: WatchContext, command: SyncCommand): P
 	return syncFailed(result) || result.notFound.length > 0 ? 1 : 0;
 }
 
-export interface ReconcileCommand {
+interface ReconcileCommand {
 	execute: boolean;
 	json: boolean;
 }
@@ -128,7 +128,7 @@ export async function runReconcileCommand(ctx: WatchContext, command: ReconcileC
 	return command.execute && syncFailed(sync) ? 1 : 0;
 }
 
-export interface WatchCommand {
+interface WatchCommand {
 	once: boolean;
 	/** The `--sweep-s` flag; absent takes the setting. */
 	sweepS: number | undefined;

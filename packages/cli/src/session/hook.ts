@@ -56,7 +56,7 @@ export const MAX_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_SESSION_ID = 512;
 const MAX_DIRECTIVE_ID = 256;
 
-export type HookOutcome = (
+type HookOutcome = (
 	| { status: "checkpointed"; ckpt_id: string; seq: number; created: boolean; ledger: CheckpointResult["server"]["status"] }
 	/** The `context` trigger's digest, already bounded; the command prints it. */
 	| { status: "context"; text: string }
@@ -64,7 +64,7 @@ export type HookOutcome = (
 	| { status: "failed"; reason: string }
 ) & { hintNote?: string };
 
-export interface HookParams {
+interface HookParams {
 	trigger: HookTrigger;
 	/** The worktree used when the envelope names no `cwd`. */
 	worktree: string;

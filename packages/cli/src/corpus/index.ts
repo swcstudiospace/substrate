@@ -111,13 +111,13 @@ export const USAGE =
 	"substrate corpus prove --repo R --path P [--out FILE] [--server URL]   (prints the inclusion proof of one document)\n" +
 	"substrate corpus verify FILE [--online] [--server URL] [--json]   (0 valid, 1 invalid, 2 usage; offline unless --online)\n";
 
-export const DEFAULT_ROOT = "/root/src/repos";
-export const DEFAULT_BATCH_DOCS = 20;
-export const DEFAULT_BATCH_BYTES = 1_000_000;
+const DEFAULT_ROOT = "/root/src/repos";
+const DEFAULT_BATCH_DOCS = 20;
+const DEFAULT_BATCH_BYTES = 1_000_000;
 /** A plan or an ingest batch of a few thousand entries is megabytes of JSON; the server needs time to judge it. */
 export const CORPUS_TIMEOUT_MS = 120_000;
 
-export interface CorpusDeps {
+interface CorpusDeps {
 	/** The substrate's base URL, without a trailing slash. */
 	url: string;
 	token: string | undefined;

@@ -11,7 +11,7 @@ import type { MirrorReport, SyncResult } from "./sync.ts";
 /** Absent-mirror reasons that deserve a line (a stale mirror always does); no origin and nothing fetched yet are the normal working-tree case. */
 const MIRROR_PROBLEMS: readonly string[] = ["clone-failed", "clone-timeout", "mirror-dir-unusable", "mirror-unmatched"];
 
-export interface MirrorProblem {
+interface MirrorProblem {
 	repo: string;
 	/** `mirror-stale` for a fetch that failed over a mirror that exists, `mirror` for a mirror that could not be made or read. */
 	kind: "mirror-stale" | "mirror";
@@ -87,7 +87,7 @@ export function syncJson(result: SyncResult): Record<string, unknown> {
 	};
 }
 
-export interface ReconcileView {
+interface ReconcileView {
 	sync: SyncResult;
 	drift: CorpusReconcileResponse["drift"];
 	repaired: CorpusReconcileResponse["repaired"];

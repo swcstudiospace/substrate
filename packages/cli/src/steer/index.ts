@@ -63,11 +63,11 @@ export const STEER_USAGE =
 
 /** One poll asks for this long; the server clamps it to its own ceiling (`SUBSTRATE_STEERING_WAIT_MAX_MS`) and says what it applied, which the loop then uses. */
 export const LISTEN_POLL_MS = 25_000;
-export const LISTEN_BACKOFF_BASE_MS = 1_000;
+const LISTEN_BACKOFF_BASE_MS = 1_000;
 export const LISTEN_BACKOFF_MAX_MS = 30_000;
 /** An answer to a long poll that came back sooner than this is not a long poll; the loop pauses so a misbehaving server cannot spin it. */
-export const LISTEN_MIN_POLL_GAP_MS = 200;
-export const LISTEN_MAX_WAIT_MS_LIMIT = 24 * 3_600_000;
+const LISTEN_MIN_POLL_GAP_MS = 200;
+const LISTEN_MAX_WAIT_MS_LIMIT = 24 * 3_600_000;
 /** A listener remembers at most this many printed directive ids, oldest dropped first. */
 export const LISTEN_PRINTED_MAX = 1_000;
 const DEFAULT_SURFACE = "claude-code";
@@ -116,7 +116,7 @@ const ALLOWED: Record<Sub, readonly string[]> = {
 	context: ["repo", "session", "limit", "format", "surface"],
 };
 
-export interface ParsedSteer {
+interface ParsedSteer {
 	sub: Sub;
 	flags: Map<string, string | true>;
 	positional: string[];
