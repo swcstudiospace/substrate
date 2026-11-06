@@ -52,6 +52,7 @@ import type { LedgerCommand, NoteOutcome } from "./ledger-archive.ts";
 import type { EventInput } from "./types.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
+import { diskDestination } from "./destination.ts";
 
 function exitUsage(message: string): never {
 	process.stderr.write(`${message}\n${LEDGER_USAGE}`);
@@ -85,7 +86,7 @@ if (command.command === "verify-archive") {
 	process.exit(mismatched > 0 ? 2 : 0);
 }
 
-const config = loadConfig();
+const config = loadConfig(process.env, { realDestination: diskDestination });
 if (!config.greptime) exitUsage("GREPTIME_URL is not set");
 const greptime = new GreptimeClient(config.greptime, { ledger: config.ledger });
 

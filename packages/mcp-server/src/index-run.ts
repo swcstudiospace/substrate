@@ -56,6 +56,7 @@ import type { NoteOutcome } from "./ledger-archive.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
+import { diskDestination } from "./destination.ts";
 
 function exitUsage(message: string): never {
 	process.stderr.write(`${message}\n${INDEX_ARCHIVE_USAGE}`);
@@ -82,7 +83,7 @@ if (command.command === "verify-archive") {
 	process.exit(report.ok ? 0 : 2);
 }
 
-const config = loadConfig();
+const config = loadConfig(process.env, { realDestination: diskDestination });
 const settings = config.indexArchive;
 
 if (command.command === "restore") {

@@ -24,6 +24,7 @@ import type { IndexReader, LedgerReader } from "./reconcile-read.ts";
 import { DEFAULT_RECONCILE_CAPS, type ReconcileDeps, runReport } from "./reconcile-run.ts";
 import { executePlan, failedRepair, failureReason, planFromReport, type Plan, type RepairResult, scanCounters } from "./reconcile-repair.ts";
 import type { Report } from "./reconcile.ts";
+import { diskDestination } from "./destination.ts";
 
 /** The three layers a run reads, and the call that releases the index socket once the run is over. */
 export interface ReconcileClients {
@@ -189,7 +190,7 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 
 	let config: SubstrateConfig;
 	try {
-		config = loadConfig(env);
+		config = loadConfig(env, { realDestination: diskDestination });
 	} catch (cause) {
 		io.err(`reconcile: ${failureReason(cause)}`);
 		return 2;

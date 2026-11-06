@@ -46,6 +46,7 @@ import {
 } from "./reanchor.ts";
 import { rowToEvent, Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
+import { diskDestination } from "./destination.ts";
 
 /** Devnet reads and the send's read-back: one slow call each, three tries, room to breathe between (the anchor job's figures). */
 const RPC_TIMEOUT_MS = 15_000;
@@ -244,7 +245,7 @@ export function fileLock(path: string, options: LockFileOptions = {}): ReanchorL
 export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}): ReanchorDeps | { refused: string } {
 	let config: SubstrateConfig;
 	try {
-		config = loadConfig(open.env ?? process.env);
+		config = loadConfig(open.env ?? process.env, { realDestination: diskDestination });
 	} catch (cause) {
 		return { refused: `the configuration is not valid: ${reasonOf(cause)}` };
 	}

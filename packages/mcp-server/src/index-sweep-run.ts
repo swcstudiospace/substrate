@@ -35,6 +35,7 @@ import {
 import { hindsightFromEnv } from "./planes/hindsight.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
+import { diskDestination } from "./destination.ts";
 
 const USAGE =
 	"usage: index-sweep-run.ts [--apply | --dry-run] [--json]\n" +
@@ -62,7 +63,7 @@ if (mode === "off") {
 	process.exit(0);
 }
 
-const config = loadConfig();
+const config = loadConfig(process.env, { realDestination: diskDestination });
 if (!config.postgresUrl) exitUsage("SUBSTRATE_PG_URL is not set");
 
 const index = new IndexStore(config.postgresUrl);
