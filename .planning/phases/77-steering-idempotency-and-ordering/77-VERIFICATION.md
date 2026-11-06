@@ -46,8 +46,8 @@ covered_files:
   - "packages/mcp-server/src/service.ts"
   - "packages/mcp-server/src/silent-failures.ts"
   - "scripts/code-ratchet.test.ts"
-covered_digest: "v3:sha256:8b0e3c207fe1ab8e941d1b2625c64fc06dcada995ae92ac15c61e2800e4fa1ff"
-head_refresh: "ad7073c6: service.ts readPointerChecks and judgePointer now run under the verify budget (Greptile P1, 39023247): the anchor pointer path, the hunk family this record already cites for 3ce87f63. Outside this record's truths; verdict unchanged. Earlier, 06d0a5d6 and c37d194a: text-only changes (emit stderr wording, reconcile comment, flag-registry readBy, regenerated config doc) refreshed at c37d194a. covered_digest refreshed from verification.fingerprint; gate r46 on ad7073c6 is the run of record for the tests."
+covered_digest: "v3:sha256:95aa348a252a7d3203e0be509477e38f66ef2cd4c212890f2ce68ef461c1472d"
+head_refresh: "771636ff (4ffeb7de before it): config.ts: loadConfig takes an optional probe object; the symlink-aware destination check moved to destination.ts (diskDestination), and config.ts reads no disk; silent-failures.ts: one stderr line per site and code, not per site. Verdict not re-audited by this refresh; statuses unchanged. covered_digest refreshed from verification.fingerprint at 771636ff; gate r50 on 771636ff is the run of record for the tests."
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:

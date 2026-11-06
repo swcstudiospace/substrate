@@ -62,8 +62,8 @@ covered_files:
   - "packages/observability/src/recall-metrics.test.ts"
   - "scripts/doctor-units.test.ts"
   - "scripts/sandbox-dropins.test.ts"
-covered_digest: "v3:sha256:1e6ea3f33c8d6a20a93c18fdec39c348faaebcc226e43f8abbb660528d1816d3"
-head_refresh: "ad7073c6: service.ts readPointerChecks and judgePointer now run under the verify budget (Greptile P1, 39023247): the anchor pointer path, the hunk family this record already cites for 3ce87f63. Outside this record's truths; verdict unchanged. Earlier, 06d0a5d6 and c37d194a: text-only changes (emit stderr wording, reconcile comment, flag-registry readBy, regenerated config doc) refreshed at c37d194a. covered_digest refreshed from verification.fingerprint; gate r46 on ad7073c6 is the run of record for the tests."
+covered_digest: "v3:sha256:d14b9b4bf6e3f2f062cce44d1c124b9ee8aa48327e684eb91b8b7c3eaa1586ef"
+head_refresh: "771636ff (4ffeb7de before it): silent-failures.test.ts: the dedupe test follows the site and code key; silent-failures.ts: one stderr line per site and code, not per site. Verdict not re-audited by this refresh; statuses unchanged. covered_digest refreshed from verification.fingerprint at 771636ff; gate r50 on 771636ff is the run of record for the tests."
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
