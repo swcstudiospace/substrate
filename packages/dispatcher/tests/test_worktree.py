@@ -279,6 +279,24 @@ def test_ensure_worktree_reuses_a_registered_worktree_under_the_second_root(
     assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
 
 
+def test_ensure_worktree_refuses_a_configured_root_entry_that_resolves_outside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (configured / GID).symlink_to(outside / GID)
+    monkeypatch.setenv("SUBSTRATE_WORKTREE_ROOTS", str(configured))
+
+    def run(argv, **kwargs):
+        raise AssertionError(f"git must not run for a refused path: {argv}")
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(tmp_path / "repo", GID, "main", run=run, disk_usage=plenty)
+    assert err.value.marker == "invalid-graph-id"
+
+
 def test_worktree_roots_defaults_when_env_unset(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv(ROOTS_ENV, raising=False)
     assert worktree_roots() == [Path("/var/lib/substrate/worktrees")]
