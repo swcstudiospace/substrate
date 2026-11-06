@@ -5,7 +5,8 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { resolve } from "node:path";
+import { readlinkSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
 import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
@@ -2611,7 +2612,7 @@ function loadEventBufferSettings(env: Record<string, string | undefined>): Event
 				"retries needs a file to be recorded in. Set SUBSTRATE_EVENT_DEAD_LETTER_PATH, or unset SUBSTRATE_EVENT_BUFFER_PATH",
 		);
 	}
-	if (resolve(path) === resolve(deadLetterPath)) {
+	if (destinationOf(path) === destinationOf(deadLetterPath)) {
 		throw new ConfigError(
 			"SUBSTRATE_EVENT_BUFFER_PATH and SUBSTRATE_EVENT_DEAD_LETTER_PATH name one file, so each store would rewrite the other's records. " +
 				"Give them two different files",
@@ -2625,6 +2626,34 @@ function loadEventBufferSettings(env: Record<string, string | undefined>): Event
 		backoffMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS),
 		backoffCapMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS),
 	};
+}
+
+/** Hops followed before a symlink chain counts as a loop (the kernel's SYMLOOP_MAX). */
+const MAX_LINK_HOPS = 40;
+
+/**
+ * The file a path names once symlinks are followed. A path that does not exist yet is placed under its real parent directory;
+ * a dangling link is followed to its target. A chain longer than `MAX_LINK_HOPS` is a loop, and the path is kept as written.
+ */
+function destinationOf(path: string, hops = 0): string {
+	const absolute = resolve(path);
+	try {
+		return realpathSync(absolute);
+	} catch {
+		if (hops >= MAX_LINK_HOPS) return absolute;
+		const target = linkTargetOf(absolute);
+		if (target !== null) return destinationOf(resolve(dirname(absolute), target), hops + 1);
+		const parent = dirname(absolute);
+		return parent === absolute ? absolute : join(destinationOf(parent, hops), basename(absolute));
+	}
+}
+
+function linkTargetOf(path: string): string | null {
+	try {
+		return readlinkSync(path);
+	} catch {
+		return null;
+	}
 }
 
 /**

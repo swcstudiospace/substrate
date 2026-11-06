@@ -16,8 +16,9 @@
 import { describe, expect, test } from "bun:test";
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
 	ConfigError,
 	DEFAULT_SKILLS_GH,
@@ -860,5 +861,51 @@ describe("the server entry point refuses a registry without scopes (phase 72)", 
 		expect(stderr).toContain("[substrate] refused");
 		expect(stderr).toContain("SUBSTRATE_REPO_REGISTRY");
 		expect(stderr).toContain("SUBSTRATE_REPO_SCOPES");
+	});
+});
+
+describe("the telemetry buffer and its dead-letter file name two files (phase 76)", () => {
+	/** Runs `body` in a fresh directory, removed afterwards. */
+	function inTempDir<T>(body: (dir: string) => T): T {
+		const dir = mkdtempSync(join(tmpdir(), "event-buffer-paths-"));
+		try {
+			return body(dir);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+
+	test("a dead-letter path reaching the buffer's file through a symlinked directory is refused at load", () => {
+		inTempDir((dir) => {
+			mkdirSync(join(dir, "real"));
+			symlinkSync(join(dir, "real"), join(dir, "alias"), "dir");
+			expect(() =>
+				loadConfig({
+					SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "real", "events.jsonl"),
+					SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "alias", "events.jsonl"),
+				}),
+			).toThrow("name one file");
+		});
+	});
+
+	test("a dead-letter symlink to the buffer file, not yet created, is refused at load", () => {
+		inTempDir((dir) => {
+			const buffer = join(dir, "events.jsonl");
+			symlinkSync(buffer, join(dir, "dead.jsonl"));
+			expect(() => loadConfig({ SUBSTRATE_EVENT_BUFFER_PATH: buffer, SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "dead.jsonl") })).toThrow("name one file");
+		});
+	});
+
+	test("distinct files are accepted, even when one of their directories is a symlink", () => {
+		inTempDir((dir) => {
+			mkdirSync(join(dir, "real"));
+			writeFileSync(join(dir, "real", "events.jsonl"), "");
+			symlinkSync(join(dir, "real"), join(dir, "alias"), "dir");
+			const env = {
+				SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "real", "events.jsonl"),
+				SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "alias", "dead.jsonl"),
+			};
+			expect(loadConfig(env).eventBuffer).toMatchObject({ path: env.SUBSTRATE_EVENT_BUFFER_PATH, deadLetterPath: env.SUBSTRATE_EVENT_DEAD_LETTER_PATH });
+		});
 	});
 });
