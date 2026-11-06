@@ -38,7 +38,8 @@ jobs:
   verify:
     name: Typecheck, lint, tests and repo locks
     if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-24.04 ships the PostgreSQL 16 that the scratch database needs. ubuntu-latest moves to 26.04, which ships PostgreSQL 18.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out the repository
