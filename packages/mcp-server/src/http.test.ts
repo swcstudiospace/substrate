@@ -514,6 +514,26 @@ describe("REST is audited on the same chain as MCP", () => {
 		expect(((await response.json()) as { error: string }).error).toContain("coord_handoff");
 	});
 
+	test("a REST handoff to a surface outside the list answers 400 and writes nothing", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		const handoff = spyOn(Substrate.prototype, "handoff");
+		try {
+			const response = await fetch(`${harness.base}/handoff`, {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ surface: "omp", to: "nobody", goal: "finish the migration", graph_id: "ut-7" }),
+			});
+
+			expect(response.status).toBe(400);
+			expect(await response.json()).toEqual({ error: "handoff `to` must name a known surface" });
+			// Nothing is written: no packet, and no audit record of a handoff that never happened.
+			expect(handoff).not.toHaveBeenCalled();
+			expect(harness.observability.audit.recent()).toEqual([]);
+		} finally {
+			handoff.mockRestore();
+		}
+	});
+
 	test("a fail-open REST read is still served when the chain will not take the record", async () => {
 		// The other half. These sit inside a prompt's hook budget, and an unwritable audit
 		// file is not a reason to fail an agent's turn.

@@ -1504,6 +1504,11 @@ export function createHttpServer(
 					return;
 				}
 				const body = parsed as Record<string, unknown>;
+				// A handoff names its recipient from SURFACES, as the MCP tool's schema does. Refused before the claim is remembered or the call is audited.
+				if (body.to !== undefined && !(typeof body.to === "string" && (SURFACES as readonly string[]).includes(body.to))) {
+					sendJson(res, 400, { error: "handoff `to` must name a known surface" });
+					return;
+				}
 				rememberClaim(claim, body);
 				// A tokened caller hands off as its own surface. A body naming another is refused, never re-attributed.
 				const handoffRefusal = surfaceClaimRefusal(surface, body.surface);

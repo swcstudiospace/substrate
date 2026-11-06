@@ -38,9 +38,11 @@
  * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
  * does. With the flag off `emit` is the single POST it always was.
  *
- * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
+ * Exit status is always 0 for `brief` and `emit`, and for `handoff` when the server cannot be reached. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
- * or turn; the substrate is never allowed to do that. `verify`, `drift`,
+ * or turn; the substrate is never allowed to do that. `handoff` exits 1 when the server refuses
+ * the packet: a refused handoff is not recorded, and printing it as success would hide that.
+ * `verify`, `drift`,
  * `evidence` and the `lessons` writes do report failure, because nothing depends
  * on them succeeding and a silent empty answer would be worse than an error —
  * `drift` exits 1 when it found drift, so a hook or a cron can act on it, and an
@@ -150,6 +152,7 @@ async function post(path: string, body: unknown, surface = "claude-code", timeou
 			signal: AbortSignal.timeout(timeoutMs ?? timeout()),
 		});
 	} catch {
+		// No reply (unreachable or timed out) is null; each caller decides what that means.
 		return null;
 	}
 }
@@ -338,16 +341,17 @@ async function cmdDrift(args: Record<string, string | true>): Promise<number> {
 }
 
 /**
- * Record a signed handoff packet. Exits 0 whatever happens, like `emit`: a
- * handoff runs at the end of a turn, and failing the turn over it would lose
- * the very work the handoff is there to preserve.
+ * Record a signed handoff packet. Exits 1 when the server refuses it (a `to` outside the surface
+ * list, for one): the packet was not recorded, and reporting success would hide that. Exits 0 when
+ * the server cannot be reached, as `emit` does: a handoff runs at the end of a turn, and failing the
+ * turn over an unreachable server would lose the very work the handoff is there to preserve.
  */
-async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
+async function cmdHandoff(args: Record<string, string | true>): Promise<number> {
 	const to = str(args.to);
 	const goal = str(args.goal);
 	if (!to || !goal) {
 		process.stderr.write("[substrate] handoff needs --to and --goal\n");
-		return;
+		return 0;
 	}
 	const surface = str(args.surface) ?? "claude-code";
 	const response = await post(
@@ -373,7 +377,13 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 	);
 	if (!response) {
 		process.stderr.write("[substrate] unreachable; the handoff was not recorded\n");
-		return;
+		return 0;
+	}
+	if (!response.ok) {
+		const refusal = (await response.json().catch(() => undefined)) as { error?: unknown } | undefined;
+		const reason = typeof refusal?.error === "string" ? refusal.error : `HTTP ${response.status}`;
+		process.stderr.write(`[substrate] handoff refused: ${reason}\n`);
+		return 1;
 	}
 	const body = (await response.json()) as { packet?: { handoff_id?: string }; signed?: boolean; stored?: boolean; gaps?: string[] };
 	process.stdout.write(
@@ -382,6 +392,7 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 	);
 	// The gaps go to stderr: they are advice to the operator, not the packet.
 	for (const gap of body.gaps ?? []) process.stderr.write(`[substrate] ${gap}\n`);
+	return 0;
 }
 
 /**
@@ -667,8 +678,7 @@ switch (command) {
 		process.exit(await cmdDrift(args));
 		break;
 	case "handoff":
-		await cmdHandoff(args);
-		process.exit(0);
+		process.exit(await cmdHandoff(args));
 		break;
 	case "evidence":
 		process.exit(await cmdEvidence(args));
