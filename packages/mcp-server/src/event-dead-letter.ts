@@ -93,6 +93,11 @@ export class DeadLetterStore {
 		return this.onDisk + this.held.length;
 	}
 
+	/** The records held in memory, not yet on the file, oldest first. A copy, read on demand: a shutdown that cannot keep them reports them. */
+	heldRecords(): DeadLetterRecord[] {
+		return [...this.held];
+	}
+
 	/**
 	 * Keep one record for an event given up under `reason`. Never throws: a failed write is reported and the record is held.
 	 *

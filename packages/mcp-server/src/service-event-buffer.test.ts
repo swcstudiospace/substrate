@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -229,6 +229,44 @@ describe("the telemetry buffer", () => {
 		state.down = false;
 		await substrate.drainEventBuffer({ all: true });
 		expect(state.rows).toEqual([]);
+	});
+
+	test("a service that shuts down while a dead-letter file cannot be written reports each held record on stderr, and no summary text", async () => {
+		// Neither file can be created under a regular file, so the buffer's save fails as well as the dead-letter write. A buffer that
+		// cannot be saved is the one that abandons what it holds at shutdown, and the held record is reported from there.
+		const dir = mkdtempSync(join(tmpdir(), "telemetry-buffer-"));
+		dirs.push(dir);
+		const blocker = join(dir, "not-a-directory");
+		writeFileSync(blocker, "");
+		const env = {
+			SUBSTRATE_EVENT_BUFFER_PATH: join(blocker, "buffer.jsonl"),
+			SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(blocker, "dead.jsonl"),
+			SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS: "3",
+		};
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(env, greptime);
+		state.down = true;
+
+		const summary = "held event text that must never reach stderr";
+		const result = await substrate.emit(input(summary));
+		await substrate.drainEventBuffer({ all: true });
+		await substrate.drainEventBuffer({ all: true });
+		expect(await substrate.health()).toMatchObject({ eventBuffer: { deadLetter: { depth: 1, durable: false } } });
+
+		// The shutdown is the call `index.ts` makes: `drainPendingEvents` with `abandon`. Only its stderr output is captured.
+		const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+		let lines: string[];
+		try {
+			await substrate.drainPendingEvents(50, { abandon: true });
+			lines = stderr.mock.calls.map((call) => String(call[0]));
+		} finally {
+			stderr.mockRestore();
+		}
+
+		expect(lines.map((line) => JSON.parse(line) as Record<string, unknown>)).toMatchObject([
+			{ event_id: result.event.id, hash: result.event.hash, reason: "exhausted" },
+		]);
+		for (const line of lines) expect(line).not.toContain(summary);
 	});
 });
 

@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeEvent } from "./event.ts";
 import { type EnqueueOutcome, type EventDelivery, type EventEnqueue, EventBuffer, type EventBufferEntry, eventBufferBackoffMs } from "./event-buffer.ts";
-import type { DeadLetterReason } from "./event-dead-letter.ts";
+import { DeadLetterStore, type DeadLetterReason } from "./event-dead-letter.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -486,5 +486,81 @@ describe("EventBuffer pending dead letters", () => {
 		expect(second.store.written).toEqual(["a"]);
 		expect(second.dead).toEqual([{ summary: "a", reason: "exhausted" }]);
 		expect(second.buffer.size()).toBe(0);
+	});
+});
+
+/** What `run` writes to stderr. The writes are swallowed so the test output stays clean; the spy is restored even when `run` throws. */
+function captureStderr(run: () => void): string {
+	const spy = spyOn(process.stderr, "write").mockImplementation(() => true);
+	try {
+		run();
+		return spy.mock.calls.map((call) => String(call[0])).join("");
+	} finally {
+		spy.mockRestore();
+	}
+}
+
+describe("EventBuffer abandon at shutdown", () => {
+	test("abandonAll on a durable dead-letter store writes no identifier line to stderr", () => {
+		const path = tempPath();
+		const store = new DeadLetterStore({ path });
+		const buffer = new EventBuffer({
+			deadLetters: store,
+			onDeadLetter: (entry, reason) => {
+				store.record({ event: entry.event, attempts: entry.attempts, enqueued_at: entry.enqueued_at, last_reason: entry.last_reason }, reason);
+				return store.durable;
+			},
+		});
+		buffer.enqueue(request("s-1", "first summary"));
+		buffer.enqueue(request("s-2", "second summary"));
+
+		let abandoned = 0;
+		const stderr = captureStderr(() => {
+			abandoned = buffer.abandonAll();
+		});
+
+		expect(abandoned).toBe(2);
+		expect(store.durable).toBe(true);
+		expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(2);
+		// The store writes its own per-record notice; abandonAll must add nothing else.
+		expect(stderr.split("\n").filter((line) => line.length > 0 && !line.startsWith("[substrate] event "))).toEqual([]);
+	});
+
+	test("abandonAll with a dead-letter file that cannot be written reports each held record on stderr as one JSON line of identifiers, never the summary", () => {
+		const blocker = tempPath();
+		writeFileSync(blocker, "");
+		const store = new DeadLetterStore({ path: join(blocker, "dead.jsonl") });
+		const buffer = new EventBuffer({
+			deadLetters: store,
+			onDeadLetter: (entry, reason) => {
+				store.record({ event: entry.event, attempts: entry.attempts, enqueued_at: entry.enqueued_at, last_reason: entry.last_reason }, reason);
+				return store.durable;
+			},
+		});
+		const first = buffered(buffer.enqueue(request("s-1", "summary text one")));
+		const second = buffered(buffer.enqueue(request("s-2", "summary text two")));
+
+		let abandoned = 0;
+		const stderr = captureStderr(() => {
+			abandoned = buffer.abandonAll();
+		});
+
+		expect(abandoned).toBe(2);
+		expect(store.durable).toBe(false);
+		const held = store.heldRecords();
+		expect(held).toHaveLength(2);
+
+		const lines = stderr.split("\n").filter((line) => line.startsWith("{"));
+		expect(lines).toHaveLength(held.length);
+		const reported = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+		const fields = ["event_id", "hash", "id", "reason", "recorded_at", "session_id"];
+		expect(reported.map((line) => Object.keys(line).sort())).toEqual([fields, fields]);
+		expect(reported.map((line) => line.id)).toEqual(held.map((record) => record.id));
+		expect(reported.map((line) => line.event_id)).toEqual([first.event.id, second.event.id]);
+		expect(reported.map((line) => line.hash)).toEqual([first.event.hash, second.event.hash]);
+		expect(reported.map((line) => line.reason)).toEqual(["abandoned", "abandoned"]);
+		expect(reported.map((line) => line.session_id)).toEqual(["s-1", "s-2"]);
+		expect(stderr).not.toContain("summary text one");
+		expect(stderr).not.toContain("summary text two");
 	});
 });

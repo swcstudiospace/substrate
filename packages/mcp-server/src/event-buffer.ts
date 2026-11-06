@@ -24,7 +24,7 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import { parseStoredLine, StoredEvent } from "./event.ts";
 import type { SubstrateEvent } from "./types.ts";
-import { DEAD_LETTER_REASONS, type DeadLetterReason } from "./event-dead-letter.ts";
+import { DEAD_LETTER_REASONS, type DeadLetterReason, type DeadLetterStore } from "./event-dead-letter.ts";
 
 export const DEFAULT_EVENT_BUFFER_MAX = 256;
 export const DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS = 10;
@@ -98,6 +98,11 @@ export interface EventBufferOptions {
 	onDeadLetter: (entry: EventBufferEntry, reason: DeadLetterReason) => boolean;
 	/** Writes the records the store still holds. Returns true when every record is on disk. Spends no attempt. Defaults to true. */
 	flushDeadLetters?: () => boolean;
+	/**
+	 * The store the records go to. `abandonAll` reads it: while the store is not durable, each record it still holds is written to stderr
+	 * as one JSON line of identifiers, so a shutdown that cannot keep them leaves a trace. Unset, nothing is written.
+	 */
+	deadLetters?: Pick<DeadLetterStore, "durable" | "heldRecords">;
 }
 
 /** What `enqueue` needs. `build` runs after any eviction, so the link it writes names the entry that is really ahead of it. */
@@ -140,6 +145,7 @@ export class EventBuffer {
 	private readonly allow: () => boolean;
 	private readonly onDeadLetter: (entry: EventBufferEntry, reason: DeadLetterReason) => boolean;
 	private readonly flushDeadLetters: () => boolean;
+	private readonly deadLetters: Pick<DeadLetterStore, "durable" | "heldRecords"> | null;
 	/** Ids of the pending entries whose record this process has already handed to the store, so none is recorded twice. */
 	private readonly recordedIds = new Set<string>();
 	/** Insertion order is age order, and within one session it is chain order. */
@@ -166,6 +172,7 @@ export class EventBuffer {
 		this.allow = options.allow ?? (() => true);
 		this.onDeadLetter = options.onDeadLetter;
 		this.flushDeadLetters = options.flushDeadLetters ?? (() => true);
+		this.deadLetters = options.deadLetters ?? null;
 		if (this.path !== null) this.hydrate(this.path);
 	}
 
@@ -314,7 +321,8 @@ export class EventBuffer {
 	 * the process may exit before a delivery in flight settles, so that entry is recorded now too: the earlier rule kept it pending, and an
 	 * exit then lost it. A pending entry already has its record with the store, so it is not recorded twice. A delivery in flight is never
 	 * retried. If it lands after this, the event is in the ledger and in the dead-letter store under the same id and hash: at-least-once,
-	 * and the duplicate is detectable. Returns how many entries were given up now.
+	 * and the duplicate is detectable. Returns how many entries were given up now. While the store is not durable, each record it still
+	 * holds is reported on stderr (see `reportHeldDeadLetters`).
 	 */
 	abandonAll(): number {
 		const dropped = [...this.entries.values()];
@@ -327,7 +335,28 @@ export class EventBuffer {
 			entry.given_up = "abandoned";
 			this.onDeadLetter(entry, "abandoned");
 		}
+		this.reportHeldDeadLetters();
 		return dropped.length;
+	}
+
+	/**
+	 * Writes each record the dead-letter store still holds to stderr, one JSON line each, with identifiers only: the id, event id, hash,
+	 * reason, session and record time. Never the payload or the summary, since the process is going away and event text does not belong
+	 * in a log. A durable store has no held records to report, and writes nothing.
+	 */
+	private reportHeldDeadLetters(): void {
+		if (this.deadLetters === null || this.deadLetters.durable) return;
+		for (const record of this.deadLetters.heldRecords()) {
+			const line = {
+				id: record.id,
+				event_id: record.event_id,
+				hash: record.event_hash,
+				reason: record.reason,
+				session_id: record.session_id,
+				recorded_at: record.dead_lettered_at,
+			};
+			process.stderr.write(`${JSON.stringify(line)}\n`);
+		}
 	}
 
 	private async runDrain(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, all: boolean): Promise<void> {
