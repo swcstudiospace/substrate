@@ -447,6 +447,24 @@ describe("TaskService.openTask", () => {
 			rmSync(second, { recursive: true, force: true });
 		}
 	});
+	test("a graph's bound worktree ignores the records of other graphs", async () => {
+		const first = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const second = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			const store = new MemoryTaskStore();
+			const h = harness({ store, worktreeRoots: [first, second] });
+			expect((await h.service.openTask(openBody({ worktree: join(second, GID) }))).status).toBe(202);
+			const opened = store.get(GID, NID);
+			if (!opened) throw new Error("the open left no record");
+			const other = "ut-other-99999999";
+			store.save({ ...opened, graph_id: other, worktree: join(first, other) });
+			expect(boundWorktreeOf(store, GID, [first, second])).toBe(join(second, GID));
+			expect(boundWorktreeOf(store, other, [first, second])).toBe(join(first, other));
+		} finally {
+			rmSync(first, { recursive: true, force: true });
+			rmSync(second, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("TaskService status, terminate and kill", () => {

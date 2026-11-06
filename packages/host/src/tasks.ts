@@ -157,15 +157,15 @@ export function validateOpenRequest(body: unknown, worktreeRoots: readonly strin
 }
 
 /** The worktree an accepted open bound this graph to, while it still sits under a configured root: a root removed from the config binds nothing. */
-export function boundWorktree(store: Pick<TaskStoreLike, "list">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string | null {
-	for (const record of store.list()) {
-		if (record.graph_id === graphId && worktreeUnderRoot(graphId, record.worktree, worktreeRoots)) return record.worktree;
+export function boundWorktree(store: Pick<TaskStoreLike, "forGraph">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string | null {
+	for (const record of store.forGraph(graphId)) {
+		if (worktreeUnderRoot(graphId, record.worktree, worktreeRoots)) return record.worktree;
 	}
 	return null;
 }
 
 /** The worktree a graph's tasks run in: the bound one, else the derived `<root>/<graph_id>`. */
-export function boundWorktreeOf(store: Pick<TaskStoreLike, "list">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string {
+export function boundWorktreeOf(store: Pick<TaskStoreLike, "forGraph">, graphId: string, worktreeRoots: readonly string[] = [WORKTREES_ROOT]): string {
 	return boundWorktree(store, graphId, worktreeRoots) ?? worktreeFor(graphId, worktreeRoots);
 }
 
@@ -206,6 +206,7 @@ export type TaskStoreLike = {
 	get(graphId: string, nodeId: string): TaskRecord | null;
 	save(record: TaskRecord): void;
 	list(): TaskRecord[];
+	forGraph(graphId: string): TaskRecord[];
 };
 
 /** One JSON file per task under <dir>/<gid>--<nid>.json, mode 0600, written via temp + rename. */
@@ -244,9 +245,19 @@ export class TaskStore implements TaskStoreLike {
 	}
 
 	list(): TaskRecord[] {
+		return this.readMatching("");
+	}
+
+	/** One graph's records: only that graph's files are read, by name, so the rest of the directory is never parsed. */
+	forGraph(graphId: string): TaskRecord[] {
+		return this.readMatching(`${graphId}--`).filter((record) => record.graph_id === graphId);
+	}
+
+	/** Every stored task whose file name starts with `prefix`: the one place a task file is parsed. */
+	private readMatching(prefix: string): TaskRecord[] {
 		const records: TaskRecord[] = [];
 		for (const name of readdirSync(this.dir).sort()) {
-			if (!name.endsWith(".json")) continue;
+			if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
 			records.push(withRecordDefaults(JSON.parse(readFileSync(join(this.dir, name), "utf8")) as TaskRecord));
 		}
 		return records;
@@ -271,6 +282,10 @@ export class MemoryTaskStore implements TaskStoreLike {
 
 	list(): TaskRecord[] {
 		return [...this.records.values()];
+	}
+
+	forGraph(graphId: string): TaskRecord[] {
+		return [...this.records.values()].filter((record) => record.graph_id === graphId);
 	}
 }
 
