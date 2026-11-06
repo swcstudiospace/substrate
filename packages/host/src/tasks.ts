@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { errorLabel } from "./error-label.ts";
 import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
 import { GRAPH_LABEL, isValidGraphId } from "./sandbox-options.ts";
 import {
@@ -114,8 +115,6 @@ export const RESUME_TEXT =
 	"substrate-host restarted during your last turn. Continue the same task from the files in /home/agentos/work and the numbered steps of your first prompt; do not repeat steps that already succeeded.";
 
 export type OpenRequest = { graph_id: string; node_id: string; identifier: string; repo: string; worktree: string };
-
-export type SessionStatus = "idle" | "running" | "waiting" | "failed";
 
 /**
  * The dispatcher's poll(): null while the turn runs or waits on an approval, 0 after a clean
@@ -640,7 +639,9 @@ export class TaskService {
 		const key = `${graphId}/${nodeId}`;
 		this.clearHeartbeat(graphId, nodeId);
 		const timer = setInterval(() => {
-			void this.heartbeatTick(graphId, nodeId);
+			void this.heartbeatTick(graphId, nodeId).catch((cause: unknown) => {
+				process.stderr.write(`[substrate-host] host.heartbeat ${errorLabel(cause)}\n`);
+			});
 		}, this.deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
 		timer.unref?.();
 		this.heartbeats.set(key, timer);

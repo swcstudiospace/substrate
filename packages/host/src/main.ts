@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
+import { errorLabel } from "./error-label.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
 import { defaultSandboxStatePath, destroySandbox, listSandboxes, runEgressCleanup, setEgressWarnSink } from "./sandbox-provider.ts";
@@ -284,7 +285,7 @@ if (broker.enabled) {
 	try {
 		const username = await broker.whoami();
 		log(`[substrate-host] telegram approvals on (bot @${username})`);
-		void pollApprovals();
+		void pollApprovals().catch((cause: unknown) => warn(`host.approvals ${errorLabel(cause)}`));
 	} catch (cause) {
 		const message = cause instanceof TelegramError ? cause.message : "telegram getMe: request failed (Error)";
 		log(`[substrate-host] ${message}`);

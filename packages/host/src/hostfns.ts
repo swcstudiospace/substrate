@@ -121,15 +121,19 @@ export type Runner = (argv: readonly string[]) => Promise<RunResult>;
  */
 export function execFileRunner(argv: readonly string[]): Promise<RunResult> {
 	const { promise, resolve } = Promise.withResolvers<RunResult>();
-	execFile(
-		argv[0] as string,
-		argv.slice(1),
-		{ timeout: RUN_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, encoding: "utf8", env: { ...process.env, HOME: "/root", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" } },
-		(error, stdout, stderr) => {
-			const code = error ? (typeof error.code === "number" ? error.code : null) : 0;
-			resolve({ code, stdout: String(stdout), stderr: String(stderr) });
-		},
-	);
+	try {
+		execFile(
+			argv[0] as string,
+			argv.slice(1),
+			{ timeout: RUN_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, encoding: "utf8", env: { ...process.env, HOME: "/root", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" } },
+			(error, stdout, stderr) => {
+				const code = error ? (typeof error.code === "number" ? error.code : null) : 0;
+				resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+			},
+		);
+	} catch (error) {
+		return Promise.reject(error);
+	}
 	return promise;
 }
 function tail(result: RunResult): string {

@@ -20,6 +20,7 @@
 import { spawn as spawnProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createInterface } from "node:readline";
+import { errorLabel } from "./error-label.ts";
 import { TRACKER_PROXY_PORT } from "./options.ts";
 
 export const TRACKERS = ["notion", "linear"] as const;
@@ -294,7 +295,14 @@ export function createTrackerProxy(options: TrackerProxyOptions): Server {
 			res.end(JSON.stringify({ error: "POST only" }));
 			return;
 		}
-		const body = await readBody(req);
+		let body: Body;
+		try {
+			body = await readBody(req);
+		} catch (cause) {
+			process.stderr.write(`[substrate-host] host.mcp-proxy.body ${errorLabel(cause)}\n`);
+			sendJson(res, 400, rpcError(null, -32600, "Invalid Request"));
+			return;
+		}
 		if (!body.ok) {
 			res.writeHead(413, { "content-type": "application/json", connection: "close" });
 			res.end(JSON.stringify({ error: "request body too large" }));
