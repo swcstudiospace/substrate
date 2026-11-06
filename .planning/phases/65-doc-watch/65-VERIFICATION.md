@@ -62,8 +62,8 @@ covered_files:
   - "packages/observability/src/recall-metrics.test.ts"
   - "scripts/doctor-units.test.ts"
   - "scripts/sandbox-dropins.test.ts"
-covered_digest: "v3:sha256:98e5ea557bf10ff65b5b5931dccb04dcb035dc5c271ed5824e0a3370f16082eb"
-head_refresh: "c37d194a: text-only changes in covered files (packages/cli/src/index.ts emit stderr wording; packages/mcp-server/src/reconcile-run.ts comment; packages/mcp-server/src/flag-registry.ts readBy; docs/config-reference.md regenerated from the registry). covered_digest refreshed from verification.fingerprint; verdict, title list and behaviour unchanged; gate r45 on c37d194a is the run of record for the tests."
+covered_digest: "v3:sha256:1e6ea3f33c8d6a20a93c18fdec39c348faaebcc226e43f8abbb660528d1816d3"
+head_refresh: "ad7073c6: service.ts readPointerChecks and judgePointer now run under the verify budget (Greptile P1, 39023247): the anchor pointer path, the hunk family this record already cites for 3ce87f63. Outside this record's truths; verdict unchanged. Earlier, 06d0a5d6 and c37d194a: text-only changes (emit stderr wording, reconcile comment, flag-registry readBy, regenerated config doc) refreshed at c37d194a. covered_digest refreshed from verification.fingerprint; gate r46 on ad7073c6 is the run of record for the tests."
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
