@@ -138,6 +138,17 @@ gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            #
 
 **Status on 2026-10-09: off.** The first run on pull request 27 failed before any step started, with the annotation "The job was not started because recent account payments have failed or your spending limit needs to be increased". The organisation's Actions usage for the month is already large (other repositories), so enabling this is the operator's decision about spend, not a code change. After the account can run jobs: fix billing, run the workflow once by hand (`gh workflow run CI --ref main` after setting the variable, or open a pull request), confirm `verify` is green, and optionally require `CI / Typecheck, lint, tests and repo locks` in branch protection when the repository's plan supports it. The first run on a real runner may expose a setup detail this repository could not test (for example the Postgres service health check); fix it in a small pull request, or clear the variable while you do.
 
+### Pool scope and recovery (2026-11-07)
+
+The verify job runs on the Omega CI pool, which serves a private allowlist of repositories. The allowlist is set in two places: the controller setting `OMEGA_CI_REPOS`, and the runner group `omega-ci`, which grants repository access only to selected repositories and refuses public ones. It currently covers `swcstudiospace/substrate`, `swcstudiospace/spectrumwebco-marketing` and `swcstudiospace/autonogrammer-ai`.
+
+- This supersedes the organisation-wide setting of 2026-10-24. `swcstudiospace/asterinas` has 299 queued jobs that carry only the `self-hosted` label, and they include TDX and benchmark jobs the pool cannot serve. The controller matches a job by its labels and cannot exclude a repository, so an organisation-wide scope would fill the pool with those jobs. Reverting to `swcstudiospace/*` is a single setting, but asterinas needs its own runners first.
+- Public repositories are not served. Public repositories that use the `omega-ci` label need an owner decision before they can use the pool.
+- Recovery: after the Desktop agents fail to wake, the controller opens a launch circuit breaker, and only a restart of the controller clears it. The journal line `agent reconcile failed (DesktopError)` is a periodic check with a 150 s wake budget. It is a symptom, not the cause.
+- Verify after any change: the runner group lists the repository, an online runner carries the labels `self-hosted, linux, x64, omega-ci`, and a job from this repository completes. On 2026-11-07 the verify job of run 42293269517 completed with success on the pool.
+
+The status above (2026-10-09) is history. On 2026-11-07 `CI_ENABLED` is `true` and `BOOT_GATE` is unset.
+
 ## Editing the workflow
 
 - Pin every third-party action by full commit SHA with the version in a comment; resolve a tag with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and dereference an annotated tag through `git/tags/<sha>`.
