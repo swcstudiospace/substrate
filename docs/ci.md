@@ -140,14 +140,15 @@ gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            #
 
 ### Pool scope and recovery (2026-11-07)
 
-The verify job runs on the Omega CI pool, which serves a private allowlist of repositories. The allowlist is set in two places: the controller setting `OMEGA_CI_REPOS`, and the runner group `omega-ci`, which grants repository access only to selected repositories and refuses public ones. It currently covers `swcstudiospace/substrate`, `swcstudiospace/spectrumwebco-marketing` and `swcstudiospace/autonogrammer-ai`.
+The verify job runs on the Omega CI pool. The pool serves a private allowlist of repositories, set in two places: the controller setting `OMEGA_CI_REPOS` in `/etc/omega-ci/controller.env` on the pool host, and the org runner group `omega-ci`, which grants repository access only to selected repositories and refuses public ones. It currently covers `swcstudiospace/substrate`, `swcstudiospace/spectrumwebco-marketing` and `swcstudiospace/autonogrammer-ai`.
 
-- This supersedes the organisation-wide setting of 2026-10-24. `swcstudiospace/asterinas` has 299 queued jobs that carry only the `self-hosted` label, and they include TDX and benchmark jobs the pool cannot serve. The controller matches a job by its labels and cannot exclude a repository, so an organisation-wide scope would fill the pool with those jobs. Reverting to `swcstudiospace/*` is a single setting, but asterinas needs its own runners first.
-- Public repositories are not served. Public repositories that use the `omega-ci` label need an owner decision before they can use the pool.
-- Recovery: after the Desktop agents fail to wake, the controller opens a launch circuit breaker, and only a restart of the controller clears it. The journal line `agent reconcile failed (DesktopError)` is a periodic check with a 150 s wake budget. It is a symptom, not the cause.
-- Verify after any change: the runner group lists the repository, an online runner carries the labels `self-hosted, linux, x64, omega-ci`, and a job from this repository completes. On 2026-11-07 the verify job of run 42293269517 completed with success on the pool.
+- This narrowing is temporary, pending the owner's decision. It replaces the organisation-wide setting recorded on 2026-10-24, which served every repository, public ones included. The reason: `swcstudiospace/asterinas` has 299 queued jobs that carry only the `self-hosted` label, including TDX and benchmark jobs the pool cannot serve, and the controller matches jobs by label and cannot exclude a repository.
+- Public repositories are not served: the group refuses them. Public repositories that carry the `omega-ci` label are `swcstudiospace/realm`, `swcstudiospace/ultrathink`, `swcstudiospace/PumpGrok` and `swcstudiospace/Omega-Prime`. They need the owner's decision.
+- Full revert to the 2026-10-24 setting, in this order: set `OMEGA_CI_REPOS=swcstudiospace/*` and `OMEGA_CI_PUBLIC_REPOS=swcstudiospace/*` in `/etc/omega-ci/controller.env` (the controller refuses a public entry that the repos list does not cover); set the `omega-ci` runner group to `visibility=all`; then restart the unit `omega-ci-autoscaler`. Allowing public repositories through the group is a separate setting (`allows_public_repositories`), and it stays `false` until the owner decides.
+- Recovery: after the Desktop agents fail to wake, the controller opens a launch circuit breaker, and only a restart of the unit `omega-ci-autoscaler` clears it. The journal line `agent reconcile failed (DesktopError)` is a periodic check with a 150 s wake budget. It is a symptom, not the cause.
+- Verify after any change: the runner group lists the repository (`gh api orgs/swcstudiospace/actions/runner-groups/4/repositories`), an online runner carries the labels `self-hosted, linux, x64, omega-ci`, and a job from this repository completes. On 2026-11-07 the verify job of run 42293269517 completed with success on the pool.
 
-The status above (2026-10-09) is history. On 2026-11-07 `CI_ENABLED` is `true` and `BOOT_GATE` is unset.
+The status above (2026-10-09) is history. On 2026-11-07 the repository variable `CI_ENABLED` is `true` (set 2026-10-09; there is no organisation-level variable of that name), and `BOOT_GATE` is unset at both levels.
 
 ## Editing the workflow
 
