@@ -39,7 +39,7 @@ import {
 	createSteerClient,
 } from "./client.ts";
 import { plain } from "./plain.ts";
-import { renderDigest, renderDirectiveLine, renderDirectives, renderSessions, renderWriteReply } from "./render.ts";
+import { LIVE_SESSION_ID_CHARS, renderDigest, renderDirectiveLine, renderDirectives, renderSessions, renderWriteReply } from "./render.ts";
 import { BindingRecordError, LIVE_SESSION_ID_PATTERN, MAX_BINDING_RECORDS, bindingRecordPath, loadBindingRecord, reclaimDeadBindingRecords, saveBindingRecord, serverIdentity, updateBindingExpiry, removeBindingRecord, type BindingRecordOptions, type LiveSessionBindingRecord } from "./binding-record.ts";
 
 export const EXIT_DONE = 0;
@@ -453,7 +453,7 @@ async function commandStatus(parsed: ParsedSteer, deps: SteerDeps, client: Steer
 	out.push(...renderSessions({ sessions: shown, truncated: sessions.value.truncated }, nowMs).map((line) => `  ${line}`));
 	if (queued.length > 0) out.push("pending directives:");
 	for (const entry of queued) {
-		out.push(`  ${plain(entry.session_id, 64)}:`);
+		out.push(`  ${plain(entry.session_id, LIVE_SESSION_ID_CHARS)}:`);
 		if (!entry.directives.ok) out.push(`    unavailable: ${plain(entry.directives.message, 300)}`);
 		else out.push(...renderDirectives(entry.directives.value, nowMs).map((line) => `    ${line.split("\n").join("\n    ")}`));
 	}

@@ -17,7 +17,9 @@ const MAX_FIELDS_PER_ITEM = 6;
 const MAX_NOTES_SHOWN = 5;
 const HASH_SHOWN_CHARS = 8;
 /** A server-issued live handle: `ls_` then 64 lowercase hexadecimal characters, the shape `LIVE_SESSION_ID_PATTERN` accepts. */
-const LIVE_SESSION_ID_CHARS = "ls_".length + 64;
+export const LIVE_SESSION_ID_CHARS = "ls_".length + 64;
+/** The longest directive id the server accepts: `DIRECTIVE_ID_RE` in the planning steering module allows 128 characters. */
+const DIRECTIVE_ID_CHARS = 128;
 /** Room kept for the "N more lines cut" line when a text is bounded. */
 const CUT_LINE_RESERVE = 40;
 
@@ -74,7 +76,7 @@ export function renderSessions(result: SteerSessions, nowMs: number): string[] {
 
 export function renderDirectiveLine(directive: SteerDirective, nowMs: number): string {
 	const parts = [
-		plain(directive.id, 64),
+		plain(directive.id, DIRECTIVE_ID_CHARS),
 		directive.status === "queued" ? "queued" : `acknowledged${directive.outcome === null ? "" : ` (${plain(directive.outcome, 16)})`}`,
 		`${directive.action}/${directive.priority}`,
 		`by ${plain(directive.author, 48)}`,
@@ -100,7 +102,7 @@ export function renderWriteReply(reply: WriteReply): string[] {
 		lines.push(`session state: ${plain(state.status, 32)}${"state" in state && typeof state.state === "string" ? ` -> ${plain(state.state, 32)}` : ""}`);
 	}
 	if (reply.checkpoint_hint !== undefined) {
-		lines.push(`checkpoint hint: the session's steering hook will take a ${plain(reply.checkpoint_hint.trigger, 32)} checkpoint for ${plain(reply.checkpoint_hint.directive_id, 64)}`);
+		lines.push(`checkpoint hint: the session's steering hook will take a ${plain(reply.checkpoint_hint.trigger, 32)} checkpoint for ${plain(reply.checkpoint_hint.directive_id, DIRECTIVE_ID_CHARS)}`);
 	}
 	return lines;
 }

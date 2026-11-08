@@ -3,9 +3,9 @@
  * digest never exceeds its bound or cuts a line in half.
  */
 import { describe, expect, test } from "bun:test";
-import type { ContextDigest, DigestItem } from "./client.ts";
+import type { ContextDigest, DigestItem, SteerDirective } from "./client.ts";
 import { plain } from "./plain.ts";
-import { ageOf, ageText, boundLines, renderDigest, renderSessionLine, renderSessions } from "./render.ts";
+import { ageOf, ageText, boundLines, renderDigest, renderDirectives, renderSessionLine, renderSessions } from "./render.ts";
 
 const item = (source: string, age_s: number, fields: Record<string, unknown> = {}): DigestItem => ({ source, age_s, fields });
 
@@ -164,3 +164,14 @@ function defined<T>(value: T | undefined): T {
 	if (value === undefined) throw new Error("expected a value");
 	return value;
 }
+
+describe("directive lines", () => {
+	const directive = (id: string): SteerDirective => ({
+		id, session_id: `ls_${"1".repeat(64)}`, action: "annotate", body: "note", priority: "normal", status: "queued",
+		author: "omp", created_at: "2026-01-01T00:00:00.000Z", acknowledged_at: null, outcome: null, checkpoint_hint: null,
+	});
+	test("a directive id prints whole up to the 128 characters the server accepts, so the operator can copy it to acknowledge", () => {
+		const id = `d-${"x".repeat(125)}`;
+		expect(renderDirectives([directive(id)], Date.parse("2026-01-01T00:05:00.000Z")).join("\n")).toContain(id);
+	});
+});

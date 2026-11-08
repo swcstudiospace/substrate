@@ -400,6 +400,17 @@ describe("status", () => {
 		expect(r.calls.find((call) => call.path === "/session/context")?.params.session_id).toBe(OTHER_LIVE_ID);
 	});
 
+	test("the pending-directives heading prints the whole live handle, so the handle it shows can be passed back as --session", async () => {
+		const r = rig();
+		r.reply = (call) => {
+			if (call.path === "/steering/sessions") return json({ sessions: [sessionRow(LIVE_ID)], truncated: false });
+			if (call.path === "/steering/directives") return json({ directives: [] });
+			return json(digest());
+		};
+		expect(await steer(r, "status", "--session", LIVE_ID)).toBe(EXIT_DONE);
+		expect(text(r.out)).toContain(`pending directives:\n  ${LIVE_ID}:`);
+	});
+
 	test("a server without the context route still gives a status, and says why the digest is missing", async () => {
 		const r = rig();
 		r.reply = (call) => (call.path === "/steering/sessions" ? json({ sessions: [sessionRow(LIVE_ID)], truncated: false }) : json({}, 404));
