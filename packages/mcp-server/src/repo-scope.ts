@@ -39,9 +39,15 @@ export interface RepoScope {
 	readonly registry: ReadonlyMap<string, RepoRegistration>;
 	/** Surface to the canonical repositories it is granted. Empty when scoping is off. */
 	readonly grants: ReadonlyMap<Surface, ReadonlySet<string>>;
+	/**
+	 * The resolved root each registered directory was last seen at, keyed by repository, NUL, and the directory as registered.
+	 * Mutable: boot fills it for the directories that exist, and the first lookup that finds another one pins it there (decision
+	 * D72-01). A directory whose root later differs is moved, and lookups its new root contains are refused until a restart.
+	 */
+	readonly pins: Map<string, string>;
 }
 
-export const REPO_SCOPE_OFF: RepoScope = { enforced: false, registry: new Map(), grants: new Map() };
+export const REPO_SCOPE_OFF: RepoScope = { enforced: false, registry: new Map(), grants: new Map(), pins: new Map() };
 
 /** Why a repository or path is refused. Closed; the audit and the HTTP body carry these codes and nothing else. */
 export type RepoRefusalReason = "repo-not-granted" | "repo-not-registered" | "path-not-registered" | "nested-checkout" | "path-repo-mismatch" | "all-repos-not-granted" | "graph-repo-unresolved" | "graph-repo-mismatch" | "not-declared-for-scope";
@@ -188,20 +194,46 @@ export function parseRepoScopes(raw: string): ParseOutcome<Map<Surface, Set<stri
 	return { ok: true, value: grants };
 }
 
+/** The key a registered directory is pinned under: its repository, a NUL byte, and the directory exactly as registered. */
+function pinKey(repo: string, dir: string): string {
+	return `${repo}\0${dir}`;
+}
+
+/**
+ * Pins every registered directory that resolves now, at its real location. A directory that is absent is neither pinned nor
+ * refused here: the first lookup that finds it pins it (decision D72-01).
+ */
+function pinExisting(registry: ReadonlyMap<string, RepoRegistration>): Map<string, string> {
+	const pins = new Map<string, string>();
+	for (const registration of registry.values()) {
+		for (const dir of [...registration.checkouts, ...registration.worktrees]) {
+			const root = realDirectoryOrNull(dir);
+			if (root !== null) pins.set(pinKey(registration.repo, dir), root);
+		}
+	}
+	return pins;
+}
+
 /**
  * The repository scope the two variables describe. Both unset is {@link REPO_SCOPE_OFF}. A registry with no scopes
  * variable is still parsed: `scopedGit` needs it whether or not grants are enforced.
+ *
+ * Directories resolve at check time, not at boot (decision D72-01). Boot pins each registered directory that exists now; a
+ * directory that does not exist yet is not refused here and is pinned by the first lookup that finds it. A pinned directory
+ * that later resolves elsewhere is refused for any lookup its new root contains, until a restart re-pins it (see
+ * {@link locateRepoPath}).
  */
 export function repoScopeFromEnv(env: Record<string, string | undefined>): ParseOutcome<RepoScope> {
 	const registry = parseRepoRegistry(env[REPO_REGISTRY_ENV]);
 	if (!registry.ok) return registry;
+	const pins = pinExisting(registry.value);
 	const scopesRaw = env[REPO_SCOPES_ENV];
 	if (scopesRaw === undefined) {
-		return { ok: true, value: { enforced: false, registry: registry.value, grants: new Map() } };
+		return { ok: true, value: { enforced: false, registry: registry.value, grants: new Map(), pins } };
 	}
 	const grants = parseRepoScopes(scopesRaw);
 	if (!grants.ok) return grants;
-	return { ok: true, value: { enforced: true, registry: registry.value, grants: grants.value } };
+	return { ok: true, value: { enforced: true, registry: registry.value, grants: grants.value, pins } };
 }
 
 /**
@@ -242,26 +274,35 @@ type LocatedRepoPath = { repo: string; root: string; target: string };
 type LocateOutcome = { ok: true; located: LocatedRepoPath } | { ok: false; reason: "path-not-registered" | "nested-checkout" };
 
 /**
- * The registration whose registered directory contains `path`, with that directory's real location. Every registered directory
- * is resolved here, at lookup and never at boot: a symlink repointed since boot can make two repositories resolve to one root.
+ * The registration whose registered directory contains `path`, with that directory's real location. Directories resolve at
+ * check time, not at boot (decision D72-01), so a directory created after boot is recognised. Each registered directory is
+ * pinned to the root it was last seen at: boot pins the directories that exist ({@link repoScopeFromEnv}), and a directory
+ * first seen here is pinned here. A pinned directory that now resolves elsewhere has moved (a symlink repointed since it was
+ * pinned): any lookup its new root contains is refused as `path-not-registered` until a restart re-pins it.
+ *
  * Only the registrations whose resolved root contains the path take part. When two or more distinct repositories contain it
  * (equal roots, or a deeper root of one repository beneath a root of another), no single placement is safe and the path is
- * refused as `nested-checkout`. Otherwise the deepest match wins. A `.git` entry strictly below the matched directory is a
- * nested checkout (`nested-checkout`): a repository inside a registered directory is refused unless it is registered itself,
- * so a linked worktree is placed only once it is named.
+ * refused as `nested-checkout`; that test runs before the moved test. Otherwise a moved match refuses, and the deepest match
+ * wins. A `.git` entry strictly below the matched directory is a nested checkout (`nested-checkout`): a repository inside a
+ * registered directory is refused unless it is registered itself, so a linked worktree is placed only once it is named.
  */
 export function locateRepoPath(scope: RepoScope, path: string): LocateOutcome {
 	const target = resolveContained(path);
 	if (target === null) return { ok: false, reason: "path-not-registered" };
-	const roots: Array<{ repo: string; root: string }> = [];
+	const roots: Array<{ repo: string; root: string; moved: boolean }> = [];
 	for (const registration of scope.registry.values()) {
 		for (const dir of [...registration.checkouts, ...registration.worktrees]) {
 			const root = realDirectoryOrNull(dir);
-			if (root !== null) roots.push({ repo: registration.repo, root });
+			if (root === null) continue;
+			const key = pinKey(registration.repo, dir);
+			const pinned = scope.pins.get(key);
+			if (pinned === undefined) scope.pins.set(key, root);
+			roots.push({ repo: registration.repo, root, moved: pinned !== undefined && pinned !== root });
 		}
 	}
 	const containing = roots.filter((candidate) => contains(candidate.root, target));
 	if (new Set(containing.map((candidate) => candidate.repo)).size > 1) return { ok: false, reason: "nested-checkout" };
+	if (containing.some((candidate) => candidate.moved)) return { ok: false, reason: "path-not-registered" };
 	let best: { repo: string; root: string } | null = null;
 	for (const candidate of containing) {
 		if (best === null || candidate.root.length > best.root.length) best = candidate;

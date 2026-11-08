@@ -255,6 +255,52 @@ describe("review findings on the registry, the scopes variable and the digest", 
 		expect(outcome).toEqual({ ok: false, reason: "nested-checkout" });
 	});
 
+	test("RS-20: a checkout symlink repointed to an unregistered directory after a lookup is refused, not placed under the first repository", () => {
+		const f = layout();
+		const aLink = join(f.root, "a-checkout-link");
+		symlinkSync(f.a.checkout, aLink);
+		const registry = JSON.stringify({ "owner/a": { checkouts: [aLink], worktrees: [] } });
+		const booted = repoScopeFromEnv({ [REPO_REGISTRY_ENV]: registry });
+		if (!booted.ok) throw new Error(booted.problem);
+		const insideA = join(f.a.checkout, "index.ts");
+		writeFileSync(insideA, "export {};\n");
+		expect(locateRepoPath(booted.value, insideA)).toMatchObject({ ok: true, located: { repo: "owner/a" } });
+		// Repoint a's checkout path at an unregistered directory C. Nothing in C belongs to any registration.
+		const c = join(f.root, "c");
+		mkdirSync(c);
+		writeFileSync(join(c, "index.ts"), "export {};\n");
+		unlinkSync(aLink);
+		symlinkSync(c, aLink);
+		expect(locateRepoPath(booted.value, join(c, "index.ts"))).toEqual({ ok: false, reason: "path-not-registered" });
+	});
+
+	test("RS-21: a checkout symlink repointed to an unregistered directory before any lookup is refused", () => {
+		const f = layout();
+		const aLink = join(f.root, "a-checkout-link");
+		symlinkSync(f.a.checkout, aLink);
+		const registry = JSON.stringify({ "owner/a": { checkouts: [aLink], worktrees: [] } });
+		const booted = repoScopeFromEnv({ [REPO_REGISTRY_ENV]: registry });
+		if (!booted.ok) throw new Error(booted.problem);
+		const c = join(f.root, "c");
+		mkdirSync(c);
+		writeFileSync(join(c, "index.ts"), "export {};\n");
+		unlinkSync(aLink);
+		symlinkSync(c, aLink);
+		expect(locateRepoPath(booted.value, join(c, "index.ts"))).toEqual({ ok: false, reason: "path-not-registered" });
+	});
+
+	test("RS-19: a registered checkout absent at boot is placed once it is created (decision D72-01)", () => {
+		const f = layout();
+		const later = join(f.root, "later", "checkout");
+		const registry = JSON.stringify({ "owner/a": { checkouts: [later], worktrees: [] } });
+		const booted = repoScopeFromEnv({ [REPO_REGISTRY_ENV]: registry });
+		if (!booted.ok) throw new Error(booted.problem);
+		mkdirSync(later, { recursive: true });
+		const file = join(later, "index.ts");
+		writeFileSync(file, "export {};\n");
+		expect(locateRepoPath(booted.value, file)).toMatchObject({ ok: true, located: { repo: "owner/a" } });
+	});
+
 	test("RS-15: a blank scopes variable is malformed, so the boot refuses rather than scoping off", () => {
 		expect(repoScopeFromEnv({ [REPO_SCOPES_ENV]: "   " }).ok).toBe(false);
 	});
