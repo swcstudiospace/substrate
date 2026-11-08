@@ -577,11 +577,29 @@ export class SteeringInbox {
 		return { ok: true, value: { record: structuredClone(record), replayed: false } };
 	}
 
-	/** The reply to a keyed queue already held: the same record with `replayed` set, or a conflict when the content differs. Writes nothing. */
-	private replayOf(held: SteeringReplayRecord, fingerprint: string): SteeringResult<SteeringReceipt> {
+	/**
+	 * The reply to a keyed queue already held: the same record with `replayed` set, or a conflict when the content differs. Writes nothing.
+	 * The record is the one this inbox holds. When it holds none, the record is rebuilt from durable state the way a restart loads it, and
+	 * the acknowledgement is read back from the sink, so an acknowledged directive never comes back as queued.
+	 */
+	private async replayOf(held: SteeringReplayRecord, fingerprint: string): Promise<SteeringResult<SteeringReceipt>> {
 		if (held.fingerprint !== fingerprint) return fail({ code: "idempotency-conflict" });
-		if (!this.sequences.has(held.directive.id)) this.sequences.set(held.directive.id, held.sequence);
-		return { ok: true, value: { record: { state: "queued", directive: held.directive, queuedAtMs: held.queuedAtMs }, replayed: true } };
+		const { id, targetSessionId } = held.directive;
+		const current = this.records.get(id);
+		if (current !== undefined) return { ok: true, value: { record: structuredClone(current), replayed: true } };
+		const acknowledgement = await this.durableAcknowledgement(id);
+		if (!acknowledgement.ok) return acknowledgement;
+		let sequence = this.sequences.get(id);
+		if (sequence === undefined) {
+			const restored = await this.storeCall(() => this.restoredSequence(targetSessionId, held.sequence));
+			if (!restored.ok) return restored;
+			sequence = restored.value;
+		}
+		// Nothing is written until every read above has succeeded, so a failed read leaves no record without its number.
+		const record = recordFromStore(held.directive, held.queuedAtMs, acknowledgement.value);
+		this.sequences.set(id, sequence);
+		this.records.set(id, record);
+		return { ok: true, value: { record: structuredClone(record), replayed: true } };
 	}
 
 	/**
@@ -757,6 +775,25 @@ export class SteeringInbox {
 			// A failed read leaves the directive pending; the caller reports it as failed, with the conflict code.
 			return null;
 		}
+	}
+
+	/**
+	 * The acknowledgement the sink holds for a directive, validated at the edge, or null when none is saved or the sink has no read port.
+	 * Unlike {@link readStoredAcknowledgement}, a failed or malformed read is an audit failure: a replay must not guess a queued state.
+	 */
+	private async durableAcknowledgement(directiveId: string): Promise<SteeringResult<SteeringStoredAcknowledgement | null>> {
+		const read = this.deps.history.readAcknowledgement;
+		if (read === undefined) return { ok: true, value: null };
+		let stored: unknown;
+		try {
+			stored = await read.call(this.deps.history, directiveId);
+		} catch (cause) {
+			return fail({ code: "audit-unavailable", attempts: 1, lastErrorCode: errnoCode(cause) });
+		}
+		if (stored === null) return { ok: true, value: null };
+		const parsed = SteeringStoredAcknowledgementSchema.safeParse(stored);
+		if (!parsed.success) return fail({ code: "audit-unavailable", attempts: 1, lastErrorCode: "INVALID_ACKNOWLEDGEMENT" });
+		return { ok: true, value: parsed.data };
 	}
 
 	/**

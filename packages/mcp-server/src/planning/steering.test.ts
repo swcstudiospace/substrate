@@ -607,4 +607,19 @@ describe("SteeringInbox: keyed queues under concurrency and store outages", () =
 		expect(after?.state).toBe("acknowledged");
 		expect(after?.state === "acknowledged" ? after.outcome : null).toBe(winnerOutcome);
 	});
+
+	test("a replayed keyed queue leaves the directive reachable through get and ack", async () => {
+		const store = new MemorySteeringIdempotencyStore();
+		const first = buildOver(store);
+		expect((await first.inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(true);
+
+		// A restarted process: the same store, and no in-memory record of d-1.
+		const second = buildOver(store);
+		const replay = await second.inbox.enqueueReceipt(directive({ id: "d-1" }), KEY);
+		expect(replay).toMatchObject({ ok: true, value: { replayed: true } });
+
+		expect(second.inbox.get("d-1")?.state).toBe("queued");
+		const acked = await second.inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
+		expect(acked).toMatchObject({ ok: true });
+	});
 });
