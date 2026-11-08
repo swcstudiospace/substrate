@@ -138,6 +138,11 @@ function openRepairAudit(config: SubstrateConfig): AuditLog {
 	return openAuditLog(config);
 }
 
+/** The `<plan>.result.json` record: the result and when it was recorded. It overwrites, so an earlier record cannot block the one that follows a flush. */
+function writeResultFile(planPath: string, result: RepairResult, recordedAt: Date): Promise<void> {
+	return writeFile(`${planPath}.result.json`, `${JSON.stringify({ result, recorded_at: recordedAt.toISOString() }, null, 2)}\n`);
+}
+
 /** A plan file as this unit wrote it. Anything else is refused, never guessed at. */
 function parsePlan(text: string): Plan {
 	const value: unknown = JSON.parse(text);
@@ -252,21 +257,24 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 		} catch (cause) {
 			const reason = `refused: the plan file cannot be read as a ${PLAN_SCHEMA} record: ${failureReason(cause)}`;
 			io.err(reason);
+			const refusal: RepairResult = {
+				executed: false,
+				refused: true,
+				reason,
+				planned: 0,
+				removed: 0,
+				remaining: 0,
+				limit: RECONCILE_MAX_ITEMS,
+				truncated: false,
+			};
 			// Every execute attempt leaves one audit record, so a refused plan is recorded too, before the exit.
 			if (audit !== null) {
-				const refusal: RepairResult = {
-					executed: false,
-					refused: true,
-					reason,
-					planned: 0,
-					removed: 0,
-					remaining: 0,
-					limit: RECONCILE_MAX_ITEMS,
-					truncated: false,
-				};
 				const auditFailure = await recordRepair(audit, refusal, planDigest, "unavailable");
 				if (auditFailure !== null) io.err(`reconcile: the refusal was not written to the audit chain: ${auditFailure}`);
 			}
+			// The result file is written on every execute, refusals included, as a flush's is. A write that fails reaches the
+			// outer catch, so the run exits 1 with the reason.
+			if (command.execute) await writeResultFile(command.plan, refusal, now());
 			return 1;
 		}
 		let result: RepairResult;
@@ -287,7 +295,7 @@ export async function reconcileMain(argv: readonly string[], io: ReconcileIo): P
 			if (command.execute) {
 				// Written after the flush, whether or not the plan was refused or failed, so every outcome of an execute is on
 				// record. It overwrites: an earlier record must not block the one that follows a flush.
-				await writeFile(`${command.plan}.result.json`, `${JSON.stringify({ result, recorded_at: now().toISOString() }, null, 2)}\n`);
+				await writeResultFile(command.plan, result, now());
 			}
 		}
 		if (auditFailure !== null) {
