@@ -8,6 +8,13 @@ import { issueLiveSession } from "./live-session.test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
+
+function withDatabase(url: string, database: string): string {
+	const parsed = new URL(url);
+	parsed.pathname = `/${database}`;
+	return parsed.toString();
+}
+
 const RUN = `ut-live-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 const repo = `tests/${RUN}`;
 const owner: LiveSessionCaller = { surface: "omp", isOperator: false };
@@ -22,6 +29,10 @@ let poolA: SQL;
 let poolB: SQL;
 let a: LiveSessionAuthority;
 let b: LiveSessionAuthority;
+const database = `substrate_live_auth_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
+const SETUP_TIMEOUT_MS = 120_000;
+let admin: SQL | null = null;
+let scratchUrl = "";
 
 async function issued(authority = a, caller = owner, repoId = repo) {
 	return issueLiveSession(authority, { caller, repoId, steering: "private-direction-marker", planningHash: "private-plan-marker" });
@@ -39,7 +50,10 @@ async function observeLockWait(pid: number) {
 
 describeLive("durable live-session authority against controlled PostgreSQL (two independent pools)", () => {
 	beforeAll(async () => {
-		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		admin = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		await admin.unsafe(`create database "${database}"`);
+		scratchUrl = withDatabase(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), database);
+		const url = scratchUrl;
 		poolA = new SQL(url, { max: 1 });
 		poolB = new SQL(url, { max: 1 });
 		raw = new SQL(url);
@@ -49,15 +63,18 @@ describeLive("durable live-session authority against controlled PostgreSQL (two 
 		await second.migrate();
 		a = first.liveSessions({ leaseSeconds: 3600 });
 		b = second.liveSessions({ leaseSeconds: 3600 });
-	});
+	}, SETUP_TIMEOUT_MS);
 
 	afterAll(async () => {
 		if (!PG_URL) return;
-		// Test-owned rows only; product authority deliberately has no delete/prune API.
-		if (raw) await raw`delete from live_session_bindings where repo_id like ${`tests/${RUN}%`}`;
+		// Close every client first, then drop the throwaway database this file created.
+		if (raw) await raw.close();
 		if (first) await first.close();
 		if (second) await second.close();
-		if (raw) await raw.close();
+		if (admin) {
+			await admin.unsafe(`drop database if exists "${database}" with (force)`);
+			await admin.close();
+		}
 	});
 
 	test("factory issuance with cache opt-in off persists hash-only canonical state and survives reconnect", async () => {
@@ -72,7 +89,7 @@ describeLive("durable live-session authority against controlled PostgreSQL (two 
 		expect(persisted.binding_proof_hash).toBe(expectedHash);
 		expect(JSON.stringify(persisted)).not.toContain(entry.sessionBinding);
 		expect(await b.read(entry.access, "private-read")).toEqual({ ok: true, snapshot: entry.snapshot });
-		const reboot = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		const reboot = new IndexStore(scratchUrl);
 		try {
 			expect(await reboot.liveSessions({ leaseSeconds: 3600 }).read(entry.access, "private-read")).toEqual({ ok: true, snapshot: entry.snapshot });
 		} finally { await reboot.close(); }
@@ -260,7 +277,7 @@ describeLive("durable live-session authority against controlled PostgreSQL (two 
 
 	test("unavailable pool cannot fall back to another adapter's successful cached grant", async () => {
 		const entry = await issued();
-		const disconnected = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		const disconnected = new SQL(scratchUrl);
 		const authority = bunLiveSessionAuthority(disconnected, { leaseSeconds: 3600 });
 		await disconnected.close();
 		expect(await authority.read(entry.access, "private-read")).toEqual(unavailable);

@@ -1,3 +1,8 @@
+/**
+ * HARD-S1 restart and independent-instance release against PostgreSQL. Gated on SUBSTRATE_TEST_PG_URL.
+ * One throwaway database is created for the whole file, not per test: each case reconstructs services over the same rows across
+ * simulated process restarts, so later instances must see the rows earlier instances wrote. It is dropped in afterAll.
+ */
 import { SQL } from "bun";
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
@@ -18,6 +23,13 @@ import { SteeringWaiters, type SteeringWaitRequest, type SteeringWaitResult, typ
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
+
+function withDatabase(url: string, database: string): string {
+	const parsed = new URL(url);
+	parsed.pathname = `/${database}`;
+	return parsed.toString();
+}
+
 const RUN = `ut-restart-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 const REPO = `tests/${RUN}`;
 const OWNER = { surface: "cursor", isOperator: false } as const;
@@ -110,8 +122,8 @@ async function instance(options: { waiters?: SteeringWaiters; sql?: SQL } = {}):
 	const observability = createObservability(config, env);
 	await observability.start();
 	// Every instance owns a different pool, boundary, inbox, audit chain and waiter registry.
-	const pool = options.sql ?? new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), { max: 1 });
-	const index = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), {
+	const pool = options.sql ?? new SQL(scratchUrl, { max: 1 });
+	const index = new IndexStore(scratchUrl, {
 		sql: pool, migrationOptIns: { "steering-audit": false, "steering-sessions": false },
 	});
 	const history = new History();
@@ -158,24 +170,33 @@ async function queue(h: Instance, sessionId: string) {
 	return result;
 }
 
+const database = `substrate_restart_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
+const SETUP_TIMEOUT_MS = 120_000;
+let admin: SQL | null = null;
+let scratchUrl = "";
 let control: SQL;
 describeLive("HARD-S1 durable service restart and independent-instance release (controlled PostgreSQL)", () => {
 	beforeAll(async () => {
-		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		admin = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		await admin.unsafe(`create database "${database}"`);
+		scratchUrl = withDatabase(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), database);
+		const url = scratchUrl;
 		control = new SQL(url);
 		const bootstrap = new IndexStore(url, { migrationOptIns: { "steering-audit": false, "steering-sessions": false } });
 		try { await bootstrap.migrate(); }
 		finally { await bootstrap.close(); }
-	});
+	}, SETUP_TIMEOUT_MS);
 	afterEach(async () => {
 		for (const h of instances.splice(0).reverse()) await h.stop();
 	});
 	afterAll(async () => {
-		if (!PG_URL || !control) return;
-		try {
-			// Test-owned SQL cleanup only. No product deletion/pruning API exists for security tombstones.
-			await control`delete from live_session_bindings where repo_id = ${REPO}`;
-		} finally { await control.close(); }
+		if (!PG_URL) return;
+		// Close the control client first, then drop the throwaway database created for this file.
+		if (control) await control.close();
+		if (admin) {
+			await admin.unsafe(`drop database if exists "${database}" with (force)`);
+			await admin.close();
+		}
 	});
 
 	test("teardown/reconstruction preserves owner proof, canonical state and terminal tombstone with cache migration off", async () => {
@@ -417,7 +438,7 @@ describeLive("HARD-S1 durable service restart and independent-instance release (
 		const schema = `ut_live_restart_${randomBytes(8).toString("hex")}`;
 		await control.unsafe(`create schema ${schema}`);
 		try {
-			const sql = () => new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), { max: 1, connection: { search_path: schema } });
+			const sql = () => new SQL(scratchUrl, { max: 1, connection: { search_path: schema } });
 			const a = await instance({ sql: sql() });
 			await a.pool.unsafe(defined(MIGRATION_STEPS.find((step) => step.version === 37), "migration37").sql);
 			await a.pool.unsafe(defined(MIGRATION_STEPS.find((step) => step.version === 42), "migration42").sql);
@@ -448,7 +469,7 @@ describeLive("HARD-S1 durable service restart and independent-instance release (
 	test("a real missing authority schema fails service reads, issuance and mutation closed despite another pool's grant", async () => {
 		const good = await instance(); const entry = await issue(good);
 		// pg_temp-only resolution cannot see public authority tables. Never drop/rename a shared security table.
-		const absent = await instance({ sql: new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), { max: 1, connection: { search_path: "pg_temp" } }) });
+		const absent = await instance({ sql: new SQL(scratchUrl, { max: 1, connection: { search_path: "pg_temp" } }) });
 		const schema: Array<{ relation: string | null }> = await absent.pool`select to_regclass('live_session_bindings')::text as relation`;
 		expect(schema[0]?.relation).toBeNull();
 		expect(await listed(absent, entry.sessionId, entry.sessionBinding)).toEqual(UNAVAILABLE);

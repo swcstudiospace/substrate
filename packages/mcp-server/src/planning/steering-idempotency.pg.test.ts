@@ -1,6 +1,7 @@
 /**
  * The keyed-queue replay and the delivery sequence against PostgreSQL (migration 43, under the steering-audit opt-in). Each
- * IndexStore owns its own pool, so two stores are two server processes over one database. Gated on SUBSTRATE_TEST_PG_URL.
+ * IndexStore owns its own pool, so two stores are two server processes over one database. Each file runs on a throwaway database
+ * created from SUBSTRATE_TEST_PG_URL and dropped afterwards; the shared test database is never migrated. Gated on SUBSTRATE_TEST_PG_URL.
  */
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -20,6 +21,12 @@ const CAP = 10_000;
 const FINGERPRINT = createHash("sha256").update(RUN).digest("hex");
 const wallClock: SteeringClock = { nowMs: () => Date.now() };
 
+function withDatabase(url: string, database: string): string {
+	const parsed = new URL(url);
+	parsed.pathname = `/${database}`;
+	return parsed.toString();
+}
+
 function directive(id: string, targetSessionId: string) {
 	return SteeringDirectiveSchema.parse({
 		id,
@@ -34,31 +41,34 @@ function directive(id: string, targetSessionId: string) {
 }
 
 describeLive("steering replay and delivery sequence against PostgreSQL", () => {
+	const database = `substrate_idem_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
+	const SETUP_TIMEOUT_MS = 120_000;
+	let admin: SQL | null = null;
 	let first: IndexStore;
 	let second: IndexStore;
 	let raw: SQL;
 
 	beforeAll(async () => {
-		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		admin = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		await admin.unsafe(`create database "${database}"`);
+		const url = withDatabase(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), database);
 		const migrationOptIns = { "steering-audit": true, "steering-sessions": false };
 		first = new IndexStore(url, { migrationOptIns });
 		second = new IndexStore(url, { migrationOptIns });
 		await first.migrate();
 		raw = new SQL(url);
-	});
+	}, SETUP_TIMEOUT_MS);
 
 	afterAll(async () => {
 		if (!PG_URL) return;
-		// Test-owned rows only: every session this file names starts with RUN.
-		if (raw) {
-			const like = `${RUN}%`;
-			await raw`delete from planning_steering_audit where target_session_id like ${like}`;
-			await raw`delete from planning_steering_replay where target_session_id like ${like}`;
-			await raw`delete from planning_steering_sequence where target_session_id like ${like}`;
-			await raw.close();
-		}
+		// Close every client first, then drop the throwaway database this file created.
+		if (raw) await raw.close();
 		if (first) await first.close();
 		if (second) await second.close();
+		if (admin) {
+			await admin.unsafe(`drop database if exists "${database}" with (force)`);
+			await admin.close();
+		}
 	});
 
 	function inboxOver(index: IndexStore): SteeringInbox {
