@@ -12,4 +12,11 @@ This is orchestrator evidence. It does not change the 72 verification record.
 |------|------|------|
 | `packages/mcp-server/src/worktree-registry.pg.test.ts` | 13 | 0 |
 
-Row 18 (the scoped service gate) is not evidenced by this file.
+Row 18 (the scoped service gate) is evidenced in the section below.
+
+## Row 18 (scoped service gate)
+
+The scoped gate for `updateLiveSession` at the service call is `packages/mcp-server/src/live-session-scope.test.ts`, test "gate: updateLiveSession issue for a repository the caller's grant does not include is refused and writes nothing" (describe "live-session issue under scope, at the service call"). It is not PG-gated.
+
+- Command: `env -u SUBSTRATE_TEST_PG_URL bun test packages/mcp-server/src/live-session-scope.test.ts -t "gate: updateLiveSession issue"`.
+- Result: 1 pass, 0 fail.
