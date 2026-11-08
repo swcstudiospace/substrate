@@ -611,9 +611,10 @@ export function compareToAnchoredHead(events: readonly ChainLink[], leaves: read
 	}
 	const committed = new Set(stored.map((leaf) => leaf.event_id));
 	const extras = events.filter((event) => !committed.has(event.id)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-	// The committed chain goes on from its last hash, so the extra linked to that hash is the first event past the anchored end. Only when none
-	// is linked is an order taken from the extras themselves, and their hashes may be the edited ones.
-	const extra = extras.find((event) => event.prev === last.hash) ?? inChainOrder(extras)[0];
+	// The committed chain goes on from its last hash, so the extra linked to that hash is the first event past the anchored end. When none
+	// is linked, the first extra whose content no longer hashes to its stored hash is the edit itself. Only then is an order taken from the
+	// extras' own hashes, which may be the edited ones.
+	const extra = extras.find((event) => event.prev === last.hash) ?? extras.find((event) => event.hash !== event.storedHash) ?? inChainOrder(extras)[0];
 	return extra === undefined ? { ok: true } : { ok: false, kind: "first-differing", eventId: extra.id };
 }
 

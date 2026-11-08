@@ -718,6 +718,15 @@ describe("chain leaves and the anchored head (D73-02, D73-03)", () => {
 		expect(compareToAnchoredHead(extended, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_z" });
 	});
 
+	test("when no extra links to the anchored end, the first extra whose content no longer matches its stored hash is named, not an intact event that sorts first", () => {
+		const unlinked: ChainLink[] = [
+			...intact,
+			{ id: "evt_a", hash: hashOf("evt_a"), storedHash: hashOf("evt_a"), prev: hashOf("elsewhere") },
+			{ id: "evt_z", hash: hashOf("evt_z edited"), storedHash: hashOf("evt_z"), prev: hashOf("also elsewhere") },
+		];
+		expect(compareToAnchoredHead(unlinked, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_z" });
+	});
+
 	test("a leaf with an empty event id is no head and does not throw", () => {
 		const blank = leaves.map((stored) => (stored.seq === 3 ? { ...stored, event_id: "" } : stored));
 		expect(() => headRecordsFromLeaves(blank, H10)).not.toThrow();
