@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { DerivedMemoryHit, RecallReply } from "./memory-recall.ts";
 import { mergeDerivedHits } from "./memory-search.ts";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
 	authorizeRepoPath,
 	grantedRepos,
 	isGranted,
+	locateRepoPath,
 	parseRepoRegistry,
 	parseRepoScopes,
 	REPO_REGISTRY_ENV,
@@ -233,6 +234,25 @@ describe("review findings on the registry, the scopes variable and the digest", 
 		symlinkSync(f.a.checkout, alias);
 		const registry = JSON.stringify({ "owner/a": { checkouts: [f.a.checkout], worktrees: [] }, "owner/b": { checkouts: [alias], worktrees: [] } });
 		expect(parseRepoRegistry(registry).ok).toBe(false);
+	});
+
+	test("RS-16: a checkout symlink repointed after boot does not place another repository's files under the first", () => {
+		const f = layout();
+		const realA = join(f.root, "real-a");
+		mkdirSync(realA);
+		const aLink = join(f.root, "a-checkout-link");
+		symlinkSync(realA, aLink);
+		const registry = JSON.stringify({ "owner/a": { checkouts: [aLink], worktrees: [] }, "owner/b": { checkouts: [f.b.checkout], worktrees: [] } });
+		const booted = repoScopeFromEnv({ [REPO_REGISTRY_ENV]: registry });
+		if (!booted.ok) throw new Error(booted.problem);
+		// Repoint a's checkout path at b's checkout after boot. Boot-time overlap checks never see this.
+		unlinkSync(aLink);
+		symlinkSync(f.b.checkout, aLink);
+		mkdirSync(join(f.b.checkout, "src"));
+		const file = join(f.b.checkout, "src", "index.ts");
+		writeFileSync(file, "export {};\n");
+		const outcome = locateRepoPath(booted.value, file);
+		expect(outcome.ok && outcome.located.repo === "owner/a").toBe(false);
 	});
 
 	test("RS-15: a blank scopes variable is malformed, so the boot refuses rather than scoping off", () => {

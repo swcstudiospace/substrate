@@ -242,20 +242,29 @@ type LocatedRepoPath = { repo: string; root: string; target: string };
 type LocateOutcome = { ok: true; located: LocatedRepoPath } | { ok: false; reason: "path-not-registered" | "nested-checkout" };
 
 /**
- * The registration whose registered directory contains `path`, with that directory's real location. The deepest match wins. A
- * `.git` entry strictly below the matched directory is a nested checkout (`nested-checkout`): a repository inside a registered
- * directory is refused unless it is registered itself, so a linked worktree is placed only once it is named.
+ * The registration whose registered directory contains `path`, with that directory's real location. Every registered directory
+ * is resolved here, at lookup and never at boot: a symlink repointed since boot can make two repositories resolve to one root.
+ * Only the registrations whose resolved root contains the path take part. When two or more distinct repositories contain it
+ * (equal roots, or a deeper root of one repository beneath a root of another), no single placement is safe and the path is
+ * refused as `nested-checkout`. Otherwise the deepest match wins. A `.git` entry strictly below the matched directory is a
+ * nested checkout (`nested-checkout`): a repository inside a registered directory is refused unless it is registered itself,
+ * so a linked worktree is placed only once it is named.
  */
 export function locateRepoPath(scope: RepoScope, path: string): LocateOutcome {
 	const target = resolveContained(path);
 	if (target === null) return { ok: false, reason: "path-not-registered" };
-	let best: { repo: string; root: string } | null = null;
+	const roots: Array<{ repo: string; root: string }> = [];
 	for (const registration of scope.registry.values()) {
 		for (const dir of [...registration.checkouts, ...registration.worktrees]) {
 			const root = realDirectoryOrNull(dir);
-			if (root === null || !contains(root, target)) continue;
-			if (best === null || root.length > best.root.length) best = { repo: registration.repo, root };
+			if (root !== null) roots.push({ repo: registration.repo, root });
 		}
+	}
+	const containing = roots.filter((candidate) => contains(candidate.root, target));
+	if (new Set(containing.map((candidate) => candidate.repo)).size > 1) return { ok: false, reason: "nested-checkout" };
+	let best: { repo: string; root: string } | null = null;
+	for (const candidate of containing) {
+		if (best === null || candidate.root.length > best.root.length) best = candidate;
 	}
 	if (best === null) return { ok: false, reason: "path-not-registered" };
 	if (nestedCheckoutBetween(best.root, target)) return { ok: false, reason: "nested-checkout" };
