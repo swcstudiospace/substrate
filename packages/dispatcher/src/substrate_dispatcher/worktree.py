@@ -5,7 +5,8 @@ is the first of ``SUBSTRATE_WORKTREE_ROOTS`` (default ``/var/lib/substrate/workt
 reused when git already has it registered under any configured root, created from the existing branch when
 only the branch exists, and created with a new branch otherwise.
 Creation is refused when the filesystem it lands on (the nearest existing directory at or above the first root)
-has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB); no git command runs then.
+has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB); no worktree is added then.
+Reusing a worktree git already has registered never consults the disk, so the floor does not apply to it.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
 checks out a branch in the main checkout.
 """
@@ -179,6 +180,12 @@ def ensure_worktree(
         if candidate.resolve().parent != candidate_root.resolve():
             raise WorktreeRefused(f"worktree path {candidate} escapes {candidate_root}", "invalid-graph-id")
 
+    repo = Path(repo)
+    for candidate_root in roots:
+        candidate = candidate_root / gid
+        if candidate.is_dir() and _registered(run, repo, candidate):
+            return candidate
+
     # The worktree is created under roots[0], so the floor is read where it will land: the nearest directory above it that exists.
     probe = _existing_ancestor(roots[0])
     free = disk_usage(str(probe)).free
@@ -189,12 +196,9 @@ def ensure_worktree(
             "low-disk",
         )
 
-    repo = Path(repo)
     for candidate_root in roots:
         candidate = candidate_root / gid
         if _registered(run, repo, candidate):
-            if candidate.is_dir():
-                return candidate
             raise WorktreeRefused(
                 f"{candidate} is registered with git but missing on disk (git worktree prune needed)",
                 "path-conflict",

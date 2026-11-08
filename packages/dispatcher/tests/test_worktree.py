@@ -279,6 +279,23 @@ def test_ensure_worktree_reuses_a_registered_worktree_under_the_second_root(
     assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
 
 
+def test_ensure_worktree_reuses_a_registered_worktree_under_the_second_root_below_the_floor(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    second.mkdir()
+    monkeypatch.setenv("SUBSTRATE_WORKTREE_ROOTS", f"{first}:{second}")
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(second / GID), "main")
+    run = Recorder()
+    low = Usage(100 * 1024**3, 99 * 1024**3, 1 * 1024**3)
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=lambda _path: low)
+
+    assert path == second / GID
+    assert run.adds() == []
+
+
 def test_ensure_worktree_refuses_a_configured_root_entry_that_resolves_outside_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
