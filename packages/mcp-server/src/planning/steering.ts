@@ -452,6 +452,15 @@ export class SteeringInbox {
 		return this.sequences.get(directiveId) ?? null;
 	}
 
+	/**
+	 * The delivery sequence of a directive this inbox holds for `sessionId`, or null. Another session's directive gives null
+	 * too: a wait cursor is a position in its own session's queue, so an id from elsewhere must not filter it.
+	 */
+	sequenceOfFor(sessionId: string, directiveId: string): number | null {
+		if (this.records.get(directiveId)?.directive.targetSessionId !== sessionId) return null;
+		return this.sequences.get(directiveId) ?? null;
+	}
+
 	/** The queued directives of one session with their delivery sequence, lowest sequence first. A read: it changes nothing. */
 	queuedFor(sessionId: string): Array<{ sequence: number; record: Extract<SteeringRecord, { state: "queued" }> }> {
 		const queued: Array<{ sequence: number; record: Extract<SteeringRecord, { state: "queued" }> }> = [];

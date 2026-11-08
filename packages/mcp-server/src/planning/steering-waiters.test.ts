@@ -93,6 +93,16 @@ describe("nextQueuedDirective", () => {
 		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "forgotten"))).toBe("d1");
 	});
 
+	test("a cursor naming another session's directive filters nothing, so it cannot hide this session's queue", async () => {
+		const inbox = inboxOf();
+		await queue(inbox, "a1");
+		await queue(inbox, "a2");
+		await queue(inbox, "b1", "sess-b");
+		await queue(inbox, "b2", "sess-b");
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "b2"))).toBe("a1");
+		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "a1"))).toBe("a2");
+	});
+
 	test("an acknowledged directive is not next", async () => {
 		const inbox = inboxOf();
 		await queue(inbox, "d1");

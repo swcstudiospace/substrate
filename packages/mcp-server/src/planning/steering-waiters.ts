@@ -55,14 +55,14 @@ const GLOBAL_TIMERS: SteeringWaitTimers = {
 
 /**
  * The next queued directive for `sessionId` after the directive `after` names, in the order directives entered the inbox, or
- * null. `after` is a cursor over the inbox's delivery sequence, not over timestamps: a clock that steps back or two directives
+ * null. `after` is a cursor over the session's delivery sequence, not over timestamps: a clock that steps back or two directives
  * in one millisecond cannot sort a later directive before the last delivered one. A directive the inbox does not hold (a
- * restart forgot it, or it was never one) filters nothing, so the caller sees every queued directive rather than none and
- * dedupes by id. A read: it changes nothing in the inbox.
+ * restart forgot it, or it was never one), or one that targets another session, filters nothing, so the caller sees every
+ * queued directive rather than none and dedupes by id. A read: it changes nothing in the inbox.
  */
 export function nextQueuedDirective(inbox: SteeringInbox, sessionId: string, after: string | null): QueuedDelivery | null {
 	const queued = inbox.queuedFor(sessionId);
-	const cursor = after === null ? null : inbox.sequenceOf(after);
+	const cursor = after === null ? null : inbox.sequenceOfFor(sessionId, after);
 	if (cursor === null) return queued[0] ?? null;
 	return queued.find((entry) => entry.sequence > cursor) ?? null;
 }
