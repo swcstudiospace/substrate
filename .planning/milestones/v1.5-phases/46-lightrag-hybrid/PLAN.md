@@ -81,7 +81,7 @@ Content check, 2026-10-24 (read-only; each sample document was read at its openi
 
 ### T4 — Parity comparator (BLOCKED)
 
-- Status: UNBLOCKED for the fixture scope on 2026-11-07, by the user's decision D46-6 in CONTEXT.md. The live evidence stays gated: T5 and T6 need operator approval, and T7 runs the gate live. Criterion 4 stays unmet until T7 passes.
+- Status: UNBLOCKED for the fixture scope on 2026-11-08, by the user's decision D46-6 in CONTEXT.md. The live evidence stays gated: T5 and T6 need operator approval, and T7 runs the gate live. Criterion 4 stays unmet until T7 passes.
 - Reason: the comparator must be checked against the live RAGFlow dataset. A fixture-level design is out of this run's budget, and a fixture design would not prove PARITY_GATE against the real dataset anyway.
 - Unblock step: (1) T5 archive completes with a verified checksum (operator approval); (2) a read-only export of the RAGFlow dataset's document list (dataset, source URL, version) is captured for the comparator; (3) the comparator is written against that export and tested against the export; (4) the comparator is then reviewed before T7.
 - Files: `packages/mcp-server/src/lightrag-parity.ts` and `packages/mcp-server/src/lightrag-parity.test.ts` (new). No runtime wiring, no RAGFlow or LightRAG call, and no live export. Verification: `bun test` on the new test file, plus tsc and lint.

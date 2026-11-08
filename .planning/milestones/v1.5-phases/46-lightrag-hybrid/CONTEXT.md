@@ -107,7 +107,7 @@ Each record has the same ten fields: id, phase, question, options considered, se
 - question: How should the parity comparator be delivered when criterion 4 cannot be proven on fixtures?
 - options considered: a fixture-tested comparator on the run branch, with the live PARITY_GATE kept as a validation request; hold criterion 4 until an operator approves a live read-only comparison; the owner amends PARITY_GATE to fixture acceptance.
 - selected option: the first. The comparator's rules and its fail-closed behaviour are built and tested on fixtures. Criterion 4 stays unmet until T7 runs PARITY_GATE live against the RAGFlow export, after the operator approves T5 and T6.
-- source: user answer, 2026-11-07, at the discuss stage of the gsd-autonomous run.
+- source: user answer, 2026-11-08, at the discuss stage of the gsd-autonomous run.
 - rubric rationale: fixtures prove the comparator's rules, not the dataset. Keeping the live gate separate stops a fixture pass from being read as criterion 4 evidence.
 - reversibility: reversible. It is a code module and tests, with no runtime wiring.
 - confidence: high, since it is the user's choice.

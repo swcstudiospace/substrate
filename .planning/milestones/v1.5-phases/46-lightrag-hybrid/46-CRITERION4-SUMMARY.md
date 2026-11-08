@@ -1,6 +1,6 @@
-# Phase 46, criterion 4: in-repo part (run 20, 2026-11-07)
+# Phase 46, criterion 4: in-repo part (run 20, 2026-11-08)
 
-Decision: D46-6 (user, 2026-11-07). The comparator is delivered fixture-tested. The live PARITY_GATE stays a validation request.
+Decision: D46-6 (user, 2026-11-08). The comparator is delivered fixture-tested. The live PARITY_GATE stays a validation request.
 
 ## Delivered
 

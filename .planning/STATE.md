@@ -267,7 +267,7 @@ Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49
 
 Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Phases 37-39 are closed by the operator's live-criteria waiver recorded in 585ef28 (2026-10-25); their rows stay here only as the record of what was waived. Phase 46 is open work (re-scoped), not deferred.
 
-Phases 71-73 and 75-78 were deferred for human validation on 2026-11-07 by the run decision "continue without validation" (Run 20). They stay BLOCKED for milestone completion. Phase 74 is owner-deferred past v1.8 (2026-11-06) and is not in this table.
+Phases 71-73 and 75-78 were deferred for human validation on 2026-11-08 by the run decision "continue without validation" (Run 20). They stay BLOCKED for milestone completion. Phase 74 is owner-deferred past v1.8 (2026-11-06) and is not in this table.
 
 ## Run record (2026-10-24, graph ut-mvlvvvbt-57c57d9e)
 
@@ -907,7 +907,7 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.
 
-## Run 20 (gsd-autonomous, 2026-11-07)
+## Run 20 (gsd-autonomous, 2026-11-08)
 
 - Preflight: the Main ref is `main` at aa2ed6a0, 262 commits behind origin/main at b1b42f92. The run branch `gsd/v18-orchestrator-items` is pushed, and PR #210 is open as a draft into main. Nothing is merged.
 - Kickoff: Notion rows were created (the Task row, 7 node issues, and 47 sub-issue rows). Linear created nothing, because the workspace free-issue limit is exceeded. The optional substrate graph_register step was not run. The Task row shows PR #210 and status Implementing.
