@@ -77,3 +77,11 @@ No production code changed. Nothing beyond the seven items was added.
 
 - R3 (carried from 77-01): the Bun SQL adapter and migration 43 were not executed in this track. The PG runs in §6 are the first execution.
 - `steering-durable.test.ts` and the PG file use fakes and the scratch database; a fake that differs from real SQL behaviour is not caught here.
+
+## 8. Run 20 (2026-11-07): foreign wait cursor, and PG per-file evidence
+
+- Code change (`9cf012de`): `nextQueuedDirective` honours the `after` cursor only for a directive that targets the waiting session, via `SteeringInbox.sequenceOfFor`. Before the change, a directive of another session could supply a cursor that hid this session's queued commands. This is Greptile P1 on PR #205, claim C3. It was confirmed present first (`expected "a1", received null`). The regression test is in `steering-waiters.test.ts`. D77-HARDEN-1 in §5 no longer describes the whole diff.
+- PG per-file evidence on `substrate_test` (scratch Postgres 16 at 127.0.0.1:55433, trust auth), at `8ca6aa05`:
+  - `planning/steering-idempotency.pg.test.ts`: 4 pass, 0 fail (orchestrator evidence for T5 to T7, Needs Human row 77).
+  - `planning/steering-idempotency-migration.pg.test.ts`: 1 pass, 0 fail (migration 43 up/down).
+- This is orchestrator evidence. The verifier re-run that changes the 77 record has not been run.
