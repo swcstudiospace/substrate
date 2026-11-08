@@ -13,6 +13,7 @@
  */
 import { SQL } from "bun";
 import { readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore, MIGRATION_STEPS, applicableMigrationSteps, indexMigrateLockKey } from "./index-store.ts";
@@ -83,16 +84,30 @@ async function timeoutSettings(sql: SQL): Promise<{ statement: string; lock: str
 	return { statement: String(row.statement_timeout), lock: String(row.lock_timeout) };
 }
 
+/** The same server with another database: only the path of the URL changes. */
+function withDatabase(url: string, name: string): string {
+	const target = new URL(url);
+	target.pathname = `/${name}`;
+	return target.toString();
+}
+
 describeLive("migrate against a live index", () => {
 	let store: IndexStore;
 	let raw: SQL;
 	let pool: SQL;
 	let before: { statement: string; lock: string };
+	let admin: SQL;
+	let dbName: string;
 
 	beforeAll(async () => {
 		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
-		raw = new SQL(url);
-		store = new IndexStore(url);
+		// This file asserts the ledger's exact state, so it gets a database of its own. A shared one made it order-dependent.
+		admin = new SQL(url);
+		dbName = `substrate_migrate_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
+		await admin.unsafe(`create database "${dbName}"`);
+		const fresh = withDatabase(url, dbName);
+		raw = new SQL(fresh);
+		store = new IndexStore(fresh);
 		// The store pool is what `migrate` reserves. A separate client would not show a poisoned session.
 		pool = (store as unknown as { sql: SQL }).sql;
 		before = await timeoutSettings(pool);
@@ -102,6 +117,8 @@ describeLive("migrate against a live index", () => {
 		if (!PG_URL) return;
 		await raw.end().catch(() => undefined);
 		await store.close().catch(() => undefined);
+		await admin.unsafe(`drop database if exists "${dbName}" with (force)`);
+		await admin.close();
 	});
 
 	test("the second migrate adds no ledger rows, and the reviews indexes match the drop", async () => {

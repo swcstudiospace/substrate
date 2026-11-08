@@ -194,10 +194,18 @@ The fallback is Hindsight recall (`lightragFallback` in `docs-search.ts`,
 `hindsightRagFallback` in `mcp.ts`). It applies after the retries, a breaker
 refusal, or an unconfigured plane:
 
-- A warning event `docs search failed: <reason>` is emitted on every fallback
-  reply, degraded or unavailable, carrying `fallback: "hindsight"` when recall
-  answered. `docs_search` sets `action: "docs.search"`; `docs_lightrag_query`
-  and `POST /docs/lightrag/query` set `action: "docs.lightrag_query"`.
+- A warning event is emitted on every fallback reply, degraded or unavailable.
+  Its kind is `warning`, its summary is `docs search failed: <reason>`, and its
+  payload is `{ action, reason }`, plus `fallback: "hindsight"` when recall
+  answered. `docs_lightrag_query` and `POST /docs/lightrag/query` emit
+  `action: "docs.lightrag_query"`; `docs_search` emits `action: "docs.search"`.
+  Their `session_id` differs: `docs_lightrag_query` has no session id of its
+  own, so each fallback event gets a fresh `docs-lightrag-query:<uuid>`, while
+  `docs_search` uses the session id its caller supplies, or a fresh
+  `docs-search:<uuid>` when none is given. The event's surface is the caller's,
+  or `claude-code` when the caller is unauthenticated. The event is written
+  before the reply. A failed write is reported silently and the reply is
+  unchanged.
 - The reason is redacted and capped at 200 characters (`datasetReason` in
   `docs-search.ts`, which both paths use) before it is returned, kept in the RAG
   machine, or put in the event. A Hindsight recall that throws is no hits: its
@@ -210,6 +218,14 @@ refusal, or an unconfigured plane:
 A `lightrag` backend without a usable `LIGHTRAG_URL` does not start (see the
 top of this document). So the "unconfigured" branch above is reachable only
 by a caller that builds the search directly, never by a running server.
+
+### Deploy precondition
+
+With `SUBSTRATE_DOCS_BACKEND=lightrag`, boot refuses unless `LIGHTRAG_URL` is set
+to an absolute `http` or `https` URL with a host (surrounding whitespace is
+trimmed). The check is `assertLightragReach` in `packages/mcp-server/src/config.ts`.
+It reads `LIGHTRAG_URL` only: `SUBSTRATE_LIGHTRAG_URL` does not satisfy it. The
+refusal never prints the value.
 
 
 ## The `corpus` dataset (phase 63)

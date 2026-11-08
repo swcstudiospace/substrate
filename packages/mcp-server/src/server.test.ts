@@ -1366,7 +1366,7 @@ describe("routes", () => {
 			}
 		});
 
-		test("D-14: with LightRAG failing and recall empty, docs_search and POST /docs/lightrag/query answer the same unavailable shape", async () => {
+		test("D-14: docs_search and POST /docs/lightrag/query share degraded and unavailable semantics; the REST reply also carries backend and fallback", async () => {
 			globalThis.fetch = stubLightrag(async () => new Response("upstream down", { status: 500 }));
 			const { greptime } = ledger();
 			const { post, stop } = await serve(greptime, LIGHTRAG_ENV, { hindsightFetch: new HindsightFake().fetch });
@@ -1416,7 +1416,7 @@ describe("routes", () => {
 				const reply = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "never answers" }, auth)));
 				expect(planeCalls).toBe(3);
 				expect(reply).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
-				expect(String(reply.reason)).toMatch(/^lightrag 500; /);
+				expect(reply.reason).toBe("lightrag 500; hindsight recall failed: sub-omp: hindsight POST /v1/default/banks/sub-omp/memories/recall: bank not found");
 			} finally {
 				await stop();
 			}
