@@ -906,3 +906,12 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | GitHub | PRs 199, 201 and 204 | Pushes not approved; Greptile threads not resolved | Owner |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.
+
+## Run 20 (gsd-autonomous, 2026-11-07)
+
+- Preflight: the Main ref is `main` at aa2ed6a0, 262 commits behind origin/main at b1b42f92. The run branch `gsd/v18-orchestrator-items` is pushed, and PR #210 is open as a draft into main. Nothing is merged.
+- Kickoff: Notion rows were created (the Task row, 7 node issues, and 47 sub-issue rows). Linear created nothing, because the workspace free-issue limit is exceeded. The optional substrate graph_register step was not run. The Task row shows PR #210 and status Implementing.
+- Decisions recorded in the spec: q2 (push, answered as push work branch only), u1 (kickoff approved), u2 (phases 71-78 continue without validation), and u3 (first unit is the phase 46 comparator). CONTEXT records D46-6.
+- Phases 71-73 and 75-78 are verification_deferred_human. Phase 74 is owner-deferred past v1.8.
+- Phase 46 criterion 4: the in-repo comparator is delivered (`lightrag-parity.ts`, 19 tests). Criterion 4 stays NOT MET until the operator-gated live run (T5, T6, T7).
+- Still gated: GitHub writes beyond PR #210, merge into main, the live T5 to T7 steps, 31 owner items, and 6 operator items.
