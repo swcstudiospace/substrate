@@ -364,6 +364,10 @@ export class MemorySteeringIdempotencyStore implements SteeringIdempotencyStore 
 function fingerprintOf(directive: SteeringDirective): string {
 	return createHash("sha256").update(JSON.stringify([directive.action, directive.priority, directive.targetSessionId, directive.body, directive.planRef ?? null, directive.conflictsWithActivePlan])).digest("hex");
 }
+/** The reply every keyed replay gets: the original queued receipt. The stored state is read elsewhere. */
+function originalReplyOf(held: SteeringReplayRecord): SteeringReceipt {
+	return { record: { state: "queued", directive: structuredClone(held.directive), queuedAtMs: held.queuedAtMs }, replayed: true };
+}
 /** What a queue returns: the record, and whether the call replayed an earlier keyed queue. A replay wrote nothing, so it announces nothing. */
 interface SteeringReceipt {
 	record: SteeringRecord;
@@ -577,16 +581,17 @@ export class SteeringInbox {
 		return { ok: true, value: { record: structuredClone(record), replayed: false } };
 	}
 
-	/**
-	 * The reply to a keyed queue already held: the same record with `replayed` set, or a conflict when the content differs. Writes nothing.
-	 * The record is the one this inbox holds. When it holds none, the record is rebuilt from durable state the way a restart loads it, and
-	 * the acknowledgement is read back from the sink, so an acknowledged directive never comes back as queued.
-	 */
+/**
+ * The reply to a keyed queue already held: the original queued reply with `replayed` set, or a conflict when the content differs.
+ * Writes nothing. The reply is always the original one, while the stored record is the current state: a directive acknowledged
+ * since then still replays as queued. When this inbox holds no record, the record is rebuilt from durable state the way a restart
+ * loads it, and the acknowledgement is read back from the sink, so `get` and `acknowledge` see the true state.
+ */
 	private async replayOf(held: SteeringReplayRecord, fingerprint: string): Promise<SteeringResult<SteeringReceipt>> {
 		if (held.fingerprint !== fingerprint) return fail({ code: "idempotency-conflict" });
 		const { id, targetSessionId } = held.directive;
 		const current = this.records.get(id);
-		if (current !== undefined) return { ok: true, value: { record: structuredClone(current), replayed: true } };
+		if (current !== undefined) return { ok: true, value: originalReplyOf(held) };
 		const acknowledgement = await this.durableAcknowledgement(id);
 		if (!acknowledgement.ok) return acknowledgement;
 		let sequence = this.sequences.get(id);
@@ -599,7 +604,7 @@ export class SteeringInbox {
 		const record = recordFromStore(held.directive, held.queuedAtMs, acknowledgement.value);
 		this.sequences.set(id, sequence);
 		this.records.set(id, record);
-		return { ok: true, value: { record: structuredClone(record), replayed: true } };
+		return { ok: true, value: originalReplyOf(held) };
 	}
 
 	/**

@@ -617,9 +617,23 @@ describe("SteeringInbox: keyed queues under concurrency and store outages", () =
 		const second = buildOver(store);
 		const replay = await second.inbox.enqueueReceipt(directive({ id: "d-1" }), KEY);
 		expect(replay).toMatchObject({ ok: true, value: { replayed: true } });
+		expect(replay.ok ? replay.value.record.state : null).toBe("queued");
+		expect(second.inbox.sequenceOf("d-1")).toBe(first.inbox.sequenceOf("d-1"));
 
 		expect(second.inbox.get("d-1")?.state).toBe("queued");
 		const acked = await second.inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
 		expect(acked).toMatchObject({ ok: true });
+	});
+
+	test("a keyed replay after the target was acknowledged returns the original queued reply and keeps the acknowledged state", async () => {
+		const { inbox } = buildOver(new MemorySteeringIdempotencyStore());
+		const first = await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		expect(first.ok).toBe(true);
+		const queuedAtMs = first.ok && first.value.state === "queued" ? first.value.queuedAtMs : null;
+		await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
+		const replay = await inbox.enqueueReceipt(directive({ id: "d-1" }), KEY);
+		expect(replay.ok ? replay.value.replayed : null).toBe(true);
+		expect(replay.ok && replay.value.record.state === "queued" ? replay.value.record.queuedAtMs : null).toBe(queuedAtMs);
+		expect(inbox.get("d-1")?.state).toBe("acknowledged");
 	});
 });
