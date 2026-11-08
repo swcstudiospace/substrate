@@ -219,9 +219,9 @@ function boundPasses(passes: readonly string[][], limit: number): string[][] {
 
 /**
  * Run a plan. It re-runs the read-only report first, then refuses when the graph list is truncated, when the findings or the cache counters differ from the
- * plan's digest, when no
- * generation orphan remains, or when any plan item is not the flush this repair runs: another action, another match than
- * `substrate:v1:*`, or an orphan the fresh report does not list as live. It then scans `substrate:v1:*` once and refuses when
+ * plan's digest, when no generation orphan remains, when the plan is empty, or when any plan item is not the flush this repair runs: another action,
+ * another match than `substrate:v1:*`, an orphan the fresh report does not list as live, or a flush that names no orphan. It then scans
+ * `substrate:v1:*` once and refuses when
  * the scan cannot complete, so a partial key list is never flushed. The scan is read-only and runs in every mode, so a dry run
  * and a refusal both report the planned keys. Without `execute` it writes nothing. With `execute` it needs `serverStopped`,
  * and refuses without it. An execute removes the first RECONCILE_MAX_ITEMS keys of the ordered list, in three passes: answers
