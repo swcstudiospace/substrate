@@ -252,7 +252,7 @@ describe("review findings on the registry, the scopes variable and the digest", 
 		const file = join(f.b.checkout, "src", "index.ts");
 		writeFileSync(file, "export {};\n");
 		const outcome = locateRepoPath(booted.value, file);
-		expect(outcome.ok && outcome.located.repo === "owner/a").toBe(false);
+		expect(outcome).toEqual({ ok: false, reason: "nested-checkout" });
 	});
 
 	test("RS-15: a blank scopes variable is malformed, so the boot refuses rather than scoping off", () => {
