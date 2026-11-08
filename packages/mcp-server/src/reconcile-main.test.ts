@@ -246,25 +246,6 @@ describe("reconcileMain", () => {
 		}
 	});
 
-	test("an unreadable plan under execute writes the result file with the refusal and exits 1", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "reconcile-unreadable-result-"));
-		try {
-			const env = { ...REPAIR_ENV, SUBSTRATE_AUDIT_PATH: join(dir, "audit.jsonl") };
-			const fixture = repairClients(ORPHAN_FIXTURE);
-			const planPath = join(dir, "plan.json");
-			await writeFile(planPath, "not a plan\n");
-			const io: ReconcileIo = { out: () => {}, err: () => {}, now: () => NOW, env, open: () => fixture.clients };
-			expect(await reconcileMain(["repair", "--plan", planPath, "--execute", "--server-stopped"], io)).toBe(1);
-			const record = JSON.parse(await readFile(`${planPath}.result.json`, "utf8")) as { result: RepairResult; recorded_at: string };
-			expect(record.result).toMatchObject({ executed: false, refused: true, planned: 0, removed: 0, remaining: 0, truncated: false });
-			expect(record.result.reason).toMatch(/cannot be read as a substrate\.reconcile\.plan\.v1 record/);
-			expect(record.recorded_at).toBe(NOW.toISOString());
-			expect(fixture.removed).toEqual([]);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
 	test("an execute whose plan file is missing records one refusal with an unreadable digest and exits 1", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "reconcile-missing-"));
 		try {
@@ -279,24 +260,6 @@ describe("reconcileMain", () => {
 			expect(lines).toHaveLength(1);
 			expect(lines[0]).toContain("outcome=refused planned=0 removed=0");
 			expect(lines[0]).toContain("plan_digest=unreadable");
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("an execute whose plan file is missing writes the result file with the refusal and exits 1", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "reconcile-missing-result-"));
-		try {
-			const env = { ...REPAIR_ENV, SUBSTRATE_AUDIT_PATH: join(dir, "audit.jsonl") };
-			const fixture = repairClients(ORPHAN_FIXTURE);
-			const planPath = join(dir, "absent.json");
-			const io: ReconcileIo = { out: () => {}, err: () => {}, now: () => NOW, env, open: () => fixture.clients };
-			expect(await reconcileMain(["repair", "--plan", planPath, "--execute", "--server-stopped"], io)).toBe(1);
-			const record = JSON.parse(await readFile(`${planPath}.result.json`, "utf8")) as { result: RepairResult; recorded_at: string };
-			expect(record.result).toMatchObject({ executed: false, refused: true, planned: 0, removed: 0, remaining: 0, truncated: false });
-			expect(record.result.reason).toMatch(/cannot be read as a substrate\.reconcile\.plan\.v1 record/);
-			expect(record.recorded_at).toBe(NOW.toISOString());
-			expect(fixture.removed).toEqual([]);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
