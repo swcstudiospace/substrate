@@ -45,13 +45,16 @@ interface ScopedLocation {
 
 type ScopedGitOutcome = ({ ok: true; result: ScopedGitResult } & ScopedLocation) | { ok: false; reason: RepoRefusalReason };
 
-/** The registered checkout of `repo` that exists on this host. Refused when the repository is unregistered or none of its checkouts exist. */
+/** The registered checkout of `repo` that exists on this host, located exactly as a path is (see {@link locateRepoPath}): a checkout that moved after it was pinned, or that overlaps another repository, is refused. */
 function checkoutOf(scope: RepoScope, repo: string): { ok: true; location: ScopedLocation } | { ok: false; reason: RepoRefusalReason } {
 	const registration = scope.registry.get(repo);
 	if (registration === undefined) return { ok: false, reason: "repo-not-registered" };
 	for (const dir of registration.checkouts) {
-		const root = realDirectoryOrNull(dir);
-		if (root !== null) return { ok: true, location: { repo, root, target: root } };
+		if (realDirectoryOrNull(dir) === null) continue;
+		const located = locateRepoPath(scope, dir);
+		if (!located.ok) return { ok: false, reason: located.reason };
+		if (located.located.repo !== repo) return { ok: false, reason: "path-not-registered" };
+		return { ok: true, location: { repo, root: located.located.root, target: located.located.root } };
 	}
 	return { ok: false, reason: "repo-not-registered" };
 }

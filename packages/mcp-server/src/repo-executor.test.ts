@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type ScopedGitRunner, scopedGit } from "./repo-executor.ts";
@@ -185,5 +185,52 @@ describe("scopedGit refuses a nested checkout under a plain registered directory
 		const { run, calls } = recorder();
 		expect(scopedGit({ scope: parsed.value, surface: "omp", repo: null, path: linked, args: ARGS }, run)).toMatchObject({ ok: true, repo: "owner/a", root: linked, target: linked });
 		expect(calls.map((call) => call.cwd)).toEqual([linked]);
+	});
+
+	test("N1: a named checkout repointed after boot to an unregistered directory is refused, and git never runs", () => {
+		const f = fixture();
+		// a's checkout is a symlink to a real directory when the registry boots.
+		const real = join(f.root, "a-real");
+		mkdirSync(real);
+		rmdirSync(f.a.checkout);
+		symlinkSync(real, f.a.checkout);
+		const scope = scopeFor(f, { omp: ["owner/a"] });
+		// Repoint a's checkout after boot at an unregistered directory C that holds a file.
+		const c = join(f.root, "c");
+		mkdirSync(c);
+		writeFileSync(join(c, "index.ts"), "export {};\n");
+		unlinkSync(f.a.checkout);
+		symlinkSync(c, f.a.checkout);
+		const { run, calls } = recorder();
+		expect(scopedGit({ scope, surface: "omp", repo: "owner/a", path: null, args: ARGS }, run)).toEqual({ ok: false, reason: "path-not-registered" });
+		expect(calls).toHaveLength(0);
+	});
+
+	test("N2: a named checkout repointed after boot to another repository's checkout is refused, and git never runs", () => {
+		const f = fixture();
+		// a's checkout is a symlink to a real directory when the registry boots.
+		const real = join(f.root, "a-real");
+		mkdirSync(real);
+		rmdirSync(f.a.checkout);
+		symlinkSync(real, f.a.checkout);
+		const scope = scopeFor(f, { omp: ["owner/a"] });
+		// Repoint a's checkout after boot at owner/b's real checkout.
+		unlinkSync(f.a.checkout);
+		symlinkSync(f.b.checkout, f.a.checkout);
+		const { run, calls } = recorder();
+		expect(scopedGit({ scope, surface: "omp", repo: "owner/a", path: null, args: ARGS }, run)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(calls).toHaveLength(0);
+	});
+
+	test("N3: a named checkout absent at boot, later linked to another repository's checkout, is refused, and git never runs", () => {
+		const f = fixture();
+		// a's checkout does not exist at boot (decision D72-01).
+		rmdirSync(f.a.checkout);
+		const scope = scopeFor(f, { omp: ["owner/a"] });
+		// Create a's checkout path after boot as a symlink to owner/b's real checkout.
+		symlinkSync(f.b.checkout, f.a.checkout);
+		const { run, calls } = recorder();
+		expect(scopedGit({ scope, surface: "omp", repo: "owner/a", path: null, args: ARGS }, run)).toEqual({ ok: false, reason: "nested-checkout" });
+		expect(calls).toHaveLength(0);
 	});
 });

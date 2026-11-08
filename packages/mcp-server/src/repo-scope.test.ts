@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { DerivedMemoryHit, RecallReply } from "./memory-recall.ts";
 import { mergeDerivedHits } from "./memory-search.ts";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -286,6 +286,28 @@ describe("review findings on the registry, the scopes variable and the digest", 
 		writeFileSync(join(c, "index.ts"), "export {};\n");
 		unlinkSync(aLink);
 		symlinkSync(c, aLink);
+		expect(locateRepoPath(booted.value, join(c, "index.ts"))).toEqual({ ok: false, reason: "path-not-registered" });
+	});
+
+	test("RS-22: a checkout absent at boot, first seen as a link to a checkout and then repointed, is refused by path", () => {
+		const f = layout();
+		// a's checkout is absent at boot, so nothing is pinned for it yet.
+		rmdirSync(f.a.checkout);
+		const booted = repoScopeFromEnv({ [REPO_REGISTRY_ENV]: registryJson(f) });
+		if (!booted.ok) throw new Error(booted.problem);
+		// The first lookup finds a link to a real checkout of a, and pins it there.
+		const realA = join(f.root, "real-a");
+		mkdirSync(realA);
+		symlinkSync(realA, f.a.checkout);
+		const insideA = join(realA, "index.ts");
+		writeFileSync(insideA, "export {};\n");
+		expect(locateRepoPath(booted.value, insideA)).toMatchObject({ ok: true, located: { repo: "owner/a" } });
+		// Repoint a's checkout at an unregistered directory C that holds a file.
+		const c = join(f.root, "c");
+		mkdirSync(c);
+		writeFileSync(join(c, "index.ts"), "export {};\n");
+		unlinkSync(f.a.checkout);
+		symlinkSync(c, f.a.checkout);
 		expect(locateRepoPath(booted.value, join(c, "index.ts"))).toEqual({ ok: false, reason: "path-not-registered" });
 	});
 
