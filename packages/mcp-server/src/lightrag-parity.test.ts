@@ -106,6 +106,29 @@ describe("checkParityGate", () => {
 				matchRate: 1,
 			});
 		});
+
+		test("an empty export fails closed, even when nothing was migrated and every query matches", () => {
+			expect(checkParityGate(fixture({}, { source: [], migrated: [] }))).toEqual({
+				passed: false,
+				recordMismatches: ["source export is empty"],
+				queryMisses: [],
+				matched: 10,
+				total: 10,
+				matchRate: 1,
+			});
+		});
+
+		test("the same dataset and source URL at two versions is checked per version: an unmigrated stale copy is named missing", () => {
+			const stale: ParityDocument = { dataset: "programming-desk", sourceUrl: C, version: "v1" };
+			expect(checkParityGate(fixture({}, { source: [DOC_A, DOC_B, DOC_C, stale], migrated: [DOC_A, DOC_B, DOC_C] }))).toEqual({
+				passed: false,
+				recordMismatches: [`missing programming-desk ${C} v1`],
+				queryMisses: [],
+				matched: 10,
+				total: 10,
+				matchRate: 1,
+			});
+		});
 	});
 
 	describe("query check", () => {

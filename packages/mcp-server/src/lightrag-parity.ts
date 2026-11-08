@@ -92,6 +92,8 @@ export function checkParityGate(input: ParityInput): ParityReport {
 	}
 
 	const recordMismatches = checkRecords(input.source, input.migrated);
+	// An empty export is no evidence of parity, even when nothing was migrated and every query matches.
+	if (input.source.length === 0) recordMismatches.unshift("source export is empty");
 
 	const answerCounts = new Map<string, number>();
 	const answerById = new Map<string, ParityAnswer>();
