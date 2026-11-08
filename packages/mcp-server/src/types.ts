@@ -622,17 +622,21 @@ export interface RagLightragChunk {
 }
 
 /**
- * What `docs_lightrag_query` / `POST /docs/lightrag/query` answers: the
- * LightRAG REST JSON result with graph coverage, the serving state, and —
- * when the plane failed and Hindsight answered instead — `fallback:
- * "hindsight"`. `degraded` is set only when nothing could be served.
+ * What `docs_lightrag_query` / `POST /docs/lightrag/query` answers, and what `docs_search` answers on the LightRAG path, under
+ * one rule (`docs-plane.md`, "Served, degraded and unavailable"):
+ * - served: LightRAG answered with chunks. `backend: "lightrag"`, no `degraded`.
+ * - degraded: LightRAG did not answer and Hindsight recall answered. `backend: "hindsight"`, `fallback: "hindsight"`,
+ *   `degraded: true`, `reason` the LightRAG failure.
+ * - unavailable: neither answered. No `backend`, no `fallback`, `chunks` empty, `degraded: true`, `unavailable: true`,
+ *   `reason` the LightRAG failure. This is the explicit "no answer", never an empty success.
  */
 export interface RagLightragResult {
-	backend: "lightrag";
+	backend?: "lightrag" | "hindsight";
 	chunks: RagLightragChunk[];
 	graph: SearchGraphStats;
 	state: RagStateSnapshot;
 	degraded?: true;
 	reason?: string;
 	fallback?: "hindsight";
+	unavailable?: true;
 }

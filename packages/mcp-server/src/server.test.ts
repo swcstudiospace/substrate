@@ -1090,14 +1090,14 @@ describe("routes", () => {
 			try {
 				for (const question of ["drive one", "drive two", "drive three"]) {
 					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(degraded.fallback).toBe("hindsight");
+					expect(degraded).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 
 				const probe = post("/docs/lightrag/query", { question: "the probe" }, auth);
 				await probeReached.promise;
 				const burst = (await (await post("/docs/lightrag/query", { question: "the burst" }, auth)).json()) as Record<string, unknown>;
-				expect(burst.fallback).toBe("hindsight");
+				expect(burst).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 				expect(attempts).toBe(4);
 
 				probeReply.resolve(Response.json(LIGHTRAG_ANSWER));
@@ -1131,7 +1131,7 @@ describe("routes", () => {
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(degraded.fallback).toBe("hindsight");
+					expect(degraded).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 				const queriesWhenOpen = queries;
@@ -1145,7 +1145,7 @@ describe("routes", () => {
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 
 				const inside = (await (await post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)).json()) as Record<string, unknown>;
-				expect(inside.fallback).toBe("hindsight");
+				expect(inside).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 				expect(queries).toBe(queriesWhenOpen);
 			} finally {
 				await stop();
@@ -1186,7 +1186,7 @@ describe("routes", () => {
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(tripped.fallback).toBe("hindsight");
+					expect(tripped).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 				const before = planeCalls;
@@ -1226,7 +1226,7 @@ describe("routes", () => {
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(tripped.fallback).toBe("hindsight");
+					expect(tripped).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 
@@ -1238,7 +1238,7 @@ describe("routes", () => {
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "CONTEXT_REFRESH", consecutiveFailures: 3 });
 
 				probeReply.resolve(new Response("upstream down", { status: 500 }));
-				expect(((await (await probe).json()) as Record<string, unknown>).fallback).toBe("hindsight");
+				expect(await (await probe).json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR", consecutiveFailures: 4 });
 			} finally {
 				// A failed assertion above leaves the probe held; release it so `stop()` does not wait on it.
@@ -1317,20 +1317,9 @@ describe("routes", () => {
 			}
 		});
 
-		test("an unconfigured LightRAG plane is answered from Hindsight on both search routes", async () => {
-			const hindsight = recallableOmp();
+		test("a lightrag backend with no LIGHTRAG_URL refuses to start, so an unconfigured plane is never served", async () => {
 			const { greptime } = ledger();
-			// The backend is named but no LIGHTRAG_URL is set, so the plane is not configured.
-			const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_DOCS_BACKEND: "lightrag" }, { hindsightFetch: hindsight.fetch });
-			try {
-				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
-				resetRagMachine();
-				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
-				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
-				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
-			} finally {
-				await stop();
-			}
+			await expect(serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_DOCS_BACKEND: "lightrag" })).rejects.toThrow(/LIGHTRAG_URL/);
 		});
 
 		test("a degraded LightRAG reply is never replayed: its idempotency key asks the plane again, and a served answer replays", async () => {
@@ -1351,6 +1340,78 @@ describe("routes", () => {
 				expect(served.degraded).toBeUndefined();
 				expect(await jsonOf(post("/docs/lightrag/query", request, auth))).toMatchObject({ backend: "lightrag" });
 				expect(planeCalls).toBe(2);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("D-14: with LightRAG failing and recall empty, docs_search and POST /docs/lightrag/query answer the same unavailable shape", async () => {
+			globalThis.fetch = stubLightrag(async () => new Response("upstream down", { status: 500 }));
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, LIGHTRAG_ENV, { hindsightFetch: new HindsightFake().fetch });
+			try {
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
+				resetRagMachine();
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
+				for (const reply of [search, lightrag]) {
+					expect(reply).toMatchObject({ degraded: true, unavailable: true, reason: "lightrag 500", chunks: [] });
+					expect(reply.fallback).toBeUndefined();
+					expect(reply.backend).toBeUndefined();
+				}
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST LightRAG query retried after a transient failure is served, not degraded", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return planeCalls === 1 ? new Response("upstream down", { status: 503 }) : Response.json(LIGHTRAG_ANSWER);
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_MAX_RETRIES: "2", SUBSTRATE_RAG_RETRY_BASE_MS: "1" });
+			try {
+				const reply = await jsonOf(post("/docs/lightrag/query", { question: "retry me" }, auth));
+				expect(planeCalls).toBe(2);
+				expect(reply).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+				expect(reply.degraded).toBeUndefined();
+			} finally {
+				await stop();
+			}
+		});
+
+		test("the REST retry cap: a plane that never answers is asked the first attempt plus maxRetries, then the query is answered unavailable", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_MAX_RETRIES: "2", SUBSTRATE_RAG_RETRY_BASE_MS: "1" }, { hindsightFetch: new HindsightFake().fetch });
+			try {
+				const reply = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "never answers" }, auth)));
+				expect(planeCalls).toBe(3);
+				expect(reply).toMatchObject({ degraded: true, unavailable: true, reason: "lightrag 500" });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("an empty LightRAG payload is never served as a success on the REST route: it is retried as a failure and answered unavailable", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return Response.json({ status: "success", data: { chunks: [] } });
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_MAX_RETRIES: "1", SUBSTRATE_RAG_RETRY_BASE_MS: "1" }, { hindsightFetch: new HindsightFake().fetch });
+			try {
+				const reply = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "empty" }, auth)));
+				expect(planeCalls).toBe(2);
+				expect(reply).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
+				expect(reply.backend).toBeUndefined();
+				expect(reply.fallback).toBeUndefined();
 			} finally {
 				await stop();
 			}

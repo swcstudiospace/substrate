@@ -148,7 +148,7 @@ no `note`.
 
 ## Hybrid retrieval and context augmentation
 
-The docs plane is `lightrag` or `ragflow`, chosen by `resolveDocsBackend` in `packages/mcp-server/src/config.ts`: `SUBSTRATE_DOCS_BACKEND` wins when set to a usable value; otherwise a set `LIGHTRAG_URL` selects `lightrag` and an unset one selects `ragflow`, the legacy fallback. `lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. Production has served docs from LightRAG since the cutover of 2026-10-28 (`SUBSTRATE_DOCS_BACKEND=lightrag`, naive query mode until the operator decides on a real LLM). The RAGFlow service was deleted on 2026-10-25; its code stays until the operator approves removal.
+The docs plane is `lightrag` or `ragflow`, chosen by `resolveDocsBackend` in `packages/mcp-server/src/config.ts`: `SUBSTRATE_DOCS_BACKEND` wins when set; any value other than `lightrag` or `ragflow` stops the boot. Unset, a set `LIGHTRAG_URL` selects `lightrag` and an unset one selects `ragflow`, the legacy fallback. A `lightrag` backend without a usable `LIGHTRAG_URL` (an absolute http or https URL) also stops the boot. `lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. Production has served docs from LightRAG since the cutover of 2026-10-28 (`SUBSTRATE_DOCS_BACKEND=lightrag`, naive query mode until the operator decides on a real LLM). The RAGFlow service was deleted on 2026-10-25; its code stays until the operator approves removal.
 
 ### LightRAG query
 
@@ -192,7 +192,7 @@ On `lightrag`, a failed query is retried under the plane's retry policy (`docs-s
 - The reply carries `backend: "hindsight"`, `fallback: "hindsight"`, `degraded: true`, and `reason` naming the LightRAG failure. Its notice reads "Served from Hindsight fallback: <reason>." (`hindsightFallbackReply`, `docs-search.ts:617-626`).
 - One `warning` event, `docs search failed: <reason>`, carries `payload.fallback: "hindsight"` (`docs-search.ts:908-917`).
 - A degraded reply is never stored (`docs-search.ts:144`).
-- If recall returns nothing, the plain degraded reply stands, with the LightRAG reason and no Hindsight citations (`docs-search.ts:903`).
+- If recall returns nothing, the reply is `unavailable: true` with `degraded: true`, `chunks: []`, and the LightRAG reason, with no `backend` and no `fallback`. It is never an empty success. The rule is shared with `docs_lightrag_query` and `POST /docs/lightrag/query`; see `docs/docs-plane.md`, "Served, degraded and unavailable".
 
 A failed LightRAG query does not retry against RAGFlow. The RAGFlow failure reasons and the per-dataset fan-out below describe the `ragflow` plane only.
 

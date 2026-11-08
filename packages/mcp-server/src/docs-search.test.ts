@@ -584,22 +584,16 @@ describe("docs backend selection (LightRAG cutover)", () => {
 	});
 
 	test("resolveDocsBackend: LIGHTRAG_URL presence means lightrag, else ragflow", () => {
-		expect(resolveDocsBackend({})).toEqual({ backend: "ragflow", rejected: null });
-		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test:8000" })).toEqual({ backend: "lightrag", rejected: null });
-		expect(resolveDocsBackend({ LIGHTRAG_URL: "   " })).toEqual({ backend: "ragflow", rejected: null });
+		expect(resolveDocsBackend({})).toBe("ragflow");
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test:8000" })).toBe("lightrag");
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "   " })).toBe("ragflow");
 	});
 
-	test("resolveDocsBackend: an explicit SUBSTRATE_DOCS_BACKEND wins; a typo is rejected without switching", () => {
-		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "ragflow" })).toEqual({
-			backend: "ragflow",
-			rejected: null,
-		});
-		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "LightRAG" })).toEqual({ backend: "lightrag", rejected: null });
-		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "lightragg" })).toEqual({ backend: "ragflow", rejected: "lightragg" });
-		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "weaviate" })).toEqual({
-			backend: "lightrag",
-			rejected: "weaviate",
-		});
+	test("resolveDocsBackend: an explicit SUBSTRATE_DOCS_BACKEND wins; an unrecognised one stops the boot instead of switching", () => {
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "ragflow" })).toBe("ragflow");
+		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "LightRAG" })).toBe("lightrag");
+		expect(() => resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "lightragg" })).toThrow(/SUBSTRATE_DOCS_BACKEND/);
+		expect(() => resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "weaviate" })).toThrow(/SUBSTRATE_DOCS_BACKEND/);
 	});
 
 	test("lightragFromEnv: null without a URL; keyless reach is a URL alone; trims the URL; never echoes the key", () => {
@@ -679,6 +673,36 @@ describe("LightRAG search and the RAGFlow plane", () => {
 		expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
 		expect(lightrag.queries).toHaveLength(1);
 		expect(ragflowCalls).toBe(0);
+	});
+
+	test("criterion 1: docs_search answers from LightRAG in hybrid mode, with the Hindsight context block on a served answer, and only when asked", async () => {
+		const restore = hindsightEnv("sub-cursor");
+		try {
+			const hindsight = new HindsightFake();
+			hindsight.seed("sub-cursor", [{ id: "m1", text: "the plan lives in PLAN.md", document_id: "mwd_1", tags: ["cursor"], metadata: {}, score: 0.9 }]);
+			const lightrag = lightragServing("Served by LightRAG.");
+			const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }), {
+				index: null,
+				greptime: null,
+				lightragFetch: lightrag.fetch,
+				hindsightFetch: hindsight.fetch,
+			});
+			const reply = await substrate.searchDocs({ question: "where is the plan?", context: true }, "cursor");
+			expect(reply).toMatchObject({ backend: "lightrag" });
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+			// Hybrid is the default query mode when SUBSTRATE_LIGHTRAG_QUERY_MODE is unset.
+			expect(JSON.parse(lightrag.queries[0] ?? "{}")).toMatchObject({ mode: "hybrid", query: "where is the plan?" });
+			expect(reply.context?.memories.map((memory) => memory.text)).toEqual(["the plan lives in PLAN.md"]);
+			// The ledger leg is skipped without a session, so `context.degraded` names it. The Hindsight memories are unaffected, and the top-level reply stays served.
+			expect(reply.context?.degraded).toBe("no-session");
+			// The gate: a caller that did not ask for context gets none, even though the answer was served from the same cache key.
+			const plain = await substrate.searchDocs({ question: "where is the plan?" }, "cursor");
+			expect(plain.context).toBeUndefined();
+			expect(plain.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+		} finally {
+			restore();
+		}
 	});
 
 	test("a docs search through the service cites the commit the corpus manifest records", async () => {
@@ -912,7 +936,7 @@ describe("LightRAG search retries and the Hindsight fallback", () => {
 		expect(reply).toMatchObject({ degraded: true, reason: "lightrag 503" });
 	}, 20_000);
 
-	test("a LightRAG search that fails and Hindsight answers nothing, throws, or is not wired is the degraded reply with the LightRAG reason", async () => {
+	test("a LightRAG search that fails and Hindsight answers nothing, throws, or is not wired is unavailable: empty, degraded, with the LightRAG reason", async () => {
 		let attempts = 0;
 		const search = (lightragHindsight?: (question: string) => Promise<readonly DerivedMemoryHit[]>): Promise<SearchReply> =>
 			searchDocs(
@@ -932,21 +956,47 @@ describe("LightRAG search retries and the Hindsight fallback", () => {
 				},
 				"where is the plan?",
 			);
-		const degraded: SearchReply = {
+		const unavailable: SearchReply = {
 			chunks: [],
 			untrusted: UNTRUSTED_DOCS_NOTICE,
 			degraded: true,
+			unavailable: true,
 			reason: "lightrag 503",
 			degraded_datasets: [{ dataset: "agent-substrate", reason: "lightrag 503" }],
 		};
-		expect(await search(async () => [])).toEqual(degraded);
+		expect(await search(async () => [])).toEqual(unavailable);
 		expect(
 			await search(async () => {
 				throw new Error("hindsight down");
 			}),
-		).toEqual(degraded);
-		expect(await search()).toEqual(degraded);
+		).toEqual(unavailable);
+		expect(await search()).toEqual(unavailable);
 		expect(attempts).toBe(3 * (RETRY.maxRetries + 1));
+	});
+
+	test("an empty LightRAG answer is never a success: it is a failed attempt that is not retried, and the reply is unavailable", async () => {
+		let attempts = 0;
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG,
+				datasetNames: ["agent-substrate"],
+				lightragRetry: RETRY,
+				lightragRetrieve: async () => {
+					attempts += 1;
+					return { ok: true, chunks: [], detail: NO_GRAPH };
+				},
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+		expect(attempts).toBe(1);
+		expect(reply).toMatchObject({ chunks: [], degraded: true, unavailable: true, reason: "lightrag: empty answer" });
+		expect(reply.backend).toBeUndefined();
+		expect(reply.fallback).toBeUndefined();
+		expect(searchReplyStorable(reply)).toBe(false);
 	});
 
 	test("Substrate.searchDocs answers from Hindsight once the LightRAG plane has failed its retries", async () => {
@@ -982,7 +1032,7 @@ describe("LightRAG search retries and the Hindsight fallback", () => {
 		}
 	});
 
-	test("an unconfigured LightRAG plane is answered from Hindsight when recall finds something, else degraded with its reason", async () => {
+	test("an unconfigured LightRAG plane is answered from Hindsight when recall finds something, else unavailable with its reason", async () => {
 		const deps = {
 			config: null,
 			backend: "lightrag" as const,
@@ -996,7 +1046,7 @@ describe("LightRAG search retries and the Hindsight fallback", () => {
 		expect(served.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
 		expect(searchReplyStorable(served)).toBe(false);
 		const nothing = await searchDocs({ ...deps, lightragHindsight: async () => [] }, "where is the plan?");
-		expect(nothing).toEqual({ chunks: [], untrusted: UNTRUSTED_DOCS_NOTICE, degraded: true, reason: "lightrag-not-configured" });
+		expect(nothing).toEqual({ chunks: [], untrusted: UNTRUSTED_DOCS_NOTICE, degraded: true, unavailable: true, reason: "lightrag-not-configured" });
 	});
 });
 

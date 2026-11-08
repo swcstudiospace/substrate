@@ -33,6 +33,7 @@ import {
 	loadLedgerSettings,
 	parseRedisUrl,
 	railwayHostingFromEnv,
+	resolveDocsBackend,
 	surfaceForToken,
 	teiFromEnv,
 } from "./config.ts";
@@ -908,5 +909,65 @@ describe("the telemetry buffer and its dead-letter file name two files (phase 76
 			};
 			expect(loadConfig(env, { realDestination: diskDestination }).eventBuffer).toMatchObject({ path: env.SUBSTRATE_EVENT_BUFFER_PATH, deadLetterPath: env.SUBSTRATE_EVENT_DEAD_LETTER_PATH });
 		});
+	});
+});
+
+describe("docs plane selection and fail-fast reach (LightRAG cutover)", () => {
+	test("LIGHTRAG_URL presence selects lightrag when no backend is named, and blank means ragflow", () => {
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test:8000" })).toBe("lightrag");
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "   " })).toBe("ragflow");
+		expect(resolveDocsBackend({})).toBe("ragflow");
+	});
+
+	test("an explicit SUBSTRATE_DOCS_BACKEND wins over the reach, case-insensitively", () => {
+		expect(resolveDocsBackend({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "ragflow" })).toBe("ragflow");
+		expect(resolveDocsBackend({ SUBSTRATE_DOCS_BACKEND: "LightRAG" })).toBe("lightrag");
+	});
+
+	test("an unrecognised SUBSTRATE_DOCS_BACKEND stops the boot, naming the variable and the allowed values, never the value", () => {
+		const env = { LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightragg-typo" };
+		expect(() => resolveDocsBackend(env)).toThrow(ConfigError);
+		expect(() => resolveDocsBackend(env)).toThrow(/SUBSTRATE_DOCS_BACKEND.*ragflow, lightrag/);
+		expect(() => loadConfig(env)).toThrow(ConfigError);
+		expect(() => loadConfig(env)).toThrow(/SUBSTRATE_DOCS_BACKEND/);
+		expect(() => loadConfig(env)).not.toThrow(/lightragg-typo/);
+	});
+
+	test("a lightrag backend with no LIGHTRAG_URL fails at load, naming LIGHTRAG_URL", () => {
+		expect(() => loadConfig({ SUBSTRATE_DOCS_BACKEND: "lightrag" })).toThrow(ConfigError);
+		expect(() => loadConfig({ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_URL: "   " })).toThrow(/LIGHTRAG_URL/);
+	});
+
+	test("a lightrag backend with an unparseable LIGHTRAG_URL fails at load, naming LIGHTRAG_URL and not echoing it", () => {
+		const env = { LIGHTRAG_URL: "not a url with user:secret@", SUBSTRATE_DOCS_BACKEND: "lightrag" };
+		expect(() => loadConfig(env)).toThrow(/LIGHTRAG_URL/);
+		expect(() => loadConfig(env)).not.toThrow(/secret/);
+		expect(() => loadConfig({ LIGHTRAG_URL: "ftp://lightrag.test" })).toThrow(/LIGHTRAG_URL must be an absolute http or https URL/);
+	});
+
+	test("the LightRAG API key never appears in a reach error", () => {
+		const apiKey = "lrk-never-echo-0123";
+		const refusals = [
+			{ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_API_KEY: apiKey },
+			{ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_API_KEY: apiKey, LIGHTRAG_URL: `::bad::${apiKey}` },
+			{ LIGHTRAG_URL: `ftp://${apiKey}`, LIGHTRAG_API_KEY: apiKey },
+		];
+		for (const env of refusals) {
+			let message = "";
+			try {
+				loadConfig(env);
+			} catch (cause) {
+				expect(cause).toBeInstanceOf(ConfigError);
+				message = (cause as Error).message;
+			}
+			expect(message).not.toBe("");
+			expect(message).not.toContain(apiKey);
+		}
+	});
+
+	test("a valid lightrag reach loads with the backend selected and no refusal", () => {
+		const config = loadConfig({ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_URL: "https://lightrag.test/", LIGHTRAG_API_KEY: "k" });
+		expect(config.docsBackend).toBe("lightrag");
+		expect(config.lightrag).toStrictEqual({ url: "https://lightrag.test", apiKey: "k" });
 	});
 });

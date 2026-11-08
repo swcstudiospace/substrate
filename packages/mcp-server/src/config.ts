@@ -150,17 +150,38 @@ export function embedCacheFromEnv(env: Record<string, string | undefined> = proc
  *
  * An explicit `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`,
  * case-insensitive) wins; otherwise the configured reach decides — a
- * `LIGHTRAG_URL` means lightrag, else ragflow. An unrecognised value keeps
- * the reach-derived backend and is carried back as `rejected`, so a typo
- * never switches the plane.
+ * `LIGHTRAG_URL` means lightrag, else ragflow. An unrecognised value is a
+ * `ConfigError` naming the variable and the allowed values: a typo must stop
+ * the boot, never quietly pick a plane.
  */
-export function resolveDocsBackend(env: Record<string, string | undefined> = process.env): { backend: DocsBackend; rejected: string | null } {
-	const fallback: DocsBackend = env.LIGHTRAG_URL?.trim() ? "lightrag" : "ragflow";
+export function resolveDocsBackend(env: Record<string, string | undefined> = process.env): DocsBackend {
 	const raw = env.SUBSTRATE_DOCS_BACKEND?.trim();
-	if (!raw) return { backend: fallback, rejected: null };
+	if (!raw) return env.LIGHTRAG_URL?.trim() ? "lightrag" : "ragflow";
 	const lower = raw.toLowerCase();
-	if (lower === "lightrag" || lower === "ragflow") return { backend: lower, rejected: null };
-	return { backend: fallback, rejected: raw };
+	if (lower === "lightrag" || lower === "ragflow") return lower;
+	throw new ConfigError(`SUBSTRATE_DOCS_BACKEND is not a docs plane; set it to one of ${DOCS_BACKENDS.join(", ")}, or unset it so LIGHTRAG_URL decides`);
+}
+
+/** Whether a string is an absolute http or https URL with a host. Never echoes the string. */
+function isHttpUrl(value: string): boolean {
+	try {
+		const parsed = new URL(value);
+		return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host !== "";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Fail fast when the LightRAG plane is selected without a usable reach. A
+ * lightrag backend needs `LIGHTRAG_URL` set and parseable; the message names
+ * the variable and never its value, since a URL may carry credentials.
+ */
+export function assertLightragReach(backend: DocsBackend, env: Record<string, string | undefined>): void {
+	if (backend !== "lightrag") return;
+	const url = env.LIGHTRAG_URL?.trim() ?? "";
+	if (url === "") throw new ConfigError("SUBSTRATE_DOCS_BACKEND selects lightrag, which needs LIGHTRAG_URL set to the LightRAG base URL");
+	if (!isHttpUrl(url)) throw new ConfigError("LIGHTRAG_URL must be an absolute http or https URL");
 }
 
 /** Default ms between LightRAG planning polls (SPE-19385). */
@@ -307,11 +328,6 @@ export interface SubstrateConfig {
 	 * means lightrag, otherwise ragflow (`resolveDocsBackend`).
 	 */
 	docsBackend: DocsBackend;
-	/**
-	 * The rejected `SUBSTRATE_DOCS_BACKEND` value, when one was set. A mode
-	 * name, never a credential, so the boot warning may quote it.
-	 */
-	docsBackendRejected: string | null;
 	/**
 	 * The LightRAG reach, or null when the plane is unconfigured.
 	 *
@@ -1134,7 +1150,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.split(",")
 		.map((root) => root.trim())
 		.filter((root) => root.length > 0);
-	const docsBackendPick = resolveDocsBackend(env);
+	const docsBackend = resolveDocsBackend(env);
+	assertLightragReach(docsBackend, env);
 	const cache = cacheSettings(env, dbEndpoints.allow);
 	const cachePreloadRequested = loadCachePreloadSettings(env);
 	const sloWebhookUrl = env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "";
@@ -1172,8 +1189,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
 		ragflow: ragflowFromEnv(env),
 		lightrag: lightragFromEnv(env),
-		docsBackend: docsBackendPick.backend,
-		docsBackendRejected: docsBackendPick.rejected,
+		docsBackend,
 		lightragQueryModeRejected: resolveLightragQueryMode(env).rejected,
 		tei: teiFromEnv(env),
 		embedCache: embedCacheFromEnv(env),
@@ -2226,9 +2242,6 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Named by variable, rule and field path only: the value never reaches the log.
 	if (config.solana.signerSetProblem !== null) {
 		warnings.push(`checkpoint_verify and memory_verify answer unverified until SUBSTRATE_ANCHOR_SIGNER_SET is fixed: ${config.solana.signerSetProblem}`);
-	}
-	if (config.docsBackendRejected !== null) {
-		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);
 	}
 	// Named by key only, never by value: the warning goes to a log.
 	if (config.lightragQueryModeRejected) {

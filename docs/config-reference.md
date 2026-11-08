@@ -204,8 +204,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `RAGFLOW_URL` | string | none | RAGFlow base URL | docs_search answers degraded, docs_ingest refuses. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_API_KEY` | secret-ref | none | API key | the plane is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_DATASET_ID` | string | none | dataset id | nothing: no code reads it today (docs_ingest names the dataset after the repo) (UNREAD: no code reads it today). See `docs/docs-search-ingest.md` | none | yes |
-| `LIGHTRAG_URL` | string | none | LightRAG base URL | the LightRAG path is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
-| `LIGHTRAG_API_KEY` | secret-ref | none | API key, sent as a bearer on the LightRAG health probe | LightRAG is reached unauthenticated. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `LIGHTRAG_URL` | string | none | absolute http or https base URL; required (boot stops without it) when the docs backend is lightrag | the LightRAG path is unconfigured; the docs backend is ragflow unless SUBSTRATE_DOCS_BACKEND names lightrag. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `LIGHTRAG_API_KEY` | secret-ref | none | API key, sent as the X-API-Key header on every LightRAG call (never a bearer) | LightRAG is reached unauthenticated. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_URL` | string | none | LightRAG base URL override for the Railway hosting layer | LIGHTRAG_URL applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_API_KEY` | secret-ref | none | API key override for the Railway hosting layer | LIGHTRAG_API_KEY applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PROJECT` | string | none | Railway project label, report-only: it names the project in Railway plans and status and never scopes ingest or search | no project label. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |

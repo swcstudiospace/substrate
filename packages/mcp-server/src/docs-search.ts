@@ -33,12 +33,12 @@
  */
 import { randomUUID } from "node:crypto";
 import type { BreakerState, CitationProvenance } from "@substrate/observability";
-import { DeadlineError, type SharedDeadline, sharedDeadline } from "./deadline.ts";
+import { DeadlineError, sharedDeadline } from "./deadline.ts";
 import { repoScopePrefix } from "./event.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import { withDeadline } from "./docs-freshness.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
-import { ragRetryDelay } from "./rag-retry.ts";
+import { LIGHTRAG_EMPTY_ANSWER, runLightragAttempts, settleLightrag, type LightragSettled } from "./lightrag-attempts.ts";
 import { DEFAULT_TANDEM_OPTIONS, mergeTandem, type TandemCounts, type TandemOptions, type TandemOrigin, type TandemProvenance } from "./tandem-recall.ts";
 import {
 	listDatasets,
@@ -172,6 +172,12 @@ export interface SearchReply {
 	 * LightRAG plane failed and Hindsight recall answered in its place.
 	 */
 	backend?: DocsBackend | "hindsight";
+	/**
+	 * Set when the LightRAG path answered from neither the plane nor Hindsight: the plane failed after its retries (or
+	 * was refused or unconfigured) and recall found nothing. Always `degraded` too, with `reason` the failure, and
+	 * `chunks` empty. It is the explicit "no answer" the LightRAG tools share; it is never an empty success.
+	 */
+	unavailable?: true;
 	/** Set when Hindsight recall answered in place of a failed LightRAG plane; `reason` names the failure. */
 	fallback?: "hindsight";
 	/**
@@ -451,12 +457,13 @@ interface SearchDeps {
 	tandem?: TandemOptions;
 }
 
-function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[]): Promise<SearchReply> {
+function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[], unavailable = false): Promise<SearchReply> {
 	const reply: SearchReply = {
 		chunks: [],
 		untrusted: UNTRUSTED_DOCS_NOTICE,
 		degraded: true,
 		reason,
+		...(unavailable ? { unavailable: true as const } : {}),
 		...(degradedDatasets !== undefined ? { degraded_datasets: degradedDatasets } : {}),
 	};
 	// Hindsight fallback (SPE-19390): before the degraded reply is stored,
@@ -957,33 +964,13 @@ function mergedGraphCounts(hints: readonly PlanningGraphHint[] | undefined, deta
 	return { entities: names.size, relations: planningGraphCounts(hinted).relations + detail.counts.relations };
 }
 
-/** A read's outcome as `Promise.allSettled` reports it, for one awaited read. */
-function settle<T>(read: Promise<T>): Promise<PromiseSettledResult<T>> {
-	return read.then(
-		(value): PromiseSettledResult<T> => ({ status: "fulfilled", value }),
-		(reason: unknown): PromiseSettledResult<T> => ({ status: "rejected", reason }),
-	);
-}
-
 /**
- * Whether a failed LightRAG attempt is worth another. A breaker refusal is not: the breaker decides when the
- * plane is tried again, and a retry would be refused the same way. Nor is a spent budget: no time is left to try in.
+ * An answer with no chunks is not an answer: it is a failed attempt, so the retry policy and the fallback judge it the
+ * way they judge any other failure. `planes/lightrag.ts` already refuses an empty payload; this keeps the rule at the
+ * search too, so no empty result can be served as a success.
  */
-function retryableLightragFailure(outcome: PromiseSettledResult<LightragQueryOutcome>): boolean {
-	if (outcome.status === "rejected") return !(outcome.reason instanceof DeadlineError);
-	return !outcome.value.ok && outcome.value.reason !== LIGHTRAG_CIRCUIT_OPEN;
-}
-
-/**
- * One retry's backoff, raced against the search's shared deadline. False when the budget ended the wait first, so
- * the retry is not made: no attempt starts once the budget has run out. `ragRetryDelay` never rejects, so the race
- * can only reject with the deadline's own `DeadlineError`.
- */
-function backoffWithinDeadline(deadline: SharedDeadline, baseMs: number, retry: number): Promise<boolean> {
-	return deadline.race(ragRetryDelay(baseMs, retry)).then(
-		() => true,
-		() => false,
-	);
+function failEmptyAnswer(outcome: LightragQueryOutcome): LightragQueryOutcome {
+	return outcome.ok && outcome.chunks.length === 0 ? { ok: false, reason: LIGHTRAG_EMPTY_ANSWER } : outcome;
 }
 
 /** How the Hindsight leg of a tandem search ended. */
@@ -1037,8 +1024,10 @@ async function hindsightRecall(deps: SearchDeps, question: string): Promise<read
 }
 
 /**
- * A LightRAG plane failure after its retries, a breaker refusal, or an unconfigured plane: Hindsight recall answers in its place when
- * it can. With no hit the plain degraded reply stands, its reason the LightRAG failure as before.
+ * The LightRAG path's answer when the plane did not answer: a LightRAG failure after its retries, a breaker refusal, an
+ * unconfigured plane, or an empty answer. Hindsight recall answers in its place when it finds something (`degraded`,
+ * `fallback: "hindsight"`). With no hit the reply is `unavailable`: degraded, empty, and carrying the LightRAG reason.
+ * This is the rule `docs_lightrag_query` and `POST /docs/lightrag/query` answer by too (`answerLightragQuery`).
  */
 async function lightragFallback(
 	deps: SearchDeps,
@@ -1048,7 +1037,7 @@ async function lightragFallback(
 	degradedDatasets?: DegradedDataset[],
 ): Promise<SearchReply> {
 	const recalled = await hindsightRecall(deps, question);
-	if (recalled.length === 0) return failed(deps, sessionId, reason, degradedDatasets);
+	if (recalled.length === 0) return failed(deps, sessionId, reason, degradedDatasets, true);
 	const reply = hindsightFallbackReply(
 		recalled.slice(0, 10).map((hit, index) => hindsightCite(hit, index)),
 		reason,
@@ -1103,20 +1092,21 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// ignores scope on the wire, so the ids only key pins and the note payload.
 	const listed: DatasetListOutcome =
 		deps.lightragDatasets !== undefined ? await deps.lightragDatasets.list() : { ok: true, datasets: [...wanted].sort().map((name) => ({ id: name, name })) };
-	if (!listed.ok) return failed(deps, sessionId, listed.reason);
+	if (!listed.ok) return lightragFallback(deps, sessionId, question, listed.reason);
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
 	const first = readable[0];
-	if (first === undefined) return failed(deps, sessionId, "no-readable-datasets");
+	if (first === undefined) return lightragFallback(deps, sessionId, question, "no-readable-datasets");
 	const effectiveQuestion = augmentQuestionWithSteering(question, deps.steering ?? null);
 	const repoId = normalizeRepoId(deps.repoId ?? null);
 	const fetchImpl = deps.lightragFetch ?? deps.fetchImpl;
 	const deadline = sharedDeadline(deps.budgetMs ?? 0, "docs budget");
 	const policy = deps.lightragRetry ?? DEFAULT_RAG_MACHINE_SETTINGS;
 	// A client that throws synchronously is a failed search, not an
-	// exception out of the search.
+	// exception out of the search. An answer with no chunks is a failed
+	// attempt (`LIGHTRAG_EMPTY_ANSWER`), never a success.
 	const once = (): Promise<LightragQueryOutcome> => {
 		try {
-			return deadline.race(retrieve(lightrag, effectiveQuestion, readable.map((dataset) => dataset.id), fetchImpl));
+			return deadline.race(retrieve(lightrag, effectiveQuestion, readable.map((dataset) => dataset.id), fetchImpl)).then(failEmptyAnswer);
 		} catch (cause) {
 			return Promise.reject(cause);
 		}
@@ -1124,22 +1114,18 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// One attempt. Half-open recovery, mirroring the RAGFlow fan-out: a refusal
 	// that landed while another probe held the slot is retried once when the
 	// breaker has since closed.
-	const attempt = async (): Promise<PromiseSettledResult<LightragQueryOutcome>> => {
-		let settled = await settle(once());
+	const attempt = async (): Promise<LightragSettled<LightragQueryOutcome>> => {
+		let settled = await settleLightrag(once());
 		if (breakerState?.() === "closed" && settled.status === "fulfilled" && !settled.value.ok && settled.value.reason === LIGHTRAG_CIRCUIT_OPEN) {
-			settled = await settle(once());
+			settled = await settleLightrag(once());
 		}
 		return settled;
 	};
 	// Tandem: Hindsight is asked beside the LightRAG retrieval, under its own budget, so it adds no wait of its own beyond that.
 	const tandemLeg = startTandemLeg(deps, question);
-	// The plane's retries, on docs_lightrag_query's backoff. One shared budget covers every attempt and every wait:
-	// a wait the budget ends stops the retries, and the last failure is the one answered.
-	let outcome = await attempt();
-	for (let retry = 1; retry <= policy.maxRetries && retryableLightragFailure(outcome); retry += 1) {
-		if (!(await backoffWithinDeadline(deadline, policy.retryBaseMs, retry))) break;
-		outcome = await attempt();
-	}
+	// The plane's retries, under `runLightragAttempts`: one shared budget covers every attempt and every wait, and a
+	// wait the budget ends stops the retries, so the last failure is the one answered.
+	const outcome = await runLightragAttempts(attempt, policy, deadline);
 	deadline.clear();
 	const nowMs = deps.nowMs ?? Date.now();
 	const pinAged = deps.degradedDatasets?.includes(first.name) ?? false;

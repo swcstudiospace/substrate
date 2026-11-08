@@ -81,21 +81,15 @@ import { checkoutHead } from "./git.ts";
 import type { CursorPosition, GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import {
+	answerLightragQuery,
 	attributedSurface,
-	augmentRagQuery,
 	createMcpServer,
-	getCachedRagResult,
-	hindsightRagFallback,
 	ingestRefusalIsGate,
-	lightragReplayKey,
-	ragGraphCounts,
 	ragMachine,
-	setCachedRagResult,
 	surfaceClaimRefusal,
 	type McpCaller,
 	withLightragNotice,
 } from "./mcp.ts";
-import { isLightragQueryMode, LIGHTRAG_CIRCUIT_OPEN } from "./planes/lightrag.ts";
 import {
 	auditRefusal,
 	auditToolCalls,
@@ -117,7 +111,6 @@ import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 import { parseClaimsQuery } from "./worktree-claims.ts";
 import { parseWorktreeListQuery, validateWorktreeReport, WORKTREE_REPORT_MAX_BYTES } from "./worktree-registry.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
-import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
@@ -1949,95 +1942,15 @@ export function createHttpServer(
 					...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_lightrag_query", fields))) return;
-				const entityList = Array.isArray(entities) ? (entities as string[]) : [];
-				const relationList = Array.isArray(relations)
-					? (relations as Array<{ source: string; target: string; kind: string }>)
-					: [];
-				const key = lightragReplayKey(
-					surface,
-					{
-						question: record.question as string,
-						...(typeof mode === "string" ? { mode } : {}),
-						...(typeof topK === "number" ? { topK } : {}),
-						entities: entityList,
-						relations: relationList,
-					},
-					typeof idempotencyKey === "string" ? idempotencyKey : undefined,
-				);
-				const replayed = getCachedRagResult(key);
-				if (replayed !== undefined) {
-					process.stderr.write(
-						`${JSON.stringify({ source: "substrate", event: "rag-state", from: replayed.state.state, to: replayed.state.state, reason: "idempotent-replay", duplicate: true })}\n`,
-					);
-					sendJson(res, 200, withLightragNotice(replayed));
-					return;
-				}
-				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
-				if (admission === "refuse") {
-					const held = await hindsightRagFallback(substrate, surface, record.question as string, entityList, relationList, "rag breaker open");
-					setCachedRagResult(key, held);
-					sendJson(res, 200, withLightragNotice(held));
-					return;
-				}
-				const report = { probe: admission === "probe" };
-				// A probe's attempt ends here, whatever it found: until then no other query reaches the plane.
-				try {
-					ragMachine.transition("STEERING", `lightrag_query:${config.docsBackend}`);
-					const lightrag = config.lightrag;
-					if (lightrag === null) {
-						ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:unconfigured");
-						const degraded = await hindsightRagFallback(
-							substrate,
-							surface,
-							record.question as string,
-							entityList,
-							relationList,
-							"lightrag-not-configured",
-						);
-						setCachedRagResult(key, degraded);
-						sendJson(res, 200, withLightragNotice(degraded));
-						return;
-					}
-					const augmented = augmentRagQuery(record.question as string, entityList, relationList);
-					ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
-					let lastReason = "lightrag unreachable";
-					for (let attempt = 0; attempt <= config.ragMachine.maxRetries; attempt += 1) {
-						if (attempt > 0) await ragRetryDelay(config.ragMachine.retryBaseMs, attempt);
-						const answered = await substrate.lightragQuery(lightrag, {
-							question: augmented,
-							...(isLightragQueryMode(mode) ? { mode } : {}),
-							...(typeof topK === "number" ? { topK } : {}),
-						});
-						if (answered.ok) {
-							const state = ragMachine.recordSuccess("lightrag_query:served", report);
-							const result = {
-								backend: "lightrag" as const,
-								chunks: answered.chunks,
-								graph: ragGraphCounts(answered.chunks, entityList, relationList),
-								state,
-							};
-							setCachedRagResult(key, result);
-							sendJson(res, 200, withLightragNotice(result));
-							return;
-						}
-						lastReason = answered.reason;
-						// An open plane breaker refused the call without reaching LightRAG: another attempt would be refused too, so it is not retried.
-						if (answered.reason === LIGHTRAG_CIRCUIT_OPEN) break;
-					}
-					ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`, report);
-					const degraded = await hindsightRagFallback(
-						substrate,
-						surface,
-						record.question as string,
-						entityList,
-						relationList,
-						lastReason,
-					);
-					setCachedRagResult(key, degraded);
-					sendJson(res, 200, withLightragNotice(degraded));
-				} finally {
-					if (admission === "probe") ragMachine.settleProbe();
-				}
+				const reply = await answerLightragQuery(substrate, surface, {
+					question: record.question as string,
+					...(typeof mode === "string" ? { mode } : {}),
+					...(typeof topK === "number" ? { topK } : {}),
+					entities: Array.isArray(entities) ? (entities as string[]) : [],
+					relations: Array.isArray(relations) ? (relations as Array<{ source: string; target: string; kind: string }>) : [],
+					...(typeof idempotencyKey === "string" ? { idempotencyKey } : {}),
+				});
+				sendJson(res, 200, withLightragNotice(reply));
 				return;
 			}
 

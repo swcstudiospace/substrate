@@ -1239,7 +1239,7 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 		}) as unknown as typeof fetch;
 		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_BREAKER_ENV);
 		for (const question of ["trip one", "trip two", "trip three"]) {
-			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+			expect((await call(client, "docs_lightrag_query", { question })).json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 		}
 		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
 		const queriesWhenOpen = queries;
@@ -1256,7 +1256,7 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
 
 		const inside = await call(client, "docs_lightrag_query", { question: "asked inside the cooldown" });
-		expect(inside.json().fallback).toBe("hindsight");
+		expect(inside.json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 		expect(queries).toBe(queriesWhenOpen);
 	});
 
@@ -1294,14 +1294,14 @@ describe("the RAG breaker admits one half-open probe", () => {
 		// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
 		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_QUERY_ENV);
 		for (const question of ["drive one", "drive two", "drive three"]) {
-			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+			expect((await call(client, "docs_lightrag_query", { question })).json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 		}
 		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
 
 		const probe = call(client, "docs_lightrag_query", { question: "the probe" });
 		await probeReached.promise;
 		const burst = await call(client, "docs_lightrag_query", { question: "the burst" });
-		expect(burst.json().fallback).toBe("hindsight");
+		expect(burst.json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 		expect(attempts).toBe(4);
 
 		probeReply.resolve(lightragAnswer());
@@ -1390,7 +1390,7 @@ describe("a docs_search is the RAG breaker's half-open probe", () => {
 		// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
 		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_BREAKER_ENV);
 		for (const question of ["trip one", "trip two", "trip three"]) {
-			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+			expect((await call(client, "docs_lightrag_query", { question })).json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 		}
 		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
 		const tripped = planeCalls;
@@ -1458,7 +1458,7 @@ describe("a half-open probe is settled only by its own report", () => {
 		// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
 		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_QUERY_ENV);
 		for (const question of ["trip one", "trip two", "trip three"]) {
-			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
+			expect((await call(client, "docs_lightrag_query", { question })).json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 		}
 		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
 
@@ -1470,7 +1470,7 @@ describe("a half-open probe is settled only by its own report", () => {
 		expect((await call(client, "docs_rag_state")).json()).toMatchObject({ state: "CONTEXT_REFRESH", consecutiveFailures: 3 });
 
 		probeReply.resolve(new Response("upstream down", { status: 500 }));
-		expect((await probe).json().fallback).toBe("hindsight");
+		expect((await probe).json()).toMatchObject({ degraded: true, unavailable: true, chunks: [] });
 		expect((await call(client, "docs_rag_state")).json()).toMatchObject({ state: "ERROR", consecutiveFailures: 4 });
 	});
 });
@@ -1510,6 +1510,34 @@ describe("docs_lightrag_query serves a Hindsight answer as degraded", () => {
 			}
 		}
 	});
+
+	test("with recall empty too, a failed LightRAG query is unavailable: no fallback, no backend, no chunks", async () => {
+		globalThis.fetch = (async () => new Response("upstream down", { status: 500 })) as unknown as typeof fetch;
+		const substrate = new Substrate(
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_MAX_RETRIES: "0", SUBSTRATE_RAG_HALF_OPEN_MS: "0" }),
+			{ index: null, greptime: ledger().greptime as never, hindsightFetch: new HindsightFake().fetch },
+		);
+		const server = createMcpServer(substrate, "omp");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"] as const;
+		const saved = names.map((name) => [name, process.env[name]] as const);
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = "sub-omp";
+		try {
+			const reply = await call(client, "docs_lightrag_query", { question: "where is the plan?" });
+			expect(reply.json()).toMatchObject({ degraded: true, unavailable: true, chunks: [], reason: expect.stringContaining("lightrag 500") });
+			expect(reply.json().fallback).toBeUndefined();
+			expect(reply.json().backend).toBeUndefined();
+		} finally {
+			for (const [name, value] of saved) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	});
 });
 
 describe("docs_lightrag_query runs through the LightRAG plane client and its breaker", () => {
@@ -1534,13 +1562,13 @@ describe("docs_lightrag_query runs through the LightRAG plane client and its bre
 		expect(substrate.planes.gate("lightrag").breaker?.state()).toBe("closed");
 		for (const n of [1, 2, 3, 4, 5]) {
 			const reply = await call(client, "docs_lightrag_query", { question: `failing question ${n}` });
-			expect(reply.json()).toMatchObject({ fallback: "hindsight", reason: expect.stringContaining("lightrag 500") });
+			expect(reply.json()).toMatchObject({ degraded: true, unavailable: true, chunks: [], reason: expect.stringContaining("lightrag 500") });
 		}
 		expect(seen).toHaveLength(5);
 		expect(substrate.planes.gate("lightrag").breaker?.state()).toBe("open");
 
 		const refused = await call(client, "docs_lightrag_query", { question: "asked while the breaker is open" });
-		expect(refused.json()).toMatchObject({ fallback: "hindsight", reason: expect.stringContaining("lightrag circuit open") });
+		expect(refused.json()).toMatchObject({ degraded: true, unavailable: true, chunks: [], reason: expect.stringContaining("lightrag circuit open") });
 		// The open breaker refused the call before the server saw it.
 		expect(seen).toHaveLength(5);
 
