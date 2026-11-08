@@ -2644,6 +2644,7 @@ export class Substrate {
 				repo: request.repo ?? null,
 				branch: request.branch ?? null,
 				graph_id: request.graph_id ?? null,
+				grant: this.memoryGrantDigest(request.surface),
 				...this.expiryKey(undefined),
 				// The recall mode changes the rendered text, so it is in every key the text lives under
 				// (answer, last-good snapshot): a shadow entry is never served as enforce, nor the reverse.
@@ -2867,7 +2868,7 @@ export class Substrate {
 		const scope = this.config.contextualRecall.recallScope;
 		const graphId = this.recallGraphId(request);
 		// Under `graph` the answer holds the claimed graph's lines, so another graph (or none) must never be served this entry; under `off` the key is the key it was.
-		const args = { ...fanoutSnapshotArgs(repo, banks, query), ...(scope === "graph" && graphId !== null ? { graph: graphId } : {}) };
+		const args = { ...fanoutSnapshotArgs(repo, banks, query), grant: this.memoryGrantDigest(surface), ...(scope === "graph" && graphId !== null ? { graph: graphId } : {}) };
 		let unchecked = false;
 		const index = this.index;
 		const fanOut = async (): Promise<RecallSnapshot | null> => {
@@ -2875,7 +2876,7 @@ export class Substrate {
 			const fanout = await fanOutBriefRecall(
 				{ config: hindsight, banks, fetchImpl: this.hindsightFetch, budgetMs: briefRecallBudgetMs(this.config.briefRecall.budgetMs) },
 				query,
-				{ surface, repo },
+				{ surface, repo, granted: this.memoryGrant(surface) },
 				{
 					// Another repo's copy of the same text must not reach the cross-bank dedupe, where it could hide this repo's own copy.
 					keep: (hit) => hit.metadata.scope === repoScope(repo) || (graphId !== null && hit.metadata.graph_id === graphId),
@@ -3880,7 +3881,7 @@ export class Substrate {
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: { recall: true, query, banks: banks ?? null, repo: callerRepo },
+			args: { recall: true, query, banks: banks ?? null, repo: callerRepo, grant: this.memoryGrantDigest(callerSurface) },
 			// An accepted memory write bumps the memory generation, so a fresh
 			// retain is never hidden behind a stale recall (D26-06a). The retain
 			// itself lands later: under `narrow` it bumps the recall generation,
@@ -6947,6 +6948,18 @@ export class Substrate {
 		const scope = this.config.repoScope;
 		if (!scope.enforced) return undefined;
 		return (repo) => isSurfaceName(surface) && authorizeRepo(scope, surface, repo).ok;
+	}
+
+	/**
+	 * The digest of the repositories `surface` is granted under repository scope. It is part of every cache key whose answer depends on
+	 * the grant, so an answer cached under one grant is never served under another. One fixed value while scoping is off, where every
+	 * caller is granted every repository.
+	 */
+	private memoryGrantDigest(surface: string | null): string {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return "off";
+		const granted = isSurfaceName(surface) ? [...(scope.grants.get(surface) ?? [])].sort() : [];
+		return createHash("sha256").update(canonicalJson(granted)).digest("hex").slice(0, 16);
 	}
 
 	/**

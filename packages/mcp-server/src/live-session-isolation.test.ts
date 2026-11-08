@@ -7,6 +7,11 @@ import { runSteer, type SteerDeps } from "../../cli/src/steer/index.ts";
 import { issueLiveSession } from "./planning/live-session.test-support.ts";
 import { listSteering, LiveSessionBoundaryError, queueSteering } from "./planning/steering-tools.ts";
 import { AUTH_OWNER, AUTH_FOREIGN, AUTH_OPERATOR, OWNER, FOREIGN, OPERATOR, UNKNOWN, NOT_FOUND, UNAVAILABLE, AUDIT_UNAVAILABLE, call, cleanupLiveHarness, responseFingerprint, serveLive, settle, toolValue } from "./live-session-consumer.test-support.ts";
+import { ReadThroughCache, type CacheRedis } from "./cache.ts";
+import { loadConfig } from "./config.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
+import { clearEnsuredBanks } from "./planes/hindsight.ts";
+import { Substrate } from "./service.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await cleanupLiveHarness(); for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -220,3 +225,61 @@ describe("real CLI and REST isolation", () => {
 		expect(response.status).toBe(503); expect(await response.json()).toEqual(UNAVAILABLE);
 	});
 });
+
+/** Point the Hindsight env reads at the fake for one test, with four banks configured; restores every touched variable. */
+async function withHindsight<T>(body: () => Promise<T>): Promise<T> {
+	const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"];
+	const saved = new Map(names.map((name) => [name, process.env[name]]));
+	process.env.HINDSIGHT_URL = "http://fake";
+	process.env.HINDSIGHT_API_KEY = "test-bearer";
+	process.env.HINDSIGHT_BANKS = ["sub-omp", "sub-hermes", "sub-cursor", "sub-grok-bot"].join(",");
+	clearEnsuredBanks();
+	try {
+		return await body();
+	} finally {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+}
+
+/** The in-memory Redis two instances share: the read-through cache needs get, set and incr only. */
+class FakeRedis implements CacheRedis {
+	readonly values = new Map<string, string>();
+	async get(key: string): Promise<string | null> {
+		return this.values.get(key) ?? null;
+	}
+	async set(key: string, value: string): Promise<void> {
+		this.values.set(key, value);
+	}
+	async incr(key: string): Promise<number> {
+		const next = Number(this.values.get(key) ?? "0") + 1;
+		this.values.set(key, String(next));
+		return next;
+	}
+}
+
+/** One Substrate over the shared Redis and the Hindsight fake, with `scopes` as its `SUBSTRATE_REPO_SCOPES`. */
+function substrateOver(redis: FakeRedis, fake: HindsightFake, scopes: Record<string, string[]>): Substrate {
+	const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+	return new Substrate(loadConfig({ SUBSTRATE_REPO_SCOPES: JSON.stringify(scopes) }), { index: null, greptime: null, cache, hindsightFetch: fake.fetch });
+}
+
+describe("memory-search answers under repo scope", () => {
+	test("an answer cached under one grant is not served to an instance whose grant for that repo was removed", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			fake.seed("sub-omp", [{ id: "a-1", text: "owner-a lesson: rotate the lease", document_id: "a-1-doc", tags: [], metadata: { scope: "repo:owner/a", repo: "owner/a" }, score: 0.9 }]);
+			for (const bank of ["sub-hermes", "sub-cursor", "sub-grok-bot"]) fake.seed(bank, []);
+			const redis = new FakeRedis();
+			// The first instance grants omp owner/a and caches the answer. Its recall is non-degraded, so the answer is stored.
+			const granted = await substrateOver(redis, fake, { omp: ["owner/a"] }).recallMemories({ query: "lease" }, "omp", "owner/a");
+			expect(granted.results.map((hit) => hit.text)).toEqual(["owner-a lesson: rotate the lease"]);
+			// The second instance grants omp nothing: same surface, repo and query, so only a grant-aware cache key keeps it from the first answer.
+			const removed = await substrateOver(redis, fake, { cursor: ["owner/a"] }).recallMemories({ query: "lease" }, "omp", "owner/a");
+			expect(removed.results.map((hit) => hit.text)).not.toContain("owner-a lesson: rotate the lease");
+		});
+	});
+});
+
