@@ -2644,7 +2644,7 @@ export class Substrate {
 				repo: request.repo ?? null,
 				branch: request.branch ?? null,
 				graph_id: request.graph_id ?? null,
-				grant: this.memoryGrantDigest(request.surface),
+				...this.grantKey(request.surface),
 				...this.expiryKey(undefined),
 				// The recall mode changes the rendered text, so it is in every key the text lives under
 				// (answer, last-good snapshot): a shadow entry is never served as enforce, nor the reverse.
@@ -2868,7 +2868,7 @@ export class Substrate {
 		const scope = this.config.contextualRecall.recallScope;
 		const graphId = this.recallGraphId(request);
 		// Under `graph` the answer holds the claimed graph's lines, so another graph (or none) must never be served this entry; under `off` the key is the key it was.
-		const args = { ...fanoutSnapshotArgs(repo, banks, query), grant: this.memoryGrantDigest(surface), ...(scope === "graph" && graphId !== null ? { graph: graphId } : {}) };
+		const args = { ...fanoutSnapshotArgs(repo, banks, query), ...this.grantKey(surface), ...(scope === "graph" && graphId !== null ? { graph: graphId } : {}) };
 		let unchecked = false;
 		const index = this.index;
 		const fanOut = async (): Promise<RecallSnapshot | null> => {
@@ -3881,7 +3881,7 @@ export class Substrate {
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: { recall: true, query, banks: banks ?? null, repo: callerRepo, grant: this.memoryGrantDigest(callerSurface) },
+			args: { recall: true, query, banks: banks ?? null, repo: callerRepo, ...this.grantKey(callerSurface) },
 			// An accepted memory write bumps the memory generation, so a fresh
 			// retain is never hidden behind a stale recall (D26-06a). The retain
 			// itself lands later: under `narrow` it bumps the recall generation,
@@ -6951,15 +6951,15 @@ export class Substrate {
 	}
 
 	/**
-	 * The digest of the repositories `surface` is granted under repository scope. It is part of every cache key whose answer depends on
-	 * the grant, so an answer cached under one grant is never served under another. One fixed value while scoping is off, where every
-	 * caller is granted every repository.
+	 * The grant part of a cache key: the digest of the repositories `surface` is granted under repository scope. An answer cached under one
+	 * grant is never served under another, so the part is present while scoping is on. While scoping is off it is absent, so unscoped keys
+	 * keep the shape they had before the grant existed.
 	 */
-	private memoryGrantDigest(surface: string | null): string {
+	private grantKey(surface: string | null): { grant?: string } {
 		const scope = this.config.repoScope;
-		if (!scope.enforced) return "off";
+		if (!scope.enforced) return {};
 		const granted = isSurfaceName(surface) ? [...(scope.grants.get(surface) ?? [])].sort() : [];
-		return createHash("sha256").update(canonicalJson(granted)).digest("hex").slice(0, 16);
+		return { grant: createHash("sha256").update(canonicalJson(granted)).digest("hex").slice(0, 16) };
 	}
 
 	/**
