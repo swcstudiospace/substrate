@@ -134,7 +134,7 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 | HARD-S2 | Security | 72 | Identifier clause closed under SUBSTRATE_REPO_SCOPES; the server refuses to start with the registry set and no scopes (owner decision 2026-11-03); open: default-off posture of the corpus CLI and collector installer. |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
-| HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |
-| HARD-R3 | Redundancy | 76 | Not started |
+| HARD-R2 | Redundancy | 75 | Human-needed: 8/8 truths verified; live proofs H-2, H-3, H-4a and owner item H-5 remain; HARD-R2 unowned per 75-VERIFICATION |
+| HARD-R3 | Redundancy | 76 | Human-needed: 2/2 must-haves verified; SC1 within the owner-accepted pre-send scope; SC2 passed by owner override, not verified (see 76-VERIFICATION.md) |
 | HARD-H1 | Hardening | 77 | Human-needed (2026-11-06): 7 of 8 truths verified at a46d42c3 (T1 to T7); T8 uncertain and not scored; T5 to T7 named gate passes; open: T8 per-session ordering rule and HARD-H1 ownership, no plan claims it (STATE Needs Human, H5); see 77-VERIFICATION.md |
-| HARD-H2 | Hardening | 78 | Not started |
+| HARD-H2 | Hardening | 78 | Human-needed: 8 of 9 truths verified; truth 7 partial (owner item); 4 live proofs open (see 78-VERIFICATION.md) |
