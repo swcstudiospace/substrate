@@ -403,6 +403,33 @@ describe("executePlan", () => {
 		expect(cache.keys.size).toBe(FIXTURE_KEYS.length);
 	});
 
+	test("a plan with no items is refused and writes nothing, even while the report holds an orphan", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = await planOver(deps);
+		const empty: Plan = { ...plan, items: [] };
+		const result = await executePlan(empty, deps, { execute: true, serverStopped: true });
+		expect(result.refused).toBe(true);
+		expect(result.executed).toBe(false);
+		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
+		expect(cache.keys.size).toBe(FIXTURE_KEYS.length);
+	});
+
+	test("a flush item that names no supporting orphan is refused and writes nothing", async () => {
+		const cache = orphanCache();
+		const deps = fakeDeps(cache, []);
+		const plan = await planOver(deps);
+		const unsupported: Plan = {
+			...plan,
+			items: [{ action: "flush-derived-cache" as const, match: "substrate:v1:*", reason: "names no orphan", orphans: [] }],
+		};
+		const result = await executePlan(unsupported, deps, { execute: true, serverStopped: true });
+		expect(result.refused).toBe(true);
+		expect(result.executed).toBe(false);
+		expect(cache.calls.some((call) => call.startsWith("unlink"))).toBe(false);
+		expect(cache.keys.size).toBe(FIXTURE_KEYS.length);
+	});
+
 	test("a flush that fails after one batch reports the keys that batch removed", async () => {
 		const cache = orphanCache();
 		const deps = fakeDeps(cache, []);

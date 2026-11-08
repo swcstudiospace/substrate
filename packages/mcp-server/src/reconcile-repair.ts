@@ -167,16 +167,20 @@ export function planFromReport(report: Report, now: Date, counters: readonly str
 }
 
 /**
- * Why a plan's items may not be run, or null when every item is the flush this repair runs. The digest pins what the report
+ * Why a plan may not be run, or null when it names at least one flush and every item is that flush. The digest pins what the report
  * found; this pins what the plan asks to remove. Messages never echo a value from the plan file.
  */
 function planRefusal(items: readonly PlanItem[], liveOrphans: ReadonlySet<string>): string | null {
+	if (items.length === 0) return "the plan names no action; re-plan before repairing";
 	for (const item of items) {
 		if (typeof item !== "object" || item === null || item.action !== "flush-derived-cache") {
 			return "the plan names an action this repair does not run; re-plan before repairing";
 		}
 		if (item.match !== FLUSH_MATCH) return `the plan names a match other than ${FLUSH_MATCH}; re-plan before repairing`;
-		if (!Array.isArray(item.orphans) || item.orphans.some((orphan) => !liveOrphans.has(orphan))) {
+		if (!Array.isArray(item.orphans) || item.orphans.length === 0) {
+			return "the plan's flush names no supporting orphan; re-plan before repairing";
+		}
+		if (item.orphans.some((orphan) => !liveOrphans.has(orphan))) {
 			return "the plan names an orphan that the fresh report does not list as a live generation orphan; re-plan before repairing";
 		}
 	}
