@@ -19,7 +19,10 @@ import {
 	type SteeringAuditEntry,
 	type SteeringClock,
 	type SteeringHistorySink,
+	MemorySteeringIdempotencyStore,
+	type SteeringIdempotencyStore,
 } from "./steering.ts";
+import { nextQueuedDirective } from "./steering-waiters.ts";
 
 const HUMAN = "ops.lead";
 const WORKER = "worker-a";
@@ -519,5 +522,89 @@ describe("steering idempotency settings", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.errors.map((error) => error.key).sort()).toEqual([STEERING_IDEMPOTENCY_CAP_ENV, STEERING_IDEMPOTENCY_TTL_ENV].sort());
 		expect(loadSteeringIdempotencySettings({ [STEERING_IDEMPOTENCY_CAP_ENV]: "0" }).ok).toBe(false);
+	});
+});
+
+describe("SteeringInbox: keyed queues under concurrency and store outages", () => {
+	const KEY = "retry-key-0001";
+
+	/** The memory store, with one call failing the way a lost connection would. */
+	class DownStore extends MemorySteeringIdempotencyStore {
+		constructor(private readonly down: "findReplay" | "nextSequence") {
+			super();
+		}
+		override async findReplay(scopeKey: string, nowMs: number) {
+			if (this.down === "findReplay") throw connectionLost();
+			return super.findReplay(scopeKey, nowMs);
+		}
+		override async nextSequence(sessionId: string) {
+			if (this.down === "nextSequence") throw connectionLost();
+			return super.nextSequence(sessionId);
+		}
+	}
+
+	function connectionLost(): Error {
+		return Object.assign(new Error("connection lost"), { code: "ECONNREFUSED" });
+	}
+
+	function buildOver(store: SteeringIdempotencyStore) {
+		const clock = new ManualClock(1_000_000);
+		const history = new RecordingHistory(() => inbox);
+		const inbox: SteeringInbox = new SteeringInbox({ history, clock, policy: { allowlist: [HUMAN], ratePerMin: DEFAULT_STEERING_RATE_PER_MIN }, store });
+		return { inbox, history };
+	}
+
+	test("a replay takes no sequence, so the next distinct command takes the number after the first", async () => {
+		const { inbox } = build();
+		await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		expect((await inbox.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(inbox.get("d-2")).toBeNull();
+		expect((await inbox.enqueue(directive({ id: "d-3" }), "retry-key-0002")).ok).toBe(true);
+		expect(inbox.sequenceOf("d-3")).toBe(2);
+	});
+
+	test("a replay lookup that fails is audit-unavailable, and nothing is queued or audited", async () => {
+		const { inbox, history } = buildOver(new DownStore("findReplay"));
+		expect(await inbox.enqueue(directive({ id: "d-1" }), KEY)).toEqual({ ok: false, error: { code: "audit-unavailable", attempts: 1, lastErrorCode: "ECONNREFUSED" } });
+		expect(inbox.get("d-1")).toBeNull();
+		expect(history.entries).toEqual([]);
+	});
+
+	test("a sequence the store cannot take is audit-unavailable, and nothing is queued or audited", async () => {
+		const { inbox, history } = buildOver(new DownStore("nextSequence"));
+		expect(await inbox.enqueue(directive({ id: "d-1" }))).toEqual({ ok: false, error: { code: "audit-unavailable", attempts: 1, lastErrorCode: "ECONNREFUSED" } });
+		expect(inbox.get("d-1")).toBeNull();
+		expect(history.entries).toEqual([]);
+	});
+
+	test("eight concurrent distinct keyed queues take gapless sequences, and the wait cursor delivers them in that order", async () => {
+		const { inbox } = build();
+		const ids = Array.from({ length: 8 }, (_, index) => `c-${index + 1}`);
+		const results = await Promise.all(ids.map((id, index) => inbox.enqueue(directive({ id }), `concurrent-${String(index + 1).padStart(4, "0")}`)));
+		expect(results.every((result) => result.ok)).toBe(true);
+		expect(ids.map((id) => inbox.sequenceOf(id))).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+		const delivered: string[] = [];
+		for (let next = nextQueuedDirective(inbox, WORKER, null); next !== null; next = nextQueuedDirective(inbox, WORKER, next.record.directive.id)) {
+			delivered.push(next.record.directive.id);
+		}
+		expect(delivered).toEqual(ids);
+	});
+
+	test("applied and declined racing on one directive leave one terminal state and one acknowledgement", async () => {
+		const { inbox, history } = build();
+		await inbox.enqueue(directive({ id: "d-1" }));
+		const results = await Promise.all([
+			inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" }),
+			inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" }),
+		]);
+		const won = results.filter((result) => result.ok);
+		expect(won).toHaveLength(1);
+		expect(results.filter((result) => !result.ok)).toEqual([{ ok: false, error: { code: "already-acknowledged" } }]);
+		expect(history.entries.filter((entry) => entry.event === "acknowledged")).toHaveLength(1);
+		const [only] = won;
+		const winnerOutcome = only?.ok && only.value.state === "acknowledged" ? only.value.outcome : null;
+		const after = inbox.get("d-1");
+		expect(after?.state).toBe("acknowledged");
+		expect(after?.state === "acknowledged" ? after.outcome : null).toBe(winnerOutcome);
 	});
 });
