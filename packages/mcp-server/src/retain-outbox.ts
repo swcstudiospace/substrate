@@ -69,7 +69,7 @@ export type RetainDropCause = "outbox-full" | "exhausted" | "abandoned";
 
 export type RetainDeliveryOutcome = "delivered" | "gone" | "permanent" | { transient: string };
 
-export interface RetainOutboxOptions {
+interface RetainOutboxOptions {
 	/** JSONL file; null keeps the queue in memory. */
 	path?: string | null;
 	max?: number;

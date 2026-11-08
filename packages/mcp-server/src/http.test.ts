@@ -6,7 +6,7 @@
  * actual subprocess — the CLI is a script with top-level side effects, so spawning it
  * is the only honest way to prove the command works rather than the function it calls.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -54,7 +54,7 @@ async function start(
 		config,
 		// Duck-typed stores. A test that needs `verifyGraph` to fail wants a ledger whose
 		// read throws, and standing up a real client to get that would prove nothing extra.
-		{ index: null, greptime: null, ...stores } as ConstructorParameters<typeof Substrate>[1],
+		{ index: null, greptime: null, ...stores, steering: { history: null, liveSessions: null } } as ConstructorParameters<typeof Substrate>[1],
 		observability.observer,
 	);
 	const server = createHttpServer(substrate, config, observability, options);
@@ -514,6 +514,26 @@ describe("REST is audited on the same chain as MCP", () => {
 		expect(((await response.json()) as { error: string }).error).toContain("coord_handoff");
 	});
 
+	test("a REST handoff to a surface outside the list answers 400 and writes nothing", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		const handoff = spyOn(Substrate.prototype, "handoff");
+		try {
+			const response = await fetch(`${harness.base}/handoff`, {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ surface: "omp", to: "nobody", goal: "finish the migration", graph_id: "ut-7" }),
+			});
+
+			expect(response.status).toBe(400);
+			expect(await response.json()).toEqual({ error: "handoff `to` must name a known surface" });
+			// Nothing is written: no packet, and no audit record of a handoff that never happened.
+			expect(handoff).not.toHaveBeenCalled();
+			expect(harness.observability.audit.recent()).toEqual([]);
+		} finally {
+			handoff.mockRestore();
+		}
+	});
+
 	test("a fail-open REST read is still served when the chain will not take the record", async () => {
 		// The other half. These sit inside a prompt's hook budget, and an unwritable audit
 		// file is not a reason to fail an agent's turn.
@@ -743,14 +763,16 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 		// Denying unconditionally made a fault in the audit path able to refuse `/brief`,
 		// which is fail-open precisely so the substrate cannot fail an agent's turn.
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		const response = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
-
-		expect(response.status).toBe(200);
-		expect(await response.text()).not.toContain("audit chain");
-		// And the fault really happened rather than the audit quietly succeeding: nothing
-		// was appended, because the encoder threw before a record existed. Without this the
-		// test would keep passing if the body stopped overflowing the encoder.
-		expect(harness.observability.audit.recent()).toEqual([]);
+		const append = spyOn(harness.observability.audit, "append").mockRejectedValue(new Error("controlled unexpected audit failure"));
+		try {
+			const response = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ surface: "omp" }) });
+			expect(response.status).toBe(200);
+			expect((await response.text()).length).toBeGreaterThan(0);
+			expect(append).toHaveBeenCalledTimes(1);
+			expect(harness.observability.audit.recent()).toEqual([]);
+		} finally {
+			append.mockRestore();
+		}
 	});
 
 	test("a fail-closed route is refused, because there the unrecorded write is worse", async () => {
@@ -775,11 +797,18 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 
 	test("a fail-open route's fault is counted as an allowed record that was lost", async () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
-
-		const appends = defined(findCounter(harness.observability.snapshot(), METRIC.auditAppends), "audit appends counter");
-		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(1);
-		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(0);
+		const append = spyOn(harness.observability.audit, "append").mockRejectedValue(new Error("controlled unexpected audit failure"));
+		try {
+			const response = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ surface: "omp" }) });
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(append).toHaveBeenCalledTimes(1);
+			const appends = defined(findCounter(harness.observability.snapshot(), METRIC.auditAppends), "audit appends counter");
+			expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(1);
+			expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(0);
+		} finally {
+			append.mockRestore();
+		}
 	});
 });
 

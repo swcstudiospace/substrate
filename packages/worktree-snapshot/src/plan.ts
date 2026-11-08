@@ -222,7 +222,7 @@ export async function validateTarget(ctx: RepoContext, target: Snapshot): Promis
 	return target.tree;
 }
 
-export type PlanRestoreParams = {
+type PlanRestoreParams = {
 	worktree: string;
 	target: Snapshot;
 	expectedCurrentTree?: string;

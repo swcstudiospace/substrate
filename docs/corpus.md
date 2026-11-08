@@ -25,8 +25,9 @@ Every documentation file is described by one entry. The contract is `packages/co
 | `source` | `fs`, `github` or `greptile` |
 | `commit` | the commit the content was read at, when known (the checkout HEAD, or the branch head for GitHub) |
 
-The document's citation URL is `https://github.com/<owner>/<repo>/blob/<commit>/<path>` for a GitHub origin and
-`corpus://<repo>/<path>` for a repository with none.
+A GitHub-origin document is cited as `https://github.com/<owner>/<repo>/blob/<commit>/<path>`, where `<commit>` is the full commit the
+manifest records for it; a document whose manifest row records no full commit name is cited as `blob/HEAD/<path>`, and a repository
+with no origin as `corpus://<repo>/<path>`. A citation to a recorded commit does not drift when the repository moves on (ATLAS-03).
 
 ## Kinds and tiers
 
@@ -293,13 +294,20 @@ TEI URL appears in a reply, an audit record, an event or a log line, and the aud
 
 ### `POST /corpus/ingest`
 
-Request: `{protocol, documents, tombstones}` where `documents` are entries plus `body` (the UTF-8 text) and `tombstones`
+Request: `{protocol, documents, tombstones, scope?}` where `documents` are entries plus `body` (the UTF-8 text) and `tombstones`
 are `{repo, path}` rows to remove from the docs plane. `documents: []` with tombstones is a tombstone-only request. The CLI
 sends the tombstones first, as requests of their own, then the document batches. Within one request the server removes the
 tombstoned rows first, then inserts the documents, and only after all of them are recorded deletes the plane documents
 that changed documents superseded; a plane document is deleted only when no active row still holds its id. Ingest
 requests on one server are handled one at a time. An `update` document is sent like an add; when the stored sha256 equals
 the sent one the server refreshes the row's source, kind, tier and commit without touching the plane and answers `updated`.
+
+A request with tombstones carries `scope`, `{coverage, maxTier}` in the plan's shape (`coverage` is a list of `{repo, source}` pairs,
+`maxTier` a tier). Each tombstoned row must sit inside it: its `(repo, source)` pair is in `coverage` and its tier is at most `maxTier`.
+A tombstone request without `scope` is refused `400` with `reason` `tombstone-scope-required`; a request with a tombstone naming a row
+outside the scope is refused `403` with `reason` `tombstone-out-of-scope`. Both are whole-request refusals, checked before any plane write,
+so nothing is removed.
+The `scope` is the caller's own declaration: the server checks each tombstone against it so that a request is consistent with itself. It is not an access control. The grant that bounds a caller is the repo grant (`SUBSTRATE_REPO_SCOPES`), which is off by default.
 
 Response: `{protocol, results, counts, manifestVersion}`. Each result is
 `{repo, path, status: "ingested"|"updated"|"unchanged"|"tombstoned"|"refused"|"failed", reason?, documentId?}`; `reason` is a closed
@@ -314,7 +322,7 @@ time or null and `lagSeconds` the seconds since the newest manifest write, or nu
 ### `POST /corpus/reconcile`
 
 Request: `{protocol, execute}`. Without `execute` it is a dry run. Response: `{protocol, drift, repaired, manifestVersion}`
-with `drift: {missingInPlane: [{repo, path}], orphansInPlane: [name], checked, truncated}` (each list capped at 500; the
+with `drift: {missingInPlane: [{repo, path}], orphansInPlane: [name], checked, truncated}` (the lists are cut at 500 keys in total, missing rows and orphans together; the
 counts and `checked` cover everything, and `truncated` is true when a list was cut or the plane listing was not complete)
 and `repaired: {requeued, deleted}` (both 0 on a dry run). With `execute` the server marks the active rows whose plane
 document is gone as removed, without touching the plane, so the next plan offers them as `add`; and it deletes plane

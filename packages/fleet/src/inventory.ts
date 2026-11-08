@@ -20,7 +20,7 @@ import { Gate, lookupPr, type PrState, PR_NONE, PR_UNKNOWN, type PrInfo, DEFAULT
 import { findIgnoredWork } from "./ignored.ts";
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_MS, measureTree } from "./size.ts";
 
-export interface WorktreeEntry {
+interface WorktreeEntry {
 	path: string;
 	head: string | null;
 	/** Short branch name, null when detached or bare. */
@@ -80,14 +80,14 @@ export async function reloadWorktree(path: string, repoDir: string, git: GitRunn
 	return entry === undefined || entry.bare ? null : { ...entry, repoDir };
 }
 
-export interface RepoRef {
+interface RepoRef {
 	/** Absolute, resolved git common dir: the identity of the repository. */
 	commonDir: string;
 	/** A working directory to run git in; the primary checkout when one was found under the roots. */
 	dir: string;
 }
 
-export interface DiscoverOptions {
+interface DiscoverOptions {
 	git: GitRunner;
 	/** Directories below a root to look through; a root's own children are depth 1. Default 3. */
 	maxDepth?: number;
@@ -95,13 +95,13 @@ export interface DiscoverOptions {
 	maxEntries?: number;
 }
 
-export interface Discovery {
+interface Discovery {
 	repos: RepoRef[];
 	notes: string[];
 }
 
-export const DEFAULT_DISCOVER_DEPTH = 3;
-export const DEFAULT_DISCOVER_ENTRIES = 20_000;
+const DEFAULT_DISCOVER_DEPTH = 3;
+const DEFAULT_DISCOVER_ENTRIES = 20_000;
 const SKIPPED_DIRS: ReadonlySet<string> = new Set(["node_modules", ".git"]);
 const GIT_CONCURRENCY = 6;
 
@@ -220,7 +220,7 @@ export interface WorktreeInfo {
 	notes: string[];
 }
 
-export interface PrShared {
+interface PrShared {
 	run: CommandRunner;
 	cache: Map<string, Promise<PrInfo>>;
 	gate: Gate;
@@ -235,7 +235,7 @@ interface RepoFacts {
 	defaultRef: string | null;
 }
 
-export interface InspectOptions {
+interface InspectOptions {
 	git: GitRunner;
 	/** Pull-request lookups; absent means `pr_state` is `unknown` for every worktree. */
 	pr?: PrShared;
@@ -252,7 +252,7 @@ export interface InspectOptions {
 	facts?: Map<string, Promise<RepoFacts>>;
 }
 
-export interface InspectInput extends WorktreeEntry {
+interface InspectInput extends WorktreeEntry {
 	/** Primary checkout of the repository this worktree belongs to. */
 	repoDir: string;
 }
@@ -426,7 +426,7 @@ export interface InventoryOptions extends InspectOptions {
 	concurrency?: number;
 }
 
-export interface Inventory {
+interface Inventory {
 	worktrees: WorktreeInfo[];
 	repos: RepoRef[];
 	notes: string[];

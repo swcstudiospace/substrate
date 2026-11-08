@@ -223,6 +223,20 @@ describe("testRunArgv (tests_route oneshot)", () => {
 		expect(() => testRunArgv({ ...ok, worktree: `${worktree}/../other`, paths: ["a.test.ts"] })).toThrow(/worktree/);
 		expect(testRunArgv({ ...ok, paths: Array.from({ length: 8 }, (_, i) => `t${i}.test.ts`) })).toHaveLength(8 + 16);
 	});
+	test("accepts the bound worktree under a configured root that is not the first, when the first holds a stray directory", () => {
+		const stray = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		const real = mkdtempSync(join(tmpdir(), "wt-roots-"));
+		try {
+			mkdirSync(join(stray, GID));
+			mkdirSync(join(real, GID));
+			const argv = testRunArgv({ graphId: GID, worktree: join(real, GID), worktreeRoots: [stray, real], nodeModules: null, paths: ["a.test.ts"] });
+			expect(argv).toContain(`${join(real, GID)}:/work:ro`);
+			expect(() => testRunArgv({ graphId: GID, worktree: join(stray, "other"), worktreeRoots: [stray, real], nodeModules: null, paths: ["a.test.ts"] })).toThrow(/worktree/);
+		} finally {
+			rmSync(stray, { recursive: true, force: true });
+			rmSync(real, { recursive: true, force: true });
+		}
+	});
 });
 
 const ULTRATHINK = ["ultrathink-kickoff", "ultrathink-plan", "ultrathink-ship", "ultrathink-sync"] as const;

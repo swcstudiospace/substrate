@@ -287,7 +287,8 @@ describe("replayable from the packet alone", () => {
 		const signed = signHandoff(packet({ goal, blockers: [blocker], notes: 'Use SECRET="abc", then retry once.' }), SIGNER);
 		expect(signed.goal).toContain("then deploy the new build and run all checks before handing over.");
 		expect(signed.blockers[0]).toContain("and the staging deploy after it.");
-		expect(JSON.stringify(signed)).not.toMatch(/example"|hunter2|abc"/);
+		// Scoped to the user text: handoff_id and the signature are random hex, and a random tail can end in `abc"`.
+		expect([signed.goal, ...signed.blockers, signed.notes].join("\n")).not.toMatch(/example"|hunter2|abc"/);
 		const event = normalizeEvent({ surface: "grok-bot", kind: "handoff", summary: "handoff", payload: { handoff: signed } }, null);
 		const stored = event.payload.handoff as HandoffPacket;
 		expect(canonicalJson(stored)).toBe(canonicalJson(signed));

@@ -15,7 +15,7 @@ import { COUNTERS_KEY } from "./emit.ts";
 const DEFAULT_STATE_DIR = "/var/lib/substrate";
 const REFUSED_FILE = "refused-emits.jsonl";
 
-export interface CollectorCounters {
+interface CollectorCounters {
 	stored: number;
 	refused: number;
 	failed: number;
@@ -23,7 +23,7 @@ export interface CollectorCounters {
 	extras: Record<string, number>;
 }
 
-export interface RefusedLine {
+interface RefusedLine {
 	ts: string;
 	collector: string;
 	source: string;
@@ -33,7 +33,7 @@ export interface RefusedLine {
 	error: string;
 }
 
-export interface StatusSummary {
+interface StatusSummary {
 	collectors: Record<string, CollectorCounters>;
 	/** Refused lines with `ts` at or after `since`, in file order. */
 	refused: RefusedLine[];
@@ -115,6 +115,7 @@ function readJson(path: string): unknown {
 	try {
 		return JSON.parse(readFileSync(path, "utf8")) as unknown;
 	} catch {
+		// An unreadable or unparseable file is no state: its counters read as zero.
 		return undefined;
 	}
 }
@@ -123,6 +124,7 @@ function readLines(path: string): string[] {
 	try {
 		return readFileSync(path, "utf8").split("\n");
 	} catch {
+		// A missing or unreadable refused journal has no lines.
 		return [];
 	}
 }

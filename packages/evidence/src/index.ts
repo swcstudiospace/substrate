@@ -7,12 +7,9 @@
 export {
 	type AnchorEvidence,
 	type AnchorState,
-	type AuditAttribution,
 	type ChainEvidence,
-	type ChainState,
 	type EvidenceBundle,
 	type EvidenceInput,
-	type EvidenceUsage,
 	type TeachableEvidence,
 	buildEvidence,
 	chainStateOf,

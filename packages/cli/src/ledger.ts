@@ -50,7 +50,7 @@ export function ledgerRunnerArgs(argv: readonly string[], args: Args): string[] 
 	return out;
 }
 
-export interface LedgerDeps {
+interface LedgerDeps {
 	/** Run the runner with these arguments and return its exit status. */
 	spawn: (runnerArgs: string[]) => number;
 	err: (text: string) => void;

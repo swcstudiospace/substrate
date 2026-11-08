@@ -15,9 +15,9 @@ const DEFAULT_STATE_PATH = "/var/lib/substrate/agentos/approvals.json";
 const GET_UPDATES_TIMEOUT_MS = 35_000;
 const CALL_TIMEOUT_MS = 10_000;
 
-export type ApprovalOption = { optionId: string; kind: string; name?: string };
+type ApprovalOption = { optionId: string; kind: string; name?: string };
 
-export type ApprovalPost = {
+type ApprovalPost = {
 	graphId: string;
 	nodeId: string;
 	sessionId: string;
@@ -27,15 +27,15 @@ export type ApprovalPost = {
 	options: ApprovalOption[];
 };
 
-export type ApprovalButton = { text: string; index: number };
+type ApprovalButton = { text: string; index: number };
 
-export type RenderedApproval = { text: string; buttons: ApprovalButton[] };
+type RenderedApproval = { text: string; buttons: ApprovalButton[] };
 
-export type ApprovalConfig = { chatId: string; userIds: number[] };
+type ApprovalConfig = { chatId: string; userIds: number[] };
 
-export type ApprovalOutcome = "answered" | "not_pending";
+type ApprovalOutcome = "answered" | "not_pending";
 
-export type ApprovalDeps = {
+type ApprovalDeps = {
 	fetchImpl?: typeof fetch;
 	log?: (line: string) => void;
 	respond?: (graphId: string, sessionId: string, requestId: string, optionId: string) => Promise<ApprovalOutcome>;

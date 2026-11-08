@@ -308,3 +308,74 @@ describe("discoverRepos", () => {
 		expect(defaultGitRunner(["definitely-not-a-git-command"], root).code).not.toBe(0);
 	});
 });
+
+describe("discoverRepos under a registry refuses a nested checkout", () => {
+	test("a nested checkout under a registered plain directory is skipped with a note that names it, and no git runs in it", () => {
+		// `plain` is registered and has no `.git` of its own. The checkout inside it is not registered, so it is refused.
+		const root = fixture({ "plain/sub/clone/.git/HEAD": "" });
+		const plain = join(root, "plain");
+		const clone = join(plain, "sub", "clone");
+		const env = { SUBSTRATE_REPO_REGISTRY: JSON.stringify({ "owner/plain": { checkouts: [plain], worktrees: [] } }) };
+		const run = fakeGit({ [clone]: { branch: "main" } });
+		const found = discoverRepos([plain], { run, env });
+		expect(found.checkouts).toEqual([]);
+		expect(found.notes.some((note) => note.includes(clone) && note.includes("nested"))).toBe(true);
+		expect(run.calls.some((call) => call.cwd === clone)).toBe(false);
+	});
+
+	test("the registered repository itself is still discovered and run in", () => {
+		const root = fixture({ "checkout/.git/HEAD": "", "checkout/README.md": "# checkout" });
+		const checkout = join(root, "checkout");
+		const env = { SUBSTRATE_REPO_REGISTRY: JSON.stringify({ "owner/checkout": { checkouts: [checkout], worktrees: [] } }) };
+		const run = fakeGit({ [checkout]: { branch: "main" } });
+		const found = discoverRepos([checkout], { run, env });
+		expect(found.checkouts.map((c) => c.dir)).toEqual([checkout]);
+		expect(run.calls.some((call) => call.cwd === checkout)).toBe(true);
+	});
+
+	test("a standalone checkout and a linked worktree inside a registered worktrees directory are each skipped by name, and no git runs in them", () => {
+		// outer holds the registered checkout and worktrees directory. A `.git` directory is a clone and a `.git` file is a linked worktree; neither is registered.
+		const root = fixture({
+			"outer/checkout/.git/HEAD": "",
+			"outer/worktrees/feat/.git": "gitdir: x\n",
+			"outer/worktrees/clone/.git/HEAD": "",
+		});
+		const outer = join(root, "outer");
+		const checkout = join(outer, "checkout");
+		const feat = join(outer, "worktrees", "feat");
+		const clone = join(outer, "worktrees", "clone");
+		const env = { SUBSTRATE_REPO_REGISTRY: JSON.stringify({ "owner/outer": { checkouts: [checkout], worktrees: [join(outer, "worktrees")] } }) };
+		const run = fakeGit({ [checkout]: { branch: "main" }, [feat]: { branch: "feat" }, [clone]: { branch: "main" } });
+		const found = discoverRepos([outer], { run, env });
+		expect(found.checkouts.map((c) => c.dir)).toEqual([checkout]);
+		expect(found.notes.some((note) => note.includes(clone) && note.includes("nested"))).toBe(true);
+		expect(found.notes.some((note) => note.includes(feat) && note.includes("nested"))).toBe(true);
+		expect(run.calls.some((call) => call.cwd === clone || call.cwd === feat)).toBe(false);
+		expect(run.calls.some((call) => call.cwd === checkout)).toBe(true);
+	});
+
+	test("a linked worktree inside a registered worktrees directory is discovered once it is registered by name", () => {
+		const root = fixture({
+			"outer/checkout/.git/HEAD": "",
+			"outer/worktrees/feat/.git": "gitdir: x\n",
+			"outer/worktrees/clone/.git/HEAD": "",
+		});
+		const outer = join(root, "outer");
+		const checkout = join(outer, "checkout");
+		const feat = join(outer, "worktrees", "feat");
+		const clone = join(outer, "worktrees", "clone");
+		const env = { SUBSTRATE_REPO_REGISTRY: JSON.stringify({ "owner/outer": { checkouts: [checkout, feat], worktrees: [join(outer, "worktrees")] } }) };
+		const run = fakeGit({ [checkout]: { branch: "main" }, [feat]: { branch: "feat" }, [clone]: { branch: "main" } });
+		const found = discoverRepos([outer], { run, env });
+		expect(found.checkouts.map((c) => c.dir).sort()).toEqual([checkout, feat].sort());
+		expect(found.notes.some((note) => note.includes(clone) && note.includes("nested"))).toBe(true);
+	});
+
+	test("with no registry set, the same standalone checkout is discovered as before", () => {
+		const root = fixture({ "outer/checkout/.git/HEAD": "", "outer/worktrees/clone/.git/HEAD": "" });
+		const outer = join(root, "outer");
+		const run = fakeGit({ [join(outer, "checkout")]: { branch: "main" }, [join(outer, "worktrees", "clone")]: { branch: "main" } });
+		const found = discoverRepos([outer], { run, env: {} });
+		expect(found.checkouts.map((c) => c.dir).sort()).toEqual([join(outer, "checkout"), join(outer, "worktrees", "clone")].sort());
+	});
+});

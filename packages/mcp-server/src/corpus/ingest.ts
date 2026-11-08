@@ -58,18 +58,15 @@ export function withCorpusLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /** Why a document is refused before anything is sent. Closed. */
-export const REFUSAL_REASONS = [...DOCUMENT_REFUSALS, "sha-mismatch", "secret-findings"] as const;
-
-/** Why a document or tombstone failed after it was accepted for work; a retry sends only these. Closed. */
-export const FAILURE_REASONS = ["plane-unavailable", "timeout", "rejected", "conflict", "pipeline-failed", "duplicate-content", "manifest-unavailable", "delete-failed"] as const;
+const REFUSAL_REASONS = [...DOCUMENT_REFUSALS, "sha-mismatch", "secret-findings"] as const;
 
 const PLANE_FAILURES: readonly string[] = ["plane-unavailable", "timeout", "rejected", "conflict", "pipeline-failed", "duplicate-content"];
 
 /** Why the whole request is refused before any work. The HTTP status is the route's answer. Closed. */
-export const GATE_REASONS = ["unauthenticated", "vm-guest", "corpus.disabled", "corpus.backend-unavailable"] as const;
+const GATE_REASONS = ["unauthenticated", "vm-guest", "corpus.disabled", "corpus.backend-unavailable"] as const;
 export type GateReason = (typeof GATE_REASONS)[number];
 
-export interface CorpusGate {
+interface CorpusGate {
 	status: 401 | 403 | 503;
 	reason: GateReason;
 }
@@ -89,7 +86,7 @@ export interface CorpusIngestSettings {
 	batchBytes: number;
 }
 
-export interface CorpusIngestDeps {
+interface CorpusIngestDeps {
 	store: CorpusStore;
 	plane: LightragBulkPlane;
 	settings: CorpusIngestSettings;
@@ -193,7 +190,7 @@ function refuse(tally: Tally, document: CorpusDocument, reason: (typeof REFUSAL_
  * active row at that sha256 vanished meanwhile, so the document takes the full path.
  */
 async function refreshMetadata(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument, prior: ManifestRow): Promise<boolean> {
-	// The commit lands in the manifest and in citation URLs, so it gets the scan the full path gives a name and a URL.
+	// The commit is stored in the manifest, so the source URL built with it is scanned the way the full path scans a name and a URL.
 	const rules = findingRules(`${sourceUrl(document.repo, document.path, document.commit)}\n${document.commit ?? ""}`);
 	if (rules.length > 0) {
 		refuse(tally, document, "secret-findings", rules);
@@ -470,7 +467,11 @@ export function ingestCorpus(deps: CorpusIngestDeps, request: CorpusIngestReques
 	return ingestLock.run(() => runIngest(deps, request));
 }
 
-async function runIngest(deps: CorpusIngestDeps, request: CorpusIngestRequest): Promise<CorpusIngestResponse> {
+/**
+ * The ingest body. `ingestCorpus` runs it under the corpus lock; the service runs it inside the same lock hold as the tombstone
+ * scope check, so a caller of this function holds `withCorpusLock`.
+ */
+export async function runIngest(deps: CorpusIngestDeps, request: CorpusIngestRequest): Promise<CorpusIngestResponse> {
 	const tally: Tally = { results: new Map(), rules: new Map(), orphaned: 0, batches: 0, superseded: new Set(), conflicts: [] };
 	// Phase T: every tombstone, deletes included, finishes before the first insert.
 	await tombstone(deps, tally, request.tombstones);

@@ -25,7 +25,7 @@ import type { MemoryEntry } from "./types.ts";
 /** Failures a re-run can cure: the plane was slow, unreachable, overloaded or refusing for now. */
 const RETRYABLE_KINDS: readonly HindsightErrorKind[] = ["timeout", "network", "server", "rate-limit"];
 
-export interface ForgetPlaneOptions {
+interface ForgetPlaneOptions {
 	/** The Hindsight plane, or null when it is not configured. */
 	config: HindsightConfig | null;
 	/** A VM guest never reaches Hindsight (the retain path skips it the same way). */

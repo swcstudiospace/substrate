@@ -37,6 +37,7 @@ import {
 	CORPUS_FRESHNESS_METRIC,
 	CORPUS_GOLDEN_RECALL5_METRIC,
 	CORPUS_INGEST_RATE_METRIC,
+	CORPUS_SYNC_LAG_METRIC,
 	DOCS_SEARCH_OUTCOMES,
 	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
@@ -55,13 +56,14 @@ import {
 import type { MetricsHistorySeriesMode, MetricsHistorySettings } from "./config.ts";
 import type { GreptimeClient, MetricHistoryPoint } from "./greptime.ts";
 import { TRANSITION_OUTCOMES } from "./planning/telemetry.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { SURFACES } from "./types.ts";
 
 /** The counter a dropped batch is counted on, by closed reason. */
 export const DROPPED_METRIC = "substrate.metrics.history.dropped";
 
 /** Why a batch (or part of one) was not stored. A closed set: it is a metric label. */
-export const METRIC_DROP_REASONS = ["breaker_open", "unavailable", "rejected", "ddl", "schema", "invalid", "capped", "internal"] as const;
+const METRIC_DROP_REASONS = ["breaker_open", "unavailable", "rejected", "ddl", "schema", "invalid", "capped", "internal"] as const;
 export type MetricDropReason = (typeof METRIC_DROP_REASONS)[number];
 
 /** Rows per `INSERT`. The sampler emits a few dozen, so this is a ceiling, not a target. */
@@ -69,9 +71,9 @@ export const MAX_METRIC_BATCH = 200;
 /** Points a readback may return, whatever the window and step. */
 export const MAX_METRIC_POINTS = 2000;
 /** Per-point baselines the delta tracker keeps; past it, further points are not sampled (stably, in snapshot order). */
-export const MAX_TRACKED_POINTS = 16_384;
+const MAX_TRACKED_POINTS = 16_384;
 
-export type SampleKind = "counter" | "gauge" | "histogram" | "ratio";
+type SampleKind = "counter" | "gauge" | "histogram" | "ratio";
 type LabelKey = "surface" | "plane" | "decision" | "outcome" | "result" | "mode";
 
 /**
@@ -80,7 +82,7 @@ type LabelKey = "surface" | "plane" | "decision" | "outcome" | "result" | "mode"
  * bucket, never an average that hides a spike), `wavg` for ratios weighted by
  * the sample count of each interval.
  */
-export type SampleAggregate = "sum" | "avg" | "max" | "wavg";
+type SampleAggregate = "sum" | "avg" | "max" | "wavg";
 
 export interface SeriesSpec {
 	/** What the registry value was: stored in the `kind` column. */
@@ -143,10 +145,11 @@ const MEMORY_MODE_VALUES: ReadonlySet<string> = new Set<string>(MEMORY_EXPIRED_M
  * `admission.decisions` already carries `limited` and
  * `shadow_limited`, so nothing is added for admission.
  *
- * The three `corpus.*` gauges (v1.7 phase 70) are the docs plane's service objectives: the age of the newest manifest change
+ * The four `corpus.*` gauges (v1.7 phase 70) are the docs plane's service objectives: the age of the newest manifest change
  * (the worst reading in a step), the documents per second of the last ingest request and the golden-set recall at 5 as the
  * docs canary last reported it (both averaged: a gauge repeats its last value every interval, so the mean of a step is
  * that value, never an invented tail).
+ * The fourth, `corpus.sync_lag_seconds`, is the lag the newest `docs.sync` note reported (the worst in a step, as freshness is).
  */
 export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"cache.operations": { kind: "counter", label: "result", values: CACHE_RESULT_VALUES, agg: "sum", unit: "{operation}" },
@@ -161,6 +164,7 @@ export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"corpus.freshness_seconds": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 	"corpus.ingest_docs_per_s": { kind: "gauge", label: null, values: null, agg: "avg", unit: "{document}/s" },
 	"corpus.golden_recall5": { kind: "gauge", label: null, values: null, agg: "avg", unit: "ratio" },
+	"corpus.sync_lag_seconds": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 };
 
 /** Core plus extended: what the ledger client can store and read, whatever the mode. Never what a caller may ask for; that is {@link metricSeriesFor}. */
@@ -212,6 +216,7 @@ export function readLabels(series: string, raw: unknown): Record<string, string>
 		const value = (parsed as Record<string, unknown>)[spec.label];
 		return typeof value === "string" && spec.values?.has(value) === true ? { [spec.label]: value } : {};
 	} catch {
+		// A row whose labels do not parse reads back as no labels, as the doc above states.
 		return {};
 	}
 }
@@ -415,6 +420,7 @@ const EXTENDED_GAUGE_SOURCES: ReadonlyArray<{ series: string; metric: string }> 
 	{ series: "corpus.freshness_seconds", metric: CORPUS_FRESHNESS_METRIC },
 	{ series: "corpus.ingest_docs_per_s", metric: CORPUS_INGEST_RATE_METRIC },
 	{ series: "corpus.golden_recall5", metric: CORPUS_GOLDEN_RECALL5_METRIC },
+	{ series: "corpus.sync_lag_seconds", metric: CORPUS_SYNC_LAG_METRIC },
 ];
 
 /** A gauge nobody set has no point (the archive age before a first archive), and a non-finite reading is not a number to store: both are skipped. */
@@ -527,14 +533,14 @@ function rowsFrom(deltas: { counters: CounterDelta[]; histograms: HistogramDelta
 // ── the sampler ──────────────────────────────────────────────────────────────
 
 /** What the sampler needs from the client; `GreptimeClient.recordMetricSamples` is the production one. */
-export type RecordSamples = (rows: MetricSampleRow[]) => Promise<{ stored: number; drops: Partial<Record<MetricDropReason, number>> }>;
+type RecordSamples = (rows: MetricSampleRow[]) => Promise<{ stored: number; drops: Partial<Record<MetricDropReason, number>> }>;
 
 export interface TimerApi {
 	setInterval(handler: () => void, ms: number): { unref(): unknown };
 	clearInterval(handle: { unref(): unknown }): void;
 }
 
-export interface MetricsHistorySamplerDeps {
+interface MetricsHistorySamplerDeps {
 	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS"> & { series?: MetricsHistorySeriesMode };
 	/** The registry snapshot, as `/metrics` serves it. */
 	snapshot: () => MetricSnapshot[];
@@ -617,6 +623,7 @@ export class MetricsHistorySampler {
 	flush(): Promise<void> {
 		if (!this.deps.settings.enabled) return Promise.resolve();
 		this.flushing ??= (async () => {
+			// run() catches its own failures, so this wait only orders the two samples; the fresh sample below is what flush records.
 			if (this.inFlight !== null) await this.inFlight.catch(() => undefined);
 			await this.sample();
 		})().finally(() => {
@@ -628,7 +635,7 @@ export class MetricsHistorySampler {
 	private async run(): Promise<void> {
 		let rows: MetricSampleRow[] = [];
 		try {
-			await this.deps.beforeSample?.().catch(() => undefined);
+			await this.deps.beforeSample?.().catch((cause: unknown) => reportSilent("metrics-history.before-sample", cause));
 			rows = this.collector.collect(this.deps.snapshot(), this.deps.runwayDays(), this.clock());
 			if (rows.length === 0) return;
 			const result = await this.deps.record(rows);
@@ -679,10 +686,10 @@ export function parseHistoryStep(raw: string): number | null {
 }
 
 /** How long an answer is served again, and how many are kept. The route scans the whole TTL window through the shared ledger gate, so it is memoised. */
-export const HISTORY_MEMO_MS = 15_000;
-export const HISTORY_MEMO_MAX = 64;
+const HISTORY_MEMO_MS = 15_000;
+const HISTORY_MEMO_MAX = 64;
 /** Reads that may run at once; each is a scan of the shared ledger, so this is the bound on the work a public route can add. */
-export const HISTORY_PENDING_MAX = 16;
+const HISTORY_PENDING_MAX = 16;
 const HISTORY_RETRY_AFTER_S = 5;
 
 /**
@@ -783,7 +790,7 @@ function metricHistoryBusy(): MetricHistoryAnswer {
 	};
 }
 
-export interface MetricHistoryDeps {
+interface MetricHistoryDeps {
 	/** `enabled` is the effective flag (switch on AND a ledger), see `loadMetricsHistorySettings`. */
 	settings: Pick<MetricsHistorySettings, "enabled" | "intervalS" | "ttl" | "ttlDays"> & { series?: MetricsHistorySeriesMode };
 	greptime: Pick<GreptimeClient, "readMetricHistory"> | null;
@@ -792,7 +799,7 @@ export interface MetricHistoryDeps {
 	memo?: MetricHistoryMemo;
 }
 
-export interface MetricHistoryAnswer {
+interface MetricHistoryAnswer {
 	status: number;
 	body: Record<string, unknown>;
 	/** Extra response headers (`Retry-After` on a busy 503). */

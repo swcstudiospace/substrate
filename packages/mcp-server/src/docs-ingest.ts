@@ -412,7 +412,7 @@ export interface IngestInput {
 	graphHints?: PlanningGraphHint[];
 }
 
-export interface IngestPageResult {
+interface IngestPageResult {
 	path: string;
 	source_url: string;
 	/** `failed` is LightRAG-path only: per-file isolation records the page instead of refusing the call. */
@@ -466,7 +466,7 @@ export type IngestOutcome =
 	  };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
-export interface SupersededDocument {
+interface SupersededDocument {
 	document_id: string;
 	/** The commit that upload carried, when the caller named one. */
 	commit?: string;
@@ -585,7 +585,7 @@ function sha256(text: string): string {
  * it. The CLI carries its own copy (it cannot import this module without
  * breaking the substrate-only door) pinned by a text test.
  */
-export function normalizeIngestPath(path: string): string | null {
+function normalizeIngestPath(path: string): string | null {
 	const slashed = path.replace(/\\/g, "/");
 	if (slashed.startsWith("/")) return null;
 	const parts: string[] = [];
@@ -1102,7 +1102,7 @@ async function writeBatch(
  * member and loads with an empty version store; the next save writes
  * version 2 (one-way).
  */
-export interface IngestStateFile {
+interface IngestStateFile {
 	version: 2;
 	records: Record<string, IngestRecord>;
 	versions: Record<string, DatasetVersion[]>;
@@ -1198,14 +1198,14 @@ export async function saveIngestRecords(
  * describes from memory. The hash, not the pages, is the cross-call state,
  * so a restarted poller resumes from one stored string.
  */
-export interface PlanningPollConfig {
+interface PlanningPollConfig {
 	/** Ms between polls; the caller sleeps, this module only scans once per call. */
 	intervalMs?: number;
 	/** Upper bound on pages hashed per tick; extra pages are ignored, never fetched. */
 	maxPages?: number;
 }
 
-export const PLANNING_POLL_DEFAULTS: Required<PlanningPollConfig> = { intervalMs: 5000, maxPages: 200 };
+const PLANNING_POLL_DEFAULTS: Required<PlanningPollConfig> = { intervalMs: 5000, maxPages: 200 };
 
 /**
  * The stable hash of one poll tick: the sorted `path + sha` pairs, so
@@ -1220,45 +1220,12 @@ export function planningContentHash(pages: readonly IngestPage[], maxPages: numb
 	return sha256(pairs.join("\n"));
 }
 
-/** Compare one tick against the last served hash. */
-export function planningPollTick(
-	previousHash: string | null,
-	pages: readonly IngestPage[],
-	config: PlanningPollConfig = {},
-): { hash: string; changed: boolean } {
-	const hash = planningContentHash(pages, config.maxPages ?? PLANNING_POLL_DEFAULTS.maxPages);
-	return { hash, changed: previousHash === null ? pages.length > 0 : previousHash !== hash };
-}
-
-/**
- * One non-blocking poll tick: scan the roots and report whether the
- * planning content moved. A scan failure is not a change — the next tick
- * retries — and the previous hash is returned so the caller keeps serving it.
- */
-export async function pollPlanningRefresh(
-	baseDir: string,
-	roots: readonly string[],
-	previousHash: string | null,
-	config: PlanningPollConfig = {},
-	io: ScanIo = nodeIo,
-): Promise<{ hash: string; changed: boolean; pages: IngestPage[]; error?: string }> {
-	let pages: IngestPage[];
-	try {
-		pages = await scanIngestPages(baseDir, roots, io);
-	} catch (cause) {
-		const reason = cause instanceof Error ? cause.message : String(cause);
-		return { hash: previousHash ?? "", changed: false, pages: [], error: redact(reason).slice(0, 200) };
-	}
-	const { hash, changed } = planningPollTick(previousHash, pages, config);
-	return { hash, changed, pages };
-}
-
 /**
  * Roots a planning scrape sweeps. The whole `.planning/` tree — phase
  * plans ride the same refresh as the project brief — narrowed from the
  * ingest roots so a planning poll never reads `docs/` or `README.md`.
  */
-export const PLANNING_SCAN_ROOTS: readonly string[] = [".planning/"];
+const PLANNING_SCAN_ROOTS: readonly string[] = [".planning/"];
 
 /**
  * The LightRAG planning-scrape lifecycle, in order: a sweep starts
@@ -1269,8 +1236,8 @@ export const PLANNING_SCAN_ROOTS: readonly string[] = [".planning/"];
  * (nothing could be read or indexed). Terminal states are `SUCCESS`,
  * `PARTIAL` and `ERROR` — the poller only re-serves on those.
  */
-export const PLANNING_SCRAPE_STATES = ["IDLE", "SCANNING", "PROCESSING", "INDEXING", "SUCCESS", "PARTIAL", "ERROR"] as const;
-export type PlanningScrapeState = (typeof PLANNING_SCRAPE_STATES)[number];
+const PLANNING_SCRAPE_STATES = ["IDLE", "SCANNING", "PROCESSING", "INDEXING", "SUCCESS", "PARTIAL", "ERROR"] as const;
+type PlanningScrapeState = (typeof PLANNING_SCRAPE_STATES)[number];
 
 /**
  * Sanitize one planning page for the vector insert: remote images are
@@ -1279,7 +1246,7 @@ export type PlanningScrapeState = (typeof PLANNING_SCRAPE_STATES)[number];
  * content change. Pure — the gate refusals in `ingestDocs` still apply
  * to the sanitized body before anything uploads.
  */
-export function sanitizePlanningBody(body: string): { body: string; stripped: number } {
+function sanitizePlanningBody(body: string): { body: string; stripped: number } {
 	const stripped = stripRemoteImages(body);
 	return { body: stripped.body.trim(), stripped: stripped.stripped };
 }
@@ -1293,13 +1260,6 @@ export function planningPageSha(page: Pick<IngestPage, "body">): string {
 	return sha256(sanitizePlanningBody(page.body).body);
 }
 
-/** One path's last indexed hash, for the incremental update. */
-export function hashPlanningPages(pages: readonly IngestPage[]): Map<string, string> {
-	const hashes = new Map<string, string>();
-	for (const page of pages) hashes.set(page.path, planningPageSha(page));
-	return hashes;
-}
-
 /**
  * Polling-plus-hash trigger: compare one scan against the last indexed
  * per-page hashes. `previous === null` is the first poll (everything not
@@ -1307,7 +1267,7 @@ export function hashPlanningPages(pages: readonly IngestPage[]): Map<string, str
  * an unchanged poll indexes nothing. Pure — the caller owns the sleep
  * between polls and persists the returned `hash`.
  */
-export interface PlanningIngestTrigger {
+interface PlanningIngestTrigger {
 	triggered: boolean;
 	/** The roots this decision covers (`PLANNING_SCAN_ROOTS` unless overridden). */
 	roots: readonly string[];
@@ -1339,76 +1299,10 @@ export function planningIngestTrigger(
  * (an unchanged incremental tick is not a failure), no failures is
  * `SUCCESS`, some failures is `PARTIAL`, total failure is `ERROR`.
  */
-export function planningScrapeStateForOutcome(total: number, failed: number): PlanningScrapeState {
+function planningScrapeStateForOutcome(total: number, failed: number): PlanningScrapeState {
 	if (total === 0 || failed === 0) return "SUCCESS";
 	if (failed < total) return "PARTIAL";
 	return "ERROR";
-}
-
-/** One file the `PROCESSING` step could not sanitize: isolated, never fatal. */
-export interface PlanningScrapeError {
-	path: string;
-	error: string;
-}
-
-/** The settled result of a planning scrape: terminal state, pages and per-file errors. */
-export interface PlanningScrapeResult {
-	state: PlanningScrapeState;
-	pages: IngestPage[];
-	/** Sanitized bodies by path, for the `INDEXING` step; pages that failed are absent. */
-	sanitized: Map<string, string>;
-	errors: PlanningScrapeError[];
-	hash: string;
-	changed: boolean;
-}
-
-/**
- * Scrape the planning roots through `SCANNING` → `PROCESSING`, reporting
- * each transition via `onState` (the initial `IDLE` is reported too, so a
- * poller can log the full lifecycle). Per-file isolation: a page that
- * cannot be sanitized is recorded in `errors` and excluded from
- * `sanitized`, while the rest of the sweep still settles `SUCCESS` (no
- * errors) or `PARTIAL`. A scan that throws settles `ERROR` with no pages.
- * Never throws: the poller calls this on a timer and must not crash on it.
- */
-export async function scrapePlanningPages(
-	baseDir: string,
-	roots: readonly string[] = PLANNING_SCAN_ROOTS,
-	previousHash: string | null = null,
-	opts: { io?: ScanIo; maxPages?: number; onState?: (state: PlanningScrapeState) => void } = {},
-): Promise<PlanningScrapeResult> {
-	const io = opts.io ?? nodeIo;
-	const report = (state: PlanningScrapeState): void => {
-		try {
-			opts.onState?.(state);
-		} catch {
-			// A logging callback must never fail the scrape.
-		}
-	};
-	report("IDLE");
-	report("SCANNING");
-	let pages: IngestPage[];
-	try {
-		pages = await scanIngestPages(baseDir, roots, io);
-	} catch {
-		report("ERROR");
-		return { state: "ERROR", pages: [], sanitized: new Map(), errors: [], hash: previousHash ?? "", changed: false };
-	}
-	report("PROCESSING");
-	const sanitized = new Map<string, string>();
-	const errors: PlanningScrapeError[] = [];
-	for (const page of pages) {
-		try {
-			sanitized.set(page.path, sanitizePlanningBody(page.body).body);
-		} catch (cause) {
-			const reason = cause instanceof Error ? cause.message : String(cause);
-			errors.push({ path: page.path, error: redact(reason).slice(0, 200) });
-		}
-	}
-	const { hash, changed } = planningPollTick(previousHash, pages, opts.maxPages === undefined ? {} : { maxPages: opts.maxPages });
-	const state = errors.length === 0 ? "SUCCESS" : pages.length - errors.length > 0 ? "PARTIAL" : "ERROR";
-	report(state);
-	return { state, pages, sanitized, errors, hash, changed };
 }
 
 /**

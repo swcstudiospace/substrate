@@ -58,7 +58,7 @@ const HASH_RE = /^[0-9a-f]{64}$/;
 const SIGNATURE_RE = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
 const REASON_MAX = 300;
 
-export type CheckpointVerifyErrorCode = "invalid-ref" | "invalid-config" | "not-found" | "not-a-checkpoint" | "ref-mismatch";
+type CheckpointVerifyErrorCode = "invalid-ref" | "invalid-config" | "not-found" | "not-a-checkpoint" | "ref-mismatch";
 
 /** A caller error (bad ref, missing or foreign event, bad config). Distinct from a verification verdict. */
 export class CheckpointVerifyError extends Error {
@@ -100,7 +100,7 @@ export interface AnchorTransactionRead {
 	finality: "processed" | "confirmed" | "finalized";
 }
 
-export interface CheckpointVerifyConfig {
+interface CheckpointVerifyConfig {
 	/** The genesis hash of the cluster anchors must live on (devnet's). */
 	expectedGenesis: string;
 	/** How long after an hour ends its anchor may still land (default `DEFAULT_ANCHOR_LAG_MS`). */
@@ -318,7 +318,7 @@ async function verifyAnchoredEvent(deps: CheckpointVerifyDeps, event: SubstrateE
 	if (Date.parse(row.period_start) !== hour) findings.push(`the anchors row names ${row.period_start}, not ${hourIso(hour)}`);
 	const rowMemo = parseMemo(row.memo);
 	if (rowMemo === null) {
-		findings.push("the anchors row's memo is not a v1 anchor memo");
+		findings.push("the anchors row's memo is not a v1 or v2 anchor memo");
 	} else if (rowMemo.periodStartMs !== hour || rowMemo.rootHex !== row.root || rowMemo.count !== row.event_count) {
 		findings.push("the anchors row disagrees with its own memo (period, root or count)");
 	}
@@ -404,7 +404,7 @@ async function verifyAnchoredEvent(deps: CheckpointVerifyDeps, event: SubstrateE
 	if (transaction.memo === null) {
 		findings.push("the anchor transaction carries no memo-program instruction");
 	} else if (memo === null) {
-		findings.push("the anchor transaction's memo is not a v1 anchor memo");
+		findings.push("the anchor transaction's memo is not a v1 or v2 anchor memo");
 	} else {
 		evidence.anchored_root = memo.rootHex;
 		evidence.count = memo.count;

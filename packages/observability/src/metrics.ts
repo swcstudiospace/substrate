@@ -73,7 +73,7 @@ export const DEFAULT_MAX_SERIES = 500;
  * holds this many series, every further combination folds into one, and the series
  * count cannot grow again. Observations are still counted, as always.
  */
-export const HARD_MAX_SERIES = 4 * DEFAULT_MAX_SERIES;
+const HARD_MAX_SERIES = 4 * DEFAULT_MAX_SERIES;
 
 export interface CounterPoint {
 	attributes: Attributes;
@@ -593,7 +593,7 @@ export function sumCounter(snapshot: CounterSnapshot, where: Record<string, stri
 }
 
 /** Whether every attribute in `where` is present on the point with that value. */
-export function matches(attributes: Attributes, where: Record<string, string>): boolean {
+function matches(attributes: Attributes, where: Record<string, string>): boolean {
 	return Object.entries(where).every(([key, value]) => String(attributes[key] ?? "") === value);
 }
 
@@ -685,7 +685,7 @@ export function quantileFromBuckets(
  * The latest value of one reading, with no attributes. Not cumulative: it
  * reports whatever was last set or observed, which is why it never rides a checkpoint.
  */
-export class Gauge {
+class Gauge {
 	private value: number | null = null;
 	/** Computes the reading at snapshot time; replaces `set` when installed (`null` means no reading yet). */
 	observe: (() => number | null) | null = null;
@@ -717,6 +717,7 @@ export class Gauge {
 			const observed = this.observe();
 			return observed !== null && Number.isFinite(observed) ? observed : null;
 		} catch {
+			// A throwing observer reads as null: no point, as the doc above says.
 			return null;
 		}
 	}

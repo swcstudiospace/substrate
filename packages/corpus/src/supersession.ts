@@ -84,7 +84,7 @@ function liveCounterpart(path: string): string | null {
 	return flat === undefined ? null : [...prefix, flat].join("/");
 }
 
-export interface SupersessionOptions {
+interface SupersessionOptions {
 	/**
 	 * Whether rule 3 (the two-copy comparison) may run. False when `rows` is known not to be every active row: a copy group is
 	 * judged by its exact size, so a third copy that was never read would turn an ambiguous group into a false "superseded".

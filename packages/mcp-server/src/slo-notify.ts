@@ -37,12 +37,12 @@ import type { EventInput } from "./types.ts";
 /** Longest summary an event carries; the sentence is for a brief, not a report. */
 export const NOTIFY_SUMMARY_MAX = 200;
 /** How long one webhook POST may take. One attempt, never a retry. */
-export const WEBHOOK_TIMEOUT_MS = 5000;
+const WEBHOOK_TIMEOUT_MS = 5000;
 /** The `session_id` every transition carries, so they chain in one place on the ledger. */
 export const NOTIFY_SESSION = "slo:notify";
 
 /** One objective's current condition, as the evaluators report it this tick. */
-export interface NotifyCondition {
+interface NotifyCondition {
 	objective: string;
 	/** The state this condition announces when sustained; `null` means the condition is clear. */
 	state: Exclude<NotifyState, "recovered"> | null;
@@ -60,14 +60,14 @@ export interface NotifyInputs {
 }
 
 /** What one transition emitted: the event, and whether the webhook took it. */
-export interface NotifyTransition {
+interface NotifyTransition {
 	objective: string;
 	state: NotifyState;
 	event: EventInput;
 	webhook: "sent" | "failed" | "skipped";
 }
 
-export interface SloNotifierDeps {
+interface SloNotifierDeps {
 	settings: SloNotifySettings;
 	/** The evaluators, read fresh each tick; `/slo` serves the same arrays. */
 	evaluate(): NotifyInputs;

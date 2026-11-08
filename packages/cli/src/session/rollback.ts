@@ -85,7 +85,7 @@ import {
 import { PendingJournalError, removePending, resolvePendingDir, settleInterruptedRestores, writePending } from "./pending.ts";
 
 /** The command to run when a restore was interrupted or could not be rolled back. */
-export const RECOVER_COMMAND = "substrate session recover";
+const RECOVER_COMMAND = "substrate session recover";
 
 const MAX_PLAN_OPERATIONS_SHOWN = 200;
 const MAX_DRIFT_SHOWN = 50;
@@ -123,14 +123,14 @@ export const unsupportedTranscriptPort: TranscriptPort = {
 // Result types
 // ---------------------------------------------------------------------------
 
-export type RollbackStatus = "dry-run" | "committed" | "commit-pending" | "refused" | "failed";
+type RollbackStatus = "dry-run" | "committed" | "commit-pending" | "refused" | "failed";
 
-export interface OperationSummary {
+interface OperationSummary {
 	op: RestoreOperation["op"];
 	path: string;
 }
 
-export interface PlanSummary {
+interface PlanSummary {
 	counts: { add: number; modify: number; delete: number; chmod: number; retype: number; total: number };
 	operations: OperationSummary[];
 	operations_truncated: boolean;
@@ -141,14 +141,14 @@ export interface PlanSummary {
 	skipped_list_truncated?: { recorded: number; total: number };
 }
 
-export interface RecoveredInfo {
+interface RecoveredInfo {
 	id: string;
 	direction: "forward" | "rollback";
 	files: { added: number; modified: number; deleted: number };
 	safety_ref: string;
 }
 
-export interface FailureInfo {
+interface FailureInfo {
 	code: string;
 	message: string;
 	/** Whether any path was touched; null when unknown. */
@@ -160,15 +160,15 @@ export interface FailureInfo {
 	recover: string | null;
 }
 
-export type LedgerState = "committed" | "pending" | "not-recorded" | "not-attempted" | "refusal-recorded" | "refusal-not-recorded";
+type LedgerState = "committed" | "pending" | "not-recorded" | "not-attempted" | "refusal-recorded" | "refusal-not-recorded";
 
-export interface LedgerInfo {
+interface LedgerInfo {
 	state: LedgerState;
 	event_id?: string;
 	message?: string;
 }
 
-export interface AnchorInfo {
+interface AnchorInfo {
 	status: AnchorStatus;
 	reasons: string[];
 	/** `server`: from the plan. `local`: no plan was obtained, so nothing is known to be anchored. */
@@ -199,7 +199,7 @@ export interface RollbackResult {
 	warnings: string[];
 }
 
-export type RollbackInputErrorCode = "invalid-target" | "invalid-session";
+type RollbackInputErrorCode = "invalid-target" | "invalid-session";
 
 export class RollbackInputError extends Error {
 	readonly code: RollbackInputErrorCode;
@@ -262,6 +262,7 @@ async function skippedOfCheckpoint(
 	try {
 		return await readPinnedSkipped({ worktree: params.worktree, ref: checkpoint.ref, now: params.now, run });
 	} catch {
+		// null: the pin cannot be read; the callers skip that checkpoint or count it as skipping nothing.
 		return null;
 	}
 }

@@ -15,7 +15,7 @@
 export const SESSION_STATES = ["LOADING", "EMPTY", "STALE", "DEGRADED", "ERROR", "SUCCESS"] as const;
 export type SessionState = (typeof SESSION_STATES)[number];
 
-export type SessionClassification = "active" | "stale" | "unknown";
+type SessionClassification = "active" | "stale" | "unknown";
 
 export interface SessionViewInput {
 	/** Whether the view has finished its first read. */

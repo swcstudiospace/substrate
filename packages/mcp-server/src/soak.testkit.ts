@@ -243,6 +243,9 @@ export class SoakRpc implements Rpc {
 	async addressMemos(): Promise<never[]> {
 		throw new Error("verification never lists addresses");
 	}
+	async addressSignaturePage(): Promise<never[]> {
+		return [];
+	}
 	async getGenesisHash(): Promise<string> {
 		this.calls++;
 		if (this.down !== null) throw new Error(this.down);
@@ -420,6 +423,7 @@ export async function boot(fakes: Fakes, env: Record<string, string> = {}): Prom
 	const cache = new ReadThroughCache({ redis: fakes.redis, enabled: true, log: () => {} });
 	const substrate = new Substrate(loadConfig({ SOLANA_ANCHOR_PUBKEY: SOAK_SIGNER, ...env }), {
 		index: fakes.index as unknown as IndexStore,
+		steering: { history: null, liveSessions: null },
 		greptime: fakes.ledger as unknown as GreptimeClient,
 		hindsightFetch: async (input, init) => (fakes.faults.planeDown ? Response.json({ detail: "injected outage" }, { status: 503 }) : fakes.plane.fetch(input, init)),
 		cache,

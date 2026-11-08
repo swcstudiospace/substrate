@@ -8,6 +8,7 @@ import { CORPUS_PROTOCOL } from "@substrate/corpus";
 import { CORPUS_FRESHNESS_METRIC, CORPUS_GOLDEN_RECALL5_METRIC, CORPUS_INGEST_RATE_METRIC } from "@substrate/observability";
 import { loadConfig } from "../config.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_SOURCE_DEADLINE_MS, gatherFabricFacts } from "../fabric/gather.ts";
+import { healthyFacts } from "../fabric/fixtures.ts";
 import { corpusRow } from "../fabric/status.ts";
 import { createObservability, type Observability } from "../observe.ts";
 import type { BulkDocumentOutcome, BulkTextDocument } from "../planes/lightrag-bulk.ts";
@@ -22,7 +23,7 @@ describe("CorpusSloState", () => {
 	test("starts with no reading at all, and a missing reading is null rather than 0", () => {
 		const state = new CorpusSloState();
 		expect(state.newestAtMs()).toBeNull();
-		expect(state.readings(1_000_000)).toEqual({ freshnessS: null, recall5: null, ingestDocsPerS: null });
+		expect(state.readings(1_000_000)).toEqual({ freshnessS: null, recall5: null, ingestDocsPerS: null, syncLagS: null });
 	});
 
 	test("freshness is the seconds since the manifest's last ingest, from the status answer, and an unreadable answer keeps the last one", () => {
@@ -57,6 +58,17 @@ describe("CorpusSloState", () => {
 		state.recordGolden({ action: "docs.canary" });
 		expect(state.readings(0).recall5).toBe(0.75);
 		expect(seen).toEqual([0.75]);
+	});
+
+	test("the sync lag is the lag of the newest docs.sync note the server took that carries a usable one, and any other note leaves it in place", () => {
+		const state = new CorpusSloState();
+		state.recordSyncLag({ action: "docs.sync", lag_s: 42 });
+		expect(state.readings(0).syncLagS).toBe(42);
+		state.recordSyncLag({ action: "docs.sync", lag_s: "soon" });
+		state.recordSyncLag({ action: "docs.planning", lag_s: 5 });
+		expect(state.readings(0).syncLagS).toBe(42);
+		state.recordSyncLag({ action: "docs.sync", lag_s: 7 });
+		expect(state.readings(0).syncLagS).toBe(7);
 	});
 });
 
@@ -418,5 +430,29 @@ describe("the fabric's corpus source", () => {
 		expect(on.substrate.fabricSources().config).toMatchObject({ corpusEnabled: true, docsSlo: { freshnessS: 600, recall5: 0.7, ingestDocsPerS: 2 } });
 		const off = await world({});
 		expect(off.substrate.fabricSources().config).toMatchObject({ corpusEnabled: false, docsSlo: { freshnessS: 86_400, recall5: 0.6, ingestDocsPerS: 0.2 } });
+	});
+});
+
+describe("a stored docs.sync note", () => {
+	const sync = (lag: unknown) => ({ surface: "omp" as const, kind: "note" as const, summary: "docs sync", session_id: "docs-sync:t", payload: { action: "docs.sync", runtime: "corpus-sync", lag_s: lag } });
+	const rowFor = async (w: World) => {
+		const corpus = await w.substrate.fabricSources().corpus();
+		return corpusRow(healthyFacts({ corpus: { enabled: true, readings: corpus.readings, thresholds: w.substrate.fabricSources().config.docsSlo, unread: corpus.unread } }));
+	};
+
+	test("with the threshold set, a lag above it degrades the fabric row with the breach named, and a lag on it does not", async () => {
+		const w = await world({ SUBSTRATE_CORPUS: "on", SUBSTRATE_DOCS_SLO_SYNC_LAG_S: "3600" });
+		await w.substrate.emit(sync(4000));
+		expect((await w.substrate.fabricSources().corpus()).readings.syncLagS).toBe(4000);
+		expect(await rowFor(w)).toMatchObject({ state: "degraded", source: "corpus.slo: breached sync", detail: { syncLag: { reading: 4000, threshold: 3600 }, breaches: ["sync"] } });
+		await w.substrate.emit(sync(3600));
+		expect(await rowFor(w)).toMatchObject({ state: "ok", detail: { syncLag: { reading: 3600, threshold: 3600 }, breaches: [] } });
+	});
+
+	test("with the threshold unset the lag is shown with no verdict", async () => {
+		const w = await world({ SUBSTRATE_CORPUS: "on" });
+		await w.substrate.emit(sync(4000));
+		expect(w.substrate.fabricSources().config.docsSlo.syncLagS).toBeUndefined();
+		expect(await rowFor(w)).toMatchObject({ state: "ok", detail: { syncLag: { reading: 4000, threshold: null }, breaches: [] } });
 	});
 });

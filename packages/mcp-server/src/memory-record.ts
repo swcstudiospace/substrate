@@ -30,9 +30,9 @@ export const FORGOTTEN_PREFIX = "forgotten:";
 /** Most hops the chain walk takes in either direction. A real chain is a handful of versions. */
 export const MAX_CHAIN_HOPS = 256;
 
-export type NexusState = "current" | "superseded" | "forgotten";
+type NexusState = "current" | "superseded" | "forgotten";
 
-export interface NexusProvenance {
+interface NexusProvenance {
 	writer: string;
 	actor: Actor;
 	trust: Trust;
@@ -46,7 +46,7 @@ export interface NexusProvenance {
 }
 
 /** The identity and provenance view of one memory entry. It carries no content. */
-export interface NexusRecord {
+interface NexusRecord {
 	id: string;
 	version: number;
 	supersedes: string | null;
@@ -80,18 +80,18 @@ export interface TombstoneRecord {
 	tombstone: { reason: string; at: string };
 }
 
-export interface NexusContext {
+interface NexusContext {
 	/** Ids the caller knows are forgotten even though the row carries no marker. */
 	forgotten?: ReadonlySet<string>;
 }
 
-export interface CapsuleContext extends NexusContext {
+interface CapsuleContext extends NexusContext {
 	/** The clock, for the `at` of the tombstone a forgotten entry becomes. Injected, never read from the system. */
 	now: () => Date;
 }
 
 /** Which hash version a stored `entry_hash` matches, or null when it matches neither. */
-export type HashMatch = "v1" | "v2";
+type HashMatch = "v1" | "v2";
 
 function nullable(value: string | undefined | null): string | null {
 	return typeof value === "string" && value.length > 0 ? value : null;
@@ -176,10 +176,10 @@ export function toCapsuleRecord(entry: MemoryEntry, ctx: CapsuleContext): Capsul
 }
 
 /** The ends a chain walk can reach. */
-export type ChainBack = "root" | "missing" | "cycle" | "truncated";
-export type ChainForward = "current" | "forgotten" | "missing" | "cycle" | "truncated";
+type ChainBack = "root" | "missing" | "cycle" | "truncated";
+type ChainForward = "current" | "forgotten" | "missing" | "cycle" | "truncated";
 
-export interface SupersessionChain {
+interface SupersessionChain {
 	/** The id asked for. */
 	id: string;
 	/** Oldest to newest, including `id`. Empty when `id` is not in the rows. */

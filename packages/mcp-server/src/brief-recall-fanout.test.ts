@@ -365,6 +365,23 @@ describe("brief recall fan-out (SUBSTRATE_BRIEF_RECALL=enforce)", () => {
 			expect(ttl).toBeGreaterThanOrEqual(3598);
 		});
 	});
+
+	test("under repo scope, a graph hit from a repository the surface is not granted stays out of the brief, even on the claimed graph", async () => {
+		await withHindsight(async () => {
+			const fake = new HindsightFake();
+			fake.seed("sub-omp", [
+				{ id: "own-b", text: "owner-b own lesson", document_id: "own-b-doc", tags: [], metadata: { scope: "repo:owner/b", repo: "owner/b" }, score: 0.9 },
+				{ id: "graph-a", text: "owner-a graph lesson", document_id: "graph-a-doc", tags: [], metadata: { scope: "repo:owner/a", repo: "owner/a", graph_id: "graph-1" }, score: 0.8 },
+			]);
+			for (const bank of ["sub-hermes", "sub-cursor", "sub-grok-bot"]) fake.seed(bank, []);
+			// omp is granted owner/b only. The hit names the request's graph but its repository is owner/a, so the grant must keep it out.
+			const w = world({ ...ENFORCE, SUBSTRATE_BRIEF_RECALL_SCOPE: "graph", SUBSTRATE_REPO_SCOPES: JSON.stringify({ omp: ["owner/b"] }) }, fake);
+			const request = { repo: "owner/b", surface: "omp", graph_id: "graph-1" } as const;
+			const text = (await w.substrate.briefDetailed(request, undefined, request.surface)).text;
+			expect(text).toContain("- owner-b own lesson");
+			expect(text).not.toContain("owner-a graph lesson");
+		});
+	});
 });
 
 describe("brief recall fan-out and forgotten entries", () => {

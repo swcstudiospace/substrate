@@ -83,8 +83,8 @@ export interface IdenticalGroup {
 	copies: string[];
 }
 
-export const MAX_IDENTICAL_GROUPS = 200;
-export const MAX_IDENTICAL_COPIES = 20;
+const MAX_IDENTICAL_GROUPS = 200;
+const MAX_IDENTICAL_COPIES = 20;
 
 export interface ScanReport {
 	/** Checkouts found before clones and worktrees collapsed. */
@@ -118,7 +118,7 @@ export interface AdapterResult {
 	paths: Map<string, string>;
 }
 
-export interface ScanResult {
+interface ScanResult {
 	entries: CorpusEntry[];
 	report: ScanReport;
 	/** Where each entry's bytes live, keyed by `documentKey(repo, path)`, so a later step can read the body. */
@@ -131,7 +131,7 @@ export interface FileStat {
 	size: number;
 }
 
-export interface ScanOptions {
+interface ScanOptions {
 	roots: string[];
 	/** Entries above this tier are dropped. Default 2. */
 	maxTier?: DocTier | undefined;
@@ -165,7 +165,7 @@ export interface CheckoutRead {
 	problems: string[];
 }
 
-export type Inspected =
+type Inspected =
 	| { ok: true; sha256: string; bytes: number; text: string }
 	| { ok: false; reason: "empty" | "too-large" | "binary" | "invalid-utf8" };
 

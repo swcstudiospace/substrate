@@ -21,11 +21,11 @@ export const PR_BODY_MAX = 20_000;
 export const COMMIT_MESSAGE_MAX = 2_000;
 
 /** Names the b:hooks shim and any smoke helper use inside the worktree; never committed, never pushed (T-03-07-07). */
-export const SCRATCH_PREFIX = ".substrate-";
-export const SCRATCH_EXCLUDE_PATHSPEC = ":(exclude,glob)**/.substrate-*";
+const SCRATCH_PREFIX = ".substrate-";
+const SCRATCH_EXCLUDE_PATHSPEC = ":(exclude,glob)**/.substrate-*";
 
-export const COMMIT_USER_NAME = "substrate claude-code";
-export const COMMIT_USER_EMAIL = "claude-code@substrate.local";
+const COMMIT_USER_NAME = "substrate claude-code";
+const COMMIT_USER_EMAIL = "claude-code@substrate.local";
 
 const BASE_BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const RUN_TIMEOUT_MS = 120_000;
@@ -34,7 +34,7 @@ const GITDIR_FILE_MAX = 4_096;
 /** Config every host git call carries: hooks and fsmonitor are programs a worktree could supply, so both stay off. */
 const GIT_GUARD_ARGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
-export function branchFor(graphId: string): string {
+function branchFor(graphId: string): string {
 	worktreeFor(graphId); // validates the id
 	return `substrate/${graphId}`;
 }
@@ -56,7 +56,7 @@ export type GitSite = { worktree: string; gitDir: string };
  * Every host git argv starts here: the site pinned by path, hooks and fsmonitor off. The explicit gitdir
  * means git never reads the worktree's own `.git` file, which the guest can rewrite through the mount.
  */
-export function gitArgv(site: GitSite, args: readonly string[]): string[] {
+function gitArgv(site: GitSite, args: readonly string[]): string[] {
 	return ["git", "-C", site.worktree, `--git-dir=${site.gitDir}`, `--work-tree=${site.worktree}`, ...GIT_GUARD_ARGS, ...args];
 }
 
@@ -65,7 +65,7 @@ export function pushArgv(site: GitSite, graphId: string): string[] {
 	return gitArgv(site, ["push", "origin", branchFor(graphId)]);
 }
 
-export type PrCreateInput = { repo: string; graphId: string; base: string; title: string; body: string };
+type PrCreateInput = { repo: string; graphId: string; base: string; title: string; body: string };
 
 /** `gh pr create` with every target fixed by the host; only title and body are the guest's, within limits. */
 export function prCreateArgv(input: PrCreateInput): string[] {
@@ -121,22 +121,26 @@ export type Runner = (argv: readonly string[]) => Promise<RunResult>;
  */
 export function execFileRunner(argv: readonly string[]): Promise<RunResult> {
 	const { promise, resolve } = Promise.withResolvers<RunResult>();
-	execFile(
-		argv[0] as string,
-		argv.slice(1),
-		{ timeout: RUN_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, encoding: "utf8", env: { ...process.env, HOME: "/root", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" } },
-		(error, stdout, stderr) => {
-			const code = error ? (typeof error.code === "number" ? error.code : null) : 0;
-			resolve({ code, stdout: String(stdout), stderr: String(stderr) });
-		},
-	);
+	try {
+		execFile(
+			argv[0] as string,
+			argv.slice(1),
+			{ timeout: RUN_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, encoding: "utf8", env: { ...process.env, HOME: "/root", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" } },
+			(error, stdout, stderr) => {
+				const code = error ? (typeof error.code === "number" ? error.code : null) : 0;
+				resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+			},
+		);
+	} catch (error) {
+		return Promise.reject(error);
+	}
 	return promise;
 }
 function tail(result: RunResult): string {
 	return redact(`${result.stdout}${result.stderr}`.trim().slice(-OUTPUT_TAIL_CHARS));
 }
 
-export type ScratchCheck = { ok: true } | { ok: false; reason: string; paths: string[] };
+type ScratchCheck = { ok: true } | { ok: false; reason: string; paths: string[] };
 
 /**
  * Before any network call: the branch's diff against origin/<base> must list no scratch path.
@@ -154,21 +158,21 @@ export async function checkScratch(input: { graphId: string; base: string; run: 
 	return { ok: true };
 }
 
-export type HostFnStore = { get(graphId: string, nodeId: string): TaskRecord | null; save(record: TaskRecord): void };
+type HostFnStore = { get(graphId: string, nodeId: string): TaskRecord | null; save(record: TaskRecord): void };
 
 /** What every executor receives: the graph from the actor key, the node the guest named, and the host's collaborators. */
-export type HostFnContext = {
+type HostFnContext = {
 	graphId: string;
 	nodeId: string;
 	store: HostFnStore;
 	substrate: { graphGet(graphId: string): Promise<GraphView | null> };
 	run: Runner;
-	/** Where worktrees live. Unset in production (worktreeFor); tests point it at a temp root. */
+	/** The configured root holding the graph's worktree (vm.ts sets it); unset is the default root (tests point it at a temp root). */
 	worktreeRoot?: string;
 	log?: (line: string) => void;
 };
 
-export type HostFnError = { error: string };
+type HostFnError = { error: string };
 
 type Target = { record: TaskRecord; graph: GraphView; repo: string; base: string } | HostFnError;
 
@@ -190,7 +194,7 @@ function siteFor(graphId: string, worktreeRoot: string | undefined): GitSiteResu
 	return resolveGitSite(worktreeRoot === undefined ? canonical : `${worktreeRoot}/${graphId}`);
 }
 
-export type GitSiteResult = { site: GitSite } | HostFnError;
+type GitSiteResult = { site: GitSite } | HostFnError;
 
 /**
  * The worktree's `.git` must be a regular file holding `gitdir: <absolute path>`, the path an existing directory
@@ -258,7 +262,7 @@ function registeredTo(gitDir: string, worktreeReal: string): boolean {
 	}
 }
 
-export type GitPushResult = { pushed: string; output: string } | HostFnError;
+type GitPushResult = { pushed: string; output: string } | HostFnError;
 
 /**
  * `agentos-substrate git-push --node <nid>`: worktree on substrate/<gid>, origin naming the
@@ -288,12 +292,12 @@ export async function gitPush(ctx: HostFnContext): Promise<GitPushResult> {
 	return { pushed: branch, output: tail(push) };
 }
 
-export type PrCreateResult = { pr_url: string; pr_number: number; existing: boolean } | HostFnError;
+type PrCreateResult = { pr_url: string; pr_number: number; existing: boolean } | HostFnError;
 
 const PR_URL_RE = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)$/;
 
 /** The repo's PR URL from gh's stdout (its last line), or null. */
-export function prUrlOf(stdout: string, repo: string): { url: string; number: number } | null {
+function prUrlOf(stdout: string, repo: string): { url: string; number: number } | null {
 	for (const line of stdout.split("\n").reverse()) {
 		const match = PR_URL_RE.exec(line.trim());
 		if (match && match[1]?.toLowerCase() === repo.toLowerCase()) return { url: line.trim(), number: Number(match[2]) };
@@ -332,7 +336,7 @@ export async function prCreate(ctx: HostFnContext & { title: string; body: strin
 	return { pr_url: pr.url, pr_number: pr.number, existing: false };
 }
 
-export type CommitResult = { committed: true; sha: string } | HostFnError;
+type CommitResult = { committed: true; sha: string } | HostFnError;
 
 /** c:hostfn_commit only — `agentos-substrate commit --node <nid> --message …` on the host worktree. */
 export async function commit(ctx: HostFnContext & { message: string }): Promise<CommitResult> {

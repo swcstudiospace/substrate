@@ -169,6 +169,20 @@ describe("CorpusRootKeeper", () => {
 		expect(event.summary).toContain(corpusRoot(rowsOf(4)).root.slice(0, 12));
 	});
 
+	test("flush writes the owed root now, without the timer, exactly once: the root and the count go out a single time", async () => {
+		const { clock, emitted, keeper, store } = harness();
+		seed(defined(store), 3);
+		keeper.manifestChanged();
+		expect(clock.timers).toHaveLength(1);
+		await keeper.flush();
+		expect(emitted).toHaveLength(1);
+		expect(defined(emitted[0]).payload).toEqual({ action: CORPUS_ROOT_ACTION, root: corpusRoot(rowsOf(3)).root, count: 3, manifest_version: 3 });
+		// The armed timer was disarmed by the flush: firing it later writes nothing more.
+		clock.fire();
+		await flush();
+		expect(emitted).toHaveLength(1);
+	});
+
 	test("changes inside the window are coalesced into one event that carries the latest state", async () => {
 		const { clock, emitted, keeper, store } = harness();
 		const manifest = defined(store);

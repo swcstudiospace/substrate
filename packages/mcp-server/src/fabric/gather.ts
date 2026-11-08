@@ -22,7 +22,7 @@ export const FABRIC_HEALTH_WINDOW_MS = 2_000;
  */
 export const CORPUS_MANIFEST_READ_MS = 1000;
 
-export type Read<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: "timeout" | "failed" };
+type Read<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: "timeout" | "failed" };
 
 /** `work`'s answer, or why there is none: it outlasted `ms` (timeout), or it threw (failed). Never rejects. */
 export async function within<T>(work: () => Promise<T>, ms: number): Promise<Read<T>> {

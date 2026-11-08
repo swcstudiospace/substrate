@@ -45,6 +45,7 @@ import { redact } from "./redact.ts";
 import type { AnchorCoverage, ExportCursor, ExportPage, ExportWindowQuery } from "./greptime.ts";
 import { ARCHIVE_NOTE_PREFIX, INGEST_LAG_MS } from "./greptime.ts";
 import { rowToEvent } from "./service.ts";
+import { reportSilent } from "./silent-failures.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const DAY_MS = 24 * HOUR_MS;
@@ -53,13 +54,13 @@ const DAY_MS = 24 * HOUR_MS;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** The release root on the VPS; an archive under it would expire with the next prune, and it is the root disk. */
-export const RELEASE_ROOT = "/opt/agent-substrate";
+const RELEASE_ROOT = "/opt/agent-substrate";
 
 /** The floor `substrate ledger archive` applies when the env does not say otherwise: the deploy gate's 5 GB. */
 export const DEFAULT_MIN_FREE_GB = 5;
 
 /** Rows per export page when the operator passes none: the read cap, so a day is as few statements as it can be. */
-export const DEFAULT_PAGE_SIZE = 500;
+const DEFAULT_PAGE_SIZE = 500;
 
 /** The archive refused before writing anything: a usage or environment fault, exit 2 at the CLI. */
 export class ArchiveRefused extends Error {}
@@ -96,6 +97,7 @@ export const dfRunner: DfRunner = (path) => {
 	try {
 		return execFileSync("df", ["-Pk", "--", path], { encoding: "utf8", timeout: 10_000 });
 	} catch {
+		// null is the documented unreadable answer: freeKbOf and the floor gate refuse on it (fail closed).
 		return null;
 	}
 };
@@ -128,7 +130,7 @@ export function dayOf(ms: number): string {
 }
 
 /** Whether `day` is a real UTC calendar day in the `YYYY-MM-DD` form. */
-export function isDay(day: string): boolean {
+function isDay(day: string): boolean {
 	if (!DAY_RE.test(day)) return false;
 	const ms = Date.parse(`${day}T00:00:00.000Z`);
 	return Number.isFinite(ms) && dayOf(ms) === day;
@@ -246,6 +248,7 @@ export const devReader: DevReader = (path) => {
 	try {
 		return statSync(path).dev;
 	} catch {
+		// null is the documented unreadable answer: refusedMount refuses with the reason.
 		return null;
 	}
 };
@@ -299,6 +302,7 @@ export function releaseShaOf(cwd: string): string | undefined {
 	try {
 		real = realpathSync(cwd);
 	} catch {
+		// An unresolvable cwd is not a releases tree: undefined, as for a checkout (see above).
 		return undefined;
 	}
 	const match = /\/releases\/([0-9a-f]{7,40})$/.exec(real);
@@ -504,7 +508,7 @@ export async function archiveWindow(
 }
 
 /** One thing `verifyArchive` found wrong; `kind` is closed so a caller can act on it. */
-export interface VerifyMismatch {
+interface VerifyMismatch {
 	kind: "missing" | "manifest" | "sha256" | "count" | "parse" | "hash" | "chain" | "root" | "anchor";
 	file?: string;
 	event?: string;
@@ -513,7 +517,7 @@ export interface VerifyMismatch {
 }
 
 /** The offline verdict on one day's archive. `ok` is `mismatches.length === 0`; partial and unanchored hours are reported, never failures. */
-export interface VerifyReport {
+interface VerifyReport {
 	ok: boolean;
 	day: string;
 	dir: string;
@@ -826,7 +830,7 @@ export function archiveNote(manifest: ArchiveManifest): EventInput {
 }
 
 /** The marker a day keeps beside its manifest from before its note is first sent until the ledger has taken it. */
-export interface PendingNote {
+interface PendingNote {
 	day: string;
 	note: EventInput;
 	/** Sends the ledger has refused or that threw; `0` while the first is still in flight. */
@@ -933,7 +937,8 @@ export function readPendingNote(dir: string, day: string): PendingNote | null {
 		const parsed = PendingNoteSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
 		// The marker was written from an `EventInput`; the schema checks the three fields every event has.
 		return parsed.success ? { ...parsed.data, note: parsed.data.note as unknown as EventInput } : null;
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("ledger-archive.pending-note", cause);
 		return null;
 	}
 }
@@ -1089,7 +1094,7 @@ export function formatManifest(manifest: ArchiveManifest): string {
  * for, and what `ledger-archive.test.ts` pins. `detail` carries the specifics
  * (the hash, the hour, the counts) after it.
  */
-export const MISMATCH_SENTENCE: Record<VerifyMismatch["kind"], string> = {
+const MISMATCH_SENTENCE: Record<VerifyMismatch["kind"], string> = {
 	missing: "a file the archive needs is missing",
 	manifest: "the manifest does not describe these files",
 	sha256: "a file's digest differs from the manifest",

@@ -4,7 +4,7 @@
  * `--check` writes nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
 	CORPUS_HOOKS,
 	corpusHookBlock,
 	installCorpusHooks,
+	installRepos,
 	uninstallCorpusHooks,
 } from "./install-git-hook.ts";
 
@@ -25,9 +26,13 @@ function emptyRepo(): string {
 	return repo;
 }
 
-function run(...args: string[]): { code: number; out: string } {
-	const result = Bun.spawnSync(["bun", "--no-env-file", INSTALLER, ...args], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" } });
+function runWith(env: Record<string, string>, ...args: string[]): { code: number; out: string } {
+	const result = Bun.spawnSync(["bun", "--no-env-file", INSTALLER, ...args], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env } });
 	return { code: result.exitCode, out: result.stdout.toString() };
+}
+
+function run(...args: string[]): { code: number; out: string } {
+	return runWith({}, ...args);
 }
 
 describe("install-git-hook", () => {
@@ -220,5 +225,159 @@ describe("corpus hint hooks", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
+	});
+});
+
+describe("installRepos keeps going past a failing repository", () => {
+	test("one failing repository does not stop the others, which still get their hook", () => {
+		const bad = emptyRepo();
+		const good = emptyRepo();
+		const alsoGood = emptyRepo();
+		// A directory where the hook file belongs: reading it throws, as an unreadable hook would.
+		mkdirSync(hookPath(bad, "post-commit"), { recursive: true });
+		const lines: string[] = [];
+		const outcome = installRepos([bad, good, alsoGood], { write: (text) => lines.push(text) });
+		for (const repo of [good, alsoGood]) {
+			const hook = hookPath(repo, "post-commit");
+			expect(statSync(hook).isFile()).toBe(true);
+			expect(statSync(hook).mode & 0o111).not.toBe(0);
+		}
+		expect(outcome.failures).toBe(1);
+		expect(lines.length).toBe(3);
+		expect(lines[0]?.startsWith(`✗ ${bad} — install failed: `)).toBe(true);
+		expect(lines.slice(1)).toEqual([`✓ ${good} — installed\n`, `✓ ${alsoGood} — installed\n`]);
+	});
+
+	test("the failing repository is named in the result with a one-line reason", () => {
+		const bad = emptyRepo();
+		mkdirSync(hookPath(bad, "post-commit"), { recursive: true });
+		const outcome = installRepos([bad], { write: () => {} });
+		expect(outcome.errors.length).toBe(1);
+		const failure = outcome.errors[0];
+		expect(failure?.repo).toBe(bad);
+		expect(failure?.reason.length).toBeGreaterThan(0);
+		expect(failure?.reason).not.toContain("\n");
+		expect(failure?.reason).not.toMatch(/:\/\//);
+		expect(outcome.failures).toBe(1);
+	});
+
+	test("with no failure the result is unchanged: no errors, the same line per repository", () => {
+		const repo = emptyRepo();
+		const lines: string[] = [];
+		const outcome = installRepos([repo], { write: (text) => lines.push(text) });
+		expect(outcome).toEqual({ failures: 0, errors: [] });
+		expect(lines).toEqual([`✓ ${repo} — installed\n`]);
+		const again: string[] = [];
+		expect(installRepos([repo], { write: (text) => again.push(text) })).toEqual({ failures: 0, errors: [] });
+		expect(again).toEqual([`✓ ${repo} — refreshed\n`]);
+	});
+
+	test("the CLI exits 1 for a failing repository, names it, and still installs the others", () => {
+		const bad = emptyRepo();
+		const good = emptyRepo();
+		mkdirSync(hookPath(bad, "post-commit"), { recursive: true });
+		const result = run(bad, good);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(`✗ ${bad} — install failed: `);
+		expect(result.out).toContain(`✓ ${good} — installed`);
+		expect(existsSync(hookPath(good, "post-commit"))).toBe(true);
+	});
+
+	test("a repository with several problems is counted once in failures, not once per problem", () => {
+		const repo = emptyRepo();
+		writeFileSync(hookPath(repo, "post-commit"), "#!/bin/sh\necho mine\n");
+		writeFileSync(hookPath(repo, "post-merge"), "#!/bin/sh\necho mine\n");
+		writeFileSync(hookPath(repo, "post-checkout"), "#!/bin/sh\necho mine\n");
+		const lines: string[] = [];
+		const outcome = installRepos([repo], { corpus: true, write: (text) => lines.push(text) });
+		expect(outcome).toEqual({ failures: 1, errors: [] });
+		expect(lines.some((line) => line.includes(`${repo} — post-merge foreign`))).toBe(true);
+		expect(lines.some((line) => line.includes(`${repo} — post-checkout foreign`))).toBe(true);
+	});
+});
+
+function registryOf(repo: string): string {
+	return JSON.stringify({ "acme/hooks-fixture": { checkouts: [repo] } });
+}
+
+describe("core.hooksPath under a repository registry", () => {
+	test("a hooks directory outside the registered repository is refused and nothing is written there; an in-repo one still installs", () => {
+		const repo = emptyRepo();
+		const outside = mkdtempSync(join(tmpdir(), "install-hook-outside-"));
+		Bun.spawnSync(["git", "-C", repo, "config", "core.hooksPath", outside]);
+
+		const refused = runWith({ SUBSTRATE_REPO_REGISTRY: registryOf(repo) }, "--corpus", repo);
+
+		expect(refused.code).toBe(1);
+		expect(refused.out).toContain(`✗ ${repo} — refused: `);
+		expect(refused.out).toContain(outside);
+		expect(readdirSync(outside)).toEqual([]);
+
+		const inside = emptyRepo();
+		mkdirSync(join(inside, ".githooks"));
+		Bun.spawnSync(["git", "-C", inside, "config", "core.hooksPath", ".githooks"]);
+
+		const installed = runWith({ SUBSTRATE_REPO_REGISTRY: registryOf(inside) }, "--corpus", inside);
+
+		expect(installed.code).toBe(0);
+		expect(existsSync(join(inside, ".githooks", "post-commit"))).toBe(true);
+		expect(readdirSync(outside)).toEqual([]);
+	});
+});
+
+describe("a registry is checked before any git call", () => {
+	test("with a registry set, an unregistered repository is refused without spawning git, and nothing is written", () => {
+		const repo = emptyRepo();
+		const registered = emptyRepo();
+		const shims = mkdtempSync(join(tmpdir(), "install-hook-git-shim-"));
+		const callLog = join(shims, "git-calls.log");
+		const realGit = Bun.which("git");
+		if (realGit === null) throw new Error("git is not on PATH");
+		// A git shim that records each call and then runs the real git, so a call is visible without changing the answer.
+		writeFileSync(join(shims, "git"), `#!/bin/sh\necho "$*" >> '${callLog}'\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+
+		const result = Bun.spawnSync([process.execPath, "--no-env-file", INSTALLER, repo], {
+			env: { PATH: shims, HOME: process.env.HOME ?? "", SUBSTRATE_REPO_REGISTRY: registryOf(registered) },
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout.toString()).toContain(`✗ ${repo} — refused: `);
+		expect(existsSync(callLog)).toBe(false);
+		expect(existsSync(hookPath(repo, "post-commit"))).toBe(false);
+	});
+});
+
+describe("a linked worktree's shared hooks need its primary checkout registered", () => {
+	function linkedWorktreeOf(primary: string): string {
+		const parent = mkdtempSync(join(tmpdir(), "install-hook-linked-"));
+		const linked = join(parent, "linked");
+		Bun.spawnSync(["git", "-C", primary, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--allow-empty", "-m", "init"]);
+		const added = Bun.spawnSync(["git", "-C", primary, "worktree", "add", "--detach", linked]);
+		if (added.exitCode !== 0) throw new Error(added.stderr.toString());
+		return linked;
+	}
+
+	test("a registered linked worktree whose primary is not registered is refused: nothing is written to the primary's hooks and the line names the primary", () => {
+		const primary = emptyRepo();
+		const linked = linkedWorktreeOf(primary);
+
+		const refused = runWith({ SUBSTRATE_REPO_REGISTRY: registryOf(linked) }, linked);
+
+		expect(refused.code).toBe(1);
+		expect(refused.out).toContain(`✗ ${linked} — refused: `);
+		expect(refused.out).toContain(`primary checkout ${primary}`);
+		expect(existsSync(hookPath(primary, "post-commit"))).toBe(false);
+	});
+
+	test("with the primary registered too, the linked worktree installs into the primary's shared hooks", () => {
+		const primary = emptyRepo();
+		const linked = linkedWorktreeOf(primary);
+		const registry = JSON.stringify({ "acme/hooks-fixture": { checkouts: [primary, linked] } });
+
+		const installed = runWith({ SUBSTRATE_REPO_REGISTRY: registry }, linked);
+
+		expect(installed.code).toBe(0);
+		expect(installed.out).toContain(`✓ ${linked} — installed`);
+		expect(existsSync(hookPath(primary, "post-commit"))).toBe(true);
 	});
 });

@@ -122,13 +122,13 @@ The table is created by migration step `worktrees` (additive, `expand`; see `doc
 
 ## Flags
 
-All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
+All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_ROOTS` and `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
 
 | Variable | Default | Read by | Meaning |
 | --- | --- | --- | --- |
 | `SUBSTRATE_WORKTREE_REGISTRY` | `off` | the server | `on` enables the routes and the tool |
 | `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` | `1209600` | the server | the retention window, 60 to 31,536,000 seconds |
-| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher does not read it and always uses that directory |
+| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor, the dispatcher | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher reads it too and creates each graph's worktree under its first entry, which is `/var/lib/substrate/worktrees` when unset |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | `5` | the CLI, the fleet package, the dispatcher | the free-disk floor for creating a worktree |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | `14` | the server, the CLI, the fleet package | how long a worktree must be untouched before prune may call it safe, and when a listing calls it `stale` |
 | `SUBSTRATE_SESSION_ID` | none | the CLI, the fleet package | the session `substrate worktree scan --report` attributes the worktree holding the current directory to when `--session ID` is absent (the flag wins; a value that is not a session id is a usage error) |
@@ -140,3 +140,24 @@ All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MI
 3. Run the reporter; `GET /worktrees?host=<host>` shows what it sent.
 
 To turn it off set the variable back to `off`: the routes answer 503 again and the rows stay, unread, until the next time it is on or an operator drops the table.
+
+## Repository scope (phase 72)
+
+Two JSON variables decide which repositories a surface may address, and where each repository lives on this host. Both are read once at boot; a malformed value refuses the boot, so a scope that cannot be read never defaults to open.
+
+- `SUBSTRATE_REPO_REGISTRY`: `{"owner/name": {"checkouts": ["/abs"], "worktrees": ["/abs"]}}`. A path is placed in a repository only by this table. Two repositories may not share or nest a directory.
+- `SUBSTRATE_REPO_SCOPES`: `{"<surface>": ["owner/name"]}`. Unset means scoping is off and every caller may address every repository, as before, unless `SUBSTRATE_REPO_REGISTRY` is set: then the server refuses to start. Set, a surface missing from the object, and every anonymous caller, is granted nothing.
+
+What is refused, and before what:
+
+- `POST /drift` and `drift_scan` refuse a repository outside the grant, or a path that does not resolve (through symlinks and `..`) into a registered directory of the named repository. The refusal runs no git and reads no trail.
+- `GET /worktrees` and `worktree_list` filter in the store to the granted repositories; naming another repository is a 403.
+- `GET /corpus/proof`, `POST /corpus/plan`, `POST /corpus/ingest` refuse a repository outside the grant before any manifest or plane read. `GET /corpus/status` and `POST /corpus/reconcile` read every repository at once, so they are refused to a scoped surface.
+- A live session issued or changed for an ungranted repository answers the same `not-found` an unknown session does.
+- `substrate worktree` runs as surface `claude-code` and reads the same two variables. Every root must lie in a registered directory of a granted repository, and `--repo`, `provision`, `merge-back` and `guard` paths must too. A refusal exits 2 before any git call.
+- `substrate corpus` (`scan`, `plan`, `ingest`, `eval`, `reflect`, `sync`, `watch`, `reconcile`, `hook install|uninstall|status`) refuses a `--root`, a `--repo` directory or a named `--repo` that the registry does not place, before any git call or hook write. A refusal exits 2 naming the repository or path. `--root` values come from `--root`, `SUBSTRATE_CORPUS_ROOTS` or the default root. Unset, `SUBSTRATE_REPO_REGISTRY` leaves the corpus CLI as it was. `corpus hint` writes a spool file and runs no git, so it is not gated. With `SUBSTRATE_REPO_REGISTRY` set, the server refuses to start unless `SUBSTRATE_REPO_SCOPES` is set; this CLI does not refuse, and with the scopes variable unset it reads no grant. The top-level CLI reads cwd git (for `brief`, `emit` and `drift` without `--path`) only inside a registered checkout when the registry is set; otherwise it reads no git and sends no repository from cwd.
+- `packages/collectors/src/install-git-hook.ts` (the post-commit collector installer, run as a script) is gated when a registry is set. With `SUBSTRATE_REPO_REGISTRY` set, `install`, `uninstall` and `status` refuse an unregistered repository before any git call, and refuse a hooks directory outside the repository (commits `27778dee`, `0504e77c`). `5d` is closed (`a28ecac8`): a linked worktree's shared hooks need its primary checkout registered, and are refused otherwise. `6b` is closed for the decision-6 cases (`a28ecac8`): a nested checkout under a registered checkout with its own `.git`, or under a registered worktrees directory, is refused by name, and no git runs in it. `6c` is closed by the strict rule (owner decision 2026-11-03): any nested `.git` under a registered root is refused, and each repository, including each linked worktree, must be named by the registry. The server refuses to start when `SUBSTRATE_REPO_REGISTRY` is set without `SUBSTRATE_REPO_SCOPES`; this installer does not refuse that state and accepts a registry without the scopes variable. The identifier clause (`POST /drift`, `substrate drift --path`, `--root`) is gated only when `SUBSTRATE_REPO_SCOPES` is set.
+
+A refusal is recorded as a `repo.scope-refused` ledger warning with the route, the reason code and a 16-hex digest of what was asked for; the requested path or repository is never written. An anonymous refusal is recorded by the route audit. The corpus root and anchor are not gated: they are digests over every repository and reveal no document content.
+
+The scoped credential is the surface bearer plus its grant. No per-repository secret exists; that is a recorded open decision.

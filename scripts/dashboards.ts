@@ -53,6 +53,7 @@ import {
 	CORPUS_FRESHNESS_METRIC,
 	CORPUS_GOLDEN_RECALL5_METRIC,
 	CORPUS_INGEST_RATE_METRIC,
+	CORPUS_SYNC_LAG_METRIC,
 	DEFAULT_THRESHOLDS,
 	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
@@ -129,6 +130,7 @@ export const SERIES_SOURCES: Readonly<Record<string, string>> = {
 	"corpus.freshness_seconds": CORPUS_FRESHNESS_METRIC,
 	"corpus.ingest_docs_per_s": CORPUS_INGEST_RATE_METRIC,
 	"corpus.golden_recall5": CORPUS_GOLDEN_RECALL5_METRIC,
+	"corpus.sync_lag_seconds": CORPUS_SYNC_LAG_METRIC,
 };
 
 /**
@@ -305,6 +307,7 @@ function planeItems(): Item[] {
 		{ kind: "chart", series: "index.archive_age_s", title: "Index archive age", note: "Age of the newest complete archive. No point until a first archive exists." },
 		{ kind: "chart", series: "corpus.ingest_docs_per_s", title: "Corpus ingest throughput", note: "Documents per second of the last ingest request's wall time; 0 when it sent nothing. The objective is SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S." },
 		{ kind: "chart", series: "corpus.golden_recall5", title: "Golden-set recall at 5", note: "As the docs canary last reported it. No point until a first report. The objective is SUBSTRATE_DOCS_SLO_RECALL5." },
+		{ kind: "chart", series: "corpus.sync_lag_seconds", title: "Corpus sync lag", note: "Seconds the newest reported corpus sync had behind its source change. The objective is SUBSTRATE_DOCS_SLO_SYNC_LAG_S." },
 	];
 }
 

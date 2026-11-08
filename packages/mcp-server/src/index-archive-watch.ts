@@ -21,17 +21,17 @@ import { z } from "zod";
 import { ARCHIVE_TABLE_NAMES } from "./index-archive-spec.ts";
 
 /** How long one directory read serves every caller. */
-export const INDEX_ARCHIVE_MEMO_MS = 60_000;
+const INDEX_ARCHIVE_MEMO_MS = 60_000;
 
 /** Snapshot directories whose manifest is tried, newest first, before the read gives up: a damaged manifest must not hide an older good one, and a flood of directories must not make the read unbounded. */
 const MAX_MANIFESTS_TRIED = 5;
 
-/** The largest manifest read: a manifest lists nine tables, so anything bigger is damage. */
+/** The largest manifest read: a manifest lists ten tables, so anything bigger is damage. */
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 
 const SNAPSHOT_RE = /^index-\d{8}T\d{6}Z$/;
 
-export interface IndexArchiveStatus {
+interface IndexArchiveStatus {
 	/** The newest complete snapshot's `createdAt`, or `null` when the directory holds none. */
 	lastArchiveAt: string | null;
 	snapshot: string | null;
@@ -53,7 +53,7 @@ const WatchedManifest = z.object({
 });
 
 /**
- * Whether every archived table's data file the manifest lists is on disk with the listed size: nine `stat`s, no
+ * Whether every archived table's data file the manifest lists is on disk with the listed size: ten `stat`s, no
  * reads. A manifest over missing or truncated files is not a backup, however it got that way. The file names are
  * taken from the closed table list, never from the manifest, so a manifest cannot point a stat elsewhere.
  */
@@ -150,7 +150,7 @@ export class IndexArchiveWatch {
 	}
 }
 
-export type IndexArchiveSloStatus = "ok" | "breached" | "insufficient-data" | "report-only";
+type IndexArchiveSloStatus = "ok" | "breached" | "insufficient-data" | "report-only";
 
 /** The `index.archive.age` row on `/slo`: report-only until `SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H` is set. */
 export interface IndexArchiveSloResult {

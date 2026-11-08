@@ -11,6 +11,7 @@ import { BreakerOpenError, CircuitBreaker, type PlaneGate, type PlaneSample } fr
 import { normalizeEvent } from "./event.ts";
 import {
 	AppendOnlyViolation,
+	IngestNotRecorded,
 	assertAppendOnly,
 	chainTip,
 	COVERAGE_MAX_UNCOVERED,
@@ -29,7 +30,6 @@ import {
 	INGEST_LAG_MS,
 	INGEST_BUDGET_MS,
 	INGEST_RETRY_LOOKBACK_MS,
-	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
 	MAX_RECENT_EVENTS,
 	queryLimit,
@@ -238,6 +238,58 @@ describe("insertEvent", () => {
 	});
 });
 
+describe("insertEvent with mayExist", () => {
+	test("a row already stored for this event is not inserted again", async () => {
+		const event = normalizeEvent(input, null);
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SELECT "id" FROM "agent_events"')) return records(["id"], [[event.id]]);
+			if (statement.includes('FROM "event_ingest" WHERE "event_id"')) return records(["event_id", "ingested_at"], [[event.id, 1790186361859]]);
+			return defaultReply(statement);
+		});
+
+		await new GreptimeClient(config).insertEvent(event, { mayExist: true });
+
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "agent_events"'))).toBe(false);
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "event_ingest"'))).toBe(false);
+	});
+
+	test("a row not yet stored is inserted", async () => {
+		const event = normalizeEvent(input, null);
+		const { sql } = stubFetch((statement) => (statement.includes('SELECT "id" FROM "agent_events"') ? records(["id"], []) : defaultReply(statement)));
+
+		await new GreptimeClient(config).insertEvent(event, { mayExist: true });
+
+		expect(insertStatement(sql)).toContain(`'${event.hash}'`);
+	});
+
+	test("a row stored without its ingest record gets that record, and no second row", async () => {
+		const event = normalizeEvent(input, null);
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SELECT "id" FROM "agent_events"')) return records(["id"], [[event.id]]);
+			if (statement.includes('FROM "event_ingest" WHERE "event_id"')) return records(["event_id", "ingested_at"], []);
+			return defaultReply(statement);
+		});
+
+		await new GreptimeClient(config).insertEvent(event, { mayExist: true });
+
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "agent_events"'))).toBe(false);
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "event_ingest"'))).toBe(true);
+	});
+});
+
+describe("insertEvent with mayExist, when the membership read fails", () => {
+	test("a row already stored whose ingest membership cannot be read is an unconfirmed ingest, not a failed write", async () => {
+		const event = normalizeEvent(input, null);
+		stubFetch((statement) => {
+			if (statement.includes('SELECT "id" FROM "agent_events"')) return records(["id"], [[event.id]]);
+			if (statement.includes('FROM "event_ingest" WHERE "event_id"')) return new Response("unavailable", { status: 500 });
+			return defaultReply(statement);
+		});
+
+		await expect(new GreptimeClient(config).insertEvent(event, { mayExist: true })).rejects.toBeInstanceOf(IngestNotRecorded);
+	});
+});
+
 describe("sql", () => {
 	test("maps rows onto their column names", async () => {
 		stubFetch(() => records(["hash", "ts"], [["abc", 1790186361859]]));
@@ -248,6 +300,12 @@ describe("sql", () => {
 	test("returns no rows when the response carries none", async () => {
 		stubFetch(() => affected);
 		expect(await new GreptimeClient(config).sql("SELECT 1")).toEqual([]);
+	});
+
+	test("a reply that is not an object is refused with the module error, not a TypeError", async () => {
+		stubFetch(() => null);
+		const error = await new GreptimeClient(config).sql("SELECT 1").catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(GreptimeError);
 	});
 
 	test("refuses a mutating statement before it reaches the network", async () => {

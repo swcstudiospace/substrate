@@ -39,13 +39,14 @@ const MAX_COMMIT_LENGTH = 100;
 const MAX_ENTRY_BYTES = 2_147_483_647;
 
 /** Why a whole request is refused. Closed: the CLI prints these and the tests pin them. */
-export const REQUEST_REFUSALS = [
+const REQUEST_REFUSALS = [
 	"bad-request",
 	"bad-protocol",
 	"too-many-entries",
 	"too-many-documents",
 	"too-many-tombstones",
 	"empty-request",
+	"tombstone-scope-required",
 	"bad-scope",
 	"bad-repo",
 	"bad-path",
@@ -65,7 +66,7 @@ export const REQUEST_REFUSALS = [
 ] as const;
 export type RequestRefusal = (typeof REQUEST_REFUSALS)[number];
 
-export type Parsed<T> = { ok: true; value: T } | { ok: false; reason: RequestRefusal; detail?: string | undefined };
+type Parsed<T> = { ok: true; value: T } | { ok: false; reason: RequestRefusal; detail?: string | undefined };
 
 function refuse(reason: RequestRefusal, detail?: string): { ok: false; reason: RequestRefusal; detail?: string | undefined } {
 	return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
@@ -99,7 +100,7 @@ export function parseEntry(raw: unknown): Parsed<CorpusEntry> {
  * well formed and each source known, de-duplicated. An empty coverage is valid: a scan with no complete read still has entries
  * worth planning, and it simply tombstones nothing.
  */
-export function parseScope(raw: unknown): Parsed<CorpusScope> {
+function parseScope(raw: unknown): Parsed<CorpusScope> {
 	if (!isRecord(raw)) return refuse("bad-scope", "scope must be an object");
 	const { coverage, maxTier } = raw;
 	if (!Array.isArray(coverage) || !isDocTier(maxTier)) return refuse("bad-scope", "scope needs coverage and maxTier");
@@ -143,8 +144,12 @@ export function parsePlanRequest(raw: unknown): Parsed<CorpusPlanRequest> {
 /**
  * `POST /corpus/ingest`: documents (an entry plus its text) and tombstone keys, within the per-request bounds, each key at most
  * once across both lists. A body over {@link MAX_DOCUMENT_BYTES} is not a request refusal: it is that one document's `too-large`.
+ * A request with tombstones must also carry `scope` (the plan's `{coverage, maxTier}`): a tombstone removes a document from the
+ * plane, so it is judged against the same bound the plan puts on one. Without it the request is `tombstone-scope-required`.
  */
-export function parseIngestRequest(raw: unknown): Parsed<CorpusIngestRequest> {
+export type ParsedIngestRequest = CorpusIngestRequest & { scope?: CorpusScope };
+
+export function parseIngestRequest(raw: unknown): Parsed<ParsedIngestRequest> {
 	if (!isRecord(raw)) return refuse("bad-request", "the body must be a JSON object");
 	if (raw.protocol !== CORPUS_PROTOCOL) return refuse("bad-protocol", `this server speaks protocol ${CORPUS_PROTOCOL}`);
 	const rawDocuments = raw.documents === undefined ? [] : raw.documents;
@@ -176,7 +181,11 @@ export function parseIngestRequest(raw: unknown): Parsed<CorpusIngestRequest> {
 		seen.add(key);
 		tombstones.push({ repo, path });
 	}
-	return { ok: true, value: { protocol: CORPUS_PROTOCOL, documents, tombstones } };
+	if (tombstones.length === 0) return { ok: true, value: { protocol: CORPUS_PROTOCOL, documents, tombstones } };
+	if (raw.scope === undefined) return refuse("tombstone-scope-required", `${tombstones.length} tombstone(s) without a scope`);
+	const scope = parseScope(raw.scope);
+	if (!scope.ok) return scope;
+	return { ok: true, value: { protocol: CORPUS_PROTOCOL, documents, tombstones, scope: scope.value } };
 }
 
 /** `POST /corpus/reconcile`: the protocol version and `execute`. An absent `execute` is a dry run, so a body that forgot it repairs nothing. */

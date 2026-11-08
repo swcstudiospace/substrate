@@ -63,7 +63,7 @@ function viewOf(
 /** A substrate whose index returns `view`, whose mirror answers `relate`, and whose events are captured. */
 function harness(view: unknown, mirror: unknown) {
 	const index = { registerGraph: async () => view };
-	const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, mirror: mirror as never });
+	const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, mirror: mirror as never, steering: { history: null, liveSessions: null } });
 	const emitted: EventInput[] = [];
 	substrate.emit = (async (input: EventInput) => {
 		emitted.push(input);
@@ -228,7 +228,7 @@ describe("graph edges at registration", () => {
 			},
 		} as unknown as Mirror;
 		const cache = new ReadThroughCache({ redis: new MemoryRedis(), enabled: true, log: () => {} });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, mirror: mirror as never, cache });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, mirror: mirror as never, cache, steering: { history: null, liveSessions: null } });
 
 		expect(await substrate.getGraph(GRAPH)).toMatchObject({ graph_id: GRAPH, notion_task_page: "before" });
 		const registering = substrate.registerGraph({ graph_id: GRAPH, edges: view.edges } as never);

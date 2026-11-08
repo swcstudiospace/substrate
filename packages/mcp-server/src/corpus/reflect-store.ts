@@ -34,7 +34,7 @@ export interface RetrievedDocument {
 }
 
 /** What `SUBSTRATE_DOCS_RERANK=shadow` records about a search: the order `on` would have answered and how many positions would move. */
-export interface RetrievalRerank {
+interface RetrievalRerank {
 	mode: "shadow";
 	order: string[];
 	moved: number;

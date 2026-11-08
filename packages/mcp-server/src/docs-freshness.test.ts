@@ -945,6 +945,10 @@ describe("the corpus's freshness (v1.7 phase 65)", () => {
 	const LIMIT_S = 2 * DAY_S;
 	const ago = (seconds: number): string => new Date(NOW - seconds * 1000).toISOString();
 	const judged = (lastIngestAt: string | null, maxAgeS = LIMIT_S) => corpusFreshnessRow({ lastIngestAt, now: NOW, maxAgeS });
+	/** The service's corpus readings, reached through the seam the lag pass reads: a `docs.sync` note the server took sets the lag. */
+	interface SyncSeam {
+		corpusSlo: { recordSyncLag(payload: Record<string, unknown>): void };
+	}
 
 	test("a corpus is stale only past the age limit; with the limit at 0, nothing ingested, or an unreadable instant it is not judged", () => {
 		expect(judged(ago(LIMIT_S))).toMatchObject({ dataset: CORPUS_FRESHNESS_DATASET, stale: false, lagging: false, trigger_lag_seconds: LIMIT_S });
@@ -984,7 +988,10 @@ describe("the corpus's freshness (v1.7 phase 65)", () => {
 			await substrate.settleDocsLag(now);
 			await substrate.docsLagIdle();
 		};
-		return { events, pass };
+		const sync = (lagS: number): void => {
+			(substrate as unknown as SyncSeam).corpusSlo.recordSyncLag({ action: "docs.sync", runtime: "corpus-sync", lag_s: lagS });
+		};
+		return { events, pass, sync };
 	}
 
 	test("a corpus past the limit warns once however many passes the breach lasts, and says so once when a fresh ingest clears it", async () => {
@@ -1041,5 +1048,59 @@ describe("the corpus's freshness (v1.7 phase 65)", () => {
 		const loose = corpusServer({}, fake);
 		await loose.pass(NOW);
 		expect(loose.events).toEqual([]);
+	});
+
+	test("a sync lag over its objective raises the warning and names the sync breach; on the objective, under it or with no objective it does not", async () => {
+		const fake = new FakeStore();
+		fake.lastIngestAt = ago(3600);
+		const over = corpusServer({ SUBSTRATE_DOCS_SLO_SYNC_LAG_S: "3600" }, fake);
+		over.sync(3601);
+		await over.pass(NOW);
+		expect(over.events).toHaveLength(1);
+		expect(over.events[0]).toMatchObject({
+			kind: "warning",
+			payload: { action: "docs.freshness", dataset: "corpus", state: "lagging", breaches: ["sync_lag"], sync_lag_seconds: 3601, sync_threshold_seconds: 3600 },
+		});
+		expect(over.events[0]?.summary).toContain("sync lag 3601 s");
+		over.sync(3600);
+		await over.pass(NOW + MIN);
+		expect(over.events.map((event) => [event.kind, event.payload?.state])).toEqual([
+			["warning", "lagging"],
+			["note", "recovered"],
+		]);
+
+		const on = corpusServer({ SUBSTRATE_DOCS_SLO_SYNC_LAG_S: "3600" }, fake);
+		on.sync(3600);
+		await on.pass(NOW);
+		on.sync(12);
+		await on.pass(NOW + MIN);
+		expect(on.events).toEqual([]);
+
+		const unset = corpusServer({}, fake);
+		unset.sync(999_999);
+		await unset.pass(NOW);
+		expect(unset.events).toEqual([]);
+	});
+
+	test("the warning names the age breach alone while no sync objective is set, both breaches when the sync lag is over its objective too, and the sync breach alone when the age limit is 0", async () => {
+		const stale = new FakeStore();
+		stale.lastIngestAt = ago(3 * DAY_S);
+		const ageOnly = corpusServer({}, stale);
+		ageOnly.sync(7200);
+		await ageOnly.pass(NOW);
+		expect(ageOnly.events[0]?.payload).toMatchObject({ breaches: ["ingest_age"], lag_seconds: 3 * DAY_S });
+		expect(ageOnly.events[0]?.payload).not.toHaveProperty("sync_lag_seconds");
+
+		const both = corpusServer({ SUBSTRATE_DOCS_SLO_SYNC_LAG_S: "3600" }, stale);
+		both.sync(7200);
+		await both.pass(NOW);
+		expect(both.events).toHaveLength(1);
+		expect(both.events[0]?.payload).toMatchObject({ breaches: ["ingest_age", "sync_lag"], sync_lag_seconds: 7200, sync_threshold_seconds: 3600, threshold_seconds: LIMIT_S });
+
+		const ageOff = corpusServer({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "0", SUBSTRATE_DOCS_SLO_SYNC_LAG_S: "3600" }, stale);
+		ageOff.sync(7200);
+		await ageOff.pass(NOW);
+		expect(ageOff.events[0]?.payload).toMatchObject({ breaches: ["sync_lag"], sync_lag_seconds: 7200 });
+		expect(ageOff.events[0]?.payload).not.toHaveProperty("threshold_seconds");
 	});
 });

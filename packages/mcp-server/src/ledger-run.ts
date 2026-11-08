@@ -52,6 +52,7 @@ import type { LedgerCommand, NoteOutcome } from "./ledger-archive.ts";
 import type { EventInput } from "./types.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
+import { diskDestination } from "./destination.ts";
 
 function exitUsage(message: string): never {
 	process.stderr.write(`${message}\n${LEDGER_USAGE}`);
@@ -85,7 +86,7 @@ if (command.command === "verify-archive") {
 	process.exit(mismatched > 0 ? 2 : 0);
 }
 
-const config = loadConfig();
+const config = loadConfig(process.env, { realDestination: diskDestination });
 if (!config.greptime) exitUsage("GREPTIME_URL is not set");
 const greptime = new GreptimeClient(config.greptime, { ledger: config.ledger });
 
@@ -116,7 +117,8 @@ if (until === undefined) {
 	exitUsage(`day ${until} is not closed yet`);
 }
 
-const substrate = new Substrate(config, { greptime });
+// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+const substrate = new Substrate({ ...config, eventBuffer: null }, { greptime });
 const releaseSha = releaseShaOf(process.cwd());
 // The same floor and grammar as `deploy-release.sh` (`^[0-9]{1,4}$`, `0` disables); anything else is the default.
 const floorRaw = process.env.SUBSTRATE_DEPLOY_MIN_FREE_GB?.trim() ?? "";

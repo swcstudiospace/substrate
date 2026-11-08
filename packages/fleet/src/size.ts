@@ -21,7 +21,7 @@ export const DEFAULT_MAX_MS = 20_000;
 /** The walk gives the event loop a turn this often. */
 const YIELD_EVERY = 2048;
 
-export interface MeasureOptions {
+interface MeasureOptions {
 	maxEntries?: number;
 	maxMs?: number;
 	/** Milliseconds clock; injected by tests. */
@@ -31,7 +31,7 @@ export interface MeasureOptions {
 }
 
 /** One hardlinked inode as a walk saw it: its link count on disk, the links inside the tree, and its allocated bytes. */
-export interface InodeLinks {
+interface InodeLinks {
 	nlink: number;
 	found: number;
 	bytes: number;
@@ -44,7 +44,7 @@ export interface TreeLinks {
 	shared: Map<string, InodeLinks>;
 }
 
-export interface Measurement {
+interface Measurement {
 	bytes: number | null;
 	lastActivityMs: number | null;
 	/** Why the numbers are null, or a caveat about what was skipped. */

@@ -102,7 +102,7 @@ export interface SkillsDeps {
 	fetch?: typeof fetch;
 }
 
-export const USAGE =
+const USAGE =
 	"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G] [--dry-run]\n" +
 	"                         [--replace] [--reopen] [--allow-doc-examples pem,jwt]   (operator tokens only)\n" +
 	"substrate skills list [--state approved|proposed|declined|retired|all]\n" +

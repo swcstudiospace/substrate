@@ -59,7 +59,7 @@ export interface WatchLoopDeps {
 }
 
 /** The registered repositories and which directories belong to which label. */
-export interface Registry {
+interface Registry {
 	labels: string[];
 	/** The checkout and collection roots, as watch targets. */
 	roots: WatchTarget[];

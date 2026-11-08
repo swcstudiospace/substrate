@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { assertDevnetRpcUrl, bs58decode, createRpc, RpcError, RpcUrlError } from "./rpc.ts";
+import { graphIndexAddress } from "./graph-index.ts";
+import { formatMemoV3 } from "./memo.ts";
+import { assertDevnetRpcUrl, bs58decode, bs58encode, createRpc, RpcError, RpcUrlError } from "./rpc.ts";
 
 const URL_ = "https://rpc.test.invalid";
 const PAYER = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
@@ -277,5 +279,88 @@ describe("assertDevnetRpcUrl (defence in depth beside the genesis-hash gate)", (
 		for (const url of ["https://api.devnet.solana.com", "http://localhost:8899"]) {
 			expect(() => createRpc({ url, timeoutMs: 1000, attempts: 1, backoffMs: 0 })).not.toThrow();
 		}
+	});
+});
+
+describe("bs58encode", () => {
+	test("encodes the reference vector and maps each leading zero byte to a 1", () => {
+		expect(bs58encode(new TextEncoder().encode("Hello World!"))).toBe("2NEpo7TZRRrLZSi2U");
+		expect(bs58encode(Uint8Array.of(0, 0, 1))).toBe("112");
+		expect(bs58encode(Uint8Array.of(0))).toBe("1");
+		expect(bs58encode(new Uint8Array(0))).toBe("");
+	});
+
+	test("is the inverse of bs58decode, including leading zero bytes", () => {
+		for (const bytes of [Uint8Array.of(0, 0, 255, 0, 1), Uint8Array.of(1), new Uint8Array(32).fill(0xab), Uint8Array.of(0, 7)]) {
+			expect([...bs58decode(bs58encode(bytes))]).toEqual([...bytes]);
+		}
+	});
+});
+
+describe("addressSignaturePage (paged listing of an index address)", () => {
+	const INDEX = graphIndexAddress("graph-a");
+	const OLDER = `4${"5".repeat(86)}k`;
+	const POINTER = formatMemoV3({
+		graphId: "graph-a",
+		periodStartMs: Date.UTC(2026, 8, 26, 10),
+		count: 3,
+		graphHeadsRootHex: "cd".repeat(32),
+		hourTxSig: SIG,
+	});
+
+	test("sends getSignaturesForAddress with the address, the limit, the before cursor and the commitment", async () => {
+		const { rpc, requests } = fakeRpc([{ result: [] }]);
+		expect(await rpc.addressSignaturePage(INDEX, { limit: 100, before: SIG, commitment: "confirmed" })).toEqual([]);
+		expect(requests[0]).toMatchObject({ method: "getSignaturesForAddress" });
+		expect(requests[0]?.params).toEqual([INDEX, { limit: 100, before: SIG, commitment: "confirmed" }]);
+	});
+
+	test("omits the before cursor when there is none", async () => {
+		const { rpc, requests } = fakeRpc([{ result: [] }]);
+		await rpc.addressSignaturePage(INDEX, { limit: 10, commitment: "finalized" });
+		expect(requests[0]?.params).toEqual([INDEX, { limit: 10, commitment: "finalized" }]);
+	});
+
+	test("caps the limit at 1000 and sends a limit of 1000 unchanged", async () => {
+		const { rpc, requests } = fakeRpc([{ result: [] }, { result: [] }]);
+		await rpc.addressSignaturePage(INDEX, { limit: 5000, commitment: "confirmed" });
+		await rpc.addressSignaturePage(INDEX, { limit: 1000, commitment: "confirmed" });
+		expect(requests[0]?.params).toEqual([INDEX, { limit: 1000, commitment: "confirmed" }]);
+		expect(requests[1]?.params).toEqual([INDEX, { limit: 1000, commitment: "confirmed" }]);
+	});
+
+	test("refuses a limit that is not a positive integer, sending nothing", async () => {
+		const { rpc, requests } = fakeRpc([]);
+		for (const limit of [0, -1, 1.5, Number.NaN]) {
+			await expect(rpc.addressSignaturePage(INDEX, { limit, commitment: "confirmed" })).rejects.toThrow("addressSignaturePage:");
+		}
+		expect(requests).toEqual([]);
+	});
+
+	test("returns the memo as a hint with its listing prefix stripped; the caller confirms it with transactionMemo", async () => {
+		const { rpc } = fakeRpc([
+			{ result: [{ signature: SIG, slot: 9, err: null, memo: `[${POINTER.length}] ${POINTER}`, blockTime: 1_790_000_000 }] },
+		]);
+		expect(await rpc.addressSignaturePage(INDEX, { limit: 1, commitment: "confirmed" })).toEqual([
+			{ signature: SIG, memo: POINTER, err: null, slot: 9, blockTime: 1_790_000_000 },
+		]);
+	});
+
+	test("pages backwards: the next page is requested before the last signature of the previous one", async () => {
+		const { rpc, requests } = fakeRpc([
+			{ result: [{ signature: SIG, slot: 9, err: null, memo: null, blockTime: null }] },
+			{ result: [{ signature: OLDER, slot: 8, err: null, memo: null, blockTime: null }] },
+		]);
+		const first = await rpc.addressSignaturePage(INDEX, { limit: 1, commitment: "confirmed" });
+		const cursor = first[0]?.signature;
+		if (cursor === undefined) throw new Error("the first page is empty");
+		const second = await rpc.addressSignaturePage(INDEX, { limit: 1, before: cursor, commitment: "confirmed" });
+		expect(requests[1]?.params).toEqual([INDEX, { limit: 1, before: SIG, commitment: "confirmed" }]);
+		expect(second.map((s) => s.signature)).toEqual([OLDER]);
+	});
+
+	test("a non-array reply throws RpcError", async () => {
+		const { rpc } = fakeRpc([{ result: {} }]);
+		await expect(rpc.addressSignaturePage(INDEX, { limit: 1, commitment: "confirmed" })).rejects.toBeInstanceOf(RpcError);
 	});
 });

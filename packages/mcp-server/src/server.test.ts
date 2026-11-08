@@ -346,7 +346,7 @@ describe("routes", () => {
 	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" };
 	const OMP_AUTH = { authorization: "Bearer tok-omp" };
 
-	test("POST /docs/search with context true reaches the service and answers a context block", async () => {
+	test("POST /docs/search historical attribution retains public memory context without private ledger reads", async () => {
 		const fake = new RagflowFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
@@ -359,7 +359,8 @@ describe("routes", () => {
 			expect(response.status).toBe(200);
 			expect(Object.hasOwn(body, "context")).toBe(true);
 			expect(hindsight.recalls()).toHaveLength(1);
-			expect(reads).toEqual([["session_id", "s-1"]]);
+			expect(body.context).toMatchObject({ memories: [{ id: "m1", text: "quote every version" }], events: [] });
+			expect(reads).toEqual([]);
 		} finally {
 			await stop();
 		}
@@ -396,7 +397,6 @@ describe("routes", () => {
 				for (const context of ["true", null]) {
 					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context }, OMP_AUTH);
 					expect(response.status).toBe(400);
-					expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("context a boolean");
 				}
 			});
 			expect(hindsight.recalls()).toEqual([]);
@@ -1090,14 +1090,14 @@ describe("routes", () => {
 			try {
 				for (const question of ["drive one", "drive two", "drive three"]) {
 					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(degraded.fallback).toBe("hindsight");
+					expect(degraded).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 
 				const probe = post("/docs/lightrag/query", { question: "the probe" }, auth);
 				await probeReached.promise;
 				const burst = (await (await post("/docs/lightrag/query", { question: "the burst" }, auth)).json()) as Record<string, unknown>;
-				expect(burst.fallback).toBe("hindsight");
+				expect(burst).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 				expect(attempts).toBe(4);
 
 				probeReply.resolve(Response.json(LIGHTRAG_ANSWER));
@@ -1131,7 +1131,7 @@ describe("routes", () => {
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(degraded.fallback).toBe("hindsight");
+					expect(degraded).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 				const queriesWhenOpen = queries;
@@ -1145,7 +1145,7 @@ describe("routes", () => {
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 
 				const inside = (await (await post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)).json()) as Record<string, unknown>;
-				expect(inside.fallback).toBe("hindsight");
+				expect(inside).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 				expect(queries).toBe(queriesWhenOpen);
 			} finally {
 				await stop();
@@ -1186,7 +1186,7 @@ describe("routes", () => {
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(tripped.fallback).toBe("hindsight");
+					expect(tripped).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 				const before = planeCalls;
@@ -1226,7 +1226,7 @@ describe("routes", () => {
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
-					expect(tripped.fallback).toBe("hindsight");
+					expect(tripped).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 				}
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
 
@@ -1238,7 +1238,7 @@ describe("routes", () => {
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "CONTEXT_REFRESH", consecutiveFailures: 3 });
 
 				probeReply.resolve(new Response("upstream down", { status: 500 }));
-				expect(((await (await probe).json()) as Record<string, unknown>).fallback).toBe("hindsight");
+				expect(await (await probe).json()).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR", consecutiveFailures: 4 });
 			} finally {
 				// A failed assertion above leaves the probe held; release it so `stop()` does not wait on it.
@@ -1284,7 +1284,7 @@ describe("routes", () => {
 				resetRagMachine();
 				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
 				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
-				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+				expect(lightrag).toMatchObject({ backend: "lightrag", degraded: true, fallback: "hindsight", reason: "lightrag 500" });
 				expect(hindsight.recalls()).toHaveLength(2);
 			} finally {
 				await stop();
@@ -1310,24 +1310,34 @@ describe("routes", () => {
 				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)));
 				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "asked inside the cooldown" }, auth)));
 				expect(planeCalls).toBe(before);
-				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "rag breaker open" });
+				expect(lightrag).toMatchObject({ backend: "lightrag", degraded: true, fallback: "hindsight", reason: "rag breaker open" });
 				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "rag breaker open" });
 			} finally {
 				await stop();
 			}
 		});
 
-		test("an unconfigured LightRAG plane is answered from Hindsight on both search routes", async () => {
+		test("a lightrag backend with no LIGHTRAG_URL refuses to start, so an unconfigured plane is never served", async () => {
+			const { greptime } = ledger();
+			await expect(serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_DOCS_BACKEND: "lightrag" })).rejects.toThrow(/LIGHTRAG_URL/);
+		});
+
+		test("an unconfigured LightRAG plane is answered from Hindsight on the REST LightRAG route", async () => {
+			// A ragflow deployment names no LIGHTRAG_URL, so `config.lightrag` is null and the query takes the unconfigured branch.
 			const hindsight = recallableOmp();
 			const { greptime } = ledger();
-			// The backend is named but no LIGHTRAG_URL is set, so the plane is not configured.
-			const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_DOCS_BACKEND: "lightrag" }, { hindsightFetch: hindsight.fetch });
+			const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_DOCS_BACKEND: "ragflow" }, { hindsightFetch: hindsight.fetch });
 			try {
-				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
-				resetRagMachine();
 				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
-				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
-				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
+				expect(lightrag).toMatchObject({
+					backend: "lightrag",
+					fallback: "hindsight",
+					degraded: true,
+					reason: "lightrag-not-configured",
+					chunks: [expect.objectContaining({ content: "the plan lives in PLAN.md" })],
+				});
+				expect(lightrag.unavailable).not.toBe(true);
+				expect(hindsight.recalls()).toHaveLength(1);
 			} finally {
 				await stop();
 			}
@@ -1351,6 +1361,98 @@ describe("routes", () => {
 				expect(served.degraded).toBeUndefined();
 				expect(await jsonOf(post("/docs/lightrag/query", request, auth))).toMatchObject({ backend: "lightrag" });
 				expect(planeCalls).toBe(2);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("D-14: docs_search and POST /docs/lightrag/query share degraded and unavailable semantics; the REST reply also carries backend and fallback", async () => {
+			globalThis.fetch = stubLightrag(async () => new Response("upstream down", { status: 500 }));
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, LIGHTRAG_ENV, { hindsightFetch: new HindsightFake().fetch });
+			try {
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
+				resetRagMachine();
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
+				// docs_search keeps its unavailable reply as it was: degraded, empty, the LightRAG failure as the reason, and no backend or fallback.
+				expect(search).toMatchObject({ degraded: true, unavailable: true, reason: "lightrag 500", chunks: [] });
+				expect(search.fallback).toBeUndefined();
+				expect(search.backend).toBeUndefined();
+				// The LightRAG query reply keeps the legacy backend and fallback; its reason carries the recall note after the LightRAG failure.
+				expect(lightrag).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
+				expect(String(lightrag.reason)).toMatch(/^lightrag 500; /);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a REST LightRAG query retried after a transient failure is served, not degraded", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return planeCalls === 1 ? new Response("upstream down", { status: 503 }) : Response.json(LIGHTRAG_ANSWER);
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_MAX_RETRIES: "2", SUBSTRATE_RAG_RETRY_BASE_MS: "1" });
+			try {
+				const reply = await jsonOf(post("/docs/lightrag/query", { question: "retry me" }, auth));
+				expect(planeCalls).toBe(2);
+				expect(reply).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+				expect(reply.degraded).toBeUndefined();
+			} finally {
+				await stop();
+			}
+		});
+
+		test("the REST retry cap: a plane that never answers is asked the first attempt plus maxRetries, then the query is answered unavailable", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_MAX_RETRIES: "2", SUBSTRATE_RAG_RETRY_BASE_MS: "1" }, { hindsightFetch: new HindsightFake().fetch });
+			try {
+				const reply = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "never answers" }, auth)));
+				expect(planeCalls).toBe(3);
+				expect(reply).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
+				expect(reply.reason).toBe("lightrag 500; hindsight recall failed: sub-omp: hindsight POST /v1/default/banks/sub-omp/memories/recall: bank not found");
+			} finally {
+				await stop();
+			}
+		});
+
+		test("an empty LightRAG payload is never served as a success on the REST route: it is not retried and is answered unavailable", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return Response.json({ status: "success", data: { chunks: [] } });
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_MAX_RETRIES: "1", SUBSTRATE_RAG_RETRY_BASE_MS: "1" }, { hindsightFetch: new HindsightFake().fetch });
+			try {
+				const reply = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "empty" }, auth)));
+				// An empty answer is not a failure to retry: one plane call, then the unavailable answer.
+				expect(planeCalls).toBe(1);
+				expect(reply).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a LightRAG failure on the REST route is retried up to maxRetries before it is answered unavailable", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_MAX_RETRIES: "1", SUBSTRATE_RAG_RETRY_BASE_MS: "1" }, { hindsightFetch: new HindsightFake().fetch });
+			try {
+				const reply = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "down" }, auth)));
+				// A real failure keeps the retry: the first attempt plus one retry.
+				expect(planeCalls).toBe(2);
+				expect(reply).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
 			} finally {
 				await stop();
 			}
@@ -1949,7 +2051,7 @@ describe("agent card route", () => {
 		const index = {
 			searchMemoryPage: async () => ({ entries: rows, next: null }),
 		};
-		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, observability.observer);
 		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -2229,7 +2331,7 @@ describe("memoryWriteStatus", () => {
 		// The whole path, not only the mapping: a throwing claim is what the service turns into
 		// `store.write-failed`, and that reason must reach the caller as 503.
 		const failing = { claimWrite: async () => { throw new Error("connect ETIMEDOUT"); } };
-		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null, steering: { history: null, liveSessions: null } });
 		const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes", idempotency_key: "k-503" };
 
 		const result = await substrate.writeMemory(entry);

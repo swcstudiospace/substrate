@@ -100,6 +100,20 @@ Each record has the same ten fields: id, phase, question, options considered, se
 - status: auto-selected.
 - review flag: YES. The operator should confirm the rate and the sample.
 
+### D46-6 criterion 4 delivery scope (user decision)
+
+- id: D46-6
+- phase: 46
+- question: How should the parity comparator be delivered when criterion 4 cannot be proven on fixtures?
+- options considered: a fixture-tested comparator on the run branch, with the live PARITY_GATE kept as a validation request; hold criterion 4 until an operator approves a live read-only comparison; the owner amends PARITY_GATE to fixture acceptance.
+- selected option: the first. The comparator's rules and its fail-closed behaviour are built and tested on fixtures. Criterion 4 stays unmet until T7 runs PARITY_GATE live against the RAGFlow export, after the operator approves T5 and T6.
+- source: user answer, 2026-11-08, at the discuss stage of the gsd-autonomous run.
+- rubric rationale: fixtures prove the comparator's rules, not the dataset. Keeping the live gate separate stops a fixture pass from being read as criterion 4 evidence.
+- reversibility: reversible. It is a code module and tests, with no runtime wiring.
+- confidence: high, since it is the user's choice.
+- status: user-selected.
+- review flag: no. The operator still confirms the live run under D46-5.
+
 ## Live steps (not decisions)
 
 Criteria 2, 3, 5 and 6 cover archive, deploy, ingestion, cutover and storage deletion. These are not decisions to auto-select. They are HARD_STOP tasks in PLAN.md (T5 to T8). Each waits for the operator's explicit approval for that run. Nothing in this phase runs them.
@@ -111,7 +125,7 @@ Criteria 2, 3, 5 and 6 cover archive, deploy, ingestion, cutover and storage del
 | 1 | docs_search answers from LightRAG with hybrid search and Hindsight context, with tests | T1 tests (`docs-search.test.ts`), T2 docs; the default mode is already `hybrid` (`lightrag.ts:40`) | none required for the in-repo proof; a live answer needs T6 |
 | 2 | RAGFlow dataset archived with a verified checksum before deletion | none in repo | T5 |
 | 3 | LightRAG deployed to production, timed health probe | none in repo | T6 |
-| 4 | Migration job and parity comparator pass PARITY_GATE before ingestion | T3 sample list and rate (D46-5) | T4 comparator deferred; T7 runs it live |
+| 4 | Migration job and parity comparator pass PARITY_GATE before ingestion | T3 sample list and rate (D46-5); comparator rules and fixture tests (D46-6, `lightrag-parity.ts`) | T7 live PARITY_GATE run, after operator approval of T5 and T6 |
 | 5 | Cutover logged and reversible; RAGFlow removed only after 1 to 4 and the RAG-dependent phases | none in repo | T8 |
 | 6 | Each live step runs only after operator approval for that run | the HARD_STOP gates in PLAN.md | every live step (T5 to T8) |
 

@@ -53,7 +53,7 @@ describe("the query hash and text", () => {
 describe("retrievalRowOf", () => {
 	test("keeps at most ten document keys with their scores, the best score, the count and the backend, and no citation text", () => {
 		const chunks = Array.from({ length: 12 }, (_, index) => corpusCitation(`docs/d${index}.md`, 0.9 - index / 100));
-		const row = retrievalRowOf({ surface: "omp", question: "How do plans work?", backend: "lightrag", reply: { chunks }, shadow: null });
+		const row = retrievalRowOf({ surface: "omp", question: "How do plans work?", backend: "lightrag", reply: { chunks }, shadow: null, isPrivate: false });
 		expect(row.returned).toHaveLength(RETRIEVAL_MAX_RETURNED);
 		expect(row.returned[0]).toEqual({ key: "acme/app:docs/d0.md", score: 0.9 });
 		expect(row).toMatchObject({ surface: "omp", backend: "lightrag", topScore: 0.9, returnedCount: 12, degraded: false, rerank: null, queryText: "How do plans work?" });
@@ -62,23 +62,31 @@ describe("retrievalRowOf", () => {
 
 	test("a citation that is not a corpus document is keyed by its source URL, cut to the key limit", () => {
 		const long = citation("plan.md", 0.4, { source_url: `https://example.com/${"p".repeat(500)}` });
-		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "lightrag", reply: { chunks: [long] }, shadow: null });
+		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "lightrag", reply: { chunks: [long] }, shadow: null, isPrivate: false });
 		expect(defined(row.returned[0], "the returned key").key).toHaveLength(RETRIEVAL_KEY_CHARS);
 	});
 
 	test("an answer with no citation has a null best score, a zero count and keeps its degraded flag", () => {
-		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "ragflow", reply: { chunks: [], degraded: true }, shadow: null });
+		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "ragflow", reply: { chunks: [], degraded: true }, shadow: null, isPrivate: false });
 		expect(row).toMatchObject({ topScore: null, returnedCount: 0, returned: [], degraded: true });
 	});
 
 	test("a shadow note is stored with the order and the number of positions it would move", () => {
-		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "lightrag", reply: { chunks: [corpusCitation("a.md", 0.5)] }, shadow: { mode: "shadow", order: ["acme/app:a.md"], moved: 0 } });
+		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "lightrag", reply: { chunks: [corpusCitation("a.md", 0.5)] }, shadow: { mode: "shadow", order: ["acme/app:a.md"], moved: 0 }, isPrivate: false });
 		expect(row.rerank).toEqual({ mode: "shadow", order: ["acme/app:a.md"], moved: 0 });
+	});
+
+	test("a private row keeps no query text and the hash of the question", () => {
+		const row = retrievalRowOf({ surface: "omp", question: "How do plans work?", backend: "lightrag", reply: { chunks: [corpusCitation("a.md", 0.5)] }, shadow: null, isPrivate: true });
+		expect(row.queryText).toBeNull();
+		expect(row.queryHash).toBe(createHash("sha256").update("how do plans work?", "utf8").digest("hex"));
+		expect(row.returned).toEqual([{ key: "acme/app:a.md", score: 0.5 }]);
+		expect(JSON.stringify(row)).not.toContain("How do plans work");
 	});
 });
 
 describe("RetrievalRecorder", () => {
-	const row = retrievalRowOf({ surface: "omp", question: "q", backend: "lightrag", reply: { chunks: [] }, shadow: null });
+	const row = retrievalRowOf({ surface: "omp", question: "q", backend: "lightrag", reply: { chunks: [] }, shadow: null, isPrivate: false });
 
 	function recorder(store: ReflectStore | null, over: { writeBudgetMs?: number; maxPending?: number } = {}) {
 		const lines: string[] = [];

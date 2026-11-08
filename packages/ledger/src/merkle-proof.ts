@@ -108,7 +108,7 @@ export function verifyAuditPath(
 	return sn === 0 && bytesEqual(r, root);
 }
 
-export type MerkleProofHex = { index: number; size: number; path: string[] };
+type MerkleProofHex = { index: number; size: number; path: string[] };
 
 function assertHash(fn: string, what: string, value: unknown): asserts value is string {
 	if (typeof value !== "string" || !HASH_HEX_RE.test(value)) {

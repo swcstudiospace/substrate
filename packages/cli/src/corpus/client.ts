@@ -35,7 +35,7 @@ import {
 	type EmbeddingReason,
 } from "@substrate/corpus";
 
-export interface ClientConfig {
+interface ClientConfig {
 	/** The substrate's base URL, without a trailing slash. */
 	url: string;
 	token: string | undefined;
@@ -44,8 +44,8 @@ export interface ClientConfig {
 	fetchImpl?: typeof fetch | undefined;
 }
 
-export const ERROR_KINDS = ["unauthorized", "forbidden", "disabled", "unavailable", "embeddings", "protocol", "invalid", "http", "network", "timeout"] as const;
-export type ErrorKind = (typeof ERROR_KINDS)[number];
+const ERROR_KINDS = ["unauthorized", "forbidden", "disabled", "unavailable", "embeddings", "protocol", "invalid", "http", "network", "timeout"] as const;
+type ErrorKind = (typeof ERROR_KINDS)[number];
 
 export interface ClientError {
 	kind: ErrorKind;
@@ -254,7 +254,7 @@ function isAnchorEvidence(value: unknown): boolean {
 	);
 }
 
-export function isAnchorResponse(value: unknown): value is CorpusAnchorResponse {
+function isAnchorResponse(value: unknown): value is CorpusAnchorResponse {
 	return (
 		isRecord(value) &&
 		value.protocol === CORPUS_PROTOCOL &&

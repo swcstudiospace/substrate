@@ -129,6 +129,9 @@ class FakeRpc implements Rpc {
 	async addressMemos(): Promise<never[]> {
 		throw new Error("verification never lists addresses");
 	}
+	async addressSignaturePage(): Promise<never[]> {
+		return [];
+	}
 	async getGenesisHash(): Promise<string> {
 		this.genesisCalls++;
 		return this.genesis;
@@ -184,6 +187,8 @@ function world(target: SubstrateEvent, options: { size?: number; index?: number;
 		solana: { pubkey: options.pubkey === undefined ? SIGNER_A : options.pubkey, problem: null },
 		operatorSurfaces: new Set(options.operators ?? [OPERATOR]),
 		nowMs: () => NOW,
+		listGraphPointers: async () => ({ entries: [], complete: true }),
+		confirmPointer: async () => null,
 	};
 	return { ledger, rpc, target, ports, rpcBuilt: () => built };
 }

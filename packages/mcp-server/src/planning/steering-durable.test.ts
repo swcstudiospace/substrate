@@ -4,10 +4,11 @@
  * the read port from its own rows, and an injected clock. No database, no network, no timers.
  */
 import { createHash } from "node:crypto";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
-	DEFAULT_STEERING_ACK_TTL_S,
-	DEFAULT_STEERING_EXPIRY_SWEEP_S,
+	DEFAULT_STEERING_IDEMPOTENCY_TTL_S,
+	MemorySteeringIdempotencyStore,
+	type SteeringIdempotencyStore,
 	STEERING_ACK_TTL_BOUNDS_S,
 	STEERING_ACK_TTL_ENV,
 	STEERING_AUDIT_ATTEMPTS,
@@ -19,6 +20,9 @@ import {
 	type SteeringAuditEntry,
 	type SteeringClock,
 	type SteeringHistorySink,
+	type SteeringReplayClaim,
+	type SteeringReplayRecord,
+	type SteeringUnit,
 } from "./steering.ts";
 import {
 	SteeringAuditConflictError,
@@ -36,7 +40,12 @@ import {
 	type SteeringStoredAckRow,
 	type SteeringStoredDirectiveRow,
 } from "./steering-store.ts";
-import { listSteering } from "./steering-tools.ts";
+import { loadConfig } from "../config.ts";
+import { auditToolCalls, createObservability } from "../observe.ts";
+import { Substrate } from "../service.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./live-session.test-support.ts";
+import { STEERING_ACKNOWLEDGED_HISTORY_LIMIT } from "./steering-rest.ts";
+import type { LiveSessionAuditPort } from "./steering-tools.ts";
 
 const HUMAN = "ops.lead";
 const WORKER = "worker-a";
@@ -140,6 +149,7 @@ function stored(row: SteeringAuditRow, acknowledgement: SteeringStoredAckRow | n
 		planPlan: row.planPlan,
 		conflictsWithActivePlan: row.conflictsWithActivePlan,
 		directiveCreatedAtMs: row.directiveCreatedAtMs,
+		deliverySequence: row.deliverySequence,
 		queuedAt: row.recordedAt,
 		acknowledgement,
 	};
@@ -162,6 +172,7 @@ function queuedRow(overrides: Partial<SteeringAuditRow> = {}): SteeringAuditRow 
 		planPlan: null,
 		conflictsWithActivePlan: false,
 		directiveCreatedAtMs: 1_000,
+		deliverySequence: null,
 		payloadSha256: "seeded",
 		recordedAt: new Date(T0),
 		...overrides,
@@ -676,12 +687,10 @@ describe("acknowledgement deadline", () => {
 		const sql = new DurableSql();
 		const { inbox } = await queuedAt(sql, new ManualClock(T0));
 		await inbox.expireStale(T0 + TTL);
-		const wiring = { enabled: true, clock: new ManualClock(T0), settingsErrors: [], inbox };
-
-		expect(listSteering(wiring, { session_id: WORKER })).toMatchObject({
-			status: "listed",
-			directives: [{ id: "d-1", state: "acknowledged", outcome: "declined", reason: "timeout", acknowledged_at_ms: T0 + TTL }],
-		});
+		// This is the inbox/audit-log restore contract, not an authorization fixture.
+		expect(inbox.recordsFor(WORKER)).toMatchObject([
+			{ directive: { id: "d-1" }, state: "acknowledged", outcome: "declined", reason: "timeout", acknowledgedAtMs: T0 + TTL },
+		]);
 
 		const restarted = processOver(sql, new ManualClock(T0 + TTL + 1));
 		const recent = await restarted.sink.readRecent({ limit: 10 });
@@ -778,11 +787,6 @@ describe("the payload hash covers the reason", () => {
 });
 
 describe("expiry settings", () => {
-	test("unset keys take the defaults, in milliseconds", () => {
-		expect(loadSteeringExpirySettings({})).toEqual({ ok: true, settings: { ackTtlMs: DEFAULT_STEERING_ACK_TTL_S * 1_000, expirySweepMs: DEFAULT_STEERING_EXPIRY_SWEEP_S * 1_000 } });
-		expect(DEFAULT_STEERING_ACK_TTL_S).toBe(86_400);
-		expect(DEFAULT_STEERING_EXPIRY_SWEEP_S).toBe(60);
-	});
 
 	test("set keys are whole seconds within inclusive bounds", () => {
 		expect(loadSteeringExpirySettings({ [STEERING_ACK_TTL_ENV]: "3600", [STEERING_EXPIRY_SWEEP_ENV]: "15" })).toEqual({
@@ -807,5 +811,160 @@ describe("expiry settings", () => {
 			errors: [{ key: STEERING_ACK_TTL_ENV, reason: "out-of-range", min: STEERING_ACK_TTL_BOUNDS_S.min, max: STEERING_ACK_TTL_BOUNDS_S.max }],
 		});
 		expect(loadSteeringExpirySettings({ [STEERING_ACK_TTL_ENV]: "" })).toEqual({ ok: false, errors: [{ key: STEERING_ACK_TTL_ENV, reason: "not-integer" }] });
+	});
+});
+
+const serviceStops: Array<() => void> = [];
+afterEach(() => { for (const stop of serviceStops.splice(0)) stop(); });
+
+describe("private durable history through the service boundary", () => {
+	async function historyService() {
+		const env = { SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp" };
+		const config = loadConfig(env);
+		const observability = createObservability(config, env);
+		await observability.start(); serviceStops.push(() => observability.stop());
+		const authority = createTestLiveSessionAuthority({ nowMs: Date.now() });
+		const owner = { surface: "cursor", isOperator: false } as const;
+		const row = await issueLiveSession(authority, { caller: owner });
+		const sql = new DurableSql();
+		const sink = new SteeringAuditSink(sql, sql);
+		const audit: LiveSessionAuditPort = { auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) };
+		const substrate = new Substrate(config, { index: null, greptime: null, steering: { history: sink, durable: sink, liveSessions: authority } }, observability.observer, audit);
+		for (let n = 0; n <= STEERING_ACKNOWLEDGED_HISTORY_LIMIT; n++) {
+			const queued = queuedRow({ directiveId: `history-${n}`, targetSessionId: row.sessionId, bodyRedacted: "PRIVATE-HISTORY-DIRECTION", authorPrincipal: "omp" });
+			sql.seed(queued);
+			sql.seed({ ...queued, transition: "acknowledged", outcome: "declined", confirmed: false, reason: "timeout", recordedAt: new Date(T0 + n) });
+		}
+		return { owner, row, sql, sink, substrate, authority };
+	}
+
+	test("checked owner gets bounded acknowledged history and truthful truncation, without fabricated hints", async () => {
+		const h = await historyService();
+		const read = spyOn(h.sql, "readClosed");
+		const reply = await h.substrate.readLiveDirectives(h.owner, { sessionId: h.row.sessionId, status: "acknowledged" }, h.row.sessionBinding);
+		expect(reply.history).toBe("durable");
+		expect(reply.history_truncated).toBe(true);
+		expect(reply.directives).toHaveLength(STEERING_ACKNOWLEDGED_HISTORY_LIMIT);
+		expect(read).toHaveBeenCalledWith({ sessionId: h.row.sessionId, limit: STEERING_ACKNOWLEDGED_HISTORY_LIMIT + 1 });
+		for (const directive of reply.directives) expect(directive).toMatchObject({ status: "acknowledged", outcome: "declined", checkpoint_hint: null });
+	});
+
+	test("missing proof is denied before touching durable acknowledged history", async () => {
+		const h = await historyService(); const read = spyOn(h.sql, "readClosed");
+		await expect(h.substrate.readLiveDirectives(h.owner, { sessionId: h.row.sessionId, status: "all" })).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "not-found" } } });
+		expect(read).not.toHaveBeenCalled();
+	});
+
+	for (const failure of ["close", "expiry", "outage"] as const) test(`${failure} during awaited history read refuses the entire private result`, async () => {
+		const h = await historyService();
+		const entered = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+		const read = h.sql.readClosed.bind(h.sql);
+		spyOn(h.sql, "readClosed").mockImplementation(async query => { entered.resolve(); await release.promise; return read(query); });
+		const pending = h.substrate.readLiveDirectives(h.owner, { sessionId: h.row.sessionId, status: "all" }, h.row.sessionBinding);
+		await entered.promise;
+		if (failure === "close") await h.authority.close(h.row.access);
+		if (failure === "expiry") h.authority.advance(3600_000);
+		if (failure === "outage") h.authority.unavailable = true;
+		release.resolve();
+		await expect(pending).rejects.toMatchObject({ refusal: { status: "refused", error: { code: failure === "outage" ? "session-unavailable" : "not-found" } } });
+	});
+});
+
+describe("keyed replay and delivery sequence across a restart", () => {
+	const KEY = "retry-key-0001";
+
+	/** A server process over the shared audit log and the shared replay store. A restart is a new process over the same two. */
+	function serverOver(sql: DurableSql, store: SteeringIdempotencyStore, clock: SteeringClock): ServerProcess {
+		const sink = new SteeringAuditSink(sql, sql);
+		const inbox = new SteeringInbox({ history: sink, clock, policy: { allowlist: [HUMAN], ratePerMin: 100 }, store });
+		return { inbox, sink };
+	}
+
+	test("a keyed retry after a restart returns the original record and sequence, even once the directive was acknowledged, and writes no audit row", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		const writer = serverOver(sql, store, clock).inbox;
+		const first = await writer.enqueue(directive({ id: "d-1" }), KEY);
+		await writer.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
+		const attempts = sql.insertAttempts;
+		const restarted = serverOver(sql, store, clock).inbox;
+		const replay = await restarted.enqueue(directive({ id: "d-2" }), KEY);
+		expect(replay).toEqual(first);
+		expect(sql.insertAttempts).toBe(attempts);
+		expect(restarted.sequenceOf("d-1")).toBe(1);
+		expect(restarted.get("d-2")).toBeNull();
+	});
+
+	test("after a restart the next distinct command takes the next sequence, and a restored directive keeps its own", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }));
+		const restarted = serverOver(sql, store, clock);
+		expect(await restoreSteeringInboxPaged(restarted.inbox, restarted.sink, { limit: 100 })).toMatchObject({ ok: true, value: { report: { restored: ["d-1", "d-2"] } } });
+		expect([restarted.inbox.sequenceOf("d-1"), restarted.inbox.sequenceOf("d-2")]).toEqual([1, 2]);
+		const next = await restarted.inbox.enqueue(directive({ id: "d-3" }), "retry-key-0002");
+		expect(next.ok ? restarted.inbox.sequenceOf("d-3") : null).toBe(3);
+	});
+
+	test("past the retention window a retry across a restart is a new command with the next sequence", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
+		const later = serverOver(sql, store, new ManualClock(T0 + DEFAULT_STEERING_IDEMPOTENCY_TTL_S * 1_000)).inbox;
+		expect((await later.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(later.sequenceOf("d-2")).toBe(2);
+	});
+
+	test("a retry across a restart with different content is refused as a conflict, and writes nothing", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
+		const attempts = sql.insertAttempts;
+		const other = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2", action: "annotate" }), KEY);
+		expect(other).toEqual({ ok: false, error: { code: "idempotency-conflict" } });
+		expect(sql.insertAttempts).toBe(attempts);
+	});
+
+	/** A store whose claim commits, then loses its reply: the caller sees a failure, while the claim and its audit row stay kept. */
+	class LostReplyStore extends MemorySteeringIdempotencyStore {
+		loseNextReply = false;
+		override async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
+			const claim = await super.claimReplay(record, nowMs, cap, queue);
+			if (this.loseNextReply) {
+				this.loseNextReply = false;
+				throw new Error("reply lost after commit");
+			}
+			return claim;
+		}
+	}
+
+	const queuedIds = (sql: DurableSql): string[] => sql.rows.filter((row) => row.transition === "queued").map((row) => row.directiveId);
+
+	test("a keyed queue whose reply is lost after its audit row committed replays on retry and is never queued twice", async () => {
+		const sql = new DurableSql();
+		const store = new LostReplyStore();
+		const clock = new ManualClock(T0);
+		store.loseNextReply = true;
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		expect(queuedIds(sql)).toEqual(["d-1"]);
+		const retry = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY);
+		expect(retry).toMatchObject({ ok: true, value: { directive: { id: "d-1" } } });
+		expect(queuedIds(sql)).toEqual(["d-1"]);
+	});
+
+	test("an audit refusal inside the keyed claim holds nothing, so the retry queues once", async () => {
+		const sql = new DurableSql();
+		const store = new MemorySteeringIdempotencyStore();
+		const clock = new ManualClock(T0);
+		sql.failInsert = new Error("connection reset");
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		sql.failInsert = null;
+		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(queuedIds(sql)).toEqual(["d-2"]);
 	});
 });

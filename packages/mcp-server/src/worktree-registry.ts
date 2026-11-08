@@ -18,9 +18,10 @@
  * reporting keeps its rows (their `last_seen_at` says how old they are) until it reports again.
  */
 import type { SQL } from "bun";
+import { repoOverCap, repoTooLongMessage } from "./event.ts";
 
 /** The report's `protocol` member. A different value is refused, so a changed shape never half-parses. */
-export const WORKTREE_REPORT_PROTOCOL = 1;
+const WORKTREE_REPORT_PROTOCOL = 1;
 /** Most worktrees one report may carry. */
 export const WORKTREE_REPORT_MAX_ITEMS = 500;
 /** The request body cap for `POST /worktrees/report`, in bytes. The route reads under it and the CLI's report splitter packs under it (less a margin). */
@@ -47,14 +48,14 @@ export const WORKTREE_FILE_MAX_CHARS = 400;
 /** Most rows the brief's overlap section reads for one repository. */
 export const WORKTREE_BRIEF_CANDIDATES_MAX = 100;
 
-export const WORKTREE_REGISTRY_MODES = ["off", "on"] as const;
+const WORKTREE_REGISTRY_MODES = ["off", "on"] as const;
 export type WorktreeRegistryMode = (typeof WORKTREE_REGISTRY_MODES)[number];
 
-export const WORKTREE_PR_STATES = ["open", "merged", "closed", "none", "unknown"] as const;
+const WORKTREE_PR_STATES = ["open", "merged", "closed", "none", "unknown"] as const;
 export type WorktreePrState = (typeof WORKTREE_PR_STATES)[number];
 
 export const WORKTREE_LIST_STATES = ["all", "dirty", "stale"] as const;
-export type WorktreeListState = (typeof WORKTREE_LIST_STATES)[number];
+type WorktreeListState = (typeof WORKTREE_LIST_STATES)[number];
 
 /** One worktree as a reporter describes it. `session_id` and `graph_id` are present only when the reporter could attribute the worktree. */
 export interface WorktreeRecord {
@@ -136,6 +137,8 @@ export interface WorktreeStoreFilter {
 	state: WorktreeListState;
 	limit: number;
 	staleBefore: Date;
+	/** The canonical repositories a row must belong to, or null for every repository. An empty list matches no row. Applied in the query, never after the read. */
+	repos: readonly string[] | null;
 }
 
 export interface WorktreeRegistryStore {
@@ -222,6 +225,8 @@ function validateWorktree(raw: unknown, index: number): Parsed<ReportedWorktree>
 	if (typeof path !== "string" || !path.startsWith("/") || path.length > WORKTREE_PATH_MAX_CHARS || path.includes("\u0000")) {
 		return fail(`${at}.path must be an absolute path of at most ${WORKTREE_PATH_MAX_CHARS} characters with no NUL`);
 	}
+	const repoUnits = typeof repo === "string" ? repoOverCap(repo) : null;
+	if (repoUnits !== null) return fail(repoTooLongMessage(repoUnits));
 	if (typeof repo !== "string" || !WORKTREE_REPO_PATTERN.test(repo)) return fail(`${at}.repo must be owner/name`);
 	if (branch !== null && !isWorktreeLabel(branch)) return fail(`${at}.branch must be a string of at most ${WORKTREE_TEXT_MAX_CHARS} characters, or null`);
 	if (typeof head !== "string" || !HEAD_PATTERN.test(head)) return fail(`${at}.head must be 40 or 64 hex characters`);
@@ -301,7 +306,7 @@ export function validateWorktreeReport(body: unknown): Parsed<WorktreeReport> {
 }
 
 /** The arguments a listing accepts, as the two doors hand them over: strings from a URL, typed values from a tool call. */
-export interface RawWorktreeListQuery {
+interface RawWorktreeListQuery {
 	repo?: unknown;
 	host?: unknown;
 	state?: unknown;
@@ -337,7 +342,7 @@ export function staleCutoff(now: number, idleDays: number): Date {
 }
 
 /** Postgres adapter's way to run a call under the index plane's gate; `IndexStore` passes its own. */
-export type RunUnderGate = <T>(op: string, fn: () => Promise<T>) => Promise<T>;
+type RunUnderGate = <T>(op: string, fn: () => Promise<T>) => Promise<T>;
 
 /** The Postgres adapter. Constructed by `IndexStore.worktreeRegistry()`, over the index's own pool. */
 export class PgWorktreeRegistry implements WorktreeRegistryStore {
@@ -357,6 +362,7 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 				for (const worktree of input.worktrees) {
 					// `::text::jsonb`: a bare `::jsonb` makes the driver JSON-encode the string into a scalar (see index-sweep.ts).
 					const filesJson = worktree.files === undefined || worktree.files === null ? null : JSON.stringify(worktree.files);
+					// A report that omits session_id or graph_id keeps the stored value: attribution is replaced, never cleared, by silence.
 					await tx`
 						insert into worktrees (
 							host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes,
@@ -372,7 +378,7 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 						    dirty = excluded.dirty, ahead = excluded.ahead, behind = excluded.behind,
 						    last_commit_at = excluded.last_commit_at, size_bytes = excluded.size_bytes,
 						    locked = excluded.locked, is_primary = excluded.is_primary, pr_state = excluded.pr_state,
-						    session_id = excluded.session_id, graph_id = excluded.graph_id,
+						    session_id = coalesce(excluded.session_id, worktrees.session_id), graph_id = coalesce(excluded.graph_id, worktrees.graph_id),
 						    changed_files = excluded.changed_files, files_truncated = excluded.files_truncated,
 						    last_seen_at = excluded.last_seen_at, reported_at = excluded.reported_at`;
 				}
@@ -385,12 +391,14 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 
 	async list(filter: WorktreeStoreFilter): Promise<StoredWorktree[]> {
 		const staleBefore = filter.staleBefore.toISOString();
+		const repos = filter.repos === null ? null : this.sql.array([...filter.repos], "TEXT");
 		return this.run("worktrees.list", async () => {
 			const rows = (await this.sql`
 				select host, path, repo, branch, head, base, dirty, ahead, behind, last_commit_at, size_bytes,
 				       locked, is_primary, pr_state, session_id, graph_id, first_seen_at, last_seen_at, reported_at
 				from worktrees
 				where (${filter.repo}::text is null or repo = ${filter.repo})
+				  and (${repos}::text[] is null or lower(repo) = any(${repos}::text[]))
 				  and (${filter.host}::text is null or host = ${filter.host})
 				  and (${filter.state}::text = 'all'
 				       or (${filter.state}::text = 'dirty' and dirty)
@@ -442,6 +450,7 @@ function filesFromText(value: unknown): string[] | null {
 		const parsed: unknown = JSON.parse(value);
 		return Array.isArray(parsed) ? normalizeWorktreeFiles(parsed) : null;
 	} catch {
+		// Text that does not parse holds no array: null, the same answer as a column that is not one, as the doc above says.
 		return null;
 	}
 }

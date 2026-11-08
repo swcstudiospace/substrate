@@ -35,8 +35,8 @@ export function sha256Hex(input: string): string {
 	return new Bun.CryptoHasher("sha256").update(input).digest("hex");
 }
 
-export const AUDIT_DECISIONS = ["allowed", "denied"] as const;
-export type AuditDecision = (typeof AUDIT_DECISIONS)[number];
+const AUDIT_DECISIONS = ["allowed", "denied"] as const;
+type AuditDecision = (typeof AUDIT_DECISIONS)[number];
 
 /**
  * What happens when the chain cannot take a record.
@@ -48,7 +48,7 @@ export type AuditDecision = (typeof AUDIT_DECISIONS)[number];
  */
 export type AuditMode = "fail-open" | "fail-closed";
 
-export const AUDIT_TRANSPORTS = ["mcp", "rest", "internal"] as const;
+const AUDIT_TRANSPORTS = ["mcp", "rest", "internal"] as const;
 export type AuditTransport = (typeof AUDIT_TRANSPORTS)[number];
 
 export interface AuditRecordInput {
@@ -274,7 +274,7 @@ export type ChainVerdict =
 	| { ok: true; records: number }
 	| { ok: false; records: number; brokenAt: number; reason: string };
 
-export interface VerifyChainOptions {
+interface VerifyChainOptions {
 	/**
 	 * Require the chain to open at `seq: 1` with `prev: null`. On by default.
 	 *

@@ -160,6 +160,7 @@ async function connect(
 	const rpcTouched: string[] = [];
 	const substrate = new Substrate(loadConfig(options.env ?? {}), {
 		index: (options.index === false ? null : memoryIndex(options.entries ?? [])) as never,
+		steering: { history: null, liveSessions: null },
 		greptime: (options.ledger === false ? null : ledger) as never,
 		rpc: forbiddenRpc(rpcTouched),
 	});

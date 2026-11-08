@@ -11,7 +11,7 @@ import type { MirrorReport, SyncResult } from "./sync.ts";
 /** Absent-mirror reasons that deserve a line (a stale mirror always does); no origin and nothing fetched yet are the normal working-tree case. */
 const MIRROR_PROBLEMS: readonly string[] = ["clone-failed", "clone-timeout", "mirror-dir-unusable", "mirror-unmatched"];
 
-export interface MirrorProblem {
+interface MirrorProblem {
 	repo: string;
 	/** `mirror-stale` for a fetch that failed over a mirror that exists, `mirror` for a mirror that could not be made or read. */
 	kind: "mirror-stale" | "mirror";
@@ -87,7 +87,7 @@ export function syncJson(result: SyncResult): Record<string, unknown> {
 	};
 }
 
-export interface ReconcileView {
+interface ReconcileView {
 	sync: SyncResult;
 	drift: CorpusReconcileResponse["drift"];
 	repaired: CorpusReconcileResponse["repaired"];
@@ -98,7 +98,7 @@ export function renderReconcile(view: ReconcileView): string {
 	const { drift } = view;
 	const out: string[] = [`reconcile${view.execute ? "" : " (dry run)"}: ${drift.checked} compared, ${drift.missingInPlane.length} missing from the docs plane, ${drift.orphansInPlane.length} orphaned in the plane\n`];
 	out.push(renderMirrorProblems(view.sync.mirrors));
-	if (drift.truncated) out.push(`the comparison was cut short (lists are capped at ${RECONCILE_MAX_ITEMS}, or the plane listing was not complete)\n`);
+	if (drift.truncated) out.push(`the comparison was cut short (the drift is capped at ${RECONCILE_MAX_ITEMS} keys in total, or the plane listing was not complete)\n`);
 	if (drift.missingInPlane.length > 0) {
 		out.push("active rows whose plane document is gone:\n");
 		for (const row of drift.missingInPlane.slice(0, LIST_LIMIT)) out.push(`  ${row.repo}:${row.path}\n`);

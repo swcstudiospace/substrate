@@ -5,7 +5,7 @@
 import type { Runner } from "../../../worktree-snapshot/src/index.ts";
 
 /** `owner/name` from a remote URL (ssh or https, with or without `.git`), or undefined. */
-export function repoSlugFromRemote(url: string): string | undefined {
+function repoSlugFromRemote(url: string): string | undefined {
 	return url.trim().match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
 }
 
@@ -16,6 +16,7 @@ export async function repoSlugOfWorktree(worktree: string, run: Runner): Promise
 		if (result.code !== 0) return undefined;
 		return repoSlugFromRemote(result.stdout.toString("utf8"));
 	} catch {
+		// git could not run or there is no origin remote: the slug is unknown.
 		return undefined;
 	}
 }

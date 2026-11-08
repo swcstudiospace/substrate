@@ -90,7 +90,7 @@ export const NO_LEASE: LeaseSnapshot = {
 	epoch: 0,
 };
 
-export type LeaseState = "free" | "held" | "expired";
+type LeaseState = "free" | "held" | "expired";
 
 export function parseTime(value: string | Date | number | null | undefined): number | null {
 	if (value === null || value === undefined) return null;
@@ -159,7 +159,7 @@ export type ClaimAction =
 	/** Another holder's lease is live. Nothing changed. */
 	| "denied";
 
-export interface ClaimRequest extends LeaseHolder {
+interface ClaimRequest extends LeaseHolder {
 	ttl_seconds: number;
 	/**
 	 * The authenticated token's surface, null on an anonymous local run. A claim
@@ -273,7 +273,7 @@ export function decideClaim(
 	};
 }
 
-export type HeartbeatRefusal =
+type HeartbeatRefusal =
 	/** Nothing holds the node. */
 	| "unheld"
 	/** Another surface holds it. The caller's token cannot act for that holder, whatever id it presents. */
@@ -335,7 +335,7 @@ export function decideHeartbeat(
 	};
 }
 
-export type ReleaseAction =
+type ReleaseAction =
 	/** The holder released its own lease. */
 	| "released"
 	/** Nothing held the node. */
@@ -343,7 +343,7 @@ export type ReleaseAction =
 	/** An operator dropped someone else's lease deliberately. */
 	| "forced";
 
-export type ReleaseRefusal =
+type ReleaseRefusal =
 	/** Another surface holds it. Only the holder's own token, or an operator's force, can drop it. */
 	| "not-holder"
 	/** The lease id offered is not the one on the node — a stale holder. */

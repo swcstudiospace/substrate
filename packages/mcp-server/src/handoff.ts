@@ -36,7 +36,7 @@ import { canonicalJson } from "./event.ts";
 import { redact } from "./redact.ts";
 import type { Surface } from "./types.ts";
 
-export const HANDOFF_VERSION = 1 as const;
+const HANDOFF_VERSION = 1 as const;
 export const HANDOFF_ALG = "hmac-sha256" as const;
 
 /** Per-field caps, so one packet cannot fill the payload budget on its own. */
@@ -61,12 +61,12 @@ const MAX_PACKET_BYTES = 12_000;
 /** What a signature adds to a packet: an algorithm name, a key id, a timestamp and a hex digest, with room to spare. */
 const MAX_SIGNATURE_BYTES = 1_024;
 
-export interface HandoffParty {
+interface HandoffParty {
 	surface: Surface;
 	session_id: string | null;
 }
 
-export interface HandoffSignature {
+interface HandoffSignature {
 	alg: typeof HANDOFF_ALG;
 	key_id: string;
 	signed_at: string;
@@ -304,7 +304,7 @@ function signingInput(packet: HandoffPacket, header: Omit<HandoffSignature, "val
 	return canonicalJson({ ...packet, signature: header });
 }
 
-export interface SigningKey {
+interface SigningKey {
 	key_id: string;
 	key: string;
 }

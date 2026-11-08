@@ -68,6 +68,7 @@ function endpointTarget(url: string): { host: string; port: string } | undefined
 	try {
 		parsed = new URL(url);
 	} catch {
+		// An unparseable endpoint URL names no target: classifyEndpoint answers direct for it.
 		return undefined;
 	}
 	const host = canonicalHost(parsed.hostname);
@@ -85,6 +86,7 @@ function canonicalHost(text: string): string | undefined {
 	try {
 		return new URL(`http://${text}/`).hostname.replace(/\.+$/, "");
 	} catch {
+		// An unparseable host has no canonical form: undefined, so it matches no target and no allow entry.
 		return undefined;
 	}
 }

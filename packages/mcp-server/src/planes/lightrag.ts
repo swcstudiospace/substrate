@@ -56,7 +56,7 @@ export function isLightragQueryMode(value: unknown): value is LightragQueryMode 
 }
 
 /** The default retrieval mode: graph (`hybrid`) so planning sees relations. */
-export const DEFAULT_QUERY_MODE: LightragQueryMode = "hybrid";
+const DEFAULT_QUERY_MODE: LightragQueryMode = "hybrid";
 
 /** The modes that fuse the knowledge graph (local + global). */
 const GRAPH_MODE: Record<string, true> = { hybrid: true, mix: true };
@@ -93,6 +93,20 @@ export function lightragOp(method: string, url: string): string {
 /** The reason an open breaker gives a call it refused; callers do not retry it. */
 export const LIGHTRAG_CIRCUIT_OPEN = "lightrag circuit open";
 
+/**
+ * The code an answer with no usable content carries. It is a failure, never an empty success, and the retry policy never
+ * retries it. The reason it travels with stays the plane's own; `docs_search` gives this same reason to an empty answer it
+ * judges itself. Lives here, not in `lightrag-attempts.ts`, which imports this module.
+ */
+export const LIGHTRAG_EMPTY_ANSWER = "lightrag: empty answer";
+
+/** A failed LightRAG query: its reason, and the code of a failure the retry policy must not retry. */
+export interface LightragFailure {
+	ok: false;
+	reason: string;
+	code?: typeof LIGHTRAG_EMPTY_ANSWER;
+}
+
 /** The reason a transport failure becomes; an open breaker is named as such. */
 function unreachable(cause: unknown): string {
 	if (cause instanceof Error && cause.name === "BreakerOpenError") return LIGHTRAG_CIRCUIT_OPEN;
@@ -104,10 +118,7 @@ function unreachable(cause: unknown): string {
 // optional). This plane never defines its own reader — one reader, no
 // drift — and the key never appears in a reason string.
 
-/** Drop-in chunk shape: exactly the RAGFlow plane's chunk. */
-export type LightragChunk = RagflowChunk;
-
-export interface LightragRetrievalRequest {
+interface LightragRetrievalRequest {
 	question: string;
 	/**
 	 * Query mode. Defaults to `config.queryMode` (`SUBSTRATE_LIGHTRAG_QUERY_MODE`),
@@ -128,7 +139,7 @@ export interface LightragRetrievalRequest {
 }
 
 /** The most results one retrieval may ask for (D25-03). */
-export const MAX_LIGHTRAG_TOP_K = 10;
+const MAX_LIGHTRAG_TOP_K = 10;
 
 const QUERY_MODE_PREFIXES: Readonly<Record<string, LightragQueryMode>> = {
 	"/mix": "mix",
@@ -411,7 +422,7 @@ function graphField(data: unknown, ...names: string[]): unknown {
  * `data.relations`, or the same under `data.graph`). Counts are what the
  * backend reported; 0 means none or unknown.
  */
-export function readGraphDetail(data: unknown, mode: LightragQueryMode): LightragGraphDetail {
+function readGraphDetail(data: unknown, mode: LightragQueryMode): LightragGraphDetail {
 	const entities = graphNames(graphField(data, "entities"));
 	const relations = graphNames(graphField(data, "relations", "relationships", "edges"));
 	return {
@@ -423,7 +434,7 @@ export function readGraphDetail(data: unknown, mode: LightragQueryMode): Lightra
 
 export type LightragQueryOutcome =
 	| { ok: true; chunks: RagflowChunk[]; detail: LightragGraphDetail }
-	| { ok: false; reason: string };
+	| LightragFailure;
 
 /**
  * `retrieveChunks` with the graph detail kept: the docs-search dispatch
@@ -455,8 +466,8 @@ export async function queryWithGraph(
 	}
 	if (chunks.length === 0) {
 		// An actually empty payload is a shape failure, never a silent
-		// empty answer.
-		return { ok: false, reason: "lightrag: unexpected response shape" };
+		// empty answer. It is coded empty, so the retry policy never asks again.
+		return { ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER };
 	}
 	return { ok: true, chunks, detail: readGraphDetail(data, resolved.mode) };
 }
@@ -480,7 +491,7 @@ export async function retrieveForSearch(
 }
 
 /** The ingest metadata every upload carries, so retrieval can echo it. */
-export interface LightragUploadMetadata {
+interface LightragUploadMetadata {
 	source_url: string;
 	commit: string;
 	heading_path: string;
@@ -511,12 +522,12 @@ export interface LightragUploadRequest {
  * {@link resolveDocumentIds}. `conflict` marks HTTP 409: upstream refuses a
  * same-name document until the existing one is deleted.
  */
-export type LightragUploadOutcome =
+type LightragUploadOutcome =
 	| { ok: true; track_id: string }
 	| { ok: false; reason: string; conflict?: true };
 
 /** The reason an upload (or text insert) gets when LightRAG answers HTTP 409. */
-export const LIGHTRAG_SAME_NAME_CONFLICT = "lightrag 409 same-name conflict";
+const LIGHTRAG_SAME_NAME_CONFLICT = "lightrag 409 same-name conflict";
 
 function uploadTrackId(data: unknown): string | undefined {
 	if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
@@ -595,7 +606,7 @@ export async function uploadDocument(
  * via {@link uploadDocument} (multipart with a text fallback). A transport
  * or shape failure is a reason, never a throw.
  */
-export interface StorePlanningPageRequest {
+interface StorePlanningPageRequest {
 	/** The page's repo path, e.g. `.planning/phases/03-x/PLAN.md`. */
 	path: string;
 	/** The page's source URL (the scan's `file://` URL). */
@@ -636,7 +647,7 @@ export async function storePlanningPage(
 	);
 }
 
-export interface LightragPollOptions {
+interface LightragPollOptions {
 	maxPolls?: number;
 	intervalMs?: number;
 	timeoutMs?: number;
@@ -785,14 +796,14 @@ function readMember(value: unknown, name: string): unknown {
 }
 
 /** One document `GET /documents/track_status/{track_id}` lists. */
-export interface LightragTrackedDocument {
+interface LightragTrackedDocument {
 	id: string;
 	status?: string;
 	file_path?: string;
 	error_msg?: string;
 }
 
-export interface LightragTrackOptions {
+interface LightragTrackOptions {
 	/** Most reads before giving up on the enqueue landing. Default 10. */
 	maxPolls?: number;
 	/** Wait between reads. Default 500 ms. */
@@ -807,7 +818,7 @@ export interface LightragTrackOptions {
 	now?: () => number;
 }
 
-export type LightragTrackOutcome =
+type LightragTrackOutcome =
 	| { ok: true; ids: string[]; documents: LightragTrackedDocument[] }
 	| { ok: false; reason: string };
 
@@ -919,7 +930,7 @@ export function documentName(path: string): string {
 }
 
 /** The result of a LightRAG health probe. */
-export interface LightragProbe {
+interface LightragProbe {
 	ok: boolean;
 	/** Whether the indexing pipeline is busy, when the server said. */
 	busy?: boolean;
@@ -965,7 +976,7 @@ export const LIGHTRAG_SNIPPET_CAP = 1200;
 
 export type LightragToolOutcome =
 	| { ok: true; chunks: RagLightragChunk[]; mode: LightragQueryMode }
-	| { ok: false; reason: string };
+	| LightragFailure;
 
 /**
  * The query the `docs_lightrag_query` tool and `POST /docs/lightrag/query`
@@ -974,7 +985,7 @@ export type LightragToolOutcome =
  * (so the plane's circuit breaker sees every call). Hits come back in the
  * query surface's `RagLightragChunk` shape, redacted and capped; an entry
  * without text is skipped and no usable entry is `lightrag: unexpected
- * response shape`.
+ * response shape`, coded empty so the retry policy never asks again.
  */
 export async function queryForTool(
 	config: LightragConfig,
@@ -998,6 +1009,6 @@ export async function queryForTool(
 			score: chunk.score ?? 0,
 		});
 	}
-	if (chunks.length === 0) return { ok: false, reason: "lightrag: unexpected response shape" };
+	if (chunks.length === 0) return { ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER };
 	return { ok: true, chunks, mode: answered.detail.mode };
 }

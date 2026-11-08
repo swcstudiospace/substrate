@@ -68,33 +68,34 @@ import {
 	type DfRunner,
 	type NoteOutcome,
 } from "./ledger-archive.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { redact } from "./redact.ts";
 import type { EventInput } from "./types.ts";
 
 export { ArchiveRefused };
 
 /** The manifest's format version; a reader refuses any other. */
-export const INDEX_ARCHIVE_VERSION = 1;
+const INDEX_ARCHIVE_VERSION = 1;
 
 /** The manifest's file name inside a snapshot directory. */
-export const MANIFEST_FILE = "manifest.json";
+const MANIFEST_FILE = "manifest.json";
 
 /** Snapshot files (data, `.part`, manifest, note markers) hold complete accepted memory text or its digests: owner-only whatever the process umask. */
-export const PRIVATE_FILE_MODE = 0o600;
+const PRIVATE_FILE_MODE = 0o600;
 /** Snapshot directories, and the archive directory when this run has to create it: owner-only. */
-export const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_DIR_MODE = 0o700;
 
 /** Rows per export page when the operator passes none. */
-export const DEFAULT_ARCHIVE_PAGE_ROWS = 500;
+const DEFAULT_ARCHIVE_PAGE_ROWS = 500;
 
 /** The most rows an operator may ask for per page: the store's own page ceiling. */
-export const MAX_ARCHIVE_PAGE_ROWS_CLI = 5000;
+const MAX_ARCHIVE_PAGE_ROWS_CLI = 5000;
 
 /** How long one export may run before it is abandoned and rolled back (`SUBSTRATE_INDEX_ARCHIVE_MAX_SECONDS`). */
-export const DEFAULT_ARCHIVE_MAX_SECONDS = 900;
+const DEFAULT_ARCHIVE_MAX_SECONDS = 900;
 
 /** How many bytes one export may write (`SUBSTRATE_INDEX_ARCHIVE_MAX_BYTES`): 1 GiB, against a 500 MB production volume. */
-export const DEFAULT_ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024;
+const DEFAULT_ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024;
 
 /** The longest NDJSON line a reader will hold: a body is capped far below this, so a longer line is damage, not data. */
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
@@ -117,7 +118,7 @@ export class IndexArchiveFailed extends Error {}
  * recomputes it from a scratch database whose collation may sort keys
  * differently from the source's, and the digest must still agree.
  */
-export class SetDigest {
+class SetDigest {
 	private sum = 0n;
 	private xor = 0n;
 	private count = 0;
@@ -135,7 +136,7 @@ export class SetDigest {
 }
 
 /** The digests one table's rows feed: every line, and the `entry_hash` of every row that has one. */
-export class TableDigests {
+class TableDigests {
 	readonly rows = new SetDigest();
 	readonly entryHashes: SetDigest | null;
 
@@ -152,7 +153,7 @@ export class TableDigests {
 
 // ─── The manifest ───────────────────────────────────────────────────────────
 
-export interface TableManifest {
+interface TableManifest {
 	file: string;
 	rows: number;
 	bytes: number;
@@ -204,12 +205,12 @@ const ManifestSchema = z.object({
 });
 
 /** The snapshot directory name for an instant: `index-20261014T031500Z`. */
-export function snapshotName(ms: number): string {
+function snapshotName(ms: number): string {
 	return `index-${new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
 }
 
 /** Snapshot directories in `dir` with a manifest, newest first; an unreadable dir is empty. */
-export function completeSnapshots(dir: string): string[] {
+function completeSnapshots(dir: string): string[] {
 	let names: string[];
 	try {
 		names = readdirSync(dir);
@@ -345,7 +346,7 @@ function quietly(work: () => void): void {
 }
 
 /** How old an unfinished snapshot directory must be before the next run removes it: a run in progress is never touched. */
-export const STALE_SNAPSHOT_MS = 60 * 60 * 1000;
+const STALE_SNAPSHOT_MS = 60 * 60 * 1000;
 
 /** The instant a snapshot directory's name records (UTC), or `NaN`. */
 function snapshotTime(name: string): number {
@@ -366,6 +367,7 @@ export function sweepStaleSnapshots(outDir: string, now: number, minAgeMs: numbe
 	try {
 		names = readdirSync(outDir);
 	} catch {
+		// An unreadable directory holds no stale snapshot this sweep can remove; the export into it reports its own failure.
 		return [];
 	}
 	const ours = new Set<string>([`${MANIFEST_FILE}.part`]);
@@ -622,17 +624,17 @@ function newStats(): LineStats {
 
 /** The closed vocabulary of what `verify-archive` can find wrong. */
 export const INDEX_MISMATCH_KINDS = ["missing-file", "size", "hash", "rowcount", "parse", "schema", "manifest"] as const;
-export type IndexMismatchKind = (typeof INDEX_MISMATCH_KINDS)[number];
+type IndexMismatchKind = (typeof INDEX_MISMATCH_KINDS)[number];
 
 /** One thing `verifyIndexArchive` found wrong: a name, a kind and counts — never a row's contents. */
-export interface IndexVerifyMismatch {
+interface IndexVerifyMismatch {
 	kind: IndexMismatchKind;
 	file?: string;
 	table?: string;
 	detail: string;
 }
 
-export interface IndexVerifyReport {
+interface IndexVerifyReport {
 	ok: boolean;
 	/** The directory given. */
 	dir: string;
@@ -643,7 +645,7 @@ export interface IndexVerifyReport {
 }
 
 /** The snapshot directory `dir` names: itself when it holds a manifest, else its newest complete `index-*` child. */
-export function resolveSnapshotDir(dir: string): string | null {
+function resolveSnapshotDir(dir: string): string | null {
 	if (existsSync(join(dir, MANIFEST_FILE))) return dir;
 	const newest = completeSnapshots(dir)[0];
 	return newest === undefined ? null : join(dir, newest);
@@ -806,7 +808,7 @@ export function formatIndexManifest(manifest: IndexArchiveManifest): string {
 /** A restore refused before it wrote anything: a usage or environment fault, exit 2 at the runner. */
 export class RestoreRefused extends Error {}
 
-export interface PgTarget {
+interface PgTarget {
 	host: string;
 	port: number;
 	database: string;
@@ -915,6 +917,7 @@ export function normalizePgUrl(raw: string): PgTarget | null {
 	try {
 		url = new URL(raw);
 	} catch {
+		// Not a URL at all: not a plain postgres URL, so null, as the doc above states.
 		return null;
 	}
 	if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return null;
@@ -928,6 +931,7 @@ export function normalizePgUrl(raw: string): PgTarget | null {
 		if (!Number.isInteger(port) || port < 1 || port > 65535 || database === "") return null;
 		return { host, port, database };
 	} catch {
+		// A malformed percent-escape is not a plain postgres URL either: null, as the doc above states.
 		return null;
 	}
 }
@@ -962,7 +966,7 @@ export interface RestoreTarget {
 	withRestoreTransaction<T>(work: (tx: IndexRestoreTx) => Promise<T>): Promise<T>;
 }
 
-export interface RestoreTableResult {
+interface RestoreTableResult {
 	table: string;
 	manifestRows: number;
 	restoredRows: number;
@@ -1024,6 +1028,8 @@ export async function restoreIndexArchive(target: RestoreTarget, options: { dir:
 				}
 			}
 			if (chunk.length > 0) await tx.insert(spec.name, chunk);
+			// The rows carried their own identity values: move each sequence past them before anything else writes to the table.
+			await tx.advanceIdentity(spec.name);
 		}
 		const compared: RestoreTableResult[] = [];
 		for (const spec of ARCHIVE_TABLES) {
@@ -1098,7 +1104,7 @@ export function indexArchiveNote(manifest: IndexArchiveManifest): EventInput {
 }
 
 /** The marker a snapshot keeps beside its directory from before its note is first sent until the ledger has taken it. */
-export interface PendingIndexNote {
+interface PendingIndexNote {
 	snapshot: string;
 	note: EventInput;
 	/** Sends the ledger has refused or that threw; `0` while the first is still in flight. */
@@ -1151,7 +1157,7 @@ async function sendNote(emit: (input: EventInput) => Promise<NoteOutcome>, note:
 }
 
 /** What one note attempt answers, plus why its retry marker could not be written or cleared, when it could not. */
-export interface IndexNoteOutcome extends NoteOutcome {
+interface IndexNoteOutcome extends NoteOutcome {
 	markerError?: string;
 }
 
@@ -1185,7 +1191,8 @@ export function readPendingIndexNote(dir: string, snapshot: string): PendingInde
 	try {
 		const parsed = PendingNoteSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
 		return parsed.success ? { ...parsed.data, note: parsed.data.note as unknown as EventInput } : null;
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("index-archive.pending-note", cause);
 		return null;
 	}
 }

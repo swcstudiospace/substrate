@@ -179,7 +179,7 @@ describe("POST /corpus/ingest", () => {
 	test("a tombstone-only request (no documents) is accepted and removes the row", async () => {
 		const harness = await start(ON);
 		harness.store.seed(makeRow({ repo: REPO, path: "docs/old.md", documentId: "doc-old" }));
-		const response = await post(harness, "/corpus/ingest", { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: REPO, path: "docs/old.md" }] });
+		const response = await post(harness, "/corpus/ingest", { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: REPO, path: "docs/old.md" }], scope: { coverage: [{ repo: REPO, source: "fs" }], maxTier: 3 } });
 		expect(response.status).toBe(200);
 		expect(((await response.json()) as { counts: Record<string, number> }).counts).toMatchObject({ tombstoned: 1 });
 		expect(harness.plane.deletes).toEqual([["doc-old"]]);
@@ -192,11 +192,22 @@ describe("POST /corpus/ingest", () => {
 			protocol: CORPUS_PROTOCOL,
 			documents: [{ ...document, sha256: sha256Hex("not the body") }],
 			tombstones: [{ repo: REPO, path: "docs/old.md" }],
+			scope: { coverage: [{ repo: REPO, source: "fs" }], maxTier: 3 },
 		});
 		const body = (await response.json()) as { results: Array<{ status: string; reason?: string }> };
 		expect(response.status).toBe(200);
 		expect(body.results).toMatchObject([{ status: "refused", reason: "sha-mismatch" }, { status: "tombstoned" }]);
 		expect(harness.store.row(REPO, "docs/old.md")?.state).toBe("tombstoned");
+	});
+
+	test("a tombstone outside the request's scope is refused 403 tombstone-out-of-scope and deletes nothing", async () => {
+		const harness = await start(ON);
+		harness.store.seed(makeRow({ repo: REPO, path: "docs/old.md", documentId: "doc-old" }));
+		const response = await post(harness, "/corpus/ingest", { protocol: CORPUS_PROTOCOL, documents: [], tombstones: [{ repo: REPO, path: "docs/old.md" }], scope: { coverage: [{ repo: REPO, source: "github" }], maxTier: 3 } });
+		expect(response.status).toBe(403);
+		expect(await reasonOf(response)).toBe("tombstone-out-of-scope");
+		expect(harness.store.row(REPO, "docs/old.md")?.state).toBe("active");
+		expect(harness.plane.deletes).toEqual([]);
 	});
 });
 

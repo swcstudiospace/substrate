@@ -40,7 +40,7 @@ import { ADMISSION_CLASSES } from "@substrate/observability";
 import type { EnvRead } from "./flag-registry-scan.ts";
 import { SURFACES } from "./types.ts";
 
-export type FlagKind = "mode" | "toggle" | "number" | "path" | "list" | "secret-ref" | "string";
+type FlagKind = "mode" | "toggle" | "number" | "path" | "list" | "secret-ref" | "string";
 
 /** One data plane or owner; the reference document has one table per entry, in this order. */
 export const FLAG_PLANES = [
@@ -59,7 +59,7 @@ export const FLAG_PLANES = [
 	"clients",
 	"harness",
 ] as const;
-export type FlagPlane = (typeof FLAG_PLANES)[number];
+type FlagPlane = (typeof FLAG_PLANES)[number];
 
 export const FLAG_PLANE_TITLES: Readonly<Record<FlagPlane, string>> = {
 	identity: "Identity, tokens and memory governance",
@@ -78,7 +78,7 @@ export const FLAG_PLANE_TITLES: Readonly<Record<FlagPlane, string>> = {
 	harness: "Smoke, rehearsal and test harness",
 };
 
-export type Comparator = "<=" | ">=" | "<" | ">" | "==";
+type Comparator = "<=" | ">=" | "<" | ">" | "==";
 
 /** A set of points of one history series: those whose closed label value is in `labels` (all of them when omitted). */
 export interface SeriesTerm {
@@ -87,7 +87,7 @@ export interface SeriesTerm {
 }
 
 /** `share`: sum of the numerator's values over sum of the denominator's values (the whole numerator series when there is no denominator). `ratio`: sum of the numerator's values over the sum of the denominator's sample counts. `max`: worst value. `sum`: total value. */
-export type EvidenceStat = "share" | "ratio" | "max" | "sum";
+type EvidenceStat = "share" | "ratio" | "max" | "sum";
 
 /**
  * The extended series that proves EXTENDED sampling covered a window: a gauge the extended sampler writes in
@@ -125,7 +125,7 @@ export interface Evidence {
 	proposed: true;
 }
 
-export interface PolicySpec {
+interface PolicySpec {
 	/** The value that preserves today's behaviour or only reports. */
 	safe: string;
 	/** The value that makes the policy bite. */
@@ -161,7 +161,7 @@ export interface FlagSpec {
 }
 
 /** A group of names the code composes at run time. The scan finds only the prefix, so the family names it. */
-export interface FlagFamily {
+interface FlagFamily {
 	/** Display form, e.g. `SUBSTRATE_TOKEN_<SURFACE>`. */
 	pattern: string;
 	/** The template prefix the scan reports. */
@@ -186,6 +186,7 @@ const CLASS_BUDGET_NAMES: readonly string[] = ADMISSION_CLASSES.flatMap((klass) 
 const SURFACE_BUDGET_NAMES: readonly string[] = SURFACES.flatMap((surface) =>
 	ADMISSION_CLASSES.flatMap((klass) => [`SUBSTRATE_BUDGET_${spelled(surface)}_${klass.toUpperCase()}_RPS`, `SUBSTRATE_BUDGET_${spelled(surface)}_${klass.toUpperCase()}_BURST`]),
 );
+const CLASS_BREAKER_NAMES: readonly string[] = ADMISSION_CLASSES.map((klass) => `SUBSTRATE_BUDGET_${klass.toUpperCase()}_BREAKER`);
 
 export const FLAG_FAMILIES: readonly FlagFamily[] = [
 	{
@@ -212,6 +213,19 @@ export const FLAG_FAMILIES: readonly FlagFamily[] = [
 		readBy: "mcp-server/config.ts",
 		members: [...CLASS_BUDGET_NAMES, ...SURFACE_BUDGET_NAMES],
 		documentedMembers: CLASS_BUDGET_NAMES,
+		doc: "docs/observability.md",
+	},
+	{
+		pattern: "SUBSTRATE_BUDGET_<CLASS>_BREAKER",
+		prefix: "SUBSTRATE_BUDGET_",
+		kind: "mode",
+		plane: "admission",
+		default: "fail-open",
+		allowed: "fail-open | fail-closed",
+		unset: "fail-open: unset or blank, an open cache breaker admits the request and counts a bypass, as before; fail-closed refuses it with 503 in enforce and, in shadow, admits it and counts a bypass; any other value refuses to boot (SUBSTRATE_BUDGETS keeps its older fallback to shadow)",
+		readBy: "mcp-server/config.ts",
+		members: CLASS_BREAKER_NAMES,
+		documentedMembers: CLASS_BREAKER_NAMES,
 		doc: "docs/observability.md",
 	},
 	{
@@ -308,7 +322,9 @@ export const FLAGS: readonly FlagSpec[] = [
 	},
 	{ name: "SUBSTRATE_WORKTREE_REGISTRY", kind: "toggle", plane: "server", default: "off", allowed: "off | on (case- and space-insensitive; anything else is off)", unset: "off: POST /worktrees/report, GET /worktrees and worktree_list answer 503 worktrees.disabled, nothing is stored and memory_brief carries no worktrees section; on: the same routes serve and a brief that names repo and session_id also lists other sessions' worktrees that touch files its own worktree touches (docs/live-steering.md)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/worktree-fleet-api.md" },
 	{ name: "SUBSTRATE_WORKTREE_REGISTRY_TTL_S", kind: "number", plane: "server", default: "1209600", allowed: "60..31536000 whole seconds", unset: "1209600 s (14 days): an accepted report deletes its own host's rows last seen longer ago than this", readBy: "mcp-server/config.ts", documented: true, doc: "docs/worktree-fleet-api.md" },
-	{ name: "SUBSTRATE_WORKTREE_ROOTS", kind: "list", plane: "clients", default: "none", allowed: "colon-separated absolute directories (relative entries are dropped)", unset: "the worktree commands say no root is configured and exit 2, and the doctor adds no worktree row; the collector's graph attribution still falls back to /var/lib/substrate/worktrees (also when no entry is an absolute path); the dispatcher does not read this variable and always uses that directory", readBy: "fleet/config.ts, cli/worktree, collectors/worktree-graph.ts, scripts/doctor-runtime.ts", documented: true, doc: "docs/worktree-fleet-api.md" },
+	{ name: "SUBSTRATE_WORKTREE_ROOTS", kind: "list", plane: "clients", default: "none", allowed: "colon-separated absolute directories (relative entries are dropped)", unset: "the worktree commands say no root is configured and exit 2, and the doctor adds no worktree row; the collector's graph attribution still falls back to /var/lib/substrate/worktrees (also when no entry is an absolute path); the dispatcher reads this variable too and creates each graph's worktree under its first entry, which is /var/lib/substrate/worktrees when unset", readBy: "fleet/config.ts, cli/worktree, collectors/worktree-graph.ts, dispatcher/worktree.py, scripts/doctor-runtime.ts, host/src/main.ts, host/src/sandbox-options.ts", documented: true, doc: "docs/worktree-fleet-api.md" },
+	{ name: "SUBSTRATE_REPO_SCOPES", kind: "string", plane: "identity", default: "none", allowed: "JSON object mapping each surface name to a list of owner/name repositories; a surface missing from it is granted none", unset: "scoping is off when `SUBSTRATE_REPO_REGISTRY` is also unset: every caller may address every repository, as before; with the registry set and this unset or blank, the server refuses to start; set, every surface and every anonymous caller is refused any repository it is not granted, and a malformed value refuses the boot", readBy: "mcp-server/config.ts, mcp-server/repo-scope.ts, cli/worktree", documented: true, doc: "docs/worktree-fleet-api.md" },
+	{ name: "SUBSTRATE_REPO_REGISTRY", kind: "string", plane: "clients", default: "none", allowed: "JSON object mapping each owner/name repository to its absolute checkouts and worktrees directories; two repositories may not share or nest a directory; any `.git` nested under a registered directory is refused (the strict rule), and each repository, including each linked worktree, must be named. With this set and `SUBSTRATE_REPO_SCOPES` unset or blank the server refuses to start; the corpus CLI and the collector installer accept it without scopes", unset: "no repository has a registered directory: a scoped git step or a scoped path is refused before git runs; a malformed value refuses the boot", readBy: "mcp-server/config.ts, mcp-server/repo-scope.ts, cli/worktree", documented: true, doc: "docs/worktree-fleet-api.md" },
 	{ name: "SUBSTRATE_WORKTREE_MIN_FREE_GB", kind: "number", plane: "clients", default: "5", allowed: "positive number of gigabytes (anything else is the default)", unset: "5 GB: worktree creation refuses below it (substrate worktree provision, and the dispatcher's ensure_worktree, which reads it in Python and is not covered by the scan)", readBy: "fleet/config.ts, cli/worktree, dispatcher/worktree.py", documented: true, doc: "docs/worktree-fleet-api.md" },
 	{ name: "SUBSTRATE_WORKTREE_IDLE_DAYS", kind: "number", plane: "clients", default: "14", allowed: "positive number of days (anything else is the default)", unset: "14 days: a worktree must be untouched this long before prune may call it safe, and the registry listing calls a worktree stale after it", readBy: "fleet/config.ts, cli/worktree, mcp-server/config.ts", documented: true, doc: "docs/worktree-fleet-api.md" },
 	{ name: "SUBSTRATE_SESSION_ID", kind: "string", plane: "clients", default: "none", allowed: "a non-empty label of at most 255 characters with no control character (anything else is a usage error, exit 2)", unset: "no attribution from the session: `substrate worktree scan --report` attributes no worktree to a session unless `--session ID` is given or the dispatcher's live claim on the worktree's graph names exactly one session; a blank value is the same as unset; the flag wins over the variable", readBy: "fleet/config.ts, cli/worktree", documented: true, doc: "docs/worktree-fleet-api.md" },
@@ -319,11 +335,14 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "NOTION_TASK_GRAPH_DS", kind: "string", plane: "server", default: "the repo's task-graph data source id", allowed: "data source id", unset: "the built-in id", readBy: "mcp-server/config.ts, host/sync.ts", documented: true },
 	{ name: "HERMES_LINEAR_URL", kind: "string", plane: "server", default: "http://127.0.0.1:8792", allowed: "URL", unset: "the connector's loopback address", readBy: "mcp-server/config.ts", documented: true },
 	{ name: "SUBSTRATE_DOD_GATE_TIMEOUT_MS", kind: "number", plane: "server", default: "35000", allowed: "positive integer ms", unset: "35000 ms", readBy: "mcp-server/config.ts", documented: true },
+	{ name: "SUBSTRATE_LIVE_SESSION_LEASE_S", kind: "number", plane: "server", default: "3600", allowed: "whole seconds 60..86400 (out of range clamps; non-integer or unparseable falls back)", unset: "3600 s authoritative live-session lease; heartbeat every 300 s by default, and before expiry when configured below 600 s; independent of restart-cache TTL", readBy: "mcp-server/config.ts", documented: true, doc: "docs/live-steering.md" },
 	{ name: "SUBSTRATE_PLANNING_STEERING", kind: "toggle", plane: "server", default: "off", allowed: "on | off (1/0, true/false, yes/no; case- and space-insensitive; anything else refuses the steering settings with a typed error naming the variable)", unset: "off: steering is not enabled and no steering tool is registered; on: steering_queue and steering_acknowledge act only for an operator caller, steering_list is a read, and each write answers not-configured until an audit sink is injected", readBy: "mcp-server/planning/steering.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_STEERING_PRINCIPALS", kind: "list", plane: "server", default: "none", allowed: "comma separated principal ids (letters, digits and . _ @ : -; 1 to 128 characters each; an empty entry is refused)", unset: "empty: every principal is refused, so no steering directive can be queued", readBy: "mcp-server/planning/steering.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", kind: "number", plane: "server", default: "10", allowed: "whole number 1..1000 (not an integer or out of range: refused with a typed error naming the variable)", unset: "10 directives per minute per target session", readBy: "mcp-server/planning/steering.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_STEERING_ACK_TTL_S", kind: "number", plane: "server", default: "86400", allowed: "whole seconds 60..2592000 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured)", unset: "86400 s (one day): a directive nobody acknowledged by then is closed as declined with reason timeout, audited, and no longer offered to its session", readBy: "mcp-server/planning/steering.ts", documented: true },
 	{ name: "SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S", kind: "number", plane: "server", default: "60", allowed: "whole seconds 1..3600 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured)", unset: "60 s between expiry passes; the pass runs only while steering is on with the audit table enabled", readBy: "mcp-server/planning/steering.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S", kind: "number", plane: "server", default: "86400", allowed: "whole seconds 60..2592000 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured)", unset: "86400 s (one day): a keyed steering queue replays its original reply within that window; past it the same key is a new command", readBy: "mcp-server/planning/steering.ts", documented: true },
+	{ name: "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP", kind: "number", plane: "server", default: "10000", allowed: "whole number 1..1000000 (not an integer or out of range: refused with a typed error naming the variable, and the steering tools answer misconfigured)", unset: "10000 keyed queues kept; at the cap the oldest is forgotten first", readBy: "mcp-server/planning/steering.ts", documented: true },
 
 	// ── ledger ────────────────────────────────────────────────────────────────
 	{ name: "GREPTIME_URL", kind: "secret-ref", plane: "ledger", default: "none", allowed: "HTTP SQL base URL", unset: "no ledger: events are not recorded and claims are not withdrawn for it", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
@@ -336,6 +355,12 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_LEDGER_CHAIN_CACHE_MAX", kind: "number", plane: "ledger", default: "10000", allowed: "1..1000000", unset: "10000 sessions", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS", kind: "number", plane: "ledger", default: "30", allowed: "1..3650", unset: "30 days", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_WRITE_PROBE_S", kind: "number", plane: "ledger", default: "60", allowed: "0..86400 (0 never probes)", unset: "60 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_MAX", kind: "number", plane: "ledger", default: "256", allowed: "positive integer", unset: "256 entries (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path", unset: "buffer off: a failed write answers stored: false, as before", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS", kind: "number", plane: "ledger", default: "10", allowed: "positive integer", unset: "10 attempts (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_BACKOFF_MS", kind: "number", plane: "ledger", default: "1000", allowed: "positive integer ms", unset: "1000 ms (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS", kind: "number", plane: "ledger", default: "60000", allowed: "positive integer ms", unset: "60000 ms (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_DEAD_LETTER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path, required while SUBSTRATE_EVENT_BUFFER_PATH is set", unset: "no dead-letter file: boot refuses while the buffer is on", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{
 		name: "SUBSTRATE_LEDGER_TTL",
 		kind: "string",
@@ -506,8 +531,7 @@ export const FLAGS: readonly FlagSpec[] = [
 		},
 	},
 	{ name: "SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE", kind: "toggle", plane: "index", default: "off", allowed: "on | off (1/0, true/false, yes/no; anything else is off)", unset: "off: migrate() creates no planning_steering_audit table, so steering audit writes fail closed until an operator turns it on", readBy: "mcp-server/planning/steering-store.ts", documented: true },
-	{ name: "SUBSTRATE_STEERING_SESSIONS_TABLE", kind: "toggle", plane: "index", default: "off", allowed: "on | off (1/0, true/false, yes/no; anything else is off)", unset: "off: the steering session registry stays in process memory and migrate() creates no steering_sessions table; on: sessions are written through to steering_sessions and loaded at boot", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
-	{ name: "SUBSTRATE_STEERING_SESSION_TTL_S", kind: "number", plane: "index", default: "604800", allowed: "60..31536000 (out of range clamps; unparseable falls back)", unset: "604800 s (seven days): a steering session not updated for longer is dropped when the durable registry loads; read only while SUBSTRATE_STEERING_SESSIONS_TABLE is on", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
+	{ name: "SUBSTRATE_STEERING_SESSIONS_TABLE", kind: "toggle", plane: "index", default: "off", allowed: "on | off (1/0, true/false, yes/no; anything else is off)", unset: "off: migration 37 remains unselected; on: preserve its historical optional steering_sessions schema selection only. Runtime cache removed; never grants live authority", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_STEERING_WAIT_MAX_MS", kind: "number", plane: "server", default: "30000", allowed: "1000..120000 (out of range clamps; unparseable falls back)", unset: "30000 ms: the longest GET /steering/wait holds one request before it answers 204; a longer timeout_ms is clamped to it and the answer reports the wait it got", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_BRIEF_SESSIONS", kind: "toggle", plane: "brief", default: "off", allowed: "on | off (1/0, true/false, yes/no; anything else is off)", unset: "off: the brief carries no sessions, steering or handoffs section and is byte-identical to before, and the session_context tool and GET /session/context refuse with session-context.disabled; on: those sections are appended live to every full brief (under the brief's own deadline) and the digest is served", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_INDEX_VOLUME_BYTES", kind: "number", plane: "index", default: "none", allowed: "bytes", unset: "no capacity runway row (the ceiling is unknown)", readBy: "observability/config.ts", documented: true, doc: "docs/observability.md" },
@@ -605,7 +629,7 @@ export const FLAGS: readonly FlagSpec[] = [
 	// ── brief ─────────────────────────────────────────────────────────────────
 	{ name: "SUBSTRATE_BRIEF_BUDGET_MS", kind: "number", plane: "brief", default: "1200", allowed: "0 = no deadline", unset: "1200 ms", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS", kind: "number", plane: "brief", default: "30", allowed: "positive integer", unset: "30 days", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
-	{ name: "SUBSTRATE_BRIEF_SNAPSHOT_TTL_S", kind: "number", plane: "brief", default: "3600", allowed: "0 = no snapshots", unset: "3600 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
+	{ name: "SUBSTRATE_BRIEF_SNAPSHOT_TTL_S", kind: "number", plane: "brief", default: "3600", allowed: "0 = no snapshots", unset: "3600 s; also the window of the in-process last-good brief this process keeps for while the cache cannot be read (the breaker is open). A forget another process made is not seen then; once the cache can be read again its forget mark decides. This process's own forgets are honoured at once.", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_HEALTHZ_CACHE_MS", kind: "number", plane: "brief", default: "5000", allowed: "0 = recompute per call", unset: "5000 ms", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S", kind: "number", plane: "brief", default: "0", allowed: "0..300 whole seconds (a fraction is floored with a boot warning; above 300 is capped at 300 with a boot warning; negative or not a number is 0 with a boot warning)", unset: "0: the index size report (capacity.index) is measured on every computed /healthz body", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{
@@ -769,8 +793,8 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "RAGFLOW_URL", kind: "string", plane: "docs", default: "none", allowed: "RAGFlow base URL", unset: "docs_search answers degraded, docs_ingest refuses", readBy: "mcp-server/planes/ragflow.ts", documented: true, doc: "docs/docs-search-ingest.md" },
 	{ name: "RAGFLOW_API_KEY", kind: "secret-ref", plane: "docs", default: "none", allowed: "API key", unset: "the plane is unconfigured", readBy: "mcp-server/planes/ragflow.ts", documented: true, doc: "docs/docs-search-ingest.md" },
 	{ name: "RAGFLOW_DATASET_ID", kind: "string", plane: "docs", default: "none", allowed: "dataset id", unset: "nothing: no code reads it today (docs_ingest names the dataset after the repo)", readBy: "none", documented: true, status: "unread", doc: "docs/docs-search-ingest.md" },
-	{ name: "LIGHTRAG_URL", kind: "string", plane: "docs", default: "none", allowed: "LightRAG base URL", unset: "the LightRAG path is unconfigured", readBy: "mcp-server/config.ts", documented: true, doc: "docs/docs-search-ingest.md" },
-	{ name: "LIGHTRAG_API_KEY", kind: "secret-ref", plane: "docs", default: "none", allowed: "API key, sent as a bearer on the LightRAG health probe", unset: "LightRAG is reached unauthenticated", readBy: "mcp-server/config.ts", documented: true, doc: "docs/docs-search-ingest.md" },
+	{ name: "LIGHTRAG_URL", kind: "string", plane: "docs", default: "none", allowed: "absolute http or https base URL; required (boot stops without it) when the docs backend is lightrag", unset: "the LightRAG path is unconfigured; the docs backend is ragflow unless SUBSTRATE_DOCS_BACKEND names lightrag", readBy: "mcp-server/config.ts", documented: true, doc: "docs/docs-search-ingest.md" },
+	{ name: "LIGHTRAG_API_KEY", kind: "secret-ref", plane: "docs", default: "none", allowed: "API key, sent as the X-API-Key header on every LightRAG call (never a bearer)", unset: "LightRAG is reached unauthenticated", readBy: "mcp-server/config.ts", documented: true, doc: "docs/docs-search-ingest.md" },
 	{ name: "SUBSTRATE_LIGHTRAG_URL", kind: "string", plane: "docs", default: "none", allowed: "LightRAG base URL override for the Railway hosting layer", unset: "LIGHTRAG_URL applies", readBy: "mcp-server/config.ts", documented: true, doc: "docs/docs-search-ingest.md" },
 	{ name: "SUBSTRATE_LIGHTRAG_API_KEY", kind: "secret-ref", plane: "docs", default: "none", allowed: "API key override for the Railway hosting layer", unset: "LIGHTRAG_API_KEY applies", readBy: "mcp-server/config.ts", documented: true, doc: "docs/docs-search-ingest.md" },
 	{ name: "SUBSTRATE_LIGHTRAG_PROJECT", kind: "string", plane: "docs", default: "none", allowed: "Railway project label, report-only: it names the project in Railway plans and status and never scopes ingest or search", unset: "no project label", readBy: "mcp-server/config.ts", documented: true, doc: "docs/docs-search-ingest.md" },
@@ -854,7 +878,7 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_CORPUS_BATCH_DOCS", kind: "number", plane: "docs", default: "20", allowed: "1..200", unset: "20 documents per batch", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-ingest.md" },
 	{ name: "SUBSTRATE_CORPUS_BATCH_BYTES", kind: "number", plane: "docs", default: "1000000", allowed: "10000..5000000", unset: "1000000 bytes per batch", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-ingest.md" },
 	// Doc watch (v1.7 phase 65).
-	{ name: "SUBSTRATE_CORPUS_FRESH_MAX_AGE_S", kind: "number", plane: "docs", default: "172800", allowed: "whole seconds 0..31536000; 0 judges nothing (not a whole number: the default; above the range: clamped)", unset: "172800 s (two days): while SUBSTRATE_CORPUS=on a corpus whose last ingest is older raises the docs.freshness warning; with the corpus off nothing is judged", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-sync.md" },
+	{ name: "SUBSTRATE_CORPUS_FRESH_MAX_AGE_S", kind: "number", plane: "docs", default: "172800", allowed: "whole seconds 0..31536000; 0 judges no age, but a set SUBSTRATE_DOCS_SLO_SYNC_LAG_S is still judged (not a whole number: the default; above the range: clamped)", unset: "172800 s (two days): while SUBSTRATE_CORPUS=on a corpus whose last ingest is older raises the docs.freshness warning; with the corpus off nothing is judged", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-sync.md" },
 	{ name: "SUBSTRATE_PLANNING_HASH_STORE", kind: "toggle", plane: "docs", default: "off", allowed: "on | off", unset: "off: the planning refresh keeps its page hashes in memory only, as before, and every restart re-ingests every planning page; on keeps them in the index table planning_page_hashes (memory when there is no index)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/runbooks/corpus-sync.md" },
 	{ name: "SUBSTRATE_CORPUS_MIRROR_DIR", kind: "string", plane: "clients", default: "$XDG_STATE_HOME/substrate/corpus-mirrors", allowed: "directory path", unset: "<state dir>/corpus-mirrors, where <state dir> is $XDG_STATE_HOME/substrate (an absolute XDG_STATE_HOME), else ~/.local/state/substrate", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
 	{ name: "SUBSTRATE_CORPUS_SPOOL", kind: "string", plane: "clients", default: "$XDG_STATE_HOME/substrate/corpus-hints", allowed: "directory path", unset: "<state dir>/corpus-hints, with the same state dir as the mirrors", readBy: "cli/corpus/watch-settings.ts", documented: true, doc: "docs/corpus-watch.md" },
@@ -867,10 +891,11 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS", kind: "number", plane: "docs", default: "30", allowed: "1..365 whole days (outside it is capped; not a whole number is 30)", unset: "30 days; only read while SUBSTRATE_DOCS_TELEMETRY is on", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_DOCS_RERANK", kind: "mode", plane: "docs", default: "off", allowed: "off | shadow | on (case- and space-insensitive; anything else is off)", unset: "off: a docs answer is exactly what the plane returned; shadow records what the authority re-rank would change in the telemetry row and leaves the answer alone; on annotates corpus citations with stale and superseded_by and re-orders them by authority", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_DOCS_GAP_SCORE", kind: "number", plane: "docs", default: "0.2", allowed: "a number in [0, 1] (anything else is 0.2)", unset: "0.2: a query whose best citation scored below it, or that returned none, is a gap in GET /corpus/gaps", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
-	// Docs plane objectives and the golden-set evaluation (v1.7 phase 70). The three thresholds are read by `@substrate/corpus` (`slo.ts`) for the server's fabric row and the CLI's `corpus eval` alike.
+	// Docs plane objectives and the golden-set evaluation (v1.7 phase 70). The thresholds are read by `@substrate/corpus` (`slo.ts`) for the server's fabric row and the CLI's `corpus eval` alike.
 	{ name: "SUBSTRATE_DOCS_SLO_FRESHNESS_S", kind: "number", plane: "docs", default: "86400", allowed: "1 or more (seconds)", unset: "86400 seconds: the corpus row of fabric_status degrades when the newest manifest change is older than a day; an empty, zero, negative or non-numeric value is the default too", readBy: "corpus/src/slo.ts", documented: true, doc: "docs/corpus-eval.md" },
 	{ name: "SUBSTRATE_DOCS_SLO_RECALL5", kind: "number", plane: "docs", default: "0.6", allowed: "above 0 up to 1", unset: "0.6: a golden-set recall at 5 below it degrades the corpus row and fails the canary and `substrate corpus eval`; a value outside the range is the default too", readBy: "corpus/src/slo.ts", documented: true, doc: "docs/corpus-eval.md" },
 	{ name: "SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S", kind: "number", plane: "docs", default: "0.2", allowed: "above 0 (documents per second)", unset: "0.2: an ingest request that sent documents and averaged below it degrades the corpus row; a request that sent none is not judged; an invalid value is the default too", readBy: "corpus/src/slo.ts", documented: true, doc: "docs/corpus-eval.md" },
+	{ name: "SUBSTRATE_DOCS_SLO_SYNC_LAG_S", kind: "number", plane: "docs", default: "none", allowed: "1 or more whole seconds (a fraction is rounded down)", unset: "no sync-lag objective: the corpus row of fabric_status shows the lag the newest docs.sync note reported, with no verdict; an empty, non-numeric or below-1 value is unset too", readBy: "corpus/src/slo.ts", documented: true, doc: "docs/corpus-eval.md" },
 	{ name: "SUBSTRATE_DOCS_EVAL_REPO", kind: "string", plane: "docs", default: "swcstudiospace/agent-substrate", allowed: "owner/name", unset: "swcstudiospace/agent-substrate: the repository name `scripts/docs-eval.ts --live` and the canary expect this checkout's docs to be ingested under", readBy: "scripts/docs-eval.ts", documented: true, doc: "docs/corpus-eval.md" },
 
 	// ── admission ─────────────────────────────────────────────────────────────
@@ -959,6 +984,8 @@ export const FLAGS: readonly FlagSpec[] = [
 	},
 	{ name: "SUBSTRATE_SLO_NOTIFY_S", kind: "number", plane: "observability", default: "60", allowed: "5..86400", unset: "60 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_SLO_NOTIFY_SUSTAIN_S", kind: "number", plane: "observability", default: "300", allowed: "0..86400 (0 announces at once)", unset: "300 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
+	{ name: "SUBSTRATE_RECONCILE_INTERVAL_S", kind: "number", plane: "observability", default: "0", allowed: "0 (off) or whole seconds, at least 60 above 0; not a whole number refuses boot", unset: "off: no scheduled reconcile. Above 0 the cross-layer report runs on that interval and writes one JSON log line per run; the reconcile writes nothing to the ledger, the index or the cache", readBy: "mcp-server/config.ts", documented: true, doc: "docs/reconcile.md" },
+	{ name: "SUBSTRATE_RECONCILE_WINDOW_HOURS", kind: "number", plane: "observability", default: "24", allowed: "1..168 whole hours (outside it is clamped; not a whole number refuses boot)", unset: "24 hours of ledger and index history per scheduled run; the reconcile only reads, and writes nothing", readBy: "mcp-server/config.ts", documented: true, doc: "docs/reconcile.md" },
 	{ name: "SUBSTRATE_SLO_WEBHOOK_URL", kind: "secret-ref", plane: "observability", default: "none", allowed: "http(s) URL", unset: "no webhook; the URL may carry a token and is never printed", readBy: "mcp-server/config.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_BURN_TOKENS_PER_HOUR", kind: "number", plane: "observability", default: "none", allowed: "tokens per rolling hour", unset: "the burn.tokens row is unconfigured and never judged", readBy: "observability/burn.ts", documented: true, doc: "docs/observability.md" },
 	{ name: "SUBSTRATE_BURN_COST_USD_PER_HOUR", kind: "number", plane: "observability", default: "none", allowed: "USD per rolling hour", unset: "the burn.cost_usd row is unconfigured and never judged", readBy: "observability/burn.ts", documented: true, doc: "docs/observability.md" },

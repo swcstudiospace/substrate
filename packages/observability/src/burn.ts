@@ -53,21 +53,21 @@ export const BURN_MIN_SPAN_MS = 5 * 60 * 1000;
 /** Samples kept per metric; the window is what bounds the useful history anyway. */
 export const BURN_MAX_SAMPLES = 480;
 
-export const BURN_TOKENS_ID = "burn.tokens";
-export const BURN_COST_ID = "burn.cost_usd";
+const BURN_TOKENS_ID = "burn.tokens";
+const BURN_COST_ID = "burn.cost_usd";
 
 export const TOKENS_BURN_ENV = "SUBSTRATE_BURN_TOKENS_PER_HOUR";
-export const COST_BURN_ENV = "SUBSTRATE_BURN_COST_USD_PER_HOUR";
+const COST_BURN_ENV = "SUBSTRATE_BURN_COST_USD_PER_HOUR";
 
 /** Ceilings an operator can set without touching code; `null` is unconfigured. */
-export interface BurnThresholds {
+interface BurnThresholds {
 	/** Max model tokens (input + output) per rolling hour. */
 	tokensPerHour: number | null;
 	/** Max spend in USD per rolling hour. */
 	costUsdPerHour: number | null;
 }
 
-export type BurnStatus = "ok" | "breached" | "unconfigured" | "insufficient-data";
+type BurnStatus = "ok" | "breached" | "unconfigured" | "insufficient-data";
 
 /** One burn verdict; the field shape mirrors `SloResult` so `/slo` reads alike. */
 export interface BurnResult {
@@ -86,7 +86,7 @@ export interface BurnResult {
 }
 
 /** What one `BurnLedger.observe` answers: a rate when the span supports one. */
-export interface BurnReading {
+interface BurnReading {
 	/** Extrapolated per-hour delta, or `null` before two samples span `minSpanMs`. */
 	perHour: number | null;
 	/** The span the rate (or would-be rate) was taken over. */
@@ -227,7 +227,7 @@ export function loadBurnThresholds(
 	};
 }
 
-export interface BurnTarget {
+interface BurnTarget {
 	id: string;
 	title: string;
 	/** The cumulative series the per-hour rate is taken over. */
@@ -239,7 +239,7 @@ export interface BurnTarget {
 	statement: string;
 }
 
-export function burnTargets(thresholds: BurnThresholds): BurnTarget[] {
+function burnTargets(thresholds: BurnThresholds): BurnTarget[] {
 	// Tokens are whole counts; USD carries cents. Both are display forms only — the
 	// verdict compares raw numbers — but the statement and the verdict sentence must
 	// agree on the spelling, so each site spells its unit the same way.
@@ -332,7 +332,7 @@ function evaluateBurn(snapshot: MetricSnapshot[], target: BurnTarget, ledger: Bu
 	};
 }
 
-export interface BurnEvalOptions {
+interface BurnEvalOptions {
 	/** Environment the ceilings are read from; defaults to `process.env`. */
 	env?: Record<string, string | undefined>;
 	/** Sample history; defaults to the process-wide ledger every evaluation feeds. */

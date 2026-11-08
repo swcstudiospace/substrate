@@ -22,7 +22,7 @@
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
  *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
  *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
- *   substrate steer sessions|status|queue|ack|list|listen|context   Live Steering from a terminal (docs/live-steering.md)
+ *   substrate steer open|heartbeat|close|sessions|status|queue|ack|list|listen|context   Live Steering from a terminal (docs/live-steering.md)
  *       (exit 0 done, 1 failed, 2 usage, 3 refused by the server: not an operator, rate limited, bad token)
  *   substrate corpus scan|plan|ingest|reflect|status|sync|watch|reconcile|hook|hint   the documentation corpus of every repository (docs/corpus.md, docs/corpus-watch.md, docs/corpus-reflect.md)
  *       (exit 0 done, 1 failed, 2 usage; ingest, reflect, sync and reconcile are dry runs until --execute; status --gaps lists unanswered queries)
@@ -38,9 +38,11 @@
  * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
  * does. With the flag off `emit` is the single POST it always was.
  *
- * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
+ * Exit status is always 0 for `brief` and `emit`, and for `handoff` when the server cannot be reached. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
- * or turn; the substrate is never allowed to do that. `verify`, `drift`,
+ * or turn; the substrate is never allowed to do that. `handoff` exits 1 when the server refuses
+ * the packet: a refused handoff is not recorded, and printing it as success would hide that.
+ * `verify`, `drift`,
  * `evidence` and the `lessons` writes do report failure, because nothing depends
  * on them succeeding and a silent empty answer would be worse than an error —
  * `drift` exits 1 when it found drift, so a hook or a cron can act on it, and an
@@ -68,6 +70,7 @@ import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
 import { runSteer } from "./steer/index.ts";
 import { CORPUS_TIMEOUT_MS, runCorpus } from "./corpus/index.ts";
+import { localGitPermitted } from "./corpus/scope.ts";
 import type { TranscriptPort } from "./session/rollback.ts";
 import { runConsistency } from "./consistency.ts";
 import { httpCapsuleMcp, nodeCapsuleFs, runMemory } from "./capsule.ts";
@@ -119,7 +122,12 @@ function timeout(): number {
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
 }
 
+/**
+ * Reads git in `cwd` only when the registry permits it (phase 72): an unset registry reads as before; a set one reads only a
+ * registered checkout the local surface is granted. An unregistered checkout yields "", as a checkout with no git would.
+ */
 function git(args: string[], cwd = process.cwd()): string {
+	if (!localGitPermitted(process.env, cwd)) return "";
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
 	return result.status === 0 ? result.stdout.trim() : "";
 }
@@ -144,6 +152,7 @@ async function post(path: string, body: unknown, surface = "claude-code", timeou
 			signal: AbortSignal.timeout(timeoutMs ?? timeout()),
 		});
 	} catch {
+		// No reply (unreachable or timed out) is null; each caller decides what that means.
 		return null;
 	}
 }
@@ -223,7 +232,12 @@ async function cmdEmit(args: Record<string, string | true>): Promise<void> {
 		});
 		return;
 	}
-	await post("/events", body, surface);
+	const response = await post("/events", body, surface);
+	if (response === null) {
+		// No answer and no spool to park the event. The server may still have stored it before the reply was lost,
+		// so name the kind as unconfirmed on stderr. The summary and payload are never printed; the exit status stays 0.
+		process.stderr.write(`[substrate] emit ${JSON.stringify(kind.slice(0, 64))} storage not confirmed: the server did not answer and the event spool is off\n`);
+	}
 }
 
 /** Write the brief to disk, then exec the agent. For surfaces with no hook API. */
@@ -257,7 +271,7 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 		reason?: string;
 		events?: number;
 		chain?: { ok: boolean; brokenAt?: string; reason?: string };
-		hours?: Array<{ period_start: string; status: string; tx_sig?: string; reason?: string }>;
+		hours?: Array<{ period_start: string; status: string; tx_sig?: string; reason?: string; pointer?: "verified" | "failed" | "absent" }>;
 		uncovered?: { count: number; ids: string[] };
 		missing?: { count: number; ids: string[] };
 	};
@@ -270,16 +284,18 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 		process.stderr.write(`chain BROKEN for ${graphId} at ${body.chain?.brokenAt ?? body.brokenAt}: ${body.chain?.reason ?? body.reason}\n`);
 	}
 	for (const hour of body.hours ?? []) {
+		// Each hour line names its pointer status, so an hour the chain names through no pointer is visible as such (design 5).
+		const pointer = hour.pointer === undefined ? "" : ` [pointer ${hour.pointer}]`;
 		if (hour.status === "anchored") {
-			process.stdout.write(`${hour.period_start} anchored ${hour.tx_sig ?? ""}\n`);
+			process.stdout.write(`${hour.period_start} anchored ${hour.tx_sig ?? ""}${pointer}\n`);
 		} else if (hour.status === "pending") {
-			process.stdout.write(`${hour.period_start} pending\n`);
+			process.stdout.write(`${hour.period_start} pending${pointer}\n`);
 		} else if (hour.status === "mismatch") {
-			process.stdout.write(`hour ${hour.period_start} does not match its anchor: ${hour.reason ?? "mismatch"}\n`);
+			process.stdout.write(`hour ${hour.period_start} does not match its anchor: ${hour.reason ?? "mismatch"}${pointer}\n`);
 		} else if (hour.status === "unverified") {
 			process.stderr.write(`[substrate] verify could not check devnet for ${hour.period_start}: ${hour.reason ?? "unreadable"}\n`);
 		} else {
-			process.stdout.write(`${hour.period_start} ${hour.status}${hour.reason ? `: ${hour.reason}` : ""}\n`);
+			process.stdout.write(`${hour.period_start} ${hour.status}${hour.reason ? `: ${hour.reason}` : ""}${pointer}\n`);
 		}
 	}
 	if ((body.uncovered?.count ?? 0) > 0) {
@@ -330,16 +346,17 @@ async function cmdDrift(args: Record<string, string | true>): Promise<number> {
 }
 
 /**
- * Record a signed handoff packet. Exits 0 whatever happens, like `emit`: a
- * handoff runs at the end of a turn, and failing the turn over it would lose
- * the very work the handoff is there to preserve.
+ * Record a signed handoff packet. Exits 1 when the server refuses it (a `to` outside the surface
+ * list, for one): the packet was not recorded, and reporting success would hide that. Exits 0 when
+ * the server cannot be reached, as `emit` does: a handoff runs at the end of a turn, and failing the
+ * turn over an unreachable server would lose the very work the handoff is there to preserve.
  */
-async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
+async function cmdHandoff(args: Record<string, string | true>): Promise<number> {
 	const to = str(args.to);
 	const goal = str(args.goal);
 	if (!to || !goal) {
 		process.stderr.write("[substrate] handoff needs --to and --goal\n");
-		return;
+		return 0;
 	}
 	const surface = str(args.surface) ?? "claude-code";
 	const response = await post(
@@ -365,7 +382,13 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 	);
 	if (!response) {
 		process.stderr.write("[substrate] unreachable; the handoff was not recorded\n");
-		return;
+		return 0;
+	}
+	if (!response.ok) {
+		const refusal = (await response.json().catch(() => undefined)) as { error?: unknown } | undefined;
+		const reason = typeof refusal?.error === "string" ? refusal.error : `HTTP ${response.status}`;
+		process.stderr.write(`[substrate] handoff refused: ${reason}\n`);
+		return 1;
 	}
 	const body = (await response.json()) as { packet?: { handoff_id?: string }; signed?: boolean; stored?: boolean; gaps?: string[] };
 	process.stdout.write(
@@ -374,6 +397,7 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 	);
 	// The gaps go to stderr: they are advice to the operator, not the packet.
 	for (const gap of body.gaps ?? []) process.stderr.write(`[substrate] ${gap}\n`);
+	return 0;
 }
 
 /**
@@ -659,8 +683,7 @@ switch (command) {
 		process.exit(await cmdDrift(args));
 		break;
 	case "handoff":
-		await cmdHandoff(args);
-		process.exit(0);
+		process.exit(await cmdHandoff(args));
 		break;
 	case "evidence":
 		process.exit(await cmdEvidence(args));
@@ -810,6 +833,7 @@ switch (command) {
 				env: process.env,
 				out: (text) => process.stdout.write(text),
 				err: (text) => process.stderr.write(text),
+				audit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.corpus", url: base() }),
 			}),
 		);
 		break;
@@ -833,7 +857,7 @@ switch (command) {
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
 				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
-				"substrate steer sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (substrate steer for the flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
+				"substrate steer open --repo R | heartbeat --session ID | close --session ID | sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (private commands use --binding-file PATH; substrate steer for all flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
 				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +

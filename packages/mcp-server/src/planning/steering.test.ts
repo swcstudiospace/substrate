@@ -7,6 +7,11 @@ import {
 	DEFAULT_STEERING_RATE_PER_MIN,
 	STEERING_AUDIT_ATTEMPTS,
 	STEERING_ENABLED_ENV,
+	DEFAULT_STEERING_IDEMPOTENCY_CAP,
+	DEFAULT_STEERING_IDEMPOTENCY_TTL_S,
+	loadSteeringIdempotencySettings,
+	STEERING_IDEMPOTENCY_CAP_ENV,
+	STEERING_IDEMPOTENCY_TTL_ENV,
 	STEERING_PRINCIPALS_ENV,
 	STEERING_RATE_PER_MIN_ENV,
 	SteeringInbox,
@@ -14,7 +19,10 @@ import {
 	type SteeringAuditEntry,
 	type SteeringClock,
 	type SteeringHistorySink,
+	MemorySteeringIdempotencyStore,
+	type SteeringIdempotencyStore,
 } from "./steering.ts";
+import { nextQueuedDirective } from "./steering-waiters.ts";
 
 const HUMAN = "ops.lead";
 const WORKER = "worker-a";
@@ -391,5 +399,241 @@ describe("SteeringInbox: a clock that moves backwards adds no tokens", () => {
 		expect((await inbox.enqueue(directive({ id: "d-2" }))).ok).toBe(true);
 		clock.advance(30_000);
 		expect(await inbox.enqueue(directive({ id: "d-3" }))).toMatchObject({ ok: false, error: { code: "rate-limited" } });
+	});
+});
+
+describe("SteeringInbox: a keyed queue replays once and carries a per-session sequence", () => {
+	const KEY = "retry-key-0001";
+	const TTL_MS = DEFAULT_STEERING_IDEMPOTENCY_TTL_S * 1_000;
+
+	test("a keyed replay returns the original record and writes nothing, even with no rate token left", async () => {
+		const { inbox, history } = build({ ratePerMin: 1 });
+		const first = await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		const appendsBefore = history.entries.length;
+		const replay = await inbox.enqueue(directive({ id: "d-2" }), KEY);
+		expect(replay).toEqual(first);
+		expect(history.entries.length).toBe(appendsBefore);
+		expect(inbox.get("d-2")).toBeNull();
+		expect(inbox.sequenceOf("d-1")).toBe(1);
+	});
+
+	test("the same key with different content is refused as a conflict and writes nothing", async () => {
+		const { inbox, history } = build();
+		await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		const appendsBefore = history.entries.length;
+		const other = await inbox.enqueue(directive({ id: "d-2", action: "annotate" }), KEY);
+		expect(other).toEqual({ ok: false, error: { code: "idempotency-conflict" } });
+		expect(history.entries.length).toBe(appendsBefore);
+		expect(inbox.get("d-2")).toBeNull();
+	});
+
+	test("a key from another author, or for another target session, does not replay", async () => {
+		const { inbox } = build({ allowlist: [HUMAN, "ops.two"] });
+		await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		const otherAuthor = await inbox.enqueue(directive({ id: "d-2", author: { principalId: "ops.two", kind: "human" } }), KEY);
+		const otherSession = await inbox.enqueue(directive({ id: "d-3", targetSessionId: "worker-b" }), KEY);
+		expect(otherAuthor.ok).toBe(true);
+		expect(otherSession.ok).toBe(true);
+		expect(inbox.get("d-2")?.state).toBe("queued");
+		expect(inbox.get("d-3")?.state).toBe("queued");
+	});
+
+	test("an unkeyed repeat is a second directive, as before", async () => {
+		const { inbox, history } = build();
+		await inbox.enqueue(directive({ id: "d-1" }));
+		const second = await inbox.enqueue(directive({ id: "d-2" }));
+		expect(second.ok).toBe(true);
+		expect(history.entries.map((entry) => entry.event)).toEqual(["queued", "queued"]);
+		expect(inbox.sequenceOf("d-2")).toBe(2);
+	});
+
+	test("distinct keyed commands take their sequence per target session, and queue order is sequence order", async () => {
+		const { inbox } = build();
+		await inbox.enqueue(directive({ id: "d-1", priority: "low", body: "Read the schema first." }), "key-first-0001");
+		await inbox.enqueue(directive({ id: "d-2", priority: "high", body: "Then the migration." }), "key-second-01");
+		await inbox.enqueue(directive({ id: "d-3", targetSessionId: "worker-b" }), "key-third-0001");
+		expect([inbox.sequenceOf("d-1"), inbox.sequenceOf("d-2"), inbox.sequenceOf("d-3")]).toEqual([1, 2, 1]);
+		expect(inbox.queuedFor(WORKER).map((entry) => entry.record.directive.id)).toEqual(["d-1", "d-2"]);
+	});
+
+	test("after the retention window the same key is a new command", async () => {
+		const { inbox, clock } = build();
+		await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		clock.advance(TTL_MS);
+		const later = await inbox.enqueue(directive({ id: "d-2" }), KEY);
+		expect(later.ok).toBe(true);
+		expect(inbox.get("d-2")?.state).toBe("queued");
+		expect(inbox.sequenceOf("d-2")).toBe(2);
+	});
+
+	test("a keyed queue that could not be audited is not remembered, so a retry applies", async () => {
+		const { inbox, history } = build();
+		history.failNext(STEERING_AUDIT_ATTEMPTS);
+		expect((await inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		expect((await inbox.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(inbox.get("d-2")?.state).toBe("queued");
+		expect(inbox.get("d-1")).toBeNull();
+	});
+
+	test("a key outside the grammar is refused, and only the field is named", async () => {
+		const { inbox, history } = build();
+		expect(await inbox.enqueue(directive(), "short")).toEqual({ ok: false, error: { code: "invalid-directive", issues: ["idempotency_key"] } });
+		expect(await inbox.enqueue(directive(), "has a space in it")).toEqual({ ok: false, error: { code: "invalid-directive", issues: ["idempotency_key"] } });
+		expect(history.entries).toEqual([]);
+	});
+
+	test("the replay store is bounded: at the configured cap the oldest key is forgotten and the newest still replays", async () => {
+		const clock = new ManualClock(1_000_000);
+		const history: RecordingHistory = new RecordingHistory(() => inbox);
+		const inbox: SteeringInbox = new SteeringInbox({ history, clock, policy: { allowlist: [HUMAN], ratePerMin: DEFAULT_STEERING_RATE_PER_MIN }, idempotency: { ttlMs: TTL_MS, cap: 3 } });
+		for (let index = 0; index < 4; index++) {
+			expect((await inbox.enqueue(directive({ id: `d-${index}`, targetSessionId: `sess-${index}` }), `cap-key-${index}`)).ok).toBe(true);
+		}
+		const newest = await inbox.enqueue(directive({ id: "late", targetSessionId: "sess-3" }), "cap-key-3");
+		expect(newest.ok ? newest.value.directive.id : null).toBe("d-3");
+		expect(inbox.get("late")).toBeNull();
+		const forgotten = await inbox.enqueue(directive({ id: "again", targetSessionId: "sess-0" }), "cap-key-0");
+		expect(forgotten.ok ? forgotten.value.directive.id : null).toBe("again");
+	});
+
+	test("the retention and the capacity must be positive whole numbers", () => {
+		const history: RecordingHistory = new RecordingHistory(() => inbox);
+		const clock = new ManualClock(1_000_000);
+		const policy = { allowlist: [HUMAN], ratePerMin: DEFAULT_STEERING_RATE_PER_MIN };
+		expect(() => new SteeringInbox({ history, clock, policy, idempotency: { ttlMs: 0, cap: 1 } })).toThrow(RangeError);
+		expect(() => new SteeringInbox({ history, clock, policy, idempotency: { ttlMs: TTL_MS, cap: 0 } })).toThrow(RangeError);
+		const inbox: SteeringInbox = new SteeringInbox({ history, clock, policy, idempotency: { ttlMs: TTL_MS, cap: 1 } });
+		expect(inbox).toBeInstanceOf(SteeringInbox);
+	});
+});
+
+describe("steering idempotency settings", () => {
+	test("both settings take their defaults when unset", () => {
+		expect(loadSteeringIdempotencySettings({})).toEqual({ ok: true, settings: { ttlMs: DEFAULT_STEERING_IDEMPOTENCY_TTL_S * 1_000, cap: DEFAULT_STEERING_IDEMPOTENCY_CAP } });
+	});
+
+	test("the retention is read in seconds and the capacity in records, both inclusive at their bounds", () => {
+		expect(loadSteeringIdempotencySettings({ [STEERING_IDEMPOTENCY_TTL_ENV]: "60", [STEERING_IDEMPOTENCY_CAP_ENV]: "1" })).toEqual({ ok: true, settings: { ttlMs: 60_000, cap: 1 } });
+		expect(loadSteeringIdempotencySettings({ [STEERING_IDEMPOTENCY_TTL_ENV]: "2592000", [STEERING_IDEMPOTENCY_CAP_ENV]: "1000000" })).toEqual({ ok: true, settings: { ttlMs: 2_592_000_000, cap: 1_000_000 } });
+	});
+
+	test("an out-of-range or malformed value is a typed error naming its key, never a fallback", () => {
+		const result = loadSteeringIdempotencySettings({ [STEERING_IDEMPOTENCY_TTL_ENV]: "59", [STEERING_IDEMPOTENCY_CAP_ENV]: "x" });
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.errors.map((error) => error.key).sort()).toEqual([STEERING_IDEMPOTENCY_CAP_ENV, STEERING_IDEMPOTENCY_TTL_ENV].sort());
+		expect(loadSteeringIdempotencySettings({ [STEERING_IDEMPOTENCY_CAP_ENV]: "0" }).ok).toBe(false);
+	});
+});
+
+describe("SteeringInbox: keyed queues under concurrency and store outages", () => {
+	const KEY = "retry-key-0001";
+
+	/** The memory store, with one call failing the way a lost connection would. */
+	class DownStore extends MemorySteeringIdempotencyStore {
+		constructor(private readonly down: "findReplay" | "nextSequence") {
+			super();
+		}
+		override async findReplay(scopeKey: string, nowMs: number) {
+			if (this.down === "findReplay") throw connectionLost();
+			return super.findReplay(scopeKey, nowMs);
+		}
+		override async nextSequence(sessionId: string) {
+			if (this.down === "nextSequence") throw connectionLost();
+			return super.nextSequence(sessionId);
+		}
+	}
+
+	function connectionLost(): Error {
+		return Object.assign(new Error("connection lost"), { code: "ECONNREFUSED" });
+	}
+
+	function buildOver(store: SteeringIdempotencyStore) {
+		const clock = new ManualClock(1_000_000);
+		const history = new RecordingHistory(() => inbox);
+		const inbox: SteeringInbox = new SteeringInbox({ history, clock, policy: { allowlist: [HUMAN], ratePerMin: DEFAULT_STEERING_RATE_PER_MIN }, store });
+		return { inbox, history };
+	}
+
+	test("a replay takes no sequence, so the next distinct command takes the number after the first", async () => {
+		const { inbox } = build();
+		await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		expect((await inbox.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect(inbox.get("d-2")).toBeNull();
+		expect((await inbox.enqueue(directive({ id: "d-3" }), "retry-key-0002")).ok).toBe(true);
+		expect(inbox.sequenceOf("d-3")).toBe(2);
+	});
+
+	test("a replay lookup that fails is audit-unavailable, and nothing is queued or audited", async () => {
+		const { inbox, history } = buildOver(new DownStore("findReplay"));
+		expect(await inbox.enqueue(directive({ id: "d-1" }), KEY)).toEqual({ ok: false, error: { code: "audit-unavailable", attempts: 1, lastErrorCode: "ECONNREFUSED" } });
+		expect(inbox.get("d-1")).toBeNull();
+		expect(history.entries).toEqual([]);
+	});
+
+	test("a sequence the store cannot take is audit-unavailable, and nothing is queued or audited", async () => {
+		const { inbox, history } = buildOver(new DownStore("nextSequence"));
+		expect(await inbox.enqueue(directive({ id: "d-1" }))).toEqual({ ok: false, error: { code: "audit-unavailable", attempts: 1, lastErrorCode: "ECONNREFUSED" } });
+		expect(inbox.get("d-1")).toBeNull();
+		expect(history.entries).toEqual([]);
+	});
+
+	test("eight concurrent distinct keyed queues take gapless sequences, and the wait cursor delivers them in that order", async () => {
+		const { inbox } = build();
+		const ids = Array.from({ length: 8 }, (_, index) => `c-${index + 1}`);
+		const results = await Promise.all(ids.map((id, index) => inbox.enqueue(directive({ id }), `concurrent-${String(index + 1).padStart(4, "0")}`)));
+		expect(results.every((result) => result.ok)).toBe(true);
+		expect(ids.map((id) => inbox.sequenceOf(id))).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+		const delivered: string[] = [];
+		for (let next = nextQueuedDirective(inbox, WORKER, null); next !== null; next = nextQueuedDirective(inbox, WORKER, next.record.directive.id)) {
+			delivered.push(next.record.directive.id);
+		}
+		expect(delivered).toEqual(ids);
+	});
+
+	test("applied and declined racing on one directive leave one terminal state and one acknowledgement", async () => {
+		const { inbox, history } = build();
+		await inbox.enqueue(directive({ id: "d-1" }));
+		const results = await Promise.all([
+			inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" }),
+			inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "declined" }),
+		]);
+		const won = results.filter((result) => result.ok);
+		expect(won).toHaveLength(1);
+		expect(results.filter((result) => !result.ok)).toEqual([{ ok: false, error: { code: "already-acknowledged" } }]);
+		expect(history.entries.filter((entry) => entry.event === "acknowledged")).toHaveLength(1);
+		const [only] = won;
+		const winnerOutcome = only?.ok && only.value.state === "acknowledged" ? only.value.outcome : null;
+		const after = inbox.get("d-1");
+		expect(after?.state).toBe("acknowledged");
+		expect(after?.state === "acknowledged" ? after.outcome : null).toBe(winnerOutcome);
+	});
+
+	test("a replayed keyed queue leaves the directive reachable through get and ack", async () => {
+		const store = new MemorySteeringIdempotencyStore();
+		const first = buildOver(store);
+		expect((await first.inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(true);
+
+		// A restarted process: the same store, and no in-memory record of d-1.
+		const second = buildOver(store);
+		const replay = await second.inbox.enqueueReceipt(directive({ id: "d-1" }), KEY);
+		expect(replay).toMatchObject({ ok: true, value: { replayed: true } });
+		expect(replay.ok ? replay.value.record.state : null).toBe("queued");
+		expect(second.inbox.sequenceOf("d-1")).toBe(first.inbox.sequenceOf("d-1"));
+
+		expect(second.inbox.get("d-1")?.state).toBe("queued");
+		const acked = await second.inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
+		expect(acked).toMatchObject({ ok: true });
+	});
+
+	test("a keyed replay after the target was acknowledged returns the original queued reply and keeps the acknowledged state", async () => {
+		const { inbox } = buildOver(new MemorySteeringIdempotencyStore());
+		const first = await inbox.enqueue(directive({ id: "d-1" }), KEY);
+		expect(first.ok).toBe(true);
+		const queuedAtMs = first.ok && first.value.state === "queued" ? first.value.queuedAtMs : null;
+		await inbox.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
+		const replay = await inbox.enqueueReceipt(directive({ id: "d-1" }), KEY);
+		expect(replay.ok ? replay.value.replayed : null).toBe(true);
+		expect(replay.ok && replay.value.record.state === "queued" ? replay.value.record.queuedAtMs : null).toBe(queuedAtMs);
+		expect(inbox.get("d-1")?.state).toBe("acknowledged");
 	});
 });

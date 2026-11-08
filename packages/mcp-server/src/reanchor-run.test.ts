@@ -64,6 +64,10 @@ function spies(): { cli: ReanchorCliDeps; opened: ReanchorOptions[]; runnerCalls
 			rpcCalls.push("addressMemos");
 			return [];
 		},
+		addressSignaturePage: async () => {
+			rpcCalls.push("addressSignaturePage");
+			return [];
+		},
 		getGenesisHash: async () => {
 			rpcCalls.push("getGenesisHash");
 			return GENESIS;
@@ -78,7 +82,7 @@ function spies(): { cli: ReanchorCliDeps; opened: ReanchorOptions[]; runnerCalls
 		return { code: 0, stdout: "", stderr: "" };
 	};
 	const ports: ReanchorDeps = {
-		ledger: { anchorForPeriod: async () => null },
+		ledger: { anchorForPeriod: async () => null, eventsByIds: async () => [] },
 		rpc,
 		runner,
 		substrate: {} as unknown as ReanchorDeps["substrate"],

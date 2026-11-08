@@ -5,17 +5,24 @@ the substrate only: no agent holds `LIGHTRAG_API_KEY`, `LIGHTRAG_URL`,
 `RAGFLOW_API_KEY` or `RAGFLOW_MCP_URL`, and nothing secret, unsourced,
 out-of-root or oversize reaches a dataset.
 
-The plane is chosen in `resolveDocsBackend` in `packages/mcp-server/src/config.ts`.
-`SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`, case-insensitive) wins.
-Otherwise a set `LIGHTRAG_URL` selects `lightrag`, and an unset one selects
-`ragflow`. LightRAG is the live production backend: it was cut over on
-2026-10-28 (Run 11) with `SUBSTRATE_DOCS_BACKEND=lightrag`, in naive query mode
-until the operator decides on a real LLM for graph and hybrid retrieval.
-RAGFlow is only the legacy fallback when `LIGHTRAG_URL` is unset (`resolveDocsBackend`).
-`lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional
-`LIGHTRAG_API_KEY`. The RAGFlow service was deleted on 2026-10-25; its code stays
-until the operator approves removal (phase 46), and it is not a runtime fallback
-for LightRAG (see "Failure and fallback" below).
+The plane is chosen in `resolveDocsBackend` in `packages/mcp-server/src/config.ts`. This is the rule, exactly:
+
+- An explicit `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`, case-insensitive) wins.
+- Otherwise `lightrag` whenever `LIGHTRAG_URL` is set to a non-blank value, and `ragflow` when it is unset or blank.
+- Any other `SUBSTRATE_DOCS_BACKEND` value stops the boot with a `ConfigError` that names the variable and the two allowed values. It never switches the plane quietly.
+
+LightRAG is the live production backend. It was cut over on 2026-10-28 (Run 11)
+with `SUBSTRATE_DOCS_BACKEND=lightrag`, in naive query mode until the operator
+decides on a real LLM for graph and hybrid retrieval. `lightragFromEnv` reads
+`LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. The RAGFlow service was
+deleted on 2026-10-25, and its code stays until the operator approves removal
+(phase 46). RAGFlow is not a runtime fallback for LightRAG (see "Failure and
+fallback" below).
+
+**Fail fast.** When the selected backend is `lightrag`, `loadConfig` refuses to
+start if `LIGHTRAG_URL` is missing, blank, or not an absolute `http` or `https`
+URL. The error names `LIGHTRAG_URL` and never prints its value, since a URL can
+carry credentials. `LIGHTRAG_API_KEY` is never echoed in any reach error.
 
 ## The two tools
 
@@ -129,36 +136,97 @@ retrieval and context augmentation". In brief:
   `hybrid` fails the smoke query check in that state. A leading `/mix` or
   `/hybrid` in the question selects that mode and is stripped from the query
   (`resolveQueryMode` in `planes/lightrag.ts`).
-- `context` is opt-in and off by default on every backend (`searchDocs` in
-  `service.ts`). With `context: true` a successful LightRAG answer
-  carries the Hindsight context block beside its citations.
+- `context` is opt-in and off by default on every backend. The gate is one
+  check, in `searchDocsUnmeasured` (`service.ts`): `context: true` in the call
+  attaches the Hindsight memories and the session's recent events, after the
+  cache, to a served or a degraded reply alike. A reply that carries `context`
+  is per call and is never stored. A caller that does not ask gets no `context`.
 
 ## Failure and fallback
 
-On the LightRAG plane a failed query is retried under the plane's retry
-policy. If it still fails, or the LightRAG breaker is open, the answer
-falls back to Hindsight recall (`lightragFallback` in `docs-search.ts`):
+### Served, degraded and unavailable
 
-- The reply is Hindsight-sourced: `backend: "hindsight"`,
-  `fallback: "hindsight"`, `degraded: true`, and `reason` names the LightRAG
-  failure. Its notice reads "Served from Hindsight fallback: <reason>."
-  (`hindsightFallbackReply` in `docs-search.ts`).
-- A warning event `docs search failed: <reason>` carries
-  `fallback: "hindsight"` (emitted by `lightragFallback`).
-- A degraded reply is never cached (`searchReplyStorable` in `docs-search.ts`).
-- If recall finds nothing, the plain degraded reply stands with the LightRAG
-  reason.
-- An unconfigured LightRAG plane (`lightrag-not-configured`) takes the same
-  path: Hindsight recall answers when it finds something, else the degraded
-  reply.
-- `docs_lightrag_query` and `POST /docs/lightrag/query` set `degraded: true`
-  and `reason` on a reply served from Hindsight, and `fallback: "hindsight"`
-  on every reply served after a failed, refused or unconfigured query. With no
-  Hindsight chunk, `reason` also records that recall was empty. Their replies
-  keep `backend: "lightrag"`, `graph` and the RAG machine `state`.
+Both LightRAG doors answer by one rule: `docs_search` on the LightRAG plane
+(`searchDocs` in `docs-search.ts`) and `docs_lightrag_query` with
+`POST /docs/lightrag/query` (`answerLightragQuery` in `mcp.ts`). Each reply is
+exactly one of three states:
 
-A failed LightRAG query does not retry against RAGFlow. RAGFlow serves only
-when it is the selected plane.
+- **served**: LightRAG answered with at least one chunk. `backend: "lightrag"`,
+  and no `degraded`, `fallback`, `reason` or `unavailable`.
+- **degraded**: LightRAG did not answer (retries spent, breaker open or
+  refused, plane unconfigured, or an empty answer), and Hindsight recall
+  answered with at least one hit. `backend: "lightrag"`,
+  `fallback: "hindsight"`, `degraded: true`, `reason` names the LightRAG
+  failure. Its notice reads "Served from Hindsight fallback."
+- **unavailable**: neither answered: recall returned no hit either. The reply
+  carries `backend: "lightrag"`, `fallback: "hindsight"`, `degraded: true`,
+  `unavailable: true` and `chunks: []`. Its `reason` names the LightRAG failure
+  and, after `; `, recall's own reason. This is the explicit "no answer". It is
+  never an empty success. Its notice carries the same fallback text as a
+  degraded reply.
+
+An empty LightRAG answer is a failed attempt, never a success, and it falls to
+the fallback rule. The plane client reports an empty payload as
+`lightrag: unexpected response shape`, which is retried like any other failure.
+An answer the search path sees with no chunks is reported as
+`lightrag: empty answer`, which is not retried. A degraded or unavailable reply
+is never cached or replayed (`searchReplyStorable` and `setCachedRagResult`).
+
+### Retry bounds
+
+Every LightRAG query (`lightrag-attempts.ts`) makes one attempt, then at most
+`SUBSTRATE_RAG_MAX_RETRIES` retries (default 2). Retry `n` waits
+`SUBSTRATE_RAG_RETRY_BASE_MS` * 2^(n-1) ms: at the default base of 200 ms, that
+is 200 ms, then 400 ms. The backoff has no jitter. Each attempt keeps its own
+timeout. Three outcomes are never retried: a refusal by an open breaker, an
+empty answer, and (on `docs_search`) a spent budget.
+
+Only `docs_search` on the LightRAG plane runs its attempts and waits under one
+total budget, `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` (default 4000 ms; 0 means no
+total cap). A wait the budget ends starts no further attempt.
+`docs_lightrag_query` and `POST /docs/lightrag/query` have no total budget: the
+budget never caps them, so each attempt runs to its own timeout and each backoff
+runs to its end.
+
+### Hindsight fallback
+
+The fallback is Hindsight recall (`lightragFallback` in `docs-search.ts`,
+`hindsightRagFallback` in `mcp.ts`). It applies after the retries, a breaker
+refusal, or an unconfigured plane:
+
+- A warning event is emitted on every fallback reply, degraded or unavailable.
+  Its kind is `warning`, its summary is `docs search failed: <reason>`, and its
+  payload is `{ action, reason }`, plus `fallback: "hindsight"` when recall
+  answered. `docs_lightrag_query` and `POST /docs/lightrag/query` emit
+  `action: "docs.lightrag_query"`; `docs_search` emits `action: "docs.search"`.
+  Their `session_id` differs: `docs_lightrag_query` has no session id of its
+  own, so each fallback event gets a fresh `docs-lightrag-query:<uuid>`, while
+  `docs_search` uses the session id its caller supplies, or a fresh
+  `docs-search:<uuid>` when none is given. The event's surface is the caller's,
+  or `claude-code` when the caller is unauthenticated. The event is written
+  before the reply. A failed write is reported silently and the reply is
+  unchanged.
+- The reason is redacted and capped at 200 characters (`datasetReason` in
+  `docs-search.ts`, which both paths use) before it is returned, kept in the RAG
+  machine, or put in the event. A Hindsight recall that throws is no hits: its
+  message follows the LightRAG failure after `hindsight threw:`.
+- A failed LightRAG query never retries against RAGFlow. RAGFlow serves only
+  when it is the selected plane.
+
+### Startup
+
+A `lightrag` backend without a usable `LIGHTRAG_URL` does not start (see the
+top of this document). So the "unconfigured" branch above is reachable only
+by a caller that builds the search directly, never by a running server.
+
+### Deploy precondition
+
+With `SUBSTRATE_DOCS_BACKEND=lightrag`, boot refuses unless `LIGHTRAG_URL` is set
+to an absolute `http` or `https` URL with a host (surrounding whitespace is
+trimmed). The check is `assertLightragReach` in `packages/mcp-server/src/config.ts`.
+It reads `LIGHTRAG_URL` only: `SUBSTRATE_LIGHTRAG_URL` does not satisfy it. The
+refusal never prints the value.
+
 
 ## The `corpus` dataset (phase 63)
 

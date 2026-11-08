@@ -70,7 +70,7 @@ export function consistencyRunnerArgs(argv: readonly string[]): string[] | null 
 	return out;
 }
 
-export interface ConsistencyDeps {
+interface ConsistencyDeps {
 	/** Run the runner with these arguments and return its exit status; any status outside 0..3 (a signal, a crash) is reported as 3. */
 	spawn: (runnerArgs: string[]) => number;
 	err: (text: string) => void;

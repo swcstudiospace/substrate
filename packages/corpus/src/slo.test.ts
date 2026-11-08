@@ -78,3 +78,28 @@ describe("goldenRecallOf", () => {
 		expect(goldenRecallOf({})).toBeNull();
 	});
 });
+
+describe("the sync lag objective", () => {
+	test("is not set unless its flag is a whole number of 1 or more, and a fraction is rounded down", () => {
+		expect("syncLagS" in loadSloThresholds({})).toBe(false);
+		expect(loadSloThresholds({ SUBSTRATE_DOCS_SLO_SYNC_LAG_S: " 3600 " }).syncLagS).toBe(3600);
+		expect(loadSloThresholds({ SUBSTRATE_DOCS_SLO_SYNC_LAG_S: "90.9" }).syncLagS).toBe(90);
+		for (const value of ["", " ", "0", "0.5", "-5", "soon", "NaN", "Infinity"]) {
+			expect("syncLagS" in loadSloThresholds({ SUBSTRATE_DOCS_SLO_SYNC_LAG_S: value })).toBe(false);
+		}
+	});
+
+	test("breaches only above the threshold: a reading on it holds, and an unset threshold or an unmeasured lag never breaches", () => {
+		const limits = { freshnessS: 100, recall5: 0.6, ingestDocsPerS: 0.2, syncLagS: 3600 };
+		const none = { freshnessS: null, recall5: null, ingestDocsPerS: null };
+		expect(sloBreaches({ ...none, syncLagS: 3601 }, limits)).toEqual(["sync"]);
+		expect(sloBreaches({ ...none, syncLagS: 3600 }, limits)).toEqual([]);
+		expect(sloBreaches({ ...none, syncLagS: 12 }, limits)).toEqual([]);
+		expect(sloBreaches({ ...none, syncLagS: null }, limits)).toEqual([]);
+		expect(sloBreaches({ ...none, syncLagS: 999_999 }, { freshnessS: 100, recall5: 0.6, ingestDocsPerS: 0.2 })).toEqual([]);
+	});
+
+	test("is the last objective named, after freshness, recall and ingest", () => {
+		expect(sloBreaches({ freshnessS: 500, recall5: 0.1, ingestDocsPerS: 0.01, syncLagS: 7200 }, { freshnessS: 100, recall5: 0.6, ingestDocsPerS: 0.2, syncLagS: 3600 })).toEqual(["freshness", "recall5", "ingest", "sync"]);
+	});
+});

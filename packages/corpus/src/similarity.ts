@@ -10,7 +10,7 @@
 export const NEAR_DUPLICATE_MAX_ITEMS = 5000;
 
 /** The default cap on pairs returned. */
-export const NEAR_DUPLICATE_DEFAULT_MAX_PAIRS = 1000;
+const NEAR_DUPLICATE_DEFAULT_MAX_PAIRS = 1000;
 
 export interface NearDuplicateItem {
 	key: string;
@@ -23,7 +23,7 @@ export interface NearDuplicatePair {
 	similarity: number;
 }
 
-export interface NearDuplicateOptions {
+interface NearDuplicateOptions {
 	/** Pairs with a similarity at or above this are returned. Must be a finite number. */
 	threshold: number;
 	/** Cap on the pairs returned, the most similar first. Default 1000. */
@@ -148,9 +148,9 @@ export function nearDuplicates(items: readonly NearDuplicateItem[], opts: NearDu
 }
 
 /** The multiply-adds {@link nearDuplicatesYielding} does between two yields unless told otherwise. */
-export const NEAR_DUPLICATE_YIELD_WORK = 2_000_000;
+const NEAR_DUPLICATE_YIELD_WORK = 2_000_000;
 
-export interface NearDuplicateYielding {
+interface NearDuplicateYielding {
 	/** Called between blocks of rows so other work can run; resolves when the comparison may continue. */
 	yieldFn: () => Promise<void>;
 	/** Multiply-adds between two yields (a row of `n - i - 1` pairs costs that many times the vector length). Default {@link NEAR_DUPLICATE_YIELD_WORK}. */

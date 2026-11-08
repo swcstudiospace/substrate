@@ -168,7 +168,7 @@ async function dropTargetPin(ctx: RepoContext, ref: string): Promise<void> {
 	}
 }
 
-export type RestoreParams = {
+type RestoreParams = {
 	worktree: string;
 	/** The snapshot to restore to. Its tree must be in the object database; its manifest must match. */
 	target: Snapshot;
@@ -272,7 +272,7 @@ export async function restore(params: RestoreParams): Promise<RestoreResult> {
 	}
 }
 
-export type RecoverParams = {
+type RecoverParams = {
 	worktree: string;
 	journalDir?: string;
 	now?: Clock;

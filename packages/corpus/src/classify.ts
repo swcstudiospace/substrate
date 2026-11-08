@@ -6,12 +6,12 @@
  */
 import { DIGEST_PATH, type DocKind, type DocTier } from "./protocol.ts";
 
-export interface Classification {
+interface Classification {
 	kind: DocKind;
 	tier: DocTier;
 }
 
-export interface ClassifyContext {
+interface ClassifyContext {
 	/**
 	 * Whether the path sits at the root of its repository. Defaults to "the path has one segment"; a caller that
 	 * classifies a path relative to a directory other than the repository root says so here.
@@ -20,10 +20,10 @@ export interface ClassifyContext {
 }
 
 /** The extensions that make a file a documentation candidate, lowercase. */
-export const DOC_EXTENSIONS = [".md", ".mdx", ".rst", ".adoc"] as const;
+const DOC_EXTENSIONS = [".md", ".mdx", ".rst", ".adoc"] as const;
 
 /** Directory names that never hold documentation worth keeping: dependencies, build output and caches. */
-export const EXCLUDED_SEGMENTS: ReadonlySet<string> = new Set([
+const EXCLUDED_SEGMENTS: ReadonlySet<string> = new Set([
 	"node_modules",
 	".git",
 	"dist",

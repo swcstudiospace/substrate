@@ -8,8 +8,9 @@
  * injected. What is asserted is what a reader of the bundle sees.
  */
 import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
-import { formatMemo, hourEnd, merkleRootHex } from "@substrate/ledger";
-import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { formatMemo, formatMemoV2, formatMemoV3, graphHeadsRoot, headsRoot, hourEnd, merkleRootHex } from "@substrate/ledger";
+import { buildGraphHeads, DEVNET_GENESIS_HASH } from "./anchor.ts";
+import type { StoredLeaf } from "./event.ts";
 import { loadConfig } from "./config.ts";
 import { buildGraphEvidence, createObservability } from "./observe.ts";
 import { FakeStore } from "./memory-write.test.ts";
@@ -24,6 +25,8 @@ const GRAPH = "ut-teach-41";
 const SESSION = "sess-p41-anchor";
 const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
 const SIG = "sig-scratch-41";
+/** The v2 hour's transaction: base58, as a real signature is, since its graph pointer names it (design 3.2). */
+const V2_HOUR_SIG = "5".repeat(64);
 const EXPLORER = `https://explorer.solana.com/tx/${SIG}?cluster=devnet`;
 const hourIso = (ms: number) => new Date(ms).toISOString();
 
@@ -69,6 +72,7 @@ interface ScratchLedger {
 		readEvents: (column: string, value: string) => Promise<Array<Record<string, unknown>>>;
 		graphIngest: (graphId: string) => Promise<IngestRecord[]>;
 		firstIngestMs: () => Promise<number>;
+		graphChainLeafHours: (graphId: string) => Promise<number[]>;
 		hourLeaves: (hour: number) => Promise<Array<{ event_id: string; hash: string }>>;
 		anchorForPeriod: (hour: number) => Promise<Record<string, unknown> | null>;
 	};
@@ -79,6 +83,10 @@ interface ScratchLedger {
 	memoOf: (signature: string) => string | null;
 	/** Freeze the anchor row for `hour` the way the hourly job would have written it. Hour H by default. */
 	anchorHour: (hour?: number) => void;
+	/** Freeze the anchor row for `hour` as a v2 memo over the per-(graph, session) heads. Hour H by default. */
+	anchorHourV2: (hour?: number) => void;
+	/** The v3 pointers this ledger wrote for its v2 hours, as the index listing carries them. */
+	pointerEntries: () => Array<{ signature: string; memo: string }>;
 	/** Ingest every event from here on into this hour. */
 	ingestHour: (hour: number) => void;
 }
@@ -92,6 +100,8 @@ function scratchLedger(): ScratchLedger {
 	const tips = new Map<string, string>();
 	const records: IngestRecord[] = [];
 	const anchored = new Map<number, Record<string, unknown>>();
+	const storedLeaves = new Map<number, StoredLeaf[]>();
+	const pointers = new Map<string, string>();
 	let clock = 0;
 	let hourBase = H;
 
@@ -120,6 +130,8 @@ function scratchLedger(): ScratchLedger {
 			return records.filter((record) => ids.has(record.event_id));
 		},
 		firstIngestMs: async () => H,
+		graphChainLeafHours: async () => [],
+		hourChainLeaves: async (hour: number) => storedLeaves.get(hour) ?? [],
 		hourLeaves: async (hour: number) => leaves(hour),
 		anchorForPeriod: async (hour: number) => anchored.get(hour) ?? null,
 	};
@@ -135,8 +147,9 @@ function scratchLedger(): ScratchLedger {
 			for (const row of anchored.values()) {
 				if (row.tx_sig === signature) return String(row.memo);
 			}
-			return null;
+			return pointers.get(signature) ?? null;
 		},
+		pointerEntries: () => [...pointers].map(([signature, memo]) => ({ signature, memo })),
 		anchorHour: (hour = H) => {
 			const batch = leaves(hour);
 			const root = merkleRootHex(batch.map((leaf) => leaf.hash));
@@ -154,15 +167,47 @@ function scratchLedger(): ScratchLedger {
 				anchored_at: hourIso(NOW),
 			});
 		},
+		anchorHourV2: (hour = H) => {
+			const batch = leaves(hour);
+			const members = batch.map((leaf) => {
+				const row = rows.get(leaf.event_id);
+				if (!row) throw new Error(`hour member ${leaf.event_id} has no row`);
+				return { id: row.id, hash: row.hash, prev: row.prev, graph_id: row.graph_id ?? "", session_id: row.session_id ?? "" };
+			});
+			const built = buildGraphHeads(members, hour);
+			const root = merkleRootHex(batch.map((leaf) => leaf.hash));
+			anchored.set(hour, {
+				period_start: hourIso(hour),
+				period_end: hourIso(hourEnd(hour)),
+				root,
+				event_count: batch.length,
+				memo: formatMemoV2({ periodStartMs: hour, rootHex: root, count: batch.length, headsRootHex: headsRoot(built.records) }),
+				tx_sig: V2_HOUR_SIG,
+				signer: PUBKEY,
+				cluster: "devnet",
+				slot: 42,
+				anchored_at: hourIso(NOW),
+			});
+			storedLeaves.set(hour, built.leaves);
+			for (const graphId of new Set(members.map((member) => member.graph_id))) {
+				const count = members.filter((member) => member.graph_id === graphId).length;
+				pointers.set(`pointer-${hour}-${graphId}`, formatMemoV3({ graphId, periodStartMs: hour, count, graphHeadsRootHex: graphHeadsRoot(built.records, graphId), hourTxSig: V2_HOUR_SIG }));
+			}
+		},
 		ingestHour: (hour: number) => {
 			hourBase = hour;
 		},
 	};
 }
 
-/** A fake devnet read-back: a genesis hash, and whatever `transactionMemo` answers for a signature. */
-function fakeRpc(transactionMemo: (signature: string) => Promise<unknown>) {
-	return { getGenesisHash: async () => DEVNET_GENESIS_HASH, transactionMemo };
+/** A fake devnet read-back: a genesis hash, whatever `transactionMemo` answers for a signature, and the pointers listed at the index addresses. */
+function fakeRpc(transactionMemo: (signature: string) => Promise<unknown>, pointers: Array<{ signature: string; memo: string }> = []) {
+	return {
+		getGenesisHash: async () => DEVNET_GENESIS_HASH,
+		transactionMemo,
+		addressSignaturePage: async (_address: string, options: { before?: string }) =>
+			options.before === undefined ? pointers.map((pointer) => ({ signature: pointer.signature, memo: pointer.memo, err: null, slot: 42 })) : [],
+	};
 }
 
 /**
@@ -204,7 +249,7 @@ async function scratchWorld(verifyTimeoutMs?: number) {
 	const base = loadConfig({});
 	const substrate = new Substrate(
 		{ ...base, solana: { ...base.solana, pubkey: PUBKEY }, verifyTimeoutMs: verifyTimeoutMs ?? base.verifyTimeoutMs },
-		{ index: new ScratchIndex() as never, greptime: ledger.greptime as never },
+		{ index: new ScratchIndex() as never, greptime: ledger.greptime as never, steering: { history: null, liveSessions: null } },
 	);
 	const observed = createObservability(base);
 	await observed.start();
@@ -347,6 +392,43 @@ describe("evidence bundle anchors", () => {
 		expect(bundle.anchors[HOURS - 1]?.status).toBe("unverified");
 		expect(bundle.anchors[HOURS - 1]?.reason).toBeTruthy();
 		expect(bundle.teachables.find((teachable) => teachable.hour === hourIso(hourAt(HOURS - 1)))?.anchored).toBe(false);
+	});
+
+	test("an anchored v2 hour whose event was edited after anchoring is unverified, and the evidence says the head failed", async () => {
+		const { ledger, substrate, observed } = await scratchWorld();
+		await writeTeachable(substrate);
+		ledger.anchorHourV2();
+		const altered = [...ledger.rows.values()].find((row) => row.payload.action === "teachable");
+		if (!altered) throw new Error("the teachable should be written");
+		// The hour is anchored over stored hashes; this changes the content and leaves the stored hash alone.
+		ledger.rows.set(altered.id, { ...altered, payload: { ...altered.payload, content_sha256: "e".repeat(64) } });
+
+		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
+			rpc: fakeRpc(async (signature) => signedMemo(ledger.memoOf(signature)), ledger.pointerEntries()) as never,
+			now: NOW,
+		});
+
+		expect(bundle.anchors[0]).toMatchObject({ status: "unverified", head_failed: true });
+		expect(bundle.anchors[0]?.reason).toContain("differs at");
+	});
+
+	test("an hour list that cannot be read leaves the app chain unverifiable, though every listed hour is anchored", async () => {
+		const { ledger, substrate, observed } = await scratchWorld();
+		await writeAnchoredTeachables(ledger, substrate);
+		// The chain-leaves store cannot name this graph's hours, so the verdict is untrusted and the bundle must not attest to the chain.
+		ledger.greptime.graphChainLeafHours = async () => {
+			throw new Error("graph_chain_leaves unreadable");
+		};
+
+		startVirtualClock();
+		const bundle = await buildGraphEvidence(observed, substrate, GRAPH, [], undefined, {
+			rpc: timedRpc(ledger) as never,
+			now: NOW_LATE,
+		});
+
+		expect(bundle.anchors.every((anchor) => anchor.status === "anchored")).toBe(true);
+		expect(bundle.chains.app_events).toMatchObject({ state: "unverifiable", ok: null });
+		expect(bundle.chains.app_events.reason).toContain("store-failed");
 	});
 });
 

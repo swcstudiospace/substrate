@@ -112,6 +112,15 @@ describe("rejected directives and class rules", () => {
 		}
 	});
 
+	test("the three corpus units ship ProtectHome=read-only in the base unit file, not only in their class A drop-ins", () => {
+		for (const service of ["substrate-corpus-sync.service", "substrate-corpus-watch.service", "substrate-corpus-reconcile.service"]) {
+			const home = sectionDirectives(readUnit(service).base, "Service")
+				.filter(([key]) => key === "ProtectHome")
+				.map(([, value]) => value);
+			expect({ service, home }).toEqual({ service, home: ["read-only"] });
+		}
+	});
+
 	test("the four units that write inside operator git repos are Class B; the stateless ones are Class A", () => {
 		const classOf = (service: string): SandboxSpec["class"] => staged[services.indexOf(service)]?.spec.class ?? null;
 		for (const service of ["substrate-collector-muse.service", "substrate-dispatcher.service", "substrate-collector-herdr.service", "substrate-host.service"]) {

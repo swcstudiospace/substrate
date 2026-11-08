@@ -19,12 +19,12 @@ import type { PrState } from "./pr.ts";
 /** The route accepts at most this many worktrees per report. */
 export const MAX_REPORT_WORKTREES = WORKTREE_REPORT_MAX_ITEMS;
 /** Headroom under the route's byte limit, so a body the server measures a little differently still fits. */
-export const REPORT_BYTE_MARGIN = 16 * 1024;
+const REPORT_BYTE_MARGIN = 16 * 1024;
 /** The most UTF-8 bytes of JSON one report body may take: the route's limit minus the margin. */
 export const MAX_REPORT_BYTES = WORKTREE_REPORT_MAX_BYTES - REPORT_BYTE_MARGIN;
-export const REPORT_PROTOCOL = 1;
+const REPORT_PROTOCOL = 1;
 
-export interface ReportWorktree {
+interface ReportWorktree {
 	path: string;
 	repo: string;
 	branch: string | null;
@@ -52,7 +52,7 @@ export interface WorktreeReport {
 	worktrees: ReportWorktree[];
 }
 
-export interface ReportOptions {
+interface ReportOptions {
 	now?: Date;
 	/** Roots used for graph attribution; defaults to the collectors' configured roots. */
 	roots?: readonly string[];
@@ -93,12 +93,12 @@ export function buildReport(host: string, inventory: readonly WorktreeInfo[], op
 	};
 }
 
-export interface SkippedWorktree {
+interface SkippedWorktree {
 	path: string;
 	reason: string;
 }
 
-export interface ReportPlan {
+interface ReportPlan {
 	/** Bodies the route accepts, in the order of the inventory. Never empty: an empty inventory is one empty report. */
 	reports: WorktreeReport[];
 	/** Worktrees that cannot be sent, each with why; the rest are unaffected. */

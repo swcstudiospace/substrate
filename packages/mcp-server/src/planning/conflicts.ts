@@ -27,10 +27,10 @@ export type { UnknownViewReason } from "./presence.ts";
 export const PLANNING_CONFLICT = "planning.conflict";
 
 /** The event's kind in the frozen `EVENT_KINDS` vocabulary (phase 17). A conflict is a warning on the `substrate` surface. */
-export const PLANNING_CONFLICT_EVENT_KIND = "warning";
+const PLANNING_CONFLICT_EVENT_KIND = "warning";
 
 /** Each id list in a conflict payload holds at most this many ids. The payload stays inside the ledger's payload limit. */
-export const MAX_CONFLICT_LIST = 32;
+const MAX_CONFLICT_LIST = 32;
 
 export type SessionView =
 	| { sessionId: string; status: "known"; scannedAtMs: number; repo: string | null; touched: TouchedPair[] }
@@ -38,7 +38,7 @@ export type SessionView =
 
 type KnownView = Extract<SessionView, { status: "known" }>;
 
-export type ConflictKey = { by: "phase"; phase: string } | { by: "plan"; plan: string };
+type ConflictKey = { by: "phase"; phase: string } | { by: "plan"; plan: string };
 
 export interface PlanningConflict {
 	kind: typeof PLANNING_CONFLICT;
@@ -66,14 +66,14 @@ export interface ConflictInput {
 	ttlMs: number;
 }
 
-export interface ConflictReport {
+interface ConflictReport {
 	/** One view per active session, sorted by session id. */
 	views: SessionView[];
 	/** Per repository, phase conflicts first (sorted by phase), then plan conflicts (sorted by plan id). Empty when nothing conflicts. */
 	conflicts: PlanningConflict[];
 }
 
-export type ConflictWriteGate =
+type ConflictWriteGate =
 	| { ok: true }
 	| { ok: false; code: "planning-view-unknown"; reason: UnknownViewReason | "no-active-session" };
 

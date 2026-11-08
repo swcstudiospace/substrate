@@ -1783,6 +1783,35 @@ describe("the text cap", () => {
 	});
 });
 
+describe("repo cap on the write path", () => {
+	// A repo over 512 code units is refused, not cut, on the row and on a `repo:` scope. The refusal comes before RBAC and before any hash.
+	test("refuses a row repo of 513 code units with repo_too_long, and stores nothing", async () => {
+		const repo = `swcstudiospace/${"r".repeat(513 - "swcstudiospace/".length)}`;
+		expect(repo.length).toBe(513);
+		const result = await write({ repo });
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("repo_too_long");
+		expect(result.remedy).toContain("got 513");
+		expect(store.entries()).toEqual([]);
+	});
+
+	test("refuses a repo: scope whose id is 513 code units with repo_too_long, and stores nothing", async () => {
+		const result = await write({ scope: `repo:${"r".repeat(513)}` });
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("repo_too_long");
+		expect(result.remedy).toContain("got 513");
+		expect(store.entries()).toEqual([]);
+	});
+
+	test("accepts a row repo of exactly 512 code units, stored unchanged", async () => {
+		const repo = `swcstudiospace/${"r".repeat(512 - "swcstudiospace/".length)}`;
+		expect(repo.length).toBe(512);
+		const result = await write({ repo });
+		expect(result.outcome).toBe("accepted");
+		expect(store.entries()[0]?.repo).toBe(repo);
+	});
+});
+
 describe("provenance", () => {
 	test("the entry carries where it came from", async () => {
 		const result = await write({

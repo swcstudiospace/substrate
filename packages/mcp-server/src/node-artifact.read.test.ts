@@ -31,7 +31,7 @@ function row(id: number, nodeId: string | null, payload: Record<string, unknown>
 }
 
 function substrateWith(greptime: unknown): Substrate {
-	return new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, mirror: null as never });
+	return new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, mirror: null as never, steering: { history: null, liveSessions: null } });
 }
 
 const at = (id: number) => new Date(1_700_000_000_000 + id).toISOString();

@@ -71,8 +71,8 @@ export class CorpusStub {
 		return this.seen.filter((seen) => seen.path === path);
 	}
 
-	stop(): void {
-		this.server.stop(true);
+	async stop(): Promise<void> {
+		await this.server.stop(true);
 	}
 }
 

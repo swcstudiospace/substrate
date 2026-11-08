@@ -90,6 +90,12 @@ function portsOf(ledger: AnchorLedger | null, decode: AnchorVerifyPorts["rowToEv
 		solana: { pubkey: null, problem: null },
 		operatorSurfaces: new Set<string>(),
 		nowMs: () => START + 10 * 3_600_000,
+		listGraphPointers: () => {
+			throw new Error("the lookup never reads a graph's pointers");
+		},
+		confirmPointer: () => {
+			throw new Error("the lookup never confirms a pointer");
+		},
 	};
 }
 

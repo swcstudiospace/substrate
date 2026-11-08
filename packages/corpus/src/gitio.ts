@@ -8,7 +8,7 @@
  */
 import { spawnSync } from "node:child_process";
 
-export interface GitCall {
+interface GitCall {
 	args: string[];
 	cwd: string;
 	/** Standard input; absent means none. */
@@ -30,7 +30,7 @@ export type GitBytesRunner = (call: GitCall) => GitOutput;
 /** A ceiling that only guards against a runaway process; callers bound what they ask for. */
 const GIT_MAX_BUFFER = 512 * 1024 * 1024;
 
-export const TIMED_OUT_CODE = 124;
+const TIMED_OUT_CODE = 124;
 
 export const defaultGitBytesRunner: GitBytesRunner = (call) => {
 	const result = spawnSync("git", call.args, {

@@ -1,10 +1,11 @@
 /**
- * The corpus atlas's three readings (v1.7 phase 70), kept in the one place the gauges and the `fabric_status` row both read:
- * the age of the newest manifest change, the documents per second of the last ingest request, and the golden-set recall at 5 the
- * docs canary last reported. Nothing here is persisted: a restart starts with no reading, and a missing reading is never a
- * breach (see `sloBreaches` in `@substrate/corpus`).
+ * The corpus atlas's readings (v1.7 phase 70), kept in the one place the gauges and the `fabric_status` row both read: the age of
+ * the newest manifest change, the documents per second of the last ingest request, the golden-set recall at 5 the docs canary last
+ * reported, and the lag the newest `docs.sync` note reported. Nothing here is persisted: a restart starts with no reading, and a
+ * missing reading is never a breach (see `sloBreaches` in `@substrate/corpus`).
  */
 import { goldenRecallOf, ingestDocsPerSecond, type SloReadings } from "@substrate/corpus";
+import { syncLagSeconds } from "./sync-event.ts";
 
 /** The action the docs canary reports under, and the one surface its token authenticates as. `reserved-actions.ts` keeps every other caller from writing it. */
 export const DOCS_CANARY_ACTION = "docs.canary";
@@ -14,7 +15,7 @@ export const DOCS_CANARY_SURFACE = "substrate";
 export type CorpusRefresh = "ok" | "timeout" | "failed";
 
 /** Where a reading is announced, so the registry's gauges follow it. Both are optional: a server without observability has none. */
-export interface CorpusSloSinks {
+interface CorpusSloSinks {
 	ingestRate?: ((docsPerSecond: number) => void) | undefined;
 	goldenRecall?: ((recall5: number) => void) | undefined;
 }
@@ -24,6 +25,8 @@ export class CorpusSloState {
 	/** The reading the SLO judges: null until a request sent documents, and null again after a request that sent none. */
 	private ingestReading: number | null = null;
 	private golden: number | null = null;
+	/** The lag the newest `docs.sync` note reported, seconds; `null` until one is stored. */
+	private syncLag: number | null = null;
 
 	constructor(private readonly sinks: CorpusSloSinks = {}) {}
 
@@ -62,12 +65,23 @@ export class CorpusSloState {
 		this.sinks.goldenRecall?.(recall);
 	}
 
-	/** The three readings at `nowMs`. */
+	/**
+	 * A `docs.sync` note the server took (stored, held for a later write, or dead-lettered): its `lag_s` is read by
+	 * `syncLagSeconds`, and a note without a usable lag leaves the last one in place. Returns the lag it recorded, or null.
+	 */
+	recordSyncLag(payload: Record<string, unknown>): number | null {
+		const lag = syncLagSeconds(payload);
+		if (lag !== null) this.syncLag = lag;
+		return lag;
+	}
+
+	/** The readings at `nowMs`. */
 	readings(nowMs: number): SloReadings {
 		return {
 			freshnessS: this.newestChangeAtMs === null ? null : Math.max(0, (nowMs - this.newestChangeAtMs) / 1000),
 			recall5: this.golden,
 			ingestDocsPerS: this.ingestReading,
+			syncLagS: this.syncLag,
 		};
 	}
 }

@@ -7,9 +7,13 @@ import {
 	merkleRoot,
 	merkleRootHex,
 	parseSignerSet,
+	type Rpc,
+	type TransactionMemo,
 	verifyMerkleProofHex,
 	YOUNG_ANCHOR_GRACE_MS,
 } from "@substrate/ledger";
+import { type AnchorLedger, type AnchorVerifyPorts, verifyCheckpointRef } from "./anchor-verify-deps.ts";
+import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import {
 	type AnchorTransactionRead,
 	CHECKPOINT_VERIFY_STATUSES,
@@ -20,10 +24,10 @@ import {
 	verifyCheckpoint,
 	verifyEventAnchor,
 } from "./checkpoint-verify.ts";
-import { eventHash } from "./event.ts";
-import { INGEST_LAG_MS, type AnchorRow } from "./greptime.ts";
+import { eventHash, normalizeEvent } from "./event.ts";
+import { type AnchorRow, type EventQuery, type HourLeaf, INGEST_LAG_MS } from "./greptime.ts";
 import { buildCheckpointEvent } from "./session-events.ts";
-import { VERIFY_PENDING_MS } from "./service.ts";
+import { rowToEvent, VERIFY_PENDING_MS } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
 
 /**
@@ -645,5 +649,83 @@ describe("verifyEventAnchor: any ledger event, not only a checkpoint", () => {
 		const missing = depsFor(s, { findEvent: async () => null }).deps;
 		expect(await code(verifyEventAnchor(missing, note.id))).toBe("not-found");
 		expect(await code(verifyEventAnchor(depsFor(s, { nowMs: Number.NaN }).deps, note.id))).toBe("invalid-config");
+	});
+});
+
+describe("checkpoint verify finds a session id in the form the write path stores it", () => {
+	/** 513 code units: the 512-unit cap leaves a lone high surrogate at the end, which the stored form drops. */
+	const rawSession = `${"sess-".padEnd(511, "s")}\u{1F600}`;
+	const INGESTED = H + 30 * 60_000;
+
+	/** The ledger reads checkpoint verify makes, over rows in the stored shape (`ts` in ms, `payload` as JSON). */
+	class StoredLedger {
+		rows: Array<Record<string, unknown>> = [];
+		leaves: HourLeaf[] = [];
+		row: AnchorRow | null = null;
+		async cursorPosition(id: string): Promise<{ id: string; ingestedAt: number }> {
+			return { id, ingestedAt: INGESTED };
+		}
+		async queryEvents(query: EventQuery = {}): Promise<Array<Record<string, unknown>>> {
+			const match = (query.match ?? {}) as Record<string, unknown>;
+			return this.rows.filter((row) => Object.entries(match).every(([column, value]) => value === undefined || row[column] === value)).slice(0, query.limit ?? 50);
+		}
+		async hourLeaves(): Promise<HourLeaf[]> {
+			return this.leaves;
+		}
+		async anchorForPeriod(ms: number): Promise<AnchorRow | null> {
+			return ms === H ? this.row : null;
+		}
+	}
+
+	test("a checkpoint written under a straddling session id is found by that id and verifies as anchored", async () => {
+		const draft = buildCheckpointEvent(rawSession, { ckpt_id: CKPT, seq: 1, trigger: "turn", git_tree: HEX_40, manifest_sha256: HEX_64, file_count: 3, skipped_count: 0 });
+		// The write path: the stored event carries the normalised session id, not the raw one.
+		const stored = normalizeEvent({ surface: "claude-code", kind: draft.kind, summary: draft.summary, payload: { ...draft.payload }, session_id: rawSession, ts: new Date(INGESTED).toISOString() }, null);
+		expect(stored.session_id).not.toBe(rawSession);
+
+		const size = 3;
+		const index = 1;
+		const ledger = new StoredLedger();
+		ledger.rows = [{ ...stored, ts: Date.parse(stored.ts), payload: JSON.stringify(stored.payload) }];
+		ledger.leaves = Array.from({ length: size }, (_, i) =>
+			i === index ? { event_id: stored.id, ingested_at: INGESTED, hash: stored.hash } : { event_id: `evt_p59bother${i}`, ingested_at: INGESTED, hash: leafHash(i) },
+		);
+		const root = merkleRootHex(ledger.leaves.map((leaf) => leaf.hash));
+		const memo = formatMemo({ periodStartMs: H, rootHex: root, count: size });
+		ledger.row = {
+			period_start: new Date(H).toISOString(),
+			period_end: new Date(H + HOUR_MS).toISOString(),
+			root,
+			event_count: size,
+			memo,
+			tx_sig: SIGNATURE,
+			signer: SIGNER_A,
+			cluster: "devnet",
+			slot: 4242,
+			anchored_at: new Date(ANCHORED_AT).toISOString(),
+			stale_hashes: null,
+		};
+		const transaction = { memo, payer: SIGNER_A, payerSigned: true, err: null, fee: 5000, slot: 4242, blockTime: BLOCK_TIME / 1000 };
+		const rpc = {
+			async transactionMemo(signature: string, commitment: string): Promise<TransactionMemo | null> {
+				return signature === SIGNATURE && commitment === "finalized" ? transaction : null;
+			},
+			async getGenesisHash(): Promise<string> {
+				return DEVNET_GENESIS_HASH;
+			},
+		} as unknown as Rpc;
+		const ports: AnchorVerifyPorts = {
+			ledger: ledger as unknown as AnchorLedger,
+			rowToEvent,
+			rpc: () => rpc,
+			solana: { pubkey: SIGNER_A, problem: null },
+			operatorSurfaces: new Set(),
+			nowMs: () => NOW,
+			listGraphPointers: async () => ({ entries: [], complete: true }),
+			confirmPointer: async () => null,
+		};
+
+		const result = await verifyCheckpointRef(ports, CKPT, { sessionId: rawSession });
+		expect(result).toMatchObject({ status: "anchored", reasons: [], checkpoint: { event_id: stored.id, session_id: stored.session_id } });
 	});
 });

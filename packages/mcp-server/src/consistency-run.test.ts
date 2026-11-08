@@ -100,7 +100,7 @@ function fake(entries: MemoryEntry[], docs: Array<[string, string | null]>, setu
 			ledger: {
 				memoryWrites: async () => {
 					if (setup.ledger === "down") throw new Error("greptime 503");
-					return { events, next: null };
+					return { events, next: null, skipped: 0 };
 				},
 			},
 			outbox: { parkedEntryIds: async () => new Set<string>() },
@@ -727,6 +727,35 @@ describe("ledgerWriteReader", () => {
 	test("a malformed cursor is refused", async () => {
 		const reader = ledgerWriteReader({ queryEvents: async () => [] });
 		await expect(reader.memoryWrites({ since: "a", until: "b", limit: 5, cursor: "9|nope" })).rejects.toThrow("bad cursor");
+	});
+
+	test("an unparseable ledger payload is counted as skipped, and no event is invented for it", async () => {
+		const reader = ledgerWriteReader({ queryEvents: async () => [row("ok", NOW - 5000), row("bad", NOW - 4000, { payload: "{not json" })] });
+		const page = await reader.memoryWrites({ since: minutesAgo(10), until: minutesAgo(0), limit: 500, cursor: null });
+		expect(page.skipped).toBe(1);
+		expect(page.events.map((e) => e.id)).toEqual(["ok"]);
+
+		// Through the verifier: the report counts the skip, and an invented event would surface as drift.
+		const f = consistent();
+		const rows: Array<Record<string, unknown>> = f.entries.map((e) => ({
+			id: `ev-${e.id}`,
+			ts: Date.parse(e.created) + 2000,
+			surface: e.writer,
+			summary: "memory.write accepted: fact at repo:acme/app",
+			payload: JSON.stringify({ outcome: "accepted", scope: e.scope, kind: e.kind }),
+		}));
+		rows.push(row("bad", NOW - 60_000, { payload: "{not json" }));
+		f.ctx.readers.ledger = ledgerWriteReader({ queryEvents: async (query) => (query?.match?.kind === "note" ? rows : []) });
+		const result = await run(["--json"], f);
+		expect(result.code).toBe(0);
+		expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, findings: [], counts: { ledger_events_malformed: 1 } });
+	});
+
+	test("a resumed page does not count the same unparseable row twice", async () => {
+		const reader = ledgerWriteReader({ queryEvents: async () => [row("bad", NOW - 2000, { payload: "{not json" })] });
+		const first = await reader.memoryWrites({ since: minutesAgo(10), until: minutesAgo(0), limit: 1, cursor: null });
+		const again = await reader.memoryWrites({ since: minutesAgo(10), until: minutesAgo(0), limit: 1, cursor: first.next });
+		expect([first.skipped, again.skipped]).toEqual([1, 0]);
 	});
 });
 

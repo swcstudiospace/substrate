@@ -47,8 +47,8 @@ import {
 } from "./actions.ts";
 import { decodeXwd, encodePng } from "./png.ts";
 
-export const RETAIN_RUNS = 200;
-export const RETAIN_MS = 7 * 86_400_000;
+const RETAIN_RUNS = 200;
+const RETAIN_MS = 7 * 86_400_000;
 /**
  * One docker exec round trip. Measured on this VPS under ~75% CPU steal: 4-7 s for an xdotool
  * call and 8-11 s for an xwd, so a 10 s budget cut real calls off.
@@ -103,7 +103,7 @@ export type DesktopLogEntry = {
 	error?: string;
 };
 
-export type DesktopScreenshot = { path: string; width: number; height: number; sha256: string };
+type DesktopScreenshot = { path: string; width: number; height: number; sha256: string };
 
 /** `images` are the screenshots' PNG bytes as base64, in order, for the MCP image blocks. */
 export type DesktopRunResult = {
@@ -116,7 +116,7 @@ export type DesktopRunResult = {
 };
 
 /** Per-call emit: `Substrate.runDesktop` passes `(e) => this.emit(e)` so `stored` can stop the run. */
-export type DesktopEmit = (event: EventInput) => Promise<{ stored: boolean }>;
+type DesktopEmit = (event: EventInput) => Promise<{ stored: boolean }>;
 
 export interface DesktopDriver {
 	run(input: unknown, ctx: { surface: Surface; emit: DesktopEmit }): Promise<DesktopRunResult>;
@@ -144,7 +144,7 @@ let active: string | null = null;
  * owns it: exactly one process holds the port, and a crashed holder releases
  * it. There is no claim file to read, delete, or go stale.
  */
-export const DESKTOP_LOCK_PORT = 45931;
+const DESKTOP_LOCK_PORT = 45931;
 /** How long a refused caller waits for the holder to name its run. */
 const LOCK_IDENTITY_TIMEOUT_MS = 2000;
 /** Lock connections served at once; a connection past this is dropped unanswered. */
@@ -246,7 +246,7 @@ function failure(result: BufferRunResult): string {
 }
 
 /** Remove run dirs beyond the newest RETAIN_RUNS or older than RETAIN_MS; `keep` always stays. */
-export function prune(shotsDir: string, keep: string, at: number): void {
+function prune(shotsDir: string, keep: string, at: number): void {
 	const runs = readdirSync(shotsDir)
 		.filter((name) => RUN_ID.test(name))
 		.map((name) => ({ name, mtime: statSync(join(shotsDir, name)).mtimeMs }))

@@ -33,11 +33,12 @@
  */
 import { randomUUID } from "node:crypto";
 import type { BreakerState, CitationProvenance } from "@substrate/observability";
-import { DeadlineError, type SharedDeadline, sharedDeadline } from "./deadline.ts";
+import { DeadlineError, sharedDeadline } from "./deadline.ts";
 import { repoScopePrefix } from "./event.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
+import { withDeadline } from "./docs-freshness.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
-import { ragRetryDelay } from "./rag-retry.ts";
+import { LIGHTRAG_EMPTY_ANSWER, runLightragAttempts, settleLightrag, type LightragSettled } from "./lightrag-attempts.ts";
 import { DEFAULT_TANDEM_OPTIONS, mergeTandem, type TandemCounts, type TandemOptions, type TandemOrigin, type TandemProvenance } from "./tandem-recall.ts";
 import {
 	listDatasets,
@@ -50,6 +51,7 @@ import {
 	type RetrievalKnobs,
 	type RetrievalOutcome,
 } from "./planes/ragflow.ts";
+import { reportSilent } from "./silent-failures.ts";
 /**
  * LightRAG cutover, import-ready: the LightRAG retriever resolves to a
  * `LightragQueryOutcome` (the `RagflowChunk` list plus the graph detail), so the
@@ -58,12 +60,13 @@ import {
  * unchanged.
  */
 import { retrieveForSearch as retrieveForSearchLightrag, type LightragGraphDetail, type LightragQueryOutcome } from "./planes/lightrag.ts";
-export { retrieveForSearchLightrag };
 import type { SteeringNotice } from "./planning/steering-delivery.ts";
 import { redact, redactValue } from "./redact.ts";
 import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
 import type { DocumentProvenance } from "./docs-ingest.ts";
 import { CORPUS_DATASET, parseCorpusDocumentName, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
+import type { ParsedCorpusName } from "@substrate/corpus";
+import type { ManifestState } from "./corpus/store.ts";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
 export const UNTRUSTED_DOCS_NOTICE =
@@ -119,7 +122,7 @@ export interface SearchCitation {
  * budget), redacted and capped so no transport message grows past 200
  * characters.
  */
-export interface DegradedDataset {
+interface DegradedDataset {
 	dataset: string;
 	reason: string;
 }
@@ -169,6 +172,12 @@ export interface SearchReply {
 	 * LightRAG plane failed and Hindsight recall answered in its place.
 	 */
 	backend?: DocsBackend | "hindsight";
+	/**
+	 * Set when the LightRAG path answered from neither the plane nor Hindsight: the plane failed after its retries (or
+	 * was refused or unconfigured) and recall found nothing. Always `degraded` too, with `reason` the failure, and
+	 * `chunks` empty. It is the explicit "no answer" the LightRAG tools share; it is never an empty success.
+	 */
+	unavailable?: true;
 	/** Set when Hindsight recall answered in place of a failed LightRAG plane; `reason` names the failure. */
 	fallback?: "hindsight";
 	/**
@@ -271,7 +280,7 @@ export function planningGraphCounts(hints: readonly PlanningGraphHint[]): Search
  * accepted-ignored on this plane (one knowledge base per server) — scope
  * is a no-op, never an error.
  */
-export type LightragRetriever = (
+type LightragRetriever = (
 	config: LightragConfig,
 	question: string,
 	datasetIds: readonly string[],
@@ -286,10 +295,10 @@ export interface LightragDatasetList {
 }
 
 /** Limits of a `context` block; the budgets are enforced where the sources are read. */
-export const DOCS_CONTEXT_MEMORY_LIMIT = 3;
-export const DOCS_CONTEXT_EVENT_LIMIT = 5;
-export const DOCS_CONTEXT_MEMORY_CHARS = 400;
-export const DOCS_CONTEXT_SUMMARY_CHARS = 200;
+const DOCS_CONTEXT_MEMORY_LIMIT = 3;
+const DOCS_CONTEXT_EVENT_LIMIT = 5;
+const DOCS_CONTEXT_MEMORY_CHARS = 400;
+const DOCS_CONTEXT_SUMMARY_CHARS = 200;
 /** The ledger read's own budget, ms. The recall runs under `searchRecallBudgetMs`. */
 export const DOCS_CONTEXT_LEDGER_BUDGET_MS = 1000;
 
@@ -323,13 +332,22 @@ export interface DatasetPin {
 	ingested_at?: string;
 }
 
-export interface SearchDeps {
+/** The corpus manifest's record of a document: the commit it was ingested at, the content hash it holds, and its state. */
+export interface ManifestCommitRecord {
+	commit: string | null;
+	sha256: string;
+	state: ManifestState;
+}
+
+interface SearchDeps {
 	config: RagflowConfig | null;
 	datasetNames?: readonly string[];
 	pins?: Record<string, DatasetPin>;
 	emit: (event: EventInput) => Promise<unknown>;
 	surface?: Surface | null;
 	sessionId?: string;
+	/** Safe original question for public notes, supplied separately from any privately augmented retrieval question. */
+	eventQuestion?: string;
 	fetchImpl?: FetchLike;
 	/** Datasets serving from a stale pin: their citations carry pin_age_ms (D25-07). */
 	degradedDatasets?: readonly string[];
@@ -341,6 +359,13 @@ export interface SearchDeps {
 	retrieval?: RetrievalKnobs;
 	/** The ingest record of a document id — source URL and the commit it was uploaded under (uplift-2 R6). */
 	provenanceOf?: (documentId: string) => DocumentProvenance | undefined;
+	/**
+	 * The corpus manifest's record of a document, read by its repository and path (`CorpusStore.rowFor`). A chunk is cited at the record's
+	 * commit only when the record is `active` and the chunk's name carries the record's content hash (`citableCommit`); every other chunk cites
+	 * HEAD. Read once per distinct corpus document a reply cites; a null answer, a throw or rejection, or no answer within
+	 * `MANIFEST_COMMIT_DEADLINE_MS` cites HEAD and never fails the search.
+	 */
+	manifestCommit?: (repo: string, path: string) => Promise<ManifestCommitRecord | null>;
 	/**
 	 * One shared deadline for every dataset's retrieval, ms (uplift-3 N5;
 	 * `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`). `0` or unset: no shared deadline,
@@ -373,8 +398,6 @@ export interface SearchDeps {
 	 * untrusted as before.
 	 */
 	steering?: string | null;
-	/** The planning hash the steering session holds; echoed on the note event so a refresh can be told apart. */
-	planningHash?: string | null;
 	/**
 	 * Hindsight fallback (SPE-19390): when every dataset fails, this is
 	 * tried before the degraded reply. Null means no fallback answered;
@@ -434,12 +457,13 @@ export interface SearchDeps {
 	tandem?: TandemOptions;
 }
 
-function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[]): Promise<SearchReply> {
+function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[], unavailable = false): Promise<SearchReply> {
 	const reply: SearchReply = {
 		chunks: [],
 		untrusted: UNTRUSTED_DOCS_NOTICE,
 		degraded: true,
 		reason,
+		...(unavailable ? { unavailable: true as const } : {}),
 		...(degradedDatasets !== undefined ? { degraded_datasets: degradedDatasets } : {}),
 	};
 	// Hindsight fallback (SPE-19390): before the degraded reply is stored,
@@ -476,7 +500,7 @@ const REASON_CAP = 200;
 const CIRCUIT_OPEN = "ragflow circuit open";
 
 /** The bounded, redacted form of why one dataset was not served. */
-function datasetReason(cause: unknown): string {
+export function datasetReason(cause: unknown): string {
 	const text = cause instanceof Error ? cause.message : String(cause);
 	return redact(text).slice(0, REASON_CAP);
 }
@@ -513,22 +537,78 @@ function cite(
 	};
 }
 
+/** A commit name a citation may link: a 40- or 64-character lower-case hex git object name, so nothing stored can steer the citation URL. */
+const CITABLE_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** Longest a manifest lookup may take before its document is cited at HEAD; a hung store read must not hang the search. */
+const MANIFEST_COMMIT_DEADLINE_MS = 500;
+
+/** The key of one corpus document: its repository and its path together, so one path in two repositories stays two documents. */
+function documentKey(repo: string, path: string): string {
+	return JSON.stringify([repo, path]);
+}
+
+/** The corpus document a chunk is, by its source URL or its document name; null for every other result. */
+function corpusDocumentOf(chunk: RagflowChunk): ParsedCorpusName | null {
+	return parseCorpusDocumentName(chunk.source_url ?? "") ?? parseCorpusDocumentName(chunk.document_name);
+}
+
+/**
+ * The manifest's record of each corpus document the chunks name, keyed by `documentKey`. One lookup per distinct document, so a reply's
+ * lookups are bounded by its documents, not its chunks. A record is kept only when it names a full commit. A lookup that throws or rejects,
+ * answers no record or one without a full commit name, or does not answer within `MANIFEST_COMMIT_DEADLINE_MS` leaves its document out, and
+ * its chunks are cited at HEAD. Whether a kept record is cited for a given chunk is decided by `citableCommit`.
+ */
+async function manifestCommits(deps: SearchDeps, chunks: readonly RagflowChunk[]): Promise<ReadonlyMap<string, ManifestCommitRecord>> {
+	const commits = new Map<string, ManifestCommitRecord>();
+	const lookup = deps.manifestCommit;
+	if (lookup === undefined) return commits;
+	const documents = new Map<string, ParsedCorpusName>();
+	for (const chunk of chunks) {
+		const parsed = corpusDocumentOf(chunk);
+		if (parsed !== null) documents.set(documentKey(parsed.repo, parsed.path), parsed);
+	}
+	await Promise.all(
+		[...documents].map(async ([key, { repo, path }]) => {
+			try {
+				const record = await withDeadline(lookup(repo, path), MANIFEST_COMMIT_DEADLINE_MS);
+				if (record !== null && record.commit !== null && CITABLE_COMMIT.test(record.commit)) commits.set(key, record);
+			} catch {
+				// The citation falls back to HEAD; a failed lookup never fails the search.
+			}
+		}),
+	);
+	return commits;
+}
+
 /**
  * A LightRAG result whose file path is a corpus document name (`corpus:<repo>:<path>@<sha>`) cites the document's own
- * repository and path: `source_url` from the corpus URL rule, `title` as `repo:path`, `dataset: "corpus"`. LightRAG holds
- * one workspace, so without this the result would be attributed to the first dataset searched. `heading_path` keeps what
- * LightRAG returned and every other result is returned as it was.
+ * repository and path: `source_url` and `commit` at the commit `citableCommit` allows for it (HEAD otherwise, with `commit` as the unrecorded marker),
+ * `title` as `repo:path`, `dataset: "corpus"`. LightRAG holds one workspace, so without this the result would be attributed to the first dataset
+ * searched. `heading_path` keeps what LightRAG returned and every other result is returned as it was.
  */
-function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation): SearchCitation {
-	const parsed = parseCorpusDocumentName(chunk.source_url ?? "") ?? parseCorpusDocumentName(chunk.document_name);
+function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation, commits: ReadonlyMap<string, ManifestCommitRecord>): SearchCitation {
+	const parsed = corpusDocumentOf(chunk);
 	if (parsed === null) return citation;
+	const recorded = citableCommit(parsed, commits.get(documentKey(parsed.repo, parsed.path)));
 	return {
 		...citation,
 		title: redact(`${parsed.repo}:${parsed.path}`),
-		source_url: redact(corpusSourceUrl(parsed.repo, parsed.path)),
-		commit: `dataset-pin:${CORPUS_DATASET}:unrecorded`,
+		source_url: redact(corpusSourceUrl(parsed.repo, parsed.path, recorded)),
+		commit: recorded ?? `dataset-pin:${CORPUS_DATASET}:unrecorded`,
 		dataset: CORPUS_DATASET,
 	};
+}
+
+/**
+ * The commit a corpus chunk is cited at, or undefined for HEAD. The manifest's commit is used only when the row is `active` and the
+ * chunk's name carries the row's content: the chunk's sha12 is a prefix of the row's sha256 (lower-case hex). A chunk indexed from an older
+ * version of a document, and any chunk of a tombstoned row, is cited at HEAD: never at a commit whose content it is not.
+ */
+export function citableCommit(parsed: ParsedCorpusName, record: ManifestCommitRecord | undefined): string | undefined {
+	if (record === undefined || record.state !== "active" || record.commit === null) return undefined;
+	if (!CITABLE_COMMIT.test(record.commit)) return undefined;
+	return record.sha256.toLowerCase().startsWith(parsed.sha12) ? record.commit : undefined;
 }
 
 /**
@@ -542,7 +622,7 @@ function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation): Se
  */
 
 /** The most steering characters that travel with a retrieval question. */
-export const STEERING_CAP = 2000;
+const STEERING_CAP = 2000;
 
 /**
  * The retrieval question with live steering appended. Null, undefined or
@@ -574,15 +654,8 @@ export function scopedDatasetName(repoId: string | null | undefined, dataset: st
 	return scoped === null ? dataset : `repo:${scoped}:${dataset}`;
 }
 
-/** Split a scoped name back into its repo scope and dataset. */
-export function parseScopedDataset(scoped: string): { repo_id: string | null; dataset: string } {
-	const match = /^repo:([a-z0-9._-]+\/[a-z0-9._-]+):(.+)$/.exec(scoped);
-	if (!match) return { repo_id: null, dataset: scoped };
-	return { repo_id: match[1] ?? null, dataset: match[2] ?? scoped };
-}
-
 /** One LightRAG REST/JSON hit: content plus whatever locator the endpoint returned. */
-export interface LightRagHit {
+interface LightRagHit {
 	content: string;
 	source_url?: string;
 	score?: number;
@@ -595,7 +668,7 @@ export interface LightRagHit {
  * shape, wrong types, unparseable — is zero hits, never a throw, so the
  * RAGFlow path simply serves without them.
  */
-export function parseLightRagJson(raw: unknown): LightRagHit[] {
+function parseLightRagJson(raw: unknown): LightRagHit[] {
 	const candidates: unknown = raw !== null && typeof raw === "object" && !Array.isArray(raw)
 		? ((raw as Record<string, unknown>).data ?? (raw as Record<string, unknown>).results ?? [])
 		: Array.isArray(raw) ? raw : [];
@@ -614,7 +687,7 @@ export function parseLightRagJson(raw: unknown): LightRagHit[] {
 }
 
 /** A LightRAG hit as a citation: redacted, capped, framed exactly like a RAGFlow one. */
-export function lightRagCite(hit: LightRagHit, datasetName: string, index: number): SearchCitation {
+function lightRagCite(hit: LightRagHit, datasetName: string, index: number): SearchCitation {
 	return {
 		title: redact(hit.source_url ?? datasetName),
 		source_url: hit.source_url !== undefined ? redact(hit.source_url) : `dataset:${datasetName}`,
@@ -632,7 +705,7 @@ export function lightRagCite(hit: LightRagHit, datasetName: string, index: numbe
  * retained under, so it never reads as a LightRAG source. A memory records no commit, so its commit is the
  * `unrecorded` marker.
  */
-export function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitation {
+function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitation {
 	const document = hit.document_id ?? hit.id;
 	return {
 		title: redact(document),
@@ -647,43 +720,11 @@ export function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitat
 }
 
 /**
- * The local circuit breaker one search consults before paying for the
- * plane (SPE-19390). Closed calls pass; `failureThreshold` consecutive
- * failures open it for `resetTimeoutMs`, during which calls refuse fast
- * with `docs circuit open`; the next call after the window is the
- * half-open probe, whose outcome closes or re-opens the breaker. Small
- * and in-memory on purpose: the plane gate in `planes/ragflow.ts` stays
- * the authority, this only stops a hot loop from paying per search.
- */
-export type DocsBreakerState = "closed" | "open" | "half-open";
-
-export class DocsSearchBreaker {
-	private failures = 0;
-	private openedAt = 0;
-	constructor(private readonly failureThreshold: number = 3, private readonly resetTimeoutMs: number = 30_000) {}
-	state(nowMs: number = Date.now()): DocsBreakerState {
-		if (this.failures < this.failureThreshold) return "closed";
-		return nowMs - this.openedAt >= this.resetTimeoutMs ? "half-open" : "open";
-	}
-	canUse(nowMs: number = Date.now()): boolean {
-		return this.state(nowMs) !== "open";
-	}
-	recordSuccess(): void {
-		this.failures = 0;
-		this.openedAt = 0;
-	}
-	recordFailure(nowMs: number = Date.now()): void {
-		this.failures += 1;
-		if (this.failures >= this.failureThreshold) this.openedAt = nowMs;
-	}
-}
-
-/**
  * The Hindsight fallback reply (SPE-19390): what a LightRAG search serves when the plane failed and the banks
  * answered. Framed derived-untrusted like every other fallback. It is `degraded`, since the answer is not the
  * plane's and so is never stored, and `reason` names the plane failure it stands in for.
  */
-export function hindsightFallbackReply(chunks: SearchCitation[], reason: string): SearchReply {
+function hindsightFallbackReply(chunks: SearchCitation[], reason: string): SearchReply {
 	return {
 		chunks,
 		untrusted: `${UNTRUSTED_DOCS_NOTICE} Served from Hindsight fallback: ${reason}.`,
@@ -838,7 +879,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 			action: "docs.search",
 			dataset_ids: ids,
 			...(repoId !== null ? { repo_id: repoId, scope: repoScopePrefix(repoId) } : {}),
-			...(deps.planningHash ? { planning_hash: deps.planningHash } : {}),
+			...(deps.eventQuestion === undefined ? {} : { question: deps.eventQuestion }),
 			...(deps.steering ? { steered: true } : {}),
 			urls: chunks.map((citation) => citation.source_url),
 			count: chunks.length,
@@ -920,40 +961,20 @@ function mergedGraphCounts(hints: readonly PlanningGraphHint[] | undefined, deta
 	return { entities: names.size, relations: planningGraphCounts(hinted).relations + detail.counts.relations };
 }
 
-/** A read's outcome as `Promise.allSettled` reports it, for one awaited read. */
-function settle<T>(read: Promise<T>): Promise<PromiseSettledResult<T>> {
-	return read.then(
-		(value): PromiseSettledResult<T> => ({ status: "fulfilled", value }),
-		(reason: unknown): PromiseSettledResult<T> => ({ status: "rejected", reason }),
-	);
-}
-
 /**
- * Whether a failed LightRAG attempt is worth another. A breaker refusal is not: the breaker decides when the
- * plane is tried again, and a retry would be refused the same way. Nor is a spent budget: no time is left to try in.
+ * An answer with no chunks is not an answer: it is a failed attempt, so the retry policy and the fallback judge it the
+ * way they judge any other failure. `planes/lightrag.ts` already refuses an empty payload; this keeps the rule at the
+ * search too, so no empty result can be served as a success.
  */
-function retryableLightragFailure(outcome: PromiseSettledResult<LightragQueryOutcome>): boolean {
-	if (outcome.status === "rejected") return !(outcome.reason instanceof DeadlineError);
-	return !outcome.value.ok && outcome.value.reason !== LIGHTRAG_CIRCUIT_OPEN;
-}
-
-/**
- * One retry's backoff, raced against the search's shared deadline. False when the budget ended the wait first, so
- * the retry is not made: no attempt starts once the budget has run out. `ragRetryDelay` never rejects, so the race
- * can only reject with the deadline's own `DeadlineError`.
- */
-function backoffWithinDeadline(deadline: SharedDeadline, baseMs: number, retry: number): Promise<boolean> {
-	return deadline.race(ragRetryDelay(baseMs, retry)).then(
-		() => true,
-		() => false,
-	);
+function failEmptyAnswer(outcome: LightragQueryOutcome): LightragQueryOutcome {
+	return outcome.ok && outcome.chunks.length === 0 ? { ok: false, reason: LIGHTRAG_EMPTY_ANSWER } : outcome;
 }
 
 /** How the Hindsight leg of a tandem search ended. */
-export type TandemLegStatus = "ok" | "empty" | "timeout" | "failed";
+type TandemLegStatus = "ok" | "empty" | "timeout" | "failed";
 
 /** The structured note a tandem reply carries: the counts merged, and how the Hindsight leg ended. */
-export interface TandemNote extends TandemCounts {
+interface TandemNote extends TandemCounts {
 	leg: TandemLegStatus;
 }
 
@@ -993,14 +1014,17 @@ async function hindsightRecall(deps: SearchDeps, question: string): Promise<read
 	if (deps.lightragHindsight === undefined) return [];
 	try {
 		return await deps.lightragHindsight(question);
-	} catch {
+	} catch (cause: unknown) {
+		reportSilent("docs-search.hindsight-recall", cause);
 		return [];
 	}
 }
 
 /**
- * A LightRAG plane failure after its retries, a breaker refusal, or an unconfigured plane: Hindsight recall answers in its place when
- * it can. With no hit the plain degraded reply stands, its reason the LightRAG failure as before.
+ * The LightRAG path's answer when the plane did not answer: a LightRAG failure after its retries, a breaker refusal, an
+ * unconfigured plane, or an empty answer. Hindsight recall answers in its place when it finds something (`degraded`,
+ * `fallback: "hindsight"`). With no hit the reply is `unavailable`: degraded, empty, and carrying the LightRAG reason.
+ * This is the rule `docs_lightrag_query` and `POST /docs/lightrag/query` answer by too (`answerLightragQuery`).
  */
 async function lightragFallback(
 	deps: SearchDeps,
@@ -1010,7 +1034,7 @@ async function lightragFallback(
 	degradedDatasets?: DegradedDataset[],
 ): Promise<SearchReply> {
 	const recalled = await hindsightRecall(deps, question);
-	if (recalled.length === 0) return failed(deps, sessionId, reason, degradedDatasets);
+	if (recalled.length === 0) return failed(deps, sessionId, reason, degradedDatasets, true);
 	const reply = hindsightFallbackReply(
 		recalled.slice(0, 10).map((hit, index) => hindsightCite(hit, index)),
 		reason,
@@ -1026,7 +1050,7 @@ async function lightragFallback(
 			...(degradedDatasets !== undefined ? { degraded_datasets: degradedDatasets } : {}),
 			fallback: "hindsight",
 		},
-	}).catch(() => undefined);
+	}).catch((cause: unknown) => reportSilent("docs-search.emit-fallback", cause));
 	return reply;
 }
 
@@ -1065,20 +1089,21 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// ignores scope on the wire, so the ids only key pins and the note payload.
 	const listed: DatasetListOutcome =
 		deps.lightragDatasets !== undefined ? await deps.lightragDatasets.list() : { ok: true, datasets: [...wanted].sort().map((name) => ({ id: name, name })) };
-	if (!listed.ok) return failed(deps, sessionId, listed.reason);
+	if (!listed.ok) return lightragFallback(deps, sessionId, question, listed.reason);
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
 	const first = readable[0];
-	if (first === undefined) return failed(deps, sessionId, "no-readable-datasets");
+	if (first === undefined) return lightragFallback(deps, sessionId, question, "no-readable-datasets");
 	const effectiveQuestion = augmentQuestionWithSteering(question, deps.steering ?? null);
 	const repoId = normalizeRepoId(deps.repoId ?? null);
 	const fetchImpl = deps.lightragFetch ?? deps.fetchImpl;
 	const deadline = sharedDeadline(deps.budgetMs ?? 0, "docs budget");
 	const policy = deps.lightragRetry ?? DEFAULT_RAG_MACHINE_SETTINGS;
 	// A client that throws synchronously is a failed search, not an
-	// exception out of the search.
+	// exception out of the search. An answer with no chunks is a failed
+	// attempt (`LIGHTRAG_EMPTY_ANSWER`), never a success.
 	const once = (): Promise<LightragQueryOutcome> => {
 		try {
-			return deadline.race(retrieve(lightrag, effectiveQuestion, readable.map((dataset) => dataset.id), fetchImpl));
+			return deadline.race(retrieve(lightrag, effectiveQuestion, readable.map((dataset) => dataset.id), fetchImpl)).then(failEmptyAnswer);
 		} catch (cause) {
 			return Promise.reject(cause);
 		}
@@ -1086,22 +1111,18 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// One attempt. Half-open recovery, mirroring the RAGFlow fan-out: a refusal
 	// that landed while another probe held the slot is retried once when the
 	// breaker has since closed.
-	const attempt = async (): Promise<PromiseSettledResult<LightragQueryOutcome>> => {
-		let settled = await settle(once());
+	const attempt = async (): Promise<LightragSettled<LightragQueryOutcome>> => {
+		let settled = await settleLightrag(once());
 		if (breakerState?.() === "closed" && settled.status === "fulfilled" && !settled.value.ok && settled.value.reason === LIGHTRAG_CIRCUIT_OPEN) {
-			settled = await settle(once());
+			settled = await settleLightrag(once());
 		}
 		return settled;
 	};
 	// Tandem: Hindsight is asked beside the LightRAG retrieval, under its own budget, so it adds no wait of its own beyond that.
 	const tandemLeg = startTandemLeg(deps, question);
-	// The plane's retries, on docs_lightrag_query's backoff. One shared budget covers every attempt and every wait:
-	// a wait the budget ends stops the retries, and the last failure is the one answered.
-	let outcome = await attempt();
-	for (let retry = 1; retry <= policy.maxRetries && retryableLightragFailure(outcome); retry += 1) {
-		if (!(await backoffWithinDeadline(deadline, policy.retryBaseMs, retry))) break;
-		outcome = await attempt();
-	}
+	// The plane's retries, under `runLightragAttempts`: one shared budget covers every attempt and every wait, and a
+	// wait the budget ends stops the retries, so the last failure is the one answered.
+	const outcome = await runLightragAttempts(attempt, policy, deadline);
 	deadline.clear();
 	const nowMs = deps.nowMs ?? Date.now();
 	const pinAged = deps.degradedDatasets?.includes(first.name) ?? false;
@@ -1114,7 +1135,8 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
 	}
 	const { detail } = outcome.value;
-	const citations = outcome.value.chunks.map((chunk) => withCorpusProvenance(chunk, cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf)));
+	const commits = await manifestCommits(deps, outcome.value.chunks);
+	const citations = outcome.value.chunks.map((chunk) => withCorpusProvenance(chunk, cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf), commits));
 	citations.sort((left, right) => right.score - left.score);
 	const lightragChunks = citations.slice(0, 10);
 	attachGraphHints(lightragChunks, deps.graphHints);
@@ -1152,7 +1174,7 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 			backend: "lightrag",
 			dataset_ids: readable.map((dataset) => dataset.id),
 			...(repoId !== null ? { repo_id: repoId, scope: repoScopePrefix(repoId) } : {}),
-			...(deps.planningHash ? { planning_hash: deps.planningHash } : {}),
+			...(deps.eventQuestion === undefined ? {} : { question: deps.eventQuestion }),
 			...(deps.steering ? { steered: true } : {}),
 			urls: chunks.map((citation) => citation.source_url),
 			count: chunks.length,

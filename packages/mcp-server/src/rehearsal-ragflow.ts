@@ -36,9 +36,6 @@ export const RAGFLOW_FIXTURE_KEY_ENV = "RAGFLOW_FIXTURE_KEY";
 /** Fixture listen port carriage: child env, a value the operator may see. */
 export const RAGFLOW_FIXTURE_PORT_ENV = "RAGFLOW_FIXTURE_PORT";
 
-/** The readiness marker `consumer.env` carries when the fixture is up. */
-export const RAGFLOW_FIXTURE_READY = "1";
-
 /** Control routes, served only by the owned stand-in on loopback. */
 export const FIXTURE_HEALTH_PATH = "/__fixture/health";
 export const FIXTURE_COUNTS_PATH = "/__fixture/counts";
@@ -54,38 +51,17 @@ export const FIXTURE_SEED_MAX_CHUNKS = 20;
 /** The only retrieval failure statuses the control route accepts. */
 export const FIXTURE_FAILURE_STATUSES = [500, 502, 503] as const;
 
-/** Parse behaviours the control route accepts. */
-export const FIXTURE_PARSE_BEHAVIOURS = ["done", "never"] as const;
-
  /** `consumer.env` names for the fixture locator: endpoint, marker, pid. */
 export const FIXTURE_URL_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_URL";
 export const FIXTURE_READY_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_READY";
 export const FIXTURE_PID_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_PID";
 
 /** Loopback hosts a fixture endpoint or control URL may name. */
-export const FIXTURE_LOOPBACK_HOSTS: Record<string, true> = {
+const FIXTURE_LOOPBACK_HOSTS: Record<string, true> = {
 	"127.0.0.1": true,
 	"::1": true,
 	localhost: true,
 };
-
-/** Persisted fixture identity, stored under `TwinState.ragflowFixture`. */
-export interface RagflowFixtureState {
-	enabled: boolean;
-	/** Loopback base URL, e.g. the 127.0.0.1 URL of the owned listener. */
-	endpoint: string;
-	pid: number;
-	/**
-	 * Birth the harness captured at spawn. Null while starting means the
-	 * birth could not be verified: the record is preserved and never
-	 * signalled until the birth reads verifiable.
-	 */
-	startSeconds: number | null;
-	/** Checkout the child was spawned from; stop identity must match. */
-	cwd: string;
-	/** Entry point the child runs; stop identity must match. */
-	script: string;
-}
 
 /** Facts about a host process, gathered before any signal. */
 export interface FixtureProcFacts {
@@ -98,21 +74,11 @@ export interface FixtureProcFacts {
 }
 
 /** Side-effect counts the control route reports: numbers only, never bodies. */
-export interface FixtureCounts {
+interface FixtureCounts {
 	requests: number;
 	retrievals: number;
 	uploads: number;
 	documents: number;
-}
-
-/** The loopback base URL for a fixture on this port. */
-export function fixtureEndpoint(port: number): string {
-	return `http://127.0.0.1:${port}`;
-}
-
-/** The fixture spawn argv: Bun without env-file autoload, the fixture entry. */
-export function buildFixtureSpawnArgv(execPath: string = process.execPath): string[] {
-	return [execPath, "--no-env-file", RAGFLOW_FIXTURE_SCRIPT];
 }
 
 /** A fresh random scratch key for one fixture: hex, so it is log-shape safe. */
@@ -244,7 +210,7 @@ export function parseParseBehaviourBody(body: unknown): { behavior: "done" | "ne
 }
 
 /** One normalized seeded chunk: dataset resolved, score defaulted, bounds checked. */
-export interface SeedChunk {
+interface SeedChunk {
 	dataset: string;
 	content: string;
 	document_id: string;
@@ -311,6 +277,7 @@ export async function checkFixtureReady(endpoint: string, timeoutMs: number): Pr
 		const body = (await res.json()) as unknown;
 		return body !== null && typeof body === "object" && (body as Record<string, unknown>)["ok"] === true;
 	} catch {
+		// Any error, a transport failure included, is not ready: the doc above says so and the harness polls again.
 		return false;
 	}
 }

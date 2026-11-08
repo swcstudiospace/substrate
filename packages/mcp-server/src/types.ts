@@ -175,16 +175,16 @@ export interface MemoryScope {
  * `append` is the absence of a collision rule: without a `subject` there is no
  * identity to collide on, so the entry simply lands alongside its predecessors.
  */
-export const CONFLICT_STRATEGIES = ["append", "lww", "versioned", "require-review"] as const;
+const CONFLICT_STRATEGIES = ["append", "lww", "versioned", "require-review"] as const;
 export type ConflictStrategy = (typeof CONFLICT_STRATEGIES)[number];
 
-export const MEMORY_WRITE_OUTCOMES = ["accepted", "conflict", "quarantined", "denied"] as const;
+const MEMORY_WRITE_OUTCOMES = ["accepted", "conflict", "quarantined", "denied"] as const;
 export type MemoryWriteOutcome = (typeof MEMORY_WRITE_OUTCOMES)[number];
 
-export const QUARANTINE_REASONS = ["secret", "pii", "speculative"] as const;
+const QUARANTINE_REASONS = ["secret", "pii", "speculative"] as const;
 export type QuarantineReason = (typeof QUARANTINE_REASONS)[number];
 
-export interface MemoryEntryInput {
+interface MemoryEntryInput {
 	/** `graph:<id>` | `repo:<name>` | `global` | `agent:<surface>` | `person:<name>` */
 	scope: string;
 	kind: MemoryKind;
@@ -504,8 +504,8 @@ export interface GraphView extends GraphIndexRow {
  * `lightrag` is the graph-backed cutover target. Additive: no existing
  * reply or input shape changes meaning.
  */
-export const RETRIEVAL_BACKENDS = ["ragflow", "lightrag"] as const;
-export type RetrievalBackend = (typeof RETRIEVAL_BACKENDS)[number];
+const RETRIEVAL_BACKENDS = ["ragflow", "lightrag"] as const;
+type RetrievalBackend = (typeof RETRIEVAL_BACKENDS)[number];
 
 /**
  * Pick the serving backend from what is configured. An explicit preference
@@ -570,7 +570,7 @@ export interface CitationGraphProvenance {
  * the snapshot (with `stateHash` for polling change detection) is served
  * on `docs_rag_state` / `GET /rag/state`.
  */
-export const RAG_STATES = ["IDLE", "STEERING", "CONTEXT_REFRESH", "DEGRADED", "ERROR"] as const;
+const RAG_STATES = ["IDLE", "STEERING", "CONTEXT_REFRESH", "DEGRADED", "ERROR"] as const;
 export type RagState = (typeof RAG_STATES)[number];
 
 /**
@@ -579,7 +579,7 @@ export type RagState = (typeof RAG_STATES)[number];
  * plane may retry (steer again), recover, or trip the breaker to `ERROR`;
  * `ERROR` only leaves via a fresh steer or an explicit reset to `IDLE`.
  */
-export const RAG_STATE_TRANSITIONS: Record<RagState, readonly RagState[]> = {
+const RAG_STATE_TRANSITIONS: Record<RagState, readonly RagState[]> = {
 	IDLE: ["STEERING"],
 	STEERING: ["CONTEXT_REFRESH", "IDLE", "DEGRADED"],
 	CONTEXT_REFRESH: ["IDLE", "DEGRADED"],
@@ -622,17 +622,27 @@ export interface RagLightragChunk {
 }
 
 /**
- * What `docs_lightrag_query` / `POST /docs/lightrag/query` answers: the
- * LightRAG REST JSON result with graph coverage, the serving state, and —
- * when the plane failed and Hindsight answered instead — `fallback:
- * "hindsight"`. `degraded` is set only when nothing could be served.
+ * What `docs_lightrag_query` / `POST /docs/lightrag/query` answers, and what `docs_search` answers on the LightRAG path, under
+ * one rule (`docs-plane.md`, "Served, degraded and unavailable"):
+ * - served: LightRAG answered with chunks. `backend: "lightrag"`, and no `degraded`, `fallback`, `reason` or `unavailable`.
+ * - degraded: LightRAG did not answer and Hindsight recall answered with a hit. `backend: "lightrag"`,
+ *   `fallback: "hindsight"`, `degraded: true`, `reason` the LightRAG failure.
+ * - unavailable: LightRAG did not answer and recall returned no hit. The degraded fields, plus `unavailable: true` and
+ *   `chunks` empty. This is the explicit "no answer", never an empty success.
+ * `reason` is redacted and capped at 200 characters. A reply that falls back emits the `docs_search` warning event.
  */
 export interface RagLightragResult {
+	/** The backend the query asked. It is "lightrag" whether the answer is LightRAG's or Hindsight's fallback. */
 	backend: "lightrag";
 	chunks: RagLightragChunk[];
 	graph: SearchGraphStats;
 	state: RagStateSnapshot;
+	/** True on every Hindsight-fallback reply, degraded or unavailable. */
 	degraded?: true;
+	/** The LightRAG failure the reply stands in for. With no hit, recall's own reason follows after `; `. */
 	reason?: string;
+	/** Set on every Hindsight-fallback reply, including an unavailable one. */
 	fallback?: "hindsight";
+	/** Set only when recall returned zero hits. */
+	unavailable?: true;
 }

@@ -5,6 +5,7 @@ import {
 	conflictPlan,
 	DEFAULT_GRANTS,
 	grantFor,
+	grantedToCaller,
 	isTerminalGraphStatus,
 	MEMORY_TTL_30D_MS,
 	memoryExpiry,
@@ -18,6 +19,7 @@ import {
 	reverifyAfter,
 	TRUST_SHELF_LIFE_DAYS,
 	type MemoryGrant,
+	visibleToCaller,
 } from "./memory-policy.ts";
 import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import { MEMORY_KINDS, type MemoryKind, type MemoryScope } from "./types.ts";
@@ -352,4 +354,22 @@ describe("memory lifetime (uplift-3 N4)", () => {
 		expect(memoryGraphId({ scope: "global" })).toBeNull();
 		expect(memoryGraphId({ scope: "graph:" })).toBeNull();
 	});
+});
+
+test("a repo keeps its exact spelling for visibility: a lone high surrogate is not trimmed into the granted repo", () => {
+	// A legacy row was stored with a lone high surrogate on its repo. Trimming it would make that row the granted `owner/name`.
+	const legacy = "owner/name\uD83D";
+	const granted = (repo: string) => repo === "owner/name";
+	const caller = { surface: "hermes", repo: "owner/name", granted };
+	// The row with the surrogate is not visible to a caller granted `owner/name`, and neither is its repo grant.
+	expect(visibleToCaller("agent:hermes", legacy, caller)).toBe(false);
+	expect(grantedToCaller("repo:owner/name", legacy, granted)).toBe(false);
+	// A caller spelling its repo with the surrogate sees only the rows written for that spelling.
+	expect(visibleToCaller("agent:hermes", "owner/name", { surface: "hermes", repo: legacy })).toBe(false);
+	expect(visibleToCaller("agent:hermes", legacy, { surface: "hermes", repo: legacy })).toBe(true);
+	// The same caller sees a row whose repo is exactly the granted one.
+	expect(visibleToCaller("agent:hermes", "owner/name", caller)).toBe(true);
+	expect(grantedToCaller("repo:owner/name", "owner/name", granted)).toBe(true);
+	// A repo scope keeps the surrogate too, so the scope is not granted as the trimmed repo.
+	expect(scope(`repo:${legacy}`).id).toBe(legacy);
 });

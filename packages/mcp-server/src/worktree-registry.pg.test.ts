@@ -7,10 +7,11 @@
  * The table is the real migration. Every host and repo is namespaced to one run by a marker, and every host a case
  * touched is swept at the end by a report from the far future, so a shared database is left as it was found.
  */
-import { afterAll, beforeAll, describe } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
 import { defined } from "./test-support.ts";
 import { worktreeStoreContract } from "./worktree-registry.testkit.ts";
+import type { ReportedWorktree, WorktreeStoreFilter } from "./worktree-registry.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const MARKER = `ut-wt-${Date.now().toString(36)}`;
@@ -46,4 +47,64 @@ describeLive("the worktree registry against a live index", () => {
 		},
 		repo: (label) => `${MARKER}/${label}`,
 	}));
+
+	test("a listing with a repos filter returns only the rows of the listed repositories, and an empty list returns none", async () => {
+		const store = index.worktreeRegistry();
+		const host = `${MARKER}-repos-filter`;
+		hosts.add(host);
+		const seenAt = new Date();
+		const row = (repo: string, path: string): ReportedWorktree => ({
+			path,
+			repo,
+			branch: "main",
+			head: "a".repeat(40),
+			base: "b".repeat(40),
+			dirty: false,
+			ahead: 0,
+			behind: 0,
+			last_commit_at: null,
+			size_bytes: null,
+			locked: false,
+			primary: false,
+			pr_state: "none",
+		});
+		const repoA = `${MARKER}/repos-a`;
+		const repoB = `${MARKER}/repos-b`;
+		await store.report({ host, reportedAt: seenAt, seenAt, ttlS: 86_400, worktrees: [row(repoA, `/w/${MARKER}/a`), row(repoB, `/w/${MARKER}/b`)] });
+		const filter = (repos: string[]): WorktreeStoreFilter => ({ repo: null, host, state: "all", limit: 500, staleBefore: new Date(0), repos });
+		expect((await store.list(filter([repoA]))).map((stored) => stored.repo)).toEqual([repoA]);
+		expect(await store.list(filter([]))).toEqual([]);
+	});
+
+	test("a report that omits session_id or graph_id keeps the stored value, and one that carries it replaces that value", async () => {
+		const store = index.worktreeRegistry();
+		const host = `${MARKER}-attribution-kept`;
+		hosts.add(host);
+		const repo = `${MARKER}/attribution`;
+		const path = `/w/${MARKER}/attributed`;
+		const row: ReportedWorktree = {
+			path,
+			repo,
+			branch: "main",
+			head: "a".repeat(40),
+			base: "b".repeat(40),
+			dirty: false,
+			ahead: 0,
+			behind: 0,
+			last_commit_at: null,
+			size_bytes: null,
+			locked: false,
+			primary: false,
+			pr_state: "none",
+		};
+		const seenAt = new Date();
+		const later = new Date(seenAt.getTime() + 60_000);
+		const latest = new Date(later.getTime() + 60_000);
+		const listed = () => store.list({ repo: null, host, state: "all", limit: 500, staleBefore: new Date(0), repos: null });
+		await store.report({ host, reportedAt: seenAt, seenAt, ttlS: 86_400, worktrees: [{ ...row, session_id: "sess-kept", graph_id: "graph-kept" }] });
+		await store.report({ host, reportedAt: later, seenAt: later, ttlS: 86_400, worktrees: [row] });
+		expect(await listed()).toMatchObject([{ path, session_id: "sess-kept", graph_id: "graph-kept" }]);
+		await store.report({ host, reportedAt: latest, seenAt: latest, ttlS: 86_400, worktrees: [{ ...row, session_id: "sess-new" }] });
+		expect(await listed()).toMatchObject([{ path, session_id: "sess-new", graph_id: "graph-kept" }]);
+	});
 });

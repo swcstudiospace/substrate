@@ -22,9 +22,9 @@ import { git, gitText, gitTry, type RepoContext } from "./runner.ts";
 import { assertObjectId, assertTreeExists, snapshotOfTree } from "./tree.ts";
 import type { PinResult, Snapshot, SkippedPath } from "./types.ts";
 
-export const REF_ROOT = "refs/substrate";
+const REF_ROOT = "refs/substrate";
 
-export type PinNamespace = "checkpoints" | "safety" | "restore-target";
+type PinNamespace = "checkpoints" | "safety" | "restore-target";
 
 /** The largest canonical-JSON metadata a pin carries: it lives in the commit message, next to the ref it describes. */
 export const MAX_METADATA_BYTES = 4096;
@@ -113,7 +113,7 @@ async function worktreeScope(ctx: RepoContext): Promise<WorktreeScope> {
 }
 
 /** The ref a pin of `namespace`/`id` lives at in this worktree; only checkpoints are scoped. */
-export async function pinRef(ctx: RepoContext, namespace: PinNamespace, id: string): Promise<string> {
+async function pinRef(ctx: RepoContext, namespace: PinNamespace, id: string): Promise<string> {
 	if (!isValidId(id)) throw new SnapshotPolicyError("id must match ^[A-Za-z0-9._-]{8,64}$");
 	if (namespace !== "checkpoints") return `${REF_ROOT}/${namespace}/${id}`;
 	return `${REF_ROOT}/checkpoints/${(await worktreeScope(ctx)).scope}/${id}`;

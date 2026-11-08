@@ -41,9 +41,9 @@ const MAX_NAMES = 10_000;
 /** A line is cut here before it is redacted, so one huge line cannot make the redaction slow. The output cap is far below it. */
 const LINE_PREFIX_MAX = 4_096;
 
-export type PositionErrorCode = "missing" | "too-large" | "malformed-frontmatter" | "unreadable" | "no-position" | "truncated" | "ambiguous-phase-dir" | "internal";
+type PositionErrorCode = "missing" | "too-large" | "malformed-frontmatter" | "unreadable" | "no-position" | "truncated" | "ambiguous-phase-dir" | "internal";
 
-export type PositionErrorWhere = "STATE.md" | "ROADMAP.md" | "phases";
+type PositionErrorWhere = "STATE.md" | "ROADMAP.md" | "phases";
 
 export interface PositionError {
 	code: PositionErrorCode;
@@ -51,7 +51,7 @@ export interface PositionError {
 	where: PositionErrorWhere;
 }
 
-export interface PositionPhase {
+interface PositionPhase {
 	/** The title: the roadmap's, else the state's. */
 	name: string | null;
 	/** The phase number as text, without leading zeros (`8.1`, `58`), so an inserted phase keeps its place. */
@@ -60,7 +60,7 @@ export interface PositionPhase {
 	slug: string | null;
 }
 
-export interface Position {
+interface Position {
 	milestone: string | null;
 	milestone_name: string | null;
 	phase: PositionPhase | null;
@@ -94,7 +94,7 @@ export interface PositionInput {
 }
 
 /** The frontmatter of a document, as the planning index reads it. The same shape as `Frontmatter` in `index.ts`. */
-export type PositionFrontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
+type PositionFrontmatter = { state: "none" } | { state: "parsed"; data: Record<string, unknown> } | { state: "malformed" };
 
 export type PartOutcome<T> = { ok: true; part: T } | { ok: false; error: PositionError };
 
@@ -109,7 +109,7 @@ export interface StatePart {
 	step: string | null;
 }
 
-export interface RoadmapPhaseEntry {
+interface RoadmapPhaseEntry {
 	/** The box of the `- [x] **Phase N: ...**` list, or null when the list does not name the phase. */
 	checked: boolean | null;
 	items: Array<{ done: boolean; id: string }>;
@@ -298,7 +298,7 @@ export function parsePosition(input: PositionInput): PositionResult {
 }
 
 /** The position with every field unknown. */
-export function emptyPosition(): Position {
+function emptyPosition(): Position {
 	return { milestone: null, milestone_name: null, phase: null, plan: null, progress: null, status: null, step: null };
 }
 

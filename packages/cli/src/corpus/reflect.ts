@@ -35,7 +35,7 @@ const PLANNING_FILES = [
 	{ label: "project", path: ".planning/PROJECT.md" },
 ] as const;
 
-export interface ReflectSkip {
+interface ReflectSkip {
 	repo: string;
 	/** A closed code: `bad-repo`, `duplicate-label`, `not-found`, `no-state`, or `<file>-<why>` such as `roadmap-too-large`. */
 	reason: string;
@@ -49,7 +49,7 @@ export interface ReflectCollection {
 	checkouts: number;
 }
 
-export interface CollectOptions {
+interface CollectOptions {
 	roots: readonly string[];
 	/** Repository labels to digest; empty means every repository that has a STATE. */
 	repos: readonly string[];
@@ -178,14 +178,14 @@ export function collectDigests(opts: CollectOptions): ReflectCollection {
 	return { digests, skipped, notes, checkouts: found.found };
 }
 
-export interface ReflectProblem {
+interface ReflectProblem {
 	repo: string;
 	status: "refused" | "failed";
 	reason?: string | undefined;
 }
 
 /** A digest the server stored whose Hindsight leg did not land as asked, with the server's closed reason (`hindsight:...`). */
-export interface ReflectWarning {
+interface ReflectWarning {
 	repo: string;
 	reason: string;
 }
@@ -201,7 +201,7 @@ export interface ReflectSummary {
 	manifestVersion: number | null;
 }
 
-export interface ReflectOutcome {
+interface ReflectOutcome {
 	summary: ReflectSummary;
 	fatal: ClientError | null;
 }

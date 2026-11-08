@@ -26,7 +26,7 @@
  * testable without a Postgres: the SQL is thin, the decisions are not.
  */
 import { randomUUID } from "node:crypto";
-import { canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
+import { canonicalJson, normalizeIdentifier, normalizeKey, repoOverCap, repoTooLongMessage, sha256Hex } from "./event.ts";
 import { isLessonWrite, lessonWriteIssue } from "./lesson-content.ts";
 import { classify } from "./memory-classify.ts";
 import {
@@ -40,11 +40,13 @@ import {
 	needsReverification,
 	normalizeSubject,
 	parseScope,
+	repoScopeOverCap,
 	resolveActor,
 	resolveTrust,
 	reverifyAfter,
 	type MemoryGrant,
 } from "./memory-policy.ts";
+import { reportSilent } from "./silent-failures.ts";
 import { redact } from "./redact.ts";
 import {
 	MEMORY_TTLS,
@@ -247,7 +249,7 @@ export interface MemoryStore {
 	findWrite?(key: string): Promise<WriteRecord | null>;
 }
 
-export interface GovernanceDeps {
+interface GovernanceDeps {
 	store: MemoryStore;
 	/** Checked against the operator's configured reviewer tokens. Never logged. */
 	isReviewToken: (token: string | undefined) => boolean;
@@ -370,7 +372,7 @@ function candidateKey(
 	sourceEvent: string | null,
 	reviewed: boolean,
 ): { key: string; explicit: boolean } {
-	const explicitKey = normalizeKey(raw);
+	const explicitKey = normalizeIdempotencyKey(raw);
 	return { key: explicitKey ?? derivedKey(entryHash, sourceEvent, reviewed), explicit: explicitKey !== null };
 }
 
@@ -489,6 +491,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 			"scope must be `global`, or `graph:<id>` / `repo:<owner/name>` / `agent:<surface>` / `person:<name>`.",
 		);
 	}
+	// A repo over the cap is refused before anything is judged or hashed: the cap would cut it, and a cut repo is a different repo.
+	const overRepo = repoOverCap(request.repo) ?? repoScopeOverCap(request.scope);
+	if (overRepo !== null) return refuse("denied", "repo_too_long", `${repoTooLongMessage(overRepo)}. Nothing was stored.`);
 	if (!isMemoryKind(request.kind)) {
 		return refuse("denied", "kind.unknown", "kind must be one of decision, fact, warning, handoff, todo.");
 	}
@@ -548,7 +553,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	}
 	const subject = normalizeSubject(request.subject);
 	let sourceEvent = normalizeIdentifier(request.source_event);
-	const sessionId = normalizeIdentifier(request.session_id);
+	const sessionId = normalizeKey(request.session_id);
 	// The memory-bank retain drops a fact that names no source. A lesson without
 	// one would read as saved in the index and never come back from the bank.
 	if (isLessonWrite(judged, subjectInput) && !sourceEvent && sessionId) {
@@ -644,7 +649,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		trust: "agent-claimed",
 		ttl,
 		source_event: sourceEvent,
-		session_id: normalizeIdentifier(request.session_id),
+		session_id: normalizeKey(request.session_id),
 		graph_id: graphId,
 		repo,
 		conflict_key: null,
@@ -791,7 +796,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		if (reviewed && scope.class === "global") {
 			await releaseCompatibleReviews(store, entryHash, priorEntry, orphan.id, writer);
 		}
-		await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
+		await store.finishWrite(key, holder, "accepted", orphan.id).catch((cause: unknown) => reportSilent("memory-write.finish-orphan", cause));
 		return {
 			outcome: "accepted",
 			reason: "recovered.orphan",
@@ -849,7 +854,10 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 		// nothing for this.
 		const sourceEventVerified =
 			request.trust === "verified-by-test" && !reviewed && sourceEvent
-				? await (deps.verifySourceEvent?.(sourceEvent) ?? Promise.resolve(false)).catch(() => false)
+				? await (deps.verifySourceEvent?.(sourceEvent) ?? Promise.resolve(false)).catch((cause: unknown) => {
+					reportSilent("memory-write.verify-source", cause);
+					return false;
+				})
 				: false;
 		const trust = resolveTrust({ ...(request.trust === undefined ? {} : { requested: request.trust }), reviewed, sourceEventVerified });
 		const actor = resolveActor(request.actor, reviewed);
@@ -1077,7 +1085,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
  * free-text field. Redaction is deterministic, so the same key still dedupes
  * against itself on a retry.
  */
-function normalizeKey(value: unknown): string | null {
+function normalizeIdempotencyKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;
 	const cleaned = redact(value.trim()).slice(0, MAX_KEY);
 	return cleaned.length > 0 ? cleaned : null;

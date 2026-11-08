@@ -1,10 +1,11 @@
-/**
- * Steering delivery (phase 58): the `steering` notice a session reads, the acknowledgement-to-state mapping, the one hint per
- * queued directive, and the expiry timer. Everything runs on an injected clock, injected timers and in-memory sinks: no network,
- * no real delay. The session state machine here is a stub (see `StubSessionMachine`); the real adapter, `SteeringSessionRegistry`, is tested in `session-state.test.ts`.
- */
-import { describe, expect, test } from "bun:test";
+/** Pure notice/sweeper coverage and real authority-backed acknowledgement effects. Authored; parent executes. */
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { EventInput } from "../types.ts";
+import { loadConfig } from "../config.ts";
+import { auditToolCalls, createObservability } from "../observe.ts";
+import { Substrate } from "../service.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./live-session.test-support.ts";
+import { LiveSessionStatePort } from "./session-state.ts";
 import type { PlanningTimers } from "./observer.ts";
 import { SteeringInbox, type SteeringAuditEntry, type SteeringDirective, type SteeringHistorySink } from "./steering.ts";
 import {
@@ -15,16 +16,12 @@ import {
 	STEERING_QUEUED_ACTION,
 	SteeringExpirySweeper,
 	SteeringHintAnnouncer,
-	acknowledgeSteeringWithState,
 	sessionStateForAcknowledgement,
 	steeringNoticeFor,
 	steeringQueuedEvent,
 	type SessionStateName,
-	type SessionStatePort,
-	type SessionTransitionContext,
-	type SessionTransitionResult,
 } from "./steering-delivery.ts";
-import { queueSteering, type SteeringCaller, type SteeringWiring } from "./steering-tools.ts";
+import { acknowledgeSteeringWithState, queueSteering, type LiveSessionAuditPort, type SteeringCaller } from "./steering-tools.ts";
 
 const NOW = 1_800_000_000_000;
 const OPERATOR: SteeringCaller = { surface: "omp", isOperator: true };
@@ -43,42 +40,6 @@ class MemorySink implements SteeringHistorySink {
 	}
 }
 
-/**
- * A stub of the live steering session state machine, for the seam. It MIRRORS main's `steeringStateTransition` (event.ts, SPE-19390: states
- * ACTIVE, CONTEXT_REFRESH, PAUSED, RESUMED; ACTIVE to CONTEXT_REFRESH or PAUSED, CONTEXT_REFRESH to ACTIVE or PAUSED, PAUSED to
- * RESUMED, RESUMED to ACTIVE or PAUSED, a state to itself). The production port is the registry over `nextSteeringSession`
- * (`session-state.ts`). It refuses what the rules refuse and never forces a transition.
- */
-class StubSessionMachine implements SessionStatePort {
-	readonly states = new Map<string, SessionStateName>();
-	readonly calls: Array<[string, SessionStateName]> = [];
-	readonly directiveIds: string[] = [];
-	throws = false;
-
-	applyTransition(sessionKey: string, target: SessionStateName, context?: SessionTransitionContext): SessionTransitionResult {
-		this.calls.push([sessionKey, target]);
-		if (context !== undefined) this.directiveIds.push(context.directiveId);
-		if (this.throws) throw new Error("state store unavailable");
-		const current = this.states.get(sessionKey) ?? "ACTIVE";
-		if (!StubSessionMachine.allowed(current, target)) return { ok: false, reason: `steering transition ${current} -> ${target} refused` };
-		this.states.set(sessionKey, target);
-		return { ok: true, changed: current !== target };
-	}
-
-	private static allowed(current: SessionStateName, next: SessionStateName): boolean {
-		if (current === next) return true;
-		switch (current) {
-			case "ACTIVE":
-				return next === "CONTEXT_REFRESH" || next === "PAUSED";
-			case "CONTEXT_REFRESH":
-				return next === "ACTIVE" || next === "PAUSED";
-			case "PAUSED":
-				return next === "RESUMED";
-			case "RESUMED":
-				return next === "ACTIVE" || next === "PAUSED";
-		}
-	}
-}
 
 function clockAt(start: number): { nowMs(): number; set(ms: number): void } {
 	let now = start;
@@ -112,12 +73,6 @@ function inboxOver(history: SteeringHistorySink, clock: { nowMs(): number }, ack
 	});
 }
 
-function wiringOver(inbox: SteeringInbox, clock: { nowMs(): number }): SteeringWiring {
-	let next = 0;
-	return { enabled: true, clock, settingsErrors: [], inbox, newDirectiveId: () => `dir-${++next}` };
-}
-
-const QUEUE = { target_session_id: "sess-a", priority: "normal", conflicts_with_active_plan: false, body: "Check the plan." } as const;
 
 describe("sessionStateForAcknowledgement", () => {
 	const table: Array<[string, Parameters<typeof sessionStateForAcknowledgement>[0], SessionStateName | null]> = [
@@ -219,114 +174,142 @@ describe("steeringNoticeFor", () => {
 	});
 });
 
+const stops: Array<() => void> = [];
+afterEach(() => { for (const stop of stops.splice(0)) stop(); });
+
 describe("acknowledgeSteeringWithState", () => {
-	async function queued(action: "pause" | "redirect" | "annotate", machine: StubSessionMachine | null, conflicts = false) {
-		const clock = clockAt(NOW);
-		const inbox = inboxOver(new MemorySink(), clock);
-		const wiring = wiringOver(inbox, clock);
-		const result = await queueSteering(wiring, OPERATOR, { ...QUEUE, action, conflicts_with_active_plan: conflicts });
-		if (result.status !== "queued") throw new Error(`expected queued, got ${result.status}`);
-		return { inbox, wiring, machine, id: result.directive_id };
+	async function queued(action: "pause" | "redirect" | "annotate", state: SessionStateName = "ACTIVE", conflicts = false) {
+		const env = { SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp" };
+		const config = loadConfig(env);
+		const observability = createObservability(config, env);
+		await observability.start();
+		stops.push(() => observability.stop());
+		const authority = createTestLiveSessionAuthority({ nowMs: NOW });
+		const row = await issueLiveSession(authority, { caller: { surface: "cursor", isOperator: false }, state });
+		const sink = new MemorySink();
+		const events: EventInput[] = [];
+		const port = new LiveSessionStatePort({ authority, emit: async event => { events.push(event); } });
+		const audit: LiveSessionAuditPort = { auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) };
+		const substrate = new Substrate(config, { index: null, greptime: null, steering: { history: sink, liveSessions: authority, sessionState: port, nowMs: () => NOW } }, observability.observer, audit);
+		const wiring = substrate.steering;
+		const result = await queueSteering(wiring, OPERATOR, { target_session_id: row.sessionId, action, priority: "normal", body: "Check the plan.", conflicts_with_active_plan: conflicts });
+		if (result.status !== "queued") throw new Error("test queue refused");
+		const input = { directive_id: result.directive_id, session_id: row.sessionId, outcome: "applied" as const };
+		return { authority, row, sink, events, port, wiring, input, id: result.directive_id, inbox: substrate.steering.inbox };
 	}
 
-	test("an applied pause moves the session to PAUSED", async () => {
-		const machine = new StubSessionMachine();
-		const { wiring, id } = await queued("pause", machine);
-		const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
-		expect(reply).toMatchObject({ status: "acknowledged", outcome: "applied", session_state: { status: "applied", state: "PAUSED" } });
-		expect(machine.states.get("sess-a")).toBe("PAUSED");
-		expect(machine.calls).toEqual([["sess-a", "PAUSED"]]);
-		expect(machine.directiveIds).toEqual([id]);
-		expect(reply).toMatchObject({ checkpoint_hint: { trigger: "steering", directive_id: id } });
+	for (const [action, target] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) test(`applied ${action} commits state and provides an honest checkpoint hint`, async () => {
+		const h = await queued(action);
+		expect(await acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, h.port)).toMatchObject({ status: "acknowledged", session_state: { status: "applied", state: target }, checkpoint_hint: { trigger: "steering", directive_id: h.id } });
+		expect(await h.authority.read(h.row.access, "private-read")).toMatchObject({ ok: true, snapshot: { session: { state: target } } });
+		expect(h.events).toHaveLength(1);
+		expect(h.inbox?.get(h.id)).toMatchObject({ state: "acknowledged", sessionMoved: true });
 	});
 
-	test("an applied redirect moves the session to CONTEXT_REFRESH, and the machine's own rules take it back to ACTIVE", async () => {
-		const machine = new StubSessionMachine();
-		const { wiring, id } = await queued("redirect", machine);
-		const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
-		expect(reply).toMatchObject({ session_state: { status: "applied", state: "CONTEXT_REFRESH" } });
-		expect(reply).toMatchObject({ checkpoint_hint: { trigger: "steering", directive_id: id } });
-		expect(machine.states.get("sess-a")).toBe("CONTEXT_REFRESH");
-		expect(machine.applyTransition("sess-a", "ACTIVE")).toEqual({ ok: true, changed: true });
-	});
-
-	test("an applied annotate and every declined outcome leave the session where it is and never call the port", async () => {
-		for (const [action, outcome] of [["annotate", "applied"], ["pause", "declined"], ["redirect", "declined"], ["annotate", "declined"]] as const) {
-			const machine = new StubSessionMachine();
-			const { wiring, id } = await queued(action, machine);
-			const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome }, machine);
-			expect(reply).toMatchObject({ status: "acknowledged", outcome, session_state: { status: "unchanged" } });
-			expect(machine.calls).toEqual([]);
-			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
-		}
-	});
-
-	test("a pause for an already PAUSED session and a redirect for an already CONTEXT_REFRESH session report unchanged and carry no checkpoint hint", async () => {
-		for (const [action, held] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) {
-			const machine = new StubSessionMachine();
-			machine.states.set("sess-a", held);
-			const { wiring, id } = await queued(action, machine);
-			const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
-			expect(reply).toMatchObject({ status: "acknowledged", outcome: "applied", session_state: { status: "unchanged" } });
-			expect(machine.calls).toEqual([["sess-a", held]]);
-			expect(machine.states.get("sess-a")).toBe(held);
-			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
-		}
-	});
-
-	test("an illegal transition is refused by the machine, reported, and not forced; the acknowledgement stands", async () => {
-		const machine = new StubSessionMachine();
-		machine.states.set("sess-a", "PAUSED");
-		const { wiring, inbox, id } = await queued("redirect", machine);
-		const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
-		expect(reply).toMatchObject({
-			status: "acknowledged",
-			session_state: { status: "refused", state: "CONTEXT_REFRESH", reason: "steering transition PAUSED -> CONTEXT_REFRESH refused" },
-		});
-		expect(machine.states.get("sess-a")).toBe("PAUSED");
+	for (const [action, state] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) test(`${action} already held is unchanged without a hint`, async () => {
+		const h = await queued(action, state);
+		const reply = await acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, h.port);
+		expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "unchanged" } });
 		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
-		expect(inbox.get(id)?.state).toBe("acknowledged");
+		expect(h.events).toEqual([]);
 	});
 
-	test("a port that throws is a refused transition, not a failed acknowledgement", async () => {
-		const machine = new StubSessionMachine();
-		machine.throws = true;
-		const { wiring, inbox, id } = await queued("pause", machine);
-		const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
-		expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "refused", state: "PAUSED", reason: "state store unavailable" } });
-		expect(inbox.get(id)?.state).toBe("acknowledged");
+	test("illegal transition preserves acknowledgement but never fabricates a state movement", async () => {
+		const h = await queued("redirect", "PAUSED");
+		const reply = await acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, h.port);
+		expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "refused", state: "CONTEXT_REFRESH", reason: "invalid-transition" } });
+		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		expect(h.inbox?.get(h.id)?.state).toBe("acknowledged");
+		expect(await h.authority.read(h.row.access, "private-read")).toMatchObject({ ok: true, snapshot: { session: { state: "PAUSED" } } });
 	});
 
-	test("with no port the reply is the plain acknowledgement and names no session state", async () => {
-		const { wiring, id } = await queued("pause", null);
-		const reply = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, null);
-		expect(reply).toEqual({ status: "acknowledged", directive_id: id, outcome: "applied", confirmed: false });
-		expect(Object.hasOwn(reply, "session_state")).toBe(false);
+	test("annotate and every declined outcome never call the state port", async () => {
+		for (const [action, outcome] of [["annotate", "applied"], ["pause", "declined"], ["redirect", "declined"], ["annotate", "declined"]] as const) {
+			const h = await queued(action);
+			const transition = spyOn(h.port, "applyTransition");
+			const reply = await acknowledgeSteeringWithState(h.wiring, OPERATOR, { ...h.input, outcome }, h.port);
+			expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "unchanged" } });
+			expect(transition).not.toHaveBeenCalled();
+			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		}
 	});
 
-	test("a refused acknowledgement never reaches the port", async () => {
-		const machine = new StubSessionMachine();
-		const { wiring, id } = await queued("pause", machine, true);
-		const unconfirmed = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied" }, machine);
-		expect(unconfirmed).toEqual({ status: "refused", error: { code: "confirmation-required" } });
-		const wrongSession = await acknowledgeSteeringWithState(wiring, OPERATOR, { directive_id: id, session_id: "sess-b", outcome: "applied", confirm: true }, machine);
-		expect(wrongSession).toEqual({ status: "refused", error: { code: "wrong-session" } });
-		const notOperator = await acknowledgeSteeringWithState(wiring, { surface: "omp", isOperator: false }, { directive_id: id, session_id: "sess-a", outcome: "applied", confirm: true }, machine);
-		expect(notOperator).toEqual({ status: "forbidden", reason: "operator-required" });
-		expect(machine.calls).toEqual([]);
+	test("a refused acknowledgement cannot reach the transition port", async () => {
+		const h = await queued("pause", "ACTIVE", true);
+		const transition = spyOn(h.port, "applyTransition");
+		expect(await acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, h.port)).toEqual({ status: "refused", error: { code: "confirmation-required" } });
+		expect(await acknowledgeSteeringWithState(h.wiring, OPERATOR, { ...h.input, session_id: `ls_${"f".repeat(64)}`, confirm: true }, h.port)).toEqual({ status: "refused", error: { code: "not-found" } });
+		expect(transition).not.toHaveBeenCalled();
+		expect(h.inbox?.get(h.id)?.state).toBe("queued");
+	});
+
+	test("no state port returns exactly the audited plain acknowledgement", async () => {
+		const h = await queued("pause");
+		expect(await acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, null)).toEqual({ status: "acknowledged", directive_id: h.id, outcome: "applied", confirmed: false });
+		expect(await h.authority.read(h.row.access, "private-read")).toMatchObject({ ok: true, snapshot: { session: { state: "ACTIVE" } } });
+	});
+
+	test("close winning during durable acknowledgement preserves the ack and suppresses state and hint", async () => {
+		const h = await queued("pause");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const append = h.sink.append.bind(h.sink);
+		spyOn(h.sink, "append").mockImplementation(async entry => { entered.resolve(); await release.promise; await append(entry); });
+		const pending = acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, h.port);
+		await entered.promise;
+		await h.authority.close(h.row.access);
+		release.resolve();
+		const reply = await pending;
+		expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "refused" } });
+		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		expect(h.inbox?.get(h.id)?.state).toBe("acknowledged");
+		expect(h.events).toEqual([]);
+	});
+
+	for (const failure of ["close", "outage"] as const) test(`${failure} after state commit preserves applied receipt but suppresses checkpoint hint`, async () => {
+		const h = await queued("pause");
+		const moved: string[] = [];
+		const transition = h.authority.transition.bind(h.authority);
+		const effect = spyOn(h.authority, "transition").mockImplementation(async (access, input, operation) => {
+			const result = await transition(access, input, operation);
+			if (result.ok) {
+				moved.push(result.snapshot.session.state);
+				if (failure === "close") await h.authority.close(h.row.access);
+				else h.authority.unavailable = true;
+			}
+			return result;
+		});
+		const reply = await acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, h.port);
+		expect(effect).toHaveBeenCalledTimes(1);
+		expect(moved).toEqual(["PAUSED"]);
+		expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "applied", state: "PAUSED" } });
+		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		expect(h.inbox?.get(h.id)).toMatchObject({ state: "acknowledged", sessionMoved: true });
+		expect(h.sink.entries.filter(entry => entry.event === "acknowledged")).toHaveLength(1);
+		expect(await h.authority.read(h.row.access, "private-read")).toEqual({ ok: false, error: { code: failure === "close" ? "not-found" : "session-unavailable" } });
+	});
+
+	test("a throwing state port sanitizes diagnostics without undoing acknowledgement", async () => {
+		const h = await queued("pause");
+		spyOn(h.port, "applyTransition").mockImplementation(() => { throw new Error("PRIVATE-DRIVER-DIAGNOSTIC"); });
+		const reply = await acknowledgeSteeringWithState(h.wiring, OPERATOR, h.input, h.port);
+		expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "refused", reason: "session-unavailable" } });
+		expect(JSON.stringify(reply)).not.toContain("PRIVATE-DRIVER");
+		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
+		expect(h.inbox?.get(h.id)?.state).toBe("acknowledged");
 	});
 });
 
 describe("steeringQueuedEvent and SteeringHintAnnouncer", () => {
 	test("the event is a note on the substrate surface that names the directive and carries no body", () => {
 		const event = steeringQueuedEvent(directive({ body: `ride ${TOKEN}` }));
-		expect(event).toEqual({
+		expect(event).toMatchObject({
 			surface: "substrate",
 			kind: "note",
-			summary: "steering redirect queued for sess-a",
 			session_id: "sess-a",
-			payload: { action: STEERING_QUEUED_ACTION, directive_id: "dir-1", target_session_id: "sess-a", steering_action: "redirect", priority: "normal" },
+			payload: { action: STEERING_QUEUED_ACTION, directive_id: "dir-1", session_id: "sess-a", non_blocking: true },
 		});
+		expect(Object.keys(event.payload ?? {}).sort()).toEqual(["action", "directive_id", "non_blocking", "session_id"]);
 		expect(JSON.stringify(event)).not.toContain(TOKEN);
 		expect(JSON.stringify(event)).not.toContain("Stop the migration");
 	});

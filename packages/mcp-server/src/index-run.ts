@@ -56,6 +56,7 @@ import type { NoteOutcome } from "./ledger-archive.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
+import { diskDestination } from "./destination.ts";
 
 function exitUsage(message: string): never {
 	process.stderr.write(`${message}\n${INDEX_ARCHIVE_USAGE}`);
@@ -82,7 +83,7 @@ if (command.command === "verify-archive") {
 	process.exit(report.ok ? 0 : 2);
 }
 
-const config = loadConfig();
+const config = loadConfig(process.env, { realDestination: diskDestination });
 const settings = config.indexArchive;
 
 if (command.command === "restore") {
@@ -113,6 +114,7 @@ if (command.command === "restore") {
 			code = 1;
 		}
 	}
+	// The restore has finished and its outcome is decided; a pool close at exit cannot change it.
 	await target.close({ timeout: 1 }).catch(() => undefined);
 	process.exit(code);
 }
@@ -147,7 +149,8 @@ try {
 	// The path gates run before anything is written, markers included: an unmounted volume must not collect a note marker on the root disk.
 	assertArchiveDir(outDir, options, process.cwd());
 	const greptime = config.greptime ? new GreptimeClient(config.greptime, { ledger: config.ledger }) : null;
-	const substrate = new Substrate(config, { index, greptime });
+	// A job process never opens the server's telemetry buffer file: the server owns it (see reanchor-run.ts).
+	const substrate = new Substrate({ ...config, eventBuffer: null }, { index, greptime });
 	const emitNote = (input: EventInput): Promise<NoteOutcome> => substrate.emit(input);
 
 	const retried = await retryPendingIndexNotes(outDir, emitNote);
@@ -180,6 +183,7 @@ try {
 		code = 1;
 	}
 }
+// The archive outcome is decided above; a pool close at exit cannot change it.
 await index.close({ timeout: 1 }).catch(() => undefined);
 // A note the ledger has not taken is reported above and left as a marker for the next run; the archive itself succeeded, so it does not fail the run.
 if (unrecorded.length > 0) process.stderr.write(`[index] ${unrecorded.length} archive note(s) still pending: ${unrecorded.join(", ")}\n`);

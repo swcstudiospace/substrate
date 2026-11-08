@@ -26,10 +26,10 @@ import { METRIC, findCounter, sumCounter } from "@substrate/observability";
  * it no way to distinguish the two. `ok` is kept beside it: it is what the HTML renders
  * and what the older readers of this schema check.
  */
-export type ChainState = "verified" | "broken" | "unverifiable" | "not-configured";
+type ChainState = "verified" | "broken" | "unverifiable" | "not-configured";
 
 /** Whether a bundle's audit section is about one graph only. See `EvidenceInput.audit`. */
-export type AuditAttribution = "exact" | "ambiguous";
+type AuditAttribution = "exact" | "ambiguous";
 
 export interface ChainEvidence {
 	ok: boolean | null;
@@ -69,6 +69,10 @@ export interface AnchorEvidence {
 	/** The Solana devnet transaction page for `tx_sig`. */
 	explorer_url?: string;
 	reason?: string;
+	/** True when the ledger or the stored leaves contradict this hour's anchored head (D73-03); absent otherwise. */
+	head_failed?: boolean;
+	/** The graph's v3 pointer for this hour (design 5): `verified` when a pointer confirmed on chain names it, `failed` when one fails its checks, `absent` when none names it. */
+	pointer?: "verified" | "failed" | "absent";
 }
 
 /**
@@ -160,7 +164,7 @@ export interface EvidenceInput {
 	notes?: string[];
 }
 
-export interface EvidenceUsage {
+interface EvidenceUsage {
 	inputTokens: number;
 	outputTokens: number;
 	costUsd: number;

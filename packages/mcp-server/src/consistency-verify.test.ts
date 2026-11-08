@@ -165,7 +165,7 @@ function world(entries: MemoryEntry[], setup: { docs?: "auto" | "none"; events?:
 				const inside = w.events.filter((e) => e.ts >= request.since && e.ts <= request.until).sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.id < b.id ? -1 : 1));
 				const from = request.cursor === null ? 0 : Number(request.cursor);
 				const take = Math.min(request.limit, setup.ledgerPageLimit ?? 500);
-				return { events: inside.slice(from, from + take), next: from + take < inside.length ? String(from + take) : null };
+				return { events: inside.slice(from, from + take), next: from + take < inside.length ? String(from + take) : null, skipped: 0 };
 			},
 		},
 		outbox: { parkedEntryIds: async () => (w.parked === undefined ? new Set<string>() : w.parked) },
@@ -663,7 +663,7 @@ describe("ledger comparison", () => {
 		expect(report.counts.ledger_events_examined).toBe(6);
 
 		const stuck = world(entries);
-		stuck.readers.ledger.memoryWrites = async () => ({ events: [], next: "same" });
+		stuck.readers.ledger.memoryWrites = async () => ({ events: [], next: "same", skipped: 0 });
 		const bad = await run(stuck);
 		expect(bad.stores.ledger).toEqual({ state: "store_unreachable", reason: "memoryWrites: paging made no progress" });
 	});
@@ -682,7 +682,7 @@ describe("ledger comparison", () => {
 		const w = world([]);
 		// Served as-is: the fake's own time filter would drop an unparsable ts before the verifier saw it.
 		const bad: LedgerWriteEvent = { id: "ev-bad", ts: "not a date", surface: "hermes", scope: "global", kind: "fact" };
-		w.readers.ledger.memoryWrites = async () => ({ events: [bad], next: null });
+		w.readers.ledger.memoryWrites = async () => ({ events: [bad], next: null, skipped: 0 });
 		const report = await run(w);
 		expect(report.counts.ledger_events_malformed).toBe(1);
 		expect(report.findings).toEqual([]);
@@ -957,7 +957,7 @@ describe("paging that does not move", () => {
 	test("a ledger page with no write events but a moving cursor is not a stall", async () => {
 		const w = world([entry("mem_a")]);
 		const real = w.readers.ledger.memoryWrites;
-		w.readers.ledger.memoryWrites = async (request) => (request.cursor === null ? { events: [], next: "1" } : real({ ...request, cursor: null }));
+		w.readers.ledger.memoryWrites = async (request) => (request.cursor === null ? { events: [], next: "1", skipped: 0 } : real({ ...request, cursor: null }));
 		const report = await run(w);
 		expect(report.ok).toBe(true);
 		expect(report.counts.ledger_pairs).toBe(1);

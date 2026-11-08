@@ -47,7 +47,7 @@ export const CHECKPOINT_VERSION = 1;
 export const MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024;
 
 /** The states the notifier announces; `recovered` is the end of either of the other two. */
-export const NOTIFY_STATES = ["breached", "open", "recovered"] as const;
+const NOTIFY_STATES = ["breached", "open", "recovered"] as const;
 export type NotifyState = (typeof NOTIFY_STATES)[number];
 
 /** The last transition emitted for one objective, as the checkpoint remembers it. */
@@ -58,20 +58,20 @@ export interface NotifyRecord {
 }
 
 /** One counter as the checkpoint carries it: name, kind, points — never description or unit, which the running release owns. */
-export interface CheckpointCounter {
+interface CheckpointCounter {
 	kind: "counter";
 	name: string;
 	points: CounterPoint[];
 }
 
-export interface CheckpointHistogram {
+interface CheckpointHistogram {
 	kind: "histogram";
 	name: string;
 	bounds: number[];
 	points: HistogramPoint[];
 }
 
-export type CheckpointMetric = CheckpointCounter | CheckpointHistogram;
+type CheckpointMetric = CheckpointCounter | CheckpointHistogram;
 
 export interface SloCheckpoint {
 	v: typeof CHECKPOINT_VERSION;
@@ -89,7 +89,7 @@ export interface SloCheckpoint {
 }
 
 /** What the server adds to the observability package's own state when it writes. */
-export interface CheckpointExtras {
+interface CheckpointExtras {
 	/** Carried from the restored checkpoint, or the registry's start on a fresh process. */
 	since: string;
 	capacity?: readonly CapacitySample[];

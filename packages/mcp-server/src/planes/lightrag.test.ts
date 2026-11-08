@@ -7,11 +7,14 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { LightragConfig } from "../config.ts";
+import { sharedDeadline } from "../deadline.ts";
+import { runLightragAttempts, settleLightrag } from "../lightrag-attempts.ts";
 import {
 	deleteDocuments,
 	documentName,
 	isClearAllRequest,
 	isLightragQueryMode,
+	LIGHTRAG_EMPTY_ANSWER,
 	lightragCall,
 	lightragOp,
 	parseDocuments,
@@ -301,7 +304,7 @@ describe("retrieval (POST /query)", () => {
 	test("an envelope with no usable entries is a shape failure, not an empty answer", async () => {
 		const fake = fakeLightrag({ "POST /query": [json({ data: { chunks: [] } })] });
 		const outcome = await retrieveChunks(PLAIN, { question: "q" }, fake.fetch);
-		expect(outcome).toEqual({ ok: false, reason: "lightrag: unexpected response shape" });
+		expect(outcome).toEqual({ ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER });
 	});
 
 	test("an empty or whitespace question is a reason and makes no request", async () => {
@@ -895,13 +898,57 @@ describe("queryForTool (the docs_lightrag_query door)", () => {
 	test("a failure, an empty question and an answer with no usable text are reasons", async () => {
 		const fake = fakeLightrag({ "POST /query": [json({ detail: "x" }, 500), json({ data: { chunks: [{ content: "" }] } })] });
 		expect(await queryForTool(PLAIN, { question: "q" }, fake.fetch)).toEqual({ ok: false, reason: "lightrag 500" });
-		expect(await queryForTool(PLAIN, { question: "q" }, fake.fetch)).toEqual({ ok: false, reason: "lightrag: unexpected response shape" });
+		expect(await queryForTool(PLAIN, { question: "q" }, fake.fetch)).toEqual({ ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER });
 		expect(await queryForTool(PLAIN, { question: "  " }, fake.fetch)).toEqual({ ok: false, reason: "lightrag: empty query" });
 	});
 
 	test("isLightragQueryMode accepts exactly the five modes the client sends", () => {
 		for (const mode of ["naive", "local", "global", "hybrid", "mix"]) expect(isLightragQueryMode(mode)).toBe(true);
 		for (const mode of ["bypass", "", 3, null, undefined]) expect(isLightragQueryMode(mode)).toBe(false);
+	});
+});
+
+describe("the retry policy on the plane's failures: a zero-chunk answer is never retried, a 500 or a timeout is", () => {
+	const RETRY = { maxRetries: 2, retryBaseMs: 1 };
+	const answer = (): Response => json({ data: { chunks: [{ content: "kept", file_path: "docs__a.md", score: 0.5 }] } });
+
+	test("a zero-chunk answer from queryWithGraph is asked exactly once, though a retry would have answered", async () => {
+		const fake = fakeLightrag({ "POST /query": [json({ data: { chunks: [] } }), answer()] });
+		const outcome = await runLightragAttempts(() => settleLightrag(queryWithGraph(PLAIN, "q", fake.fetch)), RETRY, sharedDeadline(0, "docs budget"));
+		expect(fake.calls).toHaveLength(1);
+		expect(outcome).toEqual({ status: "fulfilled", value: { ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER } });
+	});
+
+	test("a zero-chunk answer from queryForTool is asked exactly once, though a retry would have answered", async () => {
+		const fake = fakeLightrag({ "POST /query": [json({ data: { chunks: [{ content: "" }] } }), answer()] });
+		const outcome = await runLightragAttempts(() => settleLightrag(queryForTool(PLAIN, { question: "q" }, fake.fetch)), RETRY, sharedDeadline(0, "docs budget"));
+		expect(fake.calls).toHaveLength(1);
+		expect(outcome).toEqual({ status: "fulfilled", value: { ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER } });
+	});
+
+	test("a 500 is retried: the first attempt plus maxRetries, then the last failure stands", async () => {
+		const fake = fakeLightrag({ "POST /query": [json({ detail: "x" }, 500), json({ detail: "x" }, 500), json({ detail: "x" }, 500)] });
+		const outcome = await runLightragAttempts(() => settleLightrag(queryForTool(PLAIN, { question: "q" }, fake.fetch)), RETRY, sharedDeadline(0, "docs budget"));
+		expect(fake.calls).toHaveLength(RETRY.maxRetries + 1);
+		expect(outcome).toEqual({ status: "fulfilled", value: { ok: false, reason: "lightrag 500" } });
+	});
+
+	test("a 500 followed by an answer: the retry's answer is the outcome", async () => {
+		const fake = fakeLightrag({ "POST /query": [json({ detail: "x" }, 500), answer()] });
+		const outcome = await runLightragAttempts(() => settleLightrag(queryForTool(PLAIN, { question: "q" }, fake.fetch)), RETRY, sharedDeadline(0, "docs budget"));
+		expect(fake.calls).toHaveLength(2);
+		expect(outcome).toEqual({ status: "fulfilled", value: { ok: true, chunks: [{ content: "kept", title: "docs__a.md", sourceUrl: "docs__a.md", score: 0.5 }], mode: "hybrid" } });
+	});
+
+	test("a timeout is retried: every attempt times out, and the chain ends at maxRetries plus the first attempt", async () => {
+		let calls = 0;
+		const timedOut: FetchLike = async () => {
+			calls += 1;
+			throw Object.assign(new Error("The operation timed out."), { name: "TimeoutError" });
+		};
+		const outcome = await runLightragAttempts(() => settleLightrag(queryForTool(PLAIN, { question: "q" }, timedOut)), RETRY, sharedDeadline(0, "docs budget"));
+		expect(calls).toBe(RETRY.maxRetries + 1);
+		expect(outcome).toEqual({ status: "fulfilled", value: { ok: false, reason: "lightrag unreachable: The operation timed out." } });
 	});
 });
 

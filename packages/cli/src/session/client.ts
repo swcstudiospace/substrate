@@ -33,7 +33,7 @@ import {
 export const CKPT_ID_PATTERN = /^ckpt_[0-9a-z]{26}$/;
 export const ROLLBACK_ID_PATTERN = /^rb_[0-9a-z]{26}$/;
 
-export interface ClientError {
+interface ClientError {
 	code: string;
 	message: string;
 	retryable: boolean;
@@ -51,7 +51,7 @@ export interface RecordCheckpointOk {
 }
 
 export type AnchorStatus = "anchored" | "pending" | "unanchored" | "unverified" | "mismatch";
-export const ANCHOR_STATUSES: readonly AnchorStatus[] = ["anchored", "pending", "unanchored", "unverified", "mismatch"];
+const ANCHOR_STATUSES: readonly AnchorStatus[] = ["anchored", "pending", "unanchored", "unverified", "mismatch"];
 
 export interface RollbackPlan {
 	rollback_id: string;
@@ -142,7 +142,7 @@ export function isUnreachable(error: ClientError): boolean {
 }
 
 /** The failure an offline client returns for every call: the caller decides what to do locally. */
-export function offlineFailure(): ClientFailure {
+function offlineFailure(): ClientFailure {
 	return { ok: false, error: { code: "offline", message: "the server was not contacted (offline mode or the server is unreachable)", retryable: true } };
 }
 
@@ -188,7 +188,7 @@ function parseRecordOk(body: Rec): RecordCheckpointOk {
 	return { ckpt_id: asStr(body.ckpt_id, "ckpt_id"), event_id: asStr(body.event_id, "event_id"), stored: asBool(body.stored, "stored") };
 }
 
-export function parsePlan(value: unknown): RollbackPlan {
+function parsePlan(value: unknown): RollbackPlan {
 	const plan = asRec(value, "plan");
 	const target = asRec(plan.target, "plan.target");
 	const anchorRaw = plan.anchor;

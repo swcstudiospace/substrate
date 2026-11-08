@@ -3,9 +3,9 @@
  * digest never exceeds its bound or cuts a line in half.
  */
 import { describe, expect, test } from "bun:test";
-import type { ContextDigest, DigestItem } from "./client.ts";
+import type { ContextDigest, DigestItem, SteerDirective } from "./client.ts";
 import { plain } from "./plain.ts";
-import { ageOf, ageText, boundLines, renderDigest, renderSessionLine } from "./render.ts";
+import { ageOf, ageText, boundLines, renderDigest, renderDirectives, renderSessionLine, renderSessions } from "./render.ts";
 
 const item = (source: string, age_s: number, fields: Record<string, unknown> = {}): DigestItem => ({ source, age_s, fields });
 
@@ -48,6 +48,42 @@ describe("ages", () => {
 		expect(line).toContain("updated recently");
 		expect(line).toContain("steering=PAUSED");
 		expect(line).not.toContain("planning=");
+	});
+});
+
+describe("metadata-only session rendering", () => {
+	const metadata = {
+		session_id: `ls_${"1".repeat(64)}`, surface: "omp", repo_id: "acme/widgets", state: "ACTIVE",
+		updated_at: "2026-01-01T00:00:00.000Z", expires_at: "2026-01-01T01:00:00.000Z",
+	};
+
+	test("absent private fields are omitted, not invented as zero or undefined", () => {
+		const line = renderSessionLine(metadata, Date.parse("2026-01-01T00:01:00.000Z"));
+		expect(line).toContain("surface=omp");
+		expect(line).toContain("state=ACTIVE");
+		expect(line).toContain("repo=acme/widgets");
+		expect(line).toContain("updated 1m ago");
+		expect(line).not.toContain("pending=");
+		expect(line).not.toContain("planning=");
+		expect(line).not.toContain("steering=");
+		expect(line).not.toContain("undefined");
+		expect(line).not.toContain("null");
+		expect(renderSessions({ sessions: [metadata], truncated: false }, Date.parse("2026-01-01T00:01:00.000Z"))).toEqual([line]);
+	});
+
+	test("explicit operator zero and authorized private values remain distinguishable from absence", () => {
+		const line = renderSessionLine({ ...metadata, pending_directives: 0, planning_hash: "0123456789abcdef", steering: { state: "PAUSED" } }, 0);
+		expect(line).toContain("pending=0");
+		expect(line).toContain("planning=01234567");
+		expect(line).toContain("steering=PAUSED");
+	});
+
+	test("metadata strings still neutralize terminal controls", () => {
+		const line = renderSessionLine({ ...metadata, surface: "omp\u001b[2J", repo_id: "acme/widgets\u0007", state: "ACTIVE\nPAUSED" }, 0);
+		expect(line).not.toContain("\u001b");
+		expect(line).not.toContain("\u0007");
+		expect(line).not.toContain("\n");
+		expect(line).not.toContain("pending=");
 	});
 });
 
@@ -128,3 +164,14 @@ function defined<T>(value: T | undefined): T {
 	if (value === undefined) throw new Error("expected a value");
 	return value;
 }
+
+describe("directive lines", () => {
+	const directive = (id: string): SteerDirective => ({
+		id, session_id: `ls_${"1".repeat(64)}`, action: "annotate", body: "note", priority: "normal", status: "queued",
+		author: "omp", created_at: "2026-01-01T00:00:00.000Z", acknowledged_at: null, outcome: null, checkpoint_hint: null,
+	});
+	test("a directive id prints whole up to the 128 characters the server accepts, so the operator can copy it to acknowledge", () => {
+		const id = `d-${"x".repeat(125)}`;
+		expect(renderDirectives([directive(id)], Date.parse("2026-01-01T00:05:00.000Z")).join("\n")).toContain(id);
+	});
+});

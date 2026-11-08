@@ -79,6 +79,7 @@ import {
 	supersededEntries,
 	type VerifyReport,
 } from "./render.ts";
+import { corpusScopeRefusal, type LocalAudit, type LocalTarget } from "./scope.ts";
 import {
 	HOOK_ACTIONS,
 	type HookAction,
@@ -110,13 +111,13 @@ export const USAGE =
 	"substrate corpus prove --repo R --path P [--out FILE] [--server URL]   (prints the inclusion proof of one document)\n" +
 	"substrate corpus verify FILE [--online] [--server URL] [--json]   (0 valid, 1 invalid, 2 usage; offline unless --online)\n";
 
-export const DEFAULT_ROOT = "/root/src/repos";
-export const DEFAULT_BATCH_DOCS = 20;
-export const DEFAULT_BATCH_BYTES = 1_000_000;
+const DEFAULT_ROOT = "/root/src/repos";
+const DEFAULT_BATCH_DOCS = 20;
+const DEFAULT_BATCH_BYTES = 1_000_000;
 /** A plan or an ingest batch of a few thousand entries is megabytes of JSON; the server needs time to judge it. */
 export const CORPUS_TIMEOUT_MS = 120_000;
 
-export interface CorpusDeps {
+interface CorpusDeps {
 	/** The substrate's base URL, without a trailing slash. */
 	url: string;
 	token: string | undefined;
@@ -138,6 +139,8 @@ export interface CorpusDeps {
 	readPrefix?: ((path: string, maxBytes: number) => Uint8Array) | undefined;
 	/** Test seam of `prove --out`. */
 	writeFile?: ((path: string, text: string) => void) | undefined;
+	/** Audits a refused request (phase 72); the CLI wires the ledger, and a refusal is never blocked by a failed write. */
+	audit?: LocalAudit | undefined;
 }
 
 const SCAN_VALUES = ["root", "tier", "max-bytes", "source", "greptile-dir", "github-owner", "max-repos"] as const;
@@ -172,6 +175,26 @@ interface ScanArgs {
 function resolveRoots(parsed: Parsed, env: Record<string, string | undefined>): string[] {
 	const configured = (env.SUBSTRATE_CORPUS_ROOTS ?? "").split(":").filter((root) => root !== "");
 	return parsed.values.get("root") ?? (configured.length > 0 ? configured : [DEFAULT_ROOT]);
+}
+
+/**
+ * What a corpus command would run git in, hook, or name, before it runs (phase 72). `scan`, `plan`, `ingest` and `eval` run git
+ * over their roots only when the filesystem source is selected. `hint` writes a spool file and runs no git, so it has no target.
+ */
+function localTargets(sub: string, parsed: Parsed, env: Record<string, string | undefined>): LocalTarget[] {
+	const roots = (): LocalTarget[] => resolveRoots(parsed, env).map((path) => ({ path }));
+	const repos = (): LocalTarget[] => (parsed.values.get("repo") ?? []).map((repo) => ({ repo }));
+	if (sub === "scan" || sub === "plan" || sub === "ingest" || sub === "eval") {
+		const sources = (parsed.values.get("source") ?? ["fs"]).flatMap((text) => text.split(","));
+		return sources.includes("fs") ? roots() : [];
+	}
+	if (sub === "reflect" || sub === "sync") return [...roots(), ...repos()];
+	if (sub === "watch" || sub === "reconcile") return roots();
+	if (sub === "hook") {
+		const repo = last(parsed, "repo");
+		return repo === undefined ? [] : [{ path: resolve(repo) }];
+	}
+	return [];
 }
 
 function resolveScanArgs(parsed: Parsed, env: Record<string, string | undefined>): ScanArgs | string {
@@ -277,6 +300,12 @@ export async function runCorpus(argv: string[], deps: CorpusDeps): Promise<numbe
 		deps.err(`[substrate] corpus ${sub}: ${message}\n`);
 		return 2;
 	};
+	// Phase 72: a root, hook directory or repository the registry does not place is refused before any git call or hook write.
+	const refusal = await corpusScopeRefusal(sub, deps.env, localTargets(sub, parsed, deps.env), deps.audit);
+	if (refusal !== null) {
+		deps.err(`[substrate] corpus ${sub}: ${refusal}`);
+		return 2;
+	}
 	try {
 		if (sub === "status") return await status(parsed, deps);
 		if (sub === "hint" || sub === "hook") return hintOrHook(sub, argv[1], parsed, deps, usage);
@@ -325,7 +354,7 @@ function hintOrHook(sub: "hint" | "hook", action: string | undefined, parsed: Pa
 	if (sub === "hint") return runHintCommand({ settings: readWatchSettings(deps.env), now: deps.now ?? Date.now, err: deps.err }, repo);
 	const known = HOOK_ACTIONS.find((candidate): candidate is HookAction => candidate === action);
 	if (known === undefined) return usage("hook needs one of install, uninstall, status");
-	return runHookCommand({ out: deps.out }, known, resolve(repo));
+	return runHookCommand({ out: deps.out, env: deps.env }, known, resolve(repo));
 }
 
 async function watchFamily(

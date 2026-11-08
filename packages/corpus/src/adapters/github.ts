@@ -27,9 +27,9 @@ import {
 import { entrySupersededBy } from "../supersession.ts";
 
 export const DEFAULT_GITHUB_MAX_REPOS = 50;
-export const DEFAULT_GITHUB_CONCURRENCY = 4;
+const DEFAULT_GITHUB_CONCURRENCY = 4;
 /** The `-L` of `gh repo list`: how many repositories of the owner are listed before the cap and the filters apply. */
-export const DEFAULT_GITHUB_LIST_LIMIT = 1000;
+const DEFAULT_GITHUB_LIST_LIMIT = 1000;
 
 const GH_MAX_BUFFER = 256 * 1024 * 1024;
 /** A GitHub account name; it may not start with a hyphen, so it can never be read as a flag by `gh`. */
@@ -46,7 +46,7 @@ export interface GhResult {
 /** Runs `gh <args>`. Never a shell string; a non-zero `code` means gh failed. */
 export type GhRunner = (args: string[]) => Promise<GhResult>;
 
-export const defaultGhRunner: GhRunner = (args) => {
+const defaultGhRunner: GhRunner = (args) => {
 	const { promise, resolve } = Promise.withResolvers<GhResult>();
 	execFile("gh", args, { encoding: "utf8", maxBuffer: GH_MAX_BUFFER }, (error, stdout) => {
 		resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : 1, stdout });
@@ -54,7 +54,7 @@ export const defaultGhRunner: GhRunner = (args) => {
 	return promise;
 };
 
-export interface GithubScanOptions {
+interface GithubScanOptions {
 	owner: string;
 	/** Repositories read, after archived and skipped ones are removed, in `owner/name` order. Default 50. */
 	maxRepos?: number | undefined;

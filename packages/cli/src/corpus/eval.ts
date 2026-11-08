@@ -25,12 +25,12 @@ import { printable } from "./render.ts";
 import type { Inventory } from "./inventory.ts";
 
 /** The extensions of the documents the questions are written from. */
-export const EVAL_EXTENSIONS: readonly string[] = [".md", ".markdown", ".mdx"];
+const EVAL_EXTENSIONS: readonly string[] = [".md", ".markdown", ".mdx"];
 /** How many unreadable documents a report names; the rest are counted. */
 export const EVAL_LISTED_PROBLEMS = 10;
 
 /** A repository the scan did not read completely: its documents may be missing from the questions, so a result over the rest is partial. */
-export interface IncompleteRepo {
+interface IncompleteRepo {
 	repo: string;
 	source: string;
 	reason: string;
@@ -78,7 +78,7 @@ export function readEvalDocuments(inventory: Inventory, read: (path: string) => 
 	return { docs, unreadable, incomplete, copies: { groups: identicalCopies, unlisted: Math.max(0, identical - listedCopies) } };
 }
 
-export interface EvalServer {
+interface EvalServer {
 	url: string;
 	token: string;
 	fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
@@ -94,7 +94,7 @@ export interface EvalRequest {
 	now: () => number;
 }
 
-export interface EvalOutcome {
+interface EvalOutcome {
 	code: number;
 	/** Standard output text. */
 	text: string;

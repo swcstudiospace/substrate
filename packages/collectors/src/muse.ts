@@ -40,7 +40,7 @@ const DEFAULT_STATE_DIR = "/var/lib/substrate";
 const STATE_NAME = "muse-offsets.json";
 const FETCH_TIMEOUT_MS = 3_000;
 
-export interface MuseCounters {
+interface MuseCounters {
 	stored: number;
 	refused: number;
 	failed: number;
@@ -51,7 +51,7 @@ export interface MuseCounters {
 	unchanged: number;
 }
 
-export interface RepoRecord {
+interface RepoRecord {
 	last_success?: string;
 	last_failure?: string;
 	/** The `ETag` of the last 200, sent as `If-None-Match` on the next fetch. */
@@ -71,7 +71,7 @@ export function emptyState(): MuseState {
 }
 
 /** Where per-repo timestamps and counters live. `SUBSTRATE_COLLECTOR_STATE` overrides the file. */
-export function stateFile(): string {
+function stateFile(): string {
 	const override = process.env.SUBSTRATE_COLLECTOR_STATE?.trim();
 	if (override) return override;
 	const dir = process.env.SUBSTRATE_STATE_DIR?.trim() || DEFAULT_STATE_DIR;
@@ -177,12 +177,13 @@ export async function ledgerAvailable(): Promise<boolean> {
 		const body = (await response.json()) as { greptime?: unknown };
 		return body.greptime === true;
 	} catch {
+		// A failed probe is an unavailable ledger; the error itself is not kept.
 		return false;
 	}
 }
 
 /** What one `POST /brief` came back as. `unchanged` is a 304 against the tag we sent. */
-export type FetchedBrief =
+type FetchedBrief =
 	| { ok: true; unchanged: false; text: string; etag: string | null }
 	| { ok: true; unchanged: true; etag: string }
 	| { ok: false; reason: string };
@@ -212,7 +213,7 @@ export async function fetchBrief(slug: string, branch: string | undefined, etag:
 }
 
 /** Write `text` by tmp + rename. Returns false when the bytes are already current. */
-export function writeIfChanged(path: string, text: string): boolean {
+function writeIfChanged(path: string, text: string): boolean {
 	try {
 		if (existsSync(path) && readFileSync(path, "utf8") === text) return false;
 	} catch {
@@ -306,7 +307,7 @@ export function ensurePointer(repo: string, counters: MuseCounters): "written" |
  * `git rev-parse --git-path info/exclude` names. Local only; never committed.
  * In a worktree that path is the worktree git dir, not the main repo's.
  */
-export function ensureExclude(repo: string): void {
+function ensureExclude(repo: string): void {
 	const relative = ".substrate";
 	if (!existsSync(join(repo, relative))) return;
 	const ignored = spawnSync("git", ["-C", repo, "check-ignore", "-q", relative], { encoding: "utf8" });

@@ -87,7 +87,7 @@ export function toProposalRequest(body: Record<string, unknown>): SkillProposalR
 }
 
 /** What a failed proposal answers with: the route's status and JSON body, and the tool's refusal payload. */
-export interface ProposalFailure {
+interface ProposalFailure {
 	status: 400 | 401 | 403 | 409 | 502;
 	body: {
 		refused?: true;

@@ -36,28 +36,28 @@ export const TEI_REASONS = [
 	"dim-mismatch",
 	"input-refused",
 ] as const;
-export type TeiReason = (typeof TEI_REASONS)[number];
+type TeiReason = (typeof TEI_REASONS)[number];
 
 export type TeiEmbedResult =
 	| { ok: true; vectors: Float32Array[]; model: string; dim: number }
 	| { ok: false; reason: TeiReason };
 
 /** The facts of `GET /info` the client uses. */
-export interface TeiInfo {
+interface TeiInfo {
 	modelId: string;
 	maxInputLength: number | null;
 	maxClientBatchSize: number | null;
 }
 
-export type TeiInfoResult = { ok: true; info: TeiInfo } | { ok: false; reason: TeiReason };
-export type TeiHealthResult = { ok: true; latencyMs: number } | { ok: false; reason: TeiReason };
+type TeiInfoResult = { ok: true; info: TeiInfo } | { ok: false; reason: TeiReason };
+type TeiHealthResult = { ok: true; latencyMs: number } | { ok: false; reason: TeiReason };
 
 /** Where the model the fabric reports came from. Closed. */
-export const TEI_MODEL_SOURCES = ["pinned", "learned", "observed", "none"] as const;
+const TEI_MODEL_SOURCES = ["pinned", "learned", "observed", "none"] as const;
 export type TeiModelSource = (typeof TEI_MODEL_SOURCES)[number];
 
 /** What the client has seen, for the fabric row. Names and numbers only. */
-export interface TeiSnapshot {
+interface TeiSnapshot {
 	/** The pinned model, else the one learned from an embed answer; null before either. This is the model cache keys name. */
 	model: string | null;
 	/** The model `/info` last named, however it was read (a probe included); null before one. Never a cache key. */
@@ -108,7 +108,7 @@ export const MAX_TEXT_CHARS = 32 * 1024;
 export const MAX_TEXTS_PER_CALL = 4096;
 /** Attempts per request, the first included. */
 export const MAX_ATTEMPTS = 4;
-export const BACKOFF_BASE_MS = 250;
+const BACKOFF_BASE_MS = 250;
 export const BACKOFF_CAP_MS = 4000;
 /** How long a model check stays good before `/info` is read again, ms. */
 export const MODEL_RECHECK_MS = 10 * 60 * 1000;

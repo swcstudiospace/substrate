@@ -41,8 +41,8 @@ import { dirname, join } from "node:path";
 import { SKILL_NAME_RE } from "../../mcp-server/src/skills/propose.ts";
 import type { Action, WarningEvent } from "./skills.ts";
 
-export const GOVERNANCE_ENV = "SUBSTRATE_SKILLS_GOVERNANCE";
-export type GovernanceMode = "off" | "report" | "enforce";
+const GOVERNANCE_ENV = "SUBSTRATE_SKILLS_GOVERNANCE";
+type GovernanceMode = "off" | "report" | "enforce";
 
 /** Names the server may send: its own cap is 500 (`truncated` flags the rest). */
 export const MAX_APPROVED = 500;
@@ -53,7 +53,7 @@ export const MAX_CACHE_BYTES = 64 * 1024;
 /** Names carried in one warning; the count carries the rest. */
 export const MAX_WARNED_NAMES = 20;
 /** Fail-open fetch budget, the same family as the projector's POST /events. */
-export const FETCH_TIMEOUT_MS = 3_000;
+const FETCH_TIMEOUT_MS = 3_000;
 /** The same warning is re-sent after this long even when nothing changed, so a standing gap stays visible. */
 export const RENOTIFY_MS = 24 * 60 * 60 * 1000;
 const TMP_SUFFIX = ".substrate-tmp";
@@ -62,11 +62,11 @@ const CACHE_VERSION = 2;
 /** Longest origin or library string a cache may carry. */
 const MAX_SOURCE_CHARS = 200;
 
-export const APPROVED_CACHE_NAME = "approved.json";
-export const GOVERNANCE_WARNED_NAME = "governance-warned.json";
+const APPROVED_CACHE_NAME = "approved.json";
+const GOVERNANCE_WARNED_NAME = "governance-warned.json";
 
 /** The substrate's `/skills` door, with the projector's own surface token. */
-export interface GovernanceTarget {
+interface GovernanceTarget {
 	url: string;
 	token: string;
 }
@@ -135,7 +135,7 @@ export function skillsGovernanceConfigWarnings(options: Pick<GovernanceOptions, 
 	return [`${GOVERNANCE_ENV}=${JSON.stringify(options.rejected)} is not off, report or enforce; using off (no governance)`];
 }
 
-export interface ApprovedList {
+interface ApprovedList {
 	names: Set<string>;
 	truncated: boolean;
 	/** Entries dropped for a missing or invalid name. */
@@ -145,7 +145,7 @@ export interface ApprovedList {
 }
 
 /** `scheme://host[:port]` of a URL, without credentials, path or query; null when it is not an http(s) URL. */
-export function originOf(url: string): string | null {
+function originOf(url: string): string | null {
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
@@ -201,7 +201,7 @@ async function readCapped(response: Response, max: number): Promise<string | nul
 	return Buffer.concat(chunks).toString("utf8");
 }
 
-export type FetchOutcome = { ok: true; list: ApprovedList } | { ok: false; reason: string };
+type FetchOutcome = { ok: true; list: ApprovedList } | { ok: false; reason: string };
 
 /** `GET /skills?state=approved`; every failure is a reason (never a throw, never the token). */
 export async function fetchApproved(target: GovernanceTarget, fetchImpl: typeof fetch = fetch, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<FetchOutcome> {
@@ -286,7 +286,7 @@ export function writeApprovedCache(
 	writeJsonAtomic(file, { version: CACHE_VERSION, fetched_at: new Date(now).toISOString(), source, truncated, names: [...names].sort() });
 }
 
-export type ApprovedSource = "live" | "cache" | "none";
+type ApprovedSource = "live" | "cache" | "none";
 
 export interface GovernanceRun {
 	mode: Exclude<GovernanceMode, "off">;
@@ -404,6 +404,14 @@ interface WarnedEntry {
 	at: number;
 }
 
+/** A fixed short label for a caught error: its code or constructor name, never its message. */
+function errorTag(error: unknown): string {
+	const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+	if (typeof code === "string" && /^[A-Za-z0-9._-]{1,40}$/.test(code)) return code;
+	const name = error instanceof Error ? error.constructor.name : "";
+	return /^[A-Za-z0-9._-]{1,40}$/.test(name) ? name : "unknown";
+}
+
 function readWarned(file: string): Record<string, WarnedEntry> {
 	try {
 		const stat = lstatSync(file);
@@ -418,7 +426,9 @@ function readWarned(file: string): Record<string, WarnedEntry> {
 			if (typeof digest === "string" && typeof at === "number" && Number.isFinite(at)) out[key] = { digest, at };
 		}
 		return out;
-	} catch {
+	} catch (error) {
+		const tag = errorTag(error);
+		if (tag !== "ENOENT") process.stderr.write(`projector.skills-governance.state ${tag}\n`);
 		return {};
 	}
 }
@@ -438,7 +448,7 @@ type GovernanceReason = keyof typeof REASON_SUMMARY;
  * beyond the cut (in `enforce` they stay held back — fail-closed for new links — until the list fits);
  * `approved-list-unavailable` (enforce, nothing fetched and nothing cached) says why no new link was made.
  */
-export function governanceWarning(run: GovernanceRun, libraryCount: number): { key: string; digest: string; event: WarningEvent } | null {
+function governanceWarning(run: GovernanceRun, libraryCount: number): { key: string; digest: string; event: WarningEvent } | null {
 	let reason: GovernanceReason;
 	let names: string[];
 	let count: number;

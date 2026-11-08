@@ -29,7 +29,7 @@ export type AuthorityLookup = (key: string) => DocAuthority | null;
  * The re-rank multiplies a citation's own score by `FLOOR + (1 - FLOOR) * authority`, so authority moves a citation by at
  * most half of its score: the plane's relevance still decides, authority only breaks near ties and demotes the doubtful.
  */
-export const RERANK_AUTHORITY_FLOOR = 0.5;
+const RERANK_AUTHORITY_FLOOR = 0.5;
 
 /** A document is `stale` through feedback once this many readers called it stale and more did so than called it helpful. */
 export const STALE_FEEDBACK_MIN = 3;
@@ -42,7 +42,7 @@ export interface ShadowNote {
 	moved: number;
 }
 
-export interface ReflectedCitations {
+interface ReflectedCitations {
 	chunks: SearchCitation[];
 	/** Set only in `on` mode: the answer carries it as `rerank`. */
 	rerank?: { applied: true; moved: number };

@@ -31,13 +31,13 @@ import { HOOK_TIMEOUT_MS, postEvent } from "./emit.ts";
 
 export const TRANSCRIPTS_DIR = "/var/lib/substrate/transcripts/cursor";
 export const CURSOR_ROOT = "/root/.cursor";
-export const MAX_TRANSCRIPT_BYTES = 20_000_000;
+const MAX_TRANSCRIPT_BYTES = 20_000_000;
 
 const STDIN_TIMEOUT_MS = 5000;
 const CONVERSATION_ID = /^[A-Za-z0-9-]{8,128}$/;
 
 /** The fields of Cursor's stop envelope this hook reads; the rest pass through untouched. */
-export interface StopInput {
+interface StopInput {
 	conversation_id?: unknown;
 	transcript_path?: unknown;
 	status?: unknown;
@@ -45,7 +45,7 @@ export interface StopInput {
 }
 
 /** Result of a copy attempt: the destination path, or null and why. */
-export interface CopyResult {
+interface CopyResult {
 	ref: string | null;
 	reason?: string;
 }
@@ -61,7 +61,7 @@ export function sessionLessonText(transcript: string, limit = 3000): string {
 	return body;
 }
 
-export interface StopDeps {
+interface StopDeps {
 	/** Post `session.end`. `timeoutMs` is the fetch bound still left in the hook. The promise includes the spool park after a timeout, and the hook awaits it. */
 	emit: (event: EventInput, timeoutMs: number) => Promise<unknown>;
 	/** Transcripts outside this directory (after realpath) are refused. */
@@ -96,6 +96,7 @@ export function parseStopInput(raw: string): StopInput | null {
 		const value: unknown = JSON.parse(raw.replace(/^\ufeff/, ""));
 		return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as StopInput) : null;
 	} catch {
+		// Not JSON: null, which runStop records as a malformed envelope.
 		return null;
 	}
 }
@@ -302,7 +303,9 @@ async function readStdin(timeoutMs: number): Promise<string> {
 	const timer = setTimeout(() => resolveTimeout(""), timeoutMs);
 	try {
 		return await Promise.race([Bun.stdin.text(), timeout]);
-	} catch {
+	} catch (cause) {
+		const code = (cause as { code?: unknown } | null)?.code;
+		process.stderr.write(`[substrate] cursor-stop stdin read failed (${String(code ?? "none")})\n`);
 		return "";
 	} finally {
 		clearTimeout(timer);

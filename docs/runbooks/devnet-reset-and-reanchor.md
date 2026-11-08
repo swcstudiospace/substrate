@@ -116,7 +116,7 @@ The JSON (`schema: 1`, `dry_run: true`) has `window`, `chain` (`expected_genesis
 | `present-on-observed-cluster` | the signature already exists on the observed cluster | nothing |
 | `chain-unreachable` | the endpoint did not answer for this hour, or the anchor is inside the 120 s grace window | re-run later |
 | `signature-missing-without-reset` | the cluster is the expected one and the signature is missing: pruning or tampering | **investigate; never re-anchor** |
-| `invalid-row` | the row's root, count, memo or signature is not sound (the memo must be exactly `formatMemo` of its own period, root and count) | investigate the row; a row is never "repaired" |
+| `invalid-row` | the row's root, count, memo or signature is not sound (the memo must be a v1 or v2 memo of its own period, root and count) | investigate the row; a row is never "repaired" |
 | `duplicate-row` | a second row names the hour | resolve the duplicate first |
 | `no-evidence` | no chain read was possible for this hour (for example the signature is not base58) | investigate the row |
 
@@ -162,7 +162,7 @@ Gates. Everything read-only, **for every hour of the plan**, finishes **before t
 | `unfunded` | the key holds less than the rent-exempt minimum plus the fees of the sends this run may make (`REQUIRED_BALANCE_LAMPORTS` = 895 880, then 5 000 lamports for each further send) |
 | `no-operator-surface` | no operator surface to write the note as (see `--surface`): the verifier ignores a note from any other surface, so nothing is sent that could not be recorded |
 | `row-missing`, `store-failed`, `digest-failed` | the stored `anchors` row cannot be read, or the hour cannot be recomputed |
-| `root-mismatch` | for **every** plan hour, the stored row, the plan and the digest recomputed from the ledger must agree on root, event count and memo **byte for byte** (the memo must be exactly `formatMemo` of the hour, root and count). A difference is a ledger-integrity question, never repaired. The same refusal applies when the new cluster already holds a memo by the signer for that hour with a different root |
+| `root-mismatch` | for **every** plan hour, the stored row, the plan and the digest recomputed from the ledger must agree on root, event count and memo **byte for byte** (the memo must be exactly `formatMemo` (v1) or `formatMemoV2` (v2) of the hour, root, count and, for v2, the heads root). A difference is a ledger-integrity question, never repaired. The same refusal applies when the new cluster already holds a memo by the signer for that hour with a different root |
 | `present-on-cluster` | the stored signature exists on the cluster: this is not a reset for that hour (checked for every hour before the first send) |
 | `reanchor-locked` | the re-anchor lock is not available: another `--execute` run holds it (wait for it to finish), or the lock directory or file could not be created (the refusal names the cause: fix it); nothing was listed or sent |
 | `discovery-incomplete` | the signer's signatures could not be paged back to the earliest hour that has no recorded note within the page cap (100 pages of 100, so 10 000 signatures); an earlier send cannot be ruled out, so nothing is sent. Look at why that key has so many signatures since that hour (it should hold about one per anchored hour) rather than send blind; an hour that already has a recorded `anchor.reanchor` note never needs the listing |
@@ -184,6 +184,8 @@ The verification caveat: `checkpoint_verify` still compares the cluster's genesi
 | d. **OPERATOR ONLY** Let fresh hours anchor | timer / operator | after (b) is deployed, `systemctl start substrate-anchor.service` (or wait for the timer). Preview first with `bun --env-file=/etc/substrate/substrate.env packages/mcp-server/src/anchor-run.ts --dry-run`: it prints `would anchor <hour>` and sends nothing. It anchors at most 24 non-empty hours per run within seven days; an older hour needs `anchor-run.ts --period <HOUR>` (**OPERATOR ONLY**, one hour per run, it sends) |
 | e. **OPERATOR ONLY** Re-send the old hours | operator | first the dry run, then one hour, then the rest (commands below). **The send itself is operator-run.** Deleting or overwriting an `anchors` row has no tool, no test and unverified store semantics: never do it by hand |
 | f. Record each real re-anchor | the entry | automatic: step e writes one `anchor.reanchor` note per hour as an operator surface (below). Only a `store-failed` refusal after a send needs you: run step e again (it adopts the transaction and records it) |
+
+**Pointers.** After a reset the v3 pointers of each anchored hour are re-sent too, each with the memo recomputed from the new hour transaction signature. A pointer is first sent with 0 lamports. The funded path (`INDEX_FUND_LAMPORTS`, 890 880 lamports, once per pointer) applies only when that 0-lamport transfer is refused.
 
 Step e, from the host, with the plan saved in step 3 (`<PLAN_FILE>`) and the new cluster's genesis hash (`<NEW_GENESIS_HASH>`, the plan's `chain.observed_genesis`):
 

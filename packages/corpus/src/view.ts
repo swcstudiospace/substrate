@@ -36,8 +36,8 @@ import {
 } from "./scan.ts";
 
 /** Blobs read per `git cat-file --batch` call, by count and by the bytes they add up to. */
-export const VIEW_BATCH_OBJECTS = 500;
-export const VIEW_BATCH_BYTES = 64 * 1024 * 1024;
+const VIEW_BATCH_OBJECTS = 500;
+const VIEW_BATCH_BYTES = 64 * 1024 * 1024;
 /** Object ids asked of the origin in one fetch when a blobless mirror lacks documentation blobs. */
 const PREFETCH_BATCH = 1000;
 /** A read of a large tree takes seconds; the bound only stops a wedged process. */
@@ -48,7 +48,7 @@ const MAX_PROBLEMS = 50;
 const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const TREE_ROW = /^(\d+) (\w+) ([0-9a-f]+)(?: +(\d+|-))?$/;
 
-export interface ViewOptions {
+interface ViewOptions {
 	/** The repository label the entries carry. */
 	repo: string;
 	repoDir: string;
@@ -69,10 +69,10 @@ export interface ViewResult extends CheckoutRead {
 	fromWorkingTree: number;
 }
 
-export const GIT_BLOB_SCHEME = "git-blob:";
+const GIT_BLOB_SCHEME = "git-blob:";
 
 /** Where the bytes of a mirror entry live: a git object of the mirror, resolved by {@link readLocation}. */
-export function blobLocation(mirrorDir: string, oid: string): string {
+function blobLocation(mirrorDir: string, oid: string): string {
 	return `${GIT_BLOB_SCHEME}${oid}@${mirrorDir}`;
 }
 

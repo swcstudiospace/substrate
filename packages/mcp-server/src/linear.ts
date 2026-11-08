@@ -22,7 +22,7 @@ export const LINEAR_API_URL = "https://api.linear.app/graphql";
 
 export class LinearError extends Error {}
 
-export interface LinearState {
+interface LinearState {
 	id: string;
 	name: string;
 	type: string;
@@ -87,7 +87,7 @@ interface LabelQueryResult {
 }
 
 /** An issue as `issueRelations` reads it: its UUID, identifier, and the relations it is the source of. */
-export interface IssueRelations {
+interface IssueRelations {
 	id: string;
 	identifier: string;
 	relations: Array<{ type: string; relatedIssueId: string }>;
@@ -127,12 +127,16 @@ export class LinearClient {
 		const text = await response.text();
 		if (!response.ok) throw new LinearError(`linear ${response.status}: ${text.slice(0, 200)}`);
 
-		let body: GraphqlResponse<T>;
+		let parsed: unknown;
 		try {
-			body = JSON.parse(text) as GraphqlResponse<T>;
+			parsed = JSON.parse(text);
 		} catch {
 			throw new LinearError(`linear returned non-JSON: ${text.slice(0, 200)}`);
 		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new LinearError("linear POST graphql returned a non-object reply");
+		}
+		const body = parsed as GraphqlResponse<T>;
 		if (body.errors?.length) {
 			const messages = body.errors.map((e) => e.message ?? "unknown error").join("; ");
 			throw new LinearError(`linear: ${messages.slice(0, 200)}`);

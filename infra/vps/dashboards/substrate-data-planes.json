@@ -2783,6 +2783,113 @@
       "title": "Golden-set recall at 5",
       "transformations": [],
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "Seconds the newest reported corpus sync had behind its source change. The objective is SUBSTRATE_DOCS_SLO_SYNC_LAG_S. Series `corpus.sync_lag_seconds` (gauge, max per step, s), source `substrate.corpus.sync_lag_seconds`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 107
+      },
+      "id": 28,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "corpus.sync_lag_seconds"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Corpus sync lag",
+      "transformations": [],
+      "type": "timeseries"
     }
   ],
   "refresh": "5m",

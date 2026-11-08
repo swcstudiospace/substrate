@@ -19,7 +19,7 @@ export interface EvalDocument {
 	text: string;
 }
 
-export type GoldenKind = "title" | "heading" | "lead";
+type GoldenKind = "title" | "heading" | "lead";
 
 export interface GoldenQuery {
 	query: string;
@@ -33,17 +33,17 @@ export interface GoldenQuery {
 /** Queries one document yields at most. */
 export const GOLDEN_QUERIES_PER_DOCUMENT = 3;
 /** A query shorter than this many words is too vague to point at one document. */
-export const GOLDEN_MIN_WORDS = 3;
+const GOLDEN_MIN_WORDS = 3;
 /** The opening sentence is cut to this many words. */
 export const GOLDEN_LEAD_WORDS = 12;
 /** The default cap on queries in one set; a larger corpus is sampled with the seed. */
-export const GOLDEN_DEFAULT_MAX_QUERIES = 2000;
+const GOLDEN_DEFAULT_MAX_QUERIES = 2000;
 /** The default seed of the sampling generator. */
-export const GOLDEN_DEFAULT_SEED = 1;
+const GOLDEN_DEFAULT_SEED = 1;
 /** The most characters of one document the generator reads. */
 export const EVAL_MAX_TEXT_CHARS = 200_000;
 
-export interface GenerateGoldenOptions {
+interface GenerateGoldenOptions {
 	/** Queries per document, default {@link GOLDEN_QUERIES_PER_DOCUMENT}. */
 	perDocument?: number | undefined;
 	/** Cap on the whole set, default {@link GOLDEN_DEFAULT_MAX_QUERIES}. */
@@ -53,7 +53,7 @@ export interface GenerateGoldenOptions {
 }
 
 /** What a markdown document says about itself. */
-export interface DocumentOutline {
+interface DocumentOutline {
 	/** The first level-1 heading, or null. */
 	title: string | null;
 	/** Every level-2 heading in order. */

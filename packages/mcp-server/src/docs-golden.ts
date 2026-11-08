@@ -30,9 +30,9 @@ import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import type { EventInput } from "./types.ts";
 
 /** The reserved host every corpus document is cited under (RFC 2606), as the fake's own seeds are. */
-export const GOLDEN_SOURCE_HOST = "https://example.com";
+const GOLDEN_SOURCE_HOST = "https://example.com";
 
-export interface GoldenDocument {
+interface GoldenDocument {
 	dataset: string;
 	slug: string;
 	source_url: string;
@@ -42,7 +42,7 @@ export interface GoldenDocument {
 	body: string;
 }
 
-export interface GoldenCorpus {
+interface GoldenCorpus {
 	documents: GoldenDocument[];
 }
 
@@ -100,7 +100,7 @@ const STOPWORDS: Record<string, true> = {
 };
 
 /** The lower-cased words of three letters or more that are not stopwords. */
-export function terms(text: string): Set<string> {
+function terms(text: string): Set<string> {
 	const out = new Set<string>();
 	for (const word of text.toLowerCase().split(/[^a-z0-9]+/)) {
 		if (word.length >= 3 && STOPWORDS[word] !== true) out.add(word);
@@ -115,7 +115,7 @@ export function terms(text: string): Set<string> {
  * term: the document is not retrieved at all, which is what lets an
  * unanswerable fixture come back empty.
  */
-export function lexicalChunk(document: GoldenDocument, question: string): FakeChunk | null {
+function lexicalChunk(document: GoldenDocument, question: string): FakeChunk | null {
 	const wanted = terms(question);
 	if (wanted.size === 0) return null;
 	let heading = "";
@@ -168,14 +168,14 @@ export function goldenFake(corpus: GoldenCorpus): RagflowFake {
 	return fake;
 }
 
-export interface GoldenSearchOptions {
+interface GoldenSearchOptions {
 	/** The commit every corpus document is recorded under, and every dataset pinned at. */
 	commit: string;
 	/** The shared retrieval budget; the service default when omitted. */
 	budgetMs?: number;
 }
 
-export interface GoldenSearchResult {
+interface GoldenSearchResult {
 	reply: SearchReply;
 	/** The dataset ids the search actually retrieved — the scope-isolation proof. */
 	retrievedDatasetIds: string[];

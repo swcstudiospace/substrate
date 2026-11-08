@@ -53,16 +53,16 @@ import { dirname, join, resolve } from "node:path";
 
 export const SERVER = "substrate";
 /** No `:-default`: a swarm with `SUBSTRATE_URL` unset is off, and a default would quietly point it at a server. */
-export const URL_TEMPLATE = "${SUBSTRATE_URL}/mcp";
-export const AUTHORIZATION_TEMPLATE = "Bearer ${SUBSTRATE_TOKEN}";
+const URL_TEMPLATE = "${SUBSTRATE_URL}/mcp";
+const AUTHORIZATION_TEMPLATE = "Bearer ${SUBSTRATE_TOKEN}";
 
-export type Format = "json" | "toml";
-export const RUNTIME_FILES: Readonly<Record<string, { path: string; format: Format }>> = {
+type Format = "json" | "toml";
+const RUNTIME_FILES: Readonly<Record<string, { path: string; format: Format }>> = {
 	claude: { path: ".mcp.json", format: "json" },
 	omp: { path: ".mcp.json", format: "json" },
 	grok: { path: ".grok/config.toml", format: "toml" },
 };
-export const RUNTIMES = Object.keys(RUNTIME_FILES);
+const RUNTIMES = Object.keys(RUNTIME_FILES);
 
 /** Claude and omp read the same shape: `type`, `url`, `headers`. */
 export function jsonEntry(): Record<string, unknown> {
@@ -70,11 +70,11 @@ export function jsonEntry(): Record<string, unknown> {
 }
 
 /** Grok's `[mcp_servers.<name>]`: a URL makes it HTTP, so there is no `type`. */
-export function tomlEntry(): Record<string, unknown> {
+function tomlEntry(): Record<string, unknown> {
 	return { url: URL_TEMPLATE, headers: { Authorization: AUTHORIZATION_TEMPLATE } };
 }
 
-export function tomlBlock(): string {
+function tomlBlock(): string {
 	return [
 		"# substrate-mcp, projected by agent-substrate packages/projector. The token is named here, never written.",
 		`[mcp_servers.${SERVER}]`,
@@ -84,7 +84,7 @@ export function tomlBlock(): string {
 	].join("\n");
 }
 
-export interface Spec {
+interface Spec {
 	version: 1;
 	server: string;
 	runtimes: Record<string, { path: string; format: Format }>;
@@ -92,7 +92,7 @@ export interface Spec {
 	toml: { entry: Record<string, unknown>; block: string };
 }
 
-export function spec(): Spec {
+function spec(): Spec {
 	return {
 		version: 1,
 		server: SERVER,
@@ -104,7 +104,7 @@ export function spec(): Spec {
 
 export class ProjectionRefused extends Error {}
 
-export interface Change {
+interface Change {
 	/** Absolute path of the file. */
 	path: string;
 	/** The same file relative to the workspace, as the runtime table names it. */
@@ -526,7 +526,7 @@ export function apply(changes: readonly Change[]): Change[] {
 }
 
 /** The lines the plan adds, as a reader of a dry run wants them: per file, what is appended. */
-export function describe(changes: readonly Change[]): string[] {
+function describe(changes: readonly Change[]): string[] {
 	const lines: string[] = [];
 	for (const change of changes) {
 		const rel = change.file;

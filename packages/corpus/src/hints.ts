@@ -13,7 +13,7 @@ import { closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, r
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 
-export const HINT_VERSION = 1;
+const HINT_VERSION = 1;
 export const MAX_HINT_FILES = 1000;
 export const MAX_HINT_BYTES = 4096;
 /** The longest repository directory a hint carries; a longer one cannot fit a file of {@link MAX_HINT_BYTES} anyway. */
@@ -21,10 +21,10 @@ export const MAX_HINT_DIR_BYTES = 2048;
 
 const HINT_FILE = /^[0-9]{13}-[0-9a-f]{8}\.json$/;
 
-export const HINT_REFUSALS = ["bad-directory", "too-large", "spool-full", "spool-unwritable"] as const;
-export type HintRefusal = (typeof HINT_REFUSALS)[number];
+const HINT_REFUSALS = ["bad-directory", "too-large", "spool-full", "spool-unwritable"] as const;
+type HintRefusal = (typeof HINT_REFUSALS)[number];
 
-export type HintWrite = { ok: true; file: string } | { ok: false; reason: HintRefusal };
+type HintWrite = { ok: true; file: string } | { ok: false; reason: HintRefusal };
 
 export interface HintClock {
 	nowMs: () => number;

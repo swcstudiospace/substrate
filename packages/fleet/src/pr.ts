@@ -11,7 +11,7 @@ import type { CommandRunner } from "./git.ts";
 export type PrState = "open" | "merged" | "closed" | "none" | "unknown";
 
 /** One merged pull request: its head commit, and the branch it merged into (null when GitHub did not say). */
-export interface MergedHead {
+interface MergedHead {
 	headSha: string;
 	baseRef: string | null;
 }
@@ -31,7 +31,7 @@ export const PR_UNKNOWN: PrInfo = { state: "unknown", headSha: null, number: nul
 export const PR_NONE: PrInfo = { state: "none", headSha: null, number: null, mergedHeadShas: [], mergedHeads: [] };
 
 /** `gh pr list` returns at most this many pull requests for one branch. */
-export const PR_LIST_LIMIT = 5;
+const PR_LIST_LIMIT = 5;
 export const DEFAULT_PR_CONCURRENCY = 4;
 
 /** At most `limit` jobs run at once; the rest wait in order. */
@@ -60,7 +60,7 @@ export class Gate {
 	}
 }
 
-export interface PrDeps {
+interface PrDeps {
 	run: CommandRunner;
 	/** A directory inside the repository, so `gh` finds its remote. */
 	cwd: string;
@@ -96,6 +96,7 @@ export function parsePrList(text: string): PrInfo | null {
 	try {
 		parsed = JSON.parse(text);
 	} catch {
+		// Not JSON is not the gh list shape: null, as the doc above says.
 		return null;
 	}
 	if (!Array.isArray(parsed) || !parsed.every(isRawPr)) return null;

@@ -39,7 +39,7 @@ export const PRESENCE_KEY_PREFIX = "substrate:v1:planning:presence:";
 /** The largest freshness window the settings allow, in seconds. Taken from the same bounds `loadPlanningSettings` enforces. */
 export const PRESENCE_TTL_MAX_S = PLANNING_BOUNDS.presenceTtlS.max;
 /** How a key's lifetime is derived from the freshness window. The margin is twice the window, held between these bounds, in seconds. */
-export const PRESENCE_MARGIN_FACTOR = 2;
+const PRESENCE_MARGIN_FACTOR = 2;
 export const PRESENCE_MARGIN_MIN_S = 300;
 export const PRESENCE_MARGIN_MAX_S = 86_400;
 /** The longest a presence key lives, in seconds: the largest freshness window plus the largest margin. */
@@ -65,7 +65,7 @@ export function presenceRetentionS(ttlMs: number): number {
 /** The most sessions one listing reads. Beyond it the listing is marked truncated. */
 export const PRESENCE_MAX_SESSIONS = 256;
 /** The most time one listing may take, in milliseconds. Each command has its own reply deadline; this bounds the listing as a whole. */
-export const PRESENCE_LISTING_BUDGET_MS = 5_000;
+const PRESENCE_LISTING_BUDGET_MS = 5_000;
 
 /** Each call takes an optional `signal`: an aborted signal stops the call before any command is sent. */
 export interface PresenceBackend {
@@ -78,7 +78,7 @@ export interface PresenceBackend {
 	serverTimeMs(): Promise<number>;
 }
 
-export interface PresenceListing {
+interface PresenceListing {
 	records: SessionRecord[];
 	/** True when the listing stopped before every session was read. The records returned are still exact. */
 	truncated: boolean;
@@ -190,6 +190,7 @@ function heldChangeTime(value: string | null): number | null {
 	try {
 		json = JSON.parse(value);
 	} catch {
+		// Unparseable text is not a session record, so there is no change time, as the doc above states.
 		return null;
 	}
 	const parsed = SessionRecordSchema.safeParse(json);

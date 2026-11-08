@@ -22,13 +22,13 @@ import { FEEDBACK_MAX_KEYS, type ReflectStore } from "./reflect-store.ts";
 import type { ActiveRows, CorpusStore, ManifestRow } from "./store.ts";
 
 /** The most active rows one snapshot reads. A document past the cap is never flagged or re-ranked, never wrongly so. */
-export const AUTHORITY_MAX_ROWS = 100_000;
+const AUTHORITY_MAX_ROWS = 100_000;
 /** How long a snapshot is trusted before the manifest version is read again, ms. */
 export const VERSION_CHECK_MS = 30_000;
 /** How long the feedback counts are cached, ms. */
 export const FEEDBACK_TTL_MS = 60_000;
 /** The longest a search waits for the index to load; past it the search is answered without it while the load finishes. */
-export const LOOKUP_BUDGET_MS = 500;
+const LOOKUP_BUDGET_MS = 500;
 
 const DAY_MS = 86_400_000;
 const NO_FEEDBACK: FeedbackCounts = { helpful: 0, unhelpful: 0, stale: 0, wrong: 0, duplicate: 0 };
@@ -39,7 +39,7 @@ interface Held {
 	ingestedAtMs: number | null;
 }
 
-export interface Snapshot {
+interface Snapshot {
 	version: number;
 	rows: Map<string, Held>;
 	/** Key of a superseded document -> key of the document that supersedes it. */
@@ -50,7 +50,7 @@ export interface Snapshot {
 	checkedAt: number;
 }
 
-export interface AuthorityIndexDeps {
+interface AuthorityIndexDeps {
 	/** The manifest, or null while the corpus is off or there is no index. */
 	store: () => CorpusStore | null;
 	/** The feedback table, or null when there is none: every document then has no feedback. */

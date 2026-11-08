@@ -34,16 +34,16 @@ import { matchEntryHash, type CapsuleRecord, type NexusContent, type TombstoneRe
 import { isMemoryKind } from "./memory-policy.ts";
 import { ACTORS, TRUST_LEVELS, type Actor, type EventInput, type EventKind, type Trust } from "./types.ts";
 
-export const CAPSULE_VERSION = 1;
+const CAPSULE_VERSION = 1;
 export const CAPSULE_SCHEMA = "substrate.memory.capsule/1";
 /** Largest capsule `importCapsule` and `tombstoneCapsule` will read. */
 export const MAX_CAPSULE_BYTES = 64 * 1024 * 1024;
-export const MAX_CAPSULE_RECORDS = 100_000;
+const MAX_CAPSULE_RECORDS = 100_000;
 
 export const CAPSULE_EXPORT_ACTION = "memory.capsule.export";
 export const CAPSULE_REDACT_ACTION = "memory.capsule.redact";
 
-export type CapsuleRule =
+type CapsuleRule =
 	| "not_object"
 	| "unknown_key"
 	| "missing"
@@ -80,7 +80,7 @@ export class CapsuleError extends Error {
 
 export type CapsuleEntry = CapsuleRecord | TombstoneRecord;
 
-export interface CapsuleManifest {
+interface CapsuleManifest {
 	capsule_version: typeof CAPSULE_VERSION;
 	schema: typeof CAPSULE_SCHEMA;
 	producer: string;
@@ -98,15 +98,15 @@ export interface CapsuleOutput {
 	digest: string;
 }
 
-export interface ImportedCapsule {
+interface ImportedCapsule {
 	manifest: CapsuleManifest;
 	records: CapsuleEntry[];
 	digest: string;
 }
 
-export type ImportResult = { ok: true; capsule: ImportedCapsule } | { ok: false; error: CapsuleError };
+type ImportResult = { ok: true; capsule: ImportedCapsule } | { ok: false; error: CapsuleError };
 
-export interface ExportOptions {
+interface ExportOptions {
 	/** Who produced the capsule, for instance `substrate-mcp`. */
 	producer: string;
 	/** The injected clock. */
@@ -464,7 +464,7 @@ export function tombstoneCapsule(bytes: Uint8Array, ids: readonly string[], reas
 // Ledger notes
 // ---------------------------------------------------------------------------
 
-export interface CapsuleExportPayload {
+interface CapsuleExportPayload {
 	action: typeof CAPSULE_EXPORT_ACTION;
 	/** SHA-256 of the capsule bytes. */
 	digest: string;
@@ -474,7 +474,7 @@ export interface CapsuleExportPayload {
 	size: number;
 }
 
-export interface CapsuleRedactPayload {
+interface CapsuleRedactPayload {
 	action: typeof CAPSULE_REDACT_ACTION;
 	digest_before: string;
 	digest_after: string;

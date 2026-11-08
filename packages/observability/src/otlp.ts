@@ -20,7 +20,7 @@ import type { SpanRecord } from "./trace.ts";
 
 const CUMULATIVE = 2;
 
-export interface OtlpResource {
+interface OtlpResource {
 	serviceName: string;
 	serviceVersion: string;
 	serviceInstanceId: string;
@@ -44,7 +44,7 @@ export interface OtlpConfig {
 	resource: OtlpResource;
 }
 
-export interface ExportResult {
+interface ExportResult {
 	ok: boolean;
 	/** Data points or spans in the request. Zero means nothing was sent. */
 	items: number;
@@ -213,7 +213,7 @@ export function encodeSpans(spans: SpanRecord[], resource: OtlpResource): { body
 	};
 }
 
-export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 /**
  * Pushes encoded batches at a collector.
@@ -294,7 +294,9 @@ export class PeriodicExporter {
 
 	start(): void {
 		if (this.timer) return;
-		this.timer = setInterval(() => void this.flush(), this.deps.intervalMs);
+		// A failed metrics export is retried on the next tick: the snapshot is cumulative. Spans are drained before the export,
+		// so a failed span export drops its batch.
+		this.timer = setInterval(() => void this.flush().catch(() => undefined), this.deps.intervalMs);
 		this.timer.unref?.();
 	}
 

@@ -51,7 +51,7 @@ export interface InventoryOptions {
 	onBody?: ((entry: CorpusEntry, body: string) => void | Promise<void>) | undefined;
 }
 
-export interface InventoryReport {
+interface InventoryReport {
 	checkouts: number;
 	repos: RepoReport[];
 	collapsed: ScanReport["collapsed"];

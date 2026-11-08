@@ -92,6 +92,7 @@ def _env_switch(env_file: Path, environ: Mapping[str, str], key: str) -> bool:
                 if stripped.startswith(key + "="):
                     value = stripped[len(key) + 1:]
     except OSError:
+        # Unreadable: the environment decides, as the docstring says.
         value = None
     if value is None:
         value = environ.get(key, "")
