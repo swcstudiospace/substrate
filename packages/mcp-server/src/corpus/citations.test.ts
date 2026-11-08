@@ -77,6 +77,16 @@ describe("corpus citations", () => {
 		expect(lookups).toEqual(["swcstudiospace/agent-substrate:docs/data planes.md"]);
 	});
 
+	test("a manifest row recording a 64-character commit name cites that commit, not HEAD", async () => {
+		const commit64 = "0123456789abcdef".repeat(4);
+		const reply = await search([{ content: "The planes are described here.", document_name: NAME, source_url: NAME, score: 0.9 }], async () => ({ ...RECORD, commit: commit64 }));
+		expect(defined(reply.chunks[0], "the citation")).toMatchObject({
+			source_url: `https://github.com/swcstudiospace/agent-substrate/blob/${commit64}/docs/data%20planes.md`,
+			commit: commit64,
+			dataset: "corpus",
+		});
+	});
+
 	test("a chunk indexed from an older version is cited at HEAD, not at the newer commit", async () => {
 		const older = corpusDocumentName("swcstudiospace/agent-substrate", "docs/data planes.md", sha256Hex("older body"));
 		const reply = await search([{ content: "The planes were described here.", document_name: older, source_url: older, score: 0.9 }], async () => RECORD);

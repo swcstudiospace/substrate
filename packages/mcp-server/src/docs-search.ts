@@ -537,8 +537,8 @@ function cite(
 	};
 }
 
-/** A full git commit name: the only form a citation's `blob/<commit>` path takes from the manifest. */
-const FULL_COMMIT = /^[0-9a-f]{40}$/i;
+/** A commit name a citation may link: a 40- or 64-character lower-case hex git object name, so nothing stored can steer the citation URL. */
+const CITABLE_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /** Longest a manifest lookup may take before its document is cited at HEAD; a hung store read must not hang the search. */
 const MANIFEST_COMMIT_DEADLINE_MS = 500;
@@ -572,7 +572,7 @@ async function manifestCommits(deps: SearchDeps, chunks: readonly RagflowChunk[]
 		[...documents].map(async ([key, { repo, path }]) => {
 			try {
 				const record = await withDeadline(lookup(repo, path), MANIFEST_COMMIT_DEADLINE_MS);
-				if (record !== null && record.commit !== null && FULL_COMMIT.test(record.commit)) commits.set(key, record);
+				if (record !== null && record.commit !== null && CITABLE_COMMIT.test(record.commit)) commits.set(key, record);
 			} catch {
 				// The citation falls back to HEAD; a failed lookup never fails the search.
 			}
@@ -599,9 +599,6 @@ function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation, com
 		dataset: CORPUS_DATASET,
 	};
 }
-
-/** A commit a citation may link: a full 40- or 64-character lower-case hex object name, so nothing stored can steer the citation URL. */
-const CITABLE_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
  * The commit a corpus chunk is cited at, or undefined for HEAD. The manifest's commit is used only when the row is `active` and the
