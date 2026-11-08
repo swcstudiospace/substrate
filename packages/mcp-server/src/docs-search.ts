@@ -500,7 +500,7 @@ const REASON_CAP = 200;
 const CIRCUIT_OPEN = "ragflow circuit open";
 
 /** The bounded, redacted form of why one dataset was not served. */
-function datasetReason(cause: unknown): string {
+export function datasetReason(cause: unknown): string {
 	const text = cause instanceof Error ? cause.message : String(cause);
 	return redact(text).slice(0, REASON_CAP);
 }

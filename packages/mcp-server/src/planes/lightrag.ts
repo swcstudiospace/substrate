@@ -93,6 +93,20 @@ export function lightragOp(method: string, url: string): string {
 /** The reason an open breaker gives a call it refused; callers do not retry it. */
 export const LIGHTRAG_CIRCUIT_OPEN = "lightrag circuit open";
 
+/**
+ * The code an answer with no usable content carries. It is a failure, never an empty success, and the retry policy never
+ * retries it. The reason it travels with stays the plane's own; `docs_search` gives this same reason to an empty answer it
+ * judges itself. Lives here, not in `lightrag-attempts.ts`, which imports this module.
+ */
+export const LIGHTRAG_EMPTY_ANSWER = "lightrag: empty answer";
+
+/** A failed LightRAG query: its reason, and the code of a failure the retry policy must not retry. */
+export interface LightragFailure {
+	ok: false;
+	reason: string;
+	code?: typeof LIGHTRAG_EMPTY_ANSWER;
+}
+
 /** The reason a transport failure becomes; an open breaker is named as such. */
 function unreachable(cause: unknown): string {
 	if (cause instanceof Error && cause.name === "BreakerOpenError") return LIGHTRAG_CIRCUIT_OPEN;
@@ -420,7 +434,7 @@ function readGraphDetail(data: unknown, mode: LightragQueryMode): LightragGraphD
 
 export type LightragQueryOutcome =
 	| { ok: true; chunks: RagflowChunk[]; detail: LightragGraphDetail }
-	| { ok: false; reason: string };
+	| LightragFailure;
 
 /**
  * `retrieveChunks` with the graph detail kept: the docs-search dispatch
@@ -452,8 +466,8 @@ export async function queryWithGraph(
 	}
 	if (chunks.length === 0) {
 		// An actually empty payload is a shape failure, never a silent
-		// empty answer.
-		return { ok: false, reason: "lightrag: unexpected response shape" };
+		// empty answer. It is coded empty, so the retry policy never asks again.
+		return { ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER };
 	}
 	return { ok: true, chunks, detail: readGraphDetail(data, resolved.mode) };
 }
@@ -962,7 +976,7 @@ export const LIGHTRAG_SNIPPET_CAP = 1200;
 
 export type LightragToolOutcome =
 	| { ok: true; chunks: RagLightragChunk[]; mode: LightragQueryMode }
-	| { ok: false; reason: string };
+	| LightragFailure;
 
 /**
  * The query the `docs_lightrag_query` tool and `POST /docs/lightrag/query`
@@ -971,7 +985,7 @@ export type LightragToolOutcome =
  * (so the plane's circuit breaker sees every call). Hits come back in the
  * query surface's `RagLightragChunk` shape, redacted and capped; an entry
  * without text is skipped and no usable entry is `lightrag: unexpected
- * response shape`.
+ * response shape`, coded empty so the retry policy never asks again.
  */
 export async function queryForTool(
 	config: LightragConfig,
@@ -995,6 +1009,6 @@ export async function queryForTool(
 			score: chunk.score ?? 0,
 		});
 	}
-	if (chunks.length === 0) return { ok: false, reason: "lightrag: unexpected response shape" };
+	if (chunks.length === 0) return { ok: false, reason: "lightrag: unexpected response shape", code: LIGHTRAG_EMPTY_ANSWER };
 	return { ok: true, chunks, mode: answered.detail.mode };
 }

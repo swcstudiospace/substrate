@@ -624,19 +624,25 @@ export interface RagLightragChunk {
 /**
  * What `docs_lightrag_query` / `POST /docs/lightrag/query` answers, and what `docs_search` answers on the LightRAG path, under
  * one rule (`docs-plane.md`, "Served, degraded and unavailable"):
- * - served: LightRAG answered with chunks. `backend: "lightrag"`, no `degraded`.
- * - degraded: LightRAG did not answer and Hindsight recall answered. `backend: "hindsight"`, `fallback: "hindsight"`,
- *   `degraded: true`, `reason` the LightRAG failure.
- * - unavailable: neither answered. No `backend`, no `fallback`, `chunks` empty, `degraded: true`, `unavailable: true`,
- *   `reason` the LightRAG failure. This is the explicit "no answer", never an empty success.
+ * - served: LightRAG answered with chunks. `backend: "lightrag"`, and no `degraded`, `fallback`, `reason` or `unavailable`.
+ * - degraded: LightRAG did not answer and Hindsight recall answered with a hit. `backend: "lightrag"`,
+ *   `fallback: "hindsight"`, `degraded: true`, `reason` the LightRAG failure.
+ * - unavailable: LightRAG did not answer and recall returned no hit. The degraded fields, plus `unavailable: true` and
+ *   `chunks` empty. This is the explicit "no answer", never an empty success.
+ * `reason` is redacted and capped at 200 characters. A reply that falls back emits the `docs_search` warning event.
  */
 export interface RagLightragResult {
-	backend?: "lightrag" | "hindsight";
+	/** The backend the query asked. It is "lightrag" whether the answer is LightRAG's or Hindsight's fallback. */
+	backend: "lightrag";
 	chunks: RagLightragChunk[];
 	graph: SearchGraphStats;
 	state: RagStateSnapshot;
+	/** True on every Hindsight-fallback reply, degraded or unavailable. */
 	degraded?: true;
+	/** The LightRAG failure the reply stands in for. With no hit, recall's own reason follows after `; `. */
 	reason?: string;
+	/** Set on every Hindsight-fallback reply, including an unavailable one. */
 	fallback?: "hindsight";
+	/** Set only when recall returned zero hits. */
 	unavailable?: true;
 }

@@ -1487,9 +1487,10 @@ describe("docs_lightrag_query serves a Hindsight answer as degraded", () => {
 		globalThis.fetch = (async () => new Response("upstream down", { status: 500 })) as unknown as typeof fetch;
 		const hindsight = new HindsightFake();
 		hindsight.seed("sub-omp", [{ id: "m1", text: "the plan lives in PLAN.md", document_id: "mwd_1", tags: ["omp"], metadata: {}, score: 0.9 }]);
+		const stub = ledger();
 		const substrate = new Substrate(
 			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_MAX_RETRIES: "0", SUBSTRATE_RAG_HALF_OPEN_MS: "0" }),
-			{ index: null, greptime: ledger().greptime as never, hindsightFetch: hindsight.fetch },
+			{ index: null, greptime: stub.greptime as never, hindsightFetch: hindsight.fetch },
 		);
 		const server = createMcpServer(substrate, "omp");
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
@@ -1503,6 +1504,15 @@ describe("docs_lightrag_query serves a Hindsight answer as degraded", () => {
 		try {
 			const reply = await call(client, "docs_lightrag_query", { question: "where is the plan?" });
 			expect(reply.json()).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+			expect(reply.json()).toMatchObject({ backend: "lightrag", degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+			expect(reply.json().unavailable).toBeUndefined();
+			expect(stub.written).toContainEqual(
+				expect.objectContaining({
+					kind: "warning",
+					summary: "docs search failed: lightrag 500",
+					payload: expect.objectContaining({ action: "docs.lightrag_query", reason: "lightrag 500", fallback: "hindsight" }),
+				}),
+			);
 		} finally {
 			for (const [name, value] of saved) {
 				if (value === undefined) delete process.env[name];
@@ -1511,7 +1521,7 @@ describe("docs_lightrag_query serves a Hindsight answer as degraded", () => {
 		}
 	});
 
-	test("with recall empty too, a failed LightRAG query is unavailable: no fallback, no backend, no chunks", async () => {
+	test("with recall empty too, a failed LightRAG query is unavailable: the lightrag backend and hindsight fallback named, no chunks", async () => {
 		globalThis.fetch = (async () => new Response("upstream down", { status: 500 })) as unknown as typeof fetch;
 		const substrate = new Substrate(
 			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_RAG_MAX_RETRIES: "0", SUBSTRATE_RAG_HALF_OPEN_MS: "0" }),
@@ -1529,14 +1539,53 @@ describe("docs_lightrag_query serves a Hindsight answer as degraded", () => {
 		try {
 			const reply = await call(client, "docs_lightrag_query", { question: "where is the plan?" });
 			expect(reply.json()).toMatchObject({ degraded: true, unavailable: true, chunks: [], reason: expect.stringContaining("lightrag 500") });
-			expect(reply.json().fallback).toBeUndefined();
-			expect(reply.json().backend).toBeUndefined();
+			expect(reply.json().fallback).toBe("hindsight");
+			expect(reply.json().backend).toBe("lightrag");
 		} finally {
 			for (const [name, value] of saved) {
 				if (value === undefined) delete process.env[name];
 				else process.env[name] = value;
 			}
 		}
+	});
+
+	test("a LightRAG failure's reason is redacted and capped at 200 characters, on the reply and in the warning event", async () => {
+		globalThis.fetch = (async () => {
+			throw new Error(`Bearer abcDEF123456789xyz ${"x".repeat(300)}`);
+		}) as unknown as typeof fetch;
+		const stub = ledger();
+		const { client } = await connect(stub.greptime, "omp", LIGHTRAG_QUERY_ENV);
+		const body = (await call(client, "docs_lightrag_query", { question: "where is the plan?" })).json();
+		expect(body).toMatchObject({ backend: "lightrag", fallback: "hindsight", degraded: true, unavailable: true, chunks: [] });
+		expect(body.reason).toHaveLength(200);
+		expect(body.reason).toMatch(/^lightrag unreachable: Bearer \[REDACTED\]/);
+		expect(body.reason).not.toContain("abcDEF123456789xyz");
+		expect(stub.written).toContainEqual(
+			expect.objectContaining({
+				kind: "warning",
+				summary: `docs search failed: ${body.reason}`,
+				payload: expect.objectContaining({ action: "docs.lightrag_query", reason: body.reason }),
+			}),
+		);
+		expect(stub.written.find((event) => event.kind === "warning")?.payload).not.toHaveProperty("fallback");
+	});
+
+	test("docs_lightrag_query has no total budget: a retry's backoff outlasts SUBSTRATE_DOCS_SEARCH_BUDGET_MS and the retry is still served", async () => {
+		let calls = 0;
+		globalThis.fetch = (async () => {
+			calls += 1;
+			return calls === 1 ? new Response("upstream down", { status: 500 }) : lightragAnswer();
+		}) as unknown as typeof fetch;
+		const { client } = await connect(ledger().greptime, "omp", {
+			...LIGHTRAG_QUERY_ENV,
+			SUBSTRATE_RAG_MAX_RETRIES: "1",
+			SUBSTRATE_RAG_RETRY_BASE_MS: "60",
+			SUBSTRATE_DOCS_SEARCH_BUDGET_MS: "10",
+		});
+		const served = (await call(client, "docs_lightrag_query", { question: "asked under a tiny budget" })).json();
+		expect(served).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+		expect(served.fallback).toBeUndefined();
+		expect(calls).toBe(2);
 	});
 });
 

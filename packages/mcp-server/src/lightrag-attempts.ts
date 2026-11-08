@@ -3,20 +3,25 @@
  * LightRAG plane (`docs-search.ts`) and `docs_lightrag_query` with
  * `POST /docs/lightrag/query` (`mcp.ts`, `answerLightragQuery`).
  *
- * A query makes its first attempt and then at most `maxRetries` more, each
- * after an exponential backoff (`ragRetryDelay`). Every attempt and every wait
- * runs under one shared budget (`sharedDeadline`), so the whole chain has a
- * total time cap. Three outcomes are never retried: a refusal by the plane's
- * open breaker (the breaker decides when the plane is asked again), a spent
- * budget (no time is left to try in), and an answer with no usable content
- * (`LIGHTRAG_EMPTY_ANSWER`), which is a failure and never an empty success.
+ * A query makes its first attempt and then at most `maxRetries` more. Retry
+ * `n` waits `retryBaseMs * 2^(n - 1)` ms (`ragRetryDelay`): at the default
+ * base of 200 ms, that is 200 ms then 400 ms. There is no jitter. Every
+ * attempt and every wait runs under the shared total budget (`sharedDeadline`)
+ * when the caller gives one. Only `docs_search` has a total budget; `docs_lightrag_query`
+ * has per-attempt timeouts and backoff, and no total cap.
+ *
+ * Three outcomes are never retried: a refusal by the plane's open breaker (the
+ * breaker decides when the plane is asked again), a spent budget (no time is
+ * left to try in), and an answer with no usable content (`LIGHTRAG_EMPTY_ANSWER`),
+ * which is a failure and never an empty success. Every other failure, an HTTP
+ * error, a timeout or a transport error, is retried under the policy.
  */
 import { DeadlineError, type SharedDeadline } from "./deadline.ts";
-import { LIGHTRAG_CIRCUIT_OPEN } from "./planes/lightrag.ts";
+import { LIGHTRAG_CIRCUIT_OPEN, LIGHTRAG_EMPTY_ANSWER } from "./planes/lightrag.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 
-/** The reason an answer with no usable content gives. It is a failure: an empty answer is never a success. */
-export const LIGHTRAG_EMPTY_ANSWER = "lightrag: empty answer";
+/** The empty-answer code and reason, owned by the plane and re-exported for the callers that name them here. */
+export { LIGHTRAG_EMPTY_ANSWER };
 
 /** The retry bounds: retries after the first attempt, and the base of the exponential backoff in ms. */
 export interface LightragRetryPolicy {
@@ -28,6 +33,7 @@ export interface LightragRetryPolicy {
 export interface LightragAttemptShape {
 	ok: boolean;
 	reason?: string;
+	code?: string;
 }
 
 /** An attempt's settled outcome, as `Promise.allSettled` reports it. */
@@ -48,6 +54,8 @@ export function settleLightrag<T>(read: Promise<T>): Promise<LightragSettled<T>>
 export function retryableLightragFailure(outcome: LightragSettled<LightragAttemptShape>): boolean {
 	if (outcome.status === "rejected") return !(outcome.reason instanceof DeadlineError);
 	if (outcome.value.ok) return false;
+	// An empty answer is never retried. The plane codes it; `docs_search` builds its own with the reason alone.
+	if (outcome.value.code === LIGHTRAG_EMPTY_ANSWER) return false;
 	return outcome.value.reason !== LIGHTRAG_CIRCUIT_OPEN && outcome.value.reason !== LIGHTRAG_EMPTY_ANSWER;
 }
 

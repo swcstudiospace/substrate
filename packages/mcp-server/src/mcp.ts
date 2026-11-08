@@ -32,7 +32,7 @@ import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISA
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact, redactValue } from "./redact.ts";
 import { reportSilent } from "./silent-failures.ts";
-import { UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
+import { datasetReason, UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
 import {
 	CORRELATION_ID_PATTERN,
 	GRAPH_ID_PATTERN,
@@ -536,9 +536,11 @@ export function ragGraphCounts(
 
 /**
  * Hindsight recall in place of a LightRAG answer that did not come (SPE-19384 fallback). It reads only through
- * `substrate.recallMemories` and maps redacted hits onto the LightRAG chunk shape. Hits make the reply degraded
- * (`backend: "hindsight"`, `fallback: "hindsight"`); no hit makes it unavailable (`RagLightragResult`). `reason` names the
- * LightRAG failure either way. A Hindsight hit is not a LightRAG success, so the breaker is not reset by it.
+ * `substrate.recallMemories` and maps redacted hits onto the LightRAG chunk shape. Every reply it returns is
+ * `backend: "lightrag"`, `fallback: "hindsight"` and `degraded`, with `reason` the LightRAG failure. With no hit it is also
+ * `unavailable` and empty, and recall's own reason joins `reason`. `reason` is redacted and capped like `docs_search`'s
+ * (`datasetReason`). Every fallback reply emits the warning `docs_search` emits on fallback. A Hindsight hit is not a
+ * LightRAG success, so the breaker is not reset by it.
  */
 export async function hindsightRagFallback(
 	substrate: Substrate,
@@ -549,6 +551,7 @@ export async function hindsightRagFallback(
 	cause: string,
 ): Promise<RagLightragResult> {
 	let chunks: RagLightragChunk[] = [];
+	let reason = cause;
 	try {
 		const reply = await substrate.recallMemories({ query: question }, callerSurface);
 		chunks = reply.results.slice(0, 10).map((hit) => ({
@@ -557,21 +560,35 @@ export async function hindsightRagFallback(
 			sourceUrl: `hindsight:${hit.bank}/${hit.document_id ?? hit.id}`,
 			score: hit.score ?? 0,
 		}));
+		if (chunks.length === 0) reason = `${cause}; ${reply.reason ?? "hindsight empty"}`;
 	} catch (fallbackCause) {
-		// A failed recall is no hits. It is reported as a silent failure, never as a second reason: `reason` is the
-		// LightRAG failure on every door, so `docs_search` and `docs_lightrag_query` name the same cause.
+		// A failed recall is no hits and is reported as a silent failure. The reply still names the LightRAG failure first.
+		reason = `${cause}; hindsight threw: ${String(fallbackCause instanceof Error ? fallbackCause.message : fallbackCause)}`;
 		reportSilent("mcp.hindsight-fallback", fallbackCause);
 	}
-	const reason = cause;
-	// The machine only moves to DEGRADED here: serving from memory must not reset the plane's own failure count. An
-	// unconfigured plane (CONTEXT_REFRESH) is degraded too.
+	const bounded = datasetReason(reason);
+	// A Hindsight hit is not a LightRAG success. The breaker counts the plane's own failures, and serving from memory must
+	// not reset them: the machine only moves to DEGRADED. An unconfigured plane (CONTEXT_REFRESH) is degraded too.
 	const state =
 		chunks.length === 0 || ragMachine.snapshot().state === "CONTEXT_REFRESH"
-			? ragMachine.transition("DEGRADED", reason)
+			? ragMachine.transition("DEGRADED", bounded)
 			: ragMachine.snapshot();
 	const graph = ragGraphCounts(chunks, entities, relations);
-	if (chunks.length === 0) return { chunks: [], graph, state, degraded: true, unavailable: true, reason };
-	return { backend: "hindsight", chunks, graph, state, degraded: true, fallback: "hindsight", reason };
+	await substrate
+		.emit({
+			surface: callerSurface ?? "claude-code",
+			kind: "warning",
+			summary: `docs search failed: ${bounded}`,
+			session_id: `docs-lightrag-query:${randomUUID()}`,
+			payload: {
+				action: "docs.lightrag_query",
+				reason: bounded,
+				...(chunks.length > 0 ? { fallback: "hindsight" } : {}),
+			},
+		})
+		.catch((emitCause: unknown) => reportSilent("mcp.lightrag-fallback-emit", emitCause));
+	const result: RagLightragResult = { backend: "lightrag", chunks, graph, state, fallback: "hindsight", degraded: true, reason: bounded };
+	return chunks.length === 0 ? { ...result, unavailable: true } : result;
 }
 
 /** A `docs_lightrag_query` request as the MCP tool and the REST route both state it. */
@@ -586,9 +603,9 @@ export interface LightragQueryRequest {
 
 /**
  * Answer one LightRAG query for `docs_lightrag_query` and `POST /docs/lightrag/query`. Both doors call this, so they cannot
- * disagree: the replay cache, the RAG machine's admission, the retry policy (`runLightragAttempts`, under the
- * `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` total budget), and the served, degraded and unavailable rule of `RagLightragResult`.
- * A served answer is cached for replay; a degraded or unavailable one never is.
+ * disagree: the replay cache, the RAG machine's admission, the retry policy (`runLightragAttempts`: each attempt under its
+ * own timeout, the exponential backoff, and no total budget), and the served, degraded and unavailable rule of
+ * `RagLightragResult`. A served answer is cached for replay; a degraded or unavailable one never is.
  */
 export async function answerLightragQuery(substrate: Substrate, callerSurface: Surface | null, request: LightragQueryRequest): Promise<RagLightragResult> {
 	const { question, entities, relations } = request;
@@ -622,9 +639,9 @@ export async function answerLightragQuery(substrate: Substrate, callerSurface: S
 	try {
 		ragMachine.transition("STEERING", `lightrag_query:${substrate.config.docsBackend}`);
 		const lightrag = substrate.config.lightrag;
-		const degrade = async (reason: string): Promise<RagLightragResult> => {
-			ragMachine.recordFailure(settings, `lightrag_query: ${reason}`, report);
-			const held = await hindsightRagFallback(substrate, callerSurface, question, entities, relations, reason);
+		const degrade = async (cause: string): Promise<RagLightragResult> => {
+			ragMachine.recordFailure(settings, `lightrag_query: ${datasetReason(cause)}`, report);
+			const held = await hindsightRagFallback(substrate, callerSurface, question, entities, relations, cause);
 			setCachedRagResult(key, held);
 			return held;
 		};
@@ -636,18 +653,20 @@ export async function answerLightragQuery(substrate: Substrate, callerSurface: S
 		}
 		const augmented = augmentRagQuery(question, entities, relations);
 		ragMachine.transition("CONTEXT_REFRESH", "lightrag_query:retrieve");
-		const deadline = sharedDeadline(substrate.config.docsSearchBudgetMs, "docs budget");
+		// No total budget here: `docs_search`'s `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` caps its own reads only. Zero means no deadline,
+		// so each attempt keeps its own timeout and the backoff runs unraced.
+		const unbudgeted = sharedDeadline(0, "docs_lightrag_query");
 		const once = (): Promise<LightragToolOutcome> =>
-			deadline.race(
+			unbudgeted.race(
 				substrate.lightragQuery(lightrag, {
 					question: augmented,
 					...(isLightragQueryMode(request.mode) ? { mode: request.mode } : {}),
 					...(request.topK !== undefined ? { topK: request.topK } : {}),
 				}),
 			);
-		const outcome = await runLightragAttempts(() => settleLightrag(once()), settings, deadline);
-		deadline.clear();
-		if (outcome.status === "rejected") return degrade(outcome.reason instanceof Error ? redact(outcome.reason.message).slice(0, 200) : "lightrag unreachable");
+		const outcome = await runLightragAttempts(() => settleLightrag(once()), settings, unbudgeted);
+		unbudgeted.clear();
+		if (outcome.status === "rejected") return degrade(outcome.reason instanceof Error ? outcome.reason.message : "lightrag unreachable");
 		if (!outcome.value.ok) return degrade(outcome.value.reason);
 		// An answer with no chunks is not an answer (`LIGHTRAG_EMPTY_ANSWER`): it degrades like any other failure.
 		if (outcome.value.chunks.length === 0) return degrade(LIGHTRAG_EMPTY_ANSWER);

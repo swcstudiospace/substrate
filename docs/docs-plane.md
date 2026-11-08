@@ -152,16 +152,18 @@ Both LightRAG doors answer by one rule: `docs_search` on the LightRAG plane
 exactly one of three states:
 
 - **served**: LightRAG answered with at least one chunk. `backend: "lightrag"`,
-  no `degraded`.
+  and no `degraded`, `fallback`, `reason` or `unavailable`.
 - **degraded**: LightRAG did not answer (retries spent, breaker open or
   refused, plane unconfigured, or an empty answer), and Hindsight recall
-  answered with at least one hit. `backend: "hindsight"`,
+  answered with at least one hit. `backend: "lightrag"`,
   `fallback: "hindsight"`, `degraded: true`, `reason` names the LightRAG
   failure. Its notice reads "Served from Hindsight fallback."
-- **unavailable**: neither answered. `degraded: true`, `unavailable: true`,
-  `chunks: []`, `reason` names the LightRAG failure, and there is no `backend`
-  and no `fallback`. This is the explicit "no answer". It is never an empty
-  success.
+- **unavailable**: neither answered: recall returned no hit either. The reply
+  carries `backend: "lightrag"`, `fallback: "hindsight"`, `degraded: true`,
+  `unavailable: true` and `chunks: []`. Its `reason` names the LightRAG failure
+  and, after `; `, recall's own reason. This is the explicit "no answer". It is
+  never an empty success. Its notice carries the same fallback text as a
+  degraded reply.
 
 An empty LightRAG answer is a failed attempt, never a success, and it falls to
 the fallback rule. The plane client reports an empty payload as
@@ -173,12 +175,18 @@ is never cached or replayed (`searchReplyStorable` and `setCachedRagResult`).
 ### Retry bounds
 
 Every LightRAG query (`lightrag-attempts.ts`) makes one attempt, then at most
-`SUBSTRATE_RAG_MAX_RETRIES` retries (default 2), each after an exponential
-backoff from `SUBSTRATE_RAG_RETRY_BASE_MS` (default 200 ms). Every attempt and
-every wait runs under one total budget, `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`
-(default 4000 ms; 0 means no total cap, each attempt still bounded by its own
-timeout). A wait the budget ends starts no further attempt. Three outcomes are
-never retried: a refusal by an open breaker, an empty answer, and a spent budget.
+`SUBSTRATE_RAG_MAX_RETRIES` retries (default 2). Retry `n` waits
+`SUBSTRATE_RAG_RETRY_BASE_MS` * 2^(n-1) ms: at the default base of 200 ms, that
+is 200 ms, then 400 ms. The backoff has no jitter. Each attempt keeps its own
+timeout. Three outcomes are never retried: a refusal by an open breaker, an
+empty answer, and (on `docs_search`) a spent budget.
+
+Only `docs_search` on the LightRAG plane runs its attempts and waits under one
+total budget, `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` (default 4000 ms; 0 means no
+total cap). A wait the budget ends starts no further attempt.
+`docs_lightrag_query` and `POST /docs/lightrag/query` have no total budget: the
+budget never caps them, so each attempt runs to its own timeout and each backoff
+runs to its end.
 
 ### Hindsight fallback
 
@@ -186,8 +194,14 @@ The fallback is Hindsight recall (`lightragFallback` in `docs-search.ts`,
 `hindsightRagFallback` in `mcp.ts`). It applies after the retries, a breaker
 refusal, or an unconfigured plane:
 
-- A warning event `docs search failed: <reason>` is emitted, carrying
-  `fallback: "hindsight"` when recall answered.
+- A warning event `docs search failed: <reason>` is emitted on every fallback
+  reply, degraded or unavailable, carrying `fallback: "hindsight"` when recall
+  answered. `docs_search` sets `action: "docs.search"`; `docs_lightrag_query`
+  and `POST /docs/lightrag/query` set `action: "docs.lightrag_query"`.
+- The reason is redacted and capped at 200 characters (`datasetReason` in
+  `docs-search.ts`, which both paths use) before it is returned, kept in the RAG
+  machine, or put in the event. A Hindsight recall that throws is no hits: its
+  message follows the LightRAG failure after `hindsight threw:`.
 - A failed LightRAG query never retries against RAGFlow. RAGFlow serves only
   when it is the selected plane.
 
