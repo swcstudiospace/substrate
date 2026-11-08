@@ -257,8 +257,17 @@ Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49
 | 48 | verification_deferred_human | /gsd:verify-work 48 |
 | 49 | verification_deferred_human | /gsd:verify-work 49 |
 | 50 | verification_deferred_human | /gsd:verify-work 50 |
+| 71 | verification_deferred_human | /gsd:verify-work 71 |
+| 72 | verification_deferred_human | /gsd:verify-work 72 |
+| 73 | verification_deferred_human | /gsd:verify-work 73 |
+| 75 | verification_deferred_human | /gsd:verify-work 75 |
+| 76 | verification_deferred_human | /gsd:verify-work 76 |
+| 77 | verification_deferred_human | /gsd:verify-work 77 |
+| 78 | verification_deferred_human | /gsd:verify-work 78 |
 
 Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Phases 37-39 are closed by the operator's live-criteria waiver recorded in 585ef28 (2026-10-25); their rows stay here only as the record of what was waived. Phase 46 is open work (re-scoped), not deferred.
+
+Phases 71-73 and 75-78 were deferred for human validation on 2026-11-07 by the run decision "continue without validation" (Run 20). They stay BLOCKED for milestone completion. Phase 74 is owner-deferred past v1.8 (2026-11-06) and is not in this table.
 
 ## Run record (2026-10-24, graph ut-mvlvvvbt-57c57d9e)
 
