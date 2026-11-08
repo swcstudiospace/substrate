@@ -661,9 +661,12 @@ export class SteeringInbox {
 				report.unchanged.push(directive.id);
 				continue;
 			}
-			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
 			// A directive this process has not seen keeps the sequence it was delivered with. An entry written before sequences were stored takes its session's next.
-			if (!this.sequences.has(directive.id)) this.sequences.set(directive.id, await this.restoredSequence(directive.targetSessionId, sequence ?? null));
+			// The number is read before either map is written, so a failed read leaves no record without its number.
+			const known = this.sequences.get(directive.id);
+			const assigned = known ?? (await this.restoredSequence(directive.targetSessionId, sequence ?? null));
+			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
+			this.sequences.set(directive.id, assigned);
 			report.restored.push(directive.id);
 		}
 		return report;

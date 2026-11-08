@@ -4,7 +4,7 @@
  * timer or listener behind. The timers are injected and the inbox is in memory, so nothing sleeps.
  */
 import { describe, expect, test } from "bun:test";
-import { SteeringInbox, type SteeringAuditEntry, type SteeringHistorySink } from "./steering.ts";
+import { MemorySteeringIdempotencyStore, SteeringInbox, type SteeringAuditEntry, type SteeringHistorySink } from "./steering.ts";
 import { STEERING_WAIT_PER_SESSION_MAX, SteeringWaiters, nextQueuedDirective, type QueuedDelivery, type SteeringWaitTimers } from "./steering-waiters.ts";
 import { defined } from "../test-support.ts";
 
@@ -149,6 +149,24 @@ describe("nextQueuedDirective", () => {
 		expect(idsOf(nextQueuedDirective(inbox, "sess-a", null))).toBe("r-late");
 		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "r-late"))).toBe("r-early");
 		expect(idsOf(nextQueuedDirective(inbox, "sess-a", "r-early"))).toBe("fresh");
+	});
+});
+
+describe("restore at boot", () => {
+	test("a restore whose sequence read fails leaves no directive with a record and no number", async () => {
+		class SequenceDown extends MemorySteeringIdempotencyStore {
+			override async nextSequence(): Promise<number> {
+				throw new Error("sequence store down");
+			}
+		}
+		const inbox = new SteeringInbox({ history: new MemorySink(), clock: { nowMs: () => clockMs }, policy: { allowlist: ["omp"], ratePerMin: 1000 }, store: new SequenceDown() });
+		const legacy = {
+			directive: { id: "r-legacy", author: { principalId: "omp", kind: "human" }, createdAtMs: clockMs, priority: "normal", targetSessionId: "sess-a", action: "annotate", body: "note", conflictsWithActivePlan: false },
+			queuedAtMs: clockMs,
+		};
+		await expect(inbox.restore([legacy])).rejects.toThrow("sequence store down");
+		expect(inbox.get("r-legacy")).toBeNull();
+		expect(inbox.sequenceOf("r-legacy")).toBeNull();
 	});
 });
 
