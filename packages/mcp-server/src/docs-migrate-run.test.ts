@@ -150,7 +150,7 @@ export async function applyFixture(over: { versions?: Record<string, number>; re
 export function partAFile(dir: string, records = 6, marker?: string): string {
 	const resolved = marker ?? `parity-gate:part-a:passed records=${String(records)}`;
 	const file = join(dir, "SUMMARY-part-a.md");
-	writeFileSync(file, `dry run ok\n\n\`${marker}\`\n`, "utf8");
+	writeFileSync(file, `dry run ok\n\n\`${resolved}\`\n`, "utf8");
 	return file;
 }
 
