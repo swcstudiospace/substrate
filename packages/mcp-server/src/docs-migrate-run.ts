@@ -75,12 +75,11 @@ export interface ParsedMigrateArgs {
 	stateFile: string | null;
 	datasets: string[];
 	substrateUrl: string | null;
-	substrateToken: string | null;
 	reason: string | null;
 }
 
 export function parseMigrateArgs(argv: readonly string[]): ParsedMigrateArgs {
-	const parsed: ParsedMigrateArgs = { mode: "dry-run", archive: null, partA: null, answers: null, rehearsal: false, stateFile: null, datasets: [], substrateUrl: null, substrateToken: null, reason: null };
+	const parsed: ParsedMigrateArgs = { mode: "dry-run", archive: null, partA: null, answers: null, rehearsal: false, stateFile: null, datasets: [], substrateUrl: null, reason: null };
 	for (let index = 0; index < argv.length; index += 1) {
 		const flag = argv[index] ?? "";
 		const next = (): string | null => {
@@ -91,14 +90,13 @@ export function parseMigrateArgs(argv: readonly string[]): ParsedMigrateArgs {
 		if (flag === "--dry-run") parsed.mode = "dry-run";
 		else if (flag === "--apply") parsed.mode = "apply";
 		else if (flag === "--rehearsal") parsed.rehearsal = true;
-		else if (flag === "--archive" || flag === "--part-a" || flag === "--answers" || flag === "--state-file" || flag === "--substrate-url" || flag === "--substrate-token") {
+		else if (flag === "--archive" || flag === "--part-a" || flag === "--answers" || flag === "--state-file" || flag === "--substrate-url") {
 			const value = next();
 			if (value === null) return { ...parsed, reason: `${flag} needs a value; ${MIGRATE_USAGE}` };
 			if (flag === "--archive") parsed.archive = value;
 			else if (flag === "--part-a") parsed.partA = value;
 			else if (flag === "--answers") parsed.answers = value;
 			else if (flag === "--substrate-url") parsed.substrateUrl = value;
-			else if (flag === "--substrate-token") parsed.substrateToken = value;
 			else parsed.stateFile = value;
 		} else if (flag === "--dataset") {
 			const value = next();
@@ -140,7 +138,16 @@ export function loadArchive(dir: string): ArchiveLoad {
 	const baselines: ArchivedBaseline[] = [];
 	for (const entry of readArchiveDir(join(dir, "baseline"))) {
 		const baseline = parseJsonObject(readFileSync(join(dir, "baseline", entry), "utf8"));
-		if (baseline !== null) baselines.push(baseline as unknown as ArchivedBaseline);
+		if (baseline === null || typeof baseline.id !== "string" || typeof baseline.question !== "string" || typeof baseline.ok !== "boolean" || !Array.isArray(baseline.citations)) continue;
+		const shapedCitations = baseline.citations.map((citation) => {
+			const source = citation !== null && typeof citation === "object" ? (citation as Record<string, unknown>) : {};
+			return {
+				source_url: typeof source.source_url === "string" ? source.source_url : null,
+				document_name: typeof source.document_name === "string" ? source.document_name : "",
+				score: typeof source.score === "number" ? source.score : null,
+			};
+		});
+		baselines.push({ id: baseline.id, question: baseline.question, ok: baseline.ok, citations: shapedCitations });
 	}
 	const statePath = join(dir, "state", "docs-ingest.json");
 	const state = parseJsonObject(readFileSync(statePath, "utf8"));
@@ -183,9 +190,9 @@ function loadIngestRecordsSync(file: string): { records: Map<string, IngestRecor
 	// Keep the sync wrapper honest: an unreadable state file is an empty one,
 	// exactly as the service hydrates it.
 	const raw = readFileSync(file, "utf8");
-	const parsed = JSON.parse(raw) as { records?: Record<string, unknown>; versions?: unknown };
+	const parsed = parseJsonObject(raw);
 	const records = new Map<string, IngestRecord>();
-	for (const [key, value] of Object.entries(parsed.records ?? {})) {
+	for (const [key, value] of Object.entries((parsed?.records as Record<string, unknown> | undefined) ?? {})) {
 		if (value === null || typeof value !== "object") continue;
 		const entry = value as Record<string, unknown>;
 		if (typeof entry.sha !== "string" || typeof entry.dataset_id !== "string" || typeof entry.source_url !== "string" || typeof entry.document_id !== "string") continue;
@@ -198,7 +205,7 @@ function loadIngestRecordsSync(file: string): { records: Map<string, IngestRecor
 			version: typeof entry.version === "number" && Number.isInteger(entry.version) && entry.version >= 1 ? entry.version : 1,
 		});
 	}
-	const versions = typeof parsed.versions === "object" && parsed.versions !== null ? versionsFromJson(parsed.versions) : createVersionStore();
+	const versions = typeof parsed?.versions === "object" && parsed.versions !== null ? versionsFromJson(parsed.versions) : createVersionStore();
 	return { records, versions };
 }
 
@@ -322,11 +329,13 @@ export interface ApplyOptions {
 	now?: () => number;
 	poll?: { maxPolls?: number; intervalMs?: number };
 	/** When set, ledger events (the cutover note) POST to this substrate URL instead of staying in memory. */
-	substrateUrl?: string;
+	substrateUrl?: string | undefined;
 	/** Bearer for the substrate events endpoint; SUBSTRATE_TOKEN_SUBSTRATE is the operator's usual source. */
 	substrateToken?: string | undefined;
 	/** The fetch the events POST uses; tests inject a capture here instead of the global. */
-	eventsFetch?: FetchLike;
+	eventsFetch?: FetchLike | undefined;
+	/** The local checkout of swcstudiospace/agent-skills, needed to replay that dataset's archived commits. */
+	agentSkillsRoot?: string | undefined;
 }
 
 async function defaultGitShow(commit: string, path: string): Promise<string> {
@@ -355,39 +364,58 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	}
 	const archive = loadArchive(archiveDir);
 	const wanted = options.datasets.length > 0 ? new Set(options.datasets) : null;
-	const gitShow = options.gitShow ?? defaultGitShow;
 	const now = options.now ?? Date.now;
+	/** Per-dataset git reader: an injected gitShow (tests) covers every dataset; agent-skills otherwise replays from its own checkout. */
+	const gitShowFor = (dataset: string): ((commit: string, path: string) => Promise<string>) => {
+		if (options.gitShow !== undefined) return options.gitShow;
+		if (dataset !== "agent-skills") return defaultGitShow;
+		const root = options.agentSkillsRoot;
+		if (root === undefined || root === "") {
+			throw new Error("the agent-skills dataset replays from its own checkout; set SUBSTRATE_AGENT_SKILLS_ROOT to this repository's agent-skills worktree");
+		}
+		return async (commit: string, path: string) => {
+			const run = promisify(execFile);
+			const { stdout } = await run("git", ["-C", root, "show", `${commit}:${path}`], { maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
+			return stdout;
+		};
+	};
 	// A prior apply's records, versions, pins and freshness survive: the state
 	// file is the store of record, so this apply merges into it instead of
 	// replacing it (sequential per-dataset applies must not erase each other).
 	const loaded = options.stateFile != null
 		? await loadIngestRecords(options.stateFile)
 		: { records: new Map<string, IngestRecord>(), versions: createVersionStore(), freshness: createFreshnessState() };
+	if (loaded.problem !== undefined) {
+		// A saved state that cannot be read must not be silently replaced: the
+		// replay would erase records, pins and freshness for every dataset.
+		const refused = "saved docs state is unreadable; refusing to overwrite it";
+		const report = { mode: "apply", archive: archiveDir, state_file: options.stateFile, problem: loaded.problem, refused };
+		io.err(`${JSON.stringify(report)}\n`);
+		return { ok: false, exit: 2, report, refused };
+	}
 	const seen = loaded.records;
 	const versions = loaded.versions;
 	const freshness = loaded.freshness;
 	const events: EventInput[] = [];
 	let lastEventStored = false;
+	// Only the cutover note leaves the process, through the injected events
+	// fetch: ingestDocs' own notes and warnings stay in the report — the
+	// ledger write is the service's job, not the migration runner's.
 	const postEvent = options.eventsFetch ?? fetch;
 	const emit = async (event: EventInput): Promise<unknown> => {
 		events.push(event);
 		if (options.substrateUrl === undefined) return { stored: false };
-		try {
-			const response = await postEvent(new URL("/events", options.substrateUrl), {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					...(options.substrateToken !== undefined ? { authorization: `Bearer ${options.substrateToken}` } : {}),
-				},
-				body: JSON.stringify(event),
-				signal: AbortSignal.timeout(5_000),
-			});
-			lastEventStored = response.ok;
-			return { stored: response.ok };
-		} catch {
-			lastEventStored = false;
-			return { stored: false };
-		}
+		const response = await postEvent(new URL("/events", options.substrateUrl), {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...(options.substrateToken !== undefined ? { authorization: `Bearer ${options.substrateToken}` } : {}),
+			},
+			body: JSON.stringify(event),
+			signal: AbortSignal.timeout(5_000),
+		});
+		lastEventStored = response.ok;
+		return { stored: response.ok };
 	};
 	const names = archive.datasets.map((dataset) => dataset.name);
 	const totals = { ingested: 0, replaced: 0, unchanged: 0, failed: 0 };
@@ -395,12 +423,25 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	let applied = true;
 	for (const dataset of archive.datasets) {
 		if (wanted !== null && !wanted.has(dataset.name)) continue;
+		// Each archived dataset replays from its own repository: the substrate
+		// datasets read the caller's checkout, agent-skills reads its own
+		// (SUBSTRATE_AGENT_SKILLS_ROOT), without which the dataset is refused
+		// with the remedy named rather than read from the wrong repository.
+		let datasetGitShow: (commit: string, path: string) => Promise<string>;
+		try {
+			datasetGitShow = gitShowFor(dataset.name);
+		} catch (cause) {
+			const reason = cause instanceof Error ? cause.message : String(cause);
+			perDataset.push({ dataset: dataset.name, refused: reason });
+			applied = false;
+			continue;
+		}
 		const byCommit = new Map<string, IngestPage[]>();
 		for (const document of dataset.documents) {
 			if (document.commit === null || document.path === null || document.source_url === null) continue;
 			let body: string;
 			try {
-				body = await gitShow(document.commit, document.path);
+				body = await datasetGitShow(document.commit, document.path);
 			} catch (cause) {
 				const reason = cause instanceof Error ? cause.message.slice(0, 200) : String(cause);
 				perDataset.push({ dataset: dataset.name, refused: `git show failed for ${document.path}: ${reason}` });
@@ -494,7 +535,7 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	// re-upload them); the pins and the cutover note wait for a clean apply.
 	const statePersisted = !options.rehearsal && options.stateFile != null;
 	if (statePersisted) await saveIngestRecords(options.stateFile as string, seen, versions, freshness);
-	const cutover = !options.rehearsal && applied;
+	const cutover = !options.rehearsal && applied && options.substrateUrl !== undefined;
 	if (cutover) {
 		await emit({
 			surface: "substrate",
@@ -526,7 +567,10 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 		cutover_note_stored: cutover && lastEventStored,
 	};
 	io.out(`${JSON.stringify(report, null, 2)}\n`);
-	return { ok: applied, exit: applied ? 0 : 1, report, ...(applied ? {} : { refused: "apply failed; see the report" }) };
+	// A successful apply whose cutover note could not be stored is not a
+	// success: SC5's logged, reversible switch is the record.
+	const exitOk = applied && (!cutover || lastEventStored);
+	return { ok: exitOk, exit: exitOk ? 0 : 1, report, ...(exitOk ? {} : { refused: "apply incomplete; see the report" }) };
 }
 
 export interface MigrateEnv {
@@ -559,6 +603,14 @@ export async function main(
 		io.err("docs-migrate: LIGHTRAG_URL is unset; refusing to apply before any socket is opened\n");
 		return 2;
 	}
+	const substrateUrl = parsed.substrateUrl ?? env.SUBSTRATE_URL?.trim() ?? "";
+	if (parsed.mode === "apply" && !parsed.rehearsal && substrateUrl === "") {
+		// SC5: the logged, reversible switch is the record. A non-rehearsal
+		// apply without an events endpoint cannot leave that record, so it is
+		// refused before any page is replayed.
+		io.err("docs-migrate: a non-rehearsal apply records its cutover note; pass --substrate-url <url> or set SUBSTRATE_URL\n");
+		return 2;
+	}
 	if (parsed.partA === null) {
 		io.err("docs-migrate: --apply requires --part-a <file> naming the summary that records the Part A pass\n");
 		return 2;
@@ -573,8 +625,9 @@ export async function main(
 			lightragUrl: reach.url,
 			...(reach.apiKey !== undefined ? { lightragApiKey: reach.apiKey } : {}),
 			fetchImpl,
-			...(parsed.substrateUrl !== null && parsed.substrateUrl !== "" ? { substrateUrl: parsed.substrateUrl } : env.SUBSTRATE_URL?.trim() ? { substrateUrl: env.SUBSTRATE_URL.trim() } : {}),
-			substrateToken: parsed.substrateToken ?? env.SUBSTRATE_TOKEN_SUBSTRATE?.trim() ?? undefined,
+			substrateUrl: parsed.substrateUrl ?? (env.SUBSTRATE_URL?.trim() || undefined),
+			substrateToken: env.SUBSTRATE_TOKEN_SUBSTRATE?.trim() || undefined,
+			agentSkillsRoot: env.SUBSTRATE_AGENT_SKILLS_ROOT?.trim() || undefined,
 		},
 		io,
 	);

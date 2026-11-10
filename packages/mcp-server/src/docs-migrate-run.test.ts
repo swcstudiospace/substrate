@@ -378,6 +378,28 @@ describe("docs-migrate", () => {
 		expect(report.cutover_note_emitted).toBe(false);
 	});
 
+	test("the agent-skills dataset is refused with the remedy named when no skills checkout is given", async () => {
+		const fixture = await applyFixture();
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				partAFile: partA,
+				rehearsal: false,
+				stateFile: fixture.stateFile,
+				datasets: ["agent-skills"],
+				lightragUrl: "http://lightrag.test",
+				fetchImpl: fixture.lightrag.fetchImpl,
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			{ out: () => undefined, err: () => undefined },
+		);
+		expect(outcome.exit).toBe(1);
+		const report = outcome.report as { datasets: Array<Record<string, unknown>> };
+		expect(report.datasets.some((dataset) => typeof dataset.refused === "string" && dataset.refused.includes("SUBSTRATE_AGENT_SKILLS_ROOT"))).toBe(true);
+	});
+
 	test("the cutover note POSTs to the substrate events endpoint when one is configured", async () => {
 		const fixture = await applyFixture();
 		const posts: Array<{ url: string; body: unknown; auth: string | null }> = [];

@@ -5918,7 +5918,7 @@ describe("planning refresh: refusal cooldown and note dedup", () => {
 			expect(uploadAttempts).toBe(attemptsAfterPass1);
 			expect(planningNotes(emitted)).toHaveLength(1); // and the unchanged pending set notes nothing
 			// Backoff expiry: the window lapses, so the next pass attempts again.
-			const refusals = substrate["planningRefusals" as keyof Substrate] as unknown as Map<string, { at: number }>;
+			const refusals = (substrate as unknown as { planningRefusals: Map<string, { at: number }> }).planningRefusals;
 			for (const entry of refusals.values()) entry.at = Date.now() - 31_000;
 			await runPlanningPass(substrate);
 			expect(uploadAttempts).toBeGreaterThan(attemptsAfterPass1);
