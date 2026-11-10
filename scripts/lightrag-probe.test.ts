@@ -64,6 +64,30 @@ describe("LightRAG probe sampling", () => {
 		expect(outcome.report).toMatchObject({ ok: false, failures: 0, p95_ms: 600 });
 	});
 
+	test("p95 exactly at the bound passes: the bound is at most 500 ms", async () => {
+		const outcome = await runProbe(PROBE_DEFAULTS, scripted([{ status: 200, latencyMs: 500 }]).deps(URL_ENV));
+		expect(outcome.exitCode).toBe(0);
+		expect(outcome.report).toMatchObject({ ok: true, failures: 0, p95_ms: 500 });
+	});
+
+	test("p95 one millisecond over the bound exits 1", async () => {
+		const outcome = await runProbe(PROBE_DEFAULTS, scripted([{ status: 200, latencyMs: 501 }]).deps(URL_ENV));
+		expect(outcome.exitCode).toBe(1);
+		expect(outcome.report).toMatchObject({ ok: false, failures: 0, p95_ms: 501 });
+	});
+
+	test("every 2xx status is a passing sample: 204 passes", async () => {
+		const outcome = await runProbe(PROBE_DEFAULTS, scripted([{ status: 204, latencyMs: 100 }]).deps(URL_ENV));
+		expect(outcome.exitCode).toBe(0);
+		expect(outcome.report).toMatchObject({ ok: true, failures: 0 });
+	});
+
+	test("a 3xx status is not 2xx: a redirect fails the sample and names its status", async () => {
+		const outcome = await runProbe(PROBE_DEFAULTS, scripted([{ status: 301, latencyMs: 100 }]).deps(URL_ENV));
+		expect(outcome.exitCode).toBe(1);
+		expect(outcome.report).toMatchObject({ ok: false, failures: 20, failure_reasons: expect.arrayContaining(["lightrag 301"]) });
+	});
+
 	test("percentiles are nearest-rank: one slow sample in twenty is the max, not the p95", async () => {
 		const steps = [...OK_100.slice(0, 19), { status: 200, latencyMs: 900 }];
 		const outcome = await runProbe(PROBE_DEFAULTS, scripted(steps).deps(URL_ENV));
