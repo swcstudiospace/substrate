@@ -16,7 +16,7 @@ import { archiveRagflow, ingestSha256, type ArchiveQuery } from "./docs-archive.
 import { RagflowFake } from "./ragflow-fake.ts";
 import type { EventInput } from "./types.ts";
 import type { FetchLike } from "./planes/lightrag.ts";
-import { archiveDigestOf, loadArchive, main, partAMarker, partARecorded, runApply, runDryRun } from "./docs-migrate-run.ts";
+import { archiveDigestOf, loadArchive, main, partAMarker, runApply, runDryRun } from "./docs-migrate-run.ts";
 
 const BERLIN = "ds-berlin-agent-substrate";
 const HAMM = "ds-hamm-programming-desk";
@@ -147,7 +147,8 @@ export async function applyFixture(over: { versions?: Record<string, number>; re
 	return { archiveDir, gitFiles, lightrag: { fetchImpl: lightragFetch, uploads }, events, eventsPosts, eventsFetch, stateFile };
 }
 
-export function partAFile(dir: string, records = 6, marker = partAMarker(records, archiveDigestOf(loadArchive(fixture.archiveDir)))): string {
+export function partAFile(dir: string, records = 6, marker?: string): string {
+	const resolved = marker ?? `parity-gate:part-a:passed records=${String(records)}`;
 	const file = join(dir, "SUMMARY-part-a.md");
 	writeFileSync(file, `dry run ok\n\n\`${marker}\`\n`, "utf8");
 	return file;
