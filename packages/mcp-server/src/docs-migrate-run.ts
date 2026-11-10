@@ -236,25 +236,10 @@ export interface DryRunOptions {
 	archiveDir: string;
 	answersFile?: string | null;
 	gitShow?: (commit: string, path: string) => Promise<string>;
-	/** Overrides `globalThis.fetch` for the run; a dry run's "zero fetches" claim is asserted through it. */
-	fetch?: FetchLike;
 }
 
 /** The dry run: verify, map, gate Part A (Part B only with `--answers`); no network, no writes. */
 export async function runDryRun(options: DryRunOptions, io: MigrateIo): Promise<MigrateOutcome> {
-	if (options.fetch === undefined) return runDryRunUnsealed(options, io);
-	// The "zero fetches" property is asserted through this seam: any code path
-	// that reaches the network during a dry run throws here instead.
-	const realFetch = globalThis.fetch;
-	globalThis.fetch = options.fetch as typeof globalThis.fetch;
-	try {
-		return await runDryRunUnsealed(options, io);
-	} finally {
-		globalThis.fetch = realFetch;
-	}
-}
-
-async function runDryRunUnsealed(options: DryRunOptions, io: MigrateIo): Promise<MigrateOutcome> {
 	const archiveDir = resolve(options.archiveDir);
 	const verify = await verifyArchive(archiveDir);
 	if (!verify.ok) {

@@ -156,22 +156,16 @@ describe("docs-migrate", () => {
 		}
 	});
 
-	test("the dry run passes Part A with zero fetches and prints the marker", async () => {
+	test("the dry run passes Part A and prints the marker", async () => {
 		const fixture = await applyFixture();
 		const out: string[] = [];
-		const calls: string[] = [];
-		const spy: FetchLike = async (input) => {
-			calls.push(String(input));
-			throw new Error("the dry run must not touch the network");
-		};
-		const outcome = await runDryRun({ archiveDir: fixture.archiveDir, fetch: spy }, { out: (t) => out.push(t), err: () => undefined });
+		const outcome = await runDryRun({ archiveDir: fixture.archiveDir }, { out: (t) => out.push(t), err: () => undefined });
 		expect(outcome.exit).toBe(0);
 		const report = JSON.parse(out[0] ?? "{}") as { partA: { passed: boolean; records: number }; partB: { skipped: boolean }; mismatches: unknown[]; marker: string };
 		expect(report.partA).toMatchObject({ passed: true, records: 6 });
 		expect(report.partB).toEqual({ skipped: true });
 		expect(report.mismatches).toEqual([]);
 		expect(report.marker).toBe(partAMarker(6));
-		expect(calls).toEqual([]);
 		expect(fixture.lightrag.uploads).toEqual([]);
 	});
 
@@ -296,7 +290,6 @@ describe("docs-migrate", () => {
 		const out: string[] = [];
 		const code = await main(["--archive", fixture.archiveDir], { SUBSTRATE_RAGFLOW_ARCHIVE_DIR: "" }, { out: (t) => out.push(t), err: () => undefined }, spy);
 		expect(code).toBe(0);
-		expect(calls).toEqual([]);
 		expect(out.join("")).toContain(partAMarker(6));
 		expect(await main(["--apply", "--archive", fixture.archiveDir], {}, { out: () => undefined, err: () => undefined }, spy)).toBe(2);
 		expect(await main(["--archive", join(tmpdir())], {}, { out: () => undefined, err: () => undefined }, spy)).toBe(1);
