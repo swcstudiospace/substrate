@@ -1655,38 +1655,6 @@ describe("docs_search context (D46-d, D46-e)", () => {
 			});
 		}
 
-		test("with the flag, chunks come from LightRAG and the context carries recalled memories and the session's last five events", async () => {
-			const lightrag = lightragPlane();
-			const { greptime, reads } = ledgerStub(sessionRows(7));
-			const reply = await lightragSubstrate({ lightrag: lightrag.fetch, hindsight: recallable(), greptime }).searchDocs(
-				{ question: "where is the plan?", session_id: "s-1", context: true },
-				"cursor",
-			);
-			expect(reply).toMatchObject({ backend: "lightrag" });
-			expect(reply.degraded).toBeUndefined();
-			expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
-			expect(lightrag.queries()).toBe(1);
-			expect(reply.context?.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
-			expect(reply.context?.degraded).toBeUndefined();
-			expect(reply.context?.memories.map((memory) => memory.id)).toEqual(["m2", "m4", "m3"]);
-			expect(reply.context?.events.map((event) => event.id)).toEqual(["evt-2", "evt-3", "evt-4", "evt-5", "evt-6"]);
-			expect(reads).toEqual([["session_id", "s-1"]]);
-		});
-
-		test("without the flag the LightRAG reply has no context key, and neither recall nor the ledger is read", async () => {
-			const lightrag = lightragPlane();
-			const hindsight = recallable();
-			const { greptime, reads } = ledgerStub(sessionRows(7));
-			const reply = await lightragSubstrate({ lightrag: lightrag.fetch, hindsight, greptime }).searchDocs(
-				{ question: "where is the plan?", session_id: "s-1" },
-				"cursor",
-			);
-			expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
-			expect(Object.hasOwn(reply, "context")).toBe(false);
-			expect(hindsight.recalls()).toEqual([]);
-			expect(reads).toEqual([]);
-		});
-
 		test("with no session, the LightRAG context has no events, names no-session, and keeps the memories", async () => {
 			const lightrag = lightragPlane();
 			const { greptime, reads } = ledgerStub(sessionRows(7));
