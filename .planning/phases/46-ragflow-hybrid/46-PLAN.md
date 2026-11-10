@@ -354,6 +354,18 @@ Run by the main agent once, after all sub-plans land. Sub-plan executors run onl
 Create `.planning/phases/46-ragflow-hybrid/SUMMARY.md` when the offline sub-plans land, recording the verified commands and their results. Create one `VERIFICATION.md` after the C checkpoints run, with each criterion status updated from live evidence.
 </output>
 
+## Dead-on-arrival archive writer (recorded 2026-11-10)
+
+The archive writer reads from RAGFlow, and the RAGFlow service was deleted on 2026-10-25, before the 2026-10-28 cutover. It cannot run against any live source, so it is dead on arrival. It stays in place only because D1 is pending the operator. Do not run it, and do not count it toward criterion 2.
+
+Affected code added on this branch:
+
++- `packages/mcp-server/src/docs-archive.ts` and `docs-archive.test.ts`: the writer and checksum verifier, added by `4076ccdd`, with the tsc fix in `6e4f95b1`.
++- `packages/mcp-server/src/planes/ragflow.ts`: the `listDocuments` and `RagflowDocument` additions (55 lines), added by `4076ccdd`.
++- `packages/mcp-server/src/config.ts` (`ragflowArchiveFromEnv`), `flag-registry.ts`, `.env.example` and `docs/config-reference.md`: the `SUBSTRATE_RAGFLOW_ARCHIVE_DIR` and `SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS` entries, added by `4076ccdd`.
+
+Nothing is deleted in this step. If D1 resolves to (c), T7 deletes `docs-archive.ts` and its test. The RAGFlow `listDocuments` and the archive config go with `planes/ragflow.ts` in the removal.
+
 ## Offline task status (recorded after execution)
 
 | Task | Status | Commit |
