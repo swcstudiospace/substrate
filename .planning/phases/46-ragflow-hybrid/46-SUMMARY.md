@@ -71,3 +71,16 @@ Not run here, by contract: every live step (below). Pre-existing failures at HEA
 - Part B has never run against a real LightRAG: the rehearsal answers come from the operator's Task 10 run, fed back through `bun scripts/docs-migrate.ts --archive <dir> --answers <answers.json>` (full ordered gate) or directly into `parityGate`.
 - The archived per-URL versions are metadata the migration carries forward, not data the replay renumbers — `docs-migrate --apply` writes them onto the `lightrag::` keys so Part A's triple compares equal and post-cutover replacements increment from the right generation.
 - The `git show` page-hash check reports (never silently accepts) pages whose bytes changed since ingest; a real archive with such pages should reconcile the commits before apply, not widen the gate.
+
+
+## Review-round addendum (2026-11-10, Greptile rounds 2-5 on PR #214)
+
+Five apex-tier review rounds drove four fix rounds; each round's findings were fixed and tested:
+
+- Round 2 (a76dc918 review): cooldown scope split — gate refusals ride the configured 24 h cooldown, transient plane faults ride a short 30 s backoff window; both reset on content change; an empty filtered attempt set notes nothing. Validated archive parses replaced the last unchecked `JSON.parse(...) as T` casts (ratchet baseline stays 45/26).
+- Round 3 (157d1c4 review): the events emit never throws — a lost or timed-out POST can no longer discard upload progress; the replay accepts exactly the paths each dataset's archive records (their top-level directory as the ingest root), never the substrate-wide defaults.
+- Round 4 (37a8da19 review): per-dataset roots distinguish shared directory segments (`docs/`) from lone top-level files (`README.md`); each archived commit replays through batchPagesForIngest (one commit can exceed the 5 MB call limit); the RAGFlow document listing paginates past the first page.
+- Round 5 (d2e82d42 review): roots derive from each archived path's directory part; replay selects each source URL's current copy (the archive lists superseded copies first), so old bodies never land under a sibling's version; a rehearsal apply never POSTs even when an endpoint is configured.
+- Round 6 finding: the Part A approval is now bound to the loaded archive's digest (dataset ids/names plus record keys) — a stale or foreign Part A summary can no longer authorize a replay; an unreadable saved state refuses the apply instead of being overwritten (round 2 finding).
+
+Still operator-gated: the live SC6 sequence and criteria 2/6 + LightRAG graph/hybrid modes (see above).
