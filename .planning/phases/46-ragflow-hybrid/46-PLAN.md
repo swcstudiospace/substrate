@@ -353,3 +353,17 @@ Run by the main agent once, after all sub-plans land. Sub-plan executors run onl
 <output>
 Create `.planning/phases/46-ragflow-hybrid/SUMMARY.md` when the offline sub-plans land, recording the verified commands and their results. Create one `VERIFICATION.md` after the C checkpoints run, with each criterion status updated from live evidence.
 </output>
+
+## Offline task status (recorded after execution)
+
+| Task | Status | Commit |
+| --- | --- | --- |
+| T1 trim duplicate SC1 tests | done (agent) | 5732b3b1 (pre-trim base 432a330a) |
+| T2 freeze 10-query parity sample | done (agent) | 8a55bdf5 |
+| T3 PARITY_GATE comparator, offline and read-only | done (agent) | 4ad7dc7e |
+| T4 probe test gaps and probe:lightrag | done (agent) | 0011d77b |
+| T5 cutover record and docs-plane status (non-D4/D6 parts) | done (agent) | eb071794 |
+| D1-D6 decisions | agent default, pending operator, NOT ACTED ON | 32fcde58 |
+| T6-T8 RAGFlow removal, live C1-C7 | not started, operator-gated | - |
+
+Note: planes/ragflow.ts gained additive code from the archive writer (listDocuments, RagflowDocument). Retiring it is part of D1 and is not done.
