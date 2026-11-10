@@ -1588,6 +1588,20 @@ export class Substrate {
 	private planningHashStoreCache: PlanningHashStore | null = null;
 	private readonly planningHashSeam: PlanningHashStore | null;
 	/**
+	 * The gate refusals the cooldown may park: content and structural verdicts
+	 * are deterministic given the page, so re-polling them inside the window
+	 * only re-warns. Everything else — upload and parse errors, lock timeouts,
+	 * an unreachable plane — is transient and must retry on the next pass,
+	 * or a brief LightRAG outage would leave planning pages stale for a day.
+	 */
+	private static readonly PLANNING_PARKABLE_REASONS: Record<string, true> = {
+		"secret-findings": true,
+		"no-source-url": true,
+		"outside-roots": true,
+		"page-too-large": true,
+		"call-too-large": true,
+	};
+	/**
 	 * Pages the planning ingest refused, keyed by path: the content sha refused, why, and when.
 	 * The cooldown parks a refused page until the window lapses or its sha moves, so one
 	 * permanent refusal cannot re-attempt and re-warn every poll.
@@ -6779,7 +6793,7 @@ export class Substrate {
 					// locator) instead of per-page results; that page alone is parked when the
 					// cooldown is on. Any other refusal is a plane fault (lock timeout, upload
 					// error): leave it unrecorded so the next pass retries it.
-					if (cooldownMs > 0 && outcome.refused === true && typeof outcome.page === "string") {
+					if (cooldownMs > 0 && outcome.refused === true && typeof outcome.page === "string" && Substrate.PLANNING_PARKABLE_REASONS[outcome.reason]) {
 						const page = byPath.get(outcome.page);
 						if (page !== undefined) {
 							this.planningRefusals.set(outcome.page, { sha: planningPageSha(page), reason: outcome.reason.split(":", 1)[0]?.trim() || "unknown", at: now });
@@ -6795,7 +6809,7 @@ export class Substrate {
 				for (const page of batch) {
 					const refusal = refused.get(page.path);
 					if (refusal !== undefined) {
-						if (cooldownMs > 0) this.planningRefusals.set(page.path, { sha: planningPageSha(page), reason: refusal, at: now });
+						if (cooldownMs > 0 && Substrate.PLANNING_PARKABLE_REASONS[refusal]) this.planningRefusals.set(page.path, { sha: planningPageSha(page), reason: refusal, at: now });
 					} else {
 						const sha = planningPageSha(page);
 						hashes.set(page.path, sha);

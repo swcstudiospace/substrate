@@ -39,7 +39,7 @@
  * (`lightragFromEnv`), or a missing Part A record.
  */
 import { execFile } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -72,11 +72,13 @@ export interface ParsedMigrateArgs {
 	rehearsal: boolean;
 	stateFile: string | null;
 	datasets: string[];
+	substrateUrl: string | null;
+	substrateToken: string | null;
 	reason: string | null;
 }
 
 export function parseMigrateArgs(argv: readonly string[]): ParsedMigrateArgs {
-	const parsed: ParsedMigrateArgs = { mode: "dry-run", archive: null, partA: null, answers: null, rehearsal: false, stateFile: null, datasets: [], reason: null };
+	const parsed: ParsedMigrateArgs = { mode: "dry-run", archive: null, partA: null, answers: null, rehearsal: false, stateFile: null, datasets: [], substrateUrl: null, substrateToken: null, reason: null };
 	for (let index = 0; index < argv.length; index += 1) {
 		const flag = argv[index] ?? "";
 		const next = (): string | null => {
@@ -87,12 +89,14 @@ export function parseMigrateArgs(argv: readonly string[]): ParsedMigrateArgs {
 		if (flag === "--dry-run") parsed.mode = "dry-run";
 		else if (flag === "--apply") parsed.mode = "apply";
 		else if (flag === "--rehearsal") parsed.rehearsal = true;
-		else if (flag === "--archive" || flag === "--part-a" || flag === "--answers" || flag === "--state-file") {
+		else if (flag === "--archive" || flag === "--part-a" || flag === "--answers" || flag === "--state-file" || flag === "--substrate-url" || flag === "--substrate-token") {
 			const value = next();
 			if (value === null) return { ...parsed, reason: `${flag} needs a value; ${MIGRATE_USAGE}` };
 			if (flag === "--archive") parsed.archive = value;
 			else if (flag === "--part-a") parsed.partA = value;
 			else if (flag === "--answers") parsed.answers = value;
+			else if (flag === "--substrate-url") parsed.substrateUrl = value;
+			else if (flag === "--substrate-token") parsed.substrateToken = value;
 			else parsed.stateFile = value;
 		} else if (flag === "--dataset") {
 			const value = next();
@@ -296,6 +300,12 @@ export interface ApplyOptions {
 	gitShow?: (commit: string, path: string) => Promise<string>;
 	now?: () => number;
 	poll?: { maxPolls?: number; intervalMs?: number };
+	/** When set, ledger events (the cutover note) POST to this substrate URL instead of staying in memory. */
+	substrateUrl?: string;
+	/** Bearer for the substrate events endpoint; SUBSTRATE_TOKEN_SUBSTRATE is the operator's usual source. */
+	substrateToken?: string | undefined;
+	/** The fetch the events POST uses; tests inject a capture here instead of the global. */
+	eventsFetch?: FetchLike;
 }
 
 async function defaultGitShow(commit: string, path: string): Promise<string> {
@@ -328,10 +338,36 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	const now = options.now ?? Date.now;
 	const seen = new Map<string, IngestRecord>();
 	const versions = createVersionStore();
+	// A prior apply's records, versions and pins survive: the state file is the
+	// store of record, so this apply merges into it instead of replacing it
+	// (sequential per-dataset applies must not erase each other).
+	if (options.stateFile != null && existsSync(options.stateFile)) {
+		const loaded = loadIngestRecordsSync(options.stateFile);
+		for (const [key, record] of loaded.records) seen.set(key, record);
+		for (const [dataset, entry] of loaded.versions) versions.set(dataset, entry);
+	}
 	const events: EventInput[] = [];
+	let lastEventStored = false;
+	const postEvent = options.eventsFetch ?? fetch;
 	const emit = async (event: EventInput): Promise<unknown> => {
 		events.push(event);
-		return { stored: false };
+		if (options.substrateUrl === undefined) return { stored: false };
+		try {
+			const response = await postEvent(new URL("/events", options.substrateUrl), {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					...(options.substrateToken !== undefined ? { authorization: `Bearer ${options.substrateToken}` } : {}),
+				},
+				body: JSON.stringify(event),
+				signal: AbortSignal.timeout(5_000),
+			});
+			lastEventStored = response.ok;
+			return { stored: response.ok };
+		} catch {
+			lastEventStored = false;
+			return { stored: false };
+		}
 	};
 	const names = archive.datasets.map((dataset) => dataset.name);
 	const totals = { ingested: 0, replaced: 0, unchanged: 0, failed: 0 };
@@ -384,6 +420,12 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 				else if (result.status === "unchanged") datasetReport.unchanged = (datasetReport.unchanged as number) + 1;
 				else datasetReport.failed = (datasetReport.failed as number) + 1;
 			}
+			if ((datasetReport.failed as number) > 0) {
+				// Partial ingestion is not a successful apply: the state save, the
+				// dataset pins and the cutover note all wait until every page landed.
+				applied = false;
+				datasetReport.partial = true;
+			}
 		}
 		totals.ingested += datasetReport.ingested as number;
 		totals.replaced += datasetReport.replaced as number;
@@ -408,22 +450,25 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	}
 	// Dataset pins: the archived RAGFlow pin becomes the LightRAG pin, so
 	// citations keep their commit and a second refresh replaces rather than
-	// renumbering.
+	// renumbering. A partial apply records none — the pin claims the dataset
+	// migrated, and a dataset with failed pages has not.
 	let pins = 0;
-	for (const [dataset, list] of archive.versions) {
-		if (wanted !== null && !wanted.has(dataset)) continue;
-		const latest = [...list].reverse().find((version) => version.backend === "ragflow");
-		if (latest === undefined) continue;
-		recordVersion(versions, {
-			dataset,
-			dataset_id: dataset,
-			version: latest.version,
-			commit: latest.commit,
-			content_sha256: latest.content_sha256,
-			ingested_at: new Date(now()).toISOString(),
-			backend: "lightrag",
-		});
-		pins += 1;
+	if (applied) {
+		for (const [dataset, list] of archive.versions) {
+			if (wanted !== null && !wanted.has(dataset)) continue;
+			const latest = [...list].reverse().find((version) => version.backend === "ragflow");
+			if (latest === undefined) continue;
+			recordVersion(versions, {
+				dataset,
+				dataset_id: dataset,
+				version: latest.version,
+				commit: latest.commit,
+				content_sha256: latest.content_sha256,
+				ingested_at: new Date(now()).toISOString(),
+				backend: "lightrag",
+			});
+			pins += 1;
+		}
 	}
 	const statePersisted = !options.rehearsal && options.stateFile != null && applied;
 	if (statePersisted) await saveIngestRecords(options.stateFile as string, seen, versions);
@@ -456,6 +501,7 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 		versions_recorded: pins,
 		state_file_persisted: statePersisted,
 		cutover_note_emitted: cutover,
+		cutover_note_stored: cutover && lastEventStored,
 	};
 	io.out(`${JSON.stringify(report, null, 2)}\n`);
 	return { ok: applied, exit: applied ? 0 : 1, report, ...(applied ? {} : { refused: "apply failed; see the report" }) };
@@ -505,6 +551,8 @@ export async function main(
 			lightragUrl: reach.url,
 			...(reach.apiKey !== undefined ? { lightragApiKey: reach.apiKey } : {}),
 			fetchImpl,
+			...(parsed.substrateUrl !== null && parsed.substrateUrl !== "" ? { substrateUrl: parsed.substrateUrl } : env.SUBSTRATE_URL?.trim() ? { substrateUrl: env.SUBSTRATE_URL.trim() } : {}),
+			substrateToken: parsed.substrateToken ?? env.SUBSTRATE_TOKEN_SUBSTRATE?.trim() ?? undefined,
 		},
 		io,
 	);

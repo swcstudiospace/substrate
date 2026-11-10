@@ -5799,7 +5799,7 @@ describe("planning refresh: refusal cooldown and note dedup", () => {
 		};
 	}
 
-	function planningSubstrate(dir: string, uploads: string[], env: Record<string, string> = {}) {
+	function planningSubstrate(dir: string, uploads: string[], env: Record<string, string> = {}, plane?: FetchLike) {
 		const { emitted, index, greptime } = stubStores(null);
 		const substrate = new Substrate(
 			loadConfig({
@@ -5816,7 +5816,7 @@ describe("planning refresh: refusal cooldown and note dedup", () => {
 				ragflowFetch: async () => {
 					throw new Error("connect ECONNREFUSED");
 				},
-				lightragFetch: planeRecording(uploads),
+				lightragFetch: plane ?? planeRecording(uploads),
 				planningBaseDir: dir,
 			},
 		);
@@ -5888,6 +5888,35 @@ describe("planning refresh: refusal cooldown and note dedup", () => {
 			expect(refusalWarnings(emitted)).toHaveLength(1);
 			await runPlanningPass(substrate);
 			expect(refusalWarnings(emitted)).toHaveLength(2); // two attempts across two passes
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a transient upload error is never parked — the next pass retries the page", async () => {
+		const dir = await planningCheckout({ "clean.md": CLEAN });
+		const uploads: string[] = [];
+		let uploadAttempts = 0;
+		const flaky: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && url.pathname === "/documents/upload" && init.body instanceof FormData) {
+				uploadAttempts += 1;
+				if (uploadAttempts === 1) return Response.json({ detail: "lightrag unavailable" }, { status: 503 });
+				uploads.push(String(init.body.get("file_source")));
+				return Response.json({ status: "success", data: { track_id: "trk-1" } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+		const { substrate, emitted } = planningSubstrate(dir, uploads, {}, flaky);
+		try {
+			await runPlanningPass(substrate); // pass 1: the upload 503s — a plane fault, never a gate refusal
+			expect(refusalWarnings(emitted)).toHaveLength(0);
+			await runPlanningPass(substrate); // pass 2: retried immediately, the page lands
+			expect(uploadAttempts).toBe(2);
+			expect(uploadsOf(uploads, "clean.md")).toBe(1);
+			expect(planningNotes(emitted)).toHaveLength(1);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}

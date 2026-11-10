@@ -296,4 +296,114 @@ describe("docs-migrate", () => {
 		expect(await main([], {}, { out: () => undefined, err: () => undefined }, spy)).toBe(2);
 		expect(await main(["--mystery"], {}, { out: () => undefined, err: () => undefined }, spy)).toBe(2);
 	});
+
+	test("a second apply for another dataset merges into the state file instead of replacing it", async () => {
+		const fixture = await applyFixture({ versions: { "docs/page-ds-berlin-agent-substrate-1.md": 3 } });
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const base = {
+			archiveDir: fixture.archiveDir,
+			partAFile: partA,
+			rehearsal: false,
+			stateFile: fixture.stateFile,
+			lightragUrl: "http://lightrag.test",
+			fetchImpl: fixture.lightrag.fetchImpl,
+			gitShow: async (commit: string, path: string) => fixture.gitFiles[`${commit}:${path}`] ?? "",
+			poll: { maxPolls: 1, intervalMs: 0 },
+			now: () => 1_700_000_000_000,
+		};
+		const first = await runApply({ ...base, datasets: ["agent-substrate"] }, { out: () => undefined, err: () => undefined });
+		expect(first.exit).toBe(0);
+		const persistedAfterFirst = JSON.parse(readFileSync(fixture.stateFile, "utf8")) as { records: Record<string, unknown> };
+		const firstKeys = Object.keys(persistedAfterFirst.records).filter((key) => key.includes("agent-substrate::") && key.includes("https://"));
+		expect(firstKeys.length).toBeGreaterThan(0);
+		const second = await runApply({ ...base, datasets: ["programming-desk"] }, { out: () => undefined, err: () => undefined });
+		expect(second.exit).toBe(0);
+		const persisted = JSON.parse(readFileSync(fixture.stateFile, "utf8")) as { records: Record<string, unknown> };
+		const keys = Object.keys(persisted.records);
+		for (const firstKey of firstKeys) expect(keys).toContain(firstKey); // the first apply's records survive
+		expect(keys.some((key) => key.includes("programming-desk::") && key.includes("https://"))).toBe(true); // the second apply's records are added
+	});
+
+	test("a partial apply is not a success: no state save, no pins, no cutover note, exit 1", async () => {
+		const fixture = await applyFixture();
+		const inner = fixture.lightrag.fetchImpl;
+		let uploads = 0;
+		const flaky: FetchLike = async (input, init) => {
+			const response = await inner(input, init);
+			if (response.status === 200 && new URL(String(input)).pathname === "/documents/upload") {
+				uploads += 1;
+				if (uploads === 2) return Response.json({ detail: "lightrag unavailable" }, { status: 503 });
+			}
+			return response;
+		};
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				partAFile: partA,
+				rehearsal: false,
+				stateFile: fixture.stateFile,
+				datasets: [],
+				lightragUrl: "http://lightrag.test",
+				fetchImpl: flaky,
+				gitShow: async (commit, path) => fixture.gitFiles[`${commit}:${path}`] ?? "",
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			{ out: () => undefined, err: () => undefined },
+		);
+		expect(outcome.exit).toBe(1);
+		const report = outcome.report as { totals: { failed: number }; datasets: Array<Record<string, unknown>>; versions_recorded: number; state_file_persisted: boolean; cutover_note_emitted: boolean };
+		// The failed page surfaces either as a per-page failure or as a dataset
+		// refusal; both mean the apply did not succeed.
+		expect(
+			report.totals.failed > 0 || report.datasets.some((dataset) => dataset.refused !== undefined || (dataset.failed as number) > 0),
+		).toBe(true);
+		expect(report.versions_recorded).toBe(0); // a dataset with failed pages records no pin
+		expect(report.state_file_persisted).toBe(false);
+		expect(report.cutover_note_emitted).toBe(false);
+	});
+
+	test("the cutover note POSTs to the substrate events endpoint when one is configured", async () => {
+		const fixture = await applyFixture();
+		const posts: Array<{ url: string; body: unknown; auth: string | null }> = [];
+		const eventsFetch: FetchLike = async (input, init) => {
+			posts.push({
+				url: String(input),
+				body: JSON.parse(String(init?.body ?? "{}")) as unknown,
+				auth: (init?.headers as Record<string, string> | undefined)?.authorization ?? null,
+			});
+			return Response.json({ stored: true });
+		};
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				partAFile: partA,
+				rehearsal: false,
+				stateFile: fixture.stateFile,
+				datasets: [],
+				lightragUrl: "http://lightrag.test",
+				fetchImpl: fixture.lightrag.fetchImpl,
+				eventsFetch,
+				substrateUrl: "http://substrate.test",
+				substrateToken: "tok",
+				gitShow: async (commit, path) => fixture.gitFiles[`${commit}:${path}`] ?? "",
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			{ out: () => undefined, err: () => undefined },
+		);
+		expect(outcome.exit).toBe(0);
+		const report = outcome.report as { cutover_note_emitted: boolean; cutover_note_stored: boolean };
+		expect(report.cutover_note_emitted).toBe(true);
+		expect(report.cutover_note_stored).toBe(true);
+		const note = posts.find((post) => {
+			const body = post.body as { payload?: { action?: string } };
+			return body.payload?.action === "docs.cutover";
+		});
+		expect(note).toBeDefined();
+		expect(note?.url).toBe("http://substrate.test/events");
+		expect(note?.auth).toBe("Bearer tok");
+	});
 });
