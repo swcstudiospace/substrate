@@ -678,7 +678,7 @@ function graphStrings(hint: PlanningGraphHint): string[] {
  * page with a planning-graph hint folds in the entities and relations its LightRAG insert uploads, so a graph
  * correction with unchanged markdown is a change. RAGFlow never passes a hint, so its hash stays the body's.
  */
-function changeSha(body: string, hint: PlanningGraphHint | undefined): string {
+export function changeSha(body: string, hint: PlanningGraphHint | undefined): string {
 	if (hint === undefined) return sha256(body);
 	const relations = hint.relations.map((relation) => [relation.source, relation.target, relation.kind]);
 	return sha256(JSON.stringify({ body, entities: hint.entities, relations }));
