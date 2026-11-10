@@ -3,14 +3,14 @@
  * REST directive shape with its `checkpoint_hint`, and the HTTP status of every typed result. The inbox is in memory and the
  * clock a number, so nothing here needs a server.
  */
-import { describe, expect, test } from "bun:test";
-import type { SteeringSession, SteeringSessionState } from "../event.ts";
+import { afterEach, describe, expect, test } from "bun:test";
+import { loadConfig } from "../config.ts";
+import { auditToolCalls, createObservability } from "../observe.ts";
+import { Substrate } from "../service.ts";
 import { defined } from "../test-support.ts";
-import type { Surface } from "../types.ts";
-import { SteeringSessionRegistry } from "./session-state.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./live-session.test-support.ts";
 import {
 	listRestDirectives,
-	listSteeringSessions,
 	parseAcknowledgeBody,
 	parseDirectivesQuery,
 	parseQueueBody,
@@ -24,8 +24,7 @@ import {
 	steeringUnavailable,
 } from "./steering-rest.ts";
 import { SteeringInbox, steeringRecordsFromEntries, type SteeringAuditEntry, type SteeringError, type SteeringHistorySink, type SteeringRecord } from "./steering.ts";
-import { acknowledgeSteeringWithState, type SteeringAcknowledgeReply } from "./steering-delivery.ts";
-import { queueSteering, type SteeringCaller, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
+import { acknowledgeSteeringWithState, queueSteering, type LiveSessionAuditPort, type SteeringCaller, type SteeringWriteResult } from "./steering-tools.ts";
 
 const NOW = 1_800_000_000_000;
 /** A made-up credential shaped like a GitHub token, so the redactor has something to find. */
@@ -55,18 +54,18 @@ async function queue(inbox: SteeringInbox, id: string, action: "pause" | "redire
 }
 
 const OPERATOR: SteeringCaller = { surface: "omp", isOperator: true };
-const wiringOf = (inbox: SteeringInbox): SteeringWiring => ({ enabled: true, inbox, clock: { nowMs: () => NOW }, settingsErrors: [] });
-
-/** A session registry (the port the routes drive) that holds `sess-a` of surface omp in `state`. */
-function registryHolding(state: SteeringSessionState): SteeringSessionRegistry {
-	const registry = new SteeringSessionRegistry({ emit: async () => undefined, nowMs: () => NOW });
-	registry.put("omp", "sess-a", { session_id: "sess-a", repo_id: "owner/name", state, updated_at: new Date(NOW).toISOString() });
-	return registry;
-}
-
-/** The acknowledgement path `POST /steering/acknowledge` runs, over the same inbox and registry. */
-function acknowledge(inbox: SteeringInbox, registry: SteeringSessionRegistry, id: string, confirm?: boolean): Promise<SteeringAcknowledgeReply> {
-	return acknowledgeSteeringWithState(wiringOf(inbox), OPERATOR, { directive_id: id, session_id: "sess-a", outcome: "applied", ...(confirm === undefined ? {} : { confirm }) }, registry);
+const stops: Array<() => void> = [];
+afterEach(() => { for (const stop of stops.splice(0)) stop(); });
+async function live(state: "ACTIVE" | "PAUSED" = "ACTIVE") {
+	const env = { SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp" };
+	const config = loadConfig(env);
+	const observability = createObservability(config, env);
+	await observability.start(); stops.push(() => observability.stop());
+	const authority = createTestLiveSessionAuthority({ nowMs: NOW });
+	const row = await issueLiveSession(authority, { caller: { surface: "cursor", isOperator: false }, state, steering: "PRIVATE-DIRECTION", planningHash: "PRIVATE-PLAN" });
+	const audit: LiveSessionAuditPort = { auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) };
+	const substrate = new Substrate(config, { index: null, greptime: null, steering: { history: new MemorySink(), liveSessions: authority, nowMs: () => NOW } }, observability.observer, audit);
+	return { authority, row, substrate };
 }
 
 const params = (query: string): URLSearchParams => new URLSearchParams(query);
@@ -87,45 +86,22 @@ describe("parseSessionsQuery", () => {
 	});
 });
 
-describe("listSteeringSessions", () => {
-	const session = (id: string, updated: number, repo = "owner/name"): SteeringSession => ({ session_id: id, repo_id: repo, state: "ACTIVE", updated_at: new Date(updated).toISOString() });
-	const registry = (held: Array<{ surface: Surface; session: SteeringSession }>) => ({ entries: () => held });
-	const rows = [
-		{ surface: "omp" as Surface, session: session("s-old", NOW - 5_000) },
-		{ surface: "cursor" as Surface, session: session("s-cursor", NOW - 1_000) },
-		{ surface: "omp" as Surface, session: session("s-new", NOW, "other/repo") },
-	];
-
-	test("an operator sees every surface, newest first, and a repo filter narrows", () => {
-		const all = listSteeringSessions(registry(rows), null, { surface: "omp", isOperator: true }, { repoId: null, limit: 10 });
-		expect(all.sessions.map((entry) => entry.session_id)).toEqual(["s-new", "s-cursor", "s-old"]);
-		const narrowed = listSteeringSessions(registry(rows), null, { surface: "omp", isOperator: true }, { repoId: "owner/name", limit: 10 });
-		expect(narrowed.sessions.map((entry) => entry.session_id)).toEqual(["s-cursor", "s-old"]);
-	});
-
-	test("a non-operator sees only its own surface, and a caller with no surface sees nothing", () => {
-		const own = listSteeringSessions(registry(rows), null, { surface: "cursor", isOperator: false }, { repoId: null, limit: 10 });
-		expect(own.sessions.map((entry) => entry.surface)).toEqual(["cursor"]);
-		expect(listSteeringSessions(registry(rows), null, { surface: null, isOperator: false }, { repoId: null, limit: 10 }).sessions).toEqual([]);
-	});
-
-	test("the limit cuts the list and says so, and a count of pending directives rides each row", async () => {
-		const inbox = inboxOf();
-		await queue(inbox, "d1", "annotate", "s-cursor");
-		const cut = listSteeringSessions(registry(rows), inbox, { surface: "omp", isOperator: true }, { repoId: null, limit: 2 });
-		expect(cut.sessions).toHaveLength(2);
-		expect(cut.truncated).toBe(true);
-		expect(defined(cut.sessions.find((entry) => entry.session_id === "s-cursor"), "the cursor row").pending_directives).toBe(1);
-		expect(cut.sessions[0]).toMatchObject({ planning_hash: null, steering: null });
-	});
-
-	test("a credential in a session's directions is redacted in the answer", () => {
-		const leaky: SteeringSession = { ...session("s-leak", NOW), steering: `Use ${TOKEN} to push`, planning_hash: `hash-${TOKEN}` };
-		const answer = listSteeringSessions(registry([{ surface: "omp", session: leaky }]), null, { surface: "omp", isOperator: true }, { repoId: null, limit: 10 });
-		const row = defined(answer.sessions[0], "the session row");
-		expect(JSON.stringify(answer)).not.toContain(TOKEN);
-		expect(row.steering).toContain("[REDACTED]");
-		expect(row.planning_hash).toContain("[REDACTED]");
+describe("issued-session metadata discovery", () => {
+	test("owner/surface and repository filters apply before the cap, without private fields", async () => {
+		const h = await live();
+		await issueLiveSession(h.authority, { caller: { surface: "omp", isOperator: false } });
+		await issueLiveSession(h.authority, { caller: { surface: "cursor", isOperator: false }, repoId: "other/repo" });
+		const caller = { surface: "cursor", isOperator: false } as const;
+		const own = await h.substrate.listLiveSessions(caller, { repoId: "owner/name", limit: 1 });
+		expect(own).toMatchObject({ sessions: [{ session_id: h.row.sessionId, surface: "cursor" }], truncated: false });
+		for (const entry of own.sessions) expect(Object.keys(entry).sort()).toEqual(["expires_at", "repo_id", "session_id", "state", "surface", "updated_at"]);
+		const operator = await h.substrate.listLiveSessions(OPERATOR, { repoId: null, limit: 1 });
+		expect(operator.sessions).toHaveLength(1); expect(operator.truncated).toBe(true);
+		expect(operator.next_cursor).toBe(operator.sessions[0]?.session_id);
+		const next = await h.substrate.listLiveSessions(OPERATOR, { repoId: null, limit: 1, cursor: defined(operator.next_cursor, "cursor") });
+		expect(next.sessions[0]?.session_id).not.toBe(operator.sessions[0]?.session_id);
+		expect(JSON.stringify([own, operator, next])).not.toContain("PRIVATE-");
+		expect(JSON.stringify([own, operator, next])).not.toContain(h.row.sessionBinding);
 	});
 });
 
@@ -137,60 +113,24 @@ describe("restDirective and checkpoint_hint", () => {
 		expect(shaped).toMatchObject({ id: "d1", session_id: "sess-a", status: "queued", acknowledged_at: null, outcome: null, checkpoint_hint: null, author: "omp", created_at: new Date(NOW).toISOString() });
 	});
 
-	test("an applied pause or redirect that moved the session names a steering checkpoint hint, on the reply and on the list", async () => {
-		for (const action of ["pause", "redirect"] as const) {
-			const inbox = inboxOf();
-			const registry = registryHolding("ACTIVE");
-			await queue(inbox, "d", action);
-			const reply = await acknowledge(inbox, registry, "d");
-			expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: "applied" }, checkpoint_hint: { trigger: "steering", directive_id: "d" } });
-			expect(restDirective(defined(inbox.get("d"), "d"))).toMatchObject({ status: "acknowledged", outcome: "applied", checkpoint_hint: { trigger: "steering", directive_id: "d" } });
-			expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" })).toMatchObject([{ id: "d", checkpoint_hint: { trigger: "steering", directive_id: "d" } }]);
+	test("only a committed acknowledgement state movement creates REST and list checkpoint hints", async () => {
+		for (const [state, action, expected] of [["ACTIVE", "pause", "applied"], ["ACTIVE", "redirect", "applied"], ["PAUSED", "redirect", "refused"], ["PAUSED", "pause", "unchanged"]] as const) {
+			const h = await live(state);
+			const queued = await queueSteering(h.substrate.steering, OPERATOR, { target_session_id: h.row.sessionId, action, priority: "normal", body: "Check plan.", conflicts_with_active_plan: false });
+			if (queued.status !== "queued") throw new Error("test queue refused");
+			const reply = await acknowledgeSteeringWithState(h.substrate.steering, OPERATOR, { directive_id: queued.directive_id, outcome: "applied" }, h.substrate.sessionState);
+			expect(reply).toMatchObject({ status: "acknowledged", session_state: { status: expected } });
+			const inbox = defined(h.substrate.steering.inbox, "inbox");
+			const shaped = restDirective(defined(inbox.get(queued.directive_id), "acknowledged record"));
+			expect(shaped.checkpoint_hint).toEqual(expected === "applied" ? { trigger: "steering", directive_id: queued.directive_id } : null);
+			expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(expected === "applied");
+			const record = defined(inbox.get(queued.directive_id), "record");
+			if (record.state !== "acknowledged") throw new Error("test acknowledgement missing");
+			const entry = { directive: record.directive, queuedAtMs: record.queuedAtMs, acknowledgement: { atMs: record.acknowledgedAtMs, outcome: record.outcome, confirmed: record.confirmed } };
+			const reloaded = inboxOf(); await reloaded.restore([entry]);
+			expect(listRestDirectives(reloaded, { sessionId: h.row.sessionId, status: "acknowledged" })[0]?.checkpoint_hint).toBeNull();
+			expect(listRestDirectives(inboxOf(), { sessionId: h.row.sessionId, status: "all" }, steeringRecordsFromEntries([entry]))[0]?.checkpoint_hint).toBeNull();
 		}
-	});
-
-	test("a move the session refused names no hint: not on the reply, not on the list, not after a reload", async () => {
-		const inbox = inboxOf();
-		// PAUSED may only resume, so the move a redirect asks for (CONTEXT_REFRESH) is refused.
-		const registry = registryHolding("PAUSED");
-		await queue(inbox, "d", "redirect");
-		const reply = await acknowledge(inbox, registry, "d");
-		expect(reply).toMatchObject({ status: "acknowledged", outcome: "applied", session_state: { status: "refused", state: "CONTEXT_REFRESH" } });
-		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
-		expect(registry.get("omp", "sess-a")?.state).toBe("PAUSED");
-		expect(restDirective(defined(inbox.get("d"), "d"))).toMatchObject({ outcome: "applied", checkpoint_hint: null });
-		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "all" })).toMatchObject([{ id: "d", checkpoint_hint: null }]);
-
-		// A restart-style reload: the boot path restores the acknowledged directive into a fresh inbox, and the history read adds it.
-		const record = defined(inbox.get("d"), "d");
-		if (record.state !== "acknowledged") throw new Error("expected an acknowledged record");
-		const entry = { directive: record.directive, queuedAtMs: record.queuedAtMs, acknowledgement: { atMs: record.acknowledgedAtMs, outcome: record.outcome, confirmed: record.confirmed } };
-		const reloaded = inboxOf();
-		await reloaded.restore([entry]);
-		expect(listRestDirectives(reloaded, { sessionId: "sess-a", status: "all" })).toMatchObject([{ id: "d", status: "acknowledged", checkpoint_hint: null }]);
-		expect(listRestDirectives(inboxOf(), { sessionId: "sess-a", status: "all" }, steeringRecordsFromEntries([entry]))).toMatchObject([{ id: "d", checkpoint_hint: null }]);
-	});
-
-	test("a request for the state the session already holds names no hint", async () => {
-		const inbox = inboxOf();
-		const registry = registryHolding("PAUSED");
-		await queue(inbox, "d", "pause");
-		const reply = await acknowledge(inbox, registry, "d");
-		expect(reply).toMatchObject({ session_state: { status: "unchanged" } });
-		expect(Object.hasOwn(reply, "checkpoint_hint")).toBe(false);
-		expect(restDirective(defined(inbox.get("d"), "d")).checkpoint_hint).toBeNull();
-	});
-
-	test("a conflicting directive queued over the route needs confirm, like the tool's", async () => {
-		const inbox = inboxOf();
-		const registry = registryHolding("ACTIVE");
-		const parsed = parseQueueBody({ session_id: "sess-a", action: "redirect", body: "switch plans", conflicts_with_active_plan: true });
-		if (!parsed.ok) throw new Error(parsed.error);
-		const queued = await queueSteering({ ...wiringOf(inbox), newDirectiveId: () => "c1" }, OPERATOR, parsed.value);
-		expect(queued).toMatchObject({ status: "queued", directive_id: "c1" });
-		expect(await acknowledge(inbox, registry, "c1")).toEqual({ status: "refused", error: { code: "confirmation-required" } });
-		expect(inbox.get("c1")?.state).toBe("queued");
-		expect(await acknowledge(inbox, registry, "c1", true)).toMatchObject({ status: "acknowledged", confirmed: true, checkpoint_hint: { directive_id: "c1" } });
 	});
 
 	test("an annotate, or any declined outcome, moves no session and carries no hint", async () => {
@@ -324,17 +264,12 @@ describe("body parsing", () => {
 		if (!badSession.ok) expect(badSession.error).toContain("session_id");
 	});
 
-	test("an acknowledge body takes the session from the directive itself", async () => {
-		const inbox = inboxOf();
-		await queue(inbox, "d1", "pause", "sess-z");
-		const parsed = parseAcknowledgeBody({ directive_id: "d1", outcome: "applied", confirm: true }, inbox);
-		expect(parsed.ok).toBe(true);
-		if (parsed.ok) expect(parsed.value).toMatchObject({ directive_id: "d1", session_id: "sess-z", outcome: "applied", confirm: true });
-		// A directive nobody queued still parses, so the inbox answers not-found rather than a shape error.
-		expect(parseAcknowledgeBody({ directive_id: "ghost", outcome: "declined" }, inbox).ok).toBe(true);
-		expect(parseAcknowledgeBody({ directive_id: "d1", outcome: "applied", session_id: "other" }, inbox)).toEqual({ ok: false, error: "unknown field: session_id" });
-		expect(parseAcknowledgeBody({ directive_id: "bad id", outcome: "applied" }, inbox)).toEqual({ ok: false, error: "invalid directive_id" });
-		expect(parseAcknowledgeBody({ directive_id: "d1", outcome: "maybe" }, inbox).ok).toBe(false);
+	test("acknowledgement parsing remains pure and accepts the old directive-only unkeyed shape", () => {
+		expect(parseAcknowledgeBody({ directive_id: "d1", outcome: "applied", confirm: true })).toEqual({ ok: true, value: { directive_id: "d1", outcome: "applied", confirm: true } });
+		expect(parseAcknowledgeBody({ directive_id: "ghost", outcome: "declined" }).ok).toBe(true);
+		expect(parseAcknowledgeBody({ directive_id: "d1", outcome: "applied", session_id: "other" }).ok).toBe(false);
+		expect(parseAcknowledgeBody({ directive_id: "bad id", outcome: "applied" }).ok).toBe(false);
+		expect(parseAcknowledgeBody({ directive_id: "d1", outcome: "maybe" }).ok).toBe(false);
 	});
 });
 
@@ -369,11 +304,11 @@ describe("statuses", () => {
 		expect(steeringRetryAfterS(refused({ code: "not-found" }))).toBeNull();
 	});
 
-	test("steeringUnavailable names invalid settings by key before it reports a missing sink", () => {
-		const clock = { nowMs: () => NOW };
-		const invalid: SteeringWiring = { enabled: true, inbox: null, clock, settingsErrors: [{ key: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", reason: "not-integer" }] };
-		expect(steeringUnavailable(invalid)).toEqual({ status: "misconfigured", error: "the steering settings are invalid", keys: ["SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN"] });
-		expect(steeringUnavailable({ enabled: true, inbox: null, clock, settingsErrors: [] })).toMatchObject({ status: "not-configured" });
-		expect(steeringUnavailable({ enabled: true, inbox: inboxOf(), clock, settingsErrors: [] })).toBeNull();
+	test("steeringUnavailable distinguishes invalid settings from a missing inbox", async () => {
+		const h = await live();
+		const wiring = h.substrate.steering;
+		expect(steeringUnavailable({ ...wiring, inbox: null, settingsErrors: [{ key: "SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN", reason: "not-integer" }] })).toMatchObject({ status: "misconfigured", keys: ["SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN"] });
+		expect(steeringUnavailable({ ...wiring, inbox: null })).toMatchObject({ status: "not-configured" });
+		expect(steeringUnavailable(wiring)).toBeNull();
 	});
 });

@@ -14,6 +14,9 @@ import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
+import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
+import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
+import { ZodError } from "zod";
 import { defined } from "./test-support.ts";
 
 /** Records what reached the event log, and stands in for the index. */
@@ -68,7 +71,7 @@ describe("claimNode", () => {
 		// Regression: the claim event used to carry no repo, so it was invisible to
 		// every repo-scoped brief — the one place a claim most needs to be seen.
 		const { emitted, index, greptime } = stubStores({ repo: "swcstudiospace/x", branch: "main" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -81,7 +84,7 @@ describe("claimNode", () => {
 
 	test("does not repeat the node id the brief already renders", async () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -94,7 +97,7 @@ describe("claimNode", () => {
 		index.getGraph = async () => {
 			throw new Error("postgres blipped");
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -104,7 +107,7 @@ describe("claimNode", () => {
 
 	test("hands the caller the lease it is now holding, and the TTL it was granted", async () => {
 		const { index, greptime } = stubStores({ repo: "r" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null, 5);
 
@@ -119,7 +122,7 @@ describe("claimNode", () => {
 		// An event per renewal would bury the trail under the one thing in it that
 		// carries no information, and a heartbeating agent renews for hours.
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "renewed" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -135,7 +138,7 @@ describe("claimNode", () => {
 			{ repo: "swcstudiospace/x" },
 			{ action: "stolen", evicted: { surface: "grok-bot", session_id: "sess-dead" } },
 		);
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
@@ -150,7 +153,7 @@ describe("claimNode", () => {
 
 	test("a re-claim after its own lease lapsed says so, and evicts nobody", async () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "reclaimed" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
@@ -161,7 +164,7 @@ describe("claimNode", () => {
 
 	test("a refused claim writes nothing, reports the holder and hides its lease id", async () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "denied", claimed: false });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
@@ -179,7 +182,7 @@ describe("claimNode", () => {
 			{ repo: "r" },
 			{ action: "denied", claimed: false, reason: "not-holder" },
 		);
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "swarm-a05-be", "A05@r0:ut-1", "hermes");
 
@@ -263,7 +266,7 @@ describe("releaseNode and completeNode", () => {
 	}
 
 	function substrateFor(stores: ReturnType<typeof leasedIndex>) {
-		return new Substrate(loadConfig({}), { index: stores.index as never, greptime: stores.greptime as never });
+		return new Substrate(loadConfig({}), { index: stores.index as never, greptime: stores.greptime as never, steering: { history: null, liveSessions: null } });
 	}
 
 	test("the holder's release writes a note naming the node", async () => {
@@ -447,7 +450,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		// A dropped event costs a line in the trail; a claim whose event dropped costs
 		// mutual exclusion — no other agent's brief would show the node as taken.
 		const { released, index, greptime } = stores({ stored: false });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -465,7 +468,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		// and the failed append. An unconditional release would clear *their* live claim
 		// and break the mutual exclusion this withdrawal exists to protect.
 		const { released, index, greptime } = stores({ stored: false, heldByAnother: true });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		return substrate.claimNode("ut-1", "n4", "omp", "sess-1", null).then((result) => {
 			expect(result.claimed).toBe(false);
@@ -476,7 +479,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 
 	test("grants it when the ledger took the event", async () => {
 		const { released, index, greptime } = stores({ stored: true });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -487,7 +490,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 	test("does not require a recording when no ledger is configured at all", async () => {
 		// A local run with no ledger would otherwise have every claim withdrawn.
 		const { index } = stores({ stored: false });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, decision: "granted" });
 	});
@@ -495,7 +498,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 	test("an operator can force fail-closed even with no ledger", async () => {
 		const { index } = stores({ stored: false });
 		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "true" });
-		const substrate = new Substrate(config, { index: index as never, greptime: null });
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).decision).toBe("revoked");
 	});
@@ -503,14 +506,14 @@ describe("claimNode is fail-closed on the ledger", () => {
 	test("an operator can force fail-open with a ledger that is refusing", async () => {
 		const { index, greptime } = stores({ stored: false });
 		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "false" });
-		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).decision).toBe("granted");
 	});
 
 	test("says so when the withdrawal itself failed, so the node is known to need a manual release", async () => {
 		const { index, greptime } = stores({ stored: false, releaseFails: true });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -538,7 +541,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 				observed_expiry: null,
 			},
 		});
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -554,7 +557,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const claimed: unknown[] = [];
 		const substrate = new Substrate(
 			loadConfig({}),
-			{ index: index as never, greptime: greptime as never },
+			{ index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } },
 			{ claimed: (sample) => claimed.push(sample) },
 		);
 
@@ -1051,20 +1054,20 @@ describe("append-mode enforcement", () => {
 		const { greptime } = ledger(true);
 		const capacity = { databaseBytes: 11_000_000, tables: [{ name: "memory_entries", totalBytes: 400_000, liveRows: 64, deadRows: 0 }] };
 		const quick = { ping: async () => true, capacity: async () => capacity };
-		const answered = await new Substrate(loadConfig({}), { index: quick as never, greptime: greptime as never }).health();
+		const answered = await new Substrate(loadConfig({}), { index: quick as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }).health();
 		expect(answered.index).toBe(true);
 		expect(answered.capacity).toEqual({ index: capacity, ledger: null });
 		expect(answered.planes.index).toMatchObject({ ok: true });
 
 		const slow = { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise };
 		const started = Date.now();
-		const timedOut = await new Substrate(loadConfig({}), { index: slow as never, greptime: greptime as never }).health();
+		const timedOut = await new Substrate(loadConfig({}), { index: slow as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }).health();
 		expect(Date.now() - started).toBeLessThan(HEALTH_PROBE_MS + 500);
 		expect(timedOut.capacity).toEqual({ index: null, ledger: null });
 		expect(timedOut.index).toBe(true);
 
 		// An index without the method at all (an older fake) is null too, never a throw.
-		const bare = await new Substrate(loadConfig({}), { index: { ping: async () => true } as never, greptime: greptime as never }).health();
+		const bare = await new Substrate(loadConfig({}), { index: { ping: async () => true } as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }).health();
 		expect(bare.capacity).toEqual({ index: null, ledger: null });
 	});
 
@@ -1348,7 +1351,7 @@ describe("memory.write is fail-closed", () => {
 				throw new Error("connect failed: postgres://user:hunter2@host/db");
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory(entry);
 
@@ -1363,7 +1366,7 @@ describe("memory.write is fail-closed", () => {
 		// denial is otherwise visible only to the agent that was denied, which is the
 		// one party with an interest in not mentioning it.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, scope: "person:ove" });
 
@@ -1378,7 +1381,7 @@ describe("memory.write is fail-closed", () => {
 		// The body may be exactly the secret that got the write quarantined, and copying
 		// it into an append-only ledger to record that it was quarantined is absurd.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.writeMemory({ ...entry, writer: "unknown", text: "PGPASSWORD=s3cr3t-do-not-log" });
 
@@ -1389,7 +1392,7 @@ describe("memory.write is fail-closed", () => {
 		// `unknown` is not a surface, so there is nothing to attribute the audit event
 		// to; the stderr line is its trail. The refusal still happens.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, writer: "unknown" });
 
@@ -1407,7 +1410,7 @@ describe("memory.write is fail-closed", () => {
 				throw new Error("greptime unreachable");
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		expect((await substrate.writeMemory({ ...entry, scope: "person:ove" })).outcome).toBe("denied");
 	});
@@ -1417,7 +1420,7 @@ describe("memory.write is fail-closed", () => {
 		// verdict with no ledger trace. Same emitter, so the hour's anchor sees the
 		// writes that landed beside the ones that did not.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory(entry);
 
@@ -1439,7 +1442,7 @@ describe("memory.write is fail-closed", () => {
 		const config = loadConfig({
 			SUBSTRATE_MEMORY_GRANTS: JSON.stringify([{ name: "operator", surfaces: ["mystery-bot"], scopes: ["graph"], kinds: ["fact"] }]),
 		});
-		const substrate = new Substrate(config, { index: acceptingIndex() as never, greptime: greptime as never });
+		const substrate = new Substrate(config, { index: acceptingIndex() as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, writer: "mystery-bot" });
 
@@ -1454,7 +1457,7 @@ describe("memory.write is fail-closed", () => {
 			enqueueReview: async () => "memr_1",
 			finishWrite: async () => undefined,
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, scope: "global" });
 
@@ -1469,6 +1472,7 @@ describe("memory.write is fail-closed", () => {
 		const { emitted, greptime } = auditing();
 		const substrate = new Substrate(loadConfig({}), {
 			index: { quarantineEntry: async () => "memq_1" } as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 		});
 
@@ -1501,7 +1505,7 @@ describe("memory.write is fail-closed", () => {
 
 		test("an accepted write carries the id of the entry the result stored, as snake_case entry_id", async () => {
 			const { emitted, greptime } = auditing();
-			const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never });
+			const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 			const result = await substrate.writeMemory(entry);
 
@@ -1513,7 +1517,7 @@ describe("memory.write is fail-closed", () => {
 
 		test("the id comes from the stored result even when the caller supplies a conflicting one", async () => {
 			const { emitted, greptime } = auditing();
-			const substrate = new Substrate(loadConfig({}), { index: storingAs("mem_stored_by_index") as never, greptime: greptime as never });
+			const substrate = new Substrate(loadConfig({}), { index: storingAs("mem_stored_by_index") as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 			// `id` and `entry_id` are not request fields; a JSON caller can still send them, and neither may reach the ledger.
 			const result = await substrate.writeMemory({ ...entry, id: "mem_forged_by_caller", entry_id: "mem_forged_by_caller" } as never);
@@ -1527,7 +1531,7 @@ describe("memory.write is fail-closed", () => {
 
 		test("a denied, conflicting or quarantined write stored nothing and carries no entry_id", async () => {
 			const denied = auditing();
-			await new Substrate(loadConfig({}), { index: {} as never, greptime: denied.greptime as never }).writeMemory({ ...entry, scope: "person:ove", id: "mem_forged_by_caller" } as never);
+			await new Substrate(loadConfig({}), { index: {} as never, greptime: denied.greptime as never, steering: { history: null, liveSessions: null } }).writeMemory({ ...entry, scope: "person:ove", id: "mem_forged_by_caller" } as never);
 
 			const conflicted = auditing();
 			const reviewIndex = {
@@ -1535,10 +1539,10 @@ describe("memory.write is fail-closed", () => {
 				enqueueReview: async () => "memr_1",
 				finishWrite: async () => undefined,
 			};
-			await new Substrate(loadConfig({}), { index: reviewIndex as never, greptime: conflicted.greptime as never }).writeMemory({ ...entry, scope: "global", entry_id: "mem_forged_by_caller" } as never);
+			await new Substrate(loadConfig({}), { index: reviewIndex as never, greptime: conflicted.greptime as never, steering: { history: null, liveSessions: null } }).writeMemory({ ...entry, scope: "global", entry_id: "mem_forged_by_caller" } as never);
 
 			const quarantined = auditing();
-			await new Substrate(loadConfig({}), { index: { quarantineEntry: async () => "memq_1" } as never, greptime: quarantined.greptime as never }).writeMemory({
+			await new Substrate(loadConfig({}), { index: { quarantineEntry: async () => "memq_1" } as never, greptime: quarantined.greptime as never, steering: { history: null, liveSessions: null } }).writeMemory({
 				...entry,
 				text: "poller needs GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				entry_id: "mem_forged_by_caller",
@@ -1660,7 +1664,7 @@ describe("handoff", () => {
 				return { released: true };
 			},
 		};
-		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
@@ -1691,7 +1695,7 @@ describe("handoff", () => {
 		};
 
 		// No ledger at all, so the append cannot land.
-		const unstorable = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: null });
+		const unstorable = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 		const refused = await unstorable.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
 		expect(refused.stored).toBe(false);
@@ -1700,7 +1704,7 @@ describe("handoff", () => {
 
 		// And with a ledger that takes it, the release happens.
 		const { greptime } = ledger();
-		const stored = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const stored = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const done = await stored.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
 		expect(done.stored).toBe(true);
@@ -1747,7 +1751,7 @@ describe("handoff", () => {
 		};
 		const { greptime } = ledger();
 		const env = { ...SIGNING_ENV, SUBSTRATE_TOKEN_HERMES: "tok-h", SUBSTRATE_TOKEN_GROK_BOT: "tok-g" };
-		const substrate = new Substrate(loadConfig(env), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(env), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const release = { handover_lease_id: "lse_h", release_lease: true };
 
 		const stranger = await substrate.handoff({ ...input, ...release });
@@ -1780,7 +1784,7 @@ describe("handoff", () => {
 			},
 		};
 		const { greptime } = ledger();
-		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const done = await substrate.handoff({ ...input, handover_lease_id: "lse_o", release_lease: true });
 
@@ -1827,7 +1831,7 @@ describe("handoff", () => {
 	test("takes the repo from the graph, so the handoff shows up in that repo's brief", async () => {
 		const { written, greptime } = ledger();
 		const index = { getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }) };
-		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.handoff(input);
 
@@ -1995,6 +1999,7 @@ describe("driftScan", () => {
 				edgesForRepo: async () => [],
 			} as never,
 			greptime: null,
+			steering: { history: null, liveSessions: null },
 		});
 
 		const report = await substrate.driftScan({ repo: "swcstudiospace/agent-substrate" });
@@ -2016,6 +2021,7 @@ describe("driftScan", () => {
 				},
 			} as never,
 			greptime: null,
+			steering: { history: null, liveSessions: null },
 		});
 
 		const report = await substrate.driftScan({ repo: "swcstudiospace/agent-substrate" });
@@ -2309,6 +2315,7 @@ describe("the governance queue withholds what quarantine was protecting", () => 
 	function substrateWithTokens(tokens?: string) {
 		return new Substrate(loadConfig(tokens ? { SUBSTRATE_MEMORY_REVIEW_TOKENS: tokens } : {}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 		});
 	}
@@ -2365,7 +2372,7 @@ describe("the audit line is redacted", () => {
 			return true;
 		}) as typeof process.stderr.write;
 		try {
-			const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null });
+			const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null, steering: { history: null, liveSessions: null } });
 			await substrate.writeMemory({
 				scope: "graph:GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				kind: "fact",
@@ -3044,6 +3051,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		const stores = stubStores({ repo: "swcstudiospace/x", branch: "main" }, claim);
 		const substrate = new Substrate(loadConfig(env), {
 			index: stores.index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: stores.greptime as never,
 			mirror: mirror.mirror as never,
 		});
@@ -3157,6 +3165,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		};
 		const revokedSubstrate = new Substrate(loadConfig({}), {
 			index: revokedIndex as never,
+			steering: { history: null, liveSessions: null },
 			greptime: {
 				ensureAppendMode: async () => true,
 				lastHash: async () => null,
@@ -3207,6 +3216,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			mirror: mirror.mirror as never,
 		});
@@ -3333,6 +3343,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			mirror: mirror.mirror as never,
 		});
@@ -3530,6 +3541,7 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			// No tracker keys: the gate's required checks are unavailable.
 			mirror: (knobs.mirrorOff ? null : mirror) as never,
@@ -4017,6 +4029,7 @@ describe("graph_find and issue_get (D23-22..24)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			mirror: mirror as never,
 		});
@@ -5218,5 +5231,113 @@ describe("boot endpoint notes (phase 48)", () => {
 			await expect(substrate.emitDbEndpoints()).resolves.toBeUndefined();
 			expect(calls).toBe(3);
 		}
+	});
+});
+
+describe("private reads under the request budget and the docs steering precedence", () => {
+	const caller = { surface: "cursor", isOperator: false } as const;
+	const briefRequest = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
+	const briefIndex = {
+		getGraph: async () => ({ graph_id: "ut-1", notion_task_page: null, repo: "acme/app", branch: null, surface: "cursor", status: "active", pr_url: null, created: null, updated: null, nodes: [], steps: [], edges: [] }),
+		openGraphs: async () => [],
+		memoryForBrief: async () => [],
+	};
+
+	/** The authority answers its first `answered` reads and never again, so only the request budget can end the call. */
+	function stallAfter(authority: TestLiveSessionAuthority, answered: number): void {
+		const read = authority.read.bind(authority);
+		let calls = 0;
+		Object.assign(authority, {
+			read: (access: LiveSessionAccess, operation: LiveSessionOperation) => {
+				calls += 1;
+				return calls > answered ? new Promise<never>(() => {}) : read(access, operation);
+			},
+		});
+	}
+
+	function briefOf(substrate: Substrate, sessionId: string, sessionBinding: string) {
+		return substrate.briefDetailed({ ...briefRequest, steering_session_id: sessionId }, undefined, caller.surface, { caller, sessionBinding });
+	}
+
+	test("a private brief whose authority check stalls after composition is session-unavailable within the brief budget", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller, steering: "PRIVATE-BUDGET-DIRECTION" });
+		stallAfter(authority, 1);
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "50" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		await expect(briefOf(substrate, session.sessionId, session.sessionBinding)).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "session-unavailable" } } });
+	});
+
+	test("a private brief whose authority check stalls before composition is session-unavailable within the brief budget", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller, steering: "PRIVATE-BUDGET-DIRECTION" });
+		stallAfter(authority, 0);
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "50" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		await expect(briefOf(substrate, session.sessionId, session.sessionBinding)).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "session-unavailable" } } });
+	});
+
+	test("a private brief inside its budget composes as before", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller });
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "5000" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		const detail = await briefOf(substrate, session.sessionId, session.sessionBinding);
+		expect(detail.state).toBe("complete");
+		expect(detail.failed).toEqual([]);
+	});
+
+	describe("docs_search directions", () => {
+		async function rig(stored?: string) {
+			const ragflow = new RagflowFake();
+			const authority = createTestLiveSessionAuthority();
+			const session = await issueLiveSession(authority, { caller, ...(stored === undefined ? {} : { steering: stored }) });
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+				index: null,
+				greptime: null,
+				ragflowFetch: ragflow.fetch,
+				steering: { history: null, liveSessions: authority },
+			});
+			return { substrate, ragflow, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
+		}
+		const askedWith = (ragflow: RagflowFake): string => JSON.stringify(ragflow.retrievals());
+
+		test("a supplied direction wins over the stored one for that search", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "PER-CALL-DIRECTION" }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("PER-CALL-DIRECTION");
+			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+		});
+
+		test("stored directions answer a search that supplies none", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("STORED-DIRECTION");
+		});
+
+		test("a search with no directions anywhere asks the plain question", async () => {
+			const h = await rig();
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("who reads RAGFlow?");
+			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+		});
+
+		test("an explicitly empty direction replaces the stored one with none", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "" }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+		});
+
+		test("a supplied direction steers a search outside any steering session", async () => {
+			const ragflow = new RagflowFake();
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: ragflow.fetch });
+			await substrate.searchDocs({ question: "who reads RAGFlow?", steering: "PER-CALL-DIRECTION" }, "cursor");
+			expect(askedWith(ragflow)).toContain("PER-CALL-DIRECTION");
+		});
+
+		test("a directions value that is not a string of at most 16000 characters is refused at the boundary", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await expect(h.substrate.searchDocs({ question: "q", steering: 42 }, caller.surface)).rejects.toBeInstanceOf(ZodError);
+			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
+			expect(askedWith(h.ragflow)).toBe("[]");
+		});
 	});
 });

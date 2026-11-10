@@ -200,7 +200,7 @@ describe("teachablesForSurface", () => {
 	];
 
 	function substrateFor(index: unknown) {
-		return new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		return new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 	}
 
 	test("returns exactly the surface's live teachable facts, newest first", async () => {
@@ -246,7 +246,7 @@ describe("GET /.well-known/agent-card.json", () => {
 		const config = loadConfig({});
 		const observability = createObservability(config, {});
 		await observability.start();
-		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, observability.observer);
 		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -343,6 +343,7 @@ describe("card end-to-end (session → card)", () => {
 		}
 		const substrate = new Substrate(loadConfig({}), {
 			index: new Searchable() as never,
+			steering: { history: null, liveSessions: null },
 			greptime: {
 				ensureAppendMode: async () => true,
 				lastHash: async () => null,

@@ -98,7 +98,7 @@ function rigOf(mode: CacheSwrMode, offsetMs = 0): Rig {
 		openGraphs: async () => [],
 		memoryForBrief: async () => state.memory,
 	};
-	return { substrate: new Substrate(config, { index: index as never, greptime: null, cache }), cache, redis, config, state };
+	return { substrate: new Substrate(config, { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } }), cache, redis, config, state };
 }
 
 describe("single-flight across generations (uplift-4 S4)", () => {
@@ -116,7 +116,7 @@ describe("single-flight across generations (uplift-4 S4)", () => {
 			openGraphs: async () => [],
 			memoryForBrief: async () => [],
 		};
-		const substrate = new Substrate(config, { index: index as never, greptime: null, cache });
+		const substrate = new Substrate(config, { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 
 		const older = substrate.briefDetailed(request);
 		const sameGeneration = substrate.briefDetailed(request);
@@ -335,7 +335,7 @@ describe("a stale brief says so in the compact state line (uplift-4 S4 x S1)", (
 			openGraphs: async () => [],
 			memoryForBrief: async () => [],
 		};
-		const substrate = new Substrate(config, { index: index as never, greptime: null, cache }, {});
+		const substrate = new Substrate(config, { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } }, {});
 		const fresh = await substrate.briefDetailed(request, "compact", "cursor");
 		expect(fresh.text.split("\n")[0]).toBe("[brief: complete]");
 

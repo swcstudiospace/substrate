@@ -70,7 +70,7 @@ export const SESSION_USAGE =
 	"       substrate session rollback <ckpt|seq|previous> [--session ID] [--surface S] [--dry-run] [--force] [--offline] [--json]\n" +
 	"       substrate session recover [--json]\n" +
 	"       substrate session sync [--json]\n" +
-	"       substrate session hook <turn|plan-step|steering|baseline|context> [--session ID] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]   (reads a JSON envelope on stdin; fail-open: always exits 0; `context` prints the live-context digest)\n" +
+	"       substrate session hook <turn|plan-step|steering|baseline|context> [--session HISTORICAL_ID] [--steering-session LIVE_ID] [--binding-file PATH] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]   (reads a JSON envelope on stdin; fail-open: always exits 0; `context` prints the historical-filtered live-context digest; steering hints require an explicit live handle and matching private record)\n" +
 	`       substrate session hook-config <${HOOK_CONFIG_TARGETS.join("|")}>   (prints the hook configuration to install; installs nothing)\n` +
 	`triggers: ${CHECKPOINT_TRIGGERS.join(", ")}\n` +
 	"exit: 0 done, 1 failed, 2 usage, 3 refused (drift, anchor mismatch, unknown or foreign target), 4 files restored but the ledger commit is pending\n" +
@@ -124,14 +124,14 @@ export interface SessionDeps {
 type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync" | "hook" | "hook-config";
 
 const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config"];
-const VALUE_FLAGS: readonly string[] = ["session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"];
+const VALUE_FLAGS: readonly string[] = ["session", "steering-session", "binding-file", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"];
 const ALLOWED: Record<Sub, readonly string[]> = {
 	checkpoint: ["json", "session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"],
 	checkpoints: ["json", "session", "surface", "offline"],
 	rollback: ["json", "session", "surface", "dry-run", "force", "offline"],
 	recover: ["json"],
 	sync: ["json"],
-	hook: ["session", "surface", "plan-phase", "plan-step", "verbose"],
+	hook: ["session", "steering-session", "binding-file", "surface", "plan-phase", "plan-step", "verbose"],
 	"hook-config": [],
 };
 
@@ -155,7 +155,7 @@ export function parseSessionArgs(argv: readonly string[]): Parsed | string {
 			continue;
 		}
 		const name = token.slice(2);
-		if (!allowed.includes(name)) return `unknown flag ${token} for \`session ${sub}\``;
+		if (!allowed.includes(name)) return `unknown flag for \`session ${sub}\``;
 		if (flags.has(name)) return `${token} given more than once`;
 		if (VALUE_FLAGS.includes(name)) {
 			const value = argv[i + 1];
@@ -775,6 +775,9 @@ async function commandHook(parsed: Parsed, deps: SessionDeps, out: Output, run: 
 			trigger,
 			worktree: deps.worktree,
 			surface,
+			url: deps.url,
+			...(flagValue(parsed, "steering-session") === undefined ? {} : { steeringSessionId: flagValue(parsed, "steering-session") }),
+			...(flagValue(parsed, "binding-file") === undefined ? {} : { bindingFile: flagValue(parsed, "binding-file") }),
 			...(flagValue(parsed, "session") === undefined ? {} : { sessionId: flagValue(parsed, "session") }),
 			...(planRef === undefined ? {} : { planRef }),
 			// The client gives up before the hook's own budget, so a slow server still leaves the record in the pending journal.
