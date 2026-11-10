@@ -50,7 +50,6 @@ import {
 } from "./docs-archive.ts";
 import { parityGate, type ParityRecord } from "./docs-parity.ts";
 import {
-	DEFAULT_INGEST_ROOTS,
 	ingestDocs,
 	loadIngestRecords,
 	saveIngestRecords,
@@ -405,17 +404,25 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	const emit = async (event: EventInput): Promise<unknown> => {
 		events.push(event);
 		if (options.substrateUrl === undefined) return { stored: false };
-		const response = await postEvent(new URL("/events", options.substrateUrl), {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				...(options.substrateToken !== undefined ? { authorization: `Bearer ${options.substrateToken}` } : {}),
-			},
-			body: JSON.stringify(event),
-			signal: AbortSignal.timeout(5_000),
-		});
-		lastEventStored = response.ok;
-		return { stored: response.ok };
+		try {
+			const response = await postEvent(new URL("/events", options.substrateUrl), {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					...(options.substrateToken !== undefined ? { authorization: `Bearer ${options.substrateToken}` } : {}),
+				},
+				body: JSON.stringify(event),
+				signal: AbortSignal.timeout(5_000),
+			});
+			lastEventStored = response.ok;
+			return { stored: response.ok };
+		} catch {
+			// A lost or timed-out events request must not throw out of
+			// ingestDocs: the landed pages are saved below and the report names
+			// the delivery failure through the stored flags.
+			lastEventStored = false;
+			return { stored: false };
+		}
 	};
 	const names = archive.datasets.map((dataset) => dataset.name);
 	const totals = { ingested: 0, replaced: 0, unchanged: 0, failed: 0 };
@@ -423,10 +430,12 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	let applied = true;
 	for (const dataset of archive.datasets) {
 		if (wanted !== null && !wanted.has(dataset.name)) continue;
-		// Each archived dataset replays from its own repository: the substrate
-		// datasets read the caller's checkout, agent-skills reads its own
-		// (SUBSTRATE_AGENT_SKILLS_ROOT), without which the dataset is refused
-		// with the remedy named rather than read from the wrong repository.
+		// The replay accepts exactly the paths this dataset's archive records
+		// (their own top-level directory as the ingest root), never the
+		// substrate-wide defaults: agent-skills pages live at <skill>/SKILL.md
+		// and <skill>/references/, which DEFAULT_INGEST_ROOTS excludes.
+		const datasetRoots = [...new Set(dataset.documents.filter((document) => document.path !== null).map((document) => `${(document.path as string).split("/")[0]}/`))];
+		if (datasetRoots.length === 0 && dataset.documents.some((document) => document.path !== null)) continue;
 		let datasetGitShow: (commit: string, path: string) => Promise<string>;
 		try {
 			datasetGitShow = gitShowFor(dataset.name);
@@ -463,7 +472,7 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 					lightragFetch: options.fetchImpl,
 					seen,
 					locks: new Map(),
-					roots: DEFAULT_INGEST_ROOTS,
+					roots: datasetRoots,
 					surface: "substrate",
 					emit,
 					...(options.poll !== undefined ? { poll: options.poll } : {}),
