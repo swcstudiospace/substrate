@@ -16,7 +16,7 @@ export const LEDGER_USAGE =
 	"usage: substrate ledger coverage [--json]\n" +
 	"       substrate ledger archive [--until YYYY-MM-DD] [--out DIR] [--page-size N] [--json]\n" +
 	"       substrate ledger verify-archive <dir> [--day YYYY-MM-DD] [--json]\n" +
-	"       (SUBSTRATE_GREPTIME_TIMEOUT_MS=ms raises the per-statement budget for a slow store; default 5000)\n";
+	"       (a per-statement budget override can raise this for a slow store; see docs/config-reference.md, default 5000)\n";
 
 const SUBCOMMANDS = ["coverage", "archive", "verify-archive"] as const;
 const FLAGS: Record<(typeof SUBCOMMANDS)[number], readonly string[]> = {

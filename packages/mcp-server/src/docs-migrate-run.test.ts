@@ -12,11 +12,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { archiveRagflow, ingestSha256, type ArchiveQuery } from "../packages/mcp-server/src/docs-archive.ts";
-import { RagflowFake } from "../packages/mcp-server/src/ragflow-fake.ts";
-import type { EventInput } from "../packages/mcp-server/src/types.ts";
-import type { FetchLike } from "../packages/mcp-server/src/planes/lightrag.ts";
-import { main, loadArchive, partAMarker, runApply, runDryRun } from "./docs-migrate.ts";
+import { archiveRagflow, ingestSha256, type ArchiveQuery } from "./docs-archive.ts";
+import { RagflowFake } from "./ragflow-fake.ts";
+import type { EventInput } from "./types.ts";
+import type { FetchLike } from "./planes/lightrag.ts";
+import { main, loadArchive, partAMarker, runApply, runDryRun } from "./docs-migrate-run.ts";
 
 const BERLIN = "ds-berlin-agent-substrate";
 const HAMM = "ds-hamm-programming-desk";
@@ -147,7 +147,7 @@ export function partAFile(dir: string, records = 6): string {
 
 describe("docs-migrate", () => {
 	test("the frozen sample is exactly 20 unique {id, question} entries", () => {
-		const fixture = JSON.parse(readFileSync(new URL("../fixtures/parity/parity-queries.json", import.meta.url).pathname, "utf8")) as { queries: Array<{ id: string; question: string }> };
+		const fixture = JSON.parse(readFileSync(new URL("../../../fixtures/parity/parity-queries.json", import.meta.url).pathname, "utf8")) as { queries: Array<{ id: string; question: string }> };
 		expect(fixture.queries).toHaveLength(20);
 		expect(new Set(fixture.queries.map((query) => query.id)).size).toBe(20);
 		for (const query of fixture.queries) {

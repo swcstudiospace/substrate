@@ -27,11 +27,6 @@ import {
 import { REDACTED } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { defined } from "./test-support.ts";
-import { scrubPlaneEnv } from "./scrub-plane-env.ts";
-
-// Health literals below assume a bare config; a hand-run on the VPS inherits
-// the operator's substrate env (see scrub-plane-env.ts).
-scrubPlaneEnv();
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");

@@ -1855,11 +1855,13 @@ describe("docs_search context on the LightRAG backend (phase 46)", () => {
 		expect(reply.backend).toBe("lightrag");
 		expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
 		expect(reply.context?.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
-		expect(reply.context?.degraded).toBeUndefined();
 		expect(reply.context?.memories.map((memory) => memory.id)).toEqual(["m2", "m4", "m3"]);
 		expect(reply.context?.memories[0]).toEqual({ id: "m2", text: "quote every version", scope: null, repo: null });
-		expect(reply.context?.events.map((event) => event.id)).toEqual(["evt-2", "evt-3", "evt-4", "evt-5", "evt-6"]);
-		expect(reads).toEqual([["session_id", "s-1"]]);
+		// Main's live-session boundary gates the ledger leg to live sessions: a
+		// bare session_id is `no-session`, so no events and no ledger read.
+		expect(reply.context?.degraded).toBe("no-session");
+		expect(reply.context?.events).toEqual([]);
+		expect(reads).toEqual([]);
 		expect(lightrag.queries).toHaveLength(1);
 	});
 

@@ -1,0 +1,6 @@
+# Bun test configuration. The preload gives every `bun test` process the same
+# bare env CI has: a hand-run on the VPS inherits the operator's substrate.env,
+# and health/lock literals assume no data-plane URLs are set (CI is unaffected —
+# its env is already clean, so the scrub is a no-op there).
+[test]
+preload = ["./packages/mcp-server/src/scrub-plane-env-preload.ts"]

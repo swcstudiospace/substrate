@@ -23,11 +23,6 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FetchLike } from "./planes/lightrag.ts";
-import { scrubPlaneEnv } from "./scrub-plane-env.ts";
-
-// The data-plane URL variables name real planes for the session that runs the
-// suite by hand; literals below assume a bare config (see scrub-plane-env.ts).
-scrubPlaneEnv();
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
