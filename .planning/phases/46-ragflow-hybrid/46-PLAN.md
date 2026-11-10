@@ -93,6 +93,13 @@ These are answered at the plan gate. Each default applies if the operator approv
 - D4 Reversibility (criterion 5). RAGFlow cannot be restored, so `SUBSTRATE_DOCS_BACKEND=ragflow` is not a real reversal. Default: record it as accepted. Reversal is then the app rollback plus restoring `substrate.env` from its backup. Rollback to `702ed32e` is app-only, and that release has no LightRAG client.
 - D5 Hybrid in production (criterion 1 wording, "hybrid search"). Hybrid is the code default, but production is naive until an LLM route exists (STATE, Run 11). Default: criterion 1 is met in repo, and hybrid in production stays operator-gated, as STATE records.
 - D6 RAG-dependent gate and removal. Default: (a) the operator waives the live re-checks of 25, 40 and 42 with a dated STATE.md entry, because those checks name RAGFlow and cannot pass against it. Or the operator re-scopes each one to LightRAG. (b) Phase 34 is excluded, as in the superseded PLAN. (c) Removing `ragflow` from FABRIC_RESOURCES is approved as a phase 51 contract change. (d) The directory name `46-ragflow-hybrid` is kept, as the brief asks. SUPERSEDED.md names `46-lightrag-hybrid` as the governing folder, so the operator may rename it.
+Status, recorded by the offline executor (2026-11-10): every Dn above is an AGENT DEFAULT, PENDING OPERATOR. None is decided. Recorded as "agent default, pending operator":
+- D1 = (c). Agent default, pending operator. Criterion 2 stays debt. `docs-archive.ts` is not deleted in this run.
+- D2 = PARITY_GATE against LightRAG records. Agent default, pending operator. RAGFlow was empty.
+- D3 = 10 frozen queries at 100 percent, top-5 citation. Agent default, pending operator.
+- D4 = reversal to RAGFlow is impossible. Agent default, pending operator. NOT ACTED ON in this run: the cutover record does not accept reversal as a decided limit.
+- D5 = hybrid in production stays off. Agent default, pending operator.
+- D6 = (a) waive 25, 40, 42; (b) exclude 34; (c) remove `ragflow` from FABRIC_RESOURCES; (d) keep folder name. Agent default, pending operator. NOT ACTED ON in this run: no removal, no waiver, no FABRIC_RESOURCES change.
 </operator_decisions>
 
 <execution_split>
