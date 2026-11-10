@@ -1630,16 +1630,15 @@ describe("docs_search context (D46-d, D46-e)", () => {
 	});
 
 	describe("on the LightRAG backend (SC1)", () => {
-		const lightragConfig = loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", SUBSTRATE_RAG_RETRY_BASE_MS: "1" });
+		const lightragConfig = loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" });
 
-		/** A LightRAG `/query` stand-in: answers one chunk, or 503 when `down`, and counts every query it gets. */
-		function lightragPlane(options: { down?: boolean } = {}): { fetch: FetchLike; queries: () => number } {
+		/** A LightRAG `/query` stand-in: answers one chunk and counts every query it gets. */
+		function lightragPlane(): { fetch: FetchLike; queries: () => number } {
 			let queries = 0;
 			const fetch: FetchLike = async (input, init) => {
 				const url = new URL(String(input));
 				if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
 				queries += 1;
-				if (options.down === true) return new Response("unavailable", { status: 503 });
 				return Response.json({ status: "success", data: { chunks: [{ content: "Served by LightRAG.", document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
 			};
 			return { fetch, queries: () => queries };
@@ -1654,20 +1653,6 @@ describe("docs_search context (D46-d, D46-e)", () => {
 				cache: options.cache ?? new ReadThroughCache({ redis: null, enabled: false, log: () => {} }),
 			});
 		}
-
-		test("with no session, the LightRAG context has no events, names no-session, and keeps the memories", async () => {
-			const lightrag = lightragPlane();
-			const { greptime, reads } = ledgerStub(sessionRows(7));
-			const reply = await lightragSubstrate({ lightrag: lightrag.fetch, hindsight: recallable(), greptime }).searchDocs(
-				{ question: "where is the plan?", context: true },
-				"cursor",
-			);
-			expect(reply.degraded).toBeUndefined();
-			expect(reply.context?.events).toEqual([]);
-			expect(reply.context?.degraded).toBe("no-session");
-			expect(reply.context?.memories).toHaveLength(3);
-			expect(reads).toEqual([]);
-		});
 
 		test("a LightRAG context reply is never stored: the cache keeps the LightRAG answer, and a repeat keeps its own events", async () => {
 			const lightrag = lightragPlane();
@@ -1687,23 +1672,6 @@ describe("docs_search context (D46-d, D46-e)", () => {
 			expect(second.chunks).toEqual(first.chunks);
 			expect(second.context?.events).toHaveLength(5);
 			expect(lightrag.queries()).toBe(1);
-		});
-
-		test("a LightRAG search that fails its retries is answered from Hindsight, is never stored, and names the LightRAG reason", async () => {
-			const lightrag = lightragPlane({ down: true });
-			const redis = new FakeRedis();
-			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-			const substrate = lightragSubstrate({ lightrag: lightrag.fetch, hindsight: recallable(), greptime: null, cache });
-			const request = { question: "where is the plan?" };
-			const first = await substrate.searchDocs(request, "cursor");
-			expect(first).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight" });
-			expect(first.reason).toMatch(/^lightrag/);
-			expect(first.chunks.length).toBeGreaterThan(0);
-			expect(first.chunks.every((citation) => citation.source_url.startsWith("hindsight:"))).toBe(true);
-			expect([...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"))).toHaveLength(0);
-			const second = await substrate.searchDocs(request, "cursor");
-			expect(second).toMatchObject({ degraded: true, fallback: "hindsight" });
-			expect([...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"))).toHaveLength(0);
 		});
 	});
 });

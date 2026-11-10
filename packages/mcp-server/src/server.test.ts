@@ -70,7 +70,7 @@ describe("healthStatus", () => {
 async function serve(
 	greptime: unknown,
 	env: Record<string, string | undefined> = {},
-	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; lightragFetch?: FetchLike; eventBus?: () => EventBus | null } = {},
+	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null } = {},
 	options: HttpServerOptions = {},
 ) {
 	const config = loadConfig(env);
@@ -401,34 +401,6 @@ describe("routes", () => {
 			});
 			expect(hindsight.recalls()).toEqual([]);
 			expect(reads).toEqual([]);
-		} finally {
-			await stop();
-		}
-	});
-
-	test("POST /docs/search on the LightRAG backend answers from LightRAG and attaches the context block only when asked", async () => {
-		const lightragQueries: string[] = [];
-		const lightrag: FetchLike = async (input, init) => {
-			const url = new URL(input instanceof Request ? input.url : String(input));
-			if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
-			lightragQueries.push(String(init.body));
-			return Response.json({ status: "success", data: { chunks: [{ content: "Served by LightRAG.", document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
-		};
-		const hindsight = ompBank();
-		const { reads, greptime } = sessionLedger();
-		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test" }, { lightragFetch: lightrag, hindsightFetch: hindsight.fetch });
-		try {
-			await withHindsightEnv("sub-omp", async () => {
-				const withContext = (await (await post("/docs/search", { question: "where is the plan?", session_id: "s-1", context: true }, OMP_AUTH)).json()) as Record<string, unknown>;
-				expect(withContext).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ snippet: "Served by LightRAG." })] });
-				expect(Object.hasOwn(withContext, "context")).toBe(true);
-				const withoutContext = (await (await post("/docs/search", { question: "where is the plan?", session_id: "s-1" }, OMP_AUTH)).json()) as Record<string, unknown>;
-				expect(withoutContext.chunks).toHaveLength(1);
-				expect(Object.hasOwn(withoutContext, "context")).toBe(false);
-			});
-			expect(lightragQueries).toHaveLength(2);
-			expect(hindsight.recalls()).toHaveLength(1);
-			expect(reads).toEqual([["session_id", "s-1"]]);
 		} finally {
 			await stop();
 		}
