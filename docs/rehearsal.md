@@ -203,7 +203,7 @@ proof; a twin from this harness is where proofs run.
 
 ## Live-gated docs proof checklist — NOT RUN
 
-The isolated proof (`rehearsal up --ragflow-fixture`, `smoke:docs`, unit
+The isolated proof (`rehearsal up --ragflow-fixture`, `bun scripts/docs-smoke.ts --name <owned>`, unit
 tests) covers every refusal and error path against fakes. The five steps
 below touch the live RAGFlow or the host, so each waits for an explicit
 operator approval window. None has run; none is implied to have run.
