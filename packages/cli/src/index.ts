@@ -22,7 +22,7 @@
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
  *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
  *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
- *   substrate steer sessions|status|queue|ack|list|listen|context   Live Steering from a terminal (docs/live-steering.md)
+ *   substrate steer open|heartbeat|close|sessions|status|queue|ack|list|listen|context   Live Steering from a terminal (docs/live-steering.md)
  *       (exit 0 done, 1 failed, 2 usage, 3 refused by the server: not an operator, rate limited, bad token)
  *   substrate corpus scan|plan|ingest|reflect|status|sync|watch|reconcile|hook|hint   the documentation corpus of every repository (docs/corpus.md, docs/corpus-watch.md, docs/corpus-reflect.md)
  *       (exit 0 done, 1 failed, 2 usage; ingest, reflect, sync and reconcile are dry runs until --execute; status --gaps lists unanswered queries)
@@ -833,7 +833,7 @@ switch (command) {
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
 				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
-				"substrate steer sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (substrate steer for the flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
+				"substrate steer open --repo R | heartbeat --session ID | close --session ID | sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (private commands use --binding-file PATH; substrate steer for all flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
 				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +

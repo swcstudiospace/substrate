@@ -8,22 +8,28 @@
  * refuses nothing, that an MCP batch pays per member, that a dead cache admits,
  * and that the monitor routes are never metered.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import type { AddressInfo } from "node:net";
-import { BreakerOpenError, METRIC, findCounter, sumCounter } from "@substrate/observability";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { FakeBudgetRedis } from "./admission.test.ts";
 import { ReadThroughCache } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
-import { createObservability, type Observability } from "./observe.ts";
+import { auditToolCalls, createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { defined } from "./test-support.ts";
+import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
 
 interface Harness {
 	base: string;
 	observability: Observability;
 	redis: FakeBudgetRedis;
 	clock: { now: number };
+	substrate: Substrate;
+	authority: TestLiveSessionAuthority;
 	close(): void;
 }
 
@@ -35,12 +41,14 @@ async function start(env: Record<string, string | undefined> = {}, stores: Parti
 	await observability.start();
 	const redis = new FakeBudgetRedis();
 	const clock = { now: 1_700_000_000_000 };
+	const authority = createTestLiveSessionAuthority({ leaseSeconds: config.liveSessionLeaseS });
 	const substrate = new Substrate(
 		config,
-		{ index: null, greptime: null, cache: new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => clock.now }), ...stores } as ConstructorParameters<
+		{ index: null, greptime: null, steering: { history: null, liveSessions: authority }, cache: new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => clock.now }), ...stores } as ConstructorParameters<
 			typeof Substrate
 		>[1],
 		observability.observer,
+		{ auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) },
 	);
 	const server = createHttpServer(substrate, config, observability, { now: () => clock.now });
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -51,6 +59,8 @@ async function start(env: Record<string, string | undefined> = {}, stores: Parti
 		observability,
 		redis,
 		clock,
+		substrate,
+		authority,
 		close() {
 			if (closed) return;
 			closed = true;
@@ -287,5 +297,120 @@ describe("what is never metered", () => {
 		}
 		expect(harness.redis.calls).toHaveLength(2);
 		expect(decisions(harness, { surface: "cursor" })).toBe(2);
+	});
+});
+
+describe("live lifecycle policy over HTTP", () => {
+	const env = { ...ENFORCE, SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "cursor" };
+	const owner = { surface: "cursor", isOperator: false } as const;
+
+	test("POST issuance spends write budget while GET metadata spends read budget", async () => {
+		const h = await start({ ...env, SUBSTRATE_BUDGET_READ_BURST: "1", SUBSTRATE_BUDGET_READ_RPS: "0.01", SUBSTRATE_BUDGET_WRITE_BURST: "1", SUBSTRATE_BUDGET_WRITE_RPS: "0.01" });
+		const post = () => fetch(`${h.base}/steering/sessions`, { method: "POST", headers: CURSOR, body: JSON.stringify({ repo_id: "owner/name", state: "ACTIVE" }) });
+		const opened = await post();
+		expect(opened.status).toBe(200);
+		expect(h.redis.calls.map((call) => call.keys[0])).toEqual(["substrate:v1:budget:cursor:write"]);
+		const list = await fetch(`${h.base}/steering/sessions?repo_id=owner/name`, { headers: CURSOR });
+		expect(list.status).toBe(200);
+		expect(h.redis.calls.map((call) => call.keys[0])).toEqual(["substrate:v1:budget:cursor:write", "substrate:v1:budget:cursor:read"]);
+		expect((await post()).status).toBe(429);
+		expect((await fetch(`${h.base}/steering/sessions`, { headers: CURSOR })).status).toBe(429);
+		expect(h.observability.audit.recent().map((record) => [record.tool, record.transport])).toEqual([["docs_steering_session", "rest"], ["live_session_discovery", "rest"]]);
+	});
+
+	for (const route of ["/steering/sessions", "/steering/sessions/heartbeat", "/steering/sessions/close"]) {
+		test(`${route} rejects non-JSON after authentication and before any admission or effect`, async () => {
+			const h = await start(env);
+			const issue = spyOn(h.authority, "issue");
+			const read = spyOn(h.authority, "read");
+			const post = (authorization?: string) => fetch(`${h.base}${route}`, { method: "POST", headers: { "content-type": "text/plain", ...(authorization === undefined ? {} : { authorization }) }, body: "{}" });
+			expect((await post()).status).toBe(401);
+			const wrongType = await post("Bearer tok-cursor");
+			expect(wrongType.status).toBe(415);
+			expect(await wrongType.json()).toEqual({ error: "request body must be application/json" });
+			expect(h.redis.calls).toEqual([]);
+			expect(h.observability.audit.recent()).toEqual([]);
+			expect(issue).not.toHaveBeenCalled();
+			expect(read).not.toHaveBeenCalled();
+		});
+	}
+
+	for (const [route, tool] of [["/steering/sessions/heartbeat", "steering_session_heartbeat"], ["/steering/sessions/close", "steering_session_close"]] as const) {
+		test(`${tool} is one write debit and one real audit despite final authority rechecks`, async () => {
+			const h = await start({ ...env, SUBSTRATE_BUDGET_WRITE_BURST: "1", SUBSTRATE_BUDGET_WRITE_RPS: "0.01" });
+			const entry = await issueLiveSession(h.authority, { caller: owner });
+			const read = spyOn(h.authority, "read");
+			const mutate = spyOn(h.authority, route.endsWith("close") ? "close" : "heartbeat");
+			const request = () => fetch(`${h.base}${route}`, { method: "POST", headers: { ...CURSOR, "x-substrate-session-binding": entry.sessionBinding }, body: JSON.stringify({ session_id: entry.sessionId }) });
+			const response = await request();
+			expect(response.status).toBe(200);
+			const reply: unknown = await response.json();
+			expect(reply).toMatchObject({ status: route.endsWith("close") ? "closed" : "renewed", session_id: entry.sessionId });
+			expect(JSON.stringify(reply)).not.toContain(entry.sessionBinding);
+			expect(JSON.stringify(h.observability.snapshot())).not.toContain(entry.sessionBinding);
+			expect(JSON.stringify(h.observability.snapshot())).not.toContain(entry.sessionId);
+			expect(JSON.stringify(h.observability.audit.recent())).not.toContain(entry.sessionBinding);
+			expect(h.redis.calls).toHaveLength(1);
+			expect(h.redis.calls[0]?.keys).toEqual(["substrate:v1:budget:cursor:write"]);
+			expect(mutate).toHaveBeenCalledTimes(1);
+			expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
+			expect(h.observability.audit.recent()).toHaveLength(1);
+			expect(h.observability.audit.recent()[0]).toMatchObject({ tool, transport: "rest", mode: "fail-closed", decision: "allowed", session_id: null });
+			const reads = read.mock.calls.length;
+			expect((await request()).status).toBe(429);
+			expect(read.mock.calls).toHaveLength(reads);
+			expect(mutate).toHaveBeenCalledTimes(1);
+			expect(h.observability.audit.recent()).toHaveLength(1);
+		});
+	}
+
+	for (const mode of ["off", "shadow", "enforce"]) test(`mandatory private admission survives ${mode} and a failed general cache`, async () => {
+		const { greptime, written } = ledger();
+		const h = await start({ ...env, SUBSTRATE_BUDGETS: mode, SUBSTRATE_BUDGET_READ_BURST: "1", SUBSTRATE_BUDGET_READ_RPS: "0.01" }, { greptime });
+		h.redis.fail = "injected cache outage";
+		const read = spyOn(h.authority, "read");
+		const request = (index: number) => fetch(`${h.base}/steering/directives?session_id=ls_${index.toString(16).padStart(64, "0")}`, { headers: CURSOR });
+		const first = await request(1);
+		expect(first.status).toBe(404);
+		expect(read).toHaveBeenCalledTimes(1);
+		const refusals = written.length;
+		expect(refusals).toBe(1);
+		for (let index = 2; index < 34; index++) {
+			const limited = await request(index);
+			expect(limited.status).toBe(429);
+			expect(await limited.json()).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		}
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(written).toHaveLength(refusals);
+		expect(h.observability.audit.recent()).toEqual([]);
+	});
+
+	test("unwritable generic audit cannot replace target404 or permit admitted lifecycle effects", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "substrate-live-policy-"));
+		writeFileSync(join(directory, "file"), "");
+		const h = await start({ ...env, SUBSTRATE_AUDIT_PATH: join(directory, "file", "audit.jsonl") });
+		try {
+			const entry = await issueLiveSession(h.authority, { caller: owner });
+			const issue = spyOn(h.authority, "issue");
+			const heartbeat = spyOn(h.authority, "heartbeat");
+			const close = spyOn(h.authority, "close");
+			for (const route of ["/steering/sessions/heartbeat", "/steering/sessions/close"]) {
+				const denied = await fetch(`${h.base}${route}`, { method: "POST", headers: CURSOR, body: JSON.stringify({ session_id: entry.sessionId }) });
+				expect(denied.status).toBe(404);
+				expect(await denied.json()).toEqual({ status: "refused", error: { code: "not-found" } });
+				expect(h.observability.audit.recent()).toEqual([]);
+			}
+			for (const [route, body] of [
+				["/steering/sessions", { repo_id: "owner/name", state: "ACTIVE" }],
+				["/steering/sessions/heartbeat", { session_id: entry.sessionId }],
+				["/steering/sessions/close", { session_id: entry.sessionId }],
+			] as const) {
+				const failed = await fetch(`${h.base}${route}`, { method: "POST", headers: { ...CURSOR, "x-substrate-session-binding": entry.sessionBinding }, body: JSON.stringify(body) });
+				expect(failed.status).toBe(503);
+				expect(await failed.json()).toEqual({ status: "refused", error: { code: "audit-unavailable" } });
+			}
+			for (const effect of [issue, heartbeat, close]) expect(effect).not.toHaveBeenCalled();
+			expect(await h.authority.read(entry.access, "private-read")).toEqual({ ok: true, snapshot: entry.snapshot });
+		} finally { h.close(); rmSync(directory, { recursive: true, force: true }); }
 	});
 });

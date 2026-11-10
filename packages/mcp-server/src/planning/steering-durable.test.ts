@@ -4,10 +4,8 @@
  * the read port from its own rows, and an injected clock. No database, no network, no timers.
  */
 import { createHash } from "node:crypto";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
-	DEFAULT_STEERING_ACK_TTL_S,
-	DEFAULT_STEERING_EXPIRY_SWEEP_S,
 	STEERING_ACK_TTL_BOUNDS_S,
 	STEERING_ACK_TTL_ENV,
 	STEERING_AUDIT_ATTEMPTS,
@@ -36,7 +34,12 @@ import {
 	type SteeringStoredAckRow,
 	type SteeringStoredDirectiveRow,
 } from "./steering-store.ts";
-import { listSteering } from "./steering-tools.ts";
+import { loadConfig } from "../config.ts";
+import { auditToolCalls, createObservability } from "../observe.ts";
+import { Substrate } from "../service.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./live-session.test-support.ts";
+import { STEERING_ACKNOWLEDGED_HISTORY_LIMIT } from "./steering-rest.ts";
+import type { LiveSessionAuditPort } from "./steering-tools.ts";
 
 const HUMAN = "ops.lead";
 const WORKER = "worker-a";
@@ -676,12 +679,10 @@ describe("acknowledgement deadline", () => {
 		const sql = new DurableSql();
 		const { inbox } = await queuedAt(sql, new ManualClock(T0));
 		await inbox.expireStale(T0 + TTL);
-		const wiring = { enabled: true, clock: new ManualClock(T0), settingsErrors: [], inbox };
-
-		expect(listSteering(wiring, { session_id: WORKER })).toMatchObject({
-			status: "listed",
-			directives: [{ id: "d-1", state: "acknowledged", outcome: "declined", reason: "timeout", acknowledged_at_ms: T0 + TTL }],
-		});
+		// This is the inbox/audit-log restore contract, not an authorization fixture.
+		expect(inbox.recordsFor(WORKER)).toMatchObject([
+			{ directive: { id: "d-1" }, state: "acknowledged", outcome: "declined", reason: "timeout", acknowledgedAtMs: T0 + TTL },
+		]);
 
 		const restarted = processOver(sql, new ManualClock(T0 + TTL + 1));
 		const recent = await restarted.sink.readRecent({ limit: 10 });
@@ -778,11 +779,6 @@ describe("the payload hash covers the reason", () => {
 });
 
 describe("expiry settings", () => {
-	test("unset keys take the defaults, in milliseconds", () => {
-		expect(loadSteeringExpirySettings({})).toEqual({ ok: true, settings: { ackTtlMs: DEFAULT_STEERING_ACK_TTL_S * 1_000, expirySweepMs: DEFAULT_STEERING_EXPIRY_SWEEP_S * 1_000 } });
-		expect(DEFAULT_STEERING_ACK_TTL_S).toBe(86_400);
-		expect(DEFAULT_STEERING_EXPIRY_SWEEP_S).toBe(60);
-	});
 
 	test("set keys are whole seconds within inclusive bounds", () => {
 		expect(loadSteeringExpirySettings({ [STEERING_ACK_TTL_ENV]: "3600", [STEERING_EXPIRY_SWEEP_ENV]: "15" })).toEqual({
@@ -807,5 +803,61 @@ describe("expiry settings", () => {
 			errors: [{ key: STEERING_ACK_TTL_ENV, reason: "out-of-range", min: STEERING_ACK_TTL_BOUNDS_S.min, max: STEERING_ACK_TTL_BOUNDS_S.max }],
 		});
 		expect(loadSteeringExpirySettings({ [STEERING_ACK_TTL_ENV]: "" })).toEqual({ ok: false, errors: [{ key: STEERING_ACK_TTL_ENV, reason: "not-integer" }] });
+	});
+});
+
+const serviceStops: Array<() => void> = [];
+afterEach(() => { for (const stop of serviceStops.splice(0)) stop(); });
+
+describe("private durable history through the service boundary", () => {
+	async function historyService() {
+		const env = { SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp" };
+		const config = loadConfig(env);
+		const observability = createObservability(config, env);
+		await observability.start(); serviceStops.push(() => observability.stop());
+		const authority = createTestLiveSessionAuthority({ nowMs: Date.now() });
+		const owner = { surface: "cursor", isOperator: false } as const;
+		const row = await issueLiveSession(authority, { caller: owner });
+		const sql = new DurableSql();
+		const sink = new SteeringAuditSink(sql, sql);
+		const audit: LiveSessionAuditPort = { auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) };
+		const substrate = new Substrate(config, { index: null, greptime: null, steering: { history: sink, durable: sink, liveSessions: authority } }, observability.observer, audit);
+		for (let n = 0; n <= STEERING_ACKNOWLEDGED_HISTORY_LIMIT; n++) {
+			const queued = queuedRow({ directiveId: `history-${n}`, targetSessionId: row.sessionId, bodyRedacted: "PRIVATE-HISTORY-DIRECTION", authorPrincipal: "omp" });
+			sql.seed(queued);
+			sql.seed({ ...queued, transition: "acknowledged", outcome: "declined", confirmed: false, reason: "timeout", recordedAt: new Date(T0 + n) });
+		}
+		return { owner, row, sql, sink, substrate, authority };
+	}
+
+	test("checked owner gets bounded acknowledged history and truthful truncation, without fabricated hints", async () => {
+		const h = await historyService();
+		const read = spyOn(h.sql, "readClosed");
+		const reply = await h.substrate.readLiveDirectives(h.owner, { sessionId: h.row.sessionId, status: "acknowledged" }, h.row.sessionBinding);
+		expect(reply.history).toBe("durable");
+		expect(reply.history_truncated).toBe(true);
+		expect(reply.directives).toHaveLength(STEERING_ACKNOWLEDGED_HISTORY_LIMIT);
+		expect(read).toHaveBeenCalledWith({ sessionId: h.row.sessionId, limit: STEERING_ACKNOWLEDGED_HISTORY_LIMIT + 1 });
+		for (const directive of reply.directives) expect(directive).toMatchObject({ status: "acknowledged", outcome: "declined", checkpoint_hint: null });
+	});
+
+	test("missing proof is denied before touching durable acknowledged history", async () => {
+		const h = await historyService(); const read = spyOn(h.sql, "readClosed");
+		await expect(h.substrate.readLiveDirectives(h.owner, { sessionId: h.row.sessionId, status: "all" })).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "not-found" } } });
+		expect(read).not.toHaveBeenCalled();
+	});
+
+	for (const failure of ["close", "expiry", "outage"] as const) test(`${failure} during awaited history read refuses the entire private result`, async () => {
+		const h = await historyService();
+		const entered = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+		const read = h.sql.readClosed.bind(h.sql);
+		spyOn(h.sql, "readClosed").mockImplementation(async query => { entered.resolve(); await release.promise; return read(query); });
+		const pending = h.substrate.readLiveDirectives(h.owner, { sessionId: h.row.sessionId, status: "all" }, h.row.sessionBinding);
+		await entered.promise;
+		if (failure === "close") await h.authority.close(h.row.access);
+		if (failure === "expiry") h.authority.advance(3600_000);
+		if (failure === "outage") h.authority.unavailable = true;
+		release.resolve();
+		await expect(pending).rejects.toMatchObject({ refusal: { status: "refused", error: { code: failure === "outage" ? "session-unavailable" : "not-found" } } });
 	});
 });

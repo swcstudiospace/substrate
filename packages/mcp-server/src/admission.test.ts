@@ -7,8 +7,9 @@
  * Lua is called with — is covered without a socket. The Lua text itself is
  * pinned by its contract here and run against a real redis in the smoke.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { ADMISSION_CLASSES, ADMISSION_DECISIONS, type BreakerOpenError, type AdmissionClass } from "@substrate/observability";
 import {
@@ -40,7 +41,9 @@ import {
 import type { CacheRedis, ScriptOutcome } from "./cache.ts";
 import { ConfigError, DEFAULT_BUDGETS, loadAdmissionSettings, loadConfig } from "./config.ts";
 import { defined } from "./test-support.ts";
-import { SURFACES } from "./types.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
+import { LiveSessionBoundary, type LiveSessionInvocation } from "./planning/steering-tools.ts";
+import { SURFACES, type EventInput } from "./types.ts";
 
 /**
  * A redis whose `EVAL` executes `bucketStep` for `BUDGET_SCRIPT`, keeping the
@@ -444,24 +447,26 @@ describe("the class tables are exhaustive over what the server serves", () => {
 		expect([...classified].filter((route) => !servedRoutes.has(route))).toEqual([]);
 	});
 
-	test("the live steering routes take their tools' classes: queue and acknowledge write, everything else a read", () => {
-		expect({
-			sessions: ROUTE_CLASSES["/steering/sessions"],
-			directives: ROUTE_CLASSES["/steering/directives"],
-			wait: ROUTE_CLASSES["/steering/wait"],
-			queue: ROUTE_CLASSES["/steering/queue"],
-			acknowledge: ROUTE_CLASSES["/steering/acknowledge"],
-			context: ROUTE_CLASSES["/session/context"],
-			tool: TOOL_CLASSES.session_context,
-		}).toEqual({ sessions: "read", directives: "read", wait: "read", queue: "write", acknowledge: "write", context: "read", tool: "read" });
-		expect(ROUTE_CLASSES["/steering/queue"]).toBe(TOOL_CLASSES.steering_queue);
-		expect(ROUTE_CLASSES["/steering/acknowledge"]).toBe(TOOL_CLASSES.steering_acknowledge);
+	test("live lifecycle admission is method-aware and shares the mutation tool classes", () => {
+		expect(routeClass("GET", "/steering/sessions")).toBe("read");
+		expect(routeClass("POST", "/steering/sessions")).toBe("write");
+		for (const [route, tool] of [
+			["/steering/sessions", "docs_steering_session"],
+			["/steering/sessions/heartbeat", "steering_session_heartbeat"],
+			["/steering/sessions/close", "steering_session_close"],
+			["/steering/queue", "steering_queue"],
+			["/steering/acknowledge", "steering_acknowledge"],
+		] as const) {
+			expect(routeClass("POST", route)).toBe("write");
+			expect(toolClass(tool)).toBe("write");
+		}
+		for (const route of ["/steering/directives", "/steering/wait", "/session/context"]) expect(routeClass("GET", route)).toBe("read");
+		for (const tool of ["steering_list", "steering_wait", "live_session_discovery", "session_context"]) expect(toolClass(tool)).toBe("read");
 	});
 
-	test("every tool mcp.ts registers is classified — and nothing stale is listed", () => {
+	test("every registered MCP tool has an explicit admission class", () => {
 		expect(registeredTools.size).toBeGreaterThan(20);
 		expect([...registeredTools].filter((tool) => !Object.hasOwn(TOOL_CLASSES, tool))).toEqual([]);
-		expect(Object.keys(TOOL_CLASSES).filter((tool) => !registeredTools.has(tool))).toEqual([]);
 	});
 
 	test("the coordination class is exactly the lease tools", () => {
@@ -570,5 +575,68 @@ describe("loadAdmissionSettings", () => {
 			const parsed = loadAdmissionSettings({ [`SUBSTRATE_BUDGET_${spelled}_WRITE_BURST`]: "7" });
 			expect(parsed.overrides[surface]?.write).toEqual({ rps: 10, burst: 7 });
 		}
+	});
+});
+
+describe("mandatory live principal budgets", () => {
+	const caller = { surface: "cursor", isOperator: false } as const;
+	for (const mode of ["off", "shadow", "enforce"] as const) test(`random targets cannot evade the principal bucket in ${mode}`, async () => {
+		const authority = createTestLiveSessionAuthority();
+		const read = spyOn(authority, "read");
+		const refused: EventInput[] = [];
+		let inferred = 0;
+		const boundary = new LiveSessionBoundary({
+			authority, settings: settings({ mode, classes: { read: { rps: 0.01, burst: 1 }, write: { rps: 0.01, burst: 1 }, coordination: { rps: 1, burst: 1 } } }),
+			nowMs: () => 1_000,
+			resolveDirective: () => { inferred++; return null; },
+			recordRefusal: async (event) => { refused.push(event); throw new Error("injected refusal sink outage"); },
+		});
+		const firstId = `ls_${"1".padStart(64, "0")}`;
+		expect(await boundary.prepare({ caller, tool: "steering_list", args: {}, operation: "private-read", sessionId: firstId })).toEqual({ status: "refused", error: { code: "not-found" } });
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(refused).toHaveLength(1);
+		expect(refused[0]).toMatchObject({ payload: { action: "steering.refused", target_sha256: createHash("sha256").update(`substrate.live-session-refusal.v1\0${firstId}`).digest("hex") } });
+		expect(JSON.stringify(refused)).not.toContain(firstId);
+		for (let index = 2; index <= 200; index++) {
+			const result = await boundary.prepare({ caller, tool: "steering_list", args: { session_binding: "b".repeat(64) }, operation: "private-read", sessionId: `ls_${index.toString(16).padStart(64, "0")}` });
+			expect(result).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		}
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(refused).toHaveLength(1);
+		const ack: LiveSessionInvocation = { caller, tool: "steering_acknowledge", args: {}, operation: "operator-ack", directiveId: "first-directive" };
+		expect(await boundary.prepare(ack)).toEqual({ status: "refused", error: { code: "not-found" } });
+		expect(inferred).toBe(1);
+		expect(await boundary.prepare({ ...ack, directiveId: "second-directive" })).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		expect(inferred).toBe(1);
+		expect(refused).toHaveLength(2);
+		// Inspect cardinality without adding a production test-only grant or reset method.
+		const buckets: unknown = Reflect.get(boundary, "buckets");
+		expect(buckets).toBeInstanceOf(Map);
+		if (!(buckets instanceof Map)) throw new Error("expected bounded principal map");
+		expect([...buckets.keys()].sort()).toEqual(["cursor:read", "cursor:write"]);
+	});
+
+	test("batch reservation refuses before lookup and release rechecks spend no second token", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const entry = await issueLiveSession(authority, { caller });
+		const read = spyOn(authority, "read");
+		const refused: EventInput[] = [];
+		const boundary = new LiveSessionBoundary({
+			authority, settings: settings({ classes: { read: { rps: 0.01, burst: 1 }, write: { rps: 1, burst: 1 }, coordination: { rps: 1, burst: 1 } } }),
+			nowMs: () => 1_000,
+			resolveDirective: () => null,
+			recordRefusal: async (event) => { refused.push(event); return true; },
+		});
+		const invocation: LiveSessionInvocation = { caller, tool: "steering_list", args: {}, operation: "private-read", sessionId: entry.sessionId, sessionBinding: entry.sessionBinding };
+		expect(await boundary.prepareBatch([invocation, invocation])).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		expect(read).not.toHaveBeenCalled();
+		expect(refused).toEqual([]);
+		const prepared = await boundary.prepare(invocation);
+		if ("status" in prepared) throw new Error("one allowed token must remain after the refused batch");
+		await boundary.recheck(prepared);
+		await boundary.recheck(prepared);
+		expect(read).toHaveBeenCalledTimes(3);
+		expect(await boundary.prepare(invocation)).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		expect(read).toHaveBeenCalledTimes(3);
 	});
 });

@@ -113,6 +113,7 @@ describe("a finished graph drops the cached searches that still list its memorie
 		const redis = new FakeRedis();
 		const substrate = new Substrate(loadConfig({ SUBSTRATE_MEMORY_EXPIRY: "enforce" }), {
 			index: stub.index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -142,6 +143,7 @@ describe("a finished graph drops the cached searches that still list its memorie
 		const redis = new FakeRedis();
 		const substrate = new Substrate(loadConfig({ SUBSTRATE_MEMORY_EXPIRY: "enforce" }), {
 			index: stub.index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -170,7 +172,7 @@ describe("a finished graph drops the cached searches that still list its memorie
 				return { ...GRAPH_VIEW, status };
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache: cacheOf(new FakeRedis()) });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache: cacheOf(new FakeRedis()), steering: { history: null, liveSessions: null } });
 		expect((await substrate.searchMemory("prefix", undefined, undefined, undefined, "cursor")).entries[0]?.expired).toBe(false);
 		await substrate.registerGraph({ graph_id: "ut-1", status: "Merged" } as never);
 		expect((await substrate.searchMemory("prefix", undefined, undefined, undefined, "cursor")).entries[0]?.expired).toBe(true);
@@ -201,7 +203,7 @@ describe("a brief cached under report is not served under enforce", () => {
 	test("the answer key and the snapshot key both carry the mode, so a restart into enforce composes afresh", async () => {
 		const redis = new FakeRedis();
 		const reporting = briefIndex("report");
-		const before = new Substrate(loadConfig({}), { index: reporting.index as never, greptime: null, cache: cacheOf(redis) });
+		const before = new Substrate(loadConfig({}), { index: reporting.index as never, greptime: null, cache: cacheOf(redis), steering: { history: null, liveSessions: null } });
 		const served = await before.briefDetailed(request);
 		expect(served.state).toBe("complete");
 		expect(served.text).toContain("old advice");
@@ -217,6 +219,7 @@ describe("a brief cached under report is not served under enforce", () => {
 		const enforcing = briefIndex("enforce");
 		const after = new Substrate(loadConfig({ SUBSTRATE_MEMORY_EXPIRY: "enforce" }), {
 			index: enforcing.index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -234,6 +237,7 @@ describe("a brief cached under report is not served under enforce", () => {
 		const snapshots = reportSnapshots;
 		const replayed = await new Substrate(loadConfig({}), {
 			index: briefIndex("report", true).index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(new FakeRedis(snapshots)),
 		}).briefDetailed(request);
@@ -241,6 +245,7 @@ describe("a brief cached under report is not served under enforce", () => {
 		expect(replayed.text).toContain("old advice");
 		const fallen = await new Substrate(loadConfig({ SUBSTRATE_MEMORY_EXPIRY: "enforce" }), {
 			index: briefIndex("enforce", true).index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(new FakeRedis(snapshots)),
 		}).briefDetailed(request);
@@ -253,12 +258,13 @@ describe("a brief cached under report is not served under enforce", () => {
 		// must not cold-start every report-mode brief.
 		const redis = new FakeRedis();
 		const stub = briefIndex("report");
-		const substrate = new Substrate(loadConfig({}), { index: stub.index as never, greptime: null, cache: cacheOf(redis) });
+		const substrate = new Substrate(loadConfig({}), { index: stub.index as never, greptime: null, cache: cacheOf(redis), steering: { history: null, liveSessions: null } });
 		await substrate.brief(request);
 		const sets = redis.commands.filter((line) => line.startsWith("SET substrate:v1:brief:"));
 		expect(sets).toHaveLength(1);
 		const explicit = new Substrate(loadConfig({ SUBSTRATE_MEMORY_EXPIRY: "report" }), {
 			index: briefIndex("report").index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		});
@@ -269,9 +275,10 @@ describe("a brief cached under report is not served under enforce", () => {
 
 	test("each mode writes its own answer key and its own snapshot key", async () => {
 		const redis = new FakeRedis();
-		await new Substrate(loadConfig({}), { index: briefIndex("report").index as never, greptime: null, cache: cacheOf(redis) }).brief(request);
+		await new Substrate(loadConfig({}), { index: briefIndex("report").index as never, greptime: null, cache: cacheOf(redis), steering: { history: null, liveSessions: null } }).brief(request);
 		await new Substrate(loadConfig({ SUBSTRATE_MEMORY_EXPIRY: "enforce" }), {
 			index: briefIndex("enforce").index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 			cache: cacheOf(redis),
 		}).brief(request);

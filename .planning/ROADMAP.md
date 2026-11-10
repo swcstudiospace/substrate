@@ -1229,22 +1229,25 @@ Plans:
 
 ### Phase 71: Multi-Session boundary
 
-**Goal**: A steering read or wait reaches only a session the caller's authenticated surface owns, unless the caller is the operator. Steering writes stay operator-only, as the docs and CLI already state. The redacted cross-session digest that `session_context` returns (Phase 67 contract) is unchanged.
+**Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: Not started. Discovery: the steering REST routes (`packages/mcp-server/src/server.ts`) and MCP tools (`packages/mcp-server/src/mcp.ts`) take a caller-supplied target session id, and writes are not checked against the caller's surface.
+**Status**: Locally verified (5/5 criteria); awaiting-review / pending QUALITY. Greptile threads on PR #199 remediated and re-verified 2026-11-01 (71-05). The expiry pass runs on the issue path, so discovery and the session digest stay read-only. The steer capacity sweep checks and removes only records for this server and surface, so a foreign server never receives this client's bearer. Verified by typecheck, Biome lint, one full repository run after the sweep fix (11,626 pass, 2 skip, 0 fail, 0711 temp root), Python suites (330 pass), phase-close locks and audit gate. `human_needed` remains solely for the mandated Desk Quality / Programming Lead review of the remediation, which has not been observed. No phase-complete or merge-ready claim. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
 
 **Depends on**: none
+
+**Requirements**: [HARD-S1]
 
 **Repos**: agent-substrate (`packages/mcp-server/src/server.ts`, `packages/mcp-server/src/planning/steering.ts`, `packages/mcp-server/src/mcp.ts`, `packages/cli/src/steer/`)
 
 **Success Criteria** (what must be TRUE):
 
-  1. A surface that does not own target session S is refused, with no write and no acknowledgement, from every read of S: `/steering/directives`, `/steering/wait`, `steering_list` and the `listen` path. Acknowledge and queue writes stay operator-only for every caller.
-  2. The operator surface keeps cross-session access, and each refusal is an audited event.
-  3. The steering baseline on `origin/main` 9b482207 (575 pass, 7 skip, 0 fail across the steering and session suites) still passes.
-  4. `session_context` still returns the redacted digest of other sessions in the same repository, and its existing test still passes.
+  1. Foreign and unknown live session IDs produce the same 404 status, body, and headers on every private session read or write, including directive lists, wait/listen, MCP steering tools, docs-session registration/transitions, and session-scoped steering augmentation. No directive, acknowledgement, or session state changes on refusal.
+  2. Operator authority remains explicit; permitted cross-session operations remain available. Refusal audits hash requested identifiers and record no private session body. Principal-keyed limiting runs before binding lookup.
+  3. Server-issued session identities have at least 128 bits of cryptographic randomness; durable ownership and closed-session tombstones prevent reissue or cross-surface takeover, including after restart. An unavailable authority fails closed rather than accepting a volatile substitute.
+  4. The existing operator-only queue/ack contract and legacy unkeyed command shape remain unchanged. All affected callers migrate to the explicit session identity lifecycle; no alias silently bypasses binding checks.
+  5. The redacted repo-wide `session_context` digest remains available as designed in Phase 67. Re-run the recorded steering regression file set and the new isolation/revocation/restart failure-injection cases; record pass/skip counts and any deliberate contract changes.
 
-**Plans**: none written
+**Plans**: [71-01](phases/71-multi-session-boundary/71-01-PLAN.md) (SQL authority), [71-02](phases/71-multi-session-boundary/71-02-PLAN.md) (CLI/private records), [71-03](phases/71-multi-session-boundary/71-03-PLAN.md) (service and transports), [71-04](phases/71-multi-session-boundary/71-04-PLAN.md) (consumer verification and docs), [71-05](phases/71-multi-session-boundary/71-05-SUMMARY.md) (Greptile remediation, summary only). All four plans locally verified; 71-05 gates re-run; external sign-off pending.
 
 ### Phase 72: Repo allowlist and scoped credentials
 
@@ -1278,16 +1281,19 @@ Plans:
 
 ### Phase 74: Cross-repo compensating actions
 
-**Goal**: A multi-repo operation that fails partway undoes its completed steps, and a failed undo is recorded, not dropped.
+**Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: Not applicable on `origin/main` 9b482207 as far as search can show: no multi-repo, multi-step write exists. Checked and rejected: corpus ingest, skills propose, host commit and push, worktree provision and prune, snapshot restore, session rollback, steer, and the git hook installer. Owner decision needed on whether a cross-repo write path should be built first. Robustness gap found: `packages/collectors/src/install-git-hook.ts` has no try/catch around `writeHook`, so one failing repo aborts the run mid-loop.
+**Status**: Not started. Discovery found no existing multi-repo transaction path; that absence is not delivery of the accepted feature and does not waive it. Planning must select and implement a concrete multi-repo operation using Phase 72's registry and scoped executor. The unrelated git-hook install loop robustness observation remains separate.
 
-**Depends on**: none
+**Depends on**: Phase 72 (registered repositories, containment and credential-scoped execution)
+
+**Requirements**: [HARD-R1]
 
 **Success Criteria** (what must be TRUE):
 
-  1. Owner decides whether a cross-repo write path is built first; no compensation is built against a path that does not exist.
-  2. The install-git-hook robustness gap is fixed or tracked separately; it is not a compensation case.
+  1. Execute an actual operation across at least two registered repositories and persist operation/step state before effects, using stable dedupe keys and idempotent per-step retry.
+  2. A forced failure at step N yields compensated pre-operation state or a durable needs-attention result naming unfinished/failed compensation steps; never report success for a partial operation.
+  3. Exercise failure and compensation failure against temporary real repositories. Recovery/status exposes the parked result and cannot overwrite an outside ref change or silently repeat a completed effect.
 
 **Plans**: none written
 
@@ -1412,7 +1418,7 @@ Plans:
 | 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); PARTIAL: no report scheduler; dispatcher ignores roots variable | 2026-10-30 |
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
-| 71. Multi-Session boundary | v1.8 | 0/0 | Not started | - |
+| 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Not started | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |

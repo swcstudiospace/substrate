@@ -1,8 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuditLog, AuditUnavailableError, type AuditRecordInput } from "@substrate/audit";
+import { AuditLog, AuditUnavailableError, argDigest, type AuditRecordInput } from "@substrate/audit";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig } from "./config.ts";
 import {
@@ -18,8 +18,11 @@ import {
 	renderEvidenceHtml,
 	toolCallsIn,
 	toolLabel,
+	type Observability,
 } from "./observe.ts";
 import { Substrate } from "./service.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
+import type { LiveSessionAuditPort } from "./planning/steering-tools.ts";
 import { defined } from "./test-support.ts";
 
 function rpc(method: string, params?: unknown, id: unknown = 1) {
@@ -31,6 +34,18 @@ function unwritablePath(): string {
 	const directory = mkdtempSync(join(tmpdir(), "substrate-observe-"));
 	writeFileSync(join(directory, "not-a-directory"), "");
 	return join(directory, "not-a-directory", "mcp-audit.jsonl");
+}
+
+/** Inject only the failed append; successful records and corrections use the real chain. */
+function failAllowedAppend(observed: Observability, failedTool = "graph_claim"): AuditRecordInput[] {
+	const appended: AuditRecordInput[] = [];
+	const append = observed.audit.append.bind(observed.audit);
+	spyOn(observed.audit, "append").mockImplementation(async (input) => {
+		appended.push(input);
+		if (input.tool === failedTool && input.decision === "allowed") throw new AuditUnavailableError(input.tool, "injected append failure");
+		return append(input);
+	});
+	return appended;
 }
 
 describe("normalizeRoute", () => {
@@ -198,25 +213,12 @@ describe("auditToolCalls", () => {
 	});
 
 	test("a denial after an earlier success in the same batch appends a correction", async () => {
-		// Two fail-closed calls where only the first is recorded. The chain is append-only,
-		// so that `allowed` record cannot be withdrawn — it is corrected by appending a
-		// record saying the batch was refused and none of it was dispatched. A stub sink is
-		// used because a real one that refuses the second write refuses the correction too,
-		// and this is about the correction being attempted and recorded.
-		const appended: AuditRecordInput[] = [];
-		const audit = {
-			async append(input: AuditRecordInput) {
-				appended.push(input);
-				if (input.tool === "graph_claim" && input.decision === "allowed") {
-					throw new AuditUnavailableError(input.tool, "stubbed refusal");
-				}
-				return { record: {} as never, written: true };
-			},
-		};
+		// A later failed append must correct earlier real-chain records without rewriting them.
 		const observed = observability(null);
-
+		await observed.start();
+		const appended = failAllowedAppend(observed);
 		const { denials } = await auditToolCalls(
-			{ audit: audit as never, instruments: observed.instruments },
+			observed,
 			"omp",
 			[
 				{ id: 2, tool: "graph_register", args: {} },
@@ -236,19 +238,11 @@ describe("auditToolCalls", () => {
 		// by exactly that field — so it was filtered out of every bundle while the earlier
 		// `allowed` record, which does name its graph, was kept. That graph's evidence then
 		// showed a claim as allowed with nothing saying it never ran.
-		const appended: AuditRecordInput[] = [];
-		const audit = {
-			async append(input: AuditRecordInput) {
-				appended.push(input);
-				if (input.tool === "graph_claim" && input.decision === "allowed") {
-					throw new AuditUnavailableError(input.tool, "stubbed refusal");
-				}
-				return { record: {} as never, written: true };
-			},
-		};
 		const observed = observability(null);
+		await observed.start();
+		const appended = failAllowedAppend(observed);
 
-		await auditToolCalls({ audit: audit as never, instruments: observed.instruments }, "omp", [
+		await auditToolCalls(observed, "omp", [
 			{ id: 1, tool: "graph_register", args: { graph_id: "ut-1" } },
 			{ id: 2, tool: "graph_claim", args: { graph_id: "ut-1" } },
 		]);
@@ -261,19 +255,11 @@ describe("auditToolCalls", () => {
 	test("a batch spanning two graphs gets one correction each, counting only its own calls", async () => {
 		// A record carries a single `graph_id`, so one correction could only ever reach one
 		// of the affected graphs' bundles.
-		const appended: AuditRecordInput[] = [];
-		const audit = {
-			async append(input: AuditRecordInput) {
-				appended.push(input);
-				if (input.tool === "graph_claim" && input.decision === "allowed") {
-					throw new AuditUnavailableError(input.tool, "stubbed refusal");
-				}
-				return { record: {} as never, written: true };
-			},
-		};
 		const observed = observability(null);
+		await observed.start();
+		const appended = failAllowedAppend(observed);
 
-		await auditToolCalls({ audit: audit as never, instruments: observed.instruments }, "omp", [
+		await auditToolCalls(observed, "omp", [
 			{ id: 1, tool: "graph_register", args: { graph_id: "ut-1" } },
 			{ id: 2, tool: "graph_register", args: { graph_id: "ut-1" } },
 			{ id: 3, tool: "graph_register", args: { graph_id: "ut-2" } },
@@ -287,19 +273,11 @@ describe("auditToolCalls", () => {
 	});
 
 	test("a call naming no graph is corrected under a null one, where its allowed record sits", async () => {
-		const appended: AuditRecordInput[] = [];
-		const audit = {
-			async append(input: AuditRecordInput) {
-				appended.push(input);
-				if (input.tool === "graph_claim" && input.decision === "allowed") {
-					throw new AuditUnavailableError(input.tool, "stubbed refusal");
-				}
-				return { record: {} as never, written: true };
-			},
-		};
 		const observed = observability(null);
+		await observed.start();
+		const appended = failAllowedAppend(observed);
 
-		await auditToolCalls({ audit: audit as never, instruments: observed.instruments }, "omp", [
+		await auditToolCalls(observed, "omp", [
 			{ id: 1, tool: "memory_write", args: { scope: "global" } },
 			{ id: 2, tool: "graph_claim", args: {} },
 		]);
@@ -366,14 +344,14 @@ describe("auditToolCalls", () => {
 	});
 
 	test("each steering tool is a known tool and keeps its own name as its observe label", () => {
-		for (const name of ["steering_queue", "steering_acknowledge", "steering_list", "corpus_status", "corpus_ingest"]) {
+		for (const name of ["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_queue", "steering_acknowledge", "steering_list", "steering_wait", "live_session_discovery", "corpus_status", "corpus_ingest"]) {
 			expect({ name, label: toolLabel(name) }).toEqual({ name, label: name });
 		}
 	});
 
 	test("the live steering routes and the session_context tool are known, and a path under them is not", () => {
 		expect(toolLabel("session_context")).toBe("session_context");
-		for (const route of ["/steering/sessions", "/steering/directives", "/steering/wait", "/steering/queue", "/steering/acknowledge", "/session/context"]) {
+		for (const route of ["/steering/sessions", "/steering/sessions/heartbeat", "/steering/sessions/close", "/steering/directives", "/steering/wait", "/steering/queue", "/steering/acknowledge", "/session/context"]) {
 			expect(normalizeRoute(route)).toBe(route);
 		}
 		expect(normalizeRoute("/steering/queue/../../etc")).toBe("other");
@@ -917,5 +895,222 @@ describe("no note echoes the identifier the bundle was requested with", () => {
 	test("and the rendered HTML carries none of it either", async () => {
 		const bundle = await bundleFor([{ graph_id: graphId }, { graph_id: graphId }, { graph_id: graphId }], 2);
 		expect(renderEvidenceHtml(bundle)).not.toContain("sk-ant-");
+	});
+});
+
+describe("live-session generic audit boundary", () => {
+	const caller = { surface: "omp", isOperator: false } as const;
+	const liveId = `ls_${"d".repeat(64)}`;
+	const binding = "e".repeat(64);
+
+	test("a live mutation's append failure preserves fail-closed-first whole-batch graph corrections", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		const appended = failAllowedAppend(observed, "steering_session_close");
+		try {
+			const calls = [
+				{ id: "read", tool: "memory_brief", args: { session_id: "historical-label" } },
+				{ id: "g1", tool: "graph_register", args: { graph_id: "ut-live-one" } },
+				{ id: "g2", tool: "graph_register", args: { graph_id: "ut-live-two" } },
+				{ id: "close", tool: "steering_session_close", args: { session_id: liveId, session_binding: binding } },
+			];
+			const { denials } = await auditToolCalls(observed, "omp", calls);
+			expect([...denials.keys()]).toEqual(["close"]);
+			expect(appended.slice(0, 3).map((record) => record.tool)).toEqual(["graph_register", "graph_register", "steering_session_close"]);
+			const { records } = await observed.audit.readAll();
+			expect(records.some((record) => record.tool === "memory_brief")).toBe(false);
+			expect(records.filter((record) => record.tool === "batch").map((record) => record.graph_id).sort()).toEqual(["ut-live-one", "ut-live-two"]);
+			expect(records.find((record) => record.tool === "steering_session_close")).toMatchObject({ decision: "denied", session_id: null });
+			for (const graph of ["ut-live-one", "ut-live-two"]) {
+				const evidence = await buildGraphEvidence(observed, new Substrate(loadConfig({}), { index: null, greptime: null }), graph);
+				expect(evidence.audit.records.map((record) => [record.tool, record.decision])).toEqual([["graph_register", "allowed"], ["batch", "denied"]]);
+			}
+			const body = calls.map((call) => rpc("tools/call", { name: call.tool, arguments: call.args }, call.id));
+			const refusal = auditRefusal(body, denials) as Array<{ id: string; error: { message: string } }>;
+			expect(refusal.map((response) => response.id)).toEqual(["read", "g1", "g2", "close"]);
+			for (const response of refusal.slice(0, 3)) expect(response.error.message).toContain("another call in this batch");
+			for (const marker of [liveId, binding]) expect(JSON.stringify({ records, refusal })).not.toContain(marker);
+			expect((await observed.audit.verify()).ok).toBe(true);
+		} finally { observed.stop(); }
+	});
+
+	test("live targets are absent from plaintext context before record building, without redaction", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		const append = observed.audit.append.bind(observed.audit);
+		const contexts: Omit<AuditRecordInput, "args">[] = [];
+		spyOn(observed.audit, "append").mockImplementation(async (input) => {
+			const { args: _args, ...context } = input;
+			contexts.push(context);
+			return append(input);
+		});
+		try {
+			const args = { session_id: liveId, target_session_id: liveId, session_binding: binding, steering: "PRIVATE-DIRECTION-MARKER", planning_hash: "PRIVATE-PLAN-MARKER" };
+			const tools = ["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_list", "steering_wait", "steering_queue", "steering_acknowledge"];
+			const { denials } = await auditToolCalls(observed, "omp", tools.map((tool, id) => ({ id, tool, args })));
+			expect(denials.size).toBe(0);
+			expect(contexts).toHaveLength(tools.length);
+			for (const context of contexts) expect(context.session_id).toBeNull();
+			const records = observed.audit.recent();
+			expect(records).toHaveLength(tools.length);
+			for (const record of records) {
+				expect(record.session_id).toBeNull();
+				expect(record.arg_digest).toBe(argDigest(args).digest);
+				expect(record.arg_keys).toEqual(Object.keys(args).sort());
+			}
+			for (const marker of [liveId, binding, args.steering, args.planning_hash]) {
+				expect(JSON.stringify(contexts)).not.toContain(marker);
+				expect(JSON.stringify(records)).not.toContain(marker);
+			}
+			expect((await observed.audit.verify()).ok).toBe(true);
+		} finally { observed.stop(); }
+	});
+
+	test("docs, brief, events and checkpoints keep historical attribution separate from the live selector", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		try {
+			const args = { session_id: "historical-checkpoint-label", steering_session_id: liveId, session_binding: binding };
+			const tools = ["docs_search", "memory_brief", "brief", "events_emit", "events_query", "session_checkpoint", "session_rollback_plan"];
+			await auditToolCalls(observed, "omp", tools.map((tool, id) => ({ id, tool, args })));
+			expect(observed.audit.recent()).toHaveLength(tools.length);
+			for (const record of observed.audit.recent()) {
+				expect(record.session_id).toBe(args.session_id);
+				expect(record.arg_digest).toBe(argDigest(args).digest);
+				expect(JSON.stringify(record)).not.toContain(liveId);
+				expect(JSON.stringify(record)).not.toContain(binding);
+			}
+		} finally { observed.stop(); }
+	});
+
+	for (const tool of ["docs_steering_session", "steering_session_heartbeat", "steering_session_close"]) {
+		test(`${tool} audit failure keeps live target and proof out of denied context`, async () => {
+			const observed = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: unwritablePath() }));
+			await observed.start();
+			const append = observed.audit.append.bind(observed.audit);
+			const contexts: Omit<AuditRecordInput, "args">[] = [];
+			const diagnostics = spyOn(process.stderr, "write");
+			spyOn(observed.audit, "append").mockImplementation(async (input) => {
+				const { args: _args, ...context } = input;
+				contexts.push(context);
+				return append(input);
+			});
+			try {
+				const { denials } = await auditToolCalls(observed, "omp", [{ id: 42, tool, args: { session_id: liveId, session_binding: binding } }]);
+				expect(denials.has("42")).toBe(true);
+				expect(contexts.map((context) => context.decision)).toEqual(["allowed", "denied"]);
+				for (const context of contexts) expect(context.session_id).toBeNull();
+				for (const marker of [liveId, binding]) {
+					expect(JSON.stringify(contexts)).not.toContain(marker);
+					expect(JSON.stringify(observed.audit.recent())).not.toContain(marker);
+					expect(JSON.stringify([...denials])).not.toContain(marker);
+					expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(marker);
+				}
+			} finally { diagnostics.mockRestore(); observed.stop(); }
+		});
+	}
+
+	test("the fourth constructor port records the real chain before each direct lifecycle effect", async () => {
+		const config = loadConfig({});
+		const observed = createObservability(config);
+		await observed.start();
+		const authority = createTestLiveSessionAuthority();
+		const effects: string[] = [];
+		const issue = authority.issue.bind(authority);
+		spyOn(authority, "issue").mockImplementation(async (input) => { effects.push(observed.audit.recent().at(-1)?.tool ?? "missing"); return issue(input); });
+		const transition = authority.transition.bind(authority);
+		spyOn(authority, "transition").mockImplementation(async (...args) => { effects.push(observed.audit.recent().at(-1)?.tool ?? "missing"); return transition(...args); });
+		const heartbeat = authority.heartbeat.bind(authority);
+		spyOn(authority, "heartbeat").mockImplementation(async (input) => { effects.push(observed.audit.recent().at(-1)?.tool ?? "missing"); return heartbeat(input); });
+		const close = authority.close.bind(authority);
+		spyOn(authority, "close").mockImplementation(async (input) => { effects.push(observed.audit.recent().at(-1)?.tool ?? "missing"); return close(input); });
+		const port: LiveSessionAuditPort = { auditCalls: (who, calls, transport) => auditToolCalls(observed, who.surface, calls, transport) };
+		const auditCalls = spyOn(port, "auditCalls");
+		const service = new Substrate(config, { index: null, greptime: null, steering: { history: null, liveSessions: authority } }, observed.observer, { auditCalls });
+		try {
+			const opened = await service.updateLiveSession(caller, { repo_id: "owner/name", state: "ACTIVE" });
+			if (opened.status !== "issued") throw new Error("expected issued session");
+			const target = { session_id: opened.session_id, session_binding: opened.session_binding };
+			await service.updateLiveSession(caller, { ...target, repo_id: "owner/name", state: "PAUSED" });
+			await service.heartbeatLiveSession(caller, target);
+			await service.closeLiveSession(caller, target);
+			expect(effects).toEqual(["docs_steering_session", "docs_steering_session", "steering_session_heartbeat", "steering_session_close"]);
+			expect(auditCalls).toHaveBeenCalledTimes(4);
+			expect(observed.audit.recent()).toHaveLength(4);
+			expect((await observed.audit.verify()).ok).toBe(true);
+		} finally { observed.stop(); }
+	});
+
+	for (const missing of [false, true]) test(`direct mutation performs no effect when audit is ${missing ? "missing" : "unwritable"}`, async () => {
+		const config = loadConfig({ SUBSTRATE_AUDIT_PATH: unwritablePath() });
+		const observed = createObservability(config);
+		await observed.start();
+		const authority = createTestLiveSessionAuthority();
+		const entry = await issueLiveSession(authority, { caller });
+		const issue = spyOn(authority, "issue");
+		const transition = spyOn(authority, "transition");
+		const heartbeat = spyOn(authority, "heartbeat");
+		const close = spyOn(authority, "close");
+		const service = new Substrate(config, { index: null, greptime: null, steering: { history: null, liveSessions: authority } }, observed.observer,
+			missing ? undefined : { auditCalls: (who, calls, transport) => auditToolCalls(observed, who.surface, calls, transport) });
+		try {
+			const target = { session_id: entry.sessionId, session_binding: entry.sessionBinding };
+			for (const invoke of [
+				() => service.updateLiveSession(caller, { repo_id: "owner/name", state: "ACTIVE" }),
+				() => service.updateLiveSession(caller, { ...target, repo_id: "owner/name", state: "PAUSED" }),
+				() => service.heartbeatLiveSession(caller, target),
+				() => service.closeLiveSession(caller, target),
+			]) await expect(invoke()).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "audit-unavailable" } } });
+			for (const effect of [issue, transition, heartbeat, close]) expect(effect).not.toHaveBeenCalled();
+			expect(await authority.read(entry.access, "private-read")).toEqual({ ok: true, snapshot: entry.snapshot });
+		} finally { observed.stop(); }
+	});
+});
+
+describe("prepared live dispatch audit ownership", () => {
+	test("duplicate calls have separate debits and one-use entries; mismatches cannot skip audit", async () => {
+		const config = loadConfig({ SUBSTRATE_BUDGETS: "off", SUBSTRATE_BUDGET_WRITE_BURST: "2", SUBSTRATE_BUDGET_WRITE_RPS: "0.01" });
+		const observed = createObservability(config);
+		await observed.start();
+		const authority = createTestLiveSessionAuthority();
+		const caller = { surface: "omp", isOperator: false } as const;
+		const entry = await issueLiveSession(authority, { caller });
+		const heartbeat = spyOn(authority, "heartbeat");
+		const port: LiveSessionAuditPort = { auditCalls: (who, calls, transport) => auditToolCalls(observed, who.surface, calls, transport) };
+		const audit = spyOn(port, "auditCalls");
+		const stores = { index: null, greptime: null, steering: { history: null, liveSessions: authority } };
+		const service = new Substrate(config, stores, observed.observer, port);
+		const args = { session_id: entry.sessionId, session_binding: entry.sessionBinding };
+		const calls = [{ id: 1, tool: "steering_session_heartbeat", args }, { id: 2, tool: "steering_session_heartbeat", args }];
+		const firstCall = defined(calls[0], "first heartbeat call");
+		try {
+			const prepared = await service.prepareLiveBatch(caller, calls);
+			if (!prepared.ok) throw new Error("expected two reserved calls");
+			const audited = await service.auditPreparedBatch(prepared.batch, calls, "mcp");
+			if (!audited.ok) throw new Error("expected real audit records");
+			await expect(service.heartbeatLiveSession({ surface: "cursor", isOperator: false }, args, { preparedLiveDispatch: audited.dispatch })).rejects.toMatchObject({ refusal: { error: { code: "not-found" } } });
+			await expect(service.heartbeatLiveSession(caller, { ...args, session_binding: "f".repeat(64) }, { preparedLiveDispatch: audited.dispatch })).rejects.toMatchObject({ refusal: { error: { code: "not-found" } } });
+			expect(heartbeat).not.toHaveBeenCalled();
+			expect((await service.heartbeatLiveSession(caller, args, { preparedLiveDispatch: audited.dispatch })).status).toBe("renewed");
+			expect((await service.heartbeatLiveSession(caller, args, { preparedLiveDispatch: audited.dispatch })).status).toBe("renewed");
+			await expect(service.heartbeatLiveSession(caller, args, { preparedLiveDispatch: audited.dispatch })).rejects.toMatchObject({ refusal: { error: { code: "not-found" } } });
+			await expect(service.auditPreparedBatch(prepared.batch, calls, "mcp")).rejects.toMatchObject({ refusal: { error: { code: "not-found" } } });
+			expect(heartbeat).toHaveBeenCalledTimes(2);
+			expect(audit).toHaveBeenCalledTimes(1);
+			expect(observed.audit.recent().map((record) => record.seq)).toEqual([1, 2]);
+			const read = spyOn(authority, "read");
+			expect(await service.prepareLiveBatch(caller, calls)).toMatchObject({ ok: false, refusal: { error: { code: "principal-rate-limited" } } });
+			expect(read).not.toHaveBeenCalled();
+			expect(audit).toHaveBeenCalledTimes(1);
+
+			const other = new Substrate(config, stores, observed.observer, port);
+			const otherBatch = await other.prepareLiveBatch(caller, [firstCall]);
+			if (!otherBatch.ok) throw new Error("expected independent preparation");
+			await expect(service.auditPreparedBatch(otherBatch.batch, [firstCall], "mcp")).rejects.toMatchObject({ refusal: { error: { code: "not-found" } } });
+			await expect(other.auditPreparedBatch(otherBatch.batch, [{ ...firstCall, args: { ...args, session_binding: "f".repeat(64) } }], "mcp")).rejects.toMatchObject({ refusal: { error: { code: "not-found" } } });
+			expect(audit).toHaveBeenCalledTimes(1);
+			expect(heartbeat).toHaveBeenCalledTimes(2);
+			expect((await observed.audit.verify()).ok).toBe(true);
+		} finally { observed.stop(); }
 	});
 });

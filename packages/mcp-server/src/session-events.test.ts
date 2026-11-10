@@ -603,6 +603,41 @@ describe("builders", () => {
 		});
 		expect((stored.payload as Record<string, unknown>)["_ik"]).toBe(event.idempotency_key);
 	});
+
+	test("historical checkpoint and rollback labels remain proof-free, including labels shaped like public live handles", () => {
+		for (const sessionId of [SESSION, "historical-checkpoint-label-71", `ls_${"e5".repeat(32)}`]) {
+			const drafts = [
+				buildCheckpointEvent(sessionId, checkpointFields as never),
+				buildRollbackEvent(sessionId, rollbackFields as never),
+			];
+			for (const draft of drafts) {
+				const stored = normalizeEvent({
+					surface: "omp",
+					session_id: sessionId,
+					kind: draft.kind,
+					summary: draft.summary,
+					payload: { ...draft.payload },
+				}, null, { key: draft.idempotency_key ?? null });
+				expect(stored.session_id).toBe(sessionId);
+				expect(parseSessionEventPayload(stored.payload, { stored: true })).toEqual(draft.payload);
+				expect(stored.payload).not.toHaveProperty("session_binding");
+				expect(stored.payload).not.toHaveProperty("steering_session_id");
+			}
+			expect(drafts[0]?.idempotency_key).toBe(checkpointIdempotencyKey(sessionId, 4));
+			expect(drafts[1]?.idempotency_key).toBe(rollbackIdempotencyKey(sessionId, RB));
+		}
+	});
+
+	test("live credential fields do not become checkpoint or rollback payload fields", () => {
+		for (const [key, value] of [
+			["steering_session_id", `ls_${"f6".repeat(32)}`],
+			["session_binding", "sb_PRIVATE_CHECKPOINT_PROOF_MARKER_71"],
+			["planning_hash", HEX_64],
+		] as const) {
+			expectFail(() => parseCheckpointPayload(checkpoint({ [key]: value })), "unknown_key", key);
+			expectFail(() => parseRollbackPayload(rollback({ [key]: value })), "unknown_key", key);
+		}
+	});
 });
 
 describe("parseSessionEventPayload", () => {
