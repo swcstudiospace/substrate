@@ -9,9 +9,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripRemoteImages } from "@substrate/corpus";
 import { ragflowArchiveFromEnv } from "./config.ts";
 import { archiveRagflow, gitAtCommit, MANIFEST_FILE, ragflowArchiveSource, verifyArchive, type ArchiveDeps, type RagflowArchiveSource } from "./docs-archive.ts";
-import { changeSha, saveIngestRecords, stripRemoteImages, type IngestRecord } from "./docs-ingest.ts";
+import { changeSha, saveIngestRecords, type IngestRecord } from "./docs-ingest.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };

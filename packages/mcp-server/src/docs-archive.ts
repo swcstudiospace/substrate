@@ -15,7 +15,8 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { changeSha, loadIngestRecords, stripRemoteImages, type IngestRecord } from "./docs-ingest.ts";
+import { stripRemoteImages } from "@substrate/corpus";
+import { changeSha, loadIngestRecords, type IngestRecord } from "./docs-ingest.ts";
 import { refusedMount, type DevReader } from "./ledger-archive.ts";
 import { redact } from "./redact.ts";
 import {
@@ -185,7 +186,12 @@ function preflight(deps: ArchiveDeps, dir: string, stateFile: string): string | 
 		if (!statSync(dir).isDirectory()) return `refusing ${dir}: it exists and is not a directory`;
 		if (readdirSync(dir).length > 0) return `refusing ${dir}: the target directory is not empty`;
 	}
-	return refusedMount(dir, { cwd: deps.repoRoot, dev: deps.dev, releaseRoot: deps.releaseRoot, allowRootfs: deps.allowRootfs });
+	return refusedMount(dir, {
+		cwd: deps.repoRoot,
+		dev: deps.dev,
+		allowRootfs: deps.allowRootfs,
+		...(deps.releaseRoot === undefined ? {} : { releaseRoot: deps.releaseRoot }),
+	});
 }
 
 async function gather(deps: ArchiveDeps, stateFile: string): Promise<Gathered> {
