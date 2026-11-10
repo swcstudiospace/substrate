@@ -50,6 +50,7 @@ import {
 } from "./docs-archive.ts";
 import { parityGate, type ParityRecord } from "./docs-parity.ts";
 import {
+	batchPagesForIngest,
 	ingestDocs,
 	loadIngestRecords,
 	saveIngestRecords,
@@ -430,12 +431,18 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	let applied = true;
 	for (const dataset of archive.datasets) {
 		if (wanted !== null && !wanted.has(dataset.name)) continue;
-		// The replay accepts exactly the paths this dataset's archive records
-		// (their own top-level directory as the ingest root), never the
-		// substrate-wide defaults: agent-skills pages live at <skill>/SKILL.md
-		// and <skill>/references/, which DEFAULT_INGEST_ROOTS excludes.
-		const datasetRoots = [...new Set(dataset.documents.filter((document) => document.path !== null).map((document) => `${(document.path as string).split("/")[0]}/`))];
-		if (datasetRoots.length === 0 && dataset.documents.some((document) => document.path !== null)) continue;
+		// The replay accepts exactly the paths this dataset's archive records.
+		// A top-level segment shared by several paths becomes a directory root
+		// (`docs/`); a lone top-level file stays an exact file root
+		// (`README.md`), so underRoot matches both shapes.
+		const paths = dataset.documents.filter((document) => document.path !== null).map((document) => document.path as string);
+		const bySegment = new Map<string, number>();
+		for (const path of paths) {
+			const segment = path.split("/")[0] ?? path;
+			bySegment.set(segment, (bySegment.get(segment) ?? 0) + 1);
+		}
+		const datasetRoots = [...bySegment.entries()].map(([segment, count]) => (count > 1 ? `${segment}/` : segment));
+		if (datasetRoots.length === 0 && paths.length > 0) continue;
 		let datasetGitShow: (commit: string, path: string) => Promise<string>;
 		try {
 			datasetGitShow = gitShowFor(dataset.name);
@@ -463,38 +470,42 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 		}
 		const datasetReport: Record<string, unknown> = { dataset: dataset.name, commits: byCommit.size, ingested: 0, replaced: 0, unchanged: 0, failed: 0 };
 		for (const [commit, pages] of byCommit) {
-			const outcome = await ingestDocs(
-				{
-					config: null,
-					backend: "lightrag",
-					lightragConfig: { url: options.lightragUrl, ...(options.lightragApiKey !== undefined ? { apiKey: options.lightragApiKey } : {}) },
-					lightragDatasets: { list: async () => lightragSearchDatasets(names), invalidate: () => undefined },
-					lightragFetch: options.fetchImpl,
-					seen,
-					locks: new Map(),
-					roots: datasetRoots,
-					surface: "substrate",
-					emit,
-					...(options.poll !== undefined ? { poll: options.poll } : {}),
-				},
-				{ dataset: dataset.name, commit, pages },
-			);
-			if (!outcome.ok) {
-				datasetReport.refused = outcome.reason;
-				applied = false;
-				break;
-			}
-			for (const result of outcome.results) {
-				if (result.status === "ingested") datasetReport.ingested = (datasetReport.ingested as number) + 1;
-				else if (result.status === "replaced") datasetReport.replaced = (datasetReport.replaced as number) + 1;
-				else if (result.status === "unchanged") datasetReport.unchanged = (datasetReport.unchanged as number) + 1;
-				else datasetReport.failed = (datasetReport.failed as number) + 1;
-			}
-			if ((datasetReport.failed as number) > 0) {
-				// Partial ingestion is not a successful apply: the state save, the
-				// dataset pins and the cutover note all wait until every page landed.
-				applied = false;
-				datasetReport.partial = true;
+			// Size-batched like every other ingest caller: one archived commit
+			// can exceed the 5 MB call limit and must still migrate.
+			for (const batch of batchPagesForIngest(pages)) {
+				const outcome = await ingestDocs(
+					{
+						config: null,
+						backend: "lightrag",
+						lightragConfig: { url: options.lightragUrl, ...(options.lightragApiKey !== undefined ? { apiKey: options.lightragApiKey } : {}) },
+						lightragDatasets: { list: async () => lightragSearchDatasets(names), invalidate: () => undefined },
+						lightragFetch: options.fetchImpl,
+						seen,
+						locks: new Map(),
+						roots: datasetRoots,
+						surface: "substrate",
+						emit,
+						...(options.poll !== undefined ? { poll: options.poll } : {}),
+					},
+					{ dataset: dataset.name, commit, pages: batch },
+				);
+				if (!outcome.ok) {
+					datasetReport.refused = outcome.reason;
+					applied = false;
+					break;
+				}
+				for (const result of outcome.results) {
+					if (result.status === "ingested") datasetReport.ingested = (datasetReport.ingested as number) + 1;
+					else if (result.status === "replaced") datasetReport.replaced = (datasetReport.replaced as number) + 1;
+					else if (result.status === "unchanged") datasetReport.unchanged = (datasetReport.unchanged as number) + 1;
+					else datasetReport.failed = (datasetReport.failed as number) + 1;
+				}
+				if ((datasetReport.failed as number) > 0) {
+					// Partial ingestion is not a successful apply: the dataset
+					// pins and the cutover note all wait until every page landed.
+					applied = false;
+					datasetReport.partial = true;
+				}
 			}
 		}
 		totals.ingested += datasetReport.ingested as number;
