@@ -701,6 +701,13 @@ export interface HourDigest {
  * closed yet); `unanchored`, `mismatch` and `unverified` all fail the verify.
  */
 export type HourStatus = "anchored" | "pending" | "unanchored" | "mismatch" | "unverified";
+/** One (graph, session) pair in one hour: whether its chain matches its stored head, and the first event where it parts if not (D73-03). */
+export interface HeadPairReport {
+	session_id: string;
+	trusted: boolean;
+	first_differing_event_id?: string;
+	first_missing_event_id?: string;
+}
 export interface HourReport {
 	period_start: string;
 	period_end: string;
@@ -710,6 +717,15 @@ export interface HourReport {
 	tx_sig?: string;
 	slot?: number;
 	reason?: string;
+	/** The on-chain heads root of a v2 memo (D73-01); absent for a v1 memo and for hours not anchored. */
+	heads_root?: string;
+	/** Whether this hour's anchored heads are trusted (D73-04); set on every hour the verify reports. */
+	trusted?: boolean;
+	trusted_reason?: string;
+	/** Each (graph, session) pair of this graph in the hour, against its own stored head (D73-03). */
+	pairs?: HeadPairReport[];
+	/** True when the ledger or the stored leaves contradict this hour's anchored head: a tamper, not a missing proof (D73-03). */
+	head_failed?: boolean;
 }
 /** The additive verify verdict: the chain fields keep their meaning (D28-14). */
 export interface VerifyVerdict {
@@ -729,6 +745,10 @@ export interface VerifyVerdict {
 	 * racing the two reads is not an entry: the re-read finds its row.
 	 */
 	missing: { count: number; ids: string[] };
+	/** True only when every hour holds its anchored heads (D73-04): the on-chain heads root is reproduced and each pair's chain matches its stored head. */
+	trusted: boolean;
+	/** The first untrusted hour's reason, or the reason every hour is trusted. */
+	trusted_reason: string;
 }
 /** Options for {@link Substrate.verifyGraph}. The evidence bundle asks for the hour report; `anchors: false` is the chain-only read. */
 export interface VerifyOptions {
@@ -7342,7 +7362,7 @@ export class Substrate {
 		// before the event read — not when the hour loop starts — and every
 		// hour's allowance below is what's left of it.
 		const verifyStartedAt = Date.now();
-		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] } };
+		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] }, trusted: false, trusted_reason: "greptime not configured" };
 		// Read by the graph id in its stored form, for the same reason `emit` looks
 		// the session up by its normalised one.
 		const stored = normalizeIdentifier(graphId) ?? graphId;
@@ -7378,6 +7398,8 @@ export class Substrate {
 			uncovered: { count: 0, ids: [] },
 			legacy: { count: 0, ids: [] },
 			missing: { count: 0, ids: [] },
+			trusted: false,
+			trusted_reason: "anchor check skipped (anchors: false)",
 		};
 		if (!withAnchors) return emptyHours;
 		return this.hourReport(stored, rows, chain, now, opts.rpc, verifyStartedAt);
@@ -7522,6 +7544,15 @@ export class Substrate {
 		// throws naming the missing member instead of passing unseen.
 		for (const record of ingest) {
 			const hour = hourStart(record.ingested_at);
+			if (!byHour.has(hour)) byHour.set(hour, []);
+		}
+		// Hours that hold this graph's chain leaves are checked even when every event row and ingest record in them is gone: a trailing
+		// hour deleted outright is then still expected, and its leaves name what it lost. Anchors are one row per hour for the whole
+		// store, so only the leaves name this graph's hours.
+		const leafRead = await outcomeWithin(() => greptime.graphChainLeafHours(storedGraphId), Math.max(0, budgetMs - (Date.now() - startedAt) - margin));
+		// A read that throws is a store failure, and one that outlasts the budget is budget exhausted. Either way the hours found so far are still reported, and the verdict names the reason.
+		const leavesUnreadable: string | null = leafRead.kind === "answer" ? null : leafRead.kind === "timeout" ? "budget exhausted" : "store-failed";
+		for (const hour of leafRead.kind === "answer" ? leafRead.value : []) {
 			if (!byHour.has(hour)) byHour.set(hour, []);
 		}
 	// Retained ingest events with no event row in this graph's read
@@ -7720,18 +7751,26 @@ export class Substrate {
 		}
 		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, signers, remaining - margin));
 	}
+	for (const [i, report] of hours.entries()) {
+		const hour = Date.parse(report.period_start);
+		hours[i] = await this.trustHour(report, hour, byHour.get(hour) ?? [], rows, storedGraphId, budgetMs - (Date.now() - startedAt) - margin);
+	}
 
 	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
-	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0;
+	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0 && leavesUnreadable === null;
 	const reason = !chain.ok
 		? chain.reason
-		: uncovered.length > 0
-			? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
-			: missing.length > 0
-				? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
-				: failing
-					? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
-					: undefined;
+		: leavesUnreadable !== null
+			? leavesUnreadable
+			: uncovered.length > 0
+				? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
+				: missing.length > 0
+					? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
+					: failing
+						? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
+						: undefined;
+	const untrustedHour = hours.find((hour) => hour.trusted !== true);
+	const anchoredHours = hours.filter((hour) => hour.status === "anchored");
 	return {
 		ok,
 		events: rows.length,
@@ -7742,7 +7781,116 @@ export class Substrate {
 		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
 		legacy: { count: legacy.length, ids: [...legacy].sort() },
 		missing: { count: missing.length, ids: [...missing] },
+		trusted: leavesUnreadable === null && rows.length > 0 && anchoredHours.length > 0 && untrustedHour === undefined,
+		trusted_reason: leavesUnreadable !== null
+			? leavesUnreadable
+			: rows.length === 0
+				? "no events"
+				: anchoredHours.length === 0
+					? "no anchored hour"
+					: untrustedHour === undefined
+						? "every hour is trusted"
+						: `hour ${untrustedHour.period_start}: ${untrustedHour.trusted_reason ?? "not trusted"}`,
 	};
+	}
+
+	/**
+	 * D73-03 and D73-04 for one hour of one graph. Only the on-chain heads root of a signed v2 memo is trusted: the stored leaves of every
+	 * graph in the hour must reproduce it, and only then is each of this graph's (graph, session) pairs walked against its own stored
+	 * head. A head recomputed from ledger rows is never trusted, and an hour that cannot be checked says why. A `mismatch` hour whose
+	 * memo was signed is still compared, because the rows are what changed and the stored leaves say what they lost; such an hour is
+	 * untrusted whatever the comparison finds.
+	 */
+	private async trustHour(
+		report: HourReport,
+		hour: number,
+		members: readonly string[],
+		rows: Array<Record<string, unknown>>,
+		storedGraphId: string,
+		allowanceMs: number,
+	): Promise<HourReport> {
+		// A head the stored leaves contradict makes the hour a `mismatch`, which is what the verdict's `ok` reads. An hour's own reason is kept.
+		const untrusted = (reason: string, headFailed = false): HourReport =>
+			headFailed
+				? { ...report, status: "mismatch", reason: report.reason ?? reason, trusted: false, trusted_reason: reason, pairs: [], head_failed: true }
+				: { ...report, trusted: false, trusted_reason: reason, pairs: [] };
+		if (allowanceMs <= 0) return untrusted("budget exhausted");
+		if (report.status !== "anchored" && report.status !== "mismatch") return untrusted(`hour is ${report.status}: no anchored head to trust`);
+		if (report.heads_root === undefined) {
+			return untrusted(
+				report.status === "anchored" ? "anchored with a v1 memo: no heads commitment on chain" : "hour is mismatch: its memo carries no verified heads commitment",
+			);
+		}
+		const onChainHeadsRoot = report.heads_root;
+		const greptime = this.greptime;
+		if (!greptime) throw new Error("GREPTIME_URL is not set");
+		// A read that outlasts the allowance is budget exhausted; a read that throws is a store failure. Neither claims trust.
+		const outcome = Promise.withResolvers<{ kind: "read"; leaves: StoredLeaf[] } | { kind: "failed" } | { kind: "expired" }>();
+		const timer = setTimeout(() => outcome.resolve({ kind: "expired" }), Math.max(0, allowanceMs));
+		timer.unref?.();
+		greptime.hourChainLeaves(hour).then(
+			(leaves) => {
+				clearTimeout(timer);
+				outcome.resolve({ kind: "read", leaves });
+			},
+			() => {
+				clearTimeout(timer);
+				outcome.resolve({ kind: "failed" });
+			},
+		);
+		const read = await outcome.promise;
+		if (read.kind === "expired") return untrusted("budget exhausted");
+		if (read.kind === "failed") return untrusted("store-failed");
+		const leaves = read.leaves;
+		// The trust computation runs over stored bytes that may be malformed. Whatever it throws is an untrusted result, never an escape.
+		try {
+			const records = headRecordsFromLeaves(leaves, hour);
+			if (records === null || records.length === 0 || headsRoot(records) !== onChainHeadsRoot) {
+				return untrusted("stored leaves do not reproduce the on-chain heads root", true);
+			}
+			const inHour = new Set(members);
+			const events = rows.filter((row) => inHour.has(String(row.id))).map(rowToEvent);
+			const sessions = [
+				...new Set([
+					...records.filter((record) => record.graphId === storedGraphId).map((record) => record.sessionId),
+					...events.map((event) => event.session_id ?? ""),
+				]),
+			].sort();
+			const pairs: HeadPairReport[] = [];
+			for (const session of sessions) {
+				// The content hash the chain recomputes, not the stored column: an edited payload then shows where it parts from its leaf.
+				const links = events
+					.filter((event) => (event.session_id ?? "") === session)
+					.map((event) => {
+						const { hash: _stored, ...content } = event;
+						return { id: event.id, hash: eventHash(content), prev: event.prev, storedHash: event.hash };
+					});
+				const record = records.find((candidate) => candidate.graphId === storedGraphId && candidate.sessionId === session);
+				if (record === undefined) {
+					// No anchored head covers these events, so nothing on chain vouches for them: the chain's first event is where it leaves the anchor.
+					const first = inChainOrder([...links].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))[0];
+					pairs.push({ session_id: session, trusted: false, ...(first === undefined ? {} : { first_differing_event_id: first.id }) });
+					continue;
+				}
+				const pairLeaves = leaves.filter((leaf) => leaf.graph_id === storedGraphId && leaf.session_id === session);
+				const result = compareToAnchoredHead(links, pairLeaves, record);
+				if (result.ok) pairs.push({ session_id: session, trusted: true });
+				else if (result.kind === "stored-leaves-mismatch") return untrusted(result.reason, true);
+				else if (result.kind === "first-missing") pairs.push({ session_id: session, trusted: false, first_missing_event_id: result.eventId });
+				else pairs.push({ session_id: session, trusted: false, first_differing_event_id: result.eventId });
+			}
+			const failing = pairs.find((pair) => !pair.trusted);
+			if (failing === undefined) {
+				return report.status === "anchored"
+					? { ...report, trusted: true, trusted_reason: "every session's chain matches its anchored head", pairs }
+					: { ...report, trusted: false, trusted_reason: `hour is mismatch: ${report.reason ?? "not confirmed"}`, pairs };
+			}
+			const where = failing.first_missing_event_id !== undefined ? `missing ${failing.first_missing_event_id}` : `differs at ${failing.first_differing_event_id ?? ""}`;
+			const reason = `session ${failing.session_id} ${where}`;
+			return { ...report, status: "mismatch", reason: report.reason ?? reason, trusted: false, trusted_reason: reason, pairs, head_failed: true };
+		} catch (cause) {
+			return untrusted(`the anchored head could not be compared: ${redact(String(cause))}`);
+		}
 	}
 
 	/**
@@ -7793,12 +7941,28 @@ export class Substrate {
 	}
 
 	/**
+	 * The hour's recomputed digest, or the reason it cannot be made. A digest with no root (no members) has nothing to compare a
+	 * signed memo with, so it is a fault too.
+	 */
+	private async hourDigestOrFault(hour: number, now: number): Promise<{ digest: HourDigest } | { fault: string }> {
+		try {
+			const digest = await this.hourDigest(hour, now);
+			return digest.root === null ? { fault: "hour holds graph events but digests empty" } : { digest };
+		} catch (cause) {
+			return { fault: redact(String(cause)) };
+		}
+	}
+
+	/**
 	 * Check one distinct hour: digest whole, then resolve to its D28-15 status.
 	 *
 	 * The memo bytes cross from devnet untrusted: every field is re-checked,
 	 * never trusted. Anything devnet-shaped but wrong — signer, period, root,
 	 * count, row disagreement — is `mismatch`; anything unreadable is
-	 * `unverified`, fail-closed, never `anchored`.
+	 * `unverified`, fail-closed, never `anchored`. A digest that cannot be made
+	 * is a `mismatch` as well, but the memo is still read and verified: a signed
+	 * memo's heads root is what {@link trustHour} checks the stored leaves
+	 * against, so the damage to the rows is named there rather than hidden.
 	 */
 	private async checkHour(
 		hour: number,
@@ -7816,15 +7980,8 @@ export class Substrate {
 		if (!isClosed(hour, now, INGEST_LAG_MS)) {
 			return { period_start, period_end, status: "pending", event_count: memberCount, root: null };
 		}
-		let digest: HourDigest;
-		try {
-			digest = await this.hourDigest(hour, now);
-		} catch (cause) {
-			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, reason: redact(String(cause)) };
-		}
-		if (digest.root === null) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: null, reason: "hour holds graph events but digests empty" };
-		}
+		const recomputed = await this.hourDigestOrFault(hour, now);
+		const shown = "digest" in recomputed ? { event_count: recomputed.digest.event_count, root: recomputed.digest.root } : { event_count: 0, root: null };
 		const greptime = this.greptime;
 		if (!greptime) throw new Error("GREPTIME_URL is not set");
 		const stored = await greptime.anchorForPeriod(hour);
@@ -7836,73 +7993,97 @@ export class Substrate {
 			} catch (cause) {
 				// The notes could not all be read, so judging the stored row could pass over a newer pointer: unverified, with the reason.
 				if (cause instanceof ReanchorReadIncomplete) {
-					return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: stored.tx_sig, reason: redact(cause.message) };
+					return { period_start, period_end, status: "unverified", ...shown, tx_sig: stored.tx_sig, reason: redact(cause.message) };
 				}
 				throw cause;
 			}
 		}
 		if (!row) {
+			if ("fault" in recomputed) return { period_start, period_end, status: "mismatch", event_count: 0, root: null, reason: recomputed.fault };
 			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
-				return { period_start, period_end, status: "pending", event_count: digest.event_count, root: digest.root };
+				return { period_start, period_end, status: "pending", ...shown };
 			}
-			return { period_start, period_end, status: "unanchored", event_count: digest.event_count, root: digest.root, reason: "no anchors row 3 h after the hour closed" };
+			return { period_start, period_end, status: "unanchored", ...shown, reason: "no anchors row 3 h after the hour closed" };
 		}
 		if (!pubkey) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
 		}
 		let genesis: string;
 		try {
 			genesis = await readRpc().getGenesisHash();
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: redact(String(cause)) };
 		}
 		if (genesis !== DEVNET_GENESIS_HASH) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "RPC genesis hash is not devnet's" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "RPC genesis hash is not devnet's" };
 		}
 		let memo: TransactionMemo | null;
 		try {
 			memo = await readRpc().transactionMemo(row.tx_sig, "confirmed");
 		} catch (cause) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: redact(String(cause)) };
 		}
 		if (!memo) {
-			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction not found on devnet" };
+			return { period_start, period_end, status: "unverified", ...shown, tx_sig: row.tx_sig, reason: "transaction not found on devnet" };
 		}
 		if (!memo.memo) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
 		}
 		// The signer is judged the way `checkpoint_verify` judges it: by the signer set at the transaction's own block time, so an hour a
 		// key signed before a rotation stays valid after the job key moved on, and a key outside its window is not accepted.
 		if (!memo.payerSigned) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
 		}
 		const signerFault = await judgeSigner(memo, signers);
 		// A proven signer fault is final. An UNVERIFIABLE signer (no block time yet, an incomplete rotation read, an unbuildable set)
 		// waits for the content checks below: a transaction that already disagrees with the ledger is a mismatch whatever its signer,
 		// and that known cause must not be hidden behind the missing time (`checkpoint_verify` ranks proven disagreements first).
 		if (signerFault !== null && signerFault.status === "mismatch") {
-			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
+			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
 		if (memo.err !== null && memo.err !== undefined) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
 		}
 		const parsed = parseMemo(memo.memo);
 		if (!parsed) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not a v1 anchor memo" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "memo is not a v1 or v2 anchor memo" };
 		}
 		if (parsed.periodStartMs !== hour) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
 		}
+		// A memo signed by an accepted key for this hour commits to its heads, whatever the rows now say: trustHour checks the stored
+		// leaves against that root. An unaccepted signer carries no such commitment.
+		const signedHeads = signerFault === null && parsed.headsRootHex !== undefined ? { heads_root: parsed.headsRootHex } : {};
+		if ("fault" in recomputed) {
+			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, tx_sig: row.tx_sig, reason: recomputed.fault, ...signedHeads };
+		}
+		const { digest } = recomputed;
 		if (parsed.rootHex !== digest.root || parsed.count !== digest.event_count) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `chain root ${parsed.rootHex}/${parsed.count} != recomputed ${digest.root}/${digest.event_count}` };
+			return {
+				period_start,
+				period_end,
+				status: "mismatch",
+				...shown,
+				tx_sig: row.tx_sig,
+				reason: `chain root ${parsed.rootHex}/${parsed.count} != recomputed ${digest.root}/${digest.event_count}`,
+				...signedHeads,
+			};
 		}
 		if (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo) {
-			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo" };
+			return { period_start, period_end, status: "mismatch", ...shown, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo", ...signedHeads };
 		}
 		if (signerFault !== null) {
-			return { period_start, period_end, status: signerFault.status, event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: signerFault.reason };
+			return { period_start, period_end, status: signerFault.status, ...shown, tx_sig: row.tx_sig, reason: signerFault.reason };
 		}
-		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
+		return {
+			period_start,
+			period_end,
+			status: "anchored",
+			...shown,
+			tx_sig: row.tx_sig,
+			...(memo.slot !== null ? { slot: memo.slot } : {}),
+			...(parsed.headsRootHex !== undefined ? { heads_root: parsed.headsRootHex } : {}),
+		};
 	}
 
 	/** Which planes have configuration, so `/slo` can tell "unconfigured" from "silent". */

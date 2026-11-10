@@ -1268,7 +1268,7 @@ Plans:
 
 **Goal**: A rewrite, reorder, deletion or tail truncation of the event ledger is detected by recomputing the chain from the stored rows, and the verified head is anchored.
 
-**Status**: Not started. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts:313`) recomputes a session chain, and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`) reports the verdict. The gap is measured in the unit: tail truncation and whole-ledger rewrites are not yet proven detected.
+**Status**: Implemented locally; gates green (2026-11-01): typecheck, Biome lint, full repository suite (11,380 pass, 2 skip, 0 fail), Python suites (330 pass), phase-close locks and audit gate. Greptile findings on PR 201 are addressed: a mismatched anchored hour still runs the head comparison, deleted trailing hours are found through their `graph_chain_leaves` rows, a failed head reaches evidence as `head_failed`, leaves commit to event ids, malformed leaf ids are untrusted rather than thrown, recovery adopts only a memo whose heads root matches the saved one (7441a02a), the landed memo is read back and must equal the stored memo byte for byte (caabf61b), and an unreadable leaves lookup is an untrusted verdict rather than a 500, with an expired read reported as budget exhausted (8d98932d, caabf61b). Known gap: if this graph's leaves for an hour are also deleted, that hour is not enumerated for this graph and this graph's verify does not report it; the hour's anchor stays on chain. Criterion 1 is covered by tests against fake stores and the fake Solana runner. Criterion 2 is met per (graph, session) chain, because chains are per session (`verifyGraph` groups by session before ordering). Live devnet sends and production DDL were not run and remain operator-gated. Draft PR; not merge-ready. Discovery: `verifyChain` (`packages/mcp-server/src/event.ts`) and `Substrate.verifyGraph` (`packages/mcp-server/src/service.ts`).
 
 **Depends on**: none
 
@@ -1277,7 +1277,7 @@ Plans:
   1. Tests save the graph's head before the change, then edit a stored payload, delete a middle event, truncate the last events, and rewrite the whole chain with recalculated `hash` and `prev`. Each is compared with that saved head: the edits and the rewrite report the first differing event id, and truncation reports the first missing event id.
   2. The chain head for each graph is recorded in the hourly anchor. That recorded head is the trusted earlier proof criterion 1 compares against; a head recomputed from the stored rows is never used as the proof.
 
-**Plans**: none written
+**Plans**: [73-CONTEXT](phases/73-ledger-tamper-evidence/73-CONTEXT.md) (decisions D73-01 to D73-07); [73-01](phases/73-ledger-tamper-evidence/73-01-PLAN.md) (serial units U1 to U4); [73-01-SUMMARY](phases/73-ledger-tamper-evidence/73-01-SUMMARY.md).
 
 ### Phase 74: Cross-repo compensating actions
 
@@ -1420,7 +1420,7 @@ Plans:
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
-| 73. Ledger tamper evidence | v1.8 | 0/0 | Not started | - |
+| 73. Ledger tamper evidence | v1.8 | 0/0 | Implemented locally; draft PR #201, not merge-ready | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Implemented locally; draft PR #200, not merge-ready | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |

@@ -25,7 +25,7 @@
 import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import { DEFAULT_LEDGER_SETTINGS, isGreptimeDuration, type GreptimeConfig, type LedgerSettings } from "./config.ts";
 import { redact, redactKnown } from "./redact.ts";
-import { IDEMPOTENCY_KEY_PATTERN, IDEMPOTENCY_PAYLOAD_KEY } from "./event.ts";
+import { IDEMPOTENCY_KEY_PATTERN, IDEMPOTENCY_PAYLOAD_KEY, type StoredLeaf } from "./event.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { HOUR_MS, hourEnd, hourIso, hourStart, isClosed } from "@substrate/ledger";
 import { DEFAULT_METRICS_HISTORY_TTL, parseMetricsHistoryTtl } from "./config.ts";
@@ -512,6 +512,20 @@ export interface NewAnchor {
 	slot: number;
 	anchored_at: string;
 }
+
+/** One row of `graph_chain_leaves`: an event's place in its (graph, session) chain for one hour (D73-02). */
+export interface GraphChainLeafRow {
+	period_start: string;
+	graph_id: string;
+	session_id: string;
+	/** Position in chain order, from 0. */
+	seq: number;
+	event_id: string;
+	hash: string;
+}
+
+/** Leaf rows one `graph_chain_leaves` INSERT carries. */
+const LEAF_INSERT_BATCH = 500;
 
 /** The SELECT list every anchors read uses, in DDL column order. */
 const ANCHOR_COLUMNS =
@@ -1000,6 +1014,17 @@ export class GreptimeClient {
 			// the time index alone, so two events ingested in the same millisecond
 			// would silently lose a record. A warning is cheaper than that loss.
 			warnings.push(`event_ingest not created in append_mode: ${String(cause)}`);
+		}
+
+		// Chain leaves of each closed hour (D73-02), read back by the heads check. Append-only, as the
+		// ledger requires: without append_mode two leaves that share a period and a timestamp would be
+		// merged. No plain-CREATE fallback, for the same reason as event_ingest above.
+		try {
+			await this.sql(
+				`CREATE TABLE IF NOT EXISTS "graph_chain_leaves" ("period_start" TIMESTAMP TIME INDEX, "graph_id" STRING, "session_id" STRING, "seq" BIGINT, "event_id" STRING, "hash" STRING) WITH ('append_mode' = 'true')`,
+			);
+		} catch (cause) {
+			warnings.push(`graph_chain_leaves not created in append_mode: ${String(cause)}`);
 		}
 
 		await this.sql(`
@@ -1768,6 +1793,57 @@ export class GreptimeClient {
 				`${v(row.memo)}, ${v(row.tx_sig)}, ${v(row.signer)}, ${v(row.cluster)}, ` +
 				`${v(row.slot)}, ${v(row.anchored_at)}, NULL)`,
 		);
+	}
+
+	/**
+	 * Write one hour's chain leaves (D73-02): one row per event, at its place in its (graph, session)
+	 * chain. Append-only, like every ledger write. The anchor job calls this before the anchors row, so no
+	 * anchors row exists for an hour whose leaves were not stored.
+	 */
+	async insertGraphChainLeaves(rows: readonly GraphChainLeafRow[]): Promise<void> {
+		const v = (value: string | number): string => this.q(value);
+		for (let i = 0; i < rows.length; i += LEAF_INSERT_BATCH) {
+			const values = rows
+				.slice(i, i + LEAF_INSERT_BATCH)
+				.map((row) => `(${v(row.period_start)}, ${v(row.graph_id)}, ${v(row.session_id)}, ${v(row.seq)}, ${v(row.event_id)}, ${v(row.hash)})`)
+				.join(", ");
+			await this.sql(
+				`INSERT INTO "graph_chain_leaves" ("period_start", "graph_id", "session_id", "seq", "event_id", "hash") VALUES ${values}`,
+			);
+		}
+	}
+
+	/**
+	 * Every stored chain leaf of one hour, across graphs, in the order the table returns them. The verifier orders and dedupes
+	 * them; nothing here decides which rows count (D73-03, D73-04).
+	 */
+	async hourChainLeaves(periodStartMs: number): Promise<StoredLeaf[]> {
+		const rows = await this.sql(
+			`SELECT "graph_id", "session_id", "seq", "event_id", "hash" FROM "graph_chain_leaves" ` +
+				`WHERE "period_start" = ${this.q(new Date(periodStartMs).toISOString())}`,
+		);
+		return rows.map((row) => ({
+			graph_id: row.graph_id === null || row.graph_id === undefined ? "" : String(row.graph_id),
+			session_id: row.session_id === null || row.session_id === undefined ? "" : String(row.session_id),
+			seq: Number(row.seq),
+			event_id: String(row.event_id),
+			hash: String(row.hash),
+		}));
+	}
+
+	/**
+	 * The distinct hours that hold one graph's chain leaves, ascending. Verify reads these as well as the event and ingest rows, so an
+	 * hour whose rows were deleted but whose leaves remain is still checked. Quoted by the stored graph id, as every graph read is.
+	 */
+	async graphChainLeafHours(storedGraphId: string): Promise<number[]> {
+		const rows = await this.sql(`SELECT DISTINCT "period_start" FROM "graph_chain_leaves" WHERE "graph_id" = ${this.q(storedGraphId)}`);
+		return rows
+			.map((row) => {
+				const at = epochMs(row.period_start);
+				if (!Number.isFinite(at)) throw new GreptimeError(`a chain leaf of ${storedGraphId} has a period that is not a number`);
+				return at;
+			})
+			.sort((a, b) => a - b);
 	}
 
 	/**
