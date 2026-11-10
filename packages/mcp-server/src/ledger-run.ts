@@ -87,7 +87,13 @@ if (command.command === "verify-archive") {
 
 const config = loadConfig();
 if (!config.greptime) exitUsage("GREPTIME_URL is not set");
-const greptime = new GreptimeClient(config.greptime, { ledger: config.ledger });
+// A deliberate slow-store allowance for archive and recovery runs; the unit never sets it.
+const timeoutRaw = process.env.SUBSTRATE_GREPTIME_TIMEOUT_MS?.trim() ?? "";
+const timeoutMs = /^\d{4,6}$/.test(timeoutRaw) ? Number(timeoutRaw) : undefined;
+const greptime = new GreptimeClient(config.greptime, {
+	ledger: config.ledger,
+	...(timeoutMs !== undefined ? { timeoutMs } : {}),
+});
 
 if (command.command === "coverage") {
 	try {

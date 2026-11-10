@@ -78,6 +78,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | number | 2 | 0..100000 | 2 hours. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | path | none | off-box mount | substrate ledger archive refuses by name unless --out is given. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS` | toggle | false | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused. See `docs/greptime-ledger.md` | mcp-server/ledger-run.ts, index-archive.ts | yes |
+| `SUBSTRATE_GREPTIME_TIMEOUT_MS` | number | unset | integer 1000..999999 (parsed only by the ledger runner) | every statement waits the client default (5000 ms); a deliberate slow-store allowance for archive and recovery runs, the unit never sets it | mcp-server/ledger-run.ts | yes |
 | `SOLANA_RPC_URL` | string | https://api.devnet.solana.com | URL | public devnet | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_KEYPAIR` | path | none | keypair file path | the hourly anchor job is not configured | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_PUBKEY` | string | none | public key | anchors are not verified against a key | mcp-server/config.ts | yes |
