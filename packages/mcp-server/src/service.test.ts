@@ -5893,7 +5893,7 @@ describe("planning refresh: refusal cooldown and note dedup", () => {
 		}
 	});
 
-	test("a transient upload error is never parked — the next pass retries the page", async () => {
+	test("a transient upload error backs off briefly and is retried when the window lapses", async () => {
 		const dir = await planningCheckout({ "clean.md": CLEAN });
 		const uploads: string[] = [];
 		let uploadAttempts = 0;
@@ -5901,9 +5901,7 @@ describe("planning refresh: refusal cooldown and note dedup", () => {
 			const url = new URL(String(input));
 			if (init?.method === "POST" && url.pathname === "/documents/upload" && init.body instanceof FormData) {
 				uploadAttempts += 1;
-				if (uploadAttempts === 1) return Response.json({ detail: "lightrag unavailable" }, { status: 503 });
-				uploads.push(String(init.body.get("file_source")));
-				return Response.json({ status: "success", data: { track_id: "trk-1" } });
+				return Response.json({ detail: "lightrag unavailable" }, { status: 503 });
 			}
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
@@ -5912,11 +5910,18 @@ describe("planning refresh: refusal cooldown and note dedup", () => {
 		const { substrate, emitted } = planningSubstrate(dir, uploads, {}, flaky);
 		try {
 			await runPlanningPass(substrate); // pass 1: the upload 503s — a plane fault, never a gate refusal
+			const attemptsAfterPass1 = uploadAttempts;
+			expect(attemptsAfterPass1).toBeGreaterThan(0);
 			expect(refusalWarnings(emitted)).toHaveLength(0);
-			await runPlanningPass(substrate); // pass 2: retried immediately, the page lands
-			expect(uploadAttempts).toBe(2);
-			expect(uploadsOf(uploads, "clean.md")).toBe(1);
-			expect(planningNotes(emitted)).toHaveLength(1);
+			expect(planningNotes(emitted)).toHaveLength(1); // the first pass notes the pending set
+			await runPlanningPass(substrate); // pass 2 inside the backoff window: parked, the page is not attempted
+			expect(uploadAttempts).toBe(attemptsAfterPass1);
+			expect(planningNotes(emitted)).toHaveLength(1); // and the unchanged pending set notes nothing
+			// Backoff expiry: the window lapses, so the next pass attempts again.
+			const refusals = substrate["planningRefusals" as keyof Substrate] as unknown as Map<string, { at: number }>;
+			for (const entry of refusals.values()) entry.at = Date.now() - 31_000;
+			await runPlanningPass(substrate);
+			expect(uploadAttempts).toBeGreaterThan(attemptsAfterPass1);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}

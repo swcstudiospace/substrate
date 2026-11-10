@@ -465,7 +465,11 @@ export async function verifyArchive(dir: string): Promise<ArchiveVerifyResult> {
 	}
 	let manifest: ArchiveManifest;
 	try {
-		manifest = JSON.parse(manifestText) as ArchiveManifest;
+		const parsedManifest: unknown = JSON.parse(manifestText);
+		if (parsedManifest === null || typeof parsedManifest !== "object" || Array.isArray(parsedManifest)) {
+			return { ok: false, mismatches: [{ file: ARCHIVE_MANIFEST_NAME, why: "not an object" }] };
+		}
+		manifest = parsedManifest as ArchiveManifest;
 	} catch {
 		return { ok: false, mismatches: [{ file: ARCHIVE_MANIFEST_NAME, why: "not valid JSON" }] };
 	}

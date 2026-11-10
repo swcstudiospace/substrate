@@ -1601,6 +1601,8 @@ export class Substrate {
 		"page-too-large": true,
 		"call-too-large": true,
 	};
+	/** How long a transient (non-gate) failure backs its page off: short, fixed, and far below the gate cooldown. */
+	private static readonly PLANNING_TRANSIENT_BACKOFF_MS = 30_000;
 	/**
 	 * Pages the planning ingest refused, keyed by path: the content sha refused, why, and when.
 	 * The cooldown parks a refused page until the window lapses or its sha moves, so one
@@ -6781,7 +6783,11 @@ export class Substrate {
 			for (const path of trigger.paths) {
 				const refusal = this.planningRefusals.get(path);
 				const page = byPath.get(path);
-				if (cooldownMs > 0 && refusal !== undefined && page !== undefined && now - refusal.at < cooldownMs && refusal.sha === planningPageSha(page)) continue;
+				// Gate refusals ride the configured cooldown; transient plane
+				// faults ride a short fixed backoff so an outage bounds the
+				// attempt load without parking pages for a day.
+				const windowMs = refusal !== undefined && Substrate.PLANNING_PARKABLE_REASONS[refusal.reason] ? cooldownMs : Substrate.PLANNING_TRANSIENT_BACKOFF_MS;
+				if (cooldownMs > 0 && refusal !== undefined && page !== undefined && now - refusal.at < windowMs && refusal.sha === planningPageSha(page)) continue;
 				pending.add(path);
 			}
 			const pendingPages = pages.filter((page) => pending.has(page.path));
@@ -6791,9 +6797,10 @@ export class Substrate {
 				if (!outcome.ok) {
 					// A batch the gates refused in full comes back `refused` naming one page (the
 					// locator) instead of per-page results; that page alone is parked when the
-					// cooldown is on. Any other refusal is a plane fault (lock timeout, upload
-					// error): leave it unrecorded so the next pass retries it.
-					if (cooldownMs > 0 && outcome.refused === true && typeof outcome.page === "string" && Substrate.PLANNING_PARKABLE_REASONS[outcome.reason]) {
+					// cooldown is on. The refusal kind picks the window: gate
+					// refusals ride the configured cooldown, transient plane faults
+					// ride the short backoff (see the skip above).
+					if (cooldownMs > 0 && outcome.refused === true && typeof outcome.page === "string") {
 						const page = byPath.get(outcome.page);
 						if (page !== undefined) {
 							this.planningRefusals.set(outcome.page, { sha: planningPageSha(page), reason: outcome.reason.split(":", 1)[0]?.trim() || "unknown", at: now });
@@ -6809,7 +6816,7 @@ export class Substrate {
 				for (const page of batch) {
 					const refusal = refused.get(page.path);
 					if (refusal !== undefined) {
-						if (cooldownMs > 0 && Substrate.PLANNING_PARKABLE_REASONS[refusal]) this.planningRefusals.set(page.path, { sha: planningPageSha(page), reason: refusal, at: now });
+						if (cooldownMs > 0) this.planningRefusals.set(page.path, { sha: planningPageSha(page), reason: refusal, at: now });
 					} else {
 						const sha = planningPageSha(page);
 						hashes.set(page.path, sha);
@@ -6820,9 +6827,10 @@ export class Substrate {
 				await this.savePlanningHashes(stored);
 			}
 			// The note keys on the attempt set as the pass left it: the first pass notes, a pass
-			// over an identical set (a parked refusal, say) notes nothing.
+			// over an identical set (a parked refusal, say) notes nothing — and an empty attempt
+			// set (every page inside its backoff window) notes nothing either.
 			const noteHash = JSON.stringify(pendingPages.map((page) => [page.path, planningPageSha(page)] as const).sort());
-			if (this.lastPlanningNoteHash === noteHash) return;
+			if (pendingPages.length === 0 || this.lastPlanningNoteHash === noteHash) return;
 			this.lastPlanningNoteHash = noteHash;
 			await this.emit({
 				surface: "substrate",

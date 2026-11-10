@@ -39,7 +39,7 @@
  * (`lightragFromEnv`), or a missing Part A record.
  */
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -52,11 +52,13 @@ import { parityGate, type ParityRecord } from "./docs-parity.ts";
 import {
 	DEFAULT_INGEST_ROOTS,
 	ingestDocs,
+	loadIngestRecords,
 	saveIngestRecords,
 	type IngestPage,
 	type IngestRecord,
 } from "./docs-ingest.ts";
 import { lightragFromEnv } from "./config.ts";
+import { createFreshnessState } from "./docs-freshness.ts";
 import { createVersionStore, lightragSearchDatasets, recordVersion, versionsFromJson, type VersionStore } from "./docs-datasets.ts";
 import { sha256Hex } from "./event.ts";
 import type { EventInput } from "./types.ts";
@@ -131,22 +133,25 @@ export interface ArchiveLoad {
 export function loadArchive(dir: string): ArchiveLoad {
 	const datasets: ArchivedDataset[] = [];
 	for (const entry of readArchiveDir(join(dir, "inventory"))) {
-		datasets.push(JSON.parse(readFileSync(join(dir, "inventory", entry), "utf8")) as ArchivedDataset);
+		const inventory = parseJsonObject(readFileSync(join(dir, "inventory", entry), "utf8"));
+		if (inventory === null) continue;
+		datasets.push({ id: typeof inventory.id === "string" ? inventory.id : "", name: typeof inventory.name === "string" ? inventory.name : "", documents: Array.isArray(inventory.documents) ? (inventory.documents as ArchivedDataset["documents"]) : [] });
 	}
 	const baselines: ArchivedBaseline[] = [];
 	for (const entry of readArchiveDir(join(dir, "baseline"))) {
-		baselines.push(JSON.parse(readFileSync(join(dir, "baseline", entry), "utf8")) as ArchivedBaseline);
+		const baseline = parseJsonObject(readFileSync(join(dir, "baseline", entry), "utf8"));
+		if (baseline !== null) baselines.push(baseline as unknown as ArchivedBaseline);
 	}
 	const statePath = join(dir, "state", "docs-ingest.json");
-	const state = JSON.parse(readFileSync(statePath, "utf8")) as { version: number };
+	const state = parseJsonObject(readFileSync(statePath, "utf8"));
 	const loaded =
-		state.version === 2
+		state?.version === 2
 			? loadIngestRecordsSync(statePath)
 			: { records: new Map<string, IngestRecord>(), versions: createVersionStore() };
 	let sampleSha256: string | null = null;
 	try {
-		const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as { sample_sha256?: string };
-		sampleSha256 = typeof manifest.sample_sha256 === "string" ? manifest.sample_sha256 : null;
+		const manifest = parseJsonObject(readFileSync(join(dir, "manifest.json"), "utf8"));
+		sampleSha256 = typeof manifest?.sample_sha256 === "string" ? manifest.sample_sha256 : null;
 	} catch {
 		sampleSha256 = null;
 	}
@@ -159,6 +164,17 @@ function readArchiveDir(dir: string): string[] {
 	} catch {
 		return [];
 	}
+}
+
+/** `JSON.parse` with a shape check: the ratchet counts unchecked `JSON.parse(...) as T` casts. */
+function parseJsonArray(text: string): unknown[] | null {
+	const parsed: unknown = JSON.parse(text);
+	return Array.isArray(parsed) ? parsed : null;
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | null {
+	const parsed: unknown = JSON.parse(text);
+	return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
 }
 
 function loadIngestRecordsSync(file: string): { records: Map<string, IngestRecord>; versions: VersionStore } {
@@ -256,7 +272,12 @@ export async function runDryRun(options: DryRunOptions, io: MigrateIo): Promise<
 	let baseline: Array<{ id: string; source_urls: string[] }> = [];
 	let sampleAnswers: Array<Record<string, unknown>> = [];
 	if (options.answersFile != null) {
-		const answers = JSON.parse(readFileSync(options.answersFile, "utf8")) as Array<{ id: string; source_urls: string[]; degraded?: boolean }>;
+		const answersRaw = parseJsonArray(readFileSync(options.answersFile, "utf8"));
+		const answers = (answersRaw ?? []).filter((entry): entry is { id: string; source_urls: string[]; degraded?: boolean } => {
+			if (entry === null || typeof entry !== "object") return false;
+			const candidate = entry as Record<string, unknown>;
+			return typeof candidate.id === "string" && Array.isArray(candidate.source_urls) && candidate.source_urls.every((url) => typeof url === "string");
+		});
 		sampleAnswers = answers;
 		baseline = archive.baselines.map((entry) => ({ id: entry.id, source_urls: entry.citations.map((citation) => citation.source_url ?? "").filter((url) => url.length > 0) }));
 	}
@@ -336,16 +357,15 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	const wanted = options.datasets.length > 0 ? new Set(options.datasets) : null;
 	const gitShow = options.gitShow ?? defaultGitShow;
 	const now = options.now ?? Date.now;
-	const seen = new Map<string, IngestRecord>();
-	const versions = createVersionStore();
-	// A prior apply's records, versions and pins survive: the state file is the
-	// store of record, so this apply merges into it instead of replacing it
-	// (sequential per-dataset applies must not erase each other).
-	if (options.stateFile != null && existsSync(options.stateFile)) {
-		const loaded = loadIngestRecordsSync(options.stateFile);
-		for (const [key, record] of loaded.records) seen.set(key, record);
-		for (const [dataset, entry] of loaded.versions) versions.set(dataset, entry);
-	}
+	// A prior apply's records, versions, pins and freshness survive: the state
+	// file is the store of record, so this apply merges into it instead of
+	// replacing it (sequential per-dataset applies must not erase each other).
+	const loaded = options.stateFile != null
+		? await loadIngestRecords(options.stateFile)
+		: { records: new Map<string, IngestRecord>(), versions: createVersionStore(), freshness: createFreshnessState() };
+	const seen = loaded.records;
+	const versions = loaded.versions;
+	const freshness = loaded.freshness;
 	const events: EventInput[] = [];
 	let lastEventStored = false;
 	const postEvent = options.eventsFetch ?? fetch;
@@ -470,8 +490,10 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 			pins += 1;
 		}
 	}
-	const statePersisted = !options.rehearsal && options.stateFile != null && applied;
-	if (statePersisted) await saveIngestRecords(options.stateFile as string, seen, versions);
+	// Landed pages always persist (a re-run after a partial apply must not
+	// re-upload them); the pins and the cutover note wait for a clean apply.
+	const statePersisted = !options.rehearsal && options.stateFile != null;
+	if (statePersisted) await saveIngestRecords(options.stateFile as string, seen, versions, freshness);
 	const cutover = !options.rehearsal && applied;
 	if (cutover) {
 		await emit({

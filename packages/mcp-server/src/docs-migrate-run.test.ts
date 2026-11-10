@@ -101,11 +101,14 @@ interface ApplyFixture {
 	gitFiles: Record<string, string>;
 	lightrag: { fetchImpl: FetchLike; uploads: string[] };
 	events: EventInput[];
+	eventsPosts: Array<{ url: string; auth: string | null; body: unknown }>;
+	eventsFetch: FetchLike;
 	stateFile: string;
 }
 
-export async function applyFixture(over: { versions?: Record<string, number>; rehearsal?: boolean } = {}): Promise<ApplyFixture> {
+export async function applyFixture(over: { versions?: Record<string, number>; rehearsal?: boolean; failUploadWhen?: (content: string) => boolean } = {}): Promise<ApplyFixture> {
 	const fake = new RagflowFake();
+	if (over.failUploadWhen !== undefined) fake.failUploadWhen = over.failUploadWhen;
 	const gitFiles = await seedPlane(fake);
 	const { deps, stateFile } = harness(fake, gitFiles, over.versions ?? {});
 	const archiveDir = mkdtempSync(join(tmpdir(), "docs-migrate-archive-"));
@@ -113,6 +116,11 @@ export async function applyFixture(over: { versions?: Record<string, number>; re
 	if (outcome.page_hash_mismatches.length > 0) throw new Error(`fixture archive drifted: ${JSON.stringify(outcome.page_hash_mismatches)}`);
 	const uploads: string[] = [];
 	const events: EventInput[] = [];
+	const eventsPosts: Array<{ url: string; auth: string | null; body: unknown }> = [];
+	const eventsFetch: FetchLike = async (input, init) => {
+		eventsPosts.push({ url: String(input), auth: (init?.headers as Record<string, string> | undefined)?.authorization ?? null, body: JSON.parse(String(init?.body ?? "{}")) as unknown });
+		return Response.json({ stored: true });
+	};
 	const lightragFetch: FetchLike = async (input, init) => {
 		const url = new URL(String(input));
 		const method = init?.method ?? "GET";
@@ -136,7 +144,7 @@ export async function applyFixture(over: { versions?: Record<string, number>; re
 		if (method === "GET" && url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
 		return Response.json({ detail: "no route" }, { status: 404 });
 	};
-	return { archiveDir, gitFiles, lightrag: { fetchImpl: lightragFetch, uploads }, events, stateFile };
+	return { archiveDir, gitFiles, lightrag: { fetchImpl: lightragFetch, uploads }, events, eventsPosts, eventsFetch, stateFile };
 }
 
 export function partAFile(dir: string, records = 6): string {
@@ -159,7 +167,8 @@ describe("docs-migrate", () => {
 	test("the dry run passes Part A and prints the marker", async () => {
 		const fixture = await applyFixture();
 		const out: string[] = [];
-		const outcome = await runDryRun({ archiveDir: fixture.archiveDir }, { out: (t) => out.push(t), err: () => undefined });
+		const outcome = await runDryRun({ archiveDir: fixture.archiveDir }, { out: (t) => out.push(t), err: (t) => out.push(t) });
+		console.log("DRYRUN-OUT", out.join("").slice(0, 400));
 		expect(outcome.exit).toBe(0);
 		const report = JSON.parse(out[0] ?? "{}") as { partA: { passed: boolean; records: number }; partB: { skipped: boolean }; mismatches: unknown[]; marker: string };
 		expect(report.partA).toMatchObject({ passed: true, records: 6 });
@@ -232,6 +241,9 @@ describe("docs-migrate", () => {
 				datasets: [],
 				lightragUrl: "http://lightrag.test",
 				fetchImpl: fixture.lightrag.fetchImpl,
+				eventsFetch: fixture.eventsFetch,
+				substrateUrl: "http://substrate.test",
+				substrateToken: "tok",
 				gitShow: async (commit, path) => fixture.gitFiles[`${commit}:${path}`] ?? "",
 				poll: { maxPolls: 1, intervalMs: 0 },
 				now: () => 1_700_000_000_000,
@@ -239,7 +251,7 @@ describe("docs-migrate", () => {
 			{ out: () => undefined, err: () => undefined },
 		);
 		expect(outcome.exit).toBe(0);
-		const report = outcome.report as { totals: { ingested: number; failed: number }; records_lightrag: number; versions_carried: number; versions_recorded: number; state_file_persisted: boolean; cutover_note_emitted: boolean };
+		const report = outcome.report as { totals: { ingested: number; failed: number }; records_lightrag: number; versions_carried: number; versions_recorded: number; state_file_persisted: boolean; cutover_note_emitted: boolean; cutover_note_stored: boolean };
 		expect(report.totals).toMatchObject({ ingested: 6, failed: 0 });
 		expect(report.records_lightrag).toBe(6);
 		expect(report.versions_recorded).toBe(2);
@@ -307,6 +319,8 @@ describe("docs-migrate", () => {
 			stateFile: fixture.stateFile,
 			lightragUrl: "http://lightrag.test",
 			fetchImpl: fixture.lightrag.fetchImpl,
+			eventsFetch: fixture.eventsFetch,
+			substrateUrl: "http://substrate.test",
 			gitShow: async (commit: string, path: string) => fixture.gitFiles[`${commit}:${path}`] ?? "",
 			poll: { maxPolls: 1, intervalMs: 0 },
 			now: () => 1_700_000_000_000,
@@ -324,15 +338,18 @@ describe("docs-migrate", () => {
 		expect(keys.some((key) => key.includes("programming-desk::") && key.includes("https://"))).toBe(true); // the second apply's records are added
 	});
 
-	test("a partial apply is not a success: no state save, no pins, no cutover note, exit 1", async () => {
+	test("a partial apply is not a success: landed pages persist, no pins, no cutover note, exit 1", async () => {
 		const fixture = await applyFixture();
+		// doc-002's track_status reports a processing failure: a per-page write
+		// failure beside landing siblings.
 		const inner = fixture.lightrag.fetchImpl;
-		let uploads = 0;
-		const flaky: FetchLike = async (input, init) => {
+		const failingFetch: FetchLike = async (input, init) => {
 			const response = await inner(input, init);
-			if (response.status === 200 && new URL(String(input)).pathname === "/documents/upload") {
-				uploads += 1;
-				if (uploads === 2) return Response.json({ detail: "lightrag unavailable" }, { status: 503 });
+			const url = new URL(String(input));
+			if (url.pathname.startsWith("/documents/track_status/") && response.status === 200) {
+				const body = (await response.json()) as { documents?: Array<{ id: string; status?: string; error_msg?: string }> };
+				const failed = body.documents?.map((document) => (document.id === "doc-002" ? { ...document, status: "failed", error_msg: "parse failed upstream" } : document)) ?? [];
+				return Response.json({ ...body, documents: failed }, { status: response.status });
 			}
 			return response;
 		};
@@ -345,7 +362,7 @@ describe("docs-migrate", () => {
 				stateFile: fixture.stateFile,
 				datasets: [],
 				lightragUrl: "http://lightrag.test",
-				fetchImpl: flaky,
+				fetchImpl: failingFetch,
 				gitShow: async (commit, path) => fixture.gitFiles[`${commit}:${path}`] ?? "",
 				poll: { maxPolls: 1, intervalMs: 0 },
 				now: () => 1_700_000_000_000,
@@ -353,14 +370,11 @@ describe("docs-migrate", () => {
 			{ out: () => undefined, err: () => undefined },
 		);
 		expect(outcome.exit).toBe(1);
-		const report = outcome.report as { totals: { failed: number }; datasets: Array<Record<string, unknown>>; versions_recorded: number; state_file_persisted: boolean; cutover_note_emitted: boolean };
-		// The failed page surfaces either as a per-page failure or as a dataset
-		// refusal; both mean the apply did not succeed.
-		expect(
-			report.totals.failed > 0 || report.datasets.some((dataset) => dataset.refused !== undefined || (dataset.failed as number) > 0),
-		).toBe(true);
+		const report = outcome.report as { totals: { ingested: number; failed: number }; datasets: Array<Record<string, unknown>>; versions_recorded: number; state_file_persisted: boolean; cutover_note_emitted: boolean };
+		console.log("DS", JSON.stringify(report.datasets));
+		expect(report.datasets.some((dataset) => typeof dataset.refused === "string" && (dataset.refused as string).includes("document failed to process"))).toBe(true);
 		expect(report.versions_recorded).toBe(0); // a dataset with failed pages records no pin
-		expect(report.state_file_persisted).toBe(false);
+		expect(report.state_file_persisted).toBe(true); // landed pages persist; only the pins and the note wait
 		expect(report.cutover_note_emitted).toBe(false);
 	});
 
