@@ -1,9 +1,17 @@
-# Docs plane — cited answers from RAGFlow through the substrate only
+# Docs plane — cited answers from LightRAG through the substrate only
 
-Tracked as DOCS-01/02/03 (Phase 25). Agents get cited docs answers from
-RAGFlow through the substrate only: no agent holds `RAGFLOW_API_KEY` or
-`RAGFLOW_MCP_URL`, and nothing secret, unsourced, out-of-root or oversize
-reaches a dataset.
+Tracked as DOCS-01/02/03 (Phase 25) and SOTA-02 (Phase 46). Agents get cited docs
+answers through the substrate only: no agent holds `LIGHTRAG_API_KEY`,
+`RAGFLOW_API_KEY` or a plane URL, and nothing secret, unsourced, out-of-root or
+oversize reaches a dataset.
+
+LightRAG is the serving plane. `docs_search` retrieves in hybrid mode by default;
+a leading `/mix` in the question selects mix and is stripped. The backend is
+`SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`). When it is unset, `LIGHTRAG_URL`
+selects `lightrag` and its absence selects `ragflow`. RAGFlow is the rollback plane
+until its removal. Phase 46 (`.planning/phases/46-ragflow-hybrid/46-PLAN.md`) gates
+the cutover and the removal behind the archive, parity and cutover checkpoints; a
+deployment whose cutover is not yet recorded may still serve from RAGFlow.
 
 ## The two tools
 
@@ -25,6 +33,8 @@ authenticated search emits exactly one event (`docs.search` note or warning),
 fail-open, without the query text.
 
 `docs_search` also takes an optional `context` boolean, default `false`. With `true`, the reply adds recalled memories and the session's recent events, framed as untrusted. The section "Hybrid retrieval and context augmentation" in `docs/docs-search-ingest.md` sets out its budgets and degraded reasons.
+
+**Open item D46-i.** The paragraph above names `query` and `limit` as the `docs_search` arguments. The server's input schema takes `question`, `datasets`, `session_id` and `context`, and it does not accept `limit`. This page keeps that wording until a separate docs change corrects it.
 
 `docs_ingest` (DOCS-02) is a publication path: only `substrate` and operator
 tokens (anonymous 401 before the body is read, agent surfaces 403). The page
@@ -69,8 +79,8 @@ a GitHub Action, which cannot reach the loopback substrate.
 
 ## Proof
 
-Isolated: unit tests against in-process fakes, and `bun run smoke:docs`
-(`scripts/docs-smoke.ts`) against a twin started with
+Isolated: unit tests against in-process fakes, and `bun scripts/docs-smoke.ts --name <owned>`
+against a twin started with
 `rehearsal up --ragflow-fixture` — a loopback fake RAGFlow with scriptable
 timeout/error-code/malformed modes, run-dir manifest and fixture registry
 (see `docs/rehearsal.md`). Live (operator-approved, explicitly not run here):
