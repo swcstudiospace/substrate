@@ -16,7 +16,7 @@ import { archiveRagflow, ingestSha256, type ArchiveQuery } from "./docs-archive.
 import { RagflowFake } from "./ragflow-fake.ts";
 import type { EventInput } from "./types.ts";
 import type { FetchLike } from "./planes/lightrag.ts";
-import { main, loadArchive, partAMarker, runApply, runDryRun } from "./docs-migrate-run.ts";
+import { archiveDigestOf, loadArchive, main, partAMarker, partARecorded, runApply, runDryRun } from "./docs-migrate-run.ts";
 
 const BERLIN = "ds-berlin-agent-substrate";
 const HAMM = "ds-hamm-programming-desk";
@@ -147,9 +147,9 @@ export async function applyFixture(over: { versions?: Record<string, number>; re
 	return { archiveDir, gitFiles, lightrag: { fetchImpl: lightragFetch, uploads }, events, eventsPosts, eventsFetch, stateFile };
 }
 
-export function partAFile(dir: string, records = 6): string {
+export function partAFile(dir: string, records = 6, marker = partAMarker(records, archiveDigestOf(loadArchive(fixture.archiveDir)))): string {
 	const file = join(dir, "SUMMARY-part-a.md");
-	writeFileSync(file, `dry run ok\n\n\`${partAMarker(records)}\`\n`, "utf8");
+	writeFileSync(file, `dry run ok\n\n\`${marker}\`\n`, "utf8");
 	return file;
 }
 
@@ -174,7 +174,7 @@ describe("docs-migrate", () => {
 		expect(report.partA).toMatchObject({ passed: true, records: 6 });
 		expect(report.partB).toEqual({ skipped: true });
 		expect(report.mismatches).toEqual([]);
-		expect(report.marker).toBe(partAMarker(6));
+		expect(report.marker).toBe(partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		expect(fixture.lightrag.uploads).toEqual([]);
 	});
 
@@ -231,7 +231,7 @@ describe("docs-migrate", () => {
 
 	test("a passing apply replays pages, carries versions, records pins and notes the cutover", async () => {
 		const fixture = await applyFixture({ versions: { "docs/page-ds-berlin-agent-substrate-1.md": 3 } });
-		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")), 6, partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		const outcome = await runApply(
 			{
 				archiveDir: fixture.archiveDir,
@@ -269,7 +269,7 @@ describe("docs-migrate", () => {
 
 	test("a rehearsal apply persists nothing and emits no cutover note", async () => {
 		const fixture = await applyFixture();
-		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")), 6, partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		const before = readFileSync(fixture.stateFile, "utf8");
 		const outcome = await runApply(
 			{
@@ -302,7 +302,7 @@ describe("docs-migrate", () => {
 		const out: string[] = [];
 		const code = await main(["--archive", fixture.archiveDir], { SUBSTRATE_RAGFLOW_ARCHIVE_DIR: "" }, { out: (t) => out.push(t), err: () => undefined }, spy);
 		expect(code).toBe(0);
-		expect(out.join("")).toContain(partAMarker(6));
+		expect(out.join("")).toContain(partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		expect(await main(["--apply", "--archive", fixture.archiveDir], {}, { out: () => undefined, err: () => undefined }, spy)).toBe(2);
 		expect(await main(["--archive", join(tmpdir())], {}, { out: () => undefined, err: () => undefined }, spy)).toBe(1);
 		expect(await main([], {}, { out: () => undefined, err: () => undefined }, spy)).toBe(2);
@@ -311,7 +311,7 @@ describe("docs-migrate", () => {
 
 	test("a second apply for another dataset merges into the state file instead of replacing it", async () => {
 		const fixture = await applyFixture({ versions: { "docs/page-ds-berlin-agent-substrate-1.md": 3 } });
-		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")), 6, partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		const base = {
 			archiveDir: fixture.archiveDir,
 			partAFile: partA,
@@ -353,7 +353,7 @@ describe("docs-migrate", () => {
 			}
 			return response;
 		};
-		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")), 6, partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		const outcome = await runApply(
 			{
 				archiveDir: fixture.archiveDir,
@@ -379,7 +379,7 @@ describe("docs-migrate", () => {
 
 	test("the agent-skills dataset is refused with the remedy named when no skills checkout is given", async () => {
 		const fixture = await applyFixture();
-		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")), 6, partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		const outcome = await runApply(
 			{
 				archiveDir: fixture.archiveDir,
@@ -410,7 +410,7 @@ describe("docs-migrate", () => {
 			});
 			return Response.json({ stored: true });
 		};
-		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")));
+		const partA = partAFile(mkdtempSync(join(tmpdir(), "docs-migrate-")), 6, partAMarker(6, archiveDigestOf(loadArchive(fixture.archiveDir))));
 		const outcome = await runApply(
 			{
 				archiveDir: fixture.archiveDir,

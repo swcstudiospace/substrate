@@ -108,13 +108,13 @@ export function parseMigrateArgs(argv: readonly string[]): ParsedMigrateArgs {
 	return parsed;
 }
 
-/** The Part A marker the dry run prints and every apply demands. */
-export function partAMarker(records: number): string {
-	return `parity-gate:part-a:passed records=${String(records)}`;
+/** The Part A marker the dry run prints and every apply demands. The digest binds the approval to this archive. */
+export function partAMarker(records: number, archiveDigest: string): string {
+	return `parity-gate:part-a:passed records=${String(records)} archive=${archiveDigest}`;
 }
 
-export function partARecorded(text: string): { ok: boolean; records: number | null } {
-	const match = /parity-gate:part-a:passed records=(\d+)/.exec(text);
+export function partARecorded(text: string, archiveDigest: string): { ok: boolean; records: number | null } {
+	const match = new RegExp(`parity-gate:part-a:passed records=(\\d+) archive=${archiveDigest.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).exec(text);
 	if (match === null) return { ok: false, records: null };
 	return { ok: true, records: Number(match[1]) };
 }
@@ -209,6 +209,11 @@ function loadIngestRecordsSync(file: string): { records: Map<string, IngestRecor
 	return { records, versions };
 }
 
+/** The digest a Part A marker binds its approval to: the loaded archive's dataset list and record keys. */
+export function archiveDigestOf(archive: ArchiveLoad): string {
+	return sha256Hex(JSON.stringify([archive.datasets.map((d) => [d.id, d.name]), [...archive.records.keys()].sort()]));
+}
+
 export interface RecordMapping {
 	ragflow: ParityRecord[];
 	lightrag: ParityRecord[];
@@ -297,7 +302,8 @@ export async function runDryRun(options: DryRunOptions, io: MigrateIo): Promise<
 		skipPartB: sampleAnswers.length === 0,
 	});
 	const partAOk = gate.partA.passed;
-	const marker = partAOk && sampleAnswers.length === 0 ? partAMarker(gate.partA.records) : undefined;
+	const archiveDigest = archiveDigestOf(archive);
+	const marker = partAOk && sampleAnswers.length === 0 ? partAMarker(gate.partA.records, archiveDigest) : undefined;
 	const report: Record<string, unknown> = {
 		mode: "dry-run",
 		archive: archiveDir,
@@ -355,14 +361,15 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 		return { ok: false, exit: 1, report, refused };
 	}
 	const partAText = readFileSync(options.partAFile, "utf8");
-	const recorded = partARecorded(partAText);
+	const archive = loadArchive(archiveDir);
+	const archiveDigest = archiveDigestOf(archive);
+	const recorded = partARecorded(partAText, archiveDigest);
 	if (!recorded.ok) {
-		const refused = "--part-a does not record a Part A pass (the dry run's marker line \"parity-gate:part-a:passed records=<N>\")";
-		const report = { mode: "apply", archive: archiveDir, part_a: { ok: false, records: null }, refused };
+		const refused = "--part-a does not record a Part A pass for this archive (the dry run's marker names the archive digest)";
+		const report = { mode: "apply", archive: archiveDir, part_a: { ok: false, records: recorded.records }, refused };
 		io.err(`${JSON.stringify(report)}\n`);
 		return { ok: false, exit: 1, report, refused };
 	}
-	const archive = loadArchive(archiveDir);
 	const wanted = options.datasets.length > 0 ? new Set(options.datasets) : null;
 	const now = options.now ?? Date.now;
 	/** Per-dataset git reader: an injected gitShow (tests) covers every dataset; agent-skills otherwise replays from its own checkout. */
