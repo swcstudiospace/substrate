@@ -7,8 +7,8 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { RedisClient } from "bun";
-import { decideClaim, type ClaimDecision } from "@substrate/audit";
-import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { canonicalJson, decideClaim, type AuditTransport, type ClaimDecision } from "@substrate/audit";
+import { acceptsSigner, createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import {
 	PLANES,
 	PlaneRegistry,
@@ -99,7 +99,7 @@ import {
 	type PageSettlement,
 } from "./docs-ingest.ts";
 import { CORPUS_FRESHNESS_DATASET, LagSettler, TRIGGER_RECORD_DEADLINE_MS, corpusFreshnessRow, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
+import { augmentQuestionWithSteering, DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -110,7 +110,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, type StoredLeaf, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -208,17 +208,19 @@ import { FileBaselineStore } from "./planning/baseline-store.ts";
 import { PlanningReader } from "./planning/read.ts";
 import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
-import type { SteeringWiring } from "./planning/steering-tools.ts";
+import { DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundary, LiveSessionBoundaryError, liveSessionNotFound, SESSION_BINDING_INPUT, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, type LiveCallFailure, type LiveSessionAuditPort, type LiveSessionInvocation, type PreparedLiveCall, type PreparedLiveDispatch, type SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
-import { STEERING_SESSION_ENDED_ACTION, SteeringSessionRegistry } from "./planning/session-state.ts";
+import { LiveSessionStatePort, STEERING_SESSION_ENDED_ACTION, steeringSessionEvent } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
-import type { SteeringSessionsStore } from "./planning/steering-sessions-store.ts";
-import { SteeringWaiters } from "./planning/steering-waiters.ts";
-import { STEERING_ACKNOWLEDGED_HISTORY_LIMIT, type DurableAcknowledged } from "./planning/steering-rest.ts";
+import type { LiveSessionAuthority, LiveSessionCaller, LiveSessionInput, LiveSessionMetadata } from "./planning/steering-sessions-store.ts";
+import { nextQueuedDirective, SteeringWaiters, type SteeringWaitResult } from "./planning/steering-waiters.ts";
+import { listRestDirectives, steeringUnavailable, SteeringReadUnavailableError, STEERING_ACKNOWLEDGED_HISTORY_LIMIT, type DirectivesQuery, type DurableAcknowledged, type RestDirective, type SessionsQuery, type WaitQuery } from "./planning/steering-rest.ts";
+import type { AuditOutcome, McpToolCall } from "./observe.ts";
+import { z } from "zod";
 import { composeLiveSections, type BriefSteeringInput, type BriefWorktreesInput } from "./brief-sessions.ts";
 import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
-import { sharedDeadline } from "./deadline.ts";
+import { DeadlineError, sharedDeadline } from "./deadline.ts";
 import type { FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
@@ -642,8 +644,6 @@ export interface EmitResult {
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
 export interface EmitOptions {
 	replay?: boolean;
-	/** The authenticated caller, when the transport has one. A `session.end` closes steering state only for its session's own surface, or for an operator. */
-	caller?: { surface: string | null; isOperator: boolean };
 }
 
 /** Who is forgetting: the authenticated surface (the ledger note's own `surface`) and, when it has one, its session. */
@@ -1424,6 +1424,53 @@ function productionPresence(config: SubstrateConfig): DragonflyPresenceStore | n
 	return new DragonflyPresenceStore(dragonflyPresenceBackend(config.dragonflyUrl, config.cacheConnectTimeoutMs));
 }
 
+export type LiveSessionUpdateReply = (Pick<SteeringSession, "session_id" | "repo_id" | "state" | "updated_at"> & { status: "issued"; expires_at: string; session_binding: string; event_stored: boolean }) | (Pick<SteeringSession, "session_id" | "repo_id" | "state" | "updated_at"> & { status: "updated"; expires_at: string; event_stored: boolean }) | { status: "refused"; error: { code: "invalid-transition" } };
+export interface LiveSessionHeartbeatReply { status: "renewed"; session_id: string; expires_at: string }
+export interface LiveSessionCloseReply { status: "closed"; session_id: string; closed_at: string; event_stored: boolean }
+export interface LiveSessionDiscoveryReply { sessions: LiveSessionMetadata[]; truncated: boolean; next_cursor?: string }
+export interface LiveDirectivesReply { directives: RestDirective[]; history: DurableAcknowledged["history"]; history_truncated: boolean }
+
+export interface LiveAccessOptions {
+	caller: LiveSessionCaller;
+	sessionBinding?: string | undefined;
+	preparedLiveDispatch?: PreparedLiveDispatch | undefined;
+	transport?: AuditTransport | undefined;
+	/** Exact validated transport arguments, for request-local dispatch matching only. */
+	invocationArgs?: unknown;
+}
+declare const liveBatchBrand: unique symbol;
+export interface PreparedLiveBatch { readonly [liveBatchBrand]: true }
+export type LiveBatchPreparation = { ok: true; batch: PreparedLiveBatch; live: boolean } | { ok: false; refusal: LiveCallFailure };
+export const LIVE_BRIEF_INPUT = z.object({
+	repo: z.string().max(256).optional(), branch: z.string().max(256).optional(), graph_id: z.string().max(128).optional(), surface: z.enum(SURFACES).optional(),
+	session_id: z.string().max(128).optional(), steering_session_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional(),
+	session_binding: SESSION_BINDING_INPUT, if_none_match: z.string().max(4096).optional(), profile: z.string().max(32).optional(),
+}).strict();
+function liveCallKey(invocation: LiveSessionInvocation): string {
+	return createHash("sha256").update(canonicalJson({ caller: { surface: invocation.caller.surface, isOperator: invocation.caller.isOperator }, tool: invocation.tool, operation: invocation.operation, args: invocation.args, binding: invocation.sessionBinding, session: invocation.sessionId, directive: invocation.directiveId, kind: invocation.kind })).digest("hex");
+}
+function liveInvocationFor(caller: LiveSessionCaller, call: McpToolCall): LiveSessionInvocation | null {
+	const base = { caller, tool: call.tool, args: call.args };
+	if (call.tool === "docs_steering_session") {
+		const args = LIVE_SESSION_UPDATE_INPUT.parse(call.args);
+		return { ...base, operation: "owner-transition", sessionId: args.session_id, sessionBinding: args.session_binding, ...(args.session_id === undefined ? { kind: "issue" as const } : {}) };
+	}
+	if (call.tool === "steering_session_heartbeat" || call.tool === "steering_session_close") {
+		const args = LIVE_SESSION_TARGET_INPUT.parse(call.args);
+		return { ...base, operation: call.tool === "steering_session_close" ? "close" : "heartbeat", sessionId: args.session_id, sessionBinding: args.session_binding };
+	}
+	if (call.tool === "steering_queue") { const args = STEERING_QUEUE_INPUT.parse(call.args); return { ...base, operation: "operator-queue", sessionId: args.target_session_id, sessionBinding: args.session_binding }; }
+	if (call.tool === "steering_acknowledge") { const args = STEERING_ACKNOWLEDGE_INPUT.parse(call.args); return { ...base, operation: "operator-ack", sessionId: args.session_id, directiveId: args.directive_id, sessionBinding: args.session_binding }; }
+	if (call.tool === "steering_list") { const args = STEERING_LIST_INPUT.parse(call.args); return { ...base, operation: "private-read", sessionId: args.session_id, sessionBinding: args.session_binding }; }
+	if (call.tool === "docs_search" || call.tool === "memory_brief") {
+		if (call.args === null || typeof call.args !== "object" || !("steering_session_id" in call.args) || call.args.steering_session_id === undefined) return null;
+		const args = call.tool === "docs_search" ? DOCS_SEARCH_INPUT.parse(call.args) : LIVE_BRIEF_INPUT.parse(call.args);
+		if (args.steering_session_id === undefined) return null;
+		return { ...base, operation: "private-read", sessionId: args.steering_session_id, sessionBinding: args.session_binding };
+	}
+	return null;
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	/** Phase 68: the registry store a test injected, `null` for none; undefined builds it from the index on first use (see `worktreeAccess`). */
@@ -1581,12 +1628,11 @@ export class Substrate {
 	private readonly steeringSweeper: SteeringExpirySweeper | null;
 	/** Phase 58: one wake-up hint per queued directive. */
 	readonly steeringHints: SteeringHintAnnouncer;
-	/**
-	 * Phase 58: the live steering sessions `docs_steering_session` holds. One registry per instance, so a test and a restart start empty.
-	 * It is also the port an acknowledgement drives (see `sessionState`), which is how the two steering mechanisms share one state model.
-	 */
-	readonly steeringSessions: SteeringSessionRegistry;
-	/** Phase 58: the live session state an acknowledgement drives. The registry while steering is on, unless a test injects another; null while steering is off. */
+	/** Durable authority is the only source of live identity and private state. */
+	readonly liveSessions: LiveSessionAuthority | null;
+	readonly liveBoundary: LiveSessionBoundary;
+	private readonly preparedBatches = new WeakMap<object, { caller: LiveSessionCaller; callsDigest: string; entries: Array<{ key: string; prepared: PreparedLiveCall }> }>();
+	private readonly liveDispatches = new WeakMap<PreparedLiveDispatch, Array<{ key: string; prepared: PreparedLiveCall; consumed: boolean }>>();
 	readonly sessionState: SessionStatePort | null;
 	/** Phase 67: the long-poll waiters behind `GET /steering/wait`. Woken by `onSteeringQueued`, closed by `stopSteering`. */
 	readonly steeringWaiters: SteeringWaiters;
@@ -1635,13 +1681,14 @@ export class Substrate {
 				timers?: PlanningTimers;
 				nowMs?: () => number;
 				report?: (line: string) => void;
-				/** Phase 67: the durable session store. Absent builds the Postgres one when `SUBSTRATE_STEERING_SESSIONS_TABLE` is on; null keeps the registry in memory. */
-				sessionsStore?: SteeringSessionsStore | null;
+				/** Test authority; production always uses IndexStore.liveSessions. */
+				liveSessions?: LiveSessionAuthority | null;
 				/** Phase 67: the long-poll registry. A test injects one with its own timers; production builds the default. */
 				waiters?: SteeringWaiters;
 			};
 		},
 		observer: SubstrateObserver = {},
+		private readonly liveAudit?: LiveSessionAuditPort,
 	) {
 		this.observer = observer;
 		this.corpusSlo = new CorpusSloState({
@@ -1794,21 +1841,24 @@ export class Substrate {
 			steeringSettings?.enabled === true && steeringHistory !== null && steeringErrors.length === 0
 				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
 				: null;
+		this.liveSessions = steeringSeam?.liveSessions !== undefined ? steeringSeam.liveSessions : this.index?.liveSessions({ leaseSeconds: config.liveSessionLeaseS }) ?? null;
+		this.liveBoundary = new LiveSessionBoundary({
+			authority: this.liveSessions,
+			settings: config.admission,
+			resolveDirective: (id) => steeringInbox?.get(id)?.directive.targetSessionId ?? null,
+			recordRefusal: async (event) => (await this.emit(event)).stored,
+			nowMs: steeringClock.nowMs,
+		});
 		this.steering = {
 			enabled: config.steeringRegistered,
 			clock: steeringClock,
 			settingsErrors: steeringErrors,
 			inbox: steeringInbox,
+			boundary: this.liveBoundary,
+			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
-		this.steeringSessions = new SteeringSessionRegistry({
-			emit: (event: EventInput) => this.emit(event),
-			// Phase 67: the durable copy, only with the opt-in on and an index to hold it (or an injected store, in a test).
-			store: steeringSeam?.sessionsStore !== undefined ? steeringSeam.sessionsStore : config.steeringSessionsTable && this.index !== null ? this.index.steeringSessions() : null,
-			ttlMs: config.steeringSessionTtlS * 1000,
-			...(steeringSeam?.report === undefined ? {} : { report: steeringSeam.report }),
-		});
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();
-		this.sessionState = steeringSeam?.sessionState !== undefined ? steeringSeam.sessionState : steeringInbox !== null ? this.steeringSessions : null;
+		this.sessionState = steeringSeam?.sessionState !== undefined ? steeringSeam.sessionState : steeringInbox !== null ? new LiveSessionStatePort({ authority: this.liveSessions, emit: (event) => this.emit(event) }) : null;
 		this.steeringHints = new SteeringHintAnnouncer({
 			emit: async (event: EventInput) => (await this.emit(event)).stored,
 			...(steeringSeam?.report === undefined ? {} : { report: steeringSeam.report }),
@@ -1897,6 +1947,151 @@ export class Substrate {
 		});
 		this.noteHindsightOutbox();
 	}
+	/** Reserve every live cost before resolving any batch target or recording any generic audit. */
+	async prepareLiveBatch(caller: LiveSessionCaller, calls: McpToolCall[]): Promise<LiveBatchPreparation> {
+		const invocations = calls.flatMap((call) => { const invocation = liveInvocationFor(caller, call); return invocation === null ? [] : [invocation]; });
+		const keys = invocations.map(liveCallKey);
+		const callsDigest = createHash("sha256").update(canonicalJson(calls)).digest("hex");
+		const prepared = await this.liveBoundary.prepareBatch(invocations);
+		if (!Array.isArray(prepared)) return { ok: false, refusal: prepared };
+		const batch = Object.freeze({}) as PreparedLiveBatch;
+		const entries = prepared.map((entry, index) => {
+			const key = keys[index];
+			if (key === undefined) throw new Error("live session preparation invariant violated");
+			return { key, prepared: entry };
+		});
+		this.preparedBatches.set(batch, { caller: { surface: caller.surface, isOperator: caller.isOperator }, callsDigest, entries });
+		return { ok: true, batch, live: invocations.length > 0 };
+	}
+
+	async auditPreparedBatch(batch: PreparedLiveBatch, allCalls: McpToolCall[], transport: AuditTransport): Promise<{ ok: true; dispatch: PreparedLiveDispatch } | { ok: false; denials: Map<string, string> }> {
+		const stored = this.preparedBatches.get(batch);
+		if (stored === undefined) throw new LiveSessionBoundaryError(liveSessionNotFound());
+		this.preparedBatches.delete(batch);
+		if (stored.callsDigest !== createHash("sha256").update(canonicalJson(allCalls)).digest("hex")) throw new LiveSessionBoundaryError(liveSessionNotFound());
+		let outcome: AuditOutcome;
+		if (this.liveAudit === undefined) {
+			// Missing wiring is never evidence that a required mutation was audited.
+			outcome = { denials: new Map(allCalls.map((call) => [String(call.id), "audit unavailable"])) };
+		} else {
+			try { outcome = await this.liveAudit.auditCalls(stored.caller, allCalls, transport); }
+			catch { outcome = { denials: new Map(allCalls.map((call) => [String(call.id), "audit unavailable"])) }; }
+		}
+		if (outcome.denials.size > 0) return { ok: false, denials: outcome.denials };
+		if (stored.callsDigest !== createHash("sha256").update(canonicalJson(allCalls)).digest("hex")) throw new LiveSessionBoundaryError(liveSessionNotFound());
+		const dispatch = Object.freeze({}) as PreparedLiveDispatch;
+		this.liveDispatches.set(dispatch, stored.entries.map((entry) => ({ key: entry.key, prepared: entry.prepared, consumed: false })));
+		return { ok: true, dispatch };
+	}
+
+	async executeLiveCall<T>(invocation: LiveSessionInvocation, effect: (prepared: PreparedLiveCall) => Promise<T>, dispatch?: PreparedLiveDispatch): Promise<T> {
+		let prepared: PreparedLiveCall;
+		if (dispatch !== undefined) {
+			const entry = this.liveDispatches.get(dispatch)?.find((candidate) => !candidate.consumed && candidate.key === liveCallKey(invocation));
+			if (entry === undefined) throw new LiveSessionBoundaryError(liveSessionNotFound());
+			entry.consumed = true;
+			prepared = entry.prepared;
+		} else {
+			const admitted = await this.liveBoundary.prepare(invocation);
+			if ("status" in admitted) throw new LiveSessionBoundaryError(admitted);
+			prepared = admitted;
+			if (this.liveAudit === undefined) {
+				if (invocation.operation !== "private-read") throw new LiveSessionBoundaryError({ status: "refused", error: { code: "audit-unavailable" } });
+			} else {
+				const calls: McpToolCall[] = [{ id: "live", tool: invocation.tool, args: invocation.args }];
+				const batch = Object.freeze({}) as PreparedLiveBatch;
+				this.preparedBatches.set(batch, { caller: invocation.caller, callsDigest: createHash("sha256").update(canonicalJson(calls)).digest("hex"), entries: [{ key: liveCallKey(invocation), prepared }] });
+				const audited = await this.auditPreparedBatch(batch, calls, invocation.transport ?? "mcp");
+				if (!audited.ok) throw new LiveSessionBoundaryError({ status: "refused", error: { code: "audit-unavailable" } });
+				return this.executeLiveCall(invocation, effect, audited.dispatch);
+			}
+		}
+		await this.liveBoundary.recheck(prepared);
+		return effect(prepared);
+	}
+
+	async updateLiveSession(caller: LiveSessionCaller, raw: unknown, options?: Omit<LiveAccessOptions, "caller">): Promise<LiveSessionUpdateReply> {
+		const input = LIVE_SESSION_UPDATE_INPUT.parse(raw);
+		return this.executeLiveCall<LiveSessionUpdateReply>({ caller, tool: "docs_steering_session", args: options?.invocationArgs ?? input, operation: "owner-transition", sessionId: input.session_id, sessionBinding: options?.sessionBinding ?? input.session_binding, ...(input.session_id === undefined ? { kind: "issue" as const } : {}), transport: options?.transport }, async (prepared) => {
+			const authority = this.liveSessions;
+			if (authority === null) throw new LiveSessionBoundaryError({ status: "refused", error: { code: "session-unavailable" } });
+			const request: LiveSessionInput = { repoId: scopeRepoId(input.repo_id), state: input.state, ...(input.steering === undefined ? {} : { steering: input.steering }), ...(input.planning_hash === undefined ? {} : { planningHash: input.planning_hash }) };
+			const checked = this.liveBoundary.checked(prepared);
+			const result = checked === null ? await authority.issue({ ...request, caller }) : await authority.transition(checked.access, { ...request, ...(input.previous_state === undefined ? {} : { previousState: input.previous_state }) }, "owner-transition");
+			if (!result.ok) {
+				if (result.error.code === "invalid-transition") return { status: "refused", error: { code: "invalid-transition" } };
+				throw new LiveSessionBoundaryError({ status: "refused", error: { code: result.error.code } });
+			}
+			const eventStored = await this.emit(steeringSessionEvent(result.snapshot.ownerSurface, result.snapshot.session, "previous" in result ? result.previous : undefined)).then((written) => written.stored, () => false);
+			const session = result.snapshot.session;
+			const receipt = { session_id: session.session_id, repo_id: session.repo_id, state: session.state, updated_at: session.updated_at, expires_at: result.snapshot.expiresAt, event_stored: eventStored };
+			// This is the committed mutation receipt, not a private read of potentially revoked state.
+			if ("sessionBinding" in result) return { status: "issued", ...receipt, session_binding: result.sessionBinding };
+			return { status: "updated", ...receipt };
+		}, options?.preparedLiveDispatch);
+	}
+
+	async heartbeatLiveSession(caller: LiveSessionCaller, raw: unknown, options?: Omit<LiveAccessOptions, "caller">): Promise<LiveSessionHeartbeatReply> {
+		const input = LIVE_SESSION_TARGET_INPUT.parse(raw);
+		return this.executeLiveCall<LiveSessionHeartbeatReply>({ caller, tool: "steering_session_heartbeat", args: options?.invocationArgs ?? input, operation: "heartbeat", sessionId: input.session_id, sessionBinding: options?.sessionBinding ?? input.session_binding, transport: options?.transport }, async (prepared) => {
+			const checked = this.liveBoundary.checked(prepared);
+			if (checked === null || this.liveSessions === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
+			const result = await this.liveSessions.heartbeat(checked.access);
+			if (!result.ok) throw new LiveSessionBoundaryError({ status: "refused", error: result.error });
+			return { status: "renewed", session_id: input.session_id, expires_at: result.snapshot.expiresAt };
+		}, options?.preparedLiveDispatch);
+	}
+
+	async closeLiveSession(caller: LiveSessionCaller, raw: unknown, options?: Omit<LiveAccessOptions, "caller">): Promise<LiveSessionCloseReply> {
+		const input = LIVE_SESSION_TARGET_INPUT.parse(raw);
+		return this.executeLiveCall<LiveSessionCloseReply>({ caller, tool: "steering_session_close", args: options?.invocationArgs ?? input, operation: "close", sessionId: input.session_id, sessionBinding: options?.sessionBinding ?? input.session_binding, transport: options?.transport }, async (prepared) => {
+			const checked = this.liveBoundary.checked(prepared);
+			if (checked === null || this.liveSessions === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
+			const result = await this.liveSessions.close(checked.access);
+			if (!result.ok) throw new LiveSessionBoundaryError({ status: "refused", error: result.error });
+			this.steeringWaiters.closeSession(input.session_id);
+			const eventStored = await this.emit({ surface: caller.surface ?? "substrate", kind: "note", summary: "live steering session ended", session_id: input.session_id, repo: result.snapshot.session.repo_id, payload: { action: STEERING_SESSION_ENDED_ACTION, session_id: input.session_id, repo_id: result.snapshot.session.repo_id, closed_at: result.closedAt, non_blocking: true } }).then((written) => written.stored, () => false);
+			return { status: "closed", session_id: input.session_id, closed_at: result.closedAt, event_stored: eventStored };
+		}, options?.preparedLiveDispatch);
+	}
+
+	async listLiveSessions(caller: LiveSessionCaller, query: SessionsQuery): Promise<LiveSessionDiscoveryReply> {
+		return this.executeLiveCall({ caller, tool: "live_session_discovery", args: query, operation: "private-read", kind: "discovery", transport: "rest" }, async () => {
+			const result = await this.liveSessions?.listVisible(caller, { ...(query.repoId === null ? {} : { repoId: query.repoId }), limit: query.limit, ...(query.cursor === undefined ? {} : { cursor: query.cursor }) });
+			if (result === undefined || !result.ok) throw new LiveSessionBoundaryError({ status: "refused", error: { code: result?.error.code ?? "session-unavailable" } });
+			return { sessions: result.sessions, truncated: result.nextCursor !== undefined, ...(result.nextCursor === undefined ? {} : { next_cursor: result.nextCursor }) };
+		});
+	}
+
+	async readLiveDirectives(caller: LiveSessionCaller, query: DirectivesQuery, sessionBinding?: string): Promise<LiveDirectivesReply> {
+		return this.executeLiveCall({ caller, tool: "steering_list", args: { session_id: query.sessionId, status: query.status }, operation: "private-read", sessionId: query.sessionId, sessionBinding, transport: "rest" }, async (prepared) => {
+			const inbox = this.steering.inbox;
+			const unavailable = steeringUnavailable(this.steering);
+			if (unavailable !== null || inbox === null) throw new SteeringReadUnavailableError(unavailable ?? { status: "not-configured", error: "no steering audit sink is configured" });
+			const durable = query.status === "queued" ? { records: [], history: "memory-only" as const, truncated: false } : await this.durableAcknowledgedFor(prepared);
+			await this.liveBoundary.recheck(prepared);
+			return { directives: listRestDirectives(inbox, query, durable.records), history: durable.history, history_truncated: durable.truncated };
+		});
+	}
+
+	async waitLiveDirectives(caller: LiveSessionCaller, query: WaitQuery, sessionBinding: string | undefined, signal: AbortSignal): Promise<SteeringWaitResult> {
+		return this.executeLiveCall({ caller, tool: "steering_wait", args: { session_id: query.sessionId, after: query.after, timeout_ms: query.timeoutMs }, operation: "private-read", sessionId: query.sessionId, sessionBinding, transport: "rest" }, async (prepared) => {
+			const inbox = this.steering.inbox;
+			const unavailable = steeringUnavailable(this.steering);
+			if (unavailable !== null || inbox === null) throw new SteeringReadUnavailableError(unavailable ?? { status: "not-configured", error: "no steering audit sink is configured" });
+			const deadline = performance.now() + query.timeoutMs;
+			for (;;) {
+				await this.liveBoundary.recheck(prepared);
+				const checked = this.liveBoundary.checked(prepared);
+				const remaining = Math.max(0, deadline - performance.now());
+				const leaseRemaining = checked === null ? 0 : Math.max(1, Date.parse(checked.snapshot.expiresAt) - Date.now());
+				const result = await this.steeringWaiters.wait({ sessionId: query.sessionId, timeoutMs: Math.min(1000, remaining, leaseRemaining), signal, check: () => nextQueuedDirective(inbox, query.sessionId, query.after) });
+				await this.liveBoundary.recheck(prepared);
+				if (result.status !== "timeout" || performance.now() >= deadline) return result;
+			}
+		});
+	}
+
 
 	/**
 	 * desktop_run (DESK-01..03): drive the substrate-desktop container.
@@ -1984,9 +2179,8 @@ export class Substrate {
 	}
 
 	/** The brief as text — what every caller without a validator to offer wants. */
-	async brief(request: BriefRequest): Promise<string> {
-		// In-process callers read the whole brief whatever the wire profile is.
-		return (await this.briefDetailed(request, "full")).text;
+	async brief(request: BriefRequest, live?: LiveAccessOptions): Promise<string> {
+		return (await this.briefDetailed(request, "full", undefined, live)).text;
 	}
 
 	/**
@@ -2007,8 +2201,9 @@ export class Substrate {
 		ifNoneMatch: string | string[] | undefined,
 		profile?: BriefProfile,
 		bearerSurface?: string | null,
+		live?: LiveAccessOptions,
 	): Promise<BriefAnswer> {
-		const detail = await this.briefDetailed(request, profile, bearerSurface);
+		const detail = await this.briefDetailed(request, profile, bearerSurface, live);
 		const notModified = etagMatches(ifNoneMatch, detail.etag);
 		const surface = boundedSurface(request.surface);
 		this.observer.briefResult?.({
@@ -2048,11 +2243,26 @@ export class Substrate {
 	 * caller's own word (`profile` on the REST body or MCP call), resolved by
 	 * `resolveBriefProfile` against the mode and the surface list.
 	 */
-	async briefDetailed(request: BriefRequest, requestedProfile?: BriefProfile, bearerSurface?: string | null): Promise<BriefDetail> {
-		// Phase 47 (D47-d): one count per caller's brief request for the preloader. Off, nothing is counted.
-		if (this.config.cachePreload.enabled && request.repo !== undefined && normalizeIdentifier(request.repo) !== null) {
-			this.repoAccess.record(Date.now(), { ...request, repo: request.repo });
+	async briefDetailed(request: BriefRequest, requestedProfile?: BriefProfile, bearerSurface?: string | null, live?: LiveAccessOptions): Promise<BriefDetail> {
+		if (request.steering_session_id !== undefined) {
+			const caller = live?.caller ?? { surface: null, isOperator: false };
+			// The brief budget bounds the authority work too: the boundary's reads before and after composition can wait on a row lock,
+			// so they race the deadline the brief started with. Past it the caller gets session-unavailable and no private text.
+			const deadline = sharedDeadline(this.briefOptions.budgetMs, "brief authority");
+			try {
+				return await deadline.race(this.executeLiveCall({ caller, tool: "memory_brief", args: live?.invocationArgs ?? request, operation: "private-read", sessionId: request.steering_session_id, sessionBinding: live?.sessionBinding, transport: live?.transport }, async prepared => {
+					const detail = await this.briefUncounted(request, requestedProfile, bearerSurface, true, false, prepared);
+					await this.liveBoundary.recheck(prepared);
+					return detail;
+				}, live?.preparedLiveDispatch));
+			} catch (cause) {
+				if (cause instanceof DeadlineError) throw new LiveSessionBoundaryError({ status: "refused", error: { code: "session-unavailable" } });
+				throw cause;
+			} finally {
+				deadline.clear();
+			}
 		}
+		if (this.config.cachePreload.enabled && request.repo !== undefined && normalizeIdentifier(request.repo) !== null) this.repoAccess.record(Date.now(), { ...request, repo: request.repo });
 		return this.briefUncounted(request, requestedProfile, bearerSurface, true, false);
 	}
 
@@ -2061,7 +2271,7 @@ export class Substrate {
 	 * then is its latency and recall metric recorded; the preloader passes false, so its warm-ups are neither demand nor a
 	 * caller's wait. It reads and writes the brief cache as a request does; a `refresh` warm-up skips the fresh read, so it composes and stores over a live entry.
 	 */
-	private async briefUncounted(request: BriefRequest, requestedProfile: BriefProfile | undefined, bearerSurface: string | null | undefined, observed: boolean, refresh: boolean): Promise<BriefDetail> {
+	private async briefUncounted(request: BriefRequest, requestedProfile: BriefProfile | undefined, bearerSurface: string | null | undefined, observed: boolean, refresh: boolean, prepared?: PreparedLiveCall): Promise<BriefDetail> {
 		const started = performance.now();
 		let ok = false;
 		try {
@@ -2143,7 +2353,7 @@ export class Substrate {
 			};
 			// Phase 67: the live session sections start now, with the brief, so they share its deadline instead of beginning after it.
 			// Empty at once with `SUBSTRATE_BRIEF_SESSIONS` off. Never rejects.
-			const extraRead = this.liveBriefSections(request);
+			const extraRead = this.liveBriefSections(request, prepared);
 			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
 				refresh,
@@ -2533,7 +2743,6 @@ export class Substrate {
 		this.planningEvent(input);
 		if (result.stored) this.noteDocsCanary(result.event);
 		if (result.stored) this.publishHint(result.event);
-		if (result.stored && result.event.kind === "session.end") await this.endSteeringSession(result.event, options.caller);
 		return result;
 	}
 
@@ -2549,35 +2758,6 @@ export class Substrate {
 		void bus.publish(hint).catch(() => false);
 	}
 
-	/**
-	 * Applies a recorded `session.end` to the steering registry. The caller's authenticated surface must be the session's surface
-	 * (the surface the event names), or the caller must be an operator; otherwise the registry is left alone. Either way a
-	 * `steering.session_ended` note records the decision and whether a live session was removed. The effect is only the live
-	 * session and its durable row: queued directives are not touched. Never throws into the emit path.
-	 */
-	private async endSteeringSession(event: SubstrateEvent, caller: EmitOptions["caller"]): Promise<void> {
-		const sessionId = event.session_id;
-		if (sessionId === null) return;
-		const authorized = caller !== undefined && (caller.isOperator || (caller.surface !== null && caller.surface === event.surface));
-		try {
-			const outcome = authorized ? this.steeringSessions.end(event.surface, sessionId) : null;
-			const removed = outcome !== null && outcome.removal !== "refused" && outcome.held;
-			const id = redact(sessionId).slice(0, 80);
-			await this.emit({
-				surface: event.surface,
-				kind: "note",
-				summary: !authorized
-					? `steering session ${id} end refused: the caller is neither the session's surface nor an operator`
-					: outcome?.removal === "refused"
-						? `steering session ${id} end refused: the removal queue is full, so the session stays live`
-						: `steering session ${id} ended: ${removed ? "its live session was removed" : "it held no live session"}`,
-				session_id: sessionId,
-				payload: { action: STEERING_SESSION_ENDED_ACTION, authorized, removed, removal: outcome?.removal ?? null },
-			});
-		} catch (cause) {
-			process.stderr.write(`[substrate] steering: recording the end of session ${redact(sessionId).slice(0, 80)} failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
-		}
-	}
 
 	/**
 	 * What this request asks of the ledger under `SUBSTRATE_EVENT_IDEMPOTENCY` (U5-4a); `null` under
@@ -3230,6 +3410,7 @@ export class Substrate {
 		callerSurface: string | null,
 		budgetMs?: number,
 		callerRepo: string | null = null,
+		privateLive = false,
 	): Promise<RecallReply> {
 		if (this.config.vmGuest) {
 			return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
@@ -3239,6 +3420,14 @@ export class Substrate {
 		const config = hindsightFromEnv();
 		const banks = hindsightBanksFromEnv();
 		const index = this.index;
+		const load = () => recallMemories(
+			{
+				config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch,
+				budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+				...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids) }),
+			}, query, callerSurface, callerRepo,
+		);
+		if (privateLive) return load();
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
@@ -3256,22 +3445,7 @@ export class Substrate {
 			// waiting out the owner's. The reply is the shape `recallMemories` gives on a budget miss.
 			deadlineMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
 			onDeadline: () => ({ results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "recall-timeout: budget exceeded" }),
-			load: () =>
-				recallMemories(
-					{
-						config,
-						banks,
-						vmGuest: this.config.vmGuest,
-						fetchImpl: this.hindsightFetch,
-						budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
-						// A forgotten entry's document can outlive the forget (a plane delete that is still pending): its text is
-						// withheld here, from the index's own record, until the deletion lands.
-						...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids) }),
-					},
-					query,
-					callerSurface,
-					callerRepo,
-				),
+			load,
 		});
 	}
 
@@ -3365,8 +3539,6 @@ export class Substrate {
 		const inbox = this.steering.inbox;
 		const sink = this.steeringDurable;
 		const none = { restored: 0, skipped: 0, truncated: false, readFailed: null, sweeping: false };
-		// Phase 67: the durable session registry loads whatever the inbox is. It never throws: a failed read is reported and the registry starts empty.
-		await this.steeringSessions.loadDurable();
 		if (inbox === null || sink === null) return none;
 		let outcome: { restored: number; skipped: number; truncated: boolean; readFailed: string | null; stoppedBy: SteeringRestoreStop | null } = { restored: 0, skipped: 0, truncated: false, readFailed: null, stoppedBy: null };
 		try {
@@ -3399,7 +3571,6 @@ export class Substrate {
 		this.steeringWaiters.closeAll();
 		this.steeringSweeper?.stop();
 		await this.steeringSweeper?.idle();
-		await this.steeringSessions.idle();
 	}
 
 	/**
@@ -3422,16 +3593,19 @@ export class Substrate {
 	 * {@link STEERING_ACKNOWLEDGED_HISTORY_LIMIT} rows, newest acknowledgement first. Without the audit table only the inbox
 	 * exists (`memory-only`); a read that fails is `unavailable`, never an empty answer. Never throws.
 	 */
-	async durableAcknowledgedFor(sessionId: string): Promise<DurableAcknowledged> {
+	private async durableAcknowledgedFor(prepared: PreparedLiveCall): Promise<DurableAcknowledged> {
+		await this.liveBoundary.recheck(prepared);
+		const checked = this.liveBoundary.checked(prepared);
+		if (checked === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
 		const sink = this.steeringDurable;
 		if (sink === null) return { records: [], history: "memory-only", truncated: false };
+		let result: DurableAcknowledged;
 		try {
-			const page = await sink.readRecent({ sessionId, limit: STEERING_ACKNOWLEDGED_HISTORY_LIMIT });
-			if (!page.ok) return { records: [], history: "unavailable", truncated: false };
-			return { records: steeringRecordsFromEntries(page.value.entries), history: "durable", truncated: page.value.truncated };
-		} catch {
-			return { records: [], history: "unavailable", truncated: false };
-		}
+			const page = await sink.readRecent({ sessionId: checked.access.sessionId, limit: STEERING_ACKNOWLEDGED_HISTORY_LIMIT });
+			result = !page.ok ? { records: [], history: "unavailable", truncated: false } : { records: steeringRecordsFromEntries(page.value.entries), history: "durable", truncated: page.value.truncated };
+		} catch { result = { records: [], history: "unavailable", truncated: false }; }
+		await this.liveBoundary.recheck(prepared);
+		return result;
 	}
 
 	/**
@@ -3460,12 +3634,12 @@ export class Substrate {
 							};
 						}
 					: null,
-				steering: async () => ({
-					items: this.steeringSessions
-						.entries()
-						.filter((entry) => scopeRepoId(entry.session.repo_id) === scope)
-						.map((entry) => ({ surface: entry.surface, sessionId: entry.session.session_id, state: entry.session.state, updatedAtMs: Date.parse(entry.session.updated_at) })),
-				}),
+				steering: async () => {
+					if (this.liveSessions === null) throw new Error("live session metadata unavailable");
+					const listed = await this.liveSessions.listMetadata({ repoId: scope, limit: 200 });
+					if (!listed.ok) throw new Error("live session metadata unavailable");
+					return { items: listed.sessions.map((session) => ({ surface: session.surface, sessionId: session.session_id, state: session.state, updatedAtMs: Date.parse(session.updated_at) })), truncated: listed.nextCursor !== undefined };
+				},
 				claims:
 					index === null
 						? null
@@ -3556,7 +3730,7 @@ export class Substrate {
 	 * ready by then is replaced by a one-line note that names it. With no deadline configured (budget 0) the digest's own
 	 * default bound applies, so these reads are never unbounded.
 	 */
-	private async liveBriefSections(request: BriefRequest): Promise<BriefSection[]> {
+	private async liveBriefSections(request: BriefRequest, prepared?: PreparedLiveCall): Promise<BriefSection[]> {
 		const sessionsOn = this.config.briefSessions;
 		if (!sessionsOn && this.config.worktreeRegistry.mode !== "on") return [];
 		const nowMs = Date.now();
@@ -3570,26 +3744,17 @@ export class Substrate {
 			return await composeLiveSections(
 				{
 					context: !sessionsOn || repo === null ? null : () => this.sessionContext({ repoId: repo, sessionId: sessionId ?? null, limit: 10 }, budgetMs),
-					steering:
-						!sessionsOn || sessionId === undefined
-							? null
-							: () => {
-									try {
-										const notice = this.steering.inbox === null ? null : steeringNoticeFor(this.steering.inbox, sessionId, this.steering.clock.nowMs());
-										const held = this.steeringSessions.lookup(sessionId);
-										const input: BriefSteeringInput = {
-											sessionId,
-											state: held.status === "one" ? held.session.state : null,
-											steering: held.status === "one" ? (held.session.steering ?? null) : null,
-											pending: (notice?.entries ?? []).map((entry) => ({ id: entry.id, action: entry.action, priority: entry.priority, body: entry.body, ageS: Math.floor(entry.age_ms / 1000) })),
-											pendingTotal: notice?.count ?? 0,
-										};
-										return input;
-									} catch (cause) {
-										process.stderr.write(`[substrate] brief steering section skipped: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
-										return null;
-									}
-								},
+					steering: !sessionsOn || prepared === undefined ? null : () => {
+						const checked = this.liveBoundary.checked(prepared);
+						if (checked === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
+						const notice = this.steeringNoticeOf(prepared);
+						const input: BriefSteeringInput = {
+							sessionId: checked.access.sessionId, state: checked.snapshot.session.state, steering: checked.snapshot.session.steering ?? null,
+							pending: (notice?.entries ?? []).map((entry) => ({ id: entry.id, action: entry.action, priority: entry.priority, body: entry.body, ageS: Math.floor(entry.age_ms / 1000) })),
+							pendingTotal: notice?.count ?? 0,
+						};
+						return input;
+					},
 					handoffs:
 						!sessionsOn || graphId === undefined
 							? null
@@ -3630,11 +3795,12 @@ export class Substrate {
 	 * Phase 58: the `steering` notice for one session's `docs_search`, or null: steering off, no session named, nothing queued, or
 	 * the inbox could not be read. Never throws. The inbox is in memory, so this is a map walk and never delays a search.
 	 */
-	private steeringNoticeOf(sessionId: string | undefined): SteeringNotice | null {
+	private steeringNoticeOf(prepared: PreparedLiveCall | undefined): SteeringNotice | null {
+		const checked = prepared === undefined ? null : this.liveBoundary.checked(prepared);
 		const inbox = this.steering.inbox;
-		if (inbox === null || sessionId === undefined) return null;
+		if (inbox === null || checked === null) return null;
 		try {
-			return steeringNoticeFor(inbox, sessionId, this.steering.clock.nowMs());
+			return steeringNoticeFor(inbox, checked.access.sessionId, this.steering.clock.nowMs());
 		} catch (cause) {
 			// Fail-open: a notice is a courtesy on a search that already succeeded. A fault here is reported and the reply goes out without it.
 			process.stderr.write(`[substrate] steering notice skipped: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
@@ -5660,8 +5826,28 @@ export class Substrate {
 	 * cached chunks and is never stored.
 	 */
 	async searchDocs(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; steering_session_id?: unknown; steering?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		callerSurface: Surface | null,
+		live?: LiveAccessOptions,
+	): Promise<SearchReply> {
+		// Supplied directions are checked on every path with the schema the steering path parses them by.
+		DOCS_SEARCH_INPUT.shape.steering.parse(input.steering);
+		if (input.steering_session_id !== undefined) {
+			const { probe, cooling, ...wire } = input;
+			const validated = DOCS_SEARCH_INPUT.parse(wire);
+			const caller = live?.caller ?? { surface: null, isOperator: false };
+			return this.executeLiveCall({ caller, tool: "docs_search", args: live?.invocationArgs ?? validated, operation: "private-read", sessionId: validated.steering_session_id, sessionBinding: live?.sessionBinding, transport: live?.transport }, async prepared => {
+				const reply = await this.searchDocsMeasured({ ...validated, probe, cooling }, callerSurface, prepared);
+				await this.liveBoundary.recheck(prepared);
+				return reply;
+			}, live?.preparedLiveDispatch);
+		}
+		return this.searchDocsMeasured(input, callerSurface);
+	}
+
+	private async searchDocsMeasured(
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; steering_session_id?: unknown; steering?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
+		callerSurface: Surface | null, prepared?: PreparedLiveCall,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
 		const started = performance.now();
@@ -5670,7 +5856,7 @@ export class Substrate {
 		try {
 			reply = await this.searchDocsUnmeasured(input, surface, callerSurface, () => {
 				loaded = true;
-			});
+			}, prepared);
 			this.noteServed("docs", surface, reply);
 			return reply;
 		} finally {
@@ -5687,18 +5873,21 @@ export class Substrate {
 	}
 
 	private async searchDocsUnmeasured(
-		input: { question?: unknown; datasets?: unknown; session_id?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown; steering_session_id?: unknown; steering?: unknown; repo_id?: unknown; planning_hash?: unknown; context?: unknown; probe?: unknown; cooling?: unknown },
 		surface: Surface,
 		callerSurface: Surface | null,
 		noteLoaded: () => void,
+		prepared?: PreparedLiveCall,
 	): Promise<SearchReply> {
-		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
-		const question = typeof input.question === "string" ? input.question : "";
+		const checked = prepared === undefined ? null : this.liveBoundary.checked(prepared);
+		const sessionId = checked?.access.sessionId ?? (typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined);
+		const originalQuestion = typeof input.question === "string" ? input.question : "";
+		const question = augmentQuestionWithSteering(originalQuestion, typeof input.steering === "string" ? input.steering : (checked?.snapshot.session.steering ?? null));
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
-		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : null);
-		const planningHash = typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
+		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : checked?.snapshot.session.repo_id ?? null);
+		const planningHash = checked === null && typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
 		await this.hydrateDocsSeen();
 		const pins = this.config.docsBackend === "lightrag" ? pinsByName(this.docsVersions, names, this.config.docsBackend) : pinsFromVersions(this.docsVersions, this.config.docsBackend);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) && !this.docsSkillsRefreshFailed ? [] : ["agent-skills"];
@@ -5713,11 +5902,14 @@ export class Substrate {
 					datasetNames: names,
 					pins,
 					degradedDatasets,
-					emit: (event) => this.emit(event),
+					emit: (event) => this.emit(checked === null ? event : {
+						surface: checked.snapshot.ownerSurface, kind: event.kind, summary: "live session documentation retrieval", session_id: checked.access.sessionId, repo: checked.snapshot.session.repo_id,
+						payload: { action: "docs.search", session_id: checked.access.sessionId, repo_id: checked.snapshot.session.repo_id, non_blocking: true },
+					}),
 					surface,
 					...(sessionId !== undefined ? { sessionId } : {}),
 					repoId,
-					planningHash,
+					eventQuestion: originalQuestion,
 					fetchImpl: this.ragflowFetch,
 					lightragFetch: this.lightragFetch,
 					datasets: this.docsDatasetList,
@@ -5728,7 +5920,7 @@ export class Substrate {
 					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
 					lightragRetry: this.config.ragMachine,
 					lightragCooling: input.cooling === true,
-					lightragHindsight: async (query) => (await this.recallMemories({ query }, callerSurface)).results,
+					lightragHindsight: async (query) => (prepared === undefined ? await this.recallMemories({ query }, callerSurface) : await this.recallUncounted({ query }, callerSurface, undefined, null, true)).results,
 					tandem: this.config.contextualRecall.tandem,
 				},
 				question,
@@ -5759,18 +5951,18 @@ export class Substrate {
 		// keeps the cache: a reply cached for its question is served, and a miss runs `load`, which answers from
 		// Hindsight on the cooling path, so LightRAG is not asked.
 		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
-		const served = question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
+		const served = prepared !== undefined || typeof input.steering === "string" || question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The re-rank reads the answer after the cache, per call, so the stored answer never carries it and a manifest change shows at once.
 		const reflected = await this.reflectAnswer(served);
 		const chunks = reflected.reply;
 		// The context is attached per call, after the chunks: a session's events
 		// belong to that session, so the cached answer never carries them.
-		const answered = input.context === true ? { ...chunks, context: await this.docsContextOf(question, callerSurface, sessionId) } : chunks;
+		const answered = input.context === true ? { ...chunks, context: await this.docsContextOf(originalQuestion, callerSurface, prepared) } : chunks;
 		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
-		const steering = this.steeringNoticeOf(sessionId);
+		const steering = this.steeringNoticeOf(prepared);
 		const final = this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
-		this.recordRetrieval(surface, question, chunks, reflected.shadow);
+		if (prepared === undefined) this.recordRetrieval(surface, originalQuestion, chunks, reflected.shadow);
 		return final;
 	}
 
@@ -5925,8 +6117,8 @@ export class Substrate {
 	 * answer: a source that errors or runs out of time is dropped and named in
 	 * `degraded`.
 	 */
-	private async docsContextOf(question: string, caller: Surface | null, sessionId: string | undefined): Promise<DocsContext> {
-		const [recalled, ledger] = await Promise.all([this.recallForContext(question, caller), this.ledgerForContext(sessionId)]);
+	private async docsContextOf(question: string, caller: Surface | null, prepared: PreparedLiveCall | undefined): Promise<DocsContext> {
+		const [recalled, ledger] = await Promise.all([this.recallForContext(question, caller), this.ledgerForContext(prepared)]);
 		const reasons = [recalled.reason, ledger.reason].filter((reason): reason is string => reason !== undefined);
 		return {
 			memories: recalled.memories,
@@ -5963,17 +6155,19 @@ export class Substrate {
 	}
 
 	/** The ledger leg: no session names `no-session`; otherwise the session's last events under `DOCS_CONTEXT_LEDGER_BUDGET_MS`. */
-	private async ledgerForContext(sessionId: string | undefined): Promise<{ events: DocsContextEvent[]; reason?: string }> {
-		if (sessionId === undefined) return { events: [], reason: "no-session" };
+	private async ledgerForContext(prepared: PreparedLiveCall | undefined): Promise<{ events: DocsContextEvent[]; reason?: string }> {
+		if (prepared === undefined) return { events: [], reason: "no-session" };
+		await this.liveBoundary.recheck(prepared);
+		const checked = this.liveBoundary.checked(prepared);
+		if (checked === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
 		if (this.greptime === null) return { events: [], reason: "ledger-not-configured" };
+		let result: { events: DocsContextEvent[]; reason?: string };
 		try {
-			// The ledger keeps an identifier as `normalizeIdentifier` cleaned it, so the session is read under that form.
-			const stored = normalizeIdentifier(sessionId) ?? sessionId;
-			const rows = await withDeadline(this.greptime.readEvents("session_id", stored), DOCS_CONTEXT_LEDGER_BUDGET_MS);
-			return { events: docsContextEvents(rows) };
-		} catch (cause) {
-			return { events: [], reason: `ledger: ${redact(String(cause))}` };
-		}
+			const rows = await withDeadline(this.greptime.readEvents("session_id", checked.access.sessionId), DOCS_CONTEXT_LEDGER_BUDGET_MS);
+			result = { events: docsContextEvents(rows.filter((row) => row.surface === checked.snapshot.ownerSurface && row.session_id === checked.access.sessionId)) };
+		} catch { result = { events: [], reason: "ledger: unavailable" }; }
+		await this.liveBoundary.recheck(prepared);
+		return result;
 	}
 
 	/**

@@ -702,3 +702,23 @@ describe("TEI and the embedding cache (phase 64)", () => {
 		expect(message).not.toContain("example.test");
 	});
 });
+
+describe("authoritative live-session lease", () => {
+	test("the loader supplies the default independently of optional historical storage", () => {
+		expect(loadConfig({}).liveSessionLeaseS).toBe(3_600);
+		expect(loadConfig({ SUBSTRATE_STEERING_SESSIONS_TABLE: "off" }).liveSessionLeaseS).toBe(3_600);
+		expect(loadConfig({ SUBSTRATE_STEERING_SESSIONS_TABLE: "on", SUBSTRATE_LIVE_SESSION_LEASE_S: "600" }).liveSessionLeaseS).toBe(600);
+	});
+
+	test("whole-second bounds are inclusive and out-of-range integers clamp", () => {
+		for (const [raw, expected] of [["60", 60], ["86400", 86_400], ["59", 60], ["86401", 86_400], ["0", 60], [" 300 ", 300]] as const) {
+			expect(loadConfig({ SUBSTRATE_LIVE_SESSION_LEASE_S: raw }).liveSessionLeaseS).toBe(expected);
+		}
+	});
+
+	test("missing, blank, fractional and nonnumeric leases use the default", () => {
+		for (const raw of [undefined, "", " ", "-1", "60.5", "NaN", "Infinity", "forever"]) {
+			expect(loadConfig({ SUBSTRATE_LIVE_SESSION_LEASE_S: raw }).liveSessionLeaseS).toBe(3_600);
+		}
+	});
+});

@@ -171,8 +171,8 @@ These apply to every source:
 | `worktrees.report` | 68 | `note` | `caller` | `worktrees.report` | — | — | no |
 | `worktree.prune` | 68 | `note` | `caller` | `worktree.prune` | — | the pruned worktree's repository (omitted for a local-only one) | no |
 | `worktree.merge_back` | 68 | `note` | `caller` | `worktree.merge_back` | — | the merged-back worktree's repository (omitted for a local-only one) | no |
-| `steering.persist_failed` | 67 | `warning` | `caller` | `steering.persist_failed` | — | — | no |
-| `steering.session_ended` | 68 | `note` | `caller` | `steering.session_ended` | — | — | no |
+| `steering.session_ended` | 71 | `note` | `caller` | `steering.session_ended` | — | closed live session's repository | no |
+| `steering.refused` | 71 | `warning` | `caller` | `steering.refused` | — | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
@@ -222,6 +222,35 @@ a write the gate refused, or that failed at Railway, is a `warning`. Their paylo
 `action`, `runtime`, `status`, `environment_id`, `service_id`, the refusal code when there
 is one, and the approval reference when one was valid. They never carry the token or a
 request body. The four Railway reads emit nothing (D45-b).
+
+## Live-session events and shared history (phase 71)
+
+This is the implemented producer contract, not a deployment or passing-test claim. It adds no event kind or surface. Live public handles are metadata, never authorization credentials; generic event queries keep their existing historical authorization and `include_payload` behavior.
+
+- **Refused target:** `warning`, `payload.action: "steering.refused"`, from the authenticated caller (or fixed system fallback). Payload is exactly the fixed action/operation, trusted `caller_surface`, `operator`, and `target_sha256`. The hash is SHA-256 of `substrate.live-session-refusal.v1`, a NUL separator and the bounded requested identifier. Neither summary, payload nor top-level `session_id` contains that raw target, proof, ownership/existence reason or private body. Refusal auditing is best-effort; failure never adds `audit: unrecorded` or changes the common not-found response. Mandatory principal 429 does no refusal audit or target lookup.
+- **New live state transitions:** existing `note` / `warning` (PAUSED), public session/repo/state/time and optional previous state. Acknowledgement extras are restricted to public `directive_id` and fixed `via: "steering_acknowledge"`. No snapshot spread, steering text, planning hash, proof/hash or private command count is published.
+- **Queue wake hint:** existing `note`, fixed `substrate` surface, `action: "steering.queued"`, public `directive_id`, `session_id`, `non_blocking: true`. It carries no directive action/priority/body/count.
+- **Explicit committed close:** existing `note`, `action: "steering.session_ended"`, public `session_id`, `repo_id`, SQL `closed_at`, `non_blocking: true`; top-level session/repo are public metadata. Older events may carry legacy removal-decision fields; they are historical records, not the new close contract. Generic `session.end` remains historical append and never revokes a live handle.
+- **New private docs-search notes:** fixed public summary and allowlisted action/live session/repo/non-blocking metadata only, on both success/failure paths. Privately augmented question, directions, planning hash, nested backend extras, proof/hash and directive bodies/counts never enter the shared row. Ordinary search attribution is still historical.
+- **Legacy persistence warning:** historical `steering.persist_failed` rows remain readable, but the restart-cache writer and its producer catalog row were removed. Authority failure returns typed `session-unavailable`, not a successful cache save warning. No event kind was removed or added.
+
+Illustrative refusal payload (the hash placeholder is not a wire value):
+
+```json
+{
+  "action": "steering.refused",
+  "operation": "steering_list",
+  "caller_surface": "omp",
+  "operator": false,
+  "target_sha256": "<domain-separated SHA-256>"
+}
+```
+
+HTTP MCP prepares live targets/budgets before generic audit; one boundary refusal prevents all batch dispatch. Otherwise required mutation audit precedes effects. Generic audit stores canonical argument digest/structural keys, not plaintext live target context or proof. Historical audit/checkpoint labels and prior query authorization are unchanged.
+
+Lifecycle SQL mutations report truthful public receipts even if the subsequent public note fails: issue/update/close return `event_stored: false` rather than hiding the committed effect. This is not the required generic-audit gate (which remains pre-effect). Later close never rewrites an accepted queue/ack/state receipt into a false no-effect refusal. Private read/hint release still requires the final SQL authorization check; a committed movement can retain applied metadata while its hint is withheld.
+
+**No retroactive confidentiality:** previously published rows are not rewritten, scrubbed or newly access-controlled by this cutover. Old live events may contain previously published directions/hashes. Caller-controlled `events_emit` remains historical storage, not a confidential channel. Cache, ledger and presence cannot reconstruct binding credentials or lost terminal authority records. Full operating/recovery limits: [Live Steering](live-steering.md).
 
 ## Session checkpoint and rollback events
 

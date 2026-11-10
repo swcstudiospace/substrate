@@ -21,7 +21,7 @@ describe("a memory write during a substrate outage is answered 503", () => {
 				throw new Error("connect ETIMEDOUT");
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, idempotency_key: "k-503-refused" });
 
@@ -45,7 +45,7 @@ describe("a memory write during a substrate outage is answered 503", () => {
 	test("a policy refusal with the index present is still 403, not 503", async () => {
 		// RBAC is decided before the store is touched, so a writer with no grant is refused
 		// without any store call. The status therefore names the policy, not the outage.
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		const refused = await substrate.writeMemory({ ...entry, writer: "unknown" });
 

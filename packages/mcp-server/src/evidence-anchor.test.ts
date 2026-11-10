@@ -234,7 +234,7 @@ async function scratchWorld(verifyTimeoutMs?: number) {
 	const base = loadConfig({});
 	const substrate = new Substrate(
 		{ ...base, solana: { ...base.solana, pubkey: PUBKEY }, verifyTimeoutMs: verifyTimeoutMs ?? base.verifyTimeoutMs },
-		{ index: new ScratchIndex() as never, greptime: ledger.greptime as never },
+		{ index: new ScratchIndex() as never, greptime: ledger.greptime as never, steering: { history: null, liveSessions: null } },
 	);
 	const observed = createObservability(base);
 	await observed.start();

@@ -9,11 +9,14 @@ import {
 	InvalidEventError,
 	normalizeEvent,
 	normalizeIdentifier,
-	sha256Hex,
-	type StoredLeaf,
+	steeringSessionPayload,
+	type SteeringSession,
 	verifyChain,
 } from "./event.ts";
 import { REDACTED } from "./redact.ts";
+import { steeringSessionEvent } from "./planning/session-state.ts";
+import { steeringQueuedEvent } from "./planning/steering-delivery.ts";
+import { defined } from "./test-support.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const base: EventInput = {
@@ -267,85 +270,131 @@ describe("normalizeIdentifier", () => {
 	});
 });
 
-describe("chain leaves and the anchored head (D73-02, D73-03)", () => {
-	const H10 = Date.UTC(2026, 8, 26, 10);
-	const hashOf = (text: string): string => sha256Hex(text);
-	const leaf = (seq: number, eventId: string, hash: string = hashOf(eventId)): StoredLeaf => ({
-		graph_id: "graph-a",
-		session_id: "s",
-		seq,
-		event_id: eventId,
-		hash,
-	});
-	const link = (id: string, prev: string | null = null): ChainLink => ({ id, hash: hashOf(id), storedHash: hashOf(id), prev });
-	const headOf = (stored: StoredLeaf[]) => {
-		const head = headRecordsFromLeaves(stored, H10)?.[0];
-		if (head === undefined) throw new Error("the leaves form no head");
-		return head;
+describe("new live events expose public metadata only", () => {
+	const privateFields = {
+		steering: "PRIVATE_DIRECTION_MARKER_71",
+		planning_hash: "a1".repeat(32),
+		session_binding: "sb_PRIVATE_PROOF_MARKER_71",
+		proof_hash: "b2".repeat(32),
+		body: "PRIVATE_DIRECTIVE_BODY_MARKER_71",
+		directive_count: 731,
+		question: "PRIVATE_AUGMENTED_QUESTION_MARKER_71",
+		nested: { steering: "PRIVATE_NESTED_MARKER_71" },
+	};
+	const session: SteeringSession & typeof privateFields = {
+		session_id: `ls_${"c3".repeat(32)}`,
+		repo_id: "owner/repo",
+		state: "CONTEXT_REFRESH",
+		updated_at: "2026-10-31T12:00:00.000Z",
+		...privateFields,
+	};
+	const publicPayload = {
+		action: "docs.steering",
+		repo_id: session.repo_id,
+		session_id: session.session_id,
+		state: session.state,
+		updated_at: session.updated_at,
+		non_blocking: true,
 	};
 
-	const ids = ["evt_1", "evt_2", "evt_3", "evt_4"];
-	const leaves = ids.map((id, seq) => leaf(seq, id));
-	const head = headOf(leaves);
-	const intact = ids.map((id) => link(id));
+	function expectNoPrivateFields(value: unknown): void {
+		const serialized = JSON.stringify(value);
+		for (const marker of [
+			privateFields.steering,
+			privateFields.planning_hash,
+			privateFields.session_binding,
+			privateFields.proof_hash,
+			privateFields.body,
+			privateFields.question,
+			privateFields.nested.steering,
+		]) expect(serialized).not.toContain(marker);
+	}
 
-	test("an intact chain agrees with its anchored head", () => {
-		expect(compareToAnchoredHead(intact, leaves, head)).toEqual({ ok: true });
+	test("the transition payload is an exact allowlist, with previous state only when supplied", () => {
+		expect(steeringSessionPayload(session)).toEqual(publicPayload);
+		expect(steeringSessionPayload(session, "ACTIVE")).toEqual({ ...publicPayload, previous_state: "ACTIVE" });
+		expectNoPrivateFields(steeringSessionPayload(session, "ACTIVE"));
 	});
 
-	test("changing any stored event id changes the leaves root, so the leaves no longer reproduce the head", () => {
-		for (const seq of [0, 1, 2]) {
-			const forged = leaves.map((stored) => (stored.seq === seq ? { ...stored, event_id: "evt_forged" } : stored));
-			expect(headOf(forged).leavesRootHex).not.toBe(head.leavesRootHex);
-			expect(compareToAnchoredHead(intact, forged, head)).toMatchObject({ ok: false, kind: "stored-leaves-mismatch" });
+	test("the actual transition producer ignores private snapshot fields and arbitrary acknowledgement extras", () => {
+		for (const state of ["CONTEXT_REFRESH", "PAUSED"] as const) {
+			const event = steeringSessionEvent("omp", { ...session, state }, "ACTIVE", {
+				...privateFields,
+				directive_id: "steer-public-71",
+				via: "steering_acknowledge",
+			});
+			expect(event.kind).toBe(state === "PAUSED" ? "warning" : "note");
+			expect(event.session_id).toBe(session.session_id);
+			expect(event.repo).toBe(session.repo_id);
+			expect(event.payload).toEqual({
+				...publicPayload,
+				state,
+				previous_state: "ACTIVE",
+				directive_id: "steer-public-71",
+				via: "steering_acknowledge",
+			});
+			const stored = normalizeEvent(event, null);
+			expect(stored.payload).toEqual(defined(event.payload, "transition event payload"));
+			expectNoPrivateFields(stored);
 		}
 	});
 
-	test("a deleted middle event is first-missing at the deleted id", () => {
-		const without = intact.filter((event) => event.id !== "evt_2");
-		expect(compareToAnchoredHead(without, leaves, head)).toEqual({ ok: false, kind: "first-missing", eventId: "evt_2" });
+	test("unknown transition extras cannot overwrite public metadata or become a via marker", () => {
+		const event = steeringSessionEvent("omp", session, undefined, {
+			...privateFields,
+			action: "private-action-marker-71",
+			session_id: "private-target-marker-71",
+			repo_id: "private/repo",
+			state: "PAUSED",
+			updated_at: "private-time-marker-71",
+			non_blocking: false,
+			via: "PRIVATE_NESTED_MARKER_71",
+			directive_id: { body: privateFields.body },
+		});
+		expect(event.payload).toEqual(publicPayload);
+		expectNoPrivateFields(normalizeEvent(event, null));
 	});
 
-	test("a truncated tail is first-missing at the first absent event", () => {
-		const truncated = intact.filter((event) => event.id !== "evt_3" && event.id !== "evt_4");
-		expect(compareToAnchoredHead(truncated, leaves, head)).toEqual({ ok: false, kind: "first-missing", eventId: "evt_3" });
+	test("the queued wake event omits command action, priority, body, counts and nested extras", () => {
+		const directive = {
+			id: "steer-public-71",
+			targetSessionId: session.session_id,
+			action: "pause" as const,
+			priority: "high" as const,
+			...privateFields,
+		};
+		const event = steeringQueuedEvent(directive);
+		expect(event.payload).toEqual({
+			action: "steering.queued",
+			directive_id: directive.id,
+			session_id: session.session_id,
+			non_blocking: true,
+		});
+		const stored = normalizeEvent(event, null);
+		expect(stored.payload).toEqual(defined(event.payload, "queued event payload"));
+		expect(stored.payload).not.toHaveProperty("priority");
+		expect(stored.payload).not.toHaveProperty("directive_action");
+		expectNoPrivateFields(stored);
 	});
+});
 
-	test("an edited payload is first-differing at the edited event", () => {
-		const edited = intact.map((event) => (event.id === "evt_2" ? { ...event, hash: hashOf("evt_2 edited") } : event));
-		expect(compareToAnchoredHead(edited, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_2" });
-	});
-
-	test("a row whose stored hash no longer matches its content is first-differing at that row", () => {
-		const rewritten = intact.map((event) => (event.id === "evt_3" ? { ...event, storedHash: hashOf("evt_3 rewritten") } : event));
-		expect(compareToAnchoredHead(rewritten, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_3" });
-	});
-
-	test("an event past the stored end is first-differing", () => {
-		const extended = [...intact, link("evt_5", hashOf("evt_4"))];
-		expect(compareToAnchoredHead(extended, leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_5" });
-	});
-
-	test("two rows under one id are first-differing at that id", () => {
-		expect(compareToAnchoredHead([...intact, link("evt_2")], leaves, head)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_2" });
-	});
-
-	test("in a later-hour slice a middle payload edit names that event, not an intact successor", () => {
-		// evt_a0 sorts before evt_m1 and its prev points at the edited event's old hash: an order built from changed hashes would start there.
-		const sliceLeaves = [leaf(0, "evt_m1"), leaf(1, "evt_m2"), leaf(2, "evt_a0")];
-		const sliceHead = headOf(sliceLeaves);
-		const sliceEvents: ChainLink[] = [
-			{ id: "evt_m1", hash: hashOf("evt_m1"), storedHash: hashOf("evt_m1"), prev: hashOf("previous hour") },
-			{ id: "evt_m2", hash: hashOf("evt_m2 edited"), storedHash: hashOf("evt_m2"), prev: hashOf("evt_m1") },
-			{ id: "evt_a0", hash: hashOf("evt_a0"), storedHash: hashOf("evt_a0"), prev: hashOf("evt_m2") },
-		];
-		expect(compareToAnchoredHead(sliceEvents, sliceLeaves, sliceHead)).toEqual({ ok: false, kind: "first-differing", eventId: "evt_m2" });
-	});
-
-	test("a leaf with an empty event id is no head and does not throw", () => {
-		const blank = leaves.map((stored) => (stored.seq === 3 ? { ...stored, event_id: "" } : stored));
-		expect(() => headRecordsFromLeaves(blank, H10)).not.toThrow();
-		expect(headRecordsFromLeaves(blank, H10)).toBeNull();
-		expect(compareToAnchoredHead(intact, blank, head)).toMatchObject({ ok: false, kind: "stored-leaves-mismatch" });
+describe("historical event payload compatibility", () => {
+	test("generic historical append does not retroactively apply the new live-producer allowlist", () => {
+		const payload = {
+			action: "docs.steering",
+			steering: "historically-published-direction-71",
+			planning_hash: "d4".repeat(32),
+			directive_count: 7,
+			nested: { body: "historically-published-body-71" },
+		};
+		const stored = normalizeEvent({
+			surface: "omp",
+			kind: "note",
+			session_id: "historical-session-71",
+			summary: "historical caller-controlled payload",
+			payload,
+		}, null);
+		expect(stored.session_id).toBe("historical-session-71");
+		expect(stored.payload).toEqual(payload);
 	});
 });

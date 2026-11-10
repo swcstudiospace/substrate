@@ -1,113 +1,168 @@
 # Live Steering
 
-Live Steering lets an operator tell a running agent session what to do next, and lets a session see what the other sessions of its repository are doing. It is two small mechanisms, a way to read both from a terminal, and a hook that closes the loop on the session's worktree. Nothing here acts on a session by itself: every directive is a message a session reads and answers.
+Live Steering carries operator directives to an explicitly issued live session. Public repository context is a separate, deliberately cross-session view. A directive is advice: the server never edits an agent's worktree or process.
 
-## What it is
+**Phase 71 change record — implementation unverified and not deployed.** This credential cutover replaces caller-chosen registration and process-memory/restart-cache authorization. Production migration/rehearsal, backup/restore, flags, real token issuance, hooks/timers and real-host delivery were not performed for this change. Parent verification and operator release gates remain required.
 
-**The state machine.** The server holds one state per live session (surface and session id): `ACTIVE`, `CONTEXT_REFRESH`, `PAUSED`, `RESUMED`. A session reports its own state with `docs_steering_session`; the server enforces the legal moves. By default the registry is process memory (capped at 1,000 sessions); with `SUBSTRATE_STEERING_SESSIONS_TABLE` on it is also written to the `steering_sessions` table and read back at boot, inside a time-to-live.
+## Identity, authority and lifetime
 
-**The directive inbox.** An operator queues a *directive* for a session: an `action` (`pause`, `redirect` or `annotate`), a `body` (up to 4,096 characters, redacted before it is stored) and a `priority`. The directive waits until someone acknowledges it as `applied` or `declined`. Acknowledging an applied `pause` moves the session to `PAUSED`, an applied `redirect` to `CONTEXT_REFRESH`; `annotate` and `declined` move nothing. A move that actually changed the state also returns a `checkpoint_hint` (`{ "trigger": "steering", "directive_id": "..." }`): the session may take a checkpoint of its worktree for that directive (see [session rollback](runbooks/session-rollback.md#the-steering-trigger-and-the-checkpoint_hint-reader)). A directive nobody acknowledges within a day is closed as declined with reason `timeout`.
+The server independently generates a public `session_id` (`ls_` plus 64 lowercase hexadecimal characters) and private `session_binding` (64 lowercase hexadecimal characters), each from 32 CSPRNG bytes. Neither derives from the other or the bearer. The handle is metadata, **not a credential**. Sessions sharing a surface token are separated by the exact binding proof, not by an ID alone.
 
-**The context digest.** `session_context` (MCP tool) and `GET /session/context` return a bounded, redacted digest of the other live sessions of the caller's repository: presence, worktree and branch, claims, recent events, handoffs and planning changes. Every item carries its `source` and `age_s`, so a reader can tell a heartbeat from a minute ago from a claim from yesterday. It is part of the sessions feature set behind `SUBSTRATE_BRIEF_SESSIONS`: with the flag off the tool answers the typed refusal `session-context.disabled`, the route answers 503 with the same reason, and nothing is read. With it on, `memory_brief` also carries the same material as `sessions`, `steering` and `handoffs` sections inside its existing size bound, read under the brief's own deadline (a section not ready in time is replaced by one line that names it) and also shown when the brief is served from its last-good snapshot.
+Mandatory PostgreSQL migration **42**, `live_session_bindings`, stores the domain-separated proof hash, immutable owner surface/repository, canonical state, lease and retained terminal records. Raw proof is returned only at successful issuance after commit. Private operations check SQL; cache, presence, ledger or old `steering_sessions` rows cannot grant, transfer or revive ownership. No legacy active backfill, caller-chosen identity, re-registration, proof reset, ID reuse or tombstone-delete API exists.
 
-**The long poll.** `GET /steering/wait?session_id=&after=&timeout_ms=` holds the request until a directive for that session arrives (HTTP 200 `{ "directive": ..., "wait_ms": N }`) or the wait ends (HTTP 204 with an `X-Steering-Wait-Ms` header). A `timeout_ms` above `SUBSTRATE_STEERING_WAIT_MAX_MS` is clamped to it, not refused, and `wait_ms` says the wait the request got. `after` is a place in the order directives entered the inbox, so a clock that steps back never hides a queued directive. `substrate steer listen` loops on it.
+`SUBSTRATE_LIVE_SESSION_LEASE_S` defaults to **3600 seconds**, bounds **60..86400**. Out-of-range integers clamp; non-integer/unparseable values fall back. Owner-proof state updates and explicit heartbeats renew; reads/listening, discovery, presence and operator queue/ack/read do **not**. Quiet hosts must heartbeat too: every **300 seconds** at default, earlier and well before expiry for shorter leases (especially below 600 seconds). CLI installs no timer. SQL time after row-lock acquisition decides liveness; local record expiry is advisory.
+
+A partition may let the lease expire. Expiry and explicit close are terminal: stop private operations, open a new identity and retarget commands. Historical `session.end` only appends history; it neither closes nor re-registers a live identity. Close does not itself acknowledge/decline directives.
+
+The state machine remains `ACTIVE`, `CONTEXT_REFRESH`, `PAUSED`, `RESUMED`. Owner updates enforce legal moves and optional `previous_state`; omitted steering/planning hash carry forward. Applied operator `pause` maps to `PAUSED`, applied `redirect` to `CONTEXT_REFRESH`; `annotate`/`declined` move nothing. Audited acknowledgement stands if close/outage prevents later state application. Refused/unchanged movement has no `checkpoint_hint`; a committed movement retains applied metadata even if a later authorization check withholds its hint.
 
 ## Who may do what
 
-| Role | May | May not |
+Private calls need an authenticated surface. Operator status derives from the bearer, never a body field or `--surface` spelling.
+
+| Operation | Ordinary owner with exact proof | Same-surface sibling without proof / foreign caller | Trusted operator |
+| --- | --- | --- | --- |
+| Issue | own new identity | may issue its own, never select another handle | own new identity |
+| Update / heartbeat | yes | common not-found | owner plus proof; no override/renewal of another session |
+| Targeted directives/list/wait, private docs/brief | yes | common not-found | explicit private-read override |
+| Explicit close | yes | common not-found | explicit close override |
+| Queue / ack | `403` `operator-required` after target binding | common not-found before write policy | existing operator/principal/audit/confirm rules; proof not required |
+| Discovery | own surface's active metadata, including sibling handles | no private bodies/counts | all active metadata, still no private bodies/counts |
+| Redacted repository digest | existing public-redacted view, no proof | same view under existing auth/flag rules | same view |
+
+Overrides never bypass unknown/expired/closed targets. Queue authors are authenticated operator surfaces on `SUBSTRATE_PLANNING_STEERING_PRINCIPALS`. Queue rate remains 10/minute per target by default. Directive bodies are redacted before storage, at most 4096 characters. Conflicts require confirmation when applied. Queue/ack remain **unkeyed**: no new idempotency key or binding field is required in REST bodies.
+
+## Refusals, audit and concurrent reads
+
+Well-shaped missing/wrong-proof, foreign, unknown, expired and closed private targets share REST **404**, the same application headers and this body:
+
+```json
+{"status":"refused","error":{"code":"not-found"}}
+```
+
+No ownership reason, target echo or audit-status decoration is included. MCP returns the same typed object with `isError: true` in its normal tool/JSON-RPC envelope (HTTP MCP is not REST 404). Invalid inputs are separate validation errors (REST 400); absent bearer on steering routes is 401. An untyped 404 may mean a disabled/missing route; a **typed** session 404 never means “old server.”
+
+Authority/missing-schema failure is **503** `session-unavailable`. Otherwise-admitted required mutation audit failure is **503** `audit-unavailable`, before effect. Inbox `misconfigured` / `not-configured` are separate 503 cases. Mandatory principal exhaustion is **429** `principal-rate-limited`, with `retry_after_s` and `Retry-After`.
+
+The process-local mandatory bucket keys authenticated surface and read/write class, not requested IDs. It runs even with general admission off/shadow or cache down, before authority lookup, directive inference, generic audit and refusal audit. Rechecks never recharge. Target preparation precedes generic audit, so audit outage cannot replace a target refusal. Admitted required mutations audit before effect. HTTP MCP prepares the whole batch: one live boundary/budget refusal dispatches **no member**; other request IDs receive target-independent `batch-not-dispatched`. Non-live batches retain existing behavior.
+
+Best-effort `steering.refused` events contain fixed operation/caller metadata and domain-separated `target_sha256`, never raw target/proof/body; audit failure does not change 404. Generic live-call audit preserves canonical argument digest/key handling without plaintext live-target context; proof is never separately logged.
+
+Private docs/brief, context/history reads and waits recheck SQL after awaits, including full/fast/snapshot/ETag paths. Close/expiry before the final read check means no private 200/204/304; unavailable authority means 503. Already-authorized/released bytes cannot be retracted. Waits hold no SQL transaction across the socket; local close wakes them and SQL rechecks at most every 1000 ms cover another instance's close. This is a read-release boundary, **not a cross-store rollback** of already accepted audited writes; acknowledgement may stand while its state application is refused.
+
+**Mutation receipts have a different linearization point.** Pre-effect binding/audit checks remain mandatory, but successful SQL/inbox commit produces a truthful public receipt (`issued`, `updated`, `renewed`, `closed`, `queued`, `acknowledged`) even if close/expiry wins later. Receipts never echo canonical private steering/planning hash. Issuance alone returns the one-time proof to its creator as part of that committed receipt; if already closed, it is permanently unusable. Receipt success is not a promise of liveness on the next call. Issuance/update/close additionally report `event_stored` for their subsequent public ledger note; `false` does not undo committed authority state. This is distinct from required generic mutation audit, which still fails closed **before** effect.
+
+Commit/transport failures can be uncertain, and failed local persistence can leave an unused issued identity. No error implies automatic distributed rollback or safe retry with the same identity/key. There is no proof reset/reuse: retain truthful receipts, open a new identity when needed, and let inaccessible unused identities expire.
+
+## REST and MCP protocol
+
+REST proof travels **only** in `X-Substrate-Session-Binding`, never URL/query or JSON body. MCP uses optional `session_binding` arguments supplied by a trusted client credential channel; never paste proofs into chat prompts/transcripts. Missing proof reaches common authorization refusal, rather than a schema-required-proof oracle.
+
+| REST | MCP | Contract |
 | --- | --- | --- |
-| Operator (an operator token whose surface is on `SUBSTRATE_PLANNING_STEERING_PRINCIPALS`) | queue and acknowledge directives; read everything below | exceed 10 directives a minute per target session (`SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN`) |
-| Agent (any other token) | report its state; read the directives for its session and wait for them; read the context digest | author a directive, or acknowledge one |
+| `POST /steering/sessions` | `docs_steering_session` without `session_id` | `{repo_id, state, steering?, planning_hash?}`; `status: issued`, public `session_id`, `repo_id`, `state`, `updated_at`, `expires_at`, `event_stored`, one-time `session_binding`; no canonical private text/hash echoed |
+| No REST update endpoint | `docs_steering_session` with target/proof | `session_id`, `session_binding`, `repo_id`, `state`, optional `steering`, `planning_hash`, `previous_state`; active owner only, `status: updated` and same public metadata/`event_stored`, no proof/private text/hash; never creates unknown IDs |
+| `POST /steering/sessions/heartbeat` | `steering_session_heartbeat` | REST `{session_id}`, MCP also proof; committed `status: renewed`, `session_id`, `expires_at` |
+| `POST /steering/sessions/close` | `steering_session_close` | REST `{session_id}`; `status: closed`, `session_id`, committed `closed_at`, `event_stored`; repeat close not-found |
+| `GET /steering/sessions?repo_id=&limit=&cursor=` | not MCP `steering_list` | metadata discovery, limit 1..100 (default 50), ascending handle keyset order, `truncated`, optional `next_cursor` |
+| `GET /steering/directives?session_id=&status=` | `steering_list` with target/proof | private inbox; REST status `queued`, `acknowledged`, `all` (default), `history`, `history_truncated` |
+| `GET /steering/wait?session_id=&after=&timeout_ms=` | no separate wait tool | `200 {directive, wait_ms}` or 204 plus `X-Steering-Wait-Ms`, after final read authorization |
+| `POST /steering/queue` | `steering_queue` | REST `{session_id, action, body, priority?, conflicts_with_active_plan?}`; MCP uses `target_session_id`, requires priority/conflict, supports optional `plan_ref` |
+| `POST /steering/acknowledge` | `steering_acknowledge` | REST `{directive_id, outcome, confirm?}` infers target after principal admission; MCP also requires matching `session_id` |
+| `POST /docs/search`, `POST /brief` | `docs_search`, `memory_brief` | historical `session_id` is attribution; explicit `steering_session_id` plus header/MCP proof selects private augmentation |
+| `GET /session/context?repo_id=&session_id=&limit=` | `session_context` | redacted digest; `session_id` is self-exclusion only |
 
-Agents never author directives: the server refuses a queue or an acknowledgement from a caller that is not an operator on the allow-list, before anything is stored. A directive is audited before it is queued, so a queue the audit sink cannot record is refused rather than half done.
+Discovery rows contain only `session_id`, `surface`, `repo_id`, `state`, `updated_at`, `expires_at`, even for operators: no private direction, planning hash, directive body/count. Public repository metadata is not a private inbox.
 
-## The flags
+`after` follows inbox insertion order, not wall clock. Waits above the configured ceiling clamp (default 30000 ms, bounds 1000..120000). Separate waiter-cap 429 also uses `Retry-After`. Durable inbox REST history merges up to 100 acknowledged records after restart; audit-restored records have no inferred checkpoint hint.
 
-All of them are off or empty by default; with every one unset the server behaves as it did before this feature. The full rows (default, allowed values, what unset means) are in [config-reference.md](config-reference.md).
+## Flags and storage
 
 | Variable | Effect |
 | --- | --- |
-| `SUBSTRATE_PLANNING_STEERING` | turns the directive inbox and the `/steering/*` routes on; off: no steering tool or route exists and a client sees 404 |
-| `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | the operator surfaces allowed to queue and acknowledge; empty means nobody can queue |
-| `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | makes the audit (and so the inbox) durable in `planning_steering_audit`; without it a restart forgets queued directives and writes fail closed |
-| `SUBSTRATE_BRIEF_SESSIONS` | the sessions feature set: adds the `sessions`, `steering` and `handoffs` sections to `memory_brief`, and serves `session_context` and `GET /session/context` (off: both refuse with `session-context.disabled`) |
-| `SUBSTRATE_WORKTREE_REGISTRY` | (phase 68, [worktree-fleet.md](worktree-fleet.md)) with the registry on, `memory_brief` also appends the `worktrees` section below when the request names `repo` and `session_id`; it does not need `SUBSTRATE_BRIEF_SESSIONS` |
-| `SUBSTRATE_STEERING_SESSIONS_TABLE` | persists the session state registry in `steering_sessions` and loads it at boot; the session's free text (`steering`, `planning_hash`) is redacted before it is written and in `GET /steering/sessions` |
-| `SUBSTRATE_STEERING_SESSION_TTL_S` | how old a persisted session may be when it is loaded at boot (default seven days); read only with the table on |
-| `SUBSTRATE_STEERING_WAIT_MAX_MS` | the longest one `GET /steering/wait` holds a request (default 30,000 ms); a longer `timeout_ms` is clamped to it and the answer reports the wait it got |
+| `SUBSTRATE_PLANNING_STEERING` | default off: no inbox MCP tools or `/steering/*` routes; lifecycle docs-session/heartbeat/close MCP tools register independently |
+| `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | allowed operator authors; empty refuses all authors |
+| `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | opt-in migrations 33/34 and durable inbox; missing sink fails writes closed |
+| `SUBSTRATE_LIVE_SESSION_LEASE_S` | default 3600 seconds, 60..86400; mandatory migration 42 has no opt-in |
+| `SUBSTRATE_STEERING_SESSIONS_TABLE` | historical migration 37 selection only; runtime cache removed, applied SQL/history unchanged |
+| `SUBSTRATE_STEERING_WAIT_MAX_MS` | default 30000 ms per wait |
+| `SUBSTRATE_BRIEF_SESSIONS` | public digest/live brief sections; off: digest `session-context.disabled` (REST 503) |
+| `SUBSTRATE_WORKTREE_REGISTRY` | independent public worktree-overlap section |
 
-The CLI reads `SUBSTRATE_URL` for the server and a bearer for the surface from `SUBSTRATE_TOKEN` (or the token file and per-surface files the other commands use). `--surface S` picks the token of surface `S`; the default is `claude-code`.
+Retired restart-cache TTL configuration has no reader/example. [config-reference.md](config-reference.md) is generated by parent integration. Bindings are not disposable cache; see [native recovery requirements](runbooks/index-archive.md) and [unsafe old-code downgrade](runbooks/rollback-compat.md).
 
-## The commands
+## CLI and the private record
 
 ```
+substrate steer open [--repo R] [--binding-file PATH] [--json]
+substrate steer heartbeat|close --session LIVE_ID [--binding-file PATH] [--json]
 substrate steer sessions [--repo R] [--limit N] [--json]
-substrate steer status [--repo R] [--session ID] [--json]
-substrate steer queue --session ID --action pause|redirect|annotate --body TEXT [--priority low|normal|high] [--conflicts] [--json]
+substrate steer status [--repo R] [--session LIVE_ID [--binding-file PATH]] [--json]
+substrate steer queue --session LIVE_ID --action pause|redirect|annotate --body TEXT [--priority low|normal|high] [--conflicts] [--json]
 substrate steer ack DIRECTIVE (--applied | --declined) [--confirm] [--json]
-substrate steer list --session ID [--status queued|acknowledged|all] [--json]
-substrate steer listen --session ID [--once] [--max-wait-ms N] [--after DIRECTIVE] [--json]
-substrate steer context [--repo R] [--session ID] [--limit N] [--format text|json]
+substrate steer list --session LIVE_ID [--binding-file PATH] [--status queued|acknowledged|all] [--json]
+substrate steer listen --session LIVE_ID [--binding-file PATH] [--once] [--max-wait-ms N] [--after DIRECTIVE] [--json]
+substrate steer context [--repo R] [--session HISTORICAL_ID] [--limit N] [--format text|json]
 ```
 
-`--repo` defaults to the `owner/name` of the working directory's `origin` remote, as `substrate brief` resolves it. Human output is one compact line per item and says how old each is (`updated 5m ago`, `[presence, 12s old]`); text that came from the server (names, directive bodies and the server's error messages alike) has its control characters replaced before it reaches the terminal, while `--json` prints the values as they came. `--limit` is a whole number from 1 to 100, the server's own bound, and a directive id (the `ack` argument and `--after`) must be letters, digits and `. _ : -` (at most 128 characters, the first a letter or digit): a value the server would refuse is a usage error before any request.
+Every command takes `--surface S` (default `claude-code`). The existing resolver reads `SUBSTRATE_URL` and surface bearer (`SUBSTRATE_TOKEN` or existing token files). Repo otherwise resolves origin. Surface selection is not operator elevation.
+
+`open` starts ACTIVE, saves proof and prints only public fields plus `binding_file`, also in JSON. Default records are `~/.local/state/substrate/live-sessions/<context-digest>.json`, binding canonical server URL, surface and exact handle. `--binding-file` selects one record, never sibling discovery. Credential-bearing/query/fragment URLs are refused for binding identity.
+
+Version-1 records contain `version`, `server_identity`, `surface`, `session_id`, `session_binding`, `expires_at`. Files are exclusively created/published atomically, synced, **0600**, in owner-only **0700** directories. Unsafe modes/ancestors, symlinks, hardlinks, mismatch and overwrite fail closed. Bounds: 4096 bytes/record, 256 directory entries. Keep records **outside repositories/checkpoint snapshots**; never display, attach or commit them.
+
+Explicit missing/corrupt/unsafe records fail locally. Heartbeat requires a matching record. Reads/close with absent *default* record may send an unproved request solely for server-enforced operator override, never owner authorization. Heartbeat updates expiry only; successful close removes the matching record, failed close retains it. Lost issuance/persistence has no reset: unused identity expires; open a new one.
+
+No proof belongs in stdout/stderr, URL, argv, prompts, envelopes, audit, metrics or shared caches. Private directions may augment a checked request, but credential never enters its prompt. Private docs/memory results and brief private sections do not enter shared caches/snapshots. **Network session isolation is not process isolation**: another process under the same OS account (or root) may read the record. Use separate OS users/sandboxing for that threat.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | done (`listen` also exits 0 when interrupted or when its bound passes) |
-| 1 | failed: the server was not reached, answered with an error, or sent a body that is not a valid reply (the message names the field that was wrong) |
-| 2 | usage: a wrong flag is refused before anything is sent |
-| 3 | refused by the server, or the server is not set up for steering: not an operator, a principal that is not allowed, rate limited, a directive that needs `--confirm`, a bad token, a typed `misconfigured` or `not-configured` answer, steering switched off (a 404 on a steering route) |
+| 0 | success; listener interrupt/budget completion too |
+| 1 | transport/untyped server failure, invalid response or local record failure |
+| 2 | usage refused before sending |
+| 3 | typed refusal, bad bearer, unavailable/disabled steering, rate limit or confirmation needed |
 
-A reply is classified by its typed body before its HTTP status. The tools' typed answers `forbidden`, `refused`, `misconfigured` and `not-configured` are the server saying no or that it is not set up for steering, so they are exit 3 whatever the status: the server sends `misconfigured` and `not-configured` with 503, and for `queue` and `ack` the reply is printed as the refusal it is. Only a 5xx with no typed body is a failure (exit 1). A 404 whose body is not typed means the route is missing: the server predates this feature, or its flag is off; the message says so and the exit is 3. The one 404 that is not that is the typed refusal an `ack` gets for a directive that does not exist (`refused (not-found)`, exit 3), which says the route works and the directive is missing. A reply to `queue` or `ack` counts as a success only when it carries what its status promises (`queued` a `directive_id`; `acknowledged` a `directive_id` and an `outcome`); an incomplete reply or a status the tools do not have is a bad response (exit 1).
-
-`steer listen` prints each directive as it arrives, remembers the last id (sent as `after`) and every id it already printed (the last 1,000), so a server that restarted and replays a directive it still holds does not print it twice, backs off (1 s, doubling to 30 s) after a connection error or a 5xx and starts over after the next good answer, and stops on Ctrl-C, after the first directive with `--once`, or when `--max-wait-ms` has passed. `--max-wait-ms` is one budget for the whole command: every request is cut where it ends (a request is allowed its long poll plus 5 s, or what is left of the budget if that is less), no pause or backoff runs past it, and the command then ends with exit 0 like any other end of listening, so a stalled connection cannot hold it past the limit. Ctrl-C ends a backoff or a pause at once. Each poll asks for 25 s; the server clamps that to `SUBSTRATE_STEERING_WAIT_MAX_MS` and reports what it applied (`wait_ms` in a delivered answer, `X-Steering-Wait-Ms` on a 204), and the next poll asks for no more than that, so a short server ceiling is not an error. A 400 or other refusal ends the loop with exit 3 rather than being retried. It cannot be made to spin: a server that answers a long poll at once is paced.
+Typed `not-found`/`session-unavailable` terminate `listen`, not old-server fallback or endless retries. Transient transport/untyped server errors back off 1..30 seconds. `--max-wait-ms` bounds the whole command; a bounded 1000-ID set suppresses repeated output.
 
 ## A worked example
 
-An operator wants session `sess-7` of `acme/widgets` to stop and look at the parser.
+This is an operator/host procedure, **not performed for this change**. Existing bearer configuration supplies authentication. `jq` reads public command output only, never proof.
 
 ```sh
-# 1. See who is running and what is waiting.
-substrate steer status --repo acme/widgets
-#   sessions (2):
-#     sess-7  surface=omp  state=ACTIVE  repo=acme/widgets  updated 40s ago  pending=0
-#     sess-9  surface=claude-code  ...
-#   context digest (generated ...): sessions 2, claims 1, events 20, handoffs 0, planning 1
+# Host side: keep historical checkpoint identity stable.
+HISTORICAL_SESSION_ID=work-parser
+SURFACE=omp
+OPEN_RESULT="$(substrate steer open --repo acme/widgets --surface "$SURFACE" --json)"
+STEERING_SESSION_ID="$(printf '%s' "$OPEN_RESULT" | jq -r '.session_id')"
+BINDING_FILE="$(printf '%s' "$OPEN_RESULT" | jq -r '.binding_file')"
+unset OPEN_RESULT
+substrate steer status --repo acme/widgets --surface "$SURFACE"
 
-# 2. Queue the directive (an operator token; the server picks the id).
-substrate steer queue --session sess-7 --action redirect --priority high --body "Stop the refactor; first make the parser tests pass."
-#   queued directive dir_01...
+# Operator side: host supplies public handle, never proof.
+# OPERATOR_SURFACE is an existing authenticated/allowlisted operator surface.
+QUEUED="$(substrate steer queue --surface "$OPERATOR_SURFACE" --session "$STEERING_SESSION_ID" --action redirect --priority high --body "First address the parser tests." --json)"
+DIRECTIVE_ID="$(printf '%s' "$QUEUED" | jq -r '.directive_id')"
+unset QUEUED
 
-# 3. The session side. A host that wants to see it at once runs, in the session's worktree:
-substrate steer listen --session sess-7 --once
-#   dir_01...  queued  redirect/high  by operator-1  2s ago
-#       Stop the refactor; first make the parser tests pass.
+# Host side: selected record supplies the private header.
+substrate steer list --surface "$SURFACE" --session "$STEERING_SESSION_ID" --binding-file "$BINDING_FILE"
+substrate steer listen --surface "$SURFACE" --session "$STEERING_SESSION_ID" --binding-file "$BINDING_FILE" --once
+substrate steer heartbeat --surface "$SURFACE" --session "$STEERING_SESSION_ID" --binding-file "$BINDING_FILE"
 
-# 4. The operator acknowledges it as applied once the session has acted on it (acknowledging is an operator action).
-substrate steer ack dir_01... --applied
-#   acknowledged directive dir_01...
-#   session state: applied -> CONTEXT_REFRESH
-#   checkpoint hint: the session's steering hook will take a steering checkpoint for dir_01...
+# Operator, only after session applies directive:
+substrate steer ack "$DIRECTIVE_ID" --surface "$OPERATOR_SURFACE" --applied
 
-# 5. The session's steering hook (run by the host after the session applied the directive) reads that hint and writes the checkpoint of the worktree as it stood.
-substrate session hook steering --session sess-7 --surface omp </dev/null
-substrate session checkpoints --session sess-7
-#   sess-7  seq 4  ckpt_...  steering  ...
+# Host: private live hint; historical checkpoint label.
+substrate session hook steering --session "$HISTORICAL_SESSION_ID" --steering-session "$STEERING_SESSION_ID" --binding-file "$BINDING_FILE" --surface "$SURFACE" </dev/null
+substrate session checkpoints --session "$HISTORICAL_SESSION_ID" --surface "$SURFACE"
+substrate steer context --repo acme/widgets --session "$HISTORICAL_SESSION_ID" --surface "$SURFACE"
+
+# Explicit terminal host close; session.end does not do this.
+substrate steer close --session "$STEERING_SESSION_ID" --binding-file "$BINDING_FILE" --surface "$SURFACE"
 ```
 
-A session that does not run `listen` still sees the directive: the server announces a queued directive with a note in the ledger and `docs_search` with a `session_id` returns the pending notice. `listen` and the long poll make it prompt instead of pull-only.
+Keep configured server/surface identical throughout. The host must schedule quiet-session renewal and choose when to apply/ack; the example installs neither. Docs/brief need explicit live handle/proof for stored directions/notices, never historical `session_id` alone.
 
-To see the digest a session would be handed:
-
-```sh
-substrate steer context --repo acme/widgets --session sess-7
-#   Live context for acme/widgets (for session sess-7), generated ...
-#   sessions:
-#   - [presence, 12s old] session_id=sess-9 surface=claude-code worktree=... branch=feat/x
-#   events:
-#   - [ledger, 4s old] kind=commit summary=...
-```
 
 ## Worktree overlap in the brief
 
@@ -124,29 +179,24 @@ The lists come from `substrate worktree scan --report` ([worktree-fleet.md](work
 
 ## The hooks
 
-`substrate session hook` has two triggers that read these routes. Both are fail-open: the host never waits on them for more than the hook's 10-second budget and they always exit 0.
+`substrate session hook steering` separates historical `--session` / envelope `session_id` from `--steering-session` / `steering_session_id` and `--binding-file` / `binding_file`. Flags override envelope fields; envelopes reject plaintext proof. Without explicit live handle and valid selected record it never queries private hints.
 
-- `steering` reads the session's acknowledged directives and writes the checkpoint each `checkpoint_hint` names, once. See [session rollback](runbooks/session-rollback.md#the-steering-trigger-and-the-checkpoint_hint-reader).
-- `context` prints the digest for the session's repository as at most 4,000 characters of text, so a host that injects a hook's stdout into the session at start or at prompt submit can show the session its neighbours. On any error it prints nothing.
+Up to five authorized hints are processed per run; consumed decisions include **both historical and live identity**, never proof. Refused/unavailable hints preserve ordinary fail-open checkpoint behavior, with sanitized verbose diagnostics, but never authorize via historical label. The context hook prints the existing redacted digest, at most 4000 characters. Hooks keep their 10-second budget and exit 0.
 
-`substrate session hook-config context` prints the script to wire; `substrate session hook-config steering` is the other.
+`substrate session hook-config steering` and `... context` **print only**: no settings/hook/timer/service install. ADR 0007 maps no host event; an operator chooses one. See [session rollback](runbooks/session-rollback.md#the-steering-trigger-and-the-checkpoint_hint-reader).
 
-## Limits
+## Privacy, durability and recovery limits
 
-- **Pull, not push.** A directive reaches a session only when the session (or its host) asks: by `listen`, by the long poll, by `docs_search`, or by the steering hook. The server never writes into a session's worktree or process.
-- **A directive is advice.** The session decides what to do and acknowledges it. A session that never acknowledges leaves the directive queued until it times out as declined after a day.
-- **State is per server.** Without `SUBSTRATE_STEERING_SESSIONS_TABLE` a restart forgets the session registry; without `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` it also forgets queued directives, and `GET /steering/directives` can then answer only from memory (its `history` field says `memory-only`). With the audit table on, a restart restores the open directives and the route reads the session's latest 100 acknowledged directives back from the table. The table records the acknowledgement but not what it did to the session, so a directive read back after a restart carries no `checkpoint_hint`: a hook that had not consumed its hint before the restart takes no steering checkpoint for that directive. The registry holds at most 1,000 sessions and drops the oldest.
-- **The digest is bounded and approximate.** Each list is capped, anything cut is named in `truncated` (including a full 200-event ledger window and a handoff read that did not cover every graph), a source that failed is named in `notes`, and every line states its age; a session that stopped heartbeating stays in the list until its age says so.
-- **A malformed handoff is skipped, not trusted.** `events_emit` takes any payload, so a `handoff` event can carry a packet with no goal or one of the wrong type. The digest's and the brief's handoff readers keep only packets with a non-empty goal, `files`, `dod` and `blockers` as lists of strings, a named `from` and `to` surface, and every field inside the bounds `coord_handoff` applies; any other row is one fewer packet, and the rest are listed as usual.
-- **Rate limit.** At most 10 directives a minute per target session by default.
-- **A session's end removes the live session.** A `session.end` removes the session from the live registry and from `steering_sessions`, and only that. It never declines or closes a queued directive and never refuses a later one: a directive still queued expires through the acknowledgement deadline, as any other does. A session that writes again re-registers. A repeat end while its removal waits joins that removal. Removals are bounded: at the bound a new end is refused, the session stays live, and the note says so. A `session.end` is honoured only from the session's own surface or from an operator token; any other caller's is refused, and a `steering.session_ended` note records the decision.
-- **The checkpoint hint is a hint.** It is attached only when an acknowledgement actually changed the session's state, on every route: a redirect applied while the session is `PAUSED` (a move the session refuses) or a pause for a session already paused carries none, on the acknowledgement reply and on the list alike. The checkpoint itself is taken by the hook, and is skipped when the worktree has not changed since the last one.
+- **Metadata is not private content.** `session_context` / `GET /session/context` stay cross-session, bounded/redacted, with existing caps, `source`, `age_s`, provenance, truncation and historical self-exclusion; no proof required. Private inbox/body/count and stored direction access require checked target.
+- **New events are public-safe; old history is unchanged.** Newly server-emitted live transitions, private docs notes, queue hints and close notes allowlist metadata only: no raw/nested direction, planning hash, proof/hash, private body/count or augmented question. Existing REST/MCP historical queries/authorization and published rows are unchanged, not retroactively confidential. Caller-controlled historical `events_emit` is not private storage.
+- **No cache authority.** SQL retains identity/revocation across restart. Removed legacy cache cannot resurrect sessions; migration 37 selects historical schema only. Inbox audit is separate, never identity authority.
+- **Hints are not durable transition proofs.** Restored acknowledged records have no inferred hint. An acknowledgement can stand while state application refuses; a committed state movement remains applied metadata even if a later check withholds its hint.
+- **Terminal records are security state.** Complete PostgreSQL-native backup/recovery must preserve all bindings/tombstones; the closed logical archive excludes them. Stale dump/cache/ledger cannot reconstruct lost tombstones or prove permanent non-reuse. Quiesce live access on incomplete recovery; recover complete state and invalidate restored active bindings before controlled re-enable. No automatic reset/downgrade can supply missing evidence.
 
 ## What is still operator-gated
 
-- **Installing hooks in a host.** `hook-config` only prints text; no command here edits a host's settings. Which host event runs the `steering` and `context` hooks is the operator's choice (ADR 0007 maps no event to them). Until it is done, no session reads its hints or sees the digest on its own.
-- **Turning the flags on, creating the tables and setting the principals.** Each flag is an operator decision; the opt-in tables migrate only when their flag is on.
-- **Operator tokens.** Which surfaces may author and acknowledge directives is `SUBSTRATE_PLANNING_STEERING_PRINCIPALS`; issuing the tokens is outside this repository.
-- **Delivery to a real session end to end** has to be exercised by an operator with a host wired as above; the tests here run against a fake server.
+Production migration/rehearsal (including mandatory migration 42), complete native backup/restore and active invalidation, deployment, flags/principals, real bearer issuance, hook/timer installs and real-host delivery remain operator actions. None was performed/certified for this cutover. No caller-controlled legacy row backfill: clients explicitly open/retarget live identities; historical checkpoint/event labels stay stable.
 
-See also [coordination](coordination.md) (leases, handoffs and drift, the other cross-session mechanisms) and [session rollback](runbooks/session-rollback.md).
+Pre-proof code can bypass the boundary despite additive migration 42. It is not a safe transparent rollback: keep private endpoints inaccessible during approved recovery; never automatically run documentary down/delete tombstones. Parent must record integrated test/review results before HARD-S1 completion; this is no deployment or merge-ready claim.
+
+See [coordination](coordination.md), [data planes](data-planes.md), [index archive](runbooks/index-archive.md) and [rollback compatibility](runbooks/rollback-compat.md).

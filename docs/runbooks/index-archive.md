@@ -2,10 +2,10 @@
 
 | | |
 | --- | --- |
-| Question | Can the Postgres index (graph, lease and governed-memory tables) be rebuilt if the Railway volume is lost? |
+| Question | Can the archived graph, lease and governed-memory subset be rebuilt if the Postgres volume is lost? This is not a complete security-authority backup. |
 | Scope | Read-only against the index; writes only under `SUBSTRATE_INDEX_ARCHIVE_DIR` and one ledger `note` per run |
 | Blast radius | None on production. The export is one `REPEATABLE READ READ ONLY` transaction; restore refuses the production database |
-| Not covered | Hindsight banks, RAGFlow datasets, the Greptime ledger (see `docs/greptime-ledger.md`, *Coverage and archive*), the desk's own tables, Redis |
+| Not covered | `live_session_bindings` (including permanent identity/tombstone security history), historical `steering_sessions`, `planning_steering_audit`, other tables outside the closed graph/memory list; Hindsight, docs datasets, Greptime ledger (see `docs/greptime-ledger.md`), desk tables and Redis |
 
 The release gate does not prove this archive unless `SUBSTRATE_GATE_INDEX_DRILL=1`. That opt-in drill archives the twin's scratch Postgres into a temp directory under the run dir and restores it into a second database on the same loopback server. It does not read or write `/mnt/index-archive`, and it does not set `SUBSTRATE_INDEX_ARCHIVE_DIR`.
 
@@ -25,11 +25,9 @@ check it.
 | `memory_quarantine.ndjson`, `memory_reviews.ndjson` | Parked writes — **without their text** (below) |
 | `manifest.json` | Format version, `createdAt`, release sha, Postgres `server_version`, the schema hash, and per table `{file, rows, bytes, sha256, columns, withheld, rowDigest, entryHashDigest}` |
 
-The table list is closed: it is `IndexStore.migrate()`'s nine graph and memory tables, held in
-`index-archive-spec.ts`, and no table or column name ever comes from input. The
-`skills_registry` table (uplift-5) is not archived, and the `skill.*` events in the ledger are a
-best-effort trail, not a restore source: a lost table is rebuilt by deciding the pull requests
-again ([skills-propose.md](../skills-propose.md#approving-a-skill)).
+The closed list is the nine graph/memory tables in `index-archive-spec.ts`, **not every table created by `IndexStore.migrate()`**. Its compatibility schema hash remains unchanged by live-authority migration 42. Excluding a table preserves old logical-archive compatibility; it does not provide backup coverage.
+
+`skills_registry` is also excluded. Its `skill.*` events are best-effort trail, not restore source: approvals must be decided again ([skills-propose.md](../skills-propose.md#approving-a-skill)). Unlike rebuildable metadata, live binding/tombstone history cannot safely be decided again from events or legacy rows.
 `index-store.archive.test.ts` compares the list
 with `information_schema` on a live database, so a column added to `migrate()` and
 not to the spec fails CI. Tables are read in key order, in pages of
@@ -156,11 +154,24 @@ Create the scratch database yourself (`createdb`), on a server that is not the p
 the same server under another name. Drop it afterwards. CI does this with the `postgres:16` service
 (`SUBSTRATE_TEST_PG_URL`) in `index-store.archive.test.ts`.
 
-**Disaster recovery from an archive** is a manual, deliberate act: restore into a new Railway
-database, check the table, then point `SUBSTRATE_PG_URL` at it (an operator step). Parked-write text is
-gone by design; the leases in the archive are as of the snapshot, come back **without their fencing token**
-(`lease_id` is NULL, so a restored holder cannot heartbeat it) and have lapsed or will lapse on their own
-(`docs/runbooks/lease-stuck.md`).
+**Disaster recovery from this logical archive is incomplete.** An operator may restore its graph/memory subset into a replacement database and inspect the table results, but must not point live-session serving traffic at that database on the strength of this archive. Parked text is withheld by design; restored graph leases lack `lease_id` and lapse ([lease-stuck.md](lease-stuck.md)). Migration creating an empty authority table is not recovery of live-session identity history.
+
+## Live-session authority — complete native backup and controlled recovery
+
+Mandatory migration 42's `live_session_bindings` contains immutable owner/proof-hash/state/lease records and terminal tombstones. Both active and terminal rows are excluded from the logical archive. Historical migration-37 `steering_sessions` rows, presence, cache, inbox audit and shared ledger do not contain authoritative complete security state; none can recreate lost tombstones, restore a proof or justify ID reuse. Applied old SQL/digests are unchanged.
+
+Before operating the credential cutover, an operator must establish a **complete PostgreSQL-native backup/recovery path** covering all authority records, schema and migration history: for example an access-controlled native base backup with retained WAL/PITR and a documented consistent recovery point. A native logical dump is useful only if its coverage and recovery horizon are security-complete; an old dump missing later issued/closed identities is not. Native backups contain sensitive authority/private data despite hash-only proof storage; encrypt/restrict them and never attach rows/credentials to logs or tickets. This repository's closed archive/verify/drill commands do not implement or certify that path.
+
+On missing, stale, corrupt or uncertain security records:
+
+1. **Quiesce every live-session entry point** on every instance, including MCP lifecycle, private docs/brief and REST, before recovery. Stop serving or gate authenticated ingress through an operator-controlled maintenance boundary. Merely setting `SUBSTRATE_PLANNING_STEERING=off` is insufficient: independent lifecycle MCP/private consumers still exist. Preserve surviving records, backups and WAL; never delete tombstones or automatically run documentary down SQL.
+2. Recover complete native PostgreSQL security state into an isolated target. Establish continuity for **all previously issued identities**, not just active rows at one old snapshot. Do not backfill caller-chosen legacy rows or infer ownership/revocation from ledger/cache/presence. Verify backup integrity/coverage and schema/migration compatibility through the operator's native recovery procedure before any re-enable.
+3. **Invalidate all restored active bindings before serving again**, retaining their identity records as terminal. This prevents older leases/proofs restored from a snapshot from becoming usable again. Use an approved operator recovery procedure with quiesced authority; there is no automatic bulk-reset/recovery CLI or new API here. Individually reachable active identities can be explicitly closed with an authorized operator, but that is not proof that absent historical tombstones were recovered.
+4. Only with complete retained terminal history and an approved recovery decision, re-enable compatible proof-enforcing code and let clients explicitly open new identities. Retarget live handles/private files while keeping historical checkpoint labels. Do not restore lost plaintext proof from public history or reset/re-register an old ID.
+
+**If tombstones/issued-identity history are irretrievably lost or recovery is stale, permanent non-reuse cannot be proven.** Quiescence, active invalidation or a newly empty table does not reconstruct missing evidence. Keep the guarantee uncertified and live access quiesced pending an explicit operator security-recovery decision; never present cache/ledger reconstruction as safe automatic recovery.
+
+No complete native backup, production restore/rehearsal, active invalidation, deployment or live-traffic re-enable was performed for Phase 71. Even a passing logical scratch drill would not prove authority recovery. Old unbound code is not a transparent recovery fallback; see [rollback compatibility](rollback-compat.md).
 
 ## The ledger note and its marker
 

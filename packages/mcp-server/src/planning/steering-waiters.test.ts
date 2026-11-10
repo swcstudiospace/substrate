@@ -290,4 +290,42 @@ describe("SteeringWaiters.wait", () => {
 		expect((await healthy).status).toBe("directive");
 		expect(waiters.size).toBe(0);
 	});
+
+	test("closeSession cancels only matching waits, once, without closing the registry", async () => {
+		const timers = new FakeTimers();
+		const waiters = new SteeringWaiters({ timers });
+		const abort = new AbortController();
+		const a = waiters.wait({ sessionId: "session-a", timeoutMs: 1000, signal: abort.signal, check: () => null });
+		const b = waiters.wait({ sessionId: "session-b", timeoutMs: 1000, check: () => null });
+		expect(waiters.closeSession("session-a")).toBe(1);
+		expect(await a).toEqual({ status: "closed" });
+		expect(waiters.closeSession("session-a")).toBe(0);
+		abort.abort();
+		expect(waiters.size).toBe(1);
+		expect(timers.live.size).toBe(1);
+		const fresh = waiters.wait({ sessionId: "session-a", timeoutMs: 1000, check: () => null });
+		expect(waiters.size).toBe(2);
+		waiters.closeAll();
+		expect(await b).toEqual({ status: "closed" });
+		expect(await fresh).toEqual({ status: "closed" });
+		expect(waiters.size).toBe(0);
+		expect(timers.live.size).toBe(0);
+	});
+
+	test("synchronous and throwing timer seams cannot leak a waiter or abort listener", async () => {
+		for (const throws of [false, true]) {
+			const cleared: unknown[] = [];
+			const waiters = new SteeringWaiters({ timers: {
+				set: run => { if (throws) throw new Error("test timer unavailable"); run(); return "timer"; },
+				clear: handle => { cleared.push(handle); },
+			} });
+			const abort = new AbortController();
+			const response = await waiters.wait({ sessionId: "session-a", timeoutMs: 1, signal: abort.signal, check: () => null });
+			expect(response.status).toBe(throws ? "closed" : "timeout");
+			expect(waiters.size).toBe(0);
+			expect(cleared).toEqual(throws ? [] : ["timer"]);
+			abort.abort();
+			expect(waiters.size).toBe(0);
+		}
+	});
 });

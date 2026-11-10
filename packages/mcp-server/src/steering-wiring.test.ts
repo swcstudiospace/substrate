@@ -11,14 +11,13 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { loadConfig } from "./config.ts";
-import { searchReplyStorable, type SearchReply } from "./docs-search.ts";
+import { searchReplyStorable } from "./docs-search.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { RecordingPresenceBackend } from "./planning/backend.fixtures.ts";
-import { listRestDirectives } from "./planning/steering-rest.ts";
 import type { PlanningTimers } from "./planning/observer.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { SteeringInbox } from "./planning/steering.ts";
-import type { SessionStateName, SessionStatePort, SessionTransitionResult } from "./planning/steering-delivery.ts";
+import type { SessionStatePort } from "./planning/steering-delivery.ts";
 import {
 	SteeringAuditSink,
 	type SteeringAuditReadQuery,
@@ -34,6 +33,12 @@ import { FakeTree, TREE_ROOT } from "./planning/tree.fixtures.ts";
 import { IndexStore } from "./index-store.ts";
 import type { EventInput } from "./types.ts";
 import { Substrate } from "./service.ts";
+import { auditToolCalls, createObservability } from "./observe.ts";
+import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
+import { LiveSessionStatePort } from "./planning/session-state.ts";
+import { LiveSessionBoundaryError } from "./planning/steering-tools.ts";
+import { AuditUnavailableError, type AuditRecord } from "@substrate/audit";
+import type { LiveSessionAccess, LiveSessionSnapshot } from "./planning/steering-sessions-store.ts";
 
 const T0 = 1_800_000_000_000;
 const OPERATOR: McpCaller = { surface: "omp", isOperator: true };
@@ -170,18 +175,6 @@ async function seedPreviousProcess(sql: FakeAuditSql, directives: Array<Record<s
 	for (const entry of directives) expect((await previous.enqueue(entry)).ok).toBe(true);
 }
 
-/** A port stub for the tests that inject one (the seam). It MIRRORS `steeringStateTransition` (event.ts); production wires the real `SteeringSessionRegistry`, which the last describe below drives. */
-class StubSessionMachine implements SessionStatePort {
-	readonly states = new Map<string, SessionStateName>();
-
-	applyTransition(sessionKey: string, target: SessionStateName): SessionTransitionResult {
-		const current = this.states.get(sessionKey) ?? "ACTIVE";
-		const ok = current === target || (current === "ACTIVE" && (target === "CONTEXT_REFRESH" || target === "PAUSED")) || (current === "CONTEXT_REFRESH" && (target === "ACTIVE" || target === "PAUSED")) || (current === "PAUSED" && target === "RESUMED") || (current === "RESUMED" && (target === "ACTIVE" || target === "PAUSED"));
-		if (!ok) return { ok: false, reason: `steering transition ${current} -> ${target} refused` };
-		this.states.set(sessionKey, target);
-		return { ok: true, changed: current !== target };
-	}
-}
 
 interface Harness {
 	substrate: Substrate;
@@ -189,20 +182,36 @@ interface Harness {
 	clock: ManualClock;
 	timers: FakeTimers;
 	lines: string[];
+	authority: TestLiveSessionAuthority;
+	session: { sessionId: string; sessionBinding: string; access: LiveSessionAccess; snapshot: LiveSessionSnapshot };
+	auditRecords: AuditRecord[];
 }
 
-function harness(env: Record<string, string | undefined> = {}, options: { sql?: FakeAuditSql; sessionState?: SessionStatePort | null } = {}): Harness {
+async function harness(env: Record<string, string | undefined> = {}, options: { sql?: FakeAuditSql; sessionState?: SessionStatePort | null; missingAudit?: boolean; failingAudit?: boolean } = {}): Promise<Harness> {
 	const sql = options.sql ?? new FakeAuditSql();
 	const clock = new ManualClock(T0);
 	const timers = new FakeTimers();
 	const lines: string[] = [];
-	const substrate = new Substrate(loadConfig({ ...STEERING_ON, SUBSTRATE_PLANNING_STEERING_ACK_TTL_S: "60", SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S: "5", ...env }), {
-		index: null,
-		greptime: null,
-		planning: { presence: null, emit: async () => true },
-		steering: { history: null, durable: new SteeringAuditSink(sql, sql), ...(options.sessionState !== undefined ? { sessionState: options.sessionState } : {}), timers, nowMs: clock.nowMs, report: (line) => lines.push(line) },
+	const authority = createTestLiveSessionAuthority({ nowMs: T0 });
+	const session = await issueLiveSession(authority, { caller: OPERATOR });
+	const config = loadConfig({ ...STEERING_ON, SUBSTRATE_PLANNING_STEERING_ACK_TTL_S: "60", SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S: "5", ...env });
+	const observability = createObservability(config, {});
+	const auditRecords: AuditRecord[] = [];
+	const append = observability.audit.append.bind(observability.audit);
+	spyOn(observability.audit, "append").mockImplementation(async (input) => {
+		if (options.failingAudit && input.mode === "fail-closed") throw new AuditUnavailableError(input.tool, "isolated audit failure");
+		const written = await append(input);
+		auditRecords.push(written.record);
+		return written;
 	});
-	return { substrate, sql, clock, timers, lines };
+	const substrate = new Substrate(config, {
+		index: null, greptime: null,
+		planning: { presence: null, emit: async () => true },
+		steering: { liveSessions: authority, history: null, durable: new SteeringAuditSink(sql, sql), ...(options.sessionState !== undefined ? { sessionState: options.sessionState } : {}), timers, nowMs: clock.nowMs, report: (line) => lines.push(line) },
+	}, observability.observer, options.missingAudit ? undefined : {
+		auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport),
+	});
+	return { substrate, sql, clock, timers, lines, authority, session, auditRecords };
 }
 
 async function connect(substrate: Substrate, caller: McpCaller): Promise<Client> {
@@ -260,11 +269,11 @@ describe("the settings", () => {
 	test("a bad expiry setting makes the steering tools answer misconfigured, and builds no inbox", async () => {
 		const stderr = captureStderr();
 		try {
-			const { substrate } = harness({ SUBSTRATE_PLANNING_STEERING_ACK_TTL_S: "5" });
+			const { substrate, session } = await harness({ SUBSTRATE_PLANNING_STEERING_ACK_TTL_S: "5" });
 			expect(substrate.steering.inbox).toBeNull();
 			expect(substrate.steering.settingsErrors).toEqual([{ key: "SUBSTRATE_PLANNING_STEERING_ACK_TTL_S", reason: "out-of-range", min: 60, max: 2_592_000 }]);
 			const client = await connect(substrate, OPERATOR);
-			expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({ isError: true, body: { status: "misconfigured" } });
+			expect(await call(client, "steering_list", { session_id: session.sessionId })).toMatchObject({ isError: true, body: { status: "misconfigured" } });
 			expect(stderr.text()).toContain("SUBSTRATE_PLANNING_STEERING_ACK_TTL_S");
 		} finally {
 			stderr.restore();
@@ -278,7 +287,7 @@ describe("the durable inbox", () => {
 		await seedPreviousProcess(sql, [directive({ id: "d-1" }), directive({ id: "d-2", priority: "high", createdAtMs: T0 + 1 })]);
 		const rowsBefore = sql.rows.length;
 		const attemptsBefore = sql.insertAttempts;
-		const { substrate, timers, lines } = harness({}, { sql });
+		const { substrate, timers, lines } = await harness({}, { sql });
 		expect(substrate.steering.inbox?.get("d-1")).toBeNull();
 
 		const started = await substrate.startSteering();
@@ -295,7 +304,7 @@ describe("the durable inbox", () => {
 		const sql = new FakeAuditSql();
 		await seedPreviousProcess(sql, [directive()]);
 		sql.failReads = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
-		const { substrate } = harness({}, { sql });
+		const { substrate } = await harness({}, { sql });
 		const stderr = captureStderr();
 		try {
 			const started = await substrate.startSteering();
@@ -314,7 +323,7 @@ describe("the durable inbox", () => {
 	test("an expiry pass closes a directive nobody acknowledged as declined:timeout, and shutdown clears the timer for good", async () => {
 		const sql = new FakeAuditSql();
 		await seedPreviousProcess(sql, [directive()]);
-		const { substrate, clock, timers } = harness({}, { sql });
+		const { substrate, clock, timers } = await harness({}, { sql });
 		await substrate.startSteering();
 		const tick = timers.runs[0];
 		if (tick === undefined) throw new Error("the expiry timer was not started");
@@ -351,7 +360,7 @@ describe("the durable inbox", () => {
 
 	test("with steering off nothing is built: no inbox, no timer, no read", async () => {
 		const sql = new FakeAuditSql();
-		const { substrate, timers } = harness({ SUBSTRATE_PLANNING_STEERING: "off" }, { sql });
+		const { substrate, timers } = await harness({ SUBSTRATE_PLANNING_STEERING: "off" }, { sql });
 		expect(substrate.steering.inbox).toBeNull();
 		expect(await substrate.startSteering()).toMatchObject({ restored: 0, sweeping: false });
 		expect(timers.runs).toEqual([]);
@@ -395,295 +404,189 @@ describe("the durable inbox", () => {
 });
 
 describe("the steering notice on docs_search", () => {
-	async function search(substrate: Substrate, sessionId: string | undefined): Promise<SearchReply> {
-		return substrate.searchDocs({ question: "", ...(sessionId === undefined ? {} : { session_id: sessionId }) }, "omp");
+	async function search(h: Harness) {
+		return h.substrate.searchDocs({ question: "", session_id: "historical-label", steering_session_id: h.session.sessionId }, "omp", { caller: OPERATOR, sessionBinding: h.session.sessionBinding });
 	}
 
-	test("a session with queued directives reads a count and at most three entries, and the reply is never storable", async () => {
-		const sql = new FakeAuditSql();
-		await seedPreviousProcess(sql, [
-			directive({ id: "d-1", body: `deploy with ${TOKEN}` }),
-			directive({ id: "d-2", priority: "high", action: "pause", createdAtMs: T0 + 1 }),
-			directive({ id: "d-3", createdAtMs: T0 + 2 }),
-			directive({ id: "d-4", createdAtMs: T0 + 3 }),
-			directive({ id: "d-other", targetSessionId: "sess-b" }),
+	test("an issued session sees at most three redacted entries, never selected by historical attribution", async () => {
+		const h = await harness();
+		await seedPreviousProcess(h.sql, [
+			directive({ id: "d-1", targetSessionId: h.session.sessionId, body: `deploy with ${TOKEN}` }),
+			directive({ id: "d-2", targetSessionId: h.session.sessionId, priority: "high", action: "pause", createdAtMs: T0 + 1 }),
+			directive({ id: "d-3", targetSessionId: h.session.sessionId, createdAtMs: T0 + 2 }),
+			directive({ id: "d-4", targetSessionId: h.session.sessionId, createdAtMs: T0 + 3 }),
+			directive({ id: "d-other", targetSessionId: "historical-label" }),
 		]);
-		const { substrate, clock } = harness({}, { sql });
-		await substrate.startSteering();
-		clock.set(T0 + 4_000);
-
-		const reply = await search(substrate, "sess-a");
-
+		await h.substrate.startSteering();
+		h.clock.set(T0 + 4_000);
+		const reply = await search(h);
 		expect(reply.steering?.count).toBe(4);
 		expect(reply.steering?.entries.map((entry) => entry.id)).toEqual(["d-2", "d-1", "d-3"]);
 		expect(reply.steering?.entries[0]).toMatchObject({ id: "d-2", action: "pause", priority: "high", age_ms: 4_000 });
 		expect(JSON.stringify(reply)).not.toContain(TOKEN);
+		expect(JSON.stringify(reply)).not.toContain(h.session.sessionBinding);
 		expect(searchReplyStorable(reply)).toBe(false);
-		// A reply is storable only without the notice: it is the notice that makes a reply per call.
-		const base: SearchReply = { chunks: [], untrusted: "x" };
-		expect(searchReplyStorable(base)).toBe(true);
-		expect(searchReplyStorable({ ...base, steering: { count: 1, entries: [], untrusted: "x" } })).toBe(false);
+		expect(searchReplyStorable({ chunks: [], untrusted: "x" })).toBe(true);
+		expect(searchReplyStorable({ chunks: [], untrusted: "x", steering: { count: 1, entries: [], untrusted: "x" } })).toBe(false);
+		expect((await h.substrate.searchDocs({ question: "", session_id: h.session.sessionId }, "omp")).steering).toBeUndefined();
 	});
 
-	test("it is absent for a session with nothing queued, with no session named, after an acknowledgement, and with steering off", async () => {
-		const sql = new FakeAuditSql();
-		await seedPreviousProcess(sql, [directive()]);
-		const { substrate } = harness({}, { sql });
-		await substrate.startSteering();
-		expect(Object.hasOwn(await search(substrate, "sess-z"), "steering")).toBe(false);
-		expect(Object.hasOwn(await search(substrate, undefined), "steering")).toBe(false);
-		expect(Object.hasOwn(await search(substrate, "sess-a"), "steering")).toBe(true);
-
-		await substrate.steering.inbox?.acknowledge({ directiveId: "d-1", sessionId: "sess-a", outcome: "declined" });
-		expect(Object.hasOwn(await search(substrate, "sess-a"), "steering")).toBe(false);
-
-		const off = harness({ SUBSTRATE_PLANNING_STEERING: "off" }, { sql });
-		expect(Object.hasOwn(await search(off.substrate, "sess-a"), "steering")).toBe(false);
+	test("empty, acknowledged and disabled notices are absent; closed targets refuse", async () => {
+		const h = await harness();
+		expect((await search(h)).steering).toBeUndefined();
+		await seedPreviousProcess(h.sql, [directive({ targetSessionId: h.session.sessionId })]);
+		await h.substrate.startSteering();
+		expect((await search(h)).steering?.count).toBe(1);
+		await h.substrate.steering.inbox?.acknowledge({ directiveId: "d-1", sessionId: h.session.sessionId, outcome: "declined" });
+		expect((await search(h)).steering).toBeUndefined();
+		await h.authority.close(h.session.access);
+		await expect(search(h)).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "not-found" } } });
+		expect((await search(await harness({ SUBSTRATE_PLANNING_STEERING: "off" }))).steering).toBeUndefined();
 	});
 
-	test("a fault reading the inbox never fails the search: the reply goes out without the notice", async () => {
-		const sql = new FakeAuditSql();
-		await seedPreviousProcess(sql, [directive()]);
-		const { substrate } = harness({}, { sql });
-		await substrate.startSteering();
-		const inbox = substrate.steering.inbox;
+	test("a failed inbox read degrades only the notice after binding succeeds", async () => {
+		const h = await harness();
+		const inbox = h.substrate.steering.inbox;
 		if (inbox === null) throw new Error("expected an inbox");
-		const broken = spyOn(inbox, "recordsFor").mockImplementation(() => {
-			throw new Error("inbox unreadable");
-		});
+		const broken = spyOn(inbox, "recordsFor").mockImplementation(() => { throw new Error("inbox unreadable"); });
 		const stderr = captureStderr();
 		try {
-			const reply = await search(substrate, "sess-a");
-			expect(Object.hasOwn(reply, "steering")).toBe(false);
+			const reply = await search(h);
+			expect(reply.steering).toBeUndefined();
 			expect(reply.chunks).toEqual([]);
 			expect(stderr.text()).toContain("steering notice skipped");
-		} finally {
-			stderr.restore();
-			broken.mockRestore();
-		}
+		} finally { stderr.restore(); broken.mockRestore(); }
 	});
 
-	test("over MCP the docs_search reply carries the notice", async () => {
-		const sql = new FakeAuditSql();
-		await seedPreviousProcess(sql, [directive()]);
-		const { substrate } = harness({}, { sql });
-		await substrate.startSteering();
-		const client = await connect(substrate, OPERATOR);
-
-		const reply = await call(client, "docs_search", { question: "", session_id: "sess-a" });
-		expect(reply.body).toMatchObject({ steering: { count: 1, entries: [{ id: "d-1", action: "redirect", priority: "normal" }] } });
+	test("MCP passes the explicit live selector and proof to the service", async () => {
+		const h = await harness();
+		await seedPreviousProcess(h.sql, [directive({ targetSessionId: h.session.sessionId })]);
+		await h.substrate.startSteering();
+		const reply = await call(await connect(h.substrate, OPERATOR), "docs_search", {
+			question: "", session_id: "historical-label", steering_session_id: h.session.sessionId, session_binding: h.session.sessionBinding,
+		});
+		expect(reply).toMatchObject({ isError: false, body: { steering: { count: 1, entries: [{ id: "d-1", action: "redirect", priority: "normal" }] } } });
+		expect(h.auditRecords.some((record) => record.tool === "docs_search")).toBe(true);
 	});
 });
 
-describe("the hint for a queued directive", () => {
-	test("each queued directive publishes one steering.queued note that names it and carries no body", async () => {
-		const { substrate } = harness();
-		const emitted: Array<{ kind: string; surface: string; payload?: Record<string, unknown> }> = [];
-		const emit = spyOn(substrate, "emit").mockImplementation((async (event: { kind: string; surface: string; payload?: Record<string, unknown> }) => {
-			emitted.push(event);
-			return { stored: true };
-		}) as never);
-		try {
-			const client = await connect(substrate, OPERATOR);
-			const first = await call(client, "steering_queue", { ...QUEUE_ARGS, body: `Hold it, key ${TOKEN}` });
-			const second = await call(client, "steering_queue", QUEUE_ARGS);
-			expect(first.body.status).toBe("queued");
-			expect(second.body.status).toBe("queued");
-
-			const hints = emitted.filter((event) => event.payload?.["action"] === "steering.queued");
-			expect(hints).toHaveLength(2);
-			expect(hints.map((event) => event.payload?.["directive_id"])).toEqual([first.body.directive_id, second.body.directive_id]);
-			for (const hint of hints) {
-				expect(hint).toMatchObject({ kind: "note", surface: "substrate" });
-				expect(JSON.stringify(hint)).not.toContain("Hold");
-				expect(JSON.stringify(hint)).not.toContain(TOKEN);
-			}
-		} finally {
-			emit.mockRestore();
-		}
-	});
-
-	/** How many of the recorded `emit` calls are steering.queued hints. Other events are not this test's concern. */
-	function hintsIn(calls: ReadonlyArray<readonly [EventInput, ...unknown[]]>): number {
-		return calls.filter(([event]) => event.payload?.["action"] === "steering.queued").length;
-	}
-
-	test("a refused queue publishes no hint, and a hint the ledger cannot store never fails the queue", async () => {
-		const { substrate } = harness();
-		const emit = spyOn(substrate, "emit").mockImplementation((async () => ({ stored: false })) as never);
-		try {
-			const refused = await call(await connect(substrate, { surface: "omp", isOperator: false }), "steering_queue", QUEUE_ARGS);
-			expect(refused).toMatchObject({ isError: true, body: { status: "forbidden" } });
-			expect(hintsIn(emit.mock.calls)).toBe(0);
-
-			const queued = await call(await connect(substrate, OPERATOR), "steering_queue", QUEUE_ARGS);
-			expect(queued).toMatchObject({ isError: false, body: { status: "queued" } });
-			expect(hintsIn(emit.mock.calls)).toBe(1);
-		} finally {
-			emit.mockRestore();
-		}
-	});
-});
-
-describe("an acknowledgement drives the session state", () => {
-	async function queuedAndAcknowledged(machine: StubSessionMachine | null, action: "pause" | "redirect" | "annotate", outcome: "applied" | "declined") {
-		const { substrate } = harness({}, { sessionState: machine });
-		spyOn(substrate, "emit").mockImplementation((async () => ({ stored: true })) as never);
-		const client = await connect(substrate, OPERATOR);
-		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action });
-		const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome });
-		return acknowledged;
-	}
-
-	test("pause applied reads PAUSED and redirect applied reads CONTEXT_REFRESH", async () => {
-		const paused = new StubSessionMachine();
-		expect(await queuedAndAcknowledged(paused, "pause", "applied")).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "applied", state: "PAUSED" } } });
-		expect(paused.states.get("sess-a")).toBe("PAUSED");
-
-		const refreshed = new StubSessionMachine();
-		expect(await queuedAndAcknowledged(refreshed, "redirect", "applied")).toMatchObject({ body: { session_state: { status: "applied", state: "CONTEXT_REFRESH" } } });
-		expect(refreshed.states.get("sess-a")).toBe("CONTEXT_REFRESH");
-	});
-
-	test("annotate and declined leave the state alone", async () => {
-		for (const [action, outcome] of [["annotate", "applied"], ["pause", "declined"]] as const) {
-			const machine = new StubSessionMachine();
-			expect(await queuedAndAcknowledged(machine, action, outcome)).toMatchObject({ body: { status: "acknowledged", session_state: { status: "unchanged" } } });
-			expect(machine.states.size).toBe(0);
-		}
-	});
-
-	test("a pause for an already PAUSED session reads unchanged and carries no checkpoint_hint", async () => {
-		const machine = new StubSessionMachine();
-		machine.states.set("sess-a", "PAUSED");
-		const reply = await queuedAndAcknowledged(machine, "pause", "applied");
-		expect(reply).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "unchanged" } } });
-		expect(Object.hasOwn(reply.body, "checkpoint_hint")).toBe(false);
-		expect(machine.states.get("sess-a")).toBe("PAUSED");
-	});
-
-	test("a pause that moves the session still carries the checkpoint_hint", async () => {
-		const reply = await queuedAndAcknowledged(new StubSessionMachine(), "pause", "applied");
-		expect(reply).toMatchObject({ body: { session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering" } } });
-	});
-
-	test("with the port injected as null the reply is the plain acknowledgement: no session_state, no checkpoint_hint", async () => {
-		const reply = await queuedAndAcknowledged(null, "pause", "applied");
-		expect(reply).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied" } });
-		expect(Object.hasOwn(reply.body, "session_state")).toBe(false);
-		expect(Object.hasOwn(reply.body, "checkpoint_hint")).toBe(false);
-	});
-});
-
-describe("the two steering mechanisms share one state model", () => {
-	/** A substrate on the production default port: no port injected. Its `emit` is recorded and answers stored. */
-	function shared() {
-		const { substrate } = harness();
+describe("queued hints and shared authoritative acknowledgement state", () => {
+	async function shared(options: { sessionState?: SessionStatePort | null } = {}) {
+		const h = await harness({}, options);
 		const events: EventInput[] = [];
-		spyOn(substrate, "emit").mockImplementation((async (event: EventInput) => {
+		spyOn(h.substrate, "emit").mockImplementation((async (event: EventInput) => {
 			events.push(event);
 			return { event: { id: `ev-${events.length}` }, stored: true };
 		}) as never);
-		/** The `docs.steering` notes only: the queue hint and other events are not this describe's concern. */
-		const steeringNotes = () => events.filter((event) => event.payload?.["action"] === "docs.steering");
-		return { substrate, steeringNotes };
+		const client = await connect(h.substrate, OPERATOR);
+		const queue = (action: "pause" | "redirect" | "annotate" = "pause") => call(client, "steering_queue", { ...QUEUE_ARGS, target_session_id: h.session.sessionId, action });
+		const ack = (directiveId: unknown, outcome = "applied") => call(client, "steering_acknowledge", { directive_id: directiveId, session_id: h.session.sessionId, outcome });
+		const state = async () => {
+			const read = await h.authority.read(h.session.access, "private-read");
+			if (!read.ok) throw new Error("expected active issued session");
+			return read.snapshot.session.state;
+		};
+		return { ...h, client, queue, ack, state, events };
 	}
 
-	const SESSION = { session_id: "sess-a", repo_id: "owner/name" };
-
-	test("the registry is the default port while steering is on, and no port exists while it is off", () => {
-		const on = harness().substrate;
-		expect(on.sessionState).toBe(on.steeringSessions);
-		const off = harness({ SUBSTRATE_PLANNING_STEERING: "off" }).substrate;
-		expect(off.sessionState).toBeNull();
-	});
-
-	test("a pause acknowledged through the inbox changes the state docs_steering_session reports, and the ledger names the directive", async () => {
-		const { substrate, steeringNotes } = shared();
-		const client = await connect(substrate, OPERATOR);
-		expect((await call(client, "docs_steering_session", { ...SESSION, state: "ACTIVE" })).isError).toBe(false);
-		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "pause" });
-		const directiveId = String(queued.body.directive_id);
-		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({ body: { status: "listed", session_state: { status: "held", state: "ACTIVE" } } });
-
-		const acknowledged = await call(client, "steering_acknowledge", { directive_id: directiveId, session_id: "sess-a", outcome: "applied" });
-		expect(acknowledged).toMatchObject({
-			isError: false,
-			body: { status: "acknowledged", session_state: { status: "applied", state: "PAUSED" }, checkpoint_hint: { trigger: "steering", directive_id: directiveId } },
-		});
-
-		// docs_steering_session's own state is PAUSED: the claim of previous_state PAUSED is checked against the stored state and holds.
-		const reported = await call(client, "docs_steering_session", { ...SESSION, state: "PAUSED", previous_state: "PAUSED" });
-		expect(reported).toMatchObject({ isError: false, body: { state: "PAUSED" } });
-		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({ body: { session_state: { status: "held", state: "PAUSED" } } });
-
-		// The ledger carries one note for the acknowledgement, with the directive id.
-		const driven = steeringNotes().filter((event) => event.payload?.["directive_id"] === directiveId);
-		expect(driven).toHaveLength(1);
-		expect(driven[0]).toMatchObject({ surface: "omp", kind: "warning", session_id: "sess-a" });
-		expect(driven[0]?.payload).toMatchObject({ state: "PAUSED", previous_state: "ACTIVE", via: "steering_acknowledge" });
-	});
-
-	test("the reverse reads: a state docs_steering_session sets is the state the inbox side sees, and a resume lets a later redirect apply", async () => {
-		const { substrate } = shared();
-		const client = await connect(substrate, OPERATOR);
-		await call(client, "docs_steering_session", { ...SESSION, state: "ACTIVE" });
-		await call(client, "docs_steering_session", { ...SESSION, state: "PAUSED" });
-		await call(client, "docs_steering_session", { ...SESSION, state: "RESUMED" });
-		expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe("RESUMED");
-
-		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "pause" });
-		const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
-		expect(acknowledged).toMatchObject({ body: { session_state: { status: "applied", state: "PAUSED" } } });
-		expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe("PAUSED");
-	});
-
-	test("a redirect for a PAUSED session is refused, the acknowledgement stands, no hint is given and the state is unchanged", async () => {
-		const { substrate, steeringNotes } = shared();
-		const client = await connect(substrate, OPERATOR);
-		await call(client, "docs_steering_session", { ...SESSION, state: "PAUSED" });
-		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "redirect" });
-		const directiveId = String(queued.body.directive_id);
-		const notesBefore = steeringNotes().length;
-
-		const acknowledged = await call(client, "steering_acknowledge", { directive_id: directiveId, session_id: "sess-a", outcome: "applied" });
-		expect(acknowledged.isError).toBe(false);
-		expect(acknowledged.body).toMatchObject({
-			status: "acknowledged",
-			outcome: "applied",
-			session_state: { status: "refused", state: "CONTEXT_REFRESH", reason: "steering transition PAUSED -> CONTEXT_REFRESH refused" },
-		});
-		expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
-		expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe("PAUSED");
-		expect(steeringNotes()).toHaveLength(notesBefore);
-		expect(substrate.steering.inbox?.get(directiveId)?.state).toBe("acknowledged");
-	});
-
-	test("a session the server holds no state for is reported as not registered, and the acknowledgement stands", async () => {
-		const { substrate } = shared();
-		const client = await connect(substrate, OPERATOR);
-		const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action: "pause" });
-		expect(await call(client, "steering_list", { session_id: "sess-a" })).toMatchObject({ body: { session_state: { status: "none" } } });
-
-		const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
-		expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "refused", state: "PAUSED", reason: "session not registered" } } });
-		expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
-	});
-
-	test("a pause for an already PAUSED session and a redirect for an already CONTEXT_REFRESH session are unchanged: no hint, no note, state kept", async () => {
-		for (const [action, held] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) {
-			const { substrate, steeringNotes } = shared();
-			const client = await connect(substrate, OPERATOR);
-			await call(client, "docs_steering_session", { ...SESSION, state: held });
-			const queued = await call(client, "steering_queue", { ...QUEUE_ARGS, action });
-			const notesBefore = steeringNotes().length;
-
-			const acknowledged = await call(client, "steering_acknowledge", { directive_id: queued.body.directive_id, session_id: "sess-a", outcome: "applied" });
-			expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied", session_state: { status: "unchanged" } } });
-			expect(Object.hasOwn(acknowledged.body, "checkpoint_hint")).toBe(false);
-			expect(substrate.steeringSessions.get("omp", "sess-a")?.state).toBe(held);
-			expect(steeringNotes()).toHaveLength(notesBefore);
+	test("each queued directive publishes exactly one allowlisted hint without body or command metadata", async () => {
+		const h = await shared();
+		const first = await h.queue();
+		const second = await h.queue("redirect");
+		expect(first.body.status).toBe("queued");
+		expect(second.body.status).toBe("queued");
+		const hints = h.events.filter((event) => event.payload?.action === "steering.queued");
+		expect(hints).toHaveLength(2);
+		expect(hints.map((event) => event.payload?.directive_id)).toEqual([first.body.directive_id, second.body.directive_id]);
+		for (const hint of hints) {
+			expect(hint).toMatchObject({ kind: "note", surface: "substrate" });
+			expect(Object.keys(hint.payload ?? {}).sort()).toEqual(["action", "directive_id", "non_blocking", "session_id"]);
+			expect(JSON.stringify(hint)).not.toContain("Hold the migration");
+			expect(JSON.stringify(hint)).not.toContain(h.session.sessionBinding);
 		}
+	});
+
+	test("a bound nonoperator queue is forbidden without a hint; hint storage failure does not undo an audited queue", async () => {
+		const h = await shared();
+		const emit = spyOn(h.substrate, "emit").mockImplementation((async () => ({ stored: false })) as never);
+		const nonoperator = await connect(h.substrate, { surface: "omp", isOperator: false });
+		expect(await call(nonoperator, "steering_queue", { ...QUEUE_ARGS, target_session_id: h.session.sessionId, session_binding: h.session.sessionBinding })).toMatchObject({ isError: true, body: { status: "forbidden", reason: "operator-required" } });
+		expect(emit.mock.calls.filter(([event]) => event.payload?.action === "steering.queued")).toHaveLength(0);
+		expect(await h.queue()).toMatchObject({ isError: false, body: { status: "queued" } });
+		expect(emit.mock.calls.filter(([event]) => event.payload?.action === "steering.queued")).toHaveLength(1);
+	});
+
+	test("pause and redirect apply authority state and the docs transition sees the same state", async () => {
+		for (const [action, target] of [["pause", "PAUSED"], ["redirect", "CONTEXT_REFRESH"]] as const) {
+			const h = await shared();
+			expect(h.substrate.sessionState).toBeInstanceOf(LiveSessionStatePort);
+			const queued = await h.queue(action);
+			expect(await h.ack(queued.body.directive_id)).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "applied", state: target }, checkpoint_hint: { trigger: "steering" } } });
+			expect(await h.state()).toBe(target);
+			const notes = h.events.filter((event) => event.payload?.action === "docs.steering");
+			expect(notes).toHaveLength(1);
+			expect(notes[0]).toMatchObject({ surface: "omp", session_id: h.session.sessionId, payload: { state: target, previous_state: "ACTIVE", directive_id: queued.body.directive_id, via: "steering_acknowledge" } });
+			expect(await call(h.client, "docs_steering_session", { session_id: h.session.sessionId, session_binding: h.session.sessionBinding, repo_id: "owner/name", state: target, previous_state: target })).toMatchObject({ isError: false, body: { state: target } });
+		}
+	});
+
+	test("owner transitions and acknowledgements share state, and resume permits another pause", async () => {
+		const h = await shared();
+		for (const state of ["PAUSED", "RESUMED"] as const) {
+			expect((await call(h.client, "docs_steering_session", { session_id: h.session.sessionId, session_binding: h.session.sessionBinding, repo_id: "owner/name", state })).isError).toBe(false);
+		}
+		expect(await h.state()).toBe("RESUMED");
+		expect(await h.ack((await h.queue()).body.directive_id)).toMatchObject({ body: { session_state: { status: "applied", state: "PAUSED" } } });
+		expect(await h.state()).toBe("PAUSED");
+	});
+
+	test("annotate, declined and already-held states produce no transition note or checkpoint hint", async () => {
+		for (const [action, outcome, initial] of [["annotate", "applied", "ACTIVE"], ["pause", "declined", "ACTIVE"], ["pause", "applied", "PAUSED"], ["redirect", "applied", "CONTEXT_REFRESH"]] as const) {
+			const h = await shared();
+			if (initial !== "ACTIVE") await h.authority.transition(h.session.access, { repoId: "owner/name", state: initial }, "owner-transition");
+			const acknowledged = await h.ack((await h.queue(action)).body.directive_id, outcome);
+			expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", session_state: { status: "unchanged" } } });
+			expect(acknowledged.body).not.toHaveProperty("checkpoint_hint");
+			expect(await h.state()).toBe(initial);
+			expect(h.events.filter((event) => event.payload?.action === "docs.steering")).toHaveLength(0);
+		}
+	});
+
+	test("an invalid redirect preserves acknowledgement, paused state and absence of hint", async () => {
+		const h = await shared();
+		await h.authority.transition(h.session.access, { repoId: "owner/name", state: "PAUSED" }, "owner-transition");
+		const queued = await h.queue("redirect");
+		const acknowledged = await h.ack(queued.body.directive_id);
+		expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied", session_state: { status: "refused", state: "CONTEXT_REFRESH", reason: "invalid-transition" } } });
+		expect(acknowledged.body).not.toHaveProperty("checkpoint_hint");
+		expect(await h.state()).toBe("PAUSED");
+		expect(h.substrate.steering.inbox?.get(String(queued.body.directive_id))?.state).toBe("acknowledged");
+		expect(h.events.filter((event) => event.payload?.action === "docs.steering")).toHaveLength(0);
+	});
+
+	test("unknown targets cannot queue; close after queue prevents acknowledgement", async () => {
+		const h = await shared();
+		expect(await call(h.client, "steering_queue", { ...QUEUE_ARGS, target_session_id: `ls_${"f".repeat(64)}` })).toMatchObject({ isError: true, body: { status: "refused", error: { code: "not-found" } } });
+		const queued = await h.queue();
+		await h.authority.close(h.session.access);
+		expect(await h.ack(queued.body.directive_id)).toMatchObject({ isError: true, body: { status: "refused", error: { code: "not-found" } } });
+		expect(h.substrate.steering.inbox?.get(String(queued.body.directive_id))?.state).toBe("queued");
+	});
+
+	test("an explicitly null state port preserves the plain acknowledgement", async () => {
+		const h = await shared({ sessionState: null });
+		const acknowledged = await h.ack((await h.queue()).body.directive_id);
+		expect(acknowledged).toMatchObject({ isError: false, body: { status: "acknowledged", outcome: "applied" } });
+		expect(acknowledged.body).not.toHaveProperty("session_state");
+		expect(acknowledged.body).not.toHaveProperty("checkpoint_hint");
+	});
+
+	for (const mode of ["missingAudit", "failingAudit"] as const) test(`direct lifecycle mutation fails closed with ${mode}`, async () => {
+		const h = await harness({}, { [mode]: true });
+		await expect(h.substrate.closeLiveSession(OPERATOR, { session_id: h.session.sessionId }, { sessionBinding: h.session.sessionBinding })).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "audit-unavailable" } } });
+		expect((await h.authority.read(h.session.access, "private-read")).ok).toBe(true);
+		await expect(h.substrate.closeLiveSession(OPERATOR, { session_id: `ls_${"f".repeat(64)}` })).rejects.toBeInstanceOf(LiveSessionBoundaryError);
+		await expect(h.substrate.closeLiveSession(OPERATOR, { session_id: `ls_${"e".repeat(64)}` })).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "not-found" } } });
 	});
 });
 
@@ -775,48 +678,45 @@ describe("the planning observer's baseline and liveness", () => {
 });
 
 describe("acknowledged directives after a restart", () => {
-	/** A previous process queues `d-1` for `sess-a` and acknowledges it as applied, leaving both rows in the table. */
-	async function acknowledgedByPreviousProcess(sql: FakeAuditSql): Promise<void> {
+	/** Prior inbox process over the same audit rows; live authority is supplied independently. */
+	async function acknowledgedByPreviousProcess(sql: FakeAuditSql, sessionId: string): Promise<void> {
 		const previous = new SteeringInbox({
 			history: new SteeringAuditSink(sql, sql),
 			clock: { nowMs: () => T0 },
 			policy: { allowlist: ["omp"], ratePerMin: 100 },
 		});
-		expect((await previous.enqueue(directive())).ok).toBe(true);
-		expect((await previous.acknowledge({ directiveId: "d-1", sessionId: "sess-a", outcome: "applied" })).ok).toBe(true);
+		expect((await previous.enqueue(directive({ targetSessionId: sessionId }))).ok).toBe(true);
+		expect((await previous.acknowledge({ directiveId: "d-1", sessionId, outcome: "applied" })).ok).toBe(true);
 	}
 
 	test("the route still lists a directive that was acknowledged before the restart, with no checkpoint hint (the audit holds no transition result)", async () => {
-		const sql = new FakeAuditSql();
-		await acknowledgedByPreviousProcess(sql);
-		const { substrate } = harness({}, { sql });
+		const { substrate, session, sql, authority } = await harness();
+		await acknowledgedByPreviousProcess(sql, session.sessionId);
 		await substrate.startSteering();
-		const inbox = substrate.steering.inbox;
-		if (inbox === null) throw new Error("expected an inbox");
-		// Boot restores open directives only, so the inbox no longer holds it; the in-memory view alone would lose the directive.
-		expect(inbox.get("d-1")).toBeNull();
-		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" })).toEqual([]);
-
-		const durable = await substrate.durableAcknowledgedFor("sess-a");
-		expect(durable).toMatchObject({ history: "durable", truncated: false });
-		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "acknowledged" }, durable.records)).toMatchObject([
+		expect(substrate.steering.inbox?.get("d-1")).toBeNull();
+		const durable = await substrate.readLiveDirectives(OPERATOR, { sessionId: session.sessionId, status: "acknowledged" }, session.sessionBinding);
+		expect(durable).toMatchObject({ history: "durable", history_truncated: false, directives: [
 			{ id: "d-1", status: "acknowledged", outcome: "applied", checkpoint_hint: null },
-		]);
-		// The history is read for the session asked about only.
-		expect((await substrate.durableAcknowledgedFor("sess-b")).records).toEqual([]);
+		] });
+		const other = await issueLiveSession(authority, { caller: OPERATOR });
+		expect((await substrate.readLiveDirectives(OPERATOR, { sessionId: other.sessionId, status: "acknowledged" }, other.sessionBinding)).directives).toEqual([]);
 	});
 
 	test("without the audit table only the inbox exists, and the answer says so", async () => {
-		const history = { append: async (): Promise<void> => undefined };
-		const substrate = new Substrate(loadConfig(STEERING_ON), { index: null, greptime: null, planning: { presence: null, emit: async () => true }, steering: { history } });
-		expect(await substrate.durableAcknowledgedFor("sess-a")).toEqual({ records: [], history: "memory-only", truncated: false });
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller: OPERATOR });
+		const config = loadConfig(STEERING_ON);
+		const observability = createObservability(config, {});
+		const substrate = new Substrate(config, { index: null, greptime: null, planning: { presence: null, emit: async () => true }, steering: { liveSessions: authority, history: { append: async () => undefined } } }, observability.observer, {
+			auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport),
+		});
+		expect(await substrate.readLiveDirectives(OPERATOR, { sessionId: session.sessionId, status: "acknowledged" }, session.sessionBinding)).toEqual({ directives: [], history: "memory-only", history_truncated: false });
 	});
 
 	test("a history that cannot be read is unavailable, not an empty list", async () => {
-		const sql = new FakeAuditSql();
-		await acknowledgedByPreviousProcess(sql);
+		const { substrate, session, sql } = await harness();
+		await acknowledgedByPreviousProcess(sql, session.sessionId);
 		sql.failReads = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
-		const { substrate } = harness({}, { sql });
-		expect(await substrate.durableAcknowledgedFor("sess-a")).toEqual({ records: [], history: "unavailable", truncated: false });
+		expect(await substrate.readLiveDirectives(OPERATOR, { sessionId: session.sessionId, status: "acknowledged" }, session.sessionBinding)).toEqual({ directives: [], history: "unavailable", history_truncated: false });
 	});
 });

@@ -79,7 +79,7 @@ async function start(env: Record<string, string>, index: Record<string, unknown>
 	const config = loadConfig(env);
 	const observability = createObservability(config, env);
 	await observability.start();
-	const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+	const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, observability.observer);
 	const server = createHttpServer(substrate, config, observability);
 	const listening = Promise.withResolvers<void>();
 	server.listen(0, "127.0.0.1", listening.resolve);
