@@ -404,7 +404,9 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	const postEvent = options.eventsFetch ?? fetch;
 	const emit = async (event: EventInput): Promise<unknown> => {
 		events.push(event);
-		if (options.substrateUrl === undefined) return { stored: false };
+		// A rehearsal must never touch production history, even when an events
+		// endpoint is configured.
+		if (options.rehearsal === true || options.substrateUrl === undefined) return { stored: false };
 		try {
 			const response = await postEvent(new URL("/events", options.substrateUrl), {
 				method: "POST",
@@ -436,12 +438,10 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 		// (`docs/`); a lone top-level file stays an exact file root
 		// (`README.md`), so underRoot matches both shapes.
 		const paths = dataset.documents.filter((document) => document.path !== null).map((document) => document.path as string);
-		const bySegment = new Map<string, number>();
-		for (const path of paths) {
-			const segment = path.split("/")[0] ?? path;
-			bySegment.set(segment, (bySegment.get(segment) ?? 0) + 1);
-		}
-		const datasetRoots = [...bySegment.entries()].map(([segment, count]) => (count > 1 ? `${segment}/` : segment));
+		// A page's directory part is the ingest root (`skill-a/` from
+		// `skill-a/SKILL.md`); a repo-root file (`README.md`) is its own exact
+		// file root. underRoot matches both shapes.
+		const datasetRoots = [...new Set(paths.map((path) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : path)))];
 		if (datasetRoots.length === 0 && paths.length > 0) continue;
 		let datasetGitShow: (commit: string, path: string) => Promise<string>;
 		try {
@@ -453,20 +453,29 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 			continue;
 		}
 		const byCommit = new Map<string, IngestPage[]>();
-		for (const document of dataset.documents) {
-			if (document.commit === null || document.path === null || document.source_url === null) continue;
+		// RAGFlow keeps superseded copies by default while LightRAG refuses a
+		// second upload with the same name: replay only each source URL's
+		// current copy (the highest archived version), never every retained one.
+		const currentByUrl = new Map<string, { path: string; commit: string; sourceUrl: string; order: number }>();
+		dataset.documents.forEach((document, order) => {
+			if (document.source_url === null || document.path === null || document.commit === null) return;
+			// Keep the last occurrence: the archive lists the current copy last
+			// after the superseded ones (RAGFlow keeps old copies by default).
+			currentByUrl.set(document.source_url, { path: document.path, commit: document.commit, sourceUrl: document.source_url, order });
+		});
+		for (const { path, commit, sourceUrl } of [...currentByUrl.values()].sort((a, b) => a.order - b.order)) {
 			let body: string;
 			try {
-				body = await datasetGitShow(document.commit, document.path);
+				body = await datasetGitShow(commit, path);
 			} catch (cause) {
 				const reason = cause instanceof Error ? cause.message.slice(0, 200) : String(cause);
-				perDataset.push({ dataset: dataset.name, refused: `git show failed for ${document.path}: ${reason}` });
+				perDataset.push({ dataset: dataset.name, refused: `git show failed for ${path}: ${reason}` });
 				applied = false;
 				continue;
 			}
-			const pages = byCommit.get(document.commit) ?? [];
-			pages.push({ path: document.path, source_url: document.source_url, body, ...(document.heading_path !== null ? { heading_path: document.heading_path } : {}) });
-			byCommit.set(document.commit, pages);
+			const pages = byCommit.get(commit) ?? [];
+			pages.push({ path, source_url: sourceUrl, body });
+			byCommit.set(commit, pages);
 		}
 		const datasetReport: Record<string, unknown> = { dataset: dataset.name, commits: byCommit.size, ingested: 0, replaced: 0, unchanged: 0, failed: 0 };
 		for (const [commit, pages] of byCommit) {

@@ -371,8 +371,7 @@ describe("docs-migrate", () => {
 		);
 		expect(outcome.exit).toBe(1);
 		const report = outcome.report as { totals: { ingested: number; failed: number }; datasets: Array<Record<string, unknown>>; versions_recorded: number; state_file_persisted: boolean; cutover_note_emitted: boolean };
-		console.log("DS", JSON.stringify(report.datasets));
-		expect(report.datasets.some((dataset) => typeof dataset.refused === "string" && (dataset.refused as string).includes("document failed to process"))).toBe(true);
+				expect(report.datasets.some((dataset) => typeof dataset.refused === "string" && (dataset.refused as string).includes("document failed to process"))).toBe(true);
 		expect(report.versions_recorded).toBe(0); // a dataset with failed pages records no pin
 		expect(report.state_file_persisted).toBe(true); // landed pages persist; only the pins and the note wait
 		expect(report.cutover_note_emitted).toBe(false);
