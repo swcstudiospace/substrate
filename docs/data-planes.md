@@ -72,6 +72,8 @@ The brief can carry cross-session recall from Hindsight as a `Recalled context` 
 
 The table below records the dataset layout the RAGFlow plane used. The service is gone; the layout stays here because the dataset names are the registry names `docs_search` and `docs_ingest` still accept (`packages/mcp-server/src/docs-datasets.ts`). Whether a LightRAG ingest keeps one workspace per dataset or one for all is not decided here: the LightRAG client sends no workspace.
 
+`docs_search` serves from LightRAG (SOTA-02, Phase 46): hybrid retrieval by default, and Hindsight context on `context: true`. RAGFlow is the rollback plane until its removal. The table lists the dataset names and sources; LightRAG names each dataset after its registry name (`lightragSearchDatasets`), so the names are the same on both planes.
+
 | Dataset | Source | Ingest trigger |
 |---|---|---|
 | `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | merge to `main` |
