@@ -47,13 +47,11 @@ import {
 	verifyArchive,
 	type ArchivedBaseline,
 	type ArchivedDataset,
-	type ArchiveQuery,
 } from "../packages/mcp-server/src/docs-archive.ts";
 import { parityGate, type ParityRecord } from "../packages/mcp-server/src/docs-parity.ts";
 import {
 	DEFAULT_INGEST_ROOTS,
 	ingestDocs,
-	loadIngestRecords,
 	saveIngestRecords,
 	type IngestPage,
 	type IngestRecord,
@@ -61,7 +59,7 @@ import {
 import { lightragFromEnv } from "../packages/mcp-server/src/config.ts";
 import { createVersionStore, lightragSearchDatasets, recordVersion, versionsFromJson, type VersionStore } from "../packages/mcp-server/src/docs-datasets.ts";
 import { sha256Hex } from "../packages/mcp-server/src/event.ts";
-import type { EventInput, Surface } from "../packages/mcp-server/src/types.ts";
+import type { EventInput } from "../packages/mcp-server/src/types.ts";
 import type { FetchLike } from "../packages/mcp-server/src/planes/lightrag.ts";
 
 const MIGRATE_USAGE = "usage: bun scripts/docs-migrate.ts [--dry-run] [--apply] [--rehearsal] --archive <dir> [--part-a <file>] [--answers <file>] [--state-file <file>] [--dataset <name>...]";
@@ -238,10 +236,25 @@ export interface DryRunOptions {
 	archiveDir: string;
 	answersFile?: string | null;
 	gitShow?: (commit: string, path: string) => Promise<string>;
+	/** Overrides `globalThis.fetch` for the run; a dry run's "zero fetches" claim is asserted through it. */
+	fetch?: FetchLike;
 }
 
 /** The dry run: verify, map, gate Part A (Part B only with `--answers`); no network, no writes. */
 export async function runDryRun(options: DryRunOptions, io: MigrateIo): Promise<MigrateOutcome> {
+	if (options.fetch === undefined) return runDryRunUnsealed(options, io);
+	// The "zero fetches" property is asserted through this seam: any code path
+	// that reaches the network during a dry run throws here instead.
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = options.fetch as typeof globalThis.fetch;
+	try {
+		return await runDryRunUnsealed(options, io);
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+}
+
+async function runDryRunUnsealed(options: DryRunOptions, io: MigrateIo): Promise<MigrateOutcome> {
 	const archiveDir = resolve(options.archiveDir);
 	const verify = await verifyArchive(archiveDir);
 	if (!verify.ok) {

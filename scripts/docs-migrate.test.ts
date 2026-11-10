@@ -104,7 +104,7 @@ interface ApplyFixture {
 	stateFile: string;
 }
 
-async function applyFixture(over: { versions?: Record<string, number>; rehearsal?: boolean } = {}): Promise<ApplyFixture> {
+export async function applyFixture(over: { versions?: Record<string, number>; rehearsal?: boolean } = {}): Promise<ApplyFixture> {
 	const fake = new RagflowFake();
 	const gitFiles = await seedPlane(fake);
 	const { deps, stateFile } = harness(fake, gitFiles, over.versions ?? {});
@@ -121,6 +121,17 @@ async function applyFixture(over: { versions?: Record<string, number>; rehearsal
 			uploads.push(await file.text());
 			return Response.json({ status: "success", data: { track_id: `trk-${String(uploads.length).padStart(3, "0")}` } });
 		}
+		if (method === "GET" && url.pathname.startsWith("/documents/track_status/")) {
+			const trackId = url.pathname.split("/").pop() ?? "";
+			const index = Number(trackId.slice(4)) - 1;
+			const body = uploads[index] ?? "";
+			return Response.json({
+				track_id: trackId,
+				documents: [{ id: `doc-${String(index + 1).padStart(3, "0")}`, status: "processed", file_path: body.slice(0, 40) }],
+				total_count: 1,
+				status_summary: { processed: 1 },
+			});
+		}
 		if (method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 		if (method === "GET" && url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
 		return Response.json({ detail: "no route" }, { status: 404 });
@@ -128,7 +139,7 @@ async function applyFixture(over: { versions?: Record<string, number>; rehearsal
 	return { archiveDir, gitFiles, lightrag: { fetchImpl: lightragFetch, uploads }, events, stateFile };
 }
 
-function partAFile(dir: string, records = 6): string {
+export function partAFile(dir: string, records = 6): string {
 	const file = join(dir, "SUMMARY-part-a.md");
 	writeFileSync(file, `dry run ok\n\n\`${partAMarker(records)}\`\n`, "utf8");
 	return file;
@@ -153,7 +164,7 @@ describe("docs-migrate", () => {
 			calls.push(String(input));
 			throw new Error("the dry run must not touch the network");
 		};
-		const outcome = await runDryRun({ archiveDir: fixture.archiveDir }, { out: (t) => out.push(t), err: () => undefined });
+		const outcome = await runDryRun({ archiveDir: fixture.archiveDir, fetch: spy }, { out: (t) => out.push(t), err: () => undefined });
 		expect(outcome.exit).toBe(0);
 		const report = JSON.parse(out[0] ?? "{}") as { partA: { passed: boolean; records: number }; partB: { skipped: boolean }; mismatches: unknown[]; marker: string };
 		expect(report.partA).toMatchObject({ passed: true, records: 6 });
