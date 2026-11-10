@@ -351,31 +351,40 @@ export async function listDocuments(
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 8000,
 ): Promise<DocumentListOutcome> {
-	const answered = await call(
-		config,
-		fetchImpl,
-		`/api/v1/datasets/${encodeURIComponent(datasetId)}/documents?page=1&page_size=${DOCUMENT_LIST_PAGE_SIZE}`,
-		{ method: "GET", timeoutMs },
-	);
-	if (!answered.ok) return answered;
-	const data = dataOf(answered.body);
-	if (data === null || typeof data !== "object" || !("docs" in data) || !Array.isArray(data.docs)) {
-		return { ok: false, reason: "ragflow: unexpected document list shape" };
-	}
+	// Paginate until a short page comes back: the archive step must see every
+	// document in the dataset, and RAGFlow caps each page (page_size up to
+	// DOCUMENT_LIST_PAGE_SIZE).
 	const documents: RagflowDocument[] = [];
-	for (const entry of data.docs) {
-		if (entry === null || typeof entry !== "object") continue;
-		const id = readString(entry, "id");
-		const name = readString(entry, "name", "location");
-		if (id === undefined || name === undefined) continue;
-		const rawMeta = (entry as Record<string, unknown>).meta_fields;
-		const metaFields: Record<string, string> = {};
-		if (rawMeta !== null && typeof rawMeta === "object" && !Array.isArray(rawMeta)) {
-			for (const [key, value] of Object.entries(rawMeta as Record<string, unknown>)) {
-				if (typeof value === "string") metaFields[key] = value;
-			}
+	const seenIds = new Set<string>();
+	for (let page = 1; ; page += 1) {
+		const answered = await call(
+			config,
+			fetchImpl,
+			`/api/v1/datasets/${encodeURIComponent(datasetId)}/documents?page=${page}&page_size=${DOCUMENT_LIST_PAGE_SIZE}`,
+			{ method: "GET", timeoutMs },
+		);
+		if (!answered.ok) return answered;
+		const data = dataOf(answered.body);
+		if (data === null || typeof data !== "object" || !("docs" in data) || !Array.isArray(data.docs)) {
+			return { ok: false, reason: "ragflow: unexpected document list shape" };
 		}
-		documents.push({ id, name, ...(readString(entry, "run") !== undefined ? { run: readString(entry, "run") as string } : { run: "UNKNOWN" }), meta_fields: metaFields });
+		if (data.docs.length === 0) break;
+		for (const entry of data.docs) {
+			if (entry === null || typeof entry !== "object") continue;
+			const id = readString(entry, "id");
+			const name = readString(entry, "name", "location");
+			if (id === undefined || name === undefined || seenIds.has(id)) continue;
+			seenIds.add(id);
+			const rawMeta = (entry as Record<string, unknown>).meta_fields;
+			const metaFields: Record<string, string> = {};
+			if (rawMeta !== null && typeof rawMeta === "object" && !Array.isArray(rawMeta)) {
+				for (const [key, value] of Object.entries(rawMeta as Record<string, unknown>)) {
+					if (typeof value === "string") metaFields[key] = value;
+				}
+			}
+			documents.push({ id, name, ...(readString(entry, "run") !== undefined ? { run: readString(entry, "run") as string } : { run: "UNKNOWN" }), meta_fields: metaFields });
+		}
+		if (data.docs.length < DOCUMENT_LIST_PAGE_SIZE) break;
 	}
 	return { ok: true, documents };
 }
