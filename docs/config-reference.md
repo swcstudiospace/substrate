@@ -221,6 +221,11 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_AGENT_SKILLS_ROOT` | path | none | absolute path to an agent-skills checkout | the merge-trigger for agent-skills is a noop: no checkout, no version recorded. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAGFLOW_ARCHIVE_DIR` | path | none | archive directory path | the archive refuses by name before any write (phase 46 SC2). See `docs/data-planes.md` | mcp-server/docs-archive.ts, scripts/docs-migrate.ts | yes |
+| `SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS` | toggle | off | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused (phase 46 SC2; mirrors SUBSTRATE_INDEX_ARCHIVE_ALLOW_ROOTFS). See `docs/data-planes.md` | mcp-server/docs-archive.ts | yes |
+| `SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS` | number | 86400000 | integer 0..7776000000 (out of range falls back to the default) | one day before a refused planning page is re-polled | mcp-server/config.ts | no |
+| `RAGFLOW_MCP_URL` | string | none | URL; deleted by scrubPlaneEnv, never read as a plane reach | the transport stays unconfigured (D25-02: deliberately unused) | mcp-server/scrub-plane-env.ts | no |
+| `SUBSTRATE_LIGHTRAG_QUERY_MODE` | string | none | query mode name; deleted by scrubPlaneEnv | the plane default (hybrid) stands | mcp-server/scrub-plane-env.ts | no |
 | `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | toggle | off | 1 | off: every superseded document stays on the plane. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` | number | 0.2 | [0, 1] | 0.2. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |

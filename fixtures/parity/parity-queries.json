@@ -1,0 +1,26 @@
+{
+	"kind": "parity-queries",
+	"note": "The frozen 20-query parity sample (phase 46, SC4 / plan Task 8). Drawn from the repo's own docs so the RAGFlow baseline and the LightRAG answers are comparable. Each entry carries exactly {id, question}; the file is frozen and hashed into the phase SUMMARY before any gate run. Do not edit, reorder or extend: the gate's match rate is only meaningful against this exact sample.",
+	"queries": [
+		{ "id": "q01", "question": "What does docs_search return when it fails?" },
+		{ "id": "q02", "question": "Which arguments does docs_search accept?" },
+		{ "id": "q03", "question": "What does the context block contain, and how long is each memory text?" },
+		{ "id": "q04", "question": "What is the default vector similarity weight, and how is it changed?" },
+		{ "id": "q05", "question": "When is a reranker used?" },
+		{ "id": "q06", "question": "How many ingest refusals are there, and what are they?" },
+		{ "id": "q07", "question": "What are the caps on an ingest request?" },
+		{ "id": "q08", "question": "How many dataset versions are kept, and what happens to the rest?" },
+		{ "id": "q09", "question": "Why does re-ingesting an unchanged page do nothing?" },
+		{ "id": "q10", "question": "What does substrate docs refresh read from?" },
+		{ "id": "q11", "question": "How often does the merge trigger run?" },
+		{ "id": "q12", "question": "What happens when skills-sync is not live?" },
+		{ "id": "q13", "question": "Where does the docs ingest state file live by default?" },
+		{ "id": "q14", "question": "Which credentials does an agent hold for the docs plane?" },
+		{ "id": "q15", "question": "Which paths are excluded from every dataset?" },
+		{ "id": "q16", "question": "What does a LightRAG search answer from when the plane fails its retries?" },
+		{ "id": "q17", "question": "What does the golden-question live tier refuse without?" },
+		{ "id": "q18", "question": "What does the live canary require before it posts?" },
+		{ "id": "q19", "question": "What is the docs search budget default?" },
+		{ "id": "q20", "question": "What does the docs search cache store, and for how long?" }
+	]
+}

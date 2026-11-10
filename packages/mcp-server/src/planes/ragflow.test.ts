@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { BreakerOpenError, CircuitBreaker, gatedFetch, type PlaneSample } from "@substrate/observability";
-import { listDatasets, ragflowFromEnv, ragflowOp, retrieveChunks } from "./ragflow.ts";
+import { listDatasets, listDocuments, ragflowFromEnv, ragflowOp, retrieveChunks } from "./ragflow.ts";
 import { ConfigError, loadConfig } from "../config.ts";
 import { RagflowFake } from "../ragflow-fake.ts";
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
@@ -265,5 +265,40 @@ describe("the plane gate (uplift-2 R2)", () => {
 		expect(failing.requests.length).toBe(before);
 		expect(samples.map((s) => `${s.op}:${s.outcome}`)).toEqual(["retrieve:error", "retrieve:error", "retrieve:open", "datasets:open"]);
 		expect(BreakerOpenError.name).toBe("BreakerOpenError");
+	});
+});
+
+describe("listDocuments (phase 46 archive)", () => {
+	test("lists a dataset's documents with the metadata the upload PATCH attached", async () => {
+		const fake = new RagflowFake();
+		const form = new FormData();
+		form.append("file", new File(["# served bytes\n"], "docs/page-a.md"));
+		const uploaded = await fake.fetch("http://ragflow.test/api/v1/datasets/ds-berlin-agent-substrate/documents", { method: "POST", body: form });
+		const reply = (await uploaded.json()) as { data: Array<{ id: string }> };
+		const documentId = reply.data[0]?.id ?? "";
+		await fake.fetch(`http://ragflow.test/api/v1/datasets/ds-berlin-agent-substrate/documents/${documentId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ meta_fields: { source_url: "https://example.com/docs/page-a.md", commit: "c0ffee0", heading_path: "Docs" } }),
+		});
+		const outcome = await listDocuments(CONFIG, "ds-berlin-agent-substrate", fake.fetch);
+		expect(outcome.ok).toBe(true);
+		if (!outcome.ok) return;
+		expect(outcome.documents).toHaveLength(1);
+		const document = outcome.documents[0]!;
+		expect(document.id).toBe(documentId);
+		expect(document.name).toBe("docs/page-a.md");
+		expect(document.run).toBe("UNSTART");
+		expect(document.meta_fields).toEqual({ source_url: "https://example.com/docs/page-a.md", commit: "c0ffee0", heading_path: "Docs" });
+	});
+
+	test("an unknown dataset and a broken shape come back as reasons, never throws", async () => {
+		const fake = new RagflowFake();
+		const unknown = await listDocuments(CONFIG, "ds-unknown", fake.fetch);
+		expect(unknown).toEqual({ ok: false, reason: "ragflow code 102: You don't own the dataset ds-unknown." });
+		const transport = await listDocuments(CONFIG, "ds-berlin-agent-substrate", async () => {
+			throw new Error("plane down");
+		});
+		if (transport.ok) throw new Error("a transport failure came back as documents");
+		expect(transport.reason).toContain("ragflow unreachable");
 	});
 });
