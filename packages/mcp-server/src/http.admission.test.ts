@@ -270,6 +270,21 @@ describe("when the cache cannot answer", () => {
 			server.close();
 		}
 	});
+
+	test("an open cache breaker is a bypass for a fail-open class and a 503 for a fail-closed one", async () => {
+		const open = await start(ENFORCE);
+		open.redis.refusal = new BreakerOpenError("cache", 2_000);
+		expect((await fetch(`${open.base}/brief`, { method: "POST", headers: CURSOR, body: "{}" })).status).toBe(200);
+		expect(decisions(open, { decision: "bypass" })).toBe(1);
+
+		const closed = await start({ ...ENFORCE, SUBSTRATE_BUDGET_READ_BREAKER: "fail-closed" });
+		closed.redis.refusal = new BreakerOpenError("cache", 2_000);
+		const refused = await fetch(`${closed.base}/brief`, { method: "POST", headers: CURSOR, body: "{}" });
+		expect(refused.status).toBe(503);
+		expect(refused.headers.get("retry-after")).toBe("2");
+		expect(await refused.json()).toEqual({ error: "cache_unavailable", class: "read", retry_after_s: 2 });
+		expect(decisions(closed, { decision: "refused" })).toBe(1);
+	});
 });
 
 describe("what is never metered", () => {
