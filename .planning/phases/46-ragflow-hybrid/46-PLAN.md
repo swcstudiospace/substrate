@@ -102,6 +102,25 @@ Status, recorded by the offline executor (2026-11-10): every Dn above is an AGEN
 - D6 = (a) waive 25, 40, 42; (b) exclude 34; (c) remove `ragflow` from FABRIC_RESOURCES; (d) keep folder name. Agent default, pending operator. NOT ACTED ON in this run: no removal, no waiver, no FABRIC_RESOURCES change.
 </operator_decisions>
 
+## Frozen sample
+
+Frozen by T2 (2026-11-10, read-only, by content). Query wording is fixed. Source: the governing archived plan T3, with Q8 amended as recorded there (archived PLAN, line 74, operator approval 2026-10-25). Line numbers below are the current ones; the archived plan's line numbers were stale. Match rule (D3, agent default, pending operator): a query passes when a top-5 citation comes from the expected document; the gate is 100 percent, fail-closed.
+
+| # | Query | Expected source | Line(s) | Confirmed fact |
+|---|-------|-----------------|---------|----------------|
+| Q1 | Which LightRAG query mode does docs_search use by default? | `docs/docs-plane.md` | 126 | "The query mode defaults to `hybrid` (`DEFAULT_QUERY_MODE` in ...)" |
+| Q2 | How does docs ingest refuse secrets or unsourced pages? | `docs/docs-search-ingest.md` | 267-280 | "## The six ingest refusals": a redactor finding is refused; a page with no source URL is refused |
+| Q3 | How is Hindsight memory governed for retained memories? | `docs/memory-governance.md` | 594-595 | "Hindsight holds a *derived* copy of every accepted entry" |
+| Q4 | How are Greptime ledger events stored and read? | `docs/greptime-ledger.md` | 32, 39 | "Reads go through `events_query` and `events_verify`"; "## Schema" |
+| Q5 | What is the closed event vocabulary? | `docs/event-vocabulary.md` | 15 | "Closed vocabulary, both enums." |
+| Q6 | How does the redactor treat secrets in output? | `docs/redaction.md` | 7-14 | "Thirty-nine named rules on the event pass" |
+| Q7 | How does the substrate dispatcher start a Hermes session? | `docs/dispatcher.md` | 3 | "Turns a Linear `dispatch:<surface>` label into a Hermes session" |
+| Q8 | What does the skills propose flow check before it opens a pull request? | `docs/skills-propose.md` | 60-62, 66-75 | "## What is checked, and in what order" (name, paths, UTF-8, byte cap, SKILL.md, redaction) and "## Duplicates" (content_sha256 answers) |
+| Q9 | How does the Railway service connect over Tailscale? | `docs/railway-tailscale.md` | 5-7 | "## Why a forwarder per project"; one Tailscale Forwarder per project's production environment |
+| Q10 | What does the MCP audit log record? | `docs/mcp-audit.md` | 6 | "One hash-chained record per call an agent made to `substrate-mcp`" |
+
+All ten files exist, and each pairing was confirmed against its content. The duplicate-check grep in T2's verify (`What is checked, and in what order`, `## Duplicates`) matches `docs/skills-propose.md` at lines 60 and 66.
+
 <execution_split>
 Executors split this plan into sub-plans. Each stays within the 2-3 task budget.
 
