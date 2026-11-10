@@ -1587,6 +1587,14 @@ export class Substrate {
 	/** The store behind `planningHashes`, built on first use; null while `SUBSTRATE_PLANNING_HASH_STORE` is off. */
 	private planningHashStoreCache: PlanningHashStore | null = null;
 	private readonly planningHashSeam: PlanningHashStore | null;
+	/**
+	 * Pages the planning ingest refused, keyed by path: the content sha refused, why, and when.
+	 * The cooldown parks a refused page until the window lapses or its sha moves, so one
+	 * permanent refusal cannot re-attempt and re-warn every poll.
+	 */
+	private planningRefusals = new Map<string, { sha: string; reason: string; at: number }>();
+	/** The pending-set hash the last `docs.planning` note carried; an identical pending set does not re-note. */
+	private lastPlanningNoteHash: string | null = null;
 	/** The planning pass in flight, if any: one at a time, and a request during it marks the next pass dirty. */
 	private planningPass: Promise<void> | null = null;
 	private planningDirty = false;
@@ -6730,9 +6738,13 @@ export class Substrate {
 
 	/**
 	 * Scan the planning roots and index what changed since the last pass. Changed pages go
-	 * through the guarded ingest in batches; a page the plane refused stays pending for the
-	 * next pass. The `docs.planning` note carries the planning hash steering sessions compare
-	 * against. Never throws: a timer must not crash the process.
+	 * through the guarded ingest in batches; a page the plane refused is recorded with the
+	 * content sha it was refused under and parked for `planningRefusalCooldownMs` — the
+	 * next pass skips it unless its content moves or the window lapses, so a permanent
+	 * refusal cannot re-attempt (and re-warn) every poll. The `docs.planning` note carries
+	 * the planning hash steering sessions compare against, and fires only when the pending
+	 * set actually changes: an identical pass re-notes nothing. Never throws: a timer must
+	 * not crash the process.
 	 */
 	private async runPlanningRefresh(reason: string): Promise<void> {
 		if (!this.planningEnabled()) return;
@@ -6743,27 +6755,66 @@ export class Substrate {
 			await this.loadPlanningHashes();
 			const trigger = planningIngestTrigger(pages, this.planningHashes, roots);
 			if (!trigger.triggered) return;
-			const pending = new Set(trigger.paths);
 			const hashes = this.planningHashes ?? new Map<string, string>();
 			this.planningHashes = hashes;
-			for (const batch of batchPagesForIngest(pages.filter((page) => pending.has(page.path)))) {
+			const byPath = new Map(pages.map((page) => [page.path, page] as const));
+			// A refusal for a page the checkout no longer holds can never be refreshed by an
+			// attempt; drop it instead of carrying it forever.
+			for (const path of this.planningRefusals.keys()) if (!byPath.has(path)) this.planningRefusals.delete(path);
+			const cooldownMs = this.config.planningRefusalCooldownMs;
+			const now = Date.now();
+			const pending = new Set<string>();
+			for (const path of trigger.paths) {
+				const refusal = this.planningRefusals.get(path);
+				const page = byPath.get(path);
+				if (cooldownMs > 0 && refusal !== undefined && page !== undefined && now - refusal.at < cooldownMs && refusal.sha === planningPageSha(page)) continue;
+				pending.add(path);
+			}
+			const pendingPages = pages.filter((page) => pending.has(page.path));
+			if (pendingPages.length === 0) return;
+			for (const batch of batchPagesForIngest(pendingPages)) {
 				const outcome = await this.ingestDocs({ dataset: PLANNING_DATASET, pages: batch }, "substrate");
-				if (!outcome.ok) break;
-				const failed = new Set(outcome.results.filter((result) => result.status === "failed").map((result) => result.path));
+				if (!outcome.ok) {
+					// A batch the gates refused in full comes back `refused` naming one page (the
+					// locator) instead of per-page results; that page alone is parked when the
+					// cooldown is on. Any other refusal is a plane fault (lock timeout, upload
+					// error): leave it unrecorded so the next pass retries it.
+					if (cooldownMs > 0 && outcome.refused === true && typeof outcome.page === "string") {
+						const page = byPath.get(outcome.page);
+						if (page !== undefined) {
+							this.planningRefusals.set(outcome.page, { sha: planningPageSha(page), reason: outcome.reason.split(":", 1)[0]?.trim() || "unknown", at: now });
+						}
+					}
+					break;
+				}
+				const refused = new Map<string, string>();
+				for (const result of outcome.results) {
+					if (result.status === "failed") refused.set(result.path, result.error?.split(":", 1)[0]?.trim() || "unknown");
+				}
 				const stored = new Map<string, string>();
 				for (const page of batch) {
-					if (failed.has(page.path)) continue;
-					const sha = planningPageSha(page);
-					hashes.set(page.path, sha);
-					stored.set(page.path, sha);
+					const refusal = refused.get(page.path);
+					if (refusal !== undefined) {
+						if (cooldownMs > 0) this.planningRefusals.set(page.path, { sha: planningPageSha(page), reason: refusal, at: now });
+					} else {
+						const sha = planningPageSha(page);
+						hashes.set(page.path, sha);
+						stored.set(page.path, sha);
+						this.planningRefusals.delete(page.path);
+					}
 				}
 				await this.savePlanningHashes(stored);
 			}
+			// The note keys on the attempt set as the pass left it: the first pass notes, a pass
+			// over an identical set (a parked refusal, say) notes nothing.
+			const noteHash = JSON.stringify(pendingPages.map((page) => [page.path, planningPageSha(page)] as const).sort());
+			if (this.lastPlanningNoteHash === noteHash) return;
+			this.lastPlanningNoteHash = noteHash;
 			await this.emit({
 				surface: "substrate",
 				kind: "note",
-				summary: `planning refresh (${reason}): ${trigger.paths.length} changed page(s) under .planning/`,
-				payload: { action: "docs.planning", reason, paths: trigger.paths, planning_hash: planningContentHash(pages) },
+				summary: `planning refresh (${reason}): ${pendingPages.length} changed page(s) under .planning/`,
+				payload: { action: "docs.planning", reason, paths: [...pending].sort(), planning_hash: planningContentHash(pages) },
 			});
 		} catch (cause) {
 			process.stderr.write(`[substrate] planning refresh failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
