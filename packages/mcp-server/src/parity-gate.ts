@@ -7,6 +7,8 @@
  * `file_path` of a document (`planes/__fixtures__/lightrag-v1.5.7-routes.json`, route `paginated`), so the name is the
  * one place a listing carries dataset, source and version: `corpus:<repo>:<path>@<sha12>`. A matched pair compares
  * dataset (`dataset_id` to repo), source URL (`source_url` to path) and version (`sha` to the 12-character sha prefix).
+ * A `file://` source URL (docs-ingest stores one) matches on its trailing path segments. A flattened ingest name
+ * (`docs__x.md`) carries the path only, so it confirms the source and is an unverifiable name for dataset and version.
  * Zero mismatches is the pass. A record with no document, a document with no record, and any field that differs are
  * each a mismatch. A truncated listing and an empty record set fail closed: neither proves a match.
  *
@@ -14,7 +16,7 @@
  * the expected document. The gate passes when the match rate meets the threshold (D3, agent default, pending
  * operator: 100 percent, so one miss fails).
  */
-import { parseCorpusDocumentName } from "@substrate/corpus";
+import { CORPUS_NAME_PREFIX, parseCorpusDocumentName } from "@substrate/corpus";
 import { documentName } from "./planes/lightrag.ts";
 
 /** One `lightrag::` record of the docs state file, with the fields the mapping reads. */
@@ -39,7 +41,8 @@ export type MappingMismatch =
 	| { kind: "unparseable-name"; id: string }
 	| { kind: "dataset-mismatch"; id: string }
 	| { kind: "source-url-mismatch"; id: string }
-	| { kind: "version-mismatch"; id: string };
+	| { kind: "version-mismatch"; id: string }
+	| { kind: "unverifiable-name"; id: string };
 
 export interface RecordMappingResult {
 	ok: boolean;
@@ -51,7 +54,8 @@ export interface RecordMappingResult {
 }
 
 /**
- * Compares the manifest's `lightrag::` records with the plane's `corpus:` documents. `listingTruncated` is the plane's
+ * Compares the manifest's `lightrag::` records with the plane's documents. A `corpus:` name carries dataset, path and sha; a
+ * flattened name carries the path only. `listingTruncated` is the plane's
  * own answer that its listing is incomplete: a document missing from a truncated listing proves nothing, so it fails.
  */
 export function checkRecordMapping(records: readonly ManifestRecord[], documents: readonly PlaneDocument[], listingTruncated: boolean): RecordMappingResult {
@@ -71,19 +75,52 @@ export function checkRecordMapping(records: readonly ManifestRecord[], documents
 			continue;
 		}
 		referenced.add(document.id);
+		if (!document.name.startsWith(CORPUS_NAME_PREFIX)) {
+			// A flattened ingest name carries the path only: it can confirm the source, never the dataset or the version.
+			if (!flattenedNameMatches(record.sourceUrl, document.name)) mismatches.push({ kind: "source-url-mismatch", id: document.id });
+			mismatches.push({ kind: "unverifiable-name", id: document.id });
+			continue;
+		}
 		const name = parseCorpusDocumentName(document.name);
 		if (name === null) {
 			mismatches.push({ kind: "unparseable-name", id: document.id });
 			continue;
 		}
 		if (record.datasetId !== name.repo) mismatches.push({ kind: "dataset-mismatch", id: document.id });
-		if (record.sourceUrl !== name.path) mismatches.push({ kind: "source-url-mismatch", id: document.id });
+		if (!sourceMatchesPath(record.sourceUrl, name.path)) mismatches.push({ kind: "source-url-mismatch", id: document.id });
 		if (!record.sha.startsWith(name.sha12)) mismatches.push({ kind: "version-mismatch", id: document.id });
 	}
 	for (const document of documents) {
 		if (!referenced.has(document.id)) mismatches.push({ kind: "document-without-record", id: document.id });
 	}
 	return { ok: mismatches.length === 0, ...base, mismatches };
+}
+
+/**
+ * Whether a record's source names the repo-relative path. A stored repo-relative source must equal it. A `file://` source is
+ * absolute, so the path must be its trailing segments, at a `/` boundary: `xdocs/a.md` does not name `docs/a.md`.
+ */
+function sourceMatchesPath(sourceUrl: string, repoPath: string): boolean {
+	const decoded = safeDecode(sourceUrl.trim());
+	if (!decoded.startsWith("file://")) return decoded === repoPath;
+	const absolute = decoded.slice("file://".length).replace(/^\/+/, "");
+	return absolute === repoPath || absolute.endsWith(`/${repoPath}`);
+}
+
+/**
+ * Whether a flattened ingest name (`documentName`) is what a record's source flattens to. The name keeps the path under the
+ * repo and no repo or sha, so every trailing run of segments is tried: `file:///srv/docs/a.md` flattens to `docs__a.md`, and
+ * `file:///srv/xdocs/a.md` does not.
+ */
+export function flattenedNameMatches(sourceUrl: string, name: string): boolean {
+	const decoded = safeDecode(sourceUrl.trim());
+	if (!decoded.startsWith("file://")) return documentName(decoded) === name;
+	const absolute = decoded.slice("file://".length);
+	for (let start = 0; start < absolute.length; start += 1) {
+		if (start > 0 && absolute[start - 1] !== "/") continue;
+		if (documentName(absolute.slice(start)) === name) return true;
+	}
+	return false;
 }
 
 /**

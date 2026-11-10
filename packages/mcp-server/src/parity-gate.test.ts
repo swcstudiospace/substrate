@@ -5,6 +5,7 @@ import { parsePartArgs } from "../../../scripts/parity-gate.ts";
 import {
 	checkRecordMapping,
 	citationMatches,
+	flattenedNameMatches,
 	FROZEN_SAMPLE,
 	manifestRecords,
 	type ManifestRecord,
@@ -77,6 +78,33 @@ describe("Part A record mapping", () => {
 		changed.record = { ...changed.record, datasetId: "someone-else/repo" };
 		const result = mapping([changed, pair("doc-2", "docs/b.md")]);
 		expect(result.mismatches).toEqual([{ kind: "dataset-mismatch", id: "doc-1" }]);
+	});
+
+	test("a file:// source URL matches its corpus document by the trailing repo path", () => {
+		const record: ManifestRecord = { documentId: "doc-1", datasetId: REPO, sourceUrl: "file:///srv/checkout/docs/a.md", sha: SHA };
+		const result = mapping([{ record, document: { id: "doc-1", name: corpusDocumentName(REPO, "docs/a.md", SHA) } }, pair("doc-2", "docs/b.md")]);
+		expect(result).toEqual({ ok: true, records: 2, documents: 2, mismatches: [] });
+	});
+
+	test("a file:// source matches on whole path segments: a file under xdocs/ is a source-url mismatch", () => {
+		const record: ManifestRecord = { documentId: "doc-1", datasetId: REPO, sourceUrl: "file:///srv/checkout/xdocs/a.md", sha: SHA };
+		const result = mapping([{ record, document: { id: "doc-1", name: corpusDocumentName(REPO, "docs/a.md", SHA) } }, pair("doc-2", "docs/b.md")]);
+		expect(result.mismatches).toEqual([{ kind: "source-url-mismatch", id: "doc-1" }]);
+	});
+
+	test("a flattened ingest name confirms its record's path but not dataset or version, and a different path is a source mismatch", () => {
+		const record: ManifestRecord = { documentId: "doc-1", datasetId: REPO, sourceUrl: "file:///srv/checkout/docs/a.md", sha: SHA };
+		expect(flattenedNameMatches(record.sourceUrl, "docs__a.md")).toBe(true);
+		expect(flattenedNameMatches("docs/a.md", "docs__a.md")).toBe(true);
+		expect(flattenedNameMatches("file:///srv/checkout/docs/b.md", "docs__a.md")).toBe(false);
+		expect(flattenedNameMatches("file:///srv/checkout/xdocs/a.md", "docs__a.md")).toBe(false);
+		const matched = checkRecordMapping([record], [{ id: "doc-1", name: "docs__a.md" }], false);
+		expect(matched.mismatches).toEqual([{ kind: "unverifiable-name", id: "doc-1" }]);
+		const moved = checkRecordMapping([{ ...record, sourceUrl: "file:///srv/checkout/docs/b.md" }], [{ id: "doc-1", name: "docs__a.md" }], false);
+		expect(moved.mismatches).toEqual([
+			{ kind: "source-url-mismatch", id: "doc-1" },
+			{ kind: "unverifiable-name", id: "doc-1" },
+		]);
 	});
 
 	test("a stale plane document no record references is an extra mismatch", () => {
