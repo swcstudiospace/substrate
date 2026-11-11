@@ -65,6 +65,7 @@ change that raises a score above it fails the test.
 | `substrate-doctor` | A | 5.0 | 4.7 | `/var/lib/substrate` |
 | `substrate-docs-canary` | A | 5.0 | 4.7 | `/var/lib/substrate` |
 | `substrate-index-sweep` | A | 5.0 | 4.7 | `/var/lib/substrate` |
+| `substrate-cross-layer-reconcile` | A | 5.0 | 4.7 | none (read-only; `/var/lib/substrate` not opened) |
 | `substrate-alert@` | A | 5.0 | 4.7 | nothing |
 | `substrate-collector-grok` | A | 5.0 | 4.7 | `/var/lib/substrate` |
 | `substrate-index-archive` | A | 5.0 | 4.7 | `/var/lib/substrate`, `/mnt/index-archive` |
