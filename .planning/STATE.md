@@ -713,3 +713,10 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Behaviour changes to review: a rollback retry drains a session's parked event before writing (b023d2a0); a repeated forget with the same forget_id no longer writes a second memory.forget note (the note is re-written only when the plane deletions progressed); a claim is withdrawn only when its event is dead-lettered or refused outright, never when parked (e20f3634); the greptime client takes an injected fetch and the soak testkit closes its tick (067f094b).
 - Milestone audit and completion are NOT run: they need the owner's sign-off (q2).
 
+
+## Milestone pass re-run (2026-11-11, graph ut-9b281c843a-3add8e6f)
+
+- Stray folders: none remain under `~/src/repos/agent-substrate-*`. The four worktrees were removed earlier, after their unique work was ported (see Reconciliation record above). Nothing left to reconcile.
+- Code TODO/FIXME/HACK scan (`rg`, excluding `.git` and `.planning`): 5 hits, all placeholder literals (`lessons.test.ts:1319,1327`, `classify.test.ts:26`, `lesson-content.ts:35,57`, `memory-write.test.ts:434`). No open work-item markers in code. Planning-prose hits are tracked in `.planning/todo-inventory.md`.
+- Defaults applied for non-blocking questions: archived gaps accepted and recorded, not re-executed (phase 61 criterion 3 is operator-gated); quality scope limited to planned phases and TODOs.
+- Still open, needs a decision or operator step: phase 74 route/MCP exposure; phase 78 remaining layer pairs and unit install; phase 71 and 72 human review; phase 46, 61, 66, 67, 68 operator gates; milestone audit and completion (owner sign-off); draft PR #215 not merge-ready; `ship.autoMerge` true in the ultrathink config.
