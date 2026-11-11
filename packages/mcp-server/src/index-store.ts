@@ -2242,6 +2242,26 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * The `superseded_by` of each id that has a row: null for a row still in force, otherwise the forget marker or the
+	 * superseder. An id with no row is absent from the map. Read for the cross-layer reconcile; at most
+	 * {@link MAX_FORGET_LOOKUP_IDS} ids.
+	 */
+	async memoryMarkers(ids: readonly string[]): Promise<Map<string, string | null>> {
+		const distinct = [...new Set(ids)];
+		const markers = new Map<string, string | null>();
+		if (distinct.length === 0) return markers;
+		if (distinct.length > MAX_FORGET_LOOKUP_IDS) throw new Error(`memoryMarkers: ${distinct.length} ids exceeds the ${MAX_FORGET_LOOKUP_IDS}-id bound`);
+		return this.plane("memory.reconcile", async () => {
+			const rows = (await this.sql`
+				select id, superseded_by from memory_entries where id in ${this.sql(distinct)}`) as Array<Record<string, unknown>>;
+			for (const row of rows) {
+				markers.set(String(row.id), row.superseded_by === null || row.superseded_by === undefined ? null : String(row.superseded_by));
+			}
+			return markers;
+		});
+	}
+
+	/**
 	 * Which of these entry ids are forgotten (their `superseded_by` is a forget marker). The recall leg uses it to drop
 	 * a Hindsight hit whose document outlived the forget (a pending plane deletion): the text of a forgotten entry
 	 * must not be served from the plane while its deletion is retried. An id with no row, or one that is current or

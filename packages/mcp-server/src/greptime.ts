@@ -1288,6 +1288,15 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * One event with its payload, by id; null when no row has it. The cross-layer reconcile reads its plan record this way.
+	 */
+	async readEvent(id: string): Promise<Record<string, unknown> | null> {
+		if (!IDEMPOTENCY_ID.test(id)) throw new GreptimeError("refusing an event lookup for a malformed id");
+		const rows = await this.sql(`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "id" = ${this.q(id)} LIMIT 1`);
+		return rows[0] ?? null;
+	}
+
+	/**
 	 * The event's `event_ingest` record: the membership an hourly anchor reads (D27-10). Shared by
 	 * `insertEvent`, after its row landed, and by an idempotent replay that matched an existing
 	 * row (U5-4a), whose original attempt may have ended before this write.

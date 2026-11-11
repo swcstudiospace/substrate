@@ -970,6 +970,31 @@ The answer is never `stored: true` for a parked event.
   a refusal with `stored: false` and no buffering: the event's hash depends on a `prev` that cannot be read or is not
   yet safe to write.
 
+## Cross-layer reconcile (phase 78)
+
+`packages/mcp-server/src/cross-layer-reconcile.ts` checks that the ledger, the index and the cache agree about memory
+forgets. It is a function, not a unit: a timer or entry calls `runScheduledReconcile(deps, options)`. No systemd unit or
+flag is added.
+
+- **What is compared.** A `memory.forget` note names its forget id and its entry ids. For each named entry the index must
+  not still have it in force (`superseded_by` null), and the cache forget mark must be at or after the latest forget that
+  marked rows, while the mark is meant to live (`markTtlS`). An entry the index no longer has, or one another superseder
+  holds, is consistent with the forget. The index keeps no ledger event id, so no other pair has a precise key.
+- **What is judged.** Only notes older than `settleMs` (a write the telemetry buffer parked is not drift until it has had
+  its retries) and newer than `windowMs` ago. A full ledger page, a key set past `RECONCILE_MAX_KEYS`, a malformed forget
+  note or one that names fewer entries than it touched makes the read incomplete: it is reported, and nothing is planned.
+- **Read-only.** `runScheduledReconcile` writes nothing, clean or not. It returns per-layer counts and the first
+  mismatching key, or a failure naming the layer that could not be read.
+- **Repair is a separate, confirmed step.** `planRepair` writes one `reconcile.plan` note whose event id is the plan id,
+  and only for a complete read with something to repair. `applyRepair({ planId, confirm })` refuses unless `confirm`
+  equals `planId` and the stored plan's digest matches. It then marks only the planned entries (`markMemoryForgotten`,
+  which never overwrites another superseder), sets the cache mark if the plan has one, and records a `reconcile.applied`
+  note. A repeat apply marks nothing new. Repair follows the corpus delete rules (`corpus/plan.ts`): scope, never
+  overwrite, never remove (a forget keeps the row), planned keys only.
+- **Not covered.** An index forget with no ledger note is not judged: the index has no window to read it by. A repair
+  does not re-send a Hindsight document deletion; a plane document a repaired entry still holds is the plane's pending
+  work, as it is for a forget that stopped part way.
+
 ## Configuration
 
 Four variables, read from the environment and never from this repo:
