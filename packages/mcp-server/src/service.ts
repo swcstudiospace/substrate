@@ -42,14 +42,13 @@ import {
 	type BriefSection,
 } from "./brief-profile.ts";
 import {
-	CACHE_TTL,
 	DOCS_GENERATION_KEY,
-	FORGET_MARK_MARGIN_S,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	RECALL_GENERATION_KEY,
 	createReadThroughCache,
 	earliestRefreshAt,
+	forgetMarkTtlS,
 	graphGenerationKey,
 	type CacheHealth,
 	type CacheSample,
@@ -4268,7 +4267,7 @@ export class Substrate {
 				await Promise.all([
 					this.cache.bump(RECALL_GENERATION_KEY),
 					this.cache.bump(MEMORY_GENERATION_KEY),
-					this.cache.markForget(Math.max(this.config.briefSnapshotTtlS, CACHE_TTL["brief-snapshot"]) + FORGET_MARK_MARGIN_S),
+					this.cache.markForget(forgetMarkTtlS(this.config.briefSnapshotTtlS)),
 				]);
 			}
 		}

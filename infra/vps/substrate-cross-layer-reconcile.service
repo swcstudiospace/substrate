@@ -1,0 +1,42 @@
+[Unit]
+Description=Agent Substrate daily cross-layer reconcile (ledger, index and cache agree about memory forgets; read-only, substrate-cross-layer-reconcile.service)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A missing entry point skips the start silently instead of failing into the
+# timer's persistent backlog. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/mcp-server/src/cross-layer-reconcile-run.ts
+
+[Service]
+Type=oneshot
+# Same slice and oneshot ceiling as the other daily store jobs (README "Resource ceilings").
+Slice=substrate.slice
+MemoryMax=1G
+# No Restart=: a oneshot that exits non-zero already shows failed, and the timer
+# retries on the next tick. Exit 3 means the run found mismatches; the journal
+# names the first one. Exit 1 means a layer could not be read.
+WorkingDirectory=/opt/agent-substrate/current
+# Credentials only; nothing secret lives in the repo. The shared substrate.env
+# carries SUBSTRATE_PG_URL and the Greptime and cache settings the reconcile reads.
+EnvironmentFile=/etc/substrate/substrate.env
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/mcp-server/src/cross-layer-reconcile-run.ts --json
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-cross-layer-reconcile
+
+# It reads the ledger, the index and the cache. It writes none of them and no file.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# ProtectHome=false: ExecStart's bun lives under /root/.local, so ProtectHome=true would hide the interpreter.
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

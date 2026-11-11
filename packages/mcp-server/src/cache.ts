@@ -117,6 +117,14 @@ export const FORGET_MARK_KEY = `${CACHE_PREFIX}:gen:forgotten`;
 /** Seconds the mark outlives the longest saved brief it has to guard, so a snapshot saved just before a forget is covered to its last second. */
 export const FORGET_MARK_MARGIN_S = 300;
 
+/**
+ * The forget mark's lifetime for a `briefSnapshotTtlS`: the longest saved brief it has to guard, plus the margin. The one
+ * place it is computed, so `Substrate.memoryForget` and the cross-layer reconcile judge the same number.
+ */
+export function forgetMarkTtlS(briefSnapshotTtlS: number): number {
+	return Math.max(briefSnapshotTtlS, CACHE_TTL["brief-snapshot"]) + FORGET_MARK_MARGIN_S;
+}
+
 /** What the forget mark holds, as the cross-layer reconcile reads it. `disabled` when the cache is off. */
 export type ForgetMarkRead = { state: "disabled" } | { state: "absent" } | { state: "present"; atMs: number };
 
