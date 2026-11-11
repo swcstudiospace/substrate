@@ -709,7 +709,7 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Phase 77: landed (c26b1ef3, b9ecd215 durable via migrations 44 and 45). Operator gate: rehearsal of steps 44-46 on a restored dump.
 - Phase 78: memory.forget pair (46956358); scheduled entry and staged unit (a5d6bc03; not installed). Other pairs open.
 - Phase 66, 67, 68: repo-buildable gaps closed (5f705aab, ff7a7b9f, dfd7a2f0, 37e4063b, 45550f94). Still open: plane-score capture, per-process state bound, host hook install, live delivery, long-poll slot, worktree guard caller and merge-back lock.
-- Gates on the final tree: tsc clean, `bun run lint` clean, check:phase-close pass, test:py 341 pass. Full `bun test` is run once more after this entry; its result is in the milestone report.
-- Behaviour changes to review: a rollback retry drains a session's parked event before writing (b023d2a0); a repeated forget with the same forget_id no longer writes a second memory.forget note.
+- Gates measured at code commit 067f094b (this record is docs-only after it): `bun test` 11901 pass, 0 fail, 282 skip; `bunx tsc --noEmit` exit 0; `bun run lint` exit 0 (1727 files); `bun run check:phase-close` exit 0; `npm run test:py` 341 pass; `bun scripts/code-ratchet.ts --check` exit 0.
+- Behaviour changes to review: a rollback retry drains a session's parked event before writing (b023d2a0); a repeated forget with the same forget_id no longer writes a second memory.forget note (the note is re-written only when the plane deletions progressed); a claim is withdrawn only when its event is dead-lettered or refused outright, never when parked (e20f3634); the greptime client takes an injected fetch and the soak testkit closes its tick (067f094b).
 - Milestone audit and completion are NOT run: they need the owner's sign-off (q2).
 
