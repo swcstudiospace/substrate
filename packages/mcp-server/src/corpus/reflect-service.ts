@@ -14,6 +14,7 @@ import {
 	MAX_DIGEST_CHARS,
 	MAX_GAPS_LIMIT,
 	MAX_REFLECT_DIGESTS,
+	MAX_SHADOW_ROWS,
 	documentKey,
 	isSha256Hex,
 	isValidPath,
@@ -227,8 +228,9 @@ function documentOf(item: { repo: string; text: string; sha256: string }): Corpu
  * lock as any ingest), then retains each stored digest in Hindsight through the governance gate. The Hindsight legs share one
  * {@link REFLECT_RETAIN_BUDGET_MS} wall-clock budget and run {@link REFLECT_RETAIN_CONCURRENCY} at a time. A leg whose wait
  * would start after that budget is spent is still written and reported `hindsight:pending`, not waited. A refusal or an outage
- * becomes the digest's `reason` while its plane document stays stored. A digest the manifest already holds unchanged is not
- * retained again.
+ * becomes the digest's `reason` while its plane document stays stored. A digest the manifest already holds unchanged is not sent
+ * to the plane again, but it is retained again: a Hindsight leg that failed in an earlier run is owed, and the retain is idempotent
+ * (one governed entry per digest content, replaced in Hindsight by its document id), so a repeat delivers without a second row.
  */
 export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown, surface: Surface | null): Promise<ReflectReply<CorpusReflectResponse>> {
 	const gated = gateOf(deps, surface, true);
@@ -264,13 +266,13 @@ export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown,
 		}
 	}
 
-	const stored = parsed.items.flatMap((item) => {
+	const retainable = parsed.items.flatMap((item) => {
 		if (!item.ready) return [];
 		const outcome = ingested.get(item.repo);
-		if (outcome?.status !== "ingested" && outcome?.status !== "updated") return [];
-		return [{ repo: item.repo, text: item.text }];
+		if (outcome?.status !== "ingested" && outcome?.status !== "updated" && outcome?.status !== "unchanged") return [];
+		return [{ repo: item.repo, text: item.text, sha256: item.sha256 }];
 	});
-	const retained = await retainStored(deps, stored, surface, sessionId);
+	const retained = await retainStored(deps, retainable, surface);
 
 	const results: CorpusReflectResultItem[] = [];
 	for (const item of parsed.items) {
@@ -280,23 +282,37 @@ export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown,
 		}
 		const outcome = ingested.get(item.repo);
 		if (outcome === undefined) results.push({ repo: item.repo, status: "failed", reason: "manifest-unavailable" });
-		else if (outcome.status === "unchanged") results.push({ repo: item.repo, status: "unchanged" });
 		else if (outcome.status === "refused") results.push({ repo: item.repo, status: "refused", ...(outcome.reason === undefined ? {} : { reason: outcome.reason }) });
-		else if (outcome.status !== "ingested" && outcome.status !== "updated") results.push({ repo: item.repo, status: "failed", ...(outcome.reason === undefined ? {} : { reason: outcome.reason }) });
+		else if (outcome.status !== "ingested" && outcome.status !== "updated" && outcome.status !== "unchanged") results.push({ repo: item.repo, status: "failed", ...(outcome.reason === undefined ? {} : { reason: outcome.reason }) });
 		else {
 			const leg = retained.get(item.repo) ?? { ok: false as const, reason: "pending" };
-			const reason = leg.ok ? (leg.truncated === true ? "digest:truncated" : undefined) : `hindsight:${redact(leg.reason).slice(0, RETAIN_REASON_CHARS)}`;
-			results.push({ repo: item.repo, status: "stored", ...(reason === undefined ? {} : { reason }) });
+			const reason = legReasonOf(leg);
+			const status = outcome.status === "unchanged" ? "unchanged" : "stored";
+			results.push({ repo: item.repo, status, ...(reason === undefined ? {} : { reason }) });
 		}
 	}
 	return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, results, manifestVersion } };
 }
 
+/** The closed reason a digest's Hindsight leg adds to its result, or none when the leg landed in full. */
+function legReasonOf(leg: RetainOutcome): string | undefined {
+	if (!leg.ok) return `hindsight:${redact(leg.reason).slice(0, RETAIN_REASON_CHARS)}`;
+	return leg.truncated === true ? "digest:truncated" : undefined;
+}
+
 /**
- * Retains stored digests at {@link REFLECT_RETAIN_CONCURRENCY}, passing each the ms still left in the request-wide budget
- * when its wait starts. A later digest whose wait would start at or after the deadline is given `waitMs: 0`.
+ * The memory session of one digest's retain: a function of its content, so a repeat of the same digest computes the same governed
+ * write key and replays it instead of writing a second entry.
  */
-async function retainStored(deps: ReflectServiceDeps, items: ReadonlyArray<{ repo: string; text: string }>, surface: Surface, sessionId: string): Promise<Map<string, RetainOutcome>> {
+export function digestSessionOf(sha256: string): string {
+	return `corpus-reflect:digest:${sha256}`;
+}
+
+/**
+ * Retains digests at {@link REFLECT_RETAIN_CONCURRENCY}, passing each the ms still left in the request-wide budget when its wait
+ * starts. A later digest whose wait would start at or after the deadline is given `waitMs: 0`.
+ */
+async function retainStored(deps: ReflectServiceDeps, items: ReadonlyArray<{ repo: string; text: string; sha256: string }>, surface: Surface): Promise<Map<string, RetainOutcome>> {
 	const now = deps.now ?? Date.now;
 	const deadline = now() + REFLECT_RETAIN_BUDGET_MS;
 	const retained = new Map<string, RetainOutcome>();
@@ -308,7 +324,7 @@ async function retainStored(deps: ReflectServiceDeps, items: ReadonlyArray<{ rep
 			const item = items[index];
 			if (item === undefined) return;
 			const waitMs = Math.max(0, deadline - now());
-			retained.set(item.repo, await deps.retainDigest({ repo: item.repo, text: item.text, surface, sessionId, waitMs }));
+			retained.set(item.repo, await deps.retainDigest({ repo: item.repo, text: item.text, surface, sessionId: digestSessionOf(item.sha256), waitMs }));
 		}
 	};
 	const workers = Math.min(REFLECT_RETAIN_CONCURRENCY, items.length);
@@ -328,7 +344,8 @@ export function gapsLimitOf(raw: string | null): number {
 /**
  * `GET /corpus/gaps`: the queries whose best answer in the last {@link GAP_WINDOW_DAYS} days was no citation or one below
  * `SUBSTRATE_DOCS_GAP_SCORE`, aggregated by query hash, most searched first. A search the plane could not answer is not a gap.
- * `truncated` says more gaps exist than `limit` returned.
+ * `truncated` says more gaps exist than `limit` returned. `shadow` is the re-rank's shadow report over the same window: what
+ * `SUBSTRATE_DOCS_RERANK=shadow` would have moved, with the searches that would have moved most.
  */
 export async function corpusGapsReply(deps: ReflectServiceDeps, rawLimit: string | null, surface: Surface | null): Promise<ReflectReply<CorpusGapsResponse>> {
 	const gated = gateOf(deps, surface, false);
@@ -337,8 +354,15 @@ export async function corpusGapsReply(deps: ReflectServiceDeps, rawLimit: string
 	if (reflect === null) return refusal(503, "corpus.index-unavailable");
 	const limit = gapsLimitOf(rawLimit);
 	try {
-		const rows = await reflect.gaps({ gapScore: deps.gapScore, days: GAP_WINDOW_DAYS, limit: limit + 1 });
-		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, gaps: rows.slice(0, limit), truncated: rows.length > limit } };
+		const [rows, shadow] = await Promise.all([
+			reflect.gaps({ gapScore: deps.gapScore, days: GAP_WINDOW_DAYS, limit: limit + 1 }),
+			reflect.shadowReport({ days: GAP_WINDOW_DAYS, limit: MAX_SHADOW_ROWS }),
+		]);
+		return {
+			ok: true,
+			status: 200,
+			body: { protocol: CORPUS_PROTOCOL, gaps: rows.slice(0, limit), truncated: rows.length > limit, shadow: { days: GAP_WINDOW_DAYS, ...shadow } },
+		};
 	} catch {
 		return refusal(503, "corpus.index-unavailable");
 	}

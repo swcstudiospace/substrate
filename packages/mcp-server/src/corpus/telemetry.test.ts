@@ -125,6 +125,7 @@ describe("RetrievalRecorder", () => {
 			sweepRetrievals: async () => 0,
 			upsertFeedback: async () => undefined,
 			feedbackCounts: async () => new Map(),
+			shadowReport: async () => ({ searches: 0, movedSearches: 0, moved: 0, largest: [] }),
 			gaps: async () => [],
 		};
 		const { recorder: rec } = recorder(throwing);

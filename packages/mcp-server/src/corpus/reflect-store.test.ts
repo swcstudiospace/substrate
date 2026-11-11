@@ -37,6 +37,7 @@ describeLive("the reflect tables against a live index", () => {
 		if (!PG_URL) return;
 		await cleanup`delete from corpus_retrievals where surface = ${MARKER}`.catch(() => undefined);
 		await cleanup`delete from corpus_feedback where document_key like ${`${MARKER}%`}`.catch(() => undefined);
+		await cleanup`delete from corpus_documents where repo like ${`${MARKER}%`}`.catch(() => undefined);
 		await cleanup.close().catch(() => undefined);
 		await index.close().catch(() => undefined);
 	});
@@ -81,24 +82,74 @@ describeLive("the reflect tables against a live index", () => {
 		expect(recent[0]?.n).toBe(1);
 	});
 
+	/** A manifest row for one document of the marker's repository, so its votes are counted. */
+	async function activeDoc(repo: string, path: string, state: "active" | "tombstoned" = "active"): Promise<void> {
+		await cleanup`
+			insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, state)
+			values (${repo}, ${path}, 'doc', 1, ${"0".repeat(64)}, 1, 'fs', ${state})
+			on conflict (repo, path) do nothing`;
+	}
+
 	test("feedback is one verdict per document and session, the latest wins, and the counts are grouped per document", async () => {
-		const doc = `${MARKER}/app:docs/a.md`;
-		const other = `${MARKER}/app:docs/b.md`;
+		const repo = `${MARKER}/app`;
+		const doc = `${repo}:docs/a.md`;
+		const other = `${repo}:docs/b.md`;
+		await activeDoc(repo, "docs/a.md");
+		await activeDoc(repo, "docs/b.md");
 		await store.upsertFeedback({ documentKey: doc, sessionId: "omp/s1", verdict: "stale", surface: "omp" });
 		await store.upsertFeedback({ documentKey: doc, sessionId: "omp/s1", verdict: "helpful", surface: "omp" });
 		await store.upsertFeedback({ documentKey: doc, sessionId: "omp/s2", verdict: "stale", surface: "omp" });
 		await store.upsertFeedback({ documentKey: doc, sessionId: "claude-code/s1", verdict: "wrong", surface: "claude-code" });
 		await store.upsertFeedback({ documentKey: other, sessionId: "omp/s1", verdict: "duplicate", surface: "omp" });
 		const counts = await store.feedbackCounts(5000);
-		expect(counts.get(doc)).toEqual({ helpful: 1, unhelpful: 0, stale: 1, wrong: 1, duplicate: 0 });
+		// omp counts once, with its latest verdict (s2's stale); claude-code's wrong is its own vote.
+		expect(counts.get(doc)).toEqual({ helpful: 0, unhelpful: 0, stale: 1, wrong: 1, duplicate: 0 });
 		expect(counts.get(other)).toEqual({ helpful: 0, unhelpful: 0, stale: 0, wrong: 0, duplicate: 1 });
 		const rows = await cleanup`select count(*)::int as n from corpus_feedback where document_key = ${doc}`;
 		expect(rows[0]?.n).toBe(3);
 	});
 
+	test("one surface posting under many sessions counts once: its latest verdict, never the sum", async () => {
+		const doc = `${MARKER}/stack:docs/x.md`;
+		await activeDoc(`${MARKER}/stack`, "docs/x.md");
+		for (const session of ["a", "b", "c", "d"]) await store.upsertFeedback({ documentKey: doc, sessionId: `omp/${session}`, verdict: "stale", surface: "omp" });
+		expect((await store.feedbackCounts(5000)).get(doc)).toEqual({ helpful: 0, unhelpful: 0, stale: 1, wrong: 0, duplicate: 0 });
+	});
+
+	test("a document with no active manifest row is not counted, so its votes cannot take a slot of the bound", async () => {
+		const tombstoned = `${MARKER}/gone:docs/t.md`;
+		const absent = `${MARKER}/gone:docs/absent.md`;
+		await activeDoc(`${MARKER}/gone`, "docs/t.md", "tombstoned");
+		await store.upsertFeedback({ documentKey: tombstoned, sessionId: "omp/s1", verdict: "wrong", surface: "omp" });
+		await store.upsertFeedback({ documentKey: absent, sessionId: "omp/s1", verdict: "wrong", surface: "omp" });
+		const counts = await store.feedbackCounts(5000);
+		expect(counts.has(tombstoned)).toBe(false);
+		expect(counts.has(absent)).toBe(false);
+	});
+
 	test("the counts are bounded to the most recently voted documents", async () => {
 		const bounded = await store.feedbackCounts(1);
 		expect(bounded.size).toBe(1);
+	});
+
+	test("the shadow report counts the searches that carry a shadow note and lists the largest moves, never degraded ones", async () => {
+		await cleanup`delete from corpus_retrievals where surface = ${MARKER}`;
+		const shadow = (moved: number, order: string[]) => ({ mode: "shadow" as const, order, moved });
+		await store.appendRetrieval(row("shadow-none", { rerank: shadow(0, [`${MARKER}/app:docs/a.md`]) }));
+		await store.appendRetrieval(row("shadow-small", { rerank: shadow(1, [`${MARKER}/app:docs/b.md`]) }));
+		await store.appendRetrieval(row("shadow-large", { queryText: null, rerank: shadow(4, [`${MARKER}/app:docs/c.md`, `${MARKER}/app:docs/d.md`]) }));
+		await store.appendRetrieval(row("shadow-down", { degraded: true, rerank: shadow(9, []) }));
+		await store.appendRetrieval(row("unshadowed"));
+		const report = await store.shadowReport({ days: 30, limit: 5000 });
+		const mine = report.largest.filter((entry) => entry.queryHash.startsWith(MARKER));
+		expect(mine.map((entry) => ({ hash: entry.queryHash, moved: entry.moved, order: entry.order, text: entry.text }))).toEqual([
+			{ hash: `${MARKER}-shadow-large`, moved: 4, order: [`${MARKER}/app:docs/c.md`, `${MARKER}/app:docs/d.md`], text: null },
+			{ hash: `${MARKER}-shadow-small`, moved: 1, order: [`${MARKER}/app:docs/b.md`], text: "text of shadow-small" },
+		]);
+		expect(report.searches).toBeGreaterThanOrEqual(3);
+		expect(report.movedSearches).toBeGreaterThanOrEqual(2);
+		expect(report.moved).toBeGreaterThanOrEqual(5);
+		expect((await store.shadowReport({ days: 30, limit: 1 })).largest).toHaveLength(1);
 	});
 
 	test("a verdict outside the closed list is refused by the table", async () => {

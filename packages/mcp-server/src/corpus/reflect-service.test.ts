@@ -22,6 +22,7 @@ import {
 	parseReflectRequest,
 	REFLECT_RETAIN_BUDGET_MS,
 	REFLECT_RETAIN_CONCURRENCY,
+	digestSessionOf,
 } from "./reflect-service.ts";
 import { FakePlane, FakeStore, makeRow, sha256Hex } from "./testkit.ts";
 
@@ -211,13 +212,33 @@ describe("corpusReflectReply", () => {
 		expect(reply.manifestVersion).toBeGreaterThan(0);
 	});
 
-	test("a repeat of the same digest is unchanged: nothing is sent to the plane and nothing is retained again", async () => {
+	test("a repeat of the same digest is unchanged: nothing is sent to the plane, and it is retained again under the same memory session", async () => {
 		const { plane, retained, deps } = world();
 		await corpusReflectReply(deps, request(digest(REPO, text)), "omp");
 		const again = ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
 		expect(again.results).toEqual([{ repo: REPO, status: "unchanged" }]);
 		expect(plane.batches).toHaveLength(1);
-		expect(retained).toHaveLength(1);
+		expect(retained).toHaveLength(2);
+		expect(retained[1]?.text).toBe(text);
+	});
+
+	test("a Hindsight leg that failed is owed: the next run of the unchanged digest retains it again and reports the leg only while it is still owed", async () => {
+		let answer: RetainOutcome = { ok: false, reason: "memory-write-failed" };
+		const { deps, retained } = world({}, () => answer);
+		const first = ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+		expect(first.results).toEqual([{ repo: REPO, status: "stored", reason: "hindsight:memory-write-failed" }]);
+		answer = { ok: true };
+		const second = ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+		expect(second.results).toEqual([{ repo: REPO, status: "unchanged" }]);
+		expect(retained).toHaveLength(2);
+		answer = { ok: false, reason: "pending" };
+		const third = ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
+		expect(third.results).toEqual([{ repo: REPO, status: "unchanged", reason: "hindsight:pending" }]);
+	});
+
+	test("digests retain under a session of their content: two repeats share one, a changed digest has its own", () => {
+		expect(digestSessionOf(sha256Hex(text))).toBe(digestSessionOf(sha256Hex(text)));
+		expect(digestSessionOf(sha256Hex(text))).not.toBe(digestSessionOf(sha256Hex(`${text}\n- open`)));
 	});
 
 	test("a changed digest replaces the plane document and is retained again", async () => {
@@ -457,6 +478,36 @@ describe("gaps", () => {
 		expect(reply.truncated).toBe(true);
 		const all = ok(await corpusGapsReply(deps, "5", "omp"));
 		expect(all.gaps.find((gap) => gap.queryHash === "a")?.text).toBeNull();
+	});
+
+	test("the reply carries the shadow report over the window: what the re-rank would have moved, and the searches that would have moved most", async () => {
+		const { reflect, deps } = world();
+		const shadowed = (queryHash: string, moved: number, over: { degraded?: boolean } = {}) => ({
+			...row(queryHash, 0.9, over),
+			rerank: { mode: "shadow" as const, order: [`repo:docs/${queryHash}.md`, "repo:docs/other.md"], moved },
+		});
+		await reflect.appendRetrieval(shadowed("none-moved", 0));
+		await reflect.appendRetrieval(shadowed("small", 1));
+		await reflect.appendRetrieval(shadowed("large", 4));
+		await reflect.appendRetrieval(shadowed("down", 9, { degraded: true }));
+		await reflect.appendRetrieval(row("unshadowed", 0.9));
+		const shadow = ok(await corpusGapsReply(deps, null, "omp")).shadow;
+		expect(shadow).toEqual({
+			days: 30,
+			searches: 3,
+			movedSearches: 2,
+			moved: 5,
+			largest: [
+				{ queryHash: "large", text: "text of large", at: expect.any(String), moved: 4, order: ["repo:docs/large.md", "repo:docs/other.md"] },
+				{ queryHash: "small", text: "text of small", at: expect.any(String), moved: 1, order: ["repo:docs/small.md", "repo:docs/other.md"] },
+			],
+		});
+	});
+
+	test("with no shadow note the report is all zeros and lists nothing", async () => {
+		const { reflect, deps } = world();
+		await reflect.appendRetrieval(row("plain", 0.9));
+		expect(ok(await corpusGapsReply(deps, null, "omp")).shadow).toEqual({ days: 30, searches: 0, movedSearches: 0, moved: 0, largest: [] });
 	});
 
 	test("a lower gap score shrinks the report", async () => {

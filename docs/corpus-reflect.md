@@ -18,10 +18,11 @@ exactly as before.
 | Retrieval row (`corpus_retrievals`) | `docs_search`, when `SUBSTRATE_DOCS_TELEMETRY=on` | a hash of the query, a capped and redacted copy of its text (none when the redactor found a secret in it), the backend, the keys and scores of the returned documents, the best score, whether the plane answered, and in shadow mode the re-rank note | `SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS` days |
 | Feedback verdict (`corpus_feedback`) | `docs_feedback` (MCP tool and REST route) | one verdict per session and document: `helpful`, `unhelpful`, `stale`, `wrong` or `duplicate`; a later verdict of the same session for the same document replaces the earlier one | not swept by the retrieval retention |
 | Supersession | scan and manifest | the `superseded_by` column of `corpus_documents` and a computed map (see below) | with the manifest row |
-| Digest | `substrate corpus reflect` | one document per repository at the virtual path `.substrate/digest.md` (kind `digest`, tier 1) | replaced when its sha256 changes |
+| Digest | `substrate corpus reflect` | one document per repository at the virtual path `.substrate/digest.md` (kind `digest`, tier 1), and its Hindsight entry | the plane document is replaced when its sha256 changes; the Hindsight entry is retained on every run that holds the digest |
 
 A retrieval row never holds the text of a document, and a verdict is idempotent: the same session giving the same
-verdict for the same document twice changes nothing.
+verdict for the same document twice changes nothing. A surface counts once per document in the feedback counts: its latest
+verdict, whichever of its sessions gave it. One surface cannot reach the stale threshold by posting under many session ids.
 
 ## Authority: one number per document
 
@@ -123,8 +124,8 @@ A section with nothing to say reads `- none found`. Every line is cut to a fixed
 20,000 characters the server accepts. STATE lists decisions as they were made, so the newest are its last bullets.
 
 The text carries no timestamp (the `last_updated` of STATE is not copied), so a digest is byte-identical while its sources
-are, and the server stores nothing for a run that changed nothing (`unchanged`). Its key is `corpus-digest:<repo>` and its
-sha256 covers exactly the text that is sent.
+are, and the server sends nothing to the docs plane for a run that changed nothing (`unchanged`). Its key is
+`corpus-digest:<repo>` and its sha256 covers exactly the text that is sent.
 
 A repository is digested only when it has a readable `.planning/STATE.md`. A planning file that exists but cannot be read
 (empty, too large, binary, a symlink) leaves its repository out of the run with a closed reason such as `roadmap-empty`,
@@ -133,7 +134,10 @@ so a digest is never built from half of its sources and stored over a complete o
 
 On the server each digest goes into the docs plane as a document of kind `digest` and is retained in Hindsight as a
 governed `fact` entry at repository scope with its deterministic key, replacing the earlier one. Only accepted entries
-reach Hindsight (`docs/memory-governance.md`).
+reach Hindsight (`docs/memory-governance.md`). Every run retains every digest the manifest holds, including an unchanged one, so
+a Hindsight leg that failed in an earlier run is delivered by the next run. A repeat of unchanged content computes the same
+governed write key and replays it, so it adds no second entry; a result reports `hindsight:<reason>` on a `stored` or
+`unchanged` digest for as long as its leg is still owed.
 
 ## Gaps: the questions the corpus could not answer
 
@@ -148,6 +152,11 @@ character in text that came from the server before it prints it. `--limit N` cap
 of 200 is lowered with a message.
 
 Gaps need `SUBSTRATE_DOCS_TELEMETRY=on`: without retrieval rows the list is empty.
+
+The same `GET /corpus/gaps` reply carries the shadow report over the same 30 days in its `shadow` field: `days`, `searches` (the
+searches with a shadow note), `movedSearches`, `moved`, and `largest`, the at most 20 searches that would have moved most, each
+with its `queryHash`, `text`, `at`, `moved` and `order` (the keys `on` would have answered in, at most ten). It reads zeros while
+`SUBSTRATE_DOCS_RERANK` is not `shadow` or telemetry is off. The `shadow` field is absent only from a reply of an older server.
 
 ## The CLI
 
@@ -184,13 +193,15 @@ citation by at most half of its score: the plane's relevance still decides, and 
 doubtful. Only a citation of a document the manifest holds as an active row is touched; every other citation keeps its place.
 While the re-rank is `on`, each corpus citation it knows also carries `stale` and `superseded_by` (the key of the document that
 replaces it, or null); in `off` and `shadow` the answer carries neither. A document is `stale` when a document supersedes it,
-or when at least three readers called it stale and more did so than called it helpful.
+or when at least three surfaces called it stale and more did so than called it helpful (each surface counted once, see above).
+The counts cover only documents that hold an active manifest row, up to the manifest's own read cap of 100,000 documents.
 
 ## Reading a shadow report
 
 `SUBSTRATE_DOCS_RERANK=shadow` leaves the answer exactly as the plane gave it and records, in the retrieval row of each
 search, the order `on` would have answered and how many positions would change. It needs `SUBSTRATE_DOCS_TELEMETRY=on` to be
-recorded at all. To decide whether to turn the re-rank on:
+recorded at all. Read it from the `shadow` field of `GET /corpus/gaps` (see Gaps): the totals, then `largest`. To decide whether
+to turn the re-rank on:
 
 1. Count the searches whose `moved` is 0. Most of them should be: authority only breaks near ties.
 2. Read the searches with a large `moved`. The documents that rose should be current tier 1 documents or ones readers

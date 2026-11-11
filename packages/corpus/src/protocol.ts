@@ -319,7 +319,10 @@ export type ReflectStatus = (typeof REFLECT_STATUSES)[number];
 export interface CorpusReflectResultItem {
 	repo: string;
 	status: ReflectStatus;
-	/** A closed reason code for `refused` and `failed`. */
+	/**
+	 * A closed reason code for `refused` and `failed`. Also set on `stored` and `unchanged` when the digest's Hindsight leg did not
+	 * land in this run (`hindsight:<reason>`, or `digest:truncated`), so the caller sees the leg that is still owed.
+	 */
 	reason?: string | undefined;
 }
 
@@ -344,10 +347,41 @@ export interface CorpusGap {
 	best: number | null;
 }
 
+/** One search whose re-rank the shadow mode measured: how many corpus positions `on` would have moved it. */
+export interface CorpusShadowRow {
+	/** The hash of the query, as the gap report keys it. */
+	queryHash: string;
+	/** The redacted, capped text of the query, when the server kept it. */
+	text: string | null;
+	at: string;
+	/** How many corpus positions `on` would have moved. */
+	moved: number;
+	/** The keys of the corpus citations in the order `on` would have answered them, at most ten. */
+	order: string[];
+}
+
+/** The shadow report over the gap window: what `SUBSTRATE_DOCS_RERANK=shadow` recorded, and the searches that would have moved most. */
+export interface CorpusShadowReport {
+	days: number;
+	/** Searches of the window that carry a shadow note. */
+	searches: number;
+	/** Of those, the searches whose re-rank would have moved at least one position. */
+	movedSearches: number;
+	/** The positions `on` would have moved, summed over the window. */
+	moved: number;
+	/** The searches that would have moved most, most moved first, at most {@link MAX_SHADOW_ROWS}. */
+	largest: CorpusShadowRow[];
+}
+
+/** The most shadow rows one `GET /corpus/gaps` answers. */
+export const MAX_SHADOW_ROWS = 20;
+
 export interface CorpusGapsResponse {
 	protocol: typeof CORPUS_PROTOCOL;
 	gaps: CorpusGap[];
 	truncated: boolean;
+	/** The shadow report over the same window; the server always sets it (zeros when the re-rank or the telemetry was off). Optional so a stub or an older server still parses. */
+	shadow?: CorpusShadowReport | undefined;
 }
 
 /**

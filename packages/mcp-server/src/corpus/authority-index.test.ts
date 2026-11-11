@@ -90,9 +90,18 @@ describe("AuthorityIndex lookup", () => {
 		const { store, reflect, index } = world();
 		seed(store, "docs/doubted.md");
 		const reflectStore = defined(reflect, "the reflect store");
-		for (const session of ["a", "b", "c"]) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: session, verdict: "stale", surface: "omp" });
+		for (const surface of ["omp", "cursor", "claude-code"] as const) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: `${surface}/s`, verdict: "stale", surface });
 		const lookup = defined(await index.lookup(), "the lookup");
 		expect(lookup(documentKey(REPO, "docs/doubted.md"))).toMatchObject({ stale: true, supersededBy: null });
+	});
+
+	test("one surface cannot mark a document stale by posting under many session ids: it counts once, with its latest verdict", async () => {
+		const { store, reflect, index } = world();
+		seed(store, "docs/doubted.md");
+		const reflectStore = defined(reflect, "the reflect store");
+		for (const session of ["a", "b", "c", "d"]) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: `omp/${session}`, verdict: "stale", surface: "omp" });
+		const lookup = defined(await index.lookup(), "the lookup");
+		expect(lookup(documentKey(REPO, "docs/doubted.md"))).toMatchObject({ stale: false });
 	});
 });
 
@@ -195,7 +204,7 @@ describe("AuthorityIndex clears racing loads", () => {
 		};
 		const racing = index.lookup();
 		await counted.promise;
-		for (const session of ["a", "b", "c"]) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: session, verdict: "stale", surface: "omp" });
+		for (const surface of ["omp", "cursor", "claude-code"] as const) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: `${surface}/s`, verdict: "stale", surface });
 		index.invalidateFeedback();
 		gate.resolve();
 		await racing;
@@ -219,7 +228,7 @@ describe("AuthorityIndex clears racing loads", () => {
 		};
 		const first = index.lookup();
 		await counted.promise;
-		for (const session of ["a", "b", "c"]) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: session, verdict: "stale", surface: "omp" });
+		for (const surface of ["omp", "cursor", "claude-code"] as const) await reflectStore.upsertFeedback({ documentKey: documentKey(REPO, "docs/doubted.md"), sessionId: `${surface}/s`, verdict: "stale", surface });
 		index.invalidateFeedback();
 		// Joins the read the clear outdated. It must not answer until the follow-up has the votes.
 		const joined = index.lookup();

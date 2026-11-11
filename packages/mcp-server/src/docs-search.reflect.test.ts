@@ -172,6 +172,30 @@ describe("SUBSTRATE_DOCS_RERANK", () => {
 		expect(reply.rerank).toEqual({ applied: true, moved: 2 });
 	});
 
+	test("a verdict stored through docs_feedback reaches the next answer: a document three surfaces called stale falls below the one they did not", async () => {
+		const built = world({ SUBSTRATE_DOCS_RERANK: "on" }, MIXED);
+		expect(titles(await ask(built))).toEqual(["plan.md", `${REPO}:docs/c.md`, `${REPO}:docs/b.md`, `${REPO}:docs/new.md`, `${REPO}:docs/old.md`, "notes.md"]);
+		for (const surface of ["omp", "cursor", "claude-code"] as const) {
+			const stored = await built.substrate.docsFeedback({ document: key("docs/c.md"), verdict: "stale", session_id: "reader" }, surface);
+			expect(stored).toMatchObject({ ok: true, body: { stored: true } });
+		}
+		const reply = await ask(built);
+		expect(titles(reply)).toEqual(["plan.md", `${REPO}:docs/b.md`, `${REPO}:docs/c.md`, `${REPO}:docs/new.md`, `${REPO}:docs/old.md`, "notes.md"]);
+		expect(reply.chunks[2]).toMatchObject({ stale: true, superseded_by: null });
+		expect(reply.chunks[1]).toMatchObject({ stale: false, superseded_by: null });
+	});
+
+	test("one surface posting the same verdict under many sessions does not reach the answer: its order and flags stay as they were", async () => {
+		const built = world({ SUBSTRATE_DOCS_RERANK: "on" }, MIXED);
+		const before = await ask(built);
+		for (const session of ["s1", "s2", "s3", "s4"]) {
+			await built.substrate.docsFeedback({ document: key("docs/c.md"), verdict: "stale", session_id: session }, "omp");
+		}
+		const after = await ask(built);
+		expect(titles(after)).toEqual(titles(before));
+		expect(after.chunks[1]).toMatchObject({ stale: false, superseded_by: null });
+	});
+
 	test("on keeps the plane's order between documents of equal authority and equal score, and reports no moved position", async () => {
 		const reply = await ask(world({ SUBSTRATE_DOCS_RERANK: "on" }, [corpusChunk("docs/t2.md", 0.7), corpusChunk("docs/t1.md", 0.7)]));
 		expect(titles(reply)).toEqual([`${REPO}:docs/t2.md`, `${REPO}:docs/t1.md`]);
