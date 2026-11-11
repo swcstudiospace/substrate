@@ -6,7 +6,7 @@ import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { type CommandResult, type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
 import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, type TestRepo, tempDir, write } from "../../../fleet/src/testkit.ts";
 import type { EventInput } from "../../../mcp-server/src/types.ts";
-import { httpClaimsLookup, httpReportPoster, runWorktree, type PostOutcome, type WorktreeDeps } from "./command.ts";
+import { httpClaimsLookup, httpRegistryLister, httpReportPoster, parseRegistryBody, runWorktree, type PostOutcome, type RegistryOutcome, type RegistryRow, type WorktreeDeps } from "./command.ts";
 import type { ClaimsLookup } from "../../../fleet/src/claims.ts";
 import { parseWorktreeArgs } from "./args.ts";
 
@@ -47,6 +47,7 @@ function harness(overrides: Partial<WorktreeDeps> = {}, env: Record<string, stri
 			return { ok: true, stored: report.worktrees.length };
 		},
 		claims: async () => ({ ok: true, claims: [] }),
+		listRegistry: async () => ({ ok: true, rows: [], truncated: false }),
 		...overrides,
 	};
 	return { deps, out, err, events, reports };
@@ -1315,6 +1316,22 @@ describe("merge-back", () => {
 		expect(h.events).toEqual([]);
 	});
 
+	test("a repository with no origin is refused: a commit merged into its local main was never pushed, and nothing is recorded", async () => {
+		const repo = makeRepo();
+		git(repo.dir, ["remote", "remove", "origin"]);
+		const root = join(tempDir(), "local-wts");
+		mkdirSync(root);
+		const path = addWorktree(repo, root, "local-only");
+		commit(path, "l.txt", "l\n");
+		git(repo.dir, ["merge", "-q", "--ff-only", "local-only"]);
+		const h = harness({}, withRoot(root));
+		expect(await runWorktree(["merge-back", "--json", path], h.deps)).toBe(1);
+		const result: MergeBackJson = JSON.parse(h.out.join(""));
+		expect(result.recorded).toEqual([]);
+		expect(reasonsOf(result, path)).toContain("head is not pushed");
+		expect(h.events).toEqual([]);
+	});
+
 	test("the parser takes paths for merge-back alone, and it needs a path and a configured root", async () => {
 		expect(parseWorktreeArgs(["merge-back", "/a", "/b", "--execute"])).toMatchObject({ ok: true, args: { command: "merge-back", positional: ["/a", "/b"], execute: true } });
 		expect(parseWorktreeArgs(["merge-back", "--root", "/x"]).ok).toBe(false);
@@ -1456,5 +1473,124 @@ describe("merge-back", () => {
 		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(0);
 		expect(h.events).toHaveLength(1);
 		expect(h.events[0]).toMatchObject({ payload: { branch: "merged-a", merged_via: "default-branch" } });
+	});
+});
+
+describe("scan --report --keep-sessions", () => {
+	/** The rows that went out with a session, as [path, session], in path order. */
+	function attributed(h: Harness): Array<[string, string]> {
+		const rows = defined(h.reports[0], "the report").worktrees;
+		return rows.flatMap((wt): Array<[string, string]> => (wt.session_id === undefined ? [] : [[wt.path, wt.session_id]])).sort(([a], [b]) => a.localeCompare(b));
+	}
+	const listing = (rows: RegistryRow[], truncated = false): RegistryOutcome => ({ ok: true, rows, truncated });
+	const holding = (session: string): ClaimsLookup => ({ ok: true, claims: [{ node_id: "node-0", holder: { surface: "hermes", session_id: session }, expires_at: "2026-10-29T13:00:00.000Z" }] });
+
+	test("the flag is a scan flag that needs --report", () => {
+		expect(parseWorktreeArgs(["scan", "--report", "--keep-sessions"])).toMatchObject({ ok: true, args: { keepSessions: true, report: true } });
+		expect(parseWorktreeArgs(["prune", "--keep-sessions"]).ok).toBe(false);
+	});
+
+	test("without the flag the registry is never read, and its sessions are cleared as before", async () => {
+		const f = fleet();
+		let reads = 0;
+		const h = harness({ listRegistry: async () => ((reads += 1), listing([{ path: f.review, session_id: "sess-kept" }])) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report"], h.deps)).toBe(0);
+		expect(reads).toBe(0);
+		expect(attributed(h)).toEqual([]);
+	});
+
+	test("--keep-sessions without --report is a usage error and reads nothing", async () => {
+		const f = fleet();
+		let reads = 0;
+		const h = harness({ listRegistry: async () => ((reads += 1), listing([])) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--keep-sessions"], h.deps)).toBe(2);
+		expect(h.err.join("")).toContain("--keep-sessions keeps a report's attribution: use it with --report");
+		expect(reads).toBe(0);
+		expect(h.reports).toEqual([]);
+	});
+
+	test("a worktree that no claim or --session names keeps the session the registry holds; rows of other paths are ignored", async () => {
+		const f = fleet();
+		const h = harness({ listRegistry: async () => listing([{ path: f.review, session_id: "sess-kept" }, { path: "/elsewhere/host-b", session_id: "sess-other" }]) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "sess-kept"]]);
+		expect(h.reports[0]?.worktrees).toHaveLength(4);
+	});
+
+	test("a live claim beats the kept session for its worktree", async () => {
+		const f = fleet();
+		const claims: WorktreeDeps["claims"] = async (graphId) => (graphId === "review-me" ? holding("sess-claim") : { ok: true, claims: [] });
+		const h = harness({ claims, listRegistry: async () => listing([{ path: f.review, session_id: "sess-kept" }]) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "sess-claim"]]);
+	});
+
+	test("--session beats the kept session for the worktree that holds the current directory", async () => {
+		const f = fleet();
+		const h = harness({ cwd: f.merged, listRegistry: async () => listing([{ path: f.merged, session_id: "sess-kept" }]) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions", "--session", "sess-own"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.merged, "sess-own"]]);
+	});
+
+	test("a failed listing and a truncated one post nothing, say why and exit 1", async () => {
+		const f = fleet();
+		const failed = harness({ listRegistry: async () => ({ ok: false, error: "HTTP 503" }) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], failed.deps)).toBe(1);
+		expect(failed.reports).toEqual([]);
+		expect(failed.err.join("")).toContain("cannot keep session attribution: the registry listing failed (HTTP 503); nothing was reported");
+
+		const truncated = harness({ listRegistry: async () => listing([], true) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], truncated.deps)).toBe(1);
+		expect(truncated.reports).toEqual([]);
+		expect(truncated.err.join("")).toContain("lists more than 500 worktrees for test-host");
+	});
+});
+
+describe("httpRegistryLister", () => {
+	test("asks for one host's rows with the bearer and reads the rows and the truncation flag", async () => {
+		const seen: Array<{ url: string; init: RequestInit }> = [];
+		const lister = httpRegistryLister({
+			url: "http://x",
+			token: "tok",
+			timeoutMs: 1000,
+			fetchImpl: async (url, init) => {
+				seen.push({ url, init });
+				return new Response(JSON.stringify({ worktrees: [{ path: "/w/a", session_id: "s1", host: "h" }, { path: "/w/b" }], truncated: false }), { status: 200 });
+			},
+		});
+		expect(await lister("test host")).toEqual({ ok: true, rows: [{ path: "/w/a", session_id: "s1" }, { path: "/w/b" }], truncated: false });
+		expect(seen[0]?.url).toBe("http://x/worktrees?host=test%20host&limit=500");
+		expect(seen[0]?.init.method).toBe("GET");
+		expect(seen[0]?.init.headers).toEqual({ authorization: "Bearer tok" });
+	});
+
+	test("no token sends no authorization header", async () => {
+		const seen: RequestInit[] = [];
+		const lister = httpRegistryLister({
+			url: "http://x",
+			token: undefined,
+			timeoutMs: 1000,
+			fetchImpl: async (_url, init) => ((seen.push(init)), new Response(JSON.stringify({ worktrees: [], truncated: false }), { status: 200 })),
+		});
+		expect(await lister("h")).toEqual({ ok: true, rows: [], truncated: false });
+		expect(seen[0]?.headers).toEqual({});
+	});
+
+	test("a refused reply, a malformed body, an unreachable server and a timeout are failures, never an empty listing", async () => {
+		const reply = (status: number, body: unknown) => httpRegistryLister({ url: "http://x", token: "t", timeoutMs: 1000, fetchImpl: async () => new Response(JSON.stringify(body), { status }) });
+		expect(await reply(503, { worktrees: [], truncated: false })("h")).toEqual({ ok: false, error: "HTTP 503" });
+		expect(await reply(200, { worktrees: "nope", truncated: false })("h")).toEqual({ ok: false, error: "unexpected response body" });
+		expect(await reply(200, { worktrees: [{ host: "h" }], truncated: false })("h")).toEqual({ ok: false, error: "unexpected response body" });
+		expect(await reply(200, { worktrees: [] })("h")).toEqual({ ok: false, error: "unexpected response body" });
+		const down = httpRegistryLister({ url: "http://x", token: "t", timeoutMs: 1000, fetchImpl: async () => Promise.reject(new Error("refused")) });
+		expect(await down("h")).toEqual({ ok: false, error: "server unreachable" });
+		const slow = httpRegistryLister({ url: "http://x", token: "t", timeoutMs: 1000, fetchImpl: async () => Promise.reject(Object.assign(new Error("slow"), { name: "TimeoutError" })) });
+		expect(await slow("h")).toEqual({ ok: false, error: "timeout" });
+	});
+
+	test("parseRegistryBody keeps a session only when the row holds one", () => {
+		expect(parseRegistryBody({ worktrees: [{ path: "/p", session_id: 7 }], truncated: true })).toEqual({ rows: [{ path: "/p" }], truncated: true });
+		expect(parseRegistryBody(null)).toBeNull();
+		expect(parseRegistryBody({ worktrees: [null], truncated: false })).toBeNull();
 	});
 });

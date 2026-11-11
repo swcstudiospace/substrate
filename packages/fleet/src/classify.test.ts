@@ -124,6 +124,17 @@ describe("classification of real worktrees", () => {
 	}
 	const later = (): PruneContext => ctx({ now: new Date(Date.now() + 40 * 24 * 3600 * 1000) });
 
+	test("a repository with no origin is never safe to prune, even when HEAD is merged into its local main", async () => {
+		const repo = makeRepo();
+		git(repo.dir, ["remote", "remove", "origin"]);
+		const path = addWorktree(repo, tempDir(), "local-only");
+		commit(path, "l.txt", "1\n");
+		git(repo.dir, ["merge", "-q", "--ff-only", "local-only"]);
+		const result = classifyForPrune(await inspect(repo.dir, path, fakeGh({})), later());
+		expect(result.class).toBe("never");
+		expect(result.reasons).toContain("head is not pushed");
+	});
+
 	test("a squash-merged branch whose HEAD is the pull request head is safe; one that advanced is review", async () => {
 		const repo = makeRepo();
 		const root = tempDir();

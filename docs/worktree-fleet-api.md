@@ -122,13 +122,13 @@ The table is created by migration step `worktrees` (additive, `expand`; see `doc
 
 ## Flags
 
-All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
+All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_ROOTS` and `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
 
 | Variable | Default | Read by | Meaning |
 | --- | --- | --- | --- |
 | `SUBSTRATE_WORKTREE_REGISTRY` | `off` | the server | `on` enables the routes and the tool |
 | `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` | `1209600` | the server | the retention window, 60 to 31,536,000 seconds |
-| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher does not read it and always uses that directory |
+| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor, the dispatcher | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher creates worktrees under the first absolute entry, else under `/var/lib/substrate/worktrees` |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | `5` | the CLI, the fleet package, the dispatcher | the free-disk floor for creating a worktree |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | `14` | the server, the CLI, the fleet package | how long a worktree must be untouched before prune may call it safe, and when a listing calls it `stale` |
 | `SUBSTRATE_SESSION_ID` | none | the CLI, the fleet package | the session `substrate worktree scan --report` attributes the worktree holding the current directory to when `--session ID` is absent (the flag wins; a value that is not a session id is a usage error) |
@@ -138,6 +138,7 @@ All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MI
 1. Set `SUBSTRATE_WORKTREE_REGISTRY=on` on the server (it needs `SUBSTRATE_PG_URL`; the table is created at boot by `migrate()`).
 2. Give each reporter a token for its surface. A reporter without one is refused.
 3. Run the reporter; `GET /worktrees?host=<host>` shows what it sent.
+4. Schedule the reporter with a host timer: `bun scripts/worktree-report.ts` ([the scheduled report](worktree-fleet.md#the-scheduled-report)). It reads `GET /worktrees` before it posts, so it keeps the sessions the registry holds.
 
 To turn it off set the variable back to `off`: the routes answer 503 again and the rows stay, unread, until the next time it is on or an operator drops the table.
 

@@ -1,10 +1,11 @@
 """Per-Graph-ID git worktrees (D-12).
 
-A dispatched session works in ``/var/lib/substrate/worktrees/<graph_id>`` on branch
+A dispatched session works in ``<root>/<graph_id>`` on branch
 ``substrate/<graph_id>``. The worktree is reused when git already has it registered, created
 from the existing branch when only the branch exists, and created with a new branch otherwise.
-Creation is refused when ``/`` has less than the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``,
-default 5 GiB), and no git command runs in that case.
+The root is the first absolute entry of ``SUBSTRATE_WORKTREE_ROOTS`` (the same variable the fleet and the collector
+read), else ``/var/lib/substrate/worktrees``. Creation is refused when the filesystem that holds the root has less than
+the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB), and no git command runs in that case.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
 checks out a branch in the main checkout.
 """
@@ -24,6 +25,7 @@ GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 WORKTREES_ROOT = Path("/var/lib/substrate/worktrees")
 REPOS_ROOT = Path("/root/src/repos")
+ROOTS_ENV = "SUBSTRATE_WORKTREE_ROOTS"
 DEFAULT_MIN_FREE_GB = 5
 MIN_FREE_ENV = "SUBSTRATE_WORKTREE_MIN_FREE_GB"
 BRANCH_PREFIX = "substrate/"
@@ -54,6 +56,41 @@ def min_free_gb(env: Mapping[str, str] | None = None) -> float:
 def min_free_bytes(env: Mapping[str, str] | None = None) -> int:
     """The floor in bytes, read from the environment at call time."""
     return int(min_free_gb(env) * 1024**3)
+
+
+def worktree_roots(env: Mapping[str, str] | None = None) -> list[Path]:
+    """The absolute entries of ``SUBSTRATE_WORKTREE_ROOTS`` in the order written, normalised and de-duplicated.
+
+    A relative or blank entry is dropped, as the fleet and the collector drop it, so the three readers agree.
+    """
+    raw = (os.environ if env is None else env).get(ROOTS_ENV, "")
+    roots: list[Path] = []
+    for part in raw.split(":"):
+        entry = part.strip()
+        if not entry or not os.path.isabs(entry):
+            continue
+        normal = Path(os.path.normpath(entry))
+        if normal not in roots:
+            roots.append(normal)
+    return roots
+
+
+def worktree_root(env: Mapping[str, str] | None = None) -> Path:
+    """Where a graph's worktree is created: the first configured root, else ``WORKTREES_ROOT``.
+
+    The collector attributes a path to the first root that contains it, so the first root is the one that keeps a
+    dispatched worktree attributed to its graph.
+    """
+    roots = worktree_roots(env)
+    return roots[0] if roots else WORKTREES_ROOT
+
+
+def _space_probe(path: Path) -> Path:
+    """The nearest existing ancestor of ``path``: the filesystem a worktree created there would use."""
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return probe
 
 
 class WorktreeRefused(Exception):
@@ -133,22 +170,26 @@ def ensure_worktree(
     graph_id: str,
     base_branch: str | None,
     *,
-    root: Path = WORKTREES_ROOT,
+    root: Path | None = None,
     run: Runner = subprocess.run,
     disk_usage: Callable[[str], Any] = shutil.disk_usage,
 ) -> Path:
-    """Return the graph's worktree, creating it only with at least the free-disk floor free on /."""
+    """Return the graph's worktree, creating it only with the free-disk floor free on the filesystem that holds the root.
+
+    ``root`` defaults to :func:`worktree_root`, read from the environment at call time.
+    """
     gid = validate_graph_id(graph_id)
-    root = Path(root)
+    root = worktree_root() if root is None else Path(root)
     path = root / gid
     if path.resolve().parent != root.resolve():
         raise WorktreeRefused(f"worktree path {path} escapes {root}", "invalid-graph-id")
 
-    free = disk_usage("/").free
+    probe = _space_probe(root)
+    free = disk_usage(str(probe)).free
     floor = min_free_bytes()
     if free < floor:
         raise WorktreeRefused(
-            f"only {free / 1024**3:.1f} GB free on /; a worktree needs at least {floor / 1024**3:g} GB",
+            f"only {free / 1024**3:.1f} GB free on {probe}; a worktree needs at least {floor / 1024**3:g} GB",
             "low-disk",
         )
 

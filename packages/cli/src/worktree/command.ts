@@ -24,7 +24,7 @@
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
-import { isWorktreeLabel, WORKTREE_TEXT_MAX_CHARS } from "../../../mcp-server/src/worktree-registry.ts";
+import { isWorktreeLabel, WORKTREE_LIST_MAX_LIMIT, WORKTREE_TEXT_MAX_CHARS } from "../../../mcp-server/src/worktree-registry.ts";
 import {
 	assertDiskFloor,
 	buildReports,
@@ -72,7 +72,7 @@ import { commandMergeBack } from "./merge-back.ts";
 
 export const WORKTREE_USAGE =
 	"usage: substrate worktree list|status [--root DIR]... [--repo R] [--json]\n" +
-	"       substrate worktree scan [--root DIR]... [--report [--session ID]] [--json]\n" +
+	"       substrate worktree scan [--root DIR]... [--report [--session ID] [--keep-sessions]] [--json]\n" +
 	"       substrate worktree prune [--root DIR]... [--idle-days N] [--execute] [--json]\n" +
 	"       substrate worktree conflicts [--repo R | --root DIR...] [--json]\n" +
 	"       substrate worktree provision --repo DIR --branch B [--base REF] [--path DIR] [--json]\n" +
@@ -81,6 +81,10 @@ export const WORKTREE_USAGE =
 	"       substrate worktree guard DIR [--json]\n";
 
 export type PostOutcome = { ok: true; stored: number } | { ok: false; error: string };
+
+/** One row of `GET /worktrees`: the path the host reported and the session the registry holds for it, when it holds one. */
+export type RegistryRow = { path: string; session_id?: string };
+export type RegistryOutcome = { ok: true; rows: RegistryRow[]; truncated: boolean } | { ok: false; error: string };
 
 export interface WorktreeDeps {
 	env: Record<string, string | undefined>;
@@ -98,6 +102,8 @@ export interface WorktreeDeps {
 	postReport: (report: WorktreeReport) => Promise<PostOutcome>;
 	/** `GET /worktrees/claims`: the live claims of one graph. Never throws; an unanswered question is a failure, not "no claims". */
 	claims: ClaimsFn;
+	/** `GET /worktrees?host=`: the rows the registry holds for one host. Never throws; a failed or truncated answer is a failure. */
+	listRegistry: (host: string) => Promise<RegistryOutcome>;
 }
 
 const GIB = 1024 ** 3;
@@ -210,6 +216,7 @@ type SessionChoice = { ok: true; id: string | null } | { ok: false; message: str
 /** The session this scan attributes its own worktree to: `--session`, else `SUBSTRATE_SESSION_ID`; only a report carries one. */
 function scanSession(args: WorktreeArgs, deps: WorktreeDeps): SessionChoice {
 	if (!args.report) {
+		if (args.keepSessions) return { ok: false, message: "--keep-sessions keeps a report's attribution: use it with --report\n" };
 		return args.session === undefined ? { ok: true, id: null } : { ok: false, message: "--session attributes a report: use it with --report\n" };
 	}
 	if (args.session !== undefined) {
@@ -232,6 +239,19 @@ function containingWorktree(worktrees: readonly WorktreeInfo[], cwd: string): st
 	return best === null ? null : best.path;
 }
 
+/**
+ * The session the registry holds for each of this host's worktrees. A truncated listing is a failure, not a partial answer: a row
+ * past the page would lose its attribution when the report replaces it.
+ */
+async function registrySessions(deps: WorktreeDeps): Promise<{ ok: true; sessions: Map<string, string> } | { ok: false; error: string }> {
+	const listing = await deps.listRegistry(deps.host);
+	if (!listing.ok) return { ok: false, error: `the registry listing failed (${listing.error})` };
+	if (listing.truncated) return { ok: false, error: `the registry lists more than ${WORKTREE_LIST_MAX_LIMIT} worktrees for ${deps.host}` };
+	const sessions = new Map<string, string>();
+	for (const row of listing.rows) if (row.session_id !== undefined) sessions.set(row.path, row.session_id);
+	return { ok: true, sessions };
+}
+
 async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {
 	const session = scanSession(args, deps);
 	if (!session.ok) return usageError(deps, session.message);
@@ -251,6 +271,15 @@ async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 			const own = containingWorktree(inventory.worktrees, deps.cwd);
 			if (own === null) deps.err(`warning: the current directory is inside none of the scanned worktrees, so session ${session.id} is attributed to no worktree\n`);
 			else sessions.set(own, session.id);
+		}
+		// Kept after the claims and the explicit id, so a worktree either of them names keeps its own session.
+		if (args.keepSessions) {
+			const kept = await registrySessions(deps);
+			if (!kept.ok) {
+				deps.err(`cannot keep session attribution: ${kept.error}; nothing was reported\n`);
+				return 1;
+			}
+			for (const [path, id] of kept.sessions) if (!sessions.has(path)) sessions.set(path, id);
 		}
 		const plan = buildReports(deps.host, inventory.worktrees, { now: deps.now(), roots: rootList, sessions });
 		skipped = plan.skipped;
@@ -612,6 +641,47 @@ export function httpReportPoster(config: HttpPosterConfig): (report: WorktreeRep
 			return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "timeout" : "server unreachable" };
 		}
 	};
+}
+
+/** A lister of one host's registry rows over `GET /worktrees` with the caller's bearer, when it has one. */
+export function httpRegistryLister(config: HttpPosterConfig): (host: string) => Promise<RegistryOutcome> {
+	const doFetch = config.fetchImpl ?? ((url: string, init: RequestInit) => fetch(url, init));
+	return async (host) => {
+		try {
+			const response = await doFetch(`${config.url}/worktrees?host=${encodeURIComponent(host)}&limit=${WORKTREE_LIST_MAX_LIMIT}`, {
+				method: "GET",
+				headers: config.token === undefined ? {} : { authorization: `Bearer ${config.token}` },
+				signal: AbortSignal.timeout(config.timeoutMs),
+			});
+			if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+			const body: unknown = await response.json();
+			const listing = parseRegistryBody(body);
+			return listing === null ? { ok: false, error: "unexpected response body" } : { ok: true, ...listing };
+		} catch (error) {
+			const name = error instanceof Error ? error.name : "";
+			return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "timeout" : "server unreachable" };
+		}
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The rows and the truncation flag of a `GET /worktrees` reply; null when the reply does not have that shape. */
+export function parseRegistryBody(body: unknown): { rows: RegistryRow[]; truncated: boolean } | null {
+	if (!isRecord(body)) return null;
+	const { worktrees, truncated } = body;
+	if (!Array.isArray(worktrees) || typeof truncated !== "boolean") return null;
+	const rows: RegistryRow[] = [];
+	for (const item of worktrees) {
+		if (!isRecord(item)) return null;
+		const path = item.path;
+		if (typeof path !== "string") return null;
+		const sessionId = item.session_id;
+		rows.push(typeof sessionId === "string" ? { path, session_id: sessionId } : { path });
+	}
+	return { rows, truncated };
 }
 
 /** A lookup of live graph claims over `GET /worktrees/claims` with the caller's bearer. Every failure is a refusal to vouch, never "no claims". */

@@ -73,6 +73,7 @@ function deps(env: Record<string, string | undefined>, cwd: string): { deps: Wor
 		},
 		postReport: async (): Promise<PostOutcome> => ({ ok: true, stored: 0 }),
 		claims: async () => ({ ok: true, claims: [] }),
+		listRegistry: async () => ({ ok: true, rows: [], truncated: false }),
 	};
 	return { deps: built, seen };
 }

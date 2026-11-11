@@ -10,12 +10,12 @@ export const SUBCOMMANDS = ["list", "status", "scan", "prune", "conflicts", "pro
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(["root", "repo", "idle-days", "branch", "base", "path", "session"]);
-const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json", "report", "execute"]);
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json", "report", "execute", "keep-sessions"]);
 
 const ALLOWED: Record<Subcommand, readonly string[]> = {
 	list: ["root", "repo", "json"],
 	status: ["root", "repo", "json"],
-	scan: ["root", "report", "session", "json"],
+	scan: ["root", "report", "session", "keep-sessions", "json"],
 	prune: ["root", "idle-days", "execute", "json"],
 	conflicts: ["root", "repo", "json"],
 	provision: ["repo", "branch", "base", "path", "json"],
@@ -36,6 +36,8 @@ export interface WorktreeArgs {
 	session: string | undefined;
 	json: boolean;
 	report: boolean;
+	/** `scan --report` only: keep the session the registry already holds for a worktree no claim or `--session` names. */
+	keepSessions: boolean;
 	execute: boolean;
 }
 
@@ -46,7 +48,7 @@ export function parseWorktreeArgs(argv: readonly string[]): ParseResult {
 	if (first === undefined) return { ok: false, error: "missing subcommand" };
 	const command = SUBCOMMANDS.find((name) => name === first);
 	if (command === undefined) return { ok: false, error: `unknown subcommand ${first}` };
-	const args: WorktreeArgs = { command, roots: [], positional: [], repo: undefined, idleDays: undefined, branch: undefined, base: undefined, path: undefined, session: undefined, json: false, report: false, execute: false };
+	const args: WorktreeArgs = { command, roots: [], positional: [], repo: undefined, idleDays: undefined, branch: undefined, base: undefined, path: undefined, session: undefined, json: false, report: false, keepSessions: false, execute: false };
 	for (let index = 0; index < rest.length; index++) {
 		const token = rest[index];
 		if (token === undefined) continue;
@@ -62,6 +64,7 @@ export function parseWorktreeArgs(argv: readonly string[]): ParseResult {
 			if (equals >= 0) return { ok: false, error: `--${name} takes no value` };
 			if (name === "json") args.json = true;
 			else if (name === "report") args.report = true;
+			else if (name === "keep-sessions") args.keepSessions = true;
 			else args.execute = true;
 			continue;
 		}

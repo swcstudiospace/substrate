@@ -136,6 +136,17 @@ describe("inspectWorktree", () => {
 		expect(after.dirty).toBe(false);
 	});
 
+	test("a repository with no origin never has a commit pushed, even one merged into its local main", async () => {
+		const repo = makeRepo();
+		git(repo.dir, ["remote", "remove", "origin"]);
+		const path = addWorktree(repo, tempDir(), "local-only");
+		commit(path, "l.txt", "1\n");
+		git(repo.dir, ["merge", "-q", "--ff-only", "local-only"]);
+		const entry = defined((await listWorktrees(repo.dir, spawnGit))?.find((item) => item.path === path), "entry");
+		const info = await inspectWorktree({ ...entry, repoDir: repo.dir }, { git: spawnGit, measure: false });
+		expect(info).toMatchObject({ default_ref: "main", merged: true, pushed: false });
+	});
+
 	test("a branch merged into the default branch is merged and counts as pushed without its own remote branch", async () => {
 		const repo = makeRepo();
 		const path = addWorktree(repo, tempDir(), "done");

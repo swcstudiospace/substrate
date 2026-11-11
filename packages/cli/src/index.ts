@@ -61,8 +61,8 @@ import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
-import { freeBytes, spawnGh, spawnGit } from "../../fleet/src/index.ts";
-import { httpClaimsLookup, httpReportPoster, runWorktree } from "./worktree/command.ts";
+import { runWorktree } from "./worktree/command.ts";
+import { requestTimeoutMs, substrateUrl, worktreeDeps } from "./worktree/deps.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
@@ -81,17 +81,10 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const DEFAULT_URL = "http://127.0.0.1:7410";
-const DEFAULT_TIMEOUT_MS = 1500;
 /** Added to the verify budget for `/evidence`: the server builds the bundle after its hour loop, outside that budget. */
 const EVIDENCE_RESPONSE_MARGIN_MS = 5_000;
-/** A worktree report holds up to 500 rows per request, so it gets more time than a hook-sized call. */
-const WORKTREE_REPORT_TIMEOUT_MS = 10_000;
-/** A claims lookup answers from one index read, but prune waits on it before every removal, so it gets more than a hook's budget. */
-const WORKTREE_CLAIMS_TIMEOUT_MS = 5_000;
-
 function base(): string {
-	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
+	return substrateUrl(process.env);
 }
 
 /**
@@ -115,8 +108,7 @@ function verifyBudgetMs(): number {
 }
 
 function timeout(): number {
-	const raw = Number(process.env.SUBSTRATE_TIMEOUT_MS);
-	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+	return requestTimeoutMs(process.env);
 }
 
 function git(args: string[], cwd = process.cwd()): string {
@@ -712,29 +704,16 @@ switch (command) {
 		break;
 	case "worktree":
 		process.exit(
-			await runWorktree(rest, {
-				env: process.env,
-				cwd: process.cwd(),
-				host: hostname(),
-				out: (text) => process.stdout.write(text),
-				err: (text) => process.stderr.write(text),
-				git: spawnGit,
-				gh: spawnGh,
-				now: () => new Date(),
-				freeBytes,
-				emit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.worktree", url: base() }),
-				postReport: httpReportPoster({
-					url: base(),
-					token: resolveBearer("claude-code", process.env) ?? undefined,
-					// A report can hold hundreds of rows; the hook-sized default budget is too short for it.
-					timeoutMs: Math.max(timeout(), WORKTREE_REPORT_TIMEOUT_MS),
+			await runWorktree(
+				rest,
+				worktreeDeps({
+					env: process.env,
+					cwd: process.cwd(),
+					host: hostname(),
+					out: (text) => process.stdout.write(text),
+					err: (text) => process.stderr.write(text),
 				}),
-				claims: httpClaimsLookup({
-					url: base(),
-					token: resolveBearer("claude-code", process.env) ?? undefined,
-					timeoutMs: Math.max(timeout(), WORKTREE_CLAIMS_TIMEOUT_MS),
-				}),
-			}),
+			),
 		);
 		break;
 	case "ledger":
