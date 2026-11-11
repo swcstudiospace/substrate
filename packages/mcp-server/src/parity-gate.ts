@@ -55,23 +55,36 @@ export interface RecordMappingResult {
 
 /**
  * Compares the manifest's `lightrag::` records with the plane's documents. A `corpus:` name carries dataset, path and sha; a
- * flattened name carries the path only. `listingTruncated` is the plane's
- * own answer that its listing is incomplete: a document missing from a truncated listing proves nothing, so it fails.
+ * flattened name carries the path only. `listingTruncated` is the plane's own answer that its listing is incomplete: a
+ * document missing from a truncated listing proves nothing, so it fails. `otherDocumentIds` are the documents the listing
+ * holds under another name (a flattened ingest name). The listing withholds those names, so a record that points at one is
+ * present but unverifiable: it is an `unverifiable-name` mismatch, not a missing document.
  */
-export function checkRecordMapping(records: readonly ManifestRecord[], documents: readonly PlaneDocument[], listingTruncated: boolean): RecordMappingResult {
+export function checkRecordMapping(
+	records: readonly ManifestRecord[],
+	documents: readonly PlaneDocument[],
+	listingTruncated: boolean,
+	otherDocumentIds: readonly string[] = [],
+): RecordMappingResult {
 	const base = { records: records.length, documents: documents.length };
 	if (listingTruncated) return { ok: false, ...base, mismatches: [], reason: "plane listing is truncated: a missing document proves nothing" };
 	if (records.length === 0) return { ok: false, ...base, mismatches: [], reason: "no lightrag records to compare: refusing to pass an empty check" };
 
 	const byId = new Map<string, PlaneDocument>();
 	for (const document of documents) byId.set(document.id, document);
+	const others = new Set(otherDocumentIds);
 	const referenced = new Set<string>();
 	const mismatches: MappingMismatch[] = [];
 
 	for (const record of records) {
 		const document = record.documentId.length > 0 ? byId.get(record.documentId) : undefined;
 		if (document === undefined) {
-			mismatches.push({ kind: "record-without-document", documentId: record.documentId });
+			if (others.has(record.documentId)) {
+				referenced.add(record.documentId);
+				mismatches.push({ kind: "unverifiable-name", id: record.documentId });
+			} else {
+				mismatches.push({ kind: "record-without-document", documentId: record.documentId });
+			}
 			continue;
 		}
 		referenced.add(document.id);
@@ -92,6 +105,9 @@ export function checkRecordMapping(records: readonly ManifestRecord[], documents
 	}
 	for (const document of documents) {
 		if (!referenced.has(document.id)) mismatches.push({ kind: "document-without-record", id: document.id });
+	}
+	for (const id of others) {
+		if (!referenced.has(id)) mismatches.push({ kind: "document-without-record", id });
 	}
 	return { ok: mismatches.length === 0, ...base, mismatches };
 }

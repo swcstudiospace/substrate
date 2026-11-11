@@ -1,7 +1,10 @@
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { corpusDocumentName } from "@substrate/corpus";
-import { parsePartArgs } from "../../../scripts/parity-gate.ts";
+import { parsePartArgs, reasonCategory, runParity } from "../../../scripts/parity-gate.ts";
+import type { FetchLike } from "./planes/lightrag.ts";
 import {
 	checkRecordMapping,
 	citationMatches,
@@ -235,5 +238,210 @@ describe("parity CLI arguments", () => {
 		expect(parsePartArgs(["--part", "C"])).toEqual({ reason: "usage: parity-gate --part A|B" });
 		expect(parsePartArgs([])).toEqual({ reason: "usage: parity-gate --part A|B" });
 		expect(parsePartArgs(["--part", "A", "extra"])).toEqual({ reason: "usage: parity-gate --part A|B" });
+	});
+});
+
+describe("record mapping: a document held under another name", () => {
+	const record = (documentId: string, path: string): ManifestRecord => ({ documentId, datasetId: REPO, sourceUrl: path, sha: SHA });
+	const document = (id: string, path: string): PlaneDocument => ({ id, name: corpusDocumentName(REPO, path, SHA) });
+
+	test("a record whose document the listing holds under a flattened name is unverifiable, not missing", () => {
+		const result = checkRecordMapping([record("flat", "docs/a.md")], [], false, ["flat"]);
+		expect(result).toMatchObject({ ok: false, mismatches: [{ kind: "unverifiable-name", id: "flat" }] });
+	});
+
+	test("a flattened-name document no record references is a document-without-record mismatch", () => {
+		const result = checkRecordMapping([record("a", "docs/a.md")], [document("a", "docs/a.md")], false, ["stale"]);
+		expect(result).toMatchObject({ ok: false, mismatches: [{ kind: "document-without-record", id: "stale" }] });
+	});
+
+	test("an id the listing does not hold is still a record-without-document, even with other ids present", () => {
+		const result = checkRecordMapping([record("gone", "docs/a.md")], [], false, ["other"]);
+		expect(result.mismatches).toEqual([
+			{ kind: "record-without-document", documentId: "gone" },
+			{ kind: "document-without-record", id: "other" },
+		]);
+	});
+});
+
+describe("plane reasons in a report", () => {
+	test("a transport reason keeps its category and drops the cause, which can carry an address", () => {
+		expect(reasonCategory(`lightrag unreachable: connect ECONNREFUSED ${PLANE_ADDRESS}:9621`)).toBe("lightrag unreachable");
+	});
+
+	test("an HTTP status keeps its code", () => {
+		expect(reasonCategory("lightrag 503")).toBe("lightrag 503");
+	});
+
+	test("a reason outside the known categories is plane-unavailable, never echoed", () => {
+		expect(reasonCategory(`proxy at ${PLANE_ADDRESS} refused`)).toBe("plane-unavailable");
+	});
+});
+
+const KEY = "k-test-only-7c1e";
+const PLANE_ADDRESS = "192.0.2.7";
+const PLANE_URL = `http://${PLANE_ADDRESS}:9621`;
+const SCRATCH = mkdtempSync(join(tmpdir(), "parity-gate-test-"));
+
+afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }));
+
+function stateFile(name: string, records: Record<string, unknown>): string {
+	const file = join(SCRATCH, name);
+	writeFileSync(file, JSON.stringify({ version: 2, records }));
+	return file;
+}
+
+const stateKey = (path: string) => `lightrag::${REPO}::${path}`;
+const stateRecord = (documentId: string, path: string, sha = SHA) => ({ document_id: documentId, dataset_id: REPO, source_url: path, sha });
+const listing = (documents: unknown[]) => ({ documents, pagination: { has_next: false } });
+const corpusEntry = (id: string, path: string) => ({ id, file_path: corpusDocumentName(REPO, path, SHA) });
+
+const CLEAN_STATE = stateFile("clean.json", {
+	[stateKey("docs/a.md")]: stateRecord("doc-a", "docs/a.md"),
+	[stateKey("docs/b.md")]: stateRecord("doc-b", "docs/b.md"),
+});
+const CLEAN_LISTING = listing([corpusEntry("doc-a", "docs/a.md"), corpusEntry("doc-b", "docs/b.md")]);
+
+interface SentRequest {
+	path: string;
+	headers: Record<string, string>;
+	body: Record<string, unknown>;
+}
+
+/** A fake LightRAG: `answer` gives each path's reply, or an Error to throw as a transport failure. */
+function fakePlane(answer: (path: string, body: Record<string, unknown>) => unknown): { fetch: FetchLike; sent: SentRequest[] } {
+	const sent: SentRequest[] = [];
+	const fetch: FetchLike = async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+		sent.push({ path, headers: { ...(init?.headers as Record<string, string> | undefined) }, body });
+		const reply = answer(path, body);
+		if (reply instanceof Error) throw reply;
+		return new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } });
+	};
+	return { fetch, sent };
+}
+
+/** The `/query` reply for one frozen question: its expected source at rank one, or a wrong source for `missId`. */
+function frozenReply(query: unknown, missId?: string): unknown {
+	const item = FROZEN_SAMPLE.find((entry) => entry.question === query);
+	const source = item !== undefined && item.id !== missId ? item.expectedSource : "docs/elsewhere.md";
+	return { data: { chunks: [{ content: "passage", file_path: corpusDocumentName(REPO, source, SHA) }] } };
+}
+
+function env(extra: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+	return { LIGHTRAG_URL: PLANE_URL, LIGHTRAG_API_KEY: KEY, ...extra };
+}
+
+describe("parity CLI run", () => {
+	test("without LIGHTRAG_URL, Part A exits 2 and opens no socket", async () => {
+		const plane = fakePlane(() => CLEAN_LISTING);
+		const outcome = await runParity(["--part", "A"], { SUBSTRATE_DOCS_STATE_FILE: CLEAN_STATE }, plane);
+		expect(outcome).toEqual({ exitCode: 2, report: { part: "A", ok: false, reason: "LIGHTRAG_URL is unset; no socket was opened" } });
+		expect(plane.sent).toHaveLength(0);
+	});
+
+	test("without LIGHTRAG_URL, Part B exits 2 and opens no socket", async () => {
+		const plane = fakePlane(() => ({}));
+		const outcome = await runParity(["--part", "B"], {}, plane);
+		expect(outcome).toEqual({ exitCode: 2, report: { part: "B", ok: false, reason: "LIGHTRAG_URL is unset; no socket was opened" } });
+		expect(plane.sent).toHaveLength(0);
+	});
+
+	test("bad arguments exit 2 before any plane read", async () => {
+		const plane = fakePlane(() => CLEAN_LISTING);
+		const outcome = await runParity(["--part", "C"], env({ SUBSTRATE_DOCS_STATE_FILE: CLEAN_STATE }), plane);
+		expect(outcome).toEqual({ exitCode: 2, report: { ok: false, reason: "usage: parity-gate --part A|B" } });
+		expect(plane.sent).toHaveLength(0);
+	});
+
+	test("a missing docs state file exits 2 and reads no plane", async () => {
+		const plane = fakePlane(() => CLEAN_LISTING);
+		const outcome = await runParity(["--part", "A"], env({ SUBSTRATE_DOCS_STATE_FILE: join(SCRATCH, "absent.json") }), plane);
+		expect(outcome).toEqual({ exitCode: 2, report: { part: "A", ok: false, reason: "the docs state file is unreadable or not JSON" } });
+		expect(plane.sent).toHaveLength(0);
+	});
+
+	test("Part A: matching records exit 0, send the key as X-API-Key, and print neither the key nor the address", async () => {
+		const plane = fakePlane((path) => (path === "/documents/paginated" ? CLEAN_LISTING : {}));
+		const outcome = await runParity(["--part", "A"], env({ SUBSTRATE_DOCS_STATE_FILE: CLEAN_STATE }), plane);
+		expect(outcome.exitCode).toBe(0);
+		expect(outcome.report).toMatchObject({ part: "A", ok: true, records: 2, plane_documents: 2, other_documents: 0, truncated: false, mismatch_count: 0 });
+		expect(plane.sent.map((request) => request.path)).toEqual(["/documents/paginated"]);
+		expect(plane.sent[0]?.headers["X-API-Key"]).toBe(KEY);
+		const printed = JSON.stringify(outcome.report);
+		expect(printed).not.toContain(KEY);
+		expect(printed).not.toContain(PLANE_ADDRESS);
+	});
+
+	test("Part A: a changed version exits 1 and is counted as a version mismatch", async () => {
+		const state = stateFile("version.json", {
+			[stateKey("docs/a.md")]: stateRecord("doc-a", "docs/a.md"),
+			[stateKey("docs/b.md")]: stateRecord("doc-b", "docs/b.md", "f".repeat(64)),
+		});
+		const plane = fakePlane(() => CLEAN_LISTING);
+		const outcome = await runParity(["--part", "A"], env({ SUBSTRATE_DOCS_STATE_FILE: state }), plane);
+		expect(outcome.exitCode).toBe(1);
+		expect(outcome.report).toMatchObject({ ok: false, mismatches: { "version-mismatch": 1 }, mismatch_count: 1 });
+	});
+
+	test("Part A: a record whose document is held under a flattened name is unverifiable, not missing", async () => {
+		const state = stateFile("flattened.json", {
+			[stateKey("docs/a.md")]: stateRecord("doc-a", "docs/a.md"),
+			[stateKey("docs/b.md")]: stateRecord("doc-b", "docs/b.md"),
+			[stateKey("docs/x.md")]: stateRecord("doc-flat", "docs/x.md"),
+		});
+		const plane = fakePlane(() => listing([...CLEAN_LISTING.documents, { id: "doc-flat", file_path: "docs__x.md" }]));
+		const outcome = await runParity(["--part", "A"], env({ SUBSTRATE_DOCS_STATE_FILE: state }), plane);
+		expect(outcome.exitCode).toBe(1);
+		expect(outcome.report).toMatchObject({ ok: false, other_documents: 1, mismatches: { "unverifiable-name": 1 } });
+	});
+
+	test("Part A: a listing with an unreadable entry is truncated and fails closed with its reason", async () => {
+		const plane = fakePlane(() => listing([...CLEAN_LISTING.documents, { file_path: "corpus:entry-without-id" }]));
+		const outcome = await runParity(["--part", "A"], env({ SUBSTRATE_DOCS_STATE_FILE: CLEAN_STATE }), plane);
+		expect(outcome.exitCode).toBe(1);
+		expect(outcome.report).toMatchObject({ ok: false, truncated: true });
+		expect(String(outcome.report.reason)).toContain("truncated");
+	});
+
+	test("Part A: an unreachable plane exits 1 with a closed reason and no address", async () => {
+		const plane = fakePlane(() => new Error(`connect ECONNREFUSED ${PLANE_ADDRESS}:9621`));
+		const outcome = await runParity(["--part", "A"], env({ SUBSTRATE_DOCS_STATE_FILE: CLEAN_STATE }), plane);
+		expect(outcome).toEqual({ exitCode: 1, report: { part: "A", ok: false, reason: "plane-unavailable" } });
+		expect(JSON.stringify(outcome.report)).not.toContain(PLANE_ADDRESS);
+	});
+
+	test("Part B: every frozen question answered from its source exits 0 with a 1.0 rate, and mode is reported", async () => {
+		const plane = fakePlane((path, body) => (path === "/query" ? frozenReply(body.query) : {}));
+		const outcome = await runParity(["--part", "B"], env(), plane);
+		expect(outcome.exitCode).toBe(0);
+		expect(outcome.report).toMatchObject({ part: "B", ok: true, mode: "hybrid", top_k: 5, queries: 10, passes: 10, rate: 1, threshold: 1 });
+		expect(plane.sent).toHaveLength(10);
+		expect(plane.sent.every((request) => request.body.mode === "hybrid")).toBe(true);
+	});
+
+	test("Part B: one wrong citation exits 1 with 9 of 10 and names the miss", async () => {
+		const plane = fakePlane((path, body) => (path === "/query" ? frozenReply(body.query, "Q1") : {}));
+		const outcome = await runParity(["--part", "B"], env(), plane);
+		expect(outcome.exitCode).toBe(1);
+		expect(outcome.report).toMatchObject({ ok: false, passes: 9, rate: 0.9 });
+		expect(outcome.report.results).toContainEqual({ id: "Q1", hit: false });
+	});
+
+	test("Part B: the mode sent is the configured mode, and the report names it", async () => {
+		const plane = fakePlane((path, body) => (path === "/query" ? frozenReply(body.query) : {}));
+		const outcome = await runParity(["--part", "B"], env({ SUBSTRATE_LIGHTRAG_QUERY_MODE: "naive" }), plane);
+		expect(outcome.report.mode).toBe("naive");
+		expect(plane.sent[0]?.body.mode).toBe("naive");
+	});
+
+	test("Part B: an unreachable plane misses every question with a category, and prints no address", async () => {
+		const plane = fakePlane(() => new Error(`connect ECONNREFUSED ${PLANE_ADDRESS}:9621`));
+		const outcome = await runParity(["--part", "B"], env(), plane);
+		expect(outcome.exitCode).toBe(1);
+		expect(outcome.report).toMatchObject({ ok: false, passes: 0, rate: 0 });
+		expect(outcome.report.results).toEqual(FROZEN_SAMPLE.map((item) => ({ id: item.id, hit: false, reason: "lightrag unreachable" })));
+		expect(JSON.stringify(outcome.report)).not.toContain(PLANE_ADDRESS);
 	});
 });
