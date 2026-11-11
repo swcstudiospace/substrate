@@ -10,7 +10,7 @@ The plane is chosen in `resolveDocsBackend` in `packages/mcp-server/src/config.t
 Otherwise a set `LIGHTRAG_URL` selects `lightrag`, and an unset one selects
 `ragflow`. LightRAG is the live production backend: it was cut over on
 2026-10-28 (Run 11) with `SUBSTRATE_DOCS_BACKEND=lightrag`, in naive query mode
-until the operator decides on a real LLM for graph and hybrid retrieval.
+until the operator decides on a real LLM for graph and hybrid retrieval. The dated cutover record is `docs/runbooks/lightrag-cutover.md`.
 RAGFlow is only the legacy fallback when `LIGHTRAG_URL` is unset (`resolveDocsBackend`).
 `lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional
 `LIGHTRAG_API_KEY`. The RAGFlow service was deleted on 2026-10-25; its code stays
@@ -158,7 +158,7 @@ falls back to Hindsight recall (`lightragFallback` in `docs-search.ts`):
   keep `backend: "lightrag"`, `graph` and the RAG machine `state`.
 
 A failed LightRAG query does not retry against RAGFlow. RAGFlow serves only
-when it is the selected plane.
+when it is the selected plane, and its service was deleted on 2026-10-25, so a selected `ragflow` plane cannot answer.
 
 ## The `corpus` dataset (phase 63)
 

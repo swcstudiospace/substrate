@@ -144,6 +144,15 @@ export function embedCacheFromEnv(env: Record<string, string | undefined> = proc
 }
 
 /**
+ * The RAGFlow archive's target. `SUBSTRATE_RAGFLOW_ARCHIVE_DIR` names the directory the archive writes to (null when unset,
+ * so the archive refuses by name); `SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS` (1, true or yes) waives only the dedicated-mount gate.
+ */
+export function ragflowArchiveFromEnv(env: Record<string, string | undefined> = process.env): { dir: string | null; allowRootfs: boolean } {
+	const dir = env.SUBSTRATE_RAGFLOW_ARCHIVE_DIR?.trim() || null;
+	return { dir, allowRootfs: /^(1|true|yes)$/i.test(env.SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS?.trim() ?? "") };
+}
+
+/**
  * Which docs plane serves this process.
  *
  * An explicit `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`,

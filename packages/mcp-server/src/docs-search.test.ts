@@ -1791,3 +1791,61 @@ describe("docs_search tandem recall (phase 57c)", () => {
 		expect(searchReplyStorable(on)).toBe(false);
 	});
 });
+
+describe("LightRAG context replies are never cached (phase 46 SC1)", () => {
+	let restoreEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreEnv = hindsightEnv("sub-cursor");
+	});
+	afterEach(() => restoreEnv());
+
+	/** A LightRAG `/query` stand-in: answers one chunk and counts every query it gets. */
+	function lightragPlane(): { fetch: FetchLike; queries: () => number } {
+		let queries = 0;
+		const fetch: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
+			queries += 1;
+			return Response.json({ status: "success", data: { chunks: [{ content: "Served by LightRAG.", document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
+		};
+		return { fetch, queries: () => queries };
+	}
+
+	function recallable(): HindsightFake {
+		const hindsight = new HindsightFake();
+		hindsight.seed("sub-cursor", [
+			{ id: "m1", text: "fence the lease", document_id: "mwd_1", tags: ["cursor"], metadata: {}, score: 0.4 },
+			{ id: "m2", text: "quote every version", document_id: "mwd_2", tags: ["cursor"], metadata: {}, score: 0.9 },
+			{ id: "m3", text: "rotate the bearer", document_id: "mwd_3", tags: ["cursor"], metadata: {}, score: 0.7 },
+			{ id: "m4", text: "drain the outbox", document_id: "mwd_4", tags: ["cursor"], metadata: {}, score: 0.8 },
+		]);
+		return hindsight;
+	}
+
+	test("a LightRAG context reply is never stored: the cache keeps the chunks, and a repeat recalls its own memories", async () => {
+		const lightragConfig = loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" });
+		const lightrag = lightragPlane();
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const { greptime } = ledgerStub(sessionRows(7));
+		const substrate = new Substrate(lightragConfig, {
+			index: null,
+			greptime,
+			lightragFetch: lightrag.fetch,
+			hindsightFetch: recallable().fetch,
+			cache,
+		});
+		const request = { question: "where is the plan?", session_id: "s-1", context: true };
+		const first = await substrate.searchDocs(request, "cursor");
+		expect(first.context?.memories).toHaveLength(3);
+		const stored = [...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"));
+		expect(stored).toHaveLength(1);
+		const envelope: { v?: Record<string, unknown> } = JSON.parse(stored[0]?.[1] ?? "{}");
+		expect(envelope.v).toBeDefined();
+		expect(Object.hasOwn(envelope.v ?? {}, "context")).toBe(false);
+		const second = await substrate.searchDocs(request, "cursor");
+		expect(second.chunks).toEqual(first.chunks);
+		expect(second.context?.memories).toHaveLength(3);
+		expect(lightrag.queries()).toBe(1);
+	});
+});

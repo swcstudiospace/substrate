@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RedisClient } from "bun";
 import { canonicalJson, decideClaim, type AuditTransport, type ClaimDecision } from "@substrate/audit";
-import { acceptsSigner, createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import {
 	PLANES,
 	PlaneRegistry,
@@ -110,7 +110,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession, type StoredLeaf } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
