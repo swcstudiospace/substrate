@@ -31,6 +31,7 @@ import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
 import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
+import { DEFAULT_DEAD_LETTER_MAX, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
 import { repoScopeFromEnv, type RepoScope } from "./repo-scope.ts";
@@ -663,6 +664,12 @@ export interface SubstrateConfig {
 	 */
 	retainOutbox: { path: string | null; max: number; maxAttempts: number; drainMs: number };
 	/**
+	 * The ledger event buffer and dead-letter store (phase 76). `path` from `SUBSTRATE_LEDGER_BUFFER_PATH` and
+	 * `deadLetterPath` from `SUBSTRATE_LEDGER_DEAD_LETTER_PATH` (null = memory-only); `max` parked events and
+	 * `deadLetterMax` records bound each store; `maxAttempts` is the write budget per event, the live one included.
+	 */
+	eventBuffer: { path: string | null; max: number; maxAttempts: number; deadLetterPath: string | null; deadLetterMax: number };
+	/**
 	 * Which Hindsight routing keys were present, for the boot warnings only:
 	 * the legacy single-bank key is unread, and a URL without a bank list means
 	 * recall reads the caller's own bank only. Presence, never a value.
@@ -1221,6 +1228,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			max: positiveIntOr(env.SUBSTRATE_RETAIN_OUTBOX_MAX, DEFAULT_RETAIN_OUTBOX_MAX),
 			maxAttempts: positiveIntOr(env.SUBSTRATE_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_MAX_ATTEMPTS),
 			drainMs: positiveIntOr(env.SUBSTRATE_RETAIN_DRAIN_MS, DEFAULT_RETAIN_DRAIN_MS),
+		},
+		// phase 76: the ledger event buffer and its dead-letter store.
+		eventBuffer: {
+			path: env.SUBSTRATE_LEDGER_BUFFER_PATH?.trim() || null,
+			max: positiveIntOr(env.SUBSTRATE_LEDGER_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX),
+			maxAttempts: positiveIntOr(env.SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS),
+			deadLetterPath: env.SUBSTRATE_LEDGER_DEAD_LETTER_PATH?.trim() || null,
+			deadLetterMax: positiveIntOr(env.SUBSTRATE_LEDGER_DEAD_LETTER_MAX, DEFAULT_DEAD_LETTER_MAX),
 		},
 		hindsightEnv: {
 			legacyBankSet: (env.HINDSIGHT_BANK?.trim() ?? "") !== "",

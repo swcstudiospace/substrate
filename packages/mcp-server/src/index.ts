@@ -213,6 +213,8 @@ server.listen(config.port, config.host, () => {
 const SHUTDOWN_FLUSH_MS = 2000;
 /** How long in-flight background retains may take before shutdown stops waiting for them. */
 const SHUTDOWN_RETAIN_MS = 10_000;
+/** How long parked ledger events may take on their last pass before shutdown stops waiting for them. */
+const SHUTDOWN_EVENT_MS = 5_000;
 /** How long in-flight planning transition records may take before shutdown stops waiting for them. */
 const SHUTDOWN_TRANSITION_MS = 5000;
 
@@ -247,6 +249,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// answered before its forward landed must not lose that forward
 			// silently on restart (the durable outbox keeps the rest).
 			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
+			// Phase 76: parked ledger events get one due pass, then a memory-only buffer hands what is left to the dead-letter
+			// store, so no event leaves the process without a record of where it went.
+			await substrate.drainPendingEvents(SHUTDOWN_EVENT_MS, { abandon: true });
 			// Planning transition records in flight are awaited within their own bound, after the retains and before the flush below.
 			await substrate.planningObserver.settleTransitions(Bun.sleep(SHUTDOWN_TRANSITION_MS));
 			// The last export before shutdown, so the counters a restart resets are not

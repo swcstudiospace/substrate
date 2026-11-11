@@ -166,7 +166,7 @@ describe("chain-tip cache", () => {
 		expect(ledger.sessionReads()).toBe(2);
 	});
 
-	test("an event-row error forgets the tip, and the next emit reads the ledger again", async () => {
+	test("an event-row error forgets the tip and parks the event: the next emit chains behind it, and the ledger receives them in order", async () => {
 		const ledger = fakeLedger();
 		const greptime = client();
 		const substrate = substrateWith(greptime);
@@ -178,14 +178,24 @@ describe("chain-tip cache", () => {
 			fail && statement.startsWith('INSERT INTO "agent_events"') ? new Response("nope", { status: 503 }) : undefined;
 		const refused = await substrate.emit(input("sess-1", "lost"));
 		expect(refused.stored).toBe(false);
+		expect(refused.buffered).toBe(true);
 		expect(greptime.chainTipsCached).toBe(0);
 
+		// The lost event is parked, not dropped. The next event of the session cannot be written beside it, so it waits
+		// behind it and chains onto it: no ledger read for the session, and nothing chains onto a row that is not there.
 		fail = false;
 		const next = await substrate.emit(input("sess-1", "after"));
-		expect(next.stored).toBe(true);
-		expect(ledger.sessionReads()).toBe(3);
-		// It chained onto the row that is actually in the ledger, not the lost one.
-		expect(next.event.prev).toBe(defined(ledger.rows[0], "first row").hash);
+		expect(next.stored).toBe(false);
+		expect(next.buffered).toBe(true);
+		expect(next.event.prev).toBe(refused.event.hash);
+		expect(ledger.sessionReads()).toBe(2);
+
+		await substrate.drainEventBuffer({ all: true });
+		expect(ledger.rows.map((row) => row.hash)).toEqual([
+			defined(ledger.rows[0], "first row").hash,
+			refused.event.hash,
+			next.event.hash,
+		]);
 	});
 
 	test("an unconfirmed ingest record keeps the tip: the event row is stored, so the chain moves on", async () => {

@@ -945,6 +945,13 @@ describe("append-mode enforcement", () => {
 				cooldownUntil: null,
 			},
 			eventBus: { enabled: false },
+			eventBuffer: {
+				pending: 0,
+				max: 1000,
+				oldestAt: null,
+				durable: false,
+				deadLetters: { depth: 0, max: 10000, durable: false, evicted: 0 },
+			},
 			planes: {
 				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
 				index: { ok: null, breaker: closed("index"), lastErrorAt: null },

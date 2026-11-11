@@ -942,6 +942,34 @@ run by the operator against the store, with `SUBSTRATE_LEDGER_TTL` unset in
 unsetting stops further deletion but does not restore rows already removed — which
 is what the export step above is for.
 
+## Write buffer and dead letters (phase 76)
+
+An event whose `agent_events` write fails is no longer lost by a single failed call. It is parked in the buffer
+(`packages/mcp-server/src/event-buffer.ts`), retried with backoff (2 s doubling to 5 min, ±20 % jitter), and after
+`SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS` writes (default 10) it is written to the dead-letter store together with its hash.
+The caller's answer is `stored: false` with `buffered: true` (it will be retried) or `deadLettered: true` (it will not).
+The answer is never `stored: true` for a parked event.
+
+- **Chain order.** Each event's `prev` is its session's previous hash, so a session's parked events are retried in
+  order and a new event of that session is parked behind them rather than written. A dead-lettered event takes the
+  session's later parked events with it (`chain-blocked`). The next event then chains from the ledger's own tip.
+- **Retry safety.** Before each retry the buffer asks whether the row is already in the ledger, because a write that
+  timed out may have landed. If it has, only the missing `event_ingest` record is written.
+- **Keyed replays.** A replay of a keyed event whose first attempt is still parked answers with the parked event and
+  writes nothing, so a retry cannot store a second copy.
+- **Bounds.** The buffer holds `SUBSTRATE_LEDGER_BUFFER_MAX` events; a new event over that bound is dead-lettered with
+  cause `overflow`. The dead-letter store holds `SUBSTRATE_LEDGER_DEAD_LETTER_MAX` records; over that, the oldest is
+  evicted and its id and hash are written to stderr.
+- **Causes.** `exhausted` (the budget was spent), `overflow` (a bound was full), `chain-blocked` (an earlier event of
+  its session was dead-lettered), `abandoned` (a memory-only buffer was shut down with it parked).
+- **Health.** `/healthz.eventBuffer` reports `pending`, `max`, `oldestAt`, `durable`, and `deadLetters` with `depth`,
+  `max`, `durable` and `evicted`. Neither store changes the `/healthz` status code.
+- **Not replayed.** The substrate never re-appends a dead letter. Reading the file and re-appending a record is an
+  operator decision, and the record carries the event whole, `prev` and `hash` included.
+- **Not covered.** A failure before the write (the chain tip unreadable, or a ledger that is not append-only) is still
+  a refusal with `stored: false` and no buffering: the event's hash depends on a `prev` that cannot be read or is not
+  yet safe to write.
+
 ## Configuration
 
 Four variables, read from the environment and never from this repo:
@@ -965,6 +993,11 @@ Plus switches, none of which is a credential:
 | `SUBSTRATE_LEDGER_TTL` | retention applied to `agent_events` and `event_ingest` at boot, a Greptime duration such as `180d`. Unset by default: nothing is altered. Invalid refuses to boot. See *Retention*. |
 | `SUBSTRATE_EVENT_IDEMPOTENCY` | `off` (default), `accept` or `enforce`. Anything else is `off` with a boot warning. See *Idempotent replay*. |
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2, 0..100000; default 2. Report-only on `/healthz`. See *Coverage and archive*. |
+| `SUBSTRATE_LEDGER_BUFFER_PATH` | file for the parked-event buffer (0600 JSONL). Unset: memory-only, and shutdown dead-letters what is parked. See *Write buffer and dead letters*. |
+| `SUBSTRATE_LEDGER_BUFFER_MAX` | parked events the buffer holds, a positive integer; default 1000. Over it a new event goes straight to the dead-letter store. |
+| `SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS` | write attempts per event, the live one included, before it is dead-lettered; default 10. |
+| `SUBSTRATE_LEDGER_DEAD_LETTER_PATH` | file for the dead-letter store (0600 JSONL). Unset: memory-only, and its records are lost at exit. |
+| `SUBSTRATE_LEDGER_DEAD_LETTER_MAX` | dead-letter records kept, a positive integer; default 10000. Over it the oldest is evicted and named on stderr. |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
 
 Out-of-range numbers clamp and unparseable ones fall back, as the breaker settings do.

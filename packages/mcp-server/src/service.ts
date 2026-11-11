@@ -110,9 +110,10 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession, type StoredLeaf } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IDEMPOTENCY_PAYLOAD_KEY, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession, type StoredLeaf } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
+	GreptimeBreakerOpen,
 	GreptimeClient,
 	INGEST_LAG_MS,
 	IngestNotRecorded,
@@ -226,6 +227,7 @@ import type { FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
+import { DeadLetterStore, EventBuffer, EVENT_DRAIN_TICK_MS, type EventDelivery } from "./event-buffer.ts";
 import {
 	RecallPrefetcher,
 	BRIEF_RECALL_CAP_MS,
@@ -627,6 +629,13 @@ export interface EmitResult {
 	stored: boolean;
 	/** Why it was not stored. Redacted, because a connection error can quote a URL. */
 	error?: string;
+	/**
+	 * Set (with `stored: false`) when the event is parked in the ledger event buffer (phase 76) and will be written when
+	 * the ledger answers. It is not in the ledger yet, and no caller should treat it as stored.
+	 */
+	buffered?: true;
+	/** Set (with `stored: false`) when the event could not be parked either, because the buffer is full or its write budget is spent: it is in the dead-letter store, with its hash. */
+	deadLettered?: true;
 	/**
 	 * Set when the event is stored but something about it is not as promised: the ledger is
 	 * not configured append-only, or the event's ingest record could not be written so it
@@ -1547,6 +1556,11 @@ export class Substrate {
 	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
 	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
 	private retainRecoverPending = false;
+	/** Phase 76: the ledger event buffer (parked events awaiting retry) and the dead-letter store (events that never reached the ledger). */
+	private readonly eventBuffer: EventBuffer;
+	private readonly deadLetters: DeadLetterStore;
+	/** The event buffer's drain tick, started on the first parked event and left unref'd. */
+	private eventDrainTimer: NodeJS.Timeout | null = null;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -1906,6 +1920,11 @@ export class Substrate {
 			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
 		});
 		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
+		// phase 76: the dead-letter store is built first, so a parked event that spends its budget has somewhere to go. A
+		// buffer file from a previous boot is hydrated now, and its tick starts when anything is parked.
+		this.deadLetters = new DeadLetterStore({ path: config.eventBuffer.deadLetterPath, max: config.eventBuffer.deadLetterMax });
+		this.eventBuffer = new EventBuffer({ path: config.eventBuffer.path, max: config.eventBuffer.max, maxAttempts: config.eventBuffer.maxAttempts, deadLetters: this.deadLetters });
+		if (this.eventBuffer.size() > 0) this.ensureEventDrainTimer();
 		// uplift-4 S5: the recall prefetcher (inert unless SUBSTRATE_BRIEF_RECALL is shadow or enforce) and the
 		// read-only Hindsight inventory (inert unless SUBSTRATE_HINDSIGHT_INVENTORY=on). Neither starts a timer here.
 		this.recall = new RecallPrefetcher({
@@ -2877,12 +2896,31 @@ export class Substrate {
 
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
 		if (idem?.lookup && idem.key !== null && this.greptime) {
-			const settled = await this.replayOutcome(input, idem.key);
+			const key = idem.key;
+			// The ledger is asked first: a parked event whose write landed (its reply was lost) is a stored row, and the
+			// lookup reports it as such.
+			const settled = await this.replayOutcome(input, key);
 			if (settled !== null) return settled;
+			// A keyed replay whose first attempt is still parked (phase 76) finds no row yet: the parked event answers it,
+			// and nothing is written, so the replay cannot store a second copy.
+			const probe = normalizeEvent(input, null, { key });
+			const parked = this.eventBuffer.find(
+				(event) =>
+					event.surface === probe.surface &&
+					event.repo === probe.repo &&
+					event.graph_id === probe.graph_id &&
+					event.kind === probe.kind &&
+					event.ts === probe.ts &&
+					event.payload[IDEMPOTENCY_PAYLOAD_KEY] === key,
+			);
+			if (parked !== null) return { event: parked, stored: false, buffered: true, error: "the original attempt of this keyed event is queued for the ledger; nothing was written" };
 		}
-		let prev: string | null = null;
+		// An event whose session has parked events chains onto the newest of them, never onto the ledger: a direct write
+		// would fork the chain those parked events are about to extend (event-buffer.ts).
+		const parkedTip = sessionId === null ? null : this.eventBuffer.tipOf(sessionId);
+		let prev: string | null = parkedTip;
 		let tipError: string | null = null;
-		if (this.greptime && sessionId) {
+		if (parkedTip === null && this.greptime && sessionId) {
 			// A tip that cannot be read is not an empty session: a null prev here would start a second
 			// chain beside the stored one. Only an answered read yields a prev; a failed one refuses the write.
 			try {
@@ -2893,6 +2931,7 @@ export class Substrate {
 		}
 		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
+		if (parkedTip !== null) return this.parkEvent(event, "an earlier event of this session has not reached the ledger", false);
 		if (tipError !== null) {
 			process.stderr.write(`[substrate] event ${event.id} not stored — chain tip unreadable: ${tipError}\n`);
 			return { event, stored: false, error: `chain tip unreadable: ${tipError}` };
@@ -2922,9 +2961,23 @@ export class Substrate {
 					warning: appendOnly !== true ? `${INGEST_NOT_RECORDED} ${DEDUP_WARNING}` : INGEST_NOT_RECORDED,
 				};
 			}
-			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
-			return { event, stored: false, error };
+			return this.parkEvent(event, error, true);
 		}
+	}
+
+	/**
+	 * Park an event the ledger did not take (phase 76). `attempted` is true when the write that just failed spent the
+	 * first attempt, and false when the event waits behind an earlier one of its session and was never tried. The caller
+	 * gets `stored: false` either way: `buffered` means it will be retried, `deadLettered` that it will not.
+	 */
+	private parkEvent(event: SubstrateEvent, error: string, attempted: boolean): EmitResult {
+		if (this.eventBuffer.enqueue(event, error, attempted) === "dead-lettered") {
+			process.stderr.write(`[substrate] event ${event.id} not stored (dead-lettered) — ${error}\n`);
+			return { event, stored: false, deadLettered: true, error: `${error}; dead-lettered` };
+		}
+		this.ensureEventDrainTimer();
+		process.stderr.write(`[substrate] event ${event.id} not stored (buffered for retry) — ${error}\n`);
+		return { event, stored: false, buffered: true, error: `${error}; buffered for retry` };
 	}
 
 	/**
@@ -3958,6 +4011,77 @@ export class Substrate {
 		if (this.retainDrainTimer === null) return;
 		clearInterval(this.retainDrainTimer);
 		this.retainDrainTimer = null;
+	}
+
+	/** Start the event buffer's drain tick once. It is unref'd, so a parked event never holds the process. */
+	private ensureEventDrainTimer(): void {
+		if (this.eventDrainTimer !== null) return;
+		this.eventDrainTimer = setInterval(() => {
+			void this.drainEventBuffer();
+		}, EVENT_DRAIN_TICK_MS);
+		this.eventDrainTimer.unref();
+	}
+
+	/** Clear the event drain tick, as `stopRetainDrain` does for the retain outbox. */
+	private stopEventDrain(): void {
+		if (this.eventDrainTimer === null) return;
+		clearInterval(this.eventDrainTimer);
+		this.eventDrainTimer = null;
+	}
+
+	/**
+	 * One pass over the parked events: due ones, in age order, one ledger write each. Without a ledger nothing is
+	 * attempted and no attempt is spent, so events parked before a restart that dropped the ledger wait for it.
+	 */
+	drainEventBuffer(options: { all?: boolean } = {}): Promise<void> {
+		const greptime = this.greptime;
+		if (greptime === null) return Promise.resolve();
+		return this.eventBuffer.drain((event) => this.deliverBufferedEvent(greptime, event), options);
+	}
+
+	/**
+	 * One delivery attempt for a parked event. It answers and never throws: a failure is a reason the buffer records,
+	 * and the buffer decides when the event is dead-lettered.
+	 */
+	private async deliverBufferedEvent(greptime: GreptimeClient, event: SubstrateEvent): Promise<EventDelivery> {
+		try {
+			// A write that timed out may have landed. Then the row is already there, and only its ingest record may be missing.
+			if (await greptime.eventStored(event.id)) {
+				await greptime.recordIngest(event);
+				return "delivered";
+			}
+			// Fail closed, as on the direct path: a ledger that may deduplicate does not get the write.
+			const appendOnly = await greptime.ensureAppendMode().catch(() => null);
+			if (appendOnly !== true && !this.config.allowDeduplicatingLedger) return { transient: appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN };
+			await greptime.insertEvent(event);
+			return "delivered";
+		} catch (cause) {
+			if (cause instanceof GreptimeBreakerOpen) return "held";
+			if (cause instanceof IngestNotRecorded) {
+				// The row is in the ledger and only its ingest record is missing: the same answer as the direct path.
+				process.stderr.write(`[substrate] event ${event.id} stored but ingest unconfirmed — ${redact(String(cause))}\n`);
+				return "delivered";
+			}
+			return { transient: redact(String(cause)) };
+		}
+	}
+
+	/**
+	 * Shutdown (phase 76): one due pass over the parked events inside `timeoutMs`. With `abandon` the tick stops, and a
+	 * memory-only buffer moves what is left to the dead-letter store, so each parked event still ends with a record. A
+	 * durable buffer keeps its file for the next boot.
+	 */
+	async drainPendingEvents(timeoutMs: number, options: { abandon?: boolean } = {}): Promise<void> {
+		if (this.eventBuffer.size() > 0) await Promise.race([this.drainEventBuffer(), Bun.sleep(timeoutMs)]);
+		if (options.abandon !== true) return;
+		this.stopEventDrain();
+		if (!this.eventBuffer.durable) {
+			const abandoned = this.eventBuffer.abandonAll();
+			if (abandoned > 0) process.stderr.write(`[substrate] event buffer: ${abandoned} parked event(s) moved to the dead-letter store at shutdown\n`);
+		}
+		if (!this.deadLetters.durable && this.deadLetters.depth() > 0) {
+			process.stderr.write(`[substrate] dead-letter store: ${this.deadLetters.depth()} record(s) held in memory are lost at exit\n`);
+		}
 	}
 
 	/**
@@ -8436,6 +8560,7 @@ export class Substrate {
 			// change its status code when the cache is down.
 			cache,
 			eventBus: this.eventBusHealth(),
+			eventBuffer: this.eventBufferHealth(),
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
@@ -8555,6 +8680,18 @@ export class Substrate {
 		if (bus === null) return { enabled: false };
 		const stats: EventBusStats = bus.stats?.() ?? { published: 0, publishFailures: 0, oversizeDropped: 0, malformedIgnored: 0, subscriptionDrops: 0 };
 		return { enabled: true, published: stats.published, failed: stats.publishFailures, oversize: stats.oversizeDropped, malformed: stats.malformedIgnored };
+	}
+
+	/** `/healthz.eventBuffer` (phase 76): what is parked for a retry and what is dead-lettered, read from memory. */
+	private eventBufferHealth(): EventBufferHealth {
+		const stats = this.eventBuffer.stats();
+		return {
+			pending: stats.pending,
+			max: stats.max,
+			oldestAt: stats.oldestAt,
+			durable: stats.durable,
+			deadLetters: { depth: this.deadLetters.depth(), max: this.deadLetters.max, durable: this.deadLetters.durable, evicted: this.deadLetters.evicted() },
+		};
 	}
 
 	/**
@@ -8885,6 +9022,8 @@ export interface SubstrateHealth {
 	cache: CacheHealth;
 	/** Phase 50: the wake-up bus's counters, `{ enabled: false }` while it is off. */
 	eventBus: EventBusHealth;
+	/** Phase 76: the ledger event buffer and its dead-letter store. Present whether or not a ledger is configured. */
+	eventBuffer: EventBufferHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
@@ -8893,6 +9032,17 @@ export interface SubstrateHealth {
 
 /** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */
 export type EventBusHealth = { enabled: false } | { enabled: true; published: number; failed: number; oversize: number; malformed: number };
+
+/** `/healthz.eventBuffer` (phase 76): parked events awaiting a retry, and the dead-letter store's depth and bound. */
+export interface EventBufferHealth {
+	pending: number;
+	max: number;
+	/** ISO instant of the oldest parked event, or `null` when none is parked. */
+	oldestAt: string | null;
+	/** False while the buffer is memory-only, or its last save failed. */
+	durable: boolean;
+	deadLetters: { depth: number; max: number; durable: boolean; evicted: number };
+}
 
 /** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
 export interface IndexArchiveHealth {

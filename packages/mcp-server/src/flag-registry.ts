@@ -353,6 +353,11 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_LEDGER_CHAIN_CACHE_MAX", kind: "number", plane: "ledger", default: "10000", allowed: "1..1000000", unset: "10000 sessions", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS", kind: "number", plane: "ledger", default: "30", allowed: "1..3650", unset: "30 days", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_WRITE_PROBE_S", kind: "number", plane: "ledger", default: "60", allowed: "0..86400 (0 never probes)", unset: "60 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_LEDGER_BUFFER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path", unset: "memory-only event buffer: a restart loses what is parked (shutdown dead-letters it)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_LEDGER_BUFFER_MAX", kind: "number", plane: "ledger", default: "1000", allowed: "positive integer", unset: "1000 parked events; over it a new event goes straight to the dead-letter store", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS", kind: "number", plane: "ledger", default: "10", allowed: "positive integer", unset: "10 write attempts per event, the live one included, before it is dead-lettered", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_LEDGER_DEAD_LETTER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path", unset: "memory-only dead-letter store: its records are lost at exit (their count is named on stderr at shutdown)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_LEDGER_DEAD_LETTER_MAX", kind: "number", plane: "ledger", default: "10000", allowed: "positive integer", unset: "10000 records; over it the oldest is evicted and named on stderr", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{
 		name: "SUBSTRATE_LEDGER_TTL",
 		kind: "string",

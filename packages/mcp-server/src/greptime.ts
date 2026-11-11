@@ -1277,6 +1277,17 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * Whether a row with this event id is in the ledger: the retry check for a buffered event (phase 76). A write
+	 * that timed out may have landed, and writing the event again would leave two rows for one event. Throws on
+	 * any ledger error, an open breaker included: a failed lookup must never be read as "not stored".
+	 */
+	async eventStored(id: string): Promise<boolean> {
+		if (!IDEMPOTENCY_ID.test(id)) throw new GreptimeError("refusing an event lookup for a malformed id");
+		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE "id" = ${this.q(id)} LIMIT 1`);
+		return rows.length > 0;
+	}
+
+	/**
 	 * The event's `event_ingest` record: the membership an hourly anchor reads (D27-10). Shared by
 	 * `insertEvent`, after its row landed, and by an idempotent replay that matched an existing
 	 * row (U5-4a), whose original attempt may have ended before this write.
