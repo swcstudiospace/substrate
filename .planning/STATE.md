@@ -701,3 +701,15 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Known stash contents not ported: `46-PLAN.md` in the stash differs from the committed phase 46 plan; review before applying.
 - Roadmap rows corrected: phase 72 ported (human_needed), phases 73 and 75 merged (PRs #201, #200).
 
+## Repo-buildable closure (2026-11-11, branch reconcile/main-2026-11-11)
+
+- Phase 46: criterion 1 met in repo; criterion 4 comparator and offline migration job built (0d230e18, 2ef45b0b, 22370c55, 214ca51a), operator gates for live PARITY, apply and the D2 identity/waiver decision. Criteria 2, 3, 5, 6 operator-gated.
+- Phase 74: engine landed (96d451a4); no route or MCP caller. Open decision: expose as a tool or keep module-only.
+- Phase 76: landed (f3e6798b; drain-on-write fix b023d2a0). Operator gates: buffer paths, claim-withdrawal policy.
+- Phase 77: landed (c26b1ef3, b9ecd215 durable via migrations 44 and 45). Operator gate: rehearsal of steps 44-46 on a restored dump.
+- Phase 78: memory.forget pair (46956358); scheduled entry and staged unit (a5d6bc03; not installed). Other pairs open.
+- Phase 66, 67, 68: repo-buildable gaps closed (5f705aab, ff7a7b9f, dfd7a2f0, 37e4063b, 45550f94). Still open: plane-score capture, per-process state bound, host hook install, live delivery, long-poll slot, worktree guard caller and merge-back lock.
+- Gates on the final tree: tsc clean, `bun run lint` clean, check:phase-close pass, test:py 341 pass. Full `bun test` is run once more after this entry; its result is in the milestone report.
+- Behaviour changes to review: a rollback retry drains a session's parked event before writing (b023d2a0); a repeated forget with the same forget_id no longer writes a second memory.forget note.
+- Milestone audit and completion are NOT run: they need the owner's sign-off (q2).
+

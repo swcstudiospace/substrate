@@ -128,9 +128,9 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 63: Corpus Atlas** - scan, classify and de-duplicate the documentation of every repository on the VPS, in GitHub and in the Greptile knowledge bases, and ingest it in bulk with provenance, deletes and one manifest. Shipped in PR #177 (2026-10-29); gaps_found: no live ingest.
 - [x] **Phase 64: Embedding fabric** - a TEI client with a Dragonfly cache, a fabric resource and near-duplicate detection. Shipped in PRs #179 and #183 (2026-10-29); gaps_found: TEI never contacted live.
 - [x] **Phase 65: Doc Watch** - documentation changes reach the docs plane on their own: git hooks, a filesystem watcher, a reconcile timer and manifest-backed state. Shipped in PR #186 (2026-10-30); gaps_found: no reconcile timer exists, and the planning state is not yet in the manifest; operator installs the triggers (none is installed).
-- [x] **Phase 66: Docs Reflect** - retrieval telemetry, feedback, authority scores, supersession, digests and gap detection make the docs RAG learn from use. Shipped in PR #184 (2026-10-30); PARTIAL.
-- [x] **Phase 67: Live Steering GA** - a steering command and view, cross-session context digests, brief sections, durable session state, the `checkpoint_hint` reader and a long poll. Shipped in PRs #180 and #192 (2026-10-29 and 2026-10-30); PARTIAL in delivery: the steering and context hooks are not installed, so no session reads its hints.
-- [x] **Phase 68: Worktree Fleet** - a worktree registry found through git, safe pruning, conflict forecasts, a disk floor and brief warnings for overlapping sessions. Shipped in PRs #178, #185, #188, #189, #190 and #193 (2026-10-29 and 2026-10-30); gaps_found, PARTIAL: no scheduler runs the fleet report; the dispatcher ignores `SUBSTRATE_WORKTREE_ROOTS`; the guard has no caller.
+- [ ] **Phase 66: Docs Reflect** - retrieval telemetry, feedback, authority scores, supersession, digests and gap detection make the docs RAG learn from use. Shipped in PR #184 (2026-10-30); repo gaps closed (5f705aab, ff7a7b9f) except the per-process state bound (60s feedback / 30s manifest propagation by design); plane-score capture, live reflect and migration rehearsal are operator-gated. PARTIAL.
+- [ ] **Phase 67: Live Steering GA** - a steering command and view, cross-session context digests, brief sections, durable session state, the `checkpoint_hint` reader and a long poll. Repo gaps closed (dfd7a2f0, 37e4063b; durable restart hint via step 45 in b9ecd215). PARTIAL: the host hook install and live delivery to a real session are operator-gated; the long-poll admission slot needs a contract decision in admission.ts.
+- [ ] **Phase 68: Worktree Fleet** - a worktree registry found through git, safe pruning, conflict forecasts, a disk floor and brief warnings for overlapping sessions. Repo gaps closed (45550f94): dispatcher roots, report entry point, disk floor, no-origin trust. PARTIAL: the guard has no caller (wiring would refuse every worktree), and the merge-back check-then-note race needs an external lock.
 - [x] **Phase 69: Doc Proofs** - a Merkle root over the corpus recorded in the ledger so the hourly devnet anchor covers it, with inclusion proofs and verification. Shipped in PR #181 (2026-10-29); gaps_found: no anchored hour yet.
 - [x] **Phase 70: Docs SLO and eval** - a self-supervised golden set, an offline CI harness, SLO metrics, a docs lint and the operator runbook. Shipped in PR #182 (2026-10-30); gaps_found: the baseline is self-supervised and reads 1.0 on every metric, so it cannot show retrieval quality.
 
@@ -141,11 +141,11 @@ Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eigh
 - [ ] **Phase 71: Multi-Session boundary** - steering and session context bound to the owning surface
 - [x] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories (ported from gsd/v18-p72-rebased in merge 082e653a; the branch's own verification is human_needed)
 - [x] **Phase 73: Ledger tamper evidence** - rewrites, reorders and tail truncation detected and anchored (merged to main as PR #201, 83779a1d)
-- [ ] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps
+- [ ] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps. Engine landed (96d451a4): branch fan-out with durable steps and compensation. PARTIAL: no route or MCP tool calls it (needs an admission classification and route decision), and migration step 43 rehearsal is operator-gated.
 - [x] **Phase 75: DragonflyDB degradation** - the cache breaker degrades reads to the authoritative store (merged to main as PR #200, 3c465dc1)
-- [ ] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered
-- [ ] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged
-- [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired
+- [x] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered (f3e6798b; claim-withdrawal policy and buffer paths in systemd are operator-gated)
+- [x] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged (c26b1ef3 in process; b9ecd215 durable via migrations 44 and 45, the rehearsal is operator-gated)
+- [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired. PARTIAL: the memory.forget pair is compared and repaired through a confirmed plan (46956358); the scheduled run is wired as `cross-layer-reconcile-run.ts` with a unit staged under `infra/vps` (a5d6bc03), not installed (operator gate); the index-to-ledger and cache-to-index pairs are not compared yet.
 
 ## Phase Details
 
@@ -1421,8 +1421,8 @@ Plans:
 | 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Ported from gsd/v18-p72-rebased (082e653a); human_needed per its own verification | - |
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Merged to main as PR #201 | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/1 | Partial: engine landed (96d451a4); no route or MCP caller; step 43 rehearsal operator-gated | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Merged to main as PR #200 | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
-| 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
-| 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 | Complete (f3e6798b); buffer paths and claim-withdrawal policy operator-gated | 2026-11-11 |
+| 77. Steering idempotency and ordering | v1.8 | 1/1 | Complete (c26b1ef3, b9ecd215); migrations 44-45 rehearsal operator-gated | 2026-11-11 |
+| 78. Cross-layer reconciliation | v1.8 | 0/1 | Partial: memory.forget pair only (46956358); scheduler unwired | - |
