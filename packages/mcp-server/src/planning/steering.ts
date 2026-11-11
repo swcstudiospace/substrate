@@ -212,7 +212,8 @@ type SimpleSteeringCode =
 	| "not-found"
 	| "wrong-session"
 	| "already-acknowledged"
-	| "confirmation-required";
+	| "confirmation-required"
+	| "idempotency-conflict";
 
 export type SteeringError =
 	| { code: "invalid-directive" | "invalid-acknowledgement"; issues: string[] }

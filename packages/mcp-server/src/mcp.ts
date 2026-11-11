@@ -2401,7 +2401,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The server assigns the directive id, returned as " +
 					"directive_id; the caller cannot choose it. The directive is audited before it is queued. A refusal carries a typed error: " +
 					"not-found for any denied or inactive target, forbidden operator-required after a valid binding, principal-not-allowed, " +
-					"rate-limited, invalid-directive or audit-unavailable. Invalid settings answer misconfigured; absent inbox audit answers not-configured.",
+					"rate-limited, invalid-directive, idempotency-conflict or audit-unavailable. Invalid settings answer misconfigured; absent inbox audit answers not-configured. " +
+					"With idempotency_key a retry applies once: the same request under the key replays the original reply, with its sequence, and writes nothing; " +
+					"a different request under the key is idempotency-conflict. A keyed reply carries sequence, the directive's delivery order.",
 				inputSchema: STEERING_QUEUE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
@@ -2424,7 +2426,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"(annotate and declined change nothing), the same session docs_steering_session holds, and the reply then carries checkpoint_hint " +
 					"{ trigger: steering, directive_id } for the session to take a steering checkpoint; a transition the session refuses (or a session " +
 					"the server does not hold) is reported as session_state refused, never forced. A refusal " +
-					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable. " +
+					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required, idempotency-conflict or audit-unavailable. " +
+					"With idempotency_key a retry under the same key and request replays the stored reply, with its sequence, and moves nothing; a different request under the key is refused. " +
 					"Answers misconfigured while the steering settings are invalid.",
 				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },

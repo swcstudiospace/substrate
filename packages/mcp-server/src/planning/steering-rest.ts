@@ -81,6 +81,8 @@ export interface RestDirective {
 	outcome: string | null;
 	/** Present for an acknowledged directive whose outcome moves the session: the session may take a steering checkpoint. */
 	checkpoint_hint: { trigger: string; directive_id: string } | null;
+	/** The delivery sequence the inbox gave this directive, the order readers see; null when the inbox does not hold it (a durable row after a restart). */
+	sequence: number | null;
 }
 
 const isoOf = (ms: number): string => new Date(ms).toISOString();
@@ -92,7 +94,7 @@ const isoOf = (ms: number): string => new Date(ms).toISOString();
  * from the audit history after a restart, which holds no transition result) all give null: a hint is never made from
  * the directive's action and outcome alone.
  */
-export function restDirective(record: SteeringRecord): RestDirective {
+export function restDirective(record: SteeringRecord, sequence: number | null): RestDirective {
 	const { directive } = record;
 	const base = {
 		id: directive.id,
@@ -102,6 +104,7 @@ export function restDirective(record: SteeringRecord): RestDirective {
 		priority: directive.priority,
 		author: directive.author.principalId,
 		created_at: isoOf(directive.createdAtMs),
+		sequence,
 	};
 	if (record.state === "queued") return { ...base, status: "queued", acknowledged_at: null, outcome: null, checkpoint_hint: null };
 	return {
@@ -149,7 +152,7 @@ export function listRestDirectives(inbox: SteeringInbox, query: DirectivesQuery,
 	return merged
 		.sort((a, b) => compareDirectives(a.directive, b.directive))
 		.filter((record) => query.status === "all" || record.state === query.status)
-		.map(restDirective);
+		.map((record) => restDirective(record, inbox.sequenceOf(record.directive.id)));
 }
 
 /** Why the steering inbox cannot answer, as the tools answer it: invalid settings are `misconfigured` (naming the keys, never the values), no audit sink is `not-configured`. */
@@ -173,8 +176,8 @@ export function steeringUnavailable(wiring: SteeringWiring): SteeringUnavailable
 
 // ── POST bodies ───────────────────────────────────────────────────────────────
 
-const QUEUE_FIELDS: readonly string[] = ["session_id", "action", "body", "priority", "conflicts_with_active_plan"];
-const ACKNOWLEDGE_FIELDS: readonly string[] = ["directive_id", "outcome", "confirm"];
+const QUEUE_FIELDS: readonly string[] = ["session_id", "action", "body", "priority", "conflicts_with_active_plan", "idempotency_key"];
+const ACKNOWLEDGE_FIELDS: readonly string[] = ["directive_id", "outcome", "confirm", "idempotency_key"];
 
 function plainObject(body: unknown): Record<string, unknown> | null {
 	return body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
@@ -207,6 +210,7 @@ export function parseQueueBody(body: unknown): RestParse<SteeringQueueInput> {
 		priority: fields.priority ?? "normal",
 		body: fields.body,
 		conflicts_with_active_plan: fields.conflicts_with_active_plan === undefined ? false : fields.conflicts_with_active_plan,
+		...(fields.idempotency_key === undefined ? {} : { idempotency_key: fields.idempotency_key }),
 	});
 	return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: `invalid ${issuePaths(parsed.error.issues).replace("target_session_id", "session_id")}` };
 }
@@ -223,6 +227,7 @@ export function parseAcknowledgeBody(body: unknown): RestParse<SteeringAcknowled
 		directive_id: directiveId,
 		outcome: fields.outcome,
 		...(fields.confirm === undefined ? {} : { confirm: fields.confirm }),
+		...(fields.idempotency_key === undefined ? {} : { idempotency_key: fields.idempotency_key }),
 	});
 	return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: `invalid ${issuePaths(parsed.error.issues).replace("session_id", "directive_id")}` };
 }
@@ -283,6 +288,7 @@ export function steeringHttpStatus(result: SteeringWriteResult | SteeringAcknowl
 				case "wrong-session":
 				case "already-acknowledged":
 				case "confirmation-required":
+				case "idempotency-conflict":
 					return 409;
 				case "rate-limited":
 					return 429;

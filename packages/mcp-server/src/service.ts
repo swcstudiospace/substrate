@@ -214,7 +214,8 @@ import { DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT
 import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
 import { LiveSessionStatePort, STEERING_SESSION_ENDED_ACTION, steeringSessionEvent } from "./planning/session-state.ts";
-import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
+import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringAcknowledgeReply, type SteeringNotice } from "./planning/steering-delivery.ts";
+import { SteeringIdempotency } from "./planning/steering-idempotency.ts";
 import type { LiveSessionAuthority, LiveSessionCaller, LiveSessionInput, LiveSessionMetadata } from "./planning/steering-sessions-store.ts";
 import { nextQueuedDirective, SteeringWaiters, type SteeringWaitResult } from "./planning/steering-waiters.ts";
 import { listRestDirectives, steeringUnavailable, SteeringReadUnavailableError, STEERING_ACKNOWLEDGED_HISTORY_LIMIT, type DirectivesQuery, type DurableAcknowledged, type RestDirective, type SessionsQuery, type WaitQuery } from "./planning/steering-rest.ts";
@@ -1870,6 +1871,7 @@ export class Substrate {
 			settingsErrors: steeringErrors,
 			inbox: steeringInbox,
 			boundary: this.liveBoundary,
+			idempotency: new SteeringIdempotency<SteeringAcknowledgeReply>(),
 			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();

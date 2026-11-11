@@ -2283,7 +2283,7 @@ export function createHttpServer(
 				const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
 				switch (waited.status) {
 					case "directive":
-						sendJson(res, 200, { directive: restDirective(waited.record), wait_ms: timeoutMs });
+						sendJson(res, 200, { directive: restDirective(waited.record, substrate.steering.inbox?.sequenceOf(waited.record.directive.id) ?? null), wait_ms: timeoutMs });
 						return;
 					case "busy":
 						send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });

@@ -67,14 +67,23 @@ REST proof travels **only** in `X-Substrate-Session-Binding`, never URL/query or
 | `GET /steering/sessions?repo_id=&limit=&cursor=` | not MCP `steering_list` | metadata discovery, limit 1..100 (default 50), ascending handle keyset order, `truncated`, optional `next_cursor` |
 | `GET /steering/directives?session_id=&status=` | `steering_list` with target/proof | private inbox; REST status `queued`, `acknowledged`, `all` (default), `history`, `history_truncated` |
 | `GET /steering/wait?session_id=&after=&timeout_ms=` | no separate wait tool | `200 {directive, wait_ms}` or 204 plus `X-Steering-Wait-Ms`, after final read authorization |
-| `POST /steering/queue` | `steering_queue` | REST `{session_id, action, body, priority?, conflicts_with_active_plan?}`; MCP uses `target_session_id`, requires priority/conflict, supports optional `plan_ref` |
-| `POST /steering/acknowledge` | `steering_acknowledge` | REST `{directive_id, outcome, confirm?}` infers target after principal admission; MCP also requires matching `session_id` |
+| `POST /steering/queue` | `steering_queue` | REST `{session_id, action, body, priority?, conflicts_with_active_plan?, idempotency_key?}`; MCP uses `target_session_id`, requires priority/conflict, supports optional `plan_ref` and `idempotency_key` |
+| `POST /steering/acknowledge` | `steering_acknowledge` | REST `{directive_id, outcome, confirm?, idempotency_key?}` infers target after principal admission; MCP also requires matching `session_id` and accepts `idempotency_key` |
 | `POST /docs/search`, `POST /brief` | `docs_search`, `memory_brief` | historical `session_id` is attribution; explicit `steering_session_id` plus header/MCP proof selects private augmentation |
 | `GET /session/context?repo_id=&session_id=&limit=` | `session_context` | redacted digest; `session_id` is self-exclusion only |
 
 Discovery rows contain only `session_id`, `surface`, `repo_id`, `state`, `updated_at`, `expires_at`, even for operators: no private direction, planning hash, directive body/count. Public repository metadata is not a private inbox.
 
 `after` follows inbox insertion order, not wall clock. Waits above the configured ceiling clamp (default 30000 ms, bounds 1000..120000). Separate waiter-cap 429 also uses `Retry-After`. Durable inbox REST history merges up to 100 acknowledged records after restart; audit-restored records have no inferred checkpoint hint.
+
+**Idempotency (keyed commands).** `idempotency_key` is 8 to 128 characters from `A-Z a-z 0-9 . _ : -`, the rule the event ledger uses, and is scoped to the caller's surface. An unkeyed command behaves exactly as before. A keyed command applies once:
+
+- A keyed queue names its directive from the key, so every retry of one key from one surface is the same directive. A replay of the same request returns the original `queued` reply, with the same `sequence`, and writes nothing. A different request under the key (another session, action, priority, body or plan reference) is refused with `idempotency-conflict` (HTTP 409).
+- A keyed acknowledgement replays the stored reply (including `session_state` and `checkpoint_hint`) for the same directive, outcome and confirm flag, and moves nothing again. A different request under the key is `idempotency-conflict`. A refused acknowledgement is not kept, so a retry runs it again.
+- A keyed reply carries `sequence`, the directive's delivery sequence. Every REST directive carries `sequence` too (`null` when the inbox does not hold it). `/steering/wait` delivers in this order, so readers see the order commands entered the inbox.
+
+The key index and sequence are process-local. After a restart a retry is still never applied twice, but it may not get the original reply: restored open directives can take new sequence numbers; a keyed acknowledgement of a directive acknowledged before the restart is refused as `not-found` (404), because the restored inbox holds only open directives; and a keyed queue for such a directive is refused as `audit-unavailable` (503), because the audit log already holds its queued row. A durable sequence and key index are an owner decision (see `.planning/phases/77-steering-idempotency-ordering/CONTEXT.md`).
+
 
 ## Flags and storage
 
