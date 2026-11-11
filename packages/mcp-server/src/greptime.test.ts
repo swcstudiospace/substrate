@@ -2980,3 +2980,24 @@ describe("metric_samples (uplift-4 S6)", () => {
 		});
 	});
 });
+
+describe("the client's transport is the one it was given", () => {
+	test("a client built with an injected fetch sends its statements only through that fetch", async () => {
+		const globalCalls: unknown[] = [];
+		globalThis.fetch = (async (...args: unknown[]) => {
+			globalCalls.push(args);
+			throw new Error("the global fetch was used");
+		}) as unknown as typeof fetch;
+		const injected: string[] = [];
+		const transport = (async (_url: string, init: RequestInit) => {
+			const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
+			injected.push(statement);
+			return new Response(JSON.stringify(defaultReply(statement)), { status: 200, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+
+		await new GreptimeClient(config, { fetch: transport }).insertEvent(normalizeEvent(input, null));
+
+		expect(injected.some((statement) => statement.startsWith("INSERT INTO"))).toBe(true);
+		expect(globalCalls).toEqual([]);
+	});
+});

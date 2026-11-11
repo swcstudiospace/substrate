@@ -436,6 +436,8 @@ export async function shutdown(running: Boot): Promise<void> {
 	running.substrate.stopEventBus();
 	running.substrate.stopPlanningPoll();
 	await running.substrate.drainPendingRetains(1_000, { abandon: true });
+	// The shutdown path of index.ts: parked events get one bounded pass, then the drain tick stops and the rest is abandoned.
+	await running.substrate.drainPendingEvents(1_000, { abandon: true });
 	await running.mcp.client.close();
 }
 

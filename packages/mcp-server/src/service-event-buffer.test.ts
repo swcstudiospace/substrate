@@ -6,6 +6,7 @@ import { loadConfig } from "./config.ts";
 import type { DeadLetter } from "./event-buffer.ts";
 import { Substrate, type EmitResult } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
+import { GreptimeClient } from "./greptime.ts";
 
 const dirs: string[] = [];
 const opened: Substrate[] = [];
@@ -319,4 +320,43 @@ describe("shutdown closes the tick, and a ledger that never answers holds a writ
 		// The write queued behind the pass without a call of its own: the pass is the one blocked call.
 		expect(silent.calls.slice(before)).toEqual([]);
 	});
+});
+
+describe("a closed instance's writes go only through its own transport", () => {
+	test("a closed Substrate with a parked event makes no call through the global fetch after the tick interval", async () => {
+		const original = globalThis.fetch;
+		const globalCalls: unknown[] = [];
+		globalThis.fetch = (async (...args: unknown[]) => {
+			globalCalls.push(args);
+			throw new Error("the global fetch was used");
+		}) as unknown as typeof fetch;
+		try {
+			const sent: string[] = [];
+			const transport = (async (_url: string, init: RequestInit) => {
+				const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
+				sent.push(statement);
+				// The append-mode probe answers true, so the event reaches the write, and the write is what fails.
+				if (statement === 'SHOW CREATE TABLE "agent_events"') {
+					return Response.json({ output: [{ records: { schema: { column_schemas: [{ name: "Table" }, { name: "Create Table" }] }, rows: [["agent_events", "... WITH( append_mode = 'true' )"]] } }] });
+				}
+				// The chain-tip read finds an empty ledger, so the event proceeds to the write, which is what fails.
+				if (statement.startsWith('SELECT "hash", "prev" FROM "agent_events"')) {
+					return Response.json({ output: [{ records: { schema: { column_schemas: [{ name: "hash" }, { name: "prev" }] }, rows: [] } }] });
+				}
+				return new Response("ledger down", { status: 500 });
+			}) as unknown as typeof fetch;
+			const client = new GreptimeClient({ url: "http://greptime.test", user: "u", password: "p", db: "substrate" }, { fetch: transport });
+			const substrate = substrateWith({ SUBSTRATE_LEDGER_BUFFER_PATH: join(scratch(), "buffer.jsonl") }, client);
+			expect((await substrate.emit(input)).buffered).toBe(true);
+			await close(substrate);
+			const sentAtClose = sent.length;
+			// The tick is a real `setInterval` inside Substrate with no clock to inject, so this test waits in real time, as the closed-instance test above does.
+			// The first retry is due 1.6–2.4 s after the park: four seconds clears it and several 1 s ticks.
+			await Bun.sleep(4_000);
+			expect(sent.length).toBe(sentAtClose);
+			expect(globalCalls).toEqual([]);
+		} finally {
+			globalThis.fetch = original;
+		}
+	}, 10_000);
 });
