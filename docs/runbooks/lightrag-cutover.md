@@ -1,8 +1,8 @@
 # LightRAG cutover record (Phase 46)
 
-This is the durable record of the docs-plane cutover to LightRAG. STATE.md Run 11 (2026-10-28) holds the full narrative; this file keeps the facts an operator needs. It names environment keys only. It records no key value, host name, tailnet name or internal address.
+This is the durable record of the docs-plane cutover to LightRAG. STATE.md Run 11 (2026-10-28) holds the full narrative; this file keeps the facts an operator needs. It names environment keys only. It records no key value, host name or internal address.
 
-Not recorded here, and pending operator decision: the reversal limits and rollback procedure (decision D4), the RAGFlow code removal and its waivers (decision D6), and hybrid query mode in production (decision D5). Each of these is an agent default pending operator confirmation, as recorded in `.planning/phases/46-ragflow-hybrid/46-PLAN.md`.
+Decided by the operator: nothing in this file. Pending, each an agent default awaiting operator confirmation in `.planning/phases/46-ragflow-hybrid/46-PLAN.md`: the reversal limit and rollback procedure (D4, stated below as facts), the RAGFlow code removal and its waivers (D6), and hybrid query mode in production (D5).
 
 ## Cutover facts
 
@@ -19,6 +19,12 @@ Not recorded here, and pending operator decision: the reversal limits and rollba
 | Plane status | `/healthz` listed the `lightrag` plane |
 
 Naive mode is required in this state. STATE.md Run 11 records that hybrid fails the smoke query check while the bypass endpoint serves in place of a model (see `docs/docs-plane.md`).
+
+## Reversal limits (decision D4, pending operator)
+
+- RAGFlow cannot be restored. Its `ragflow` Railway service was deleted on 2026-10-25, three days before the cutover, so `SUBSTRATE_DOCS_BACKEND=ragflow` has no plane behind it and is not a reversal.
+- The rollback procedure in the plan is app-only: redeploy release `702ed32e`, which has no LightRAG client, and restore `substrate.env` from its backup. That step does not restore the index. The `pg_dump` archive above is the only index backup.
+- Whether these limits are accepted is decision D4 in `.planning/phases/46-ragflow-hybrid/46-PLAN.md`, an agent default pending the operator.
 
 ## Backups taken before the cutover
 
