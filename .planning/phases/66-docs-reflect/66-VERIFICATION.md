@@ -61,3 +61,45 @@ Status: PARTIAL. The code path connects end to end; no run of it exists.
 ## Planning records
 
 At 80afb6e5, `.planning/REQUIREMENTS.md` still lists REFLECT-01 to REFLECT-05 unchecked (lines 41 to 45), and the traceability table lists them as "Planned" (line 97). This record does not change either.
+
+## Closure, 2026-11-11 (branch `reconcile/main-2026-11-11`)
+
+Scope: the repo-buildable residual risks and gaps above. Code commit `5f705aab` (phase 66: close the repo-buildable docs reflect gaps); this closure record is its own commit. The 2026-10-30 record above is unchanged. The phase is still PARTIAL: criterion 5 and the live loop need an operator run, listed under Operator-gated below.
+
+Evidence was run here: `bun test` on `corpus/reflect-store`, `corpus/reflect-service`, `corpus/authority-index`, `corpus/reflect-routes`, `corpus/telemetry`, `docs-search.reflect`, and `bunx tsc --noEmit` (exit 0). `corpus/reflect-store.test.ts` ran against a scratch `postgres:16` container (`SUBSTRATE_TEST_PG_URL`, a throwaway container, removed afterwards): 10 of 10 pass, including the three tests this closure adds. No flag, LightRAG, Hindsight or production store was touched.
+
+### Residual risks
+
+| # | Residual risk (above) | Status | Closure and evidence |
+|---|---|---|---|
+| 1 | Verdict stacking: one surface posts under many session ids | CLOSED | `feedbackCounts` (Postgres: `distinct on (document_key, surface)`, latest verdict; fake: same) counts one vote per surface per document. Tests: `authority-index.test.ts` "one surface cannot mark a document stale by posting under many session ids"; `reflect-store.test.ts` "one surface posting under many sessions counts once"; `docs-search.reflect.test.ts` "one surface posting the same verdict under many sessions does not reach the answer". The three-session seeds became three-surface seeds. Residual by design: three distinct surfaces still count as three readers; the surface is the authenticated caller's (`server.ts` `docs_feedback` route). |
+| 2 | Plane score dependence: LightRAG may return no score, so `top_score` is 0 for every answer | OPERATOR-GATED | Needs one captured live `/query` response to see which score field, if any, LightRAG returns. The fallback (what a score-less answer means for the gap report) is a decision that depends on that capture. Not changed here. |
+| 3 | Shadow report unreadable | CLOSED | `GET /corpus/gaps` now carries `shadow` (`days`, `searches`, `movedSearches`, `moved`, `largest` of at most 20 with `queryHash`, `text`, `at`, `moved`, `order`), read by `ReflectStore.shadowReport` (`reflect-store.ts`). Tests: `reflect-service.test.ts` "the reply carries the shadow report over the window" and "with no shadow note the report is all zeros"; `reflect-store.test.ts` (live) "the shadow report counts the searches that carry a shadow note and lists the largest moves, never degraded ones". `docs/corpus-reflect.md` "Reading a shadow report" now names this read path. Not done: the CLI `corpus status --gaps` does not render it (packages/cli, outside this closure's paths). |
+| 4 | Failed digest retain is not retried | CLOSED | `corpusReflectReply` retains every digest the manifest holds (`ingested`, `updated` or `unchanged`) on each run. A repeat of the same content computes the same memory session (`digestSessionOf`: a function of the sha256), so the governed write replays and adds no second entry; Hindsight replaces by document id. A `stored` or `unchanged` digest reports `hindsight:<reason>` for as long as its leg is owed. Tests: `reflect-service.test.ts` "a repeat of the same digest is unchanged ... retained again under the same memory session", "a Hindsight leg that failed is owed", "digests retain under a session of their content"; `reflect-routes.test.ts` "the same digest again ... its retain is owed again". Caveat: `packages/cli` `corpus reflect` prints warnings only for `stored` results with a reason, so an owed leg on `unchanged` is counted but not printed. A one-line CLI follow-up, outside this closure's paths. |
+| 5 | Per-process state (authority snapshot 30 s, feedback counts 60 s) | NOT CLOSED (design) | The cross-process propagation bound is the design: a verdict reaches another server within 60 s, a manifest change within 30 s (`authority-index.ts` constants). Closing it needs a shared cache or per-search reads, a design change beyond this closure. |
+| 6 | Feedback bound: the 5000 most recently voted documents | CLOSED | `FEEDBACK_MAX_KEYS` is now 100,000, the manifest's own read cap, and the counts read only documents with an active manifest row (join on `corpus_documents`). A tombstoned or unknown document's votes no longer take a slot. Tests: `reflect-store.test.ts` (live) "a document with no active manifest row is not counted"; "the counts are bounded to the most recently voted documents". |
+| 7 | Live Postgres tests conditional on `SUBSTRATE_TEST_PG_URL` | CLOSED for the SQL; CI gating unchanged | The gaps SQL, the feedback upsert, the active-row join, the per-surface counts and the shadow aggregate ran against `postgres:16` here: 10 of 10. CI runs the file only when its scratch-Postgres job exports `SUBSTRATE_TEST_PG_URL` (`.github/workflows/ci.yml`); that wiring was not changed. |
+| 8 | No end-to-end test of the loop | CLOSED | `docs-search.reflect.test.ts` "a verdict stored through docs_feedback reaches the next answer: a document three surfaces called stale falls below the one they did not" runs `Substrate.docsFeedback` then `Substrate.searchDocs` with the re-rank on and checks the order and the `stale` flag. |
+| 9 | Hindsight scope: Reflect and mental models not used | NOT A GAP | Decision D66-2, accepted. No change. |
+| 10 | Column name collision: `corpus_documents.superseded_by` (marker path) and citation `superseded_by` (document key) | NOT CLOSED (outside paths) | Closing it means renaming the column in a new migration step in `packages/mcp-server/src/index-store.ts` (outside this closure's paths) and updating `corpus/store.ts`. Step 38 may already have run where it was deployed, so a rename must be a new step, not an edit. Needs Main's assignment and an operator rehearsal. |
+
+### Criteria
+
+| # | Before | After this closure |
+|---|---|---|
+| 1 | MET | MET (unchanged) |
+| 2 | MET | MET; verdict stacking closed (risk 1) |
+| 3 | MET | MET; shadow report readable (risk 3); score fallback still gated (risk 2) |
+| 4 | MET | MET (unchanged) |
+| 5 | PARTIAL | PARTIAL. Digest retry and the shadow read are closed in repository code. No live LightRAG, Hindsight or reflect run exists; gap scores remain unverified against a live plane (risk 2). |
+
+### Operator-gated (unchanged from above, plus one)
+
+- Setting `SUBSTRATE_DOCS_TELEMETRY`, `SUBSTRATE_DOCS_RERANK` (`shadow`, then `on`), `SUBSTRATE_DOCS_GAP_SCORE`, or the retention. No default changed.
+- Enabling `SUBSTRATE_CORPUS` and the LightRAG backend.
+- Running `substrate corpus reflect --execute` against a live LightRAG and Hindsight. No schedule exists.
+- Wiring an agent, hook or skill to call `docs_feedback`. None exists in the repository.
+- Rehearsing migration step 38 on a restored dump (`docs/runbooks/rollback-compat.md`).
+- The phase 63 live ingest, which the re-rank depends on.
+- Capturing one live LightRAG `/query` response to settle risk 2 (which score field, if any).
+- Confirming that the CI scratch-Postgres job runs `corpus/reflect-store.test.ts` (risk 7).
