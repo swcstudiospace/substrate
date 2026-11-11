@@ -8,7 +8,10 @@ import { Substrate, type EmitResult } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const dirs: string[] = [];
-afterEach(() => {
+const opened: Substrate[] = [];
+afterEach(async () => {
+	// Each instance is closed the way shutdown closes it, before its scratch dir goes: a tick left running would write later.
+	for (const substrate of opened.splice(0)) await substrate.drainPendingEvents(0, { abandon: true });
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -46,7 +49,9 @@ function ledger(failures: (call: number) => string | null) {
 }
 
 function substrateWith(env: Record<string, string>, greptime: unknown): Substrate {
-	return new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+	opened.push(substrate);
+	return substrate;
 }
 
 /** Stop the drain tick and hand a memory-only buffer's leftovers to the dead letters, so no timer outlives the test. */
@@ -212,6 +217,106 @@ describe("a failed ledger write is parked, not dropped", () => {
 		const health = await after.health();
 		expect(health.eventBuffer).toMatchObject({ pending: 1, durable: true });
 		expect(health.eventBuffer.oldestAt).not.toBeNull();
-		await after.drainPendingEvents(0, { abandon: false });
+		await close(after);
+	});
+});
+
+describe("shutdown closes the tick, and a ledger that never answers holds a write for one call at most", () => {
+	/**
+	 * A ledger that answers normally until `arm()`, then settles no call: a link that accepts the connection and goes silent.
+	 * `timeoutMs` is the budget the write path bounds itself by, as the real client's is.
+	 */
+	function silentLedger(timeoutMs: number) {
+		let armed = false;
+		const calls: string[] = [];
+		const reached = Promise.withResolvers<void>();
+		const never = () => new Promise<never>(() => undefined);
+		const greptime = {
+			timeoutMs,
+			ensureAppendMode: async () => true,
+			lastHash: async () => {
+				calls.push("lastHash");
+				return armed ? never() : TIP;
+			},
+			eventStored: async () => {
+				calls.push("eventStored");
+				if (armed) reached.resolve();
+				return armed ? never() : false;
+			},
+			findByIdempotencyKey: async () => null,
+			recordIngest: async () => undefined,
+			insertEvent: async () => {
+				calls.push("insertEvent");
+				if (armed) return never();
+				throw new Error("greptime unreachable: ETIMEDOUT");
+			},
+		};
+		const arm = () => {
+			armed = true;
+		};
+		return { greptime, arm, reached: reached.promise, calls };
+	}
+
+	test("a closed instance writes nothing after the tick interval; an open one holding the same parked event delivers it", async () => {
+		const up = { value: false };
+		const down = () => (up.value ? null : "greptime unreachable: ETIMEDOUT");
+		const closedLedger = ledger(down);
+		const openLedger = ledger(down);
+		const closed = substrateWith({ SUBSTRATE_LEDGER_BUFFER_PATH: join(scratch(), "buffer.jsonl") }, closedLedger.greptime);
+		const open = substrateWith({ SUBSTRATE_LEDGER_BUFFER_PATH: join(scratch(), "buffer.jsonl") }, openLedger.greptime);
+		expect((await closed.emit(input)).buffered).toBe(true);
+		expect((await open.emit(input)).buffered).toBe(true);
+		await close(closed);
+		// A write after the close still parks, but must not re-arm the tick the close stopped.
+		expect((await closed.emit({ ...input, summary: "ran after close" })).buffered).toBe(true);
+		const closedWrites = closedLedger.inserts();
+
+		up.value = true;
+		// The tick is a real `setInterval` inside Substrate with no clock to inject, so this test waits in real time. The first
+		// retry is due 1.6–2.4 s after the park (a 2 s base, ±20%): four seconds clears it and several 1 s ticks.
+		await Bun.sleep(4_000);
+		expect(closedLedger.inserts()).toBe(closedWrites);
+		expect(closedLedger.written).toHaveLength(0);
+		expect(openLedger.written).toHaveLength(1);
+	});
+
+	test("a ledger that never answers holds a write for one call's budget at most, and the write parks behind its session's tip", async () => {
+		const TIMEOUT = 150;
+		const silent = silentLedger(TIMEOUT);
+		const substrate = substrateWith({}, silent.greptime);
+		const parked = await substrate.emit(input);
+		expect(parked.buffered).toBe(true);
+
+		silent.arm();
+		const before = silent.calls.length;
+		const started = performance.now();
+		const next = await substrate.emit({ ...input, summary: "ran cargo build" });
+		const elapsed = performance.now() - started;
+
+		expect(next.stored).toBe(false);
+		expect(next.buffered).toBe(true);
+		expect(next.event.prev).toBe(parked.event.hash);
+		expect(elapsed).toBeLessThan(TIMEOUT + 250);
+		// One blocked call, the settle's own. The write then parked: it asked the ledger for neither the tip nor an insert.
+		expect(silent.calls.slice(before)).toEqual(["eventStored"]);
+	});
+
+	test("a drain pass already blocked on the ledger does not hold a write past one call's budget", async () => {
+		const TIMEOUT = 150;
+		const silent = silentLedger(TIMEOUT);
+		const substrate = substrateWith({}, silent.greptime);
+		const parked = await substrate.emit(input);
+		silent.arm();
+		// A pass starts, as the tick's does, and blocks on the ledger. Nothing awaits it.
+		void substrate.drainEventBuffer({ all: true });
+		await silent.reached;
+		const before = silent.calls.length;
+		const started = performance.now();
+		const next = await substrate.emit({ ...input, summary: "ran cargo build" });
+		expect(performance.now() - started).toBeLessThan(TIMEOUT + 250);
+		expect(next.buffered).toBe(true);
+		expect(next.event.prev).toBe(parked.event.hash);
+		// The write queued behind the pass without a call of its own: the pass is the one blocked call.
+		expect(silent.calls.slice(before)).toEqual([]);
 	});
 });

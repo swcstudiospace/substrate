@@ -112,6 +112,7 @@ import { createEventBus, type EventBus, type EventBusClient, type EventBusStats,
 import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IDEMPOTENCY_PAYLOAD_KEY, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession, type StoredLeaf } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
+	DEFAULT_TIMEOUT_MS,
 	GreptimeBreakerOpen,
 	GreptimeClient,
 	INGEST_LAG_MS,
@@ -1248,6 +1249,16 @@ function storedLedgerId(value: string | undefined): string | null {
 type LedgerRead = { rows: Array<Record<string, unknown>> } | { reason: string };
 
 /**
+ * Resolves true when `work` settles within `ms`, false when the bound passes first. Either way the timer is cleared, so a
+ * settled call holds nothing open. A bound that passes does not cancel the work; it finishes on its own.
+ */
+function settledWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+	const bound = Promise.withResolvers<boolean>();
+	const timer: NodeJS.Timeout = setTimeout(() => bound.resolve(false), ms);
+	return Promise.race([work.then(() => true), bound.promise]).finally(() => clearTimeout(timer));
+}
+
+/**
  * One ledger read under `LEDGER_LINK_BUDGET_MS`. A timeout or an error is an outcome, not a throw, so the
  * search drops that part of its reply and says why.
  */
@@ -1561,6 +1572,8 @@ export class Substrate {
 	private readonly deadLetters: DeadLetterStore;
 	/** The event buffer's drain tick, started on the first parked event and left unref'd. */
 	private eventDrainTimer: NodeJS.Timeout | null = null;
+	/** Set by the shutdown close: the tick is never re-armed, so a closed instance starts no pass. */
+	private eventDrainClosed = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -4021,15 +4034,16 @@ export class Substrate {
 
 	/** Start the event buffer's drain tick once. It is unref'd, so a parked event never holds the process. */
 	private ensureEventDrainTimer(): void {
-		if (this.eventDrainTimer !== null) return;
+		if (this.eventDrainTimer !== null || this.eventDrainClosed) return;
 		this.eventDrainTimer = setInterval(() => {
 			void this.drainEventBuffer();
 		}, EVENT_DRAIN_TICK_MS);
 		this.eventDrainTimer.unref();
 	}
 
-	/** Clear the event drain tick, as `stopRetainDrain` does for the retain outbox. */
+	/** Clear the event drain tick, as `stopRetainDrain` does for the retain outbox, and refuse to re-arm it: a closed instance starts no pass. */
 	private stopEventDrain(): void {
+		this.eventDrainClosed = true;
 		if (this.eventDrainTimer === null) return;
 		clearInterval(this.eventDrainTimer);
 		this.eventDrainTimer = null;
@@ -4047,13 +4061,19 @@ export class Substrate {
 
 	/**
 	 * Phase 76 chain rule, settle side: one attempt now for each parked event of one session, in chain order (`EventBuffer.drainSession`).
-	 * Never throws: a failed attempt is recorded by the buffer. A session with nothing parked, or no ledger, is left alone.
+	 * Never throws: a failed attempt is recorded by the buffer. A session with nothing parked, or no ledger, is left alone. Bounded: an open
+	 * breaker skips it, and the wait is capped at one ledger call's budget. Past the cap the write parks behind the session's tip instead.
 	 */
 	private async settleParkedSession(sessionId: string): Promise<void> {
 		const greptime = this.greptime;
 		const session = normalizeIdentifier(sessionId);
 		if (greptime === null || session === null || this.eventBuffer.tipOf(session) === null) return;
-		await this.eventBuffer.drainSession(session, (event) => this.deliverBufferedEvent(greptime, event));
+		// Phase 75: while the ledger's breaker is open each attempt is refused at once, so there is nothing to settle.
+		if (this.planes.gate("greptime").breaker?.state() === "open") return;
+		// A pass already in flight can hold the drain for one call per session. Parking is always safe here: a write that
+		// parks lands behind the session's tip, so skipping the settle never reorders an event.
+		const budget = greptime.timeoutMs > 0 ? greptime.timeoutMs : DEFAULT_TIMEOUT_MS;
+		await settledWithin(this.eventBuffer.drainSession(session, (event) => this.deliverBufferedEvent(greptime, event)), budget);
 	}
 
 	/**
@@ -4113,9 +4133,11 @@ export class Substrate {
 	 * durable buffer keeps its file for the next boot.
 	 */
 	async drainPendingEvents(timeoutMs: number, options: { abandon?: boolean } = {}): Promise<void> {
-		if (this.eventBuffer.size() > 0) await Promise.race([this.drainEventBuffer(), Bun.sleep(timeoutMs)]);
+		// The tick stops before the pass, so no timer-started pass runs beside it and a closed instance starts none.
+		if (options.abandon === true) this.stopEventDrain();
+		// A zero budget spends no attempt: closing with 0 touches no ledger.
+		if (timeoutMs > 0 && this.eventBuffer.size() > 0) await Promise.race([this.drainEventBuffer(), Bun.sleep(timeoutMs)]);
 		if (options.abandon !== true) return;
-		this.stopEventDrain();
 		if (!this.eventBuffer.durable) {
 			const abandoned = this.eventBuffer.abandonAll();
 			if (abandoned > 0) process.stderr.write(`[substrate] event buffer: ${abandoned} parked event(s) moved to the dead-letter store at shutdown\n`);
@@ -5354,7 +5376,9 @@ export class Substrate {
 				},
 				...(await this.placeOf(graphId)),
 			}).catch(() => null);
-			recorded = emitted?.stored === true;
+			// A parked claim is recorded: its event lands in order once the ledger answers, so the node stays held. Only an event
+			// that can never land (dead-lettered, or refused outright) withdraws it. A thrown emit (null) is unrecorded, as before.
+			recorded = emitted !== null && (emitted.stored || emitted.buffered === true);
 		}
 
 		const verdict = decideClaim({

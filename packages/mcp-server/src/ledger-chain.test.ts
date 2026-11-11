@@ -49,7 +49,10 @@ interface FakeLedger {
 }
 
 const originalFetch = globalThis.fetch;
-afterEach(() => {
+/** Every instance a test builds, closed in `afterEach` the way shutdown closes one: a tick left running would write through the next test's ledger. */
+const opened: Substrate[] = [];
+afterEach(async () => {
+	for (const substrate of opened.splice(0)) await substrate.drainPendingEvents(0, { abandon: true });
 	globalThis.fetch = originalFetch;
 });
 
@@ -91,7 +94,9 @@ function answer(ledger: FakeLedger, statement: string): unknown {
 }
 
 function substrateWith(greptime: unknown, env: Record<string, string> = {}): Substrate {
-	return new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+	opened.push(substrate);
+	return substrate;
 }
 
 function client(env: Record<string, string> = {}, now: () => number = () => T0): GreptimeClient {

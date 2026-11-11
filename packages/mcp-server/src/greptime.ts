@@ -40,7 +40,8 @@ import {
 	type MetricSampleRow,
 } from "./metrics-history.ts";
 
-const DEFAULT_TIMEOUT_MS = 5000;
+/** The per-call budget every ledger statement is given unless the client is built with its own (`GreptimeClientOptions.timeoutMs`). */
+export const DEFAULT_TIMEOUT_MS = 5000;
 
 export class GreptimeError extends Error {
 	/**
@@ -763,7 +764,8 @@ export class GreptimeClient {
 	ingestAppendMode: boolean | null = null;
 	private ingestAppendModeCheckedAt = 0;
 
-	private readonly timeoutMs: number;
+	/** The budget one ledger statement gets before it is abandoned. The write path reads it to bound its own waits. */
+	readonly timeoutMs: number;
 	private readonly clock: () => number;
 	private readonly gate: PlaneGate | null;
 	private readonly ledger: LedgerSettings;

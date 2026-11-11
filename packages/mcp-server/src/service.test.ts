@@ -33,6 +33,7 @@ function stubStores(
 	const emitted: SubstrateEvent[] = [];
 	const callers: Array<Surface | null> = [];
 	const action = claim.action ?? "granted";
+	const released: Array<{ graph_id: string; node_id: string }> = [];
 	const index = {
 		claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string, caller: Surface | null) => {
 			callers.push(caller);
@@ -55,6 +56,10 @@ function stubStores(
 			};
 		},
 		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null } : null),
+		releaseNode: async (graph_id: string, node_id: string) => {
+			released.push({ graph_id, node_id });
+			return { released: true };
+		},
 	};
 	const greptime = {
 		// Append-only, so `emit` is not fail-closed here; enforcement has its own tests.
@@ -64,7 +69,7 @@ function stubStores(
 			emitted.push(event);
 		},
 	};
-	return { emitted, index, greptime, callers };
+	return { emitted, index, greptime, callers, released };
 }
 
 describe("claimNode", () => {
@@ -199,6 +204,80 @@ describe("claimNode", () => {
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
 		await expect(substrate.claimNode("ut-1", "n2", "hermes", "sess-1", null)).rejects.toThrow("SUBSTRATE_PG_URL");
 		await expect(substrate.heartbeatNode("ut-1", "n2", "lse_1", null)).rejects.toThrow("SUBSTRATE_PG_URL");
+	});
+
+	describe("a claim whose event does not land", () => {
+		/** The ledger refuses every write, so the claim's event is parked, or dead-lettered once the buffer's attempt budget is spent. */
+		const unreachable = (greptime: { insertEvent: (event: SubstrateEvent) => Promise<void> }) => {
+			greptime.insertEvent = async () => {
+				throw new Error("greptime unreachable: ETIMEDOUT");
+			};
+		};
+		const build = (stores: { index: unknown; greptime: unknown }, env: Record<string, string> = {}) =>
+			new Substrate(loadConfig(env), { index: stores.index as never, greptime: stores.greptime as never, steering: { history: null, liveSessions: null } });
+
+		test("a parked claim is not withdrawn: its event waits in the buffer, so the node stays held", async () => {
+			const stores = stubStores({ repo: "r" });
+			unreachable(stores.greptime);
+			const substrate = build(stores);
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+			await substrate.drainPendingEvents(0, { abandon: true });
+
+			expect(result.decision).toBe("granted");
+			expect(result.claimed).toBe(true);
+			expect(stores.released).toEqual([]);
+		});
+
+		test("a dead-lettered claim is withdrawn: its event can never land, so the node is released", async () => {
+			const stores = stubStores({ repo: "r" });
+			unreachable(stores.greptime);
+			// One attempt is the whole budget, so the failed write is dead-lettered at once rather than parked.
+			const substrate = build(stores, { SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS: "1" });
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+			await substrate.drainPendingEvents(0, { abandon: true });
+
+			expect(result.decision).toBe("revoked");
+			expect(result.claimed).toBe(false);
+			expect(stores.released).toEqual([{ graph_id: "ut-1", node_id: "n4" }]);
+		});
+
+		test("a refused claim is withdrawn as before: nothing was parked, so its event can never land", async () => {
+			const stores = stubStores({ repo: "r" });
+			stores.greptime.ensureAppendMode = async () => false;
+			const substrate = build(stores);
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+			expect(result.decision).toBe("revoked");
+			expect(stores.released).toEqual([{ graph_id: "ut-1", node_id: "n4" }]);
+		});
+
+		test("a stored claim is unchanged: granted, its event in the ledger, and nothing released", async () => {
+			const stores = stubStores({ repo: "r" });
+			const substrate = build(stores);
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+			expect(result.decision).toBe("granted");
+			expect(result.claimed).toBe(true);
+			expect(stores.emitted.map((event) => event.kind)).toEqual(["claim"]);
+			expect(stores.released).toEqual([]);
+		});
+
+		test("a thrown emit is unrecorded, so the claim is withdrawn as before", async () => {
+			const stores = stubStores({ repo: "r" });
+			const substrate = build(stores);
+			substrate.emit = async () => {
+				throw new Error("emit blew up");
+			};
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+			expect(result.decision).toBe("revoked");
+			expect(stores.released).toEqual([{ graph_id: "ut-1", node_id: "n4" }]);
+		});
 	});
 });
 
@@ -437,12 +516,11 @@ describe("claimNode is fail-closed on the ledger", () => {
 				};
 			},
 		};
+		// `stored: false` is a refusal, not an outage: the append-only check fails, so the event is refused outright and never parked.
 		const greptime = {
-			ensureAppendMode: async () => true,
+			ensureAppendMode: async () => options.stored,
 			lastHash: async () => null,
-			insertEvent: async () => {
-				if (!options.stored) throw new Error("greptime unreachable: connect ETIMEDOUT");
-			},
+			insertEvent: async () => undefined,
 		};
 		return { released, lease, index, greptime };
 	}
@@ -2487,7 +2565,10 @@ describe("emit when the ingest record is not recorded", () => {
 
 	test("an insert that fails before the event row lands is still stored: false", async () => {
 		const { written, greptime } = ledger({ insertFails: "greptime unreachable: connect ETIMEDOUT" });
-		const { result, log } = await captureStderr(() => substrateWith(greptime).emit(input));
+		const substrate = substrateWith(greptime);
+		const { result, log } = await captureStderr(() => substrate.emit(input));
+		// The write is parked, so the instance runs a tick: close it the way shutdown does.
+		await substrate.drainPendingEvents(0, { abandon: true });
 
 		expect(result.stored).toBe(false);
 		expect(result.error).toContain("ETIMEDOUT");
@@ -3181,12 +3262,11 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		const revokedSubstrate = new Substrate(loadConfig({}), {
 			index: revokedIndex as never,
 			steering: { history: null, liveSessions: null },
+			// A refusal, not an outage: the append-only check fails, so the event is refused outright and never parked.
 			greptime: {
-				ensureAppendMode: async () => true,
+				ensureAppendMode: async () => false,
 				lastHash: async () => null,
-				insertEvent: async () => {
-					throw new Error("greptime unreachable: connect ETIMEDOUT");
-				},
+				insertEvent: async () => undefined,
 			} as never,
 			mirror: revoked.mirror as never,
 		});
