@@ -74,6 +74,8 @@ import {
 import { redact } from "./redact.ts";
 import { FORGET_MARKER_PREFIX, isForgetMarker, MAX_FORGET_ENTRIES, MAX_ROLLBACK_SELECT_LIMIT } from "./memory-forget.ts";
 import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
+import type { CrossRepoStore } from "./cross-repo-ops.ts";
+import { PgCrossRepoStore } from "./cross-repo-store.ts";
 import { PgWorktreeRegistry, type WorktreeRegistryStore } from "./worktree-registry.ts";
 
 /** The most entry ids one `forgottenEntryIds` call reads (a recall fan-out holds a few hits per bank). */
@@ -902,6 +904,37 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			create index if not exists live_session_bindings_repo_id_idx
 				on live_session_bindings (repo_id, session_id) where closed_at is null`,
 	},
+	// Cross-repository operations (phase 74): one row per operation key, and one row per repository step of it. The steps are
+	// written before each git effect (`applying`, `compensating`) and after its outcome, so a crash leaves the state the retry
+	// reads. Additive: two new tables; nothing existing is touched and an older release never names them. Always on, like step
+	// 36: an empty table costs nothing. Not in the archive's closed table list: an operation is re-run, not restored.
+	// OPERATORS: rehearse on a restored dump before production, like step 36.
+	{
+		version: 43,
+		name: "cross_repo_operations",
+		phase: "expand",
+		down: `drop table if exists cross_repo_steps; drop table if exists cross_repo_operations`,
+		sql: `
+			create table if not exists cross_repo_operations (
+				op_key       text primary key,
+				fingerprint  text not null,
+				branch       text not null,
+				status       text not null check (status in ('running', 'done', 'rolled-back', 'needs-attention')),
+				created_at   timestamptz not null,
+				updated_at   timestamptz not null
+			);
+			create table if not exists cross_repo_steps (
+				op_key      text not null references cross_repo_operations (op_key),
+				idx         integer not null check (idx >= 0),
+				repo        text not null,
+				base_ref    text not null,
+				planned_sha text not null,
+				state       text not null check (state in ('pending', 'applying', 'applied', 'compensating', 'compensated', 'failed', 'parked')),
+				detail      text,
+				updated_at  timestamptz not null,
+				primary key (op_key, idx)
+			)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -965,6 +998,15 @@ export class IndexStore implements MemoryStore {
 	/** One index call under the plane gate. Without a gate it is just `fn()`. */
 	private plane<T>(op: string, fn: () => Promise<T>): Promise<T> {
 		return callPlane(this.gate, op, fn, { isFailure: isStoreFailure });
+	}
+
+	/**
+	 * The cross-repository operation log over this store's pool (phase 74): the operation and per-repository step state a
+	 * branch fan-out writes before each effect. It only builds the adapter; no statement runs until an operation uses it, and
+	 * the tables are created by migration step 43.
+	 */
+	crossRepoStore(): CrossRepoStore {
+		return new PgCrossRepoStore(this.sql, (op, fn) => this.plane(op, fn));
 	}
 
 	/**

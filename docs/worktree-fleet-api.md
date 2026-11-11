@@ -159,3 +159,17 @@ What is refused, and before what:
 A refusal is recorded as a `repo.scope-refused` ledger warning with the route, the reason code and a 16-hex digest of what was asked for; the requested path or repository is never written. An anonymous refusal is recorded by the route audit. The corpus root and anchor are not gated: they are digests over every repository and reveal no document content.
 
 The scoped credential is the surface bearer plus its grant. No per-repository secret exists; that is a recorded open decision.
+
+## Cross-repository operations (phase 74)
+
+`packages/mcp-server/src/cross-repo-ops.ts` runs one cross-repository write: a branch fan-out. The same branch is created at a named base in each of two to 16 registered repositories, one step per repository. It is a module entry point (`runBranchFanout`, with `crossRepoStatus` to read a stored operation); no HTTP route or MCP tool exposes it yet.
+
+Every step is recorded in Postgres (`cross_repo_operations` and `cross_repo_steps`, migration step 43) before its git effect runs, and its outcome is read back from the repository's ref. Each git call goes through the phase 72 executor, so a repository the surface is not granted, or that is not registered, is refused before any spawn.
+
+- Create is create-only (`update-ref` with a null old value): a branch the operation did not write is never overwritten, and a branch already at the planned commit is refused, not adopted.
+- Undo is compare-and-delete at the planned commit: a ref an outside change moved is parked as `ref-moved` and left alone.
+- Statuses: `done` (every step applied); `rolled-back` (a step failed and every applied step was undone; terminal); `needs-attention` (a step is parked; a retry re-inspects only the parked and applied steps). `done` is never reported for a partial operation.
+- The key is caller-supplied. A retry with the same key and request resumes the stored operation and runs no planning; the same key with a different request is refused (`key-reused`). A new attempt needs a new key.
+- Persisted reasons are closed codes (`apply-failed`, `ref-moved`, `undo-failed`, and so on). Git output and paths are never stored.
+
+A status read is refused as not found for a surface that is not granted every repository of the operation, as a live session is.
