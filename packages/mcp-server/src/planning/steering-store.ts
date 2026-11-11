@@ -39,6 +39,8 @@ import type {
 	SteeringPriority,
 	SteeringRestoreReport,
 } from "./steering.ts";
+import { STEERING_OUTCOMES, type SteeringKeyedRequest } from "./steering.ts";
+import { SESSION_STATE_NAMES, type SessionStateName, type SessionStateOutcome, type SessionTransitionRefusalReason } from "./steering-delivery.ts";
 
 export const STEERING_AUDIT_TABLE = "planning_steering_audit";
 /** The opt-in that makes `migrate()` create the audit table. Off creates nothing. */
@@ -71,6 +73,12 @@ export interface SteeringAuditRow {
 	directiveCreatedAtMs: number | null;
 	/** Acknowledged rows only, and only a system acknowledgement has one (migration 34). Null is left out of the payload hash, so a row hashed before the column existed keeps its hash. */
 	reason: SteeringAckReason | null;
+	/** Queued rows only (migration 44): the directive's delivery sequence, restored as stored. Hashed when present, so a row written before the column keeps its hash. */
+	deliverySequence: number | null;
+	/** Keyed commands only (migration 44): the caller surface, the key and the request fingerprint. All null for an unkeyed row. Hashed when present. */
+	idempotencySurface: string | null;
+	idempotencyKey: string | null;
+	idempotencyFingerprint: string | null;
 	payloadSha256: string;
 	recordedAt: Date;
 }
@@ -81,6 +89,46 @@ export interface SteeringSavedRow {
 	recordedAt: Date;
 }
 
+/** A session-state result as the movement table stores it (migration 45). `sessionState` is null for `unchanged`. */
+export interface SteeringSessionRow {
+	directiveId: string;
+	sessionStatus: SessionStateOutcome["status"];
+	sessionState: SessionStateName | null;
+	refusalReason: SessionTransitionRefusalReason | null;
+	checkpointHint: boolean;
+	recordedAt: Date;
+}
+
+/** A queued row a key names (phase 77): what a keyed queue replays from. */
+export interface SteeringKeyedQueueSaved {
+	directiveId: string;
+	targetSessionId: string;
+	queuedAtMs: number;
+	deliverySequence: number | null;
+	fingerprint: string;
+}
+
+/** An acknowledged row a key names (phase 77), with its queued row's sequence and its session-state result (null when none was recorded). */
+export interface SteeringKeyedAckSaved {
+	directiveId: string;
+	outcome: SteeringOutcome;
+	confirmed: boolean;
+	fingerprint: string;
+	deliverySequence: number | null;
+	session: SessionStateOutcome | null;
+	checkpointHint: boolean;
+}
+
+/** The durable side of the keyed replies (phase 77) and of the session step (phase 67). {@link SteeringAuditSink} implements it. */
+export interface SteeringDurableReplies {
+	savedKeyedQueue(surface: string, key: string): Promise<SteeringKeyedQueueSaved | null>;
+	savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null>;
+	recordSessionOutcome(directiveId: string, session: SessionStateOutcome, checkpointHint: boolean, atMs: number): Promise<void>;
+}
+
+/** The refusal reasons a stored session outcome may carry. */
+const SESSION_REFUSAL_REASONS: readonly SessionTransitionRefusalReason[] = ["not-found", "session-unavailable", "invalid-transition"];
+
 /** The injected SQL port. The Bun-backed adapter is {@link bunSteeringAuditSql}; tests inject a fake. */
 export interface SteeringAuditSql {
 	/**
@@ -90,6 +138,8 @@ export interface SteeringAuditSql {
 	insertAbsent(row: SteeringAuditRow): Promise<boolean>;
 	/** The row saved under `(directive_id, transition)`, or null when no row holds that key. */
 	savedRow(directiveId: string, transition: SteeringAuditTransition): Promise<SteeringSavedRow | null>;
+	/** Inserts the session-state result of an acknowledgement (migration 45). A repeat for one directive is a no-op. Rejects with the driver's error. */
+	insertSessionOutcome(row: SteeringSessionRow): Promise<void>;
 }
 
 /** Bounds for a read page. The sink asks the port for one more row than `limit` to learn whether the page was cut. */
@@ -102,6 +152,8 @@ export interface SteeringStoredAckRow {
 	outcome: string | null;
 	confirmed: boolean | null;
 	reason: string | null;
+	/** True when the acknowledgement's session step committed a movement (migration 45). False when no movement row exists. */
+	sessionMoved: boolean;
 	recordedAt: Date;
 }
 
@@ -118,6 +170,7 @@ export interface SteeringStoredDirectiveRow {
 	planPlan: string | null;
 	conflictsWithActivePlan: boolean | null;
 	directiveCreatedAtMs: number | null;
+	deliverySequence: number | null;
 	queuedAt: Date;
 	acknowledgement: SteeringStoredAckRow | null;
 }
@@ -138,6 +191,14 @@ export interface SteeringAuditReadSql {
 	readClosed(query: SteeringAuditReadQuery): Promise<SteeringStoredDirectiveRow[]>;
 	/** The acknowledged row saved for a directive, or null. */
 	savedAcknowledgement(directiveId: string): Promise<SteeringStoredAckRow | null>;
+	/** The queued row a key names (phase 77): its fingerprint, sequence and queue time. Null when no row holds the key. */
+	savedKeyedQueue(surface: string, key: string): Promise<SteeringKeyedQueueSaved | null>;
+	/** The acknowledged row a key names, with its queued row's sequence and session-state result. Null when no row holds the key. */
+	savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null>;
+	/** The largest delivery sequence any row holds; 0 when none does. */
+	maxDeliverySequence(): Promise<number>;
+	/** The session a directive was queued for, from the durable log; null when no queued row holds the id. */
+	targetSessionOf(directiveId: string): Promise<string | null>;
 }
 
 /** A driver failure. `code` is the driver's error code, or `UNKNOWN` when the cause carries none. */
@@ -203,7 +264,9 @@ export interface SteeringOpenReadOptions extends SteeringReadOptions {
 export interface SteeringRestoreCandidate {
 	directive: Record<string, unknown>;
 	queuedAtMs: number;
-	acknowledgement?: { atMs: number; outcome: string | null; confirmed: boolean | null; reason?: string };
+	/** The delivery sequence the row holds (migration 44). Absent on a row written before it; such a row takes restore order. */
+	deliverySequence?: number;
+	acknowledgement?: { atMs: number; outcome: string | null; confirmed: boolean | null; reason?: string; sessionMoved?: boolean };
 }
 
 export interface SteeringReadPage {
@@ -214,7 +277,7 @@ export interface SteeringReadPage {
 
 export type SteeringReadResult = { ok: true; value: SteeringReadPage } | { ok: false; error: SteeringAuditReadError };
 
-export class SteeringAuditSink implements SteeringHistorySink {
+export class SteeringAuditSink implements SteeringHistorySink, SteeringDurableReplies {
 	constructor(
 		private readonly sql: SteeringAuditSql,
 		private readonly reads: SteeringAuditReadSql | null = null,
@@ -240,6 +303,55 @@ export class SteeringAuditSink implements SteeringHistorySink {
 		if (this.reads === null) return null;
 		const saved = await this.reads.savedAcknowledgement(directiveId);
 		return saved === null ? null : acknowledgementCandidate(saved);
+	}
+
+	/** The queued row a key names (phase 77), or null. A read failure rejects with its code, so a replay is never guessed. */
+	savedKeyedQueue(surface: string, key: string): Promise<SteeringKeyedQueueSaved | null> {
+		return this.requireReads().savedKeyedQueue(surface, key);
+	}
+
+	/** The acknowledged row a key names, with its queued row's sequence and its session-state result, or null. A read failure rejects with its code. */
+	savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null> {
+		return this.requireReads().savedKeyedAcknowledgement(surface, key);
+	}
+
+	/**
+	 * Records the session-state result of one acknowledgement (phase 67 restart hint, phase 77 replay). Written once, after the
+	 * session port answers. A failure rejects with its code; the acknowledgement it describes stands without the record.
+	 */
+	async recordSessionOutcome(directiveId: string, session: SessionStateOutcome, checkpointHint: boolean, atMs: number): Promise<void> {
+		if (!Number.isSafeInteger(atMs) || atMs < 0) throw new RangeError("session outcome atMs must be a non-negative integer");
+		await this.sql.insertSessionOutcome({
+			directiveId,
+			sessionStatus: session.status,
+			sessionState: session.status === "unchanged" ? null : session.state,
+			refusalReason: session.status === "refused" ? session.reason : null,
+			checkpointHint,
+			recordedAt: new Date(atMs),
+		});
+	}
+
+	/** The largest delivery sequence the table holds, 0 when none does. A read failure is returned as a value, like the other reads. */
+	async readSequenceFloor(): Promise<{ ok: true; value: number } | { ok: false; error: SteeringAuditReadError }> {
+		if (this.reads === null) return { ok: false, error: new SteeringAuditReadError("READ_UNAVAILABLE", "this audit sink was built without a read port") };
+		try {
+			return { ok: true, value: await this.reads.maxDeliverySequence() };
+		} catch (cause) {
+			return { ok: false, error: new SteeringAuditReadError(errnoCode(cause), "steering audit read failed", cause) };
+		}
+	}
+
+	private requireReads(): SteeringAuditReadSql {
+		if (this.reads === null) throw new SteeringAuditReadError("READ_UNAVAILABLE", "this audit sink was built without a read port");
+		return this.reads;
+	}
+
+	/**
+	 * The session a directive was queued for, read from the durable log (phase 77, L77-02). The live-session boundary uses it when the
+	 * inbox no longer holds an acknowledged directive, so a keyed replay is answered and not refused as unknown. A read failure rejects.
+	 */
+	targetSessionOf(directiveId: string): Promise<string | null> {
+		return this.requireReads().targetSessionOf(directiveId);
 	}
 
 	/**
@@ -320,12 +432,14 @@ export function bunSteeringAuditSql(sql: SQL): SteeringAuditSql {
 				insert into planning_steering_audit (
 					directive_id, transition, outcome, confirmed, reason, author_principal, author_kind,
 					target_session_id, body_redacted, action, priority, plan_phase, plan_plan,
-					conflicts_with_active_plan, directive_created_at_ms, payload_sha256, recorded_at
+					conflicts_with_active_plan, directive_created_at_ms, delivery_sequence,
+					idempotency_surface, idempotency_key, idempotency_fingerprint, payload_sha256, recorded_at
 				)
 				values (
 					${row.directiveId}, ${row.transition}, ${row.outcome}, ${row.confirmed}, ${row.reason}, ${row.authorPrincipal}, ${row.authorKind},
 					${row.targetSessionId}, ${row.bodyRedacted}, ${row.action}, ${row.priority}, ${row.planPhase}, ${row.planPlan},
-					${row.conflictsWithActivePlan}, ${row.directiveCreatedAtMs}, ${row.payloadSha256}, ${row.recordedAt}
+					${row.conflictsWithActivePlan}, ${row.directiveCreatedAtMs}, ${row.deliverySequence},
+					${row.idempotencySurface}, ${row.idempotencyKey}, ${row.idempotencyFingerprint}, ${row.payloadSha256}, ${row.recordedAt}
 				)
 				on conflict (directive_id, transition) do nothing
 				returning id`;
@@ -339,12 +453,20 @@ export function bunSteeringAuditSql(sql: SQL): SteeringAuditSql {
 			if (saved === undefined) return null;
 			return { payloadSha256: String(saved.payload_sha256), recordedAt: new Date(saved.recorded_at) };
 		},
+		async insertSessionOutcome(row: SteeringSessionRow): Promise<void> {
+			await sql`
+				insert into planning_steering_movements (directive_id, session_status, session_state, refusal_reason, checkpoint_hint, recorded_at)
+				values (${row.directiveId}, ${row.sessionStatus}, ${row.sessionState}, ${row.refusalReason}, ${row.checkpointHint}, ${row.recordedAt})
+				on conflict (directive_id) do nothing`;
+		},
 	};
 }
 
 /**
  * The Bun SQL read adapter. Both listings are bounded by `limit` and ordered, and neither writes. A queued row with no
- * acknowledged row is open; the unique `(directive_id, transition)` key makes the join at most one row wide.
+ * acknowledged row is open; the unique `(directive_id, transition)` key makes the join at most one row wide. A keyed lookup
+ * reads the partial unique key `(transition, idempotency_surface, idempotency_key)`, and a stored value that is not one of the
+ * closed sets throws rather than being replayed.
  */
 export function bunSteeringAuditReadSql(sql: SQL): SteeringAuditReadSql {
 	return {
@@ -354,7 +476,7 @@ export function bunSteeringAuditReadSql(sql: SQL): SteeringAuditReadSql {
 			const afterId = query.after?.directiveId ?? null;
 			const rows = await sql`
 				select q.directive_id, q.author_principal, q.author_kind, q.target_session_id, q.body_redacted, q.action, q.priority,
-					q.plan_phase, q.plan_plan, q.conflicts_with_active_plan, q.directive_created_at_ms, q.recorded_at
+					q.plan_phase, q.plan_plan, q.conflicts_with_active_plan, q.directive_created_at_ms, q.recorded_at, q.delivery_sequence
 				from planning_steering_audit q
 				where q.transition = 'queued'
 					and (${query.sessionId}::text is null or q.target_session_id = ${query.sessionId}::text)
@@ -369,10 +491,12 @@ export function bunSteeringAuditReadSql(sql: SQL): SteeringAuditReadSql {
 		async readClosed(query: SteeringAuditReadQuery): Promise<SteeringStoredDirectiveRow[]> {
 			const rows = await sql`
 				select q.directive_id, q.author_principal, q.author_kind, q.target_session_id, q.body_redacted, q.action, q.priority,
-					q.plan_phase, q.plan_plan, q.conflicts_with_active_plan, q.directive_created_at_ms, q.recorded_at,
-					a.outcome as ack_outcome, a.confirmed as ack_confirmed, a.reason as ack_reason, a.recorded_at as ack_recorded_at
+					q.plan_phase, q.plan_plan, q.conflicts_with_active_plan, q.directive_created_at_ms, q.recorded_at, q.delivery_sequence,
+					a.outcome as ack_outcome, a.confirmed as ack_confirmed, a.reason as ack_reason, a.recorded_at as ack_recorded_at,
+					m.session_status as ack_session_status
 				from planning_steering_audit q
 				join planning_steering_audit a on a.directive_id = q.directive_id and a.transition = 'acknowledged'
+				left join planning_steering_movements m on m.directive_id = a.directive_id
 				where q.transition = 'queued'
 					and (${query.sessionId}::text is null or q.target_session_id = ${query.sessionId}::text)
 				order by a.recorded_at desc, q.directive_id desc
@@ -383,13 +507,16 @@ export function bunSteeringAuditReadSql(sql: SQL): SteeringAuditReadSql {
 					confirmed: booleanOrNull(row.ack_confirmed),
 					reason: textOrNull(row.ack_reason),
 					recordedAt: new Date(row.ack_recorded_at as string | number | Date),
+					sessionMoved: textOrNull(row.ack_session_status) === "applied",
 				}),
 			);
 		},
 		async savedAcknowledgement(directiveId: string): Promise<SteeringStoredAckRow | null> {
 			const rows = (await sql`
-				select outcome, confirmed, reason, recorded_at from planning_steering_audit
-				where directive_id = ${directiveId} and transition = 'acknowledged'`) as Array<Record<string, unknown>>;
+				select a.outcome, a.confirmed, a.reason, a.recorded_at, m.session_status
+				from planning_steering_audit a
+				left join planning_steering_movements m on m.directive_id = a.directive_id
+				where a.directive_id = ${directiveId} and a.transition = 'acknowledged'`) as Array<Record<string, unknown>>;
 			const saved = rows[0];
 			if (saved === undefined) return null;
 			return {
@@ -397,7 +524,51 @@ export function bunSteeringAuditReadSql(sql: SQL): SteeringAuditReadSql {
 				confirmed: booleanOrNull(saved.confirmed),
 				reason: textOrNull(saved.reason),
 				recordedAt: new Date(saved.recorded_at as string | number | Date),
+				sessionMoved: textOrNull(saved.session_status) === "applied",
 			};
+		},
+		async savedKeyedQueue(surface: string, key: string): Promise<SteeringKeyedQueueSaved | null> {
+			const rows = (await sql`
+				select directive_id, target_session_id, recorded_at, delivery_sequence, idempotency_fingerprint
+				from planning_steering_audit
+				where transition = 'queued' and idempotency_surface = ${surface} and idempotency_key = ${key}`) as Array<Record<string, unknown>>;
+			const saved = rows[0];
+			if (saved === undefined) return null;
+			return {
+				directiveId: String(saved.directive_id),
+				targetSessionId: String(saved.target_session_id),
+				queuedAtMs: new Date(saved.recorded_at as string | number | Date).getTime(),
+				deliverySequence: integerOrNull(saved.delivery_sequence),
+				fingerprint: String(saved.idempotency_fingerprint),
+			};
+		},
+		async savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null> {
+			const rows = (await sql`
+				select a.directive_id, a.outcome, a.confirmed, a.idempotency_fingerprint, q.delivery_sequence,
+					m.session_status, m.session_state, m.refusal_reason, m.checkpoint_hint
+				from planning_steering_audit a
+				join planning_steering_audit q on q.directive_id = a.directive_id and q.transition = 'queued'
+				left join planning_steering_movements m on m.directive_id = a.directive_id
+				where a.transition = 'acknowledged' and a.idempotency_surface = ${surface} and a.idempotency_key = ${key}`) as Array<Record<string, unknown>>;
+			const saved = rows[0];
+			if (saved === undefined) return null;
+			return {
+				directiveId: String(saved.directive_id),
+				outcome: steeringOutcomeOf(saved.outcome),
+				confirmed: booleanOrNull(saved.confirmed) === true,
+				fingerprint: String(saved.idempotency_fingerprint),
+				deliverySequence: integerOrNull(saved.delivery_sequence),
+				session: sessionOutcomeOf(textOrNull(saved.session_status), textOrNull(saved.session_state), textOrNull(saved.refusal_reason)),
+				checkpointHint: booleanOrNull(saved.checkpoint_hint) === true,
+			};
+		},
+		async maxDeliverySequence(): Promise<number> {
+			const rows = await sql`select coalesce(max(delivery_sequence), 0) as max_sequence from planning_steering_audit`;
+			return integerOrNull(rows[0]?.max_sequence) ?? 0;
+		},
+		async targetSessionOf(directiveId: string): Promise<string | null> {
+			const rows = await sql`select target_session_id from planning_steering_audit where directive_id = ${directiveId} and transition = 'queued'`;
+			return rows[0] === undefined ? null : String(rows[0].target_session_id);
 		},
 	};
 }
@@ -412,6 +583,9 @@ export async function restoreSteeringInbox(
 	sink: SteeringAuditSink,
 	options: SteeringReadOptions,
 ): Promise<{ ok: true; value: { report: SteeringRestoreReport; truncated: boolean } } | { ok: false; error: SteeringAuditReadError }> {
+	const floor = await sink.readSequenceFloor();
+	if (!floor.ok) return floor;
+	inbox.seedSequence(floor.value);
 	const page = await sink.readOpenDirectives(options);
 	if (!page.ok) return page;
 	return { ok: true, value: { report: await inbox.restore(page.value.entries), truncated: page.value.truncated } };
@@ -443,6 +617,10 @@ export type SteeringRestorePagedResult =
 export async function restoreSteeringInboxPaged(inbox: SteeringInbox, sink: SteeringAuditSink, options: SteeringRestorePagedOptions): Promise<SteeringRestorePagedResult> {
 	const maxPages = options.maxPages ?? DEFAULT_STEERING_RESTORE_MAX_PAGES;
 	if (!Number.isSafeInteger(maxPages) || maxPages < 1) return { ok: false, error: new SteeringAuditReadError("INVALID_QUERY", "maxPages must be an integer of 1 or more") };
+	// Every sequence the table holds is below the floor, so a directive queued after this restart can never tie a restored one.
+	const floor = await sink.readSequenceFloor();
+	if (!floor.ok) return floor;
+	inbox.seedSequence(floor.value);
 	const report: SteeringRestoreReport = { restored: [], unchanged: [], skipped: [] };
 	let after: SteeringReadCursor | undefined;
 	let pages = 0;
@@ -504,6 +682,8 @@ function restoreCandidate(row: SteeringStoredDirectiveRow): SteeringRestoreCandi
 	// Either half present makes a plan reference, so a half-written pair fails validation instead of vanishing.
 	if (row.planPhase !== null || row.planPlan !== null) directive.planRef = { phase: row.planPhase, plan: row.planPlan };
 	const candidate: SteeringRestoreCandidate = { directive, queuedAtMs: row.queuedAt.getTime() };
+	// The stored delivery sequence is restored as stored, so a restart keeps the order the inbox gave. A null is left out.
+	if (row.deliverySequence !== null) candidate.deliverySequence = row.deliverySequence;
 	if (row.acknowledgement !== null) candidate.acknowledgement = acknowledgementCandidate(row.acknowledgement);
 	return candidate;
 }
@@ -515,6 +695,7 @@ function acknowledgementCandidate(row: SteeringStoredAckRow): NonNullable<Steeri
 		confirmed: row.confirmed,
 	};
 	if (row.reason !== null) ack.reason = row.reason;
+	if (row.sessionMoved) ack.sessionMoved = true;
 	return ack;
 }
 
@@ -531,6 +712,7 @@ function storedDirectiveRow(row: Record<string, unknown>, acknowledgement: Steer
 		planPlan: textOrNull(row.plan_plan),
 		conflictsWithActivePlan: booleanOrNull(row.conflicts_with_active_plan),
 		directiveCreatedAtMs: integerOrNull(row.directive_created_at_ms),
+		deliverySequence: integerOrNull(row.delivery_sequence),
 		queuedAt: new Date(row.recorded_at as string | number | Date),
 		acknowledgement,
 	};
@@ -555,6 +737,37 @@ function integerOrNull(value: unknown): number | null {
 	return null;
 }
 
+function isSteeringOutcome(value: string): value is SteeringOutcome {
+	return (STEERING_OUTCOMES as readonly string[]).includes(value);
+}
+
+/** The outcome of a stored acknowledgement. A value outside the closed set throws: an unknown row is never replayed as an answer. */
+function steeringOutcomeOf(value: unknown): SteeringOutcome {
+	if (typeof value === "string" && isSteeringOutcome(value)) return value;
+	throw new RangeError("stored acknowledgement outcome is not a steering outcome");
+}
+
+function isSessionStateName(value: string | null): value is SessionStateName {
+	return value !== null && (SESSION_STATE_NAMES as readonly string[]).includes(value);
+}
+
+function isRefusalReason(value: string | null): value is SessionTransitionRefusalReason {
+	return value !== null && (SESSION_REFUSAL_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * The session-state result a movement row holds, in the shape the reply carries. A row with no movement is `null`: the
+ * acknowledgement was written but its session step was not recorded. A value outside the closed sets throws.
+ */
+function sessionOutcomeOf(status: string | null, state: string | null, reason: string | null): SessionStateOutcome | null {
+	if (status === null) return null;
+	if (status === "unchanged") return { status: "unchanged" };
+	if (!isSessionStateName(state)) throw new RangeError("stored session state is not a session state");
+	if (status === "applied") return { status: "applied", state };
+	if (status === "refused" && isRefusalReason(reason)) return { status: "refused", state, reason };
+	throw new RangeError("stored session status is not a session outcome");
+}
+
 /** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE`: on or 1/true/yes creates the audit table at `migrate()`. Anything else is off. */
 export function steeringAuditTableEnabled(env: Readonly<Record<string, string | undefined>>): boolean {
 	return /^(1|true|yes|on)$/i.test(env[STEERING_AUDIT_TABLE_ENV]?.trim() ?? "");
@@ -564,6 +777,9 @@ function toAuditRow(entry: SteeringAuditEntry): SteeringAuditRow {
 	const recordedAt = recordedAtOf(entry.atMs);
 	if (entry.event === "queued") {
 		const { directive } = entry;
+		if (entry.deliverySequence !== undefined && (!Number.isSafeInteger(entry.deliverySequence) || entry.deliverySequence < 1)) {
+			throw new RangeError("delivery sequence must be a positive integer");
+		}
 		const fields = {
 			directiveId: directive.id,
 			transition: "queued" as const,
@@ -580,6 +796,8 @@ function toAuditRow(entry: SteeringAuditEntry): SteeringAuditRow {
 			planPlan: directive.planRef?.plan ?? null,
 			conflictsWithActivePlan: directive.conflictsWithActivePlan,
 			directiveCreatedAtMs: directive.createdAtMs,
+			deliverySequence: entry.deliverySequence ?? null,
+			...keyedFieldsOf(entry.idempotency),
 			recordedAt,
 		};
 		return { ...fields, payloadSha256: payloadSha256(fields) };
@@ -601,9 +819,17 @@ function toAuditRow(entry: SteeringAuditEntry): SteeringAuditRow {
 		planPlan: null,
 		conflictsWithActivePlan: null,
 		directiveCreatedAtMs: null,
+		deliverySequence: null,
+		...keyedFieldsOf(entry.idempotency),
 		recordedAt,
 	};
 	return { ...fields, payloadSha256: payloadSha256(fields) };
+}
+
+/** The keyed-command columns of a row: all null for an unkeyed command, so an unkeyed row's payload is what it was before. */
+function keyedFieldsOf(keyed: SteeringKeyedRequest | undefined): Pick<SteeringAuditRow, "idempotencySurface" | "idempotencyKey" | "idempotencyFingerprint"> {
+	if (keyed === undefined) return { idempotencySurface: null, idempotencyKey: null, idempotencyFingerprint: null };
+	return { idempotencySurface: keyed.surface, idempotencyKey: keyed.key, idempotencyFingerprint: keyed.fingerprint };
 }
 
 function recordedAtOf(atMs: number): Date {
@@ -613,14 +839,18 @@ function recordedAtOf(atMs: number): Date {
 
 /** SHA-256 over the canonical JSON of the stored fields. `recordedAt` enters as its ISO-8601 text. */
 function payloadSha256(fields: Omit<SteeringAuditRow, "payloadSha256">): string {
-	const { reason, ...rest } = fields;
+	const { reason, deliverySequence, idempotencySurface, idempotencyKey, idempotencyFingerprint, ...rest } = fields;
 	const stored: Record<string, string | number | boolean | null> = {
 		...rest,
 		recordedAt: fields.recordedAt.toISOString(),
 	};
-	// Part of the hash whenever present, so a changed reason under one key is a conflict. Omitted when null, so a row hashed
-	// before the column existed keeps its hash and a same-payload retry of it still matches.
+	// Each of these is part of the hash whenever present, so a changed value under one key is a conflict. Omitted when null, so a
+	// row hashed before its column existed keeps its hash and a same-payload retry of it still matches.
 	if (reason !== null) stored.reason = reason;
+	if (deliverySequence !== null) stored.deliverySequence = deliverySequence;
+	if (idempotencySurface !== null) stored.idempotencySurface = idempotencySurface;
+	if (idempotencyKey !== null) stored.idempotencyKey = idempotencyKey;
+	if (idempotencyFingerprint !== null) stored.idempotencyFingerprint = idempotencyFingerprint;
 	return createHash("sha256").update(canonicalJson(stored)).digest("hex");
 }
 

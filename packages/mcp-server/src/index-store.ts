@@ -935,6 +935,79 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 				primary key (op_key, idx)
 			)`,
 	},
+	// Steering delivery order and durable command keys (phase 77, L77-01 to L77-04). Every queued row takes the directive's
+	// delivery sequence, so the order a restart restores is the order the inbox gave, and the sequence never ties across a
+	// restart. A keyed command stores its caller surface, key and request fingerprint on its row, so the unique key
+	// `(transition, surface, key)` is the durable index a replay is answered from after a restart. Null on every unkeyed row.
+	// Additive and idempotent: nullable columns and a partial unique index, no existing row touched. Rows written before this
+	// step keep a null sequence and no key. OPERATORS: rehearse on a restored dump before production, like steps 33 to 34.
+	{
+		version: 44,
+		name: "planning_steering_audit_delivery",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `drop index if exists planning_steering_audit_idempotency_key; alter table planning_steering_audit drop column if exists idempotency_fingerprint; alter table planning_steering_audit drop column if exists idempotency_key; alter table planning_steering_audit drop column if exists idempotency_surface; alter table planning_steering_audit drop column if exists delivery_sequence`,
+		sql: `
+			alter table planning_steering_audit
+				add column if not exists delivery_sequence bigint
+				constraint planning_steering_audit_delivery_sequence_check check (
+					delivery_sequence is null or (transition = 'queued' and delivery_sequence >= 1)
+				);
+			alter table planning_steering_audit add column if not exists idempotency_surface text;
+			alter table planning_steering_audit add column if not exists idempotency_key text;
+			alter table planning_steering_audit
+				add column if not exists idempotency_fingerprint text
+				constraint planning_steering_audit_idempotency_check check (
+					(idempotency_key is null) = (idempotency_surface is null)
+					and (idempotency_key is null) = (idempotency_fingerprint is null)
+				);
+			create unique index if not exists planning_steering_audit_idempotency_key
+				on planning_steering_audit (transition, idempotency_surface, idempotency_key)
+				where idempotency_key is not null`,
+	},
+	// Steering session movements (phase 77 replays, phase 67 restart hint): the committed result of the session-state step of
+	// each acknowledgement. One row per acknowledged directive, written once after the session port answers, and never updated.
+	// `session_status` is the reply's `session_state` status: `applied` is a movement the session committed (the one fact a
+	// `checkpoint_hint` rests on), `unchanged` and `refused` moved nothing. `checkpoint_hint` records whether the reply named a
+	// hint, so a restored listing and a replayed reply say what the first one said. Keyed on the directive, not the key, so it
+	// serves restart listings too. Opt-in with step 33: it is written only while the audit table is on.
+	// Additive and idempotent: one new table and its checks. An acknowledgement with no row (a crash between the audit row and
+	// this write) carries no session state and no hint after a restart, which fails safe. OPERATORS: rehearse on a restored dump
+	// before production, like steps 33 to 34.
+	{
+		version: 45,
+		name: "planning_steering_movements",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `drop table if exists planning_steering_movements`,
+		sql: `
+			create table if not exists planning_steering_movements (
+				directive_id     text primary key,
+				session_status   text not null check (session_status in ('unchanged', 'applied', 'refused')),
+				session_state    text check (session_state in ('ACTIVE', 'CONTEXT_REFRESH', 'PAUSED', 'RESUMED')),
+				refusal_reason   text,
+				checkpoint_hint  boolean not null,
+				recorded_at      timestamptz not null,
+				constraint planning_steering_movements_shape check (
+					(session_status = 'unchanged' and session_state is null and refusal_reason is null and not checkpoint_hint)
+					or (session_status = 'applied' and session_state is not null and refusal_reason is null)
+					or (session_status = 'refused' and session_state is not null and refusal_reason is not null and not checkpoint_hint)
+				)
+			)`,
+	},
+	// Corpus marker path (phase 66 closure): the explicit supersession marker of a document, a repo-relative path. It takes its
+	// own column because `superseded_by` (step 38) is also the citation field's name for a document key. The rename is an
+	// expand: a rename is not additive and the rollback contract forbids it, so the old column stays, unread and unwritten,
+	// until a later contract step drops it. No backfill: the manifest is rebuilt by the corpus scan, and a row whose marker
+	// differs from its stored value is rewritten on the next ingest. Always run (no opt-in), like step 35.
+	// OPERATORS: rehearse on a restored dump before production, like steps 35 to 38.
+	{
+		version: 46,
+		name: "corpus_documents_superseded_by_path",
+		phase: "expand",
+		down: `alter table corpus_documents drop column if exists superseded_by_path`,
+		sql: `alter table corpus_documents add column if not exists superseded_by_path text`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */

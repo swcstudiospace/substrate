@@ -17,7 +17,7 @@ import { RecordingPresenceBackend } from "./planning/backend.fixtures.ts";
 import type { PlanningTimers } from "./planning/observer.ts";
 import { DragonflyPresenceStore } from "./planning/presence-dragonfly.ts";
 import { SteeringInbox } from "./planning/steering.ts";
-import type { SessionStatePort } from "./planning/steering-delivery.ts";
+import type { SessionStateOutcome, SessionStatePort } from "./planning/steering-delivery.ts";
 import {
 	SteeringAuditSink,
 	type SteeringAuditReadQuery,
@@ -28,6 +28,9 @@ import {
 	type SteeringSavedRow,
 	type SteeringStoredAckRow,
 	type SteeringStoredDirectiveRow,
+	type SteeringKeyedAckSaved,
+	type SteeringKeyedQueueSaved,
+	type SteeringSessionRow,
 } from "./planning/steering-store.ts";
 import { FakeTree, TREE_ROOT } from "./planning/tree.fixtures.ts";
 import { IndexStore } from "./index-store.ts";
@@ -76,6 +79,7 @@ function compare(a: string, b: string): number {
 /** The audit table in memory: the write port and the read port over one list of rows. */
 class FakeAuditSql implements SteeringAuditSql, SteeringAuditReadSql {
 	readonly rows: SteeringAuditRow[] = [];
+	readonly sessions: SteeringSessionRow[] = [];
 	insertAttempts = 0;
 	failReads: Error | null = null;
 
@@ -105,14 +109,53 @@ class FakeAuditSql implements SteeringAuditSql, SteeringAuditReadSql {
 		return this.queued(query.sessionId)
 			.flatMap((row) => {
 				const ack = this.find(row.directiveId, "acknowledged");
-				return ack === undefined ? [] : [stored(row, storedAck(ack))];
+				return ack === undefined ? [] : [stored(row, storedAck(ack, this.sessions))];
 			})
 			.slice(0, query.limit);
 	}
 
 	async savedAcknowledgement(directiveId: string): Promise<SteeringStoredAckRow | null> {
 		const ack = this.find(directiveId, "acknowledged");
-		return ack === undefined ? null : storedAck(ack);
+		return ack === undefined ? null : storedAck(ack, this.sessions);
+	}
+
+	async insertSessionOutcome(row: SteeringSessionRow): Promise<void> {
+		if (this.sessions.some((saved) => saved.directiveId === row.directiveId)) return;
+		this.sessions.push({ ...row });
+	}
+
+	async savedKeyedQueue(surface: string, key: string): Promise<SteeringKeyedQueueSaved | null> {
+		if (this.failReads !== null) throw this.failReads;
+		const row = this.rows.find((candidate) => candidate.transition === "queued" && candidate.idempotencySurface === surface && candidate.idempotencyKey === key);
+		if (row === undefined) return null;
+		return { directiveId: row.directiveId, targetSessionId: row.targetSessionId, queuedAtMs: row.recordedAt.getTime(), deliverySequence: row.deliverySequence, fingerprint: row.idempotencyFingerprint ?? "" };
+	}
+
+	async savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null> {
+		if (this.failReads !== null) throw this.failReads;
+		const ack = this.rows.find((candidate) => candidate.transition === "acknowledged" && candidate.idempotencySurface === surface && candidate.idempotencyKey === key);
+		if (ack === undefined) return null;
+		if (ack.outcome === null || ack.confirmed === null) throw new Error("keyed acknowledgement row without an outcome");
+		const saved = this.sessions.find((row) => row.directiveId === ack.directiveId);
+		return {
+			directiveId: ack.directiveId,
+			outcome: ack.outcome,
+			confirmed: ack.confirmed,
+			fingerprint: ack.idempotencyFingerprint ?? "",
+			deliverySequence: this.find(ack.directiveId, "queued")?.deliverySequence ?? null,
+			session: saved === undefined ? null : sessionOutcomeOf(saved),
+			checkpointHint: saved?.checkpointHint ?? false,
+		};
+	}
+
+	async maxDeliverySequence(): Promise<number> {
+		if (this.failReads !== null) throw this.failReads;
+		return this.rows.reduce((max, row) => Math.max(max, row.deliverySequence ?? 0), 0);
+	}
+
+	async targetSessionOf(directiveId: string): Promise<string | null> {
+		if (this.failReads !== null) throw this.failReads;
+		return this.find(directiveId, "queued")?.targetSessionId ?? null;
 	}
 
 	acknowledged(): SteeringAuditRow[] {
@@ -128,8 +171,18 @@ class FakeAuditSql implements SteeringAuditSql, SteeringAuditReadSql {
 	}
 }
 
-function storedAck(row: SteeringAuditRow): SteeringStoredAckRow {
-	return { outcome: row.outcome, confirmed: row.confirmed, reason: row.reason, recordedAt: row.recordedAt };
+function storedAck(row: SteeringAuditRow, sessions: readonly SteeringSessionRow[]): SteeringStoredAckRow {
+	const moved = sessions.some((saved) => saved.directiveId === row.directiveId && saved.sessionStatus === "applied");
+	return { outcome: row.outcome, confirmed: row.confirmed, reason: row.reason, recordedAt: row.recordedAt, sessionMoved: moved };
+}
+
+/** The session outcome a fake movement row holds, in the shape the reply carries. */
+function sessionOutcomeOf(row: SteeringSessionRow): SessionStateOutcome {
+	if (row.sessionStatus === "unchanged") return { status: "unchanged" };
+	if (row.sessionState === null) throw new Error("session row without a state");
+	if (row.sessionStatus === "applied") return { status: "applied", state: row.sessionState };
+	if (row.refusalReason === null) throw new Error("refused session row without a reason");
+	return { status: "refused", state: row.sessionState, reason: row.refusalReason };
 }
 
 function stored(row: SteeringAuditRow, acknowledgement: SteeringStoredAckRow | null): SteeringStoredDirectiveRow {
@@ -145,6 +198,7 @@ function stored(row: SteeringAuditRow, acknowledgement: SteeringStoredAckRow | n
 		planPlan: row.planPlan,
 		conflictsWithActivePlan: row.conflictsWithActivePlan,
 		directiveCreatedAtMs: row.directiveCreatedAtMs,
+		deliverySequence: row.deliverySequence,
 		queuedAt: row.recordedAt,
 		acknowledgement,
 	};
@@ -388,9 +442,10 @@ describe("the durable inbox", () => {
 		const started = await substrate.startSteering();
 
 		expect(started).toMatchObject({ restored: 0, readFailed: null, sweeping: true });
-		expect(statements).toHaveLength(1);
-		expect(statements[0]).toContain("from planning_steering_audit");
-		expect(statements[0]).toContain("q.transition = 'queued'");
+		expect(statements).toHaveLength(2);
+		expect(statements[0]).toContain("max(delivery_sequence)");
+		expect(statements[1]).toContain("from planning_steering_audit");
+		expect(statements[1]).toContain("q.transition = 'queued'");
 		await substrate.stopSteering();
 	});
 

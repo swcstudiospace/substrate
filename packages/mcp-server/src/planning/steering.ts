@@ -122,6 +122,7 @@ export const SteeringStoredAcknowledgementSchema = z
 		outcome: z.enum(STEERING_OUTCOMES),
 		confirmed: z.boolean(),
 		reason: z.enum(STEERING_ACK_REASONS).nullish(),
+		sessionMoved: z.boolean().nullish(),
 	})
 	.strict();
 
@@ -130,6 +131,7 @@ const SteeringRestoreEntrySchema = z
 	.object({
 		directive: SteeringDirectiveSchema,
 		queuedAtMs: z.number().int().nonnegative(),
+		deliverySequence: z.number().int().positive().nullish(),
 		acknowledgement: SteeringStoredAcknowledgementSchema.nullish(),
 	})
 	.strict();
@@ -154,9 +156,16 @@ export type SteeringRecord =
 			sessionMoved?: boolean;
 	  };
 
+/** The request a keyed command was made with (phase 77): its caller surface, its key, and the fingerprint of its request. */
+export interface SteeringKeyedRequest {
+	surface: string;
+	key: string;
+	fingerprint: string;
+}
+
 /** What the audit sink receives. Only the directive snapshot carries content, and it is already redacted. */
 export type SteeringAuditEntry =
-	| { event: "queued"; atMs: number; directive: SteeringDirective }
+	| { event: "queued"; atMs: number; directive: SteeringDirective; deliverySequence?: number; idempotency?: SteeringKeyedRequest }
 	| {
 			event: "acknowledged";
 			atMs: number;
@@ -166,6 +175,8 @@ export type SteeringAuditEntry =
 			confirmed: boolean;
 			/** Present only on a system acknowledgement. It is part of the audited payload, so a changed reason under the same key is a conflict. */
 			reason?: SteeringAckReason;
+			/** Keyed commands only (phase 77): the caller surface, key and request fingerprint the audit row stores. */
+			idempotency?: SteeringKeyedRequest;
 	  };
 
 /** The append-only history port (the `HistorySink` shape of phase 52, typed for steering entries). */
@@ -294,13 +305,19 @@ export class SteeringInbox {
 	}
 
 	/** Validate, authorise, rate-limit, audit, then queue. */
-	enqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
-		return this.exclusive(() => this.doEnqueue(input));
+	enqueue(input: unknown, keyed?: SteeringKeyedRequest): Promise<SteeringResult<SteeringRecord>> {
+		return this.exclusive(() => this.doEnqueue(input, keyed));
 	}
 
 	/** Validate, check the session and the confirm rule, audit, then record the outcome. */
-	acknowledge(input: unknown): Promise<SteeringResult<SteeringRecord>> {
-		return this.exclusive(() => this.doAcknowledge(input));
+	acknowledge(input: unknown, keyed?: SteeringKeyedRequest): Promise<SteeringResult<SteeringRecord>> {
+		return this.exclusive(() => this.doAcknowledge(input, keyed));
+	}
+
+	/** Raises the sequence counter to at least `floor`, so a directive queued from now on sorts after every stored one. A lower value changes nothing. */
+	seedSequence(floor: number): void {
+		if (!Number.isSafeInteger(floor) || floor < 0) throw new RangeError("sequence floor must be a non-negative integer");
+		this.lastSequence = Math.max(this.lastSequence, floor);
 	}
 
 	/** A copy of the stored record. Mutating it changes nothing in the inbox. */
@@ -376,7 +393,7 @@ export class SteeringInbox {
 		return this.exclusive(() => this.doExpireStale(nowMs));
 	}
 
-	private async doEnqueue(input: unknown): Promise<SteeringResult<SteeringRecord>> {
+	private async doEnqueue(input: unknown, keyed?: SteeringKeyedRequest): Promise<SteeringResult<SteeringRecord>> {
 		const parsed = SteeringDirectiveSchema.safeParse(input);
 		if (!parsed.success) return fail({ code: "invalid-directive", issues: issuePaths(parsed.error) });
 		const directive = parsed.data;
@@ -394,17 +411,19 @@ export class SteeringInbox {
 		const saved = await this.savedTransitionAtMs("queued", directive.id);
 		if (!saved.ok) return saved;
 		const nowMs = saved.value ?? this.deps.clock.nowMs();
-		const audited = await this.audit({ event: "queued", atMs: nowMs, directive });
+		const sequence = this.lastSequence + 1;
+		const audited = await this.audit({ event: "queued", atMs: nowMs, directive, deliverySequence: sequence, ...(keyed === undefined ? {} : { idempotency: keyed }) });
 		if (!audited.ok) return audited;
 
 		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
 		this.records.set(directive.id, record);
-		this.sequences.set(directive.id, ++this.lastSequence);
+		this.lastSequence = sequence;
+		this.sequences.set(directive.id, sequence);
 		return { ok: true, value: structuredClone(record) };
 	}
 
-	private async doAcknowledge(input: unknown): Promise<SteeringResult<SteeringRecord>> {
+	private async doAcknowledge(input: unknown, keyed?: SteeringKeyedRequest): Promise<SteeringResult<SteeringRecord>> {
 		const parsed = SteeringAcknowledgementSchema.safeParse(input);
 		if (!parsed.success) return fail({ code: "invalid-acknowledgement", issues: issuePaths(parsed.error) });
 		const ack: SteeringAcknowledgement = parsed.data;
@@ -430,6 +449,7 @@ export class SteeringInbox {
 			targetSessionId: directive.targetSessionId,
 			outcome: ack.outcome,
 			confirmed,
+			...(keyed === undefined ? {} : { idempotency: keyed }),
 		});
 		if (!audited.ok) return audited;
 
@@ -453,7 +473,7 @@ export class SteeringInbox {
 				report.skipped.push({ index, directiveId: wellFormedDirectiveId(entry), code: "invalid-entry", issues: issuePaths(parsed.error) });
 				return;
 			}
-			const { directive, queuedAtMs, acknowledgement } = parsed.data;
+			const { directive, queuedAtMs, acknowledgement, deliverySequence } = parsed.data;
 			// No human flow can audit an agent author, so such a row did not come from this inbox. It is not loaded.
 			if (directive.author.kind === "agent") {
 				report.skipped.push({ index, directiveId: directive.id, code: "agent-author-refused", issues: [] });
@@ -465,8 +485,14 @@ export class SteeringInbox {
 				return;
 			}
 			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
-			// A directive this process has not seen takes the next sequence number in restore order. One already held keeps its own.
-			if (!this.sequences.has(directive.id)) this.sequences.set(directive.id, ++this.lastSequence);
+			// A directive this process has not seen keeps the sequence the table stored. A row written before the column has none, and takes restore order.
+			if (!this.sequences.has(directive.id)) {
+				if (deliverySequence == null) this.sequences.set(directive.id, ++this.lastSequence);
+				else {
+					this.sequences.set(directive.id, deliverySequence);
+					this.lastSequence = Math.max(this.lastSequence, deliverySequence);
+				}
+			}
 			report.restored.push(directive.id);
 		});
 		return report;
@@ -747,6 +773,7 @@ function recordFromStore(directive: SteeringDirective, queuedAtMs: number, ack: 
 		confirmed: ack.confirmed,
 	};
 	if (ack.reason != null) record.reason = ack.reason;
+	if (ack.sessionMoved === true) record.sessionMoved = true;
 	return record;
 }
 

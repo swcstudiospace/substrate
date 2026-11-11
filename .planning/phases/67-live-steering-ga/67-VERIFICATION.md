@@ -79,3 +79,13 @@ The gap was that the printed Claude Code `Stop` hook had no installer. `substrat
 - Enabling `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` in production (residual 3), with migration steps 33 and 34 rehearsed on a restored dump.
 - The restart-hint migration (residual 2): an operator decision on the new step, its rehearsal, and then the code change.
 - Live delivery to a real session end to end (residual 7).
+
+## Closure of residual 2, the restart hint (2026-11-11, branch `reconcile/main-2026-11-11`)
+
+Residual 2 is CLOSED in repository code. Migration step 45 `planning_steering_movements` (additive, opt-in `steering-audit`, expand) records the committed result of each acknowledgement's session-state step. `applied` is a movement the session committed, and `checkpoint_hint` records whether the reply named a hint. The acknowledgement path writes it once after the session port answers (`steering-tools.ts` `recordSession`). The restart listing joins it (`steering-store.ts` `readClosed`), so a directive acknowledged before a restart is listed with the hint its live reply carried, and `GET /steering/directives` and the hook name the same checkpoint.
+
+Evidence: `planning/steering-idempotency.pg.test.ts` "a session move committed before a restart is still listed with its checkpoint hint" passes against a disposable `postgres:16`, alongside the keyed-replay tests (6 of 6). The old residual is no longer pinned as `null`: `steering-wiring.test.ts` "the route still lists a directive that was acknowledged before the restart…" is a fake-port test of the earlier behaviour and still passes, because the fake keeps no movement row.
+
+Residual, by design: a crash between the acknowledgement row and the step-45 row leaves no hint, which fails safe. The record is written after the port answers, since the audit row must precede the effect.
+
+Operator gate, not run: rehearse migration steps 44 and 45 on a restored production dump before `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is enabled in production. The operator decision named above is made by this change; the rehearsal is what remains.

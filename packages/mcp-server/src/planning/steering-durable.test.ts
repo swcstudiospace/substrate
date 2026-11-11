@@ -34,6 +34,8 @@ import {
 	type SteeringStoredAckRow,
 	type SteeringStoredDirectiveRow,
 } from "./steering-store.ts";
+import type { SteeringKeyedAckSaved, SteeringKeyedQueueSaved, SteeringSessionRow } from "./steering-store.ts";
+import type { SessionStateOutcome } from "./steering-delivery.ts";
 import { loadConfig } from "../config.ts";
 import { auditToolCalls, createObservability } from "../observe.ts";
 import { Substrate } from "../service.ts";
@@ -60,6 +62,7 @@ class DurableSql implements SteeringAuditSql, SteeringAuditReadSql {
 	failInsert: unknown = null;
 	failReads: unknown = null;
 	insertAttempts = 0;
+	readonly sessions: SteeringSessionRow[] = [];
 
 	async insertAbsent(row: SteeringAuditRow): Promise<boolean> {
 		this.insertAttempts += 1;
@@ -95,13 +98,52 @@ class DurableSql implements SteeringAuditSql, SteeringAuditReadSql {
 		return closed
 			.sort((a, b) => b.ack.recordedAt.getTime() - a.ack.recordedAt.getTime() || compare(b.row.directiveId, a.row.directiveId))
 			.slice(0, query.limit)
-			.map(({ row, ack }) => stored(row, storedAck(ack)));
+			.map(({ row, ack }) => stored(row, storedAck(ack, this.sessions)));
 	}
 
 	async savedAcknowledgement(directiveId: string): Promise<SteeringStoredAckRow | null> {
 		if (this.failReads !== null) throw this.failReads;
 		const ack = this.find(directiveId, "acknowledged");
-		return ack === undefined ? null : storedAck(ack);
+		return ack === undefined ? null : storedAck(ack, this.sessions);
+	}
+
+	async insertSessionOutcome(row: SteeringSessionRow): Promise<void> {
+		if (this.sessions.some((saved) => saved.directiveId === row.directiveId)) return;
+		this.sessions.push({ ...row });
+	}
+
+	async savedKeyedQueue(surface: string, key: string): Promise<SteeringKeyedQueueSaved | null> {
+		if (this.failReads !== null) throw this.failReads;
+		const row = this.rows.find((candidate) => candidate.transition === "queued" && candidate.idempotencySurface === surface && candidate.idempotencyKey === key);
+		if (row === undefined) return null;
+		return { directiveId: row.directiveId, targetSessionId: row.targetSessionId, queuedAtMs: row.recordedAt.getTime(), deliverySequence: row.deliverySequence, fingerprint: row.idempotencyFingerprint ?? "" };
+	}
+
+	async savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null> {
+		if (this.failReads !== null) throw this.failReads;
+		const ack = this.rows.find((candidate) => candidate.transition === "acknowledged" && candidate.idempotencySurface === surface && candidate.idempotencyKey === key);
+		if (ack === undefined) return null;
+		if (ack.outcome === null || ack.confirmed === null) throw new Error("keyed acknowledgement row without an outcome");
+		const saved = this.sessions.find((row) => row.directiveId === ack.directiveId);
+		return {
+			directiveId: ack.directiveId,
+			outcome: ack.outcome,
+			confirmed: ack.confirmed,
+			fingerprint: ack.idempotencyFingerprint ?? "",
+			deliverySequence: this.find(ack.directiveId, "queued")?.deliverySequence ?? null,
+			session: saved === undefined ? null : sessionOutcomeOf(saved),
+			checkpointHint: saved?.checkpointHint ?? false,
+		};
+	}
+
+	async maxDeliverySequence(): Promise<number> {
+		if (this.failReads !== null) throw this.failReads;
+		return this.rows.reduce((max, row) => Math.max(max, row.deliverySequence ?? 0), 0);
+	}
+
+	async targetSessionOf(directiveId: string): Promise<string | null> {
+		if (this.failReads !== null) throw this.failReads;
+		return this.find(directiveId, "queued")?.targetSessionId ?? null;
 	}
 
 	/** A row written behind the sink's back, as another process or a bad edit would. */
@@ -126,8 +168,18 @@ function compare(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function storedAck(row: SteeringAuditRow): SteeringStoredAckRow {
-	return { outcome: row.outcome, confirmed: row.confirmed, reason: row.reason, recordedAt: row.recordedAt };
+function storedAck(row: SteeringAuditRow, sessions: readonly SteeringSessionRow[]): SteeringStoredAckRow {
+	const moved = sessions.some((saved) => saved.directiveId === row.directiveId && saved.sessionStatus === "applied");
+	return { outcome: row.outcome, confirmed: row.confirmed, reason: row.reason, recordedAt: row.recordedAt, sessionMoved: moved };
+}
+
+/** The session outcome a fake movement row holds, in the shape the reply carries. */
+function sessionOutcomeOf(row: SteeringSessionRow): SessionStateOutcome {
+	if (row.sessionStatus === "unchanged") return { status: "unchanged" };
+	if (row.sessionState === null) throw new Error("session row without a state");
+	if (row.sessionStatus === "applied") return { status: "applied", state: row.sessionState };
+	if (row.refusalReason === null) throw new Error("refused session row without a reason");
+	return { status: "refused", state: row.sessionState, reason: row.refusalReason };
 }
 
 function stored(row: SteeringAuditRow, acknowledgement: SteeringStoredAckRow | null): SteeringStoredDirectiveRow {
@@ -143,6 +195,7 @@ function stored(row: SteeringAuditRow, acknowledgement: SteeringStoredAckRow | n
 		planPlan: row.planPlan,
 		conflictsWithActivePlan: row.conflictsWithActivePlan,
 		directiveCreatedAtMs: row.directiveCreatedAtMs,
+		deliverySequence: row.deliverySequence,
 		queuedAt: row.recordedAt,
 		acknowledgement,
 	};
@@ -165,6 +218,10 @@ function queuedRow(overrides: Partial<SteeringAuditRow> = {}): SteeringAuditRow 
 		planPlan: null,
 		conflictsWithActivePlan: false,
 		directiveCreatedAtMs: 1_000,
+		idempotencySurface: null,
+		idempotencyKey: null,
+		idempotencyFingerprint: null,
+		deliverySequence: null,
 		payloadSha256: "seeded",
 		recordedAt: new Date(T0),
 		...overrides,
@@ -412,6 +469,10 @@ describe("restore from the audit log", () => {
 					},
 					readClosed: (query) => sql.readClosed(query),
 					savedAcknowledgement: (directiveId) => sql.savedAcknowledgement(directiveId),
+					savedKeyedQueue: (surface, key) => sql.savedKeyedQueue(surface, key),
+					savedKeyedAcknowledgement: (surface, key) => sql.savedKeyedAcknowledgement(surface, key),
+					maxDeliverySequence: () => sql.maxDeliverySequence(),
+					targetSessionOf: (id) => sql.targetSessionOf(id),
 				});
 
 			const first = processOver(sql, new ManualClock(T0));
@@ -434,6 +495,10 @@ describe("restore from the audit log", () => {
 				readOpen: (query) => sql.readOpen({ ...query, after: null }),
 				readClosed: (query) => sql.readClosed(query),
 				savedAcknowledgement: (directiveId) => sql.savedAcknowledgement(directiveId),
+				savedKeyedQueue: (surface, key) => sql.savedKeyedQueue(surface, key),
+				savedKeyedAcknowledgement: (surface, key) => sql.savedKeyedAcknowledgement(surface, key),
+				maxDeliverySequence: () => sql.maxDeliverySequence(),
+				targetSessionOf: (id) => sql.targetSessionOf(id),
 			});
 			const stuck = processOver(sql, new ManualClock(T0));
 			const result = await restoreSteeringInboxPaged(stuck.inbox, deaf, { limit: 3 });

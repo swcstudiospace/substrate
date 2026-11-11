@@ -3,14 +3,17 @@
  *
  * - A keyed queue names its directive from the key ({@link keyedDirectiveId}), so every retry of one key from one surface is
  *   the same directive. The inbox's duplicate check and the audit log's unique key then refuse a second `queued` row. A replay is
- *   recognised from the inbox record by its request fingerprint ({@link queueFingerprint}), so it needs no store of its own.
+ *   recognised by its request fingerprint ({@link queueFingerprint}) against the open directive, or, once the directive is no longer
+ *   open, against the durable queued row under the same surface and key (migration 44). No store of its own is needed for it.
  * - An acknowledgement's reply carries the session-state outcome, which a replay must not decide again. So {@link SteeringIdempotency}
  *   keeps the reply of each applied keyed acknowledgement, with the fingerprint it was made for ({@link acknowledgeFingerprint}).
+ *   The durable log keeps the same reply (migration 44 keys, migration 45 session result), so a replay after a restart is answered.
  * - Both paths run inside a per-key lane ({@link SteeringIdempotency.serialize}): a concurrent identical retry waits for the first
  *   and then sees its result, instead of racing the inbox and being refused as a duplicate.
  *
  * The reply index and the lanes are process-local, like the inbox. Its bound is {@link STEERING_IDEMPOTENCY_MAX_ENTRIES}: past it
- * the oldest reply is forgotten, and a replay of that key is refused by the inbox, never applied twice.
+ * the oldest reply is forgotten from memory only. A replay of that key then reads the durable log and is answered from it, never
+ * applied twice, and never refused as unknown.
  */
 import { canonicalJson, sha256Hex } from "../event.ts";
 

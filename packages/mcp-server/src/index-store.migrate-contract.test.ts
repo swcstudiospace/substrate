@@ -68,6 +68,7 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		live_session_bindings: "step 42 is durable security authority, including permanent terminal non-reuse records, not reconstructible cache; the legacy logical archive has a closed compatibility hash and excludes it, so complete PostgreSQL-native backup including tombstones is required (this exclusion provides no backup coverage)",
 		cross_repo_operations: "step 43 is the cross-repository operation log (phase 74): one row per operation key, rebuilt by re-running the operation with its key, not restored from an archive; it is not part of the archive's closed table list and archiving it is a separate change",
 		cross_repo_steps: "step 43 holds the per-repository steps of a cross-repository operation, written before each git effect; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and an operation is re-run, not restored",
+		planning_steering_movements: "step 45 holds the committed session-state result of each steering acknowledgement, written once after the session port answers; it is an opt-in (steering-audit) append-only table outside the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against), and a lost row only drops a restart hint, which fails safe",
 	},
 };
 

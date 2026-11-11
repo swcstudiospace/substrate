@@ -74,7 +74,7 @@ REST proof travels **only** in `X-Substrate-Session-Binding`, never URL/query or
 
 Discovery rows contain only `session_id`, `surface`, `repo_id`, `state`, `updated_at`, `expires_at`, even for operators: no private direction, planning hash, directive body/count. Public repository metadata is not a private inbox.
 
-`after` follows inbox insertion order, not wall clock. Waits above the configured ceiling clamp (default 30000 ms, bounds 1000..120000). Separate waiter-cap 429 also uses `Retry-After`. Durable inbox REST history merges up to 100 acknowledged records after restart; audit-restored records have no inferred checkpoint hint.
+`after` follows inbox insertion order, not wall clock. Waits above the configured ceiling clamp (default 30000 ms, bounds 1000..120000). Separate waiter-cap 429 also uses `Retry-After`. Durable inbox REST history merges up to 100 acknowledged records after restart; an acknowledgement's `checkpoint_hint` is restored from its committed movement record (migration 45), so a directive acknowledged before that migration has none.
 
 **Idempotency (keyed commands).** `idempotency_key` is 8 to 128 characters from `A-Z a-z 0-9 . _ : -`, the rule the event ledger uses, and is scoped to the caller's surface. An unkeyed command behaves exactly as before. A keyed command applies once:
 
@@ -82,7 +82,7 @@ Discovery rows contain only `session_id`, `surface`, `repo_id`, `state`, `update
 - A keyed acknowledgement replays the stored reply (including `session_state` and `checkpoint_hint`) for the same directive, outcome and confirm flag, and moves nothing again. A different request under the key is `idempotency-conflict`. A refused acknowledgement is not kept, so a retry runs it again.
 - A keyed reply carries `sequence`, the directive's delivery sequence. Every REST directive carries `sequence` too (`null` when the inbox does not hold it). `/steering/wait` delivers in this order, so readers see the order commands entered the inbox.
 
-The key index and sequence are process-local. After a restart a retry is still never applied twice, but it may not get the original reply: restored open directives can take new sequence numbers; a keyed acknowledgement of a directive acknowledged before the restart is refused as `not-found` (404), because the restored inbox holds only open directives; and a keyed queue for such a directive is refused as `audit-unavailable` (503), because the audit log already holds its queued row. A durable sequence and key index are an owner decision (see `.planning/phases/77-steering-idempotency-ordering/CONTEXT.md`).
+The key index and the sequence are durable (migrations 44 and 45, with the audit opt-in). After a restart a keyed queue or acknowledgement replays its original reply from `planning_steering_audit` and `planning_steering_movements`: the same `sequence`, `session_state` and `checkpoint_hint`, no second session transition, and no second row. A keyed command whose row predates migration 44 has no key and no sequence, so it cannot be replayed. One limit remains: the session-state record is written after the session port answers, so a crash between the acknowledgement and that record replays the acknowledgement without `session_state` and without a hint. That fails safe, and it is not applied twice. The in-process index is an optimisation: past its bound a replay reads the log.
 
 
 ## Flags and storage
@@ -91,7 +91,7 @@ The key index and sequence are process-local. After a restart a retry is still n
 | --- | --- |
 | `SUBSTRATE_PLANNING_STEERING` | default off: no inbox MCP tools or `/steering/*` routes; lifecycle docs-session/heartbeat/close MCP tools register independently |
 | `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | allowed operator authors; empty refuses all authors |
-| `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | opt-in migrations 33/34 and durable inbox; missing sink fails writes closed |
+| `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | opt-in migrations 33/34 and 44/45 and durable inbox; missing sink fails writes closed |
 | `SUBSTRATE_LIVE_SESSION_LEASE_S` | default 3600 seconds, 60..86400; mandatory migration 42 has no opt-in |
 | `SUBSTRATE_STEERING_SESSIONS_TABLE` | historical migration 37 selection only; runtime cache removed, applied SQL/history unchanged |
 | `SUBSTRATE_STEERING_WAIT_MAX_MS` | default 30000 ms per wait |
@@ -202,7 +202,7 @@ Up to five authorized hints are processed per run; consumed decisions include **
 - **Metadata is not private content.** `session_context` / `GET /session/context` stay cross-session, bounded/redacted, with existing caps, `source`, `age_s`, provenance, truncation and historical self-exclusion; no proof required. Private inbox/body/count and stored direction access require checked target.
 - **New events are public-safe; old history is unchanged.** Newly server-emitted live transitions, private docs notes, queue hints and close notes allowlist metadata only: no raw/nested direction, planning hash, proof/hash, private body/count or augmented question. Existing REST/MCP historical queries/authorization and published rows are unchanged, not retroactively confidential. Caller-controlled historical `events_emit` is not private storage.
 - **No cache authority.** SQL retains identity/revocation across restart. Removed legacy cache cannot resurrect sessions; migration 37 selects historical schema only. Inbox audit is separate, never identity authority.
-- **Hints are not durable transition proofs.** Restored acknowledged records have no inferred hint. An acknowledgement can stand while state application refuses; a committed state movement remains applied metadata even if a later check withholds its hint.
+- **Hints come from the durable record.** A `checkpoint_hint` is named only from a committed movement recorded by migration 45, never inferred from the audit's outcome. A crash between an acknowledgement and that record leaves no hint, which fails safe.
 - **Terminal records are security state.** Complete PostgreSQL-native backup/recovery must preserve all bindings/tombstones; the closed logical archive excludes them. Stale dump/cache/ledger cannot reconstruct lost tombstones or prove permanent non-reuse. Quiesce live access on incomplete recovery; recover complete state and invalidate restored active bindings before controlled re-enable. No automatic reset/downgrade can supply missing evidence.
 
 ## What is still operator-gated

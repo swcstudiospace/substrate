@@ -1862,6 +1862,7 @@ export class Substrate {
 			authority: this.liveSessions,
 			settings: config.admission,
 			resolveDirective: (id) => steeringInbox?.get(id)?.directive.targetSessionId ?? null,
+			resolveDurableDirective: async (id) => (this.steeringDurable === null ? null : this.steeringDurable.targetSessionOf(id)),
 			recordRefusal: async (event) => (await this.emit(event)).stored,
 			nowMs: steeringClock.nowMs,
 		});
@@ -1872,6 +1873,7 @@ export class Substrate {
 			inbox: steeringInbox,
 			boundary: this.liveBoundary,
 			idempotency: new SteeringIdempotency<SteeringAcknowledgeReply>(),
+			durable: this.steeringDurable,
 			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();

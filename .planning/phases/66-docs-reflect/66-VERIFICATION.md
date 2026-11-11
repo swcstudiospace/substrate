@@ -103,3 +103,15 @@ Evidence was run here: `bun test` on `corpus/reflect-store`, `corpus/reflect-ser
 - The phase 63 live ingest, which the re-rank depends on.
 - Capturing one live LightRAG `/query` response to settle risk 2 (which score field, if any).
 - Confirming that the CI scratch-Postgres job runs `corpus/reflect-store.test.ts` (risk 7).
+
+## Closure of residual 10, the column name collision (2026-11-11, branch `reconcile/main-2026-11-11`)
+
+Residual 10 is CLOSED in repository code. Its schema cleanup is a later, operator-gated step. Migration step 46 `corpus_documents_superseded_by_path` (additive, expand, always run) adds `corpus_documents.superseded_by_path`. The marker path is written and read only through that column (`corpus/store.ts`: `toManifestRow`, `refreshMetadata`, `recordIngested`). The citation field `superseded_by`, which holds a document key, no longer shares a name with any column the code uses.
+
+Why this is an expand and not a rename: `ALTER TABLE … RENAME` is not additive, and `rollback-compat.test.ts` requires every step above 32 to be additive. That test is not loosened. So the step adds the new column, and the step-38 column `superseded_by` stays, unread and unwritten, until a later contract step drops it. No backfill is needed: the manifest is rebuilt by the corpus scan, and `plan.ts` treats a row whose stored marker differs from its document's marker as changed, so each row is rewritten on the next ingest.
+
+Evidence: `corpus/store.test.ts` "reads the superseded-by marker…" reads `superseded_by_path`. `corpus/reflect-store.test.ts` and `corpus/reflect-service.test.ts` pass against a disposable `postgres:16` in the narrow set (487 pass, 0 fail, with `SUBSTRATE_TEST_PG_URL` set). `rollback-compat.test.ts` and `index-store.migrate-contract.test.ts` pass with step 46 named in the runbook.
+
+Residuals: the step-38 column stays until its contract step, and the healing ingest runs only while `SUBSTRATE_CORPUS` is on, which production does not set.
+
+Operator gate, not run: rehearse migration step 46 on a restored production dump before production migrates (`docs/runbooks/rollback-compat.md`, the row for step 46). The phase 63 live ingest is still not run, as before.
