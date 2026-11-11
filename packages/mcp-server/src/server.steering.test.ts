@@ -180,6 +180,24 @@ describe("real REST lifecycle and independent proof", () => {
 		expect(unavailable.status).toBe(503); expect(await unavailable.json()).toEqual({ status: "refused", error: { code: "session-unavailable" } });
 	});
 
+	test("operator queue and acknowledge: a refused audit write is 503 audit-unavailable and leaves the inbox as it was", async () => {
+		const h = await serve(); const row = await issueLiveSession(h.authority, { caller: OWNER });
+		const kept = await queue(h, row.sessionId);
+		const historyBefore = h.history.entries.length; const auditBefore = h.auditRecords.length;
+		h.failAudit();
+		const queued = await h.post("/steering/queue", queueBody(row.sessionId, { body: "NEW-DIRECTIVE" }), AUTH_OPERATOR);
+		expect(queued.status).toBe(503); expect(await queued.json()).toEqual({ status: "refused", error: { code: "audit-unavailable" } });
+		const acknowledged = await h.post("/steering/acknowledge", { directive_id: kept, outcome: "applied" }, AUTH_OPERATOR);
+		expect(acknowledged.status).toBe(503); expect(await acknowledged.json()).toEqual({ status: "refused", error: { code: "audit-unavailable" } });
+		// The refusals themselves are audited as denials; no write was allowed, so no steering row or allowed record was made.
+		expect(h.history.entries).toHaveLength(historyBefore);
+		expect(h.auditRecords.slice(auditBefore).map((record) => [record.tool, record.decision])).toEqual([["steering_queue", "denied"], ["steering_acknowledge", "denied"]]);
+		expect(h.substrate.steering.inbox?.get(kept)?.state).toBe("queued");
+		const listed = await (await h.get(`/steering/directives?session_id=${row.sessionId}`, proof(row.sessionBinding))).json() as { directives: Array<{ id: string; body?: string }> };
+		expect(listed.directives.map((directive) => directive.id)).toEqual([kept]);
+		expect(JSON.stringify(listed)).not.toContain("NEW-DIRECTIVE");
+	});
+
 	test("disabled steering routes remain absent rather than creating identities", async () => {
 		const h = await serve({ SUBSTRATE_PLANNING_STEERING: "off" });
 		for (const path of ["/steering/sessions", `/steering/directives?session_id=${UNKNOWN}`, `/steering/wait?session_id=${UNKNOWN}`]) expect((await h.get(path)).status).toBe(404);

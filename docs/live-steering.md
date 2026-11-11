@@ -70,7 +70,7 @@ REST proof travels **only** in `X-Substrate-Session-Binding`, never URL/query or
 | `POST /steering/queue` | `steering_queue` | REST `{session_id, action, body, priority?, conflicts_with_active_plan?, idempotency_key?}`; MCP uses `target_session_id`, requires priority/conflict, supports optional `plan_ref` and `idempotency_key` |
 | `POST /steering/acknowledge` | `steering_acknowledge` | REST `{directive_id, outcome, confirm?, idempotency_key?}` infers target after principal admission; MCP also requires matching `session_id` and accepts `idempotency_key` |
 | `POST /docs/search`, `POST /brief` | `docs_search`, `memory_brief` | historical `session_id` is attribution; explicit `steering_session_id` plus header/MCP proof selects private augmentation |
-| `GET /session/context?repo_id=&session_id=&limit=` | `session_context` | redacted digest; `session_id` is self-exclusion only |
+| `GET /session/context?repo_id=&session_id=&limit=` | `session_context` | redacted digest; `session_id` is self-exclusion only; a presence row past its TTL (`stale`) is left out, so the digest lists live sessions only |
 
 Discovery rows contain only `session_id`, `surface`, `repo_id`, `state`, `updated_at`, `expires_at`, even for operators: no private direction, planning hash, directive body/count. Public repository metadata is not a private inbox.
 
@@ -195,7 +195,7 @@ The lists come from `substrate worktree scan --report` ([worktree-fleet.md](work
 
 Up to five authorized hints are processed per run; consumed decisions include **both historical and live identity**, never proof. Refused/unavailable hints preserve ordinary fail-open checkpoint behavior, with sanitized verbose diagnostics, but never authorize via historical label. The context hook prints the existing redacted digest, at most 4000 characters. Hooks keep their 10-second budget and exit 0.
 
-`substrate session hook-config steering` and `... context` **print only**: no settings/hook/timer/service install. ADR 0007 maps no host event; an operator chooses one. See [session rollback](runbooks/session-rollback.md#the-steering-trigger-and-the-checkpoint_hint-reader).
+`substrate session hook-config steering` and `... context` **print only**: no settings/hook/timer/service install. ADR 0007 maps no host event; an operator chooses one. `substrate session hook-install claude-code --settings PATH` merges the Claude Code `Stop` hook into a settings file: a dry run unless `--write`, idempotent, never prints the file, and refuses symbolic links and malformed files. It is the only installer, and it does not run from this repository. See [session rollback](runbooks/session-rollback.md#the-steering-trigger-and-the-checkpoint_hint-reader).
 
 ## Privacy, durability and recovery limits
 
