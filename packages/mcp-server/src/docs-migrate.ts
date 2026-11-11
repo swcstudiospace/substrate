@@ -8,7 +8,7 @@
  *   bun scripts/docs-migrate.ts --apply --rehearsal --archive <dir> --part-a <summary.md>
  *
  * Every mode verifies the archive (`verifyArchive`, docs-archive.ts) and refuses on a failed read-back. The job then
- * runs PARITY_GATE (scripts/parity-gate.ts: Part A, then Part B) as a precondition of any ingestion. Part A checks that
+ * runs PARITY_GATE (parity-run.ts: Part A, then Part B) as a precondition of any ingestion. Part A checks that
  * each `lightrag::` record of the docs state matches its LightRAG document by dataset, source URL and version; Part B
  * checks that the frozen sample answers from its expected sources at the threshold. A failed gate refuses ingestion.
  * Each archived RAGFlow record must map to an archived dataset, and each archived document must name its commit and
@@ -34,7 +34,7 @@ import { DEFAULT_INGEST_ROOTS, type IngestPage, type IngestRecord, ingestDocs, l
 import { sha256Hex } from "./event.ts";
 import type { FetchLike } from "./planes/lightrag.ts";
 import type { EventInput } from "./types.ts";
-import { runPartA, runPartB } from "../../../scripts/parity-gate.ts";
+import { runPartA, runPartB } from "./parity-run.ts";
 
 export const APPROVAL_ENV = "SUBSTRATE_DOCS_MIGRATE_APPROVED";
 const STATE_ENV = "SUBSTRATE_DOCS_STATE_FILE";

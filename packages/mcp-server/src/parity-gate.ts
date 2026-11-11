@@ -1,6 +1,6 @@
 /**
- * The PARITY_GATE comparator (SOTA-02, Phase 46, T3). Pure checks with injected reads: the CLI in
- * `scripts/parity-gate.ts` does the I/O, and this module does none.
+ * The PARITY_GATE comparator (SOTA-02, Phase 46, T3). Pure checks with injected reads: the run in `parity-run.ts`
+ * does the I/O, and this module does none.
  *
  * Part A, record mapping. Each `lightrag::` record of the docs state file is matched to its LightRAG document by the
  * plane document id the ingest recorded. The plane listing (`POST /documents/paginated`) returns only the id and the

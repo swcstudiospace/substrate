@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { corpusDocumentName } from "@substrate/corpus";
-import { parsePartArgs, reasonCategory, runParity } from "../../../scripts/parity-gate.ts";
+import { parsePartArgs, reasonCategory, runParity } from "./parity-run.ts";
 import type { FetchLike } from "./planes/lightrag.ts";
 import {
 	checkRecordMapping,
