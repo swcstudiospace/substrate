@@ -167,7 +167,7 @@ export class RetainOutbox {
 	 * restart would silently lose what the failed save never wrote.
 	 */
 	get durable(): boolean {
-		return this.file !== null && this.file.durable;
+		return this.file?.durable ?? false;
 	}
 
 	/** Whether this exact entry is still parked: a replay that waited its turn re-checks before sending. */

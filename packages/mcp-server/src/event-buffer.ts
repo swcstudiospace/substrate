@@ -169,7 +169,7 @@ export class DeadLetterStore {
 
 	/** True while every record is on disk; always false for the memory-only store. */
 	get durable(): boolean {
-		return this.file !== null && this.file.durable;
+		return this.file?.durable ?? false;
 	}
 
 	list(): DeadLetter[] {
@@ -240,7 +240,7 @@ export class EventBuffer {
 
 	/** True only while every parked event is on disk; always false for the memory-only buffer. */
 	get durable(): boolean {
-		return this.file !== null && this.file.durable;
+		return this.file?.durable ?? false;
 	}
 
 	size(): number {

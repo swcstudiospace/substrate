@@ -1493,7 +1493,7 @@ describe("scan --report --keep-sessions", () => {
 	test("without the flag the registry is never read, and its sessions are cleared as before", async () => {
 		const f = fleet();
 		let reads = 0;
-		const h = harness({ listRegistry: async () => ((reads += 1), listing([{ path: f.review, session_id: "sess-kept" }])) }, withRoot(f.root));
+		const h = harness({ listRegistry: async () => { reads += 1; return listing([{ path: f.review, session_id: "sess-kept" }]); } }, withRoot(f.root));
 		expect(await runWorktree(["scan", "--report"], h.deps)).toBe(0);
 		expect(reads).toBe(0);
 		expect(attributed(h)).toEqual([]);
@@ -1502,7 +1502,7 @@ describe("scan --report --keep-sessions", () => {
 	test("--keep-sessions without --report is a usage error and reads nothing", async () => {
 		const f = fleet();
 		let reads = 0;
-		const h = harness({ listRegistry: async () => ((reads += 1), listing([])) }, withRoot(f.root));
+		const h = harness({ listRegistry: async () => { reads += 1; return listing([]); } }, withRoot(f.root));
 		expect(await runWorktree(["scan", "--keep-sessions"], h.deps)).toBe(2);
 		expect(h.err.join("")).toContain("--keep-sessions keeps a report's attribution: use it with --report");
 		expect(reads).toBe(0);
@@ -1570,7 +1570,10 @@ describe("httpRegistryLister", () => {
 			url: "http://x",
 			token: undefined,
 			timeoutMs: 1000,
-			fetchImpl: async (_url, init) => ((seen.push(init)), new Response(JSON.stringify({ worktrees: [], truncated: false }), { status: 200 })),
+			fetchImpl: async (_url, init) => {
+				seen.push(init);
+				return new Response(JSON.stringify({ worktrees: [], truncated: false }), { status: 200 });
+			},
 		});
 		expect(await lister("h")).toEqual({ ok: true, rows: [], truncated: false });
 		expect(seen[0]?.headers).toEqual({});

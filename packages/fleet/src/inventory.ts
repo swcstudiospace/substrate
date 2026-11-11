@@ -393,7 +393,7 @@ export async function inspectWorktree(wt: InspectInput, options: InspectOptions)
 	const remoteHasHead = wt.branch !== null ? ancestorOfRemote === 0 : remoteContains !== null && remoteContains !== "";
 	// A commit merged into the default branch is pushed only when that branch is a remote one. Without an origin, or without
 	// origin/HEAD, the default is a local branch, and a local merge proves nothing about what reached a remote.
-	const defaultIsRemote = defaultRef !== null && defaultRef.startsWith("origin/");
+	const defaultIsRemote = defaultRef?.startsWith("origin/") === true;
 	base.pushed = remoteHasHead || (base.merged === true && defaultIsRemote);
 	base.pr_state = pr.state;
 	base.pr_number = pr.number;
