@@ -148,7 +148,7 @@ import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, U
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type ForwardOutcome, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
-import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
+import { FORGET_ACTION, forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
 import { anchorEvidenceFor, followReanchor, ReanchorReadIncomplete, resolveSignerSet, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
@@ -2919,6 +2919,9 @@ export class Substrate {
 			);
 			if (parked !== null) return { event: parked, stored: false, buffered: true, error: "the original attempt of this keyed event is queued for the ledger; nothing was written" };
 		}
+		// Phase 76's chain rule, write side: before this event chains onto its session's parked events, give those events their one
+		// attempt now. A ledger that has recovered lands them first, so this event chains onto the ledger's tip instead of parking.
+		if (sessionId !== null) await this.settleParkedSession(sessionId);
 		// An event whose session has parked events chains onto the newest of them, never onto the ledger: a direct write
 		// would fork the chain those parked events are about to extend (event-buffer.ts).
 		const parkedTip = sessionId === null ? null : this.eventBuffer.tipOf(sessionId);
@@ -4044,6 +4047,33 @@ export class Substrate {
 	}
 
 	/**
+	 * Phase 76 chain rule, settle side: one attempt now for each parked event of one session, in chain order (`EventBuffer.drainSession`).
+	 * Never throws: a failed attempt is recorded by the buffer. A session with nothing parked, or no ledger, is left alone.
+	 */
+	private async settleParkedSession(sessionId: string): Promise<void> {
+		const greptime = this.greptime;
+		const session = normalizeIdentifier(sessionId);
+		if (greptime === null || session === null || this.eventBuffer.tipOf(session) === null) return;
+		await this.eventBuffer.drainSession(session, (event) => this.deliverBufferedEvent(greptime, event));
+	}
+
+	/**
+	 * Whether forget note `forgetId` is already in a session's chain: recorded in the ledger, or parked for it. Settles the session's
+	 * parked events first, so a parked note the ledger now takes reads as recorded. A repeat of one forget call writes no second note.
+	 */
+	private async forgetNoteInChain(sessionId: string, forgetId: string): Promise<"recorded" | "queued" | "absent"> {
+		await this.settleParkedSession(sessionId);
+		const session = normalizeIdentifier(sessionId);
+		const parked = session === null ? null : this.eventBuffer.find((event) => event.session_id === session && event.payload["action"] === FORGET_ACTION && event.payload["forget_id"] === forgetId);
+		if (parked !== null) return "queued";
+		const recorded = await this.readSessionNotes(sessionId).then(
+			(notes) => notes.events.some((event) => event.payload["action"] === FORGET_ACTION && event.payload["forget_id"] === forgetId),
+			() => false,
+		);
+		return recorded ? "recorded" : "absent";
+	}
+
+	/**
 	 * One delivery attempt for a parked event. It answers and never throws: a failure is a reason the buffer records,
 	 * and the buffer decides when the event is dead-lettered.
 	 */
@@ -4206,6 +4236,13 @@ export class Substrate {
 					},
 					emit: async (payload, summary, meta) => {
 						const sessionId = caller.session_id ?? payload.session_id;
+						// A repeat of this forget call (the rollback retries it) writes no second note: a note already in the chain is the note, and one
+						// queued for the ledger is not stored, so the forget is not reported as emitted until it lands.
+						if (sessionId !== undefined) {
+							const where = await this.forgetNoteInChain(sessionId, payload.forget_id);
+							if (where === "recorded") return;
+							if (where === "queued") throw new Error("the forget note is already queued for the ledger; nothing was written");
+						}
 						const emitted = await this.emit({
 							surface: caller.surface,
 							kind: "note",
@@ -4389,6 +4426,7 @@ export class Substrate {
 	private sessionRollbackDeps(): SessionRollbackDeps {
 		return {
 			readSessionNotes: (sessionId) => this.readSessionNotes(sessionId),
+			settleSession: (sessionId) => this.settleParkedSession(sessionId),
 			chainHead: async (sessionId) => {
 				const ledger = this.greptime;
 				const session = normalizeIdentifier(sessionId);

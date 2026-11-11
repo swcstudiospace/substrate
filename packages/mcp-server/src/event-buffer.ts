@@ -304,7 +304,21 @@ export class EventBuffer {
 	 */
 	drain(deliver: (event: SubstrateEvent) => Promise<EventDelivery>, options: { all?: boolean } = {}): Promise<void> {
 		if (this.draining) return this.draining;
-		this.draining = this.runDrain(deliver, options.all === true).finally(() => {
+		this.draining = this.runDrain(deliver, options.all === true, null).finally(() => {
+			this.draining = null;
+		});
+		return this.draining;
+	}
+
+	/**
+	 * The write path's settle (phase 76 chain rule): one delivery attempt for each parked event of one session, in chain order,
+	 * before a write chains onto them. The schedule is not consulted: the write cannot chain past those events, so each gets its
+	 * attempt now. The first event that does not land blocks the rest of the session, so one call spends at most one failing
+	 * attempt per session. A pass already running is awaited first, so one event is never delivered by two passes at once.
+	 */
+	async drainSession(sessionId: string, deliver: (event: SubstrateEvent) => Promise<EventDelivery>): Promise<void> {
+		while (this.draining) await this.draining;
+		this.draining = this.runDrain(deliver, true, sessionId).finally(() => {
 			this.draining = null;
 		});
 		return this.draining;
@@ -321,13 +335,14 @@ export class EventBuffer {
 		return dropped.length;
 	}
 
-	private async runDrain(deliver: (event: SubstrateEvent) => Promise<EventDelivery>, all: boolean): Promise<void> {
+	private async runDrain(deliver: (event: SubstrateEvent) => Promise<EventDelivery>, all: boolean, only: string | null): Promise<void> {
 		let changed = false;
 		const blocked = new Set<string>();
 		for (const entry of [...this.entries.values()]) {
 			// Dead-lettered with its session, or abandoned, since the pass began: not ours anymore.
 			if (this.entries.get(entry.event.id) !== entry) continue;
 			const session = entry.event.session_id;
+			if (only !== null && session !== only) continue;
 			if (session !== null && blocked.has(session)) continue;
 			if (!all && entry.next_at > this.now()) {
 				if (session !== null) blocked.add(session);

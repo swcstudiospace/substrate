@@ -23,14 +23,14 @@ const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo t
 
 /**
  * A ledger that records what it stores. `failures` names the insert calls (1-based, across the whole test) that
- * throw, with their message; every other insert lands. `lastHash` is the session's tip before anything was written.
+ * throw, with their message; every other insert lands. `lastHash` is the tip of what was written, or TIP before anything was.
  */
 function ledger(failures: (call: number) => string | null) {
 	const written: SubstrateEvent[] = [];
 	let calls = 0;
 	const greptime = {
 		ensureAppendMode: async () => true,
-		lastHash: async () => TIP,
+		lastHash: async () => written.at(-1)?.hash ?? TIP,
 		eventStored: async () => false,
 		// No ledger row carries the key: a replay finds nothing and the parked event answers it.
 		findByIdempotencyKey: async () => null,
@@ -145,7 +145,8 @@ describe("a failed ledger write is parked, not dropped", () => {
 	});
 
 	test("a session's later event waits behind the parked one: it chains onto it, and both land in order", async () => {
-		const { written, greptime } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
+		// The ledger is still down for the second write, so the second event parks behind the first one's attempt.
+		const { written, greptime } = ledger((call) => (call <= 2 ? "greptime unreachable: ETIMEDOUT" : null));
 		const substrate = substrateWith({}, greptime);
 		const first: EmitResult = await substrate.emit(input);
 		const second: EmitResult = await substrate.emit({ ...input, summary: "ran cargo build" });
@@ -158,6 +159,22 @@ describe("a failed ledger write is parked, not dropped", () => {
 
 		await substrate.drainEventBuffer({ all: true });
 		expect(written.map((event) => event.id)).toEqual([first.event.id, second.event.id]);
+		expect(written[1]?.prev).toBe(written[0]?.hash);
+		await close(substrate);
+	});
+
+	test("a session's later write settles the parked event first once the ledger is back: the parked one lands, then the new one chains onto it", async () => {
+		const { written, greptime } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
+		const substrate = substrateWith({}, greptime);
+		const first: EmitResult = await substrate.emit(input);
+		const second: EmitResult = await substrate.emit({ ...input, summary: "ran cargo build" });
+
+		// The first event's attempt answered on the second write, so the second is stored directly, after it.
+		expect(first.buffered).toBe(true);
+		expect(second.stored).toBe(true);
+		expect(second.buffered).toBeUndefined();
+		expect(written.map((event) => event.id)).toEqual([first.event.id, second.event.id]);
+		expect(second.event.prev).toBe(first.event.hash);
 		expect(written[1]?.prev).toBe(written[0]?.hash);
 		await close(substrate);
 	});

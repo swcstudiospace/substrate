@@ -137,6 +137,8 @@ export interface EmitOutcome {
 export interface SessionRollbackDeps {
 	/** The session's `note` events, newest first, payloads included. Throws when the ledger cannot be read. */
 	readSessionNotes(sessionId: string): Promise<SessionNotes>;
+	/** Settle the session's parked ledger events (phase 76) before a write reads the chain: one attempt each, in chain order. Never throws. */
+	settleSession(sessionId: string): Promise<void>;
 	/** The newest event of the session (the ledger chain position), or null for an empty session. May throw: the caller treats that as unobservable. */
 	chainHead(sessionId: string): Promise<{ event_id: string; hash: string } | null>;
 	/** Append one event as the caller's surface. */
@@ -467,6 +469,7 @@ async function serialisedByCheckpoint<T>(key: string, work: () => Promise<T>): P
 
 async function recordCheckpoint(deps: SessionRollbackDeps, sessionId: string, payload: CheckpointPayload, caller: RollbackCaller): Promise<CheckpointResult> {
 	try {
+		await deps.settleSession(sessionId);
 		const notes = await readNotes(deps, sessionId);
 		const known = checkpointsIn(notes.events);
 		const same = known.find((record) => record.payload.ckpt_id === payload.ckpt_id);
@@ -1053,28 +1056,34 @@ async function forgetSelected(
 /** The commit running for each (session, rollback id): the identity of the request it answers, and its answer. */
 const inflight = new Map<string, { same: string; flight: Promise<CommitResult> }>();
 
+/**
+ * The answer to a commit of a rollback id whose note is already recorded: its totals, with nothing forgotten again. Only a pending
+ * plane deletion is retried. A note another surface wrote, or one for another target checkpoint, is a conflict.
+ */
+async function replayedCommit(deps: SessionRollbackDeps, notes: SessionNotes, existing: { event: SubstrateEvent; payload: RollbackPayload }, request: CommittedRequest, caller: RollbackCaller): Promise<CommitResult> {
+	if (!ownedBy(existing.event, caller)) refuse("conflict", `rollback id ${request.rollback_id} is already used by another surface`);
+	if (existing.payload.to_ckpt_id !== request.target_ckpt_id) refuse("conflict", `rollback id ${request.rollback_id} was already used for another target checkpoint`);
+	const retry = await retryPendingPlane(deps, forgetNotesOf(notes.events, request.rollback_id, caller), request.session_id, caller);
+	return {
+		ok: true,
+		event_id: existing.event.id,
+		memory: {
+			superseded_entries: existing.payload.memory.superseded_entries,
+			forgotten_documents: existing.payload.memory.forgotten_documents,
+			plane_pending: retry.pending,
+			truncated: false,
+		},
+		replayed: true,
+	};
+}
+
 async function commitCommitted(deps: SessionRollbackDeps, request: CommittedRequest, caller: RollbackCaller): Promise<CommitResult> {
 	const sessionId = request.session_id;
 	const notes = await readNotes(deps, sessionId);
 
 	// An earlier commit of this rollback id answers again without forgetting again (only a pending plane deletion is retried).
 	const existing = rollbackIn(notes.events, request.rollback_id);
-	if (existing !== null) {
-		if (!ownedBy(existing.event, caller)) refuse("conflict", `rollback id ${request.rollback_id} is already used by another surface`);
-		if (existing.payload.to_ckpt_id !== request.target_ckpt_id) refuse("conflict", `rollback id ${request.rollback_id} was already used for another target checkpoint`);
-		const retry = await retryPendingPlane(deps, forgetNotesOf(notes.events, request.rollback_id, caller), sessionId, caller);
-		return {
-			ok: true,
-			event_id: existing.event.id,
-			memory: {
-				superseded_entries: existing.payload.memory.superseded_entries,
-				forgotten_documents: existing.payload.memory.forgotten_documents,
-				plane_pending: retry.pending,
-				truncated: false,
-			},
-			replayed: true,
-		};
-	}
+	if (existing !== null) return replayedCommit(deps, notes, existing, request, caller);
 
 	const { target, visible } = resolveTarget(notes, request.target_ckpt_id, caller);
 
@@ -1109,6 +1118,13 @@ async function commitCommitted(deps: SessionRollbackDeps, request: CommittedRequ
 	if (planned.plan.plan_digest !== request.plan_digest) {
 		return failure("stale-plan", "the plan changed since it was computed (the target, or the memory the rollback would forget); nothing was changed: call session_rollback_plan again");
 	}
+
+	// A note of this rollback that an earlier attempt parked lands on this settle and is answered as the replay it is, before anything
+	// is forgotten again. The totals below still count the chain the plan was checked against, so a forget note that lands here is not counted twice.
+	await deps.settleSession(sessionId);
+	const settled = await readNotes(deps, sessionId);
+	const landed = rollbackIn(settled.events, request.rollback_id);
+	if (landed !== null) return replayedCommit(deps, settled, landed, request, caller);
 
 	const earlier = forgetNotesOf(notes.events, request.rollback_id, caller);
 	const prior = priorTotals(earlier);
