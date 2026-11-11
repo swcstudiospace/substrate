@@ -690,3 +690,14 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | 71 | awaiting-review / pending QUALITY | Local acceptance passed; native Programming Lead held-message dispatch or an authorized Desk connector is not exposed. No external Greptile clearance observed. | Complete LEAD → QUALITY review, address findings, then `/gsd:verify-work 71` |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.
+
+## Reconciliation record (2026-11-11)
+
+- Main checkout `~/src/repos/agent-substrate` was on the stale branch `planning/consistency-check-2026-10-24` (13 commits not on `origin/main`, 265 behind). Preserved as ref `backup/pre-reconcile-2026-11-11`. Its uncommitted files (`.planning/state.json`, untracked `46-PLAN.md`, `.claude/`) are preserved in stash `pre-reconcile-2026-11-11`, not applied.
+- Working branch `reconcile/main-2026-11-11` from `origin/main` (83779a1d). Merges: `082e653a` ports `gsd/v18-p72-rebased` (phase 72, clean merge); `36c4129b` ports `gsd/p46-offline` (phase 46 LightRAG tooling, one conflict resolved to main's `docs-search.test.ts` plus a re-ported SC1 test) and restores imports that `origin/main` itself lacked (`isRefusal`, `headsRoot`, event ledger helpers, `BreakerOpenError`).
+- `gsd/hardening-s1` (phase 71 worktree) was fully contained in `origin/main`; nothing ported.
+- Planning-branch conflicts (about 20, mostly `.planning` moves and phase-46 duplicates) were not ported; `origin/main` is the authority for planning docs.
+- Stray worktrees removed: `agent-substrate-base`, `-p46`, `-p72`, `-v18` (all clean). Their branches are kept as refs. All 12 stashes are kept.
+- Known stash contents not ported: `46-PLAN.md` in the stash differs from the committed phase 46 plan; review before applying.
+- Roadmap rows corrected: phase 72 ported (human_needed), phases 73 and 75 merged (PRs #201, #200).
+

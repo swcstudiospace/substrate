@@ -139,10 +139,10 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eight features accepted; unkeyed steering commands keep working unchanged. Dependencies: 72 and 77 need 71; 76 shares the ledger write path with 73; 78 needs 73, 75 and 76. Operator-gated and not run by this milestone: deploy, Railway writes, devnet sends, anchor funding, hook and timer installs, the LightRAG LLM route, production bulk ingest.
 
 - [ ] **Phase 71: Multi-Session boundary** - steering and session context bound to the owning surface
-- [ ] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories
-- [ ] **Phase 73: Ledger tamper evidence** - rewrites, reorders and tail truncation detected and anchored
+- [x] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories (ported from gsd/v18-p72-rebased in merge 082e653a; the branch's own verification is human_needed)
+- [x] **Phase 73: Ledger tamper evidence** - rewrites, reorders and tail truncation detected and anchored (merged to main as PR #201, 83779a1d)
 - [ ] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps
-- [ ] **Phase 75: DragonflyDB degradation** - the cache breaker degrades reads to the authoritative store
+- [x] **Phase 75: DragonflyDB degradation** - the cache breaker degrades reads to the authoritative store (merged to main as PR #200, 3c465dc1)
 - [ ] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered
 - [ ] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged
 - [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired
@@ -1419,10 +1419,10 @@ Plans:
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
-| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
-| 73. Ledger tamper evidence | v1.8 | 0/0 | Implemented locally; draft PR #201, not merge-ready | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Ported from gsd/v18-p72-rebased (082e653a); human_needed per its own verification | - |
+| 73. Ledger tamper evidence | v1.8 | 0/0 | Merged to main as PR #201 | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | Implemented locally; draft PR #200, not merge-ready | - |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | Merged to main as PR #200 | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
 | 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
 | 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
