@@ -140,29 +140,29 @@ afterEach(async () => {
 	for (const h of instances.splice(0).reverse()) await h.stop();
 });
 
-beforeAll(async () => {
-	control = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
-	await control.unsafe(`create database "${DATABASE}"`);
-	db = new SQL(urlFor(DATABASE));
-	const bootstrap = new IndexStore(urlFor(DATABASE), { migrationOptIns: { "steering-audit": true, "steering-sessions": false } });
-	try {
-		await bootstrap.migrate();
-	} finally {
-		await bootstrap.close();
-	}
-});
-
-afterAll(async () => {
-	if (!PG_URL || !control) return;
-	try {
-		await db.close();
-		await control.unsafe(`drop database if exists "${DATABASE}" with (force)`);
-	} finally {
-		await control.close();
-	}
-});
-
 describeLive("keyed steering replays survive a restart (controlled PostgreSQL)", () => {
+	beforeAll(async () => {
+		control = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		await control.unsafe(`create database "${DATABASE}"`);
+		db = new SQL(urlFor(DATABASE));
+		const bootstrap = new IndexStore(urlFor(DATABASE), { migrationOptIns: { "steering-audit": true, "steering-sessions": false } });
+		try {
+			await bootstrap.migrate();
+		} finally {
+			await bootstrap.close();
+		}
+	});
+
+	afterAll(async () => {
+		if (!PG_URL || !control) return;
+		try {
+			await db.close();
+			await control.unsafe(`drop database if exists "${DATABASE}" with (force)`);
+		} finally {
+			await control.close();
+		}
+	});
+
 	test("a keyed queue replays after a restart with its original reply, and a different request under the key is refused", async () => {
 		const key = KEY("queue-replay");
 		const first = await instance();
