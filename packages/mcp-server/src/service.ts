@@ -4057,19 +4057,27 @@ export class Substrate {
 	}
 
 	/**
-	 * Whether forget note `forgetId` is already in a session's chain: recorded in the ledger, or parked for it. Settles the session's
-	 * parked events first, so a parked note the ledger now takes reads as recorded. A repeat of one forget call writes no second note.
+	 * Where forget call `forgetId` stands in a session's chain: `queued` when its note is parked for the ledger; otherwise the fewest
+	 * plane deletions still pending across the notes recorded for it (`absent` when none is recorded). Settles the session's parked
+	 * events first, so a parked note the ledger now takes reads as recorded. A repeat of one forget call writes no second note unless
+	 * it finished more of the plane deletions than the recorded notes show: the rollback's retry reads the newest note's pending count.
 	 */
-	private async forgetNoteInChain(sessionId: string, forgetId: string): Promise<"recorded" | "queued" | "absent"> {
+	private async forgetNoteInChain(sessionId: string, forgetId: string): Promise<"queued" | "absent" | { recorded: number }> {
 		await this.settleParkedSession(sessionId);
 		const session = normalizeIdentifier(sessionId);
 		const parked = session === null ? null : this.eventBuffer.find((event) => event.session_id === session && event.payload["action"] === FORGET_ACTION && event.payload["forget_id"] === forgetId);
 		if (parked !== null) return "queued";
-		const recorded = await this.readSessionNotes(sessionId).then(
-			(notes) => notes.events.some((event) => event.payload["action"] === FORGET_ACTION && event.payload["forget_id"] === forgetId),
-			() => false,
+		const pending = await this.readSessionNotes(sessionId).then(
+			(notes) =>
+				notes.events.flatMap((event) => {
+					if (event.payload["action"] !== FORGET_ACTION || event.payload["forget_id"] !== forgetId) return [];
+					// A note whose pending count cannot be read counts as pending: the repeat is then written, never dropped.
+					const plane = event.payload["plane"] as { pending?: unknown } | undefined;
+					return [typeof plane?.pending === "number" ? plane.pending : Number.POSITIVE_INFINITY];
+				}),
+			() => [],
 		);
-		return recorded ? "recorded" : "absent";
+		return pending.length === 0 ? "absent" : { recorded: Math.min(...pending) };
 	}
 
 	/**
@@ -4235,12 +4243,13 @@ export class Substrate {
 					},
 					emit: async (payload, summary, meta) => {
 						const sessionId = caller.session_id ?? payload.session_id;
-						// A repeat of this forget call (the rollback retries it) writes no second note: a note already in the chain is the note, and one
-						// queued for the ledger is not stored, so the forget is not reported as emitted until it lands.
+						// A repeat of this forget call (the rollback retries it) writes no second note while the recorded notes already show its plane
+						// deletions this far: a repeat that finished more of them writes its progress, so the rollback's retry reads it. A note queued
+						// for the ledger is not stored, so the forget is not reported as emitted until it lands.
 						if (sessionId !== undefined) {
 							const where = await this.forgetNoteInChain(sessionId, payload.forget_id);
-							if (where === "recorded") return;
 							if (where === "queued") throw new Error("the forget note is already queued for the ledger; nothing was written");
+							if (typeof where === "object" && payload.plane.pending >= where.recorded) return;
 						}
 						const emitted = await this.emit({
 							surface: caller.surface,

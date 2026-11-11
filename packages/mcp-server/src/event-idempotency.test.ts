@@ -171,6 +171,9 @@ function fakeLedger(): FakeLedger {
 				.slice(0, limit);
 			return records(["id", "hash", "payload"], hits.map((hit) => [hit.id, hit.hash, hit.payload]));
 		}
+		// `GreptimeClient.eventStored`: a settled delivery checks the row before it writes, as the real ledger answers it.
+		const stored = /^SELECT "id" FROM "agent_events" WHERE "id" = '([^']*)' LIMIT 1$/.exec(statement);
+		if (stored) return records(["id"], ledger.rows.filter((row) => row.id === stored[1]).map((row) => [row.id]));
 		const session = /WHERE "session_id" = '([^']+)'/.exec(statement);
 		if (session) {
 			const rows = ledger.rows.filter((row) => row.session_id === session[1]).reverse();
