@@ -1145,6 +1145,7 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "LLM_PROXY_HERMES_URL", kind: "string", plane: "harness", default: "http://127.0.0.1:8645", allowed: "http(s) URL; cleartext http only to a loopback host", unset: "the loopback default", readBy: "scripts/llm-proxy-smoke.ts", documented: false, doc: "docs/runbooks/lightrag-storage-topology.md" },
 	{ name: "LLM_PROXY_DUMMY_KEY", kind: "string", plane: "harness", default: "dummy-not-a-real-key", allowed: "any placeholder; never a real key", unset: "the literal dummy key", readBy: "scripts/llm-proxy-smoke.ts", documented: false, doc: "docs/runbooks/lightrag-storage-topology.md" },
 	{ name: "LLM_PROXY_TIMEOUT_MS", kind: "number", plane: "harness", default: "20000", allowed: "1..600000 ms", unset: "20000 ms per provider probe", readBy: "scripts/llm-proxy-smoke.ts", documented: false, doc: "docs/runbooks/lightrag-storage-topology.md" },
+	{ name: "SUBSTRATE_DOCS_MIGRATE_APPROVED", kind: "toggle", plane: "docs", default: "unset", allowed: "1", unset: "unset: the RAGFlow to LightRAG migration refuses to apply", readBy: "scripts/docs-migrate.ts", documented: true, doc: "docs/rehearsal.md" },
 ];
 
 /** Every name in the registry, rows and family members. */
