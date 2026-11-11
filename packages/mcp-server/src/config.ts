@@ -33,6 +33,7 @@ import { loadLivenessSettings, type LivenessConfigResult } from "./planning/obse
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
+import { repoScopeFromEnv, type RepoScope } from "./repo-scope.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
 export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
@@ -502,6 +503,11 @@ export interface SubstrateConfig {
 	 */
 	worktreeRegistry: { mode: WorktreeRegistryMode; ttlS: number; idleDays: number };
 	/**
+	 * Phase 72: which repositories each surface may address and where each lives, from `SUBSTRATE_REPO_SCOPES` and
+	 * `SUBSTRATE_REPO_REGISTRY`. Scoping is off unless the scopes variable is set; a malformed value refuses the boot.
+	 */
+	repoScope: RepoScope;
+	/**
 	 * Surfaces allowed to call `desktop_run`, from `SUBSTRATE_DESKTOP_SURFACES`.
 	 *
 	 * The operator allowlist is the only gate (D30-01): unset or empty means
@@ -940,6 +946,13 @@ export class ConfigError extends Error {
 	}
 }
 
+/** The repository scope from the environment. A problem is a boot refusal: a scope that cannot be read must not default to open. */
+function repoScopeOrRefuse(env: Record<string, string | undefined>): RepoScope {
+	const parsed = repoScopeFromEnv(env);
+	if (!parsed.ok) throw new ConfigError(`${parsed.problem}; fix it or unset it (unset scoping is off)`);
+	return parsed.value;
+}
+
 /**
  * bearer token → surface, from every `SUBSTRATE_TOKEN_*` variable.
  *
@@ -1229,6 +1242,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...memoryLifecycleFromEnv(env.SUBSTRATE_MEMORY_LIFECYCLE),
 		// uplift-5 S5a
 		...skillsGovernanceFromEnv(env.SUBSTRATE_SKILLS_GOVERNANCE),
+		// Phase 72
+		repoScope: repoScopeOrRefuse(env),
 		// Phase 68
 		worktreeRegistry: {
 			mode: (env.SUBSTRATE_WORKTREE_REGISTRY?.trim().toLowerCase() ?? "") === "on" ? "on" : "off",
