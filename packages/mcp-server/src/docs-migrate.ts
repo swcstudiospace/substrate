@@ -23,6 +23,9 @@
  * `--rehearsal` persists nothing and reports no cutover event. The CLI does not write the event ledger, so the operator
  * records the cutover event.
  *
+ * Every document is named under the owner/name of the checkout the replay reads its pages from, when the dataset is that
+ * repository (its name is the repository's name). A dataset with no such repository is refused, never named bare.
+ *
  * Exit codes: 0 the mode's checks passed; 1 a verification, gate or replay failure (the report names each mismatch by
  * kind and dataset, never page content); 2 refused before any effect: bad flags, no archive, no `LIGHTRAG_URL`, no
  * state file, no recorded gate pass, or no approval.
@@ -31,12 +34,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type LightragConfig, lightragFromEnv, ragflowArchiveFromEnv } from "./config.ts";
 import { gitAtCommit, type ReadAtCommit, verifyArchive } from "./docs-archive.ts";
-import { type DatasetVersion, lightragSearchDatasets, recordVersion, type VersionStore } from "./docs-datasets.ts";
+import { type DatasetVersion, recordVersion, type VersionStore } from "./docs-datasets.ts";
 import { DEFAULT_INGEST_ROOTS, type IngestPage, type IngestRecord, ingestDocs, loadIngestRecords, saveIngestRecords } from "./docs-ingest.ts";
 import { sha256Hex } from "./event.ts";
 import type { FetchLike } from "./planes/lightrag.ts";
 import type { EventInput } from "./types.ts";
 import { runPartA, runPartB } from "./parity-run.ts";
+import { repoOf } from "./planning/checkout.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
 
 export const APPROVAL_ENV = "SUBSTRATE_DOCS_MIGRATE_APPROVED";
 const STATE_ENV = "SUBSTRATE_DOCS_STATE_FILE";
@@ -210,6 +215,23 @@ export function mapRecords(archive: ArchiveLoad): RecordMapping {
 	return { migrated, unmapped };
 }
 
+/** The owner/name of the checkout the replay reads its pages from (`process.cwd()`), or null when git names none. */
+async function checkoutRepoOf(root: string): Promise<string | null> {
+	const lookup = await repoOf(nodePlanningFs(), root);
+	return lookup.state === "known" ? lookup.repo : null;
+}
+
+/**
+ * The owner/name a dataset's documents are named under. Every replayed page is read from that checkout, so a dataset is
+ * the checkout's repository when its name is the repository's name (datasets are named after their repo: `agent-substrate`
+ * is `<owner>/agent-substrate`). A dataset with no such repository has no owner/name to name its documents under, so this
+ * is null and the replay refuses it rather than naming it bare.
+ */
+function datasetRepo(dataset: string, checkout: string | null): string | null {
+	if (checkout === null) return null;
+	return checkout.split("/")[1] === dataset ? checkout : null;
+}
+
 export interface MigrateIo {
 	out: (text: string) => void;
 	err: (text: string) => void;
@@ -283,6 +305,8 @@ export interface ApplyOptions extends JobInput {
 	partAFile: string;
 	rehearsal: boolean;
 	datasets: readonly string[];
+	/** The owner/name of the checkout the replay reads pages from (`checkoutRepoOf`), or null when git names none. */
+	checkoutRepo: string | null;
 	readAtCommit?: ReadAtCommit;
 	poll?: { maxPolls?: number; intervalMs?: number };
 	now?: () => number;
@@ -304,10 +328,18 @@ interface DatasetReplay {
  */
 async function replayDataset(
 	dataset: ArchivedDataset,
-	ctx: { names: string[]; options: ApplyOptions; readAt: ReadAtCommit; seen: Map<string, IngestRecord>; events: EventInput[] },
+	ctx: { options: ApplyOptions; readAt: ReadAtCommit; seen: Map<string, IngestRecord>; events: EventInput[] },
 ): Promise<{ replay: DatasetReplay; written: string[] }> {
 	const replay: DatasetReplay = { dataset: dataset.name, commits: 0, ingested: 0, replaced: 0, unchanged: 0, failed: 0 };
 	const written: string[] = [];
+	const { options } = ctx;
+	// A dataset with no documents has nothing to name or refuse, so it needs no repository.
+	if (dataset.documents.length === 0) return { replay, written };
+	const repo = datasetRepo(dataset.name, options.checkoutRepo);
+	if (repo === null) {
+		const checkout = options.checkoutRepo ?? "unnamed";
+		return { replay: { ...replay, refused: `no owner/name repository names ${dataset.name}: the checkout is ${checkout}` }, written };
+	}
 	const pagesByCommit = new Map<string, IngestPage[]>();
 	for (const document of dataset.documents) {
 		if (document.commit === null || document.source_url === null) {
@@ -325,14 +357,14 @@ async function replayDataset(
 		pagesByCommit.set(document.commit, pages);
 	}
 	replay.commits = pagesByCommit.size;
-	const { options } = ctx;
 	for (const [commit, pages] of pagesByCommit) {
 		const outcome = await ingestDocs(
 			{
 				config: null,
 				backend: "lightrag",
 				lightragConfig: options.config,
-				lightragDatasets: { list: async () => lightragSearchDatasets(ctx.names), invalidate: () => undefined },
+				// The dataset is listed under its repository, so its documents are named and recorded under `owner/name`.
+				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: repo, name: dataset.name }] }), invalidate: () => undefined },
 				lightragFetch: options.fetchImpl,
 				// Corpus-style names, so the PARITY_GATE can verify each replayed document.
 				corpusNames: true,
@@ -350,7 +382,7 @@ async function replayDataset(
 		);
 		if (!outcome.ok) return { replay: { ...replay, refused: outcome.reason }, written };
 		for (const result of outcome.results) {
-			if (result.status === "ingested" || result.status === "replaced") written.push(`${LIGHTRAG_PREFIX}${dataset.name}::${result.source_url}`);
+			if (result.status === "ingested" || result.status === "replaced") written.push(`${LIGHTRAG_PREFIX}${repo}::${result.source_url}`);
 			if (result.status === "failed") replay.failed += 1;
 			else replay[result.status] += 1;
 		}
@@ -363,11 +395,13 @@ async function replayDataset(
  * The migrated records take the archived per-URL versions: the replay numbers its own writes, but the version is the
  * migration's metadata. Only the keys this run wrote are touched.
  */
-function carryVersions(archive: ArchiveLoad, seen: Map<string, IngestRecord>, written: ReadonlySet<string>, wanted: ReadonlySet<string> | null): number {
+function carryVersions(archive: ArchiveLoad, seen: Map<string, IngestRecord>, written: ReadonlySet<string>, wanted: ReadonlySet<string> | null, checkout: string | null): number {
 	let carried = 0;
 	for (const migrated of mapRecords(archive).migrated) {
 		if (wanted !== null && !wanted.has(migrated.dataset)) continue;
-		const key = `${LIGHTRAG_PREFIX}${migrated.dataset}::${migrated.source_url}`;
+		const repo = datasetRepo(migrated.dataset, checkout);
+		if (repo === null) continue;
+		const key = `${LIGHTRAG_PREFIX}${repo}::${migrated.source_url}`;
 		if (!written.has(key)) continue;
 		const prior = seen.get(key);
 		if (prior !== undefined && prior.version !== migrated.version) {
@@ -431,16 +465,15 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	const versions = production.versions;
 	const events: EventInput[] = [];
 	const written = new Set<string>();
-	const names = pre.archive.datasets.map((dataset) => dataset.name);
 	const perDataset: DatasetReplay[] = [];
 	for (const dataset of pre.archive.datasets) {
 		if (wanted !== null && !wanted.has(dataset.name)) continue;
-		const result = await replayDataset(dataset, { names, options, readAt, seen, events });
+		const result = await replayDataset(dataset, { options, readAt, seen, events });
 		perDataset.push(result.replay);
 		for (const key of result.written) written.add(key);
 	}
 	const applied = perDataset.every((entry) => entry.refused === undefined);
-	const carried = carryVersions(pre.archive, seen, written, wanted);
+	const carried = carryVersions(pre.archive, seen, written, wanted, options.checkoutRepo);
 	// Only a full success pins the datasets. A failed run keeps the confirmed uploads (their records and carried versions), so
 	// the state never lags the plane; it records no pin and no cutover.
 	const pins = applied ? recordPins(pre.archive, versions, wanted, now()) : 0;
@@ -516,6 +549,6 @@ export async function main(argv: readonly string[], env: Record<string, string |
 		io.err(`docs-migrate: --apply needs ${APPROVAL_ENV}=1 for this run; the operator approves each live step\n`);
 		return 2;
 	}
-	const outcome = await runApply({ archiveDir, stateFile, config, fetchImpl, partAFile: parsed.partA, rehearsal: parsed.rehearsal, datasets: parsed.datasets }, io);
+	const outcome = await runApply({ archiveDir, stateFile, config, fetchImpl, partAFile: parsed.partA, rehearsal: parsed.rehearsal, datasets: parsed.datasets, checkoutRepo: await checkoutRepoOf(process.cwd()) }, io);
 	return outcome.exit;
 }
