@@ -1,45 +1,118 @@
 ---
 phase: 53-steering-conflict-control
-verified: 2026-10-28
-status: passed
-score: 4 of 4 success criteria MET in the repository
-verified_on: main at 31a9bb36 (files read; nothing was run)
-covered_files: ["packages/mcp-server/src/planning/steering.ts", "packages/mcp-server/src/planning/steering.test.ts", "packages/mcp-server/src/planning/steering-store.ts", "packages/mcp-server/src/planning/steering-store.test.ts", "packages/mcp-server/src/planning/steering-durable.test.ts", "packages/mcp-server/src/planning/conflicts.ts", "packages/mcp-server/src/planning/conflicts.test.ts", "packages/mcp-server/src/planning/observer.ts", "packages/mcp-server/src/planning/observer.test.ts", "packages/mcp-server/src/planning/report.ts", "packages/mcp-server/src/planning/checkpoint.ts", "packages/mcp-server/src/planning/checkpoint.test.ts", "packages/mcp-server/src/planning/checkpoint-store.ts", "packages/mcp-server/src/planning/checkpoint-store.test.ts", "packages/mcp-server/src/service.ts"]
+verified: 2026-11-12T08:39:00Z
+status: human_needed
+score: 4/4 success criteria verified at library level; 1 operator check (OS-level kill) not run
+covered_files: ["packages/mcp-server/src/planning/checkpoint-store.test.ts", "packages/mcp-server/src/planning/checkpoint-store.ts", "packages/mcp-server/src/planning/checkpoint.test.ts", "packages/mcp-server/src/planning/checkpoint.ts", "packages/mcp-server/src/planning/conflicts.test.ts", "packages/mcp-server/src/planning/conflicts.ts", "packages/mcp-server/src/planning/observer.test.ts", "packages/mcp-server/src/planning/observer.ts", "packages/mcp-server/src/planning/report.ts", "packages/mcp-server/src/planning/steering-durable.test.ts", "packages/mcp-server/src/planning/steering-store.test.ts", "packages/mcp-server/src/planning/steering-store.ts", "packages/mcp-server/src/planning/steering.test.ts", "packages/mcp-server/src/planning/steering.ts", "packages/mcp-server/src/service.ts"]
+covered_digest: "v3:sha256:27867caa81a1f23bbfdffaf33c1e5caaf077b5d3e44bbc61a8c9731d671c90a3"
+behavior_unverified: 0
+overrides_applied: 0
+human_verification:
+  - test: "Run a real kill-and-restart of a checkpointed plan-step runner against DurableCompletionStore (checkpoint dir set), killing the process after one step's completion is written, then restart and count records for the phase/step/hash key."
+    expected: "Exactly one completion record for the key after restart; the completed step is skipped on resume; a changed file hash re-runs and is flagged."
+    why_human: "checkpoint-store.test.ts:34 simulates restart by reopening the directory in one process. No OS process was killed, and the step runner that calls recordCompletion lives outside this repo."
 ---
 
 # 53-VERIFICATION: Steering, conflict control and checkpoint/resume
 
-## Re-verification (2026-10-28)
+**Phase Goal:** Human-authorized steering directives are queued, acknowledged and audited before any file change; conflicts between sessions on the same parsed phase or plan id emit events and never auto-resolve; checkpoints at plan-step boundaries resume without duplicate completion.
+**Verified:** 2026-11-12T08:39:00Z
+**Status:** human_needed
+**Re-verification:** No. The prior record (2026-10-28, `passed`, against main 31a9bb36) had no `gaps:` section, so this run is a fresh verification against HEAD `708e03e6`. Its status is superseded here: one success criterion's proof level needs an operator check.
 
-- Prior record: `passed`, verified on `gsd/p53-complete-store` at 2c50263 (re-verified 2026-10-26; prior heads ca4f659, d25b5b4). That tip is not in main's history (squash-merged as PR #136, replacing draft #110).
-- This record re-verifies against main at 31a9bb36. Every success criterion is re-checked on this tree with code and test titles read here; stale line references from the prior record are replaced. Prior classifications stand, with stronger evidence in two places: the Postgres audit sink (migration 33, opt-in) is now built, and `service.ts` wires a durable-backed `SteeringInbox` with restart restore.
-- Since the prior verification, later merged PRs touched this area (phase 58 live steering, PR #137, commit b1838eb2; phase 52/54 replays). The phase 53 core is intact and extended, not regressed.
+## Goal Achievement
 
-## Gates
+### Observable Truths
 
-Not run by the author of this record. The full gate (frozen install, tsc with the strict flags, blocking Biome lint, the full bun test suite against a scratch Postgres, the Python suites, the repo locks) runs in CI on main and the orchestrator records the run in .planning/STATE.md. This record's evidence is file paths and test titles read on main. No test counts or CI numbers are claimed here.
+Roadmap success criteria are the contract (ROADMAP.md, phase 53). PLAN.md declares no `must_haves` frontmatter, so no further truths were added.
 
-## Success criteria
+| #   | Truth (ROADMAP SC) | Status | Evidence |
+| --- | ------------------ | ------ | -------- |
+| 1 | Directive queued, then acknowledged, then audited; if audit cannot be made, directive is held and no file changes | ✓ VERIFIED | Audit-before-effect with bounded retry: `steering.ts:38` (`STEERING_AUDIT_ATTEMPTS = 2`), retry loops `steering.ts:557`, `:590`, `:603`; held failure `steering.ts:597`, `:611` (`audit-unavailable`). Tests run and passing: `steering.test.ts` "a queue that cannot be audited stores nothing and returns a typed error", "an acknowledgement that cannot be audited holds the directive queued and leaves it retryable", "queued is audited before it takes effect". No file I/O: `steering.ts` imports only `zod`, `../redact.ts`, `./index.ts`, `./presence.ts`. |
+| 2 | Two sessions on the same parsed phase or plan id emit a conflict event; neither side resolves it automatically | ✓ VERIFIED | Detector `conflicts.ts:95` (`detectConflicts`) returns open events only; no resolve path. Tests run and passing: `conflicts.test.ts` "two sessions that touched one phase emit one open phase event", "two sessions that touched a shared plan id under different phases emit one open plan event", and the unknown/no-scan exclusion tests. Announce-once lives in `observer.ts` (its named tests were not run; see Behavioral Spot-Checks). |
+| 3 | Watcher gap marks the session view unknown until a full rescan | ✓ VERIFIED | Gap derivation `report.ts:33` (truncated → `scan-truncated`, unlisted → `scan-unlisted`); observer gap state `observer.ts:210`. Tests run and passing (`observer.test.ts`, name filter): "a truncated scan opens the watcher gap: its heartbeat is unknown, and the read shows the same", "a later complete scan clears the gap and returns the checkout to known", "a failed scan writes the unknown report, and the recovered complete scan writes the known one". Gap detection is scan-based; the repo has no filesystem watch. |
+| 4 | Kill-and-restart at a plan-step boundary yields exactly one completion record, keyed by phase id, plan step and file hash | ✓ VERIFIED (library level) | Key `checkpoint.ts:39-40` (`sha256(phase \n step \n fileHash)`); idempotent `recordCompletion` `checkpoint.ts:71`; durable store `checkpoint-store.ts:52`. Tests run and passing: `checkpoint.test.ts` key test, "recording the same completion twice leaves one record", resume tests; `checkpoint-store.test.ts` "record, reopen the same directory, record the same key again: exactly one record is stored", "two concurrent inserts through two opens of one directory both survive". Restart is simulated by reopen, not an OS kill, so it is routed to human verification. |
 
-| # | Criterion | Status | Evidence |
-|---|---|---|---|
-| 1 | A directive is queued, then acknowledged, then audited; when the audit write cannot be made, the directive is held and no file changes. | MET | Audit-before-effect with bounded retry: `steering.ts:37-38` (`STEERING_AUDIT_ATTEMPTS = 2`), `steering.ts:287` ("Validate, authorise, rate-limit, audit, then queue"). Held-on-failure: `steering.test.ts:97` ("a queue that cannot be audited stores nothing and returns a typed error"), `steering.test.ts:123` ("an acknowledgement that cannot be audited holds the directive queued"), `steering.test.ts:112` (one retry, then the transition proceeds). Audit order: `steering.test.ts:82-83` ("queued is audited before it takes effect"). No file change by the inbox: `steering.ts:23-26` imports only `zod`, `redact`, `index.ts`, `presence.ts` — no `node:fs`. Durable sink: `steering-store.ts:1-33` header (Postgres `planning_steering_audit`, migration 33 opt-in, append-only, idempotent by `(directive_id, transition)`, redacted, hash-chained); `steering-store.test.ts:84` (first write inserts one row with every field), `steering-store.test.ts:199` (inbox refuses to queue when the audit write fails). Restart: `steering.ts:47` (`restore` from audit rows, never audits), `steering-durable.test.ts:210` (restart reloads queued directives, writes nothing). Production wiring: `service.ts:1598-1609` (durable sink preferred, inbox gated on `enabled` and valid settings), `service.ts:3096-3102` (paged restart restore). |
-| 2 | Two sessions touching the same parsed phase or plan id emit a conflict event, and neither side resolves it automatically. | MET | Detector: `conflicts.ts:95` (`detectConflicts`); phase key `conflicts.test.ts:54` ("two sessions that touched one phase emit one open phase event"), plan key `conflicts.test.ts:163` ("two sessions that touched a shared plan id under different phases emit one open plan event"), single session emits nothing (`conflicts.test.ts:87`), repository case-insensitivity (`conflicts.test.ts:120,132,157`), TTL ageing (`conflicts.test.ts:237`), unknown views excluded (`conflicts.test.ts:247,256`). No auto-resolve: the detector returns open events only; closing happens by absence on a later scan. Announce-once: `observer.ts:24-30` header (announced once while open; return announced again; smallest-session rule by default, every-observer-under-key with a deduplicating ledger); `observer.test.ts:1493` (only the smallest session id announces, once), `observer.test.ts:1579` (deduplicating ledger: every observer announces, ledger keeps one row, smallest session needs no observer), `observer.test.ts:1607` (default mode known limit: smallest session with no observer means no announcement), `observer.test.ts:1282` (two checkouts changing one phase produce one open conflict), `observer.test.ts:1456` (cleared-and-returned conflict announced again; unstored conflict retried). Key: `conflicts.ts:132` (`conflictIdempotencyKey`). Cap: `conflicts.ts:168` (phaseCount kept with capped phases). |
-| 3 | A watcher gap marks the session view unknown until a full rescan. | MET | Gap rule: `observer.test.ts:960` ("a truncated scan opens the watcher gap: its heartbeat is unknown"), `observer.test.ts:971` ("a later complete scan clears the gap and returns the checkout to known"), `observer.test.ts:986` (a session in a gap takes no part in conflict detection until its report is complete again), `observer.test.ts:1066` (failed scan writes the unknown report; recovered complete scan writes the known one), `observer.test.ts:1046` (gap with failed presence write retried on next identical scan). Gap source is scan-based (`report.ts`: incomplete scan); the repo has no filesystem watch, so an event missed between scans is unseen until a scan finds the drift (residual, unchanged). Write gate `conflicts.ts:116` (`gateConflictSensitiveWrite`) still has no production caller; SC3 as written requires only the unknown view, so no caller is required (decision carried forward; the first conflict-sensitive write added later must call the gate). |
-| 4 | Kill-and-restart at a plan-step boundary yields exactly one completion record, keyed by phase id, plan step and file hash. | MET | Key: `checkpoint.test.ts:28` ("is the sha256 of the phase, step and file hash joined with newlines"). Idempotent record: `checkpoint.test.ts:41` ("recording the same completion twice leaves one record"), `checkpoint.test.ts:55` (malformed completion refused before anything is written). Resume: `checkpoint.test.ts:65` (completed steps skipped, rest run in order), `checkpoint.test.ts:91` (changed file hash re-runs flagged, no duplicate record). Kill-and-restart: `checkpoint-store.test.ts:34` ("record, reopen the same directory, record the same key again: exactly one record is stored"), `checkpoint-store.test.ts:47` (changed hash is a second record), `checkpoint-store.test.ts:110` (a record through one open survives an insert through a second open that loaded earlier), `checkpoint-store.test.ts:123` (two concurrent inserts through two opens both survive). Restart is simulated by reopen, not by an OS kill (residual, unchanged). `recordCompletion` (`checkpoint.ts:71`) still has no production caller outside tests; the plan-step executor is outside this repo. |
+**Score:** 4/4 success criteria verified at library level. 0 behavior-unverified truths (the restart invariant is exercised by a passing reopen test). 1 operator check outstanding.
 
-## Residual risks
+### Required Artifacts
 
-- **Migration 33 is opt-in and NOT applied.** The `planning_steering_audit` table (step 33; step 34 adds nullable `reason`) exists in code (`steering-store.ts`, migrate-contract test naming step 33 opt-in) but applying it to a live database is an operator decision. With no live sink, directives audit to the configured seam only; the held-on-failure rule still applies.
-- **Live delivery into sessions is NOT built by this phase.** Roadmap status for phase 53 says so explicitly. The inbox, restore, expiry sweeper and hint announcer are wired in `service.ts`; delivery of a directive into a running session's work is later work.
-- **SC2 default-mode limit (unchanged).** With `SUBSTRATE_EVENT_IDEMPOTENCY=off`, the smallest session of a conflict alone announces it; if that session has no running observer, no observer announces. The deduplicating-ledger path (`observer.test.ts:1579`) removes the limit where the ledger dedupes.
-- **SC2 residual edge (unchanged).** A member re-touching the same key during a live conflict moves the shared presence `ts`, so a late-starting observer that never announced could write a second row under the keyed path.
-- **SC4 proof is reopen-level, not OS-kill.** No test kills a process mid-write; atomicity rests on write-tmpfile/fsync/rename/fsync-dir in `checkpoint-store.ts` and the reopen tests above. Concurrent inserts through two open instances in one process are covered (`checkpoint-store.test.ts:123`); cross-process locking is still documented as not taken.
-- **Store-level-only SC4 caller.** Nothing outside tests calls `recordCompletion` or `DurableCompletionStore.open`; the plan-step executor is outside this repo.
-- **Write gate with no caller (decision carried forward).** `gateConflictSensitiveWrite` (`conflicts.ts:116`) has no production caller; its only callers are in `conflicts.test.ts`. SC3 requires only the unknown view, so this is a residual. The first conflict-sensitive write added later must call the gate.
-- **Durable inbox now restores, but memory still holds live state.** `SteeringInbox.restore` rebuilds from audit rows at boot (`service.ts:3096-3102`); a restart with a live sink loses nothing open. With no live sink, queued directives are still memory-only. The steering conflict flag remains caller-supplied, so the confirm rule trusts the caller's flag rather than `detectConflicts`.
-- **Truncated listings keep open conflicts open without re-checking them** (`observer.ts` truncated-listing rule, `observer.test.ts:1735`). That suppresses a repeat warning and never invents one.
-- **Per-process announcement set** (`observer.ts:228`): open-conflict state is process-local; two processes announce independently and rely on ledger dedup.
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `packages/mcp-server/src/planning/steering.ts` | Audited steering inbox, held on failure | ✓ VERIFIED | 817 lines; audit retry and hold at `:557-611` |
+| `packages/mcp-server/src/planning/conflicts.ts` | Pure conflict detector, unknown views excluded | ✓ VERIFIED | `detectConflicts` `:95`; `gateConflictSensitiveWrite` `:116`; `conflictIdempotencyKey` `:132`; `phaseCount` with capped lists `:168` |
+| `packages/mcp-server/src/planning/checkpoint.ts` | Completion key, idempotent record, pure resume | ✓ VERIFIED | `completionKey` `:39`; `recordCompletion` `:71`; `planResume` `:116` |
+| `packages/mcp-server/src/planning/checkpoint-store.ts` | Durable completion store | ✓ VERIFIED | `DurableCompletionStore` `:52`; tmpfile/fsync/rename/fsync-dir write |
+| `packages/mcp-server/src/planning/observer.ts` | Presence, conflict and gap wiring | ✓ VERIFIED (code read) | Gap state `:210`; pending-change state `:218`; announce path not executed here |
+| `packages/mcp-server/src/planning/report.ts` | Watcher-gap derivation | ✓ VERIFIED | `:21` WatcherGap type; `:33` gap rule |
+| `packages/mcp-server/src/planning/steering-store.ts` | Durable audit sink (migration 33, opt-in) | ✓ VERIFIED (code present) | Not exercised in this run; migration not applied to any DB (operator decision) |
 
-_Verified: 2026-10-28_
+### Key Link Verification
+
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| `steering.ts` | audit history sink | `this.deps.history.append` before queue/ack | ✓ WIRED | `steering.ts:557-611` |
+| `checkpoint.ts` `recordCompletion` | `CompletionStore.putIfAbsent` | key from `completionKey` | ✓ WIRED (store level) | `checkpoint.ts:71`; no production caller outside tests |
+| `conflicts.ts` `detectConflicts` | presence snapshot | `observer.ts` announce, `read.ts` | ✓ WIRED (code read) | Presence `touched` pairs per SUMMARY; repo-scoped |
+| `report.ts` gap | `observer.ts` gap state | `nextGap` → heartbeat | ✓ WIRED (tests run) | Gap tests pass |
+
+### Data-Flow Trace (Level 4)
+
+Not applicable: phase 53 delivers library modules and a store, not rendered UI.
+
+### Behavioral Spot-Checks
+
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Steering audit-before-effect, held-on-failure, auth, rate limit, confirm, env parsing; conflict detection and unknown exclusion; checkpoint key, idempotent record, resume; durable store reopen | `bun test packages/mcp-server/src/planning/steering.test.ts packages/mcp-server/src/planning/conflicts.test.ts packages/mcp-server/src/planning/checkpoint.test.ts packages/mcp-server/src/planning/checkpoint-store.test.ts` | 76 pass, 0 fail | ✓ PASS |
+| Watcher gap opens, clears, and failed-scan recovery | `bun test packages/mcp-server/src/planning/observer.test.ts -t "a truncated scan opens the watcher gap\|a later complete scan clears the gap\|a failed scan writes the unknown report"` | 3 pass, 0 fail | ✓ PASS |
+| Smallest-session-only announce (SC2 announce-once) | not run (`observer.test.ts:1493` exists by title) | — | ? SKIP |
+
+### Probe Execution
+
+No probe scripts declared or found for this phase. Not applicable.
+
+### Requirements Coverage
+
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ----------- | ----------- | ------ | -------- |
+| SOTA-09 | PLAN.md (`requirements: [SOTA-09]`) | Steering, conflict control, checkpoint/resume | ✓ SATISFIED (library level) | SC1–SC4 above |
+
+No orphaned requirements for phase 53 in this scope.
+
+### Anti-Patterns Found
+
+No `TBD`, `FIXME` or `XXX` markers in the covered files (grep run, zero hits).
+
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| `conflicts.ts` | `:116` | `gateConflictSensitiveWrite` has no production caller | ℹ️ Info | Carried residual (SC3 requires only the unknown view) |
+| `checkpoint.ts` | `:71` | `recordCompletion` has no production caller | ⚠️ Warning | Plan-step executor is outside this repo; criterion 4 is store-proven only |
+| `steering.ts` | `:171` (per SUMMARY) | Directives held in memory when no live sink | ℹ️ Info | Known residual; durable directive store (W2) not built |
+| `steering-tools.ts` | `:167` (per SUMMARY) | Steering conflict flag is caller-supplied | ℹ️ Info | Confirm rule trusts caller flag, not `detectConflicts` |
+
+### Human Verification Required
+
+### 1. Real kill-and-restart at a plan-step boundary
+
+**Test:** With `SUBSTRATE_PLANNING_CHECKPOINT_DIR` set, run a checkpointed step runner that calls `recordCompletion`, kill the OS process after one step's record is written, restart it, and count records for the phase/step/file-hash key.
+**Expected:** Exactly one completion record for the key; the completed step is skipped on resume; a changed file hash re-runs and is flagged.
+**Why human:** `checkpoint-store.test.ts:34` simulates restart by reopening in one process. No process was killed, and the step runner that would call `recordCompletion` lives outside this repo.
+
+## Gaps Summary
+
+No blocking gaps. All four roadmap success criteria are met at library level by code read and by passing tests (76 pass across the four core files; 3 pass for the watcher-gap tests).
+
+Residuals, none blocking, carried from SUMMARY.md:
+- Migration 33 (`planning_steering_audit`) is opt-in and not applied to any live database (operator decision).
+- Live delivery of directives into sessions is not built (the roadmap says so).
+- `recordCompletion`, `gateConflictSensitiveWrite` and `DurableCompletionStore.open` have no production caller in this repo.
+- Per-process announcement set and the default-mode SC2 limit (`observer.ts`); the announce-once tests were not executed in this run.
+- Not run: the full `observer.test.ts`, `steering-store.test.ts`, `steering-durable.test.ts`, `steering-idempotency.pg.test.ts` (needs live Postgres; 127.0.0.1:5432 refuses TCP here), and the full `bun test` gate.
+
+Status is `human_needed` rather than `passed` because the OS-level kill-and-restart check for SC4 was not run and needs an operator.
+
+---
+
+_Verified: 2026-11-12T08:39:00Z_
 _Verifier: Claude (gsd-verifier)_
