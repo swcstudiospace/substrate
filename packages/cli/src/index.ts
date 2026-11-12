@@ -13,6 +13,8 @@
  *   substrate skills propose|list|approve ...  propose, list or decide a skill (docs/runbooks/skills-governance.md)
  *   substrate docs ingest --dataset NAME --path PATH --source-url URL [...]
  *       ingest one page into a docs dataset (docs/docs-search-ingest.md)
+ *   substrate docs feedback <document> <verdict> [--session ID] [--json]
+ *       rate a cited corpus document: POST /docs/feedback, the docs_feedback tool's route (exit 0 stored, 1 refused or failed, 2 usage)
  *   substrate index sweep [--apply] [--json]  the index retention sweep (dry-run unless --apply
  *       AND SUBSTRATE_INDEX_SWEEP=apply are both given)
  *   substrate ledger coverage|archive|verify-archive   anchor coverage and the verified
@@ -60,6 +62,7 @@ import { list, parseArgs, str } from "./args.ts";
 import { driftExitCode, parseEmitPayload, parseEvidenceBundle } from "./guards.ts";
 import { resolveBearer } from "./token.ts";
 import { docsTimeout, runDocs } from "./docs.ts";
+import { runDocsFeedback } from "./docs/feedback.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
@@ -729,6 +732,18 @@ switch (command) {
 		);
 		break;
 	case "docs":
+		if (rest[0] === "feedback") {
+			process.exit(
+				await runDocsFeedback(rest.slice(1), {
+					url: base(),
+					token: resolveBearer("claude-code", process.env) ?? undefined,
+					timeoutMs: docsTimeout(process.env.SUBSTRATE_DOCS_TIMEOUT_MS),
+					out: (text) => process.stdout.write(text),
+					err: (text) => process.stderr.write(text),
+				}),
+			);
+			break;
+		}
 		process.exit(
 			await runDocs(rest, {
 				url: base(),
@@ -853,6 +868,7 @@ switch (command) {
 				"substrate skills list [--state approved|proposed|declined|retired|all]\n" +
 				"substrate skills approve --name N --pr NUMBER --decision approve|decline|retire [--reason R]\n" +
 				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
+				"substrate docs feedback <document> <verdict> [--session ID] [--json]\n" +
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
