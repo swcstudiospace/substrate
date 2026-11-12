@@ -42,6 +42,7 @@ import type { EventInput } from "./types.ts";
 import { runPartA, runPartB } from "./parity-run.ts";
 import { repoOf } from "./planning/checkout.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
+import { SKILL_NAME_RE } from "./skills/propose.ts";
 
 export const APPROVAL_ENV = "SUBSTRATE_DOCS_MIGRATE_APPROVED";
 const STATE_ENV = "SUBSTRATE_DOCS_STATE_FILE";
@@ -238,6 +239,17 @@ export const DATASET_REPOS: Readonly<Record<string, string>> = {
 	"agent-skills": "swcstudiospace/agent-skills",
 };
 
+/**
+ * The ingest layout each dataset replays under. The default roots (`docs/`, `README.md`, `.planning/`) hold the
+ * agent-substrate pages; an agent-skills archive holds skill pages at `<name>/SKILL.md` and `<name>/references/`, which
+ * those roots refuse as outside-roots. A dataset listed as `skills` replays under the skill-checkout layout that the
+ * normal refresh reads (`skillsCheckoutRoots`). Every other dataset keeps `DEFAULT_INGEST_ROOTS`. programming-desk is left
+ * at the default because its archive roots are not verified.
+ */
+export const DATASET_INGEST_LAYOUT: Readonly<Record<string, "default" | "skills">> = {
+	"agent-skills": "skills",
+};
+
 /** The identity a dataset's records are keyed under: its mapped repository, or its name when none is mapped. */
 export function datasetIdentity(dataset: string): string {
 	const mapped = Object.hasOwn(DATASET_REPOS, dataset) ? DATASET_REPOS[dataset] : undefined;
@@ -345,6 +357,22 @@ interface DatasetReplay {
 }
 
 /**
+ * The roots a skills-layout dataset replays under, derived from its archived page paths by the rule `skillsCheckoutRoots`
+ * applies to a checkout: `<name>/SKILL.md` for a skill folder whose name passes SKILL_NAME_RE, and `<name>/references/`.
+ * A page outside that layout gets no root, so the ingest refuses it as outside-roots.
+ */
+function skillsReplayRoots(paths: readonly string[]): string[] {
+	const roots = new Set<string>();
+	for (const path of paths) {
+		const [name, ...rest] = path.split("/");
+		if (name === undefined || !SKILL_NAME_RE.test(name)) continue;
+		if (rest.length === 1 && rest[0] === "SKILL.md") roots.add(`${name}/SKILL.md`);
+		else if (rest.length >= 2 && rest[0] === "references") roots.add(`${name}/references/`);
+	}
+	return [...roots];
+}
+
+/**
  * Replays one dataset's archived pages, grouped per recorded commit, through the LightRAG ingest. Returns the keys the
  * replay wrote, so the version carry touches only those records.
  */
@@ -362,6 +390,8 @@ async function replayDataset(
 		const checkout = options.checkoutRepo ?? "unnamed";
 		return { replay: { ...replay, refused: `no mapped repository lets ${dataset.name} replay from the checkout ${checkout}` }, written };
 	}
+	const layout = Object.hasOwn(DATASET_INGEST_LAYOUT, dataset.name) ? DATASET_INGEST_LAYOUT[dataset.name] : "default";
+	const roots = layout === "skills" ? skillsReplayRoots(dataset.documents.map((document) => document.path)) : DEFAULT_INGEST_ROOTS;
 	const pagesByCommit = new Map<string, IngestPage[]>();
 	for (const document of dataset.documents) {
 		if (document.commit === null || document.source_url === null) {
@@ -392,7 +422,7 @@ async function replayDataset(
 				corpusNames: true,
 				seen: ctx.seen,
 				locks: new Map(),
-				roots: DEFAULT_INGEST_ROOTS,
+				roots,
 				surface: "substrate",
 				emit: async (event) => {
 					ctx.events.push(event);

@@ -34,6 +34,10 @@ const EXTRA_BODY = "# Extra\n\nA page pinned to its own commit.\n";
 const EXTRA_COMMIT = "0f1e2d3c4b5a6978";
 const DESK = "docs/desk.md";
 const DESK_BODY = "# Desk\n\nA sibling dataset's page, replayed under its mapped repository.\n";
+const SKILL = "demo-skill/SKILL.md";
+const SKILL_API = "demo-skill/references/api.md";
+const SKILL_BODY = "# Demo skill\n\nThe skill's own page.\n";
+const SKILL_API_BODY = "# Demo API\n\nThe reference the skill links to.\n";
 const QUERIES: ArchiveQuery[] = [
 	{ id: "q-01", question: "where is the plan?" },
 	{ id: "q-02", question: "who reads the plan?" },
@@ -72,9 +76,10 @@ interface Fixture {
 /**
  * A production docs state holding the plan's LightRAG record (already matched by the plane), and the RAGFlow-era notes
  * record at version 3, then the archive of both. `extraRecords` adds archived records; `undocumented` adds a RAGFlow
- * document with no commit, which the replay cannot reproduce; `desk` adds an archived programming-desk page at the same commit.
+ * document with no commit, which the replay cannot reproduce; `desk` adds an archived programming-desk page at the same commit;
+ * `skills` adds an archived agent-skills skill at `demo-skill/SKILL.md` and `demo-skill/references/api.md`, at the same commit.
  */
-async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; desk?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
+async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; desk?: boolean; skills?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
 	const root = scratchDir();
 	const stateFile = join(root, "docs-ingest.json");
 	const fake = new RagflowFake();
@@ -94,11 +99,22 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 	const deskId = fake.datasets.find((dataset) => dataset.name === "programming-desk")?.id ?? "";
 	if (options.desk === true && deskId === "") throw new Error("the RAGFlow fake lists no programming-desk dataset");
 	const desk: Array<[string, IngestRecord]> = options.desk === true ? [[`${deskId}::${sourceOf(DESK)}`, { sha: shaOf(DESK_BODY), dataset_id: deskId, source_url: sourceOf(DESK), document_id: "ragflow-desk", version: 1 }]] : [];
+	const skillsId = fake.datasets.find((dataset) => dataset.name === "agent-skills")?.id ?? "";
+	if (options.skills === true && skillsId === "") throw new Error("the RAGFlow fake lists no agent-skills dataset");
+	const skillSource = (path: string): string => `file:///srv/agent-skills/${path}`;
+	const skills: Array<[string, IngestRecord]> =
+		options.skills === true
+			? [
+					[`${skillsId}::${skillSource(SKILL)}`, { sha: shaOf(SKILL_BODY), dataset_id: skillsId, source_url: skillSource(SKILL), document_id: "ragflow-skill", version: 1 }],
+					[`${skillsId}::${skillSource(SKILL_API)}`, { sha: shaOf(SKILL_API_BODY), dataset_id: skillsId, source_url: skillSource(SKILL_API), document_id: "ragflow-skill-api", version: 1 }],
+				]
+			: [];
 	const records = new Map<string, IngestRecord>([
 		[`lightrag::${PLANE_REPO}::${sourceOf(PLAN)}`, { sha: shaOf(PLAN_BODY), dataset_id: PLANE_REPO, source_url: sourceOf(PLAN), document_id: "doc-plan", version: 1 }],
 		[`${ragflowId}::${sourceOf(NOTES)}`, { sha: shaOf(NOTES_BODY), dataset_id: ragflowId, source_url: sourceOf(NOTES), document_id: "ragflow-notes", version: 3 }],
 		...(options.extraRecords ?? []),
 		...desk,
+		...skills,
 		...(options.extra === undefined ? [] : [[`${ragflowId}::${sourceOf(EXTRA)}`, { sha: shaOf(EXTRA_BODY), dataset_id: ragflowId, source_url: sourceOf(EXTRA), document_id: "ragflow-extra", version: 1 }] as [string, IngestRecord]]),
 	]);
 	await saveIngestRecords(stateFile, records, versions);
@@ -120,11 +136,19 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 	if (options.desk === true) {
 		fake.documents["ragflow-desk"] = { id: "ragflow-desk", dataset_id: deskId, name: "docs__desk.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(DESK), commit: COMMIT, heading_path: "Desk" } };
 	}
+	if (options.skills === true) {
+		fake.documents["ragflow-skill"] = { id: "ragflow-skill", dataset_id: skillsId, name: "demo-skill__SKILL.md", run: "DONE", polls: 0, meta_fields: { source_url: skillSource(SKILL), commit: COMMIT, heading_path: "Demo skill" } };
+		fake.documents["ragflow-skill-api"] = { id: "ragflow-skill-api", dataset_id: skillsId, name: "demo-skill__references__api.md", run: "DONE", polls: 0, meta_fields: { source_url: skillSource(SKILL_API), commit: COMMIT, heading_path: "Demo API" } };
+	}
 	fake.chunks[ragflowId] = [{ document_id: "ragflow-notes", document_name: "docs__notes.md", content: NOTES_BODY, source_url: sourceOf(NOTES), heading_path: "Notes", score: 0.9 }];
 
 	const bodies: Record<string, string> = { [`${COMMIT}:${PLAN}`]: PLAN_BODY, [`${COMMIT}:${NOTES}`]: NOTES_BODY };
 	if (options.extra !== undefined) bodies[`${options.extra.commit}:${EXTRA}`] = EXTRA_BODY;
 	if (options.desk === true) bodies[`${COMMIT}:${DESK}`] = DESK_BODY;
+	if (options.skills === true) {
+		bodies[`${COMMIT}:${SKILL}`] = SKILL_BODY;
+		bodies[`${COMMIT}:${SKILL_API}`] = SKILL_API_BODY;
+	}
 	const readAtCommit: ReadAtCommit = (commit, path) => {
 		const body = bodies[`${commit}:${path}`];
 		return body === undefined ? null : Buffer.from(body, "utf8");
@@ -615,5 +639,40 @@ describe("docs-migrate: a replay that does not land every page", () => {
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
 		expect(persisted.records.has(`lightrag::${PLANE_REPO}::${sourceOf(EXTRA)}`)).toBe(false);
 		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag")).toBe(false);
+	});
+});
+
+describe("docs-migrate: agent-skills layout", () => {
+	test("an agent-skills archive of skill-layout pages replays without refusal and is ingested", async () => {
+		const fixture = await buildFixture({ skills: true });
+		const plane = matchedPlane();
+		const { io } = captureIo();
+		const readAt: ReadAtCommit = (commit, path) => {
+			if (commit === COMMIT && path === SKILL) return Buffer.from(SKILL_BODY, "utf8");
+			if (commit === COMMIT && path === SKILL_API) return Buffer.from(SKILL_API_BODY, "utf8");
+			return REPLAY_READ(commit, path);
+		};
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				stateFile: fixture.stateFile,
+				config: CONFIG,
+				fetchImpl: plane.fetch,
+				partAFile: partAFile(fixture.root),
+				rehearsal: false,
+				datasets: ["agent-skills"],
+				checkoutRepo: PLANE_REPO,
+				readAtCommit: readAt,
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			io,
+		);
+		expect(outcome.exit).toBe(0);
+		const report = outcome.report as { datasets: Array<{ dataset: string; ingested: number; refused?: string }> };
+		const skillsReplay = report.datasets.find((entry) => entry.dataset === "agent-skills");
+		expect(skillsReplay?.refused).toBeUndefined();
+		expect(skillsReplay).toMatchObject({ ingested: 2 });
+		expect(plane.uploads.sort()).toEqual([SKILL_BODY, SKILL_API_BODY].sort());
 	});
 });
