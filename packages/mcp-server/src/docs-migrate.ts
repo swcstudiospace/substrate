@@ -334,6 +334,8 @@ async function replayDataset(
 				lightragConfig: options.config,
 				lightragDatasets: { list: async () => lightragSearchDatasets(ctx.names), invalidate: () => undefined },
 				lightragFetch: options.fetchImpl,
+				// Corpus-style names, so the PARITY_GATE can verify each replayed document.
+				corpusNames: true,
 				seen: ctx.seen,
 				locks: new Map(),
 				roots: DEFAULT_INGEST_ROOTS,

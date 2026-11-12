@@ -38,7 +38,7 @@ import type { Dirent, Stats } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { stripRemoteImages } from "@substrate/corpus";
+import { corpusDocumentName, isSafeCorpusName, stripRemoteImages } from "@substrate/corpus";
 import {
 	createVersionStore,
 	DATASET_VERSION_RETENTION,
@@ -522,6 +522,11 @@ export interface IngestDeps {
 	lightragDatasets?: LightragDatasetList;
 	/** Fetch the LightRAG calls go out on; `fetchImpl` when omitted. */
 	lightragFetch?: FetchLike;
+	/**
+	 * Name LightRAG documents by the corpus scheme (`corpus:<dataset>:<path>@<sha>`), so the PARITY_GATE can verify them.
+	 * Only the migration replay sets it; a live ingest keeps the flattened name.
+	 */
+	corpusNames?: boolean;
 	roots?: readonly string[];
 	vmGuest?: boolean;
 	/** Records keyed `${dataset_id}::${source_url}`; held by the service, optionally persisted. */
@@ -1504,6 +1509,8 @@ async function ingestDocsLightrag(
 			if (!running) {
 				const replacedPrior = prior;
 				const task: Promise<PageSettlement> = (async (): Promise<PageSettlement> => {
+					const name = deps.corpusNames === true ? corpusDocumentName(dataset.id, page.path, sha) : documentName(page.path);
+					if (deps.corpusNames === true && !isSafeCorpusName(name)) return { ok: false, reason: "unsafe-name" };
 					const uploaded =
 						hint !== undefined
 							? await storePlanningPage(
@@ -1522,9 +1529,8 @@ async function ingestDocsLightrag(
 							: await uploadLightragDocument(
 									lightrag,
 									{
-										// Same path-flattening as the RAGFlow plane, so both
-										// planes address the same logical document.
-										name: documentName(page.path),
+										// The corpus scheme under the migration replay; the flattened name otherwise.
+										name,
 										content: body,
 										metadata: { source_url: sourceUrl, commit, heading_path: page.heading_path ?? "" },
 									},
