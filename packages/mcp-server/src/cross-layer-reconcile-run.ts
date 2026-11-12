@@ -21,6 +21,16 @@
 import { createReadThroughCache, forgetMarkTtlS } from "./cache.ts";
 import { type SubstrateConfig, loadConfig } from "./config.ts";
 import {
+	type CacheIndexReport,
+	type IndexLedgerReport,
+	type PairDeps,
+	type PairOptions,
+	pairCacheFrom,
+	pairIndexFrom,
+	pairLedgerFrom,
+	runPairReconcile,
+} from "./cross-layer-reconcile-pairs.ts";
+import {
 	type CrossLayerReport,
 	type LedgerReads,
 	type NoteWriter,
@@ -111,6 +121,63 @@ export async function runTick(deps: ReconcileDeps, options: ReconcileOptions, js
 	return { code: EXIT.clean, stdout, stderr: "" };
 }
 
+/** The env var that names the graphs the pair comparisons judge, comma separated. Unset or blank judges none. */
+export const RECONCILE_GRAPHS_ENV = "SUBSTRATE_RECONCILE_GRAPHS";
+/** More graphs than this is refused at boot, so a tick never silently covers only part of the list. */
+export const RECONCILE_GRAPHS_MAX = 50;
+
+export type GraphIdsParse = { ok: true; ids: string[] } | { ok: false; problem: string };
+
+/** Parses `SUBSTRATE_RECONCILE_GRAPHS`. Ids are trimmed and de-duplicated. An empty entry or too many graphs is a problem, never a partial list. */
+export function graphIdsFrom(raw: string | undefined): GraphIdsParse {
+	if (raw === undefined || raw.trim() === "") return { ok: true, ids: [] };
+	const ids = [...new Set(raw.split(",").map((id) => id.trim()))];
+	if (ids.some((id) => id === "")) return { ok: false, problem: `${RECONCILE_GRAPHS_ENV} holds an empty graph id` };
+	if (ids.length > RECONCILE_GRAPHS_MAX) return { ok: false, problem: `${RECONCILE_GRAPHS_ENV} names ${ids.length} graphs; the maximum is ${RECONCILE_GRAPHS_MAX}` };
+	return { ok: true, ids };
+}
+
+export interface PairsOutcome {
+	reports: Array<{ indexLedger: IndexLedgerReport; cacheIndex: CacheIndexReport }>;
+	mismatches: number;
+	incomplete: string[];
+}
+
+/** Both pairs for each named graph. Read-only: `runPairReconcile` never repairs. A layer that cannot be read is incomplete, never drift. */
+export async function runPairsTick(deps: PairDeps, graphIds: string[], options: PairOptions): Promise<PairsOutcome> {
+	const reports: PairsOutcome["reports"] = [];
+	const incomplete: string[] = [];
+	let mismatches = 0;
+	for (const graphId of graphIds) {
+		const pair = await runPairReconcile(graphId, deps, options);
+		reports.push(pair);
+		mismatches += pair.indexLedger.mismatches.count + pair.cacheIndex.mismatches.count;
+		for (const report of [pair.indexLedger, pair.cacheIndex]) {
+			if (report.verdict === "clean" || report.verdict === "drift") continue;
+			incomplete.push(`${graphId} ${report.pair}: ${report.verdict}${report.reason ? ` (${report.reason})` : ""}`);
+		}
+	}
+	return { reports, mismatches, incomplete };
+}
+
+/** The text the journal shows for the pairs: one line per graph and pair, with the first mismatching key. */
+export function renderPairs(outcome: PairsOutcome): string {
+	return outcome.reports
+		.flatMap((pair) => [pair.indexLedger, pair.cacheIndex])
+		.map((report) => {
+			const first = report.mismatches.first ? ` first=${report.mismatches.first.key}` : "";
+			return `pair ${report.pair} graph=${report.graphId}: ${report.verdict}, mismatches=${report.mismatches.count}${first}\n`;
+		})
+		.join("");
+}
+
+/** The exit code of a tick that ran the forget pair and the graph pairs. Mismatches outrank an incomplete read, as in `runTick`. */
+export function combineExit(forget: TickResult, pairs: PairsOutcome | null): number {
+	if (forget.code === EXIT.mismatch || (pairs !== null && pairs.mismatches > 0)) return EXIT.mismatch;
+	if (forget.code !== EXIT.clean || (pairs !== null && pairs.incomplete.length > 0)) return EXIT.failed;
+	return EXIT.clean;
+}
+
 async function main(argv: string[]): Promise<number> {
 	for (const arg of argv) {
 		if (arg !== "--json") {
@@ -127,16 +194,28 @@ async function main(argv: string[]): Promise<number> {
 		process.stderr.write(`SUBSTRATE_PG_URL is not set\n${USAGE}`);
 		return EXIT.usage;
 	}
+	const graphs = graphIdsFrom(process.env[RECONCILE_GRAPHS_ENV]);
+	if (!graphs.ok) {
+		process.stderr.write(`${graphs.problem}\n${USAGE}`);
+		return EXIT.usage;
+	}
 	const greptime = new GreptimeClient(config.greptime, { ledger: config.ledger });
 	const index = new IndexStore(config.postgresUrl);
 	// With the cache off the mark reads `disabled` and the cache layer is reported as not checked, never as drift.
 	const cache = createReadThroughCache(config);
 	try {
 		const deps = scheduledDeps({ reads: greptime, index, cache }, () => Date.now());
-		const result = await runTick(deps, reconcileOptionsFor(config), argv.includes("--json"));
-		process.stdout.write(result.stdout);
-		process.stderr.write(result.stderr);
-		return result.code;
+		const options = reconcileOptionsFor(config);
+		const pairDeps: PairDeps = { ledger: pairLedgerFrom(greptime), index: pairIndexFrom(index), cache: pairCacheFrom(cache.redisClient()), now: () => Date.now() };
+		const json = argv.includes("--json");
+		const forget = await runTick(deps, options, json);
+		const pairs = graphs.ids.length === 0 ? null : await runPairsTick(pairDeps, graphs.ids, { settleMs: options.settleMs });
+		process.stdout.write(forget.stdout);
+		process.stderr.write(forget.stderr);
+		if (pairs === null) process.stderr.write(`[cross-layer-reconcile] pairs not run: ${RECONCILE_GRAPHS_ENV} is unset\n`);
+		else if (json) process.stdout.write(`${JSON.stringify({ pairs: pairs.reports, mismatches: pairs.mismatches, incomplete: pairs.incomplete })}\n`);
+		else process.stdout.write(renderPairs(pairs));
+		return combineExit(forget, pairs);
 	} finally {
 		await index.close().catch(() => undefined);
 	}

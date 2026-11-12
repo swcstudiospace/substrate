@@ -523,6 +523,11 @@ export class ReadThroughCache {
 		this.flightMaxAgeMs = Math.max(1, Math.floor(options.flightMaxAgeMs ?? FLIGHT_MAX_AGE_MS));
 	}
 
+	/** The gated redis client this cache reads through, or null when it is off. The reconcile pairs read the cache through it, so an open breaker reports `unavailable`. */
+	redisClient(): CacheRedis | null {
+		return this.redis;
+	}
+
 	health(): CacheHealth {
 		return {
 			enabled: this.enabled,

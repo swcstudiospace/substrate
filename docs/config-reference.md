@@ -67,6 +67,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
+| `SUBSTRATE_RECONCILE_GRAPHS` | list | none | comma separated graph ids, at most 50; an empty entry is refused at boot | no graph pair is compared; the scheduled run reports the pairs as not run, and its exit is the forget pair's alone. See `docs/config-reference.md` | mcp-server/cross-layer-reconcile-run.ts | no |
 | `GREPTIME_URL` | secret-ref | none | HTTP SQL base URL | no ledger: events are not recorded and claims are not withdrawn for it. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `GREPTIME_USER` | secret-ref | none | user | unauthenticated ledger calls. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `GREPTIME_PASSWORD` | secret-ref | none | password | unauthenticated ledger calls. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
