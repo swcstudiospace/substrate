@@ -287,6 +287,12 @@ describe("every memory reader in the index filters on superseded_by IS NULL, so 
 		expect((await index.memoryForBrief("owner/a", null, 5, { surface: "cursor" })).map((entry) => entry.id)).toEqual(["mem_b", "mem_a"]);
 	});
 
+	test("a brief read under a grant keeps a graph row that names no repository: its graph is checked before the read, not its missing repo", async () => {
+		const { index } = store(() => [row("mem_g", { scope: "graph:ut-1", repo: null }), row("mem_b", { scope: "global", repo: "owner/b" })]);
+		const granted = (repo: string): boolean => repo === "owner/a";
+		expect((await index.memoryForBrief(null, "ut-1", 5, { surface: "cursor", granted })).map((entry) => entry.id)).toEqual(["mem_g"]);
+	});
+
 	test("a forgotten row reads back with its marker, which is what makes the retain replay answer gone", async () => {
 		const forgotten = store(() => [row("mem_a", { superseded_by: MARKER })]);
 		const entry = await forgotten.index.readEntry("mem_a");

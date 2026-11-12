@@ -2774,8 +2774,10 @@ export class IndexStore implements MemoryStore {
 				limit ${limit}`) as Array<Record<string, unknown>>;
 			const entries = await this.servable(rows, read);
 			// A `global` row names no repository in its scope, so the scope list alone let an ungranted repository's row through: the row's own repository is checked too.
+			// A `graph:` row is checked against its graph by the caller before the page is read (scopedBriefRefusal), so here only its own repository is judged: a graph row
+			// that names no repository is kept, as memoryReplyInGrant keeps it.
 			const granted = read?.granted;
-			return granted === undefined ? entries : entries.filter((entry) => grantedToCaller(entry.scope, entry.repo, granted));
+			return granted === undefined ? entries : entries.filter((entry) => grantedToCaller(entry.scope?.startsWith("graph:") ? undefined : entry.scope, entry.repo, granted));
 		});
 	}
 
