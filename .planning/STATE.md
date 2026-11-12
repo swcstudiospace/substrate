@@ -720,3 +720,12 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Code TODO/FIXME/HACK scan (`rg`, excluding `.git` and `.planning`): 5 hits, all placeholder literals (`lessons.test.ts:1319,1327`, `classify.test.ts:26`, `lesson-content.ts:35,57`, `memory-write.test.ts:434`). No open work-item markers in code. Planning-prose hits are tracked in `.planning/todo-inventory.md`.
 - Defaults applied for non-blocking questions: archived gaps accepted and recorded, not re-executed (phase 61 criterion 3 is operator-gated); quality scope limited to planned phases and TODOs.
 - Still open, needs a decision or operator step: phase 74 route/MCP exposure; phase 78 remaining layer pairs and unit install; phase 71 and 72 human review; phase 46, 61, 66, 67, 68 operator gates; milestone audit and completion (owner sign-off); draft PR #215 not merge-ready; `ship.autoMerge` true in the ultrathink config.
+
+## Autonomous run checkpoint (2026-11-12, session)
+
+- Phase 72: gap closed in code (repo gate runs before any session-binding read; `live-session-issue-gate.test.ts` 5/5 pass). Phase stays HELD: owner decisions HARD-S2 and corpus-proof disclosure remain open. Verification report is stale against the new code; re-verify before any status change.
+- Phase 33: gaps closed in code (lane-a e2e 29/29, dispatcher driver 0 failures, pytest 289 pass). Verification report is stale; re-verify.
+- Phase 46: partially executed. T1–T5 landed earlier and re-verified; T6–T8 and checkpoints C1–C7 not run. Decisions D1–D6 are open owner decisions (see 46-SUMMARY.md). Not complete.
+- Phase 75: NOT planned. Planner dispatch is unavailable to leaf subagents; ROADMAP says merged in PR #200 while CONTEXT says pending. Owner must decide whether to plan retroactively or close against merged work.
+- Postgres: test container substrate-test-pg-5432 restarted; round-trip suite 21/21 pass.
+- v1.7 phases 63–70: NOT re-planned. STATE records them as shipped and v1.7 owner decisions 1–11 open; no work was done on them in this session.
