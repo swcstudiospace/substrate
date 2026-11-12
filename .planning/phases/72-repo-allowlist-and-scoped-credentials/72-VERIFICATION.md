@@ -7,7 +7,23 @@ covered_files: [".env.example", ".planning/phases/72-repo-allowlist-and-scoped-c
 covered_digest: "v3:sha256:ca0ef38d90094db8d2329e825d321c589ce0e0ddf02fdd5d1ac4677af63d42f4"
 behavior_unverified: 3
 overrides_applied: 0
-desk_gate: "Desk Quality / Programming Lead review WAIVED by the user on 2026-11-12 (answers what=not_real, needs=greptile_only). Status stays human_needed: the two owner decisions below are not waived."
+desk_gate: "Desk Quality / Programming Lead review WAIVED by the user on 2026-11-12 (answers what=not_real, needs=greptile_only). Status stays human_needed: the owner decisions below and the open defect below are not cleared."
+owner_decisions_2026_11_12:
+  - decision: "Corpus proof disclosure (truth 10)"
+    owner_answer: "Build a per-repository proof tree so a granted proof reveals nothing about other repositories"
+    evidence: "commit 9613e302; repository-scoped tree via repositoryTreeOf/repositoryProof; per-repo proofs verify against per-repo roots; repo A's audit path equals the ledger's own path over A's leaves; whole-corpus root pinned unchanged (6421f2e4...c35 for the fixed 7-row manifest). Test command: bun test src/corpus/root.test.ts src/corpus/proofs.test.ts src/corpus/proofs.routes.test.ts src/repo-scope.routes.test.ts: 117 pass, 0 fail."
+    trade_off: "A granted caller cannot verify a served proof against the phase 69 anchored whole-corpus root. Documented in docs/corpus-proofs.md."
+    open_follow_up: "GET /corpus/root is not repo-scoped and still exposes whole-corpus root and count to granted callers (pre-existing); proof returns 503 corpus.too-large above 100k active rows."
+  - decision: "Credential model (HARD-S2)"
+    owner_answer: "Grant model: surface bearer plus its repository grant (D72-03); HARD-S2 amended in REQUIREMENTS.md"
+    evidence: "REQUIREMENTS.md HARD-S2 line amended 2026-11-12."
+observed_results_2026_11_12:
+  - item: "Postgres scope filter (gap 7)"
+    result: "PASS: repo-scope.pg.test.ts 11 pass, 0 fail on PostgreSQL 16.15, disposable container, removed after run. First run was red: worktree-registry.ts list() used bare ::jsonb (SQLSTATE 22023) on every granted read; fixed in 73c86985."
+  - item: "MCP refusal (behavior-unverified: drift scan)"
+    result: "PASS: mcp.drift-scope.test.ts (2 tests). The MCP tool is coord_drift_scan. Refused with repo-not-granted, zero git argv calls, one repo.scope-refused warning, path not in reply. Commit 22657739."
+  - item: "Live-session issue and transition gate (16b)"
+    result: "4 of 5 PASS. FAIL: a session-bound transition in an ungranted repo reads the session binding (authority.read called 2 times) before the repo gate refuses. Caller receives the same not-found; no disclosure observed. Cause: executeLiveCall runs boundary prepare and recheck before the scope gate (service.ts repo gate at ~2057). Left failing deliberately in 22657739; open decision: move the repo gate ahead of the boundary read, or narrow the requirement to the issue path."
 re_verification:
   previous_status: gaps_found
   previous_score: 13/19
