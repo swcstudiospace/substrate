@@ -394,7 +394,7 @@ export class PgWorktreeRegistry implements WorktreeRegistryStore {
 				       locked, is_primary, pr_state, session_id, graph_id, first_seen_at, last_seen_at, reported_at
 				from worktrees
 				where (${filter.repo}::text is null or repo = ${filter.repo})
-				  and (${reposJson}::text is null or lower(repo) in (select jsonb_array_elements_text(${reposJson}::jsonb)))
+				  and (${reposJson}::text is null or lower(repo) in (select jsonb_array_elements_text(${reposJson}::text::jsonb)))
 				  and (${filter.host}::text is null or host = ${filter.host})
 				  and (${filter.state}::text = 'all'
 				       or (${filter.state}::text = 'dirty' and dirty)
