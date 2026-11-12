@@ -14,6 +14,8 @@
  *   did not write is never overwritten.
  * - Compare-and-delete. The undo is `update-ref -d <ref> <planned>`, which deletes only the value the operation wrote. A ref
  *   that moved since is parked as `ref-moved` and left alone.
+ * - One driver per key. A run holds its key's lock, so two drivers of one operation in this process never interleave: the
+ *   second waits, then reads what the first left. A step found `applying` is then from a dead process, never a live driver.
  * - Explicit statuses. `done` means every step is applied. `rolled-back` means a step failed and every applied step was undone,
  *   with nothing parked. `needs-attention` means at least one step is parked: its state cannot be proven safe to leave or undo.
  *   A partial operation is never `done`.
@@ -254,6 +256,31 @@ function nullOf(sha: string): string {
 	return "0".repeat(sha.length);
 }
 
+/**
+ * One driver per operation key, in this process. `run` waits for every earlier driver of `key` to finish, runs `fn`, and frees
+ * the key in `finally`, so a driver that throws releases it. Keys are independent: two operations never wait on each other.
+ */
+class KeyedLock {
+	private readonly tails = new Map<string, Promise<void>>();
+
+	async run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+		const previous = this.tails.get(key) ?? Promise.resolve();
+		const { promise: current, resolve: release } = Promise.withResolvers<void>();
+		const tail = previous.then(() => current);
+		this.tails.set(key, tail);
+		await previous;
+		try {
+			return await fn();
+		} finally {
+			release();
+			if (this.tails.get(key) === tail) this.tails.delete(key);
+		}
+	}
+}
+
+/** The lock every driver of this process takes. A store key is unique, so one lock per key covers every caller. */
+const operationLocks = new KeyedLock();
+
 /** The result of one step attempt. `busy` means another driver holds the step; the caller re-reads and reports the state it finds. */
 type StepOutcome = "applied" | "failed" | "parked" | "compensated" | "busy";
 
@@ -284,9 +311,10 @@ function gateRepo(ctx: Context, repo: string): { ok: true } | { ok: false; reaso
  */
 async function applyStep(ctx: Context, op: CrossRepoOperation, step: CrossRepoStep): Promise<StepOutcome> {
 	const ref = refOf(op.branch);
-	// Only a step already `applying` may have landed its create: an earlier attempt recorded that intent, then died. A `pending`
-	// step never ran one, so a ref it finds was not written by this operation. That ref is never adopted, and the undo never
-	// deletes it.
+	// A step is `applying` here only when an earlier process recorded the intent and died. The driver holds the key's lock for its
+	// whole run, so no live driver of this operation in this process can be mid-create. Only such a step may have landed its
+	// create. A `pending` step never ran one, so a ref it finds was not written by this operation. That ref is never adopted,
+	// and the undo never deletes it.
 	const resumed = step.state === "applying";
 	const settle = async (from: CrossRepoStepState, to: "applied" | "failed" | "parked", detail: CrossRepoDetail | null): Promise<StepOutcome> =>
 		(await ctx.store.moveStep(op.key, step.index, [from], to, detail, ctx.now())) ? to : "busy";
@@ -385,12 +413,18 @@ function refused(reason: CrossRepoRefusal, problem?: string): CrossRepoOutcome {
 
 /**
  * Runs a branch fan-out, or resumes the stored operation with the same key. A refusal returns before the store is written or
- * any git effect runs. A retry with a stored key performs no planning: the stored planned shas are authoritative.
+ * any git effect runs. A retry with a stored key performs no planning: the stored planned shas are authoritative. The run holds
+ * the key's lock, so two drivers of one key never interleave their steps.
  */
 export async function runBranchFanout(request: BranchFanoutRequest, deps: CrossRepoDeps): Promise<CrossRepoOutcome> {
 	const parsed = parseBranchFanoutRequest(request);
 	if (!parsed.ok) return refused("request-invalid", parsed.problem);
 	const { key, branch, repos } = parsed.value;
+	return operationLocks.run(key, () => fanout(key, branch, repos, deps));
+}
+
+/** One run under the key's lock: the gate, the stored-operation check, and the plan for a new key. */
+async function fanout(key: string, branch: string, repos: readonly BranchFanoutRepo[], deps: CrossRepoDeps): Promise<CrossRepoOutcome> {
 	const ctx = contextOf(deps);
 
 	for (const { repo } of repos) {

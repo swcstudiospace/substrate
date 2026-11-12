@@ -17,7 +17,9 @@ import {
 	type PairLedger,
 	type PairMemoryRow,
 	type PairNode,
+	PAIR_DEFAULT_SURFACE,
 	PAIR_INDEX_ROWS,
+	PAIR_SURFACES,
 	pairCacheFrom,
 	pairIndexFrom,
 	pairLedgerFrom,
@@ -72,14 +74,20 @@ class FakeIndex implements PairIndex {
 	}
 }
 
+/**
+ * The cache under test. The anonymous surface holds `value`; a named surface holds the entry in `named`, or nothing when it is not
+ * listed, so every surface a comparison reads is answered.
+ */
 class FakeCache implements PairCache {
 	constructor(
 		private readonly value: CachedGraph | Error,
 		private readonly spy: WriteSpy,
+		private readonly named: Record<string, CachedGraph> = {},
 	) {}
-	async cachedGraph(): Promise<CachedGraph> {
+	async cachedGraph(_graphId: string, surface: string): Promise<CachedGraph> {
 		if (this.value instanceof Error) throw this.value;
-		return this.value;
+		if (surface in this.named) return this.named[surface] as CachedGraph;
+		return surface === PAIR_DEFAULT_SURFACE ? this.value : { state: "absent" };
 	}
 	/** Not part of the pair's read port; present so the write spy would catch a cache write. */
 	async bump(key: string): Promise<void> {
@@ -124,7 +132,7 @@ describe("index -> ledger: what it reports", () => {
 		);
 		expect(report.verdict).toBe("clean");
 		expect(report.mismatches.count).toBe(0);
-		expect(report.counts).toEqual({ ledgerEvents: 3, indexRows: 3, settling: 0, unsourced: 1, judged: 2, matched: 2, mismatched: 0 });
+		expect(report.counts).toEqual({ ledgerEvents: 3, indexRows: 3, settling: 0, unsourced: 1, sessionRefs: 0, judged: 2, matched: 2, mismatched: 0 });
 		expect(spy.writes).toEqual([]);
 	});
 
@@ -197,6 +205,41 @@ describe("index -> ledger: what it reports", () => {
 		expect(report.mismatches.count).toBe(0);
 		expect(spy.writes).toEqual([]);
 	});
+
+	test("a session reference is counted apart: it is not an event-not-in-ledger, and it hides no real mismatch beside it", async () => {
+		const spy = new WriteSpy();
+		const report = await reconcileIndexLedger(
+			GRAPH,
+			deps({
+				ledger: new FakeLedger(["e1"]),
+				index: new FakeIndex([memoryRow("m1", "session:sess-7"), memoryRow("m2", "e1"), memoryRow("m3", "e-ghost")], null, spy),
+				cache: new FakeCache({ state: "absent" }, spy),
+			}),
+			OPTIONS,
+		);
+		expect(report.verdict).toBe("drift");
+		expect(report.counts).toEqual({ ledgerEvents: 1, indexRows: 3, settling: 0, unsourced: 0, sessionRefs: 1, judged: 2, matched: 1, mismatched: 1 });
+		expect(report.mismatches.count).toBe(1);
+		expect(report.mismatches.first).toEqual({ key: "e-ghost", reason: "event-not-in-ledger", entryId: "m3" });
+		expect(spy.writes).toEqual([]);
+	});
+
+	test("a graph whose provenance is only session references is clean, with nothing judged and nothing written", async () => {
+		const spy = new WriteSpy();
+		const report = await reconcileIndexLedger(
+			GRAPH,
+			deps({
+				ledger: new FakeLedger([]),
+				index: new FakeIndex([memoryRow("m1", "session:sess-7"), memoryRow("m2", "session:sess-8")], null, spy),
+				cache: new FakeCache({ state: "absent" }, spy),
+			}),
+			OPTIONS,
+		);
+		expect(report.verdict).toBe("clean");
+		expect(report.mismatches.count).toBe(0);
+		expect(report.counts).toMatchObject({ sessionRefs: 2, judged: 0, mismatched: 0 });
+		expect(spy.writes).toEqual([]);
+	});
 });
 
 describe("cache -> index: what it reports", () => {
@@ -212,7 +255,7 @@ describe("cache -> index: what it reports", () => {
 			}),
 		);
 		expect(report.verdict).toBe("clean");
-		expect(report.counts).toEqual({ cacheState: "present", cacheNodes: 2, indexNodes: 2, matched: 2, versionMismatch: 0, cacheOnly: 0, indexOnly: 0 });
+		expect(report.counts).toEqual({ cacheState: "present", surfacesCompared: 1, cacheNodes: 2, indexNodes: 2, matched: 2, versionMismatch: 0, cacheOnly: 0, indexOnly: 0 });
 		expect(spy.writes).toEqual([]);
 	});
 
@@ -229,7 +272,7 @@ describe("cache -> index: what it reports", () => {
 		expect(report.verdict).toBe("drift");
 		expect(report.counts).toMatchObject({ cacheNodes: 2, indexNodes: 3, matched: 0, versionMismatch: 1, cacheOnly: 1, indexOnly: 2 });
 		expect(report.mismatches.count).toBe(4);
-		expect(report.mismatches.first).toEqual({ key: "n1", reason: "version-mismatch", cachedVersion: 2, indexVersion: 3 });
+		expect(report.mismatches.first).toEqual({ surface: "unattributed", key: "n1", reason: "version-mismatch", cachedVersion: 2, indexVersion: 3 });
 		expect(spy.writes).toEqual([]);
 	});
 
@@ -309,6 +352,67 @@ describe("cache -> index: what it reports", () => {
 		);
 		expect(report.verdict).toBe("clean");
 		expect(report.counts).toMatchObject({ cacheState: "present", cacheNodes: 1, matched: 1 });
+		expect(spy.writes).toEqual([]);
+	});
+
+	test("every surface a caller can read as is compared, not only the anonymous one", async () => {
+		const read: string[] = [];
+		const cache: PairCache = {
+			async cachedGraph(_graphId, surface) {
+				read.push(surface);
+				return { state: "absent" };
+			},
+		};
+		const report = await reconcileCacheIndex(GRAPH, deps({ ledger: new FakeLedger([]), index: new FakeIndex([], [node("n1", 1)], new WriteSpy()), cache }));
+		expect(read).toEqual([...PAIR_SURFACES]);
+		expect(report).toMatchObject({ verdict: "clean", counts: { surfacesCompared: 0 } });
+	});
+
+	test("a stale entry under a named surface is drift, even when the anonymous surface holds nothing", async () => {
+		const spy = new WriteSpy();
+		const report = await reconcileCacheIndex(
+			GRAPH,
+			deps({
+				ledger: new FakeLedger([]),
+				index: new FakeIndex([], [node("n1", 3)], spy),
+				cache: new FakeCache({ state: "absent" }, spy, { omp: { state: "present", nodes: [node("n1", 2)] } }),
+			}),
+		);
+		expect(report.verdict).toBe("drift");
+		expect(report.counts).toMatchObject({ cacheState: "present", surfacesCompared: 1, cacheNodes: 1, versionMismatch: 1 });
+		expect(report.mismatches.first).toEqual({ surface: "omp", key: "n1", reason: "version-mismatch", cachedVersion: 2, indexVersion: 3 });
+		expect(spy.writes).toEqual([]);
+	});
+
+	test("an index node one surface lacks is drift under that surface, and the entries that match elsewhere still count", async () => {
+		const spy = new WriteSpy();
+		const nodes = [node("n1", 1), node("n2", 0)];
+		const report = await reconcileCacheIndex(
+			GRAPH,
+			deps({
+				ledger: new FakeLedger([]),
+				index: new FakeIndex([], nodes, spy),
+				cache: new FakeCache({ state: "present", nodes }, spy, { omp: { state: "present", nodes: [node("n1", 1)] } }),
+			}),
+		);
+		expect(report.verdict).toBe("drift");
+		expect(report.counts).toEqual({ cacheState: "present", surfacesCompared: 2, cacheNodes: 3, indexNodes: 2, matched: 3, versionMismatch: 0, cacheOnly: 0, indexOnly: 1 });
+		expect(report.mismatches.first).toEqual({ surface: "omp", key: "n2", reason: "index-only", indexVersion: 0 });
+		expect(spy.writes).toEqual([]);
+	});
+
+	test("the production cache adapter compares a named surface's current entry when the anonymous surface has none", async () => {
+		const spy = new WriteSpy();
+		const store = new Map<string, string>([
+			[graphGenerationKey(GRAPH), "7"],
+			[cacheKey("graph-view", "omp", "7", { graph_id: GRAPH }), JSON.stringify({ v: { nodes: [{ node_id: "n1", state: "claimed", lease_epoch: 2 }] } })],
+		]);
+		const report = await reconcileCacheIndex(
+			GRAPH,
+			deps({ ledger: new FakeLedger([]), index: new FakeIndex([], [node("n1", 3)], spy), cache: pairCacheFrom(fakeRedis(store)) }),
+		);
+		expect(report.verdict).toBe("drift");
+		expect(report.mismatches.first).toEqual({ surface: "omp", key: "n1", reason: "version-mismatch", cachedVersion: 2, indexVersion: 3 });
 		expect(spy.writes).toEqual([]);
 	});
 });
@@ -393,7 +497,7 @@ describe("repair: a confirmed plan touches only the planned keys", () => {
 			verdict: "drift",
 			reason: null,
 			layer: null,
-			counts: { cacheState: "present", cacheNodes: 1, indexNodes: 1, matched: 0, versionMismatch: 1, cacheOnly: 0, indexOnly: 0 },
+			counts: { cacheState: "present", surfacesCompared: 1, cacheNodes: 1, indexNodes: 1, matched: 0, versionMismatch: 1, cacheOnly: 0, indexOnly: 0 },
 			mismatches: { count: 1, first: null, items: [] },
 		});
 		if (plan === null) throw new Error("expected a plan");
@@ -410,7 +514,7 @@ describe("repair: a confirmed plan touches only the planned keys", () => {
 			verdict: "drift",
 			reason: null,
 			layer: null,
-			counts: { cacheState: "present", cacheNodes: 1, indexNodes: 1, matched: 0, versionMismatch: 1, cacheOnly: 0, indexOnly: 0 },
+			counts: { cacheState: "present", surfacesCompared: 1, cacheNodes: 1, indexNodes: 1, matched: 0, versionMismatch: 1, cacheOnly: 0, indexOnly: 0 },
 			mismatches: { count: 1, first: null, items: [] },
 		});
 		if (plan === null) throw new Error("expected a plan");

@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { type ScopedGitRunner, scopedGit } from "./repo-executor.ts";
+import { REPO_ALLOWLIST_ENV, repoAllowlistFromEnv } from "./repo-allowlist.ts";
+import { defaultScopedGitRunner, type ScopedGitRunner, type ScopedSession, scopedGit } from "./repo-executor.ts";
 import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV, type RepoScope, repoScopeFromEnv } from "./repo-scope.ts";
 import type { Surface } from "./types.ts";
 
@@ -124,5 +125,78 @@ describe("scopedGit granted calls", () => {
 		const outcome = scopedGit({ scope: scopeFor(f, null), surface, repo: null, path: f.b.checkout, args: ARGS }, run);
 		expect(outcome).toMatchObject({ ok: true, repo: "owner/b" });
 		expect(calls).toHaveLength(1);
+	});
+});
+
+const CREDENTIAL_A = "REPO_EXEC_TEST_CREDENTIAL_A";
+const CREDENTIAL_B = "REPO_EXEC_TEST_CREDENTIAL_B";
+const UNRELATED = "REPO_EXEC_TEST_UNRELATED";
+
+/** Runs `fn` with `vars` set in the parent environment, restoring each variable afterwards. */
+function withParentEnv<T>(vars: Record<string, string>, fn: () => T): T {
+	const saved = Object.keys(vars).map((name) => [name, process.env[name]] as const);
+	Object.assign(process.env, vars);
+	try {
+		return fn();
+	} finally {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+}
+
+function sessionFor(): ScopedSession {
+	const parsed = repoAllowlistFromEnv({ [REPO_ALLOWLIST_ENV]: JSON.stringify({ omp: { "owner/a": CREDENTIAL_A, "owner/b": CREDENTIAL_B } }) });
+	if (!parsed.ok) throw new Error(parsed.problem);
+	return { id: "omp", allowlist: parsed.value };
+}
+
+/**
+ * The environment a real git child sees for one call. The `envdump` alias runs `env` in the child, so its output is exactly the
+ * environment git handed to that child. The parent holds two repositories' credentials and one unrelated secret.
+ */
+function gitChildEnvironment(f: Fixture, repo: "owner/a" | "owner/b"): Record<string, string> {
+	const outcome = withParentEnv({ [CREDENTIAL_A]: "secret-a", [CREDENTIAL_B]: "secret-b", [UNRELATED]: "unrelated-secret" }, () =>
+		scopedGit(
+			{ scope: scopeFor(f, { omp: ["owner/a", "owner/b"] }), surface: "omp", repo, path: null, args: ["-c", "alias.envdump=!env", "envdump"], session: sessionFor() },
+			defaultScopedGitRunner,
+		),
+	);
+	if (!outcome.ok || outcome.result.code !== 0) throw new Error(`git child did not run: ${JSON.stringify(outcome)}`);
+	const child: Record<string, string> = {};
+	for (const line of outcome.result.stdout.split("\n")) {
+		const at = line.indexOf("=");
+		if (at > 0) child[line.slice(0, at)] = line.slice(at + 1);
+	}
+	return child;
+}
+
+describe("scopedGit child environment", () => {
+	test("a git child for repo A receives its own credential and not repo B's", () => {
+		const child = gitChildEnvironment(fixture(), "owner/a");
+		expect(child.SUBSTRATE_REPO_CREDENTIAL).toBe("secret-a");
+		expect(child[CREDENTIAL_B]).toBeUndefined();
+		expect(Object.values(child)).not.toContain("secret-b");
+		expect(child[UNRELATED]).toBeUndefined();
+		expect(Object.values(child)).not.toContain("unrelated-secret");
+	});
+
+	test("a git child for repo B receives its own credential and not repo A's", () => {
+		const child = gitChildEnvironment(fixture(), "owner/b");
+		expect(child.SUBSTRATE_REPO_CREDENTIAL).toBe("secret-b");
+		expect(child[CREDENTIAL_A]).toBeUndefined();
+		expect(Object.values(child)).not.toContain("secret-a");
+	});
+
+	test("the git child keeps the variables git needs and the call's own git flags", () => {
+		const f = fixture();
+		const child = gitChildEnvironment(f, "owner/a");
+		// git prepends its own exec path to the PATH of every child it runs, so the parent PATH is a suffix, not equal.
+		expect((child.PATH ?? "").endsWith(process.env.PATH ?? "")).toBe(true);
+		expect(child.HOME).toBe(process.env.HOME);
+		expect(child.GIT_CEILING_DIRECTORIES).toBe(dirname(f.a.checkout));
+		expect(child.GIT_TERMINAL_PROMPT).toBe("0");
+		expect(child.GIT_OPTIONAL_LOCKS).toBe("0");
 	});
 });

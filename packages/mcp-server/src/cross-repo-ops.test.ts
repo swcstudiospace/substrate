@@ -351,3 +351,108 @@ describe("the status reply answers a malformed key with 400, an unseen key with 
 		expect(await crossRepoStatusReply("op-1", depsFor(w, runnerWith().run))).toMatchObject({ status: 200, body: { ok: true, operation: { status: "done" } } });
 	});
 });
+
+const BRANCH_REF = `refs/heads/${BRANCH}`;
+
+describe("concurrent drivers of one operation key never interleave their steps", () => {
+	test("two overlapping drivers create each branch once and both report the same done operation", async () => {
+		const w = world();
+		const first = runnerWith();
+		const second = runnerWith();
+		const [x, y] = await Promise.all([runBranchFanout(request(), depsFor(w, first.run)), runBranchFanout(request(), depsFor(w, second.run))]);
+		const op = opOf(x);
+		expect(opOf(y).status).toBe("done");
+		expect(stepStates(op)).toEqual(["owner/a:applied", "owner/b:applied"]);
+		expect(first.writes.length + second.writes.length).toBe(2);
+		expect(refIn(w.checkoutA, BRANCH_REF)).toBe(op.steps[0]?.plannedSha ?? null);
+		expect(refIn(w.checkoutB, BRANCH_REF)).toBe(op.steps[1]?.plannedSha ?? null);
+	});
+
+	test("a driver that finds a live applying step waits for it: it creates nothing and the live step is not reclassified", async () => {
+		const w = world();
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const live = runnerWith();
+		const waiting = runnerWith();
+		const pausedStore = pausingAtApplying(w.store, () => {
+			reached.resolve();
+			return release.promise;
+		});
+		const first = runBranchFanout(request(), depsFor({ ...w, store: pausedStore }, live.run));
+		await reached.promise;
+		const second = runBranchFanout(request(), depsFor(w, waiting.run));
+		await flush();
+		expect(waiting.writes).toHaveLength(0);
+		release.resolve();
+		const [x, y] = await Promise.all([first, second]);
+		expect(stepStates(opOf(x))).toEqual(["owner/a:applied", "owner/b:applied"]);
+		expect(opOf(y).status).toBe("done");
+		expect(live.writes).toHaveLength(2);
+		expect(waiting.writes).toHaveLength(0);
+	});
+
+	test("overlapping drivers that roll back leave no branch in any repository", async () => {
+		const w = world();
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const failSecond: Intercept = (args, cwd) => (args[0] === "update-ref" && cwd === w.checkoutB ? FAILED : undefined);
+		const pausedStore = pausingAtApplying(w.store, () => {
+			reached.resolve();
+			return release.promise;
+		});
+		const first = runBranchFanout(request(), depsFor({ ...w, store: pausedStore }, runnerWith(failSecond).run));
+		await reached.promise;
+		const second = runBranchFanout(request(), depsFor(w, runnerWith(failSecond).run));
+		await flush();
+		release.resolve();
+		const outcomes = await Promise.all([first, second]);
+		for (const outcome of outcomes) {
+			const op = opOf(outcome);
+			expect(op.status).toBe("rolled-back");
+			expect(stepStates(op)).toEqual(["owner/a:compensated", "owner/b:failed/apply-failed"]);
+		}
+		expect(refIn(w.checkoutA, BRANCH_REF)).toBeNull();
+		expect(refIn(w.checkoutB, BRANCH_REF)).toBeNull();
+	});
+
+	test("a driver that throws releases its key: a retry of the same key completes the operation", async () => {
+		const w = world();
+		const crash: Intercept = (args, cwd) => {
+			if (args[0] === "update-ref" && cwd === w.checkoutA) throw new Error("simulated crash");
+			return undefined;
+		};
+		await expect(runBranchFanout(request(), depsFor(w, runnerWith(crash).run))).rejects.toThrow("simulated crash");
+		const retry = runnerWith();
+		const op = opOf(await runBranchFanout(request(), depsFor(w, retry.run)));
+		expect(op.status).toBe("done");
+		expect(stepStates(op)).toEqual(["owner/a:applied", "owner/b:applied"]);
+	});
+});
+
+/**
+ * Lets every concurrent driver run until it first waits. The store is in-process, so each driver's next step is a microtask: a
+ * fixed number of turns reaches the point where a driver that is not waiting would have written. No wall-clock timer is needed.
+ */
+async function flush(): Promise<void> {
+	for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+}
+
+/**
+ * A store whose first `applying` move pauses once it has landed: the step is live in the store while its git call has not run.
+ */
+function pausingAtApplying(inner: CrossRepoStore, pause: () => Promise<void>): CrossRepoStore {
+	let paused = false;
+	return {
+		create: (input) => inner.create(input),
+		load: (key) => inner.load(key),
+		moveStep: async (...args) => {
+			const moved = await inner.moveStep(...args);
+			if (moved && args[3] === "applying" && !paused) {
+				paused = true;
+				await pause();
+			}
+			return moved;
+		},
+		setStatus: (key, status, at) => inner.setStatus(key, status, at),
+	};
+}

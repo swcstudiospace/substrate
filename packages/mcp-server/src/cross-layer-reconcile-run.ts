@@ -160,12 +160,13 @@ export async function runPairsTick(deps: PairDeps, graphIds: string[], options: 
 	return { reports, mismatches, incomplete };
 }
 
-/** The text the journal shows for the pairs: one line per graph and pair, with the first mismatching key. */
+/** The text the journal shows for the pairs: one line per graph and pair, with the first mismatching key (and its surface, for the cache). */
 export function renderPairs(outcome: PairsOutcome): string {
 	return outcome.reports
 		.flatMap((pair) => [pair.indexLedger, pair.cacheIndex])
 		.map((report) => {
-			const first = report.mismatches.first ? ` first=${report.mismatches.first.key}` : "";
+			const surface = report.pair === "cache-index" && report.mismatches.first !== null ? ` surface=${report.mismatches.first.surface}` : "";
+			const first = report.mismatches.first ? ` first=${report.mismatches.first.key}${surface}` : "";
 			return `pair ${report.pair} graph=${report.graphId}: ${report.verdict}, mismatches=${report.mismatches.count}${first}\n`;
 		})
 		.join("");

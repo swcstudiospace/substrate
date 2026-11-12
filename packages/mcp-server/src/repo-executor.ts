@@ -57,11 +57,28 @@ export interface ScopedLocation {
 
 export type ScopedGitOutcome = ({ ok: true; result: ScopedGitResult } & ScopedLocation) | { ok: false; reason: RepoRefusalReason };
 
+/**
+ * The variables a git child inherits from the server environment. Everything else is withheld, so a git call for one
+ * repository never receives another repository's credential variable. The call's own variables, git's fixed flags and the
+ * admitted repository's `SUBSTRATE_REPO_CREDENTIAL`, are added on top by {@link childEnvironment}.
+ */
+const INHERITED_ENV_NAMES = ["PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"] as const;
+
+/** The child environment: the inherited allowlist, git's fixed flags, then the variables this call was given. */
+function childEnvironment(env: Record<string, string>): Record<string, string> {
+	const inherited: Record<string, string> = {};
+	for (const name of INHERITED_ENV_NAMES) {
+		const value = process.env[name];
+		if (value !== undefined) inherited[name] = value;
+	}
+	return { ...inherited, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", ...env };
+}
+
 /** The default runner: argv, no shell, git's own locks and prompts off. */
 export const defaultScopedGitRunner: ScopedGitRunner = (args, cwd, env) => {
 	const run = spawnSync("git", [...args], {
 		cwd,
-		env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true", ...env },
+		env: childEnvironment(env),
 		stdio: ["ignore", "pipe", "pipe"],
 		encoding: "utf8",
 	});

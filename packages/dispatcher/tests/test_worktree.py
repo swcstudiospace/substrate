@@ -26,9 +26,11 @@ MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
 
 
 @pytest.fixture(autouse=True)
-def _clean_floor_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_floor_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv(MIN_FREE_ENV, raising=False)
     monkeypatch.delenv(ROOTS_ENV, raising=False)
+    # Keep the host's real checkouts out of discovery; each test places its own under tmp_path.
+    monkeypatch.setattr("substrate_dispatcher.worktree.REPOS_ROOT", tmp_path / "no-repos-root")
 
 GID = "ut-mufsocbe-c7ced745"
 SLUG = "swcstudiospace/agent-substrate"
@@ -125,6 +127,38 @@ def test_repo_checkout_refuses_a_repository_outside_the_configured_roots(repo: P
 def test_repo_checkout_accepts_a_repository_inside_a_configured_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv(ROOTS_ENV, f"{tmp_path / 'elsewhere'}:{repo.parent}")
     assert repo_checkout(SLUG) == repo
+
+
+def test_repo_checkout_finds_a_primary_checkout_under_repos_root_when_worktree_roots_are_set(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("substrate_dispatcher.worktree.REPOS_ROOT", repo.parent)
+    monkeypatch.setenv(ROOTS_ENV, str(tmp_path / "graph-worktrees"))
+    assert repo_checkout(SLUG) == repo
+
+
+def _checkout(path: Path, origin: str) -> Path:
+    path.mkdir(parents=True)
+    git(path, "init", "-q", "-b", "main")
+    git(path, "remote", "add", "origin", origin)
+    return path
+
+
+def test_repo_checkout_skips_an_earlier_checkout_of_another_repository(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    alice = _checkout(first / "app", "https://github.com/alice/app.git")
+    bob = _checkout(second / "app", "https://github.com/bob/app.git")
+    assert repo_checkout("bob/app", roots=[first, second]) == bob
+    assert repo_checkout("alice/app", roots=[first, second]) == alice
+
+
+def test_repo_checkout_refuses_when_every_checkout_has_another_origin(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    _checkout(first / "app", "https://github.com/alice/app.git")
+    _checkout(second / "app", "https://github.com/carol/app.git")
+    with pytest.raises(WorktreeRefused) as err:
+        repo_checkout("bob/app", roots=[first, second])
+    assert err.value.marker == "no-checkout"
 
 
 

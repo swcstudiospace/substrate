@@ -1,10 +1,13 @@
 /**
  * The two cross-layer pairs phase 78 adds beside the memory-forget pair in `cross-layer-reconcile.ts`:
  *   - index -> ledger, for one graph: every provenance key the index holds (a memory row's `source_event`) must be an event
- *     the ledger holds for that graph. The ledger side is read oldest first; the first index key it cannot find is reported.
- *   - cache -> index, for one graph: the cached graph view (the `graph-view` entry at the graph's current generation) must
- *     hold the same nodes as the index, each at the same `lease_epoch` (the node's CAS token, bumped on every change of
- *     holder). A cached node the index lacks, an index node the cache lacks, or a version that differs is drift.
+ *     the ledger holds for that graph. A `session:` source is a session reference, not a ledger event id: it is counted
+ *     apart and never judged. The ledger side is read oldest first; the first index key it cannot find is reported.
+ *   - cache -> index, for one graph: for every surface a caller reads the graph under (`PAIR_SURFACES`), the cached graph view
+ *     (the `graph-view` entry at the graph's current generation, if that surface holds one) must hold the same nodes as the
+ *     index, each at the same `lease_epoch` (the node's CAS token, bumped on every change of holder). A cached node the index
+ *     lacks, an index node a present entry lacks, or a version that differs is drift. An absent entry under one surface says
+ *     nothing about another surface's entry, so every surface is read.
  *
  * Read-only. The comparisons take read ports only; a clean run and a dirty run both write nothing. A layer that cannot be read
  * makes its pair `unavailable` with no drift claim: a breaker that is open is reported as `breaker-open`, never as a mismatch.
@@ -26,6 +29,7 @@ import { type EventQuery, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { type LedgerReads, RECONCILE_REPORT_MAX } from "./cross-layer-reconcile.ts";
 import { redact } from "./redact.ts";
 import type { IndexStore } from "./index-store.ts";
+import { SURFACES } from "./types.ts";
 
 /** Ledger events one graph read may return. A full page is a truncated read: the pair is then `incomplete`. */
 export const PAIR_LEDGER_LIMIT = MAX_QUERY_LIMIT;
@@ -33,6 +37,10 @@ export const PAIR_LEDGER_LIMIT = MAX_QUERY_LIMIT;
 export const PAIR_INDEX_ROWS = 200;
 /** The cache surface a graph view is keyed under when the caller does not name one: the one `SubstrateService.getGraph` uses. */
 export const PAIR_DEFAULT_SURFACE = "unattributed";
+/** Every surface a graph view can be cached under: the anonymous default, then each named surface a caller can read as. */
+export const PAIR_SURFACES: readonly string[] = [PAIR_DEFAULT_SURFACE, ...SURFACES];
+/** The prefix of a `source_event` that names a session rather than a ledger event (`memory_write` stamps it). */
+const SESSION_REF_PREFIX = "session:";
 
 // ---------------------------------------------------------------------------
 // Ports. The stores satisfy them structurally through the adapters below; tests use fakes.
@@ -74,7 +82,8 @@ export type CachedGraph =
 	| { state: "present"; nodes: PairNode[] };
 
 export interface PairCache {
-	cachedGraph(graphId: string): Promise<CachedGraph>;
+	/** The graph view cached under one surface, at the graph's current generation. */
+	cachedGraph(graphId: string, surface: string): Promise<CachedGraph>;
 }
 
 export interface PairDeps {
@@ -109,13 +118,19 @@ export interface IndexLedgerCounts {
 	settling: number;
 	/** Rows with no source event: nothing to compare. */
 	unsourced: number;
+	/** Rows whose source is a session reference (`session:...`): not a ledger event id, so not judged against the ledger. */
+	sessionRefs: number;
 	judged: number;
 	matched: number;
 	mismatched: number;
 }
 
 export interface CacheIndexCounts {
+	/** `present` when at least one surface holds an entry at the current generation. */
 	cacheState: "absent" | "present";
+	/** Surfaces that held an entry at the current generation: the ones compared. */
+	surfacesCompared: number;
+	/** Cached nodes, summed over the compared surfaces. */
 	cacheNodes: number;
 	indexNodes: number;
 	matched: number;
@@ -126,10 +141,11 @@ export interface CacheIndexCounts {
 
 export type IndexLedgerMismatch = { key: string; reason: "event-not-in-ledger"; entryId: string };
 
+/** Each mismatch names the surface whose cached view it was found in. */
 export type CacheIndexMismatch =
-	| { key: string; reason: "version-mismatch"; cachedVersion: number; indexVersion: number }
-	| { key: string; reason: "cache-only"; cachedVersion: number }
-	| { key: string; reason: "index-only"; indexVersion: number };
+	| { surface: string; key: string; reason: "version-mismatch"; cachedVersion: number; indexVersion: number }
+	| { surface: string; key: string; reason: "cache-only"; cachedVersion: number }
+	| { surface: string; key: string; reason: "index-only"; indexVersion: number };
 
 interface PairReportBase<M> {
 	graphId: string;
@@ -204,6 +220,7 @@ const EMPTY_INDEX_LEDGER: IndexLedgerCounts = {
 	indexRows: 0,
 	settling: 0,
 	unsourced: 0,
+	sessionRefs: 0,
 	judged: 0,
 	matched: 0,
 	mismatched: 0,
@@ -211,8 +228,9 @@ const EMPTY_INDEX_LEDGER: IndexLedgerCounts = {
 
 /**
  * Compare one graph's index provenance with its ledger events. Each in-force memory row of the graph that is old enough to judge
- * and names a source event must name an event the ledger holds for the graph. Judged rows are matched by membership; the
- * reported first mismatch is the first such row in the index's own order (newest first).
+ * and names a ledger event as its source must name an event the ledger holds for the graph. A row whose source is a session
+ * reference is counted as `sessionRefs` and not judged: it names a session, not an event. Judged rows are matched by membership;
+ * the reported first mismatch is the first such row in the index's own order (newest first).
  */
 export async function reconcileIndexLedger(graphId: string, deps: PairDeps, options: PairOptions): Promise<IndexLedgerReport> {
 	assertOptions(options);
@@ -232,6 +250,7 @@ export async function reconcileIndexLedger(graphId: string, deps: PairDeps, opti
 			const createdMs = Date.parse(row.created);
 			if (!(createdMs <= cutoff)) counts.settling += 1;
 			else if (row.sourceEvent === null) counts.unsourced += 1;
+			else if (row.sourceEvent.startsWith(SESSION_REF_PREFIX)) counts.sessionRefs += 1;
 			else {
 				counts.judged += 1;
 				if (inLedger.has(row.sourceEvent)) counts.matched += 1;
@@ -257,6 +276,7 @@ export async function reconcileIndexLedger(graphId: string, deps: PairDeps, opti
 
 const EMPTY_CACHE_INDEX: CacheIndexCounts = {
 	cacheState: "absent",
+	surfacesCompared: 0,
 	cacheNodes: 0,
 	indexNodes: 0,
 	matched: 0,
@@ -266,42 +286,57 @@ const EMPTY_CACHE_INDEX: CacheIndexCounts = {
 };
 
 /**
- * Compare the cached graph view with the index's nodes. The cache is read at the graph's current generation, so an entry the
- * generation has already retired is not compared. A cache with no entry for the current generation has nothing to compare and
- * is clean; a disabled or unreadable cache is `unavailable`.
+ * Compare the cached graph views with the index's nodes: one comparison per surface in `PAIR_SURFACES`, each at the graph's
+ * current generation, so an entry the generation has already retired is not compared. A surface with no entry has nothing to
+ * compare, and it stands in for no other surface: a stale entry under a named surface is drift even when the anonymous surface
+ * holds nothing. A disabled or unreadable cache, or a malformed entry under any surface, is `unavailable`.
  */
 export async function reconcileCacheIndex(graphId: string, deps: PairDeps): Promise<CacheIndexReport> {
+	const unavailable = (reason: "cache-disabled" | "cache-malformed"): CacheIndexReport => ({
+		pair: "cache-index",
+		graphId,
+		verdict: "unavailable",
+		reason,
+		layer: "cache",
+		counts: { ...EMPTY_CACHE_INDEX },
+		mismatches: { ...NO_MISMATCHES, items: [] },
+	});
 	try {
-		const cached = await reachLayer("cache", () => deps.cache.cachedGraph(graphId));
-		if (cached.state === "disabled") {
-			return { pair: "cache-index", graphId, verdict: "unavailable", reason: "cache-disabled", layer: "cache", counts: { ...EMPTY_CACHE_INDEX }, mismatches: { ...NO_MISMATCHES, items: [] } };
-		}
-		if (cached.state === "malformed") {
-			return { pair: "cache-index", graphId, verdict: "unavailable", reason: "cache-malformed", layer: "cache", counts: { ...EMPTY_CACHE_INDEX }, mismatches: { ...NO_MISMATCHES, items: [] } };
+		const held: Array<{ surface: string; nodes: PairNode[] }> = [];
+		for (const surface of PAIR_SURFACES) {
+			const cached = await reachLayer("cache", () => deps.cache.cachedGraph(graphId, surface));
+			if (cached.state === "disabled") return unavailable("cache-disabled");
+			if (cached.state === "malformed") return unavailable("cache-malformed");
+			if (cached.state === "present") held.push({ surface, nodes: cached.nodes });
 		}
 		const indexNodes = (await reachLayer("index", () => deps.index.graphNodes(graphId))) ?? [];
-		const counts: CacheIndexCounts = { ...EMPTY_CACHE_INDEX, cacheState: cached.state, indexNodes: indexNodes.length };
-		if (cached.state === "absent") return { pair: "cache-index", graphId, verdict: "clean", reason: null, layer: null, counts, mismatches: { ...NO_MISMATCHES, items: [] } };
-
-		counts.cacheNodes = cached.nodes.length;
+		const counts: CacheIndexCounts = {
+			...EMPTY_CACHE_INDEX,
+			cacheState: held.length > 0 ? "present" : "absent",
+			surfacesCompared: held.length,
+			indexNodes: indexNodes.length,
+		};
 		const indexed = new Map(indexNodes.map((node) => [node.nodeId, node.leaseEpoch]));
-		const cachedIds = new Set<string>();
 		const found: CacheIndexMismatch[] = [];
-		for (const node of cached.nodes) {
-			cachedIds.add(node.nodeId);
-			const indexVersion = indexed.get(node.nodeId);
-			if (indexVersion === undefined) {
-				counts.cacheOnly += 1;
-				found.push({ key: node.nodeId, reason: "cache-only", cachedVersion: node.leaseEpoch });
-			} else if (indexVersion !== node.leaseEpoch) {
-				counts.versionMismatch += 1;
-				found.push({ key: node.nodeId, reason: "version-mismatch", cachedVersion: node.leaseEpoch, indexVersion });
-			} else counts.matched += 1;
-		}
-		for (const node of indexNodes) {
-			if (cachedIds.has(node.nodeId)) continue;
-			counts.indexOnly += 1;
-			found.push({ key: node.nodeId, reason: "index-only", indexVersion: node.leaseEpoch });
+		for (const { surface, nodes } of held) {
+			counts.cacheNodes += nodes.length;
+			const cachedIds = new Set<string>();
+			for (const node of nodes) {
+				cachedIds.add(node.nodeId);
+				const indexVersion = indexed.get(node.nodeId);
+				if (indexVersion === undefined) {
+					counts.cacheOnly += 1;
+					found.push({ surface, key: node.nodeId, reason: "cache-only", cachedVersion: node.leaseEpoch });
+				} else if (indexVersion !== node.leaseEpoch) {
+					counts.versionMismatch += 1;
+					found.push({ surface, key: node.nodeId, reason: "version-mismatch", cachedVersion: node.leaseEpoch, indexVersion });
+				} else counts.matched += 1;
+			}
+			for (const node of indexNodes) {
+				if (cachedIds.has(node.nodeId)) continue;
+				counts.indexOnly += 1;
+				found.push({ surface, key: node.nodeId, reason: "index-only", indexVersion: node.leaseEpoch });
+			}
 		}
 		const mismatches = capped(found);
 		return { pair: "cache-index", graphId, verdict: mismatches.count > 0 ? "drift" : "clean", reason: null, layer: null, counts, mismatches };
@@ -460,13 +495,13 @@ function nodesOfEnvelope(raw: string): PairNode[] | null {
 }
 
 /**
- * The cache's graph view, read the way `ReadThroughCache.getOrLoad` reads it: the graph's generation, then the entry keyed by
- * that generation. Only `get` is called, so every read goes through the redis client's own gated path: an open breaker surfaces
- * as `BreakerOpenError` and the pair reports `unavailable`. `redis` is null when the cache is off.
+ * The cache's graph view under one surface, read the way `ReadThroughCache.getOrLoad` reads it: the graph's generation, then the
+ * entry keyed by that generation and surface. Only `get` is called, so every read goes through the redis client's own gated path:
+ * an open breaker surfaces as `BreakerOpenError` and the pair reports `unavailable`. `redis` is null when the cache is off.
  */
-export function pairCacheFrom(redis: CacheRedis | null, surface: string = PAIR_DEFAULT_SURFACE): PairCache {
+export function pairCacheFrom(redis: CacheRedis | null): PairCache {
 	return {
-		async cachedGraph(graphId) {
+		async cachedGraph(graphId, surface) {
 			if (redis === null) return { state: "disabled" };
 			const generation = (await redis.get(graphGenerationKey(graphId))) ?? "0";
 			const raw = await redis.get(cacheKey("graph-view", surface, generation, { graph_id: graphId }));
