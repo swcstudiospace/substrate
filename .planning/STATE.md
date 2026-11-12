@@ -2,8 +2,8 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 Phase 71 locally verified; Greptile remediation (71-05) gates green; human_needed: awaiting Desk Quality review; no phase signed off"
-stopped_at: "Phase 71 remediation ready for draft review on PR #199; Desk SendToAgent connector not mounted in the autonomous session, so the Desk Quality gate is unobserved. Phases 72-78 not started. v1.7 owner decisions open."
+status: "v1.8 Phase 71 locally verified; Greptile review of PR #199 pending; Desk Quality / Programming Lead review waived by the user 2026-11-12 (what=not_real, needs=greptile_only); phase 72 still human_needed for HARD-S2 credential clause and corpus proof disclosure (owner decisions)"
+stopped_at: "2026-11-12: Desk Quality gate waived by user (answers what=not_real, needs=greptile_only). Remaining open: Greptile review on PR #199 and PR #215; phase 72 owner decisions (HARD-S2, corpus proof disclosure); v1.7 owner decisions open."
 last_updated: "2026-11-01"
 last_activity: 2026-11-01
 last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); expiry pass moved to issue so discovery and the digest stay read-only; one full run 11623 pass, 0 fail; phase remains human_needed"

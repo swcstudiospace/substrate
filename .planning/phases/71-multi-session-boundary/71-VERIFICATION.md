@@ -9,11 +9,16 @@ behavior_unverified: 0
 behavior_unverified_items: []
 gaps: []
 overrides_applied: 0
-external_gate: "Desk Quality / Programming Lead Greptile review not observed; draft-review handoff remains required"
+external_gate: "Desk Quality / Programming Lead review WAIVED by the user on 2026-11-12 (answers what=not_real, needs=greptile_only). Remaining gate: Greptile review with no open threads, not yet observed."
 human_verification:
-  - item: "Complete the mandated draft-PR review through Desk Quality / Programming Lead"
-    expected: "Review observed, findings addressed, gate disposition recorded; unavailable/skipped/failed review is not a pass"
-    reason: "External review is a required delivery/sign-off gate, not established by local tests or independent source review"
+  - item: "Greptile review of the phase 71 remediation on PR #199 reaches 5/5 with no open threads"
+    expected: "Review observed; findings addressed; a FAILED, SKIPPED or unavailable review is not a pass"
+    reason: "Greptile is the only remaining delivery gate after the user's Desk waiver"
+    status: "open"
+  - item: "Local gates re-run 2026-11-12 at commit 033c9694 (docs-only change after code commit 067f094b)"
+    expected: "bunx tsc --noEmit exit 0; bun run lint exit 0 (1727 files); bun run check:phase-close exit 0; npm run test:py 341 passed"
+    reason: "Recorded as evidence for the waiver; full bun test was last run at 067f094b (11,901 pass, 0 fail, 282 skip)"
+    status: "passed"
 ---
 
 # Phase 71: Multi-Session Boundary — Independent Verification

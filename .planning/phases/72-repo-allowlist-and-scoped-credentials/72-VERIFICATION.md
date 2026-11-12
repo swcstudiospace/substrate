@@ -7,6 +7,7 @@ covered_files: [".env.example", ".planning/phases/72-repo-allowlist-and-scoped-c
 covered_digest: "v3:sha256:ca0ef38d90094db8d2329e825d321c589ce0e0ddf02fdd5d1ac4677af63d42f4"
 behavior_unverified: 3
 overrides_applied: 0
+desk_gate: "Desk Quality / Programming Lead review WAIVED by the user on 2026-11-12 (answers what=not_real, needs=greptile_only). Status stays human_needed: the two owner decisions below are not waived."
 re_verification:
   previous_status: gaps_found
   previous_score: 13/19

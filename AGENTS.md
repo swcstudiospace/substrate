@@ -10,7 +10,7 @@ Cursor cloud agents in this repository follow the rules below. Grok Bot is the `
 
 - **Draft PR only.** Open a draft pull request into the default branch. No merge: do not merge, enable auto-merge, force-push, or delete branches.
 - **No secrets.** Never print, commit, or echo tokens, keys, passphrases, or bus secrets. Reference environment variables by name only. Do not write tailnet names or internal hostnames into the repo, the pull request, or the session transcript.
-- **Greptile gate via Desk Quality.** Every pull request goes through the Greptile merge gate run by Desk Quality via Programming Lead. Do not claim merge-ready while any Greptile finding is unaddressed. A FAILED, SKIPPED, or unavailable review is a blocker to report, never a pass.
+- **Greptile gate.** Every pull request goes through the Greptile merge gate. Do not claim merge-ready while any Greptile finding is unaddressed. A FAILED, SKIPPED, or unavailable review is a blocker to report, never a pass. The Desk Quality / Programming Lead review was waived for this repository by the user on 2026-11-12 (answers: `what=not_real`, `needs=greptile_only`); Programming Lead belongs to the programming-desk and Grok Bot deployment, not to this codebase.
 
 ## Cursor Cloud specific instructions
 
