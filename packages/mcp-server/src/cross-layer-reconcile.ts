@@ -11,7 +11,8 @@
  *   - ledger -> cache: a forget that marked rows set the forget mark at or after its note, for as long as the mark is meant
  *     to live (`markTtlS`). An older forget may legitimately have let its mark expire.
  *   - index -> ledger: a forget mark the index set in the window (its `forgotten_at`, migration 47) must have a `memory.forget`
- *     note for its forget id that names the entry. A window or note read short is not judged.
+ *     note for its forget id that names the entry, or a `reconcile.applied` note that marked it: a repair stamps `forgotten_at` with
+ *     the repair's time, so its forget note may be older than the window. A window or note read short is not judged.
  *   - cache -> index: a forget mark present in the cache and not older than the latest forget must find that forget in the
  *     index: an entry the index still holds carries the forget's marker.
  * The index -> ledger and cache -> index findings are report-only: they add no `RepairItem`, so the repair flow never acts on
@@ -184,8 +185,8 @@ export type PlanRun =
 	| { ok: true; report: CrossLayerReport; planId: string | null; items: RepairItem[]; refused: "incomplete-coverage" | "too-many-items" | null }
 	| Failure;
 
-/** A read of the layers and the repairs it calls for, with the digest a stored plan must match. Writes nothing. */
-export type PreviewRun = { ok: true; report: CrossLayerReport; items: RepairItem[]; itemsSha256: string } | Failure;
+/** A read of the layers and the repairs it calls for. Writes nothing. */
+export type PreviewRun = { ok: true; report: CrossLayerReport; items: RepairItem[] } | Failure;
 
 export type SkipReason = "absent" | "already-marked" | "forgotten-by-other" | "superseded" | "raced";
 
@@ -269,12 +270,17 @@ interface ForgetFact {
 	namesAll: boolean;
 }
 
-type NoteRead = { kind: "other" } | { kind: "malformed" } | { kind: "forget"; fact: ForgetFact };
+type NoteRead = { kind: "other" } | { kind: "malformed" } | { kind: "forget"; fact: ForgetFact } | { kind: "applied"; marked: string[] };
 
 function readNote(note: LedgerNote): NoteRead {
 	const payload = note.payload;
 	// A payload that did not decode could be a forget that cannot be judged, so it is malformed, not ignored.
 	if (payload === null) return { kind: "malformed" };
+	if (payload.action === RECONCILE_APPLIED_ACTION) {
+		// The entries a repair marked. A list that does not read as entry ids is malformed: the repaired rows cannot be known.
+		const marked = payload.marked;
+		return Array.isArray(marked) && marked.every(isEntryId) ? { kind: "applied", marked } : { kind: "malformed" };
+	}
 	if (payload.action !== FORGET_ACTION) return { kind: "other" };
 	const atMs = Date.parse(note.ts);
 	const { forget_id: forgetId, counts, entry_count: entryCount, entry_ids: entryIds } = payload;
@@ -312,10 +318,13 @@ async function observe(deps: ReconcileDeps, options: ReconcileOptions): Promise<
 
 	let malformed = 0;
 	const facts: ForgetFact[] = [];
+	// The entries a repair marked in the window: their index marks are the repair's, not the forget's.
+	const repaired = new Set<string>();
 	for (const note of window.notes) {
 		const read = readNote(note);
 		if (read.kind === "malformed") malformed += 1;
 		else if (read.kind === "forget") facts.push(read.fact);
+		else if (read.kind === "applied") for (const entryId of read.marked) repaired.add(entryId);
 	}
 	facts.sort((left, right) => left.atMs - right.atMs || (left.noteId < right.noteId ? -1 : left.noteId > right.noteId ? 1 : 0));
 
@@ -366,13 +375,15 @@ async function observe(deps: ReconcileDeps, options: ReconcileOptions): Promise<
 	if (!window.truncated && malformed === 0) {
 		// An entry is unnoted only when no note in the window names it under ANY forget id: a later superseder or another forget
 		// holding it is consistent with the forget. A partial note of this same forget may name it past its kept ids.
+		// A repair marks a row with the forget it repairs, and stamps `forgotten_at` with the repair's time. Its forget note may be older
+		// than the window, so an entry a `reconcile.applied` note marked is the repair's, not an unnoted forget.
 		const namedEntries = new Set(facts.flatMap((fact) => fact.entryIds));
 		const partialForgets = new Set(facts.filter((fact) => !fact.namesAll).map((fact) => fact.forgetId));
 		for (const mark of marks.marks) {
 			// `markMemoryForgotten` writes only well-formed forget markers; any other value is not a forget mark and is not judged.
 			const forgetId = forgetIdOfMarker(mark.marker);
 			if (forgetId === null) continue;
-			if (namedEntries.has(mark.entryId) || partialForgets.has(forgetId)) continue;
+			if (namedEntries.has(mark.entryId) || partialForgets.has(forgetId) || repaired.has(mark.entryId)) continue;
 			reportOnly.push({ layer: "index", key: mark.entryId, reason: "unnoted-forget", forgetId, marker: mark.marker });
 		}
 	}
@@ -456,8 +467,9 @@ function repairItemsOf(observed: Observation, markTtlS: number): RepairItem[] {
 
 /**
  * Plan the repair of what the read found. Writes ONE plan record when there is something to repair on a complete read, and
- * returns its id, which `applyRepair` needs as its confirmation. Writes nothing when the layers agree, or when the read is
- * incomplete (the mismatches are still reported). A plan that is not stored is `plan-not-recorded`: nothing is repaired.
+ * returns its id, which `applyRepair` needs as its confirmation. Writes nothing when the layers agree on a complete read. An
+ * incomplete read is refused even when it shows no repair: a read short of its coverage cannot show that the layers agree. A plan
+ * that is not stored is `plan-not-recorded`: nothing is repaired.
  */
 export async function planRepair(deps: ReconcileDeps, options: ReconcileOptions): Promise<PlanRun> {
 	assertOptions(options);
@@ -465,8 +477,8 @@ export async function planRepair(deps: ReconcileDeps, options: ReconcileOptions)
 		const observed = await observe(deps, options);
 		const { report } = observed;
 		const items = repairItemsOf(observed, options.markTtlS);
-		if (items.length === 0) return { ok: true, report, planId: null, items, refused: null };
 		if (!report.coverage.complete) return { ok: true, report, planId: null, items: [], refused: "incomplete-coverage" };
+		if (items.length === 0) return { ok: true, report, planId: null, items, refused: null };
 		if (items.length > RECONCILE_PLAN_MAX_ITEMS) return { ok: true, report, planId: null, items: [], refused: "too-many-items" };
 
 		const plan = { items, itemsSha256: repairDigest(items), window: report.window };
@@ -491,15 +503,15 @@ export function repairDigest(items: readonly RepairItem[]): string {
 }
 
 /**
- * The repair a fresh read would plan, written nowhere: the items `planRepair` would record, with their digest. Empty when the
- * layers agree. `substrate reconcile --apply` compares this digest with the stored plan's before it applies anything.
+ * The repair a fresh read would plan, written nowhere: the items `planRepair` would record. Empty when the layers agree.
+ * `substrate reconcile --apply` checks these against the stored plan with `freshItemsWithinPlan` before it applies anything.
  */
 export async function previewRepair(deps: ReconcileDeps, options: ReconcileOptions): Promise<PreviewRun> {
 	assertOptions(options);
 	try {
 		const observed = await observe(deps, options);
 		const items = repairItemsOf(observed, options.markTtlS);
-		return { ok: true, report: observed.report, items, itemsSha256: repairDigest(items) };
+		return { ok: true, report: observed.report, items };
 	} catch (cause) {
 		return failureOf(cause);
 	}
@@ -550,6 +562,26 @@ function parseStoredPlan(payload: Record<string, unknown> | null): RepairItem[] 
 	if (parsed.some(isIndexMark) && !parsed.some(isCacheMark)) return null;
 	if (repairDigest(parsed) !== itemsSha256) return null;
 	return parsed;
+}
+
+/** The items of a ledger note that is a stored reconcile plan, or null when it is not one or its items do not parse. */
+export function storedPlanItems(note: LedgerNote | null): RepairItem[] | null {
+	if (note === null || note.kind !== "note") return null;
+	return parseStoredPlan(note.payload);
+}
+
+/**
+ * Whether a fresh read's repairs are the stored plan's, or a part of them. A partly applied plan drops its applied items out of a
+ * fresh read, so the rest still matches. An item the plan never held, or one whose content changed, is not the plan.
+ */
+export function freshItemsWithinPlan(stored: readonly RepairItem[], fresh: readonly RepairItem[]): boolean {
+	return fresh.every((item) => stored.some((planned) => sameItem(planned, item)));
+}
+
+function sameItem(left: RepairItem, right: RepairItem): boolean {
+	if (isIndexMark(left) && isIndexMark(right)) return left.entryId === right.entryId && left.forgetId === right.forgetId && left.marker === right.marker;
+	if (isCacheMark(left) && isCacheMark(right)) return left.key === right.key && left.ttlS === right.ttlS;
+	return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +687,7 @@ export interface LedgerReads {
 	readEvent(id: string): Promise<Record<string, unknown> | null>;
 }
 
-/** The write the ledger adapter needs from `Substrate`: a note goes through its redacting, hash-chained path. */
+/** The write the ledger adapter needs: one `note` through the ledger's chained, redacting write path (`Substrate.emit`, or the repair run's direct append). */
 export interface NoteWriter {
 	emit(input: { surface: Surface; kind: "note"; summary: string; payload: Record<string, unknown> }): Promise<{ stored: boolean; event: { id: string } }>;
 }
@@ -679,7 +711,7 @@ function toNote(row: Record<string, unknown>): LedgerNote {
 }
 
 /**
- * A `ReconcileLedger` over the ledger's read path (`GreptimeClient`) and its write path (`Substrate.emit`). Reads ask for the
+ * A `ReconcileLedger` over the ledger's read path (`GreptimeClient`) and the `NoteWriter` given for its write path. Reads ask for the
  * payload, so a forget note can be judged. A row whose ts does not read as a time fails the read rather than being dropped.
  */
 export function ledgerFromSubstrate(surface: Surface, reads: LedgerReads, writer: NoteWriter): ReconcileLedger {

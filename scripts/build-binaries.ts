@@ -13,13 +13,13 @@
  * any target. The matrix job in .github/workflows/binaries.yml runs one target
  * per runner. A failed build is reported by target and makes the script exit 1.
  *
- * Standalone `substrate` REFUSES `index`, `ledger` and `consistency` (the chosen fix; the
+ * Standalone `substrate` REFUSES `index`, `ledger`, `consistency` and `reconcile` (the chosen fix; the
  * alternative, bundling their runners and a Bun interpreter, was not straightforward here).
  * Those commands spawn a server-side `.ts` runner beside the source tree with `process.execPath`.
  * A compiled binary has neither the runner file nor a Bun interpreter, so it cannot run them.
  * The standalone `substrate` is therefore compiled from a generated guard entry
  * (`dist/entry/substrate.ts`) that looks at argv[2] before importing the CLI. For `index`,
- * `ledger` and `consistency` it writes `substrate <command> is not available in the standalone
+ * `ledger`, `consistency` and `reconcile` it writes `substrate <command> is not available in the standalone
  * binary: …` to stderr and exits 2 without importing anything. Every other command imports
  * packages/cli/src/index.ts unchanged. Source runs execute packages/cli/src/index.ts directly and
  * are unaffected. substrate-mcp has none of these commands and compiles from its entry as before.
@@ -45,6 +45,7 @@ export const STANDALONE_REFUSALS = [
 	{ command: "index", runner: "packages/mcp-server/src/index-run.ts or index-sweep-run.ts" },
 	{ command: "ledger", runner: "packages/mcp-server/src/ledger-run.ts" },
 	{ command: "consistency", runner: "packages/mcp-server/src/consistency-run.ts" },
+	{ command: "reconcile", runner: "packages/mcp-server/src/cross-layer-reconcile-repair-run.ts" },
 ] as const;
 
 /** Where the generated guard entries are written, relative to the repository root. Build output, under dist/. */

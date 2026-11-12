@@ -2806,17 +2806,20 @@ export class IndexStore implements MemoryStore {
 		// `in ${sql(array)}` is the form Bun's SQL expands to a value list. Passing
 		// the array straight to `any()` stringifies it into a malformed array literal.
 		return this.plane("memory.brief", async () => {
+			// A `graph:` row is served only while its graph has a graph_index row. A graph that is gone, or was never registered, names no
+			// graph, so none of its entries is read here. memoryReplyInGrant drops such a row from a search for the same reason.
 			const rows = (await this.sql`
 				select *
 				from memory_entries
 				where scope in ${this.sql(scopes)}
 				  and superseded_by is null
+				  and (scope not like 'graph:%' or exists (select 1 from graph_index g where g.graph_id = substring(memory_entries.scope from 7)))
 				order by created desc
 				limit ${limit}`) as Array<Record<string, unknown>>;
 			const entries = await this.servable(rows, read);
 			// A `global` row names no repository in its scope, so the scope list alone let an ungranted repository's row through: the row's own repository is checked too.
-			// A `graph:` row is checked against its graph by the caller before the page is read (scopedBriefRefusal), so here only its own repository is judged: a graph row
-			// that names no repository is kept, as memoryReplyInGrant keeps it.
+			// A `graph:` row is judged here by its own repository only: a graph row that names no repository is kept, as memoryReplyInGrant keeps it.
+			// Its graph is checked by the query above, and the caller's grant on that graph by scopedBriefRefusal before the page is read.
 			const granted = read?.granted;
 			return granted === undefined ? entries : entries.filter((entry) => grantedToCaller(entry.scope?.startsWith("graph:") ? undefined : entry.scope, entry.repo, granted));
 		});

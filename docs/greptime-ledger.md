@@ -989,11 +989,11 @@ forgets. Its scheduled entry is `packages/mcp-server/src/cross-layer-reconcile-r
   1 for an incomplete read or a layer that could not be read, with no mismatch proven.
 - **Repair is a separate, confirmed step.** `planRepair` writes one `reconcile.plan` note whose event id is the plan id,
   and only for a complete read with something to repair. `applyRepair({ planId, confirm })` refuses unless `confirm`
-  equals `planId` and the stored plan's digest matches. It then marks only the planned entries (`markMemoryForgotten`,
+  equals `planId`, and each item a fresh read yields is one the stored plan holds. It then marks only the planned entries (`markMemoryForgotten`,
   which never overwrites another superseder), sets the cache mark if the plan has one, and records a `reconcile.applied`
   note. A repeat apply marks nothing new. Repair follows the corpus delete rules (`corpus/plan.ts`): scope, never
   overwrite, never remove (a forget keeps the row), planned keys only.
-- **Manual path.** `substrate reconcile` (no flag, or `--plan`) runs the comparison, records the plan as one `reconcile.plan` note, and prints it with its id; it repairs nothing. `substrate reconcile --apply PLAN_ID --confirm` applies that plan. It refuses without `--confirm`, and it refuses unless a fresh read of the layers produces the stored plan's digest. The CLI spawns `packages/mcp-server/src/cross-layer-reconcile-repair-run.ts`, which calls `planRepair`, `previewRepair` and `applyRepair`.
+- **Manual path.** `substrate reconcile` (no flag, or `--plan`) runs the comparison, records the plan as one `reconcile.plan` note, and prints it with its id; it repairs nothing. `substrate reconcile --apply PLAN_ID --confirm` applies that plan. It refuses without `--confirm`, and it refuses if a fresh read of the layers holds an item the stored plan does not, or an altered one; items already applied drop out, so a partial apply can be retried. The CLI runs `packages/mcp-server/src/cross-layer-reconcile-repair-run.ts`, which calls `planRepair`, `previewRepair` and `applyRepair`, and writes its notes without opening the live queues.
 - **Not covered.** An index forget with no ledger note is not judged: the index has no window to read it by. A repair
   does not re-send a Hindsight document deletion; a plane document a repaired entry still holds is the plane's pending
   work, as it is for a forget that stopped part way.

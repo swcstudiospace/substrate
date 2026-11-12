@@ -7,12 +7,13 @@
  *
  * `--plan` (the default) reads the ledger window, the index and the cache as the scheduled tick does, prints what it found,
  * and prints the repairs it calls for. `planRepair` records them as ONE `reconcile.plan` note whose event id is the plan id;
- * nothing is repaired. `--apply PLAN_ID --confirm` applies a printed plan, and only when a fresh read of the layers yields the
- * digest the stored plan recorded. Otherwise it refuses and marks nothing. The marks, the cache invalidation and the
- * `reconcile.applied` note are `applyRepair`'s.
+ * nothing is repaired. `--apply PLAN_ID --confirm` applies a printed plan. A fresh read of the layers must hold only repairs the
+ * plan holds (a repair an earlier, partial apply made is not in it, and that is fine); a new or altered repair refuses and marks
+ * nothing. The marks, the cache invalidation and the `reconcile.applied` note are `applyRepair`'s.
  *
  * Lives in this package, like `cross-layer-reconcile-run.ts`: the store clients and their credentials are read here and
- * nowhere else (the store lock). The CLI package spawns this file.
+ * nowhere else (the store lock). The CLI package spawns this file. It opens no `Substrate`: one would load and drain the live
+ * event buffer and retain outbox beside the running server, so the note writes are direct ledger appends (`directNoteWriter`).
  *
  * Exit codes: 0 nothing to repair, or applied; 1 failed: a layer could not be read, the read was incomplete, the plan id is
  * not a reconcile plan, the plan no longer matches a fresh read, or the apply's own record or cache mark was not confirmed;
@@ -20,25 +21,25 @@
  */
 import { createReadThroughCache } from "./cache.ts";
 import { loadConfig } from "./config.ts";
-import { isRecord } from "./corpus/validate.ts";
 import { EXIT, reconcileOptionsFor, renderReport } from "./cross-layer-reconcile-run.ts";
 import {
 	type ApplyRun,
-	type LedgerNote,
+	type NoteWriter,
 	type PlanRun,
-	RECONCILE_PLAN_ACTION,
 	type ReconcileDeps,
 	type ReconcileOptions,
 	type RepairItem,
 	applyRepair,
+	freshItemsWithinPlan,
 	ledgerFromSubstrate,
 	planRepair,
 	previewRepair,
+	storedPlanItems,
 } from "./cross-layer-reconcile.ts";
-import { GreptimeClient } from "./greptime.ts";
+import { normalizeEvent } from "./event.ts";
+import { GreptimeClient, IngestNotRecorded } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { redact } from "./redact.ts";
-import { Substrate } from "./service.ts";
 
 const USAGE = "usage: cross-layer-reconcile-repair-run.ts [--plan] | --apply PLAN_ID --confirm\n";
 
@@ -54,11 +55,31 @@ export function parseRepairArgs(argv: readonly string[]): RepairArgs {
 	return { mode: "apply", planId };
 }
 
-/** The digest a stored plan note carries over its items, or null when the note is not a reconcile plan. */
-export function storedPlanDigest(note: LedgerNote | null): string | null {
-	if (note === null || note.kind !== "note" || note.payload === null || note.payload.action !== RECONCILE_PLAN_ACTION) return null;
-	const plan = note.payload.plan;
-	return isRecord(plan) && typeof plan.itemsSha256 === "string" ? plan.itemsSha256 : null;
+/**
+ * The ledger write for the repair run's notes (`reconcile.plan`, `reconcile.applied`), without a `Substrate`. A `Substrate` loads the
+ * live event buffer and retain outbox from disk and starts their drain timers, and this process runs beside the server: two writers
+ * over those files would erase or double-deliver what the server has parked. So the note is appended here the way `Substrate.emit`
+ * appends a sessionless note: `normalizeEvent` redacts and hash-chains it, the append-mode check refuses a ledger that may drop rows
+ * unless the operator accepted that, and one `insertEvent` writes it. Nothing is parked: a write that fails throws, the reconcile
+ * reports the ledger as unavailable, the plan is not recorded, and nothing is repaired.
+ */
+function directNoteWriter(greptime: GreptimeClient, allowDeduplicatingLedger: boolean): NoteWriter {
+	return {
+		async emit(input) {
+			const event = normalizeEvent(input, null);
+			const appendOnly = await greptime.ensureAppendMode().catch(() => null);
+			if (appendOnly !== true && !allowDeduplicatingLedger) {
+				throw new Error("refusing to append: agent_events is not confirmed in append_mode (SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true appends anyway)");
+			}
+			try {
+				await greptime.insertEvent(event);
+			} catch (cause) {
+				// The row is stored and only its ingest record is unconfirmed: the note exists, as `Substrate.emit` reports it.
+				if (!(cause instanceof IngestNotRecorded)) throw cause;
+			}
+			return { stored: true, event: { id: event.id } };
+		},
+	};
 }
 
 function describe(item: RepairItem): string {
@@ -92,12 +113,13 @@ async function runPlan(deps: ReconcileDeps, options: ReconcileOptions): Promise<
 }
 
 async function runApply(deps: ReconcileDeps, options: ReconcileOptions, planId: string): Promise<number> {
-	const planned = storedPlanDigest(await deps.ledger.readEvent(planId));
+	const planned = storedPlanItems(await deps.ledger.readEvent(planId));
 	if (planned === null) {
-		process.stderr.write(`[cross-layer-reconcile] no reconcile plan has id ${planId}; nothing was applied\n`);
+		process.stderr.write(`[cross-layer-reconcile] no valid reconcile plan has id ${planId}; nothing was applied\n`);
 		return EXIT.failed;
 	}
-	// The fresh read writes nothing. Its digest must be the one the stored plan recorded, or the plan is stale.
+	// The fresh read writes nothing. Its repairs must all be the stored plan's. The ones an earlier, partial apply already made are not
+	// in it, so a retry proceeds for the rest; a repair that is new or altered refuses.
 	const fresh = await previewRepair(deps, options);
 	if (!fresh.ok) {
 		process.stderr.write(`[cross-layer-reconcile] fresh read failed (${fresh.reason}): ${fresh.detail}; nothing was applied\n`);
@@ -108,8 +130,8 @@ async function runApply(deps: ReconcileDeps, options: ReconcileOptions, planId: 
 		process.stderr.write("[cross-layer-reconcile] the fresh read is incomplete, so the plan cannot be confirmed; nothing was applied\n");
 		return EXIT.failed;
 	}
-	if (fresh.itemsSha256 !== planned) {
-		process.stderr.write(`[cross-layer-reconcile] plan ${planId} no longer matches a fresh read of the layers; nothing was applied. Plan again with \`substrate reconcile\`.\n`);
+	if (!freshItemsWithinPlan(planned, fresh.items)) {
+		process.stderr.write(`[cross-layer-reconcile] plan ${planId} no longer matches a fresh read of the layers: a repair it does not hold has appeared or changed; nothing was applied. Plan again with \`substrate reconcile\`.\n`);
 		return EXIT.failed;
 	}
 	const run: ApplyRun = await applyRepair(deps, { planId, confirm: planId });
@@ -150,10 +172,9 @@ async function main(argv: string[]): Promise<number> {
 	const index = new IndexStore(config.postgresUrl);
 	// The cache the scheduled tick reads. Its generations and forget mark are what `applyRepair` invalidates.
 	const cache = createReadThroughCache(config);
-	// The plan record is a write: it goes through the substrate's own redacting, hash-chained path, as the ledger archive note does.
-	const substrate = new Substrate(config, { greptime });
+	// The note writes go straight to the ledger. A `Substrate` here would load and drain the live queue files (see `directNoteWriter`).
 	try {
-		const deps: ReconcileDeps = { ledger: ledgerFromSubstrate("substrate", greptime, substrate), index, cache, now: () => Date.now() };
+		const deps: ReconcileDeps = { ledger: ledgerFromSubstrate("substrate", greptime, directNoteWriter(greptime, config.allowDeduplicatingLedger)), index, cache, now: () => Date.now() };
 		const options = reconcileOptionsFor(config);
 		return parsed.mode === "plan" ? await runPlan(deps, options) : await runApply(deps, options, parsed.planId);
 	} catch (cause) {
