@@ -573,8 +573,11 @@ export function storedPlanItems(note: LedgerNote | null): RepairItem[] | null {
 /**
  * Whether a fresh read's repairs are the stored plan's, or a part of them. A partly applied plan drops its applied items out of a
  * fresh read, so the rest still matches. An item the plan never held, or one whose content changed, is not the plan.
+ * An empty fresh read is not a retry of a non-empty plan: it could mean every item is applied, but that is the `reconcile.applied`
+ * note's record to show, not this function's, so the plan is refused and must be planned again.
  */
 export function freshItemsWithinPlan(stored: readonly RepairItem[], fresh: readonly RepairItem[]): boolean {
+	if (fresh.length === 0) return stored.length === 0;
 	return fresh.every((item) => stored.some((planned) => sameItem(planned, item)));
 }
 

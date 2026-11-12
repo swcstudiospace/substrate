@@ -13,7 +13,7 @@ const ACTIONS = [...RESERVED_NOTE_ACTIONS];
 describe("reserved note actions", () => {
 	test("the one list names every action a reader treats as authoritative", () => {
 		expect(ACTIONS.sort()).toEqual(
-			["anchor.reanchor", "anchor.signer.rotate", "docs.canary", "docs.corpus.root", "memory.forget", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
+			["anchor.reanchor", "anchor.signer.rotate", "docs.canary", "docs.corpus.root", "memory.forget", "reconcile.applied", "reconcile.plan", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
 		);
 		expect(reservedActionOf({ action: "session.checkpoint" })).toBe("session.checkpoint");
 		expect(reservedActionOf({ action: "docs.ingest" })).toBeNull();

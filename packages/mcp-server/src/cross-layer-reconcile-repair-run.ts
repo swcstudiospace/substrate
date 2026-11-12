@@ -17,13 +17,14 @@
  *
  * Exit codes: 0 nothing to repair, or applied; 1 failed: a layer could not be read, the read was incomplete, the plan id is
  * not a reconcile plan, the plan no longer matches a fresh read, or the apply's own record or cache mark was not confirmed;
- * 2 usage or missing configuration; 3 a plan was printed (the layers disagree).
+ * 2 usage or missing configuration; 3 the layers disagree: a plan was printed, or only report-only findings were read and nothing is planned for them.
  */
 import { createReadThroughCache } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { EXIT, reconcileOptionsFor, renderReport } from "./cross-layer-reconcile-run.ts";
 import {
 	type ApplyRun,
+	type Mismatch,
 	type NoteWriter,
 	type PlanRun,
 	type ReconcileDeps,
@@ -86,6 +87,11 @@ function describe(item: RepairItem): string {
 	return item.action === "index-mark" ? `  index-mark ${item.entryId} (forget ${item.forgetId})` : `  cache-mark ${item.key} (ttl ${item.ttlS}s)`;
 }
 
+/** One finding the report names: its layer, key and reason. Report-only findings have no repair item. */
+function describeMismatch(mismatch: Mismatch): string {
+	return `  ${mismatch.layer} ${mismatch.key} (${mismatch.reason})`;
+}
+
 const REFUSED: Record<"incomplete-coverage" | "too-many-items", string> = {
 	"incomplete-coverage": "the read is incomplete, so nothing is planned from it",
 	"too-many-items": "the repairs exceed one plan's size, so nothing is planned",
@@ -103,8 +109,16 @@ async function runPlan(deps: ReconcileDeps, options: ReconcileOptions): Promise<
 		return EXIT.failed;
 	}
 	if (run.planId === null) {
-		process.stdout.write("nothing to repair: the layers agree\n");
-		return EXIT.clean;
+		if (run.report.mismatches.count === 0) {
+			process.stdout.write("nothing to repair: the layers agree\n");
+			return EXIT.clean;
+		}
+		// Report-only findings have no repair, so there is no plan id. The layers still disagree, so this is not clean.
+		const { count, items } = run.report.mismatches;
+		for (const mismatch of items) process.stdout.write(`${describeMismatch(mismatch)}\n`);
+		if (count > items.length) process.stdout.write(`  ... ${count - items.length} more not named\n`);
+		process.stdout.write("nothing to repair: the findings above are report-only, and the layers disagree\n");
+		return EXIT.mismatch;
 	}
 	process.stdout.write(`plan ${run.planId}: ${run.items.length} repair(s) recorded as a reconcile.plan note; nothing repaired yet\n`);
 	for (const item of run.items) process.stdout.write(`${describe(item)}\n`);
@@ -131,7 +145,7 @@ async function runApply(deps: ReconcileDeps, options: ReconcileOptions, planId: 
 		return EXIT.failed;
 	}
 	if (!freshItemsWithinPlan(planned, fresh.items)) {
-		process.stderr.write(`[cross-layer-reconcile] plan ${planId} no longer matches a fresh read of the layers: a repair it does not hold has appeared or changed; nothing was applied. Plan again with \`substrate reconcile\`.\n`);
+		process.stderr.write(`[cross-layer-reconcile] plan ${planId} no longer matches a fresh read of the layers: nothing is left to apply, or a repair it does not hold has appeared or changed; nothing was applied. Plan again with \`substrate reconcile\`.\n`);
 		return EXIT.failed;
 	}
 	const run: ApplyRun = await applyRepair(deps, { planId, confirm: planId });
