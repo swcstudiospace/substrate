@@ -230,6 +230,12 @@ async function checkoutRepoOf(root: string): Promise<string | null> {
 export const DATASET_REPOS: Readonly<Record<string, string>> = {
 	"agent-substrate": "swcstudiospace/agent-substrate",
 	substrate: "swcstudiospace/substrate",
+	"programming-desk": "swcstudiospace/programming-desk",
+	kanbanos: "swcstudiospace/kanbanos",
+	desklanes: "swcstudiospace/desklanes",
+	clippyos: "swcstudiospace/clippyos",
+	auctioning: "swcstudiospace/auctioning",
+	"agent-skills": "swcstudiospace/agent-skills",
 };
 
 /** The identity a dataset's records are keyed under: its mapped repository, or its name when none is mapped. */

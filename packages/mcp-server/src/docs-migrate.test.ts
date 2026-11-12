@@ -32,6 +32,8 @@ const NOTES_BODY = "# Notes\n\nReplayed from the archive.\n";
 const EXTRA = "docs/extra.md";
 const EXTRA_BODY = "# Extra\n\nA page pinned to its own commit.\n";
 const EXTRA_COMMIT = "0f1e2d3c4b5a6978";
+const DESK = "docs/desk.md";
+const DESK_BODY = "# Desk\n\nA sibling dataset's page, replayed under its mapped repository.\n";
 const QUERIES: ArchiveQuery[] = [
 	{ id: "q-01", question: "where is the plan?" },
 	{ id: "q-02", question: "who reads the plan?" },
@@ -70,9 +72,9 @@ interface Fixture {
 /**
  * A production docs state holding the plan's LightRAG record (already matched by the plane), and the RAGFlow-era notes
  * record at version 3, then the archive of both. `extraRecords` adds archived records; `undocumented` adds a RAGFlow
- * document with no commit, which the replay cannot reproduce.
+ * document with no commit, which the replay cannot reproduce; `desk` adds an archived programming-desk page at the same commit.
  */
-async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
+async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; desk?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
 	const root = scratchDir();
 	const stateFile = join(root, "docs-ingest.json");
 	const fake = new RagflowFake();
@@ -89,10 +91,14 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 		ingested_at: "2026-10-28T00:00:00.000Z",
 		backend: "ragflow",
 	});
+	const deskId = fake.datasets.find((dataset) => dataset.name === "programming-desk")?.id ?? "";
+	if (options.desk === true && deskId === "") throw new Error("the RAGFlow fake lists no programming-desk dataset");
+	const desk: Array<[string, IngestRecord]> = options.desk === true ? [[`${deskId}::${sourceOf(DESK)}`, { sha: shaOf(DESK_BODY), dataset_id: deskId, source_url: sourceOf(DESK), document_id: "ragflow-desk", version: 1 }]] : [];
 	const records = new Map<string, IngestRecord>([
 		[`lightrag::${PLANE_REPO}::${sourceOf(PLAN)}`, { sha: shaOf(PLAN_BODY), dataset_id: PLANE_REPO, source_url: sourceOf(PLAN), document_id: "doc-plan", version: 1 }],
 		[`${ragflowId}::${sourceOf(NOTES)}`, { sha: shaOf(NOTES_BODY), dataset_id: ragflowId, source_url: sourceOf(NOTES), document_id: "ragflow-notes", version: 3 }],
 		...(options.extraRecords ?? []),
+		...desk,
 		...(options.extra === undefined ? [] : [[`${ragflowId}::${sourceOf(EXTRA)}`, { sha: shaOf(EXTRA_BODY), dataset_id: ragflowId, source_url: sourceOf(EXTRA), document_id: "ragflow-extra", version: 1 }] as [string, IngestRecord]]),
 	]);
 	await saveIngestRecords(stateFile, records, versions);
@@ -111,10 +117,14 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 	if (options.extra !== undefined) {
 		fake.documents["ragflow-extra"] = { id: "ragflow-extra", dataset_id: ragflowId, name: "docs__extra.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(EXTRA), commit: options.extra.commit, heading_path: "Extra" } };
 	}
+	if (options.desk === true) {
+		fake.documents["ragflow-desk"] = { id: "ragflow-desk", dataset_id: deskId, name: "docs__desk.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(DESK), commit: COMMIT, heading_path: "Desk" } };
+	}
 	fake.chunks[ragflowId] = [{ document_id: "ragflow-notes", document_name: "docs__notes.md", content: NOTES_BODY, source_url: sourceOf(NOTES), heading_path: "Notes", score: 0.9 }];
 
 	const bodies: Record<string, string> = { [`${COMMIT}:${PLAN}`]: PLAN_BODY, [`${COMMIT}:${NOTES}`]: NOTES_BODY };
 	if (options.extra !== undefined) bodies[`${options.extra.commit}:${EXTRA}`] = EXTRA_BODY;
+	if (options.desk === true) bodies[`${COMMIT}:${DESK}`] = DESK_BODY;
 	const readAtCommit: ReadAtCommit = (commit, path) => {
 		const body = bodies[`${commit}:${path}`];
 		return body === undefined ? null : Buffer.from(body, "utf8");
@@ -485,6 +495,39 @@ describe("docs-migrate: apply", () => {
 		expect(outcome.exit).toBe(0);
 		expect(outcome.report).toMatchObject({ rehearsal: true, state_file_persisted: false, cutover_event: null });
 		expect(readFileSync(fixture.stateFile, "utf8")).toBe(before);
+	});
+
+	test("a sibling dataset with archived documents replays under its mapped repository: it is not refused, and its record is keyed under that repository", async () => {
+		const fixture = await buildFixture({ desk: true });
+		const plane = matchedPlane();
+		const { io } = captureIo();
+		const readAt: ReadAtCommit = (commit, path) => (path === DESK && commit === COMMIT ? Buffer.from(DESK_BODY, "utf8") : REPLAY_READ(commit, path));
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				stateFile: fixture.stateFile,
+				config: CONFIG,
+				fetchImpl: plane.fetch,
+				partAFile: partAFile(fixture.root),
+				rehearsal: false,
+				datasets: ["programming-desk"],
+				checkoutRepo: PLANE_REPO,
+				readAtCommit: readAt,
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			io,
+		);
+		expect(outcome.exit).toBe(0);
+		const report = outcome.report as { datasets: Array<{ dataset: string; ingested: number; refused?: string }> };
+		expect(report.datasets).toMatchObject([{ dataset: "programming-desk", ingested: 1 }]);
+		expect(report.datasets[0]?.refused).toBeUndefined();
+		expect(plane.uploads).toEqual([DESK_BODY]);
+		expect(plane.names).toEqual([corpusDocumentName("swcstudiospace/programming-desk", DESK, shaOf(DESK_BODY))]);
+
+		const { records } = await loadIngestRecords(fixture.stateFile);
+		const key = `lightrag::swcstudiospace/programming-desk::${sourceOf(DESK)}`;
+		expect(records.get(key)).toMatchObject({ dataset_id: "swcstudiospace/programming-desk", document_id: "doc-up-1" });
 	});
 });
 
