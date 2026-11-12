@@ -1,10 +1,10 @@
 ---
 phase: 17-event-vocabulary-and-audit-policy
-verified: 2026-10-09T00:00:00Z
-status: passed
-score: 11/11 must-haves verified
-covered_files: [".planning/phases/17-event-vocabulary-and-audit-policy/17-01-PLAN.md", ".planning/phases/17-event-vocabulary-and-audit-policy/17-01-SUMMARY.md", ".planning/phases/17-event-vocabulary-and-audit-policy/17-02-PLAN.md", ".planning/phases/17-event-vocabulary-and-audit-policy/17-02-SUMMARY.md", ".planning/phases/17-event-vocabulary-and-audit-policy/17-03-PLAN.md", ".planning/phases/17-event-vocabulary-and-audit-policy/17-03-SUMMARY.md"]
-covered_digest: "v3:sha256:638666471a62972e3c874af64a0bd5d50369c8ca1e41e26ce3c8617ae260bbec"
+verified: 2026-11-12T08:25:40Z
+status: human_needed
+score: 10/11 must-haves verified
+covered_files: [".env.example", ".planning/milestones/v1.3-phases/17-event-vocabulary-and-audit-policy/17-01-PLAN.md", ".planning/milestones/v1.3-phases/17-event-vocabulary-and-audit-policy/17-01-SUMMARY.md", ".planning/milestones/v1.3-phases/17-event-vocabulary-and-audit-policy/17-02-PLAN.md", ".planning/milestones/v1.3-phases/17-event-vocabulary-and-audit-policy/17-02-SUMMARY.md", ".planning/milestones/v1.3-phases/17-event-vocabulary-and-audit-policy/17-03-PLAN.md", ".planning/milestones/v1.3-phases/17-event-vocabulary-and-audit-policy/17-03-SUMMARY.md", "docs/event-vocabulary.md", "docs/mcp-audit.md", "docs/swarm-correlation.md", "package.json", "packages/audit/src/policy.test.ts", "packages/audit/src/policy.ts", "packages/mcp-server/src/authority.test.ts", "packages/mcp-server/src/event-sources.test.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/types.ts", "packages/mcp-server/src/vocabulary-lock.test.ts", "scripts/phase-close-check.test.ts", "scripts/phase-close-check.ts", "scripts/vocabulary-smoke.test.ts", "scripts/vocabulary-smoke.ts"]
+covered_digest: "v3:sha256:1c433f939a2d3f3cbba2c7f20e15f17bfd0c8f60e1d2810553c8687f155cb407"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -13,14 +13,22 @@ re_verification:
   gaps_closed: []
   gaps_remaining: []
   regressions: []
+advisory: []
+human_verification:
+  - test: "Run the Phase 16 harness live: `rehearsal up --name <name> --port 0`, then `bun run smoke:vocabulary` against it, then `rehearsal down`."
+    expected: "Every EVENT_SOURCES row stored with HTTP 202, 0 refusals, all rows read back, and teardown leaves no containers or run dir. Confirm the expected count against the current EVENT_SOURCES table."
+    why_human: "Truth 10 is a wire-level proof against running harness containers. The verifier does not start services (Step 7b). The 2026-10-09 transcript predates later commits and is not evidence for HEAD."
+  - test: "Confirm that the 15 reviewed swarm surfaces added after phase 17 (swarm-a16-cloud through swarm-a30-custody, listed in REVIEWED_SURFACE_ADDITIONS in scripts/phase-close-check.ts) count toward this phase's SURFACES contract."
+    expected: "Accept: SURFACES = 42 at HEAD (v1.2 list + 15 swarm surfaces + substrate) is the current baseline. Reject: SC2 is literal (v1.2 + substrate = 27) and the additions need a fix."
+    why_human: "The phase text says 27. The code and vocabulary-lock test now pin 42 by a later reviewed decision. Which one governs is an operator call, not a code check."
 ---
 
 # Phase 17: Event vocabulary and audit policy Verification Report
 
 **Phase Goal:** Every event source v1.3 adds lands on the existing vocabulary, decided and documented once in a reviewed PR, so no later phase adds an event kind; the audit policy records whether each planned tool fails open or closed.
-**Verified:** 2026-10-09
-**Status:** passed
-**Re-verification:** Yes — after rebase onto new `main` (`9ddfc77`, PR #23 merge containing PR #22 identity bridge, Phase 16 #24, PR #23 pinned releases) with p17 commits replayed on top, plus `69272f1` fixing main's tsc error. Prior verification (passed 11/11 at `20687f1`) predates the rebase; every truth below was re-checked against HEAD `69272f1`.
+**Verified:** 2026-11-12T08:25:40Z
+**Status:** human_needed
+**Re-verification:** Yes — re-run at HEAD `33c400d1`. The prior report (2026-10-09, passed 11/11 at `69272f1`) predates later commits. Every truth below was re-checked against the current code.
 
 ## Goal Achievement
 
@@ -28,92 +36,76 @@ re_verification:
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | EVENT_KINDS equals its v1.2 literal (12, ordered) and SURFACES equals v1.2 literal plus `substrate` last (27, ordered) under plain bun test | ✓ VERIFIED | `vocabulary-lock.test.ts` 2 pass; direct import read: kinds=12, surfaces=27, last=`substrate` |
-| 2 | Every EVENT_SOURCES sample passes normalizeEvent unchanged in kind, surface and payload, host-job rows on fixed `substrate` | ✓ VERIFIED | `event-sources.test.ts` 46 pass — round-trip deep-equal, coverage, repo-rule, no-content, surface-rule |
-| 3 | A `substrate` token resolves to `substrate`, emits as `substrate`, refused otherwise on /events and via attributedSurface; other non-swarm tokens keep body-first attribution | ✓ VERIFIED | `authority.test.ts` 36 pass; `mcp.ts` attributedSurface wiring intact (32 substrate/attributedSurface refs) |
-| 4 | Doc marked table and table name same ids, kinds, surfaces, actions | ✓ VERIFIED | Drift test compares kind+surface+actions per row; markers `<!-- event-sources:start/end -->` at `docs/event-vocabulary.md:51/92` |
-| 5 | Every roadmap source has ≥1 row; no periodic row carries repo | ✓ VERIFIED | Prefix guards for `skills.sync`, `dispatch.`, `lanea.`, `mirror.`, `dod.`, `lease.`; direct read: 27 emitting + 9 silent rows |
-| 6 | Each of 8 planned tools explicitly in decided set, absent from other, auditMode returns decided mode | ✓ VERIFIED | `policy.test.ts` 14 pass via independent PLANNED_V13 literal; `policy.ts` shows 3 fail-closed + 5 fail-open planned names |
-| 7 | Every served registerTool and auditedRest name sits in exactly one set | ✓ VERIFIED | Scan guard test passes; 19 `registerTool` calls in `mcp.ts`, `auditedRest` route guard in `server.ts` |
-| 8 | Audit docs record planned tools by phase with reasons and link vocabulary doc | ✓ VERIFIED | `docs/mcp-audit.md:235` links event-vocabulary; `swarm-correlation.md:169` link sentence; store-lock 18 pass |
-| 9 | check:phase-close exits 0 here, 2 on missing lock/absent baseline, 1 with diff on any kind/surface change | ✓ VERIFIED | **Re-run by this verifier** at HEAD: exit 0, 80 pass, 12 kinds vs ab62c91, surfaces 27 (baseline + substrate) |
-| 10 | One sample per EVENT_SOURCES row stored over wire, zero refusals, read back N/N | ✓ VERIFIED | **Re-run live by this verifier** on own harness `p17-verify2` (port 0, commit 69272f1): 27/27 stored 202, refusals 0, 27/27 read back, 28/28 checks passed; `rehearsal down` removed containers, no leftovers |
-| 11 | Both package.json scripts resolve; teardown leaves no container or run dir | ✓ VERIFIED | `smoke:vocabulary` + `check:phase-close` entries confirmed; teardown observed live this run (pid stopped, 2 containers removed) |
+| 1 | EVENT_KINDS equals its v1.2 literal (12, ordered) and SURFACES equals the v1.2 list plus `substrate` last | ✓ VERIFIED (drift noted) | `types.ts:69-82` EVENT_KINDS = 12, identical to `git show ab62c91:packages/mcp-server/src/types.ts` lines 50-63. `types.ts:45-62` SURFACES ends with `"substrate"`. **Drift:** SURFACES is now 42, not 27. The 15 extra entries are the later reviewed swarm additions `swarm-a16-cloud` … `swarm-a30-custody` (`scripts/phase-close-check.ts` `REVIEWED_SURFACE_ADDITIONS`). See human item 2. |
+| 2 | Every EVENT_SOURCES sample passes normalizeEvent unchanged in kind, surface and payload, host-job rows on fixed `substrate` | ✓ VERIFIED | `event-sources.test.ts` passes in the 8-file run below (386 pass across 8 files, 0 fail). |
+| 3 | A `substrate` token resolves to `substrate`, emits as `substrate`, and is refused otherwise on /events and via attributedSurface | ✓ VERIFIED | `config.ts:2111`, `:2124`, `:2240`, `:2277-2279` (substrate refusal and substrate token warning). `authority.test.ts` passes. |
+| 4 | Doc marked table and table name agree on ids, kinds, surfaces and actions | ✓ VERIFIED | Markers at `docs/event-vocabulary.md:96` and `:189`. Drift test in `event-sources.test.ts` passes. |
+| 5 | Every roadmap source has ≥1 row; no periodic row carries repo | ✓ VERIFIED | `event-sources.test.ts` coverage and repo-rule tests pass. |
+| 6 | Each of the 8 planned tools is explicitly in the decided set, absent from the other, and `auditMode` returns the decided mode | ✓ VERIFIED | `policy.ts:25-33` fail-closed: `skills_propose`, `docs_ingest`, `desktop_run`. `policy.ts:115-122` fail-open: `docs_search`, `issue_get`, `graph_find`, `memory_recall`. `policy.test.ts` passes. |
+| 7 | Every served registerTool and auditedRest name sits in exactly one set | ✓ VERIFIED | `policy.test.ts` scan guard passes. `mcp.ts` has 57 `registerTool` matches (grep count, not the scan itself). |
+| 8 | Audit docs record planned tools by phase and link the vocabulary doc | ✓ VERIFIED | `docs/mcp-audit.md:296` and `docs/swarm-correlation.md:184` link `event-vocabulary.md`. |
+| 9 | `check:phase-close` exits 0 at HEAD, and fails on a missing lock or a kind or surface diff | ✓ VERIFIED | **Run by this verifier:** `bun run check:phase-close` exit 0. Output: `EVENT_KINDS unchanged at 12 against ab62c91; SURFACES equals baseline plus substrate at 42`. Failure branches are covered by `phase-close-check.test.ts` (passes). |
+| 10 | One sample per EVENT_SOURCES row stored over the wire, zero refusals, read back N/N | ? UNCERTAIN (human) | Not run. It needs the Phase 16 harness started, which Step 7b forbids. The only live transcript is from 2026-10-09 at an older commit. Unit-level pieces pass: `vocabulary-smoke.test.ts` (10 pass, including `isRefused` and `verifyReadBack`). See human item 1. |
+| 11 | Both package.json scripts resolve; teardown leaves no container or run dir | ✓ VERIFIED | `package.json:40` `check:phase-close` resolves and runs. The `smoke:vocabulary` entry is present. Live teardown is covered by human item 1. |
 
-**Score:** 11/11 truths verified (0 present, behavior-unverified)
+**Score:** 10/11 truths verified (0 present-but-behavior-unverified; truth 10 is ? human)
 
-### Rebase-Combination Regression (new main → HEAD)
+### Deferred Items
 
-The rebase replayed p17 onto `9ddfc77`. The one semantic conflict area, `config.ts`/`config.test.ts` (PR #22's `SUBSTRATE_ALLOW_ANONYMOUS` bridge vs WR-01's substrate refusal), was combined, not overwritten — verified in code and tests, not by commit message:
+None.
 
-| Item | Bridge (PR #22) present | WR-01 (p17) present |
-|------|------------------------|---------------------|
-| `config.ts isOperator` | bare-local-run + bridge comments, `allowAnonymous` handling, `unmappedBearer` intact | `&& named !== "substrate"` refusal; docblock names host-job threat model |
-| `config.ts configWarnings` | swarm-token listed warning intact | added substrate-listed warning branch, names surface never token |
-| `config.ts swarmTokenWarnings` | swarm-seat missing-token message intact | added substrate missing-token (`SUBSTRATE_TOKEN_SUBSTRATE`) branch |
-| `config.test.ts` (3 → **11 pass**) | 8 bridge tests (unset/0/1, bridge-not-operator, unmapped bearer, `.env.example` switch) | 3 WR-01 tests (listed substrate refused force, boot names surface without token value, swarm+substrate side-by-side) |
-| `.env.example` | `SUBSTRATE_ALLOW_ANONYMOUS=` line 98 | `SUBSTRATE_TOKEN_SUBSTRATE=` line 136, pinned by IN-01 test |
-| `authority.test.ts` 36 pass | bridge-era attribution tests green | substrate 27-surface pin + binding + warning tests green |
-| `scripts/rehearsal.ts` | — | `69272f1` guards undefined `ss` stdout (TS18048); `bunx tsc --noEmit` exit 0 confirms |
+### Advisory (New Scope, Unevidenced)
+
+None.
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `packages/mcp-server/src/event-sources.ts` | SurfaceRule/EventSource/EVENT_SOURCES/SILENT_SOURCES, imports only ./types.ts | ✓ VERIFIED | Single type-only import (line 15); 27 emitting + 9 silent rows by direct read |
-| `packages/mcp-server/src/event-sources.test.ts` | round-trip, drift, coverage, repo, no-content, surface-rule tests | ✓ VERIFIED | 46 pass |
-| `packages/mcp-server/src/vocabulary-lock.test.ts` | ordered-literal pins 12 kinds / 27 surfaces | ✓ VERIFIED | 2 pass |
-| `packages/mcp-server/src/types.ts` | substrate appended last, kinds unchanged | ✓ VERIFIED | Direct read confirms; lock still green |
-| `packages/mcp-server/src/mcp.ts` | attributedSurface binds substrate callers | ✓ VERIFIED | Wiring refs intact; PR #22's mcp changes did not displace it |
-| `packages/mcp-server/src/config.ts` | bridge + WR-01 exclusion + IN-02 warning | ✓ VERIFIED | Combined isOperator, both warning branches, no token values leaked |
-| `packages/mcp-server/src/config.test.ts` | bridge + WR-01 pins | ✓ VERIFIED | 11 pass (8 bridge + 3 substrate) |
-| `packages/mcp-server/src/authority.test.ts` | 27-surface pin + binding + warning tests | ✓ VERIFIED | 36 pass |
-| `.env.example` | bridge switch + blank SUBSTRATE_TOKEN_SUBSTRATE line | ✓ VERIFIED | Both lines present, both pinned by tests |
-| `docs/event-vocabulary.md` | reviewed mapping + marked table + silent rows + non-normative herdr | ✓ VERIFIED | Markers present; silent +2; herdr rephrased |
-| `packages/audit/src/policy.ts` | 8 planned entries, auditMode unchanged | ✓ VERIFIED | 3 closed + 5 open planned names; 14 pass |
-| `packages/audit/src/policy.test.ts` | PLANNED_V13 + scan guard | ✓ VERIFIED | 14 pass |
-| `docs/mcp-audit.md` / `docs/swarm-correlation.md` | planned table + links | ✓ VERIFIED | Links at mcp-audit.md:235, swarm-correlation.md:169 |
-| `scripts/phase-close-check.ts` + test | gate + pure helpers + IN-04 guards | ✓ VERIFIED | 16 pass, gate exit 0 |
-| `scripts/vocabulary-smoke.ts` + test | smoke + guards | ✓ VERIFIED | 10 pass; live 28/28 this run |
-| `scripts/rehearsal.ts` | 69272f1 undefined-stdout guard | ✓ VERIFIED | tsc exit 0; harness up/smoke/down all worked |
-| `package.json` | two script entries only | ✓ VERIFIED | Both scripts ran this verification |
+| `packages/mcp-server/src/event-sources.ts` | Rows and types; imports only `./types.ts` | ✓ VERIFIED | Single type-only import at line 15. |
+| `packages/mcp-server/src/event-sources.test.ts` | Round-trip, drift, coverage, repo, no-content, surface-rule tests | ✓ VERIFIED | Passes (8-file run). |
+| `packages/mcp-server/src/vocabulary-lock.test.ts` | Ordered literal pins for kinds and surfaces | ✓ VERIFIED | Passes. Pins 12 kinds and 42 surfaces at HEAD (see truth 1). |
+| `packages/mcp-server/src/types.ts` | `substrate` appended last; kinds unchanged | ✓ VERIFIED | Lines 45-82. |
+| `packages/mcp-server/src/mcp.ts` | attributedSurface binds substrate callers | ✓ VERIFIED | 57 `registerTool` matches; substrate wiring present. |
+| `packages/mcp-server/src/config.ts` | WR-01 substrate refusal + substrate token warning | ✓ VERIFIED | Lines 2111, 2124, 2240, 2277-2279. |
+| `.env.example` | `SUBSTRATE_TOKEN_SUBSTRATE` line | ✓ VERIFIED | Present; pinned by the IN-01 test. |
+| `docs/event-vocabulary.md` | Reviewed mapping with markers | ✓ VERIFIED | Markers at lines 96 and 189. |
+| `packages/audit/src/policy.ts` | Eight planned entries; `auditMode` unchanged | ✓ VERIFIED | Fail-closed set lines ~25-50; fail-open set lines ~85-135. |
+| `packages/audit/src/policy.test.ts` | Independent PLANNED_V13 literal and scan guard | ✓ VERIFIED | Passes. |
+| `docs/mcp-audit.md` / `docs/swarm-correlation.md` | Planned table and links | ✓ VERIFIED | Links at mcp-audit.md:296 and swarm-correlation.md:184. |
+| `scripts/phase-close-check.ts` + test | Gate and pure helpers | ✓ VERIFIED | Gate exit 0 at HEAD; test passes. |
+| `scripts/vocabulary-smoke.ts` + test | Smoke and guards | ✓ VERIFIED | Unit tests pass. The live run is human item 1. |
+| `package.json` | Two script entries | ✓ VERIFIED | Line 40 and the smoke entry. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|-----|--------|---------|
-| samples | normalizeEvent | write-path gate round-trip test | WIRED | deep-equal per row, 46 pass |
-| doc table | EVENT_SOURCES | event-sources markers parse test | WIRED | id/kind/surface/action equality |
-| substrate token | substrate surface | tokenEnvName, surfaceForToken, attributedSurface | WIRED | unit + /events tests |
-| substrate token | operator refusal | isOperator + configWarnings (bridge-aware) | WIRED | config.test.ts 11 pass (bridge + WR-01 side by side) |
-| PLANNED_V13 literal | policy sets | independent literal test | WIRED | editing either side fails |
-| policy sets | mcp.ts/server.ts names | scan guard regex | WIRED | membership-only, counts-free |
+| samples | normalizeEvent | write-path gate round-trip test | WIRED | `event-sources.test.ts` passes. |
+| doc table | EVENT_SOURCES | event-sources markers | WIRED | Markers at docs lines 96 and 189. |
+| substrate token | substrate surface | tokenEnvName, surfaceForToken, attributedSurface | WIRED | `config.ts` plus `authority.test.ts` pass. |
+| PLANNED_V13 literal | policy sets | independent literal test | WIRED | `policy.test.ts` passes. |
+| policy sets | mcp.ts/server.ts names | scan guard | WIRED | `policy.test.ts` scan guard passes. |
+| check:phase-close | lock files | `REVIEWED_SURFACE_ADDITIONS` diff | WIRED | Exit 0 at HEAD. |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 |----------|---------------|--------|-------------------|--------|
-| event-sources.ts samples | sample() payloads | literal per-row fixtures through real normalizeEvent | ✓ | FLOWING (proven, not mocked) |
-| phase-close-check | EVENT_KINDS/SURFACES | git show ab62c91 baseline + live import | ✓ | FLOWING |
-| vocabulary-smoke | stored/readback counts | live harness POST /events + events/query on p17-verify2 | ✓ | FLOWING (this-run transcript: 27/27, 0 refusals) |
+| event-sources.ts samples | sample() payloads | literal fixtures through real normalizeEvent | ✓ | FLOWING (unit) |
+| phase-close-check | EVENT_KINDS/SURFACES | `git show ab62c91` baseline plus live import | ✓ | FLOWING (re-run this session) |
+| vocabulary-smoke | stored/readback counts | live harness POST /events | not run | UNEVALUATED (human item 1) |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| lock tests green | `bun test ./packages/mcp-server/src/vocabulary-lock.test.ts` | 2 pass 0 fail | ✓ PASS |
-| samples green | `bun test ./packages/mcp-server/src/event-sources.test.ts` | 46 pass 0 fail | ✓ PASS |
-| config green (combined) | `bun test ./packages/mcp-server/src/config.test.ts` | 11 pass 0 fail | ✓ PASS |
-| authority green | `bun test ./packages/mcp-server/src/authority.test.ts` | 36 pass 0 fail | ✓ PASS |
-| policy green | `bun test ./packages/audit/src/policy.test.ts` | 14 pass 0 fail | ✓ PASS |
-| gate helpers green | `bun test ./scripts/phase-close-check.test.ts` | 16 pass 0 fail | ✓ PASS |
-| smoke guards green | `bun test ./scripts/vocabulary-smoke.test.ts` | 10 pass 0 fail | ✓ PASS |
-| store-lock green | `bun test ./packages/mcp-server/src/store-lock.test.ts` | 18 pass 0 fail | ✓ PASS |
-| 8-file phase battery | `bun test` on the 8 phase files | 153 pass 0 fail | ✓ PASS |
-| full suite (regression) | `bun test` | 1421 pass, 56 skip, 1 pre-existing fail (52 files) | ✓ PASS with noted exception |
-| tsc clean | `bunx tsc --noEmit` | exit 0 | ✓ PASS |
-| gate green | `bun run check:phase-close` | exit 0, 80 pass, 12 kinds / 27 surfaces | ✓ PASS |
-| live smoke | `rehearsal up --name p17-verify2 --port 0` + `smoke:vocabulary` + `rehearsal down` | 27/27 stored, 0 refusals, 27/27 read back, 28/28 checks; teardown clean | ✓ PASS |
+| Phase-close gate | `bun run check:phase-close` | exit 0; kinds 12 vs ab62c91; surfaces 42 | ✓ PASS |
+| Eight-file phase battery | `bun test` on vocabulary-lock, event-sources, authority, policy, config, store-lock, phase-close-check, vocabulary-smoke | 386 pass, 0 fail, 8 files | ✓ PASS |
+| Constants at HEAD | `bun` import of `types.ts` | kinds 12, surfaces 42, last `substrate` | ✓ PASS |
+| Live wire smoke | `rehearsal up` + `smoke:vocabulary` + `rehearsal down` | not run (starts services) | ? SKIP (human item 1) |
+
+Not run this session: full `bun test`, `bunx tsc --noEmit`, the live harness, and probes (none are declared for this phase).
 
 ### Probe Execution
 
@@ -123,31 +115,35 @@ No phase-declared or conventional probes for this phase. Skipped.
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|-------------|--------|----------|
-| FOUND-02 | 17-01, 17-02, 17-03 | Vocabulary locked, mapping documented/encoded, audit policy decided, phase-close gate + zero-refusal proof | ✓ SATISFIED | All 11 truths verified live against HEAD; REQUIREMENTS.md marks FOUND-02 Complete |
+| FOUND-02 | 17-01, 17-02, 17-03 | Vocabulary locked, mapping documented, audit policy decided, phase-close gate, zero-refusal proof | ✓ SATISFIED (code); live proof pending (human item 1) | Truths 1-9 and 11 verified at HEAD. REQUIREMENTS.md marks FOUND-02 Complete. |
 
-No orphaned requirements: FOUND-02 is the only ID in all three PLAN frontmatters and matches the assignment.
+No orphaned requirements: FOUND-02 is the only ID in the three PLAN frontmatters.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| `docs/event-vocabulary.md` | 113 | `[UNVERIFIED]` herdr marker | ℹ️ Info | Intentional honesty marker retained per IN-03 fix; Phase 19 pins identifiers. Not a debt marker. |
-| changed source files | — | No TODO/FIXME/XXX/TBD/placeholder/`Not implemented` in any phase source/test/script file or doc | — | Clean scan this run |
-
-Prohibitions (all three plans) re-confirmed: `event-sources.ts` imports only `./types.ts`; no EVENT_KINDS/normalizeEvent/MEMORY_KINDS/hash-chain change; no `registerTool`/`KNOWN_TOOLS`/`auditedRest` additions in 17-02 scope (PR #22's mcp/server changes predate the rebase base and the scan guard passes over them); smoke reads URL/bearer only from the named instance's consumer.env; no secret values in any touched file.
-
-### Known Pre-Existing Failure (not a phase gap)
-
-`packages/audit/src/log.test.ts` > "the scan does not go quadratic once the window is full" timed out (5000ms) under host load during this run's full suite. Per assignment brief this timing test also fails on `main` under current host load; its code is unchanged since PR #7 and it exercises the audit ring-scan, not phase 17's policy sets (`policy.test.ts` 14/14 green). Recorded as environmental, not a gap. Full-suite tally with it excluded: 1421 pass, 56 skip, 0 real fail.
+| (all phase-modified files; grep `TBD\|FIXME\|XXX`) | — | none found | — | Clean |
 
 ### Human Verification Required
 
-None. All truths have automated behavioral evidence (unit suites + gate + live harness transcript run by this verifier). No visual, real-time, or external-service behavior is asserted.
+### 1. Live wire proof against the Phase 16 harness
+
+**Test:** `rehearsal up --name <name> --port 0`, then `bun run smoke:vocabulary` against it, then `rehearsal down`.
+**Expected:** Every EVENT_SOURCES row stored with HTTP 202, 0 refusals, all rows read back, and teardown leaves no containers or run dir. Confirm the expected count against the current EVENT_SOURCES table.
+**Why human:** Truth 10 needs running containers and services. The verifier does not start services. The only transcript (2026-10-09) predates later commits.
+
+### 2. SURFACES baseline after later reviewed additions
+
+**Test:** Decide whether the 15 reviewed swarm surfaces (`swarm-a16-cloud` through `swarm-a30-custody`, in `REVIEWED_SURFACE_ADDITIONS`) count toward phase 17's SC2.
+**Expected:** Accept: SURFACES = 42 is the current baseline. Reject: SC2 is literal (v1.2 + substrate = 27) and the additions need a fix.
+**Why human:** The phase text says 27. The code now pins 42 by a later reviewed decision. Which one governs is an operator call.
 
 ### Gaps Summary
 
-No gaps. Phase goal achieved at HEAD `69272f1`: the closed vocabulary (12 kinds, 27 surfaces with `substrate`) is typed, locked, drift-tested against its document, proven over the wire with zero refusals on a fresh harness run, and the eight planned tools carry explicit audit modes guarded against undecided registration. The rebase onto new main combined cleanly — PR #22's anonymous bridge and WR-01's substrate refusal coexist in `config.ts` with both test families green (config.test.ts 3 → 11), and `69272f1` keeps `tsc` clean. Later phases implement against `EVENT_SOURCES`/`SILENT_SOURCES` and re-run `check:phase-close`.
+No code gaps. Every checked truth holds at HEAD, and `check:phase-close` exits 0. Status is `human_needed` for two reasons: the live wire proof (truth 10) was not run, and the SURFACES count has moved from the literal 27 to 42 through a later reviewed decision (truth 1).
 
 ---
-_Verified: 2026-10-09_
-_Verifier: Reverify17b (gsd-verifier)_
+
+_Verified: 2026-11-12T08:25:40Z_
+_Verifier: Claude (gsd-verifier)_
