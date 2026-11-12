@@ -29,7 +29,7 @@ import { corpusAnchorStatus, type AnchorVerifier } from "./anchor.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { planCorpus, planRepos } from "./plan.ts";
 import { reconcileCorpus } from "./reconcile.ts";
-import { inclusionOf, type CorpusRootKeeper } from "./root.ts";
+import { inclusionOf, repositoryTreeOf, type CorpusRootKeeper } from "./root.ts";
 import type { CorpusStore } from "./store.ts";
 import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type RequestRefusal } from "./validate.ts";
 
@@ -291,8 +291,21 @@ export async function corpusRootReply(deps: CorpusServiceDeps, surface: Surface 
 	}
 }
 
-/** `GET /corpus/proof`: the inclusion proof of one active document, taken from one read of the manifest so it matches the root it names. */
-export async function corpusProofReply(deps: CorpusServiceDeps, query: { repo: string | null; path: string | null }, surface: Surface | null): Promise<CorpusReply<CorpusProofResponse>> {
+/**
+ * `GET /corpus/proof`'s body. The root is the root of `repo`'s active documents alone (`repositoryTreeOf`), never the whole-corpus
+ * root `GET /corpus/root` and the ledger's root events name. `rootScope` says so; a verifier must not check this root against
+ * the anchored whole-corpus root, which it cannot match.
+ */
+export interface CorpusRepoProofResponse extends CorpusProofResponse {
+	rootScope: "repository";
+}
+
+/**
+ * `GET /corpus/proof`: the inclusion proof of one active document of `repo`, against the root of `repo`'s own tree. The tree holds
+ * no other repository's leaf, so no sibling hash in the audit path derives from another repository's row. One read of the manifest
+ * supplies the tree and the version, so the proof matches the version it names.
+ */
+export async function corpusProofReply(deps: CorpusServiceDeps, query: { repo: string | null; path: string | null }, surface: Surface | null): Promise<CorpusReply<CorpusRepoProofResponse>> {
 	const gated = gateOf(deps, surface, false);
 	if (gated !== null) return gated;
 	const { repo, path } = query;
@@ -303,13 +316,13 @@ export async function corpusProofReply(deps: CorpusServiceDeps, query: { repo: s
 	try {
 		const read = await deps.roots.read();
 		if (!read.ok) return refusal(503, "corpus.too-large");
-		const found = inclusionOf(read.tree, repo, path);
+		const found = inclusionOf(repositoryTreeOf(read.tree, repo), repo, path);
 		if (found === null) return refusal(404, "not-in-corpus");
 		const { sha256, leaf, index, treeSize, path: auditPath, root } = found;
 		return {
 			ok: true,
 			status: 200,
-			body: { protocol: CORPUS_PROTOCOL, repo, documentPath: path, sha256, leaf, index, treeSize, path: auditPath, root, manifestVersion: read.snapshot.manifestVersion },
+			body: { protocol: CORPUS_PROTOCOL, repo, documentPath: path, sha256, leaf, index, treeSize, path: auditPath, root, manifestVersion: read.snapshot.manifestVersion, rootScope: "repository" },
 		};
 	} catch {
 		return refusal(503, "corpus.index-unavailable");

@@ -107,6 +107,19 @@ describe("GET /corpus/root and GET /corpus/proof", () => {
 		expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: proof.root, count: 5 })).toBe(true);
 	});
 
+	test("a granted repository's proof covers that repository alone: its root is not the whole-corpus root, and the answer says which tree it covers", async () => {
+		const harness = await start(ON);
+		seedDocuments(harness, ["docs/a.md", "docs/b.md"]);
+		harness.store.seed(makeRow({ repo: "swcstudiospace/other", path: "docs/x.md", sha256: sha256Hex("body of docs/x.md") }));
+		const root = await jsonOf(await get(harness, "/corpus/root"));
+		expect(root).toMatchObject({ count: 3 });
+		const response = await get(harness, `/corpus/proof?repo=${encodeURIComponent(REPO)}&path=${encodeURIComponent("docs/b.md")}`);
+		const proof = (await response.json()) as CorpusProofResponse & { rootScope?: unknown };
+		expect({ status: response.status, rootScope: proof.rootScope, treeSize: proof.treeSize }).toEqual({ status: 200, rootScope: "repository", treeSize: 2 });
+		expect(proof.root).not.toBe(root.root as string);
+		expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: proof.root, count: 2 })).toBe(true);
+	});
+
 	test("a document that is not active is 404 not-in-corpus, and a bad name is 400", async () => {
 		const harness = await start(ON);
 		seedDocuments(harness, ["docs/a.md"]);

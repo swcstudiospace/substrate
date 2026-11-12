@@ -7,6 +7,9 @@
  * holds and never on the order rows were written or read. The manifest with no active row has the defined root
  * `CORPUS_EMPTY_ROOT` (RFC 6962's hash of the empty tree); it is never emitted.
  *
+ * A proof served to a caller is taken over one repository's rows only (`repositoryTreeOf`), so the root it names is that repository's
+ * root, not the whole-corpus root `corpusRoot` makes and the ledger anchors. The whole-corpus tree and its root are unchanged.
+ *
  * The root event rides the existing hourly anchor: it is an ordinary `note` in the ledger, and the hour it lands in is anchored
  * by the anchor job like any other. Nothing here sends a transaction or writes a memo.
  */
@@ -81,7 +84,7 @@ export interface CorpusInclusion {
 }
 
 /** The proof of `(repo, path)` in `tree`, or null when the tree holds no such document. */
-export function inclusionOf(tree: CorpusTree, repo: string, path: string): CorpusInclusion | null {
+export function inclusionOf(tree: Pick<CorpusTree, "ordered">, repo: string, path: string): CorpusInclusion | null {
 	const index = tree.ordered.findIndex((entry) => entry.repo === repo && entry.path === path);
 	const found = tree.ordered[index];
 	if (found === undefined) return null;
@@ -92,9 +95,24 @@ export function inclusionOf(tree: CorpusTree, repo: string, path: string): Corpu
 	return { sha256: found.sha256, leaf: found.leaf, index, treeSize: proof.size, path: proof.path, root: rootOf(tree.ordered) };
 }
 
-/** The proof of one document among `rows`, or null when it is not an active row. */
-export function corpusProof(rows: readonly RootRow[], repo: string, path: string): CorpusInclusion | null {
-	return inclusionOf(buildCorpusTree(rows), repo, path);
+/**
+ * One repository's leaves in tree order: the whole-corpus tree's entries for `repo`, and no other. The tree is sorted by
+ * `(repo, path, sha256)`, so the filtered entries keep the same order. A repository's root and proofs are the RFC 6962 tree over
+ * these leaves alone, so they depend on that repository's rows and on no other repository's. The whole-corpus tree is not changed.
+ */
+export function repositoryTreeOf(tree: CorpusTree, repo: string): Pick<CorpusTree, "ordered"> {
+	return { ordered: tree.ordered.filter((entry) => entry.repo === repo) };
+}
+
+/** The root over one repository's active rows alone, and how many of them it covers. The whole-corpus root is {@link corpusRoot}. */
+export function repositoryRoot(rows: readonly RootRow[], repo: string): { root: string; count: number } {
+	const { ordered } = repositoryTreeOf(buildCorpusTree(rows), repo);
+	return { root: rootOf(ordered), count: ordered.length };
+}
+
+/** The proof of one document of `repo` against that repository's root, or null when it is not an active row of `repo`. */
+export function repositoryProof(rows: readonly RootRow[], repo: string, path: string): CorpusInclusion | null {
+	return inclusionOf(repositoryTreeOf(buildCorpusTree(rows), repo), repo, path);
 }
 
 /** The root of one manifest version. */

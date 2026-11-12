@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { CORPUS_PROTOCOL, corpusLeafHex, shortRoot, type CorpusDocument } from "@substrate/corpus";
-import { verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
+import { merkleRootHex, verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
 import type { AnchorVerifyPorts } from "../anchor-verify-deps.ts";
 import { loadConfig, loadCorpusSettings } from "../config.ts";
 import { Substrate } from "../service.ts";
@@ -14,7 +14,7 @@ import type { EventInput } from "../types.ts";
 import type { AnchorVerifier } from "./anchor.ts";
 import { CorpusRootKeeper, corpusRoot, type RootClock } from "./root.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusProofReply, corpusRootReply, type CorpusServiceDeps } from "./service.ts";
-import { FakePlane, FakeStore, makeDocument, makeRow } from "./testkit.ts";
+import { FakePlane, FakeStore, makeDocument, makeRow, sha256Hex } from "./testkit.ts";
 
 const REPO = "swcstudiospace/agent-substrate";
 
@@ -119,17 +119,22 @@ describe("an ingest schedules the root event", () => {
 });
 
 describe("the root and proof doors", () => {
-	test("the proof of a live row verifies against the root the server reports for the same manifest", async () => {
+	test("the proof of a live row verifies against its repository's root, which is not the whole-corpus root and says so", async () => {
+		const OTHER_REPO = "swcstudiospace/other";
 		const { ingest, deps } = world();
-		await ingest([DOC_A, DOC_B, makeDocument(REPO, "docs/c.md", "# C")]);
+		await ingest([DOC_A, DOC_B, makeDocument(REPO, "docs/c.md", "# C"), makeDocument(OTHER_REPO, "docs/x.md", "# X")]);
 		const rootReply = await corpusRootReply(deps, "claude-code");
 		const proofReply = await corpusProofReply(deps, { repo: REPO, path: "docs/b.md" }, "claude-code");
 		if (!rootReply.ok || !proofReply.ok) throw new Error("both doors should answer");
-		expect(rootReply.body).toMatchObject({ protocol: CORPUS_PROTOCOL, count: 3, skipped: 0 });
+		expect(rootReply.body).toMatchObject({ protocol: CORPUS_PROTOCOL, count: 4, skipped: 0 });
 		const proof = proofReply.body;
-		expect(proof).toMatchObject({ protocol: CORPUS_PROTOCOL, repo: REPO, documentPath: "docs/b.md", sha256: DOC_B.sha256, root: rootReply.body.root, manifestVersion: rootReply.body.manifestVersion, treeSize: 3 });
+		expect(proof).toMatchObject({ protocol: CORPUS_PROTOCOL, repo: REPO, documentPath: "docs/b.md", sha256: DOC_B.sha256, manifestVersion: rootReply.body.manifestVersion, treeSize: 3, rootScope: "repository" });
 		expect(proof.leaf).toBe(corpusLeafHex(REPO, "docs/b.md", DOC_B.sha256));
+		const repoLeaves = [corpusLeafHex(REPO, "docs/a.md", DOC_A.sha256), proof.leaf, corpusLeafHex(REPO, "docs/c.md", sha256Hex("# C"))];
+		expect(proof.root).toBe(merkleRootHex(repoLeaves));
+		expect(proof.root).not.toBe(rootReply.body.root);
 		expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: proof.root, count: 3 })).toBe(true);
+		expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: rootReply.body.root, count: 4 })).toBe(false);
 	});
 
 	test("a missing document and a tombstoned one are 404 not-in-corpus; a malformed name is 400", async () => {

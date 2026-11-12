@@ -71,10 +71,12 @@ Routes (all need a bearer token, are reads audited under `corpus_status`, and an
 | Route | Answer |
 | --- | --- |
 | `GET /corpus/root` | `{ protocol: 1, root, count, manifestVersion, skipped }` |
-| `GET /corpus/proof?repo=R&path=P` | `{ protocol: 1, repo, documentPath, sha256, leaf, index, treeSize, path: string[], root, manifestVersion }`; `404 not-in-corpus` for a missing or tombstoned document; `400 bad-repo` / `bad-path` for a name that is not a repository or a normal relative path |
+| `GET /corpus/proof?repo=R&path=P` | `{ protocol: 1, repo, documentPath, sha256, leaf, index, treeSize, path: string[], root, manifestVersion, rootScope: "repository" }`, the root of `repo`'s own tree (see below); `404 not-in-corpus` for a missing or tombstoned document; `400 bad-repo` / `bad-path` for a name that is not a repository or a normal relative path |
 | `GET /corpus/anchor?root=HEX64` | `{ protocol: 1, root, status, reasons, eventId, count, manifestVersion, hourStart, evidence }`; `400 bad-root` for anything but 64 lowercase hex characters |
 
 In the proof, `path` is the RFC 6962 audit path (sibling hashes, leaf to root), **not** the document's path, which is `documentPath`. The proof is taken from one read of the manifest, so its leaf, path and root belong together.
+
+`rootScope` is always `"repository"`. The proof is over the active documents of `repo` alone: its root is the RFC 6962 root of that repository's leaves, and its audit path holds only hashes derived from those leaves, so no other repository's leaf or sibling hash appears in it. The hashes reveal nothing about another repository's documents. `manifestVersion` is still the whole manifest's version. The whole-corpus tree and its root are unchanged: `GET /corpus/root`, the `docs.corpus.root` events and `GET /corpus/anchor` all name that root. A served proof's root is therefore **not** the anchored root, and a caller cannot verify a served proof against the anchored root (the two match only when `repo` holds every active row).
 
 ```sh
 substrate corpus prove --repo swcstudiospace/agent-substrate --path docs/corpus.md --out proof.json
@@ -120,6 +122,8 @@ A third party needs the proof file, the recorded root event, and the hourly memo
 4. Read the anchor transaction on devnet with `evidence.signature`: its memo is `substrate:v1:<hour start>:<root>:<count>` for hours anchored before phase 73, and `substrate:v2:<hour start>:<root>:<count>:<heads root>` after. Both carry the hour, the same root and the same count, and it must be signed by an anchor key the operator publishes.
 
 Without access to the server, steps 2 and 3 need the root event and the hour's events from whoever operates the ledger (`docs/greptime-ledger.md` describes the event hash, the hour's leaf order and the anchors row); steps 1 and 4 need only the proof file and devnet.
+
+Steps 2 and 3 above apply to the whole-corpus root, not to a served proof. A proof from `GET /corpus/proof` has `rootScope: "repository"`, so, unless `repo` holds every active row, it cannot be tied to a `docs.corpus.root` event or to the hourly anchor: a third party can establish that the document is in that repository's tree, and no more. `substrate corpus verify --online` asks the anchor endpoint about such a root and gets `unanchored`.
 
 ## `docs_search`
 
