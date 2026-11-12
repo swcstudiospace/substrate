@@ -14,9 +14,11 @@
  * A refused worktree is never recorded.
  * Each path is decided and noted under the worktree's merge-back lock in its git directory, so two runs on one worktree serialize.
  *
- * A dry run is the default and writes nothing. With `--execute` each eligible worktree's note is emitted. Every git
- * command here is a read. Exit codes: 0 when every requested worktree was eligible and its note recorded (or would be,
- * in a dry run), 1 when any was refused or a note was not recorded, 2 for usage.
+ * A dry run is the default and writes nothing. With `--execute`, under the lock and before the emit, the ledger is asked whether
+ * this repository's head already has its note: a note already there is counted as recorded and not written again, and a question
+ * the ledger cannot answer refuses the worktree. Every git command here is a read. Exit codes: 0 when every requested worktree
+ * was eligible and its note recorded or already held (or would be, in a dry run), 1 when any was refused or a note was not
+ * recorded, 2 for usage.
  */
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
@@ -37,8 +39,8 @@ const MERGE_BACK_LOCK_FILE = "substrate-merge-back.lock";
 const NO_GIT_DIR = "git could not resolve the git directory of this path, so the merge-back lock cannot be taken";
 
 type MergedVia = "default-branch" | "pull-request";
-/** How the ledger took a note. `spooled` means parked for replay: the note is not recorded yet. */
-type Delivery = "stored" | "refused" | "failed" | "spooled";
+/** How the ledger took a note. `spooled` means parked for replay: the note is not recorded yet. `already` means the ledger held it before this run, so nothing was emitted. */
+type Delivery = "stored" | "refused" | "failed" | "spooled" | "already";
 
 type Decision = { eligible: true; info: WorktreeInfo; mergedVia: MergedVia } | { eligible: false; reasons: string[] };
 
@@ -196,9 +198,24 @@ export async function commandMergeBack(args: WorktreeArgs, deps: WorktreeDeps, r
 				continue;
 			}
 			const { info, mergedVia } = decision;
+			const described = `${info.repo} ${info.branch ?? "(detached)"} at ${info.head.slice(0, 12)}, merged via ${mergedVia}`;
+			if (args.execute) {
+				// Asked under the lock, so a run that just released it has already emitted and this one sees its note.
+				const noted = await deps.mergeBackNoted(info.repo, info.head);
+				if (!noted.ok) {
+					const reason = `the ledger could not say whether this head is already recorded: ${noted.error}`;
+					refused.push({ path, reasons: [reason] });
+					if (!args.json) deps.out(`refused ${path}: ${reason}\n`);
+					continue;
+				}
+				if (noted.noted) {
+					recorded.push({ path, repo: info.repo, branch: info.branch, head: info.head, merged_via: mergedVia, ledger: "already" });
+					if (!args.json) deps.out(`already recorded ${path}: ${described}\n`);
+					continue;
+				}
+			}
 			const item: Recorded = { path, repo: info.repo, branch: info.branch, head: info.head, merged_via: mergedVia, ledger: null };
 			recorded.push(item);
-			const described = `${info.repo} ${info.branch ?? "(detached)"} at ${info.head.slice(0, 12)}, merged via ${mergedVia}`;
 			if (!args.execute) {
 				if (!args.json) deps.out(`would record ${path}: ${described}\n`);
 				continue;
@@ -216,7 +233,7 @@ export async function commandMergeBack(args: WorktreeArgs, deps: WorktreeDeps, r
 			lock.release();
 		}
 	}
-	const stored = recorded.filter((item) => item.ledger === "stored").length;
+	const stored = recorded.filter((item) => item.ledger === "stored" || item.ledger === "already").length;
 	const unrecorded = args.execute ? recorded.length - stored : 0;
 	if (args.json) {
 		deps.out(`${JSON.stringify({ dry_run: !args.execute, recorded, refused: refused.map((item) => item.path), reasons: Object.fromEntries(refused.map((item) => [item.path, item.reasons])) }, null, 2)}\n`);

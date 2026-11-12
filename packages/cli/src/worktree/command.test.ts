@@ -48,6 +48,7 @@ function harness(overrides: Partial<WorktreeDeps> = {}, env: Record<string, stri
 		},
 		claims: async () => ({ ok: true, claims: [] }),
 		listRegistry: async () => ({ ok: true, rows: [], truncated: false }),
+		mergeBackNoted: async () => ({ ok: true, noted: false }),
 		...overrides,
 	};
 	return { deps, out, err, events, reports };
@@ -1218,6 +1219,22 @@ describe("merge-back", () => {
 		expect(h.out.join("")).toContain("ledger: worktree.merge_back note recorded");
 		expect(calls.filter(isWrite)).toEqual([]);
 		expect([f.merged, f.mergedToo, f.repo.dir].every((path) => existsSync(path))).toBe(true);
+	});
+
+	test("a head the ledger already holds is not noted twice: nothing is emitted and the run exits 0", async () => {
+		const f = fleet();
+		const h = harness({ mergeBackNoted: async () => ({ ok: true, noted: true }) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(0);
+		expect(h.events).toEqual([]);
+		expect(h.out.join("")).toContain("already recorded");
+	});
+
+	test("a ledger lookup that cannot answer refuses the worktree and emits nothing", async () => {
+		const f = fleet();
+		const h = harness({ mergeBackNoted: async () => ({ ok: false, error: "HTTP 503" }) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(1);
+		expect(h.events).toEqual([]);
+		expect(h.err.join("") + h.out.join("")).toContain("could not say whether this head is already recorded");
 	});
 
 	test("a squash-merged pull request proves its head: merged_via is pull-request", async () => {

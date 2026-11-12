@@ -104,6 +104,8 @@ export interface WorktreeDeps {
 	claims: ClaimsFn;
 	/** `GET /worktrees?host=`: the rows the registry holds for one host. Never throws; a failed or truncated answer is a failure. */
 	listRegistry: (host: string) => Promise<RegistryOutcome>;
+	/** Whether the ledger already holds the merge-back note for this repository and head. Never throws; an unanswered question is a failure. */
+	mergeBackNoted: MergeBackNotedFn;
 }
 
 const GIB = 1024 ** 3;
@@ -702,6 +704,47 @@ export function httpClaimsLookup(config: HttpPosterConfig): ClaimsFn {
 		} catch (error) {
 			const name = error instanceof Error ? error.name : "";
 			return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "timeout" : "server unreachable" };
+		}
+	};
+}
+
+/** Whether the ledger already holds a `worktree.merge_back` note for one head. An unanswered question is a failure, never "not recorded". */
+export type MergeBackNotedOutcome = { ok: true; noted: boolean } | { ok: false; error: string };
+export type MergeBackNotedFn = (repo: string, head: string) => Promise<MergeBackNotedOutcome>;
+
+/** The newest notes one lookup reads. A full window with no match cannot prove the note is absent. */
+const MERGE_BACK_NOTE_WINDOW = 200;
+
+/** Whether a ledger event is the merge-back note for `head`. */
+function isMergeBackNoteFor(event: unknown, head: string): boolean {
+	if (typeof event !== "object" || event === null || !("payload" in event)) return false;
+	const { payload } = event;
+	return typeof payload === "object" && payload !== null && "action" in payload && payload.action === "worktree.merge_back" && "head" in payload && payload.head === head;
+}
+
+/** A lookup of whether `repo` at `head` already has its merge-back note, over `POST /events/query` with the caller's bearer. */
+export function httpMergeBackNoted(config: HttpPosterConfig): MergeBackNotedFn {
+	const doFetch = config.fetchImpl ?? ((url: string, init: RequestInit) => fetch(url, init));
+	return async (repo, head) => {
+		if (config.token === undefined) return { ok: false, error: "no bearer token for the ledger read" };
+		const filter = repo.startsWith("local/") ? {} : { repo };
+		try {
+			const response = await doFetch(`${config.url}/events/query`, {
+				method: "POST",
+				headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" },
+				body: JSON.stringify({ surface: "claude-code", kind: "note", order: "desc", limit: MERGE_BACK_NOTE_WINDOW, include_payload: true, ...filter }),
+				signal: AbortSignal.timeout(config.timeoutMs),
+			});
+			if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+			const body: unknown = await response.json();
+			if (typeof body !== "object" || body === null) return { ok: false, error: "the ledger answered without a body" };
+			if ("error" in body && typeof body.error === "string") return { ok: false, error: body.error };
+			if (!("events" in body) || !Array.isArray(body.events)) return { ok: false, error: "the ledger answered without events" };
+			if (body.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
+			if ("truncated" in body && body.truncated === true) return { ok: false, error: `the newest ${MERGE_BACK_NOTE_WINDOW} notes do not settle it` };
+			return { ok: true, noted: false };
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		}
 	};
 }

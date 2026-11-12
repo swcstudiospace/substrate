@@ -6,7 +6,7 @@
 import { postEvent } from "../../../collectors/src/emit.ts";
 import { freeBytes, spawnGh, spawnGit } from "../../../fleet/src/index.ts";
 import { resolveBearer } from "../token.ts";
-import { httpClaimsLookup, httpRegistryLister, httpReportPoster, type WorktreeDeps } from "./command.ts";
+import { httpClaimsLookup, httpMergeBackNoted, httpRegistryLister, httpReportPoster, type WorktreeDeps } from "./command.ts";
 
 export const DEFAULT_URL = "http://127.0.0.1:7410";
 export const DEFAULT_TIMEOUT_MS = 1500;
@@ -55,6 +55,7 @@ export function worktreeDeps(options: WorktreeDepsOptions): WorktreeDeps {
 		emit: (event) => postEvent(event, { timeoutMs, collector: "cli", source: "cli.worktree", url }),
 		postReport: httpReportPoster({ url, token, timeoutMs: Math.max(timeoutMs, WORKTREE_REPORT_TIMEOUT_MS) }),
 		claims: httpClaimsLookup({ url, token, timeoutMs: Math.max(timeoutMs, WORKTREE_CLAIMS_TIMEOUT_MS) }),
+		mergeBackNoted: httpMergeBackNoted({ url, token, timeoutMs: Math.max(timeoutMs, WORKTREE_CLAIMS_TIMEOUT_MS) }),
 		listRegistry: httpRegistryLister({ url, token, timeoutMs: Math.max(timeoutMs, WORKTREE_LISTING_TIMEOUT_MS) }),
 	};
 }
