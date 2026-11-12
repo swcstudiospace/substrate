@@ -1,96 +1,138 @@
 ---
 phase: 29-agent-cards-and-teachable-moments
-verified: 2026-10-11T02:10:00Z
-status: passed
-score: 12/12 must-haves rehearsal-proven (CARD-01..04 + teachable corpus); live G1/G2/G3 OPERATOR-GATED
-covered_files: [".planning/phases/29-agent-cards-and-teachable-moments/29-01-PLAN.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-01-SUMMARY.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-02-PLAN.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-02-SUMMARY.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-03-PLAN.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-03-SUMMARY.md", "docs/agent-cards.md", "packages/mcp-server/src/agent-card.fixtures.ts", "packages/mcp-server/src/agent-card.test.ts", "packages/mcp-server/src/agent-card.ts", "packages/mcp-server/src/server.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/teachable-anchor.test.ts", "packages/mcp-server/src/teachable.fixtures.ts", "packages/mcp-server/src/teachable.test.ts", "packages/mcp-server/src/teachable.ts"]
-covered_digest: "v3:sha256:18d9f62419b3dedc0be2c2f06e380ca1f234ab92cda354e35d9cec480c216632"
-behavior_unverified: 3
+verified: 2026-11-12T08:31:11Z
+status: human_needed
+score: 4/4 roadmap success criteria verified in-repo; spec fidelity (G1) and live legs (G2, G3) human_needed
+covered_files: [".planning/milestones/v1.3-phases/29-agent-cards-and-teachable-moments/29-01-PLAN.md", ".planning/milestones/v1.3-phases/29-agent-cards-and-teachable-moments/29-01-SUMMARY.md", ".planning/milestones/v1.3-phases/29-agent-cards-and-teachable-moments/29-02-PLAN.md", ".planning/milestones/v1.3-phases/29-agent-cards-and-teachable-moments/29-02-SUMMARY.md", ".planning/milestones/v1.3-phases/29-agent-cards-and-teachable-moments/29-03-PLAN.md", ".planning/milestones/v1.3-phases/29-agent-cards-and-teachable-moments/29-03-SUMMARY.md", "docs/agent-cards.md", "packages/mcp-server/src/agent-card.fixtures.ts", "packages/mcp-server/src/agent-card.test.ts", "packages/mcp-server/src/agent-card.ts", "packages/mcp-server/src/server.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/teachable-anchor.test.ts", "packages/mcp-server/src/teachable.fixtures.ts", "packages/mcp-server/src/teachable.test.ts", "packages/mcp-server/src/teachable.ts"]
+covered_digest: "v3:sha256:2de5227ea91d968f4b074c281e0916665633d231af4a4986dea3e0b24ddd2fdb"
+behavior_unverified: 0
 overrides_applied: 0
-registration:
-  previous_status: missing
-  registered_at_tip: ed696ef
-  digest_check: card/teachable sources byte-identical since PR #50 (bc8f839) — no later phase touched them; feature tests re-run green at tip (see confirmation below)
-  gaps_remaining: ["G1 published A2A spec fetch + validator diff (UNVERIFIED pending G1)", "G2 loopback card read per surface + publication decision", "G3 devnet-backed teachable anchor + verify proof hour"]
+behavior_unverified_items: []
+human_verification:
+  - test: "G1: fetch the published A2A spec (https://a2a-protocol.org/latest/specification/) and diff its Agent Card required fields against validateAgentCard in packages/mcp-server/src/agent-card.ts"
+    expected: "Field set confirmed, or the validator corrected and re-tested"
+    why_human: "Operator-gated network read; the in-repo field set is explicitly UNVERIFIED against the published spec"
+  - test: "G2: GET /.well-known/agent-card.json?surface=<name> on loopback for each of the 27 surfaces; decide whether any card is published beyond loopback"
+    expected: "Each surface returns 200 with a validator-clean card; publication scope decided by the operator (none in v1.3 by default)"
+    why_human: "Live loopback read against the running server plus an exposure decision that only the operator can make"
+  - test: "G3: with the funded devnet key, emit a proof teachable into production, let the hourly timer anchor its hour, read the memo back by tx_sig, run substrate verify on the proof graph"
+    expected: "The teachable's hour reports anchored and the teachable event sits inside it"
+    why_human: "Writes to production ledger and devnet; no agent may run it. The in-repo proof uses a fake RPC only"
 ---
 
-# Phase 29: Agent Cards and teachable moments — Verification
+# Phase 29: Agent Cards and teachable moments Verification Report
 
-**Verified:** 2026-10-10 at main tip `bc8f839` (PR #50 squash-merged).
-**Scope:** in-repo only. CARD-01..CARD-04 rehearsal half; G1/G2/G3 are
-operator windows, never executed by agents.
+**Phase Goal:** Each agent surface publishes a spec-valid A2A Agent Card whose skills include what it has been taught, and every teachable is covered by the hourly anchor.
+**Verified:** 2026-11-12T08:31:11Z
+**Status:** human_needed
+**Re-verification:** No — initial verification in this form. The previous `29-VERIFICATION.md` (status `passed`, 2026-10-11) listed G1–G3 as operator-gated while reporting `passed`; this report supersedes it.
 
-## Executed plans
+## Goal Achievement
 
-| Plan | Commit(s) | Outcome |
-|------|-----------|---------|
-| 29-01 teachable write path | b9ba253 | Predicate + sample-shaped `note` emit + 6-row corpus, pinned |
-| 29-02 card builder + route | 3eacfae | Builder, UNVERIFIED validator, reader, loopback route |
-| 29-03 anchor proof + docs | 7d4324e | Scratch coverage proof, card e2e, `docs/agent-cards.md` |
-| Review fixes (Greptile r1) | 7eace4b | All 5 findings addressed (see below) |
-| Summaries | 12c6eea | 29-01/02/03-SUMMARY.md with evidence |
+### Observable Truths
 
-## Evidence (all green at merge)
+Truths are the four ROADMAP Phase 29 success criteria. PLAN frontmatter truths (29-01/02/03) were checked as supporting detail; none reduce scope.
 
-- `bun test` full suite: 2887 pass / 58 skip / 1 fail — the 1 fail is
-  `scripts/rehearsal.test.ts --port 7410`, which fails identically on main
-  (production-checkout guard fires first in this environment). Pre-existing,
-  unrelated, out of scope.
-- `pytest`: 230 passed.
-- `bunx tsc --noEmit`: clean.
-- `bun run check:phase-close`: pass — EVENT_KINDS at 12, SURFACES at 27.
-- CI on PR #50: "Typecheck, tests and repo locks" SUCCESS; Greptile Review
-  SUCCESS (initial 4/5 review with 1 P1 + 4 P2, all fixed, re-review green).
-- PR: https://github.com/swcstudiospace/agent-substrate/pull/50 (squash-merged as `bc8f839`).
+| #   | Truth | Status | Evidence |
+| --- | ----- | ------ | -------- |
+| 1 | Each surface has an A2A v1.0 Agent Card at `/.well-known/agent-card.json`, valid against the spec (id, name, description, supported interfaces, capabilities, default modes, skills[]) | ✓ VERIFIED (in-repo field set); spec fidelity → human G1 | Route: `packages/mcp-server/src/server.ts:1193-1210` (per-surface via `?surface=`, 400 on missing/unknown). Builder: `agent-card.ts:82-117` emits all listed fields. Validator: `agent-card.ts:123-170`. Route and validator cases pass in `agent-card.test.ts`. The field set is marked UNVERIFIED against the published A2A spec (`agent-card.ts:8-16`, `:43`, `:121`) pending G1. |
+| 2 | A teachable is a tagged governed `fact` written through `memory_write` (no new memory kind); each accepted teachable appears in its surface's card `skills[]` | ✓ VERIFIED | Predicate: `teachable.ts:36-44` (kind `fact`, `teachable:` prefix, non-empty slug). Reader: `service.ts:3429-3455` (`subjectPrefix` search, writer and kind filter, superseded excluded, newest first). Skills mapping: `agent-card.ts:82-103` (`SKILL_NAME_RE` name, redacted description capped at 1200, tag `teachable-moment`). Card e2e in `agent-card.test.ts` passes. |
+| 3 | Teachable writes emit events the hourly anchor covers; `verify` reports the hour holding a teachable as anchored | ✓ VERIFIED (in-repo, fake RPC); live anchor → human G3 | Emit: `service.ts:3160-3168` (only `accepted` + `verified_persisted` + not `deduplicated` + teachable + known surface). Event builder: `teachable.ts:58-79` (kind `note`, `action: "teachable"`, hash only). Anchor proof: `teachable-anchor.test.ts:194` ("the teachable event sits inside a verify-reported anchored hour") and `:224` (altered event fails verify naming the hour); both pass. |
+| 4 | A teachable recorded from a session appears in that surface's Agent Card, and its event sits inside an anchored hour | ✓ VERIFIED (in-repo, scratch ledger + fake RPC); live → human G3 | Session → card leg in `agent-card.test.ts` (passes); event-in-anchored-hour leg in `teachable-anchor.test.ts:194` (passes). Live devnet leg not executed. |
 
-## Greptile r1 findings — disposition
+**Score:** 4/4 roadmap success criteria verified in-repo; 0 behavior-unverified truths; 3 operator-gated human items (G1, G2, G3).
 
-1. **P1 reader shared cutoff** — fixed: `writer` + `kind` filter before paging
-   (new optional `MemorySearch` predicates, same SQL pattern); `isTeachable`
-   still decides each row.
-2. **P2 empty slug as skill** — fixed: reader reuses `isTeachable`; test added.
-3. **P2 replay double-emit** — fixed: `deduplicated` replays trail nothing;
-   replay test added. Residual: a crash between insert and ack recovered under
-   the same key (`recovered.orphan`) trails nothing — accepted as best-effort
-   trail semantics.
-4. **P2 stale warnings hidden** — fixed: `needs_reverification` entries carry
-   a "Check this advice before use. " prefix; test added.
-5. **P2 versioning claim wrong** — fixed: `fact` is append-only
-   (`conflictPlan`); docs + module comment now say revisions supersede by
-   recency, newest first.
+### Deferred Items
 
-## Live-tail status
+None.
 
-Nothing live ran in this phase. No devnet transaction, no spec fetch, no card
-served beyond loopback, no `SOLANA_*` credentials anywhere (proof uses a fake
-in-process pubkey through the config object).
+### Advisory (New Scope, Unevidenced)
 
-## OPERATOR APPROVAL NEEDED
+None. (Re-verification mode was not used; no new-scope findings were raised.)
 
-The following gated steps were recorded verbatim from the phase plans and
-have NOT been executed. Each needs explicit operator approval:
+### Required Artifacts
 
-- **G1:** Fetch the published A2A spec
-  (`https://a2a-protocol.org/latest/specification/`) and diff its Agent Card
-  required fields against the in-repo validator set; record confirmation or
-  correction in the phase report. (read-only, network read; rollback: none)
-- **G2:** Read a loopback card per surface
-  (`GET /.well-known/agent-card.json?surface=<name>` × 27); decide whether
-  any card is published beyond loopback (none in v1.3 — exposure is a
-  separate operator decision). (read-only loopback; rollback: stop
-  serving / restrict)
-- **G3:** With the funded devnet key: emit a proof teachable into
-  production, let the hourly timer anchor its hour, read the memo back by
-  `tx_sig`, `substrate verify <proof graph>` shows the teachable hour
-  `anchored`. (write: production ledger + devnet + `anchors` row + ledger
-  event; rollback: none needed — one proof hour stands as history)
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `packages/mcp-server/src/teachable.ts` | predicate, slug, sample-shaped event builder | ✓ VERIFIED | 79 lines; imported by `service.ts:170` |
+| `packages/mcp-server/src/teachable.fixtures.ts` | shared corpus | ✓ VERIFIED | 131 lines; consumed by `teachable.test.ts` |
+| `packages/mcp-server/src/agent-card.ts` | builder, validator, reader guard | ✓ VERIFIED | 174 lines; imported by `server.ts:73` |
+| `packages/mcp-server/src/agent-card.fixtures.ts` | valid + violation fixtures | ✓ VERIFIED | 84 lines; consumed by `agent-card.test.ts` |
+| `docs/agent-cards.md` | convention, route, coverage argument, G1–G3 map | ✓ VERIFIED | 62 lines; G1–G3 recorded unexecuted |
+
+### Key Link Verification
+
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| `server.ts` GET route | `buildAgentCard` + `teachablesForSurface` | `server.ts:1209` | ✓ WIRED | Route calls reader then builder, returns 200 JSON |
+| `service.writeMemory` | `teachableEvent` → `this.emit` | `service.ts:3165-3168` | ✓ WIRED | Guarded on accepted, verified, non-deduplicated, teachable, known surface |
+| `teachablesForSurface` | index `subjectPrefix` search | `service.ts:3429-3455` | ✓ WIRED | Read-only; no gate, no cache bump |
+| `agent-card` skills | `SKILL_NAME_RE` | `agent-card.ts` imports `skills/propose.ts` | ✓ WIRED | Validator rejects non-matching names |
+
+### Data-Flow Trace (Level 4)
+
+| Artifact | Data Variable | Source | Produces Real Data | Status |
+| -------- | ------------- | ------ | ------------------ | ------ |
+| card `skills[]` | `teachables` | `teachablesForSurface` → index search | Yes in code; tests use stub/fixture index | ✓ FLOWING |
+
+### Behavioral Spot-Checks
+
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Teachable write/emit/reader, card route and validator, server route, anchor proof | `bun test packages/mcp-server/src/teachable.test.ts packages/mcp-server/src/teachable-anchor.test.ts packages/mcp-server/src/agent-card.test.ts packages/mcp-server/src/server.test.ts` | 258 pass, 0 fail | ✓ PASS |
+| Anchor proof file alone | `bun test packages/mcp-server/src/teachable-anchor.test.ts` | 116 pass, 0 fail | ✓ PASS |
+| Phase lock gate | `bun run check:phase-close` | pass: 4 lock files green; EVENT_KINDS unchanged at 12 | ✓ PASS |
+| Live G1 spec diff, G2 loopback per surface, G3 devnet anchor | not run | operator-gated | ? SKIP → human |
+
+Not run: `bunx tsc --noEmit`, the full `bun test` suite, and the Python suites. `SUBSTRATE_TEST_PG_URL` was unset, so the live Postgres index tests did not run; the scratch-ledger proofs use in-process stores and a fake RPC.
+
+### Probe Execution
+
+No probes declared for this phase (no `scripts/*/tests/probe-*.sh` found; none referenced in PLAN/SUMMARY). Skipped.
+
+### Requirements Coverage
+
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ----------- | ----------- | ------ | -------- |
+| CARD-01 | 29-02 | A2A v1.0 Agent Card per surface on loopback, valid against spec | ✓ SATISFIED in-repo; spec fidelity human (G1) | `server.ts:1193-1210`, `agent-card.ts:82-170` |
+| CARD-02 | 29-01, 29-02 | Teachable = governed fact via `memory_write`; appears in `skills[]` | ✓ SATISFIED | `teachable.ts:36-44`, `service.ts:3429-3455`, `agent-card.ts:82-103` |
+| CARD-03 | 29-01, 29-03 | Teachable events covered by hourly anchor; verify reports anchored | ✓ SATISFIED in-repo; live (human G3) | `service.ts:3160-3168`, `teachable-anchor.test.ts:194` |
+| CARD-04 | 29-03 | Session teachable appears in card; event inside anchored hour | ✓ SATISFIED in-repo; live (human G3) | `agent-card.test.ts` card e2e; `teachable-anchor.test.ts:194` |
+
+### Anti-Patterns Found
+
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| `packages/mcp-server/src/agent-card.ts` | 8-16, 121 | Explicit UNVERIFIED marker on the card field set | ℹ️ Info | Documented and operator-gated (G1). Not a stub. |
+| `29-01-SUMMARY.md` / `29-VERIFICATION.md` (prior) | — | Records SURFACES at 27; `check:phase-close` now reports SURFACES at 42 (baseline plus substrate). Lock passes. | ℹ️ Info | Summary drift only; no gate fails. |
+
+No TODO/FIXME/placeholder/stub returns in the four new source files.
+
+### Human Verification Required
+
+### 1. G1: A2A spec field-set diff
+
+**Test:** Fetch `https://a2a-protocol.org/latest/specification/` and diff its Agent Card required fields against `validateAgentCard` in `packages/mcp-server/src/agent-card.ts`.
+**Expected:** Field set confirmed, or the validator corrected and its tests updated.
+**Why human:** Operator-gated network read. The in-repo set is explicitly UNVERIFIED against the published spec.
+
+### 2. G2: Loopback card read per surface and publication decision
+
+**Test:** `GET /.well-known/agent-card.json?surface=<name>` on loopback for each of the 27 surfaces; the operator decides whether any card is published beyond loopback.
+**Expected:** Each returns 200 with a validator-clean card. Publication beyond loopback is decided by the operator (none in v1.3 by default).
+**Why human:** Live read against the running server, plus an exposure decision.
+
+### 3. G3: Devnet-backed teachable anchor proof
+
+**Test:** With the funded devnet key, emit a proof teachable into production, wait for the hourly timer to anchor its hour, read the memo back by `tx_sig`, run `substrate verify <proof graph>`.
+**Expected:** The teachable's hour reports `anchored`, and the teachable event sits inside it.
+**Why human:** Writes to production ledger and devnet. Agents must not execute it. The in-repo proof uses a fake RPC only.
+
+### Gaps Summary
+
+No in-repo gaps. All four ROADMAP success criteria are implemented, wired, and covered by passing tests in the phase's scope. The status is not `passed` because three items are operator-gated and cannot be closed by an agent: the A2A spec field-set confirmation (G1), the live loopback read and publication decision (G2), and the devnet anchor proof (G3).
 
 ---
 
-## Close-out sweep tip confirmation (2026-10-11, HEAD `ed696ef`, PR #53 merged)
-
-Card/teachable sources byte-identical since PR #50 (`bc8f839`) — no later phase touched
-them. Feature tests re-run at tip (`agent-card + teachable + teachable-anchor`, inside the
-272-test 25/26/29 run): **all green, 0 fail**. Full `bun test` 3136 pass / 58 skip / 1 fail
-(F-01 only), `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
-Live G1/G2/G3 stay OPERATOR-GATED — never run.
+_Verified: 2026-11-12T08:31:11Z_
+_Verifier: Claude (gsd-verifier)_
