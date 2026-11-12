@@ -51,18 +51,28 @@ export class LiveSessionBoundaryError extends Error {
 export interface LiveSessionAuditPort { auditCalls(caller: LiveSessionCaller, calls: McpToolCall[], transport: AuditTransport): Promise<AuditOutcome> }
 /** Trusted service invocation, never a client-provided grant. Arguments contain no injected authorization state. */
 export interface LiveSessionInvocation {
- caller: LiveSessionCaller; tool: string; args: unknown; operation: LiveSessionOperation; sessionId?: string | undefined; directiveId?: string | undefined; sessionBinding?: string | undefined; kind?: "issue" | "discovery" | undefined; transport?: AuditTransport | undefined;
+  caller: LiveSessionCaller; tool: string; args: unknown; operation: LiveSessionOperation; sessionId?: string | undefined; directiveId?: string | undefined; sessionBinding?: string | undefined; kind?: "issue" | "discovery" | undefined; transport?: AuditTransport | undefined;
+  /** The repository the call names (already scoped). Admitted before any session-binding read; see `LiveSessionBoundaryDeps.admitRepo`. */
+  repoId?: string | undefined;
 }
 declare const preparedBrand: unique symbol;
 export interface PreparedLiveCall { readonly [preparedBrand]: true }
 declare const dispatchBrand: unique symbol;
 export interface PreparedLiveDispatch { readonly [dispatchBrand]: true }
 interface CheckedCall { invocation: LiveSessionInvocation; access: LiveSessionAccess | null; snapshot: LiveSessionSnapshot | null }
+export interface LiveSessionBoundaryDeps {
+  authority: LiveSessionAuthority | null; settings: AdmissionSettings; recordRefusal: (event: EventInput) => Promise<boolean>; resolveDirective: (id: string) => string | null; resolveDurableDirective?: (id: string) => Promise<string | null>; nowMs?: () => number;
+  /**
+   * Phase 72: the repository gate for a call that names a repository. Runs before any read of session state, so an ungranted
+   * repository is refused without reading the binding or the session. Returns false when refused (the refusal is recorded by the owner).
+   */
+  admitRepo?: (invocation: LiveSessionInvocation) => Promise<boolean>;
+}
 /** A SQL-backed boundary. Process-local buckets bound principals, not attacker-selected targets. */
 export class LiveSessionBoundary {
  private readonly buckets = new Map<string, BucketState>();
  private readonly prepared = new WeakMap<PreparedLiveCall, CheckedCall>();
- constructor(private readonly deps: { authority: LiveSessionAuthority | null; settings: AdmissionSettings; recordRefusal: (event: EventInput) => Promise<boolean>; resolveDirective: (id: string) => string | null; resolveDurableDirective?: (id: string) => Promise<string | null>; nowMs?: () => number }) {}
+ constructor(private readonly deps: LiveSessionBoundaryDeps) {}
  reserve(invocations: readonly LiveSessionInvocation[]): LiveSessionRefusal | null {
   const costs = new Map<string, { caller: LiveSessionCaller; klass: "read" | "write"; count: number }>();
   for (const invocation of invocations) {
@@ -88,6 +98,8 @@ export class LiveSessionBoundary {
   return entries;
  }
  private async prepareReserved(invocation: LiveSessionInvocation): Promise<PreparedLiveCall | LiveCallFailure> {
+  // Repository gate first: an ungranted repository is refused before the authority is consulted (no binding or session read).
+  if (invocation.repoId !== undefined && this.deps.admitRepo !== undefined && !(await this.deps.admitRepo(invocation))) return liveSessionNotFound();
   if (this.deps.authority === null) return { status: "refused", error: { code: "session-unavailable" } };
   if (invocation.kind !== undefined) {
    if (invocation.caller.surface === null) return this.deny(invocation, "");

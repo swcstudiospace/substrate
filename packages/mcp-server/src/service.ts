@@ -1474,7 +1474,7 @@ function liveInvocationFor(caller: LiveSessionCaller, call: McpToolCall): LiveSe
 	const base = { caller, tool: call.tool, args: call.args };
 	if (call.tool === "docs_steering_session") {
 		const args = LIVE_SESSION_UPDATE_INPUT.parse(call.args);
-		return { ...base, operation: "owner-transition", sessionId: args.session_id, sessionBinding: args.session_binding, ...(args.session_id === undefined ? { kind: "issue" as const } : {}) };
+		return { ...base, operation: "owner-transition", sessionId: args.session_id, sessionBinding: args.session_binding, repoId: scopeRepoId(args.repo_id), ...(args.session_id === undefined ? { kind: "issue" as const } : {}) };
 	}
 	if (call.tool === "steering_session_heartbeat" || call.tool === "steering_session_close") {
 		const args = LIVE_SESSION_TARGET_INPUT.parse(call.args);
@@ -1877,6 +1877,7 @@ export class Substrate {
 			resolveDurableDirective: async (id) => (this.steeringDurable === null ? null : this.steeringDurable.targetSessionOf(id)),
 			recordRefusal: async (event) => (await this.emit(event)).stored,
 			nowMs: steeringClock.nowMs,
+			admitRepo: (invocation) => this.admitLiveRepo(invocation),
 		});
 		this.steering = {
 			enabled: config.steeringRegistered,
@@ -2048,7 +2049,7 @@ export class Substrate {
 
 	async updateLiveSession(caller: LiveSessionCaller, raw: unknown, options?: Omit<LiveAccessOptions, "caller">): Promise<LiveSessionUpdateReply> {
 		const input = LIVE_SESSION_UPDATE_INPUT.parse(raw);
-		return this.executeLiveCall<LiveSessionUpdateReply>({ caller, tool: "docs_steering_session", args: options?.invocationArgs ?? input, operation: "owner-transition", sessionId: input.session_id, sessionBinding: options?.sessionBinding ?? input.session_binding, ...(input.session_id === undefined ? { kind: "issue" as const } : {}), transport: options?.transport }, async (prepared) => {
+		return this.executeLiveCall<LiveSessionUpdateReply>({ caller, tool: "docs_steering_session", args: options?.invocationArgs ?? input, operation: "owner-transition", sessionId: input.session_id, sessionBinding: options?.sessionBinding ?? input.session_binding, repoId: scopeRepoId(input.repo_id), ...(input.session_id === undefined ? { kind: "issue" as const } : {}), transport: options?.transport }, async (prepared) => {
 			const authority = this.liveSessions;
 			if (authority === null) throw new LiveSessionBoundaryError({ status: "refused", error: { code: "session-unavailable" } });
 			const request: LiveSessionInput = { repoId: scopeRepoId(input.repo_id), state: input.state, ...(input.steering === undefined ? {} : { steering: input.steering }), ...(input.planning_hash === undefined ? {} : { planningHash: input.planning_hash }) };
@@ -6489,6 +6490,18 @@ export class Substrate {
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return outcome;
+	}
+
+	/**
+	 * Phase 72: the live-session boundary's repository gate, run before any session-binding read. An ungranted repository is
+	 * recorded as a scope refusal and reported as not-found by the caller, the same answer an unknown session gets.
+	 */
+	private async admitLiveRepo(invocation: LiveSessionInvocation): Promise<boolean> {
+		if (invocation.repoId === undefined) return true;
+		const gate = authorizeRepo(this.config.repoScope, invocation.caller.surface, invocation.repoId);
+		if (gate.ok) return true;
+		await this.repoRefusal(invocation.tool, invocation.caller.surface, gate.reason, invocation.repoId);
+		return false;
 	}
 
 	/**
