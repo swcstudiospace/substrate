@@ -471,7 +471,7 @@ describe("parseEnvelope", () => {
 	});
 
 	test("reads the Claude Code fields and ignores the rest", () => {
-		expect(parseEnvelope(JSON.stringify({ session_id: "s", cwd: "/x", transcript_path: "/t", hook_event_name: "Stop", stop_hook_active: false }))).toEqual({ session_id: "s", cwd: "/x" });
+		expect(parseEnvelope(JSON.stringify({ session_id: "s", cwd: "/x", transcript_path: "/t", hook_event_name: "Stop", stop_hook_active: false }))).toEqual({ session_id: "s", cwd: "/x", transcript_path: "/t" });
 	});
 	test("null fields are absent; empty text is an empty envelope", () => {
 		expect(parseEnvelope(JSON.stringify({ session_id: null, directive_id: "d" }))).toEqual({ directive_id: "d" });

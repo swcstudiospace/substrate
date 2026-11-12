@@ -16,7 +16,9 @@
  * The historical session id is `--session`, else the envelope's `session_id`, else the one session that has local
  * checkpoints in the worktree. Private hints separately require `--steering-session` / `steering_session_id` and an
  * exact private record selected by `--binding-file` / `binding_file` or the deterministic server/surface/live path.
- * No proof is accepted on stdin or argv. `transcript_path` is accepted and ignored.
+ * No proof is accepted on stdin or argv. `transcript_path` is read and must be a string, but it is never carried. The claude-code
+ * pointer is `session_id` plus `turn_no` or `entry_id`, the ids the envelope holds, never a path. Those field names follow the
+ * claude-code contract in `transcript-ref.ts`; without them no pointer is recorded.
  *
  * A turn costs no extra tree hash over a bare `session checkpoint`: the cheap rules (rate limit, baseline,
  * directive dedupe) run first on an unlocked list; if they pass, `createCheckpoint` takes the one snapshot and
@@ -30,7 +32,8 @@
  * hook has) and which is empty on any error.
  */
 import { isAbsolute } from "node:path";
-import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
+import { transcriptRefFor } from "../../../collectors/src/transcript-ref.ts";
+import type { RandomBytes, TranscriptRef } from "../../../mcp-server/src/session-events.ts";
 import { type Clock, type Runner, type SnapshotPolicy, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import {
 	type CheckpointResult,
@@ -55,6 +58,8 @@ export const HOOK_TIMEOUT_MS = 10_000;
 export const MAX_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_SESSION_ID = 512;
 const MAX_DIRECTIVE_ID = 256;
+const MAX_ENTRY_ID = 256;
+const MAX_TRANSCRIPT_PATH = 4096;
 
 export type HookOutcome = (
 	| { status: "checkpointed"; ckpt_id: string; seq: number; created: boolean; ledger: CheckpointResult["server"]["status"] }
@@ -62,7 +67,7 @@ export type HookOutcome = (
 	| { status: "context"; text: string }
 	| { status: "skipped"; reason: string }
 	| { status: "failed"; reason: string }
-) & { hintNote?: string };
+) & { hintNote?: string; transcriptNote?: string };
 
 export interface HookParams {
 	trigger: HookTrigger;
@@ -116,6 +121,9 @@ interface Envelope {
 	binding_file?: string;
 	cwd?: string;
 	directive_id?: string;
+	transcript_path?: string;
+	turn_no?: number;
+	entry_id?: string;
 }
 
 /** Parse the stdin text. Empty is an empty envelope; anything that is not a JSON object, or has a mistyped field, is a reason. */
@@ -132,12 +140,16 @@ export function parseEnvelope(raw: string): Envelope | string {
 	const rec = value as Record<string, unknown>;
 	if ("session_binding" in rec || "sessionBinding" in rec) return "the hook envelope must reference a private binding file, not a binding proof";
 	const envelope: Envelope = {};
-	const text = (name: "session_id" | "steering_session_id" | "binding_file" | "cwd" | "directive_id", max: number): string | undefined => {
+	const text = (name: "session_id" | "steering_session_id" | "binding_file" | "cwd" | "directive_id" | "transcript_path" | "entry_id", max: number): string | undefined => {
 		const field = rec[name];
 		if (field === undefined || field === null) return undefined;
 		if (typeof field !== "string" || field.length === 0 || field.length > max) throw new Error(`the envelope field ${name} must be a string of 1 to ${max} characters`);
 		return field;
 	};
+	// turn_no is the claude-code contract's turn number: anything that is not a positive integer is a reason, not a dropped field.
+	const turnField = rec["turn_no"] ?? undefined;
+	if (turnField !== undefined && (typeof turnField !== "number" || !Number.isSafeInteger(turnField) || turnField < 1)) return "the envelope field turn_no must be a positive integer";
+	if (typeof turnField === "number") envelope.turn_no = turnField;
 	try {
 		const sessionId = text("session_id", MAX_SESSION_ID);
 		const steeringSessionId = text("steering_session_id", MAX_SESSION_ID);
@@ -149,6 +161,10 @@ export function parseEnvelope(raw: string): Envelope | string {
 		if (bindingFile !== undefined) envelope.binding_file = bindingFile;
 		if (cwd !== undefined) envelope.cwd = cwd;
 		if (directiveId !== undefined) envelope.directive_id = directiveId;
+		const transcriptPath = text("transcript_path", MAX_TRANSCRIPT_PATH);
+		const entryId = text("entry_id", MAX_ENTRY_ID);
+		if (transcriptPath !== undefined) envelope.transcript_path = transcriptPath;
+		if (entryId !== undefined) envelope.entry_id = entryId;
 	} catch (error) {
 		return error instanceof Error ? error.message : "the hook envelope is not valid";
 	}
@@ -202,6 +218,23 @@ async function contextOutcome(params: HookParams, envelope: Envelope, worktree: 
 	return { status: "context", text: renderDigest(result.value, MAX_DIGEST_CHARS - 1) };
 }
 
+/**
+ * The claude-code transcript pointer for this run's checkpoints, or the reason none is recorded. It names the envelope's own
+ * session and turn (or entry) id; the transcript path is never the locator.
+ */
+function transcriptFor(surface: string, envelope: Envelope, session: string): { ref: TranscriptRef } | { note: string } {
+	if (surface !== "claude-code") return { note: `transcript reference not recorded: the surface is ${surface}, not claude-code` };
+	if (envelope.session_id === undefined) return { note: "transcript reference not recorded: no session id in the envelope" };
+	if (envelope.session_id !== session) return { note: "transcript reference not recorded: the envelope session id is not the checkpoint session" };
+	const result = transcriptRefFor("claude-code", {
+		session_id: envelope.session_id,
+		...(envelope.turn_no === undefined ? {} : { turn_no: envelope.turn_no }),
+		...(envelope.entry_id === undefined ? {} : { entry_id: envelope.entry_id }),
+	});
+	if (result.ref === null) return { note: `transcript reference not recorded: ${result.reason}${result.detail === undefined ? "" : ` (${result.detail})`}` };
+	return { ref: result.ref };
+}
+
 async function execute(params: HookParams): Promise<HookOutcome> {
 	const run = params.run ?? spawnRunner;
 	const parsed = parseEnvelope(await params.readStdin());
@@ -226,6 +259,8 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	}
 	if (sessionId.length === 0 || sessionId.length > MAX_SESSION_ID) return { status: "failed", reason: "the session id must be 1 to 512 characters" };
 	const session = sessionId;
+	// The claude-code transcript pointer: the envelope's own session and turn or entry id, or the reason none is recorded.
+	const transcript = transcriptFor(params.surface, parsed, session);
 
 	// One checkpoint attempt, for the directive `key` names (none: a plain steering checkpoint of a changed tree).
 	const attempt = async (key: string | undefined, planRef: PlanRef | undefined): Promise<HookOutcome> => {
@@ -256,6 +291,7 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 		const result = await createCheckpoint({
 			worktree,
 			sessionId: session,
+			transcriptRef: "ref" in transcript ? transcript.ref : undefined,
 			trigger,
 			...(planRef === undefined ? {} : { planRef }),
 			surface: params.surface,
@@ -272,7 +308,7 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 			},
 		});
 		if ("status" in result) return { status: "skipped", reason: result.reason };
-		return { status: "checkpointed", ckpt_id: result.checkpoint.ckpt_id, seq: result.checkpoint.seq, created: result.created, ledger: result.server.status };
+		return { status: "checkpointed", ckpt_id: result.checkpoint.ckpt_id, seq: result.checkpoint.seq, created: result.created, ledger: result.server.status, ...("note" in transcript ? { transcriptNote: transcript.note } : {}) };
 	};
 
 	const envelopeKey = trigger === "steering" && parsed.directive_id !== undefined ? directiveKey(parsed.directive_id) : undefined;
@@ -369,9 +405,10 @@ export async function runHook(params: HookParams): Promise<HookOutcome> {
 /** The single `--verbose` line for an outcome. */
 export function describeOutcome(trigger: HookTrigger, outcome: HookOutcome): string {
 	const hintNote = outcome.hintNote === undefined ? "" : `; ${outcome.hintNote}`;
+	const transcriptNote = outcome.transcriptNote === undefined ? "" : `; ${outcome.transcriptNote}`;
 	switch (outcome.status) {
 		case "checkpointed":
-			return `substrate session hook ${trigger}: ${outcome.created ? "created" : "found"} checkpoint ${outcome.ckpt_id} (seq ${outcome.seq}; ledger ${outcome.ledger})${hintNote}`;
+			return `substrate session hook ${trigger}: ${outcome.created ? "created" : "found"} checkpoint ${outcome.ckpt_id} (seq ${outcome.seq}; ledger ${outcome.ledger})${hintNote}${transcriptNote}`;
 		case "context":
 			return `substrate session hook ${trigger}: printed ${outcome.text.length} characters of context`;
 		case "skipped":
