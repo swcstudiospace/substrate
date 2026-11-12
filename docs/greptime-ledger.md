@@ -974,7 +974,7 @@ The answer is never `stored: true` for a parked event.
 
 `packages/mcp-server/src/cross-layer-reconcile.ts` checks that the ledger, the index and the cache agree about memory
 forgets. Its scheduled entry is `packages/mcp-server/src/cross-layer-reconcile-run.ts`, which calls
-`runScheduledReconcile(deps, options)` once per tick. The daily unit that runs it is described under *Scheduled run* below.
+`runScheduledReconcile(deps, options)` once per tick. The reconcile unit that runs that tick is staged under `infra/vps/` and installed by an operator (see *Scheduled run* below). `substrate reconcile` is the manual path for the confirmed repair.
 
 - **What is compared.** A `memory.forget` note names its forget id and its entry ids. For each named entry the index must
   not still have it in force (`superseded_by` null), and the cache forget mark must be at or after the latest forget that
@@ -993,6 +993,7 @@ forgets. Its scheduled entry is `packages/mcp-server/src/cross-layer-reconcile-r
   which never overwrites another superseder), sets the cache mark if the plan has one, and records a `reconcile.applied`
   note. A repeat apply marks nothing new. Repair follows the corpus delete rules (`corpus/plan.ts`): scope, never
   overwrite, never remove (a forget keeps the row), planned keys only.
+- **Manual path.** `substrate reconcile` (no flag, or `--plan`) runs the comparison, records the plan as one `reconcile.plan` note, and prints it with its id; it repairs nothing. `substrate reconcile --apply PLAN_ID --confirm` applies that plan. It refuses without `--confirm`, and it refuses unless a fresh read of the layers produces the stored plan's digest. The CLI spawns `packages/mcp-server/src/cross-layer-reconcile-repair-run.ts`, which calls `planRepair`, `previewRepair` and `applyRepair`.
 - **Not covered.** An index forget with no ledger note is not judged: the index has no window to read it by. A repair
   does not re-send a Hindsight document deletion; a plane document a repaired entry still holds is the plane's pending
   work, as it is for a forget that stopped part way.

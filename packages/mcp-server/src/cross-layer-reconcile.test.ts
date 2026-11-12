@@ -123,6 +123,15 @@ class FakeIndex implements ReconcileIndex {
 		}
 		return changed;
 	}
+
+	/** Every forget-marked row, oldest id first: the fake keeps no forget times, so the window is not applied. */
+	async forgetMarksBetween(_sinceIso: string, _untilIso: string, limit: number): Promise<{ marks: Array<{ entryId: string; marker: string }>; truncated: boolean }> {
+		const marks = [...this.rows.entries()]
+			.filter(([, marker]) => marker?.startsWith("forgotten:") === true)
+			.map(([entryId, marker]) => ({ entryId, marker: marker ?? "" }))
+			.sort((left, right) => (left.entryId < right.entryId ? -1 : left.entryId > right.entryId ? 1 : 0));
+		return { marks: marks.slice(0, limit), truncated: marks.length > limit };
+	}
 }
 
 class FakeCache implements ReconcileCache {

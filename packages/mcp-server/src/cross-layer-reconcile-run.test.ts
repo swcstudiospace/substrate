@@ -71,6 +71,11 @@ class FakeIndex implements ReconcileIndex {
 		this.marks.push({ ids: [...ids], marker });
 		return [];
 	}
+
+	/** No forget times in this fake, so no forget mark is ever in a window: the index -> ledger direction reads nothing here. */
+	async forgetMarksBetween(_sinceIso: string, _untilIso: string, _limit: number): Promise<{ marks: Array<{ entryId: string; marker: string }>; truncated: boolean }> {
+		return { marks: [], truncated: false };
+	}
 }
 
 /** The cache's forget mark. It records every mark it is asked to set. */

@@ -143,6 +143,7 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 			text("entry_hash"),
 			ts("reverify_after"),
 			text("idempotency_key"),
+			ts("forgotten_at"),
 		],
 		key: ["id"],
 		withheld: [],

@@ -1008,6 +1008,19 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 		down: `alter table corpus_documents drop column if exists superseded_by_path`,
 		sql: `alter table corpus_documents add column if not exists superseded_by_path text`,
 	},
+	// Forget time (v1.8 phase 78, the index-to-ledger direction of the cross-layer reconcile). A forget sets `superseded_by` to its
+	// marker and nothing else records when it happened, so an index forget could not be windowed against the ledger's `memory.forget`
+	// notes. `markMemoryForgotten` sets the column. A row forgotten before this step has no time, so it is in no window and the
+	// reconcile does not judge it. OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 47,
+		name: "memory_entries_forgotten_at",
+		phase: "expand",
+		down: `alter table memory_entries drop column if exists forgotten_at`,
+		sql: `
+			alter table memory_entries add column if not exists forgotten_at timestamptz;
+			create index if not exists memory_forgotten_at_idx on memory_entries (forgotten_at) where forgotten_at is not null`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -2230,7 +2243,7 @@ export class IndexStore implements MemoryStore {
 		}
 		return this.plane("memory.forget", async () => {
 			const rows = (await this.sql`
-				update memory_entries set superseded_by = ${marker}
+				update memory_entries set superseded_by = ${marker}, forgotten_at = now()
 				where id in ${this.sql(distinct)} and superseded_by is null
 				returning id`) as Array<Record<string, unknown>>;
 			return rows.map((row) => String(row.id));
@@ -2331,6 +2344,34 @@ export class IndexStore implements MemoryStore {
 				markers.set(String(row.id), row.superseded_by === null || row.superseded_by === undefined ? null : String(row.superseded_by));
 			}
 			return markers;
+		});
+	}
+
+	/**
+	 * The forget marks set in a window: every row whose `superseded_by` is a forget marker and whose `forgotten_at` (set by
+	 * {@link markMemoryForgotten}) lies in [sinceIso, untilIso] to the millisecond, oldest first. At most `limit` rows, with
+	 * `truncated` true when more matched. A row forgotten before migration 47 has no `forgotten_at` and is in no window.
+	 * Read for the cross-layer reconcile.
+	 */
+	async forgetMarksBetween(sinceIso: string, untilIso: string, limit: number): Promise<{ marks: Array<{ entryId: string; marker: string }>; truncated: boolean }> {
+		const sinceMs = Date.parse(sinceIso);
+		const untilMs = Date.parse(untilIso);
+		if (Number.isNaN(sinceMs) || Number.isNaN(untilMs) || untilMs < sinceMs) throw new Error("forgetMarksBetween: the window is not an ordered pair of instants");
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_FORGET_LOOKUP_IDS) throw new Error(`forgetMarksBetween: limit must be an integer from 1 to ${MAX_FORGET_LOOKUP_IDS}`);
+		const since = new Date(sinceMs).toISOString();
+		const until = new Date(untilMs).toISOString();
+		return this.plane("memory.reconcile", async () => {
+			const rows = (await this.sql`
+				select id, superseded_by from memory_entries
+				where date_trunc('milliseconds', forgotten_at) >= ${since}::timestamptz
+				  and date_trunc('milliseconds', forgotten_at) <= ${until}::timestamptz
+				  and superseded_by like ${`${FORGET_MARKER_PREFIX}%`}
+				order by forgotten_at asc, id asc
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return {
+				marks: rows.slice(0, limit).map((row) => ({ entryId: String(row.id), marker: String(row.superseded_by) })),
+				truncated: rows.length > limit,
+			};
 		});
 	}
 

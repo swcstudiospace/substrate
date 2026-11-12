@@ -105,7 +105,7 @@ describe("markMemoryForgotten against a fake connection", () => {
 		expect(await index.markMemoryForgotten(["mem_a", "mem_b", "mem_c"], MARKER)).toEqual(["mem_a", "mem_c"]);
 		expect(statements).toEqual([
 			{
-				text: "update memory_entries set superseded_by = $1 where id in ($2,$3,$4) and superseded_by is null returning id",
+				text: "update memory_entries set superseded_by = $1, forgotten_at = now() where id in ($2,$3,$4) and superseded_by is null returning id",
 				params: [MARKER, "mem_a", "mem_b", "mem_c"],
 			},
 		]);

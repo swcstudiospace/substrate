@@ -5,13 +5,17 @@
  * Why this pair. `Substrate.memoryForget` does four things: it marks the index rows out of force (`superseded_by` becomes
  * the forget marker), emits ONE `memory.forget` note into the ledger, then bumps the recall and memory generations and sets
  * the cache forget mark. The index keeps no ledger event id, so only this pair has a precise key: a forget note names its
- * forget id and its entry ids. The reconcile judges two agreements:
+ * forget id and its entry ids. The reconcile judges four agreements, and reports each mismatch with its key and its evidence:
  *   - ledger -> index: an entry a forget note names must not still be in force in the index. An entry the index no longer
  *     has, or that another superseder already holds, is consistent with the forget and is not a mismatch.
  *   - ledger -> cache: a forget that marked rows set the forget mark at or after its note, for as long as the mark is meant
  *     to live (`markTtlS`). An older forget may legitimately have let its mark expire.
- * The reverse direction (an index forget with no ledger note) is not judged: the index has no window to read it by. The
- * phase summary names this limit.
+ *   - index -> ledger: a forget mark the index set in the window (its `forgotten_at`, migration 47) must have a `memory.forget`
+ *     note for its forget id that names the entry. A window or note read short is not judged.
+ *   - cache -> index: a forget mark present in the cache and not older than the latest forget must find that forget in the
+ *     index: an entry the index still holds carries the forget's marker.
+ * The index -> ledger and cache -> index findings are report-only: they add no `RepairItem`, so the repair flow never acts on
+ * them. Only ledger -> index and ledger -> cache findings are repairable, and only on a complete read.
  *
  * Read-only by default. `runScheduledReconcile` writes nothing, clean or not. `planRepair` writes ONE plan record (a
  * `reconcile.plan` ledger note, whose event id is the plan id) and only when there is a repair to make on a complete read.
@@ -30,7 +34,7 @@ import { createHash } from "node:crypto";
 import { FORGET_MARK_KEY, type ForgetMarkRead, MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY } from "./cache.ts";
 import { isRecord } from "./corpus/validate.ts";
 import { type EventQuery, epochMsAnyUnit, MAX_QUERY_LIMIT } from "./greptime.ts";
-import { FORGET_ACTION, forgetMarker, isForgetMarker } from "./memory-forget.ts";
+import { FORGET_ACTION, forgetIdOfMarker, forgetMarker, isForgetMarker } from "./memory-forget.ts";
 import { redact } from "./redact.ts";
 import type { Surface } from "./types.ts";
 
@@ -86,6 +90,11 @@ export interface ReconcileIndex {
 	memoryMarkers(ids: readonly string[]): Promise<Map<string, string | null>>;
 	/** Marks rows still in force with `marker` and returns the ids this call changed. Never overwrites another superseder. */
 	markMemoryForgotten(ids: readonly string[], marker: string): Promise<string[]>;
+	/**
+	 * The forget marks `markMemoryForgotten` set in [sinceIso, untilIso] (inclusive, to the millisecond), oldest first, at most
+	 * `limit`; `truncated` is true when more matched. Read for the index -> ledger direction.
+	 */
+	forgetMarksBetween(sinceIso: string, untilIso: string, limit: number): Promise<{ marks: Array<{ entryId: string; marker: string }>; truncated: boolean }>;
 }
 
 /** The cache's forget mark. `ReadThroughCache` satisfies it. */
@@ -130,7 +139,9 @@ export interface Failure {
 
 export type Mismatch =
 	| { layer: "index"; key: string; reason: "in-force"; forgetId: string; noteId: string }
-	| { layer: "cache"; key: string; reason: "stale-forget-mark" };
+	| { layer: "index"; key: string; reason: "unnoted-forget"; forgetId: string; marker: string }
+	| { layer: "cache"; key: string; reason: "stale-forget-mark" }
+	| { layer: "cache"; key: string; reason: "forget-not-in-index"; forgetId: string; noteId: string };
 
 export interface CrossLayerReport {
 	window: { since: string; until: string };
@@ -172,6 +183,9 @@ export interface CacheMarkItem {
 export type PlanRun =
 	| { ok: true; report: CrossLayerReport; planId: string | null; items: RepairItem[]; refused: "incomplete-coverage" | "too-many-items" | null }
 	| Failure;
+
+/** A read of the layers and the repairs it calls for, with the digest a stored plan must match. Writes nothing. */
+export type PreviewRun = { ok: true; report: CrossLayerReport; items: RepairItem[]; itemsSha256: string } | Failure;
 
 export type SkipReason = "absent" | "already-marked" | "forgotten-by-other" | "superseded" | "raced";
 
@@ -341,6 +355,28 @@ async function observe(deps: ReconcileDeps, options: ReconcileOptions): Promise<
 		}
 	}
 
+	// Index -> ledger: a forget mark the index set in the window must have a `memory.forget` note for its forget id that names the
+	// entry. The index window ends a settle lag early: a forget's note is written just after its mark, so the note is in the ledger
+	// window once the mark is at or before `until - settleMs`. A window read short, or a malformed note that may be this forget's,
+	// is not judged, and neither is a partial note that may name the entry past its kept ids. Report only.
+	const reportOnly: Mismatch[] = [];
+	const marksUntil = Math.max(since, until - options.settleMs);
+	const marks = await reach("index-unavailable", () => deps.index.forgetMarksBetween(iso(since), iso(marksUntil), RECONCILE_MAX_KEYS));
+	if (marks.truncated) keysTruncated = true;
+	if (!window.truncated && malformed === 0) {
+		// An entry is unnoted only when no note in the window names it under ANY forget id: a later superseder or another forget
+		// holding it is consistent with the forget. A partial note of this same forget may name it past its kept ids.
+		const namedEntries = new Set(facts.flatMap((fact) => fact.entryIds));
+		const partialForgets = new Set(facts.filter((fact) => !fact.namesAll).map((fact) => fact.forgetId));
+		for (const mark of marks.marks) {
+			// `markMemoryForgotten` writes only well-formed forget markers; any other value is not a forget mark and is not judged.
+			const forgetId = forgetIdOfMarker(mark.marker);
+			if (forgetId === null) continue;
+			if (namedEntries.has(mark.entryId) || partialForgets.has(forgetId)) continue;
+			reportOnly.push({ layer: "index", key: mark.entryId, reason: "unnoted-forget", forgetId, marker: mark.marker });
+		}
+	}
+
 	// The cache must hold the forget mark for the latest forget that marked rows, while the mark is meant to live.
 	const mark = await reach("cache-unavailable", () => deps.cache.readForgetMark());
 	const withMarks = facts.filter((fact) => fact.marked > 0);
@@ -352,6 +388,19 @@ async function observe(deps: ReconcileDeps, options: ReconcileOptions): Promise<
 		cacheStale = !(mark.state === "present" && mark.atMs >= latest.atMs);
 	}
 	if (cacheStale) items.push({ layer: "cache", key: FORGET_MARK_KEY, reason: "stale-forget-mark" });
+
+	// Cache -> index: a mark present and not older than the latest forget reflects that forget, so the index must hold its effect.
+	// The forget's entries the index still holds must not all be in force. Report only; no repair item.
+	if (checked && !cacheStale && latest !== null) {
+		const latestMarkers = await reach("index-unavailable", () => deps.index.memoryMarkers(latest.entryIds));
+		// The entries the index still holds, under the same rule: held by a later superseder or another forget counts as consistent.
+		// Flagged only when every held entry of the latest forget is in force, which is what the forget was meant to take out of force.
+		const held = [...latestMarkers.values()];
+		if (held.length > 0 && held.every((value) => value === null)) {
+			reportOnly.push({ layer: "cache", key: FORGET_MARK_KEY, reason: "forget-not-in-index", forgetId: latest.forgetId, noteId: latest.noteId });
+		}
+	}
+	const findings: Mismatch[] = [...items, ...reportOnly];
 
 	const partialNotes = facts.filter((fact) => !fact.namesAll).length;
 	const coverage = {
@@ -369,7 +418,7 @@ async function observe(deps: ReconcileDeps, options: ReconcileOptions): Promise<
 			index: { forgotten, superseded, absent, inForce: inForce.length },
 			cache: { state: mark.state, atMs: mark.state === "present" ? mark.atMs : null, checked },
 		},
-		mismatches: { count: items.length, first: items[0] ?? null, items: items.slice(0, RECONCILE_REPORT_MAX) },
+		mismatches: { count: findings.length, first: findings[0] ?? null, items: findings.slice(0, RECONCILE_REPORT_MAX) },
 		repairable: coverage.complete ? items.length : 0,
 	};
 	return { report, inForce, cacheStale };
@@ -420,7 +469,7 @@ export async function planRepair(deps: ReconcileDeps, options: ReconcileOptions)
 		if (!report.coverage.complete) return { ok: true, report, planId: null, items: [], refused: "incomplete-coverage" };
 		if (items.length > RECONCILE_PLAN_MAX_ITEMS) return { ok: true, report, planId: null, items: [], refused: "too-many-items" };
 
-		const plan = { items, itemsSha256: sha256(JSON.stringify(items)), window: report.window };
+		const plan = { items, itemsSha256: repairDigest(items), window: report.window };
 		const written = await reach("ledger-unavailable", () =>
 			deps.ledger.emitNote(`reconcile plan: ${items.length} repair(s) for ${report.window.since} to ${report.window.until}`, {
 				action: RECONCILE_PLAN_ACTION,
@@ -431,6 +480,26 @@ export async function planRepair(deps: ReconcileDeps, options: ReconcileOptions)
 			return { ok: false, reason: "plan-not-recorded", detail: "the plan record was not stored (it may be parked); nothing was repaired" };
 		}
 		return { ok: true, report, planId: written.id, items, refused: null };
+	} catch (cause) {
+		return failureOf(cause);
+	}
+}
+
+/** The digest a plan carries over its items: what `applyRepair` checks, and what a fresh read is compared with. */
+export function repairDigest(items: readonly RepairItem[]): string {
+	return sha256(JSON.stringify(items));
+}
+
+/**
+ * The repair a fresh read would plan, written nowhere: the items `planRepair` would record, with their digest. Empty when the
+ * layers agree. `substrate reconcile --apply` compares this digest with the stored plan's before it applies anything.
+ */
+export async function previewRepair(deps: ReconcileDeps, options: ReconcileOptions): Promise<PreviewRun> {
+	assertOptions(options);
+	try {
+		const observed = await observe(deps, options);
+		const items = repairItemsOf(observed, options.markTtlS);
+		return { ok: true, report: observed.report, items, itemsSha256: repairDigest(items) };
 	} catch (cause) {
 		return failureOf(cause);
 	}
@@ -479,7 +548,7 @@ function parseStoredPlan(payload: Record<string, unknown> | null): RepairItem[] 
 	if (parsed.filter(isCacheMark).length > 1) return null;
 	// An index mark comes with the cache mark that invalidates it. A plan without one predates that rule: applying it would mark rows and leave the cache serving them, so it is refused and must be planned again.
 	if (parsed.some(isIndexMark) && !parsed.some(isCacheMark)) return null;
-	if (sha256(JSON.stringify(parsed)) !== itemsSha256) return null;
+	if (repairDigest(parsed) !== itemsSha256) return null;
 	return parsed;
 }
 
