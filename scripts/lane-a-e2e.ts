@@ -24,7 +24,8 @@
  */
 import { worktreeFor } from "../packages/host/src/sandbox-options.ts";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commit, gitPush, prCreate } from "../packages/host/src/hostfns.ts";
@@ -76,6 +77,27 @@ function scriptedFetch(): { fetchImpl: typeof fetch; calls: FetchCall[] } {
 		return new Response(JSON.stringify({ ok: true, result: true }));
 	}) as unknown as typeof fetch;
 	return { fetchImpl, calls };
+}
+
+/**
+ * A real linked git worktree at `<root>/<gid>`, returning `<root>`. The host git boundary refuses any
+ * worktree whose `.git` is not a registered linked-worktree pointer (hostfns resolveGitSite), so the
+ * chain creates one with `git worktree add` instead of weakening that check. Git runs only here; the
+ * commit/push argvs stay on the fake runner.
+ */
+function linkedWorktreeRoot(dir: string, gid: string, branch: string): string {
+	const repo = join(dir, "repo");
+	const root = join(dir, "worktrees");
+	mkdirSync(repo, { recursive: true });
+	mkdirSync(root, { recursive: true });
+	const git = (args: string[]): void => {
+		const out = spawnSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: repo, encoding: "utf8" });
+		if (out.status !== 0) throw new Error(`git ${args[0]} failed: ${out.stderr}`);
+	};
+	git(["init", "-q"]);
+	git(["-c", "user.name=lane33", "-c", "user.email=lane33@example.invalid", "commit", "-q", "--allow-empty", "-m", "init"]);
+	git(["worktree", "add", "-q", "-b", branch, join(root, gid)]);
+	return root;
 }
 
 function tapUpdate(data: string, id: string): unknown {
@@ -454,6 +476,7 @@ async function main(argv: string[]): Promise<number> {
 		substrate: { graphGet: (id: string) => substrate.graphGet(id) },
 		run: workedRunner(REPO, BRANCH, argvLog),
 		log: (line: string) => logs.push(line),
+		worktreeRoot: linkedWorktreeRoot(dir, GID, BRANCH),
 	};
 	const committed = await commit({ ...hostCtx, message: "lane33 rehearsal" });
 	const pushed = await gitPush(hostCtx);

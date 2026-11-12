@@ -561,7 +561,8 @@ def make_launch_fn(
         )
         if candidate.surface == "claude-code":
             if open_task is None:
-                raise HostRefused("no substrate-host client configured", "host-unreachable")
+                # No request is sent, so no task was opened: the pending record must not survive.
+                raise HostRefused("no substrate-host client configured", "host-unreachable", may_be_open=False)
             launched = open_task(**ids)
             log(
                 f"launched claude-code for {candidate.identifier} graph {found['graph_id']} "
