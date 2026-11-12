@@ -712,8 +712,10 @@ export function httpClaimsLookup(config: HttpPosterConfig): ClaimsFn {
 export type MergeBackNotedOutcome = { ok: true; noted: boolean } | { ok: false; error: string };
 export type MergeBackNotedFn = (repo: string, head: string) => Promise<MergeBackNotedOutcome>;
 
-/** The newest notes one lookup reads. A full window with no match cannot prove the note is absent. */
-const MERGE_BACK_NOTE_WINDOW = 200;
+/** Notes read per page of the lookup, newest first. */
+const MERGE_BACK_NOTE_PAGE = 200;
+/** Pages one lookup may read. Past this the answer is a refusal, never "not recorded". */
+const MERGE_BACK_NOTE_MAX_PAGES = 50;
 
 /** Whether a ledger event is the merge-back note for `head`. */
 function isMergeBackNoteFor(event: unknown, head: string): boolean {
@@ -722,29 +724,60 @@ function isMergeBackNoteFor(event: unknown, head: string): boolean {
 	return typeof payload === "object" && payload !== null && "action" in payload && payload.action === "worktree.merge_back" && "head" in payload && payload.head === head;
 }
 
-/** A lookup of whether `repo` at `head` already has its merge-back note, over `POST /events/query` with the caller's bearer. */
+/** The oldest readable timestamp in a page, as an ISO string, or null when none is readable. */
+function oldestTs(events: unknown[]): string | null {
+	let oldest: number | null = null;
+	for (const event of events) {
+		if (typeof event !== "object" || event === null || !("ts" in event) || typeof event.ts !== "string") continue;
+		const time = Date.parse(event.ts);
+		if (Number.isFinite(time) && (oldest === null || time < oldest)) oldest = time;
+	}
+	return oldest === null ? null : new Date(oldest).toISOString();
+}
+
+type NotePage = { events: unknown[]; truncated: boolean } | { error: string };
+type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
+
+/** One page of the note lookup. The bearer is sent only when one is configured; the server decides whether an untokened read is allowed. */
+async function readNotePage(doFetch: FetchFn, config: HttpPosterConfig, query: Record<string, unknown>): Promise<NotePage> {
+	const headers: Record<string, string> = { "content-type": "application/json" };
+	if (config.token !== undefined) headers.authorization = `Bearer ${config.token}`;
+	try {
+		const response = await doFetch(`${config.url}/events/query`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ surface: "claude-code", kind: "note", order: "desc", limit: MERGE_BACK_NOTE_PAGE, include_payload: true, ...query }),
+			signal: AbortSignal.timeout(config.timeoutMs),
+		});
+		if (!response.ok) return { error: `HTTP ${response.status}` };
+		const body: unknown = await response.json();
+		if (typeof body !== "object" || body === null) return { error: "the ledger answered without a body" };
+		if ("error" in body && typeof body.error === "string") return { error: body.error };
+		if (!("events" in body) || !Array.isArray(body.events)) return { error: "the ledger answered without events" };
+		return { events: body.events, truncated: "truncated" in body && body.truncated === true };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/**
+ * A lookup of whether `repo` at `head` already has its merge-back note, over `POST /events/query`. It pages backwards with an
+ * `until` bound while a page is full, so a busy repository is read completely up to `MERGE_BACK_NOTE_MAX_PAGES` pages.
+ */
 export function httpMergeBackNoted(config: HttpPosterConfig): MergeBackNotedFn {
-	const doFetch = config.fetchImpl ?? ((url: string, init: RequestInit) => fetch(url, init));
+	const doFetch: FetchFn = config.fetchImpl ?? ((url, init) => fetch(url, init));
 	return async (repo, head) => {
-		if (config.token === undefined) return { ok: false, error: "no bearer token for the ledger read" };
-		const filter = repo.startsWith("local/") ? {} : { repo };
-		try {
-			const response = await doFetch(`${config.url}/events/query`, {
-				method: "POST",
-				headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" },
-				body: JSON.stringify({ surface: "claude-code", kind: "note", order: "desc", limit: MERGE_BACK_NOTE_WINDOW, include_payload: true, ...filter }),
-				signal: AbortSignal.timeout(config.timeoutMs),
-			});
-			if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
-			const body: unknown = await response.json();
-			if (typeof body !== "object" || body === null) return { ok: false, error: "the ledger answered without a body" };
-			if ("error" in body && typeof body.error === "string") return { ok: false, error: body.error };
-			if (!("events" in body) || !Array.isArray(body.events)) return { ok: false, error: "the ledger answered without events" };
-			if (body.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
-			if ("truncated" in body && body.truncated === true) return { ok: false, error: `the newest ${MERGE_BACK_NOTE_WINDOW} notes do not settle it` };
-			return { ok: true, noted: false };
-		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		const scope = repo.startsWith("local/") ? {} : { repo };
+		let until: string | undefined;
+		for (let page = 0; page < MERGE_BACK_NOTE_MAX_PAGES; page++) {
+			const read = await readNotePage(doFetch, config, { ...scope, ...(until === undefined ? {} : { until }) });
+			if ("error" in read) return { ok: false, error: read.error };
+			if (read.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
+			if (!read.truncated) return { ok: true, noted: false };
+			const oldest = oldestTs(read.events);
+			if (oldest === null) return { ok: false, error: "the newest notes carry no readable time, so older ones cannot be reached" };
+			until = new Date(Date.parse(oldest) - 1).toISOString();
 		}
+		return { ok: false, error: `the newest ${MERGE_BACK_NOTE_PAGE * MERGE_BACK_NOTE_MAX_PAGES} notes do not settle it` };
 	};
 }
