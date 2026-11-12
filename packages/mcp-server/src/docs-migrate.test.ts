@@ -12,12 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { corpusDocumentName, parseCorpusDocumentName, stripRemoteImages } from "../../corpus/src/index.ts";
 import { type ArchiveQuery, archiveRagflow, type ReadAtCommit, ragflowArchiveSource, verifyArchive } from "./docs-archive.ts";
-import { createVersionStore, recordVersion } from "./docs-datasets.ts";
-import { changeSha, type IngestRecord, loadIngestRecords, saveIngestRecords } from "./docs-ingest.ts";
+import { createVersionStore, lightragSearchDatasets, recordVersion } from "./docs-datasets.ts";
+import { changeSha, DEFAULT_INGEST_ROOTS, type IngestRecord, ingestDocs, loadIngestRecords, saveIngestRecords } from "./docs-ingest.ts";
 import type { FetchLike } from "./planes/lightrag.ts";
 import { FROZEN_SAMPLE } from "./parity-gate.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
-import { main, mapRecords, loadArchive, parseMigrateArgs, partAMarker, runApply, runDryRun, type MigrateIo } from "./docs-migrate.ts";
+import { datasetIdentity, main, mapRecords, loadArchive, parseMigrateArgs, partAMarker, runApply, runDryRun, type MigrateIo } from "./docs-migrate.ts";
 
 const REPO = "agent-substrate";
 const PLANE_REPO = "swcstudiospace/agent-substrate";
@@ -323,6 +323,38 @@ describe("docs-migrate: apply", () => {
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(PLAN)}`)?.version).toBe(1);
 		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag" && version.version === "v4")).toBe(true);
+	});
+
+	test("a normal refresh after a passing apply finds the migrated record under the same key and carries its version", async () => {
+		const fixture = await buildFixture();
+		const plane = matchedPlane();
+		const { io } = captureIo();
+		const applied = await runApply(
+			{ archiveDir: fixture.archiveDir, stateFile: fixture.stateFile, config: CONFIG, fetchImpl: plane.fetch, partAFile: partAFile(fixture.root), rehearsal: false, datasets: [], checkoutRepo: PLANE_REPO, readAtCommit: REPLAY_READ, poll: { maxPolls: 1, intervalMs: 0 } },
+			io,
+		);
+		expect(applied.exit).toBe(0);
+		const { records } = await loadIngestRecords(fixture.stateFile);
+		const key = `lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`;
+		expect(records.get(key)?.version).toBe(3);
+		const refresh = await ingestDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: CONFIG,
+				lightragDatasets: { list: async () => lightragSearchDatasets([REPO], datasetIdentity), invalidate: () => undefined },
+				lightragFetch: plane.fetch,
+				seen: records,
+				locks: new Map(),
+				roots: DEFAULT_INGEST_ROOTS,
+				surface: "substrate",
+				emit: async () => ({ stored: false }),
+				poll: { maxPolls: 1, intervalMs: 0 },
+			},
+			{ dataset: REPO, commit: "7e6d5c4b3a291807", pages: [{ path: NOTES, source_url: sourceOf(NOTES), body: "# Notes\n\nEdited after the migration.\n" }] },
+		);
+		expect(refresh.ok && refresh.results.map((result) => result.status)).toEqual(["replaced"]);
+		expect(records.get(key)?.version).toBe(4);
 	});
 
 	test("every name a passing apply writes parses to the repository its record is keyed under", async () => {

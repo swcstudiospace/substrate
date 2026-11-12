@@ -78,6 +78,7 @@ import {
 	type SkillsSyncTracker,
 	type VersionStore,
 } from "./docs-datasets.ts";
+import { datasetIdentity } from "./docs-migrate.ts";
 import {
 	batchIngestPages,
 	documentProvenance,
@@ -6876,7 +6877,7 @@ export class Substrate {
 			...(sessionId !== undefined ? { sessionId } : {}),
 			fetchImpl: this.ragflowFetch,
 			lightragFetch: this.lightragFetch,
-			lightragDatasets: { list: async () => lightragSearchDatasets([dataset]), invalidate: () => undefined },
+			lightragDatasets: { list: async () => lightragSearchDatasets([dataset], datasetIdentity), invalidate: () => undefined },
 			datasets: this.docsDatasetList,
 			prune: this.config.docsPruneSuperseded,
 		};

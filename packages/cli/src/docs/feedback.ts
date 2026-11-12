@@ -22,6 +22,7 @@
  * timeout or no bearer configured (nothing posted); 2 on a usage error
  * (a missing positional argument, an unknown flag, `--session` with no value).
  */
+import { redact, redactKnown } from "../../../mcp-server/src/redact.ts";
 
 export const FEEDBACK_USAGE = "substrate docs feedback <document> <verdict> [--session ID] [--json]\n";
 
@@ -128,7 +129,7 @@ export async function runDocsFeedback(argv: string[], deps: FeedbackDeps): Promi
 
 	const body = parseJson(text);
 	if (!response.ok) {
-		deps.err(`[substrate] docs feedback failed: ${refusalText(response.status, body, text)}\n`);
+		deps.err(`[substrate] docs feedback failed: ${redact(redactKnown(refusalText(response.status, body, text), [deps.token]))}\n`);
 		return 1;
 	}
 	if (body === undefined) {

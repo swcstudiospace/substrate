@@ -23,8 +23,8 @@
  * `--rehearsal` persists nothing and reports no cutover event. The CLI does not write the event ledger, so the operator
  * records the cutover event.
  *
- * Every document is named under the owner/name of the checkout the replay reads its pages from, when the dataset is that
- * repository (its name is the repository's name). A dataset with no such repository is refused, never named bare.
+ * Every document is named under its dataset's mapped repository (`DATASET_REPOS`), and the replay runs only from a checkout whose
+ * origin is a mapped repository. A dataset outside the table, or a checkout outside it, is refused, never named bare.
  *
  * Exit codes: 0 the mode's checks passed; 1 a verification, gate or replay failure (the report names each mismatch by
  * kind and dataset, never page content); 2 refused before any effect: bad flags, no archive, no `LIGHTRAG_URL`, no
@@ -222,14 +222,30 @@ async function checkoutRepoOf(root: string): Promise<string | null> {
 }
 
 /**
- * The owner/name a dataset's documents are named under. Every replayed page is read from that checkout, so a dataset is
- * the checkout's repository when its name is the repository's name (datasets are named after their repo: `agent-substrate`
- * is `<owner>/agent-substrate`). A dataset with no such repository has no owner/name to name its documents under, so this
- * is null and the replay refuses it rather than naming it bare.
+ * The repository each dataset's records are keyed under: a record is `lightrag::<repository>::<source URL>`, and the normal
+ * refresh reads the same key through `lightragSearchDatasets(names, datasetIdentity)`. It is a table, not the checkout's
+ * origin: an origin changes when its repository is renamed, and a key that followed the rename would strand every record the
+ * old name wrote.
+ */
+export const DATASET_REPOS: Readonly<Record<string, string>> = {
+	"agent-substrate": "swcstudiospace/agent-substrate",
+	substrate: "swcstudiospace/substrate",
+};
+
+/** The identity a dataset's records are keyed under: its mapped repository, or its name when none is mapped. */
+export function datasetIdentity(dataset: string): string {
+	const mapped = Object.hasOwn(DATASET_REPOS, dataset) ? DATASET_REPOS[dataset] : undefined;
+	return mapped ?? dataset;
+}
+
+/**
+ * The identity a dataset's documents are replayed under, or null when the job refuses it. Pages are read from the checkout at
+ * their archived commits, so a dataset replays from a checkout whose origin is a mapped repository. A commit the checkout does
+ * not hold fails its `git show` and refuses the dataset. A dataset outside the table, or a checkout outside it, is refused.
  */
 function datasetRepo(dataset: string, checkout: string | null): string | null {
-	if (checkout === null) return null;
-	return checkout.split("/")[1] === dataset ? checkout : null;
+	if (checkout === null || !Object.hasOwn(DATASET_REPOS, dataset)) return null;
+	return Object.values(DATASET_REPOS).includes(checkout) ? datasetIdentity(dataset) : null;
 }
 
 export interface MigrateIo {
@@ -338,7 +354,7 @@ async function replayDataset(
 	const repo = datasetRepo(dataset.name, options.checkoutRepo);
 	if (repo === null) {
 		const checkout = options.checkoutRepo ?? "unnamed";
-		return { replay: { ...replay, refused: `no owner/name repository names ${dataset.name}: the checkout is ${checkout}` }, written };
+		return { replay: { ...replay, refused: `no mapped repository lets ${dataset.name} replay from the checkout ${checkout}` }, written };
 	}
 	const pagesByCommit = new Map<string, IngestPage[]>();
 	for (const document of dataset.documents) {
@@ -421,7 +437,7 @@ function recordPins(archive: ArchiveLoad, versions: VersionStore, wanted: Readon
 		if (latest === undefined) continue;
 		recordVersion(versions, {
 			dataset,
-			dataset_id: dataset,
+			dataset_id: datasetIdentity(dataset),
 			version: latest.version,
 			commit: latest.commit,
 			content_sha256: latest.content_sha256,

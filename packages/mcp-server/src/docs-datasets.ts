@@ -84,13 +84,14 @@ export function latestVersionFor(store: VersionStore, dataset: string, backend: 
 }
 
 /**
- * The dataset list LightRAG reads, with no RAGFlow round trip. LightRAG names its datasets, so each wanted name is
- * its own id, whatever version a RAGFlow refresh recorded for it: a LightRAG record keyed by RAGFlow's id could not
- * be found again by the LightRAG plane. Sorted by name: search attributes every citation to the first dataset and
- * keys its cache on the sorted set, so the first must not depend on the caller's order.
+ * The dataset list LightRAG reads, with no RAGFlow round trip. Each listed dataset's id is `idOf(name)`: the identity its
+ * records are keyed under. A LightRAG record keyed by RAGFlow's id could not be found again by the LightRAG plane, so the
+ * default id is the name. The normal refresh passes the identity the migration replay keys by, so a record either writes is
+ * the record the other reads. Sorted by name: search attributes every citation to the first dataset and keys its cache on
+ * the sorted set, so the first must not depend on the caller's order.
  */
-export function lightragSearchDatasets(names: readonly string[]): DatasetListOutcome {
-	return { ok: true, datasets: [...names].sort().map((name) => ({ id: name, name })) };
+export function lightragSearchDatasets(names: readonly string[], idOf: (name: string) => string = (name) => name): DatasetListOutcome {
+	return { ok: true, datasets: [...names].sort().map((name) => ({ id: idOf(name), name })) };
 }
 
 /** The search pin a recorded version files under. */
