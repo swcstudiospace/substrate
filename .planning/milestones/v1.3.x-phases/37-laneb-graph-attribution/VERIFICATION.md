@@ -1,47 +1,124 @@
 ---
 phase: 37-laneb-graph-attribution
-verified: 2026-10-21T09:07Z
+verified: 2026-11-12T08:36:03Z
 status: human_needed
-score: 1 of 1 success criteria proven at the collector boundary. Live effect and an end-to-end run on a live server are not proven, and need an operator action
-verified_on: gsd/v13x-37-laneb 2bf4cb7 (code, after the third PR #89 review fix), on origin/main e5891e9. This record is committed after 2bf4cb7.
-covered_files: ["packages/collectors/src/worktree-graph.ts", "packages/collectors/src/worktree-graph.test.ts", "packages/collectors/src/herdr.ts", "packages/collectors/src/herdr.test.ts", "packages/collectors/src/herdr-map.ts", "packages/collectors/src/herdr-state.ts", "packages/collectors/src/herdr-state.test.ts", "packages/collectors/src/muse.ts", "packages/collectors/src/muse-etag.test.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/server.ts"]
+score: 6/8 must-haves verified in code and tests; 2 live checks not run (operator-gated)
+behavior_unverified: 0
+overrides_applied: 0
+covered_files: ["packages/collectors/src/herdr-map.ts", "packages/collectors/src/herdr-state.test.ts", "packages/collectors/src/herdr-state.ts", "packages/collectors/src/herdr.test.ts", "packages/collectors/src/herdr.ts", "packages/collectors/src/muse-etag.test.ts", "packages/collectors/src/muse.ts", "packages/collectors/src/worktree-graph.test.ts", "packages/collectors/src/worktree-graph.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/server.ts"]
+covered_digest: "v3:sha256:26b5985e20a602e7b2374987a5adfb5e119e149907e579e49672b2e263147c9f"
+human_verification:
+  - test: "Redeploy the collectors to a Lane B host that creates dispatcher worktrees, run a herdr pane inside /var/lib/substrate/worktrees/<graph_id>, then read that graph's /brief and /events evidence on the live server"
+    expected: "session.start carries graph_id; the event and the brief for that graph appear without the agent passing an id"
+    why_human: "Live host deploy is operator-gated (STATE.md run rules); no live server run was made"
+  - test: "On a host with a real worktree directory, run Muse pass() against a git repo inside that worktree and capture the /brief request body; repeat for a repo outside any worktree"
+    expected: "The body carries graph_id for the worktree repo and no graph_id for the other"
+    why_human: "The pass() call site was verified by reading and type check only; no real worktree exists on this host"
 ---
 
-> Status detail, kept verbatim from the original frontmatter: passed. The score line records that the live effect and an end-to-end live run are not proven and need an operator action. Set to human_needed for that reason
+# Phase 37: LANEB Verification Report
 
-# 37-VERIFICATION: LANEB, graph attribution from the worktree path
+**Phase Goal:** Lane B events for a worktree reach that graph's brief and evidence without agents passing ids.
+**Verified:** 2026-11-12T08:36:03Z
+**Status:** human_needed
+**Re-verification:** Yes. Fresh re-run of gsd-verifier; replaces the 2026-10-21 record. Code checked at HEAD af4c4278.
 
-Verified by the orchestrator on 2026-10-21, after the PR #89 review. Three Greptile findings: two on 2b5f364 (fixed in 84e774d), one on 52986c7 (fixed in 2bf4cb7). Requirement A-D1 (REQUIREMENTS.md:19). The change is collector-side only. The server contract it relies on already exists and was not modified.
+## Goal Achievement
 
-## Proven in-repo
+### Observable Truths
 
-| Claim | Evidence |
-|---|---|
-| Full repository suite passes on a throwaway Postgres 16 (`substrate_test`) | `bun test` with `SUBSTRATE_TEST_PG_URL` set, on 2bf4cb7: 5700 pass, 2 skip, 0 fail, 5702 tests across 208 files, 123 s, exit 0 |
-| The two skips are the same environment gates | `packages/mcp-server/src/cache-conformance.test.ts:127` (`SUBSTRATE_CONFORMANCE_REDIS_URL` unset) and `packages/mcp-server/src/redact.test.ts:813` (the rehearsal round trip, one test, `SUBSTRATE_REHEARSAL_NAME` unset). The count stayed at 2 while the suite grew by 3 tests |
-| Collectors suite passes | `bun test packages/collectors` on 2bf4cb7: 294 pass, 0 fail, 0 skip, 20 files |
-| Types clean | `bunx tsc --noEmit` exit 0 on 2bf4cb7 |
-| Steady snapshots run no Git | Regression "a pane that stays put is attributed once, at its start, so Git does not run on steady snapshots": 3 attribution calls on the pre-fix code (red), 1 after the fix (green). Production-path smoke over seven snapshots with the default attribution, on 2bf4cb7: 4 Git calls in total; zero on the two steady snapshots and on the note with no directory |
-| A session never spans two graphs | Production-path smoke, on 84e774d and again on 2bf4cb7: start in graph A; move to B; back to A; a status note with no directory keeps A; leaving every graph ends the session. Each session id carries one graph, and each change of graph ends the session with `end_reason: "graph_changed"` |
-| Each review finding was reproduced before its fix | Findings 1 and 2: the "one session, one graph" tests failed on the code before 84e774d and pass after it. Finding 3: the steady-snapshot regression failed on the code before 2bf4cb7 (3 calls where 1 is expected) and passes after it. Herdr state suite: 18 pass, 0 fail, after the final fix |
-| Earlier checks, on e0a685a (before the review fixes) | Two throwaway mutations (a dropped event `graph_id`; an always-sent brief `graph_id`) each failed their named test, and both product files were restored byte-for-byte. A loopback smoke showed the herdr event and the Muse request carry `graph_id` only inside a graph worktree. These were not re-run on 2bf4cb7 |
+| #   | Truth | Status | Evidence |
+| --- | ----- | ------ | -------- |
+| 1 | A worktree path names its graph (first segment under the root); root, sibling, traversal, relative and non-plain segments name none | ✓ VERIFIED | `worktree-graph.ts:37-52` (`graphIdForWorktree`, `graphIdUnder`); `worktree-graph.test.ts` passes |
+| 2 | Herdr session.start, note and session.end events carry the pane's graph_id | ✓ VERIFIED | `herdr-state.ts:234` (`recordFor` sets `graph_id`), `herdr-state.ts:146` (restore), `herdr-map.ts:157` (`transitionToEvent` copies it); "a graph named at start stays on the pane record…" passes |
+| 3 | One session, one graph: a graph change ends the session (`graph_changed`) and starts a new one; a no-directory snapshot keeps the session | ✓ VERIFIED | `herdr-state.ts:346-353`; "one session, one graph" tests (4) pass in `herdr-state.test.ts` |
+| 4 | Git attribution runs only on transitions; steady snapshots run no Git | ✓ VERIFIED | `herdr-state.ts:208-210` (pure `graphOfPane`), `herdr-state.ts:217-220` (attribution helper), `:361` (called only on transition); "a pane that stays put is attributed once…" passes |
+| 5 | Muse's brief request sends graph_id only when inferred from the repo root | ✓ VERIFIED | `muse.ts:196-201` (body with conditional spread), `muse.ts:405` (`graphIdForWorktree(repo)`); "the graph on the brief request" passes (`muse-etag.test.ts:184-185`) |
+| 6 | Server contract unchanged: /brief keys on graph_id; /events stores it | ✓ VERIFIED (by read) | `mcp-server/src/brief.ts:249`, `server.ts:1249`, `server.ts:1266`; not modified in this phase |
+| 7 | Lane B events reach the graph's brief and evidence without agents passing ids (roadmap SC1, end to end) | ? UNCERTAIN, live not run | Collector side verified (truths 1–6). No live server round trip was run; see Human Verification 1 |
+| 8 | pass() infers the graph from a real worktree directory end to end | ? UNCERTAIN, live not run | Call site at `muse.ts:405` verified by read and types; no real `/var/lib/substrate/worktrees/<graph_id>` on this host; see Human Verification 2 |
 
-## Review on PR #89
+**Score:** 6/8 truths verified (2 live checks not run; no truth failed)
 
-- P1, "Revisiting graphs breaks verification" (`herdr-state.ts`, on 2b5f364). Fixed in 84e774d: a graph change is a session boundary (`end_reason: "graph_changed"`), so no session spans two graphs.
-- P2, "Existing panes stay untagged" (`herdr-state.ts`, on 2b5f364). Fixed in 84e774d: a session recorded before attribution is closed at the first snapshot that names a graph, so its end and the next session are tagged.
-- Also found while reproducing P1: a snapshot with no directory overwrote the graph on a status note. Fixed in 84e774d: such a snapshot keeps the session.
-- P2, "Unchanged panes keep running Git" (`herdr-state.ts`, on 52986c7). Fixed in 2bf4cb7: the graph check is pure path work and runs on every snapshot; Git-running attribution runs only at session start, on a status change, and at a graph boundary.
+### Deferred Items
 
-## Success criteria
+None.
 
-| # | ROADMAP criterion | Verdict | Evidence |
-|---|---|---|---|
-| 1 | Lane B events reach the graph's brief and evidence without agents passing ids | PASS at the collector boundary. Live effect not run | Herdr events for a pane inside a graph worktree carry `graph_id`, and a session stays inside one graph (the smoke above). Muse's brief request names the graph when the repo root is inside one. The server stores `graph_id` on `/events` (`server.ts:1064-1066, 1273`) and keys `/brief` on it (`server.ts:1017-1018`; `brief.ts:224`). Those paths are unchanged, and the full-suite run passes on this tree |
+### Required Artifacts
 
-## Not proven
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `packages/collectors/src/worktree-graph.ts` | Pure graph-from-path helper | ✓ VERIFIED | Exports `WORKTREE_ROOT`, `graphIdForWorktree`, `worktreeRoots`. Now also reads `SUBSTRATE_WORKTREE_ROOTS` (see Info) |
+| `packages/collectors/src/herdr-state.ts` | `graphOfPane`, graph boundary, record field | ✓ VERIFIED | `:31-32`, `:77-78`, `:208-210`, `:346-353` |
+| `packages/collectors/src/herdr-map.ts` | `HerdrTransition.graph_id`, `graph_changed` | ✓ VERIFIED | `:99`, `:111`, `:157` |
+| `packages/collectors/src/herdr.ts` | `attributePane` returns repo and branch only | ✓ VERIFIED | `:34-38` |
+| `packages/collectors/src/muse.ts` | `fetchBrief(..., graphId)` | ✓ VERIFIED | `:194-201`, `:405` |
 
-- **Live effect.** A-D1 says to add it "once dispatcher worktrees exist in production" (REQUIREMENTS.md:379). Making this true on a Lane B host needs the collectors redeployed where the dispatcher creates worktrees. Deploying is a live action and waits for operator approval (STATE.md run rules). Nothing was deployed.
-- **`pass()` call site, end to end.** `pass` passes `graphIdForWorktree(repo)` to `fetchBrief`. Its path is the same helper the tests cover, but a real `/var/lib/substrate/worktrees/<graph_id>` directory was not created on this host, so the one-line call is verified by the type check and by reading it, not by a run.
-- **`repo` and `branch` for a real worktree.** They are unchanged by this phase. The smoke ran against paths that are not git repositories, so `repo` came back empty there, as it already did before this change.
-- **End to end on a live server.** No run in this phase sent a collector-shaped event through a live server and read it back in that graph's evidence, or asked a live server for the brief of a graph named by a Muse request. The server code that stores `graph_id` and keys the brief on it is unchanged, and the full-suite run passes on this tree. The end-to-end check needs a running substrate and a graph with a worktree.
+### Key Link Verification
+
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| herdr-state.ts `recordFor` | worktree-graph.ts `graphIdForWorktree` | `graphOfPane` | ✓ WIRED | `herdr-state.ts:17, 209-210` |
+| herdr-state.ts transitions | herdr-map.ts `transitionToEvent` | `graph_id` on `HerdrTransition` | ✓ WIRED | `herdr-state.ts:234, 246`; `herdr-map.ts:157` |
+| muse.ts `pass` | `fetchBrief` body | `graphIdForWorktree(repo)` | ✓ WIRED (by read) | `muse.ts:31, 405, 201` |
+| collectors | server `/brief`, `/events` | `graph_id` field | ✓ WIRED (by read) | `brief.ts:249`, `server.ts:1266` |
+
+### Data-Flow Trace (Level 4)
+
+Skipped: no UI or dynamic rendering. Event payload flow is covered by truth 2.
+
+### Behavioral Spot-Checks
+
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Graph helper, herdr state (one-session-one-graph, steady-snapshot), graphOfPane, Muse brief body, herdr transport, herdr-map | `bun test packages/collectors/src/worktree-graph.test.ts packages/collectors/src/herdr-state.test.ts packages/collectors/src/muse-etag.test.ts packages/collectors/src/herdr.test.ts packages/collectors/src/herdr-map.test.ts` | 46 pass, 0 fail, 261 expects, 5 files | ✓ PASS |
+| Full repository suite against Postgres | not run | — | ? SKIP (not run this pass) |
+| Loopback smoke: herdr pane in worktree gets graph_id; fetchBrief over real HTTP | not run | — | ? SKIP (not run this pass) |
+| Mutation checks (dropped event graph_id; always-sent brief graph_id) | not run | — | ? SKIP (not run this pass) |
+
+### Probe Execution
+
+No `scripts/*/tests/probe-*.sh` declared or present for this phase. Skipped.
+
+### Requirements Coverage
+
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ---------- | ----------- | ------ | -------- |
+| A-D1 | PLAN.md | Lane B events reach the graph's brief and evidence without agents passing ids | ? NEEDS HUMAN | Collector-side code and tests verified (truths 1–6). Live effect needs an operator deploy (Human Verification 1–2) |
+
+No ORPHANED requirements: REQUIREMENTS.md maps only A-D1 to phase 37.
+
+### Anti-Patterns Found
+
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| (none) | - | No TBD, FIXME, XXX, or placeholder markers in the phase's source files checked | - | - |
+
+### Info
+
+- **Drift from the recorded decision.** `worktree-graph.ts:9-11, 15-27` now reads `SUBSTRATE_WORKTREE_ROOTS` and accepts several roots. This came from a later commit, `8f1ce16c` (FLEET-01..05), not from phase 37. SUMMARY.md GREY_AREA 4 says "No environment knob was added", so that record is out of date. The multi-root behavior is covered by tests (`worktree-graph.test.ts:29-69`) and does not change the phase's must-haves. Recommend updating SUMMARY.md or recording the change.
+- **Security record.** No `*-SECURITY.md` exists in this phase directory, so the draft/threats_open gate does not apply. Such files exist only in older milestone folders (v1.2, v1.3).
+- **Not run this pass:** full suite (`bun test`), `tsc`, loopback smoke, and mutation checks. Their results from 2026-10-21 are in the previous record and were not re-proven here.
+
+### Human Verification Required
+
+### 1. Live end-to-end on a Lane B host
+
+**Test:** Redeploy the collectors to a Lane B host that creates dispatcher worktrees (`/var/lib/substrate/worktrees/<graph_id>`). Run a herdr pane inside one of those worktrees and read that graph's `/brief` and `/events` evidence on the live server.
+**Expected:** `session.start` carries `graph_id`. The event and brief for that graph appear without the agent passing an id.
+**Why human:** Deploying to a live host is operator-gated (STATE.md run rules). No live server run was made.
+
+### 2. pass() on a real worktree
+
+**Test:** On a host with a real worktree directory, run Muse `pass()` on a git repo inside it and capture the `/brief` request body. Repeat for a repo outside any worktree.
+**Expected:** The body has `graph_id` for the worktree repo and no `graph_id` for the other.
+**Why human:** The call site at `muse.ts:405` was verified by reading and type checking. No real worktree exists on this host.
+
+### Gaps Summary
+
+No must-have failed. All in-repo truths (1–6) are verified by code and by the collector tests that ran. The phase is not `passed` because roadmap SC1 (end-to-end delivery) and the `pass()` call site on a real worktree need a live run, which is operator-gated.
+
+---
+
+_Verified: 2026-11-12T08:36:03Z_
+_Verifier: Claude (gsd-verifier)_
