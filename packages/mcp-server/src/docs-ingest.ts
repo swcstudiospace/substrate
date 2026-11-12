@@ -667,6 +667,16 @@ function lightragRecordKey(datasetId: string, sourceUrl: string): string {
 	return `lightrag::${recordKey(datasetId, sourceUrl)}`;
 }
 
+/**
+ * The key a LightRAG record had before datasets were keyed by `owner/name`, when a migrated dataset went under its bare
+ * repository name. Null when the dataset id is not `owner/name`, so there is no legacy key to read.
+ */
+function legacyLightragRecordKey(datasetId: string, sourceUrl: string): string | null {
+	const slash = datasetId.indexOf("/");
+	if (slash <= 0 || slash === datasetId.length - 1) return null;
+	return lightragRecordKey(datasetId.slice(slash + 1), sourceUrl);
+}
+
 /** The planning-graph hint a page uploads with: its own, else the call-level one for its phase. */
 function hintFor(page: IngestPage, graphHints: readonly PlanningGraphHint[] | undefined): PlanningGraphHint | undefined {
 	return page.graph ?? (isPlanningPage(page.path) ? graphHints?.find((entry) => entry.phase === planningPhaseOf(page.path)) : undefined);
@@ -941,13 +951,14 @@ export function batchIngestPages(pages: readonly IngestPage[]): IngestPage[][] {
 function firstVersionConflict(
 	prepared: readonly PreparedPage[],
 	keyOf: (sourceUrl: string) => string,
-	seen: ReadonlyMap<string, IngestRecord>,
+	savedOf: (sourceUrl: string) => IngestRecord | undefined,
 ): { page: string; stale: VersionConflict } | undefined {
 	const planned = new Map<string, { version: number; sha: string }>();
 	for (const { page, sourceUrl, sha } of prepared) {
 		const key = keyOf(sourceUrl);
-		const current = planned.get(key) ?? seen.get(key);
-		const stale = staleVersion(planned.get(key), seen.get(key), page.expected_version);
+		const saved = savedOf(sourceUrl);
+		const current = planned.get(key) ?? saved;
+		const stale = staleVersion(planned.get(key), saved, page.expected_version);
 		if (stale) return { page: page.path, stale };
 		if (current?.sha === sha) continue;
 		planned.set(key, { version: (current?.version ?? 0) + 1, sha });
@@ -972,7 +983,11 @@ async function writeBatch(
 	const commit = input.commit ?? "unpinned";
 	// memory's `expected_version` contract, planned for every page before the first upload: a conflict refuses the
 	// whole call with nothing uploaded or recorded.
-	const conflict = firstVersionConflict(prepared, (sourceUrl) => recordKey(dataset.id, sourceUrl), seen);
+	const conflict = firstVersionConflict(
+		prepared,
+		(sourceUrl) => recordKey(dataset.id, sourceUrl),
+		(sourceUrl) => seen.get(recordKey(dataset.id, sourceUrl)),
+	);
 	if (conflict) return refused(deps, sessionId, "version.stale", { page: conflict.page, ...conflict.stale });
 
 	const results: IngestPageResult[] = [];
@@ -1480,18 +1495,28 @@ async function ingestDocsLightrag(
 			error: redact(reason).slice(0, 200),
 		});
 	};
+	// The record a page is versioned from: its owner/name key, else the legacy bare-name key. The replay keys by
+	// owner/name only, so it never reads a legacy key.
+	const savedRecord = (sourceUrl: string): IngestRecord | undefined => {
+		const primary = seen.get(lightragRecordKey(dataset.id, sourceUrl));
+		if (primary !== undefined || deps.corpusNames === true) return primary;
+		const legacy = legacyLightragRecordKey(dataset.id, sourceUrl);
+		return legacy === null ? undefined : seen.get(legacy);
+	};
 	// memory's `expected_version` contract on the LightRAG plane, planned before the first write as on RAGFlow.
-	const conflict = firstVersionConflict(prepared, (sourceUrl) => lightragRecordKey(dataset.id, sourceUrl), seen);
+	const conflict = firstVersionConflict(prepared, (sourceUrl) => lightragRecordKey(dataset.id, sourceUrl), savedRecord);
 	if (conflict) return refused(deps, sessionId, "version.stale", { page: conflict.page, ...conflict.stale });
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const hint = hintFor(page, input.graphHints);
 		const key = lightragRecordKey(dataset.id, sourceUrl);
+		// The legacy key a record saved before the owner/name keying may still sit under. The replay writes owner/name only.
+		const legacyKey = deps.corpusNames === true ? null : legacyLightragRecordKey(dataset.id, sourceUrl);
 		if (failedKeys.has(key)) {
 			recordFailed(key, page.path, sourceUrl, sha, "an earlier page of this source URL failed in this call, so this page was not written");
 			continue;
 		}
 		for (;;) {
-			const prior = seen.get(key);
+			const prior = savedRecord(sourceUrl);
 			if (prior && prior.sha === sha) {
 				results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
 				break;
@@ -1595,6 +1620,8 @@ async function ingestDocsLightrag(
 						...(input.commit !== undefined ? { commit: input.commit } : {}),
 						...(lineage.length > 0 ? { superseded: lineage } : {}),
 					});
+					// This save supersedes the legacy record, if one was read: one record per source URL from here on.
+					if (legacyKey !== null) seen.delete(legacyKey);
 					return { ok: true, result };
 				})();
 				locks.set(key, { task, sha });

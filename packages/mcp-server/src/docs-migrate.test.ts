@@ -133,6 +133,7 @@ interface Plane {
 	calls: string[];
 	uploads: string[];
 	names: string[];
+	deleted: string[];
 }
 
 /**
@@ -143,6 +144,7 @@ function fakeLightrag(listing: Array<{ id: string; file_path: string }>, rejectU
 	const documents = [...listing];
 	const calls: string[] = [];
 	const uploads: string[] = [];
+	const deleted: string[] = [];
 	const names: string[] = [];
 	const tracked = new Map<string, { id: string; file_path: string }>();
 	const fetch: FetchLike = async (input, init) => {
@@ -163,6 +165,16 @@ function fakeLightrag(listing: Array<{ id: string; file_path: string }>, rejectU
 			tracked.set(trackId, { id, file_path: file.name });
 			return json({ status: "success", data: { track_id: trackId } });
 		}
+		if (method === "DELETE" && url.pathname === "/documents/delete_document") {
+			// The delete our own prune sent: its doc_ids, removed from the listing the fake serves.
+			const sent = JSON.parse(String(init?.body)) as { doc_ids: string[] };
+			deleted.push(...sent.doc_ids);
+			for (const id of sent.doc_ids) {
+				const at = documents.findIndex((document) => document.id === id);
+				if (at >= 0) documents.splice(at, 1);
+			}
+			return json({ status: "deletion_started" });
+		}
 		if (method === "POST" && url.pathname === "/documents/paginated") return json({ documents, pagination: { has_next: false } });
 		if (method === "POST" && url.pathname === "/query") {
 			const body = JSON.parse(String(init?.body)) as { query: string };
@@ -176,7 +188,7 @@ function fakeLightrag(listing: Array<{ id: string; file_path: string }>, rejectU
 		}
 		return json({ detail: "no route" }, 404);
 	};
-	return { fetch, calls, uploads, names };
+	return { fetch, calls, uploads, names, deleted };
 }
 
 function frozenReply(question: string): unknown {
@@ -355,6 +367,36 @@ describe("docs-migrate: apply", () => {
 		);
 		expect(refresh.ok && refresh.results.map((result) => result.status)).toEqual(["replaced"]);
 		expect(records.get(key)?.version).toBe(4);
+	});
+
+	test("a normal refresh reads a record kept under the bare repository name, versions it on, and prunes its document", async () => {
+		const legacy: IngestRecord = { sha: shaOf(NOTES_BODY), dataset_id: PLANE_REPO, source_url: sourceOf(NOTES), document_id: "doc-legacy", version: 1, commit: COMMIT };
+		const plane = fakeLightrag([
+			{ id: "doc-plan", file_path: corpusDocumentName(PLANE_REPO, PLAN, shaOf(PLAN_BODY)) },
+			{ id: "doc-legacy", file_path: corpusDocumentName(PLANE_REPO, NOTES, shaOf(NOTES_BODY)) },
+		]);
+		const records = new Map<string, IngestRecord>([[`lightrag::${REPO}::${sourceOf(NOTES)}`, legacy]]);
+		const refresh = await ingestDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: CONFIG,
+				lightragDatasets: { list: async () => lightragSearchDatasets([REPO], datasetIdentity), invalidate: () => undefined },
+				lightragFetch: plane.fetch,
+				seen: records,
+				locks: new Map(),
+				roots: DEFAULT_INGEST_ROOTS,
+				surface: "substrate",
+				emit: async () => ({ stored: false }),
+				poll: { maxPolls: 1, intervalMs: 0 },
+				prune: true,
+			},
+			{ dataset: REPO, commit: "7e6d5c4b3a291807", pages: [{ path: NOTES, source_url: sourceOf(NOTES), body: "# Notes\n\nEdited after the migration.\n" }] },
+		);
+		expect(refresh.ok && refresh.results).toMatchObject([{ status: "replaced", superseded_document_id: "doc-legacy", pruned_document_id: "doc-legacy" }]);
+		expect(plane.deleted).toEqual(["doc-legacy"]);
+		expect(records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 2, document_id: "doc-up-1" });
+		expect(records.has(`lightrag::${REPO}::${sourceOf(NOTES)}`)).toBe(false);
 	});
 
 	test("every name a passing apply writes parses to the repository its record is keyed under", async () => {
