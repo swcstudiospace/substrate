@@ -82,6 +82,8 @@ export type CachedGraph =
 	| { state: "present"; nodes: PairNode[] };
 
 export interface PairCache {
+	/** The graph's current generation: the key every graph view is cached under. Read-only. */
+	graphGeneration(graphId: string): Promise<string>;
 	/** The graph view cached under one surface, at the graph's current generation. */
 	cachedGraph(graphId: string, surface: string): Promise<CachedGraph>;
 }
@@ -109,7 +111,7 @@ export type PairName = "index-ledger" | "cache-index";
 /** `clean` and `drift` are claims about a complete read; `incomplete` and `unavailable` make none. */
 export type PairVerdict = "clean" | "drift" | "incomplete" | "unavailable";
 export type PairLayer = "ledger" | "index" | "cache";
-export type PairReason = "breaker-open" | "unreadable" | "cache-disabled" | "cache-malformed" | "ledger-truncated" | "index-rows-truncated";
+export type PairReason = "breaker-open" | "unreadable" | "cache-disabled" | "cache-malformed" | "ledger-truncated" | "index-rows-truncated" | "generation-moved";
 
 export interface IndexLedgerCounts {
 	ledgerEvents: number;
@@ -301,7 +303,17 @@ export async function reconcileCacheIndex(graphId: string, deps: PairDeps): Prom
 		counts: { ...EMPTY_CACHE_INDEX },
 		mismatches: { ...NO_MISMATCHES, items: [] },
 	});
+	const moved = (): CacheIndexReport => ({
+		pair: "cache-index",
+		graphId,
+		verdict: "incomplete",
+		reason: "generation-moved",
+		layer: "cache",
+		counts: { ...EMPTY_CACHE_INDEX },
+		mismatches: { ...NO_MISMATCHES, items: [] },
+	});
 	try {
+		const generation = await reachLayer("cache", () => deps.cache.graphGeneration(graphId));
 		const held: Array<{ surface: string; nodes: PairNode[] }> = [];
 		for (const surface of PAIR_SURFACES) {
 			const cached = await reachLayer("cache", () => deps.cache.cachedGraph(graphId, surface));
@@ -310,6 +322,9 @@ export async function reconcileCacheIndex(graphId: string, deps: PairDeps): Prom
 			if (cached.state === "present") held.push({ surface, nodes: cached.nodes });
 		}
 		const indexNodes = (await reachLayer("index", () => deps.index.graphNodes(graphId))) ?? [];
+		// A claim or release that advanced the generation during these reads left the views and the index on different generations:
+		// the old views are retired entries `graph_get` can no longer reach, so the pair cannot judge them and must not report drift.
+		if ((await reachLayer("cache", () => deps.cache.graphGeneration(graphId))) !== generation) return moved();
 		const counts: CacheIndexCounts = {
 			...EMPTY_CACHE_INDEX,
 			cacheState: held.length > 0 ? "present" : "absent",
@@ -501,6 +516,9 @@ function nodesOfEnvelope(raw: string): PairNode[] | null {
  */
 export function pairCacheFrom(redis: CacheRedis | null): PairCache {
 	return {
+		async graphGeneration(graphId) {
+			return (redis === null ? null : await redis.get(graphGenerationKey(graphId))) ?? "0";
+		},
 		async cachedGraph(graphId, surface) {
 			if (redis === null) return { state: "disabled" };
 			const generation = (await redis.get(graphGenerationKey(graphId))) ?? "0";

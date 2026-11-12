@@ -65,6 +65,9 @@ describe("the scheduled pairs tick: every surface, and a session reference is no
 		reads: string[] = [];
 		writes: string[] = [];
 		constructor(private readonly bySurface: Record<string, CachedGraph>) {}
+		async graphGeneration(_graphId: string): Promise<string> {
+			return "0";
+		}
 		async cachedGraph(_graphId: string, surface: string): Promise<CachedGraph> {
 			this.reads.push(surface);
 			return this.bySurface[surface] ?? { state: "absent" };

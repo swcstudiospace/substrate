@@ -724,15 +724,15 @@ function isMergeBackNoteFor(event: unknown, head: string): boolean {
 	return typeof payload === "object" && payload !== null && "action" in payload && payload.action === "worktree.merge_back" && "head" in payload && payload.head === head;
 }
 
-/** The oldest readable timestamp in a page, as an ISO string, or null when none is readable. */
-function oldestTs(events: unknown[]): string | null {
+/** The oldest readable timestamp in a page, in epoch milliseconds, or null when none is readable. */
+function oldestMs(events: unknown[]): number | null {
 	let oldest: number | null = null;
 	for (const event of events) {
 		if (typeof event !== "object" || event === null || !("ts" in event) || typeof event.ts !== "string") continue;
 		const time = Date.parse(event.ts);
 		if (Number.isFinite(time) && (oldest === null || time < oldest)) oldest = time;
 	}
-	return oldest === null ? null : new Date(oldest).toISOString();
+	return oldest;
 }
 
 type NotePage = { events: unknown[]; truncated: boolean } | { error: string };
@@ -769,14 +769,19 @@ export function httpMergeBackNoted(config: HttpPosterConfig): MergeBackNotedFn {
 	return async (repo, head) => {
 		const scope = repo.startsWith("local/") ? {} : { repo };
 		let until: string | undefined;
+		let previousOldest: number | null = null;
 		for (let page = 0; page < MERGE_BACK_NOTE_MAX_PAGES; page++) {
 			const read = await readNotePage(doFetch, config, { ...scope, ...(until === undefined ? {} : { until }) });
 			if ("error" in read) return { ok: false, error: read.error };
 			if (read.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
 			if (!read.truncated) return { ok: true, noted: false };
-			const oldest = oldestTs(read.events);
+			const oldest = oldestMs(read.events);
 			if (oldest === null) return { ok: false, error: "the newest notes carry no readable time, so older ones cannot be reached" };
-			until = new Date(Date.parse(oldest) - 1).toISOString();
+			// The next page includes this millisecond again, so no event sharing it is skipped. A page that does not reach an
+			// earlier millisecond is all one millisecond: more notes share it than a page holds, so the lookup must refuse.
+			if (previousOldest !== null && oldest >= previousOldest) return { ok: false, error: "more notes share one millisecond than one page holds, so the lookup cannot reach past them" };
+			previousOldest = oldest;
+			until = new Date(oldest).toISOString();
 		}
 		return { ok: false, error: `the newest ${MERGE_BACK_NOTE_PAGE * MERGE_BACK_NOTE_MAX_PAGES} notes do not settle it` };
 	};

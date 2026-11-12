@@ -84,6 +84,9 @@ class FakeCache implements PairCache {
 		private readonly spy: WriteSpy,
 		private readonly named: Record<string, CachedGraph> = {},
 	) {}
+	async graphGeneration(_graphId: string): Promise<string> {
+		return "0";
+	}
 	async cachedGraph(_graphId: string, surface: string): Promise<CachedGraph> {
 		if (this.value instanceof Error) throw this.value;
 		if (surface in this.named) return this.named[surface] as CachedGraph;
@@ -355,9 +358,29 @@ describe("cache -> index: what it reports", () => {
 		expect(spy.writes).toEqual([]);
 	});
 
+	test("a generation that moves during the read is incomplete, not drift, and writes nothing", async () => {
+		const spy = new WriteSpy();
+		let reads = 0;
+		const cache: PairCache = {
+			async graphGeneration() {
+				reads += 1;
+				return reads === 1 ? "1" : "2";
+			},
+			async cachedGraph(_graphId, surface) {
+				return surface === "unattributed" ? { state: "present", nodes: [node("n1", 9)] } : { state: "absent" };
+			},
+		};
+		const report = await reconcileCacheIndex(GRAPH, deps({ ledger: new FakeLedger([]), index: new FakeIndex([], [node("n1", 1)], spy), cache }));
+		expect(report).toMatchObject({ verdict: "incomplete", reason: "generation-moved", mismatches: { count: 0 } });
+		expect(spy.writes).toEqual([]);
+	});
+
 	test("every surface a caller can read as is compared, not only the anonymous one", async () => {
 		const read: string[] = [];
 		const cache: PairCache = {
+			async graphGeneration() {
+				return "0";
+			},
 			async cachedGraph(_graphId, surface) {
 				read.push(surface);
 				return { state: "absent" };

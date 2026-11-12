@@ -51,7 +51,17 @@ describe("httpMergeBackNoted", () => {
 		const answer = await lookupWith(ledger.fetchImpl)("acme/widgets", HEAD);
 		expect(answer).toEqual({ ok: true, noted: true });
 		expect(ledger.requests).toHaveLength(2);
-		expect(ledger.requests[1]?.until).toBe("2026-11-12T08:59:59.999Z");
+		expect(ledger.requests[1]?.until).toBe("2026-11-12T09:00:00.000Z");
+	});
+
+	test("a full page whose events all share one millisecond refuses rather than answering not-recorded", async () => {
+		const sameMs = { ...NOTE, ts: "2026-11-12T09:00:00.000Z", payload: { ...NOTE.payload, head: "d".repeat(40) } };
+		const ledger = scriptedLedger([
+			{ events: [sameMs], count: 1, truncated: true },
+			{ events: [sameMs], count: 1, truncated: true },
+		]);
+		const answer = await lookupWith(ledger.fetchImpl)("acme/widgets", HEAD);
+		expect(answer.ok).toBe(false);
 	});
 
 	test("a ledger error or a non-200 answer is a failure, never not-recorded", async () => {
