@@ -63,7 +63,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
-import { Admission, admitBatch, budgetBody, budgetRefusal, isRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import { Admission, admitBatch, budgetBody, budgetRefusal, isRefusal, LONG_POLL_RETRY_AFTER_S, longPollBody, LongPollSlots, routeClass, type AdmissionVerdict } from "./admission.ts";
 import type { SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
 import { parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, SteeringReadUnavailableError } from "./planning/steering-rest.ts";
 import { acknowledgeSteeringWithState, DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundaryError, queueSteering, type LiveCallFailure, type PreparedLiveDispatch, type SteeringWriteResult } from "./planning/steering-tools.ts";
@@ -834,6 +834,8 @@ export function createHttpServer(
 		now,
 		record: (verdict) => observability.observer.admission?.(verdict),
 	});
+	// The held long polls: their own slots, not a token of the shared budget (`admission.ts`, `LongPollSlots`).
+	const longPolls = new LongPollSlots();
 	// The configured public origin, parsed once. When it does not parse, only loopback is answered.
 	const publicOrigin = parsePublicOrigin(config.publicOrigin);
 	const server = createServer(async (req, res) => {
@@ -2300,26 +2302,37 @@ export function createHttpServer(
 					sendJson(res, 400, { error: query.error });
 					return;
 				}
-				// A client that goes away ends its wait: the waiter leaves the registry with its timer and listener.
-				const gone = new AbortController();
-				res.on("close", () => gone.abort());
-				const { timeoutMs } = query.value;
-				const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
-				switch (waited.status) {
-					case "directive":
-						sendJson(res, 200, { directive: restDirective(waited.record, substrate.steering.inbox?.sequenceOf(waited.record.directive.id) ?? null), wait_ms: timeoutMs });
-						return;
-					case "busy":
-						send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });
-						return;
-					case "aborted":
-						return;
-					case "timeout":
-					case "closed":
-						// No body to carry `wait_ms`, so the wait this request got rides a header.
-						res.writeHead(204, { "x-steering-wait-ms": String(timeoutMs) });
-						res.end();
-						return;
+				// The poll's own slot, not a token of the shared budget: a full class refuses in the budget's shape, before any hold.
+				const release = longPolls.acquire();
+				if (release === null) {
+					send(res, 429, JSON.stringify(longPollBody()), "application/json", { "retry-after": String(LONG_POLL_RETRY_AFTER_S) });
+					return;
+				}
+				try {
+					// A client that goes away ends its wait: the waiter leaves the registry with its timer and listener.
+					const gone = new AbortController();
+					res.on("close", () => gone.abort());
+					const { timeoutMs } = query.value;
+					const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
+					switch (waited.status) {
+						case "directive":
+							sendJson(res, 200, { directive: restDirective(waited.record, substrate.steering.inbox?.sequenceOf(waited.record.directive.id) ?? null), wait_ms: timeoutMs });
+							return;
+						case "busy":
+							send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });
+							return;
+						case "aborted":
+							return;
+						case "timeout":
+						case "closed":
+							// No body to carry `wait_ms`, so the wait this request got rides a header.
+							res.writeHead(204, { "x-steering-wait-ms": String(timeoutMs) });
+							res.end();
+							return;
+					}
+				} finally {
+					// Every exit ends here: a directive, the timeout, a disconnect, a busy or closed registry, or a throw.
+					release();
 				}
 			}
 
