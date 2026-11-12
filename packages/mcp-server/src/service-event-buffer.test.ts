@@ -185,6 +185,26 @@ describe("a failed ledger write is parked, not dropped", () => {
 		await close(substrate);
 	});
 
+	test("a parked event that lands later publishes its wake-up hint once, at delivery, as a fresh stored event does", async () => {
+		const { written, greptime } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
+		const hints: Array<{ id: string }> = [];
+		const bus = {
+			publish: async (hint: { id: string }) => {
+				hints.push(hint);
+				return true;
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus as never });
+		opened.push(substrate);
+		const parked = await substrate.emit(input);
+		expect(parked.stored).toBe(false);
+		expect(hints).toEqual([]);
+		await substrate.drainEventBuffer({ all: true });
+		expect(written.map((event) => event.id)).toEqual([parked.event.id]);
+		expect(hints.map((hint) => hint.id)).toEqual([parked.event.id]);
+		await close(substrate);
+	});
+
 	test("a keyed replay of a parked event answers with it and writes nothing", async () => {
 		const { written, greptime, inserts } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
 		const substrate = substrateWith({ SUBSTRATE_EVENT_IDEMPOTENCY: "accept" }, greptime);

@@ -21,7 +21,7 @@ import {
 	type SweepStatement,
 } from "./index-sweep.ts";
 import { exportedColumns, tableSpec, type ArchiveRow, type ArchiveTableSpec, type ColumnType } from "./index-archive-spec.ts";
-import { memoryExpiry, memoryGraphId, needsReverification, type GraphLifetime } from "./memory-policy.ts";
+import { grantedToCaller, memoryExpiry, memoryGraphId, needsReverification, type GraphLifetime } from "./memory-policy.ts";
 import {
 	DERIVED_KEY_WINDOW_MS,
 	IN_FLIGHT_TIMEOUT_MS,
@@ -2772,7 +2772,10 @@ export class IndexStore implements MemoryStore {
 				  and superseded_by is null
 				order by created desc
 				limit ${limit}`) as Array<Record<string, unknown>>;
-			return this.servable(rows, read);
+			const entries = await this.servable(rows, read);
+			// A `global` row names no repository in its scope, so the scope list alone let an ungranted repository's row through: the row's own repository is checked too.
+			const granted = read?.granted;
+			return granted === undefined ? entries : entries.filter((entry) => grantedToCaller(entry.scope, entry.repo, granted));
 		});
 	}
 

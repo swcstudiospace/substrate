@@ -1,9 +1,10 @@
 /**
  * The migration job's offline proof. The archive is written by the real writer (`archiveRagflow`) from the RAGFlow fake,
  * and the LightRAG plane is a fake that serves PARITY_GATE's reads, the frozen sample and the ingest routes. The cases
- * prove the job refuses before any upload when the archive, the mapping, the replayability or the gate fails; that a
- * passing apply replays only the missing page, carries the archived version and records the pin; and that rehearsal
- * persists nothing. No case reaches a network: every fetch is the fake.
+ * prove the job refuses before any upload when the archive, the mapping, the replayability or the gate fails; a passing apply
+ * replays only the missing page, carries the archived version and records the pin; rehearsal persists nothing; and a replay
+ * that does not land every page refuses its dataset, keeps only the uploads it confirmed, and records no pin or cutover. No
+ * case reaches a network: every fetch is the fake.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -28,6 +29,9 @@ const NOTES = "docs/notes.md";
 const ORPHAN = "docs/orphan.md";
 const PLAN_BODY = "# Plan\n\nThe plan lives in PLAN.md.\n";
 const NOTES_BODY = "# Notes\n\nReplayed from the archive.\n";
+const EXTRA = "docs/extra.md";
+const EXTRA_BODY = "# Extra\n\nA page pinned to its own commit.\n";
+const EXTRA_COMMIT = "0f1e2d3c4b5a6978";
 const QUERIES: ArchiveQuery[] = [
 	{ id: "q-01", question: "where is the plan?" },
 	{ id: "q-02", question: "who reads the plan?" },
@@ -35,6 +39,7 @@ const QUERIES: ArchiveQuery[] = [
 const NO_RELEASE_ROOT = join(tmpdir(), "docs-migrate-test-no-release-root");
 /** The replay's page reader: the pages as they stood at the recorded commit, so no case reaches the working repository. */
 const REPLAY_READ: ReadAtCommit = (commit, path) => {
+	if (path === EXTRA && (commit === COMMIT || commit === EXTRA_COMMIT)) return Buffer.from(EXTRA_BODY, "utf8");
 	if (commit !== COMMIT) return null;
 	if (path === NOTES) return Buffer.from(NOTES_BODY, "utf8");
 	if (path === PLAN) return Buffer.from(PLAN_BODY, "utf8");
@@ -67,7 +72,7 @@ interface Fixture {
  * record at version 3, then the archive of both. `extraRecords` adds archived records; `undocumented` adds a RAGFlow
  * document with no commit, which the replay cannot reproduce.
  */
-async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean } = {}): Promise<Fixture> {
+async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
 	const root = scratchDir();
 	const stateFile = join(root, "docs-ingest.json");
 	const fake = new RagflowFake();
@@ -88,6 +93,7 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 		[`lightrag::${PLANE_REPO}::${sourceOf(PLAN)}`, { sha: shaOf(PLAN_BODY), dataset_id: PLANE_REPO, source_url: sourceOf(PLAN), document_id: "doc-plan", version: 1 }],
 		[`${ragflowId}::${sourceOf(NOTES)}`, { sha: shaOf(NOTES_BODY), dataset_id: ragflowId, source_url: sourceOf(NOTES), document_id: "ragflow-notes", version: 3 }],
 		...(options.extraRecords ?? []),
+		...(options.extra === undefined ? [] : [[`${ragflowId}::${sourceOf(EXTRA)}`, { sha: shaOf(EXTRA_BODY), dataset_id: ragflowId, source_url: sourceOf(EXTRA), document_id: "ragflow-extra", version: 1 }] as [string, IngestRecord]]),
 	]);
 	await saveIngestRecords(stateFile, records, versions);
 
@@ -102,9 +108,13 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 	if (options.undocumented === true) {
 		fake.documents["doc-orphan"] = { id: "doc-orphan", dataset_id: ragflowId, name: "docs__orphan.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(ORPHAN) } };
 	}
+	if (options.extra !== undefined) {
+		fake.documents["ragflow-extra"] = { id: "ragflow-extra", dataset_id: ragflowId, name: "docs__extra.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(EXTRA), commit: options.extra.commit, heading_path: "Extra" } };
+	}
 	fake.chunks[ragflowId] = [{ document_id: "ragflow-notes", document_name: "docs__notes.md", content: NOTES_BODY, source_url: sourceOf(NOTES), heading_path: "Notes", score: 0.9 }];
 
 	const bodies: Record<string, string> = { [`${COMMIT}:${PLAN}`]: PLAN_BODY, [`${COMMIT}:${NOTES}`]: NOTES_BODY };
+	if (options.extra !== undefined) bodies[`${options.extra.commit}:${EXTRA}`] = EXTRA_BODY;
 	const readAtCommit: ReadAtCommit = (commit, path) => {
 		const body = bodies[`${commit}:${path}`];
 		return body === undefined ? null : Buffer.from(body, "utf8");
@@ -128,7 +138,7 @@ interface Plane {
  * A fake LightRAG. `paginated` lists the given documents plus every upload it accepted, so the ingest can resolve the
  * documents it wrote. `/query` answers each frozen question from its expected source.
  */
-function fakeLightrag(listing: Array<{ id: string; file_path: string }>): Plane {
+function fakeLightrag(listing: Array<{ id: string; file_path: string }>, rejectUpload: (fileName: string) => boolean = () => false): Plane {
 	const documents = [...listing];
 	const calls: string[] = [];
 	const uploads: string[] = [];
@@ -142,6 +152,7 @@ function fakeLightrag(listing: Array<{ id: string; file_path: string }>): Plane 
 			if (!(form instanceof FormData)) return json({ detail: "the upload is not multipart" }, 400);
 			const file = form.get("file");
 			if (!(file instanceof File)) return json({ detail: "the upload has no file part" }, 400);
+			if (rejectUpload(file.name)) return json({ detail: "injected upload failure" }, 500);
 			uploads.push(await file.text());
 			const id = `doc-up-${String(uploads.length)}`;
 			const trackId = `trk-${String(uploads.length)}`;
@@ -392,5 +403,76 @@ describe("docs-migrate: archive reading", () => {
 		expect(read.archive.datasets.find((dataset) => dataset.name === REPO)?.documents.map((document) => document.path)).toEqual([NOTES]);
 		expect(mapRecords(read.archive).migrated).toEqual([{ dataset: REPO, source_url: sourceOf(NOTES), version: 3 }]);
 		expect(mapRecords(read.archive).unmapped).toEqual([]);
+	});
+});
+
+describe("docs-migrate: a replay that does not land every page", () => {
+	test("a mixed-success batch refuses the dataset: the failed page is not migrated, no pin or cutover is recorded, and the landed page is kept", async () => {
+		const fixture = await buildFixture({ extra: { commit: COMMIT } });
+		const plane = fakeLightrag([{ id: "doc-plan", file_path: corpusDocumentName(PLANE_REPO, PLAN, shaOf(PLAN_BODY)) }], (name) => name.includes("extra"));
+		const { io } = captureIo();
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				stateFile: fixture.stateFile,
+				config: CONFIG,
+				fetchImpl: plane.fetch,
+				partAFile: partAFile(fixture.root),
+				rehearsal: false,
+				datasets: [REPO],
+				readAtCommit: REPLAY_READ,
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			io,
+		);
+		expect(outcome).toMatchObject({ ok: false, exit: 1 });
+		const report = outcome.report as {
+			datasets: Array<{ dataset: string; ingested: number; failed: number; refused?: string }>;
+			totals: { ingested: number; failed: number };
+			state_file_persisted: boolean;
+			versions_recorded: number;
+			cutover_event: unknown;
+		};
+		expect(report.datasets.find((entry) => entry.dataset === REPO)).toMatchObject({ ingested: 1, failed: 1 });
+		expect(report.datasets.find((entry) => entry.dataset === REPO)?.refused).toContain("failed to upload");
+		expect(report).toMatchObject({ state_file_persisted: true, versions_recorded: 0, cutover_event: null, totals: { ingested: 1, failed: 1 } });
+		expect(plane.uploads).toEqual([NOTES_BODY]);
+
+		const persisted = await loadIngestRecords(fixture.stateFile);
+		expect(persisted.records.get(`lightrag::${REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
+		expect(persisted.records.has(`lightrag::${REPO}::${sourceOf(EXTRA)}`)).toBe(false);
+		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag")).toBe(false);
+	});
+
+	test("a dataset refused after an earlier commit landed keeps that upload, and records no pin or cutover", async () => {
+		const fixture = await buildFixture({ extra: { commit: EXTRA_COMMIT } });
+		const plane = fakeLightrag([{ id: "doc-plan", file_path: corpusDocumentName(PLANE_REPO, PLAN, shaOf(PLAN_BODY)) }], (name) => name.includes("extra"));
+		const { io } = captureIo();
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				stateFile: fixture.stateFile,
+				config: CONFIG,
+				fetchImpl: plane.fetch,
+				partAFile: partAFile(fixture.root),
+				rehearsal: false,
+				datasets: [REPO],
+				readAtCommit: REPLAY_READ,
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			io,
+		);
+		expect(outcome).toMatchObject({ ok: false, exit: 1 });
+		const report = outcome.report as { datasets: Array<{ dataset: string; refused?: string }>; state_file_persisted: boolean; versions_recorded: number; cutover_event: unknown };
+		expect(report.datasets.find((entry) => entry.dataset === REPO)?.refused).toBeDefined();
+		expect(report).toMatchObject({ state_file_persisted: true, versions_recorded: 0, cutover_event: null });
+		expect(plane.uploads).toEqual([NOTES_BODY]);
+
+		const persisted = await loadIngestRecords(fixture.stateFile);
+		expect(persisted.records.get(`lightrag::${REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
+		expect(persisted.records.has(`lightrag::${REPO}::${sourceOf(EXTRA)}`)).toBe(false);
+		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag")).toBe(false);
 	});
 });

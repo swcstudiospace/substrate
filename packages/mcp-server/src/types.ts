@@ -292,6 +292,11 @@ export interface MemoryReadOptions {
 	 * names none sees no agent row. Normalised with `normalizeIdentifier`, as the write stores it.
 	 */
 	repo?: string;
+	/**
+	 * Under repository scope, whether the caller is granted a repository. A row is returned only when its own repository and the
+	 * repository its scope names are both granted. Absent while scoping is off, which grants every row.
+	 */
+	granted?: ((repo: string) => boolean) | undefined;
 }
 
 /** One parked write, as a reviewer's queue lists it. */

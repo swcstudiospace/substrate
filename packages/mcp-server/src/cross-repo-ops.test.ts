@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type BranchFanoutRequest, type CrossRepoStore, crossRepoFanoutReply, crossRepoStatus, crossRepoStatusReply, runBranchFanout } from "./cross-repo-ops.ts";
 import { REPO_ALLOWLIST_ENV } from "./repo-allowlist.ts";
-import { defaultScopedGitRunner } from "./repo-executor.ts";
+import { defaultScopedGitRunner, type ScopedGitResult } from "./repo-executor.ts";
 import { BRANCH, depsFor, FAILED, git, type Intercept, opOf, orFail, refIn, request, runnerWith, stepStates, world } from "./cross-repo-ops.testkit.ts";
 
 describe("a branch fan-out across two registered repositories", () => {
@@ -163,6 +163,54 @@ describe("a crash between an effect and its record is resumed without a second e
 		const op = opOf(await runBranchFanout(request(), depsFor(w, retry.run)));
 		expect(op.status).toBe("done");
 		expect(retry.writes.map((write) => write.cwd)).toEqual([w.checkoutB]);
+	});
+});
+
+describe("undo never deletes a ref the operation did not create", () => {
+	const UNREADABLE: ScopedGitResult = { code: 128, stdout: "", stderr: "injected read failure" };
+
+	test("a step whose first ref read fails never attempted its create: it is failed, not parked, and a branch already there is kept", async () => {
+		const w = world();
+		git(w.checkoutB, ["branch", BRANCH, "main"]);
+		const mainB = refIn(w.checkoutB, "refs/heads/main");
+		let unreadable = false;
+		const readFailsOnce: Intercept = (args, cwd) => {
+			if (args[0] !== "rev-parse" || args[3] !== `refs/heads/${BRANCH}` || cwd !== w.checkoutB || unreadable) return undefined;
+			unreadable = true;
+			return UNREADABLE;
+		};
+		const attempt = runnerWith(readFailsOnce);
+		const op = opOf(await runBranchFanout(request(), depsFor(w, attempt.run)));
+		expect(op.status).toBe("rolled-back");
+		expect(stepStates(op)).toEqual(["owner/a:compensated", "owner/b:failed/apply-failed"]);
+		expect(attempt.writes.filter((write) => write.cwd === w.checkoutB)).toHaveLength(0);
+		expect(refIn(w.checkoutB, `refs/heads/${BRANCH}`)).toBe(mainB);
+		expect(refIn(w.checkoutA, `refs/heads/${BRANCH}`)).toBeNull();
+	});
+
+	test("a ref another writer put at the planned sha during the create is adopted, never deleted by the rollback", async () => {
+		const w = world();
+		const mainA = git(w.checkoutA, ["rev-parse", "main"]);
+		let raced = false;
+		const racedCreate: Intercept = (args, cwd, env) => {
+			if (args[0] === "update-ref" && args[1] !== "-d" && cwd === w.checkoutA && !raced) {
+				raced = true;
+				defaultScopedGitRunner(["update-ref", `refs/heads/${BRANCH}`, mainA], w.checkoutA, env);
+				return FAILED;
+			}
+			return args[0] === "update-ref" && cwd === w.checkoutB ? FAILED : undefined;
+		};
+		const op = opOf(await runBranchFanout(request(), depsFor(w, runnerWith(racedCreate).run)));
+		expect(op.status).toBe("needs-attention");
+		expect(stepStates(op)).toEqual(["owner/a:parked/adopted", "owner/b:failed/apply-failed"]);
+		expect(refIn(w.checkoutA, `refs/heads/${BRANCH}`)).toBe(mainA);
+
+		const retry = runnerWith();
+		const again = opOf(await runBranchFanout(request(), depsFor(w, retry.run)));
+		expect(again.status).toBe("needs-attention");
+		expect(stepStates(again)).toEqual(["owner/a:parked/adopted", "owner/b:failed/apply-failed"]);
+		expect(retry.writes).toHaveLength(0);
+		expect(refIn(w.checkoutA, `refs/heads/${BRANCH}`)).toBe(mainA);
 	});
 });
 

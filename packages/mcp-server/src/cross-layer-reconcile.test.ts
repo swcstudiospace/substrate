@@ -3,8 +3,9 @@
  * with its first key and the per-layer counts, and a repair is refused without a confirmed plan and then touches only the
  * planned keys. Every store is a fake that records its writes, so a test can assert what was not written as well as what was.
  */
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
-import { FORGET_MARK_KEY, type ForgetMarkRead } from "./cache.ts";
+import { FORGET_MARK_KEY, type ForgetMarkRead, MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY } from "./cache.ts";
 import { isRecord } from "./corpus/validate.ts";
 import type { EventQuery } from "./greptime.ts";
 import { FORGET_ACTION } from "./memory-forget.ts";
@@ -127,6 +128,7 @@ class FakeIndex implements ReconcileIndex {
 class FakeCache implements ReconcileCache {
 	mark: ForgetMarkRead = { state: "absent" };
 	readonly ttls: number[] = [];
+	readonly bumps: string[] = [];
 	failRead = false;
 
 	async readForgetMark(): Promise<ForgetMarkRead> {
@@ -137,6 +139,10 @@ class FakeCache implements ReconcileCache {
 	async markForget(ttlSeconds: number): Promise<void> {
 		this.ttls.push(ttlSeconds);
 		this.mark = { state: "present", atMs: NOW };
+	}
+
+	async bump(key: string): Promise<void> {
+		this.bumps.push(key);
 	}
 }
 
@@ -526,7 +532,9 @@ describe("repair: a confirmed plan touches only the planned keys", () => {
 			ok: false,
 			reason: "index-unavailable",
 		});
-		expect(w.cache.ttls).toEqual([]);
+		// The write may have committed before it failed, so the invalidation runs as it does after a successful mark (memoryForget counts a throw as touched).
+		expect(w.cache.bumps).toEqual([MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY]);
+		expect(w.cache.ttls).toEqual([TTL_S]);
 		expect(w.ledger.writes).toHaveLength(writesBefore);
 	});
 
@@ -601,5 +609,57 @@ describe("the ledger adapter", () => {
 
 		expect(written).toEqual({ id: "evt_plan", stored: true });
 		expect(emitted).toEqual([{ surface: "substrate", kind: "note", summary: "reconcile plan", payload: { action: RECONCILE_PLAN_ACTION } }]);
+	});
+});
+
+describe("repair: a mark invalidates what memoryForget invalidates", () => {
+	test("an applied repair that marks rows moves both generations and sets the forget mark", async () => {
+		const w = plantedDrift();
+		const plan = planOf(await planRepair(w.deps, OPTIONS));
+
+		const applied = appliedOf(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId }));
+
+		expect(applied.marked).toEqual(["mem_b", "mem_c"]);
+		expect(applied.cache).toBe("marked");
+		expect(w.cache.bumps).toEqual([MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY]);
+		expect(w.cache.ttls).toEqual([TTL_S]);
+	});
+
+	test("a cache that already agreed still takes the invalidation when the repair marks rows", async () => {
+		const w = plantedDrift();
+		w.cache.mark = { state: "present", atMs: NOW };
+		const plan = planOf(await planRepair(w.deps, OPTIONS));
+		expect(plan.items.at(-1)).toEqual({ action: "cache-mark", key: FORGET_MARK_KEY, ttlS: TTL_S });
+
+		appliedOf(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId }));
+
+		expect(w.cache.bumps).toEqual([MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY]);
+		expect(w.cache.ttls).toEqual([TTL_S]);
+	});
+
+	test("a repair that marks no row sets only the forget mark, moving no generation", async () => {
+		const w = world();
+		w.ledger.notes.push(forgetNote("evt_forget_1", 10, ["mem_a"]));
+		w.index.rows.set("mem_a", MARKER);
+		const plan = planOf(await planRepair(w.deps, OPTIONS));
+		expect(plan.items).toEqual([{ action: "cache-mark", key: FORGET_MARK_KEY, ttlS: TTL_S }]);
+
+		const applied = appliedOf(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId }));
+
+		expect(applied.marked).toEqual([]);
+		expect(w.cache.bumps).toEqual([]);
+		expect(w.cache.ttls).toEqual([TTL_S]);
+	});
+
+	test("a plan stored before the cache mark was planned with its index marks is refused, and nothing is marked", async () => {
+		const w = plantedDrift();
+		const items = [{ action: "index-mark", entryId: "mem_b", forgetId: FORGET, marker: MARKER }];
+		const itemsSha256 = createHash("sha256").update(JSON.stringify(items)).digest("hex");
+		w.ledger.notes.push({ id: "evt_old_plan", ts: new Date(NOW).toISOString(), kind: "note", payload: { action: RECONCILE_PLAN_ACTION, plan: { items, itemsSha256 } } });
+
+		expect(await applyRepair(w.deps, { planId: "evt_old_plan", confirm: "evt_old_plan" })).toMatchObject({ ok: false, reason: "plan-invalid" });
+		expect(w.index.marks).toEqual([]);
+		expect(w.cache.bumps).toEqual([]);
+		expect(w.cache.ttls).toEqual([]);
 	});
 });

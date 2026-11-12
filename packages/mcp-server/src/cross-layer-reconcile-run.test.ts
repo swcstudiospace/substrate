@@ -85,6 +85,12 @@ class FakeCache implements ReconcileCache {
 	async markForget(ttlSeconds: number): Promise<void> {
 		this.ttls.push(ttlSeconds);
 	}
+
+	readonly bumped: string[] = [];
+
+	async bump(key: string): Promise<void> {
+		this.bumped.push(key);
+	}
 }
 
 /** `mem_a` is out of force under the forget's marker, as `memoryForget` leaves it. */

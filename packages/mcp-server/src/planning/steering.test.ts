@@ -393,3 +393,31 @@ describe("SteeringInbox: a clock that moves backwards adds no tokens", () => {
 		expect(await inbox.enqueue(directive({ id: "d-3" }))).toMatchObject({ ok: false, error: { code: "rate-limited" } });
 	});
 });
+
+describe("SteeringInbox: a restart keeps queued directives in delivery order", () => {
+	test("a legacy row keeps its place below a directive stored after the upgrade, on every restart", async () => {
+		// The row queued before the sequence column has no stored sequence. The directive queued after the upgrade is stored with sequence 1.
+		const legacy = { directive: directive({ id: "legacy", createdAtMs: 1_000 }), queuedAtMs: 1_000 };
+		const first = build();
+		expect((await first.inbox.restore([legacy])).restored).toEqual(["legacy"]);
+		expect((await first.inbox.enqueue(directive({ id: "fresh", createdAtMs: 2_000 }))).ok).toBe(true);
+		const stored = first.history.entries.flatMap((entry) =>
+			entry.event === "queued" ? [{ directive: entry.directive, queuedAtMs: entry.atMs, deliverySequence: entry.deliverySequence }] : [],
+		);
+		const order = (inbox: SteeringInbox): string[] => inbox.queuedFor(WORKER).map((entry) => entry.record.directive.id);
+		expect(order(first.inbox)).toEqual(["legacy", "fresh"]);
+
+		// Each restart is a new inbox: it seeds the stored floor, then restores the same rows. The legacy row must not move above `fresh`.
+		for (let restart = 0; restart < 2; restart++) {
+			const next = build();
+			next.inbox.seedSequence(1);
+			expect((await next.inbox.restore([legacy, ...stored])).restored).toEqual(["legacy", "fresh"]);
+			expect(order(next.inbox)).toEqual(["legacy", "fresh"]);
+			expect(next.inbox.pendingFor(WORKER).map((pending) => pending.id)).toEqual(["legacy", "fresh"]);
+
+			// A directive queued after the restart still sorts after every restored one.
+			expect((await next.inbox.enqueue(directive({ id: "newer", createdAtMs: 3_000 }))).ok).toBe(true);
+			expect(order(next.inbox)).toEqual(["legacy", "fresh", "newer"]);
+		}
+	});
+});

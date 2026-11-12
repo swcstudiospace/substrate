@@ -61,6 +61,11 @@ export interface BriefOptions {
 	 * text is the same either way; a failed read is the same `graph` failure.
 	 */
 	graphRead?: "full" | "lite";
+	/**
+	 * Under repository scope, whether the caller is granted a repository. A memory row outside the grant is left out of the brief,
+	 * whatever its scope. Absent while scoping is off.
+	 */
+	granted?: ((repo: string) => boolean) | undefined;
 }
 
 /** The most nodes one brief lists; past it the line says how many were left out (the cached encoding caps a section at 2000 items). */
@@ -304,7 +309,7 @@ export async function composeBriefSections(
 	// Other graphs open in this repo.
 	const othersRead = index && repo ? start("open graphs", () => index.openGraphs(repo, graphId ?? undefined), [] as GraphView[]) : null;
 	// Warnings and decisions worth carrying into this session.
-	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId, undefined, { surface }), [] as MemoryEntry[]) : null;
+	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId, undefined, { surface, granted: options.granted }), [] as MemoryEntry[]) : null;
 	// The recall read rides the same start line as the reads above. It is not one of the four
 	// sources, and it is not under the brief budget: it has its own cap, and a failed or late read is a missing section.
 	const recallRead: Promise<RecallSnapshot | null> | null = options.recall ? boundedRecall(options.recall.read, options.recall.partial, options.recall.capMs ?? BRIEF_RECALL_CAP_MS) : null;

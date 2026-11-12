@@ -12,8 +12,8 @@
  *   sha is an applied step, whatever the exit code said. This is what makes a retry adopt a crashed create instead of repeating it.
  * - Create-only. The create is `update-ref <ref> <planned> <zero>`, which fails when the ref exists, so a branch the operation
  *   did not write is never overwritten.
- * - Compare-and-delete. The undo is `update-ref -d <ref> <planned>`, which deletes only the value the operation wrote. A ref
- *   that moved since is parked as `ref-moved` and left alone.
+ * - Compare-and-delete. The undo is `update-ref -d <ref> <planned>`, which deletes only the value the operation wrote, and only a
+ *   ref it created. A ref that moved since is parked as `ref-moved` and left alone; an adopted ref is parked and never deleted.
  * - One driver per key. A run holds its key's lock, so two drivers of one operation in this process never interleave: the
  *   second waits, then reads what the first left. A step found `applying` is then from a dead process, never a live driver.
  * - Explicit statuses. `done` means every step is applied. `rolled-back` means a step failed and every applied step was undone,
@@ -322,7 +322,7 @@ async function applyStep(ctx: Context, op: CrossRepoOperation, step: CrossRepoSt
 	if (step.state === "pending" && !(await ctx.store.moveStep(op.key, step.index, ["pending"], "applying", null, ctx.now()))) return "busy";
 
 	const before = readRef(ctx, step.repo, ref);
-	if (before.kind === "unreadable") return settle("applying", "parked", "apply-unknown");
+	if (before.kind === "unreadable") return resumed ? settle("applying", "parked", "apply-unknown") : settle("applying", "failed", "apply-failed");
 	if (before.kind === "at") {
 		return resumed && before.sha === step.plannedSha ? settle("applying", "applied", "adopted") : settle("applying", "failed", "ref-exists");
 	}
@@ -340,13 +340,19 @@ async function applyStep(ctx: Context, op: CrossRepoOperation, step: CrossRepoSt
 
 /**
  * Removes the branch the operation wrote in one repository. The step is `compensating` before the git call. The delete names the
- * planned sha, so a ref that moved since is never deleted; it is parked. An absent ref is already compensated.
+ * planned sha, so a ref that moved since is never deleted; it is parked. An absent ref is already compensated. A step recorded
+ * `adopted` did not write its ref (the ref was present, or it reached the planned sha without this operation's create
+ * succeeding), so the operation cannot prove it owns that ref: it is parked and never deleted.
  */
 async function undoStep(ctx: Context, op: CrossRepoOperation, step: CrossRepoStep): Promise<StepOutcome> {
 	const ref = refOf(op.branch);
 	const settle = async (to: "compensated" | "parked", detail: CrossRepoDetail | null): Promise<StepOutcome> =>
 		(await ctx.store.moveStep(op.key, step.index, ["compensating"], to, detail, ctx.now())) ? to : "busy";
 
+	if (step.detail === "adopted") {
+		if (step.state === "parked") return "parked";
+		return (await ctx.store.moveStep(op.key, step.index, ["applied"], "parked", "adopted", ctx.now())) ? "parked" : "busy";
+	}
 	if (step.state !== "compensating" && !(await ctx.store.moveStep(op.key, step.index, ["applied", "parked"], "compensating", null, ctx.now()))) {
 		return "busy";
 	}

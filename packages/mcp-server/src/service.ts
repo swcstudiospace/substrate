@@ -2361,6 +2361,7 @@ export class Substrate {
 					},
 					{
 						...this.briefOptions,
+						granted: this.memoryGrant(request.surface),
 						...recallOptions,
 						// The recall cap runs from this call's arrival, not from this compose: a compose that starts after a join (a waiter's own
 						// load) gets only what is left of it, so one call never waits on recall for longer than the cap in total.
@@ -3512,8 +3513,7 @@ export class Substrate {
 				...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids) }),
 			}, query, callerSurface, callerRepo,
 		);
-		if (privateLive) return load();
-		return this.cache.getOrLoad({
+		const reply = privateLive ? await load() : await this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
 			args: { recall: true, query, banks: banks ?? null, repo: callerRepo },
@@ -3532,6 +3532,10 @@ export class Substrate {
 			onDeadline: () => ({ results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "recall-timeout: budget exceeded" }),
 			load,
 		});
+		// A cached answer was filtered under the grants in force when it was loaded, so the grants in force now decide what it may carry.
+		const caller = { surface, repo: callerRepo, granted: this.memoryGrant(callerSurface) };
+		const results = reply.results.filter((hit) => visibleToCaller(hit.scope, hit.repo, caller));
+		return results.length === reply.results.length ? reply : { ...reply, results };
 	}
 
 	/**
@@ -4107,6 +4111,18 @@ export class Substrate {
 	 * and the buffer decides when the event is dead-lettered.
 	 */
 	private async deliverBufferedEvent(greptime: GreptimeClient, event: SubstrateEvent): Promise<EventDelivery> {
+		const delivery = await this.writeBufferedEvent(greptime, event);
+		// `emit` runs these callbacks only for an append that stored, and no earlier attempt of a parked event stored. So a landed
+		// event runs them here, once: the buffer removes a delivered entry, and no later pass reaches it again.
+		if (delivery === "delivered") {
+			this.noteDocsCanary(event);
+			this.publishHint(event);
+		}
+		return delivery;
+	}
+
+	/** The ledger write for one parked event: the attempt `deliverBufferedEvent` reports on. */
+	private async writeBufferedEvent(greptime: GreptimeClient, event: SubstrateEvent): Promise<EventDelivery> {
 		try {
 			// A write that timed out may have landed. Then the row is already there, and only its ingest record may be missing.
 			if (await greptime.eventStored(event.id)) {

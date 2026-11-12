@@ -27,7 +27,7 @@
  * Apply is idempotent for the index: a planned key already marked is skipped, so a repeat apply marks nothing new.
  */
 import { createHash } from "node:crypto";
-import { FORGET_MARK_KEY, type ForgetMarkRead } from "./cache.ts";
+import { FORGET_MARK_KEY, type ForgetMarkRead, MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY } from "./cache.ts";
 import { isRecord } from "./corpus/validate.ts";
 import { type EventQuery, epochMsAnyUnit, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { FORGET_ACTION, forgetMarker, isForgetMarker } from "./memory-forget.ts";
@@ -94,6 +94,8 @@ export interface ReconcileCache {
 	readForgetMark(): Promise<ForgetMarkRead>;
 	/** Sets the mark to now for `ttlSeconds`. */
 	markForget(ttlSeconds: number): Promise<void>;
+	/** Moves a generation, so every cached answer keyed under it is no longer served. `ReadThroughCache` satisfies it. */
+	bump(key: string): Promise<void>;
 }
 
 export interface ReconcileDeps {
@@ -398,7 +400,8 @@ function repairItemsOf(observed: Observation, markTtlS: number): RepairItem[] {
 		forgetId,
 		marker: forgetMarker(forgetId),
 	}));
-	if (observed.cacheStale) items.push({ action: "cache-mark", key: FORGET_MARK_KEY, ttlS: markTtlS });
+	// An index mark is invalidated with the cache mark, as `memoryForget` sets it on every forget, whether or not the cache agreed.
+	if (observed.cacheStale || items.length > 0) items.push({ action: "cache-mark", key: FORGET_MARK_KEY, ttlS: markTtlS });
 	return items;
 }
 
@@ -474,6 +477,8 @@ function parseStoredPlan(payload: Record<string, unknown> | null): RepairItem[] 
 		parsed.push(item);
 	}
 	if (parsed.filter(isCacheMark).length > 1) return null;
+	// An index mark comes with the cache mark that invalidates it. A plan without one predates that rule: applying it would mark rows and leave the cache serving them, so it is refused and must be planned again.
+	if (parsed.some(isIndexMark) && !parsed.some(isCacheMark)) return null;
 	if (sha256(JSON.stringify(parsed)) !== itemsSha256) return null;
 	return parsed;
 }
@@ -483,11 +488,22 @@ function parseStoredPlan(payload: Record<string, unknown> | null): RepairItem[] 
 // ---------------------------------------------------------------------------
 
 /**
+ * What a forget invalidates, as `Substrate.memoryForget` does it: the memory and recall generations, which a cached search,
+ * recall or brief is keyed under, and the forget mark, which a saved brief (it has no generation) is checked against.
+ */
+async function invalidateForgets(deps: ReconcileDeps, ttlS: number): Promise<void> {
+	await reach("cache-unavailable", () => deps.cache.bump(MEMORY_GENERATION_KEY));
+	await reach("cache-unavailable", () => deps.cache.bump(RECALL_GENERATION_KEY));
+	await reach("cache-unavailable", () => deps.cache.markForget(ttlS));
+}
+
+/**
  * Apply a confirmed plan. Refuses, writing nothing, unless `confirm` equals `planId` and the plan record is a valid stored
  * plan. Then, for each planned key only: marks an in-force index row with the plan's forget marker (never a row another
- * superseder holds), and sets the cache forget mark when the plan asks for it. Records what it did in a `reconcile.applied`
- * note. A layer that fails mid-apply returns its `Failure`; the plan can be applied again, because a key already marked is
- * skipped.
+ * superseder holds). Whenever a mark was attempted, the forget's invalidation runs as `Substrate.memoryForget` does it: the
+ * memory and recall generations move and the cache forget mark is set for the plan's TTL, so a cached answer or saved brief
+ * naming the entry is not served. Records what it did in a `reconcile.applied` note. A layer that fails mid-apply returns
+ * its `Failure`; the plan can be applied again, because a key already marked is skipped.
  */
 export async function applyRepair(deps: ReconcileDeps, request: ApplyRequest): Promise<ApplyRun> {
 	if (typeof request.planId !== "string" || request.confirm !== request.planId) {
@@ -516,19 +532,28 @@ export async function applyRepair(deps: ReconcileDeps, request: ApplyRequest): P
 				toMark.set(item.marker, group);
 			}
 		}
+		const cacheItem = items.find(isCacheMark);
 		const marked: string[] = [];
-		for (const [marker, ids] of toMark) {
-			const changed = new Set(await reach("index-unavailable", () => deps.index.markMemoryForgotten(ids, marker)));
-			for (const id of ids) {
-				if (changed.has(id)) marked.push(id);
-				else skipped.push({ entryId: id, reason: "raced" });
+		// Set before the first mark call: a call that throws may still have committed its rows, so the invalidation must run for it too.
+		let attempted = false;
+		try {
+			for (const [marker, ids] of toMark) {
+				attempted = true;
+				const changed = new Set(await reach("index-unavailable", () => deps.index.markMemoryForgotten(ids, marker)));
+				for (const id of ids) {
+					if (changed.has(id)) marked.push(id);
+					else skipped.push({ entryId: id, reason: "raced" });
+				}
 			}
+		} catch (cause) {
+			if (attempted && cacheItem !== undefined) await invalidateForgets(deps, cacheItem.ttlS);
+			throw cause;
 		}
 
 		let cache: ApplyReport["cache"] = "not-planned";
-		const cacheItem = items.find(isCacheMark);
 		if (cacheItem !== undefined) {
-			await reach("cache-unavailable", () => deps.cache.markForget(cacheItem.ttlS));
+			if (attempted) await invalidateForgets(deps, cacheItem.ttlS);
+			else await reach("cache-unavailable", () => deps.cache.markForget(cacheItem.ttlS));
 			const after = await reach("cache-unavailable", () => deps.cache.readForgetMark());
 			cache = after.state === "present" ? "marked" : "unverified";
 		}

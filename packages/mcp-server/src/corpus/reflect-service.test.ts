@@ -236,9 +236,32 @@ describe("corpusReflectReply", () => {
 		expect(third.results).toEqual([{ repo: REPO, status: "unchanged", reason: "hindsight:pending" }]);
 	});
 
-	test("digests retain under a session of their content: two repeats share one, a changed digest has its own", () => {
-		expect(digestSessionOf(sha256Hex(text))).toBe(digestSessionOf(sha256Hex(text)));
-		expect(digestSessionOf(sha256Hex(text))).not.toBe(digestSessionOf(sha256Hex(`${text}\n- open`)));
+	test("digests retain under a session of their content and manifest revision: repeats at one revision share one, a changed digest or a new revision has its own", () => {
+		expect(digestSessionOf(sha256Hex(text), 1)).toBe(digestSessionOf(sha256Hex(text), 1));
+		expect(digestSessionOf(sha256Hex(text), 1)).not.toBe(digestSessionOf(sha256Hex(`${text}\n- open`), 1));
+		expect(digestSessionOf(sha256Hex(text), 1)).not.toBe(digestSessionOf(sha256Hex(text), 2));
+	});
+
+	test("a reverted digest is written under a new revision: returning to A is not a replay of A's superseded write, and A's repeats share the new one", async () => {
+		const sessions: string[] = [];
+		const { deps } = world({
+			retainDigest: async (input) => {
+				sessions.push(input.sessionId);
+				return { ok: true };
+			},
+		});
+		const a = text;
+		const b = `${text}\n- open: write the runbook`;
+		await corpusReflectReply(deps, request(digest(REPO, a)), "omp");
+		await corpusReflectReply(deps, request(digest(REPO, b)), "omp");
+		const reverted = ok(await corpusReflectReply(deps, request(digest(REPO, a)), "omp"));
+		expect(reverted.results).toEqual([{ repo: REPO, status: "stored" }]);
+		const repeat = ok(await corpusReflectReply(deps, request(digest(REPO, a)), "omp"));
+		expect(repeat.results).toEqual([{ repo: REPO, status: "unchanged" }]);
+		expect(sessions).toHaveLength(4);
+		expect(sessions[2]).not.toBe(sessions[0]);
+		expect(sessions[3]).toBe(sessions[2]);
+		expect(sessions[1]).not.toBe(sessions[2]);
 	});
 
 	test("a changed digest replaces the plane document and is retained again", async () => {

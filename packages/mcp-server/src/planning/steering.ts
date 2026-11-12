@@ -51,6 +51,8 @@ export const STEERING_EXPIRY_SWEEP_BOUNDS_S = { min: 1, max: 3_600 } as const;
 export const STEERING_EXPIRY_BATCH = 100;
 
 const RATE_WINDOW_MS = 60_000;
+/** The sequence of the first legacy row a restore loads. Stored sequences are at least 1, so legacy rows count up from here and stay below all of them. */
+const LEGACY_SEQUENCE_FLOOR = -Number.MAX_SAFE_INTEGER;
 const DIRECTIVE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PRINCIPAL_RE = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}$/;
 const PLAN_ID_MAX = 64;
@@ -290,6 +292,8 @@ export class SteeringInbox {
 	/** Delivery order: grows by one for every directive that enters the inbox. Unlike a timestamp it never goes backwards and never ties. */
 	private readonly sequences = new Map<string, number>();
 	private lastSequence = 0;
+	/** Legacy rows restored so far by this inbox; each takes the next value above {@link LEGACY_SEQUENCE_FLOOR}. */
+	private legacyRestored = 0;
 
 	constructor(private readonly deps: SteeringInboxDeps) {
 		const { ratePerMin } = deps.policy;
@@ -339,7 +343,8 @@ export class SteeringInbox {
 
 	/**
 	 * The delivery sequence of a directive: a number that grows with every directive that enters this inbox (queued here, or
-	 * restored at boot in restore order), whatever the clock says. Null for an id the inbox does not hold.
+	 * restored at boot), whatever the clock says. A restored row keeps its stored sequence; a legacy row sorts below all of them.
+	 * Null for an id the inbox does not hold.
 	 */
 	sequenceOf(directiveId: string): number | null {
 		return this.sequences.get(directiveId) ?? null;
@@ -485,9 +490,12 @@ export class SteeringInbox {
 				return;
 			}
 			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
-			// A directive this process has not seen keeps the sequence the table stored. A row written before the column has none, and takes restore order.
+			// A directive this process has not seen keeps the sequence the table stored. A row written before the column has none takes
+			// the next place in restore order, in the band below every stored sequence (those are at least 1). The counter does not move,
+			// so a directive queued after the restart still sorts after all of them. Restore order is the table's (created, id) order,
+			// so a legacy row takes the same place on every boot; renumbering it above the stored maximum would move it past newer rows.
 			if (!this.sequences.has(directive.id)) {
-				if (deliverySequence == null) this.sequences.set(directive.id, ++this.lastSequence);
+				if (deliverySequence == null) this.sequences.set(directive.id, LEGACY_SEQUENCE_FLOOR + this.legacyRestored++);
 				else {
 					this.sequences.set(directive.id, deliverySequence);
 					this.lastSequence = Math.max(this.lastSequence, deliverySequence);

@@ -973,8 +973,8 @@ The answer is never `stored: true` for a parked event.
 ## Cross-layer reconcile (phase 78)
 
 `packages/mcp-server/src/cross-layer-reconcile.ts` checks that the ledger, the index and the cache agree about memory
-forgets. It is a function, not a unit: a timer or entry calls `runScheduledReconcile(deps, options)`. No systemd unit or
-flag is added.
+forgets. Its scheduled entry is `packages/mcp-server/src/cross-layer-reconcile-run.ts`, which calls
+`runScheduledReconcile(deps, options)` once per tick. The daily unit that runs it is described under *Scheduled run* below.
 
 - **What is compared.** A `memory.forget` note names its forget id and its entry ids. For each named entry the index must
   not still have it in force (`superseded_by` null), and the cache forget mark must be at or after the latest forget that
@@ -996,6 +996,14 @@ flag is added.
 - **Not covered.** An index forget with no ledger note is not judged: the index has no window to read it by. A repair
   does not re-send a Hindsight document deletion; a plane document a repaired entry still holds is the plane's pending
   work, as it is for a forget that stopped part way.
+
+### Scheduled run
+
+- **Units.** `infra/vps/substrate-cross-layer-reconcile.service` (`Type=oneshot`, `ExecStart=bun packages/mcp-server/src/cross-layer-reconcile-run.ts --json` in `/opt/agent-substrate/current`, `EnvironmentFile=/etc/substrate/substrate.env`) and its timer `infra/vps/substrate-cross-layer-reconcile.timer`. The entry point is `packages/mcp-server/src/cross-layer-reconcile-run.ts`.
+- **Schedule.** `OnCalendar=*-*-* 04:41:00 UTC` with `Persistent=true`: one tick a day, and a missed day runs at the next boot.
+- **Install.** Both units are staged in `infra/vps/`. Copying them into `/etc/systemd/system`, `systemctl daemon-reload` and `systemctl enable --now substrate-cross-layer-reconcile.timer` are operator steps; nothing in the repo installs them. The sandbox drop-in `infra/vps/substrate-cross-layer-reconcile.service.d/30-sandbox.conf.example` is an example and is not active until copied.
+- **Exit codes.** 0 for a complete read with no mismatch, 3 for a mismatch (the first mismatching key is in the journal under `substrate-cross-layer-reconcile`), 1 for an incomplete read or a layer that could not be read.
+- **Graphs.** `SUBSTRATE_RECONCILE_GRAPHS` (comma separated graph ids, at most 50) names the graphs whose cross-layer pairs the run compares. Unset, no graph pair is compared: the run reports those pairs as not run, and its exit is the forget pair's alone. The unit file does not set it, so it must be added to `/etc/substrate/substrate.env` to take effect. See `docs/config-reference.md`.
 
 ## Configuration
 

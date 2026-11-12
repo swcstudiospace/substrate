@@ -29,6 +29,7 @@ import type { Surface } from "../types.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { FEEDBACK_VERDICTS, GAP_WINDOW_DAYS, isFeedbackVerdict, type FeedbackVerdict, type ReflectStore } from "./reflect-store.ts";
 import type { CorpusServiceDeps } from "./service.ts";
+import type { CorpusStore } from "./store.ts";
 import { isRecord } from "./validate.ts";
 
 /** The tier a digest is stored at: the classifier gives the virtual digest path tier 1, and the server writes the same. */
@@ -230,7 +231,7 @@ function documentOf(item: { repo: string; text: string; sha256: string }): Corpu
  * would start after that budget is spent is still written and reported `hindsight:pending`, not waited. A refusal or an outage
  * becomes the digest's `reason` while its plane document stays stored. A digest the manifest already holds unchanged is not sent
  * to the plane again, but it is retained again: a Hindsight leg that failed in an earlier run is owed, and the retain is idempotent
- * (one governed entry per digest content, replaced in Hindsight by its document id), so a repeat delivers without a second row.
+ * (one governed entry per digest content and manifest revision, replaced in Hindsight by its document id), so a repeat delivers without a second row.
  */
 export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown, surface: Surface | null): Promise<ReflectReply<CorpusReflectResponse>> {
 	const gated = gateOf(deps, surface, true);
@@ -272,7 +273,7 @@ export async function corpusReflectReply(deps: ReflectServiceDeps, raw: unknown,
 		if (outcome?.status !== "ingested" && outcome?.status !== "updated" && outcome?.status !== "unchanged") return [];
 		return [{ repo: item.repo, text: item.text, sha256: item.sha256 }];
 	});
-	const retained = await retainStored(deps, retainable, surface);
+	const retained = await retainStored(deps, store, retainable, surface);
 
 	const results: CorpusReflectResultItem[] = [];
 	for (const item of parsed.items) {
@@ -301,18 +302,34 @@ function legReasonOf(leg: RetainOutcome): string | undefined {
 }
 
 /**
- * The memory session of one digest's retain: a function of its content, so a repeat of the same digest computes the same governed
- * write key and replays it instead of writing a second entry.
+ * The memory session of one digest's retain: its content and the manifest revision that stored it. A repeat of the same revision
+ * (an unchanged digest, or a retry of a Hindsight leg that failed) computes the same governed write key and replays it instead of
+ * writing a second entry. A revert to earlier content takes a new revision, so it gets a new key and is written as the current
+ * entry, superseding the later digest's memory, rather than replaying the superseded write.
  */
-export function digestSessionOf(sha256: string): string {
-	return `corpus-reflect:digest:${sha256}`;
+export function digestSessionOf(sha256: string, revision: number): string {
+	return `corpus-reflect:digest:${sha256}:${revision}`;
+}
+
+/**
+ * The manifest revision of a stored digest's current row, read once the ingest has settled. Every write of the row takes the next
+ * `manifest_seq`, so the revision changes whenever the digest does, including when it returns to earlier content. Null when the row
+ * is not the active digest at that sha256, or the manifest cannot be read.
+ */
+async function revisionOf(store: CorpusStore, repo: string, sha256: string): Promise<number | null> {
+	try {
+		const row = await store.rowFor(repo, DIGEST_PATH);
+		return row !== null && row.state === "active" && row.sha256 === sha256 ? row.manifestSeq : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
  * Retains digests at {@link REFLECT_RETAIN_CONCURRENCY}, passing each the ms still left in the request-wide budget when its wait
  * starts. A later digest whose wait would start at or after the deadline is given `waitMs: 0`.
  */
-async function retainStored(deps: ReflectServiceDeps, items: ReadonlyArray<{ repo: string; text: string; sha256: string }>, surface: Surface): Promise<Map<string, RetainOutcome>> {
+async function retainStored(deps: ReflectServiceDeps, store: CorpusStore, items: ReadonlyArray<{ repo: string; text: string; sha256: string }>, surface: Surface): Promise<Map<string, RetainOutcome>> {
 	const now = deps.now ?? Date.now;
 	const deadline = now() + REFLECT_RETAIN_BUDGET_MS;
 	const retained = new Map<string, RetainOutcome>();
@@ -323,8 +340,14 @@ async function retainStored(deps: ReflectServiceDeps, items: ReadonlyArray<{ rep
 			cursor += 1;
 			const item = items[index];
 			if (item === undefined) return;
+			const revision = await revisionOf(store, item.repo, item.sha256);
+			// Without the revision the write key would be the content's alone, which a revert can replay. Not written; the leg is owed.
+			if (revision === null) {
+				retained.set(item.repo, { ok: false, reason: "manifest-unavailable" });
+				continue;
+			}
 			const waitMs = Math.max(0, deadline - now());
-			retained.set(item.repo, await deps.retainDigest({ repo: item.repo, text: item.text, surface, sessionId: digestSessionOf(item.sha256), waitMs }));
+			retained.set(item.repo, await deps.retainDigest({ repo: item.repo, text: item.text, surface, sessionId: digestSessionOf(item.sha256, revision), waitMs }));
 		}
 	};
 	const workers = Math.min(REFLECT_RETAIN_CONCURRENCY, items.length);

@@ -280,6 +280,13 @@ describe("every memory reader in the index filters on superseded_by IS NULL, so 
 		expect(standing.statements[0]?.text).toContain("conflict_key = $1 and superseded_by is null");
 	});
 
+	test("a brief read under a repository grant leaves out a global row of an ungranted repository; a read with no grant keeps every row", async () => {
+		const { index } = store(() => [row("mem_b", { scope: "global", repo: "owner/b" }), row("mem_a", { scope: "global", repo: "owner/a" })]);
+		const granted = (repo: string): boolean => repo === "owner/a";
+		expect((await index.memoryForBrief("owner/a", null, 5, { surface: "cursor", granted })).map((entry) => entry.id)).toEqual(["mem_a"]);
+		expect((await index.memoryForBrief("owner/a", null, 5, { surface: "cursor" })).map((entry) => entry.id)).toEqual(["mem_b", "mem_a"]);
+	});
+
 	test("a forgotten row reads back with its marker, which is what makes the retain replay answer gone", async () => {
 		const forgotten = store(() => [row("mem_a", { superseded_by: MARKER })]);
 		const entry = await forgotten.index.readEntry("mem_a");

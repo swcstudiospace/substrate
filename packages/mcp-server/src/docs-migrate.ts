@@ -17,9 +17,11 @@
  * The dry run writes nothing. `--apply` needs the dry run's recorded pass (`--part-a` names a file with the marker line
  * `parity-gate:passed records=<N>`) and the operator's approval for this run (`SUBSTRATE_DOCS_MIGRATE_APPROVED=1`). It
  * replays every archived page at its recorded commit through the LightRAG ingest (`ingestDocs`, backend lightrag),
- * carries the archived per-URL versions onto the records the replay wrote, records the dataset pins, and persists the
- * state file. `--rehearsal` persists nothing and reports no cutover event. A non-rehearsal apply reports the
- * `docs.cutover` event; the CLI does not write the event ledger, so the operator records it.
+ * carries the archived per-URL versions onto the records the replay wrote, and persists the state file. A page the plane
+ * refuses is counted as failed and is not migrated, so the dataset is refused. A fully successful apply also records the
+ * dataset pins and reports the `docs.cutover` event; a refused apply keeps only the confirmed uploads and reports no cutover.
+ * `--rehearsal` persists nothing and reports no cutover event. The CLI does not write the event ledger, so the operator
+ * records the cutover event.
  *
  * Exit codes: 0 the mode's checks passed; 1 a verification, gate or replay failure (the report names each mismatch by
  * kind and dataset, never page content); 2 refused before any effect: bad flags, no archive, no `LIGHTRAG_URL`, no
@@ -351,7 +353,8 @@ async function replayDataset(
 			else replay[result.status] += 1;
 		}
 	}
-	return { replay, written };
+	const pagesFailed = replay.failed > 0 ? { refused: `${String(replay.failed)} page(s) failed to upload; the dataset is incomplete` } : {};
+	return { replay: { ...replay, ...pagesFailed }, written };
 }
 
 /**
@@ -436,8 +439,10 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	}
 	const applied = perDataset.every((entry) => entry.refused === undefined);
 	const carried = carryVersions(pre.archive, seen, written, wanted);
-	const pins = recordPins(pre.archive, versions, wanted, now());
-	const statePersisted = !options.rehearsal && applied;
+	// Only a full success pins the datasets. A failed run keeps the confirmed uploads (their records and carried versions), so
+	// the state never lags the plane; it records no pin and no cutover.
+	const pins = applied ? recordPins(pre.archive, versions, wanted, now()) : 0;
+	const statePersisted = !options.rehearsal && (applied || written.size > 0);
 	if (statePersisted) await saveIngestRecords(options.stateFile, seen, versions, production.freshness);
 	const cutover = !options.rehearsal && applied;
 	const at = new Date(now()).toISOString();
@@ -468,7 +473,7 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 			: null,
 	};
 	io.out(`${JSON.stringify(report, null, 2)}\n`);
-	if (!applied) io.err("docs-migrate: a replay refused; state was not persisted\n");
+	if (!applied) io.err(`docs-migrate: a replay refused; no cutover is recorded${statePersisted ? ", and the confirmed uploads were saved" : ""}\n`);
 	return { ok: applied, exit: applied ? 0 : 1, report, ...(applied ? {} : { refused: "apply failed; see the report" }) };
 }
 
