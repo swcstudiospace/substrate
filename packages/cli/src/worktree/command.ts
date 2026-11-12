@@ -16,13 +16,15 @@
  * directory under a root is a graph id is `never` while the server reports a live claim on that graph and
  * `review` when that cannot be checked. Every removal leaves one ledger note through the events route
  * (fail-open: a note that was not recorded is said so on stderr, and `--json` carries its delivery result).
+ * Before each removal the workspace guard (`workspaceGuard`) runs on that worktree: a refusal is a failed removal, so the run
+ * stops and nothing is retried. A worktree whose path is listed in `SUBSTRATE_WORKTREE_GUARD_ALLOW` skips the guard.
  *
  * `merge-back` records, as a retained note, that a linked worktree's work is already on the default branch. It never
  * merges, removes or moves anything; it refuses a worktree that is dirty, unpushed, unproven, holds ignored work or has a
  * live or unverifiable graph claim (see `merge-back.ts`).
  */
 import { realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
 import { isWorktreeLabel, WORKTREE_LIST_MAX_LIMIT, WORKTREE_TEXT_MAX_CHARS } from "../../../mcp-server/src/worktree-registry.ts";
 import {
@@ -78,7 +80,8 @@ export const WORKTREE_USAGE =
 	"       substrate worktree provision --repo DIR --branch B [--base REF] [--path DIR] [--json]\n" +
 	"       substrate worktree disk [--root DIR]... [--json]\n" +
 	"       substrate worktree merge-back PATH... [--execute] [--json]\n" +
-	"       substrate worktree guard DIR [--json]\n";
+	"       substrate worktree guard DIR [--json]\n" +
+	"environment: SUBSTRATE_WORKTREE_ROOTS (colon-separated roots); SUBSTRATE_WORKTREE_GUARD_ALLOW (colon-separated worktree paths that prune --execute may remove although the guard refuses them)\n";
 
 export type PostOutcome = { ok: true; stored: number } | { ok: false; error: string };
 
@@ -117,6 +120,12 @@ const LINK_WALK_CONCURRENCY = 2;
 function roots(args: WorktreeArgs, deps: WorktreeDeps): string[] {
 	if (args.roots.length > 0) return [...new Set(args.roots.map((root) => resolve(deps.cwd, root)))];
 	return worktreeRootsFromEnv(deps.env);
+}
+
+/** The worktree paths `SUBSTRATE_WORKTREE_GUARD_ALLOW` lists, read the way `roots()` reads its roots: a relative entry is dropped, the rest are made real paths. */
+function guardAllowlist(deps: WorktreeDeps): Set<string> {
+	const entries = (deps.env.SUBSTRATE_WORKTREE_GUARD_ALLOW ?? "").split(":").map((part) => part.trim()).filter((entry) => entry !== "" && isAbsolute(entry));
+	return new Set(entries.map((entry) => realPath(entry)));
 }
 
 function megabytes(bytes: number | null): string {
@@ -378,6 +387,7 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 		return 0;
 	}
 
+	const allowed = guardAllowlist(deps);
 	const removed: Array<{ path: string; size_bytes: number | null; ledger: LedgerResult }> = [];
 	const skipped: Array<{ path: string; reasons: string[] }> = [];
 	let failure: { path: string; error: string } | null = null;
@@ -401,6 +411,15 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 		if (check.class !== "safe") {
 			skip(info.path, check.reasons);
 			continue;
+		}
+		// The guard is the last check before the removal. An allowlisted path skips it, and the note says so on stderr.
+		if (allowed.has(realPath(info.path))) deps.err(`note: ${info.path} is in SUBSTRATE_WORKTREE_GUARD_ALLOW: the workspace guard was not run\n`);
+		else {
+			const guard = await workspaceGuard(info.path, deps.git);
+			if (!guard.ok) {
+				failure = { path: info.path, error: `refused by the workspace guard: ${guard.refusals.join("; ")}` };
+				break;
+			}
 		}
 		const result = await deps.git(["worktree", "remove", info.path], info.repo_dir);
 		if (result.code !== 0) {

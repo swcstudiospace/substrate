@@ -1002,12 +1002,46 @@ describe("guard", () => {
 		}
 	});
 
-	test("a .planning directory in the workspace root is refused: it is outside git", async () => {
+	test("a .planning directory in the workspace root is refused when git does not track it", async () => {
 		const w = workspace();
 		write(w.root, ".planning/STATE.md", "state\n");
 		const h = harness({}, withRoot("/nowhere"));
 		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
-		expect(h.out.join("")).toContain("workspace .planning is outside git: copy it out first");
+		expect(h.out.join("")).toContain("workspace .planning holds files git does not track: commit them or copy them out first");
+	});
+
+	test("a tracked .planning directory in a member is not refused: git holds it", async () => {
+		const w = workspace();
+		commit(w.api, ".planning/STATE.md", "state\n");
+		git(w.api, ["push", "-q", "origin", "api"]);
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.api], h.deps)).toBe(0);
+		expect(h.out.join("")).not.toContain("workspace .planning");
+	});
+
+	test("an untracked .planning directory in a member is refused", async () => {
+		const w = workspace();
+		write(w.api, ".planning/STATE.md", "state\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.api], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain("workspace .planning holds files git does not track");
+	});
+
+	test("prune --execute does not remove a worktree the guard refuses; SUBSTRATE_WORKTREE_GUARD_ALLOW removes it as before", async () => {
+		const f = fleet();
+		// An empty `.planning/` is invisible to git, so both worktrees stay `safe`, yet the guard checks it: the fake answers that check with an untracked entry.
+		for (const dir of [f.merged, f.mergedToo]) mkdirSync(join(dir, ".planning"));
+		const untracked = (args: string[]): CommandResult | null => (args.includes("--ignored=matching") ? { code: 0, stdout: "?? .planning/STATE.md\n", stderr: "" } : null);
+		const refused = harness({ git: recording(untracked).git }, withRoot(f.root));
+		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], refused.deps)).toBe(1);
+		expect(refused.err.join("")).toContain("refused by the workspace guard: ");
+		expect(refused.err.join("")).toContain("workspace .planning holds files git does not track");
+		expect(existsSync(f.merged) && existsSync(f.mergedToo)).toBe(true);
+		const allowed = harness({ git: recording(untracked).git }, { ...withRoot(f.root), SUBSTRATE_WORKTREE_GUARD_ALLOW: `${f.merged}:${f.mergedToo}` });
+		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], allowed.deps)).toBe(0);
+		expect(allowed.err.join("")).not.toContain("refused by the workspace guard");
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(f.mergedToo)).toBe(false);
 	});
 
 	test("the guard writes nothing: no remove, no branch delete and no other write verb is called", async () => {

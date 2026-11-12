@@ -2,8 +2,8 @@
  * Whether removing a workspace directory (`<root>/<graph_id>`) would lose work. The removal itself knows nothing
  * of git, so this runs before it. Every member worktree must be clean (untracked files included), fully pushed, free
  * of ignored work only it holds, and free of submodules, whose files are not checked. The workspace must hold no
- * primary checkout, no entry outside every member (a removal would delete it unchecked), and no `.planning/` directory,
- * which lives outside git.
+ * primary checkout, no entry outside every member (a removal would delete it unchecked), and no `.planning/` holding
+ * content git does not track (untracked or ignored).
  *
  * Read-only by construction: it runs `git status`, `git rev-list`, `git ls-files` (directly and through
  * `findIgnoredWork`), `git worktree list` and the discovery reads of `discoverRepos`. It never removes a worktree,
@@ -16,7 +16,7 @@ import { findIgnoredWork, type IgnoredOptions, UNKNOWN_IGNORED } from "./ignored
 import { discoverRepos, listWorktrees } from "./inventory.ts";
 import { mapLimit } from "./pool.ts";
 
-export const PLANNING_REFUSAL = "workspace .planning is outside git: copy it out first";
+export const PLANNING_REFUSAL = "workspace .planning holds files git does not track: commit them or copy them out first";
 export const PRIMARY_REFUSAL = "primary checkout inside the workspace: never removed by a workspace removal";
 export const LOOSE_REFUSAL = "outside every git worktree, so removing the workspace would delete it unchecked: copy it out first";
 
@@ -171,6 +171,20 @@ async function probe(member: Member, git: GitRunner, options: WorkspaceGuardOpti
 }
 
 /**
+ * The workspace's `.planning/`: refused when git does not track some of its content. `git status` runs in the root, so it
+ * answers for the repository that holds the root; a root that no repository holds fails the status and is refused too. Only
+ * untracked (`??`) and ignored (`!!`) entries refuse. A modified tracked file is not refused here: when the root is a
+ * member, its own probe refuses it as uncommitted changes.
+ */
+async function planningReasons(rootReal: string, git: GitRunner): Promise<string[]> {
+	if (!existsSync(join(rootReal, ".planning"))) return [];
+	const status = await git(["status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--", ".planning"], rootReal);
+	if (status.code !== 0) return [PLANNING_REFUSAL];
+	const unowned = status.stdout.split("\n").some((line) => line.startsWith("?? ") || line.startsWith("!! "));
+	return unowned ? [PLANNING_REFUSAL] : [];
+}
+
+/**
  * Whether the workspace at `root` can be removed without losing work. Reads only: see the module comment. The
  * refusals are ordered: discovery problems, each primary checkout, loose entries, then each member's reasons (every
  * member is still probed, so its state is reported), then the workspace's own `.planning/`.
@@ -185,6 +199,6 @@ export async function workspaceGuard(root: string, git: GitRunner, options: Work
 	if (!memberPaths.includes(rootReal)) refusals.push(...looseRefusals(rootReal, memberPaths, rootReal));
 	const probes = await mapLimit(discovered.members, GUARD_CONCURRENCY, (member) => probe(member, git, options));
 	refusals.push(...probes.flat());
-	if (existsSync(join(rootReal, ".planning"))) refusals.push(PLANNING_REFUSAL);
+	refusals.push(...(await planningReasons(rootReal, git)));
 	return { ok: refusals.length === 0, refusals };
 }
