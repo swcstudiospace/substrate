@@ -134,8 +134,8 @@ describe("live session issue gate (criterion 2, verification item 16b)", () => {
 	});
 
 	test("a transition for a session in an ungranted repository does not read that session before it refuses", async () => {
-		// Asserts the requirement as written. Session-bound calls are read by the boundary's prepare step (steering-tools.ts:105)
-		// before the effect that holds the repository gate (service.ts:2057), so this is expected to fail on current code.
+		// The boundary's admitRepo gate (service.ts admitLiveRepo, run by LiveSessionBoundary.prepareReserved) refuses an ungranted
+		// repository before the session binding is read, so no read happens on this path.
 		const { substrate, authority } = await fixture();
 		const seeded = await issueLiveSession(authority, { caller: CALLER, repoId: "owner/b" });
 		const read = spyOn(authority, "read");
@@ -157,6 +157,47 @@ describe("live session issue gate (criterion 2, verification item 16b)", () => {
 
 		expect(moved).toMatchObject({ status: "updated", session_id: issued.session_id, state: "PAUSED" });
 		expect(transition).toHaveBeenCalledTimes(1);
+		expect(refusalsOf(stub.written)).toHaveLength(0);
+	});
+
+	test("the MCP batch path refuses a transition for an ungranted repository before the binding read and records one refusal", async () => {
+		const { substrate, authority, ledger: stub } = await fixture();
+		const seeded = await issueLiveSession(authority, { caller: CALLER, repoId: "owner/b" });
+		const read = spyOn(authority, "read");
+		const transition = spyOn(authority, "transition");
+
+		const prepared = await substrate.prepareLiveBatch(CALLER, [{ id: "t1", tool: "docs_steering_session", args: { session_id: seeded.sessionId, session_binding: seeded.sessionBinding, repo_id: "owner/b", previous_state: "ACTIVE", state: "PAUSED" } }]);
+
+		expect(prepared).toMatchObject({ ok: false, refusal: { status: "refused", error: { code: "not-found" } } });
+		expect(read).not.toHaveBeenCalled();
+		expect(transition).not.toHaveBeenCalled();
+		const refusals = refusalsOf(stub.written);
+		expect(refusals).toHaveLength(1);
+		expect(refusals[0]).toMatchObject({ payload: { action: "repo.scope-refused", route: "docs_steering_session", reason: "repo-not-granted" } });
+	});
+
+	test("the MCP batch path refuses an issue for an ungranted repository before authority.issue and reads no session", async () => {
+		const { substrate, authority, ledger: stub } = await fixture();
+		const issue = spyOn(authority, "issue");
+		const read = spyOn(authority, "read");
+
+		const prepared = await substrate.prepareLiveBatch(CALLER, [{ id: "i1", tool: "docs_steering_session", args: { repo_id: "owner/b", state: "ACTIVE" } }]);
+
+		expect(prepared).toMatchObject({ ok: false, refusal: { status: "refused", error: { code: "not-found" } } });
+		expect(issue).not.toHaveBeenCalled();
+		expect(read).not.toHaveBeenCalled();
+		expect(refusalsOf(stub.written)).toHaveLength(1);
+	});
+
+	test("positive control: the MCP batch path admits a transition of a session in a granted repository and reads it", async () => {
+		const { substrate, authority, ledger: stub } = await fixture();
+		const seeded = await issueLiveSession(authority, { caller: CALLER, repoId: "owner/a" });
+		const read = spyOn(authority, "read");
+
+		const prepared = await substrate.prepareLiveBatch(CALLER, [{ id: "t1", tool: "docs_steering_session", args: { session_id: seeded.sessionId, session_binding: seeded.sessionBinding, repo_id: "owner/a", previous_state: "ACTIVE", state: "PAUSED" } }]);
+
+		expect(prepared).toMatchObject({ ok: true });
+		expect(read).toHaveBeenCalledTimes(1);
 		expect(refusalsOf(stub.written)).toHaveLength(0);
 	});
 });

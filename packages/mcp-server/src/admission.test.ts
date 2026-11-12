@@ -43,6 +43,7 @@ import { ConfigError, DEFAULT_BUDGETS, loadAdmissionSettings, loadConfig } from 
 import { defined } from "./test-support.ts";
 import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
 import { LiveSessionBoundary, type LiveSessionInvocation } from "./planning/steering-tools.ts";
+import { SteeringWaiters, type QueuedSteeringRecord, type SteeringWaitTimers } from "./planning/steering-waiters.ts";
 import { SURFACES, type EventInput } from "./types.ts";
 
 /**
@@ -638,5 +639,82 @@ describe("mandatory live principal budgets", () => {
 		expect(read).toHaveBeenCalledTimes(3);
 		expect(await boundary.prepare(invocation)).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
 		expect(read).toHaveBeenCalledTimes(3);
+	});
+});
+
+describe("an open long poll against the read budget", () => {
+	/** The timer seam: the poll's timeout is its only clock, and each test fires it by hand. */
+	class ManualTimers implements SteeringWaitTimers {
+		readonly pending = new Map<number, () => void>();
+		private next = 0;
+		set(run: () => void): unknown {
+			this.next += 1;
+			this.pending.set(this.next, run);
+			return this.next;
+		}
+		clear(handle: unknown): void {
+			this.pending.delete(handle as number);
+		}
+		fireAll(): void {
+			for (const [handle, run] of [...this.pending]) {
+				this.pending.delete(handle);
+				run();
+			}
+		}
+	}
+	const registry = () => {
+		const timers = new ManualTimers();
+		return { timers, waiters: new SteeringWaiters({ timers }) };
+	};
+	/** The registry reads only a record's directive id, so a record carrying that id is all it needs. */
+	const queuedRecord = (id: string): QueuedSteeringRecord => ({ state: "queued", directive: { id } }) as unknown as QueuedSteeringRecord;
+	const readBudget: Partial<AdmissionSettings> = { classes: { read: { rps: 1, burst: 3 }, write: { rps: 1, burst: 1 }, coordination: { rps: 5, burst: 5 } } };
+
+	test("the poll spends one read token on arrival and holds none while it waits, so reads keep the rest of the budget", async () => {
+		const { admission } = admissionOver(new FakeBudgetRedis(), readBudget);
+		const { timers, waiters } = registry();
+		expect(await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).toMatchObject({ decision: "allowed", tokensLeft: 2 });
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, check: () => null });
+		expect(waiters.size).toBe(1);
+		expect(await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).toMatchObject({ decision: "allowed", tokensLeft: 1 });
+		expect(await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).toMatchObject({ decision: "allowed", tokensLeft: 0 });
+		expect((await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).decision).toBe("limited");
+		timers.fireAll();
+		expect(await held).toEqual({ status: "timeout" });
+		expect(waiters.size).toBe(0);
+	});
+
+	test("the held slot is released on the timeout and leaves no timer behind", async () => {
+		const { timers, waiters } = registry();
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, check: () => null });
+		expect(waiters.size).toBe(1);
+		timers.fireAll();
+		expect(await held).toEqual({ status: "timeout" });
+		expect(waiters.size).toBe(0);
+		expect(timers.pending.size).toBe(0);
+	});
+
+	test("the held slot is released when a directive is queued for the session, and its timer is cleared", async () => {
+		const { timers, waiters } = registry();
+		let next: QueuedSteeringRecord | null = null;
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, check: () => next });
+		expect(waiters.size).toBe(1);
+		const record = queuedRecord("d-1");
+		next = record;
+		waiters.notify("sess-a");
+		expect(await held).toEqual({ status: "directive", record });
+		expect(waiters.size).toBe(0);
+		expect(timers.pending.size).toBe(0);
+	});
+
+	test("the held slot is released when the client goes away, and its timer is cleared", async () => {
+		const { timers, waiters } = registry();
+		const gone = new AbortController();
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, signal: gone.signal, check: () => null });
+		expect(waiters.size).toBe(1);
+		gone.abort();
+		expect(await held).toEqual({ status: "aborted" });
+		expect(waiters.size).toBe(0);
+		expect(timers.pending.size).toBe(0);
 	});
 });

@@ -85,12 +85,12 @@ def test_validate_graph_id_rejects(bad):
 
 def test_repo_checkout_maps_slug_when_origin_matches(repo: Path):
     root = repo.parent
-    assert repo_checkout(SLUG, root=root) == root / "agent-substrate"
+    assert repo_checkout(SLUG, roots=[root]) == root / "agent-substrate"
 
 
 def test_repo_checkout_origin_match_is_case_insensitive_and_ignores_dot_git(repo: Path):
     git(repo, "remote", "set-url", "origin", "git@github.com:SWCStudioSpace/Agent-Substrate")
-    assert repo_checkout(SLUG, root=repo.parent) == repo
+    assert repo_checkout(SLUG, roots=[repo.parent]) == repo
 
 
 @pytest.mark.parametrize(
@@ -106,8 +106,26 @@ def test_repo_checkout_refuses(repo: Path, slug, origin):
     if origin:
         git(repo, "remote", "set-url", "origin", origin)
     with pytest.raises(WorktreeRefused) as err:
-        repo_checkout(slug, root=repo.parent)
+        repo_checkout(slug, roots=[repo.parent])
     assert err.value.marker == "no-checkout"
+
+
+def test_repo_checkout_falls_back_to_repos_root_when_no_roots_are_configured(repo: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("substrate_dispatcher.worktree.REPOS_ROOT", repo.parent)
+    assert repo_checkout(SLUG) == repo
+
+
+def test_repo_checkout_refuses_a_repository_outside_the_configured_roots(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(ROOTS_ENV, str(tmp_path / "elsewhere"))
+    with pytest.raises(WorktreeRefused) as err:
+        repo_checkout(SLUG)
+    assert err.value.marker == "no-checkout"
+
+
+def test_repo_checkout_accepts_a_repository_inside_a_configured_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(ROOTS_ENV, f"{tmp_path / 'elsewhere'}:{repo.parent}")
+    assert repo_checkout(SLUG) == repo
+
 
 
 def test_ensure_worktree_creates_then_reuses(repo: Path, tmp_path: Path):

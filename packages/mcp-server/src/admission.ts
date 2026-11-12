@@ -190,7 +190,13 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/handoff": "write",
 	"/slo/history": "read",
 	"/docs/lightrag/query": "read",
-	// Phase 67 (live steering GA): the steering routes mirror the steering tools. A held long poll is one admission, like one read.
+	// Phase 67 (live steering GA): `GET /steering/wait` is `read`, the class the other held reads use (`/events/stream` holds a
+	// connection the same way). Admission is a token rate, not a concurrency pool: the poll spends one token when it arrives and
+	// holds none while it waits, so an open poll cannot starve general reads. A dedicated class would need a new member of
+	// `ADMISSION_CLASSES` in `@substrate/observability` and a budget knob, and would only isolate the re-polls, so it is not added.
+	// The slot that bounds held polls is the waiter registry (`planning/steering-waiters.ts`: 4 per session, 256 in total),
+	// released on a directive, the timeout, a client abort or close. The wait is bounded by `SUBSTRATE_STEERING_WAIT_MAX_MS`.
+	// The other steering routes mirror the steering tools.
 	"/steering/sessions": "read",
 	"/steering/sessions/heartbeat": "write",
 	"/steering/sessions/close": "write",
@@ -211,6 +217,8 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/corpus/gaps": "read",
 	"/docs/feedback": "write",
 	"/corpus/root": "read",
+	"/cross-repo/fanout": "write",
+	"/cross-repo/status": "read",
 	"/corpus/proof": "read",
 	"/corpus/anchor": "read",
 };
@@ -251,6 +259,8 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	docs_ingest: "write",
 	corpus_status: "read",
 	corpus_ingest: "write",
+	cross_repo_fanout: "write",
+	cross_repo_status: "read",
 	docs_feedback: "write",
 	skills_propose: "write",
 	docs_steering_session: "write",

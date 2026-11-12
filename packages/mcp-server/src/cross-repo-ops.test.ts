@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { type BranchFanoutRequest, crossRepoStatus, runBranchFanout } from "./cross-repo-ops.ts";
+import { type BranchFanoutRequest, type CrossRepoStore, crossRepoFanoutReply, crossRepoStatus, crossRepoStatusReply, runBranchFanout } from "./cross-repo-ops.ts";
+import { REPO_ALLOWLIST_ENV } from "./repo-allowlist.ts";
 import { defaultScopedGitRunner } from "./repo-executor.ts";
 import { BRANCH, depsFor, FAILED, git, type Intercept, opOf, orFail, refIn, request, runnerWith, stepStates, world } from "./cross-repo-ops.testkit.ts";
 
@@ -254,5 +255,99 @@ describe("status exposes the stored operation to a granted surface only", () => 
 		const w = world();
 		expect(await crossRepoStatus("never-written", depsFor(w, runnerWith().run))).toBeNull();
 		expect(await crossRepoStatus("bad key", depsFor(w, runnerWith().run))).toBeNull();
+	});
+});
+
+describe("the session allowlist applies to every git call, on top of the surface grant", () => {
+	test("a surface granted a repository by its scope is refused when its allowlist entry does not name it, before any git call", async () => {
+		const w = world();
+		const env = { ...w.env, [REPO_ALLOWLIST_ENV]: JSON.stringify({ omp: { "owner/a": "XRO_TEST_CREDENTIAL_0" } }) };
+		let gitCalls = 0;
+		const { run } = runnerWith(() => {
+			gitCalls += 1;
+			return undefined;
+		});
+		const outcome = await runBranchFanout(request(), depsFor(w, run, "omp", env));
+		expect(outcome).toMatchObject({ ok: false, reason: "repo-not-granted" });
+		expect(gitCalls).toBe(0);
+		expect(w.store.writes).toBe(0);
+	});
+
+	test("a malformed allowlist grants nothing: every repository is refused before any git call", async () => {
+		const w = world();
+		const env = { ...w.env, [REPO_ALLOWLIST_ENV]: "{not json" };
+		const { run, writes } = runnerWith();
+		expect(await runBranchFanout(request(), depsFor(w, run, "omp", env))).toMatchObject({ ok: false, reason: "repo-not-granted" });
+		expect(writes).toHaveLength(0);
+		expect(w.store.writes).toBe(0);
+	});
+
+	test("a session absent from the allowlist sees no operation, though its surface is granted every repository", async () => {
+		const w = world();
+		await runBranchFanout(request(), depsFor(w, runnerWith().run));
+		const env = { ...w.env, [REPO_ALLOWLIST_ENV]: "{}" };
+		expect(await crossRepoStatus("op-1", depsFor(w, runnerWith().run, "omp", env))).toBeNull();
+	});
+});
+
+describe("the operation persists each step before its git effect", () => {
+	test("a step is applying in the store before its create runs, and applied only after the create is read back", async () => {
+		const w = world();
+		const log: string[] = [];
+		const store: CrossRepoStore = {
+			create: (input) => w.store.create(input),
+			load: (key) => w.store.load(key),
+			moveStep: async (key, index, from, to, detail, at) => {
+				const moved = await w.store.moveStep(key, index, from, to, detail, at);
+				if (moved) log.push(`step ${index} ${to}`);
+				return moved;
+			},
+			setStatus: (key, status, at) => w.store.setStatus(key, status, at),
+		};
+		const { run } = runnerWith((args, cwd) => {
+			if (args[0] === "update-ref" && args[1] !== "-d") log.push(`ref ${cwd === w.checkoutA ? "a" : "b"}`);
+			return undefined;
+		});
+		const op = opOf(await runBranchFanout(request(), depsFor({ ...w, store }, run)));
+		expect(op.status).toBe("done");
+		expect(log).toEqual(["step 0 applying", "ref a", "step 0 applied", "step 1 applying", "ref b", "step 1 applied"]);
+	});
+});
+
+describe("the boundary answers malformed input with an explicit error and writes nothing", () => {
+	test("a body that is not a JSON object, names a field it does not read, or carries a malformed field is refused with 400", async () => {
+		const w = world();
+		const deps = depsFor(w, runnerWith().run);
+		const bodies: unknown[] = [null, [], "owner/a", { ...request(), extra: "secret-value" }, { key: "op-1", branch: BRANCH, repos: "owner/a" }, { ...request(), key: "bad key" }];
+		for (const body of bodies) {
+			const reply = await crossRepoFanoutReply(body, deps);
+			expect(reply.status).toBe(400);
+			expect(reply.body).toMatchObject({ ok: false, reason: "request-invalid" });
+			expect(JSON.stringify(reply.body)).not.toContain("secret-value");
+		}
+		expect(w.store.writes).toBe(0);
+	});
+
+	test("a reused key is 409, an unlisted repository is 403, and an anonymous caller is 403; a retry of a granted key is 200 with no ref write", async () => {
+		const w = world({ omp: ["owner/a", "owner/b"], cursor: ["owner/a"] });
+		const first = runnerWith();
+		expect((await crossRepoFanoutReply(request(), depsFor(w, first.run))).status).toBe(200);
+		const retry = runnerWith();
+		expect(await crossRepoFanoutReply(request(), depsFor(w, retry.run))).toMatchObject({ status: 200, body: { ok: true, operation: { status: "done" } } });
+		expect(retry.writes).toHaveLength(0);
+		expect(await crossRepoFanoutReply(request({ branch: "feature/other" }), depsFor(w, runnerWith().run))).toMatchObject({ status: 409, body: { reason: "key-reused" } });
+		expect(await crossRepoFanoutReply(request({ key: "op-2" }), depsFor(w, runnerWith().run, "cursor"))).toMatchObject({ status: 403, body: { reason: "repo-not-granted" } });
+		expect(await crossRepoFanoutReply(request({ key: "op-3" }), depsFor(w, runnerWith().run, null))).toMatchObject({ status: 403 });
+	});
+});
+
+describe("the status reply answers a malformed key with 400, an unseen key with 404, and a stored operation with 200", () => {
+	test("each status is answered from the stored operation and reveals nothing for an unseen key", async () => {
+		const w = world();
+		await crossRepoFanoutReply(request(), depsFor(w, runnerWith().run));
+		expect(await crossRepoStatusReply(undefined, depsFor(w, runnerWith().run))).toMatchObject({ status: 400, body: { reason: "request-invalid" } });
+		expect(await crossRepoStatusReply("bad key", depsFor(w, runnerWith().run))).toMatchObject({ status: 400 });
+		expect(await crossRepoStatusReply("never-written", depsFor(w, runnerWith().run))).toMatchObject({ status: 404, body: { reason: "not-found" } });
+		expect(await crossRepoStatusReply("op-1", depsFor(w, runnerWith().run))).toMatchObject({ status: 200, body: { ok: true, operation: { status: "done" } } });
 	});
 });

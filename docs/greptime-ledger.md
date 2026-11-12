@@ -984,7 +984,9 @@ flag is added.
   its retries) and newer than `windowMs` ago. A full ledger page, a key set past `RECONCILE_MAX_KEYS`, a malformed forget
   note or one that names fewer entries than it touched makes the read incomplete: it is reported, and nothing is planned.
 - **Read-only.** `runScheduledReconcile` writes nothing, clean or not. It returns per-layer counts and the first
-  mismatching key, or a failure naming the layer that could not be read.
+  mismatching key, or a failure naming the layer that could not be read or an incomplete read. The tick's exit codes:
+  0 for a complete read with no mismatch; 3 for mismatches found, first key reported (they outrank an incomplete read);
+  1 for an incomplete read or a layer that could not be read, with no mismatch proven.
 - **Repair is a separate, confirmed step.** `planRepair` writes one `reconcile.plan` note whose event id is the plan id,
   and only for a complete read with something to repair. `applyRepair({ planId, confirm })` refuses unless `confirm`
   equals `planId` and the stored plan's digest matches. It then marks only the planned entries (`markMemoryForgotten`,

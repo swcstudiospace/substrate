@@ -6,6 +6,7 @@ from the existing branch when only the branch exists, and created with a new bra
 The root is the first absolute entry of ``SUBSTRATE_WORKTREE_ROOTS`` (the same variable the fleet and the collector
 read), else ``/var/lib/substrate/worktrees``. Creation is refused when the filesystem that holds the root has less than
 the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB), and no git command runs in that case.
+Repository checkouts are looked up under the same roots (else ``REPOS_ROOT``), and a repository outside them is refused.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
 checks out a branch in the main checkout.
 """
@@ -19,7 +20,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -132,16 +133,35 @@ def _origin_matches(url: str, slug: str) -> bool:
     return norm == want or norm.endswith("/" + want) or norm.endswith(":" + want)
 
 
-def repo_checkout(slug: str, *, root: Path = REPOS_ROOT, run: Runner = subprocess.run) -> Path:
-    """Map an ``owner/name`` slug to its checkout ``<root>/<name>``, verified by its origin URL."""
+def repo_roots(env: Mapping[str, str] | None = None) -> list[Path]:
+    """Where a repository checkout may sit: the configured roots, else ``REPOS_ROOT``.
+
+    Read from the environment at call time. A repository outside every root is not dispatched.
+    """
+    return worktree_roots(env) or [REPOS_ROOT]
+
+
+def repo_checkout(slug: str, *, roots: Sequence[Path] | None = None, run: Runner = subprocess.run) -> Path:
+    """Map an ``owner/name`` slug to its checkout ``<root>/<name>`` under the first root that holds one, verified by origin.
+
+    ``roots`` defaults to :func:`repo_roots`. A slug whose checkout lies under no root is refused, so the configured
+    roots bound which repositories the dispatcher checks out.
+    """
     if not isinstance(slug, str) or not REPO_SLUG_RE.fullmatch(slug):
         raise WorktreeRefused(f"invalid repo slug {slug!r}", "no-checkout")
-    root = Path(root)
-    path = root / slug.split("/")[1]
-    if path.resolve().parent != root.resolve():
-        raise WorktreeRefused(f"repo slug {slug!r} escapes {root}", "no-checkout")
-    if not (path / ".git").exists():
-        raise WorktreeRefused(f"no git checkout for {slug} at {path}", "no-checkout")
+    name = slug.split("/")[1]
+    search = repo_roots() if roots is None else [Path(root) for root in roots]
+    path: Path | None = None
+    for root in search:
+        candidate = root / name
+        if candidate.resolve().parent != root.resolve():
+            raise WorktreeRefused(f"repo slug {slug!r} escapes {root}", "no-checkout")
+        if (candidate / ".git").exists():
+            path = candidate
+            break
+    if path is None:
+        listed = ", ".join(str(root) for root in search) or "no root"
+        raise WorktreeRefused(f"no git checkout for {slug} under {listed}", "no-checkout")
     origin = _git(run, path, "remote", "get-url", "origin")
     if origin.returncode != 0 or not _origin_matches(origin.stdout, slug):
         raise WorktreeRefused(f"checkout {path} is not origin {slug}", "no-checkout")

@@ -12,6 +12,7 @@
  * checked. A claim that could not be asked about refuses. A checkout outside every configured root is not a graph
  * checkout, so no claim can be on it and nobody is asked. Roots and worktree paths are compared as real paths.
  * A refused worktree is never recorded.
+ * Each path is decided and noted under the worktree's merge-back lock in its git directory, so two runs on one worktree serialize.
  *
  * A dry run is the default and writes nothing. With `--execute` each eligible worktree's note is emitted. Every git
  * command here is a read. Exit codes: 0 when every requested worktree was eligible and its note recorded (or would be,
@@ -23,6 +24,7 @@ import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
 import { type ClaimStatus, claimStatus, createPrShared, findIgnoredWork, inspectWorktree, listWorktrees, lookupPr, NOT_CHECKED, reloadWorktree, UNKNOWN_IGNORED, type WorktreeInfo } from "../../../fleet/src/index.ts";
 import type { EventInput } from "../../../mcp-server/src/types.ts";
+import { acquireWorktreeLockWithin, type WorktreeLock, WorktreeBusyError } from "../../../worktree-snapshot/src/index.ts";
 import type { WorktreeArgs } from "./args.ts";
 import type { WorktreeDeps } from "./command.ts";
 
@@ -30,6 +32,9 @@ import type { WorktreeDeps } from "./command.ts";
 const IGNORED_SHOWN = 5;
 const USAGE = "merge-back needs at least one worktree path: substrate worktree merge-back PATH... [--execute] [--json]\n";
 const MOVED = "HEAD or the branch changed while it was checked, so nothing was recorded for it";
+/** The merge-back lock, beside the restore and checkpoint locks in the worktree's git directory. */
+const MERGE_BACK_LOCK_FILE = "substrate-merge-back.lock";
+const NO_GIT_DIR = "git could not resolve the git directory of this path, so the merge-back lock cannot be taken";
 
 type MergedVia = "default-branch" | "pull-request";
 /** How the ledger took a note. `spooled` means parked for replay: the note is not recorded yet. */
@@ -124,6 +129,13 @@ async function unchangedSince(info: WorktreeInfo, deps: WorktreeDeps): Promise<b
 	return now !== null && now.head === info.head && now.branch === info.branch && now.detached === info.detached;
 }
 
+/** The git directory of the worktree at `path`, where its merge-back lock lives (per linked worktree, like the checkpoint lock). Null when git cannot say. */
+async function worktreeGitDir(path: string, deps: WorktreeDeps): Promise<string | null> {
+	const result = await deps.git(["rev-parse", "--absolute-git-dir"], path);
+	const gitDir = result.code === 0 ? result.stdout.trim() : "";
+	return gitDir.length === 0 ? null : realPath(gitDir);
+}
+
 /** The note that is the proof. It names the worktree by repository and branch, never by path. */
 function mergeBackNote(info: WorktreeInfo, mergedVia: MergedVia): EventInput {
 	return {
@@ -159,29 +171,49 @@ export async function commandMergeBack(args: WorktreeArgs, deps: WorktreeDeps, r
 	const recorded: Recorded[] = [];
 	const refused: Refused[] = [];
 	for (const path of paths) {
-		let decision = await decide(path, roots, deps);
-		if (decision.eligible && !(await unchangedSince(decision.info, deps))) decision = { eligible: false, reasons: [MOVED] };
-		if (!decision.eligible) {
-			refused.push({ path, reasons: decision.reasons });
-			if (!args.json) deps.out(`refused ${path}: ${decision.reasons.join("; ")}\n`);
+		const gitDir = await worktreeGitDir(path, deps);
+		if (gitDir === null) {
+			refused.push({ path, reasons: [NO_GIT_DIR] });
+			if (!args.json) deps.out(`refused ${path}: ${NO_GIT_DIR}\n`);
 			continue;
 		}
-		const { info, mergedVia } = decision;
-		const item: Recorded = { path, repo: info.repo, branch: info.branch, head: info.head, merged_via: mergedVia, ledger: null };
-		recorded.push(item);
-		const described = `${info.repo} ${info.branch ?? "(detached)"} at ${info.head.slice(0, 12)}, merged via ${mergedVia}`;
-		if (!args.execute) {
-			if (!args.json) deps.out(`would record ${path}: ${described}\n`);
+		// The check and its note are one unit: a run on the same worktree waits here until this one has emitted or refused.
+		let lock: WorktreeLock;
+		try {
+			lock = await acquireWorktreeLockWithin(gitDir, deps.now, { file: MERGE_BACK_LOCK_FILE, label: "merge-back" });
+		} catch (error) {
+			if (!(error instanceof WorktreeBusyError)) throw error;
+			refused.push({ path, reasons: [error.message] });
+			if (!args.json) deps.out(`refused ${path}: ${error.message}\n`);
 			continue;
 		}
-		const outcome = await deps.emit(mergeBackNote(info, mergedVia));
-		item.ledger = delivery(outcome);
-		if (outcome.kind === "stored") {
-			if (!args.json) deps.out(`recorded ${path}: ${described}\n${ledgerLine(outcome)}\n`);
-		} else {
-			// Not recorded: its own line on stdout, the reason on stderr in every mode (the folder is kept, the ledger has no line for it).
-			if (!args.json) deps.out(`not recorded (${item.ledger}) ${path}: ${described}\n`);
-			deps.err(`${ledgerLine(outcome)}\n`);
+		try {
+			let decision = await decide(path, roots, deps);
+			if (decision.eligible && !(await unchangedSince(decision.info, deps))) decision = { eligible: false, reasons: [MOVED] };
+			if (!decision.eligible) {
+				refused.push({ path, reasons: decision.reasons });
+				if (!args.json) deps.out(`refused ${path}: ${decision.reasons.join("; ")}\n`);
+				continue;
+			}
+			const { info, mergedVia } = decision;
+			const item: Recorded = { path, repo: info.repo, branch: info.branch, head: info.head, merged_via: mergedVia, ledger: null };
+			recorded.push(item);
+			const described = `${info.repo} ${info.branch ?? "(detached)"} at ${info.head.slice(0, 12)}, merged via ${mergedVia}`;
+			if (!args.execute) {
+				if (!args.json) deps.out(`would record ${path}: ${described}\n`);
+				continue;
+			}
+			const outcome = await deps.emit(mergeBackNote(info, mergedVia));
+			item.ledger = delivery(outcome);
+			if (outcome.kind === "stored") {
+				if (!args.json) deps.out(`recorded ${path}: ${described}\n${ledgerLine(outcome)}\n`);
+			} else {
+				// Not recorded: its own line on stdout, the reason on stderr in every mode (the folder is kept, the ledger has no line for it).
+				if (!args.json) deps.out(`not recorded (${item.ledger}) ${path}: ${described}\n`);
+				deps.err(`${ledgerLine(outcome)}\n`);
+			}
+		} finally {
+			lock.release();
 		}
 	}
 	const stored = recorded.filter((item) => item.ledger === "stored").length;

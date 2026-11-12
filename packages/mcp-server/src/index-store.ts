@@ -2777,6 +2777,29 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * The in-force rows of one graph's own scope (`graph:<id>`), newest first, at most `limit`. Unlike `memoryForBrief`, which
+	 * shares its page with the global and repo scopes, this reads only the graph's scope, so a busy global scope cannot push a
+	 * graph's rows off the page. `truncated` is true when the scope holds more rows than `limit`: a full page is never read as
+	 * the graph's whole provenance. Rows go through `servable`, so the expiry rule is the one a brief applies.
+	 */
+	async memoryForGraphScope(graphId: string, limit: number): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
+		const normalizedGraph = normalizeIdentifier(graphId);
+		if (normalizedGraph === null) throw new Error("memoryForGraphScope: graphId is empty after normalisation");
+		if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("memoryForGraphScope: limit must be a positive integer");
+		const scope = `graph:${normalizedGraph}`;
+		return this.plane("memory.brief", async () => {
+			const rows = (await this.sql`
+				select *
+				from memory_entries
+				where scope = ${scope}
+				  and superseded_by is null
+				order by created desc, id desc
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { entries: await this.servable(rows.slice(0, limit), undefined), truncated: rows.length > limit };
+		});
+	}
+
+	/**
 	 * What `graph_index` holds for each graph, one round trip for the whole list;
 	 * an id with no row is absent from the map. The list is a page's distinct
 	 * graph ids, so it is bounded by the page. The list goes through the

@@ -329,6 +329,7 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/steering/sessions/close": true,
 	"/worktrees/report": true,
 	"/corpus/neardup": true,
+	"/cross-repo/fanout": true,
 	"/mcp": true,
 };
 
@@ -1796,6 +1797,29 @@ export function createHttpServer(
 				}
 				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "status" }))) return;
 				const reply = await substrate.corpusStatus(surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			// Phase 74: a branch fan-out across registered repositories, and the stored status of one. The engine gates each
+			// repository on the caller's surface grant and its session allowlist, so an anonymous caller is refused there. The start
+			// is a write, audited fail-closed under `cross_repo_fanout`; the status is a read, audited under `cross_repo_status`.
+			if (req.method === "POST" && url.pathname === "/cross-repo/fanout") {
+				const raw = await readBody(req);
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(raw);
+				} catch {
+					sendJson(res, 400, { ok: false, reason: "request-invalid", problem: "the body is not valid JSON" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "cross_repo_fanout", { op: "fanout" }))) return;
+				const reply = await substrate.crossRepoFanout(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/cross-repo/status") {
+				if (!(await auditedRest(res, observability, surface, "cross_repo_status", { op: "status" }))) return;
+				const reply = await substrate.crossRepoStatus(url.searchParams.get("key"), surface);
 				sendJson(res, reply.status, reply.body);
 				return;
 			}

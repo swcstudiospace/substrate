@@ -156,4 +156,37 @@ describe("the scheduled cross-layer reconcile tick", () => {
 		expect(index.marks).toEqual([]);
 		expect(cache.ttls).toEqual([]);
 	});
+
+	test("an incomplete read with no mismatch is not a clean run: it exits 1, names why, and still writes nothing", async () => {
+		// A note whose payload does not decode is a forget the reconcile cannot judge, so the read is incomplete.
+		const garbled: Row = { id: "evt_garbled", ts: NOW - 40 * 60_000, kind: "note", payload: "{not json" };
+		const reads = new FakeReads([forgetRow("evt_forget", 30, ["mem_a"]), garbled]);
+		const index = consistentIndex();
+		const cache = new FakeCache(FRESH_MARK);
+
+		const result = await runTick(scheduledDeps({ reads, index, cache }, () => NOW), OPTIONS, false);
+
+		expect(result.code).toBe(1);
+		expect(result.stdout).toContain("mismatches: 0");
+		expect(result.stdout).toContain("coverage: incomplete, 1 malformed notes");
+		expect(result.stderr).toContain("read incomplete (1 malformed notes)");
+		expect(index.marks).toEqual([]);
+		expect(cache.ttls).toEqual([]);
+	});
+
+	test("a mismatch outranks an incomplete read: the run exits 3 and still names the first key", async () => {
+		const garbled: Row = { id: "evt_garbled", ts: NOW - 40 * 60_000, kind: "note", payload: "{not json" };
+		const reads = new FakeReads([forgetRow("evt_forget", 30, ["mem_a", "mem_b"]), garbled]);
+		const index = consistentIndex();
+		index.rows.set("mem_b", null);
+		const cache = new FakeCache(FRESH_MARK);
+
+		const result = await runTick(scheduledDeps({ reads, index, cache }, () => NOW), OPTIONS, false);
+
+		expect(result.code).toBe(3);
+		expect(result.stdout).toContain("first: index mem_b (in-force)");
+		expect(result.stdout).toContain("coverage: incomplete, 1 malformed notes");
+		expect(index.marks).toEqual([]);
+		expect(cache.ttls).toEqual([]);
+	});
 });

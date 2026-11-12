@@ -18,13 +18,15 @@
  *   with nothing parked. `needs-attention` means at least one step is parked: its state cannot be proven safe to leave or undo.
  *   A partial operation is never `done`.
  *
- * Every git call goes through `scopedGit` (phase 72), so a repository the surface is not granted, or that is not registered, is
- * refused before any spawn. The store is a port; `cross-repo-store.ts` is the Postgres adapter and `cross-repo-fake.ts` the
- * in-memory one.
+ * Every git call goes through `scopedGit` (phase 72) under the caller's allowlist session: the surface, and the repositories its
+ * entry names in `SUBSTRATE_REPO_ALLOWLIST`. A repository the session is not granted, or that is not registered, is refused
+ * before any spawn, and so is every call of a caller with no surface or a malformed allowlist. The store is a port;
+ * `cross-repo-store.ts` is the Postgres adapter and `cross-repo-fake.ts` the in-memory one.
  */
 import { createHash } from "node:crypto";
 import { scopeRepoId } from "./event.ts";
-import { defaultScopedGitRunner, type ScopedGitResult, type ScopedGitRunner, scopedGit } from "./repo-executor.ts";
+import { assertRepoAllowed, RepoNotAllowedError, repoAllowlistFromEnv } from "./repo-allowlist.ts";
+import { defaultScopedGitRunner, type ScopedGitResult, type ScopedGitRunner, type ScopedSession, scopedGit } from "./repo-executor.ts";
 import { authorizeRepo, REPO_REFUSAL_MESSAGES, type RepoRefusalReason, type RepoScope } from "./repo-scope.ts";
 import type { Surface } from "./types.ts";
 
@@ -119,6 +121,8 @@ export interface CrossRepoDeps {
 	readonly store: CrossRepoStore;
 	/** Defaults to the real git runner. Tests inject faults and crashes here. */
 	readonly run?: ScopedGitRunner | undefined;
+	/** The environment `SUBSTRATE_REPO_ALLOWLIST` is read from. Defaults to the process environment; tests inject their own. */
+	readonly env?: Readonly<Record<string, string | undefined>> | undefined;
 	/** Defaults to the wall clock. */
 	readonly now?: (() => Date) | undefined;
 }
@@ -138,27 +142,50 @@ export type CrossRepoOutcome = { ok: true; operation: CrossRepoOperation } | { o
 
 type Parsed = { ok: true; value: { key: string; branch: string; repos: BranchFanoutRepo[] } } | { ok: false; problem: string };
 
+const KEY_PROBLEM = "key must be 1 to 128 letters, digits, '.', '_', ':' or '-'";
+const BODY_FIELDS: Readonly<Record<string, true>> = { key: true, branch: true, repos: true };
+
 /**
  * Narrows an untrusted request. Every field is checked: the key, the branch, the repository count, each canonical repository
  * (once only) and each base. A malformed field is refused with a message that names the field and nothing it carried.
  */
-export function parseBranchFanoutRequest(raw: BranchFanoutRequest): Parsed {
-	if (typeof raw.key !== "string" || !KEY_PATTERN.test(raw.key)) return { ok: false, problem: "key must be 1 to 128 letters, digits, '.', '_', ':' or '-'" };
-	if (typeof raw.branch !== "string" || !NAME_PATTERN.test(raw.branch)) return { ok: false, problem: "branch must start with a letter or digit and use letters, digits, '.', '_', '/' or '-'" };
+export function parseBranchFanoutRequest(raw: { readonly key: unknown; readonly branch: unknown; readonly repos: unknown }): Parsed {
+	if (typeof raw.key !== "string" || !KEY_PATTERN.test(raw.key)) return { ok: false, problem: KEY_PROBLEM };
+	if (typeof raw.branch !== "string" || !NAME_PATTERN.test(raw.branch)) {
+		return { ok: false, problem: "branch must start with a letter or digit and use letters, digits, '.', '_', '/' or '-'" };
+	}
 	if (!Array.isArray(raw.repos) || raw.repos.length < 2 || raw.repos.length > CROSS_REPO_MAX_REPOS) {
 		return { ok: false, problem: `repos must name between 2 and ${CROSS_REPO_MAX_REPOS} repositories` };
 	}
 	const seen = new Set<string>();
 	const repos: BranchFanoutRepo[] = [];
-	for (const [index, entry] of raw.repos.entries()) {
-		const repo = typeof entry?.repo === "string" ? scopeRepoId(entry.repo) : "";
+	for (const [index, entry] of (raw.repos as readonly unknown[]).entries()) {
+		const fields = (typeof entry === "object" && entry !== null ? entry : {}) as { repo?: unknown; base?: unknown };
+		const repo = typeof fields.repo === "string" ? scopeRepoId(fields.repo) : "";
 		if (repo === "") return { ok: false, problem: `repos[${index}].repo must be owner/name` };
 		if (seen.has(repo)) return { ok: false, problem: "each repository may appear once" };
 		seen.add(repo);
-		if (typeof entry.base !== "string" || !NAME_PATTERN.test(entry.base)) return { ok: false, problem: `repos[${index}].base must name a branch, tag or commit` };
-		repos.push({ repo, base: entry.base });
+		if (typeof fields.base !== "string" || !NAME_PATTERN.test(fields.base)) {
+			return { ok: false, problem: `repos[${index}].base must name a branch, tag or commit` };
+		}
+		repos.push({ repo, base: fields.base });
 	}
 	return { ok: true, value: { key: raw.key, branch: raw.branch, repos } };
+}
+
+/**
+ * Narrows an HTTP or MCP body before {@link parseBranchFanoutRequest}: a JSON object whose fields are `key`, `branch` and
+ * `repos` and no others. Any other shape is refused with a fixed message, never with the value it carried.
+ */
+export function parseBranchFanoutBody(raw: unknown): Parsed {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return { ok: false, problem: "the request must be a JSON object with key, branch and repos" };
+	}
+	for (const field of Object.keys(raw)) {
+		if (!Object.hasOwn(BODY_FIELDS, field)) return { ok: false, problem: "the request has a field it does not accept: only key, branch and repos are read" };
+	}
+	const { key, branch, repos } = raw as { key?: unknown; branch?: unknown; repos?: unknown };
+	return parseBranchFanoutRequest({ key, branch, repos });
 }
 
 /** The SHA-256 of the canonical request: the branch and each repository with its base, sorted by repository. */
@@ -172,15 +199,25 @@ export function fingerprintOf(branch: string, repos: readonly BranchFanoutRepo[]
 interface Context {
 	readonly scope: RepoScope;
 	readonly surface: Surface | null;
+	/** The caller's allowlist session. Null when the caller is anonymous or the allowlist is malformed: nothing is granted. */
+	readonly session: ScopedSession | null;
 	readonly store: CrossRepoStore;
 	readonly run: ScopedGitRunner;
 	readonly now: () => Date;
+}
+
+/** The session of `surface` in the allowlist that `env` names. A malformed allowlist grants nothing, as an empty one does. */
+function sessionOf(surface: Surface | null, env: Readonly<Record<string, string | undefined>>): ScopedSession | null {
+	if (surface === null) return null;
+	const parsed = repoAllowlistFromEnv(env);
+	return parsed.ok ? { id: surface, allowlist: parsed.value } : null;
 }
 
 function contextOf(deps: CrossRepoDeps): Context {
 	return {
 		scope: deps.scope,
 		surface: deps.surface,
+		session: sessionOf(deps.surface, deps.env ?? process.env),
 		store: deps.store,
 		run: deps.run ?? defaultScopedGitRunner,
 		now: deps.now ?? (() => new Date()),
@@ -189,9 +226,10 @@ function contextOf(deps: CrossRepoDeps): Context {
 
 type GitCall = { ok: true; result: ScopedGitResult } | { ok: false; reason: RepoRefusalReason };
 
-/** One git call through the phase 72 executor. A refusal returns before any spawn; the caller decides what it means. */
+/** One git call through the phase 72 executor, under the caller's allowlist session. A refusal returns before any spawn. */
 function git(ctx: Context, repo: string, args: readonly string[]): GitCall {
-	const outcome = scopedGit({ scope: ctx.scope, surface: ctx.surface, repo, path: null, args }, ctx.run);
+	if (ctx.session === null) return { ok: false, reason: "repo-not-granted" };
+	const outcome = scopedGit({ scope: ctx.scope, surface: ctx.surface, repo, path: null, args, session: ctx.session }, ctx.run);
 	return outcome.ok ? { ok: true, result: outcome.result } : { ok: false, reason: outcome.reason };
 }
 
@@ -219,7 +257,22 @@ function nullOf(sha: string): string {
 /** The result of one step attempt. `busy` means another driver holds the step; the caller re-reads and reports the state it finds. */
 type StepOutcome = "applied" | "failed" | "parked" | "compensated" | "busy";
 
+/** The session's refusal for `repo`, or null when the allowlist grants it. A missing session grants nothing. */
+function sessionReason(ctx: Context, repo: string): RepoRefusalReason | null {
+	if (ctx.session === null) return "repo-not-granted";
+	try {
+		assertRepoAllowed(ctx.session.allowlist, ctx.session.id, repo);
+		return null;
+	} catch (error) {
+		if (error instanceof RepoNotAllowedError) return "repo-not-granted";
+		throw error;
+	}
+}
+
+/** Whether `repo` may be operated on: the allowlist grants it, it is registered, and the surface is granted it. */
 function gateRepo(ctx: Context, repo: string): { ok: true } | { ok: false; reason: RepoRefusalReason } {
+	const granted = sessionReason(ctx, repo);
+	if (granted !== null) return { ok: false, reason: granted };
 	if (!ctx.scope.registry.has(repo)) return { ok: false, reason: "repo-not-registered" };
 	const gate = authorizeRepo(ctx.scope, ctx.surface, repo);
 	return gate.ok ? { ok: true } : { ok: false, reason: gate.reason };
@@ -371,14 +424,45 @@ export async function runBranchFanout(request: BranchFanoutRequest, deps: CrossR
 }
 
 /**
- * The stored operation under `key`, or null. A scoped surface that is not granted every repository of the operation gets null
- * too, so the reply does not reveal that a key exists for a repository it cannot address.
+ * The stored operation under `key`, or null. A surface that is not granted every repository of the operation, or that has no
+ * allowlist session, gets null too, so the reply does not reveal that a key exists for a repository it cannot address.
  */
 export async function crossRepoStatus(key: string, deps: CrossRepoDeps): Promise<CrossRepoOperation | null> {
 	if (typeof key !== "string" || !KEY_PATTERN.test(key)) return null;
 	const ctx = contextOf(deps);
 	const op = await ctx.store.load(key);
 	if (op === null) return null;
-	const visible = op.steps.every((step) => authorizeRepo(ctx.scope, ctx.surface, step.repo).ok);
+	const visible = op.steps.every((step) => sessionReason(ctx, step.repo) === null && authorizeRepo(ctx.scope, ctx.surface, step.repo).ok);
 	return visible ? op : null;
+}
+
+/** The HTTP status of one refusal: a malformed request is 400, a repository the caller may not address is 403, a reused key is 409, and any other refusal is 422. */
+function refusalStatus(reason: CrossRepoRefusal): number {
+	if (reason === "request-invalid") return 400;
+	if (reason === "repo-not-granted") return 403;
+	if (reason === "key-reused") return 409;
+	return 422;
+}
+
+/** The reply the route and the MCP tool send: the HTTP status and the JSON body. */
+export interface CrossRepoReply {
+	readonly status: number;
+	readonly body: Record<string, unknown>;
+}
+
+/** `POST /cross-repo/fanout` and the `cross_repo_fanout` tool: validates the body, runs or resumes the operation, and answers with the stored operation. */
+export async function crossRepoFanoutReply(raw: unknown, deps: CrossRepoDeps): Promise<CrossRepoReply> {
+	const parsed = parseBranchFanoutBody(raw);
+	if (!parsed.ok) return { status: 400, body: { ok: false, reason: "request-invalid", problem: parsed.problem } };
+	const outcome = await runBranchFanout(parsed.value, deps);
+	if (!outcome.ok) return { status: refusalStatus(outcome.reason), body: { ok: false, reason: outcome.reason, problem: outcome.problem } };
+	return { status: 200, body: { ok: true, operation: outcome.operation } };
+}
+
+/** `GET /cross-repo/status?key=` and the `cross_repo_status` tool: the stored operation, or a 404 that reveals nothing the caller cannot see. */
+export async function crossRepoStatusReply(key: unknown, deps: CrossRepoDeps): Promise<CrossRepoReply> {
+	if (typeof key !== "string" || !KEY_PATTERN.test(key)) return { status: 400, body: { ok: false, reason: "request-invalid", problem: KEY_PROBLEM } };
+	const operation = await crossRepoStatus(key, deps);
+	if (operation === null) return { status: 404, body: { ok: false, reason: "not-found", problem: "no operation under that key is visible to this surface" } };
+	return { status: 200, body: { ok: true, operation } };
 }

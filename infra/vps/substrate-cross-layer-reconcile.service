@@ -14,8 +14,9 @@ Type=oneshot
 Slice=substrate.slice
 MemoryMax=1G
 # No Restart=: a oneshot that exits non-zero already shows failed, and the timer
-# retries on the next tick. Exit 3 means the run found mismatches; the journal
-# names the first one. Exit 1 means a layer could not be read.
+# retries on the next tick. Exit 0 means a complete read with no mismatch. Exit 3 means
+# the run found mismatches; the journal names the first one. Exit 1 means the read was
+# incomplete or a layer could not be read (no mismatch was proven).
 WorkingDirectory=/opt/agent-substrate/current
 # Credentials only; nothing secret lives in the repo. The shared substrate.env
 # carries SUBSTRATE_PG_URL and the Greptime and cache settings the reconcile reads.

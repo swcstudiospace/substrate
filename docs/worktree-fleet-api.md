@@ -148,6 +148,7 @@ Two JSON variables decide which repositories a surface may address, and where ea
 
 - `SUBSTRATE_REPO_REGISTRY`: `{"owner/name": {"checkouts": ["/abs"], "worktrees": ["/abs"]}}`. A path is placed in a repository only by this table. Two repositories may not share or nest a directory.
 - `SUBSTRATE_REPO_SCOPES`: `{"<surface>": ["owner/name"]}`. Unset means scoping is off and every caller may address every repository, as before. Set, a surface missing from the object, and every anonymous caller, is granted nothing.
+- `SUBSTRATE_REPO_ALLOWLIST`: `{"<session id>": {"owner/name": "<CREDENTIAL_ENV>"}}`. The session id is the caller's surface name. Each repository is canonical lowercase `owner/name`, and each value is the name of the environment variable that holds that repository's credential (`[A-Za-z_][A-Za-z0-9_]*`). A session addresses only the repositories in its own entry; an unknown and a disallowed repository are refused alike, and the refusal names neither. Unset or blank: no session is granted any repository, so every session-scoped git operation is refused before any spawn. A malformed value (not a JSON object, an empty session id, a non-canonical repository, or an invalid variable name) grants nothing and fails each operation; it does not refuse the boot. The variable is read from the process environment each time an operation runs. When git runs for an admitted repository, the executor passes that repository's credential to the runner as `SUBSTRATE_REPO_CREDENTIAL`; an unset credential variable passes nothing, and one repository's grant cannot resolve another repository's credential.
 
 What is refused, and before what:
 
@@ -159,11 +160,11 @@ What is refused, and before what:
 
 A refusal is recorded as a `repo.scope-refused` ledger warning with the route, the reason code and a 16-hex digest of what was asked for; the requested path or repository is never written. An anonymous refusal is recorded by the route audit. The corpus root and anchor are not gated: they are digests over every repository and reveal no document content.
 
-The scoped credential is the surface bearer plus its grant. No per-repository secret exists; that is a recorded open decision.
+`SUBSTRATE_REPO_SCOPES` carries no secret: the scoped credential is the surface bearer plus its grant. A repository's git credential is named only by `SUBSTRATE_REPO_ALLOWLIST` (above), which names the environment variable that holds it.
 
 ## Cross-repository operations (phase 74)
 
-`packages/mcp-server/src/cross-repo-ops.ts` runs one cross-repository write: a branch fan-out. The same branch is created at a named base in each of two to 16 registered repositories, one step per repository. It is a module entry point (`runBranchFanout`, with `crossRepoStatus` to read a stored operation); no HTTP route or MCP tool exposes it yet.
+`packages/mcp-server/src/cross-repo-ops.ts` runs one cross-repository write: a branch fan-out. The same branch is created at a named base in each of two to 16 registered repositories, one step per repository. It is exposed as `POST /cross-repo/fanout` and the `cross_repo_fanout` tool, and its stored state is read with `GET /cross-repo/status?key=` and the `cross_repo_status` tool (see [Routes and tools](#routes-and-tools-phase-74)). The module entry points are `runBranchFanout` and `crossRepoStatus`. The steps run through the same phase 72 executor and allowlist session as the rest of this document.
 
 Every step is recorded in Postgres (`cross_repo_operations` and `cross_repo_steps`, migration step 43) before its git effect runs, and its outcome is read back from the repository's ref. Each git call goes through the phase 72 executor, so a repository the surface is not granted, or that is not registered, is refused before any spawn.
 
@@ -174,3 +175,26 @@ Every step is recorded in Postgres (`cross_repo_operations` and `cross_repo_step
 - Persisted reasons are closed codes (`apply-failed`, `ref-moved`, `undo-failed`, and so on). Git output and paths are never stored.
 
 A status read is refused as not found for a surface that is not granted every repository of the operation, as a live session is.
+
+### Routes and tools (phase 74)
+
+`POST /cross-repo/fanout` and the `cross_repo_fanout` tool take the body `{"key": "...", "branch": "...", "repos": [{"repo": "owner/name", "base": "..."}]}`: two to 16 repositories, each named once. Only `key`, `branch` and `repos` are read; any other field is a 400.
+
+`GET /cross-repo/status?key=<key>` and the `cross_repo_status` tool (argument `key`) read a stored operation. A key is 1 to 128 letters, digits, `.`, `_`, `:` or `-`.
+
+A 200 answers `{"ok": true, "operation": ...}`, and `operation.status` is `done`, `rolled-back` or `needs-attention`. A 200 does not mean `done`: read the status. The operation carries `key`, `fingerprint`, `branch`, `status`, `steps` (each with `index`, `repo`, `base`, `plannedSha`, `state`, `detail`, `updatedAt`), `createdAt` and `updatedAt`. A step `state` is `pending`, `applying`, `applied`, `compensating`, `compensated`, `failed` or `parked`; `detail` is a closed reason or `null`.
+
+Every refusal answers `{"ok": false, "reason": "<code>", "problem": "<fixed message>"}`. The tools answer any non-200 as an error result.
+
+| Status | Reason | Route | When |
+| --- | --- | --- | --- |
+| 200 | none | both | the operation was run, resumed or read. |
+| 400 | `request-invalid` | both | fan-out: the body is not JSON or not an object, carries a field other than `key`, `branch` or `repos`, or a field is malformed (the key, the branch, the repository count, a repository, or a base). Status: the key is missing or malformed. |
+| 403 | `repo-not-granted` | fan-out | a named repository is not granted to the caller's surface, or is not in its `SUBSTRATE_REPO_ALLOWLIST` session. An anonymous caller, a surface with no session, and a malformed allowlist all land here. |
+| 404 | `not-found` | status | no operation is stored under the key, or the caller may not see every repository it names. Both answer alike, so a key for an ungranted repository is not revealed. |
+| 409 | `key-reused` | fan-out | the key is stored for a different request. A new attempt needs a new key. Nothing runs. |
+| 422 | the gate's reason, `branch-invalid` or `base-unresolved` | fan-out | any other refusal: `repo-not-registered`, `path-not-registered`, `all-repos-not-granted` and the like from the surface grant; `branch-invalid` (not a git branch name); `base-unresolved` (the base is not a commit in that repository). Refused before the store is written. |
+| 503 | `cross-repo.disabled` | both | no index store: `SUBSTRATE_PG_URL` is not set. Nothing runs. |
+| 503 | `error` (the audit reason) | both | the audit sink refused the record; the route is fail-closed and nothing runs. |
+
+

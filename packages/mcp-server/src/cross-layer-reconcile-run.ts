@@ -14,8 +14,9 @@
  * Read-only. The ledger port built here refuses every write, so a clean run and a dirty run both leave all three layers as
  * they were. A repair is a separate, operator-confirmed plan (`planRepair` / `applyRepair`); this tick never plans one.
  *
- * Exit codes: 0 the run found no mismatch; 3 it found mismatches (named on stdout); 1 a layer could not be read, so nothing
- * was judged; 2 usage: `GREPTIME_URL` or `SUBSTRATE_PG_URL` is not set, or an unknown argument.
+ * Exit codes: 0 every judged note matched and the read was complete; 3 the run found mismatches (named on stdout, and they
+ * outrank an incomplete read); 1 the run was not clean and found no mismatch: a layer could not be read, or the read was
+ * incomplete (stderr names why); 2 usage: `GREPTIME_URL` or `SUBSTRATE_PG_URL` is not set, or an unknown argument.
  */
 import { createReadThroughCache, forgetMarkTtlS } from "./cache.ts";
 import { type SubstrateConfig, loadConfig } from "./config.ts";
@@ -69,6 +70,16 @@ function cacheLine(cache: CrossLayerReport["layers"]["cache"]): string {
 	return `${cache.state}${at}${cache.checked ? "" : " (not checked)"}`;
 }
 
+/** Why a read is not complete, in the words the journal and the exit message use. Empty when every note was judged. */
+function incompleteReasons(coverage: CrossLayerReport["coverage"]): string[] {
+	const reasons: string[] = [];
+	if (coverage.ledgerTruncated) reasons.push("ledger window truncated");
+	if (coverage.keysTruncated) reasons.push("key set truncated");
+	if (coverage.malformedNotes > 0) reasons.push(`${coverage.malformedNotes} malformed notes`);
+	if (coverage.partialNotes > 0) reasons.push(`${coverage.partialNotes} partial forget notes`);
+	return reasons;
+}
+
 /** The text the journal shows: per-layer counts, the coverage, and the first mismatch by key. */
 export function renderReport(report: CrossLayerReport): string {
 	const { ledger, index, cache } = report.layers;
@@ -78,11 +89,7 @@ export function renderReport(report: CrossLayerReport): string {
 		`  ledger: ${ledger.forgetNotes} forget notes, ${ledger.notesWithMarks} with marks, ${ledger.namedEntries} named entries`,
 		`  index: ${index.forgotten} forgotten, ${index.superseded} superseded elsewhere, ${index.absent} absent, ${index.inForce} in force`,
 		`  cache: ${cacheLine(cache)}`,
-		`  coverage: ${coverage.complete ? "complete" : "incomplete"}` +
-			(coverage.ledgerTruncated ? ", ledger window truncated" : "") +
-			(coverage.keysTruncated ? ", key set truncated" : "") +
-			(coverage.malformedNotes > 0 ? `, ${coverage.malformedNotes} malformed notes` : "") +
-			(coverage.partialNotes > 0 ? `, ${coverage.partialNotes} partial forget notes` : ""),
+		`  coverage: ${coverage.complete ? "complete" : "incomplete"}${incompleteReasons(coverage).map((reason) => `, ${reason}`).join("")}`,
 		`  mismatches: ${mismatches.count}`,
 	];
 	if (mismatches.first !== null) lines.push(`  first: ${mismatches.first.layer} ${mismatches.first.key} (${mismatches.first.reason})`);
@@ -96,7 +103,12 @@ export async function runTick(deps: ReconcileDeps, options: ReconcileOptions, js
 		return { code: EXIT.failed, stdout: "", stderr: `[cross-layer-reconcile] run failed (${run.reason}): ${run.detail}\n` };
 	}
 	const stdout = json ? `${JSON.stringify(run.report)}\n` : renderReport(run.report);
-	return { code: run.report.mismatches.count === 0 ? EXIT.clean : EXIT.mismatch, stdout, stderr: "" };
+	if (run.report.mismatches.count > 0) return { code: EXIT.mismatch, stdout, stderr: "" };
+	const reasons = incompleteReasons(run.report.coverage);
+	if (reasons.length > 0) {
+		return { code: EXIT.failed, stdout, stderr: `[cross-layer-reconcile] read incomplete (${reasons.join(", ")}): not every note was judged, so this run is not clean\n` };
+	}
+	return { code: EXIT.clean, stdout, stderr: "" };
 }
 
 async function main(argv: string[]): Promise<number> {

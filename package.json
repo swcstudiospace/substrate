@@ -53,6 +53,7 @@
     "uat:phase0": "bun scripts/uat-phase0.ts",
     "collectors:status": "bun packages/collectors/src/status.ts",
     "proof:laneb": "bun scripts/laneb-proof.ts",
+    "build:binaries": "bun scripts/build-binaries.ts",
     "lint": "biome lint ."
   },
   "devDependencies": {
