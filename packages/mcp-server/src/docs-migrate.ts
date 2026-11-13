@@ -225,14 +225,20 @@ async function checkoutRepoOf(root: string): Promise<string | null> {
 
 /**
  * The ingest layout each dataset replays under. The default roots (`docs/`, `README.md`, `.planning/`) hold the
- * agent-substrate pages; an agent-skills archive holds skill pages at `<name>/SKILL.md` and `<name>/references/`, which
- * those roots refuse as outside-roots. A dataset listed as `skills` replays under the skill-checkout layout that the
- * normal refresh reads (`skillsCheckoutRoots`). Every other dataset keeps `DEFAULT_INGEST_ROOTS`. programming-desk is left
- * at the default because its archive roots are not verified.
+ * agent-substrate pages. An agent-skills archive holds skill pages at `<name>/SKILL.md` and `<name>/references/`, which
+ * those roots refuse as outside-roots, so a dataset listed as `skills` replays under the skill-checkout layout that the
+ * normal refresh reads (`skillsCheckoutRoots`). A dataset listed as `programming-desk` replays under the roots its source
+ * documents (`docs/docs-search-ingest.md`, the Datasets table). Every other dataset keeps `DEFAULT_INGEST_ROOTS`.
  */
-export const DATASET_INGEST_LAYOUT: Readonly<Record<string, "default" | "skills">> = {
+type IngestLayout = "default" | "skills" | "programming-desk";
+
+export const DATASET_INGEST_LAYOUT: Readonly<Record<string, IngestLayout>> = {
 	"agent-skills": "skills",
+	"programming-desk": "programming-desk",
 };
+
+/** The roots of the `swcstudiospace/programming-desk` source, as `docs/docs-search-ingest.md` documents them. */
+const PROGRAMMING_DESK_INGEST_ROOTS: readonly string[] = ["docs/", "skills/", "contracts/", "ARCHITECTURE.md", "prompts-assembled/"];
 
 /**
  * The identity a dataset's documents are replayed under, or null when the job refuses it. Pages are read from the checkout at
@@ -350,6 +356,13 @@ function skillsReplayRoots(paths: readonly string[]): string[] {
 	return [...roots];
 }
 
+/** The roots a dataset's archived pages replay under, by its ingest layout. */
+function replayRoots(layout: IngestLayout, paths: readonly string[]): readonly string[] {
+	if (layout === "skills") return skillsReplayRoots(paths);
+	if (layout === "programming-desk") return PROGRAMMING_DESK_INGEST_ROOTS;
+	return DEFAULT_INGEST_ROOTS;
+}
+
 /**
  * Replays one dataset's archived pages, grouped per recorded commit, through the LightRAG ingest. Returns the keys the
  * replay wrote, so the version carry touches only those records.
@@ -368,8 +381,8 @@ async function replayDataset(
 		const checkout = options.checkoutRepo ?? "unnamed";
 		return { replay: { ...replay, refused: `no mapped repository lets ${dataset.name} replay from the checkout ${checkout}` }, written };
 	}
-	const layout = Object.hasOwn(DATASET_INGEST_LAYOUT, dataset.name) ? DATASET_INGEST_LAYOUT[dataset.name] : "default";
-	const roots = layout === "skills" ? skillsReplayRoots(dataset.documents.map((document) => document.path)) : DEFAULT_INGEST_ROOTS;
+	const layout: IngestLayout = Object.hasOwn(DATASET_INGEST_LAYOUT, dataset.name) ? (DATASET_INGEST_LAYOUT[dataset.name] ?? "default") : "default";
+	const roots = replayRoots(layout, dataset.documents.map((document) => document.path));
 	const pagesByCommit = new Map<string, IngestPage[]>();
 	for (const document of dataset.documents) {
 		if (document.commit === null || document.source_url === null) {

@@ -35,6 +35,7 @@ const EXTRA_BODY = "# Extra\n\nA page pinned to its own commit.\n";
 const EXTRA_COMMIT = "0f1e2d3c4b5a6978";
 const DESK = "docs/desk.md";
 const DESK_BODY = "# Desk\n\nA sibling dataset's page, replayed under its mapped repository.\n";
+const DESK_SKILLS_PAGE = "skills/desk.md";
 const SKILL = "demo-skill/SKILL.md";
 const SKILL_API = "demo-skill/references/api.md";
 const SKILL_BODY = "# Demo skill\n\nThe skill's own page.\n";
@@ -77,10 +78,10 @@ interface Fixture {
 /**
  * A production docs state holding the plan's LightRAG record (already matched by the plane), and the RAGFlow-era notes
  * record at version 3, then the archive of both. `extraRecords` adds archived records; `undocumented` adds a RAGFlow
- * document with no commit, which the replay cannot reproduce; `desk` adds an archived programming-desk page at the same commit;
+ * document with no commit, which the replay cannot reproduce; `desk` adds an archived programming-desk page at the same commit, at `deskPath` (default `docs/desk.md`);
  * `skills` adds an archived agent-skills skill at `demo-skill/SKILL.md` and `demo-skill/references/api.md`, at the same commit.
  */
-async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; desk?: boolean; skills?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
+async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; desk?: boolean; deskPath?: string; skills?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
 	const root = scratchDir();
 	const stateFile = join(root, "docs-ingest.json");
 	const fake = new RagflowFake();
@@ -99,7 +100,8 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 	});
 	const deskId = fake.datasets.find((dataset) => dataset.name === "programming-desk")?.id ?? "";
 	if (options.desk === true && deskId === "") throw new Error("the RAGFlow fake lists no programming-desk dataset");
-	const desk: Array<[string, IngestRecord]> = options.desk === true ? [[`${deskId}::${sourceOf(DESK)}`, { sha: shaOf(DESK_BODY), dataset_id: deskId, source_url: sourceOf(DESK), document_id: "ragflow-desk", version: 1 }]] : [];
+	const deskPath = options.deskPath ?? DESK;
+	const desk: Array<[string, IngestRecord]> = options.desk === true ? [[`${deskId}::${sourceOf(deskPath)}`, { sha: shaOf(DESK_BODY), dataset_id: deskId, source_url: sourceOf(deskPath), document_id: "ragflow-desk", version: 1 }]] : [];
 	const skillsId = fake.datasets.find((dataset) => dataset.name === "agent-skills")?.id ?? "";
 	if (options.skills === true && skillsId === "") throw new Error("the RAGFlow fake lists no agent-skills dataset");
 	const skillSource = (path: string): string => `file:///srv/agent-skills/${path}`;
@@ -135,7 +137,7 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 		fake.documents["ragflow-extra"] = { id: "ragflow-extra", dataset_id: ragflowId, name: "docs__extra.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(EXTRA), commit: options.extra.commit, heading_path: "Extra" } };
 	}
 	if (options.desk === true) {
-		fake.documents["ragflow-desk"] = { id: "ragflow-desk", dataset_id: deskId, name: "docs__desk.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(DESK), commit: COMMIT, heading_path: "Desk" } };
+		fake.documents["ragflow-desk"] = { id: "ragflow-desk", dataset_id: deskId, name: deskPath.replace(/\//g, "__"), run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(deskPath), commit: COMMIT, heading_path: "Desk" } };
 	}
 	if (options.skills === true) {
 		fake.documents["ragflow-skill"] = { id: "ragflow-skill", dataset_id: skillsId, name: "demo-skill__SKILL.md", run: "DONE", polls: 0, meta_fields: { source_url: skillSource(SKILL), commit: COMMIT, heading_path: "Demo skill" } };
@@ -145,7 +147,7 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 
 	const bodies: Record<string, string> = { [`${COMMIT}:${PLAN}`]: PLAN_BODY, [`${COMMIT}:${NOTES}`]: NOTES_BODY };
 	if (options.extra !== undefined) bodies[`${options.extra.commit}:${EXTRA}`] = EXTRA_BODY;
-	if (options.desk === true) bodies[`${COMMIT}:${DESK}`] = DESK_BODY;
+	if (options.desk === true) bodies[`${COMMIT}:${deskPath}`] = DESK_BODY;
 	if (options.skills === true) {
 		bodies[`${COMMIT}:${SKILL}`] = SKILL_BODY;
 		bodies[`${COMMIT}:${SKILL_API}`] = SKILL_API_BODY;
@@ -580,6 +582,35 @@ describe("docs-migrate: apply", () => {
 		const { records } = await loadIngestRecords(fixture.stateFile);
 		const key = `lightrag::swcstudiospace/programming-desk::${sourceOf(DESK)}`;
 		expect(records.get(key)).toMatchObject({ dataset_id: "swcstudiospace/programming-desk", document_id: "doc-up-1" });
+	});
+
+	test("a programming-desk page under skills/ replays under the documented roots: it is not refused as outside-roots, and it is ingested", async () => {
+		const fixture = await buildFixture({ desk: true, deskPath: DESK_SKILLS_PAGE });
+		const plane = matchedPlane();
+		const { io } = captureIo();
+		const readAt: ReadAtCommit = (commit, path) => (path === DESK_SKILLS_PAGE && commit === COMMIT ? Buffer.from(DESK_BODY, "utf8") : REPLAY_READ(commit, path));
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				stateFile: fixture.stateFile,
+				config: CONFIG,
+				fetchImpl: plane.fetch,
+				partAFile: partAFile(fixture.root),
+				rehearsal: false,
+				datasets: ["programming-desk"],
+				checkoutRepo: PLANE_REPO,
+				readAtCommit: readAt,
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			io,
+		);
+		expect(outcome.exit).toBe(0);
+		const report = outcome.report as { datasets: Array<{ dataset: string; ingested: number; refused?: string }> };
+		expect(report.datasets).toMatchObject([{ dataset: "programming-desk", ingested: 1 }]);
+		expect(report.datasets[0]?.refused).toBeUndefined();
+		expect(plane.uploads).toEqual([DESK_BODY]);
+		expect(plane.names).toEqual([corpusDocumentName("swcstudiospace/programming-desk", DESK_SKILLS_PAGE, shaOf(DESK_BODY))]);
 	});
 });
 
