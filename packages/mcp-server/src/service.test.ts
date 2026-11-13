@@ -2340,6 +2340,24 @@ describe("queryEvents input checks", () => {
 		expect(queries[0]?.match?.session_id).toBeUndefined();
 	});
 
+	test("a payload pair is refused unless both halves are well formed, and a well-formed one reaches the store as a pair", async () => {
+		const { queries, greptime } = reader();
+		const substrate = substrateWith(greptime);
+		const sha = "ab".repeat(20);
+
+		await expect(substrate.queryEvents({ payload_key: "head-key", payload_value: sha })).rejects.toThrow(/payload_key must be/);
+		await expect(substrate.queryEvents({ payload_key: "head_key", payload_value: "xyz" })).rejects.toThrow(/payload_value must be/);
+		await expect(substrate.queryEvents({ payload_key: "head_key" })).rejects.toThrow(/payload_key needs payload_value/);
+		await expect(substrate.queryEvents({ payload_value: sha })).rejects.toThrow(/payload_value needs payload_key/);
+		await expect(substrate.queryEvents({ payload_key: 7 as never, payload_value: sha })).rejects.toThrow(/payload_key must be a string/);
+		expect(queries).toEqual([]);
+
+		await substrate.queryEvents({ payload_key: "head_key", payload_value: sha });
+		expect(queries[0]?.payloadPair).toEqual({ key: "head_key", value: sha });
+		await substrate.queryEvents({});
+		expect(queries[1]?.payloadPair).toBeUndefined();
+	});
+
 	test("refuses a filter of the wrong type instead of failing inside redaction", async () => {
 		// A JSON body is not typed. `redact` is written for strings, so a number used to
 		// reach `.replace` and surface as a 500 rather than a 400 naming the field.

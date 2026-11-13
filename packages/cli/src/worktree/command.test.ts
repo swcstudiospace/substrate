@@ -6,7 +6,7 @@ import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { type CommandResult, type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
 import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, type TestRepo, tempDir, write } from "../../../fleet/src/testkit.ts";
 import type { EventInput } from "../../../mcp-server/src/types.ts";
-import { httpClaimsLookup, httpRegistryLister, httpReportPoster, parseRegistryBody, runWorktree, type PostOutcome, type RegistryOutcome, type RegistryRow, type WorktreeDeps } from "./command.ts";
+import { httpClaimsLookup, httpMergeBackNoted, httpRegistryLister, httpReportPoster, parseRegistryBody, runWorktree, type PostOutcome, type RegistryOutcome, type RegistryRow, type WorktreeDeps } from "./command.ts";
 import type { ClaimsLookup } from "../../../fleet/src/claims.ts";
 import { parseWorktreeArgs } from "./args.ts";
 
@@ -1288,6 +1288,22 @@ describe("merge-back", () => {
 		expect(h.events[0]).toMatchObject({ payload: { head, merged_via: "pull-request", retained: true } });
 	});
 
+	test("the merge-back note names its head as head and as head_key, the field the keyed lookup reads", async () => {
+		const repo = makeRepo();
+		const root = join(tempDir(), "wts");
+		mkdirSync(root);
+		const wt = addWorktree(repo, root, "keyed");
+		const head = commit(wt, "k.txt", "1\n");
+		git(wt, ["push", "-q", "origin", "keyed"]);
+		commit(repo.dir, "k.txt", "1\n", "squash of keyed");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const gh = prGh({ keyed: [{ state: "MERGED", headRefOid: head, number: 12, baseRefName: "main" }] });
+		const h = harness({ gh }, withRoot(root));
+		expect(await runWorktree(["merge-back", "--execute", wt], h.deps)).toBe(0);
+		expect(h.events).toHaveLength(1);
+		expect(h.events[0]).toMatchObject({ kind: "note", payload: { head, head_key: head } });
+	});
+
 	test("a dirty, unpushed, unproven, ignored-work, primary or live-claimed worktree is refused and absent from the notes", async () => {
 		const f = fleet();
 		// The ignored notes are ignored on main before the worktree branches from it, or they would show as untracked files.
@@ -1646,5 +1662,66 @@ describe("httpRegistryLister", () => {
 		expect(parseRegistryBody({ worktrees: [{ path: "/p", session_id: 7 }], truncated: true })).toEqual({ rows: [{ path: "/p" }], truncated: true });
 		expect(parseRegistryBody(null)).toBeNull();
 		expect(parseRegistryBody({ worktrees: [null], truncated: false })).toBeNull();
+	});
+});
+
+describe("httpMergeBackNoted: the head_key path", () => {
+	const HEAD = "c".repeat(40);
+	const OTHER = "d".repeat(40);
+	const KEYED_NOTE = { kind: "note", ts: "2026-11-12T10:00:00.000Z", payload: { action: "worktree.merge_back", repo: "acme/widgets", head: HEAD, head_key: HEAD } };
+	const LEGACY_NOTE = { kind: "note", ts: "2026-11-11T10:00:00.000Z", payload: { action: "worktree.merge_back", repo: "acme/widgets", head: HEAD } };
+	const EMPTY = { events: [], count: 0, truncated: false };
+
+	type Reply = { status: number; body: unknown };
+	const answer = (body: unknown): Reply => ({ status: 200, body });
+
+	/** A ledger answering each request from a script, recording each request body. */
+	function ledger(replies: Reply[]) {
+		const requests: Record<string, unknown>[] = [];
+		const fetchImpl = (async (_url: string, init: RequestInit) => {
+			requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+			const reply = replies[requests.length - 1] ?? answer(EMPTY);
+			return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+		return { requests, lookup: httpMergeBackNoted({ url: "http://127.0.0.1:7410", token: "t", timeoutMs: 1000, fetchImpl }) };
+	}
+
+	test("a keyed note settles the question in one request, with no scan", async () => {
+		const { requests, lookup } = ledger([answer({ events: [KEYED_NOTE], count: 1, truncated: false })]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: true });
+		expect(requests).toHaveLength(1);
+		expect(requests[0]).toMatchObject({ repo: "acme/widgets", kind: "note", payload_key: "head_key", payload_value: HEAD });
+	});
+
+	test("a head with no keyed note still uses the bounded scan, which finds a note written before head_key", async () => {
+		const { requests, lookup } = ledger([answer(EMPTY), answer({ events: [LEGACY_NOTE], count: 1, truncated: false })]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: true });
+		expect(requests).toHaveLength(2);
+		expect(requests[0]).toMatchObject({ payload_key: "head_key", payload_value: HEAD });
+		expect(requests[1]).not.toHaveProperty("payload_key");
+	});
+
+	test("a head with no note under either path is not recorded, after the scan", async () => {
+		const { requests, lookup } = ledger([answer(EMPTY), answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
+	});
+
+	test("a keyed read that cannot answer falls back to the scan rather than to not recorded", async () => {
+		const { requests, lookup } = ledger([{ status: 500, body: "boom" }, answer({ events: [LEGACY_NOTE], count: 1, truncated: false })]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: true });
+		expect(requests).toHaveLength(2);
+	});
+
+	test("a keyed read and the scan that both cannot answer refuse; neither reads as not recorded", async () => {
+		const { lookup } = ledger([{ status: 500, body: "boom" }, { status: 500, body: "boom" }]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: false, error: "HTTP 500" });
+	});
+
+	test("a reply that ignores the key filter and returns another head's note does not count", async () => {
+		const other = { ...KEYED_NOTE, payload: { ...KEYED_NOTE.payload, head: OTHER, head_key: OTHER } };
+		const { requests, lookup } = ledger([answer({ events: [other], count: 1, truncated: false }), answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
 	});
 });

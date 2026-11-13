@@ -248,6 +248,9 @@ describe("routes", () => {
 				[{ until: 123 }, "until must be an ISO date string"],
 				[{ limit: "10" }, "limit must be a number"],
 				[{ repo: "" }, "repo is empty"],
+				[{ payload_key: "head-key", payload_value: "ab".repeat(20) }, "payload_key must be"],
+				[{ payload_key: "head_key" }, "payload_key needs payload_value"],
+				[{ payload_key: "head_key", payload_value: "AB".repeat(20) }, "payload_value must be"],
 			] as const) {
 				const response = await post("/events/query", body);
 				expect(response.status).toBe(400);
@@ -255,6 +258,10 @@ describe("routes", () => {
 			}
 			// None of them reached the ledger.
 			expect(queries).toEqual([]);
+			// A well-formed pair is not refused: it reaches the ledger as the pair.
+			const sha = "ab".repeat(20);
+			expect((await post("/events/query", { payload_key: "head_key", payload_value: sha })).status).toBe(200);
+			expect(queries[0]?.payloadPair).toEqual({ key: "head_key", value: sha });
 		} finally {
 			await stop();
 		}

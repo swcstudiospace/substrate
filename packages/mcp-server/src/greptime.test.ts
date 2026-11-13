@@ -1212,6 +1212,25 @@ describe("queryEvents", () => {
 		);
 	});
 
+	test("narrows by a JSON pair in the payload text, with the key's underscores escaped", async () => {
+		const { sql } = stubFetch();
+		const sha = "ab".repeat(20);
+		await new GreptimeClient(config).queryEvents({ match: { kind: "worktree.merge_back" }, payloadPair: { key: "head_key", value: sha } });
+
+		// `_` is a LIKE wildcard, so the key escapes it with `!`; the value is hex and carries no wildcard.
+		expect(selectStatement(sql)).toContain(
+			`WHERE "kind" = 'worktree.merge_back' AND "payload" LIKE '%"head!_key":"${sha}"%' ESCAPE '!'`,
+		);
+	});
+
+	test("refuses a payload pair that is not a lowercase key and a lowercase hex value, before any read", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config);
+		await expect(client.queryEvents({ payloadPair: { key: "head_key'--", value: "ab".repeat(20) } })).rejects.toThrow(/not a lowercase key/);
+		await expect(client.queryEvents({ payloadPair: { key: "head_key", value: "AB".repeat(20) } })).rejects.toThrow(/not a lowercase key/);
+		expect(selectStatement(sql)).toBe("");
+	});
+
 	test("a filter value cannot close its literal or add a clause of its own", async () => {
 		// The read path takes no SQL from a caller: column names come from
 		// QUERYABLE_COLUMNS and values are quoted, so this is stored text to match,

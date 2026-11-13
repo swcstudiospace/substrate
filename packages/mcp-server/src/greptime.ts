@@ -187,6 +187,13 @@ export const DEFAULT_QUERY_LIMIT = 50;
 /** Rows one `readRecentEvents` read may return at most. */
 export const MAX_RECENT_EVENTS = 200;
 
+/**
+ * The JSON pair a read may narrow by in the payload text: a lowercase key and a 40-character lowercase hex
+ * value (a git SHA). Both fixed shapes, so neither can carry a quote or a LIKE wildcard other than `_`.
+ */
+export const PAYLOAD_KEY_PATTERN = /^[a-z_]{1,64}$/;
+export const PAYLOAD_VALUE_PATTERN = /^[0-9a-f]{40}$/;
+
 /** A ledger read. Values are expected already normalised — see `Substrate.queryEvents`. */
 export interface EventQuery {
 	/** Equality filters, keyed by column. `undefined` and `null` values are dropped. */
@@ -198,6 +205,11 @@ export interface EventQuery {
 	/** `desc` (the default) reads the newest events first. */
 	order?: "asc" | "desc";
 	includePayload?: boolean;
+	/**
+	 * Only events whose payload text contains the JSON pair `"key":"value"`. Validated by the service
+	 * and re-checked in {@link GreptimeClient.queryEvents} before it reaches a literal.
+	 */
+	payloadPair?: { key: string; value: string };
 }
 
 /** One member of a closed ingest hour, in position order. */
@@ -1528,6 +1540,14 @@ export class GreptimeClient {
 		}
 		if (query.since !== undefined) where.push(`"ts" >= ${this.q(query.since)}`);
 		if (query.until !== undefined) where.push(`"ts" <= ${this.q(query.until)}`);
+		if (query.payloadPair !== undefined) {
+			const { key, value } = query.payloadPair;
+			if (!PAYLOAD_KEY_PATTERN.test(key) || !PAYLOAD_VALUE_PATTERN.test(value)) {
+				throw new GreptimeError("refusing a payload filter that is not a lowercase key and a 40-character lowercase hex value");
+			}
+			// `_` is a LIKE wildcard, so it is escaped with `!`. The key cannot carry `!` or `%` (it is [a-z_]) and the value is hex, so the pattern has no other wildcard.
+			where.push(`"payload" LIKE ${this.q(`%"${key.replace(/_/g, "!_")}":"${value}"%`)} ESCAPE '!'`);
+		}
 
 		const direction = query.order === "asc" ? "ASC" : "DESC";
 		return this.sql(

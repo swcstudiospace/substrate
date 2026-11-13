@@ -780,13 +780,17 @@ async function readNotePage(doFetch: FetchFn, config: HttpPosterConfig, query: R
 }
 
 /**
- * A lookup of whether `repo` at `head` already has its merge-back note, over `POST /events/query`. It pages backwards with an
- * `until` bound while a page is full, so a busy repository is read completely up to `MERGE_BACK_NOTE_MAX_PAGES` pages.
+ * A lookup of whether `repo` at `head` already has its merge-back note, over `POST /events/query`. The first read asks for the
+ * note by its `head_key` payload field, in one request. A note written before `head_key` existed has none, so when that read
+ * holds no note for `head` or cannot answer, the lookup pages backwards with an `until` bound while a page is full, so a busy
+ * repository is read completely up to `MERGE_BACK_NOTE_MAX_PAGES` pages.
  */
 export function httpMergeBackNoted(config: HttpPosterConfig): MergeBackNotedFn {
 	const doFetch: FetchFn = config.fetchImpl ?? ((url, init) => fetch(url, init));
 	return async (repo, head) => {
 		const scope = repo.startsWith("local/") ? {} : { repo };
+		const keyed = await readNotePage(doFetch, config, { ...scope, payload_key: "head_key", payload_value: head });
+		if (!("error" in keyed) && keyed.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
 		let until: string | undefined;
 		let previousOldest: number | null = null;
 		for (let page = 0; page < MERGE_BACK_NOTE_MAX_PAGES; page++) {

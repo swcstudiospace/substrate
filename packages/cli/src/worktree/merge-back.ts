@@ -146,7 +146,7 @@ function mergeBackNote(info: WorktreeInfo, mergedVia: MergedVia): EventInput {
 		summary: `worktree merged back: ${info.repo} ${info.branch ?? info.head.slice(0, 12)}`,
 		...(info.repo.startsWith("local/") ? {} : { repo: info.repo }),
 		...(info.branch === null ? {} : { branch: info.branch }),
-		payload: { action: "worktree.merge_back", repo: info.repo, branch: info.branch, head: info.head, merged_via: mergedVia, retained: true },
+		payload: { action: "worktree.merge_back", repo: info.repo, branch: info.branch, head: info.head, head_key: info.head, merged_via: mergedVia, retained: true },
 	};
 }
 

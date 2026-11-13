@@ -119,6 +119,8 @@ import {
 	INGEST_LAG_MS,
 	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
+	PAYLOAD_KEY_PATTERN,
+	PAYLOAD_VALUE_PATTERN,
 	queryLimit,
 	type EventQuery,
 	type LedgerCapacity,
@@ -490,6 +492,23 @@ function flag(what: string, value: unknown): boolean {
 }
 
 /**
+ * The payload JSON pair a read narrows by: `payload_key` and `payload_value` together, or neither. One without the
+ * other is refused, not read as no filter, because dropping half a pair would widen the read.
+ */
+function payloadPairOf(key: unknown, value: unknown): { key: string; value: string } | undefined {
+	if (key === undefined || key === null) {
+		if (value === undefined || value === null) return undefined;
+		throw new InvalidEventError("payload_value needs payload_key: give both, or neither");
+	}
+	if (typeof key !== "string") throw wrongType("payload_key", "a string");
+	if (value === undefined || value === null) throw new InvalidEventError("payload_key needs payload_value: give both, or neither");
+	if (typeof value !== "string") throw wrongType("payload_value", "a string");
+	if (!PAYLOAD_KEY_PATTERN.test(key)) throw new InvalidEventError("payload_key must be 1 to 64 lowercase letters or underscores");
+	if (!PAYLOAD_VALUE_PATTERN.test(value)) throw new InvalidEventError("payload_value must be a 40-character lowercase hex string");
+	return { key, value };
+}
+
+/**
  * A queried event.
  *
  * Every stored column except `payload`, which is present only when the caller asked
@@ -514,6 +533,9 @@ export interface EventQueryInput {
 	limit?: number | undefined;
 	order?: "asc" | "desc" | undefined;
 	include_payload?: boolean | undefined;
+	/** With `payload_value`: only events whose payload text contains the JSON pair `"payload_key":"payload_value"`. Both or neither. */
+	payload_key?: string | undefined;
+	payload_value?: string | undefined;
 }
 
 export interface EventQueryResult {
@@ -3038,6 +3060,7 @@ export class Substrate {
 		const until = bound("until", input.until);
 		const limit = rows(input.limit);
 		const includePayload = flag("include_payload", input.include_payload);
+		const payloadPair = payloadPairOf(input.payload_key, input.payload_value);
 		const query: EventQuery = {
 			match,
 			...(since === undefined ? {} : { since }),
@@ -3045,6 +3068,7 @@ export class Substrate {
 			limit,
 			...(order === undefined ? {} : { order }),
 			includePayload,
+			...(payloadPair === undefined ? {} : { payloadPair }),
 		};
 
 		if (!this.greptime) return { events: [], count: 0, truncated: false, error: "GREPTIME_URL is not set" };

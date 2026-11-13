@@ -45,18 +45,20 @@ describe("httpMergeBackNoted", () => {
 	test("a full page with no match is read further back, so a busy repository still finds its note", async () => {
 		const older = { ...NOTE, ts: "2026-11-11T09:00:00.000Z", payload: { ...NOTE.payload, head: "c".repeat(40) } };
 		const ledger = scriptedLedger([
+			{ events: [], count: 0, truncated: false },
 			{ events: [{ ...older, ts: "2026-11-12T09:00:00.000Z" }], count: 1, truncated: true },
 			{ events: [NOTE], count: 1, truncated: false },
 		]);
 		const answer = await lookupWith(ledger.fetchImpl)("acme/widgets", HEAD);
 		expect(answer).toEqual({ ok: true, noted: true });
-		expect(ledger.requests).toHaveLength(2);
-		expect(ledger.requests[1]?.until).toBe("2026-11-12T09:00:00.000Z");
+		expect(ledger.requests).toHaveLength(3);
+		expect(ledger.requests[2]?.until).toBe("2026-11-12T09:00:00.000Z");
 	});
 
 	test("a full page whose events all share one millisecond refuses rather than answering not-recorded", async () => {
 		const sameMs = { ...NOTE, ts: "2026-11-12T09:00:00.000Z", payload: { ...NOTE.payload, head: "d".repeat(40) } };
 		const ledger = scriptedLedger([
+			{ events: [], count: 0, truncated: false },
 			{ events: [sameMs], count: 1, truncated: true },
 			{ events: [sameMs], count: 1, truncated: true },
 		]);
