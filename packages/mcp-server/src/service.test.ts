@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
@@ -18,7 +18,7 @@ import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
 import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
 import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
 import { ZodError } from "zod";
-import { defined } from "./test-support.ts";
+import { defined, withoutHindsightEnv } from "./test-support.ts";
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -913,6 +913,12 @@ describe("migrate", () => {
 });
 
 describe("append-mode enforcement", () => {
+	let restoreHindsightEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreHindsightEnv = withoutHindsightEnv();
+	});
+	afterEach(() => restoreHindsightEnv());
+
 	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test", session_id: "sess-1" };
 
 	function ledger(appendMode: boolean | null, quotingDialectKnown = true) {

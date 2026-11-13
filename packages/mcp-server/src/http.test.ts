@@ -6,7 +6,7 @@
  * actual subprocess — the CLI is a script with top-level side effects, so spawning it
  * is the only honest way to prove the command works rather than the function it calls.
  */
-import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -26,7 +26,7 @@ import {
 } from "./skills/propose.ts";
 import { REDACTED } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
-import { defined } from "./test-support.ts";
+import { defined, withoutHindsightEnv } from "./test-support.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
@@ -91,6 +91,12 @@ function unwritablePath(): string {
 }
 
 describe("GET /healthz", () => {
+	let restoreHindsightEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreHindsightEnv = withoutHindsightEnv();
+	});
+	afterEach(() => restoreHindsightEnv());
+
 	test("reports whether the audit chain is durable", async () => {
 		// A deployment whose audit is in memory is one restart from having no trail.
 		const memory = await start();

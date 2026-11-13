@@ -38,7 +38,7 @@ import { createObservability } from "./observe.ts";
 import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV } from "./repo-scope.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
-import { defined } from "./test-support.ts";
+import { defined, withoutHindsightEnv } from "./test-support.ts";
 import { clearEnsuredBanks, type FetchLike } from "./planes/hindsight.ts";
 
 /**
@@ -411,21 +411,28 @@ describe("the same answer with the cache off, on and broken", () => {
 	}
 
 	test("searchMemory matches", async () => {
-		const on = new FakeRedis();
-		const broken = new FakeRedis();
-		broken.fail = true;
-		const off = substrate();
-		const live = substrate(cacheOf(on));
-		const down = substrate(cacheOf(broken));
+		// The recall the merged search shares is part of this answer: an ambient Hindsight URL and key would answer it from a host
+		// this test never set up, degrading the reply out of the cache.
+		const restoreHindsightEnv = withoutHindsightEnv();
+		try {
+			const on = new FakeRedis();
+			const broken = new FakeRedis();
+			broken.fail = true;
+			const off = substrate();
+			const live = substrate(cacheOf(on));
+			const down = substrate(cacheOf(broken));
 
-		const a = await off.searchMemory("lease", undefined, undefined, undefined, "cursor");
-		const b = await live.searchMemory("lease", undefined, undefined, undefined, "cursor");
-		const c = await down.searchMemory("lease", undefined, undefined, undefined, "cursor");
-		expect(b).toEqual(a);
-		expect(c).toEqual(a);
-		expect(await live.searchMemory("lease", undefined, undefined, undefined, "cursor")).toEqual(a);
-		// Two entries: the merged search and the recall it shares with memory_recall.
-		expect(on.sets).toBe(2);
+			const a = await off.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			const b = await live.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			const c = await down.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			expect(b).toEqual(a);
+			expect(c).toEqual(a);
+			expect(await live.searchMemory("lease", undefined, undefined, undefined, "cursor")).toEqual(a);
+			// Two entries: the merged search and the recall it shares with memory_recall.
+			expect(on.sets).toBe(2);
+		} finally {
+			restoreHindsightEnv();
+		}
 	});
 
 	test("brief matches", async () => {

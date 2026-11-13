@@ -16,6 +16,7 @@ import { createMcpServer, ingestRefusalIsGate, resetRagMachine } from "./mcp.ts"
 import { Substrate } from "./service.ts";
 import { auditToolCalls, createObservability } from "./observe.ts";
 import { createTestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
+import { withoutHindsightEnv } from "./test-support.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { SubstrateEvent, Surface } from "./types.ts";
@@ -1271,10 +1272,15 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 
 describe("the RAG breaker admits one half-open probe", () => {
 	const realFetch = globalThis.fetch;
+	let restoreHindsightEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreHindsightEnv = withoutHindsightEnv();
+	});
 	beforeEach(() => resetRagMachine());
 	afterEach(() => {
 		globalThis.fetch = realFetch;
 		resetRagMachine();
+		restoreHindsightEnv();
 	});
 
 	test("after the cooldown, two concurrent queries produce one backend attempt", async () => {
@@ -1315,10 +1321,15 @@ describe("the RAG breaker admits one half-open probe", () => {
 
 describe("a docs_search is the RAG breaker's half-open probe", () => {
 	const realFetch = globalThis.fetch;
+	let restoreHindsightEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreHindsightEnv = withoutHindsightEnv();
+	});
 	beforeEach(() => resetRagMachine());
 	afterEach(() => {
 		globalThis.fetch = realFetch;
 		resetRagMachine();
+		restoreHindsightEnv();
 	});
 
 	test("after the cooldown, one successful docs_search moves the machine out of ERROR", async () => {
