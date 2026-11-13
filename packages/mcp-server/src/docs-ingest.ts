@@ -39,6 +39,7 @@ import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:f
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { corpusDocumentName, isSafeCorpusName, stripRemoteImages } from "@substrate/corpus";
+import { datasetIdentity } from "./dataset-identity.ts";
 import {
 	createVersionStore,
 	DATASET_VERSION_RETENTION,
@@ -669,12 +670,15 @@ function lightragRecordKey(datasetId: string, sourceUrl: string): string {
 
 /**
  * The key a LightRAG record had before datasets were keyed by `owner/name`, when a migrated dataset went under its bare
- * repository name. Null when the dataset id is not `owner/name`, so there is no legacy key to read.
+ * repository name. Null when the dataset id is not `owner/name`, or when its bare name does not map back to that owner:
+ * `other/agent-skills` must not read the record `agent-skills` wrote, so a record of another owner is never read or deleted.
  */
 function legacyLightragRecordKey(datasetId: string, sourceUrl: string): string | null {
 	const slash = datasetId.indexOf("/");
 	if (slash <= 0 || slash === datasetId.length - 1) return null;
-	return lightragRecordKey(datasetId.slice(slash + 1), sourceUrl);
+	const bareName = datasetId.slice(slash + 1);
+	if (datasetIdentity(bareName) !== datasetId) return null;
+	return lightragRecordKey(bareName, sourceUrl);
 }
 
 /** The planning-graph hint a page uploads with: its own, else the call-level one for its phase. */

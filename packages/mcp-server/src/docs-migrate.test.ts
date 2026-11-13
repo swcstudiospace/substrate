@@ -17,7 +17,8 @@ import { changeSha, DEFAULT_INGEST_ROOTS, type IngestRecord, ingestDocs, loadIng
 import type { FetchLike } from "./planes/lightrag.ts";
 import { FROZEN_SAMPLE } from "./parity-gate.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
-import { datasetIdentity, main, mapRecords, loadArchive, parseMigrateArgs, partAMarker, runApply, runDryRun, type MigrateIo } from "./docs-migrate.ts";
+import { datasetIdentity } from "./dataset-identity.ts";
+import { main, mapRecords, loadArchive, parseMigrateArgs, partAMarker, runApply, runDryRun, type MigrateIo } from "./docs-migrate.ts";
 
 const REPO = "agent-substrate";
 const PLANE_REPO = "swcstudiospace/agent-substrate";
@@ -431,6 +432,33 @@ describe("docs-migrate: apply", () => {
 		expect(plane.deleted).toEqual(["doc-legacy"]);
 		expect(records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 2, document_id: "doc-up-1" });
 		expect(records.has(`lightrag::${REPO}::${sourceOf(NOTES)}`)).toBe(false);
+	});
+
+	test("a refresh of other/agent-skills does not read the agent-skills legacy record: it starts at version 1 and prunes nothing", async () => {
+		const legacy: IngestRecord = { sha: shaOf(NOTES_BODY), dataset_id: "agent-skills", source_url: sourceOf(NOTES), document_id: "doc-legacy", version: 1, commit: COMMIT };
+		const plane = fakeLightrag([{ id: "doc-legacy", file_path: corpusDocumentName("agent-skills", NOTES, shaOf(NOTES_BODY)) }]);
+		const records = new Map<string, IngestRecord>([[`lightrag::agent-skills::${sourceOf(NOTES)}`, legacy]]);
+		const refresh = await ingestDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: CONFIG,
+				lightragDatasets: { list: async () => lightragSearchDatasets(["other/agent-skills"]), invalidate: () => undefined },
+				lightragFetch: plane.fetch,
+				seen: records,
+				locks: new Map(),
+				roots: DEFAULT_INGEST_ROOTS,
+				surface: "substrate",
+				emit: async () => ({ stored: false }),
+				poll: { maxPolls: 1, intervalMs: 0 },
+				prune: true,
+			},
+			{ dataset: "other/agent-skills", commit: "7e6d5c4b3a291807", pages: [{ path: NOTES, source_url: sourceOf(NOTES), body: "# Notes\n\nEdited after the migration.\n" }] },
+		);
+		expect(refresh.ok && refresh.results.map((result) => result.status)).toEqual(["ingested"]);
+		expect(plane.deleted).toEqual([]);
+		expect(records.get(`lightrag::other/agent-skills::${sourceOf(NOTES)}`)).toMatchObject({ version: 1, document_id: "doc-up-1" });
+		expect(records.get(`lightrag::agent-skills::${sourceOf(NOTES)}`)).toEqual(legacy);
 	});
 
 	test("every name a passing apply writes parses to the repository its record is keyed under", async () => {

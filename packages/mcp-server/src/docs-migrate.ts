@@ -33,6 +33,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type LightragConfig, lightragFromEnv, ragflowArchiveFromEnv } from "./config.ts";
+import { DATASET_REPOS, datasetIdentity } from "./dataset-identity.ts";
 import { gitAtCommit, type ReadAtCommit, verifyArchive } from "./docs-archive.ts";
 import { type DatasetVersion, recordVersion, type VersionStore } from "./docs-datasets.ts";
 import { DEFAULT_INGEST_ROOTS, type IngestPage, type IngestRecord, ingestDocs, loadIngestRecords, saveIngestRecords } from "./docs-ingest.ts";
@@ -223,23 +224,6 @@ async function checkoutRepoOf(root: string): Promise<string | null> {
 }
 
 /**
- * The repository each dataset's records are keyed under: a record is `lightrag::<repository>::<source URL>`, and the normal
- * refresh reads the same key through `lightragSearchDatasets(names, datasetIdentity)`. It is a table, not the checkout's
- * origin: an origin changes when its repository is renamed, and a key that followed the rename would strand every record the
- * old name wrote.
- */
-export const DATASET_REPOS: Readonly<Record<string, string>> = {
-	"agent-substrate": "swcstudiospace/agent-substrate",
-	substrate: "swcstudiospace/substrate",
-	"programming-desk": "swcstudiospace/programming-desk",
-	kanbanos: "swcstudiospace/kanbanos",
-	desklanes: "swcstudiospace/desklanes",
-	clippyos: "swcstudiospace/clippyos",
-	auctioning: "swcstudiospace/auctioning",
-	"agent-skills": "swcstudiospace/agent-skills",
-};
-
-/**
  * The ingest layout each dataset replays under. The default roots (`docs/`, `README.md`, `.planning/`) hold the
  * agent-substrate pages; an agent-skills archive holds skill pages at `<name>/SKILL.md` and `<name>/references/`, which
  * those roots refuse as outside-roots. A dataset listed as `skills` replays under the skill-checkout layout that the
@@ -249,12 +233,6 @@ export const DATASET_REPOS: Readonly<Record<string, string>> = {
 export const DATASET_INGEST_LAYOUT: Readonly<Record<string, "default" | "skills">> = {
 	"agent-skills": "skills",
 };
-
-/** The identity a dataset's records are keyed under: its mapped repository, or its name when none is mapped. */
-export function datasetIdentity(dataset: string): string {
-	const mapped = Object.hasOwn(DATASET_REPOS, dataset) ? DATASET_REPOS[dataset] : undefined;
-	return mapped ?? dataset;
-}
 
 /**
  * The identity a dataset's documents are replayed under, or null when the job refuses it. Pages are read from the checkout at

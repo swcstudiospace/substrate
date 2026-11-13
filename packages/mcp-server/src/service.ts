@@ -78,7 +78,7 @@ import {
 	type SkillsSyncTracker,
 	type VersionStore,
 } from "./docs-datasets.ts";
-import { datasetIdentity } from "./docs-migrate.ts";
+import { datasetIdentity } from "./dataset-identity.ts";
 import {
 	batchIngestPages,
 	documentProvenance,
