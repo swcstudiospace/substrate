@@ -82,6 +82,10 @@ class FakeAuditSql implements SteeringAuditSql, SteeringAuditReadSql {
 	readonly sessions: SteeringSessionRow[] = [];
 	insertAttempts = 0;
 	failReads: Error | null = null;
+	/** When set, the floor read (`maxDeliverySequence`) waits on this and never answers before it resolves. */
+	floorGate: Promise<void> | null = null;
+	/** When set, every page read (`readOpen`) waits on this and never answers before it resolves. */
+	pageGate: Promise<void> | null = null;
 
 	async insertAbsent(row: SteeringAuditRow): Promise<boolean> {
 		this.insertAttempts += 1;
@@ -96,6 +100,7 @@ class FakeAuditSql implements SteeringAuditSql, SteeringAuditReadSql {
 	}
 
 	async readOpen(query: SteeringAuditReadQuery): Promise<SteeringStoredDirectiveRow[]> {
+		if (this.pageGate !== null) await this.pageGate;
 		if (this.failReads !== null) throw this.failReads;
 		return this.queued(query.sessionId)
 			.filter((row) => this.find(row.directiveId, "acknowledged") === undefined)
@@ -149,6 +154,7 @@ class FakeAuditSql implements SteeringAuditSql, SteeringAuditReadSql {
 	}
 
 	async maxDeliverySequence(): Promise<number> {
+		if (this.floorGate !== null) await this.floorGate;
 		if (this.failReads !== null) throw this.failReads;
 		return this.rows.reduce((max, row) => Math.max(max, row.deliverySequence ?? 0), 0);
 	}
@@ -373,6 +379,35 @@ describe("the durable inbox", () => {
 		expect(substrate.steering.inbox?.pendingFor("sess-a")).toEqual([]);
 		expect(sql.rows).toHaveLength(1);
 	});
+
+	// The deadline is the one real timer here: the read never answers, so the outcome is the same at any duration. 1 ms keeps it short.
+	for (const hung of ["floor", "page"] as const) {
+		test(`a ${hung} read that never answers gives up at the restore deadline: boot completes with readFailed timeout and an empty inbox`, async () => {
+			const sql = new FakeAuditSql();
+			await seedPreviousProcess(sql, [directive()]);
+			const answer = Promise.withResolvers<void>();
+			if (hung === "floor") sql.floorGate = answer.promise;
+			else sql.pageGate = answer.promise;
+			const { substrate, timers } = await harness({}, { sql });
+			const stderr = captureStderr();
+			try {
+				const started = await substrate.startSteering({ restoreDeadlineMs: 1 });
+				expect(started).toEqual({ restored: 0, skipped: 0, truncated: false, readFailed: "timeout", sweeping: true });
+				expect(stderr.text()).toContain("steering restore failed (timeout: no answer within 1 ms);");
+				expect(stderr.text().match(/steering restore/g)).toHaveLength(1);
+			} finally {
+				stderr.restore();
+			}
+			expect(substrate.steering.inbox?.pendingFor("sess-a")).toEqual([]);
+			expect(timers.intervals).toEqual([5_000]);
+
+			// The read answers after the deadline. A macrotask lets the abandoned reads run to their end: none applies a row or writes one.
+			answer.resolve();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(substrate.steering.inbox?.pendingFor("sess-a")).toEqual([]);
+			expect(sql.rows).toHaveLength(1);
+		});
+	}
 
 	test("an expiry pass closes a directive nobody acknowledged as declined:timeout, and shutdown clears the timer for good", async () => {
 		const sql = new FakeAuditSql();

@@ -16,6 +16,7 @@ import type { SQL } from "bun";
 import { describe, expect, test } from "bun:test";
 import {
 	INDEX_MIGRATE_LOCK_TIMEOUT_MS,
+	INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS,
 	INDEX_MIGRATE_STATEMENT_TIMEOUT_MS,
 	IndexStore,
 	MIGRATION_STEPS,
@@ -38,6 +39,8 @@ interface FakeOptions {
 	failUnlock?: boolean;
 	/** The opt-in migrations the store runs; absent is every opt-in off, the store's default. */
 	migrationOptIns?: { "steering-audit": boolean; "steering-sessions"?: boolean };
+	/** A table lock held by another session at this version: the wait ends only at `lock_timeout`, and with none set the fake reports a hang. */
+	lockContendedAt?: number;
 }
 
 /** A recording stand-in for `sql.reserve()`'s connection, with a transactional in-memory `schema_migrations`. */
@@ -47,6 +50,7 @@ function fakeIndex(options: FakeOptions = {}) {
 	const tables = new Set<string>();
 	const columns = new Set<string>();
 	let pending: number[] = [];
+	let lockTimeoutMs: number | undefined;
 
 	const reserved = Object.assign(
 		async (strings: TemplateStringsArray, ...values: unknown[]): Promise<Array<Record<string, unknown>>> => {
@@ -102,10 +106,14 @@ function fakeIndex(options: FakeOptions = {}) {
 				const lockTimeout = /^SET lock_timeout = (\d+)$/.exec(text);
 				const statementTimeout = /^SET statement_timeout = (\d+)$/.exec(text);
 				const ddl = DDL_VERSION.get(text);
-				if (lockTimeout) events.push(`set lock_timeout ${lockTimeout[1]}`);
-				else if (statementTimeout) events.push(`set statement_timeout ${statementTimeout[1]}`);
-				else if (text === "RESET lock_timeout") events.push("reset lock_timeout");
-				else if (text === "RESET statement_timeout") events.push("reset statement_timeout");
+				if (lockTimeout) {
+					lockTimeoutMs = Number(lockTimeout[1]);
+					events.push(`set lock_timeout ${lockTimeout[1]}`);
+				} else if (statementTimeout) events.push(`set statement_timeout ${statementTimeout[1]}`);
+				else if (text === "RESET lock_timeout") {
+					lockTimeoutMs = undefined;
+					events.push("reset lock_timeout");
+				} else if (text === "RESET statement_timeout") events.push("reset statement_timeout");
 				else if (text === "drop index if exists memory_reviews_hash_idx") events.push("drop memory_reviews_hash_idx");
 				else if (text === squash(PLANNING_HASH_TABLE_REPAIR)) events.push("repair planning_page_hashes");
 				else if (/^drop table if exists \w+$/.test(text)) {
@@ -119,6 +127,12 @@ function fakeIndex(options: FakeOptions = {}) {
 				} else if (ddl !== undefined) {
 					events.push(`ddl ${ddl}`);
 					if (options.failDdlAt === ddl) throw new Error(`boom at step ${ddl}`);
+					if (options.lockContendedAt === ddl) {
+						// Another session holds a table lock: the wait ends at lock_timeout, or never.
+						events.push(`lock wait ${ddl} ${lockTimeoutMs ?? "none"}`);
+						if (lockTimeoutMs === undefined || lockTimeoutMs <= 0) throw new Error(`unbounded lock wait at step ${ddl}: migrate would hang`);
+						throw Object.assign(new Error("canceling statement due to lock timeout"), { errno: "55P03" });
+					}
 					const created = /^create table if not exists (\w+)/i.exec(text);
 					if (created?.[1]) tables.add(created[1]);
 					const added = /^alter table (\w+) add column if not exists (\w+)/i.exec(text);
@@ -148,6 +162,7 @@ const PROLOGUE = [
 	`set lock_timeout ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`,
 	`set statement_timeout ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`,
 	"lock",
+	`set lock_timeout ${INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS}`,
 	`set statement_timeout ${INDEX_MIGRATE_STATEMENT_TIMEOUT_MS}`,
 	"create ledger",
 ];
@@ -255,11 +270,24 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect(events.filter((event) => event.startsWith("set ") || event.startsWith("reset "))).toEqual([
 			`set lock_timeout ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`,
 			`set statement_timeout ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`,
+			`set lock_timeout ${INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS}`,
 			`set statement_timeout ${INDEX_MIGRATE_STATEMENT_TIMEOUT_MS}`,
 			"reset lock_timeout",
 			"reset statement_timeout",
 		]);
 		expect(events.indexOf("reset lock_timeout")).toBeGreaterThan(events.indexOf("unlock"));
+	});
+
+	test("a DDL step that times out on a table lock is reported as a failed migrate, not a hang", async () => {
+		const failAt = 7;
+		const { store, events, ledger } = fakeIndex({ lockContendedAt: failAt });
+		await expect(store.migrate()).rejects.toThrow("canceling statement due to lock timeout");
+		expect(INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS).toBeLessThan(INDEX_MIGRATE_LOCK_TIMEOUT_MS);
+		expect(events).toContain(`lock wait ${failAt} ${INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS}`);
+		expect(events.slice(-9)).toEqual([`check ${failAt}`, "begin", `ddl ${failAt}`, `lock wait ${failAt} ${INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS}`, "rollback", "unlock", "reset lock_timeout", "reset statement_timeout", "release"]);
+		expect(events).not.toContain(`ledger ${failAt}`);
+		expect(events.some((event) => event.startsWith("ddl ") && Number(event.slice(4)) > failAt)).toBe(false);
+		expect([...ledger]).toEqual(ALL.filter((version) => version < failAt));
 	});
 
 	test("each step is its own transaction: ledger insert between its DDL and its COMMIT, never across steps", async () => {

@@ -15,7 +15,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { IndexStore, MIGRATION_STEPS, applicableMigrationSteps, indexMigrateLockKey } from "./index-store.ts";
+import { IndexStore, INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS, MIGRATION_STEPS, applicableMigrationSteps, indexMigrateLockKey } from "./index-store.ts";
 import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -151,4 +151,25 @@ describeLive("migrate against a live index", () => {
 		expect(timeoutMs(after.statement)).toBe(timeoutMs(before.statement));
 		expect(timeoutMs(after.lock)).toBe(timeoutMs(before.lock));
 	});
+
+	test("a table lock held by another session fails migrate within the DDL bound, and the pool is left clean", async () => {
+		await store.migrate();
+		const holder = await raw.reserve();
+		try {
+			await holder`begin`;
+			await holder`lock table schema_migrations in access exclusive mode`;
+			const started = performance.now();
+			const failure = await store.migrate().then(
+				() => undefined,
+				(cause: unknown) => cause,
+			);
+			const elapsedMs = performance.now() - started;
+			expect(String(failure)).toContain("lock timeout");
+			expect(elapsedMs).toBeLessThan(INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS * 4);
+			expect(await timeoutSettings(pool)).toEqual(before);
+		} finally {
+			await holder`rollback`.catch(() => undefined);
+			holder.release();
+		}
+	}, 60_000);
 });

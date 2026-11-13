@@ -128,6 +128,13 @@ export const INDEX_MIGRATE_LOCK_TIMEOUT_MS = 180000;
 export const INDEX_MIGRATE_STATEMENT_TIMEOUT_MS = 120000;
 
 /**
+ * `lock_timeout` for the DDL, set once the advisory lock is held. A table lock held by a long reader or writer fails the
+ * step in seconds: `migrate` throws, the service reports the index as degraded, and boot continues. Without it the step
+ * queues behind that holder for the advisory lock's {@link INDEX_MIGRATE_LOCK_TIMEOUT_MS}.
+ */
+export const INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS = 5000;
+
+/**
  * The pool and the per-connection timeouts. Before these existed the client was
  * `new SQL(url)`: Bun's default pool of 10 per process, no connect timeout, no
  * `statement_timeout`, no name — and production showed 19 idle connections with
@@ -1147,6 +1154,7 @@ export class IndexStore implements MemoryStore {
 	 * lock so two boots cannot deadlock on `CREATE INDEX`. Versions already in
 	 * `schema_migrations` are skipped; a missing version still runs, so an index
 	 * that booted before the ledger still receives later statements.
+	 * A table lock that stays busy longer than {@link INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS} rejects `migrate` with Postgres' lock-timeout error; the caller reports it and boot continues.
 	 */
 	async migrate(): Promise<void> {
 		const reserved = await this.sql.reserve();
@@ -1157,6 +1165,8 @@ export class IndexStore implements MemoryStore {
 			await reserved.unsafe(`SET lock_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
 			await reserved.unsafe(`SET statement_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
 			await reserved`select pg_advisory_lock(hashtextextended(${indexMigrateLockKey()}::text, 0))`;
+			// The DDL below takes table locks. Bound each wait for one here: the advisory lock's 180s is for two boots, not for a table.
+			await reserved.unsafe(`SET lock_timeout = ${INDEX_MIGRATE_DDL_LOCK_TIMEOUT_MS}`);
 			await reserved.unsafe(`SET statement_timeout = ${INDEX_MIGRATE_STATEMENT_TIMEOUT_MS}`);
 			await reserved`
 				create table if not exists schema_migrations (

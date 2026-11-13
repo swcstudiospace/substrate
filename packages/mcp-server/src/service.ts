@@ -218,7 +218,7 @@ import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import { DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundary, LiveSessionBoundaryError, liveSessionNotFound, SESSION_BINDING_INPUT, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, type LiveCallFailure, type LiveSessionAuditPort, type LiveSessionInvocation, type PreparedLiveCall, type PreparedLiveDispatch, type SteeringWiring } from "./planning/steering-tools.ts";
 import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
-import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
+import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, STEERING_RESTORE_DEADLINE_MS, STEERING_RESTORE_TIMEOUT_CODE, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
 import { LiveSessionStatePort, STEERING_SESSION_ENDED_ACTION, steeringSessionEvent } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringAcknowledgeReply, type SteeringNotice } from "./planning/steering-delivery.ts";
 import { SteeringIdempotency } from "./planning/steering-idempotency.ts";
@@ -3655,18 +3655,20 @@ export class Substrate {
 	/**
 	 * Phase 58 (live steering): bring the durable inbox up. With the audit table opt-in on, the open directives are read back
 	 * from `planning_steering_audit` into the inbox (nothing is audited by a restore), then the expiry sweep timer starts (unref'd).
-	 * A read that fails is reported on stderr and the inbox starts empty: it never refuses boot. Without a durable sink this
-	 * does nothing. Safe to call twice: a restore is idempotent and the sweeper starts once.
+	 * A read that fails, or that has not answered within the restore deadline (`restoreDeadlineMs`, default
+	 * `STEERING_RESTORE_DEADLINE_MS`), is reported on stderr and the inbox starts empty: it never refuses boot. Without a durable
+	 * sink this does nothing. Safe to call twice: a restore is idempotent and the sweeper starts once.
 	 */
-	async startSteering(): Promise<{ restored: number; skipped: number; truncated: boolean; readFailed: string | null; sweeping: boolean }> {
+	async startSteering(options: { restoreDeadlineMs?: number } = {}): Promise<{ restored: number; skipped: number; truncated: boolean; readFailed: string | null; sweeping: boolean }> {
 		const inbox = this.steering.inbox;
 		const sink = this.steeringDurable;
 		const none = { restored: 0, skipped: 0, truncated: false, readFailed: null, sweeping: false };
 		if (inbox === null || sink === null) return none;
+		const deadlineMs = options.restoreDeadlineMs ?? STEERING_RESTORE_DEADLINE_MS;
 		let outcome: { restored: number; skipped: number; truncated: boolean; readFailed: string | null; stoppedBy: SteeringRestoreStop | null } = { restored: 0, skipped: 0, truncated: false, readFailed: null, stoppedBy: null };
 		try {
 			// Every page of open directives, not one read: a directive past the first page would otherwise be missed until the next restart. The page cap is named when hit.
-			const result = await restoreSteeringInboxPaged(inbox, sink, { limit: DEFAULT_STEERING_RESTORE_LIMIT, maxPages: DEFAULT_STEERING_RESTORE_MAX_PAGES });
+			const result = await restoreSteeringInboxPaged(inbox, sink, { limit: DEFAULT_STEERING_RESTORE_LIMIT, maxPages: DEFAULT_STEERING_RESTORE_MAX_PAGES, deadlineMs });
 			if (result.ok) {
 				outcome = { restored: result.value.report.restored.length, skipped: result.value.report.skipped.length, truncated: result.value.truncated, readFailed: null, stoppedBy: result.value.stoppedBy };
 			} else {
@@ -3677,7 +3679,8 @@ export class Substrate {
 			outcome = { ...outcome, readFailed: cause instanceof Error && cause.name !== "" ? cause.name : "UNKNOWN" };
 		}
 		if (outcome.readFailed !== null) {
-			process.stderr.write(`[substrate] steering restore failed (${outcome.readFailed}); the inbox starts empty and the open directives stay in planning_steering_audit\n`);
+			const why = outcome.readFailed === STEERING_RESTORE_TIMEOUT_CODE ? `timeout: no answer within ${deadlineMs} ms` : outcome.readFailed;
+			process.stderr.write(`[substrate] steering restore failed (${why}); the inbox starts empty and the open directives stay in planning_steering_audit\n`);
 		} else {
 			process.stdout.write(`[substrate] steering: ${outcome.restored} open directive(s) restored${outcome.skipped > 0 ? `, ${outcome.skipped} skipped` : ""}${outcome.truncated ? ` (not every open directive was restored: ${outcome.stoppedBy ?? "truncated"}; the rest stay in planning_steering_audit)` : ""}\n`);
 		}

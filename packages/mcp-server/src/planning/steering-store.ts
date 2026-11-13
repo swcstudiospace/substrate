@@ -597,9 +597,17 @@ export const DEFAULT_STEERING_RESTORE_MAX_PAGES = 50;
 /** Why a paged restore stopped before the open directives were exhausted. `page-cap`: the cap was hit with more still open. `read-failed`: a later page could not be read. `no-cursor`: a page could not name where the next one starts. */
 export type SteeringRestoreStop = "page-cap" | "read-failed" | "no-cursor";
 
+/** The longest a boot restore may wait on the audit store, in ms, before it gives up. The inbox then starts empty, and no directive from a read that answers later is loaded. */
+export const STEERING_RESTORE_DEADLINE_MS = 10_000;
+
+/** The `SteeringAuditReadError` code of a restore that ran past its deadline. */
+export const STEERING_RESTORE_TIMEOUT_CODE = "timeout";
+
 export interface SteeringRestorePagedOptions extends SteeringReadOptions {
 	/** The most pages read, 1 or more. Absent: {@link DEFAULT_STEERING_RESTORE_MAX_PAGES}. */
 	maxPages?: number;
+	/** The wait budget of the whole restore, the floor read and every page together, in ms, 1 or more. Absent: {@link STEERING_RESTORE_DEADLINE_MS}. */
+	deadlineMs?: number;
 }
 
 export type SteeringRestorePagedResult =
@@ -608,20 +616,57 @@ export type SteeringRestorePagedResult =
 
 /**
  * The restart path over every page: reads the open directives `options.limit` at a time, oldest first, each page starting
- * after the last directive of the one before (keyset, so a page never repeats and never skips), and loads each into `inbox`.
+ * after the last directive of the one before (keyset, so a page never repeats and never skips), and loads them into `inbox`.
  * It stops when a page is not cut, or at `maxPages`; a stop with directives still open is a named truncation (`stoppedBy`),
  * never silent. A directive stays open while it is restored, so the cursor, not the read, is what advances. A first page
- * that cannot be read loads nothing and is returned as a value. A later page that cannot be read leaves the earlier pages
- * loaded and reports `stoppedBy: "read-failed"`. Nothing is audited.
+ * that cannot be read loads nothing and is returned as a value. A later page that cannot be read keeps the earlier pages
+ * and reports `stoppedBy: "read-failed"`. Nothing is audited.
+ *
+ * Every read runs under one deadline. A restore that is still reading when it passes returns a `timeout` read error, and no
+ * directive is loaded: the abandoned reads are discarded when they answer, so the inbox is never filled after the caller gave up.
  */
 export async function restoreSteeringInboxPaged(inbox: SteeringInbox, sink: SteeringAuditSink, options: SteeringRestorePagedOptions): Promise<SteeringRestorePagedResult> {
 	const maxPages = options.maxPages ?? DEFAULT_STEERING_RESTORE_MAX_PAGES;
 	if (!Number.isSafeInteger(maxPages) || maxPages < 1) return { ok: false, error: new SteeringAuditReadError("INVALID_QUERY", "maxPages must be an integer of 1 or more") };
-	// Every sequence the table holds is below the floor, so a directive queued after this restart can never tie a restored one.
+	const deadlineMs = options.deadlineMs ?? STEERING_RESTORE_DEADLINE_MS;
+	if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1) return { ok: false, error: new SteeringAuditReadError("INVALID_QUERY", "deadlineMs must be an integer of 1 or more") };
+	const read = await withDeadline(readOpenPages(inbox, sink, options, maxPages), deadlineMs);
+	if (read === DEADLINE) return { ok: false, error: new SteeringAuditReadError(STEERING_RESTORE_TIMEOUT_CODE, `steering restore did not finish within ${deadlineMs} ms`) };
+	if (!read.ok) return read;
+	// Loaded in one step once every read is whole, so a restore that gave up leaves no directive behind.
+	const loaded = await inbox.restore(read.value.entries);
+	return { ok: true, value: { report: loaded, truncated: read.value.stoppedBy !== null, pages: read.value.pages, stoppedBy: read.value.stoppedBy } };
+}
+
+const DEADLINE: unique symbol = Symbol("steering-restore-deadline");
+
+/** Settles with `work`, or with {@link DEADLINE} once `ms` has passed. The timer is cleared as soon as `work` settles. */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | typeof DEADLINE> {
+	const expired = Promise.withResolvers<typeof DEADLINE>();
+	const timer = setTimeout(expired.resolve, ms, DEADLINE);
+	try {
+		return await Promise.race([work, expired.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+interface OpenPages {
+	entries: SteeringRestoreCandidate[];
+	pages: number;
+	stoppedBy: SteeringRestoreStop | null;
+}
+
+/**
+ * The floor and every page of open directives, read but not loaded. Read failures are returned as values, as the reads return them.
+ * The floor is raised on the inbox as soon as it is read: that only moves the sequence counter up, so it holds even when a later
+ * read fails or the restore gives up, and a directive queued afterwards still sorts after every stored one.
+ */
+async function readOpenPages(inbox: SteeringInbox, sink: SteeringAuditSink, options: SteeringRestorePagedOptions, maxPages: number): Promise<{ ok: true; value: OpenPages } | { ok: false; error: SteeringAuditReadError }> {
 	const floor = await sink.readSequenceFloor();
 	if (!floor.ok) return floor;
 	inbox.seedSequence(floor.value);
-	const report: SteeringRestoreReport = { restored: [], unchanged: [], skipped: [] };
+	const entries: SteeringRestoreCandidate[] = [];
 	let after: SteeringReadCursor | undefined;
 	let pages = 0;
 	let stoppedBy: SteeringRestoreStop | null = null;
@@ -632,12 +677,7 @@ export async function restoreSteeringInboxPaged(inbox: SteeringInbox, sink: Stee
 			stoppedBy = "read-failed";
 			break;
 		}
-		const loaded = await inbox.restore(page.value.entries);
-		report.restored.push(...loaded.restored);
-		report.unchanged.push(...loaded.unchanged);
-		// An entry's index is within its page: offset it so the merged report points at the entry's place in the whole read.
-		const offset = pages * options.limit;
-		report.skipped.push(...loaded.skipped.map((skip) => ({ ...skip, index: skip.index + offset })));
+		entries.push(...page.value.entries);
 		pages += 1;
 		if (!page.value.truncated) break;
 		const next = cursorAfter(page.value.entries);
@@ -651,7 +691,7 @@ export async function restoreSteeringInboxPaged(inbox: SteeringInbox, sink: Stee
 		}
 		after = next;
 	}
-	return { ok: true, value: { report, truncated: stoppedBy !== null, pages, stoppedBy } };
+	return { ok: true, value: { entries, pages, stoppedBy } };
 }
 
 /** Where the page after `entries` starts: the last entry's creation time and id, or null when the last entry carries neither as the read ordered them. */
