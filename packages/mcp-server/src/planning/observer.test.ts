@@ -15,7 +15,7 @@ import { defined } from "../test-support.ts";
 import type { EventInput } from "../types.ts";
 import { RecordingPresenceBackend } from "./backend.fixtures.ts";
 import { BaselineStoreError, FileBaselineStore, type BaselineLoad, type BaselineStore, type StoredBaseline } from "./baseline-store.ts";
-import { DEFAULT_PRESENCE_TTL_S, PLANNING_MAX_FILES_ENV, PLANNING_PRESENCE_TTL_ENV, PLANNING_ROOT_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
+import { DEFAULT_PRESENCE_TTL_S, PLANNING_MAX_FILES_ENV, PLANNING_PRESENCE_TTL_ENV, PLANNING_ROOTS_ENV, PLANNING_SCAN_INTERVAL_ENV, loadPlanningSettings } from "./config.ts";
 import { planningSessionId } from "./checkout.ts";
 import { PLANNING_CONFLICT } from "./conflicts.ts";
 import { classifySessions, type SessionRecord } from "./presence.ts";
@@ -86,7 +86,7 @@ function observerOver(
 	const metrics = recordingSink("greptime");
 	const fallback = recordingSink("stdout");
 	const observer = new PlanningObserver({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...options.env }),
+		settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT, ...options.env }),
 		fs: tree,
 		presence: options.presence ?? null,
 		// The tree is in memory, so git is never run: the config file in the tree is what the origin is read from.
@@ -487,7 +487,7 @@ describe("planning.transition delivery", () => {
 		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
 		let holdPublish = false;
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: tree,
 			presence: null,
 			emit: async () => {
@@ -533,9 +533,9 @@ describe("the planning heartbeat", () => {
 		const stored = await presence.listWithin(10);
 		expect(stored.records.map((record) => [record.worktree, record.branch, record.activePhase])).toEqual([[TREE_ROOT, BRANCH, null]]);
 
-		const reader = new PlanningReader({ settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }), fs: tree, presence });
+		const reader = new PlanningReader({ settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }), fs: tree, presence });
 		const sessions = await reader.sessions();
-		expect(sessions.state === "ok" && sessions.sessions).toEqual([
+		expect(sessions.state === "ok" && onlyView(sessions).sessions).toEqual([
 			expect.objectContaining({ sessionId: expect.stringMatching(/^wt-[0-9a-f]{24}$/), worktree: TREE_ROOT, status: "active", ageMs: 0 }),
 		]);
 	});
@@ -757,7 +757,7 @@ describe("the planning heartbeat", () => {
 			const delays: number[] = [];
 			const handle = { id: "scan-timer" };
 			const observer = new PlanningObserver({
-				settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...env }),
+				settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT, ...env }),
 				fs: new FakeTree({}),
 				presence: null,
 				emit: async () => true,
@@ -784,7 +784,7 @@ describe("the planning heartbeat", () => {
 	test("the scan timer starts once, stops, and starts again through the same seam", () => {
 		const events: string[] = [];
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: new FakeTree({}),
 			presence: null,
 			emit: async () => true,
@@ -817,7 +817,7 @@ const TTL_60_S = "60";
 /** An observer with a document cap, for the watcher-gap tests. Every write is stored. */
 function gapObserver(tree: FakeTree, presence: DragonflyPresenceStore, maxFiles: string): PlanningObserver {
 	return new PlanningObserver({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, [PLANNING_MAX_FILES_ENV]: maxFiles }),
+		settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT, [PLANNING_MAX_FILES_ENV]: maxFiles }),
 		fs: tree,
 		presence,
 		emit: async () => true,
@@ -828,7 +828,7 @@ function gapObserver(tree: FakeTree, presence: DragonflyPresenceStore, maxFiles:
 /** An observer over one checkout that records every attempted conflict write and reports each one as stored or refused. */
 function announcingObserver(tree: FakeTree, presence: DragonflyPresenceStore, attempts: EventInput[], stored: boolean, root: string = TREE_ROOT, ttlS?: string): PlanningObserver {
 	return new PlanningObserver({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: root, ...(ttlS === undefined ? {} : { [PLANNING_PRESENCE_TTL_ENV]: ttlS }) }),
+		settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: root, ...(ttlS === undefined ? {} : { [PLANNING_PRESENCE_TTL_ENV]: ttlS }) }),
 		fs: tree,
 		presence,
 		emit: async (event) => {
@@ -867,7 +867,7 @@ function dedupingLedger(): { attempts: EventInput[]; rows: EventInput[]; emit: (
 /** An observer over one checkout that writes through a deduplicating ledger and so announces every conflict under its key. */
 function keyedObserver(tree: FakeTree, presence: DragonflyPresenceStore, ledger: { emit: (event: EventInput) => Promise<boolean> }, root: string): PlanningObserver {
 	return new PlanningObserver({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: root }),
+		settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: root }),
 		fs: tree,
 		presence,
 		emit: ledger.emit,
@@ -894,7 +894,7 @@ async function ghostSession(presence: DragonflyPresenceStore, backend: Recording
 
 function planningReaderOver(tree: FakeTree, presence: DragonflyPresenceStore, ttlS?: string): PlanningReader {
 	return new PlanningReader({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...(ttlS === undefined ? {} : { [PLANNING_PRESENCE_TTL_ENV]: ttlS }) }),
+		settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT, ...(ttlS === undefined ? {} : { [PLANNING_PRESENCE_TTL_ENV]: ttlS }) }),
 		fs: tree,
 		presence,
 	});
@@ -905,9 +905,16 @@ function storedRecord(backend: RecordingPresenceBackend, tree: FakeTree, root: s
 	return JSON.parse(backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, root)}`) ?? "{}") as SessionRecord;
 }
 
+/** The view of the one checkout an ok answer names: the entry's `view`. These tests configure one checkout, so it is the first. */
+function onlyView<E extends { view: unknown }>(answer: { checkouts: readonly E[] }): E["view"] {
+	const [only] = answer.checkouts;
+	if (only === undefined) throw new Error("the answer names no checkout");
+	return only.view;
+}
+
 function planningOf(view: PlanningSessionsView, sessionId: string) {
 	if (view.state !== "ok") throw new Error(`planning_sessions is ${view.state}`);
-	return view.sessions.find((row) => row.sessionId === sessionId)?.planning;
+	return onlyView(view).sessions.find((row) => row.sessionId === sessionId)?.planning;
 }
 
 /** A checkout's git data (origin and branch) and its files, under its own root. */
@@ -1019,7 +1026,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		let failures = 2;
 		const events: EventInput[] = [];
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: tree,
 			metrics: recordingSink("greptime").sink,
 			presence: null,
@@ -1099,7 +1106,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const presence = new DragonflyPresenceStore(backend);
 		let accept = false;
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: tree,
 			metrics: recordingSink("greptime").sink,
 			presence,
@@ -1124,7 +1131,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		backend.clockMs = SERVER_NOW;
 		const presence = new DragonflyPresenceStore(backend);
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: tree,
 			metrics: recordingSink("greptime").sink,
 			presence,
@@ -1183,7 +1190,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const presence = new DragonflyPresenceStore(backend);
 		let accept = false;
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: tree,
 			metrics: recordingSink("greptime").sink,
 			presence,
@@ -1244,7 +1251,7 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		const { promise: blocked, resolve: release } = Promise.withResolvers<void>();
 		let tick: (() => void) | undefined;
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: tree,
 			metrics: recordingSink("greptime").sink,
 			presence: null,
@@ -1264,8 +1271,8 @@ describe("planning reports, watcher gaps and conflicts on the write path (phase 
 		await observer.scan();
 
 		const scans: Promise<unknown>[] = [];
-		const scanNow = observer.scan.bind(observer);
-		observer.scan = () => {
+		const scanNow = observer.scanAll.bind(observer);
+		observer.scanAll = () => {
 			const run = scanNow();
 			scans.push(run);
 			return run;
@@ -1310,7 +1317,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		]);
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({
 			state: "ok",
-			conflicts: [{ status: "open", key: { by: "phase", phase: "53" }, sessionIds }],
+			checkouts: [{ view: { conflicts: [{ status: "open", key: { by: "phase", phase: "53" }, sessionIds }] } }],
 		});
 	});
 
@@ -1333,7 +1340,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		expect(conflictEventsOf(attempts)).toEqual([]);
 		expect(storedRecord(backend, tree, CHECKOUT_A).touched).toEqual([{ phase: "53", plan: null, observedAtMs: SERVER_NOW }]);
 		expect(storedRecord(backend, tree, CHECKOUT_B).touched).toEqual([{ phase: "54", plan: null, observedAtMs: SERVER_NOW }]);
-		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", checkouts: [{ view: { conflicts: [] } }] });
 	});
 
 	test("a touched pair that falls outside the TTL no longer conflicts", async () => {
@@ -1358,7 +1365,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 
 		expect(conflictEventsOf(attempts)).toEqual([]);
 		expect(storedRecord(backend, tree, CHECKOUT_A).touched).toContainEqual({ phase: "53", plan: null, observedAtMs: SERVER_NOW });
-		expect(await planningReaderOver(tree, presence, TTL_60_S).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(await planningReaderOver(tree, presence, TTL_60_S).sessions()).toMatchObject({ state: "ok", checkouts: [{ view: { conflicts: [] } }] });
 	});
 
 	test("an incomplete observation neither adds nor removes touched pairs", async () => {
@@ -1409,7 +1416,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		expect(backend.values.get(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, CHECKOUT_B)}`)).toBe(bRecord);
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({
 			state: "ok",
-			conflicts: [{ status: "open", key: { by: "phase", phase: "53" } }],
+			checkouts: [{ view: { conflicts: [{ status: "open", key: { by: "phase", phase: "53" } }] } }],
 		});
 	});
 
@@ -1451,7 +1458,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await a.scan();
 
 		expect(conflictEventsOf(attempts)).toEqual([]);
-		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", checkouts: [{ view: { conflicts: [] } }] });
 	});
 
 	test("a conflict that clears and returns is announced again, and one the ledger did not store is retried on the next scan", async () => {
@@ -1571,7 +1578,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		expect(conflictEventsOf(silent)).toEqual([]);
 		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({
 			state: "ok",
-			conflicts: [{ status: "open", key: { by: "phase", phase: "53" } }],
+			checkouts: [{ view: { conflicts: [{ status: "open", key: { by: "phase", phase: "53" } }] } }],
 		});
 		await a.scan();
 		expect(conflictEventsOf(announced)).toHaveLength(1);
@@ -1668,7 +1675,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await b.scan();
 
 		expect(conflictEventsOf(attempts)).toEqual([]);
-		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", checkouts: [{ view: { conflicts: [] } }] });
 		expect(storedRecord(backend, tree, CHECKOUT_B)).toMatchObject({ repo: "owner/two" });
 	});
 
@@ -1680,7 +1687,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		const attempts: EventInput[] = [];
 		let expireDuringScan = false;
 		const a = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: CHECKOUT_A }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: CHECKOUT_A }),
 			fs: tree,
 			metrics: recordingSink("greptime").sink,
 			presence,
@@ -1702,7 +1709,7 @@ describe("touched pairs and conflicts in production (phase 53, SOTA-09)", () => 
 		await a.scan();
 
 		expect(conflictEventsOf(attempts)).toEqual([]);
-		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", conflicts: [] });
+		expect(await planningReaderOver(tree, presence).sessions()).toMatchObject({ state: "ok", checkouts: [{ view: { conflicts: [] } }] });
 	});
 
 	test("a checkout whose repository was unreadable during its edit is heartbeated once it reads again, keeping the edit's time (greptile recovered-sessions thread)", async () => {
@@ -2033,7 +2040,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 		let tick: () => Promise<unknown> = async () => undefined;
 		const tree = new FakeTree({});
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: tree,
 			presence: null,
 			emit: async () => true,
@@ -2064,7 +2071,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
 		let tick: () => Promise<unknown> = async () => undefined;
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: gatedFs(tree, gate),
 			presence: null,
 			emit: async () => true,
@@ -2094,7 +2101,7 @@ describe("the observer under a change the ledger does not store, failure, load a
 		const tree = new FakeTree({ ...GIT, [`${PHASE}/52-CONTEXT.md`]: "# context\n" });
 		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
 		const observer = new PlanningObserver({
-			settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT }),
+			settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT }),
 			fs: gatedFs(tree, gate),
 			presence: null,
 			emit: async () => true,
@@ -2119,7 +2126,7 @@ const HOUR_MS = 3_600_000;
 /** An observer over `tree` that stores what it publishes in `events`. `extra` overrides any dependency, `env` any planning setting. */
 function liveObserver(tree: FakeTree, events: EventInput[], extra: Partial<PlanningObserverDeps> = {}, env: Record<string, string> = {}): PlanningObserver {
 	return new PlanningObserver({
-		settings: loadPlanningSettings({ [PLANNING_ROOT_ENV]: TREE_ROOT, ...env }),
+		settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: TREE_ROOT, ...env }),
 		fs: tree,
 		metrics: recordingSink("greptime").sink,
 		presence: null,
@@ -2679,4 +2686,159 @@ describe("the observer's durable baseline: a restart publishes what changed whil
 		expect(Math.abs(late - early)).toBeLessThanOrEqual(16);
 		expect(store.attempts).toBeLessThan(400);
 	}, 180_000);
+});
+
+/** Timers a test runs by hand: each schedule is recorded with its period, and its run function is kept to be called. */
+function handTimers(): { timers: PlanningTimers; scheduled: Array<{ ms: number; run: () => Promise<unknown> }> } {
+	const scheduled: Array<{ ms: number; run: () => Promise<unknown> }> = [];
+	return {
+		scheduled,
+		timers: {
+			setInterval: (run, ms) => {
+				scheduled.push({ ms, run });
+				return scheduled.length;
+			},
+			clearInterval: () => undefined,
+		},
+	};
+}
+
+/** An observer over both checkouts of `twoCheckouts`, in configuration order. `extra` overrides any dependency. */
+function twoCheckoutObserver(tree: FakeTree, events: EventInput[], lines: string[], extra: Partial<PlanningObserverDeps> = {}): PlanningObserver {
+	return new PlanningObserver({
+		settings: loadPlanningSettings({ [PLANNING_ROOTS_ENV]: `${CHECKOUT_A},${CHECKOUT_B}` }),
+		fs: tree,
+		metrics: recordingSink("greptime").sink,
+		presence: null,
+		emit: async (event) => {
+			events.push(event);
+			return true;
+		},
+		report: (line) => {
+			lines.push(line);
+		},
+		clock: CLOCK,
+		...extra,
+	});
+}
+
+describe("the observer over several checkouts: each checkout keeps its own state", () => {
+	test("no checkout configured: nothing is scanned, and the answer is disabled", async () => {
+		const observer = new PlanningObserver({
+			settings: loadPlanningSettings({}),
+			fs: new FakeTree({}),
+			presence: null,
+			emit: async () => true,
+			metrics: recordingSink("greptime").sink,
+			clock: CLOCK,
+		});
+		expect(await observer.scanAll()).toEqual([]);
+		expect(await observer.scan()).toEqual({ state: "disabled" });
+	});
+
+	test("each checkout's baseline is its own: a change in one publishes once and leaves the other quiet", async () => {
+		const tree = twoCheckouts();
+		const events: EventInput[] = [];
+		const observer = twoCheckoutObserver(tree, events, []);
+
+		const first = await observer.scanAll();
+		expect(first.map((entry) => [entry.key, entry.root, entry.scan])).toEqual([
+			[planningSessionId(tree, CHECKOUT_A), CHECKOUT_A, { state: "observed", outcome: "baseline", heartbeat: { state: "not-due" } }],
+			[planningSessionId(tree, CHECKOUT_B), CHECKOUT_B, { state: "observed", outcome: "baseline", heartbeat: { state: "not-due" } }],
+		]);
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, edited\n");
+		const second = await observer.scanAll();
+		expect(second.map((entry) => [entry.root, entry.scan])).toEqual([
+			[CHECKOUT_A, { state: "observed", outcome: "published", heartbeat: { state: "presence-unset" } }],
+			[CHECKOUT_B, { state: "observed", outcome: "unchanged", heartbeat: { state: "not-due" } }],
+		]);
+		expect(events).toHaveLength(1);
+
+		// The top-level answer is the first configured checkout's scan: here, unchanged after the publish.
+		expect(await observer.scan()).toEqual({ state: "observed", outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(events).toHaveLength(1);
+	});
+
+	test("each checkout heartbeats under its own session, and only the checkout that changed writes", async () => {
+		const tree = twoCheckouts();
+		const backend = new RecordingPresenceBackend();
+		const presence = new DragonflyPresenceStore(backend);
+		const observer = twoCheckoutObserver(tree, [], [], { presence });
+		await observer.scanAll();
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, edited\n");
+		const changedA = await observer.scanAll();
+		expect(changedA[0]?.scan).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		expect(changedA[1]?.scan).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(storedRecord(backend, tree, CHECKOUT_A)).toMatchObject({ sessionId: planningSessionId(tree, CHECKOUT_A), worktree: CHECKOUT_A });
+		expect(backend.values.has(`${PRESENCE_KEY_PREFIX}${planningSessionId(tree, CHECKOUT_B)}`)).toBe(false);
+
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_54, "54-CONTEXT.md"), "# context, edited\n");
+		const changedB = await observer.scanAll();
+		expect(changedB[0]?.scan).toMatchObject({ outcome: "unchanged", heartbeat: { state: "not-due" } });
+		expect(changedB[1]?.scan).toMatchObject({ outcome: "published", heartbeat: { state: "written" } });
+		expect(storedRecord(backend, tree, CHECKOUT_B)).toMatchObject({ sessionId: planningSessionId(tree, CHECKOUT_B), worktree: CHECKOUT_B });
+	});
+
+	test("one scan timer, one interval: each tick scans every checkout, and the scan timer is the only one scheduled", async () => {
+		const tree = twoCheckouts();
+		const events: EventInput[] = [];
+		const { timers, scheduled } = handTimers();
+		const observer = twoCheckoutObserver(tree, events, [], { timers });
+		expect(observer.start()).toBe(true);
+		expect(scheduled).toHaveLength(1);
+		const [scan] = scheduled;
+
+		// The first tick is each checkout's baseline: nothing is published.
+		await scan?.run();
+		expect(events).toEqual([]);
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, edited\n");
+		tree.setContent(phaseDoc(CHECKOUT_B, PHASE_53, "53-CONTEXT.md"), "# context, edited\n");
+		await scan?.run();
+		expect(events).toHaveLength(2);
+		expect(scheduled).toHaveLength(1);
+		observer.stop();
+	});
+
+	test("a checkout that cannot be read is reported on its own: the other keeps scanning and publishing", async () => {
+		// Only checkout A exists on this tree, so checkout B's root cannot be read.
+		const tree = new FakeTree({ ...checkoutOf(CHECKOUT_A, "gsd/p53-a", { [phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md")]: "# context\n" }) });
+		const events: EventInput[] = [];
+		const lines: string[] = [];
+		const { timers, scheduled } = handTimers();
+		const observer = twoCheckoutObserver(tree, events, lines, { timers });
+		observer.start();
+		const [scan] = scheduled;
+
+		await scan?.run();
+		await scan?.run();
+		expect(lines).toEqual(["[substrate] planning observer: scan unavailable: root-unavailable"]);
+
+		tree.setContent(phaseDoc(CHECKOUT_A, PHASE_53, "53-CONTEXT.md"), "# context, edited\n");
+		await scan?.run();
+		expect(events).toHaveLength(1);
+		expect(lines).toEqual(["[substrate] planning observer: scan unavailable: root-unavailable"]);
+		expect(await observer.scanAll()).toMatchObject([{ root: CHECKOUT_A, scan: { state: "observed" } }, { root: CHECKOUT_B, scan: { state: "unavailable", code: "root-unavailable" } }]);
+		observer.stop();
+	});
+
+	test("each checkout restores its own stored baseline on restart: a change made while the observer was down is published for that checkout alone", async () => {
+		const tree = twoCheckouts();
+		const store = new MemoryBaselines();
+		// A's stored baseline is an empty tree, so each of its documents is a change since it. B has none stored: its first scan is a baseline.
+		store.files.set(planningSessionId(tree, CHECKOUT_A), { root: CHECKOUT_A, snapshot: { records: [], truncated: false, unlisted: [] } });
+		const events: EventInput[] = [];
+		const observer = twoCheckoutObserver(tree, events, [], { baselines: store, baselineSaveIntervalMs: 0 });
+
+		const scans = await observer.scanAll();
+		expect(scans.map((entry) => entry.scan)).toMatchObject([{ state: "observed", outcome: "published" }, { state: "observed", outcome: "baseline" }]);
+		expect(events).toHaveLength(1);
+		await observer.idle();
+
+		// Each checkout saves its own baseline under its own session key.
+		expect(store.files.get(planningSessionId(tree, CHECKOUT_A))?.root).toBe(CHECKOUT_A);
+		expect(store.files.get(planningSessionId(tree, CHECKOUT_B))?.root).toBe(CHECKOUT_B);
+	});
 });

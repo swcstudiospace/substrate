@@ -93,6 +93,7 @@ import {
 	preflightIngestPages,
 	saveIngestRecords,
 	type IngestDeps,
+	type PlanningPage,
 	type IngestOutcome,
 	type IngestPage,
 	type IngestRecord,
@@ -205,7 +206,7 @@ import { corpusGapsReply, corpusReflectReply, docsFeedbackReply, type FeedbackSt
 import { RETRIEVAL_SWEEP_BATCH, type ReflectStore } from "./corpus/reflect-store.ts";
 import { RETRIEVAL_SWEEP_INTERVAL_MS, RetrievalRecorder, retrievalRowOf, sweepExpiredRetrievals, type RecorderCounters } from "./corpus/telemetry.ts";
 import { CorpusSloState, DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE, type CorpusRefresh } from "./corpus/slo.ts";
-import { memoryPlanningHashStore, planningDestinationKey, type PlanningHashStore } from "./planning-hash-store.ts";
+import { memoryPlanningHashStore, planningDestinationKey, planningPageKey, type PlanningHashStore } from "./planning-hash-store.ts";
 import { RailwayClient } from "./railway.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { dragonflyPresenceBackend } from "./planning/presence-client.ts";
@@ -1633,9 +1634,7 @@ export class Substrate {
 		emit: (event) => this.emit(event),
 		report: (line) => process.stderr.write(`[substrate] ${line}\n`),
 	});
-	/** The checkout whose `.planning/` tree the planning refresh reads: the process cwd unless a test injects one. */
-	private readonly planningBaseDir: string;
-	/** Per-path hash of the planning pages as the LightRAG plane last indexed them; null until the first pass. */
+	/** Per-key hash (`planningPageKey`) of the planning pages as the LightRAG plane last indexed them; null until the first pass. */
 	private planningHashes: Map<string, string> | null = null;
 	/** The store behind `planningHashes`, built on first use; null while `SUBSTRATE_PLANNING_HASH_STORE` is off. */
 	private planningHashStoreCache: PlanningHashStore | null = null;
@@ -1669,7 +1668,7 @@ export class Substrate {
 	private readonly emitChains = new Map<string, Promise<void>>();
 	/** Phase 50: the Dragonfly wake-up hints; null while `SUBSTRATE_EVENT_BUS` is off, or its endpoint is missing or refused. */
 	readonly eventBus: EventBus | null;
-	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Read-only: they write nothing. Disabled unless `SUBSTRATE_PLANNING_ROOT` is set. */
+	/** Phase 52: the planning reads behind `planning_status` and `planning_sessions`. Read-only: they write nothing. Disabled unless `SUBSTRATE_PLANNING_ROOTS` is set. */
 	readonly planning: PlanningReader;
 	/** Phase 53 (SOTA-09): the steering wiring. `inbox` is null unless steering is on and an audit sink is injected, so a write answers not-configured. */
 	readonly steering: SteeringWiring;
@@ -1713,7 +1712,6 @@ export class Substrate {
 			corpus?: { store?: CorpusStore; plane?: LightragBulkPlane; rootClock?: RootClock; anchorVerifier?: AnchorVerifier; nowMs?: () => number };
 			/** Tests inject the feedback, telemetry and gap tables; production builds them from the index. */
 			reflect?: ReflectStore;
-			planningBaseDir?: string;
 			desktop?: DesktopDriver | null;
 			railway?: RailwayClient;
 			/** Tests inject the bus through this factory; production builds it from config. */
@@ -1934,7 +1932,6 @@ export class Substrate {
 		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
 		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
 		this.rpcOverride = stores?.rpc ?? null;
-		this.planningBaseDir = stores?.planningBaseDir ?? process.cwd();
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
 		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
@@ -7219,23 +7216,30 @@ export class Substrate {
 		try {
 			await this.hydrateDocsSeen();
 			const roots = this.config.lightragPlanningRoots;
-			const pages = await scanIngestPages(this.planningBaseDir, roots);
+			const pages: PlanningPage[] = [];
+			for (const checkout of this.config.planningCheckouts) {
+				for (const page of await scanIngestPages(checkout.root, roots)) pages.push({ ...page, checkout: checkout.key });
+			}
 			await this.loadPlanningHashes();
 			const trigger = planningIngestTrigger(pages, this.planningHashes, roots);
 			if (!trigger.triggered) return;
-			const pending = new Set(trigger.paths);
+			const pending = new Set(trigger.keys);
 			const hashes = this.planningHashes ?? new Map<string, string>();
 			this.planningHashes = hashes;
-			for (const batch of batchPagesForIngest(pages.filter((page) => pending.has(page.path)))) {
+			for (const batch of batchPagesForIngest(pages.filter((page) => pending.has(planningPageKey(page.checkout, page.path)))) as PlanningPage[][]) {
 				const outcome = await this.ingestDocs({ dataset: PLANNING_DATASET, pages: batch }, "substrate");
 				if (!outcome.ok) break;
-				const failed = new Set(outcome.results.filter((result) => result.status === "failed").map((result) => result.path));
+				// A result names its page by source URL: a checkout's absolute file URL, which no other checkout shares. The repo path
+				// alone would not do, since two checkouts can hold the same relative path.
+				const keyBySource = new Map<string | undefined, string>(batch.map((page) => [page.source_url, planningPageKey(page.checkout, page.path)] as const));
+				const failed = new Set(outcome.results.filter((result) => result.status === "failed").map((result) => keyBySource.get(result.source_url)));
 				const stored = new Map<string, string>();
 				for (const page of batch) {
-					if (failed.has(page.path)) continue;
+					const key = planningPageKey(page.checkout, page.path);
+					if (failed.has(key)) continue;
 					const sha = planningPageSha(page);
-					hashes.set(page.path, sha);
-					stored.set(page.path, sha);
+					hashes.set(key, sha);
+					stored.set(key, sha);
 				}
 				await this.savePlanningHashes(stored);
 			}

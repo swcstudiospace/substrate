@@ -9,10 +9,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
-import type { IngestOutcome } from "./docs-ingest.ts";
+import { type IngestOutcome, type PlanningPage, planningIngestTrigger, planningPageSha } from "./docs-ingest.ts";
 import { normalizeEvent } from "./event.ts";
 import { IndexStore } from "./index-store.ts";
-import { bunPlanningHashStore, memoryPlanningHashStore, planningDestinationKey, type PlanningHashQuery, type PlanningHashStore } from "./planning-hash-store.ts";
+import { bunPlanningHashStore, memoryPlanningHashStore, planningDestinationKey, planningPageKey, type PlanningHashQuery, type PlanningHashStore } from "./planning-hash-store.ts";
+import { planningSessionId } from "./planning/checkout.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
 import { Substrate } from "./service.ts";
 import { defined } from "./test-support.ts";
 import type { EventInput } from "./types.ts";
@@ -42,10 +44,9 @@ interface Run {
 
 /** A server whose docs plane is a spy: every page it is asked to ingest succeeds unless `failing` names it. */
 function server(env: Record<string, string>, store: PlanningHashStore, failing: readonly string[] = []): Run {
-	const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.invalid", ...env }), {
+	const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.invalid", SUBSTRATE_DOCS_BACKEND: "lightrag", SUBSTRATE_PLANNING_ROOTS: dir, ...env }), {
 		index: null,
 		greptime: null,
-		planningBaseDir: dir,
 		planningHashes: store,
 	});
 	const batches: string[][] = [];
@@ -55,13 +56,14 @@ function server(env: Record<string, string>, store: PlanningHashStore, failing: 
 		return { event: normalizeEvent(event, null), stored: true };
 	});
 	spyOn(substrate, "ingestDocs").mockImplementation(async (input): Promise<IngestOutcome> => {
-		const paths = (Array.isArray(input.pages) ? input.pages : []).map((page: { path: string }) => page.path);
+		const pages = (Array.isArray(input.pages) ? input.pages : []) as Array<{ path: string; source_url: string }>;
+		const paths = pages.map((page) => page.path);
 		batches.push(paths);
 		return {
 			ok: true,
 			stripped_images: 0,
 			changed: true,
-			results: paths.map((path) => ({ path, source_url: `file:///${path}`, status: failing.includes(path) ? ("failed" as const) : ("ingested" as const), document_id: `doc-${path}`, content_sha256: "x" })),
+			results: pages.map((page) => ({ path: page.path, source_url: page.source_url, status: failing.includes(page.path) ? ("failed" as const) : ("ingested" as const), document_id: `doc-${page.path}`, content_sha256: "x" })),
 		};
 	});
 	return {
@@ -144,7 +146,8 @@ describe("the planning refresh with the hash store on", () => {
 	test("a page the plane failed is not stored, so the next process sends it again and only it", async () => {
 		const store = memoryPlanningHashStore();
 		await server(ON, store, [ROADMAP]).refresh();
-		expect([...(await store.load()).keys()]).toEqual([STATE]);
+		const checkout = planningSessionId(nodePlanningFs(), dir);
+		expect([...(await store.load()).keys()]).toEqual([planningPageKey(checkout, STATE)]);
 
 		const next = server(ON, store);
 		await next.refresh();
@@ -182,6 +185,37 @@ describe("the planning refresh with the hash store on", () => {
 		await write.refresh();
 		expect(write.batches.flat().sort()).toEqual([ROADMAP, STATE]);
 		expect(defined(write.events[0], "the planning note").payload?.action).toBe("docs.planning");
+	});
+});
+
+describe("two checkouts with the same relative path", () => {
+	const A = "wt-a";
+	const B = "wt-b";
+	const page = (checkout: string, body: string): PlanningPage => ({ checkout, path: STATE, body });
+
+	test("the store holds each checkout's hash under its own key", async () => {
+		const store = memoryPlanningHashStore();
+		await store.save(new Map([[planningPageKey(A, STATE), "hash-a"]]));
+		await store.save(new Map([[planningPageKey(B, STATE), "hash-b"]]));
+		const loaded = await store.load();
+		expect(loaded.size).toBe(2);
+		expect(loaded.get(planningPageKey(A, STATE))).toBe("hash-a");
+		expect(loaded.get(planningPageKey(B, STATE))).toBe("hash-b");
+	});
+
+	test("an edit to one checkout's page triggers that page alone, not the same path in the other checkout", () => {
+		const previous = new Map([[planningPageKey(A, STATE), planningPageSha(page(A, "alpha"))], [planningPageKey(B, STATE), planningPageSha(page(B, "beta"))]]);
+		const trigger = planningIngestTrigger([page(A, "alpha"), page(B, "beta, edited")], previous);
+		expect(trigger.triggered).toBe(true);
+		expect(trigger.keys).toEqual([planningPageKey(B, STATE)]);
+		expect(trigger.paths).toEqual([STATE]);
+	});
+
+	test("a first poll triggers both copies, and a repeat of the same pages triggers neither", () => {
+		const pages = [page(A, "alpha"), page(B, "beta")];
+		expect(planningIngestTrigger(pages, null).keys).toEqual([planningPageKey(A, STATE), planningPageKey(B, STATE)]);
+		const previous = new Map(pages.map((p) => [planningPageKey(p.checkout, p.path), planningPageSha(p)] as const));
+		expect(planningIngestTrigger(pages, previous).triggered).toBe(false);
 	});
 });
 

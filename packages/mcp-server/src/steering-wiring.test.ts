@@ -660,7 +660,7 @@ describe("the planning observer's baseline and liveness", () => {
 	}
 
 	function planningSubstrate(env: Record<string, string>, backend: RecordingPresenceBackend, tree: FakeTree): Substrate {
-		return new Substrate(loadConfig({ SUBSTRATE_PLANNING_ROOT: TREE_ROOT, ...env }), {
+		return new Substrate(loadConfig({ SUBSTRATE_PLANNING_ROOTS: TREE_ROOT, ...env }), {
 			index: null,
 			greptime: null,
 			planning: { presence: new DragonflyPresenceStore(backend), fs: tree, emit: async () => true },

@@ -1170,6 +1170,7 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		const page = (entity: string) => ({
 			path: ".planning/phases/01-graph/PLAN.md",
 			source_url: "file:///repo/.planning/phases/01-graph/PLAN.md",
+			checkout: "wt-0123456789abcdef01234567",
 			body: "# Plan\n\nThe plan body.",
 			graph: { phase: "01-graph", entities: [entity], relations: [] },
 		});

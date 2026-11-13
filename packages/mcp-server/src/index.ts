@@ -194,7 +194,7 @@ server.listen(config.port, config.host, () => {
 	void substrate.emitDbEndpoints();
 	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
 	const background = substrate.startRecall();
-	// Phase 52: the planning observer's scan timer. Off while SUBSTRATE_PLANNING_ROOT is unset; unref'd.
+	// Phase 52: the planning observer's scan timer. Off while SUBSTRATE_PLANNING_ROOTS is unset; unref'd.
 	substrate.startPlanning();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
 	if (background.inventory) process.stdout.write(`[substrate] hindsight inventory: on, every ${config.hindsightInventory.intervalS} s, read-only\n`);

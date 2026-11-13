@@ -438,22 +438,37 @@ describe("upload (POST /documents/upload, text fallback)", () => {
 		expect(await uploadDocument(PLAIN, UPLOAD_REQUEST, fake.fetch)).toEqual(shape);
 	});
 
-	test("storePlanningPage flattens the path, defaults commit to unpinned and heading_path to empty", async () => {
+	test("storePlanningPage names a planning page by its checkout and flattened path, and defaults commit and heading_path", async () => {
 		const fake = fakeLightrag({
 			"POST /documents/upload": [json({ data: { track_id: "trk-p" } })],
 		});
 		const outcome = await storePlanningPage(
 			PLAIN,
-			{ path: ".planning/phases/03-x/PLAN.md", sourceUrl: "file:///repo/.planning/phases/03-x/PLAN.md", body: "plan" },
+			{ checkout: "wt-a", path: ".planning/phases/03-x/PLAN.md", sourceUrl: "file:///repo/.planning/phases/03-x/PLAN.md", body: "plan" },
 			fake.fetch,
 		);
 		expect(outcome).toEqual({ ok: true, track_id: "trk-p" });
 		const form = formOf(fake.calls[0]);
 		const file = form.get("file");
 		if (!(file instanceof File)) throw new Error("file part missing");
-		expect(file.name).toBe(".planning__phases__03-x__PLAN.md");
+		expect(file.name).toBe("wt-a:.planning__phases__03-x__PLAN.md");
 		expect(form.get("commit")).toBe("unpinned");
 		expect(form.get("heading_path")).toBe("");
+	});
+
+	test("two checkouts with the same relative planning path upload under two names", async () => {
+		const fake = fakeLightrag({
+			"POST /documents/upload": [json({ data: { track_id: "trk-a" } }), json({ data: { track_id: "trk-b" } })],
+		});
+		const page = { path: ".planning/STATE.md", body: "state" } as const;
+		await storePlanningPage(PLAIN, { ...page, checkout: "wt-a", sourceUrl: "file:///a/.planning/STATE.md" }, fake.fetch);
+		await storePlanningPage(PLAIN, { ...page, checkout: "wt-b", sourceUrl: "file:///b/.planning/STATE.md" }, fake.fetch);
+		const names = fake.calls.map((call) => {
+			const file = formOf(call).get("file");
+			if (!(file instanceof File)) throw new Error("file part missing");
+			return file.name;
+		});
+		expect(names).toEqual(["wt-a:.planning__STATE.md", "wt-b:.planning__STATE.md"]);
 	});
 
 	test("storePlanningPage sends its commit and heading on the text fallback too", async () => {

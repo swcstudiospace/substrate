@@ -1,8 +1,9 @@
 /**
- * Planning settings from the environment: an unset root disables the plane, the defaults hold,
- * and every malformed or out-of-range value is a typed error rather than a fallback.
+ * Planning settings from the environment: an unset list disables the plane, the defaults hold, and every malformed,
+ * relative, duplicate or out-of-range value is a typed error rather than a fallback.
  */
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_FILES,
@@ -11,60 +12,137 @@ import {
 	PLANNING_MAX_BYTES_ENV,
 	PLANNING_MAX_FILES_ENV,
 	PLANNING_PRESENCE_TTL_ENV,
+	PLANNING_ROOTS_ENV,
 	PLANNING_SCAN_INTERVAL_ENV,
-	PLANNING_ROOT_ENV,
 	loadPlanningSettings,
 	planningConfigWarnings,
 } from "./config.ts";
 
 const DEFAULTS = { presenceTtlS: 90, maxFiles: 500, maxBytes: 262_144, scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS };
 
+/** The key `planningSessionId` gives a root: `wt-` and the first 24 hex digits of its sha256. Pinned here, not imported. */
+function keyOf(root: string): string {
+	return `wt-${createHash("sha256").update(root).digest("hex").slice(0, 24)}`;
+}
+
 describe("loadPlanningSettings: the plane is off unless a root is set", () => {
-	test("an empty environment is disabled, with the documented defaults and no root", () => {
+	test("an empty environment is disabled, with the documented defaults and no checkouts", () => {
 		const result = loadPlanningSettings({});
-		expect(result).toEqual({ ok: true, settings: { enabled: false, ...DEFAULTS } });
+		expect(result).toEqual({ ok: true, settings: { enabled: false, checkouts: [], ...DEFAULTS } });
 		expect(DEFAULT_PRESENCE_TTL_S).toBe(90);
 		expect(DEFAULT_MAX_FILES).toBe(500);
 		expect(DEFAULT_MAX_BYTES).toBe(262_144);
 	});
 
-	test("a blank root is the same as unset: disabled", () => {
-		expect(loadPlanningSettings({ [PLANNING_ROOT_ENV]: "   " })).toEqual({ ok: true, settings: { enabled: false, ...DEFAULTS } });
+	test("a blank list, or one holding only commas and blanks, is the same as unset: disabled", () => {
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "   " })).toEqual({ ok: true, settings: { enabled: false, checkouts: [], ...DEFAULTS } });
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: " , ,, " })).toEqual({ ok: true, settings: { enabled: false, checkouts: [], ...DEFAULTS } });
 	});
 
-	test("an absolute root enables the plane and is returned trimmed", () => {
-		const result = loadPlanningSettings({ [PLANNING_ROOT_ENV]: "  /srv/checkout  " });
-		expect(result).toEqual({ ok: true, settings: { enabled: true, root: "/srv/checkout", ...DEFAULTS } });
+	test("the retired single-root variable is ignored: it enables nothing", () => {
+		expect(loadPlanningSettings({ SUBSTRATE_PLANNING_ROOT: "/srv/checkout" })).toEqual({ ok: true, settings: { enabled: false, checkouts: [], ...DEFAULTS } });
 	});
 
-	test("a relative root is refused", () => {
-		expect(loadPlanningSettings({ [PLANNING_ROOT_ENV]: "checkout" })).toEqual({
-			ok: false,
-			errors: [{ key: PLANNING_ROOT_ENV, reason: "not-absolute" }],
+	test("an absolute root enables the plane; the root is returned trimmed and keyed by planningSessionId", () => {
+		const result = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "  /srv/checkout  " });
+		expect(result).toEqual({
+			ok: true,
+			settings: { enabled: true, checkouts: [{ root: "/srv/checkout", key: keyOf("/srv/checkout") }], ...DEFAULTS },
 		});
 	});
 
-	test("a root with a NUL byte is refused", () => {
-		expect(loadPlanningSettings({ [PLANNING_ROOT_ENV]: "/srv/\0x" })).toEqual({
+	test("the key has the planningSessionId shape", () => {
+		const result = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/checkout" });
+		if (!result.ok || !result.settings.enabled) throw new Error("expected an enabled plane");
+		expect(result.settings.checkouts[0]?.key).toMatch(/^wt-[0-9a-f]{24}$/);
+	});
+
+	test("several roots keep their order; blank entries are dropped and every entry is trimmed", () => {
+		const result = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: " /srv/a , ,/srv/b,  /srv/c ," });
+		expect(result).toEqual({
+			ok: true,
+			settings: {
+				enabled: true,
+				checkouts: [
+					{ root: "/srv/a", key: keyOf("/srv/a") },
+					{ root: "/srv/b", key: keyOf("/srv/b") },
+					{ root: "/srv/c", key: keyOf("/srv/c") },
+				],
+				...DEFAULTS,
+			},
+		});
+	});
+
+	test("distinct roots get distinct keys, so two checkouts with the same relative paths never share state", () => {
+		const result = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/a,/srv/b" });
+		if (!result.ok || !result.settings.enabled) throw new Error("expected an enabled plane");
+		const [first, second] = result.settings.checkouts;
+		expect(first?.key).not.toBe(second?.key);
+	});
+
+	test("a relative entry refuses the whole list, reported once", () => {
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/a,checkout,./other" })).toEqual({
 			ok: false,
-			errors: [{ key: PLANNING_ROOT_ENV, reason: "invalid-characters" }],
+			errors: [{ key: PLANNING_ROOTS_ENV, reason: "not-absolute" }],
+		});
+	});
+
+	test("an entry with a NUL byte is refused", () => {
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/\0x" })).toEqual({
+			ok: false,
+			errors: [{ key: PLANNING_ROOTS_ENV, reason: "invalid-characters" }],
+		});
+	});
+
+	test("the same root twice refuses the list as a duplicate", () => {
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/a,/srv/b,/srv/a" })).toEqual({
+			ok: false,
+			errors: [{ key: PLANNING_ROOTS_ENV, reason: "duplicate" }],
+		});
+	});
+
+	test("duplicates are compared as resolved paths: a trailing slash or a dot segment is the same checkout", () => {
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/a,/srv/a/" })).toEqual({
+			ok: false,
+			errors: [{ key: PLANNING_ROOTS_ENV, reason: "duplicate" }],
+		});
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/a,/srv/./a" })).toEqual({
+			ok: false,
+			errors: [{ key: PLANNING_ROOTS_ENV, reason: "duplicate" }],
+		});
+	});
+
+	test("each refusal reason is reported once, in the order it was first seen", () => {
+		expect(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "relative,/srv/a,/srv/a,other,/srv/\0" })).toEqual({
+			ok: false,
+			errors: [
+				{ key: PLANNING_ROOTS_ENV, reason: "not-absolute" },
+				{ key: PLANNING_ROOTS_ENV, reason: "duplicate" },
+				{ key: PLANNING_ROOTS_ENV, reason: "invalid-characters" },
+			],
 		});
 	});
 
 	test("a malformed scan interval is a boot warning that names its key and never its value, and a valid environment has none", () => {
-		const refused = loadPlanningSettings({ [PLANNING_ROOT_ENV]: "/srv/checkout", [PLANNING_SCAN_INTERVAL_ENV]: "abc" });
+		const refused = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/checkout", [PLANNING_SCAN_INTERVAL_ENV]: "abc" });
 		const warnings = planningConfigWarnings(refused);
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain(PLANNING_SCAN_INTERVAL_ENV);
 		expect(warnings.join("\n")).not.toContain("abc");
-		expect(planningConfigWarnings(loadPlanningSettings({ [PLANNING_ROOT_ENV]: "/srv/checkout" }))).toEqual([]);
+		expect(planningConfigWarnings(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/checkout" }))).toEqual([]);
+	});
+
+	test("a refused roots list names the key and the reason in its warning, never the path", () => {
+		const warnings = planningConfigWarnings(loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/secret-checkout,/srv/secret-checkout" }));
+		expect(warnings).toEqual([`${PLANNING_ROOTS_ENV} is duplicate; the planning plane stays off until it is fixed`]);
+		expect(warnings.join("\n")).not.toContain("secret-checkout");
 	});
 });
 
 describe("loadPlanningSettings: numeric settings", () => {
 	test("valid values are taken as given", () => {
 		const env = { [PLANNING_PRESENCE_TTL_ENV]: "120", [PLANNING_MAX_FILES_ENV]: "40", [PLANNING_MAX_BYTES_ENV]: "65536", [PLANNING_SCAN_INTERVAL_ENV]: "2500" };
-		expect(loadPlanningSettings(env)).toEqual({ ok: true, settings: { enabled: false, presenceTtlS: 120, maxFiles: 40, maxBytes: 65_536, scanIntervalMs: 2_500 } });
+		expect(loadPlanningSettings(env)).toEqual({ ok: true, settings: { enabled: false, checkouts: [], presenceTtlS: 120, maxFiles: 40, maxBytes: 65_536, scanIntervalMs: 2_500 } });
 	});
 
 	test.each([
@@ -111,7 +189,7 @@ describe("loadPlanningSettings: numeric settings", () => {
 
 	test("every bad key is reported in one result", () => {
 		const result = loadPlanningSettings({
-			[PLANNING_ROOT_ENV]: "relative",
+			[PLANNING_ROOTS_ENV]: "relative",
 			[PLANNING_PRESENCE_TTL_ENV]: "x",
 			[PLANNING_MAX_FILES_ENV]: "0",
 		});
@@ -120,7 +198,7 @@ describe("loadPlanningSettings: numeric settings", () => {
 			errors: [
 				{ key: PLANNING_PRESENCE_TTL_ENV, reason: "not-integer" },
 				{ key: PLANNING_MAX_FILES_ENV, reason: "out-of-range", min: 1, max: 10_000 },
-				{ key: PLANNING_ROOT_ENV, reason: "not-absolute" },
+				{ key: PLANNING_ROOTS_ENV, reason: "not-absolute" },
 			],
 		});
 	});

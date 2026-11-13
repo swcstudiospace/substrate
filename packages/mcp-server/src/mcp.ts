@@ -2396,23 +2396,25 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	/**
-	 * The planning reads (phase 52, SOTA-08). Both are typed: a plane with no root answers `disabled`, never an error.
+	 * The planning reads (phase 52, SOTA-08). Both are typed: a plane with no checkouts answers `disabled`, never an error. Each takes an optional `checkout` key.
 	 * Both are read-only and write nothing. Changes are published, and checkouts heartbeat, by the server's planning observer.
 	 */
 	server.registerTool(
 		"planning_status",
 		{
-			title: "Planning index for the configured checkout",
+			title: "Planning index for the configured checkouts",
 			description:
-				"Counts, sha256 hashes and error records for the planning documents under the configured checkout's .planning/, and the " +
+				"Counts, sha256 hashes and error records for the planning documents under each configured checkout's .planning/, and the " +
 				"GSD-Core `position` (milestone, phase, plan, step, status, progress) parsed from STATE.md and ROADMAP.md, redacted and " +
-				"capped; a missing or malformed file is an entry in its errors. Never a file body and never a frontmatter value. An unset " +
-				"root answers disabled. A read: it writes nothing and changes no file, and it sends no heartbeat. Changes are published by " +
+				"capped; a missing or malformed file is an entry in its errors. Never a file body and never a frontmatter value. The top-level " +
+				"fields are the selected checkout's (the one `checkout` names, else the first configured); `checkouts` holds one entry per " +
+				"checkout, or only the named one. An unset roots list answers disabled; an unknown `checkout` answers unavailable with reason " +
+				"unknown-checkout. A read: it writes nothing and changes no file, and it sends no heartbeat. Changes are published by " +
 				"the server's planning observer, not by this tool.",
-			inputSchema: {},
+			inputSchema: { checkout: z.string().optional().describe("The checkout key to read: `wt-` and 24 hex digits, as the reply names it. Omitted: every configured checkout.") },
 			annotations: { readOnlyHint: true },
 		},
-		async () => json(await substrate.planning.status()),
+		async ({ checkout }) => json(await substrate.planning.status(checkout)),
 	);
 
 	server.registerTool(
@@ -2421,14 +2423,16 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Planning presence for sessions",
 			description:
 				"The sessions heartbeating into the planning plane, each active, stale or unknown against the server's own clock. " +
-				"An unset root answers disabled; an unset cache endpoint answers unavailable. A read: it writes nothing and sends no " +
-				"heartbeat. The server's planning observer heartbeats a checkout when it sees that checkout change a planning document, " +
-				"and refreshes a quiet checkout's liveness on each scan, so a session idle for hours stays active; `idleForMs` is the " +
-				"time since its last planning change.",
-			inputSchema: {},
+				"The top-level fields are the selected checkout's (the one `checkout` names, else the first configured); `checkouts` holds " +
+				"each checkout's own session and the conflicts it takes part in, or only the named one. An unset roots list answers disabled; " +
+				"an unset cache endpoint answers unavailable; an unknown `checkout` answers unavailable with reason unknown-checkout. A read: " +
+				"it writes nothing and sends no heartbeat. The server's planning observer heartbeats a checkout when it sees that checkout " +
+				"change a planning document, and refreshes a quiet checkout's liveness on each scan, so a session idle for hours stays active; " +
+				"`idleForMs` is the time since its last planning change.",
+			inputSchema: { checkout: z.string().optional().describe("The checkout key to read: `wt-` and 24 hex digits, as the reply names it. Omitted: every configured checkout.") },
 			annotations: { readOnlyHint: true },
 		},
-		async () => json(await substrate.planning.sessions()),
+		async ({ checkout }) => json(await substrate.planning.sessions(checkout)),
 	);
 
 	/**

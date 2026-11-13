@@ -41,6 +41,7 @@
  * validated as a JWT first and fail every call in API-key mode.
  */
 import type { LightragConfig } from "../config.ts";
+import { planningPageKey } from "../planning-hash-store.ts";
 import { redact } from "../redact.ts";
 import type { CitationGraphProvenance, PlanningGraphRelation, RagLightragChunk, SearchGraphStats } from "../types.ts";
 import type { RagflowChunk } from "./ragflow.ts";
@@ -600,6 +601,8 @@ export interface StorePlanningPageRequest {
 	path: string;
 	/** The page's source URL (the scan's `file://` URL). */
 	sourceUrl: string;
+	/** The planning checkout key a `.planning/` page is held under: its document is named `<checkout>:<path>`. Other pages leave it unset. */
+	checkout?: string;
 	/** Sanitized markdown to index. */
 	body: string;
 	/** The commit the ingest carries, or omitted for unpinned. */
@@ -621,7 +624,7 @@ export async function storePlanningPage(
 	return uploadDocument(
 		config,
 		{
-			name: documentName(request.path),
+			name: documentName(request.checkout === undefined ? request.path : planningPageKey(request.checkout, request.path)),
 			content: request.body,
 			metadata: {
 				source_url: request.sourceUrl,

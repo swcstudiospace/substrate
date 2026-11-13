@@ -25,7 +25,7 @@ import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
-import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
+import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningCheckout, type PlanningConfigResult } from "./planning/config.ts";
 import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
@@ -768,8 +768,10 @@ export interface SubstrateConfig {
 	eventIdempotencyRejected: string | null;
 	/** `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): the Dragonfly wake-up hints. See `EventBusSettings`. */
 	eventBus: EventBusSettings;
-	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08): the planning root, presence window and read bounds. See `planning/config.ts`. */
+	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08; multi-root v1.7): the planning roots, presence window and read bounds. See `planning/config.ts`. */
 	planning: PlanningConfigResult;
+	/** `SUBSTRATE_PLANNING_ROOTS`: the checkouts whose `.planning/` the plane reads, each keyed by `planningSessionId`. Empty when the plane is off or its settings are refused. */
+	planningCheckouts: readonly PlanningCheckout[];
 	/** `SUBSTRATE_PLANNING_CHECKPOINT_DIR` (phase 53, SOTA-09): where completion checkpoints are kept durably. Unset keeps them in memory. See `planning/checkpoint-store.ts`. */
 	planningCheckpoint: CheckpointDirectoryResult;
 	/** `SUBSTRATE_PLANNING_STEERING*` (phase 53, SOTA-09): the steering switch, principal allowlist and rate. See `planning/steering.ts`. */
@@ -1134,6 +1136,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		process.stderr.write("[substrate] SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off\n");
 	}
 	const cachePreload = cache.cacheEnabled ? cachePreloadRequested : { ...cachePreloadRequested, enabled: false };
+	const planning = loadPlanningSettings(env);
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -1301,8 +1304,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
 		// Phase 50 (D50-g): the bus rides the cache endpoint, and is off with a reason when that endpoint is missing or refused.
 		eventBus: loadEventBusSettings(env, cache),
-		// Phase 52 (SOTA-08): the planning plane's root and limits. Environment only; a bad value is a typed result.
-		planning: loadPlanningSettings(env),
+		// Phase 52 (SOTA-08): the planning plane's roots and limits. Environment only; a bad value is a typed result.
+		planning,
+		planningCheckouts: planning.ok ? planning.settings.checkouts : [],
 		// Phase 53 (SOTA-09): the durable checkpoint directory. Unset keeps checkpoints in memory; a bad value is a typed result.
 		planningCheckpoint: loadCheckpointDirectory(env),
 		// Phase 53 (SOTA-09): the steering switch, allowlist and rate. Environment only; a bad value is a typed result.
