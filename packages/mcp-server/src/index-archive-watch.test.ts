@@ -250,6 +250,7 @@ describe("the lease-table tune is off unless asked, and the DDL has exactly one 
 		expect([...source.matchAll(/drop index if exists (\w+)/g)].map((match) => match[1])).toEqual([
 			"worktrees_repo_lower_seen_idx",
 			"planning_steering_audit_idempotency_key",
+			"memory_forgotten_at_idx",
 			"memory_reviews_hash_idx",
 		]);
 	});

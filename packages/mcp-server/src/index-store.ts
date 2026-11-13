@@ -340,6 +340,11 @@ export interface MigrationStep {
 	down?: string;
 	phase?: "expand" | "contract";
 	optIn?: MigrationOptIn;
+	/**
+	 * `false`: `migrate()` runs the step outside any transaction, one statement at a time, and ledgers it after the last one. For
+	 * DDL Postgres refuses inside a transaction block, such as `create index concurrently`. Absent is transactional.
+	 */
+	transactional?: false;
 }
 
 /** The first version that must declare `down` and `phase`. Steps 1..32 predate the convention and are frozen as they are. */
@@ -1028,11 +1033,59 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			alter table memory_entries add column if not exists forgotten_at timestamptz;
 			create index if not exists memory_forgotten_at_idx on memory_entries (forgotten_at) where forgotten_at is not null`,
 	},
+	// Forgotten-at index built without a table lock (v1.8 phase 78, after step 47). Step 47 builds the same index non-concurrently
+	// inside its transaction, which holds ACCESS EXCLUSIVE on `memory_entries` for the build. This step builds it CONCURRENTLY, outside
+	// any transaction (`transactional: false`), and is a no-op where a valid index already exists. A failed concurrent build leaves an
+	// INVALID index that `if not exists` would skip. This step never drops an index: it raises when it finds one INVALID, so the migration
+	// is refused and nothing is skipped silently. The operator drops that index by hand (docs/runbooks/rollback-compat.md, "forget time"), then
+	// restarts; the build below then runs. The ledger row is written after the build succeeds, so a failure is retried on the next boot.
+	// Step 47 is unchanged: its text is digest-pinned.
+	// OPERATORS: the build can outlast migrate's statement_timeout on a large table; then it fails and leaves an invalid index, and every
+	// boot refuses until an operator runs `drop index concurrently if exists memory_forgotten_at_idx`. Rehearse on a restored dump before production.
+	{
+		version: 48,
+		name: "memory_entries_forgotten_at_index_concurrent",
+		transactional: false,
+		phase: "expand",
+		down: `drop index if exists memory_forgotten_at_idx`,
+		sql: `
+			do $$
+			begin
+				if exists (
+					select 1
+					from pg_index
+					join pg_class on pg_class.oid = pg_index.indexrelid
+					where pg_class.relname = 'memory_forgotten_at_idx' and not pg_index.indisvalid
+				) then
+					raise exception 'memory_forgotten_at_idx is INVALID after a failed concurrent build; the migration is refused until an operator drops it: drop index concurrently if exists memory_forgotten_at_idx (see docs/runbooks/rollback-compat.md, forget time)';
+				end if;
+			end
+			$$;
+			create index concurrently if not exists memory_forgotten_at_idx on memory_entries (forgotten_at) where forgotten_at is not null`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
 export function applicableMigrationSteps(optIns: MigrationOptIns): ReadonlyArray<(typeof MIGRATION_STEPS)[number]> {
 	return MIGRATION_STEPS.filter((step) => step.optIn === undefined || optIns[step.optIn]);
+}
+
+/**
+ * The statements of a step's `sql`, split on `;` outside `'…'` literals and `$tag$…$tag$` bodies, so a `do $$ … $$` block stays
+ * whole. Each is trimmed and empty ones are dropped. A non-transactional step is sent one statement at a time with this: a
+ * multi-statement simple query runs as one implicit transaction, and `create index concurrently` refuses to run inside one.
+ */
+export function migrationStatements(sql: string): string[] {
+	const statements: string[] = [];
+	let current = "";
+	for (const token of sql.match(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|'(?:[^']|'')*'|[\s\S]/g) ?? []) {
+		if (token === ";") {
+			statements.push(current);
+			current = "";
+		} else current += token;
+	}
+	statements.push(current);
+	return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0);
 }
 
 /**
@@ -1177,6 +1230,12 @@ export class IndexStore implements MemoryStore {
 			for (const step of applicableMigrationSteps(this.migrationOptIns)) {
 				const present = await reserved`select version from schema_migrations where version = ${step.version}`;
 				if (present.length > 0) continue;
+				if (step.transactional === false) {
+					// Outside any transaction: each statement is sent alone (see migrationStatements). The DDL lock_timeout set above applies.
+					for (const statement of migrationStatements(step.sql)) await reserved.unsafe(statement);
+					await reserved`insert into schema_migrations (version, name) values (${step.version}, ${step.name})`;
+					continue;
+				}
 				await reserved`begin`;
 				try {
 					await reserved.unsafe(step.sql);

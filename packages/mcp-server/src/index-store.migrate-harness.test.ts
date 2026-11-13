@@ -5,7 +5,8 @@
  *
  *   - the advisory lock is taken before any DDL and released in `finally`;
  *   - `lock_timeout` and `statement_timeout` are set, then RESET;
- *   - each missing version runs in its own BEGIN..COMMIT together with its `schema_migrations` insert;
+ *   - each missing transactional version runs in its own BEGIN..COMMIT together with its `schema_migrations` insert; a
+ *     non-transactional one (step 48) runs its statements one at a time with no BEGIN;
  *   - a failing step rolls back, inserts no ledger row, rethrows, and still releases the lock;
  *   - a second run over a fully ledgered state issues no DDL;
  *   - a partially ledgered state applies exactly the missing versions, in order.
@@ -23,12 +24,15 @@ import {
 	PLANNING_HASH_TABLE_REPAIR,
 	applicableMigrationSteps,
 	indexMigrateLockKey,
+	migrationStatements,
 } from "./index-store.ts";
 
 const squash = (text: string): string => text.replace(/\s+/g, " ").trim();
 
-/** Normalised step text -> version, so a recorded `unsafe(step.sql)` is labelled `ddl <version>`. */
-const DDL_VERSION = new Map(MIGRATION_STEPS.map((step) => [squash(step.sql), step.version]));
+/** Normalised statement text -> version, so a recorded `unsafe(...)` is labelled `ddl <version>`. A transactional step is one unit; a non-transactional step is one unit per statement. */
+const DDL_VERSION = new Map(
+	MIGRATION_STEPS.flatMap((step) => (step.transactional === false ? migrationStatements(step.sql) : [step.sql]).map((text) => [squash(text), step.version] as const)),
+);
 
 interface FakeOptions {
 	/** Versions already in `schema_migrations`. */
@@ -50,6 +54,7 @@ function fakeIndex(options: FakeOptions = {}) {
 	const tables = new Set<string>();
 	const columns = new Set<string>();
 	let pending: number[] = [];
+	let inTransaction = false;
 	let lockTimeoutMs: number | undefined;
 
 	const reserved = Object.assign(
@@ -77,24 +82,28 @@ function fakeIndex(options: FakeOptions = {}) {
 			}
 			if (query === "begin") {
 				events.push("begin");
+				inTransaction = true;
 				return [];
 			}
 			if (query.startsWith("insert into schema_migrations")) {
 				const version = values[0] as number;
 				expect(values[1]).toBe(MIGRATION_STEPS.find((step) => step.version === version)?.name);
 				events.push(`ledger ${version}`);
-				pending.push(version);
+				if (inTransaction) pending.push(version);
+				else ledger.add(version);
 				return [];
 			}
 			if (query === "commit") {
 				events.push("commit");
 				for (const version of pending) ledger.add(version);
 				pending = [];
+				inTransaction = false;
 				return [];
 			}
 			if (query === "rollback") {
 				events.push("rollback");
 				pending = [];
+				inTransaction = false;
 				return [];
 			}
 			events.push(`unexpected query: ${query}`);
@@ -168,12 +177,22 @@ const PROLOGUE = [
 ];
 const EPILOGUE = ["drop memory_reviews_hash_idx", "repair planning_page_hashes", "unlock", "reset lock_timeout", "reset statement_timeout", "release"];
 
+const STEP_BY_VERSION = new Map(MIGRATION_STEPS.map((step) => [step.version, step]));
+
+/** A transactional step is one BEGIN..COMMIT; a non-transactional step (48) has no transaction and one DDL event per statement. */
+const transactional = (version: number): boolean => STEP_BY_VERSION.get(version)?.transactional !== false;
+
 /** What `migrate()` must send when `applied` is already in the ledger and nothing fails. */
 function expectedRun(applied: ReadonlySet<number>, versions: readonly number[] = ALL): string[] {
 	const body: string[] = [];
 	for (const version of versions) {
 		body.push(`check ${version}`);
-		if (!applied.has(version)) body.push("begin", `ddl ${version}`, `ledger ${version}`, "commit");
+		if (applied.has(version)) continue;
+		if (transactional(version)) body.push("begin", `ddl ${version}`, `ledger ${version}`, "commit");
+		else {
+			const statements = migrationStatements(STEP_BY_VERSION.get(version)?.sql ?? "");
+			body.push(...statements.map(() => `ddl ${version}`), `ledger ${version}`);
+		}
 	}
 	return [...PROLOGUE, ...body, ...EPILOGUE];
 }
@@ -181,8 +200,9 @@ function expectedRun(applied: ReadonlySet<number>, versions: readonly number[] =
 const isDdl = (event: string): boolean => event.startsWith("ddl ") || event === "begin" || event === "commit" || event.startsWith("ledger ");
 
 describe("IndexStore.migrate() against a fake connection", () => {
-	test("the harness itself: every step's text is distinct, so a recorded DDL maps to exactly one version", () => {
-		expect(DDL_VERSION.size).toBe(MIGRATION_STEPS.length);
+	test("the harness itself: every statement's text is distinct, so a recorded DDL maps to exactly one version", () => {
+		const units = MIGRATION_STEPS.reduce((count, step) => count + (step.transactional === false ? migrationStatements(step.sql).length : 1), 0);
+		expect(DDL_VERSION.size).toBe(units);
 	});
 
 	test("the opt-in steps 33 and 34 are skipped by default: no check, no DDL, no ledger row", async () => {
@@ -290,14 +310,24 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect([...ledger]).toEqual(ALL.filter((version) => version < failAt));
 	});
 
-	test("each step is its own transaction: ledger insert between its DDL and its COMMIT, never across steps", async () => {
+	test("each transactional step is its own transaction, with the ledger insert between its DDL and its COMMIT; step 48 has no BEGIN", async () => {
 		const { store, events } = fakeIndex();
 		await store.migrate();
 		const body = events.slice(PROLOGUE.length, events.length - EPILOGUE.length);
-		expect(body).toHaveLength(ALL.length * 5);
-		ALL.forEach((version, index) => {
-			expect(body.slice(index * 5, index * 5 + 5)).toEqual([`check ${version}`, "begin", `ddl ${version}`, `ledger ${version}`, "commit"]);
-		});
+		let at = 0;
+		for (const version of ALL) {
+			if (transactional(version)) {
+				expect(body.slice(at, at + 5)).toEqual([`check ${version}`, "begin", `ddl ${version}`, `ledger ${version}`, "commit"]);
+				at += 5;
+			} else {
+				const sql = STEP_BY_VERSION.get(version)?.sql ?? "";
+				const run = [`check ${version}`, ...migrationStatements(sql).map(() => `ddl ${version}`), `ledger ${version}`];
+				expect(body.slice(at, at + run.length)).toEqual(run);
+				at += run.length;
+			}
+		}
+		expect(at).toBe(body.length);
+		expect(body.filter((event) => event === "begin")).toHaveLength(ALL.filter(transactional).length);
 	});
 
 	test("a failing step rolls back, inserts no ledger row, rethrows, and still releases the lock", async () => {
@@ -333,7 +363,7 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		const k = 10;
 		const { store, events, ledger } = fakeIndex({ applied: ALL.filter((version) => version <= k) });
 		await store.migrate();
-		const applied = events.filter((event) => event.startsWith("ddl ")).map((event) => Number(event.slice(4)));
+		const applied = [...new Set(events.filter((event) => event.startsWith("ddl ")).map((event) => Number(event.slice(4))))];
 		expect(applied).toEqual(ALL.filter((version) => version > k));
 		expect(events).toEqual(expectedRun(new Set(ALL.filter((version) => version <= k))));
 		expect([...ledger].sort((a, b) => a - b)).toEqual(ALL);
@@ -344,6 +374,36 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		const { store, events } = fakeIndex({ applied: ALL.filter((version) => version !== missing) });
 		await store.migrate();
 		expect(events.filter((event) => event.startsWith("ddl "))).toEqual([`ddl ${missing}`]);
+	});
+
+	test("step 48 runs outside any transaction: its statements go one at a time, and its ledger row follows the last one", async () => {
+		const { store, events, ledger } = fakeIndex({ applied: ALL.filter((version) => version !== 48) });
+		await store.migrate();
+		const at = events.indexOf("check 48");
+		expect(events[at - 1]).toBe("check 47");
+		expect(events.slice(at, at + 4)).toEqual(["check 48", "ddl 48", "ddl 48", "ledger 48"]);
+		expect(events[at + 4]).toBe("drop memory_reviews_hash_idx");
+		expect(ledger.has(48)).toBe(true);
+	});
+
+	test("a failing step 48 has no BEGIN or ROLLBACK, writes no ledger row, rethrows, and still releases the lock", async () => {
+		const { store, events, ledger } = fakeIndex({ applied: ALL.filter((version) => version !== 48), failDdlAt: 48 });
+		await expect(store.migrate()).rejects.toThrow("boom at step 48");
+		expect(events.slice(-6)).toEqual(["check 48", "ddl 48", "unlock", "reset lock_timeout", "reset statement_timeout", "release"]);
+		expect(events).not.toContain("rollback");
+		expect(events).not.toContain("ledger 48");
+		expect(ledger.has(48)).toBe(false);
+	});
+
+	test("migrationStatements keeps a dollar-quoted block and quoted semicolons whole, and splits the rest", () => {
+		const step48 = MIGRATION_STEPS.find((candidate) => candidate.version === 48);
+		const statements = migrationStatements(step48?.sql ?? "");
+		expect(statements).toHaveLength(2);
+		expect(statements[0]?.startsWith("do $$")).toBe(true);
+		expect(statements[0]?.endsWith("$$")).toBe(true);
+		expect(statements[1]?.startsWith("create index concurrently if not exists memory_forgotten_at_idx")).toBe(true);
+		expect(migrationStatements("select 'a;b'; select 2;")).toEqual(["select 'a;b'", "select 2"]);
+		expect(migrationStatements("select 'it''s;'; select $t$x;y$t$")).toEqual(["select 'it''s;'", "select $t$x;y$t$"]);
 	});
 
 	test("a failed unlock discards the connection instead of returning it to the pool, and the error surfaces", async () => {

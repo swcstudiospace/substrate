@@ -43,7 +43,7 @@ export interface ContractAllowlists {
 /**
  * The exceptions for the real steps.
  *
- * - `idempotence`: none. Steps 1..33 are all `create … if not exists` or `add column if not exists`.
+ * - `idempotence`: step 48 only (see `REAL_ALLOWLISTS.idempotence`). Every other step's statements are `create … if not exists` or `add column if not exists`.
  * - `destructive`: none. The one destructive statement in the migrator, `drop index if exists memory_reviews_hash_idx`,
  *   lives in `IndexStore.migrate()` itself and is deliberately not a ledgered step.
  * - `tables`: `schema_migrations` is the ledger `migrate()` creates for itself (it is not a step, listed so a step that
@@ -53,7 +53,9 @@ export interface ContractAllowlists {
  *   host's next report rebuilds, so an archive of it would only restore stale paths.
  */
 export const REAL_ALLOWLISTS: ContractAllowlists = {
-	idempotence: {},
+	idempotence: {
+		48: "a non-transactional step whose do block only checks memory_forgotten_at_idx and raises when it is INVALID; the classifier does not read do blocks, and the build is create … if not exists, so a re-run is safe",
+	},
 	destructive: {},
 	tables: {
 		schema_migrations: "the migration ledger that IndexStore.migrate() creates itself; it is not archive data",
@@ -250,6 +252,18 @@ describe("the real MIGRATION_STEPS satisfy the contract", () => {
 		expect(step41[0]?.sql).not.toContain("add column");
 	});
 
+	test("step 48 (forgotten-at index, concurrent) is non-transactional and expand; its up drops nothing and refuses an INVALID index, and its down drops the index it creates", () => {
+		const step48 = MIGRATION_STEPS.filter((candidate) => candidate.version === 48);
+		expect(step48.map((candidate) => candidate.name)).toEqual(["memory_entries_forgotten_at_index_concurrent"]);
+		expect(normalizedStatements(step48[0]?.sql ?? "").filter((statement) => statement.startsWith("drop "))).toEqual([]);
+		expect(step48[0]?.sql).toContain("raise exception 'memory_forgotten_at_idx is INVALID");
+		expect(step48[0]?.transactional).toBe(false);
+		expect(step48[0]?.phase).toBe("expand");
+		expect(step48[0]?.down).toBe("drop index if exists memory_forgotten_at_idx");
+		expect(step48[0]?.sql).toContain("create index concurrently if not exists memory_forgotten_at_idx on memory_entries (forgotten_at) where forgotten_at is not null");
+		expect(checkMigrationSteps(step48)).toEqual([]);
+	});
+
 	test("the applied text of every step matches the committed digest fixture", () => {
 		expect(digestViolations(MIGRATION_STEPS, loadFixture()).join("\n")).toBe("");
 	});
@@ -310,6 +324,13 @@ describe("rule (a): idempotence", () => {
 			step(3, "alter table a add column if not exists b int not null default 0, add column if not exists c text"),
 		];
 		expect(checkMigrationSteps(good, allowTables("a"))).toEqual([]);
+	});
+
+	test("create index concurrently if not exists is idempotent; without if not exists it is reported", () => {
+		expect(checkMigrationSteps([step(1, "create index concurrently if not exists a_idx on a (id)")], allowTables("a"))).toEqual([]);
+		expect(checkMigrationSteps([step(1, "create index concurrently a_idx on a (id)")], allowTables("a"))).toEqual([
+			"step 1 (s1): statement is not idempotent: create index concurrently a_idx on a (id)",
+		]);
 	});
 
 	test("create table without if not exists is reported with its text", () => {

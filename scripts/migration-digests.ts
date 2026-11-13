@@ -176,7 +176,7 @@ export function splitTopLevel(text: string): string[] {
 }
 
 const CREATE_TABLE = /^create table if not exists ([\w.]+) \(/;
-const CREATE_INDEX = /^create (?:unique )?index if not exists ([\w.]+) on ([\w.]+)/;
+const CREATE_INDEX = /^create (?:unique )?index (?:concurrently )?if not exists ([\w.]+) on ([\w.]+)/;
 const ALTER_TABLE = /^alter table ([\w.]+) (.+)$/;
 const ADD_COLUMN = /^add column if not exists ([\w.]+) /;
 
