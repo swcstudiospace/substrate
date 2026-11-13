@@ -15,6 +15,7 @@ import {
 	chainTip,
 	COVERAGE_MAX_UNCOVERED,
 	DEFAULT_QUERY_LIMIT,
+	DialectRefusal,
 	epochMsAnyUnit,
 	EVENT_COLUMNS,
 	EXPORT_INGEST_SKEW_MS,
@@ -199,6 +200,15 @@ describe("assertAppendOnly", () => {
 		expect(() => assertAppendOnly(`SELECT "it's" FROM "t"; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
 		expect(() => assertAppendOnly(`SELECT "a;b" FROM "agent_events"`)).not.toThrow();
 	});
+
+	test("reads a backslash before a quote both ways, so the reading that hides a ; cannot pass", () => {
+		// `'a\'` is one literal where the server escapes backslashes, and a closed literal where it does not. The `;` sits inside the
+		// literal under one reading and outside it under the other, so each reading has to be checked.
+		expect(() => assertAppendOnly(`SELECT 'a\\'; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT 'x\\'; SELECT 'y'`)).toThrow(AppendOnlyViolation);
+		// The same literal under both readings, with no `;` to hide: still allowed.
+		expect(() => assertAppendOnly(`SELECT 'a\\' FROM "agent_events"`)).not.toThrow();
+	});
 });
 
 describe("insertEvent", () => {
@@ -256,6 +266,12 @@ describe("insertEvent", () => {
 
 		await expect(new GreptimeClient(config).insertEvent(event)).rejects.toThrow(/quoting dialect/);
 		expect(insertStatement(sql)).toBe("");
+	});
+
+	test("the refusal is a DialectRefusal, which a caller must not park for a retry", async () => {
+		stubFetch((statement) => (statement.includes("LENGTH") ? new Response("nope", { status: 500 }) : affected));
+		const event = normalizeEvent({ ...input, summary: "wrote C:\\new" }, null);
+		await expect(new GreptimeClient(config).insertEvent(event)).rejects.toBeInstanceOf(DialectRefusal);
 	});
 });
 
@@ -901,6 +917,23 @@ describe("reads", () => {
 			),
 		);
 		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("second");
+	});
+
+	test("lastHash refuses a session whose read window is full, rather than guess its tip", async () => {
+		// At the cap the newest row may not be the tip: a backfill can have pushed the real one out of the window. Answering from the
+		// window would let the next append chain onto a row that already has a successor, so the read refuses instead.
+		const full = Array.from({ length: 10_000 }, (_, i) => [`h${i}`, `p${i}`]);
+		const { sql } = stubFetch(() => records(["hash", "prev"], full));
+		const client = new GreptimeClient(config);
+		await expect(client.lastHash("sess-1")).rejects.toThrow(/chain tip unreliable/);
+		// Nothing is cached on a refusal, so the next call asks the ledger again.
+		await expect(client.lastHash("sess-1")).rejects.toThrow(/chain tip unreliable/);
+		expect(sql).toHaveLength(2);
+	});
+
+	test("lastHash still answers a window one row short of the cap", async () => {
+		stubFetch(() => records(["hash", "prev"], Array.from({ length: 9_999 }, (_, i) => [`h${i}`, `p${i}`])));
+		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("h0");
 	});
 });
 

@@ -82,19 +82,41 @@ function fleet(): Fleet {
 
 const withRoot = (root: string): Record<string, string> => ({ SUBSTRATE_WORKTREE_ROOTS: root });
 
-/** Git verbs that write to a repository or a worktree, plus the worktree, branch, remote and config forms that do. */
-const WRITE_VERBS = ["add", "commit", "push", "reset", "checkout", "switch", "restore", "clean", "gc", "stash", "fetch", "pull", "merge", "rebase", "cherry-pick", "revert", "tag", "update-ref", "rm", "mv", "init", "clone", "prune"];
-const BRANCH_WRITE_FLAGS = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream"];
+/** Git verbs that only read a repository, a worktree, a branch, a remote or its configuration. Any other recorded form is a write. */
+const READ_ONLY_VERBS = ["status", "rev-parse", "rev-list", "ls-files", "diff", "merge-tree", "merge-base", "log", "show", "for-each-ref", "check-ref-format", "version"];
 
-/** Whether a recorded git call could change a repository, a worktree, a branch, a remote or its configuration. */
-function isWrite(args: string[]): boolean {
-	if (WRITE_VERBS.includes(args[0] ?? "")) return true;
-	if (args[0] === "worktree") return args[1] !== "list";
-	if (args[0] === "branch") return args.some((arg) => BRANCH_WRITE_FLAGS.includes(arg));
-	if (args[0] === "remote") return ["add", "remove", "rm", "rename", "set-head", "set-url", "prune"].includes(args[1] ?? "");
-	if (args[0] === "config") return !args.some((arg) => arg === "--get" || arg === "--list" || arg === "-l");
-	return false;
+/** The call without the options that come before its verb: `-c key=value`, `-C dir` and `--no-pager`. */
+function withoutGlobalOptions(args: string[]): string[] {
+	let rest = args;
+	while (rest[0] === "-c" || rest[0] === "-C" || rest[0] === "--no-pager") rest = rest.slice(rest[0] === "--no-pager" ? 1 : 2);
+	return rest;
 }
+
+/** Whether a recorded git call could change a repository, a worktree, a branch, a remote or its configuration. An allowlist: a form not named here is a write. */
+function isWrite(recorded: string[]): boolean {
+	const args = withoutGlobalOptions(recorded);
+	const [verb, sub] = args;
+	if (READ_ONLY_VERBS.includes(verb ?? "")) return false;
+	if (verb === "worktree") return sub !== "list";
+	if (verb === "remote") return sub !== "get-url";
+	if (verb === "config") return !args.some((arg) => arg === "--get" || arg === "--list" || arg === "-l");
+	// One operand reads the ref; a second operand names a target, and `-d` deletes it.
+	if (verb === "symbolic-ref") return args.includes("-d") || args.includes("--delete") || args.slice(1).filter((arg) => !arg.startsWith("-")).length !== 1;
+	return true;
+}
+
+describe("the recorded-call oracle", () => {
+	for (const args of [["branch", "feature"], ["branch", "-d", "feature"], ["-c", "core.hooksPath=/dev/null", "commit", "-m", "x"], ["-C", "/tmp", "reset", "--hard"], ["--no-pager", "-c", "x=y", "checkout", "main"], ["symbolic-ref", "HEAD", "refs/heads/x"], ["remote", "add", "other", "url"], ["config", "user.name", "x"], ["worktree", "add", "-b", "x", "path"], ["notes", "add", "-m", "x"], ["replace", "a", "b"], ["frobnicate"]]) {
+		test(`${args.join(" ")} is a write`, () => {
+			expect(isWrite(args)).toBe(true);
+		});
+	}
+	for (const args of [["status", "--porcelain"], ["-c", "core.quotepath=off", "status"], ["-C", "/tmp", "rev-parse", "--git-dir"], ["--no-pager", "log", "-1"], ["worktree", "list", "--porcelain", "-z"], ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], ["remote", "get-url", "origin"], ["config", "--get", "user.name"], ["merge-tree", "--write-tree", "--name-only", "a", "b"]]) {
+		test(`${args.join(" ")} is read-only`, () => {
+			expect(isWrite(args)).toBe(false);
+		});
+	}
+});
 
 describe("usage and roots", () => {
 	test("with no configured root the commands say so and exit 2", async () => {
@@ -183,21 +205,21 @@ describe("prune", () => {
 
 	test("a worktree that became dirty after the inventory is checked again and left alone", async () => {
 		const f = fleet();
-		const statusCalls = new Map<string, number>();
-		const racing: CommandRunner = async (args, cwd) => {
-			if (args[0] === "status" && args[1] === "--porcelain" && cwd === f.merged) {
-				const count = (statusCalls.get(cwd) ?? 0) + 1;
-				statusCalls.set(cwd, count);
-				// The second status is the re-check right before removal.
-				if (count === 2) write(f.merged, "late-work.txt", "unsaved\n");
-			}
-			return spawnGit(args, cwd);
-		};
-		const h = harness({ git: racing }, withRoot(f.root));
+		const h: Harness = harness(
+			{
+				// Dirtied right after the first note is written: it lands between the inventory and the second worktree's re-check.
+				emit: async (event) => {
+					h.events.push(event);
+					write(f.mergedToo, "late-work.txt", "unsaved\n");
+					return { kind: "stored" };
+				},
+			},
+			withRoot(f.root),
+		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(existsSync(join(f.merged, "late-work.txt"))).toBe(true);
-		expect(existsSync(f.mergedToo)).toBe(false);
-		expect(h.events.map((event) => event.payload?.path)).toEqual([f.mergedToo]);
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(join(f.mergedToo, "late-work.txt"))).toBe(true);
+		expect(h.events.map((event) => event.payload?.path)).toEqual([f.merged]);
 		expect(h.err.join("")).toContain("no longer safe");
 	});
 
@@ -404,7 +426,6 @@ describe("scan --report session attribution", () => {
 		expect(attributed(h)).toEqual([[f.review, "A05@r1:ut-1"]]);
 		expect(JSON.parse(h.out.join(""))).toMatchObject({ attributed: 1 });
 	});
-
 
 	test("SUBSTRATE_SESSION_ID is used when the flag is absent, a blank one is no attribution, and the flag wins over it", async () => {
 		const f = fleet();
@@ -656,22 +677,27 @@ describe("prune and live graph claims", () => {
 	test("--execute asks again right before each removal: a claim taken after the inventory keeps that worktree", async () => {
 		const f = fleet();
 		const calls = new Map<string, number>();
-		const h = harness(
+		let firstNoted = false;
+		const h: Harness = harness(
 			{
 				claims: async (graphId) => {
-					const count = (calls.get(graphId) ?? 0) + 1;
-					calls.set(graphId, count);
-					// The first answer is the inventory's; the second is the check before removal.
-					return { ok: true, claims: graphId === "merged-a" && count >= 2 ? [CLAIM] : [] };
+					calls.set(graphId, (calls.get(graphId) ?? 0) + 1);
+					// The claim lands once the first note is written: after the inventory's answer for the second worktree, before its check.
+					return { ok: true, claims: graphId === "merged-b" && firstNoted ? [CLAIM] : [] };
+				},
+				emit: async (event) => {
+					h.events.push(event);
+					firstNoted = true;
+					return { kind: "stored" };
 				},
 			},
 			withRoot(f.root),
 		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(existsSync(f.merged)).toBe(true);
-		expect(existsSync(f.mergedToo)).toBe(false);
-		expect(calls.get("merged-a")).toBe(2);
-		expect(h.err.join("")).toContain("live claim on graph merged-a");
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(f.mergedToo)).toBe(true);
+		expect(calls.get("merged-b")).toBe(2);
+		expect(h.err.join("")).toContain("live claim on graph merged-b");
 	});
 
 	test("a worktree outside every root has no claim to ask about", async () => {
@@ -690,46 +716,59 @@ describe("prune and live graph claims", () => {
 
 describe("prune reloads the worktree's identity before it trusts a merge proof", () => {
 	test("a branch that gained a commit after the inventory is not removed on the strength of its old merged pull request", async () => {
-		const repo = makeRepo();
-		const root = join(tempDir(), "wts");
-		mkdirSync(root);
-		const wt = addWorktree(repo, root, "squashed");
+		const f = fleet();
+		const wt = addWorktree(f.repo, f.root, "squashed");
 		const merged = commit(wt, "s.txt", "1\n");
 		git(wt, ["push", "-q", "origin", "squashed"]);
 		// A squash merge leaves a different commit on main; only the pull request's head equals the branch head.
-		commit(repo.dir, "s.txt", "1\n", "squash of squashed");
-		git(repo.dir, ["push", "-q", "origin", "main"]);
+		commit(f.repo.dir, "s.txt", "1\n", "squash of squashed");
+		git(f.repo.dir, ["push", "-q", "origin", "main"]);
 		const gh = fakeGh({ squashed: [{ state: "MERGED", headRefOid: merged, number: 11 }] });
-		let listings = 0;
-		const racing: CommandRunner = async (args, cwd) => {
-			if (args[0] === "worktree" && args[1] === "list") {
-				listings += 1;
-				// The second listing is the reload right before removal: another session commits just before it.
-				if (listings === 2) commit(wt, "later.txt", "unpushed work\n");
-			}
-			return spawnGit(args, cwd);
-		};
-		const h = harness({ git: racing, gh }, withRoot(root));
+		let raced = false;
+		const h: Harness = harness(
+			{
+				gh,
+				// Another session commits to the squashed branch after the first removal, so its identity is reloaded after that commit.
+				emit: async (event) => {
+					h.events.push(event);
+					if (!raced) {
+						commit(wt, "later.txt", "unpushed work\n");
+						raced = true;
+					}
+					return { kind: "stored" };
+				},
+			},
+			withRoot(f.root),
+		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(listings).toBeGreaterThanOrEqual(2);
+		expect(raced).toBe(true);
 		expect(existsSync(join(wt, "later.txt"))).toBe(true);
 		expect(h.err.join("")).toContain("not pushed");
-		expect(h.events).toEqual([]);
+		expect(h.events.map((event) => event.payload?.path)).not.toContain(wt);
 	});
 
 	test("a worktree git no longer lists is skipped, not removed", async () => {
 		const f = fleet();
-		let listings = 0;
+		let firstNoted = false;
+		// Once the first worktree is removed and noted, git no longer lists the second: it was deleted between the two.
 		const vanishing: CommandRunner = async (args, cwd) => {
-			if (args[0] === "worktree" && args[1] === "list") {
-				listings += 1;
-				if (listings >= 2) return { code: 128, stdout: "", stderr: "fatal: not a git repository" };
-			}
+			if (firstNoted && args[0] === "worktree" && args[1] === "list") return { code: 128, stdout: "", stderr: "fatal: not a git repository" };
 			return spawnGit(args, cwd);
 		};
-		const h = harness({ git: vanishing }, withRoot(f.root));
+		const h: Harness = harness(
+			{
+				git: vanishing,
+				emit: async (event) => {
+					h.events.push(event);
+					firstNoted = true;
+					return { kind: "stored" };
+				},
+			},
+			withRoot(f.root),
+		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(existsSync(f.merged) && existsSync(f.mergedToo)).toBe(true);
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(f.mergedToo)).toBe(true);
 		expect(h.err.join("")).toContain("no longer lists");
 	});
 });
@@ -1461,18 +1500,18 @@ describe("merge-back", () => {
 	test("a HEAD that moves between the check and the note is refused, not recorded under the commit that was checked", async () => {
 		const f = fleet();
 		const mainSha = git(f.repo.dir, ["rev-parse", "HEAD"]);
-		let listings = 0;
+		let moved = false;
 		const moving: CommandRunner = async (args, cwd) => {
-			const result = await spawnGit(args, cwd);
-			if (args[0] === "worktree" && args[1] === "list" && cwd === f.repo.dir) {
-				listings += 1;
-				// The first listing is the reload that captures merged-a's HEAD; another session moves that HEAD right after it.
-				if (listings === 1) git(f.merged, ["checkout", "-q", "--detach", mainSha]);
+			// The first status in merged-a runs inside its check, after its HEAD was read: another session moves that HEAD there.
+			if (!moved && args[0] === "status" && cwd === f.merged) {
+				moved = true;
+				git(f.merged, ["checkout", "-q", "--detach", mainSha]);
 			}
-			return result;
+			return spawnGit(args, cwd);
 		};
 		const h = harness({ git: moving }, withRoot(f.root));
 		expect(await runWorktree(["merge-back", "--execute", f.merged, f.mergedToo], h.deps)).toBe(1);
+		expect(moved).toBe(true);
 		expect(h.events.map((event) => event.payload?.branch)).toEqual(["merged-b"]);
 		expect(h.out.join("")).toContain("HEAD or the branch changed");
 	});

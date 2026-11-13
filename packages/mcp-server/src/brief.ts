@@ -302,7 +302,7 @@ export async function composeBriefSections(
 		greptime && repo
 			? start(
 					"recent actions",
-					() => greptime.sql(recentActionsSql(repo, now() - windowDays * DAY_MS), budgetMs > 0 ? budgetMs : undefined),
+					() => greptime.sql(recentActionsSql(repo, now() - windowDays * DAY_MS, greptime.escapesBackslashes), budgetMs > 0 ? budgetMs : undefined),
 					[] as Array<Record<string, unknown>>,
 				)
 			: null;
@@ -447,10 +447,12 @@ export async function composeBriefSections(
  * The recent-actions statement. Exported so a test can read the bound without
  * a ledger; the SQL itself stays in this file (store lock). `since` is the
  * ISO form `queryEvents` already compares `ts` against on the live store.
+ * `backslashEscapes` is the client's dialect (`GreptimeClient.escapesBackslashes`): the repo is stored in the form that
+ * dialect writes, so it is matched in that same form.
  */
-export function recentActionsSql(repo: string, sinceMs: number): string {
+export function recentActionsSql(repo: string, sinceMs: number, backslashEscapes = true): string {
 	return `SELECT "ts", "surface", "summary", "node_id", "step" FROM "agent_events"
-				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
-				 AND "ts" >= ${quote(new Date(sinceMs).toISOString())}
+				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo, backslashEscapes)} AND "kind" NOT IN ('session.start','session.end')
+				 AND "ts" >= ${quote(new Date(sinceMs).toISOString(), backslashEscapes)}
 				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`;
 }

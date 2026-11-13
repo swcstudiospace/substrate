@@ -15,7 +15,7 @@
  * nowhere else (the store lock). The CLI package spawns this file. It opens no `Substrate`: one would load and drain the live
  * event buffer and retain outbox beside the running server, so the note writes are direct ledger appends (`directNoteWriter`).
  *
- * Exit codes: 0 nothing to repair, or applied; 1 failed: a layer could not be read, the read was incomplete, the plan id is
+ * Exit codes: 0 nothing to repair, or applied; 1 failed: the configuration or a store could not be set up, a layer could not be read, the read was incomplete, the plan id is
  * not a reconcile plan, the plan no longer matches a fresh read, or the apply's own record or cache mark was not confirmed;
  * 2 usage or missing configuration; 3 the layers disagree: a plan was printed, or only report-only findings were read and nothing is planned for them.
  */
@@ -174,21 +174,24 @@ async function main(argv: string[]): Promise<number> {
 		process.stderr.write(`${parsed.problem}\n${USAGE}`);
 		return EXIT.usage;
 	}
-	const config = loadConfig();
-	if (!config.greptime) {
-		process.stderr.write(`GREPTIME_URL is not set\n${USAGE}`);
-		return EXIT.usage;
-	}
-	if (!config.postgresUrl) {
-		process.stderr.write(`SUBSTRATE_PG_URL is not set\n${USAGE}`);
-		return EXIT.usage;
-	}
-	const greptime = new GreptimeClient(config.greptime, { ledger: config.ledger });
-	const index = new IndexStore(config.postgresUrl);
-	// The cache the scheduled tick reads. Its generations and forget mark are what `applyRepair` invalidates.
-	const cache = createReadThroughCache(config);
-	// The note writes go straight to the ledger. A `Substrate` here would load and drain the live queue files (see `directNoteWriter`).
+	// Everything that can throw is inside the try: the config read and every store client's construction, so a failure there takes
+	// the same redacted line and exit code as a failure of the run, and the index is closed whenever it was opened.
+	let index: IndexStore | null = null;
 	try {
+		const config = loadConfig();
+		if (!config.greptime) {
+			process.stderr.write(`GREPTIME_URL is not set\n${USAGE}`);
+			return EXIT.usage;
+		}
+		if (!config.postgresUrl) {
+			process.stderr.write(`SUBSTRATE_PG_URL is not set\n${USAGE}`);
+			return EXIT.usage;
+		}
+		const greptime = new GreptimeClient(config.greptime, { ledger: config.ledger });
+		index = new IndexStore(config.postgresUrl);
+		// The cache the scheduled tick reads. Its generations and forget mark are what `applyRepair` invalidates.
+		const cache = createReadThroughCache(config);
+		// The note writes go straight to the ledger. A `Substrate` here would load and drain the live queue files (see `directNoteWriter`).
 		const deps: ReconcileDeps = { ledger: ledgerFromSubstrate("substrate", greptime, directNoteWriter(greptime, config.allowDeduplicatingLedger)), index, cache, now: () => Date.now() };
 		const options = reconcileOptionsFor(config);
 		return parsed.mode === "plan" ? await runPlan(deps, options) : await runApply(deps, options, parsed.planId);
@@ -196,7 +199,7 @@ async function main(argv: string[]): Promise<number> {
 		process.stderr.write(`[cross-layer-reconcile] failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300)}\n`);
 		return EXIT.failed;
 	} finally {
-		await index.close().catch(() => undefined);
+		await index?.close().catch(() => undefined);
 	}
 }
 

@@ -16,7 +16,7 @@
  * The historical session id is `--session`, else the envelope's `session_id`, else the one session that has local
  * checkpoints in the worktree. Private hints separately require `--steering-session` / `steering_session_id` and an
  * exact private record selected by `--binding-file` / `binding_file` or the deterministic server/surface/live path.
- * No proof is accepted on stdin or argv. `transcript_path` is read and must be a string, but it is never carried. The claude-code
+ * No proof is accepted on stdin or argv. `transcript_path` is read and validated, but it is never used as a locator. The claude-code
  * pointer is `session_id` plus `turn_no` or `entry_id`, the ids the envelope holds, never a path. Those field names follow the
  * claude-code contract in `transcript-ref.ts`; without them no pointer is recorded.
  *
@@ -250,7 +250,7 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	if (params.trigger === "context") return contextOutcome(params, parsed, worktree, run);
 	const trigger: CheckpointHookTrigger = params.trigger;
 
-	const { checkpoints } = await listLocalCheckpoints({ worktree, run, now: params.now });
+	let { checkpoints } = await listLocalCheckpoints({ worktree, run, now: params.now });
 	let sessionId = params.sessionId ?? parsed.session_id;
 	if (sessionId === undefined) {
 		const known = [...new Set(checkpoints.map((checkpoint) => checkpoint.session_id))];
@@ -261,6 +261,10 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	const session = sessionId;
 	// The claude-code transcript pointer: the envelope's own session and turn or entry id, or the reason none is recorded.
 	const transcript = transcriptFor(params.surface, parsed, session);
+
+	// The tree id of this run's latest snapshot. A later attempt of this run judges "unchanged" against it, so an unchanged
+	// tree costs no second snapshot. An edit made after that snapshot is not seen by this run's later hints; the next checkpoint takes it.
+	let knownTree: string | undefined;
 
 	// One checkpoint attempt, for the directive `key` names (none: a plain steering checkpoint of a changed tree).
 	const attempt = async (key: string | undefined, planRef: PlanRef | undefined): Promise<HookOutcome> => {
@@ -285,7 +289,7 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 		};
 
 		// The cheap rules first, on the unlocked list: they need no snapshot.
-		const early = shouldCheckpoint(policyInput(checkpointsOfSession(checkpoints, session)));
+		const early = shouldCheckpoint(policyInput(checkpointsOfSession(checkpoints, session), knownTree));
 		if (!early.take) return { status: "skipped", reason: early.reason };
 
 		const result = await createCheckpoint({
@@ -303,11 +307,13 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 			policy: params.policy,
 			// The decision that counts: the whole policy again, with the history read under the checkpoint lock and the tree of the snapshot about to be pinned.
 			admit: ({ existing, tree }) => {
+				knownTree = tree;
 				const decision = shouldCheckpoint(policyInput(existing, tree));
 				return decision.take ? { take: true } : { take: false, reason: decision.reason };
 			},
 		});
 		if ("status" in result) return { status: "skipped", reason: result.reason };
+		checkpoints = [...checkpoints, result.checkpoint];
 		return { status: "checkpointed", ckpt_id: result.checkpoint.ckpt_id, seq: result.checkpoint.seq, created: result.created, ledger: result.server.status, ...("note" in transcript ? { transcriptNote: transcript.note } : {}) };
 	};
 
@@ -381,7 +387,8 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 			}
 		}
 	}
-	return outcomes.find((outcome) => outcome.status === "checkpointed") ?? (outcomes[outcomes.length - 1] as HookOutcome);
+	// A checkpoint wins. Otherwise the first failure: a later attempt that is skipped must not hide it.
+	return outcomes.find((outcome) => outcome.status === "checkpointed") ?? outcomes.find((outcome) => outcome.status === "failed") ?? (outcomes[outcomes.length - 1] as HookOutcome);
 }
 
 /** Where this historical session/live incarnation's decisions are kept, or undefined when git cannot be resolved. */

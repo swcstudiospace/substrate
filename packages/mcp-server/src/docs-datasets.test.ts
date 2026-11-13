@@ -1,6 +1,6 @@
 /**
  * Plan 25-03 Task 1: dataset resolve-by-name, refresh with last-five
- * retention, and the skills-sync-not-live degradation — all against the
+ * retention, the skills-sync pin age, and the dataset-list cache — all against the
  * recording fake. Product-dataset creation is proven as a convention here;
  * real creation is a gated live step (G2).
  */
@@ -11,12 +11,13 @@ import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { Substrate } from "./service.ts";
 import {
+	DATASET_TRIGGERS,
 	DATASET_TRIGGER_RETENTION,
+	DatasetListCache,
 	TRIGGER_SCAN_MAX,
 	createSkillsSyncTracker,
 	createTriggerStore,
 	createVersionStore,
-	degradedAgentSkillsServe,
 	isSyncLive,
 	latestVersion,
 	latestVersionFor,
@@ -35,6 +36,7 @@ import {
 	type RefreshDeps,
 } from "./docs-datasets.ts";
 import { searchDocs } from "./docs-search.ts";
+import { createDataset, type FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import type { EventInput } from "./types.ts";
 
@@ -154,35 +156,7 @@ describe("refreshDataset", () => {
 	});
 });
 
-describe("skills-sync degradation", () => {
-	test("absent fast-forward warns once and serves the pin with its age", async () => {
-		const fake = new RagflowFake();
-		const { events, emit } = eventsHarness();
-		const versions = createVersionStore();
-		recordVersion(versions, {
-			dataset: "agent-skills",
-			dataset_id: "ds-leipzig-agent-skills",
-			version: "v2",
-			commit: "skill-pin",
-			backend: "ragflow",
-			content_sha256: "sha",
-			ingested_at: new Date(1_000_000).toISOString(),
-		});
-		const tracker = createSkillsSyncTracker();
-		expect(isSyncLive(tracker)).toBe(false);
-		const deps: RefreshDeps = { config: CONFIG, versions, emit, fetchImpl: fake.fetch, nowMs: 1_000_000 + 60_000 };
-		const first = await degradedAgentSkillsServe(deps, tracker);
-		if (!first.ok) throw new Error(`expected serve: ${first.reason}`);
-		expect(first.serve.pin_age_ms).toBe(60_000);
-		const warnings = events.filter((event) => event.kind === "warning");
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]?.payload).toMatchObject({ action: "docs.ingest", reason: "skills-sync-not-live" });
-
-		const second = await degradedAgentSkillsServe(deps, tracker);
-		if (!second.ok) throw new Error(`expected serve: ${second.reason}`);
-		expect(events.filter((event) => event.kind === "warning")).toHaveLength(1);
-	});
-
+describe("skills-sync liveness and the pin age", () => {
 	test("pin age travels in the search reply for degraded datasets", async () => {
 		const fake = new RagflowFake();
 		const { emit } = eventsHarness();
@@ -225,17 +199,6 @@ describe("skills-sync degradation", () => {
 		if (!refreshed.ok) throw new Error(`expected refresh: ${refreshed.reason}`);
 		expect(refreshed.version.version).toBe("v1");
 		expect(events.some((event) => event.kind === "note")).toBe(true);
-	});
-
-	test("degraded serve without a pin is a reason, not a throw", async () => {
-		const fake = new RagflowFake();
-		const { emit } = eventsHarness();
-		const serve = await degradedAgentSkillsServe(
-			{ config: CONFIG, versions: createVersionStore(), emit, fetchImpl: fake.fetch },
-			createSkillsSyncTracker(),
-		);
-		if (serve.ok) throw new Error("expected a reason");
-		expect(serve.reason).toBe("no-pinned-version");
 	});
 });
 
@@ -335,5 +298,39 @@ describe("a completed version belongs to the backend that indexed it", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("the dataset trigger table", () => {
+	test("substrate has a merge trigger, in the same shape as the others", () => {
+		expect(DATASET_TRIGGERS).toMatchObject({ substrate: "merge to main of substrate" });
+	});
+});
+
+describe("DatasetListCache", () => {
+	test("an invalidate during an open fetch: the stale answer does not refill the hold, and the next reader sees the create", async () => {
+		const fake = new RagflowFake();
+		const cache = new DatasetListCache();
+		const gate = Promise.withResolvers<void>();
+		const reached = Promise.withResolvers<void>();
+		// The first list is answered before the create, then held open until the test releases it.
+		const holdFirst: FetchLike = async (input, init) => {
+			const response = await fake.fetch(input, init);
+			reached.resolve();
+			await gate.promise;
+			return response;
+		};
+		const stale = cache.list(CONFIG, holdFirst);
+		await reached.promise;
+		const created = await createDataset(CONFIG, "clippyos", fake.fetch);
+		if (!created.ok) throw new Error(created.reason);
+		cache.invalidate();
+		const fresh = await cache.list(CONFIG, fake.fetch);
+		gate.resolve();
+		expect((await stale).ok).toBe(true);
+		expect(fresh.ok && fresh.datasets.some((dataset) => dataset.name === "clippyos")).toBe(true);
+		const held = await cache.list(CONFIG, fake.fetch);
+		expect(held.ok && held.datasets.some((dataset) => dataset.name === "clippyos")).toBe(true);
+		expect(fake.datasetLists()).toHaveLength(2);
 	});
 });

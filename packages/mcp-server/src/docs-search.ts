@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import type { BreakerState, CitationProvenance } from "@substrate/observability";
 import { DeadlineError, type SharedDeadline, sharedDeadline } from "./deadline.ts";
 import { repoScopePrefix } from "./event.ts";
-import type { DatasetListSource } from "./docs-datasets.ts";
+import { DATASET_TRIGGERS, type DatasetListSource } from "./docs-datasets.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { DEFAULT_TANDEM_OPTIONS, mergeTandem, type TandemCounts, type TandemOptions, type TandemOrigin, type TandemProvenance } from "./tandem-recall.ts";
@@ -62,7 +62,8 @@ export { retrieveForSearchLightrag };
 import type { SteeringNotice } from "./planning/steering-delivery.ts";
 import { redact, redactValue } from "./redact.ts";
 import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
-import type { DocumentProvenance } from "./docs-ingest.ts";
+import type { DocumentProvenance, IngestRecord } from "./docs-ingest.ts";
+import { datasetIdentity } from "./dataset-identity.ts";
 import { CORPUS_DATASET, parseCorpusDocumentName, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
@@ -343,6 +344,11 @@ export interface SearchDeps {
 	retrieval?: RetrievalKnobs;
 	/** The ingest record of a document id — source URL and the commit it was uploaded under (uplift-2 R6). */
 	provenanceOf?: (documentId: string) => DocumentProvenance | undefined;
+	/**
+	 * The ingest records (`docsIngestSeen`): a LightRAG chunk is cited against the dataset its own record names, with that
+	 * dataset's pin (`lightragDocumentDataset` reads them). LightRAG path only; without it no chunk is attributed to a dataset.
+	 */
+	lightragRecords?: ReadonlyMap<string, IngestRecord>;
 	/**
 	 * One shared deadline for every dataset's retrieval, ms (uplift-3 N5;
 	 * `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`). `0` or unset: no shared deadline,
@@ -1030,13 +1036,47 @@ async function lightragFallback(
 	return reply;
 }
 
+/** The dataset label a LightRAG chunk carries when no LightRAG record names its dataset: it cites no dataset's pin. */
+const UNATTRIBUTED_DATASET = "unattributed";
+
+/** The key prefix of a LightRAG ingest record (`lightragRecordKey` in docs-ingest.ts): `lightrag::<dataset id>::<source URL>`. */
+const LIGHTRAG_RECORD_PREFIX = "lightrag::";
+
+/**
+ * The dataset id a LightRAG document was ingested under, read from the record key that holds it. The document is its
+ * record's current document or one of the record's unpruned predecessors. RAGFlow records carry no `lightrag::` prefix
+ * and never answer, so a cutover cannot attribute a LightRAG chunk to a RAGFlow upload. Undefined when no LightRAG record holds it.
+ */
+export function lightragDocumentDataset(records: ReadonlyMap<string, IngestRecord>, documentId: string): string | undefined {
+	for (const [key, record] of records) {
+		if (!key.startsWith(LIGHTRAG_RECORD_PREFIX)) continue;
+		const holds = record.document_id === documentId || (record.superseded?.some((entry) => entry.document_id === documentId) ?? false);
+		if (!holds) continue;
+		const end = key.indexOf("::", LIGHTRAG_RECORD_PREFIX.length);
+		return end < 0 ? undefined : key.slice(LIGHTRAG_RECORD_PREFIX.length, end);
+	}
+	return undefined;
+}
+
+/**
+ * The configured dataset a LightRAG chunk belongs to: the one whose ingest identity (`datasetIdentity`, the key its records are
+ * filed under) is the dataset id of the chunk's record. Undefined when the record names no configured dataset.
+ */
+function chunkDataset(deps: SearchDeps, chunk: RagflowChunk): string | undefined {
+	if (chunk.document_id === undefined || deps.lightragRecords === undefined) return undefined;
+	const datasetId = lightragDocumentDataset(deps.lightragRecords, chunk.document_id);
+	if (datasetId === undefined) return undefined;
+	return Object.keys(DATASET_TRIGGERS).find((name) => datasetIdentity(name) === datasetId);
+}
+
 /**
  * Search via the LightRAG plane (cutover backend).
  *
  * One retrieval serves every resolved dataset: LightRAG hosts a single
  * knowledge base per server, so dataset scope is accepted-ignored (never
- * an error) and every citation is attributed to the first readable
- * dataset. Everything else is the RAGFlow shape: redacted capped
+ * an error). Each citation is attributed to the dataset its own LightRAG
+ * record names (`lightragDocumentDataset`) and cites that dataset's pin; a chunk
+ * no record names is unattributed and cites no pin. Everything else is the RAGFlow shape: redacted capped
  * citations, score sort, the ten-citation cap, pins via `provenanceOf`,
  * the single `note` event, and the `graph` counts: the backend's graph detail
  * merged with the caller's `graphHints` (either alone is kept), with each
@@ -1104,7 +1144,6 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	}
 	deadline.clear();
 	const nowMs = deps.nowMs ?? Date.now();
-	const pinAged = deps.degradedDatasets?.includes(first.name) ?? false;
 	if (outcome.status === "rejected") {
 		const reason = datasetReason(outcome.reason);
 		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
@@ -1114,7 +1153,12 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
 	}
 	const { detail } = outcome.value;
-	const citations = outcome.value.chunks.map((chunk) => withCorpusProvenance(chunk, cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf)));
+	// Each chunk is cited against the dataset its own record names: that dataset's pin and degradation, never the first readable one's.
+	const citations = outcome.value.chunks.map((chunk) => {
+		const name = chunkDataset(deps, chunk);
+		const pinAged = name !== undefined && (deps.degradedDatasets?.includes(name) ?? false);
+		return withCorpusProvenance(chunk, cite(chunk, name ?? UNATTRIBUTED_DATASET, name === undefined ? undefined : deps.pins?.[name], pinAged, nowMs, deps.provenanceOf));
+	});
 	citations.sort((left, right) => right.score - left.score);
 	const lightragChunks = citations.slice(0, 10);
 	attachGraphHints(lightragChunks, deps.graphHints);

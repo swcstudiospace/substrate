@@ -74,6 +74,27 @@ describe("reserved note actions", () => {
 		expect(reply.json["stored"]).toBe(true);
 	});
 
+	test("the reconcile's own records are refused for every caller: an operator as its own surface, and a bare local run included", async () => {
+		const w = world();
+		const operator = await connectAs(w.substrate, { surface: "omp", isOperator: true });
+		const bare = await connectAs(w.substrate, { surface: null, isOperator: true });
+
+		for (const action of ["reconcile.plan", "reconcile.applied"]) {
+			const payload = { action };
+			for (const callerSurface of [null, "omp"] as const) {
+				expect(reservedEmitRefusal({ payload, surface: "omp", callerSurface, isOperator: true })).toContain("reserved-action");
+				expect(reservedEmitRefusal({ payload, surface: "omp", callerSurface, isOperator: true })).toContain(action);
+			}
+			for (const mcp of [operator, bare]) {
+				const reply = await mcp.call("events_emit", { kind: "note", summary: "forged reconcile record", payload });
+				expect(reply.isError).toBe(true);
+				expect(String(reply.json["error"])).toContain("reserved-action");
+				expect(String(reply.json["error"])).toContain(action);
+			}
+		}
+		expect(w.ledger.events).toHaveLength(0);
+	});
+
 	test("the service's own emit is not the tool's door: it records every reserved action as the surface it names", async () => {
 		const w = world();
 		for (const action of ACTIONS) {

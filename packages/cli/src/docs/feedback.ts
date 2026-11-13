@@ -105,6 +105,9 @@ export async function runDocsFeedback(argv: string[], deps: FeedbackDeps): Promi
 		deps.err("[substrate] docs feedback failed: no bearer is configured (SUBSTRATE_TOKEN, SUBSTRATE_TOKEN_FILE or the tokens directory); nothing was posted\n");
 		return 1;
 	}
+	const token = deps.token;
+	// Each server or network string is scrubbed in full before it is bounded, so a secret cannot survive the cut.
+	const scrub = (value: string): string => redact(redactKnown(value, [token]));
 
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	let response: Response;
@@ -123,13 +126,13 @@ export async function runDocsFeedback(argv: string[], deps: FeedbackDeps): Promi
 			return 1;
 		}
 		const message = cause instanceof Error ? cause.message : String(cause);
-		deps.err(`[substrate] docs feedback failed: the server did not answer: ${message.slice(0, DETAIL_LIMIT)}\n`);
+		deps.err(`[substrate] docs feedback failed: the server did not answer: ${scrub(message).slice(0, DETAIL_LIMIT)}\n`);
 		return 1;
 	}
 
 	const body = parseJson(text);
 	if (!response.ok) {
-		deps.err(`[substrate] docs feedback failed: ${redact(redactKnown(refusalText(response.status, body, text), [deps.token]))}\n`);
+		deps.err(`[substrate] docs feedback failed: ${refusalText(response.status, body, text, scrub)}\n`);
 		return 1;
 	}
 	if (body === undefined) {
@@ -150,17 +153,24 @@ function parseJson(text: string): unknown {
 	}
 }
 
-/** The server's reason for a refusal: `reason`, its `error` message and `detail` when present; else the status and a bounded text. */
-function refusalText(status: number, body: unknown, text: string): string {
-	const reason = stringField(body, "reason");
-	const message = stringField(body, "error");
-	const detail = stringField(body, "detail");
+/**
+ * The server's reason for a refusal: `reason`, its `error` message and `detail` when present; else the status and a bounded text.
+ * Each server string is scrubbed in full and only then bounded, so a secret the server echoed is never cut into a printable prefix.
+ */
+function refusalText(status: number, body: unknown, text: string, scrub: (value: string) => string): string {
+	const field = (key: string): string | undefined => {
+		const value = stringField(body, key);
+		return value === undefined ? undefined : scrub(value).slice(0, DETAIL_LIMIT);
+	};
+	const reason = field("reason");
+	const message = field("error");
+	const detail = field("detail");
 	if (reason !== undefined || message !== undefined) {
 		const head = `HTTP ${status} ${reason ?? "refused"}`;
 		const tail = [message, detail].filter((part): part is string => part !== undefined && part !== "").join(": ");
 		return tail === "" ? head : `${head}: ${tail}`;
 	}
-	const quoted = text.trim().slice(0, DETAIL_LIMIT);
+	const quoted = scrub(text.trim()).slice(0, DETAIL_LIMIT);
 	return quoted === "" ? `HTTP ${status}` : `HTTP ${status}: ${quoted}`;
 }
 

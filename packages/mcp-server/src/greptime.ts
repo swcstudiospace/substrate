@@ -90,6 +90,11 @@ export interface GreptimeClientOptions {
 /** A statement the ledger client refuses to send. See `assertAppendOnly`. */
 export class AppendOnlyViolation extends GreptimeError {}
 /**
+ * An event the ledger will not take yet: it carries a backslash and the server's quoting dialect is not known, so it is refused before
+ * anything is sent. Retrying the same event refuses the same way, so a caller must answer with a refusal and not park it for another attempt.
+ */
+export class DialectRefusal extends GreptimeError {}
+/**
  * The event row is stored but its ingest record is not, so the event will not
  * be anchored. `Substrate.append` maps this to `stored: true` with a warning
  * rather than un-storing the event — retrying the emit would mint a second
@@ -301,10 +306,8 @@ export function queryLimit(limit: number | undefined): number {
 /**
  * Upper bound on the rows `lastHash` will pull for one session.
  *
- * This is a memory guard, not an ordering assumption. It deliberately cannot be
- * reached by ordinary use — a window small enough to be crossed would reintroduce
- * the bug it replaced, where a backfill appending older source timestamps pushed
- * the real chain tip out of view and the next append forked the chain.
+ * A read that returns this many rows is not trusted to hold the chain's tip: its newest row may not be the tip once a backfill has
+ * pushed the real one out of the window. `lastHash` refuses in that case rather than fork the chain.
  */
 const MAX_SESSION_ROWS = 10_000;
 
@@ -410,8 +413,8 @@ interface GreptimeResponse {
 }
 
 /**
- * The statement's SQL structure: comments removed, and every string literal and
- * quoted identifier blanked to an empty placeholder of its own kind.
+ * The statement's SQL structure under one reading of `\` inside a string literal (`backslashEscapes`): comments removed, and every
+ * string literal and quoted identifier blanked to an empty placeholder of its own kind.
  *
  * `assertAppendOnly` has to reason about SQL structure, and an event summary is
  * arbitrary agent text: it may well contain a `;`, a `--` or an apostrophe. One
@@ -421,7 +424,7 @@ interface GreptimeResponse {
  * them first means the guard can neither be fooled by that text nor trip over
  * it and drop a legitimate event.
  */
-function sqlStructure(statement: string): string {
+function sqlStructure(statement: string, backslashEscapes: boolean): string {
 	let out = "";
 	let i = 0;
 	while (i < statement.length) {
@@ -435,7 +438,7 @@ function sqlStructure(statement: string): string {
 			i = close === -1 ? statement.length : close + 2;
 			out += " ";
 		} else if (ch === "'") {
-			i = skipQuoted(statement, i, "'", true);
+			i = skipQuoted(statement, i, "'", backslashEscapes);
 			out += "''";
 		} else if (ch === '"' || ch === "`") {
 			i = skipQuoted(statement, i, ch, false);
@@ -481,15 +484,20 @@ const APPEND_ONLY_VERBS = new Set(["select", "insert", "create", "show", "descri
 
 /** Reject anything that could mutate the ledger, or smuggle a second statement past the verb check. */
 export function assertAppendOnly(statement: string): void {
-	const structure = sqlStructure(statement).trim();
-	// Greptime's HTTP API accepts `;`-separated batches, so a single trailing
-	// semicolon is all that may follow the one statement we are sending.
-	if (structure.replace(/;\s*$/, "").includes(";")) {
-		throw new AppendOnlyViolation("refusing a batched statement: the ledger takes one statement per call");
-	}
-	const verb = structure.match(/^[a-zA-Z]+/)?.[0].toLowerCase() ?? "";
-	if (!APPEND_ONLY_VERBS.has(verb)) {
-		throw new AppendOnlyViolation(`refusing ${verb || "an empty statement"}: the event ledger is append-only`);
+	// Whether `\` escapes inside a literal depends on the server's dialect, which is not known here. The two readings disagree on a
+	// backslash before a quote: `'a\'; DELETE …` is one literal under escapes, and a closed literal then a `;` without. Each reading
+	// must pass, so the guard is not fooled by the one it did not check.
+	for (const backslashEscapes of [true, false]) {
+		const structure = sqlStructure(statement, backslashEscapes).trim();
+		// Greptime's HTTP API accepts `;`-separated batches, so a single trailing
+		// semicolon is all that may follow the one statement we are sending.
+		if (structure.replace(/;\s*$/, "").includes(";")) {
+			throw new AppendOnlyViolation("refusing a batched statement: the ledger takes one statement per call");
+		}
+		const verb = structure.match(/^[a-zA-Z]+/)?.[0].toLowerCase() ?? "";
+		if (!APPEND_ONLY_VERBS.has(verb)) {
+			throw new AppendOnlyViolation(`refusing ${verb || "an empty statement"}: the event ledger is append-only`);
+		}
 	}
 }
 
@@ -899,6 +907,14 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * Whether the server reads `\` inside a string literal as an escape: the dialect this client quotes in, assumed until probed.
+	 * SQL built outside this class must quote with it, or a value containing a backslash never matches what was stored.
+	 */
+	get escapesBackslashes(): boolean {
+		return this.backslashEscapes;
+	}
+
+	/**
 	 * Run SQL and return rows as objects keyed by column name.
 	 *
 	 * Every statement passes `assertAppendOnly` first: this is the only door to
@@ -1287,7 +1303,7 @@ export class GreptimeClient {
 			// text the hash was computed over, and an append-only table cannot be
 			// corrected — that row would fail verification for as long as it exists,
 			// and take its session's chain with it.
-			throw new GreptimeError(
+			throw new DialectRefusal(
 				"refusing to append an event containing a backslash before the server's quoting dialect is known",
 			);
 		}
@@ -1522,6 +1538,11 @@ export class GreptimeClient {
 						`SELECT "hash", "prev" FROM "agent_events" WHERE "session_id" = ${this.q(sessionId)}
 			 ORDER BY "ts" DESC, "id" DESC LIMIT ${MAX_SESSION_ROWS}`,
 					);
+		if (rows.length >= MAX_SESSION_ROWS) {
+			throw new GreptimeError(
+				`chain tip unreliable: ${MAX_SESSION_ROWS} rows in the read window, so its newest row may not be the tip; refusing to append rather than fork the chain`,
+			);
+		}
 		const tip = chainTip(rows);
 		this.chainTips?.set(sessionId, tip);
 		return tip;

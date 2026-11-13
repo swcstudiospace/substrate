@@ -7,6 +7,7 @@
  * case reaches a network: every fetch is the fake.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -251,6 +252,19 @@ function partAFile(dir: string, records = 1): string {
 	return file;
 }
 
+/** Rewrites one archived file and its manifest entry together, so the archive still verifies against its manifest. */
+function rewriteArchiveFile(dir: string, path: string, content: string): void {
+	writeFileSync(join(dir, path), content, "utf8");
+	const manifestPath = join(dir, "manifest.json");
+	const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { files: Array<{ path: string; bytes: number; sha256: string }> };
+	for (const entry of manifest.files) {
+		if (entry.path !== path) continue;
+		entry.bytes = Buffer.byteLength(content, "utf8");
+		entry.sha256 = createHash("sha256").update(content, "utf8").digest("hex");
+	}
+	writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+}
+
 const CONFIG = { url: LR_URL };
 
 describe("docs-migrate: arguments", () => {
@@ -287,6 +301,20 @@ describe("docs-migrate: dry run", () => {
 		const outcome = await runDryRun({ archiveDir: fixture.archiveDir, stateFile: fixture.stateFile, config: CONFIG, fetchImpl: plane.fetch }, io);
 		expect(outcome).toMatchObject({ ok: false, exit: 1, refused: "archive verification failed" });
 		expect(err.join("")).toContain("archive verification failed");
+		expect(plane.calls).toEqual([]);
+	});
+
+	test("an archive that verifies but does not load: verify is not reported ok, and the load reason is carried in load", async () => {
+		const fixture = await buildFixture();
+		rewriteArchiveFile(fixture.archiveDir, `inventory/${REPO}.json`, "{ not json");
+		expect(await verifyArchive(fixture.archiveDir)).toMatchObject({ ok: true, mismatches: [] });
+		const plane = matchedPlane();
+		const { io } = captureIo();
+		const outcome = await runDryRun({ archiveDir: fixture.archiveDir, stateFile: fixture.stateFile, config: CONFIG, fetchImpl: plane.fetch }, io);
+		const report = outcome.report as { verify: { ok: boolean }; load: { ok: boolean; reason: string } };
+		expect(report.verify.ok).toBe(false);
+		expect(report.load).toEqual({ ok: false, reason: `inventory/${REPO}.json is not JSON` });
+		expect(outcome).toMatchObject({ ok: false, exit: 1, refused: `inventory/${REPO}.json is not JSON` });
 		expect(plane.calls).toEqual([]);
 	});
 

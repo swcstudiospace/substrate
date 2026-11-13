@@ -26,9 +26,9 @@
  * Every document is named under its dataset's mapped repository (`DATASET_REPOS`), and the replay runs only from a checkout whose
  * origin is a mapped repository. A dataset outside the table, or a checkout outside it, is refused, never named bare.
  *
- * Exit codes: 0 the mode's checks passed; 1 a verification, gate or replay failure (the report names each mismatch by
- * kind and dataset, never page content); 2 refused before any effect: bad flags, no archive, no `LIGHTRAG_URL`, no
- * state file, no recorded gate pass, or no approval.
+ * Exit codes: 0 the mode's checks passed; 1 a verification, gate or replay failure, or an `--apply` whose `--part-a` is
+ * unreadable, records no gate pass, or records a stale one (the report names each mismatch by kind and dataset, never page
+ * content); 2 refused before any effect: bad flags, no archive, no `LIGHTRAG_URL`, no state file, a missing `--part-a`, or no approval.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -293,12 +293,13 @@ async function precondition(input: JobInput): Promise<Precondition> {
 	const verify = await verifyArchive(input.archiveDir);
 	if (!verify.ok) return { ok: false, reason: "archive verification failed", report: { verify: { ok: false, mismatches: verify.mismatches } } };
 	const read = await loadArchive(input.archiveDir);
-	if (!read.ok) return { ok: false, reason: read.reason, report: { verify: { ok: true, mismatches: [] } } };
+	// `verify.ok` means the archive verified and loaded: a load failure is reported in `load`, never as a passing verify.
+	if (!read.ok) return { ok: false, reason: read.reason, report: { verify: { ok: false, mismatches: [] }, load: { ok: false, reason: read.reason } } };
 	const mapping = mapRecords(read.archive);
 	const undocumented = read.archive.datasets.flatMap((dataset) =>
 		dataset.documents.filter((document) => document.commit === null || document.source_url === null).map((document) => ({ dataset: dataset.name, document: document.id })),
 	);
-	const base: Record<string, unknown> = { verify: { ok: true, mismatches: [] }, unmapped: mapping.unmapped, undocumented };
+	const base: Record<string, unknown> = { verify: { ok: true, mismatches: [] }, load: { ok: true }, unmapped: mapping.unmapped, undocumented };
 	if (mapping.unmapped.length > 0) return { ok: false, reason: "archived RAGFlow records map to no archived dataset", report: base };
 	if (undocumented.length > 0) return { ok: false, reason: "archived documents without a commit or source URL cannot be replayed", report: base };
 	const gate = await runGate(input.config, input.stateFile, input.fetchImpl);
@@ -567,7 +568,7 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 
 const STDIO: MigrateIo = { out: (text) => process.stdout.write(text), err: (text) => process.stderr.write(text) };
 
-/** The CLI entry. Every refusal before a live reach is exit 2; every refused check is exit 1. */
+/** The CLI entry. Exit codes are as the module header states: flag, archive, state, approval and missing-`--part-a` refusals are 2; refused checks are 1. */
 export async function main(argv: readonly string[], env: Record<string, string | undefined> = process.env, io: MigrateIo = STDIO, fetchImpl: FetchLike = fetch): Promise<number> {
 	const parsed = parseMigrateArgs(argv);
 	if (parsed.reason !== null) {

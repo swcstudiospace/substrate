@@ -232,4 +232,54 @@ describe("the answer", () => {
 		expect(result.code).toBe(1);
 		expect(result.err).toContain("the server did not answer");
 	});
+
+	test("a bearer in a network error is not printed", async () => {
+		resetStub();
+		const token = "substrate-bearer-XYZ123";
+		const result = await run(["repo:docs/a.md", "helpful"], {
+			token,
+			fetchImpl: Object.assign(
+				async (): Promise<Response> => {
+					throw new TypeError(`connection reset while sending Bearer ${token}`);
+				},
+				{ preconnect: () => undefined },
+			),
+		});
+		expect(result.code).toBe(1);
+		expect(result.err).toContain("the server did not answer");
+		expect(result.err).not.toContain(token);
+		expect(result.err).toContain("[REDACTED]");
+	});
+
+	test("a bearer the server echoes in a refusal is not printed, even where the text is cut", async () => {
+		resetStub();
+		const token = "substrate-bearer-XYZ123";
+		stub.reply = { status: 500, body: `${"x".repeat(490)}${token}` };
+		const result = await run(["repo:docs/a.md", "helpful"], { token });
+		expect(result.code).toBe(1);
+		// The cut at 500 characters used to leave this prefix of the token on the terminal.
+		expect(result.err).not.toContain(token.slice(0, 10));
+		expect(result.err).toContain("[REDACTED]");
+	});
+
+	test("a bearer the server echoes in a JSON refusal is not printed", async () => {
+		resetStub();
+		const token = "substrate-bearer-XYZ123";
+		stub.reply = { status: 401, body: { error: `token ${token} was rejected`, reason: "unauthenticated" } };
+		const result = await run(["repo:docs/a.md", "helpful"], { token });
+		expect(result.code).toBe(1);
+		expect(result.err).not.toContain(token);
+		expect(result.err).toContain("HTTP 401 unauthenticated");
+	});
+
+	test("the server's reason, error and detail are each bounded", async () => {
+		resetStub();
+		stub.reply = { status: 422, body: { reason: "r".repeat(2_000), error: "e".repeat(2_000), detail: "d".repeat(2_000) } };
+		const result = await run(["repo:docs/a.md", "helpful"]);
+		expect(result.code).toBe(1);
+		expect(result.err).toContain(`HTTP 422 ${"r".repeat(500)}`);
+		expect(result.err).not.toContain("r".repeat(501));
+		expect(result.err).not.toContain("e".repeat(501));
+		expect(result.err).not.toContain("d".repeat(501));
+	});
 });

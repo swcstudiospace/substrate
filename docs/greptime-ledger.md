@@ -256,7 +256,7 @@ no other row claims as its `prev`. A *window of the newest rows by `ts`* is what
 must not be used — a backfilled event is the real tip while sorting last, so such
 a window would leave an already-claimed hash looking unclaimed and the next append
 would fork the session. The `LIMIT` in that query is a memory guard set far above
-any real session, not an ordering assumption. `verifyGraph` puts each session's
+any real session, not an ordering assumption. A read that fills it is refused: `lastHash` throws `chain tip unreliable`, and the append answers `stored: false` and writes nothing, rather than trust a window that may not hold the tip. `verifyGraph` puts each session's
 events in chain order before verifying. This does not weaken verification — hashes are still recomputed,
 and a spliced-out event, a tampered one or a fork all leave events that do not link
 into the walk, which are kept so the break is still reported. What it stops
@@ -307,7 +307,9 @@ only by `migrate()` and only when `SUBSTRATE_LEDGER_TTL` is set (see *Retention*
 Batched statements are refused too, since Greptime's HTTP API accepts
 `;`-separated ones and checking only the first verb would leave a way in. The
 guard blanks string literals before reasoning about structure, so an event whose
-summary contains `;` or `--` is neither mistaken for a batch nor wrongly dropped.
+summary contains `;` or `--` is neither mistaken for a batch nor wrongly dropped. The guard does not know the server's dialect, so it reads
+every statement twice, with and without backslash escapes in a literal, and refuses it if either reading finds a second statement or a verb
+outside the list. The two readings disagree on a backslash before a quote: `'a\'; DELETE …` is one literal under one of them, and a closed literal then a `;` under the other.
 
 **Correct quoting.** Greptime's HTTP SQL API has no bind parameters, so every
 value is inlined and quoting is ours to get right. Single quotes are doubled.
@@ -326,7 +328,7 @@ differs from the text its hash covers, and an append-only table cannot be
 corrected: that row would fail verification for as long as it exists and take its
 session's chain with it. One lost event is the cheaper failure. The payload counts
 here too, since it is stored as JSON and a newline inside it reaches the column as
-a two-character `\n`.
+a two-character `\n`. The refusal is not buffered: a retry of the same event refuses the same way, so it is answered `stored: false` and is not parked for another attempt.
 
 **An honest result.** `emit` returns `stored`. The substrate fails open — an
 unreachable event store must never fail an agent's turn — but a caller that gets
@@ -389,11 +391,14 @@ size cap, so it is inside the hashed event (no schema change, no `ALTER`: the
 append-only guard is untouched) and survives a payload that was replaced for its size.
 It adds at most about 140 bytes beyond the 16 000-byte payload cap.
 
-**Lookup.** One bounded `SELECT` in `GreptimeClient.findByIdempotencyKey`: the
+**Lookup.** One bounded read at a time in `GreptimeClient.findByIdempotencyKey`: the
 primary-key prefix (`surface`, `repo`, `graph_id`, `kind`; a NULL `repo` or `graph_id`
-is `IS NULL`) plus the exact normalised `ts`, with the payload matched against
-`…"_ik":"<key>"}` at the end of its text, at most 5 rows (`LIKE` reads `_` as a wildcard,
-so a lookalike key can match too; each returned row is checked for the exact suffix, and a full read with no exact match is treated as a failed lookup — `503`, nothing written, `result=lookup_failed` — never as a miss, so an unusual key whose pattern matches five other rows in its cell can be answered 503 but never duplicated). It runs inside the per-session
+is `IS NULL`) plus the exact normalised `ts`, in `id` order, five rows a page. Each row's payload is checked in code for the exact
+`…"_ik":"<key>"}` suffix. There is no `LIKE`, so `_` in a key is not a wildcard and a lookalike cannot match. A page that is full with no
+match is followed by keyset paging on `"id"` (`"id" > <last id>`), up to 20 full pages, so a cell with more than five rows at that exact
+`ts` costs one read per page it needs. A short page is the whole rest of the cell, and no match there is a genuine miss. A cell still
+unresolved after 20 full pages, or a row id the paging cannot carry safely, is an inconclusive lookup: `503`, nothing written,
+`result=lookup_failed`, never a miss, so a cell too deep to read can be answered 503 but never duplicated. It runs inside the per-session
 emit turn (`emitChains`), so two concurrent same-key requests leave one row, and a
 replay waits for the original attempt still in flight. A keyed event with no session
 takes its turn on the key instead.
@@ -699,11 +704,11 @@ each as `{ name, rows, diskBytes, sstBytes, indexBytes }`, with a table's region
 summed. `/healthz` reports it under `capacity.ledger`, beside R4's
 `capacity.index`, raced against the same 1 s bound and `null` when the store does
 not answer in time. The Railway volume is 500 MB; the measured ledger was 1.28 MB
-for 14,302 rows (BASELINES.md), so there is room, but the number is now visible
+for 14,302 rows (`.planning/uplift-2/BASELINES.md`), so there is room, but the number is now visible
 rather than a one-off query.
 
 **Operator cleanup: the stale pre-append table.** `agent_events_pre_append_20260930`
-(9,851 rows, 1.29 MB; BASELINES.md) is, by its name, the copy kept when
+(9,851 rows, 1.29 MB; `.planning/uplift-2/BASELINES.md`) is, by its name, the copy kept when
 `agent_events` was recreated with `append_mode`. Nothing reads it; it shows up first in
 `capacity.ledger.tables`. Dropping it is an operator action — this client refuses
 `DROP` by design and will not grow a path for it — taken after an export of the
@@ -918,7 +923,7 @@ stays, and an exported hour can still be checked against it. What is lost is the
 ability to *recompute* a root for an expired hour from the ledger itself.
 
 **Export before expiry.** The policy says *then export*, and the VPS disk is at
-94 % (BASELINES.md), so the export goes off-box. **The precondition for setting
+94 % (`.planning/uplift-3/BASELINES.md`, `uplift-4`, `uplift-5`), so the export goes off-box. **The precondition for setting
 `SUBSTRATE_LEDGER_TTL` is a verified archive of every day that would expire:**
 `substrate ledger archive --until <day>` for every closed day older than the TTL
 (the command writes every closed day without a manifest), then `substrate ledger
@@ -966,9 +971,9 @@ The answer is never `stored: true` for a parked event.
   `max`, `durable` and `evicted`. Neither store changes the `/healthz` status code.
 - **Not replayed.** The substrate never re-appends a dead letter. Reading the file and re-appending a record is an
   operator decision, and the record carries the event whole, `prev` and `hash` included.
-- **Not covered.** A failure before the write (the chain tip unreadable, or a ledger that is not append-only) is still
-  a refusal with `stored: false` and no buffering: the event's hash depends on a `prev` that cannot be read or is not
-  yet safe to write.
+- **Not covered.** A failure before the write (the chain tip unreadable or refused, a ledger that is not append-only, or a backslash
+  the quoting dialect is not yet known for) is still a refusal with `stored: false` and no buffering: the event's hash depends on a `prev`
+  that cannot be read or is not yet safe to write.
 
 ## Cross-layer reconcile (phase 78)
 

@@ -15,11 +15,12 @@
  * small.
  *
  * The file lives in the worktree's git directory, beside the pending journal and never inside it (the journal rejects
- * files it did not write). Two hooks racing can drop each other's newest id; the checkpoint lock still admits one
- * checkpoint per directive.
+ * files it did not write). Two hooks racing can overwrite each other's decisions: each writes its own temporary file and
+ * renames it over this one, so the last rename wins and can drop every id the other recorded, not only the newest. The
+ * checkpoint lock still admits one checkpoint per directive.
  */
-import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** The last resort: a session never remembers more than this many consumed ids, newest kept. */
@@ -71,13 +72,20 @@ export function retainListed(ids: readonly string[], listed: ReadonlySet<string>
 export function writeConsumed(path: string, sessionId: string, steeringSessionId: string, ids: readonly string[]): void {
 	const body = JSON.stringify({ version: 2, session_id: sessionId, steering_session_id: steeringSessionId, directive_ids: ids.slice(-CONSUMED_HARD_MAX) });
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-	const temporary = `${path}.tmp`;
-	const fd = openSync(temporary, "w", 0o600);
+	// A name only this writer uses: a shared one would let two writers interleave their bodies in one file.
+	const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	const fd = openSync(temporary, "wx", 0o600);
 	try {
-		writeSync(fd, body);
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
+		try {
+			writeSync(fd, body);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(temporary, path);
+	} catch (error) {
+		// The temporary is this writer's own (the `wx` open above made it), so removing it cannot touch another writer's file.
+		rmSync(temporary, { force: true });
+		throw error;
 	}
-	renameSync(temporary, path);
 }

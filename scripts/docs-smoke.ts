@@ -41,8 +41,7 @@
  * superseded-gap) with last-five manifest retention proven exact on a
  * second dataset; (e) stand-in parse arms; (f) multipart retention (a
  * missing, failed, or conflicting part keeps the old pin); (g)
- * skills-sync-not-live (pinned serve with pin age plus exactly one
- * warning). Explicitly unproven here (not claimed, not asserted): live
+ * skills-sync-not-live (pinned serve with pin age). Explicitly unproven here (not claimed, not asserted): live
  * G1-G4 (first probe, discovery/creation, real ingest, real served search)
  * which stay operator-gated to a human MODEL on the real plane, and
  * server-side `vm-guest` over REST — a whole-process config door limit,
@@ -1495,10 +1494,8 @@ async function runSmokeInner(name: string, runDir: string, scriptCheckout: strin
 			check(skillSearch1.status === 200 && skillCited(skillChunks1) && skillHit1, "skills-serve-degraded", `count=${String(skillChunks1?.length ?? -1)}`);
 			const skillSearch2 = await call(ctx.base, ctx.token, "/docs/search", { question: "how do skills sync", datasets: ["agent-skills"], session_id: `${ctx.tag}-skill-search-2` });
 			const skillChunks2 = citationsOf(skillSearch2.body);
-			const skillEvents1 = await querySessionEvents(ctx, `${ctx.tag}-skill-search-1`);
-			const skillEvents2 = await querySessionEvents(ctx, `${ctx.tag}-skill-search-2`);
-			const skillWarnings = [...skillEvents1, ...skillEvents2].filter((event) => event.kind === "warning" && shaped<Record<string, unknown>>(event.payload)?.["reason"] === "skills-sync-not-live");
-			check(skillSearch2.status === 200 && skillCited(skillChunks2) && skillWarnings.length === 1, "skills-warn-once", `warnings=${String(skillWarnings.length)}`);
+			const skillSearch2Ok = skillSearch2.status === 200 && skillCited(skillChunks2);
+			check(skillSearch2Ok, "skills-serve-repeat", `count=${String(skillChunks2?.length ?? -1)}`);
 			// Bound own-state evidence over the backend locator
 			// (fixture-only, hashes and ids, never keys): the twin persists
 			// hashes and pins to runDir/docs-state.json. A missing or
@@ -1517,10 +1514,9 @@ async function runSmokeInner(name: string, runDir: string, scriptCheckout: strin
 			const seqRows = docsStateVersions?.["programming-desk"] ?? null;
 			const expectedPairs = seqShas.map((sha, index) => `v${index + 1}:${sha}`);
 			const actualPairs = (seqRows ?? []).map((row) => `${row.version}:${row.commit}`);
-			const syncRec = shaped<Record<string, unknown>>(shaped<{ sync?: unknown }>(docsStateJson)?.sync ?? null);
 			const latestSeqRow = seqRows === null || seqRows.length === 0 ? null : (seqRows[seqRows.length - 1] ?? null);
 			check(
-				insideRun && docsStateVersions !== null && seqRows !== null && seqRows.length === 5 && JSON.stringify(actualPairs) === JSON.stringify(expectedPairs.slice(-5)) && syncRec?.["fastForwardObserved"] === false && syncRec?.["notLiveWarned"] === true,
+				insideRun && docsStateVersions !== null && seqRows !== null && seqRows.length === 5 && JSON.stringify(actualPairs) === JSON.stringify(expectedPairs.slice(-5)),
 				"last-five-manifest-exact",
 				`rows=${String(seqRows?.length ?? -1)} latest=${String(latestSeqRow?.version ?? "?")}`,
 			);

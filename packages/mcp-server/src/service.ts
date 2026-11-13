@@ -114,6 +114,7 @@ import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, h
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	DEFAULT_TIMEOUT_MS,
+	DialectRefusal,
 	GreptimeBreakerOpen,
 	GreptimeClient,
 	INGEST_LAG_MS,
@@ -2996,6 +2997,7 @@ export class Substrate {
 			return { event, stored: true, ...(appendOnly !== true ? { warning: DEDUP_WARNING } : {}) };
 		} catch (cause) {
 			const error = redact(String(cause));
+			if (cause instanceof DialectRefusal) return { event, stored: false, error };
 			if (cause instanceof IngestNotRecorded) {
 				// Branch first: this error means the event row is already stored. Reporting
 				// it as `stored: false` would invite a retry that mints a second event.
@@ -6197,6 +6199,7 @@ export class Substrate {
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
+					lightragRecords: this.docsIngestSeen,
 					budgetMs: this.config.docsSearchBudgetMs,
 					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
 					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",

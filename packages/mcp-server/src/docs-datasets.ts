@@ -5,9 +5,9 @@
  * Existing datasets are reused by name; creation happens only on a
  * name-miss with the pinned embedding model. Refresh records a version per
  * dataset and keeps the last five. The `agent-skills` refresh is driven by
- * skills-sync fast-forward evidence: with the sync unit not yet live there
- * is no evidence, so refresh degrades explicitly — one warning, and serve
- * from the last pinned version with the pin age in the reply.
+ * skills-sync fast-forward evidence. With the sync unit not yet live there
+ * is no evidence, so search marks `agent-skills` citations with the age of
+ * the pin they are served from (`degradedDatasets` in `service.ts`).
  *
  * The hook has no timer and no surface: the sync tick's projection step
  * calls `noteSkillsSyncFastForward`, and search consults `isSyncLive`.
@@ -27,6 +27,7 @@ import type { EventInput, Surface } from "./types.ts";
 /** Every dataset this phase knows, with its refresh trigger. */
 export const DATASET_TRIGGERS: Readonly<Record<string, string>> = {
 	"agent-substrate": "merge to main of agent-substrate",
+	substrate: "merge to main of substrate",
 	"programming-desk": "merge to main of programming-desk",
 	"agent-skills": "substrate-skills-sync fast-forward",
 	kanbanos: "merge to main of kanbanos",
@@ -295,6 +296,8 @@ export const DATASET_LIST_TTL_MS = 60_000;
 export class DatasetListCache implements DatasetListSource {
 	private held: { datasets: readonly { id: string; name: string }[]; expiresAt: number } | null = null;
 	private inflight: Promise<DatasetListOutcome> | null = null;
+	/** Bumped by `invalidate`. A fetch that began under an older generation answers its own callers but never refills the hold. */
+	private generation = 0;
 
 	constructor(
 		private readonly ttlMs: number = DATASET_LIST_TTL_MS,
@@ -304,23 +307,31 @@ export class DatasetListCache implements DatasetListSource {
 	async list(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
 		const held = this.held;
 		if (held && held.expiresAt > this.now()) return { ok: true, datasets: held.datasets.map((dataset) => ({ ...dataset })) };
-		if (!this.inflight) {
-			this.inflight = listDatasets(config, fetchImpl)
-				.then((outcome) => {
-					if (outcome.ok) this.held = { datasets: outcome.datasets.map((dataset) => ({ ...dataset })), expiresAt: this.now() + this.ttlMs };
-					else this.held = null;
-					return outcome;
-				})
-				.finally(() => {
-					this.inflight = null;
-				});
-		}
-		const outcome = await this.inflight;
+		const outcome = await (this.inflight ?? this.startFetch(config, fetchImpl));
 		return outcome.ok ? { ok: true, datasets: outcome.datasets.map((dataset) => ({ ...dataset })) } : outcome;
 	}
 
 	invalidate(): void {
+		this.generation += 1;
 		this.held = null;
+		// An open fetch was asked before the change: the next reader asks again rather than joining it.
+		this.inflight = null;
+	}
+
+	private startFetch(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+		const generation = this.generation;
+		const pending: Promise<DatasetListOutcome> = listDatasets(config, fetchImpl)
+			.then((outcome) => {
+				if (generation === this.generation) {
+					this.held = outcome.ok ? { datasets: outcome.datasets.map((dataset) => ({ ...dataset })), expiresAt: this.now() + this.ttlMs } : null;
+				}
+				return outcome;
+			})
+			.finally(() => {
+				if (this.inflight === pending) this.inflight = null;
+			});
+		this.inflight = pending;
+		return pending;
 	}
 }
 
@@ -431,15 +442,14 @@ export async function refreshDataset(
 /**
  * Whether the Phase 22 skills-sync unit has produced fast-forward evidence.
  * The sync tick's projection step flips it via `noteSkillsSyncFastForward`;
- * until then the unit is not live and `agent-skills` serves degraded.
+ * until then the unit is not live and search marks `agent-skills` results with their pin age.
  */
 export interface SkillsSyncTracker {
 	fastForwardObserved: boolean;
-	notLiveWarned: boolean;
 }
 
 export function createSkillsSyncTracker(): SkillsSyncTracker {
-	return { fastForwardObserved: false, notLiveWarned: false };
+	return { fastForwardObserved: false };
 }
 
 /**
@@ -453,42 +463,4 @@ export function noteSkillsSyncFastForward(tracker: SkillsSyncTracker): void {
 
 export function isSyncLive(tracker: SkillsSyncTracker): boolean {
 	return tracker.fastForwardObserved;
-}
-
-export interface DegradedServe {
-	dataset: string;
-	pin: DatasetPin;
-	pin_age_ms: number;
-}
-
-/**
- * Serve `agent-skills` from its last pin while the sync unit is not live:
- * one warning ever, then the pin with its age for the reply (D25-07). No
- * silent staleness — the pin age travels in the reply.
- */
-export async function degradedAgentSkillsServe(
-	deps: RefreshDeps,
-	tracker: SkillsSyncTracker,
-): Promise<{ ok: true; serve: DegradedServe } | { ok: false; reason: string }> {
-	const pin = latestVersion(deps.versions, "agent-skills");
-	if (!pin) return { ok: false, reason: "no-pinned-version" };
-	const nowMs = deps.nowMs ?? Date.now();
-	if (!tracker.notLiveWarned) {
-		tracker.notLiveWarned = true;
-		await deps.emit({
-			surface: deps.surface ?? "claude-code",
-			kind: "warning",
-			summary: "docs dataset agent-skills serves its pinned version: skills-sync is not live",
-			session_id: deps.sessionId ?? "docs-refresh:agent-skills",
-			payload: { action: "docs.ingest", reason: "skills-sync-not-live", dataset_id: pin.dataset_id, version: pin.version },
-		});
-	}
-	return {
-		ok: true,
-		serve: {
-			dataset: "agent-skills",
-			pin: { dataset: pin.dataset, dataset_id: pin.dataset_id, version: pin.version, commit: pin.commit, ingested_at: pin.ingested_at },
-			pin_age_ms: Math.max(0, nowMs - Date.parse(pin.ingested_at)),
-		},
-	};
 }

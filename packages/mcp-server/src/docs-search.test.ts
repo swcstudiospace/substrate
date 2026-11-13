@@ -11,9 +11,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
-import { attachGraphHints, citationProvenanceCounts, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchCitation, type SearchReply } from "./docs-search.ts";
+import { attachGraphHints, citationProvenanceCounts, lightragDocumentDataset, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type DatasetPin, type SearchCitation, type SearchReply } from "./docs-search.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
-import { nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type ScanIo } from "./docs-ingest.ts";
+import { documentProvenance, nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestRecord, type ScanIo } from "./docs-ingest.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
@@ -1162,6 +1162,80 @@ describe("search graph metadata (LightRAG path)", () => {
 		expect(ragflowListings).toBe(0);
 		expect(reply.degraded ?? false).toBe(false);
 		expect(reply.chunks).toHaveLength(1);
+	});
+});
+
+describe("LightRAG citations are attributed per dataset (P2-6)", () => {
+	const SUBSTRATE_URL = "file:///checkout/agent-substrate/docs/plan.md";
+	const SKILLS_URL = "file:///checkout/agent-skills/demo-skill/SKILL.md";
+	const ORPHAN_URL = "file:///checkout/agent-substrate/docs/orphan.md";
+	/**
+	 * One LightRAG knowledge base holds both datasets. Each dataset's document sits under its own `lightrag::` record, keyed by
+	 * the identity the ingest writes. The orphan RAGFlow record (no `lightrag::` prefix) names a document, never a LightRAG dataset.
+	 */
+	const records = new Map<string, IngestRecord>([
+		[
+			`lightrag::swcstudiospace/agent-substrate::${SUBSTRATE_URL}`,
+			{ sha: "sha-substrate", dataset_id: "swcstudiospace/agent-substrate", source_url: SUBSTRATE_URL, document_id: "doc-substrate", commit: "sub-doc", version: 1 },
+		],
+		[
+			`lightrag::swcstudiospace/agent-skills::${SKILLS_URL}`,
+			{ sha: "sha-skills", dataset_id: "swcstudiospace/agent-skills", source_url: SKILLS_URL, document_id: "doc-skills", commit: "skills-doc", version: 1 },
+		],
+		[`agent-substrate::${ORPHAN_URL}`, { sha: "sha-orphan", dataset_id: "agent-substrate", source_url: ORPHAN_URL, document_id: "doc-ragflow", commit: "ragflow-doc", version: 1 }],
+	]);
+	const pins: Record<string, DatasetPin> = {
+		"agent-substrate": { dataset: "agent-substrate", dataset_id: "agent-substrate", version: "v3", commit: "sub-pin", ingested_at: "2026-11-01T00:00:00.000Z" },
+		"agent-skills": { dataset: "agent-skills", dataset_id: "agent-skills", version: "v7", commit: "skills-pin", ingested_at: "2026-11-01T00:00:00.000Z" },
+	};
+	/** A LightRAG search answering one chunk per document id, scored in the order given. */
+	const search = (documentIds: string[], datasetNames: string[]) =>
+		searchDocs(
+			{
+				config: { url: "http://ragflow.test", apiKey: "test-key" },
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames,
+				pins,
+				lightragRecords: records,
+				provenanceOf: (documentId) => documentProvenance(records, documentId),
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: documentIds.map((document_id, index) => ({ content: `chunk from ${document_id}`, document_name: `${document_id}.md`, document_id, heading_path: "H", score: 0.9 - index * 0.1 })),
+					detail: { mode: "hybrid", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
+				emit: async () => ({ stored: false }),
+				surface: "omp",
+			},
+			"where is the plan?",
+		);
+
+	test("each chunk carries its own dataset's pin and its own record's commit", async () => {
+		const reply = await search(["doc-substrate", "doc-skills"], ["agent-substrate", "agent-skills"]);
+		expect(reply.backend).toBe("lightrag");
+		expect(reply.chunks.find((chunk) => chunk.document_id === "doc-substrate")).toMatchObject({ source_url: SUBSTRATE_URL, commit: "sub-doc", dataset_commit: "sub-pin" });
+		expect(reply.chunks.find((chunk) => chunk.document_id === "doc-skills")).toMatchObject({ source_url: SKILLS_URL, commit: "skills-doc", dataset_commit: "skills-pin" });
+	});
+
+	test("a chunk no LightRAG record names is unattributed and cites no dataset's pin; a RAGFlow record names none", async () => {
+		const reply = await search(["doc-ragflow", "doc-nowhere"], ["agent-substrate", "agent-skills"]);
+		const orphan = reply.chunks.find((chunk) => chunk.document_id === "doc-ragflow");
+		expect(orphan).toMatchObject({ source_url: ORPHAN_URL, commit: "ragflow-doc" });
+		expect(orphan?.dataset_commit).toBeUndefined();
+		const nowhere = reply.chunks.find((chunk) => chunk.document_id === "doc-nowhere");
+		expect(nowhere).toMatchObject({ source_url: "dataset:unattributed", commit: "dataset-pin:unattributed:unrecorded" });
+		expect(nowhere?.dataset_commit).toBeUndefined();
+	});
+
+	test("a superseded LightRAG document is still attributed to the dataset its record is keyed under", () => {
+		const superseded = new Map<string, IngestRecord>([
+			[
+				`lightrag::swcstudiospace/agent-skills::${SKILLS_URL}`,
+				{ sha: "sha-skills-v2", dataset_id: "swcstudiospace/agent-skills", source_url: SKILLS_URL, document_id: "doc-skills-v2", commit: "skills-v2", superseded: [{ document_id: "doc-skills", commit: "skills-doc" }], version: 2 },
+			],
+		]);
+		expect(lightragDocumentDataset(superseded, "doc-skills")).toBe("swcstudiospace/agent-skills");
+		expect(lightragDocumentDataset(superseded, "doc-ragflow")).toBeUndefined();
 	});
 });
 

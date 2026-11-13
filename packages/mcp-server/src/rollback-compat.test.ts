@@ -478,14 +478,14 @@ describe("brief-snapshot envelope: the current writer against the 9231f43 reader
 
 // ── retain outbox ────────────────────────────────────────────────────────────
 
-/** Keys of one parked retain (`retain-outbox.ts:121-138` of 9231f43). `session_id` is optional. */
+/** Keys of one parked retain (`retain-outbox.ts:121-138` of 9231f43; the entry check is `isEntry` in `retain-outbox.ts` now). `session_id` is optional. */
 const OLD_OUTBOX_KEYS = ["id", "bank", "document_id", "entry_id", "surface", "entry_hash", "session_id", "attempts", "next_at", "last_reason", "enqueued_at"];
 
 /**
- * What the 9231f43 `RetainOutbox.hydrate` needs from one JSONL line, frozen:
- * each line is one JSON object (`:393`, `:406` write `JSON.stringify(entry)`;
- * `:359-363` split on newlines and parse) that passes `isEntry` (`:121-138`).
- * A line that fails is counted malformed and skipped: the parked retain is lost.
+ * What the 9231f43 `RetainOutbox.hydrate` needs from one JSONL line, frozen. Each line is one JSON object that passes `isEntry`.
+ * The line handling 9231f43 did at `:393`, `:406` (write `JSON.stringify(entry)`) and `:359-363` (split on newlines and parse)
+ * now lives in `outbox-file.ts` (`OutboxFile.append`, `rewrite` and `read`); `isEntry` (`:121-138` of 9231f43) stays in
+ * `retain-outbox.ts`. A line that fails is counted malformed and skipped: the parked retain is lost.
  */
 function oldOutboxLineViolations(line: string): string[] {
 	let parsed: unknown;
