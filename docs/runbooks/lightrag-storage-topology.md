@@ -163,8 +163,7 @@ v1.5.7 is UNVERIFIED; read it from the registry before pinning.
 - Authenticate with `LIGHTRAG_API_KEY` on the server and the `X-API-Key`
   header on the client (`utils_api.py` 404-418 and 479-495; upstream
   `env.example` 160-163). The substrate client sends that header only.
-- **The JWT bearer pitfall.** The server parses an `Authorization: Bearer`
-  header as a JWT *before* it looks at `X-API-Key` (`utils_api.py` 427-468).
+- **The JWT bearer pitfall.** For an `Authorization` header that uses the Bearer scheme, the server parses the credential as a JWT *before* it looks at `X-API-Key` (`utils_api.py` 427-468).
   A bearer value that is not a valid token makes `validate_token` raise 401
   (`lightrag/api/auth.py`, `validate_token`), and the dependency re-raises
   any 401 (`utils_api.py` 469-473). The API key in the same request is never

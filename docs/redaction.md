@@ -18,10 +18,10 @@ reported skill family, which groups shapes that mean the same credential.
 
 | Event rule | Skill family | Shape |
 |------------|--------------|-------|
-| `private-tag` | `private-tag` | A `<private>…</private>` block, claimed first so a key inside it goes as one block; an inner high-confidence shape is still reported as a finding |
+| `private-tag` | `private-tag` | A `<private>` block up to its closing tag, claimed first so a key inside it goes as one block; an inner high-confidence shape is still reported as a finding |
 | `pem` | `pem` | A PEM block |
 | `tailscale` | `tailscale` | A `tskey-` key |
-| `password` | `password` | A `password:` assignment |
+| `password` | `password` | A `password` key assignment |
 | `password-env` | `password` | A `*_PASSWORD`, `*_PASSWD` or `*_PASS` assignment |
 | `daytona` | `assignment` | A `DAYTONA_KEY` assignment |
 | `vault` | `assignment` | A vault token assignment |
@@ -73,7 +73,7 @@ This is the only D-04 pattern that is not byte-identical to September.
 ### The `api-key-lower` value runs to the end of the token
 
 September's rule redacted only the characters of its value class (`[A-Za-z0-9_\-/.+]{16,}`), so
-`api_key: abcdefghijklmnopqrstuvwxyz!2024` came back `api_key: [REDACTED]!2024` and, on the skill
+`api_key: <a long key>!2024` came back `api_key: [REDACTED]!2024` and, on the skill
 pass, the 18-character prefix `yoursecretpassword` of `yoursecretpassword!2024` looked like a
 placeholder and the whole value was kept. The value now continues to the end of the token
 (`[^\s"'`,;)]*` after the class), on both passes, so a value carrying punctuation is redacted whole
@@ -113,7 +113,7 @@ here would fork the two tables silently:
 - The fixed-length shapes (`npm_`, the Google key, the DigitalOcean token)
   carry no trailing boundary, so a longer run leaves a tail past the marker.
 - On the event path `api-key-lower` crosses a newline; the skill pass keeps
-  its whitespace on its line (`[ \t]`), so a bare `password:` at a line end
+  its whitespace on its line (`[ \t]`), so a bare `password` key with its colon at a line end
   never eats the next line's first word.
 
 ## The counter exemption
@@ -130,7 +130,7 @@ key is still redacted whole, so a token shape under `tokens` and a bare
 
 The event pass rewrites silently: the value is gone, the surrounding text
 stays. The skill pass distinguishes, because skill files are instructions an
-agent has to read — `Authorization: Bearer $PARALLEL_API_KEY` is a working
+agent has to read — an `Authorization` header with the value `Bearer $PARALLEL_API_KEY` is a working
 line, not a leak:
 
 - **Kept:** env references, angle-bracket placeholders, placeholder words and

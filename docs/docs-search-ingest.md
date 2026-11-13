@@ -482,7 +482,7 @@ redactor; no `forbidden` string appears). Two tiers share the scorer:
   the fake). It proves scope isolation, provenance, ordering, the cap,
   redaction of a planted placeholder and the scorer — not relevance;
   every committed fixture must pass its thresholds.
-- **Live** (`SUBSTRATE_URL=… SUBSTRATE_TOKEN=… bun run docs:golden -- --live`,
+- **Live** (with `SUBSTRATE_URL` and `SUBSTRATE_TOKEN` exported: `bun run docs:golden -- --live`,
   opt-in): `POST /docs/search` only; scores are printed, never asserted.
   It refuses (exit 3) when a fixture's `corpus_manifest.sha256` is not the
   corpus on disk (`--manifest` prints it), when a fixture carries no

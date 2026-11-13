@@ -104,7 +104,7 @@ prefix and list are set by the documented env names `HINDSIGHT_BANK_PREFIX` and
 
 For each bank, the operator makes one read-only bank call and records its HTTP status:
 
-`curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $HINDSIGHT_API_KEY" "$HINDSIGHT_URL/v1/default/banks/<bank>/stats"`
+`curl -s -o /dev/null -w '%{http_code}' --oauth2-bearer "$HINDSIGHT_API_KEY" "$HINDSIGHT_URL/v1/default/banks/<bank>/stats"`
 
 `HINDSIGHT_URL` and `HINDSIGHT_API_KEY` are env names; the values come from the secret store and are never written here. The condition holds only if every bank call returns `200`. Record the bank name and the status code only. Do not record the response body or any value. This check does not use `memory_search`: that tool takes a memory scope, not a bank, and its bank list comes from the caller and `HINDSIGHT_BANKS`, so it cannot show that a given `sub-*` bank answers.
 

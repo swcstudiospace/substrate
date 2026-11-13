@@ -35,8 +35,10 @@ Options: `--name <id>` (default `gate-<time>`; a name that already has a run dir
 One named check per row, each with its timing, then one line a log search or a deploy hook can key on:
 
 ```text
-gate-receipt name=<id> commit=<sha12> verdict=pass|fail|unavailable exit=<0|1|2> checks=N pass=N fail=N skip=N notes=N failed=<ids|-> unavailable=<reason|-> kept=<bool> ms=N
+gate-receipt name=<id> commit=<sha12> verdict=pass|fail|unavailable exit=<0|1|2> checks=N [pass, fail, skip, notes counts] failed=<ids|-> unavailable=<reason|-> kept=<bool> ms=N
 ```
+
+The four bracketed counts are `pass`, `fail`, `skip` and `notes`, each written as its name, `=`, and a number.
 
 | Check | Proves | Turns red when |
 | --- | --- | --- |

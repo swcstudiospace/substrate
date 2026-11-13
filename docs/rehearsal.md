@@ -38,7 +38,7 @@ default; clients reach the ledger only through `SUBSTRATE_URL`.
 All six run through the `rehearsal` package script:
 
 ```sh
-bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture] [--extra-env KEY=VALUE]...
+bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture] [--extra-env <key>=<value>]...
 bun run rehearsal smoke [--name <n>]
 bun run rehearsal status [--name <n>]
 bun run rehearsal pause --store ledger|index [--name <n>]
@@ -83,7 +83,7 @@ waits for `GET /healthz` to report a writable index and ledger, and prints the
 `consumer.env` path, the URL, the checkout commit, a dirty flag and the image
 tags. Never a credential.
 
-`--extra-env KEY=VALUE` (repeatable, `up` only) adds one server setting to the twin's environment. It is a closed list in `packages/mcp-server/src/rehearsal-env.ts` (`EXTRA_ENV_ALLOWLIST`), and every key accepts only the values listed here:
+`--extra-env <key>=<value>` (repeatable, `up` only) adds one server setting to the twin's environment. It is a closed list in `packages/mcp-server/src/rehearsal-env.ts` (`EXTRA_ENV_ALLOWLIST`), and every key accepts only the values listed here:
 
 | Key | Accepts |
 | --- | --- |
@@ -92,7 +92,7 @@ tags. Never a credential.
 | `SUBSTRATE_CACHE_SWR` | `off`, `shadow`, `enforce` |
 | `SUBSTRATE_SLO_MIN_SAMPLES` | a whole number, 1 to 999 |
 
-Anything else exits `2` before any Docker call, naming the rule: `extra-env-format` (not `KEY=VALUE`), `extra-env-key` (not on the list, so no store URL, token, path or host can be injected), `extra-env-value` (a value the key does not take) or `extra-env-duplicate` (the same key twice; the later value never silently wins). A key is added to the list only once the server reads it, with the values the server accepts. `up` prints each accepted pair.
+Anything else exits `2` before any Docker call, naming the rule: `extra-env-format` (not `<key>=<value>`), `extra-env-key` (not on the list, so no store URL, token, path or host can be injected), `extra-env-value` (a value the key does not take) or `extra-env-duplicate` (the same key twice; the later value never silently wins). A key is added to the list only once the server reads it, with the values the server accepts. `up` prints each accepted pair.
 
 `pause` and `unpause` freeze and thaw one scratch store of one instance with `docker pause` / `docker unpause`: the container keeps its connections open and answers nothing, which is how a dropped-packet outage looks to the server (`index` is the Postgres container, `ledger` the other). They take the same per-instance lock as `down` and the same local-daemon check. The container is found by the instance label **and** its exact name (`substrate-rehearsal-<name>-ledger` or `-pg`); anything else, none or two matches refuse with rule `pause-target` and nothing is paused. A store already in the asked state is reported and left alone (exit `0`), so a cleanup `unpause` is always safe, and the state is read back from Docker after the verb. A paused store does not stop `down`: removal is forced.
 

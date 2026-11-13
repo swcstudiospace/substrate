@@ -82,7 +82,7 @@ substrate index restore --scratch "$SCRATCH_URL" /mnt/index-archive
 ```
 
 Prefer `SUBSTRATE_INDEX_SCRATCH_URL` over `--scratch` when the URL carries a
-password: an argument is visible to every user in `ps`.
+password, because an argument is visible to every user in `ps`.
 
 ### Guards (all checked before anything is created)
 

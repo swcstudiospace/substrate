@@ -160,7 +160,7 @@ What is refused, and before what:
 
 A refusal is recorded as a `repo.scope-refused` ledger warning with the route, the reason code and a 16-hex digest of what was asked for; the requested path or repository is never written. An anonymous refusal is recorded by the route audit. The corpus root and anchor are not gated: they are digests over every repository and reveal no document content.
 
-`SUBSTRATE_REPO_SCOPES` carries no secret: the scoped credential is the surface bearer plus its grant. A repository's git credential is named only by `SUBSTRATE_REPO_ALLOWLIST` (above), which names the environment variable that holds it.
+`SUBSTRATE_REPO_SCOPES` carries no secret. The scoped credential is the surface bearer plus its grant. A repository's git credential is named only by `SUBSTRATE_REPO_ALLOWLIST` (above), which names the environment variable that holds it.
 
 ## Cross-repository operations (phase 74)
 

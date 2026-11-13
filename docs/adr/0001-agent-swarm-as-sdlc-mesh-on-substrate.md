@@ -393,7 +393,7 @@ Acceptance criteria:
    | Server | `SUBSTRATE_TOKEN_<SURFACE>`, one per surface | `substrate-mcp`, to build its token→surface map (`config.ts`) |
    | Client | **`SUBSTRATE_TOKEN`**, exactly one — its own | `substrate` CLI (`cli/src/index.ts`) and the collectors (`collectors/src/grok.ts`) |
 
-   So the per-agent credential file sets `SUBSTRATE_TOKEN=<that agent's value>`,
+   So the per-agent credential file sets the `SUBSTRATE_TOKEN` variable to `<that agent's value>`,
    and the *same secret* appears on the server as
    `SUBSTRATE_TOKEN_SWARM_A05_BE`. One secret, two names, opposite ends. An agent
    handed only the server-side name would send no bearer header at all — the
@@ -574,7 +574,7 @@ scan alone would not have.
 
 **Costs, accepted**
 
-- **Fifteen new surfaces and fifteen new tokens.** Not one shared `swarm` token:
+- **Fifteen new surfaces and fifteen new tokens.** Not one shared `swarm` token;
   a shared surface would collapse 15 memory writers and 15 lease holders into
   one, which defeats both RBAC and the lease. Provisioning and rotation get
   wider.

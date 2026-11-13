@@ -9,7 +9,7 @@ TEI is private: the Railway service has no public address, so the host reaches i
 | Variable | Default | Meaning |
 |---|---|---|
 | `TEI_URL` | unset | Base URL. Unset, the service is unconfigured: every call answers `not-configured` and nothing is sent. |
-| `TEI_API_KEY` | unset | Sent as `Authorization: Bearer ...` when set. Never logged, never in a status row, never in a reason. |
+| `TEI_API_KEY` | unset | Sent as a bearer credential in the Authorization header when set. Never logged, never in a status row, never in a reason. |
 | `SUBSTRATE_TEI_MODEL` | learned | The model `GET /info` must name. |
 | `SUBSTRATE_TEI_DIM` | learned | The length every vector must have. |
 | `SUBSTRATE_TEI_TIMEOUT_MS` | 10000 | Timeout of each request (100 to 120000). |

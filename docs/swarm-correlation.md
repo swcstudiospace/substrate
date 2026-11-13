@@ -48,7 +48,7 @@ thirty agents one memory writer and one lease holder. Thirty surfaces means thir
 
 The variable name is the **server's** convention (`SUBSTRATE_TOKEN_<SURFACE>`, `-` → `_`,
 uppercased). A swarm client process holds exactly one token, in `SUBSTRATE_TOKEN`, and
-sends it as `Authorization: Bearer <token>`. The names are listed, blank, in
+sends it as a bearer credential in the `Authorization` header. The names are listed, blank, in
 `.env.example`; on the server the values live only in `/etc/substrate/substrate.env`. On the
 agent side each value lives in that agent's 0600 env file, written by the swarm's workspace
 install, which also wires the `substrate` MCP entry: see [swarm-workspace.md](swarm-workspace.md)

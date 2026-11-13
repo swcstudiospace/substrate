@@ -142,7 +142,7 @@ below). An event with no usage contributes nothing rather than a zero, so a
 > invisibly, because a redacted field looks like redaction working. The exemption
 > added in `redact.ts` is an explicit list of counter names *and* requires a finite
 > numeric value: `{"tokens": "sk-ant-…"}` is still redacted whole, and so is
-> `{"password": 123456}`. A number is not inherently safe; a named count is. The full
+> `{"<password-key>": 123456}`. A number is not inherently safe; a named count is. The full
 > exemption is documented in the counter-exemption section of [`redaction.md`](redaction.md).
 
 ## Plane circuit breakers (uplift-2 R2)
@@ -856,8 +856,8 @@ while its store is gone. Blackhole the ledger for the window:
 sudo iptables -I OUTPUT -d <ledger-ip> -j DROP && sleep 60 \
   && sudo iptables -D OUTPUT -d <ledger-ip> -j DROP
 
-# terminal 2
-SUBSTRATE_URL=http://127.0.0.1:7410 SUBSTRATE_TOKEN=… bun run smoke:chaos
+# terminal 2 — with SUBSTRATE_TOKEN already exported in this shell
+SUBSTRATE_URL=http://127.0.0.1:7410 bun run smoke:chaos
 ```
 
 `--plane index|hindsight|ragflow|cache` (uplift-2 R2) blackholes a different

@@ -94,7 +94,7 @@ client keeps with the server (upstream v1.5.7; the recorded route list is
 `packages/mcp-server/src/planes/__fixtures__/lightrag-v1.5.7-routes.json`):
 
 - **Auth.** `LIGHTRAG_API_KEY` is sent as `X-API-Key` and only that. It is
-  never sent as `Authorization: Bearer`: the server reads a bearer value as a
+  never sent as a bearer token in the `Authorization` header: the server reads a bearer value as a
   JWT first and answers 401 to one that is not (`lightrag/api/utils_api.py`
   upstream), so a key sent as a bearer can fail a request the header alone
   would pass. The key is never put in a reason string.

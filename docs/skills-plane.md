@@ -110,7 +110,7 @@ file in prose.
 | Bridge, Omp queue | `omp` | The `omp` file in the tokens dir, read per request |
 | Bridge, Grok queue | `grok-build` | The `grok-build` file in the tokens dir, read per request |
 | Omp extension | `omp` | Direct, token-file, then tokens-dir order for surface `omp` |
-| skill-autonomy staging | `grok-build` | No token: it stages into the Grok queue and the bridge proposes it |
+| skill-autonomy staging | `grok-build` | No token needed; it stages into the Grok queue and the bridge proposes it |
 
 The tokens dir is the `SUBSTRATE_TOKENS_DIR` value when set, else the built-in
 tokens directory. Token files hold one short value (first line, 4 KiB cap);

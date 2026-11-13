@@ -232,14 +232,14 @@ the 30-minute soak, and attribute any delta to the dormant roster above
 or to a stranded client. A delta that names a live client is the failure
 case, not dormancy.
 
-The 401 read is `GET /metrics` with the operator token: sum the `value`
+The 401 read is `GET /metrics` with the operator token. Sum the `value`
 fields of the request-total counter points with surface unattributed and
 status 4xx (each point is one series, so counting points misses requests;
 only the summed values count requests), and confirm the response's start
 time is the restart under test:
 
 ```sh
-curl -s -H "Authorization: Bearer $(head -n 1 $OPERATOR_TOKEN_FILE)" "$SUBSTRATE_URL/metrics" | jq '[.metrics[] | select(.name == "substrate.request.total") | .points[] | select(.attributes.surface == "unattributed" and .attributes.status == "4xx") | .value] | add // 0'
+curl -s --oauth2-bearer "$(head -n 1 $OPERATOR_TOKEN_FILE)" "$SUBSTRATE_URL/metrics" | jq '[.metrics[] | select(.name == "substrate.request.total") | .points[] | select(.attributes.surface == "unattributed" and .attributes.status == "4xx") | .value] | add // 0'
 ```
 
 `OPERATOR_TOKEN_FILE` is the operator token file and `SUBSTRATE_URL` the
@@ -248,7 +248,7 @@ counter's 2xx point values summed per surface show each live client's
 token resolving, brief callers included:
 
 ```sh
-curl -s -H "Authorization: Bearer $(head -n 1 $OPERATOR_TOKEN_FILE)" "$SUBSTRATE_URL/metrics" | jq '[.metrics[] | select(.name == "substrate.request.total") | .points[] | select(.attributes.status == "2xx") | {surface: .attributes.surface, value: .value}] | group_by(.surface) | map({surface: .[0].surface, requests: (map(.value) | add)})'
+curl -s --oauth2-bearer "$(head -n 1 $OPERATOR_TOKEN_FILE)" "$SUBSTRATE_URL/metrics" | jq '[.metrics[] | select(.name == "substrate.request.total") | .points[] | select(.attributes.status == "2xx") | {surface: .attributes.surface, value: .value}] | group_by(.surface) | map({surface: .[0].surface, requests: (map(.value) | add)})'
 ```
 
 Record both summed readings beside the window row in the

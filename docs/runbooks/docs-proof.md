@@ -22,7 +22,7 @@ Records the deployment version (U-01) and confirms the upload/parse paths
 
 ```sh
 curl -s -w '\n%{http_code}\n' "$RAGFLOW_URL/api/v1/datasets" \
-  -H "authorization: Bearer $RAGFLOW_API_KEY" | tail -5
+  --oauth2-bearer "$RAGFLOW_API_KEY" | tail -5
 ```
 
 Proof read: HTTP 200 with a dataset list; the response's version field
@@ -36,7 +36,7 @@ Rollback: no writes are made; nothing to roll back.
 
 ```sh
 curl -s "$RAGFLOW_URL/api/v1/datasets" \
-  -H "authorization: Bearer $RAGFLOW_API_KEY"
+  --oauth2-bearer "$RAGFLOW_API_KEY"
 ```
 
 Proof read: the name-matched list (`agent-substrate`,
@@ -45,7 +45,7 @@ only for names with no match, with TEI `bge-small` pinned:
 
 ```sh
 curl -s -X POST "$RAGFLOW_URL/api/v1/datasets" \
-  -H "authorization: Bearer $RAGFLOW_API_KEY" -H 'content-type: application/json' \
+  --oauth2-bearer "$RAGFLOW_API_KEY" -H 'content-type: application/json' \
   -d '{"name":"<missing-name>","embedding_model":"tei-bge-small"}'
 ```
 

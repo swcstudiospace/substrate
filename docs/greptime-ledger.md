@@ -1055,7 +1055,7 @@ handle.
 ### Transport: HTTPS with Basic auth, today
 
 `GREPTIME_URL` is the HTTP SQL API base over public HTTPS, and the credential is
-sent as an `Authorization: Basic` header — built per request, never placed in the
+sent in an `Authorization` header using the Basic scheme — built per request, never placed in the
 URL, so it cannot leak through a log line, a redirect or an error this code quotes.
 This is the path INFRA probed green against the Railway service, and it is the one
 to keep using.

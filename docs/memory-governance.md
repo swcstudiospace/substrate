@@ -100,7 +100,7 @@ decided on the writer's name, so a caller-supplied name is a caller-supplied
 permission.
 
 A local run that wants memory writable without tokens says so explicitly, with
-either a surface token — `SUBSTRATE_TOKEN_CLAUDE_CODE=…`, one list-valued variable per surface — or
+either a surface token, set in `SUBSTRATE_TOKEN_CLAUDE_CODE` (one list-valued variable per surface), or
 a grant naming `unknown` in `SUBSTRATE_MEMORY_GRANTS`:
 
 ```json
@@ -324,7 +324,7 @@ see what enforcement would do before it is turned on. What happens next is
 | `enforce` | expired entries left out unless the caller passes `include_expired` | left out | deletable, still only under `SUBSTRATE_INDEX_SWEEP=apply` plus `--apply` | `substrate.memory.expired{mode=hidden}` |
 
 `include_expired` on `memory_search` is an operator action, gated like `force` on
-the operator token: an agent cannot widen its own reads by typing a flag. It is
+the operator token, since an agent cannot widen its own reads by typing a flag. It is
 refused under `report` too, so the rule is learned once rather than at the flip.
 The counter carries `surface` (the caller), the memory `kind` and `mode`, and is
 taken where the index is read — a cache hit serves a copy and counts nothing. The
