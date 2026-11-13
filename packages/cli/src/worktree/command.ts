@@ -729,12 +729,25 @@ export function httpClaimsLookup(config: HttpPosterConfig): ClaimsFn {
 
 /** Whether the ledger already holds a `worktree.merge_back` note for one head. An unanswered question is a failure, never "not recorded". */
 export type MergeBackNotedOutcome = { ok: true; noted: boolean } | { ok: false; error: string };
-export type MergeBackNotedFn = (repo: string, head: string) => Promise<MergeBackNotedOutcome>;
+export type MergeBackNotedFn = (repo: string, head: string, headCommittedAt?: string | null) => Promise<MergeBackNotedOutcome>;
 
 /** Notes read per page of the lookup, newest first. */
 const MERGE_BACK_NOTE_PAGE = 200;
 /** Pages one lookup may read. Past this the answer is a refusal, never "not recorded". */
 const MERGE_BACK_NOTE_MAX_PAGES = 50;
+
+/**
+ * The instant `head_key` went in (commit b8820570). A head committed at or after it is noted only under its key, so a keyed miss
+ * settles it; an older head may hold a note without the key, which only the bounded scan can find.
+ */
+const HEAD_KEY_CUTOVER_MS = Date.parse("2026-11-13T02:19:15Z");
+
+/** Whether a head's commit time, an ISO string, is at or after the cutover. An absent or unreadable time is not, so its scan keeps the refusal. */
+function committedAfterHeadKey(committedAt: string | null | undefined): boolean {
+	if (typeof committedAt !== "string") return false;
+	const time = Date.parse(committedAt);
+	return Number.isFinite(time) && time >= HEAD_KEY_CUTOVER_MS;
+}
 
 /** Whether a ledger event is the merge-back note for `head`. */
 function isMergeBackNoteFor(event: unknown, head: string): boolean {
@@ -783,11 +796,12 @@ async function readNotePage(doFetch: FetchFn, config: HttpPosterConfig, query: R
  * A lookup of whether `repo` at `head` already has its merge-back note, over `POST /events/query`. The first read asks for the
  * note by its `head_key` payload field, in one request. A note written before `head_key` existed has none, so when that read
  * holds no note for `head` or cannot answer, the lookup pages backwards with an `until` bound while a page is full, so a busy
- * repository is read completely up to `MERGE_BACK_NOTE_MAX_PAGES` pages.
+ * repository is read completely up to `MERGE_BACK_NOTE_MAX_PAGES` pages. When that cap is reached without an answer, a head
+ * committed at or after the cutover is new (its note would carry `head_key`), so it is not recorded; an older head is refused.
  */
 export function httpMergeBackNoted(config: HttpPosterConfig): MergeBackNotedFn {
 	const doFetch: FetchFn = config.fetchImpl ?? ((url, init) => fetch(url, init));
-	return async (repo, head) => {
+	return async (repo, head, headCommittedAt) => {
 		const scope = repo.startsWith("local/") ? {} : { repo };
 		const keyed = await readNotePage(doFetch, config, { ...scope, payload_key: "head_key", payload_value: head });
 		if (!("error" in keyed) && keyed.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
@@ -806,6 +820,8 @@ export function httpMergeBackNoted(config: HttpPosterConfig): MergeBackNotedFn {
 			previousOldest = oldest;
 			until = new Date(oldest).toISOString();
 		}
+		// Past the cap, only a head committed before `head_key` existed can hide a note that the keyed read missed.
+		if (committedAfterHeadKey(headCommittedAt)) return { ok: true, noted: false };
 		return { ok: false, error: `the newest ${MERGE_BACK_NOTE_PAGE * MERGE_BACK_NOTE_MAX_PAGES} notes do not settle it` };
 	};
 }

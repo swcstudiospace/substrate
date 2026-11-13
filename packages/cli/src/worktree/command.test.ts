@@ -1724,4 +1724,36 @@ describe("httpMergeBackNoted: the head_key path", () => {
 		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: false });
 		expect(requests).toHaveLength(2);
 	});
+
+	/** The keyed read misses, then fifty full pages of other heads' notes, each older than the last: the scan reaches its cap without an answer. */
+	function cappedScan(): Reply[] {
+		const newest = Date.parse("2026-11-12T12:00:00Z");
+		const replies: Reply[] = [answer(EMPTY)];
+		for (let page = 0; page < 50; page++) {
+			const ts = new Date(newest - page * 60_000).toISOString();
+			replies.push(answer({ events: [{ kind: "note", ts, payload: { action: "worktree.merge_back", repo: "acme/widgets", head: OTHER, head_key: OTHER } }], count: 1, truncated: true }));
+		}
+		return replies;
+	}
+
+	test("a new head committed after the cutover is not refused when its scan is capped", async () => {
+		const { requests, lookup } = ledger(cappedScan());
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(51);
+	});
+
+	test("a head committed exactly at the cutover is new when its scan is capped", async () => {
+		const { lookup } = ledger(cappedScan());
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T02:19:15.000Z")).toEqual({ ok: true, noted: false });
+	});
+
+	test("an older head whose scan is capped keeps the refusal", async () => {
+		const { lookup } = ledger(cappedScan());
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T02:19:14.999Z")).toEqual({ ok: false, error: "the newest 10000 notes do not settle it" });
+	});
+
+	test("a capped scan with no readable commit time keeps the refusal", async () => {
+		expect((await ledger(cappedScan()).lookup("acme/widgets", HEAD, null)).ok).toBe(false);
+		expect((await ledger(cappedScan()).lookup("acme/widgets", HEAD)).ok).toBe(false);
+	});
 });

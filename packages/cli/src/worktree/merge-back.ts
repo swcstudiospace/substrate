@@ -201,7 +201,7 @@ export async function commandMergeBack(args: WorktreeArgs, deps: WorktreeDeps, r
 			const described = `${info.repo} ${info.branch ?? "(detached)"} at ${info.head.slice(0, 12)}, merged via ${mergedVia}`;
 			if (args.execute) {
 				// Asked under the lock, so a run that just released it has already emitted and this one sees its note.
-				const noted = await deps.mergeBackNoted(info.repo, info.head);
+				const noted = await deps.mergeBackNoted(info.repo, info.head, info.last_commit_at);
 				if (!noted.ok) {
 					const reason = `the ledger could not say whether this head is already recorded: ${noted.error}`;
 					refused.push({ path, reasons: [reason] });
