@@ -410,41 +410,63 @@ interface GreptimeResponse {
 }
 
 /**
- * The statement with every string literal blanked out.
+ * The statement's SQL structure: comments removed, and every string literal and
+ * quoted identifier blanked to an empty placeholder of its own kind.
  *
  * `assertAppendOnly` has to reason about SQL structure, and an event summary is
- * arbitrary agent text: it may well contain a `;` or a `--`. Blanking the
- * literals first means the guard can neither be fooled by that text nor trip
- * over it and drop a legitimate event.
+ * arbitrary agent text: it may well contain a `;`, a `--` or an apostrophe. One
+ * left-to-right pass decides what every character is, so a `'` inside a line
+ * comment or a block comment never opens a literal, and a `"` or backtick
+ * identifier that holds a `'` or `;` is never mistaken for a literal. Blanking
+ * them first means the guard can neither be fooled by that text nor trip over
+ * it and drop a legitimate event.
  */
-function withoutLiterals(statement: string): string {
+function sqlStructure(statement: string): string {
 	let out = "";
 	let i = 0;
 	while (i < statement.length) {
-		if (statement[i] !== "'") {
-			out += statement[i];
-			i++;
-			continue;
-		}
-		out += "''"; // placeholder: an empty literal, structurally where the real one was
-		i++;
-		while (i < statement.length) {
-			if (statement[i] === "\\") {
-				i += 2;
-				continue;
-			}
-			if (statement[i] === "'") {
-				if (statement[i + 1] === "'") {
-					i += 2;
-					continue;
-				}
-				i++;
-				break;
-			}
+		const ch = statement[i];
+		if (ch === "-" && statement[i + 1] === "-") {
+			const newline = statement.indexOf("\n", i);
+			i = newline === -1 ? statement.length : newline;
+			out += " ";
+		} else if (ch === "/" && statement[i + 1] === "*") {
+			const close = statement.indexOf("*/", i + 2);
+			i = close === -1 ? statement.length : close + 2;
+			out += " ";
+		} else if (ch === "'") {
+			i = skipQuoted(statement, i, "'", true);
+			out += "''";
+		} else if (ch === '"' || ch === "`") {
+			i = skipQuoted(statement, i, ch, false);
+			out += ch + ch;
+		} else {
+			out += ch;
 			i++;
 		}
 	}
 	return out;
+}
+
+/**
+ * The index just past the quote that closes the one at `start`. A doubled quote
+ * is an escaped quote and does not close; a string literal also honours `\`
+ * escapes, as the ledger's dialect does, while an identifier does not.
+ */
+function skipQuoted(statement: string, start: number, quote: string, backslashEscapes: boolean): number {
+	let i = start + 1;
+	while (i < statement.length) {
+		const ch = statement[i];
+		if (backslashEscapes && ch === "\\") {
+			i += 2;
+		} else if (ch === quote) {
+			if (statement[i + 1] !== quote) return i + 1;
+			i += 2;
+		} else {
+			i++;
+		}
+	}
+	return statement.length;
 }
 
 /**
@@ -459,10 +481,7 @@ const APPEND_ONLY_VERBS = new Set(["select", "insert", "create", "show", "descri
 
 /** Reject anything that could mutate the ledger, or smuggle a second statement past the verb check. */
 export function assertAppendOnly(statement: string): void {
-	const structure = withoutLiterals(statement)
-		.replace(/\/\*[\s\S]*?\*\//g, " ")
-		.replace(/--[^\n]*/g, " ")
-		.trim();
+	const structure = sqlStructure(statement).trim();
 	// Greptime's HTTP API accepts `;`-separated batches, so a single trailing
 	// semicolon is all that may follow the one statement we are sending.
 	if (structure.replace(/;\s*$/, "").includes(";")) {

@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
@@ -32,6 +32,7 @@ import {
 	type PageSettlement,
 	type ScanIo,
 } from "./docs-ingest.ts";
+import { lightragSearchDatasets } from "./docs-datasets.ts";
 import { createMcpServer } from "./mcp.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { Substrate } from "./service.ts";
@@ -403,6 +404,47 @@ describe("ingest record persistence", () => {
 			const loaded = await loadIngestRecords(corrupt);
 			expect(loaded.records.size).toBe(0);
 			expect(typeof loaded.problem).toBe("string");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a state file that exists but cannot be read reports a problem and is never overwritten", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			// A link to itself fails to open with ELOOP: a read error, not a missing file, and it holds no state to merge into.
+			// Unlike a permission bit it fails for root too.
+			const file = join(dir, "ingest.json");
+			symlinkSync(file, file);
+			const loaded = await loadIngestRecords(file);
+			expect(loaded.records.size).toBe(0);
+			expect(loaded.problem).toMatch(/could not be read \(ELOOP\)/);
+			const seen = new Map<string, IngestRecord>([
+				["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1", version: 1 }],
+			]);
+			await expect(saveIngestRecords(file, seen)).rejects.toThrow("not overwriting it");
+			expect(lstatSync(file).isSymbolicLink()).toBe(true);
+			expect(readlinkSync(file)).toBe(file);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test.skipIf(process.getuid?.() === 0)("a state file that cannot be read keeps its bytes through a save", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			const file = join(dir, "ingest.json");
+			await saveIngestRecords(file, new Map<string, IngestRecord>([["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1", version: 1 }]]));
+			const before = readFileSync(file);
+			chmodSync(file, 0o000);
+			try {
+				const loaded = await loadIngestRecords(file);
+				expect(loaded.problem).toContain("could not be read (EACCES)");
+				await expect(saveIngestRecords(file, new Map<string, IngestRecord>())).rejects.toThrow("not overwriting it");
+			} finally {
+				chmodSync(file, 0o600);
+			}
+			expect(readFileSync(file).equals(before)).toBe(true);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -1061,6 +1103,42 @@ function lightragHarness(fake: LightragFake, options: { prune?: boolean } = {}) 
 	};
 	return { seen, ingest: (input: IngestInput): Promise<IngestOutcome> => ingestDocs(deps, input) };
 }
+
+describe("docs_ingest on the LightRAG plane: the dataset gate", () => {
+	// The service's wiring: its list names only the requested dataset, so a check against that list alone accepts any name.
+	const ingestAs = (fake: LightragFake, seen: Map<string, IngestRecord>, dataset: string): Promise<IngestOutcome> =>
+		ingestDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				lightragDatasets: { list: async () => lightragSearchDatasets([dataset]), invalidate: () => undefined },
+				lightragFetch: fake.fetch,
+				seen,
+				poll: { intervalMs: 0 },
+				emit: async (): Promise<unknown> => ({ stored: false }),
+				surface: "omp",
+			},
+			{ dataset, pages: [PAGE] },
+		);
+
+	test("a name the plane does not configure is refused unknown-dataset before any plane call, empty name included", async () => {
+		const fake = new LightragFake();
+		const seen = new Map<string, IngestRecord>();
+		for (const dataset of ["not-a-dataset", ""]) {
+			expect(await ingestAs(fake, seen, dataset)).toMatchObject({ ok: false, reason: "unknown-dataset" });
+		}
+		expect(fake.uploads).toEqual([]);
+		expect(seen.size).toBe(0);
+	});
+
+	test("a configured dataset still ingests through the same wiring", async () => {
+		const fake = new LightragFake();
+		const outcome = await ingestAs(fake, new Map<string, IngestRecord>(), "agent-substrate");
+		expect(outcome).toMatchObject({ ok: true });
+		expect(fake.uploads).toHaveLength(1);
+	});
+});
 
 describe("docs_ingest on the LightRAG plane: failed writes and graph corrections", () => {
 	test("a later page of a source URL is not written once an earlier page of that URL failed in the call", async () => {

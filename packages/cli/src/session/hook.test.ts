@@ -40,6 +40,9 @@ interface Rig {
 /** What the REST routes the steering and context triggers read answer with. `down` throws like a refused connection; `garbage` answers 200 with HTML. */
 interface SteerStub {
 	mode: "up" | "down" | "garbage" | "denied";
+	/** The durable history's answer on `/steering/directives`: `unavailable` and a cut history leave the listing partial. */
+	history: "memory-only" | "durable" | "unavailable";
+	historyTruncated: boolean;
 	directives: unknown[];
 	context: unknown;
 	calls: Array<{ path: string; search: string; authorization: string | undefined; sessionBinding: string | undefined }>;
@@ -52,7 +55,7 @@ function steerFetchFor(stub: SteerStub): SteerFetch {
 		if (stub.mode === "down") throw new TypeError("fetch failed");
 		if (stub.mode === "garbage") return new Response("<html>not json</html>", { status: 200 });
 		if (stub.mode === "denied") return Response.json({ status: "refused", error: { code: "not-found" } }, { status: 404 });
-		if (url.pathname === "/steering/directives") return Response.json({ directives: stub.directives });
+		if (url.pathname === "/steering/directives") return Response.json({ directives: stub.directives, history: stub.history, history_truncated: stub.historyTruncated });
 		if (url.pathname === "/session/context") return Response.json(stub.context);
 		return new Response("{}", { status: 404 });
 	};
@@ -62,7 +65,7 @@ function rig(overrides: Partial<SessionDeps> = {}, repo = true): Rig {
 	const dir = repo ? makeRepo() : tempDir();
 	if (repo) writeFiles(dir, { "a.txt": "alpha\n" });
 	const server = new FakeServer();
-	const steer: SteerStub = { mode: "up", directives: [], context: {}, calls: [] };
+	const steer: SteerStub = { mode: "up", history: "memory-only", historyTruncated: false, directives: [], context: {}, calls: [] };
 	const out: string[] = [];
 	const err: string[] = [];
 	const clock = { ms: T0 };
@@ -739,6 +742,35 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 		writeFiles(r.dir, { "a.txt": "gamma\n" });
 		await hook(r, envelope(r), "steering");
 		expect(await consumedOf(r)).toEqual(["kept"]);
+	});
+
+	// A listing the history cannot vouch for omits directives the server still holds: its absence proves nothing, so it must not prune.
+	const partialListingKeepsDecision = async (r: Rig, history: SteerStub["history"], historyTruncated: boolean): Promise<void> => {
+		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE), SESSION, LIVE, ["dir-1"]);
+		r.steer.history = history;
+		r.steer.historyTruncated = historyTruncated;
+		r.steer.directives = [];
+		writeFiles(r.dir, { "a.txt": "gamma\n" });
+		await hook(r, envelope(r), "steering");
+		expect(await consumedOf(r)).toEqual(["dir-1"]);
+		// The history is back and lists the hint again: its decision still stands, so no second checkpoint is taken for it.
+		r.steer.history = "durable";
+		r.steer.historyTruncated = false;
+		r.steer.directives = [directive("dir-1")];
+		writeFiles(r.dir, { "a.txt": "delta\n" });
+		await hook(r, envelope(r), "steering");
+		expect((await stepsOf(r)).filter((step) => step === "directive:dir-1")).toEqual([]);
+		expect(await consumedOf(r)).toEqual(["dir-1"]);
+	};
+
+	test("a 200 listing whose history is unavailable keeps the decision of a consumed hint, and takes no new checkpoint for it", async () => {
+		const r = rig();
+		await partialListingKeepsDecision(r, "unavailable", false);
+	});
+
+	test("a 200 listing whose history was truncated keeps the decision of a consumed hint, and takes no new checkpoint for it", async () => {
+		const r = rig();
+		await partialListingKeepsDecision(r, "durable", true);
 	});
 
 	test("directives without a steering hint, for another session, or declined are ignored; a plain steering checkpoint is still taken", async () => {

@@ -612,6 +612,61 @@ describe("docs-migrate: apply", () => {
 		expect(plane.uploads).toEqual([DESK_BODY]);
 		expect(plane.names).toEqual([corpusDocumentName("swcstudiospace/programming-desk", DESK_SKILLS_PAGE, shaOf(DESK_BODY))]);
 	});
+
+	test("a --dataset naming no archived dataset, or an empty name, refuses before any upload and leaves the state file as it was", async () => {
+		const fixture = await buildFixture();
+		const before = readFileSync(fixture.stateFile, "utf8");
+		for (const name of ["agent-substrat", ""]) {
+			const plane = matchedPlane();
+			const { io } = captureIo();
+			const outcome = await runApply(
+				{
+					archiveDir: fixture.archiveDir,
+					stateFile: fixture.stateFile,
+					config: CONFIG,
+					fetchImpl: plane.fetch,
+					partAFile: partAFile(fixture.root),
+					rehearsal: false,
+					datasets: [name],
+					checkoutRepo: PLANE_REPO,
+					readAtCommit: REPLAY_READ,
+					poll: { maxPolls: 1, intervalMs: 0 },
+					now: () => 1_700_000_000_000,
+				},
+				io,
+			);
+			expect(outcome).toMatchObject({ ok: false, exit: 1, refused: "unknown-dataset" });
+			expect(plane.uploads).toEqual([]);
+		}
+		expect(readFileSync(fixture.stateFile, "utf8")).toBe(before);
+	});
+
+	test("a --dataset subset replays and passes but records no cutover, even when it names every archived dataset", async () => {
+		const fixture = await buildFixture();
+		const plane = matchedPlane();
+		const { io, err } = captureIo();
+		const outcome = await runApply(
+			{
+				archiveDir: fixture.archiveDir,
+				stateFile: fixture.stateFile,
+				config: CONFIG,
+				fetchImpl: plane.fetch,
+				partAFile: partAFile(fixture.root),
+				rehearsal: false,
+				datasets: [REPO],
+				checkoutRepo: PLANE_REPO,
+				readAtCommit: REPLAY_READ,
+				poll: { maxPolls: 1, intervalMs: 0 },
+				now: () => 1_700_000_000_000,
+			},
+			io,
+		);
+		expect(outcome.exit).toBe(0);
+		expect(plane.uploads).toEqual([NOTES_BODY]);
+		expect(outcome.report).toMatchObject({ state_file_persisted: true, cutover_event: null });
+		expect(err.join("")).toContain("no cutover is recorded");
+	});
+
 });
 
 describe("docs-migrate: archive reading", () => {

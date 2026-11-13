@@ -110,7 +110,7 @@ async function discoverMembers(root: string, git: GitRunner): Promise<Discovered
  * The entries below `dir` that no member owns and that hold no member: a removal would delete them with nothing
  * checking them. Only real directories are searched on, so the walk is a tree that cannot revisit a directory; a
  * symbolic link is refused as it stands and its target is never read. A member's own contents are its own probes'
- * business. The root's `.planning/` has its own refusal and is skipped here.
+ * business. A real `.planning/` directory has its own refusal and is skipped here; a link of that name is refused.
  */
 function looseRefusals(dir: string, members: readonly string[], root: string): string[] {
 	let entries: Dirent[];
@@ -122,11 +122,12 @@ function looseRefusals(dir: string, members: readonly string[], root: string): s
 	const out: string[] = [];
 	for (const entry of entries) {
 		const path = join(dir, entry.name);
-		if (path === join(root, ".planning")) continue;
+		// Links are refused before the `.planning/` skip, so a dangling `.planning` link is not let through unchecked.
 		if (entry.isSymbolicLink()) {
 			out.push(`${path}: ${LOOSE_REFUSAL}`);
 			continue;
 		}
+		if (path === join(root, ".planning")) continue;
 		const real = canonical(path);
 		if (members.includes(real)) continue;
 		if (entry.isDirectory() && members.some((member) => isInside(member, real))) out.push(...looseRefusals(path, members, root));

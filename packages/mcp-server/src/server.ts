@@ -1687,6 +1687,11 @@ export function createHttpServer(
 					sendJson(res, 400, { error: "dataset is required" });
 					return;
 				}
+				// An empty name names no dataset: refused with the ingest's own unknown-dataset reason, before any audit or ingest.
+				if (parsed.dataset.length === 0) {
+					sendJson(res, 400, { ok: false, refused: true, reason: "unknown-dataset", changed: false });
+					return;
+				}
 				const commit = "commit" in parsed ? parsed.commit : undefined;
 				const pages = "pages" in parsed ? parsed.pages : undefined;
 				const ingestSession = "session_id" in parsed ? parsed.session_id : undefined;

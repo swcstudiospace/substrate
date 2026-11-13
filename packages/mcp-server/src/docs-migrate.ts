@@ -502,6 +502,12 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	const production = await loadIngestRecords(options.stateFile);
 	if (production.problem !== undefined) return refuse(production.problem);
 	const wanted = options.datasets.length > 0 ? new Set(options.datasets) : null;
+	// A requested name the archive does not hold would replay nothing under that name, and an archive with no datasets replays
+	// nothing at all. Either would read as a clean apply, so both refuse before any upload.
+	const archived = new Set(pre.archive.datasets.map((dataset) => dataset.name));
+	const absent = wanted === null ? [] : [...wanted].filter((name) => !archived.has(name));
+	if (absent.length > 0) return refuse("unknown-dataset", { datasets: absent });
+	if (pre.archive.datasets.length === 0) return refuse("the archive holds no datasets; nothing to replay");
 	const readAt = options.readAtCommit ?? gitAtCommit(process.cwd());
 	const now = options.now ?? Date.now;
 	const seen = production.records;
@@ -515,14 +521,16 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 		perDataset.push(result.replay);
 		for (const key of result.written) written.add(key);
 	}
-	const applied = perDataset.every((entry) => entry.refused === undefined);
+	const applied = perDataset.length > 0 && perDataset.every((entry) => entry.refused === undefined);
+	// The cutover says the whole archive moved to LightRAG: only a run with no subset that replayed every archived dataset records it.
+	const wholeArchive = wanted === null && perDataset.length === pre.archive.datasets.length;
 	const carried = carryVersions(pre.archive, seen, written, wanted, options.checkoutRepo);
 	// Only a full success pins the datasets. A failed run keeps the confirmed uploads (their records and carried versions), so
 	// the state never lags the plane; it records no pin and no cutover.
 	const pins = applied ? recordPins(pre.archive, versions, wanted, now()) : 0;
 	const statePersisted = !options.rehearsal && (applied || written.size > 0);
 	if (statePersisted) await saveIngestRecords(options.stateFile, seen, versions, production.freshness);
-	const cutover = !options.rehearsal && applied;
+	const cutover = !options.rehearsal && applied && wholeArchive;
 	const at = new Date(now()).toISOString();
 	const report: Record<string, unknown> = {
 		mode: "apply",
@@ -552,6 +560,7 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 	};
 	io.out(`${JSON.stringify(report, null, 2)}\n`);
 	if (!applied) io.err(`docs-migrate: a replay refused; no cutover is recorded${statePersisted ? ", and the confirmed uploads were saved" : ""}\n`);
+	if (applied && !wholeArchive && !options.rehearsal) io.err("docs-migrate: a --dataset subset replayed; no cutover is recorded\n");
 	return { ok: applied, exit: applied ? 0 : 1, report, ...(applied ? {} : { refused: "apply failed; see the report" }) };
 }
 

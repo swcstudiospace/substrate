@@ -47,7 +47,7 @@ import type { RollbackServerClient } from "./client.ts";
 import { resolvePendingDir } from "./pending.ts";
 import { consumedPath, readConsumed, retainListed, writeConsumed } from "./steering-consumed.ts";
 import { type CheckpointHookTrigger, type HookTrigger, type PolicyCheckpoint, directiveKey, shouldCheckpoint } from "./trigger-policy.ts";
-import { SESSION_ID_PATTERN, type SteerClient, type SteerDirective, type SteerResult } from "../steer/client.ts";
+import { SESSION_ID_PATTERN, type SteerClient, type SteerDirective, type SteerDirectiveListing, type SteerResult } from "../steer/client.ts";
 import { MAX_DIGEST_CHARS, renderDigest } from "../steer/render.ts";
 import { repoSlugOfWorktree } from "../steer/repo.ts";
 import { LIVE_SESSION_ID_PATTERN, bindingRecordPath, loadBindingRecord, serverIdentity } from "../steer/binding-record.ts";
@@ -98,7 +98,7 @@ export interface HookParams {
 	 * The server's REST routes for the `steering` hint reader and the `context` trigger. Absent: `steering` takes the
 	 * plain checkpoint, `context` prints nothing.
 	 */
-	steer?: Pick<SteerClient, "directives" | "context"> | undefined;
+	steer?: Pick<SteerClient, "directiveListing" | "context"> | undefined;
 }
 
 /** Read all of the process's stdin, refusing more than `MAX_ENVELOPE_BYTES`. A terminal has no envelope: that is empty, not a wait. */
@@ -333,14 +333,15 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	}
 
 	// Only acknowledged hints for this live incarnation can affect the historical checkpoint stream.
-	let listed: SteerResult<SteerDirective[]>;
+	let listed: SteerResult<SteerDirectiveListing>;
 	try {
-		listed = await params.steer.directives({ sessionId: liveSession, sessionBinding, status: "acknowledged" });
+		listed = await params.steer.directiveListing({ sessionId: liveSession, sessionBinding, status: "acknowledged" });
 	} catch {
 		return skippedHints("private hint lookup unavailable");
 	}
 	if (!listed.ok) return skippedHints("private hint lookup refused or unavailable");
-	const ownDirectives = listed.value.filter((directive) => directive.session_id === liveSession);
+	const listing = listed.value;
+	const ownDirectives = listing.directives.filter((directive) => directive.session_id === liveSession);
 	const statePath = await consumedPathFor(params, worktree, run, session, liveSession);
 	const previous = statePath === undefined ? [] : readConsumed(statePath);
 	const consumed = new Set(previous);
@@ -366,9 +367,12 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	}
 
 	// Decisions are kept for as long as the server still lists the directive (a skipped hint has no checkpoint key to stop it
-	// later); only a complete listing prunes anything, so a failed read leaves the stored decisions as they are.
+	// later). Only a complete listing may prune: a partial one (history unavailable or cut) omits directives the server still
+	// holds, so a failed or partial read leaves the stored decisions as they are.
 	if (statePath !== undefined) {
-		const kept = retainListed([...previous, ...acted], new Set(ownDirectives.map((directive) => directive.id)));
+		const kept = listing.complete
+			? retainListed([...previous, ...acted], new Set(ownDirectives.map((directive) => directive.id)))
+			: [...previous, ...acted];
 		if (acted.length > 0 || kept.length !== previous.length) {
 			try {
 				writeConsumed(statePath, session, liveSession, kept);

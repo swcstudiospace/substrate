@@ -572,12 +572,11 @@ export function storedPlanItems(note: LedgerNote | null): RepairItem[] | null {
 
 /**
  * Whether a fresh read's repairs are the stored plan's, or a part of them. A partly applied plan drops its applied items out of a
- * fresh read, so the rest still matches. An item the plan never held, or one whose content changed, is not the plan.
- * An empty fresh read is not a retry of a non-empty plan: it could mean every item is applied, but that is the `reconcile.applied`
- * note's record to show, not this function's, so the plan is refused and must be planned again.
+ * fresh read, so the rest still matches. An item the plan never held, or one whose content changed, is not the plan. An empty
+ * fresh read is a plan already applied: `applyRepair` skips every planned key and records the `reconcile.applied` note that an
+ * earlier apply did not store.
  */
 export function freshItemsWithinPlan(stored: readonly RepairItem[], fresh: readonly RepairItem[]): boolean {
-	if (fresh.length === 0) return stored.length === 0;
 	return fresh.every((item) => stored.some((planned) => sameItem(planned, item)));
 }
 
@@ -602,12 +601,29 @@ async function invalidateForgets(deps: ReconcileDeps, ttlS: number): Promise<voi
 }
 
 /**
+ * Records a partial apply: a write failed after some marks were made, and they stay made. The record names them, with the cache
+ * as the apply left it. Best effort: the cause that stopped the apply is what the caller sees, and a retry of the plan records the
+ * apply again, since a key already marked is skipped.
+ */
+async function recordPartialApply(deps: ReconcileDeps, planId: string, marked: readonly string[], skipped: ApplyReport["skipped"], cache: ApplyReport["cache"]): Promise<void> {
+	await deps.ledger
+		.emitNote(`reconcile applied (partial): ${marked.length} marked, ${skipped.length} skipped`, {
+			action: RECONCILE_APPLIED_ACTION,
+			planId,
+			marked,
+			skipped,
+			cache,
+		})
+		.catch(() => undefined);
+}
+
+/**
  * Apply a confirmed plan. Refuses, writing nothing, unless `confirm` equals `planId` and the plan record is a valid stored
  * plan. Then, for each planned key only: marks an in-force index row with the plan's forget marker (never a row another
  * superseder holds). Whenever a mark was attempted, the forget's invalidation runs as `Substrate.memoryForget` does it: the
  * memory and recall generations move and the cache forget mark is set for the plan's TTL, so a cached answer or saved brief
  * naming the entry is not served. Records what it did in a `reconcile.applied` note. A layer that fails mid-apply returns
- * its `Failure`; the plan can be applied again, because a key already marked is skipped.
+ * its `Failure` after a `reconcile.applied` note of the marks it made; the plan can be applied again, because a key already marked is skipped.
  */
 export async function applyRepair(deps: ReconcileDeps, request: ApplyRequest): Promise<ApplyRun> {
 	if (typeof request.planId !== "string" || request.confirm !== request.planId) {
@@ -638,28 +654,34 @@ export async function applyRepair(deps: ReconcileDeps, request: ApplyRequest): P
 		}
 		const cacheItem = items.find(isCacheMark);
 		const marked: string[] = [];
-		// Set before the first mark call: a call that throws may still have committed its rows, so the invalidation must run for it too.
+		let cache: ApplyReport["cache"] = cacheItem === undefined ? "not-planned" : "unverified";
+		// Set before the first index write: a write that throws may still have committed its rows, so the invalidation must run for it too.
 		let attempted = false;
 		try {
-			for (const [marker, ids] of toMark) {
-				attempted = true;
-				const changed = new Set(await reach("index-unavailable", () => deps.index.markMemoryForgotten(ids, marker)));
-				for (const id of ids) {
-					if (changed.has(id)) marked.push(id);
-					else skipped.push({ entryId: id, reason: "raced" });
+			try {
+				for (const [marker, ids] of toMark) {
+					attempted = true;
+					const changed = new Set(await reach("index-unavailable", () => deps.index.markMemoryForgotten(ids, marker)));
+					for (const id of ids) {
+						if (changed.has(id)) marked.push(id);
+						else skipped.push({ entryId: id, reason: "raced" });
+					}
 				}
+			} catch (cause) {
+				// Best effort: a failed invalidation must not replace the index cause, and a retry of the plan runs it again.
+				if (cacheItem !== undefined) await invalidateForgets(deps, cacheItem.ttlS).catch(() => undefined);
+				throw cause;
+			}
+			if (cacheItem !== undefined) {
+				if (attempted) await invalidateForgets(deps, cacheItem.ttlS);
+				else await reach("cache-unavailable", () => deps.cache.markForget(cacheItem.ttlS));
+				const after = await reach("cache-unavailable", () => deps.cache.readForgetMark());
+				cache = after.state === "present" ? "marked" : "unverified";
 			}
 		} catch (cause) {
-			if (attempted && cacheItem !== undefined) await invalidateForgets(deps, cacheItem.ttlS);
+			// Writes made before this throw stay made: their record goes in before the cause is rethrown.
+			await recordPartialApply(deps, planId, marked, skipped, cache);
 			throw cause;
-		}
-
-		let cache: ApplyReport["cache"] = "not-planned";
-		if (cacheItem !== undefined) {
-			if (attempted) await invalidateForgets(deps, cacheItem.ttlS);
-			else await reach("cache-unavailable", () => deps.cache.markForget(cacheItem.ttlS));
-			const after = await reach("cache-unavailable", () => deps.cache.readForgetMark());
-			cache = after.state === "present" ? "marked" : "unverified";
 		}
 
 		const recording = await deps.ledger

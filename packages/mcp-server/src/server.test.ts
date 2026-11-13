@@ -450,6 +450,22 @@ describe("routes", () => {
 		}
 	});
 
+	test("POST /docs/ingest refuses an empty dataset name with unknown-dataset, before any ingest", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post(
+				"/docs/ingest",
+				{ dataset: "", pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/planes", body: "The substrate is the only door." }] },
+				{ authorization: "Bearer tok-omp" },
+			);
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ ok: false, reason: "unknown-dataset" });
+		} finally {
+			await stop();
+		}
+	});
+
 	test("POST /docs/ingest refuses a body without pages", async () => {
 		const { greptime } = ledger();
 		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });

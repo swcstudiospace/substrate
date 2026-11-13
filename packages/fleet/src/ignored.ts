@@ -4,7 +4,7 @@
  * Git refuses to remove a worktree with tracked changes or untracked files, but it deletes ignored
  * files silently: a `.planning/` directory, `.env*` files and local notes live there. A worktree is
  * only as clean as its ignored files are replaceable. Regenerable directories (dependencies, build
- * output, caches) are skipped; every other ignored file counts unless the primary checkout holds the
+ * output, caches) are skipped anywhere but under `.planning/`, where a note may carry such a name; every other ignored file counts unless the primary checkout holds the
  * same bytes at the same path. The exemption is for directories only: a regular file or a link that
  * happens to be called `target` or `dist` is compared like any other. Anything this module cannot read
  * or bound counts as work, and the bounds cover everything visited (files and directories) and the
@@ -14,8 +14,11 @@ import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from
 import { join, resolve, sep } from "node:path";
 import type { GitRunner } from "./git.ts";
 
-/** Directory names whose contents are rebuilt by a command, wherever they appear in a path. */
+/** Directory names whose contents are rebuilt by a command, wherever they appear in a path outside `.planning/`. */
 export const REGENERABLE_DIRS: ReadonlySet<string> = new Set(["node_modules", "dist", "build", "target", ".cache", "coverage", "__pycache__", ".venv", "venv", ".next", "vendor"]);
+
+/** Under this directory nothing is regenerable: a note there may carry any name. */
+const PLANNING_DIR = ".planning";
 
 /** Files compared byte for byte are read in full only up to this size; a larger one counts as different. */
 export const MAX_COMPARE_BYTES = 4 * 1024 * 1024;
@@ -58,9 +61,10 @@ function makeBudget(options: IgnoredOptions): Budget {
 	};
 }
 
-/** True when a directory segment of `path` is regenerable; `isDirectory` says whether the last segment is a directory too. */
+/** True when a directory segment of `path` is regenerable; `isDirectory` says whether the last segment is a directory too. Nothing under `.planning/` is. */
 function regenerable(path: string, isDirectory: boolean): boolean {
 	const segments = path.split("/").filter((segment) => segment !== "");
+	if (segments.includes(PLANNING_DIR)) return false;
 	return (isDirectory ? segments : segments.slice(0, -1)).some((segment) => REGENERABLE_DIRS.has(segment));
 }
 
@@ -113,7 +117,7 @@ function filesBelow(root: string, dir: string, out: string[], budget: Budget): b
 			continue;
 		}
 		if (isDirectory) {
-			if (REGENERABLE_DIRS.has(name)) continue;
+			if (regenerable(relative, true)) continue;
 			if (!filesBelow(root, `${relative}/`, out, budget)) return false;
 		} else out.push(relative);
 	}

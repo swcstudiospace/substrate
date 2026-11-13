@@ -178,6 +178,27 @@ describe("assertAppendOnly", () => {
 		expect(() => assertAppendOnly(statement)).not.toThrow();
 		expect(() => assertAppendOnly(`SELECT 1 FROM "t" WHERE "x" = 'it''s; fine'`)).not.toThrow();
 	});
+
+	test("an apostrophe inside a comment never opens a literal, so a following ; still counts", () => {
+		// The regression this guards: a `'` inside `--` or a block comment used to open a
+		// literal that blanked the `;` and everything after it, so a second statement passed.
+		expect(() => assertAppendOnly(`SELECT 1 -- it's\n; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT 1 /* it's */; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT 1 /* it's */ ; DELETE FROM "agent_events" -- it's`)).toThrow(
+			AppendOnlyViolation,
+		);
+	});
+
+	test("a comment that holds an apostrophe is still only a comment", () => {
+		expect(() => assertAppendOnly(`SELECT "hash" -- it's\nFROM "agent_events"`)).not.toThrow();
+		expect(() => assertAppendOnly(`SELECT "hash" /* it's */ FROM "agent_events"`)).not.toThrow();
+		expect(() => assertAppendOnly(`SELECT 1 FROM "agent_events"; -- it's`)).not.toThrow();
+	});
+
+	test("an apostrophe or semicolon inside a quoted identifier is inert", () => {
+		expect(() => assertAppendOnly(`SELECT "it's" FROM "t"; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT "a;b" FROM "agent_events"`)).not.toThrow();
+	});
 });
 
 describe("insertEvent", () => {

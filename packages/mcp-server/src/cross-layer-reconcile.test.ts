@@ -13,6 +13,7 @@ import {
 	applyRepair,
 	type ApplyRun,
 	type CrossLayerReport,
+	freshItemsWithinPlan,
 	ledgerFromSubstrate,
 	type LedgerNote,
 	type LedgerReads,
@@ -20,6 +21,7 @@ import {
 	type NoteWriter,
 	planRepair,
 	type PlanRun,
+	previewRepair,
 	RECONCILE_APPLIED_ACTION,
 	RECONCILE_LEDGER_LIMIT,
 	RECONCILE_MAX_KEYS,
@@ -31,6 +33,7 @@ import {
 	type ReconcileOptions,
 	type ReconcileRun,
 	runScheduledReconcile,
+	storedPlanItems,
 } from "./cross-layer-reconcile.ts";
 
 const NOW = Date.parse("2026-11-11T12:00:00.000Z");
@@ -101,6 +104,9 @@ class FakeIndex implements ReconcileIndex {
 	/** Runs after the reconcile has read the rows and before it marks them: how a concurrent writer races a repair. */
 	beforeMark: (() => void) | null = null;
 	failMark = false;
+	/** The 1-based write call that is refused before it writes: the second forget group's write, in a partial apply. */
+	failOnCall: number | null = null;
+	private calls = 0;
 
 	async memoryMarkers(ids: readonly string[]): Promise<Map<string, string | null>> {
 		const out = new Map<string, string | null>();
@@ -112,7 +118,8 @@ class FakeIndex implements ReconcileIndex {
 
 	async markMemoryForgotten(ids: readonly string[], marker: string): Promise<string[]> {
 		this.marks.push({ ids: [...ids], marker });
-		if (this.failMark) throw new Error("index write refused");
+		this.calls += 1;
+		if (this.failMark || this.calls === this.failOnCall) throw new Error("index write refused");
 		this.beforeMark?.();
 		const changed: string[] = [];
 		for (const id of ids) {
@@ -139,6 +146,7 @@ class FakeCache implements ReconcileCache {
 	readonly ttls: number[] = [];
 	readonly bumps: string[] = [];
 	failRead = false;
+	failBump = false;
 
 	async readForgetMark(): Promise<ForgetMarkRead> {
 		if (this.failRead) throw new Error("cache read refused");
@@ -152,6 +160,7 @@ class FakeCache implements ReconcileCache {
 
 	async bump(key: string): Promise<void> {
 		this.bumps.push(key);
+		if (this.failBump) throw new Error("cache write refused");
 	}
 }
 
@@ -531,7 +540,7 @@ describe("repair: a confirmed plan touches only the planned keys", () => {
 		expect(w.index.marks).toHaveLength(marksAfterFirst);
 	});
 
-	test("an index write that fails stops the apply with its reason and no record", async () => {
+	test("an index write that fails stops the apply with its reason, and its record names the marks made", async () => {
 		const w = plantedDrift();
 		const plan = planOf(await planRepair(w.deps, OPTIONS));
 		w.index.failMark = true;
@@ -540,11 +549,80 @@ describe("repair: a confirmed plan touches only the planned keys", () => {
 		expect(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId })).toMatchObject({
 			ok: false,
 			reason: "index-unavailable",
+			detail: "index write refused",
 		});
 		// The write may have committed before it failed, so the invalidation runs as it does after a successful mark (memoryForget counts a throw as touched).
 		expect(w.cache.bumps).toEqual([MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY]);
 		expect(w.cache.ttls).toEqual([TTL_S]);
-		expect(w.ledger.writes).toHaveLength(writesBefore);
+		// Nothing was marked, and the one note this apply writes says so.
+		expect(w.ledger.writes).toHaveLength(writesBefore + 1);
+		expect(w.ledger.writes.at(-1)?.payload).toMatchObject({ action: RECONCILE_APPLIED_ACTION, planId: plan.planId, marked: [], cache: "unverified" });
+	});
+
+	test("a later forget group's write that fails after an earlier one committed records the marks made before it", async () => {
+		const w = world();
+		w.ledger.notes.push(forgetNote("evt_forget_1", 10, ["mem_a", "mem_b"]), forgetNote("evt_forget_2", 10, ["mem_c"], { forgetId: OTHER }));
+		w.index.rows.set("mem_a", MARKER);
+		w.index.rows.set("mem_b", null);
+		w.index.rows.set("mem_c", null);
+		const plan = planOf(await planRepair(w.deps, OPTIONS));
+		// Write 1, the first forget's group, commits. Write 2, the second forget's group, is refused.
+		w.index.failOnCall = 2;
+
+		expect(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId })).toMatchObject({
+			ok: false,
+			reason: "index-unavailable",
+			detail: "index write refused",
+		});
+		expect(w.index.rows.get("mem_b")).toBe(MARKER);
+		expect(w.index.rows.get("mem_c")).toBeNull();
+		expect(w.cache.ttls).toEqual([TTL_S]);
+		expect(w.ledger.writes.at(-1)?.payload).toMatchObject({
+			action: RECONCILE_APPLIED_ACTION,
+			planId: plan.planId,
+			marked: ["mem_b"],
+			skipped: [],
+			cache: "unverified",
+		});
+	});
+
+	test("a cache invalidation that fails after an index failure does not replace the index cause", async () => {
+		const w = plantedDrift();
+		const plan = planOf(await planRepair(w.deps, OPTIONS));
+		w.index.failMark = true;
+		w.cache.failBump = true;
+
+		expect(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId })).toMatchObject({
+			ok: false,
+			reason: "index-unavailable",
+			detail: "index write refused",
+		});
+		expect(w.ledger.writes.at(-1)?.payload).toMatchObject({ action: RECONCILE_APPLIED_ACTION, marked: [], cache: "unverified" });
+	});
+
+	test("a retry after an applied note the ledger did not store proceeds, and records that note", async () => {
+		const w = plantedDrift();
+		const plan = planOf(await planRepair(w.deps, OPTIONS));
+		w.ledger.storeWrites = false;
+		expect(appliedOf(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId })).recorded).toBe(false);
+		w.ledger.storeWrites = true;
+
+		// Every repair is already made, so a fresh read finds nothing. That is a retry of the plan, not a change to it.
+		const fresh = await previewRepair(w.deps, OPTIONS);
+		if (!fresh.ok) throw new Error(`${fresh.reason}: ${fresh.detail}`);
+		expect(fresh.items).toEqual([]);
+		const planned = storedPlanItems(w.ledger.notes.find((note) => note.id === plan.planId) ?? null);
+		if (planned === null) throw new Error("the stored plan does not parse");
+		expect(freshItemsWithinPlan(planned, fresh.items)).toBe(true);
+
+		const retry = appliedOf(await applyRepair(w.deps, { planId: plan.planId, confirm: plan.planId }));
+		expect(retry.marked).toEqual([]);
+		expect(retry.skipped).toEqual([
+			{ entryId: "mem_b", reason: "already-marked" },
+			{ entryId: "mem_c", reason: "already-marked" },
+		]);
+		expect(retry.recorded).toBe(true);
+		expect(w.ledger.writes.at(-1)?.payload).toMatchObject({ action: RECONCILE_APPLIED_ACTION, planId: plan.planId, marked: [], cache: "marked" });
 	});
 
 	test("an applied note the ledger refuses is reported, and the repairs stay made", async () => {

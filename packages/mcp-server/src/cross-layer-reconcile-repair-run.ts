@@ -133,7 +133,8 @@ async function runApply(deps: ReconcileDeps, options: ReconcileOptions, planId: 
 		return EXIT.failed;
 	}
 	// The fresh read writes nothing. Its repairs must all be the stored plan's. The ones an earlier, partial apply already made are not
-	// in it, so a retry proceeds for the rest; a repair that is new or altered refuses.
+	// in it, so a retry proceeds for the rest; an empty read (every repair already made) proceeds too, and its apply records the note
+	// the earlier run did not store. A repair that is new or altered refuses.
 	const fresh = await previewRepair(deps, options);
 	if (!fresh.ok) {
 		process.stderr.write(`[cross-layer-reconcile] fresh read failed (${fresh.reason}): ${fresh.detail}; nothing was applied\n`);
@@ -145,7 +146,7 @@ async function runApply(deps: ReconcileDeps, options: ReconcileOptions, planId: 
 		return EXIT.failed;
 	}
 	if (!freshItemsWithinPlan(planned, fresh.items)) {
-		process.stderr.write(`[cross-layer-reconcile] plan ${planId} no longer matches a fresh read of the layers: nothing is left to apply, or a repair it does not hold has appeared or changed; nothing was applied. Plan again with \`substrate reconcile\`.\n`);
+		process.stderr.write(`[cross-layer-reconcile] plan ${planId} no longer matches a fresh read of the layers: a repair it does not hold has appeared or changed; nothing was applied. Plan again with \`substrate reconcile\`.\n`);
 		return EXIT.failed;
 	}
 	const run: ApplyRun = await applyRepair(deps, { planId, confirm: planId });

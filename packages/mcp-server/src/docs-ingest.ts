@@ -34,8 +34,8 @@
  * only) loads as before and is rewritten at version 2 on the next save.
  */
 import { createHash, randomUUID } from "node:crypto";
-import type { Dirent, Stats } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { constants, type Dirent, type Stats } from "node:fs";
+import { access, lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { corpusDocumentName, isSafeCorpusName, stripRemoteImages } from "@substrate/corpus";
@@ -43,6 +43,7 @@ import { datasetIdentity } from "./dataset-identity.ts";
 import {
 	createVersionStore,
 	DATASET_VERSION_RETENTION,
+	DATASET_TRIGGERS,
 	DIRECT_DATASET_LIST,
 	versionsFromJson,
 	versionsToJson,
@@ -1118,11 +1119,12 @@ async function writeBatch(
  * Ingest records on disk, so a restarted server does not re-upload pages it
  * already stored (Greptile P1), and — since version 2 (uplift-2 R6) — the
  * per-dataset version lists, so pins and the merge-trigger's idempotency
- * survive the same restart. A missing or corrupt file means empty tables,
- * never a throw: losing dedup degrades to a duplicate upload, losing pins
- * to `unpinned` citations, while refusing ingest over an unreadable file
- * would turn a disk hiccup into an outage of the publication path. The
- * caller reports the problem string. A version-1 file has no `versions`
+ * survive the same restart. A missing file means empty tables. A corrupt or
+ * unreadable one also starts empty and reports a problem string, and
+ * saveIngestRecords never overwrites an unreadable file: losing dedup degrades
+ * to a duplicate upload, losing pins to `unpinned` citations, and refusing
+ * ingest over a disk hiccup would turn it into an outage of the publication
+ * path. A version-1 file has no `versions`
  * member and loads with an empty version store; the next save writes
  * version 2 (one-way).
  */
@@ -1136,14 +1138,27 @@ export interface IngestStateFile {
 	lag?: Record<string, LagMarker>;
 }
 
+/** The errno code of a failed file operation, or undefined for anything else. */
+function ioErrorCode(cause: unknown): string | undefined {
+	return cause !== null && typeof cause === "object" && "code" in cause && typeof cause.code === "string" ? cause.code : undefined;
+}
+
 export async function loadIngestRecords(
 	file: string,
 ): Promise<{ records: Map<string, IngestRecord>; versions: VersionStore; freshness: FreshnessState; problem?: string }> {
 	let raw: string;
 	try {
 		raw = await readFile(file, "utf8");
-	} catch {
-		return { records: new Map<string, IngestRecord>(), versions: createVersionStore(), freshness: createFreshnessState() };
+	} catch (cause) {
+		// Only a missing file is an empty state. Any other read error leaves state this process cannot see: it is reported,
+		// and saveIngestRecords leaves the file as it is.
+		if (ioErrorCode(cause) === "ENOENT") return { records: new Map<string, IngestRecord>(), versions: createVersionStore(), freshness: createFreshnessState() };
+		return {
+			records: new Map<string, IngestRecord>(),
+			versions: createVersionStore(),
+			freshness: createFreshnessState(),
+			problem: `${file} could not be read (${ioErrorCode(cause) ?? "unknown error"}); starting with empty ingest records and not overwriting it`,
+		};
 	}
 	let parsed: unknown;
 	try {
@@ -1197,7 +1212,9 @@ export async function loadIngestRecords(
 /**
  * Persist ingest records and version lists. Throws on I/O failure; the
  * caller logs and continues. Written to a sibling temp file and renamed,
- * so a crash mid-write never leaves half a JSON document behind.
+ * so a crash mid-write never leaves half a JSON document behind. A file that
+ * exists but cannot be read is never overwritten: the rename would replace
+ * state this process cannot see.
  */
 export async function saveIngestRecords(
 	file: string,
@@ -1205,6 +1222,12 @@ export async function saveIngestRecords(
 	versions: VersionStore = createVersionStore(),
 	freshness: FreshnessState = createFreshnessState(),
 ): Promise<void> {
+	// Refuse before anything is written: an existing file that cannot be read may hold state this process does not know.
+	try {
+		await access(file, constants.R_OK);
+	} catch (cause) {
+		if (ioErrorCode(cause) !== "ENOENT") throw new Error(`${file} exists but cannot be read (${ioErrorCode(cause) ?? "unknown error"}); not overwriting it`);
+	}
 	await mkdir(dirname(file), { recursive: true });
 	const state: IngestStateFile = { version: 2, records: Object.fromEntries(seen), versions: versionsToJson(versions), ...freshnessStateToJson(freshness) };
 	const tmp = `${file}.${process.pid}.tmp`;
@@ -1440,9 +1463,10 @@ export async function scrapePlanningPages(
  *
  * Shares the RAGFlow path's validation (roots, size caps, redactor scan),
  * hash idempotency, in-flight locks, records and outcome shape; only the
- * plane calls differ. Dataset resolution is best effort — the dedicated
- * LightRAG list, else the RAGFlow list (keeps existing records aligned),
- * else the requested dataset as its own id — because LightRAG hosts one
+ * plane calls differ. The requested name must be a configured dataset
+ * (`DATASET_TRIGGERS`) before any list is read. Dataset id resolution is best
+ * effort — the dedicated LightRAG list, else the RAGFlow list (keeps existing
+ * records aligned), else the requested dataset as its own id — because LightRAG hosts one
  * knowledge base per server. Pages with a planning-graph hint (`graph`,
  * or an `graphHints` entry naming the page's phase) store through
  * `storePlanningPage` so the insert indexes their entities; other pages
@@ -1468,6 +1492,10 @@ async function ingestDocsLightrag(
 	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	const lightrag = deps.lightragConfig;
 	if (lightrag == null) return refused(deps, sessionId, "lightrag-not-configured");
+	// The gate is the configured set, checked before any list is read. An injected list may name only the requested
+	// dataset (the service lists one per call), so a check against that list alone accepts any name, the empty one too.
+	const configuredName = input.dataset.includes("/") ? input.dataset.slice(input.dataset.indexOf("/") + 1) : input.dataset;
+	if (!Object.hasOwn(DATASET_TRIGGERS, configuredName)) return refused(deps, sessionId, "unknown-dataset");
 	const fetchImpl = deps.lightragFetch ?? deps.fetchImpl;
 	let listed: { ok: true; datasets: Array<{ id: string; name: string }> } | { ok: false; reason: string };
 	if (deps.lightragDatasets !== undefined) listed = await deps.lightragDatasets.list();
