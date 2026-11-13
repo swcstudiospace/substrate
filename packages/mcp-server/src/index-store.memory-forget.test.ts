@@ -287,9 +287,15 @@ describe("every memory reader in the index filters on superseded_by IS NULL, so 
 		expect((await index.memoryForBrief("owner/a", null, 5, { surface: "cursor" })).map((entry) => entry.id)).toEqual(["mem_b", "mem_a"]);
 	});
 
-	test("a brief read under a grant keeps a graph row that names no repository: its graph is checked before the read, not its missing repo", async () => {
-		const { index } = store(() => [row("mem_g", { scope: "graph:ut-1", repo: null }), row("mem_b", { scope: "global", repo: "owner/b" })]);
+	test("a brief read keeps a graph row that names no repository only while its graph has a graph_index row, whatever its ttl; under a grant the row is judged by its graph, not its missing repo", async () => {
 		const granted = (repo: string): boolean => repo === "owner/a";
+		// The query's graph_index probe: a graph that was never registered has no row, so the database returns none of its rows, permanent or not.
+		const unregistered = store(() => []);
+		expect(await unregistered.index.memoryForBrief(null, "ut-1", 5, { surface: "cursor", granted })).toEqual([]);
+		expect(unregistered.statements[0]?.text).toContain("exists (select 1 from graph_index g where g.graph_id = substring(memory_entries.scope from 7))");
+		expect(unregistered.statements[0]?.text).not.toContain("ttl <> 'graph'");
+		// A registered graph: its permanent row comes back, and the global row of an ungranted repository is still left out.
+		const { index } = store(() => [row("mem_g", { scope: "graph:ut-1", repo: null }), row("mem_b", { scope: "global", repo: "owner/b" })]);
 		expect((await index.memoryForBrief(null, "ut-1", 5, { surface: "cursor", granted })).map((entry) => entry.id)).toEqual(["mem_g"]);
 	});
 

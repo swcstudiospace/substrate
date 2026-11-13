@@ -2303,6 +2303,25 @@ describe("queryEvents", () => {
 		expect(result.error).toContain(REDACTED);
 		expect(result.error).not.toContain("hunter2");
 	});
+
+	test("a payload pair keeps only the rows whose payload holds that key with that value exactly", async () => {
+		// The store matches the pair with a plain LIKE, where `_` matches any character: a payload keyed `headXkey` matches `head_key`. The rows below are what that LIKE hands back, and the read must drop the lookalike.
+		const sha = "ab".repeat(20);
+		const { queries, greptime } = reader([
+			row({ id: "exact", payload: JSON.stringify({ head_key: sha }) }),
+			row({ id: "lookalike", payload: JSON.stringify({ headXkey: sha }) }),
+			row({ id: "other-value", payload: JSON.stringify({ head_key: "cd".repeat(20) }) }),
+			row({ id: "unparsed", payload: "not json" }),
+			row({ id: "no-payload", payload: null }),
+		]);
+		const result = await substrateWith(greptime).queryEvents({ payload_key: "head_key", payload_value: sha });
+
+		expect(result.events.map((event) => event.id)).toEqual(["exact"]);
+		expect(result.count).toBe(1);
+		// The payload is read back for the check, and is not handed out unless the caller asked for it.
+		expect(queries[0]?.includePayload).toBe(true);
+		expect(result.events[0]).not.toHaveProperty("payload");
+	});
 });
 
 describe("queryEvents input checks", () => {

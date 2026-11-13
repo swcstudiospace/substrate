@@ -112,6 +112,8 @@ describeLive("memory lifetime against a live index", () => {
 			["e-perm", SCOPE, "permanent", null, 400, "decision"],
 			// Scoped to the finished graph by scope alone: the fallback identity.
 			["e-graph-scope", `graph:${id("g-done")}`, "graph", null, 5, "fact"],
+			// Scoped to a graph that was never registered: a permanent row, hidden from serving searches.
+			["e-graph-scope-gone", `graph:${id("g-never")}`, "permanent", null, 5, "fact"],
 		];
 		for (const [name, scope, ttl, graphId, days, kind] of entries) {
 			await raw`
@@ -195,6 +197,16 @@ describeLive("memory lifetime against a live index", () => {
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-null") })).toEqual({ status: null });
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-gone") })).toBeNull();
 		expect(await plain.graphLifetime({ scope: SCOPE })).toBeNull();
+	});
+
+	test("a serving search hides a graph: row whose graph has no graph_index row, permanent or not; a registered graph's row still comes back", async () => {
+		const unregistered = `graph:${id("g-never")}`;
+		expect((await report.searchMemoryPage({ scope: unregistered, query: "", limit: 10 }, { surface: "cursor" })).entries).toEqual([]);
+		expect(await plain.searchMemory("", unregistered, 10, false, { surface: "cursor" })).toEqual([]);
+		const registered = await report.searchMemoryPage({ scope: `graph:${id("g-done")}`, query: "", limit: 10 }, { surface: "cursor" });
+		expect(registered.entries.map((entry) => entry.id)).toEqual([id("e-graph-scope")]);
+		// No read is an internal read: the consistency run lists every row to find orphaned documents, so it is unfiltered.
+		expect((await plain.searchMemoryPage({ scope: unregistered, query: "", limit: 10 })).entries.map((entry) => entry.id)).toEqual([id("e-graph-scope-gone")]);
 	});
 
 	test("a store built without settings is report: tagged, nothing hidden, nothing counted", async () => {

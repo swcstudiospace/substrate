@@ -3073,9 +3073,19 @@ export class Substrate {
 
 		if (!this.greptime) return { events: [], count: 0, truncated: false, error: "GREPTIME_URL is not set" };
 		try {
-			const rows = await this.greptime.queryEvents(query);
-			const events = rows.map((row) => rowToLedgerEvent(row, query.includePayload === true));
-			return { events, count: events.length, truncated: events.length >= (query.limit ?? 0) };
+			// The store matches the pair with a plain LIKE, where `_` matches any character, so it can return a row keyed `headXkey` for `head_key`. The payload is read back here and checked exactly, which needs the payload column, so it is selected for the store whatever the caller asked for and dropped again below.
+			const rows = await this.greptime.queryEvents(payloadPair === undefined ? query : { ...query, includePayload: true });
+			const held = payloadPair === undefined ? rows : rows.filter((row) => {
+				try {
+					const payload: unknown = JSON.parse(String(row.payload));
+					return typeof payload === "object" && payload !== null && (payload as Record<string, unknown>)[payloadPair.key] === payloadPair.value;
+				} catch {
+					return false;
+				}
+			});
+			const events = held.map((row) => rowToLedgerEvent(row, query.includePayload === true));
+			// `truncated` asks whether the store had more rows, so it counts what the store returned, before the exact check.
+			return { events, count: events.length, truncated: rows.length >= (query.limit ?? 0) };
 		} catch (cause) {
 			return { events: [], count: 0, truncated: false, error: redact(String(cause)) };
 		}

@@ -2765,6 +2765,9 @@ export class IndexStore implements MemoryStore {
 		// lookups have always been.
 		const agentScope = read === undefined ? null : `agent:${(normalizeIdentifier(read.surface) ?? "unattributed").toLowerCase()}`;
 		const agentRepo = read === undefined ? null : normalizeIdentifier(read.repo);
+		// A `graph:` row is served by a search only while its graph has a graph_index row, as a brief serves it (`memoryForBrief`), whatever its ttl.
+		// A graph that is gone or was never registered names no graph, so its rows are hidden. Only a serving read (`read` given) is filtered:
+		// the consistency run reads unfiltered to find orphaned documents, so it must still see every row.
 		return this.plane("memory.search", async () => {
 			const rows = (await this.sql`
 				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
@@ -2777,6 +2780,7 @@ export class IndexStore implements MemoryStore {
 				  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
 				  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
 				  ${agentScope === null ? this.sql`` : agentRepo === null ? this.sql`and lower(scope) not like 'agent:%'` : this.sql`and (lower(scope) not like 'agent:%' or (lower(scope) = ${agentScope} and repo = ${agentRepo}))`}
+				  ${read === undefined ? this.sql`` : this.sql`and (scope not like 'graph:%' or exists (select 1 from graph_index g where g.graph_id = substring(memory_entries.scope from 7)))`}
 				  ${cursor}
 				order by created desc, id desc
 				limit ${limit}`) as Array<Record<string, unknown>>;
@@ -2806,15 +2810,15 @@ export class IndexStore implements MemoryStore {
 		// `in ${sql(array)}` is the form Bun's SQL expands to a value list. Passing
 		// the array straight to `any()` stringifies it into a malformed array literal.
 		return this.plane("memory.brief", async () => {
-			// A `ttl: graph` row under a `graph:` scope is served only while its graph has a graph_index row. A graph that is gone, or was never
-			// registered, names no graph, so none of its graph-lived entries is read here. Permanent and other ttl rows are not filtered by the
-			// graph's row: memoryExpiry never expires them on the graph's absence. memoryReplyInGrant drops such a row from a search for the same reason.
+			// A row under a `graph:` scope is served by a brief only while its graph has a graph_index row, whatever its ttl. A graph that is gone,
+			// or was never registered, names no graph, so none of its entries is read here: a permanent one is hidden as much as a `ttl: graph` one.
+			// A registered graph is unaffected. Rows under other scopes are not checked against graph_index.
 			const rows = (await this.sql`
 				select *
 				from memory_entries
 				where scope in ${this.sql(scopes)}
 				  and superseded_by is null
-				  and (scope not like 'graph:%' or ttl <> 'graph' or exists (select 1 from graph_index g where g.graph_id = substring(memory_entries.scope from 7)))
+				  and (scope not like 'graph:%' or exists (select 1 from graph_index g where g.graph_id = substring(memory_entries.scope from 7)))
 				order by created desc
 				limit ${limit}`) as Array<Record<string, unknown>>;
 			const entries = await this.servable(rows, read);
