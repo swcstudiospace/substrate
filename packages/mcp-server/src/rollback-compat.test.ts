@@ -248,7 +248,7 @@ describe("docs state file (docs-ingest.json): the current writer against the 923
 		// The fixture is itself the old shape: guard against it drifting into something else.
 		expect(oldDocsStateViolations(JSON.parse(fixtureText("docs-ingest.json")))).toEqual([]);
 
-		const loaded = await loadIngestRecords(file);
+		const loaded = await loadIngestRecords(file, ["agent-substrate", "agent-skills"]);
 		expect(loaded.problem).toBeUndefined();
 		expect([...loaded.records.keys()]).toEqual(["agent-substrate docs/data-planes.md", "agent-substrate README.md"]);
 		expect(loaded.records.get("agent-substrate docs/data-planes.md")).toEqual({
@@ -279,7 +279,7 @@ describe("docs state file (docs-ingest.json): the current writer against the 923
 		const { file, parsed } = await writeRealDocsState(true);
 		const stripped = { version: parsed.version, records: parsed.records, versions: parsed.versions };
 		writeFileSync(file, `${JSON.stringify(stripped)}\n`);
-		const loaded = await loadIngestRecords(file);
+		const loaded = await loadIngestRecords(file, ["agent-substrate"]);
 		expect(loaded.problem).toBeUndefined();
 		expect(loaded.records.size).toBe(2);
 		expect(loaded.freshness.triggers.size).toBe(0);

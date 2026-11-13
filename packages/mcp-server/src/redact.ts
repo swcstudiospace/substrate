@@ -120,6 +120,15 @@ function redactPkRk(text: string): string {
 }
 
 /**
+ * The placeholder shapes a captured value can open with, after an optional (possibly escaped) quote: an env reference
+ * or shell expansion, a `<…>` or `{…}` template, a backtick or ellipsis, a `[REDACTED` marker, a `***`, `xxx` or `...`
+ * run, or a `your_`/`your-`/`example`/`changeme` word. The ingest gate tests each rule's `pattern` alone, so the guard is
+ * a lookahead inside the pattern. `isPlaceholder()` judges the whole captured value on the skill path; this is its
+ * prefix form for the event rules.
+ */
+const PLACEHOLDER_PREFIX = String.raw`\\?["'\x60]?(?:[$<{\x60…]|\[REDACTED|\*{3}|[xX]{3}|\.{3}|YOUR[_-]|your[_-]|(?:example|EXAMPLE|changeme|CHANGEME)(?![A-Za-z0-9]))`;
+
+/**
  * Ordered: broader structural patterns first, then token shapes.
  *
  * `pattern` is the rule's definition and what the fixtures and the lock read. A rule with
@@ -143,8 +152,22 @@ const RULES = [
 		apply: (text: string) => redactDelimited(text, PEM_OPEN, PEM_CLOSE, REDACTED_PEM, true),
 	},
 	{ name: "tailscale", pattern: /tskey-[A-Za-z0-9_-]+/g, replacement: REDACTED_TSKEY },
-	{ name: "password", pattern: /(password(?:\\?["'])?\s*[:=]\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "password-env", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
+	// A placeholder or env reference after the separator (`password: <your-password>`, `password: $DB_PASSWORD`) is not
+	// a value. The separator may cross a newline, so a key at line end with its value on the next line is still refused;
+	// the prose false positives that newline gap causes are accepted as the trade-off.
+	{
+		name: "password",
+		pattern: new RegExp(String.raw`(password(?:\\?["'])?\s*[:=]\s*(?!${PLACEHOLDER_PREFIX}))("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)`, "gi"),
+		replacement: `$1${REDACTED}`,
+	},
+	// Uppercase PASS keys match case-sensitively, with any prefix: `DB_PASS=` and `PGPASSWORD=` are secrets. A lowercase
+	// `pass=` is a secret unless its value is 1–4 digits or one letter (a counter in a log). Trade-off: a mixed-case `Pass=`
+	// or `Passwd=` key no longer matches this rule.
+	{
+		name: "password-env",
+		pattern: new RegExp(String.raw`\b([A-Za-z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*(?!${PLACEHOLDER_PREFIX})|[a-z0-9_]*(?:password|passwd)[ \t]*=[ \t]*(?!${PLACEHOLDER_PREFIX})|[a-z0-9_]*pass[ \t]*=[ \t]*(?!\d{1,4}(?![\w.-])|[A-Za-z](?![\w.-]))(?!${PLACEHOLDER_PREFIX}))("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)`, "g"),
+		replacement: `$1${REDACTED}`,
+	},
 	{ name: "daytona", pattern: /\b(DAYTONA_(?:API_)?KEY\s*=\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
 	{ name: "vault", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
 
@@ -154,14 +177,46 @@ const RULES = [
 	// whole underscore-delimited segment, so KEYBOARD_LAYOUT is not a secret.
 	// Lowercase `token` and `secret` keys (client_secret=...) match too. A bare lowercase
 	// api_key stays with api-key-lower, whose 16-character floor leaves `api_key: short` alone.
-	{ name: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*(?:\\?["'])?\s*[:=]\s*|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*(?:\\?["'])?\s*[:=]\s*)("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/g, replacement: `$1${REDACTED}` },
+	// Narrowed for the gate: a key ending `_FILE` or `_PATH` names a file, not a secret; a placeholder or env reference
+	// is not a value; and a lowercase `token`/`secret` key whose value is one bare lowercase word ending the value
+	// (`the token: is required`) is prose. The separator may cross a newline, so a key at line end with its value on the
+	// next line is still refused; the prose false positives that newline gap causes are accepted as the trade-off.
+	// Trade-off: under a lowercase key, a bare all-lowercase value of up to 15 letters that ends its value is no longer redacted.
+	{
+		name: "assignment",
+		pattern: new RegExp(
+			String.raw`\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*(?<!_FILE|_PATH)(?:\\?["'])?\s*[:=]\s*(?!${PLACEHOLDER_PREFIX})|(?:[a-z0-9]+_)*(?:token|secret)(?:_[a-z0-9]+)*(?<!_file|_path)(?:\\?["'])?\s*[:=]\s*(?!${PLACEHOLDER_PREFIX})(?![a-z]{1,15}[.,;:!?)\x60"']*(?=\s|$)))("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)`,
+			"g",
+		),
+		replacement: `$1${REDACTED}`,
+	},
 	// D-04 api-key-lower: api_key / apiKey / api-key assignments, any case; keeps the key.
 	// The value runs on past its charset to the end of the token (`[^\s"'`,;)]*`), so a value that
 	// carries punctuation is redacted whole rather than left with a tail.
-	{ name: "api-key-lower", pattern: /\b(api[_-]?key["']?\s*[:=]\s*["']?)[A-Za-z0-9_\-/.+]{16,}[^\s"'`,;)]*/gi, replacement: `$1${REDACTED}` },
+	// Not a value: an env reference (`process.env.X`, `os.environ`, `$X`, `{X}`, `<x>`) or a placeholder (`your-…`, `changeme`).
+	// The separator may cross a newline, so a key at line end with its value on the next line is still refused; the prose
+	// false positives that newline gap causes are accepted as the trade-off.
+	{
+		name: "api-key-lower",
+		pattern: new RegExp(String.raw`\b(api[_-]?key["']?\s*[:=]\s*["']?)(?!process\.env|os\.environ|Bun\.env|import\.meta\.env|Deno\.env|env\.|(?:${PLACEHOLDER_PREFIX}))[A-Za-z0-9_\-/.+]{16,}[^\s"'\x60,;)]*`, "gi"),
+		replacement: `$1${REDACTED}`,
+	},
 	// Authorization headers, however cased.
-	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi, replacement: `$1${REDACTED}` },
-	{ name: "bearer", pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g, replacement: `Bearer ${REDACTED}` },
+	// Values that are env references or templates (`$TOKEN`, `<token>`, `{x}`, a backtick, an ellipsis) are not captured,
+	// after an optional scheme or without one.
+	{
+		name: "authorization",
+		pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:(?:bearer|basic|token)[ \t]+(?!["'`]?[$<{`…])|(?!(?:bearer|basic|token)\s)(?!["'`]?[$<{`…]))("[^"\n]*"[\w.-]*|'[^'\n]*'[\w.-]*|\\"[^\n]*?\\"[\w.-]*|\\'[^\n]*?\\'[\w.-]*|\S+)/gi,
+		replacement: `$1${REDACTED}`,
+	},
+	// A bearer value must be a token: not a placeholder (`YOUR_TOKEN`, `your_token`, `xxx`, `$VAR`, `<token>`, `{x}`) and
+	// not one of a few prose words (`Bearer authentication`). The exemption is a word list, not a lowercase shape: a bare
+	// all-lowercase token is still refused.
+	{
+		name: "bearer",
+		pattern: /\bBearer\s+(?!YOUR[_-]|your[_-]|[Xx]{3}|\$|<|\{)(?!(?:authentication|authorization|authorisation|authenticated|authenticate|authorized|authorised)(?![A-Za-z0-9._~+/=_-]))[A-Za-z0-9._~+/-]{12,}=*/g,
+		replacement: `Bearer ${REDACTED}`,
+	},
 	// Connection URLs carrying a password.
 	// A match needs a literal `://`, so text without one is skipped: from every word boundary the
 	// scheme scan otherwise runs to the end of the run, which is quadratic on a long hyphenated run.

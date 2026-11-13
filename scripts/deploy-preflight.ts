@@ -467,6 +467,25 @@ function fieldOf(value: unknown, key: string): unknown {
 	return value !== null && typeof value === "object" && key in value ? (value as Record<string, unknown>)[key] : undefined;
 }
 
+/**
+ * The datasets the state file names in its `triggers` and `lag` members. The preflight has no planning config to derive the
+ * known set from, so it reads every dataset the file names: no row the writer wrote is dropped by the check.
+ */
+function datasetsNamedBy(text: string): string[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return [];
+	}
+	const names = new Set<string>();
+	for (const member of ["triggers", "lag"]) {
+		const value = fieldOf(parsed, member);
+		if (value !== null && typeof value === "object" && !Array.isArray(value)) for (const name of Object.keys(value)) names.add(name);
+	}
+	return [...names];
+}
+
 async function docsStateFinding(releaseDir: string, path: string): Promise<Finding> {
 	const file = basename(path);
 	const read = readText(path);
@@ -489,7 +508,7 @@ async function docsStateFinding(releaseDir: string, path: string): Promise<Findi
 	}
 	const load = ingest.loadIngestRecords;
 	if (!isFn(load)) return finding("state", file, "error", "the release's docs-ingest.ts exports no loadIngestRecords");
-	const loaded = await load(path);
+	const loaded = await load(path, datasetsNamedBy(read.text));
 	const problem = fieldOf(loaded, "problem");
 	const records = fieldOf(loaded, "records");
 	const versions = fieldOf(loaded, "versions");

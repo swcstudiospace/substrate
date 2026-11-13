@@ -4,7 +4,7 @@ import { loadConfig, tokenEnvName } from "./config.ts";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { request as httpRequest } from "node:http";
 import { scanIngestPages } from "./docs-ingest.ts";
 import type { EventQuery } from "./greptime.ts";
@@ -12,6 +12,7 @@ import { memoryToolWriter, resetRagMachine, surfaceClaimRefusal } from "./mcp.ts
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
+import { FakeTree } from "./planning/tree.fixtures.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import {
 	STREAM_BATCH,
@@ -60,6 +61,17 @@ describe("healthStatus", () => {
 });
 
 /**
+ * The per-repo dataset seam (as in docs-plane-hardening.test.ts): each named repo is a main checkout at
+ * `<homedir>/src/repos/<name>`, held in memory by the planning fs, so the registry names its dataset `<name>` and the repo
+ * is known. The default pair is the repos the old default search scope named besides the skills library and the corpus.
+ */
+function repoSeam(names: readonly string[] = ["agent-substrate", "programming-desk"]) {
+	const roots = names.map((name) => join(homedir(), "src", "repos", name));
+	const files = Object.fromEntries(roots.map((root) => [join(root, ".git", "HEAD"), "ref: refs/heads/main\n"]));
+	return { env: { SUBSTRATE_PLANNING_ROOTS: roots.join(",") }, stores: { planning: { fs: new FakeTree(files), presence: null } } };
+}
+
+/**
  * Boot the real server on an ephemeral port; `stop` closes it.
  *
  * The ledger is injected rather than built from the environment, so nothing here
@@ -70,7 +82,7 @@ describe("healthStatus", () => {
 async function serve(
 	greptime: unknown,
 	env: Record<string, string | undefined> = {},
-	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null } = {},
+	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null; planning?: { fs: FakeTree; presence: null } } = {},
 	options: HttpServerOptions = {},
 ) {
 	const config = loadConfig(env);
@@ -281,10 +293,11 @@ describe("routes", () => {
 	test("POST /docs/search answers cited results against the fake", async () => {
 		const { greptime } = ledger();
 		const fake = new RagflowFake();
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{ ragflowFetch: fake.fetch },
+			{ ...repos.env, RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch, ...repos.stores },
 		);
 		try {
 			const response = await post("/docs/search", { question: "who reads RAGFlow?" });
@@ -665,10 +678,11 @@ describe("routes", () => {
 		const fake = new RagflowFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{},
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
 		try {
@@ -706,10 +720,11 @@ describe("routes", () => {
 		fake.datasets.splice(0, fake.datasets.length, ...kept);
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{},
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
 		try {
@@ -852,10 +867,11 @@ describe("routes", () => {
 		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{},
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
 		try {
@@ -894,7 +910,8 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger no-ops on an unconfigured docs plane", async () => {
 		const { greptime, written } = ledger();
-		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		const repos = repoSeam();
+		const { post, stop } = await serve(greptime, { ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp" }, repos.stores);
 		try {
 			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; dataset: string; noop?: boolean; reason?: string };
@@ -927,10 +944,11 @@ describe("routes", () => {
 			return Response.json({ detail: "no route" }, { status: 404 });
 		}) as typeof fetch;
 		const docs = docsFixture({ "README.md": "The substrate is the only door." });
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" },
-			{},
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" },
+			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
 		try {
@@ -955,10 +973,11 @@ describe("routes", () => {
 			throw new Error("connect ECONNREFUSED 127.0.0.1:9");
 		});
 		const docs = docsFixture({ "README.md": "The substrate is the only door." });
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{},
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
 		try {
@@ -989,6 +1008,9 @@ describe("routes", () => {
 		try {
 			const unknown = await post("/docs/merge-trigger", { dataset: "not-a-dataset", commit: "c", content_sha256: "s" }, { authorization: "Bearer tok-omp" });
 			expect(unknown.status).toBe(400);
+			// A repo no planning root names is not known here, so its trigger is refused like any other unknown name.
+			const unplanned = await post("/docs/merge-trigger", { dataset: "programming-desk", commit: "c", content_sha256: "s" }, { authorization: "Bearer tok-omp" });
+			expect(unplanned.status).toBe(400);
 			// The names every object inherits are not dataset rows: `in` would pass
 			// "constructor" to the refresh; hasOwn refuses it like any other name.
 			const inherited = await post("/docs/merge-trigger", { dataset: "constructor", commit: "c", content_sha256: "s" }, { authorization: "Bearer tok-omp" });
@@ -1008,10 +1030,11 @@ describe("routes", () => {
 		const fake = new RagflowFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/leak.md": "password: hunter2 in the shipped config" });
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{},
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
 		try {
@@ -1068,7 +1091,8 @@ describe("routes", () => {
 				return Response.json(LIGHTRAG_ANSWER);
 			});
 			const { greptime } = ledger();
-			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			const repos = repoSeam();
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, ...repos.env, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" }, repos.stores);
 			try {
 				const stale = { path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 };
 				for (let n = 0; n < 2; n += 1) {
@@ -1150,7 +1174,8 @@ describe("routes", () => {
 			}) as unknown as typeof fetch;
 			const { greptime } = ledger();
 			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
-			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" });
+			const repos = repoSeam();
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, ...repos.env, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" }, repos.stores);
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const degraded = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;
@@ -1245,7 +1270,8 @@ describe("routes", () => {
 			}) as unknown as typeof fetch;
 			const { greptime } = ledger();
 			// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
-			const { post, get, stop } = await serve(greptime, LIGHTRAG_ENV);
+			const repos = repoSeam();
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, ...repos.env }, repos.stores);
 			try {
 				for (const question of ["trip one", "trip two", "trip three"]) {
 					const tripped = (await (await post("/docs/lightrag/query", { question }, auth)).json()) as Record<string, unknown>;

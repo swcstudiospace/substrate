@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import type { BreakerState, CitationProvenance } from "@substrate/observability";
 import { DeadlineError, type SharedDeadline, sharedDeadline } from "./deadline.ts";
 import { repoScopePrefix } from "./event.ts";
-import { DATASET_TRIGGERS, type DatasetListSource } from "./docs-datasets.ts";
+import type { DatasetListSource } from "./docs-datasets.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { DEFAULT_TANDEM_OPTIONS, mergeTandem, type TandemCounts, type TandemOptions, type TandemOrigin, type TandemProvenance } from "./tandem-recall.ts";
@@ -73,9 +73,6 @@ export const UNTRUSTED_DOCS_NOTICE =
 
 /** Snippets are redacted and capped before reply (D25-04). */
 export const SNIPPET_CAP = 1200;
-
-/** The default scope: all configured readable datasets, never a tenant default (D25-03). */
-export const DEFAULT_SEARCH_DATASET_NAMES: readonly string[] = ["agent-substrate", "programming-desk", "agent-skills", "corpus"];
 
 export interface SearchCitation {
 	title: string;
@@ -326,7 +323,8 @@ export interface DatasetPin {
 
 export interface SearchDeps {
 	config: RagflowConfig | null;
-	datasetNames?: readonly string[];
+	/** The dataset names this search reads: the known datasets the caller asked for (`knownDatasets`). */
+	datasetNames: readonly string[];
 	pins?: Record<string, DatasetPin>;
 	emit: (event: EventInput) => Promise<unknown>;
 	surface?: Surface | null;
@@ -734,7 +732,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 
 	const listed = deps.datasets ? await deps.datasets.list(config, deps.fetchImpl) : await listDatasets(config, deps.fetchImpl);
 	if (!listed.ok) return failed(deps, sessionId, listed.reason);
-	const wanted = deps.datasetNames ?? DEFAULT_SEARCH_DATASET_NAMES;
+	const wanted = deps.datasetNames;
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
 	if (readable.length === 0) return failed(deps, sessionId, "no-readable-datasets");
 
@@ -1066,7 +1064,7 @@ function chunkDataset(deps: SearchDeps, chunk: RagflowChunk): string | undefined
 	if (chunk.document_id === undefined || deps.lightragRecords === undefined) return undefined;
 	const datasetId = lightragDocumentDataset(deps.lightragRecords, chunk.document_id);
 	if (datasetId === undefined) return undefined;
-	return Object.keys(DATASET_TRIGGERS).find((name) => datasetIdentity(name) === datasetId);
+	return deps.datasetNames.find((name) => datasetIdentity(name) === datasetId);
 }
 
 /**
@@ -1097,7 +1095,7 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	// stands in for it, so a RAGFlow outage cannot refuse a LightRAG search.
 	const breakerState = deps.lightragBreakerState;
 	if (breakerState?.() === "open") return lightragFallback(deps, sessionId, question, LIGHTRAG_CIRCUIT_OPEN);
-	const wanted = deps.datasetNames ?? DEFAULT_SEARCH_DATASET_NAMES;
+	const wanted = deps.datasetNames;
 	// Dataset resolution never touches RAGFlow: a search must not depend on its
 	// reachability. The service injects the list (`lightragSearchDatasets`), keyed
 	// by dataset name: the key its pin is filed under (`pinsByName`). Otherwise the

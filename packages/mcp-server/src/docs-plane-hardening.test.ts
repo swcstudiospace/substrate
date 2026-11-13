@@ -11,7 +11,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CACHE_TTL, DOCS_GENERATION_KEY, ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
@@ -33,6 +33,9 @@ import {
 	type FetchLike,
 } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
+import { planningSessionId } from "./planning/checkout.ts";
+import { FakeTree } from "./planning/tree.fixtures.ts";
 import { createHttpServer, type HttpServerOptions } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
@@ -48,6 +51,17 @@ function eventSink() {
 		return { stored: false };
 	};
 	return { events, emit };
+}
+
+/**
+ * The per-repo dataset seam. Each name is a main checkout at `<homedir>/src/repos/<name>` (the default repos root), held
+ * in memory by the planning fs, so the registry names its dataset `<name>` and the repo is known. Nothing touches disk.
+ * The default pair is the repos the old default search scope named besides the skills library and the corpus.
+ */
+function repoSeam(names: readonly string[] = ["agent-substrate", "programming-desk"]) {
+	const roots = names.map((name) => join(homedir(), "src", "repos", name));
+	const files = Object.fromEntries(roots.map((root) => [join(root, ".git", "HEAD"), "ref: refs/heads/main\n"]));
+	return { env: { SUBSTRATE_PLANNING_ROOTS: roots.join(",") }, stores: { planning: { fs: new FakeTree(files), presence: null } } };
 }
 
 /** A redis that remembers every command, so a generation bump is observable. */
@@ -76,6 +90,7 @@ function ingestHarness(fake: RagflowFake, over: Partial<IngestDeps> = {}) {
 	const lines: string[] = [];
 	const deps: IngestDeps = {
 		config: CONFIG,
+		knownDatasets: ["agent-substrate"],
 		emit,
 		surface: "omp",
 		seen,
@@ -229,7 +244,7 @@ describe("durable versions and real pins", () => {
 		try {
 			const file = join(dir, "docs-ingest.json");
 			writeFileSync(file, JSON.stringify({ version: 1, records: { "ds-1::https://example.com/a": { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1" } } }));
-			const v1 = await loadIngestRecords(file);
+			const v1 = await loadIngestRecords(file, ["agent-substrate"]);
 			expect(v1.problem).toBeUndefined();
 			expect(v1.records.size).toBe(1);
 			expect(v1.versions.size).toBe(0);
@@ -239,7 +254,7 @@ describe("durable versions and real pins", () => {
 			const written = JSON.parse(readFileSync(file, "utf8")) as { version: number; versions: unknown };
 			expect(written.version).toBe(2);
 			expect(written.versions).toEqual(versionsToJson(versions));
-			const v2 = await loadIngestRecords(file);
+			const v2 = await loadIngestRecords(file, ["agent-substrate"]);
 			expect(v2.records.get("ds-1::https://example.com/a")?.document_id).toBe("doc-1");
 			expect(v2.versions.get("agent-substrate")?.[0]?.commit).toBe("c1");
 			// Malformed rows are skipped, never thrown on.
@@ -256,7 +271,8 @@ describe("durable versions and real pins", () => {
 			// `Substrate` polls at the production cadence (2 s between polls): one poll keeps the test inside the runner's budget.
 			const fake = new RagflowFake();
 			fake.parseDonePolls = 1;
-			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const repos = repoSeam();
+			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
 			const before = await first.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
 			expect(before.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
 			expect(before.chunks[0]?.dataset_commit).toBeUndefined();
@@ -279,7 +295,7 @@ describe("durable versions and real pins", () => {
 			expect(byDocument[seeded.document_id ?? ""]).toBe("dataset-pin:agent-substrate:unrecorded");
 
 			// A new process: pins hydrate from the file, idempotency holds.
-			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
 			const restarted = await second.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
 			expect(restarted.chunks.map((citation) => [citation.document_id, citation.commit, citation.dataset_commit])).toEqual(after.chunks.map((citation) => [citation.document_id, citation.commit, citation.dataset_commit]));
 			const newest = await second.latestDocsVersion("agent-substrate");
@@ -317,7 +333,8 @@ describe("durable versions and real pins", () => {
 		const fake = new RagflowFake();
 		fake.parseDonePolls = 1;
 		const chunkFor = (documentId: string) => ({ content: `from ${documentId}`, document_name: "data-planes.md", document_id: documentId, chunk_id: `chunk-${documentId}`, source_url: "", score: 0.5 });
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+		const repos = repoSeam();
+		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
 		const old = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "c-old", pages: [PAGE] }, "omp");
 		if (!old.ok) throw new Error(old.reason);
 		const oldId = old.results[0]?.document_id ?? "";
@@ -364,24 +381,25 @@ describe("durable versions and real pins", () => {
 			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
 			const fake = new RagflowFake();
 			fake.parseDonePolls = 1;
-			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const repos = repoSeam();
+			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
 			const v1 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
 			const v2 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c2", pages: [{ ...PAGE, body: "two" }] }, "omp");
 			if (!v1.ok || !v2.ok) throw new Error("expected both ingests");
-			const loaded = await loadIngestRecords(file);
+			const loaded = await loadIngestRecords(file, ["agent-substrate"]);
 			const record = [...loaded.records.values()][0];
 			expect(record).toMatchObject({ document_id: v2.results[0]?.document_id, commit: "c2", superseded: [{ document_id: v1.results[0]?.document_id, commit: "c1" }] });
 			// A new process resolves the old document from the hydrated lineage.
-			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
 			fake.chunks["ds-berlin-agent-substrate"] = [{ content: "x", document_name: "d", document_id: v1.results[0]?.document_id ?? "", chunk_id: "c", source_url: "", score: 1 }];
 			const reply = await second.searchDocs({ question: "q", datasets: ["agent-substrate"] }, "omp");
 			expect(reply.chunks[0]?.commit).toBe("c1");
 			// With the prune on, the deleted predecessor is not kept in the lineage.
-			const pruning = new Substrate(loadConfig({ ...env, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const pruning = new Substrate(loadConfig({ ...env, ...repos.env, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
 			const v3 = await pruning.ingestDocs({ dataset: "agent-substrate", commit: "c3", pages: [{ ...PAGE, body: "three" }] }, "omp");
 			if (!v3.ok) throw new Error(v3.reason);
 			expect(v3.results[0]?.pruned_document_id).toBe(v2.results[0]?.document_id);
-			const after = await loadIngestRecords(file);
+			const after = await loadIngestRecords(file, ["agent-substrate"]);
 			expect([...after.records.values()][0]).toMatchObject({ commit: "c3", superseded: [{ document_id: v1.results[0]?.document_id, commit: "c1" }] });
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -436,7 +454,8 @@ describe("cached reads", () => {
 		const fake = new RagflowFake();
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache });
+		const repos = repoSeam();
+		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache, ...repos.stores });
 		const first = await substrate.searchDocs({ question: "who reads  RAGFlow?" }, "omp");
 		expect(first.degraded).toBeUndefined();
 		expect(fake.datasetLists()).toHaveLength(1);
@@ -455,7 +474,8 @@ describe("cached reads", () => {
 		const fake = new RagflowFake();
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache });
+		const repos = repoSeam();
+		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache, ...repos.stores });
 		fake.failRetrievalWith = 503;
 		const degraded = await substrate.searchDocs({ question: "q" }, "omp");
 		expect(degraded.degraded).toBe(true);
@@ -606,7 +626,7 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 			// The failure still invalidated cached searches and saved page A's new record.
 			expect(bumps()).toBe(2);
 			expect(fake.deleted).toEqual([oldId]);
-			const saved = (await loadIngestRecords(file)).records.get(`ds-berlin-agent-substrate::${PAGE.source_url}`);
+			const saved = (await loadIngestRecords(file, ["agent-substrate"])).records.get(`ds-berlin-agent-substrate::${PAGE.source_url}`);
 			expect(saved?.commit).toBe("c2");
 			expect(saved?.document_id).not.toBe(oldId);
 			expect(fake.documents[saved?.document_id ?? ""]).toBeDefined();
@@ -632,10 +652,11 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 describe("the asynchronous merge-trigger", () => {
 	async function serve(fake: RagflowFake, docs: string, env: Record<string, string> = {}, options: HttpServerOptions = {}) {
 		const fullEnv = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...env };
-		const config = loadConfig(fullEnv);
+		const repos = repoSeam();
+		const config = loadConfig({ ...fullEnv, ...repos.env });
 		const observability = createObservability(config, fullEnv);
 		await observability.start();
-		const substrate = new Substrate(config, { index: null, greptime: null, ragflowFetch: fake.fetch as FetchLike }, observability.observer);
+		const substrate = new Substrate(config, { index: null, greptime: null, ragflowFetch: fake.fetch as FetchLike, ...repos.stores }, observability.observer);
 		const server = createHttpServer(substrate, config, observability, { docsIngestBaseDir: docs, ...options });
 		const listening = Promise.withResolvers<void>();
 		server.listen(0, "127.0.0.1", listening.resolve);
@@ -866,5 +887,28 @@ describe("the unit", () => {
 		const unit = readFileSync(UNIT_FILE, "utf8");
 		expect(unit).toContain("Environment=SUBSTRATE_DOCS_STATE_FILE=/var/lib/substrate/docs-ingest.json");
 		expect(unit).toContain("StateDirectory=substrate");
+	});
+});
+
+describe("the known docs datasets come from the planning roots", () => {
+	test("with no planning root, only the skills library and the corpus are known", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		expect(await substrate.knownDocsDatasets()).toEqual(["agent-skills", "corpus"]);
+	});
+
+	test("a repo is known when one of its checkouts is a planning root under the repos root, and only then", async () => {
+		const repos = repoSeam(["agent-substrate", "programming-desk"]);
+		const substrate = new Substrate(loadConfig(repos.env), { index: null, greptime: null, ...repos.stores });
+		expect(await substrate.knownDocsDatasets()).toEqual(["agent-skills", "agent-substrate", "corpus", "programming-desk"]);
+		const unrooted = new Substrate(loadConfig({}), { index: null, greptime: null });
+		expect(await unrooted.knownDocsDatasets()).not.toContain("agent-substrate");
+	});
+
+	test("a checkout outside the repos root is filed under its checkout key, and that key is its known dataset", async () => {
+		const root = join(homedir(), "srv", "planning-elsewhere");
+		const files = { [join(root, ".git", "HEAD")]: "ref: refs/heads/main\n" };
+		const key = planningSessionId(nodePlanningFs(), root);
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_PLANNING_ROOTS: root }), { index: null, greptime: null, planning: { fs: new FakeTree(files), presence: null } });
+		expect(await substrate.knownDocsDatasets()).toEqual(["agent-skills", "corpus", key]);
 	});
 });

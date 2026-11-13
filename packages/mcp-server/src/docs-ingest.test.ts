@@ -49,6 +49,7 @@ function harness(
 	const seen = new Map<string, IngestRecord>();
 	const deps: IngestDeps = {
 		config: CONFIG,
+		knownDatasets: ["agent-substrate", "programming-desk"],
 		emit: async (event: EventInput): Promise<unknown> => {
 			events.push(event);
 			return { stored: false };
@@ -297,6 +298,7 @@ describe("docs_ingest review hardening", () => {
 		const outcome = await ingestDocs(
 			{
 				config: null,
+				knownDatasets: ["agent-substrate"],
 				backend: "lightrag",
 				lightragConfig: { url: "http://lightrag.test" },
 				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
@@ -385,7 +387,7 @@ describe("ingest record persistence", () => {
 				["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1", version: 1 }],
 			]);
 			await saveIngestRecords(file, seen);
-			const loaded = await loadIngestRecords(file);
+			const loaded = await loadIngestRecords(file, ["ds-1"]);
 			expect(loaded.problem).toBeUndefined();
 			expect(loaded.records.get("ds-1::https://example.com/a")?.document_id).toBe("doc-1");
 		} finally {
@@ -396,12 +398,12 @@ describe("ingest record persistence", () => {
 	test("a missing or corrupt file means an empty map, never a throw", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
-			const missing = await loadIngestRecords(join(dir, "absent.json"));
+			const missing = await loadIngestRecords(join(dir, "absent.json"), []);
 			expect(missing.records.size).toBe(0);
 			expect(missing.problem).toBeUndefined();
 			const corrupt = join(dir, "corrupt.json");
 			writeFileSync(corrupt, "not json{{{");
-			const loaded = await loadIngestRecords(corrupt);
+			const loaded = await loadIngestRecords(corrupt, []);
 			expect(loaded.records.size).toBe(0);
 			expect(typeof loaded.problem).toBe("string");
 		} finally {
@@ -416,7 +418,7 @@ describe("ingest record persistence", () => {
 			// Unlike a permission bit it fails for root too.
 			const file = join(dir, "ingest.json");
 			symlinkSync(file, file);
-			const loaded = await loadIngestRecords(file);
+			const loaded = await loadIngestRecords(file, []);
 			expect(loaded.records.size).toBe(0);
 			expect(loaded.problem).toMatch(/could not be read \(ELOOP\)/);
 			const seen = new Map<string, IngestRecord>([
@@ -438,7 +440,7 @@ describe("ingest record persistence", () => {
 			const before = readFileSync(file);
 			chmodSync(file, 0o000);
 			try {
-				const loaded = await loadIngestRecords(file);
+				const loaded = await loadIngestRecords(file, []);
 				expect(loaded.problem).toContain("could not be read (EACCES)");
 				await expect(saveIngestRecords(file, new Map<string, IngestRecord>())).rejects.toThrow("not overwriting it");
 			} finally {
@@ -695,6 +697,7 @@ describe("docs_ingest expected_version on the LightRAG plane", () => {
 		const outcome = await ingestDocs(
 			{
 				config: null,
+				knownDatasets: ["agent-substrate"],
 				backend: "lightrag",
 				lightragConfig: { url: "http://lightrag.test" },
 				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
@@ -898,6 +901,7 @@ describe("a refresh's ingest calls (split under the call limit)", () => {
 		const events: EventInput[] = [];
 		const deps: IngestDeps = {
 			config: CONFIG,
+			knownDatasets: ["agent-substrate"],
 			emit: async (event: EventInput): Promise<unknown> => {
 				events.push(event);
 				return { stored: false };
@@ -916,7 +920,7 @@ describe("a refresh's ingest calls (split under the call limit)", () => {
 
 	test("preflightIngestPages passes a clean set and refuses an empty one", async () => {
 		const fake = new RagflowFake();
-		const deps: IngestDeps = { config: CONFIG, emit: async (): Promise<unknown> => ({ stored: false }), surface: "omp", seen: new Map(), poll: { intervalMs: 0 }, fetchImpl: fake.fetch };
+		const deps: IngestDeps = { config: CONFIG, knownDatasets: ["agent-substrate"], emit: async (): Promise<unknown> => ({ stored: false }), surface: "omp", seen: new Map(), poll: { intervalMs: 0 }, fetchImpl: fake.fetch };
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: wideSkills() })).toBeUndefined();
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [] })).toBe("no-pages");
 		expect(fake.uploads).toHaveLength(0);
@@ -1091,6 +1095,7 @@ function lightragHarness(fake: LightragFake, options: { prune?: boolean } = {}) 
 	const seen = new Map<string, IngestRecord>();
 	const deps: IngestDeps = {
 		config: null,
+		knownDatasets: ["agent-substrate"],
 		backend: "lightrag",
 		lightragConfig: { url: "http://lightrag.test" },
 		lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
@@ -1110,6 +1115,7 @@ describe("docs_ingest on the LightRAG plane: the dataset gate", () => {
 		ingestDocs(
 			{
 				config: null,
+				knownDatasets: ["agent-substrate"],
 				backend: "lightrag",
 				lightragConfig: { url: "http://lightrag.test" },
 				lightragDatasets: { list: async () => lightragSearchDatasets([dataset]), invalidate: () => undefined },

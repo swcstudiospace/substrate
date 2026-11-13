@@ -73,7 +73,6 @@ import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { syncLagSeconds } from "./corpus/sync-event.ts";
-import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
@@ -2099,13 +2098,12 @@ export function createHttpServer(
 				}
 				const body = parsed as Record<string, unknown>;
 				const dataset = typeof body.dataset === "string" ? body.dataset : MERGE_TRIGGER_DATASET;
-				// hasOwn, not `in`: `in` also accepts the names every object inherits —
-				// "constructor", "toString", "__proto__" — and those would pass the
-				// known-dataset check and reach the refresh with a dataset the store
-				// never held. Only the trigger table's own rows are known.
-				if (!Object.hasOwn(DATASET_TRIGGERS, dataset)) {
+				// The known datasets are the planning registry's repos, the skills library and the corpus (`knownDocsDatasets`).
+				// An array lookup takes no inherited name ("constructor", "__proto__"), so an unknown name cannot reach the refresh.
+				const known = await substrate.knownDocsDatasets();
+				if (!known.includes(dataset)) {
 					sendJson(res, 400, {
-						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${Object.keys(DATASET_TRIGGERS).join(", ")}`,
+						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${known.join(", ")}`,
 					});
 					return;
 				}

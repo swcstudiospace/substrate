@@ -74,6 +74,9 @@ import {
 	TRIGGER_FIELD_MAX,
 	refreshDataset,
 	resolveDatasets,
+	knownDatasets,
+	planningDatasetRegistry,
+	type PlanningDatasetRegistry,
 	type DatasetVersion,
 	type SkillsSyncTracker,
 	type VersionStore,
@@ -100,7 +103,7 @@ import {
 	type PageSettlement,
 } from "./docs-ingest.ts";
 import { CORPUS_FRESHNESS_DATASET, LagSettler, TRIGGER_RECORD_DEADLINE_MS, corpusFreshnessRow, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
-import { augmentQuestionWithSteering, DEFAULT_SEARCH_DATASET_NAMES, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
+import { augmentQuestionWithSteering, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -701,8 +704,6 @@ interface IdempotencyPlan {
  */
 const KEY_TURN_PREFIX = "\u0000idempotency:";
 
-/** The dataset planning pages are ingested into: the agent-substrate checkout's dataset (`docs/data-planes.md`). */
-const PLANNING_DATASET = "agent-substrate";
 /** Longest the lag pass waits for the corpus manifest's status before it treats the corpus as unread this pass. */
 const CORPUS_STATUS_DEADLINE_MS = 3_000;
 
@@ -1628,6 +1629,8 @@ export class Substrate {
 	// uplift-4 S7 — docs freshness and merge-trigger lag
 	/** Accepted merge-triggers and the lag warning's dedupe markers; persisted in the docs state file only once non-empty. */
 	private readonly docsFreshnessState: FreshnessState = createFreshnessState();
+	/** The per-repo dataset registry the docs datasets come from, derived once at startup from the planning roots. */
+	private readonly docsRegistry: Promise<PlanningDatasetRegistry>;
 	/** Runs lag transitions in the background, one pass at a time; reads never wait on it. */
 	private readonly docsLagSettler = new LagSettler(this.docsFreshnessState.lag, {
 		persist: () => this.persistDocsSeen(),
@@ -1835,6 +1838,7 @@ export class Substrate {
 		const planningFs = planningDeps.fs ?? nodePlanningFs();
 		const planningPresence = planningDeps.presence !== undefined ? planningDeps.presence : productionPresence(config);
 		this.planning = new PlanningReader({ settings: config.planning, fs: planningFs, presence: planningPresence, checkpoints: planningDeps.checkpoints ?? completionStoreView(config.planningCheckpoint) });
+		this.docsRegistry = planningDatasetRegistry(config.planningCheckouts, planningFs);
 		const baselineDirectory = config.planningBaseline.ok ? config.planningBaseline.directory : null;
 		const baselineProblems = config.planningBaseline.ok ? [] : config.planningBaseline.errors;
 		const livenessProblems = config.planningLiveness.ok ? [] : config.planningLiveness.errors;
@@ -6167,9 +6171,10 @@ export class Substrate {
 		const sessionId = checked?.access.sessionId ?? (typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined);
 		const originalQuestion = typeof input.question === "string" ? input.question : "";
 		const question = augmentQuestionWithSteering(originalQuestion, typeof input.steering === "string" ? input.steering : (checked?.snapshot.session.steering ?? null));
+		const known = await this.knownDocsDatasets();
 		const names = Array.isArray(input.datasets)
-			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
-			: [...DEFAULT_SEARCH_DATASET_NAMES];
+			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => known.includes(name))
+			: [...known];
 		const repoId = normalizeRepoId(typeof input.repo_id === "string" ? input.repo_id : checked?.snapshot.session.repo_id ?? null);
 		const planningHash = checked === null && typeof input.planning_hash === "string" && input.planning_hash.trim().length > 0 ? input.planning_hash.trim() : null;
 		await this.hydrateDocsSeen();
@@ -6469,7 +6474,7 @@ export class Substrate {
 			this.docsSeenReady = (async () => {
 				const file = this.config.docsStateFile;
 				if (!file) return;
-				const { records, versions, freshness, problem } = await loadIngestRecords(file);
+				const { records, versions, freshness, problem } = await loadIngestRecords(file, await this.knownDocsDatasets());
 				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
 				for (const [dataset, list] of versions) if (!this.docsVersions.has(dataset)) this.docsVersions.set(dataset, list);
 				for (const [dataset, list] of freshness.triggers) if (!this.docsFreshnessState.triggers.has(dataset)) this.docsFreshnessState.triggers.set(dataset, list);
@@ -6478,6 +6483,14 @@ export class Substrate {
 			})();
 		}
 		return this.docsSeenReady;
+	}
+
+	/**
+	 * The docs datasets a call may name: the planning registry's repos, the skills library and the corpus. The registry is
+	 * derived once at startup from the planning roots, so a repo is known exactly when one of its checkouts is a planning root.
+	 */
+	async knownDocsDatasets(): Promise<readonly string[]> {
+		return knownDatasets(await this.docsRegistry);
 	}
 
 	/**
@@ -6519,7 +6532,7 @@ export class Substrate {
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
 		const outcome = await ingestDocs(
-			this.docsIngestDeps(typeof input.dataset === "string" ? input.dataset : "", roots, callerSurface, sessionId),
+			await this.docsIngestDeps(typeof input.dataset === "string" ? input.dataset : "", roots, callerSurface, sessionId),
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
@@ -6897,9 +6910,10 @@ export class Substrate {
 	 * `dataset` is the one LightRAG dataset the ingest resolves, identified by its name, so a LightRAG
 	 * ingest never lists datasets through the RAGFlow gate (its breaker and outages do not refuse uploads).
 	 */
-	private docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): IngestDeps {
+	private async docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): Promise<IngestDeps> {
 		return {
 			config: this.config.ragflow,
+			knownDatasets: await this.knownDocsDatasets(),
 			backend: this.config.docsBackend,
 			lightragConfig: this.config.lightrag,
 			roots: roots ?? this.config.docsIngestRoots,
@@ -7121,7 +7135,7 @@ export class Substrate {
 			if (refusedAfter !== null) return finish({ ok: false, reason: refusedAfter, job });
 			// Every page passes the ingest gates before the first call writes, so a content refusal (an outside path,
 			// an oversize page, a secret) leaves the plane as it was, as a single call did.
-			const gated = await preflightIngestPages(this.docsIngestDeps(request.dataset, roots, surface), { dataset: request.dataset, commit: request.commit, pages });
+			const gated = await preflightIngestPages(await this.docsIngestDeps(request.dataset, roots, surface), { dataset: request.dataset, commit: request.commit, pages });
 			if (gated !== undefined) return finish({ ok: false, reason: gated, job });
 			// The pages go to the plane in calls that each fit one ingest call. Each call upserts its pages as it lands;
 			// the version is recorded only after the last call. A failure after an earlier call wrote is `stored`: the
@@ -7229,8 +7243,18 @@ export class Substrate {
 			const pending = new Set(trigger.keys);
 			const hashes = this.planningHashes ?? new Map<string, string>();
 			this.planningHashes = hashes;
-			for (const batch of batchPagesForIngest(pages.filter((page) => pending.has(planningPageKey(page.checkout, page.path)))) as PlanningPage[][]) {
-				const outcome = await this.ingestDocs({ dataset: PLANNING_DATASET, pages: batch }, "substrate");
+			const registry = await this.docsRegistry;
+			const byDataset = new Map<string, PlanningPage[]>();
+			for (const page of pages) {
+				if (!pending.has(planningPageKey(page.checkout, page.path))) continue;
+				const dataset = registry.datasetOf.get(page.checkout) ?? page.checkout;
+				const group = byDataset.get(dataset) ?? [];
+				group.push(page);
+				byDataset.set(dataset, group);
+			}
+			const batches = [...byDataset].flatMap(([dataset, group]) => (batchPagesForIngest(group) as PlanningPage[][]).map((batch) => ({ dataset, batch })));
+			for (const { dataset, batch } of batches) {
+				const outcome = await this.ingestDocs({ dataset, pages: batch }, "substrate");
 				if (!outcome.ok) break;
 				// A result names its page by source URL: a checkout's absolute file URL, which no other checkout shares. The repo path
 				// alone would not do, since two checkouts can hold the same relative path.
@@ -7330,13 +7354,14 @@ export class Substrate {
 		return this.docsFreshnessRows(now);
 	}
 
-	private docsFreshnessRows(now: number): DatasetFreshness[] {
+	private async docsFreshnessRows(now: number): Promise<DatasetFreshness[]> {
 		const settings = this.config.docsFreshness;
 		return evaluateFreshness({
 			versions: this.docsVersions,
 			triggers: settings.triggerLagMinutes === 0 ? new Map() : this.docsFreshnessState.triggers,
 			now,
 			settings,
+			datasets: await this.knownDocsDatasets(),
 		});
 	}
 
@@ -7354,7 +7379,7 @@ export class Substrate {
 		try {
 			await this.hydrateDocsSeen();
 			const corpus = await this.corpusFreshness(now);
-			const rows = this.docsFreshnessRows(now);
+			const rows = await this.docsFreshnessRows(now);
 			const settings = { ...this.config.docsFreshness, corpusMaxAgeS: this.config.corpus.freshMaxAgeS };
 			this.docsLagSettler.settle(corpus === null ? rows : [...rows, corpus], settings, now);
 		} catch (cause) {

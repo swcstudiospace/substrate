@@ -16,6 +16,8 @@ import { createMcpServer, ingestRefusalIsGate, resetRagMachine } from "./mcp.ts"
 import { Substrate } from "./service.ts";
 import { auditToolCalls, createObservability } from "./observe.ts";
 import { createTestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
+import { reposSeam } from "./planning/tree.fixtures.ts";
+import type { PlanningFs } from "./planning/index.ts";
 import { withoutHindsightEnv } from "./test-support.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
@@ -53,7 +55,7 @@ async function connect(
 	greptime: unknown,
 	surface: Surface | null = "omp",
 	env: Record<string, string> = {},
-	deps: { cache?: ReadThroughCache; lightragFetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> } = {},
+	deps: { cache?: ReadThroughCache; lightragFetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>; planning?: { fs: PlanningFs; presence: null } } = {},
 ) {
 	const config = loadConfig(env);
 	const authority = createTestLiveSessionAuthority();
@@ -1169,7 +1171,8 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 
 	test("several version.stale and outside-roots refusals leave the machine out of ERROR, and the next query is served", async () => {
 		const plane = stubFetch(async () => lightragAnswer());
-		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_INGEST_ENV);
+		const seam = reposSeam(["agent-substrate"]);
+		const { client } = await connect(ledger().greptime, "omp", { ...LIGHTRAG_INGEST_ENV, ...seam.env }, seam.stores);
 		const stale = { path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "A page.", expected_version: 1 };
 		const outside = { path: "secrets/keys.md", source_url: "https://example.com/agent-substrate/keys", body: "Keys." };
 
@@ -1195,7 +1198,8 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 
 	test("a plane error still counts: three failed uploads open the breaker", async () => {
 		stubFetch(async () => new Response("upstream down", { status: 500 }));
-		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_INGEST_ENV);
+		const seam = reposSeam(["agent-substrate"]);
+		const { client } = await connect(ledger().greptime, "omp", { ...LIGHTRAG_INGEST_ENV, ...seam.env }, seam.stores);
 
 		for (const n of [1, 2, 3]) {
 			const failed = await call(client, "docs_ingest", {
@@ -1238,7 +1242,8 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		}) as unknown as typeof fetch;
-		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_BREAKER_ENV);
+		const seam = reposSeam(["agent-substrate"]);
+		const { client } = await connect(ledger().greptime, "omp", { ...LIGHTRAG_BREAKER_ENV, ...seam.env }, seam.stores);
 		for (const question of ["trip one", "trip two", "trip three"]) {
 			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
 		}
@@ -1467,7 +1472,8 @@ describe("a half-open probe is settled only by its own report", () => {
 			return Response.json({ detail: "no route" }, { status: 404 });
 		}) as unknown as typeof fetch;
 		// A zero cooldown has already elapsed, so the query after ERROR is the probe; no timer is needed.
-		const { client } = await connect(ledger().greptime, "omp", LIGHTRAG_QUERY_ENV);
+		const seam = reposSeam(["agent-substrate"]);
+		const { client } = await connect(ledger().greptime, "omp", { ...LIGHTRAG_QUERY_ENV, ...seam.env }, seam.stores);
 		for (const question of ["trip one", "trip two", "trip three"]) {
 			expect((await call(client, "docs_lightrag_query", { question })).json().fallback).toBe("hindsight");
 		}

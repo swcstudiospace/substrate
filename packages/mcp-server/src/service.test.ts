@@ -19,6 +19,20 @@ import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionA
 import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
 import { ZodError } from "zod";
 import { defined, withoutHindsightEnv } from "./test-support.ts";
+import { FakeTree } from "./planning/tree.fixtures.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * The per-repo dataset seam (as in docs-plane-hardening.test.ts): each named repo is a main checkout at
+ * `<homedir>/src/repos/<name>`, held in memory by the planning fs, so the registry names its dataset `<name>` and the repo
+ * is known. The default pair is the repos the old default search scope named besides the skills library and the corpus.
+ */
+function repoSeam(names: readonly string[] = ["agent-substrate", "programming-desk"]) {
+	const roots = names.map((name) => join(homedir(), "src", "repos", name));
+	const files = Object.fromEntries(roots.map((root) => [join(root, ".git", "HEAD"), "ref: refs/heads/main\n"]));
+	return { env: { SUBSTRATE_PLANNING_ROOTS: roots.join(",") }, stores: { planning: { fs: new FakeTree(files), presence: null } } };
+}
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -1274,11 +1288,13 @@ describe("append-mode enforcement", () => {
 		// The RAGFlow outage refuses every RAGFlow call; the LightRAG ingest must neither list through it nor be refused by it.
 		let ragflowCalls = 0;
 		const uploads: string[] = [];
+		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
+				...repos.stores,
 				ragflowFetch: async () => {
 					ragflowCalls += 1;
 					throw new Error("connect ECONNREFUSED");
@@ -1311,11 +1327,13 @@ describe("append-mode enforcement", () => {
 		// ingest keys its records by that same name, so the next ingest of the same page finds the record and uploads nothing.
 		const ragflow = new RagflowFake();
 		const uploads: string[] = [];
+		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
+				...repos.stores,
 				ragflowFetch: ragflow.fetch,
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
@@ -1344,11 +1362,13 @@ describe("append-mode enforcement", () => {
 	test("a LightRAG refresh does not resolve datasets through RAGFlow: an unreachable RAGFlow does not block it, and it records a LightRAG version", async () => {
 		let ragflowCalls = 0;
 		const uploads: string[] = [];
+		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
+				...repos.stores,
 				ragflowFetch: async () => {
 					ragflowCalls += 1;
 					throw new Error("connect ECONNREFUSED");

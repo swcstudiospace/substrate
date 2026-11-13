@@ -33,6 +33,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type LightragConfig, lightragFromEnv, ragflowArchiveFromEnv } from "./config.ts";
+import { CORPUS_DATASET } from "@substrate/corpus";
 import { DATASET_REPOS, datasetIdentity } from "./dataset-identity.ts";
 import { gitAtCommit, type ReadAtCommit, verifyArchive } from "./docs-archive.ts";
 import { type DatasetVersion, recordVersion, type VersionStore } from "./docs-datasets.ts";
@@ -191,9 +192,17 @@ export async function loadArchive(dir: string): Promise<ArchiveRead> {
 			documents: inventory.documents.map((document) => ({ ...document, path: document.name.replace(/__/g, "/") })),
 		});
 	}
-	const loaded = await loadIngestRecords(join(dir, STATE_PATH));
+	const loaded = await loadIngestRecords(join(dir, STATE_PATH), migrationKnown(datasets.map((dataset) => dataset.name)));
 	if (loaded.problem !== undefined) return { ok: false, reason: loaded.problem };
 	return { ok: true, archive: { datasets, records: loaded.records, versions: loaded.versions } };
+}
+
+/**
+ * The datasets a migration load keeps trigger rows for: every dataset the identity table names, the corpus, and the archive's
+ * own. A load that named only the archive would drop the accepted-trigger rows of every other dataset on the next save.
+ */
+export function migrationKnown(archived: readonly string[]): string[] {
+	return [...new Set([...Object.keys(DATASET_REPOS), CORPUS_DATASET, ...archived])];
 }
 
 export interface RecordMapping {
@@ -406,6 +415,8 @@ async function replayDataset(
 			{
 				config: null,
 				backend: "lightrag",
+				// The replay gate names only the dataset it replays.
+				knownDatasets: [dataset.name],
 				lightragConfig: options.config,
 				// The dataset is listed under its repository, so its documents are named and recorded under `owner/name`.
 				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: repo, name: dataset.name }] }), invalidate: () => undefined },
@@ -500,7 +511,7 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 		return refuse(`--part-a records ${String(recorded.records)} differ from the live gate's ${String(pre.records)}: the recorded pass is stale`);
 	}
 
-	const production = await loadIngestRecords(options.stateFile);
+	const production = await loadIngestRecords(options.stateFile, migrationKnown(pre.archive.datasets.map((dataset) => dataset.name)));
 	if (production.problem !== undefined) return refuse(production.problem);
 	const wanted = options.datasets.length > 0 ? new Set(options.datasets) : null;
 	// A requested name the archive does not hold would replay nothing under that name, and an archive with no datasets replays

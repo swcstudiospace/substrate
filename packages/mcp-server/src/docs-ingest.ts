@@ -43,7 +43,6 @@ import { datasetIdentity } from "./dataset-identity.ts";
 import {
 	createVersionStore,
 	DATASET_VERSION_RETENTION,
-	DATASET_TRIGGERS,
 	DIRECT_DATASET_LIST,
 	versionsFromJson,
 	versionsToJson,
@@ -549,6 +548,8 @@ export interface IngestDeps {
 	fetchImpl?: FetchLike;
 	/** The dataset list reader; the plane directly when omitted (uplift-2 R6). */
 	datasets?: DatasetListSource;
+	/** The known datasets a LightRAG ingest may name (`knownDatasets`): the configured set, checked before any list is read. */
+	knownDatasets: readonly string[];
 	/** Delete the superseded document after a replacement parses (`SUBSTRATE_DOCS_PRUNE_SUPERSEDED`); off keeps it. */
 	prune?: boolean;
 	/** How long a call waits behind another ingest of its dataset before refusing `dataset-lock-timeout`. Defaults to 180 s. */
@@ -1151,6 +1152,7 @@ function ioErrorCode(cause: unknown): string | undefined {
 
 export async function loadIngestRecords(
 	file: string,
+	datasets: readonly string[],
 ): Promise<{ records: Map<string, IngestRecord>; versions: VersionStore; freshness: FreshnessState; problem?: string }> {
 	let raw: string;
 	try {
@@ -1212,7 +1214,7 @@ export async function loadIngestRecords(
 		});
 	}
 	const versions = "versions" in parsed ? versionsFromJson(parsed.versions) : createVersionStore();
-	return { records, versions, freshness: freshnessStateFromJson(parsed) };
+	return { records, versions, freshness: freshnessStateFromJson(parsed, datasets) };
 }
 
 /**
@@ -1339,7 +1341,7 @@ export function planningScrapeStateForOutcome(total: number, failed: number): "S
  * Shares the RAGFlow path's validation (roots, size caps, redactor scan),
  * hash idempotency, in-flight locks, records and outcome shape; only the
  * plane calls differ. The requested name must be a configured dataset
- * (`DATASET_TRIGGERS`) before any list is read. Dataset id resolution is best
+ * (`IngestDeps.knownDatasets`) before any list is read. Dataset id resolution is best
  * effort — the dedicated LightRAG list, else the RAGFlow list (keeps existing
  * records aligned), else the requested dataset as its own id — because LightRAG hosts one
  * knowledge base per server. Pages with a planning-graph hint (`graph`,
@@ -1370,7 +1372,7 @@ async function ingestDocsLightrag(
 	// The gate is the configured set, checked before any list is read. An injected list may name only the requested
 	// dataset (the service lists one per call), so a check against that list alone accepts any name, the empty one too.
 	const configuredName = input.dataset.includes("/") ? input.dataset.slice(input.dataset.indexOf("/") + 1) : input.dataset;
-	if (!Object.hasOwn(DATASET_TRIGGERS, configuredName)) return refused(deps, sessionId, "unknown-dataset");
+	if (!deps.knownDatasets.includes(configuredName)) return refused(deps, sessionId, "unknown-dataset");
 	const fetchImpl = deps.lightragFetch ?? deps.fetchImpl;
 	let listed: { ok: true; datasets: Array<{ id: string; name: string }> } | { ok: false; reason: string };
 	if (deps.lightragDatasets !== undefined) listed = await deps.lightragDatasets.list();

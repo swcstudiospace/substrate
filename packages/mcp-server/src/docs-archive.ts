@@ -210,7 +210,7 @@ async function gather(deps: ArchiveDeps, stateFile: string): Promise<Gathered> {
 		listings.push({ dataset, documents: documents.documents });
 	}
 
-	const loaded = await loadIngestRecords(stateFile);
+	const loaded = await loadIngestRecords(stateFile, names);
 	if (loaded.problem !== undefined) return refused(loaded.problem);
 
 	const files: ArchiveFile[] = [

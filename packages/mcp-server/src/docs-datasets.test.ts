@@ -5,13 +5,12 @@
  * real creation is a gated live step (G2).
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { Substrate } from "./service.ts";
 import {
-	DATASET_TRIGGERS,
 	DATASET_TRIGGER_RETENTION,
 	DatasetListCache,
 	TRIGGER_SCAN_MAX,
@@ -25,6 +24,8 @@ import {
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
 	pinsByName,
+	knownDatasets,
+	planningDatasetRegistry,
 	recordTrigger,
 	recordVersion,
 	refreshDataset,
@@ -39,6 +40,9 @@ import { searchDocs } from "./docs-search.ts";
 import { createDataset, type FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import type { EventInput } from "./types.ts";
+import { planningSessionId } from "./planning/checkout.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
+import type { PlanningFs } from "./planning/index.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
@@ -177,6 +181,7 @@ describe("skills-sync liveness and the pin age", () => {
 				fetchImpl: fake.fetch,
 				pins: pinsFromVersions(versions, "ragflow"),
 				degradedDatasets: ["agent-skills"],
+				datasetNames: ["agent-skills"],
 				nowMs: 1_000_000 + 30_000,
 			},
 			"what skills exist?",
@@ -215,24 +220,24 @@ describe("the accepted-trigger store (uplift-4 S7)", () => {
 		expect(kept[kept.length - 1]?.commit).toBe(`c${DATASET_TRIGGER_RETENTION + 6}`);
 	});
 
-	test("round-trips through JSON, reading only the trigger table's own datasets and skipping bad rows", () => {
+	test("round-trips through JSON, reading only the named datasets and skipping bad rows", () => {
 		const store = createTriggerStore();
 		recordTrigger(store, "kanbanos", { commit: "k1", content_sha256: "s", received_at: at });
 		const json = triggersToJson(store);
-		expect(triggersFromJson(JSON.parse(JSON.stringify(json))).get("kanbanos")).toEqual([{ commit: "k1", content_sha256: "s", received_at: at }]);
-		const hostile = triggersFromJson({ constructor: [{ commit: "c", content_sha256: "s", received_at: at }], kanbanos: [null, 5, { commit: "k", content_sha256: "s", received_at: "nope" }] });
+		expect(triggersFromJson(JSON.parse(JSON.stringify(json)), ["kanbanos"]).get("kanbanos")).toEqual([{ commit: "k1", content_sha256: "s", received_at: at }]);
+		const hostile = triggersFromJson({ constructor: [{ commit: "c", content_sha256: "s", received_at: at }], kanbanos: [null, 5, { commit: "k", content_sha256: "s", received_at: "nope" }] }, ["kanbanos"]);
 		expect(hostile.size).toBe(0);
-		expect(triggersFromJson(null).size).toBe(0);
-		expect(triggersFromJson([]).size).toBe(0);
+		expect(triggersFromJson(null, ["kanbanos"]).size).toBe(0);
+		expect(triggersFromJson([], ["kanbanos"]).size).toBe(0);
 	});
 
 	test("reads at most TRIGGER_SCAN_MAX rows from the tail of an oversized list", () => {
 		const rows = Array.from({ length: 10_000 }, (_, i) => ({ commit: `c${i}`, content_sha256: "s", received_at: at }));
-		const kept = triggersFromJson({ "agent-substrate": rows }).get("agent-substrate") ?? [];
+		const kept = triggersFromJson({ "agent-substrate": rows }, ["agent-substrate"]).get("agent-substrate") ?? [];
 		expect(kept).toHaveLength(DATASET_TRIGGER_RETENTION);
 		expect(kept[kept.length - 1]?.commit).toBe("c9999");
 		const garbage = Array.from({ length: TRIGGER_SCAN_MAX + 5 }, () => ({ nope: true }));
-		expect(triggersFromJson({ "agent-substrate": [{ commit: "old", content_sha256: "s", received_at: at }, ...garbage] }).size).toBe(0);
+		expect(triggersFromJson({ "agent-substrate": [{ commit: "old", content_sha256: "s", received_at: at }, ...garbage] }, ["agent-substrate"]).size).toBe(0);
 	});
 });
 
@@ -301,10 +306,117 @@ describe("a completed version belongs to the backend that indexed it", () => {
 	});
 });
 
-describe("the dataset trigger table", () => {
-	test("substrate has a merge trigger, in the same shape as the others", () => {
-		expect(DATASET_TRIGGERS).toMatchObject({ substrate: "merge to main of substrate" });
-	});
+describe("the per-repo dataset registry", () => {
+	const fs = nodePlanningFs();
+	/** A main checkout: its `.git` is a directory. */
+	function mainCheckout(dir: string): string {
+		mkdirSync(join(dir, ".git"), { recursive: true });
+		return dir;
+	}
+	/** A linked worktree at `dir`: its `.git` file names `<repoDotGit>/worktrees/<name>`, whose `commondir` names `<repoDotGit>`. */
+	function linkedWorktree(dir: string, repoDotGit: string, name: string): string {
+		const gitDir = join(repoDotGit, "worktrees", name);
+		mkdirSync(gitDir, { recursive: true });
+		writeFileSync(join(gitDir, "commondir"), "../..\n");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, ".git"), `gitdir: ${gitDir}\n`);
+		return dir;
+	}
+	const keyed = (root: string) => ({ root, key: planningSessionId(fs, root) });
+	async function inTree(run: (base: string) => Promise<void>): Promise<void> {
+		const base = mkdtempSync(join(tmpdir(), "substrate-datasets-"));
+		try {
+			await run(base);
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	}
+
+	test("a main checkout under the repos root is named for its directory", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const repo = keyed(mainCheckout(join(reposRoot, "agent-substrate")));
+			const registry = await planningDatasetRegistry([repo], fs, reposRoot);
+			expect(registry.datasets).toEqual(["agent-substrate"]);
+			expect(registry.datasetOf.get(repo.key)).toBe("agent-substrate");
+		}));
+
+	test("a linked worktree joins its repo's dataset wherever it is checked out, so one repo has one dataset", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const repoGit = join(reposRoot, "agent-substrate", ".git");
+			const main = keyed(mainCheckout(join(reposRoot, "agent-substrate")));
+			const worktree = keyed(linkedWorktree(join(base, "scratch", "as-fix"), repoGit, "as-fix"));
+			const registry = await planningDatasetRegistry([main, worktree], fs, reposRoot);
+			expect(registry.datasets).toEqual(["agent-substrate"]);
+			expect(registry.datasetOf.get(worktree.key)).toBe("agent-substrate");
+		}));
+
+	test("a worktree of a repo outside the repos root is unattributed and keeps a dataset named by its key", () =>
+		inTree(async (base) => {
+			const other = mainCheckout(join(base, "srv", "other"));
+			const worktree = keyed(linkedWorktree(join(base, "scratch", "o-wt"), join(other, ".git"), "o-wt"));
+			const registry = await planningDatasetRegistry([worktree], fs, join(base, "src", "repos"));
+			expect(registry.datasets).toEqual([worktree.key]);
+		}));
+
+	test("checkouts that cannot be attributed each keep a dataset named by their key", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const plain = keyed(mainCheckout(join(base, "srv", "plain")));
+			const noGit = keyed(join(base, "srv", "nogit"));
+			mkdirSync(noGit.root, { recursive: true });
+			const malformed = keyed(join(base, "srv", "malformed"));
+			mkdirSync(malformed.root, { recursive: true });
+			writeFileSync(join(malformed.root, ".git"), "not a pointer\n");
+			const nested = keyed(mainCheckout(join(reposRoot, "group", "nested")));
+			const bareCommon = keyed(linkedWorktree(join(base, "scratch", "bare-wt"), join(reposRoot, "shared.git"), "bare-wt"));
+			const checkouts = [plain, noGit, malformed, nested, bareCommon];
+			const registry = await planningDatasetRegistry(checkouts, fs, reposRoot);
+			for (const checkout of checkouts) expect(registry.datasetOf.get(checkout.key)).toBe(checkout.key);
+			expect(registry.datasets).toEqual(checkouts.map((checkout) => checkout.key).sort());
+		}));
+
+	test("a read that fails keeps that checkout on its key without failing the registry", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const repo = keyed(mainCheckout(join(reposRoot, "agent-substrate")));
+			const broken = keyed(mainCheckout(join(base, "srv", "broken")));
+			const failing: PlanningFs = {
+				...fs,
+				statFile: async (path) => {
+					if (path.startsWith(broken.root)) throw new Error("EIO");
+					return fs.statFile(path);
+				},
+			};
+			const registry = await planningDatasetRegistry([repo, broken], failing, reposRoot);
+			expect(registry.datasetOf.get(broken.key)).toBe(broken.key);
+			expect(registry.datasetOf.get(repo.key)).toBe("agent-substrate");
+		}));
+
+	test("the registry does not depend on the order the checkouts are listed in", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const alpha = keyed(mainCheckout(join(reposRoot, "alpha")));
+			const alphaWorktree = keyed(linkedWorktree(join(base, "scratch", "alpha-wt"), join(reposRoot, "alpha", ".git"), "alpha-wt"));
+			const zeta = keyed(mainCheckout(join(reposRoot, "zeta")));
+			const forward = await planningDatasetRegistry([zeta, alphaWorktree, alpha], fs, reposRoot);
+			const backward = await planningDatasetRegistry([alpha, alphaWorktree, zeta], fs, reposRoot);
+			expect(forward.datasets).toEqual(["alpha", "zeta"]);
+			expect(backward.datasets).toEqual(forward.datasets);
+			expect(Object.fromEntries(backward.datasetOf)).toEqual(Object.fromEntries(forward.datasetOf));
+		}));
+
+	test("no planning roots name no repo datasets; the known set adds the skills library and the corpus", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const empty = await planningDatasetRegistry([], fs, reposRoot);
+			expect(empty.datasets).toEqual([]);
+			expect(knownDatasets(empty)).toEqual(["agent-skills", "corpus"]);
+			const repo = keyed(mainCheckout(join(reposRoot, "kanbanos")));
+			const one = await planningDatasetRegistry([repo], fs, reposRoot);
+			expect(knownDatasets(one)).toEqual(["agent-skills", "corpus", "kanbanos"]);
+		}));
 });
 
 describe("DatasetListCache", () => {

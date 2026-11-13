@@ -19,7 +19,7 @@ import type { FetchLike } from "./planes/lightrag.ts";
 import { FROZEN_SAMPLE } from "./parity-gate.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import { datasetIdentity } from "./dataset-identity.ts";
-import { main, mapRecords, loadArchive, parseMigrateArgs, partAMarker, runApply, runDryRun, type MigrateIo } from "./docs-migrate.ts";
+import { main, mapRecords, loadArchive, migrationKnown, parseMigrateArgs, partAMarker, runApply, runDryRun, type MigrateIo } from "./docs-migrate.ts";
 
 const REPO = "agent-substrate";
 const PLANE_REPO = "swcstudiospace/agent-substrate";
@@ -396,7 +396,7 @@ describe("docs-migrate: apply", () => {
 		expect(report).toMatchObject({ state_file_persisted: true, versions_carried: 1, versions_recorded: 1 });
 		expect(report.cutover_event?.payload).toMatchObject({ action: "docs.cutover", from: "ragflow", to: "lightrag" });
 
-		const persisted = await loadIngestRecords(fixture.stateFile);
+		const persisted = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(PLAN)}`)?.version).toBe(1);
 		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag" && version.version === "v4")).toBe(true);
@@ -411,13 +411,14 @@ describe("docs-migrate: apply", () => {
 			io,
 		);
 		expect(applied.exit).toBe(0);
-		const { records } = await loadIngestRecords(fixture.stateFile);
+		const { records } = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		const key = `lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`;
 		expect(records.get(key)?.version).toBe(3);
 		const refresh = await ingestDocs(
 			{
 				config: null,
 				backend: "lightrag",
+				knownDatasets: [REPO],
 				lightragConfig: CONFIG,
 				lightragDatasets: { list: async () => lightragSearchDatasets([REPO], datasetIdentity), invalidate: () => undefined },
 				lightragFetch: plane.fetch,
@@ -445,6 +446,7 @@ describe("docs-migrate: apply", () => {
 			{
 				config: null,
 				backend: "lightrag",
+				knownDatasets: [REPO],
 				lightragConfig: CONFIG,
 				lightragDatasets: { list: async () => lightragSearchDatasets([REPO], datasetIdentity), invalidate: () => undefined },
 				lightragFetch: plane.fetch,
@@ -472,6 +474,7 @@ describe("docs-migrate: apply", () => {
 			{
 				config: null,
 				backend: "lightrag",
+				knownDatasets: ["agent-skills"],
 				lightragConfig: CONFIG,
 				lightragDatasets: { list: async () => lightragSearchDatasets(["other/agent-skills"]), invalidate: () => undefined },
 				lightragFetch: plane.fetch,
@@ -500,7 +503,7 @@ describe("docs-migrate: apply", () => {
 			io,
 		);
 		expect(outcome.exit).toBe(0);
-		const { records } = await loadIngestRecords(fixture.stateFile);
+		const { records } = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		const stored = records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`);
 		const parsed = plane.names.map((name) => parseCorpusDocumentName(name));
 		expect(plane.names).toEqual([corpusDocumentName(PLANE_REPO, NOTES, shaOf(NOTES_BODY))]);
@@ -607,7 +610,7 @@ describe("docs-migrate: apply", () => {
 		expect(plane.uploads).toEqual([DESK_BODY]);
 		expect(plane.names).toEqual([corpusDocumentName("swcstudiospace/programming-desk", DESK, shaOf(DESK_BODY))]);
 
-		const { records } = await loadIngestRecords(fixture.stateFile);
+		const { records } = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		const key = `lightrag::swcstudiospace/programming-desk::${sourceOf(DESK)}`;
 		expect(records.get(key)).toMatchObject({ dataset_id: "swcstudiospace/programming-desk", document_id: "doc-up-1" });
 	});
@@ -745,7 +748,7 @@ describe("docs-migrate: a replay that does not land every page", () => {
 		expect(report).toMatchObject({ state_file_persisted: true, versions_recorded: 0, cutover_event: null, totals: { ingested: 1, failed: 1 } });
 		expect(plane.uploads).toEqual([NOTES_BODY]);
 
-		const persisted = await loadIngestRecords(fixture.stateFile);
+		const persisted = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
 		expect(persisted.records.has(`lightrag::${PLANE_REPO}::${sourceOf(EXTRA)}`)).toBe(false);
 		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag")).toBe(false);
@@ -777,7 +780,7 @@ describe("docs-migrate: a replay that does not land every page", () => {
 		expect(report).toMatchObject({ state_file_persisted: true, versions_recorded: 0, cutover_event: null });
 		expect(plane.uploads).toEqual([NOTES_BODY]);
 
-		const persisted = await loadIngestRecords(fixture.stateFile);
+		const persisted = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
 		expect(persisted.records.has(`lightrag::${PLANE_REPO}::${sourceOf(EXTRA)}`)).toBe(false);
 		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag")).toBe(false);

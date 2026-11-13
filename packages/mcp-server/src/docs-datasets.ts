@@ -23,19 +23,65 @@ import { createDataset, listDatasets, type DatasetListOutcome, type FetchLike, t
 import type { DatasetPin } from "./docs-search.ts";
 import type { DocsBackend } from "./config.ts";
 import type { EventInput, Surface } from "./types.ts";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { CORPUS_DATASET } from "@substrate/corpus";
+import { gitLayout } from "./planning/checkout.ts";
+import type { PlanningCheckout } from "./planning/config.ts";
+import type { PlanningFs } from "./planning/index.ts";
 
-/** Every dataset this phase knows, with its refresh trigger. */
-export const DATASET_TRIGGERS: Readonly<Record<string, string>> = {
-	"agent-substrate": "merge to main of agent-substrate",
-	substrate: "merge to main of substrate",
-	"programming-desk": "merge to main of programming-desk",
-	"agent-skills": "substrate-skills-sync fast-forward",
-	kanbanos: "merge to main of kanbanos",
-	desklanes: "merge to main of desklanes",
-	clippyos: "merge to main of clippyos",
-	auctioning: "merge to main of auctioning",
-	corpus: "SUBSTRATE_CORPUS bulk ingest (substrate corpus ingest --execute); no merge trigger",
-};
+/** The dataset the skills-sync fast-forward refreshes. The skills library is not a planning root, so it is named here. */
+export const SKILLS_DATASET = "agent-skills";
+
+/**
+ * The docs datasets the planning roots name: one LightRAG dataset per repo, named by the repo's directory under the repos
+ * root (`~/src/repos`). A checkout attributes to its repo through its git common directory, so a linked worktree lands on
+ * the repo it was cut from, wherever it is checked out. A checkout that cannot be attributed (no readable git data, a
+ * common directory not named `.git`, or a repo outside the repos root) gets a dataset of its own, named by its key.
+ */
+export interface PlanningDatasetRegistry {
+	/** The dataset each checkout's records are filed under, keyed by `PlanningCheckout.key`. */
+	readonly datasetOf: ReadonlyMap<string, string>;
+	/** Every dataset the planning roots name: sorted, without repeats. */
+	readonly datasets: readonly string[];
+}
+
+/** Derived once at startup from the configured checkouts. Never throws: a checkout that cannot be read keeps its own dataset. */
+export async function planningDatasetRegistry(
+	checkouts: readonly PlanningCheckout[],
+	fs: PlanningFs,
+	reposRoot: string = join(homedir(), "src", "repos"),
+): Promise<PlanningDatasetRegistry> {
+	const repos = resolve(reposRoot);
+	const datasetOf = new Map<string, string>();
+	for (const checkout of checkouts) datasetOf.set(checkout.key, await datasetOfCheckout(checkout, fs, repos));
+	return { datasetOf, datasets: [...new Set(datasetOf.values())].sort() };
+}
+
+async function datasetOfCheckout(checkout: PlanningCheckout, fs: PlanningFs, reposRoot: string): Promise<string> {
+	const owner = await ownerOf(checkout.root, fs);
+	return owner !== null && dirname(owner) === reposRoot ? basename(owner) : checkout.key;
+}
+
+/** The checkout directory that owns this checkout's git common directory, or null when it cannot be named. */
+async function ownerOf(root: string, fs: PlanningFs): Promise<string | null> {
+	try {
+		const layout = await gitLayout(fs, root);
+		if (!layout.ok || basename(layout.commonDir) !== ".git") return null;
+		return dirname(layout.commonDir);
+	} catch {
+		// gitLayout throws on an I/O failure. One unreadable checkout must not fail startup: it keeps its own dataset.
+		return null;
+	}
+}
+
+/**
+ * Every dataset a docs call may name: the planning repos, plus the skills library and the corpus, which no planning root
+ * names and which are therefore always known. Sorted.
+ */
+export function knownDatasets(registry: PlanningDatasetRegistry): readonly string[] {
+	return [...new Set([...registry.datasets, SKILLS_DATASET, CORPUS_DATASET])].sort();
+}
 
 /** How many versions each dataset keeps (D25-06). */
 export const DATASET_VERSION_RETENTION = 5;
@@ -228,14 +274,14 @@ export function triggersToJson(store: TriggerStore): Record<string, AcceptedTrig
 
 /**
  * The trigger store a state file's `triggers` member describes. Only the
- * trigger table's own dataset names are read (`Object.hasOwn`, never `in`),
+ * named `datasets` are read (`Object.hasOwn`, never `in`),
  * each list is scanned from its tail for at most `TRIGGER_SCAN_MAX` rows,
  * and a malformed, oversized or unparseable row is skipped. Never throws.
  */
-export function triggersFromJson(value: unknown): TriggerStore {
+export function triggersFromJson(value: unknown, datasets: readonly string[]): TriggerStore {
 	const store = createTriggerStore();
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return store;
-	for (const dataset of Object.keys(DATASET_TRIGGERS)) {
+	for (const dataset of datasets) {
 		if (!Object.hasOwn(value, dataset)) continue;
 		const rows: unknown = (value as Record<string, unknown>)[dataset];
 		if (!Array.isArray(rows)) continue;

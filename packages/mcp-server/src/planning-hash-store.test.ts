@@ -38,6 +38,8 @@ afterEach(() => {
 interface Run {
 	/** The pages each `ingestDocs` call carried, in order. */
 	batches: string[][];
+	/** The dataset each `ingestDocs` call named, in order: a planning page is filed under its checkout's dataset. */
+	datasets: string[];
 	events: EventInput[];
 	refresh(): Promise<void>;
 }
@@ -50,6 +52,7 @@ function server(env: Record<string, string>, store: PlanningHashStore, failing: 
 		planningHashes: store,
 	});
 	const batches: string[][] = [];
+	const datasets: string[] = [];
 	const events: EventInput[] = [];
 	spyOn(substrate, "emit").mockImplementation(async (event) => {
 		events.push(event);
@@ -59,6 +62,7 @@ function server(env: Record<string, string>, store: PlanningHashStore, failing: 
 		const pages = (Array.isArray(input.pages) ? input.pages : []) as Array<{ path: string; source_url: string }>;
 		const paths = pages.map((page) => page.path);
 		batches.push(paths);
+		datasets.push(input.dataset as string);
 		return {
 			ok: true,
 			stripped_images: 0,
@@ -68,6 +72,7 @@ function server(env: Record<string, string>, store: PlanningHashStore, failing: 
 	});
 	return {
 		batches,
+		datasets,
 		events,
 		async refresh() {
 			substrate.startPlanningPoll();
@@ -141,6 +146,14 @@ describe("the planning refresh with the hash store on", () => {
 		await third.refresh();
 		expect(third.batches.flat()).toEqual([ROADMAP]);
 		expect(third.events.map((event) => event.payload?.paths)).toEqual([[ROADMAP]]);
+	});
+
+	test("a checkout outside the repos root is filed under its checkout key, the dataset every batch names", async () => {
+		const run = server(ON, memoryPlanningHashStore());
+		await run.refresh();
+		const checkout = planningSessionId(nodePlanningFs(), dir);
+		expect(run.datasets.length).toBeGreaterThan(0);
+		expect(run.datasets.every((dataset) => dataset === checkout)).toBe(true);
 	});
 
 	test("a page the plane failed is not stored, so the next process sends it again and only it", async () => {
