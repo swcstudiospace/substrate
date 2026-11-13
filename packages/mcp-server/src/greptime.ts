@@ -1545,8 +1545,8 @@ export class GreptimeClient {
 			if (!PAYLOAD_KEY_PATTERN.test(key) || !PAYLOAD_VALUE_PATTERN.test(value)) {
 				throw new GreptimeError("refusing a payload filter that is not a lowercase key and a 40-character lowercase hex value");
 			}
-			// `_` is a LIKE wildcard, so it is escaped with `!`. The key cannot carry `!` or `%` (it is [a-z_]) and the value is hex, so the pattern has no other wildcard.
-			where.push(`"payload" LIKE ${this.q(`%"${key.replace(/_/g, "!_")}":"${value}"%`)} ESCAPE '!'`);
+			// Plain LIKE: `_` in the key matches any character, which can only widen the match to a field named like the key with the same exact 40-character SHA. The value is hex, so it carries no wildcard.
+			where.push(`"payload" LIKE ${this.q(`%"${key}":"${value}"%`)}`);
 		}
 
 		const direction = query.order === "asc" ? "ASC" : "DESC";

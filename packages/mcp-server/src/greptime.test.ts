@@ -1212,14 +1212,14 @@ describe("queryEvents", () => {
 		);
 	});
 
-	test("narrows by a JSON pair in the payload text, with the key's underscores escaped", async () => {
+	test("narrows by a JSON pair in the payload text as a plain LIKE", async () => {
 		const { sql } = stubFetch();
 		const sha = "ab".repeat(20);
 		await new GreptimeClient(config).queryEvents({ match: { kind: "worktree.merge_back" }, payloadPair: { key: "head_key", value: sha } });
 
-		// `_` is a LIKE wildcard, so the key escapes it with `!`; the value is hex and carries no wildcard.
+		// The key is matched as written: a plain LIKE, with the value hex and carrying no wildcard.
 		expect(selectStatement(sql)).toContain(
-			`WHERE "kind" = 'worktree.merge_back' AND "payload" LIKE '%"head!_key":"${sha}"%' ESCAPE '!'`,
+			`WHERE "kind" = 'worktree.merge_back' AND "payload" LIKE '%"head_key":"${sha}"%'`,
 		);
 	});
 

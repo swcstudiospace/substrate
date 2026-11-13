@@ -1756,4 +1756,24 @@ describe("httpMergeBackNoted: the head_key path", () => {
 		expect((await ledger(cappedScan()).lookup("acme/widgets", HEAD, null)).ok).toBe(false);
 		expect((await ledger(cappedScan()).lookup("acme/widgets", HEAD)).ok).toBe(false);
 	});
+
+	test("a failed keyed read refuses a capped post-cutover head rather than reporting it not recorded", async () => {
+		const { requests, lookup } = ledger([{ status: 500, body: "boom" }, ...cappedScan().slice(1)]);
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: false, error: "the newest 10000 notes do not settle it" });
+		expect(requests).toHaveLength(51);
+	});
+
+	test("an answered keyed read starts the fallback scan at the cutover instant, not now", async () => {
+		const { requests, lookup } = ledger([answer(EMPTY), answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.until).toBe("2026-11-13T02:19:15.000Z");
+	});
+
+	test("a failed keyed read starts the fallback scan from now, with no until bound", async () => {
+		const { requests, lookup } = ledger([{ status: 500, body: "boom" }, answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
+		expect(requests[1]).not.toHaveProperty("until");
+	});
 });
