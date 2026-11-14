@@ -32,6 +32,7 @@ export const REST_ROUTE_POLICY: Readonly<Record<string, Declaration>> = {
 	"/corpus/reconcile": GATED("corpusReconcileReply: refused to a scoped caller, since it reads and writes every repository"),
 	"/cross-repo/fanout": GATED("crossRepoFanoutReply: every repository the operation names must be granted to the caller's surface and listed in its session allowlist"),
 	"/cross-repo/status": GATED("crossRepoStatusReply: the operation is returned only when every repository it names is granted to the caller's surface and session"),
+	"/cross-repo/compensate": GATED("compensateBranchFanout: operator only, refused to a non-operator before the store is read; every repository the operation names must be granted to the caller's surface and listed in its session allowlist"),
 	"/events": GATED("scopedWriteRefusal: the named repository, or the named graph's repository, must be granted"),
 	"/events/query": GATED("queryEventsFor: a named repository must be granted, and only granted rows are returned"),
 	"/docs/search": GATED("scopedDocsRefusal: refused to a scoped caller, since the docs corpus spans every repository"),

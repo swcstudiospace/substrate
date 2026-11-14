@@ -48,6 +48,8 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"corpus_ingest",
 	// Phase 74: a cross-repo fan-out writes branches in two or more repositories, so it is recorded before it runs.
 	"cross_repo_fanout",
+	// Phase 74: the operator's compensation of a stored fan-out deletes branches in two or more repositories, so it is recorded before it runs.
+	"cross_repo_compensate",
 ]);
 
 /**

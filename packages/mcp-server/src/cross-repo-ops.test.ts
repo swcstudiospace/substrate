@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type BranchFanoutRequest, type CrossRepoStore, crossRepoFanoutReply, crossRepoStatus, crossRepoStatusReply, runBranchFanout } from "./cross-repo-ops.ts";
+import { type BranchFanoutRequest, type CrossRepoStore, compensateBranchFanout, crossRepoFanoutReply, crossRepoStatus, crossRepoStatusReply, fingerprintOf, runBranchFanout } from "./cross-repo-ops.ts";
 import { REPO_ALLOWLIST_ENV } from "./repo-allowlist.ts";
 import { defaultScopedGitRunner, type ScopedGitResult } from "./repo-executor.ts";
 import { BRANCH, depsFor, FAILED, git, type Intercept, opOf, orFail, refIn, request, runnerWith, stepStates, world } from "./cross-repo-ops.testkit.ts";
@@ -503,4 +503,95 @@ function pausingAtApplying(inner: CrossRepoStore, pause: () => Promise<void>): C
 		},
 		setStatus: (key, status, at) => inner.setStatus(key, status, at),
 	};
+}
+
+describe("the operator's compensation undoes a stored operation and never applies a step forward", () => {
+	test("an operator compensates a done operation: each branch it created is removed and the status is rolled-back", async () => {
+		const w = world();
+		const done = opOf(await runBranchFanout(request(), depsFor(w, runnerWith().run)));
+		expect(done.status).toBe("done");
+		const compensated = opOf(await compensateBranchFanout("op-1", depsFor(w, runnerWith().run), true));
+		expect(compensated.status).toBe("rolled-back");
+		expect(stepStates(compensated)).toEqual(["owner/a:compensated", "owner/b:compensated"]);
+		expect(refIn(w.checkoutA, BRANCH_REF)).toBeNull();
+		expect(refIn(w.checkoutB, BRANCH_REF)).toBeNull();
+	});
+
+	test("compensation never applies a pending step: no ref is written and the pending steps stay pending", async () => {
+		const w = world();
+		const shaA = git(w.checkoutA, ["rev-parse", "main"]);
+		const shaB = git(w.checkoutB, ["rev-parse", "main"]);
+		await w.store.create({
+			key: "op-1",
+			fingerprint: fingerprintOf(BRANCH, request().repos),
+			branch: BRANCH,
+			steps: [
+				{ index: 0, repo: "owner/a", base: "main", plannedSha: shaA },
+				{ index: 1, repo: "owner/b", base: "main", plannedSha: shaB },
+			],
+			at: new Date(),
+		});
+		const runner = runnerWith();
+		const op = opOf(await compensateBranchFanout("op-1", depsFor(w, runner.run), true));
+		expect(op.status).toBe("rolled-back");
+		expect(stepStates(op)).toEqual(["owner/a:pending", "owner/b:pending"]);
+		expect(runner.writes).toHaveLength(0);
+		expect(refIn(w.checkoutA, BRANCH_REF)).toBeNull();
+		expect(refIn(w.checkoutB, BRANCH_REF)).toBeNull();
+	});
+
+	test("a non-operator is refused before the store is read or any git call runs, and the operation is left as stored", async () => {
+		const w = world();
+		await runBranchFanout(request(), depsFor(w, runnerWith().run));
+		const counted = countingStore(w.store);
+		const runner = runnerWith();
+		const outcome = await compensateBranchFanout("op-1", { ...depsFor(w, runner.run), store: counted.store }, false);
+		expect(outcome).toMatchObject({ ok: false, reason: "operator-required" });
+		expect(counted.calls()).toBe(0);
+		expect(runner.writes).toHaveLength(0);
+		expect(refIn(w.checkoutA, BRANCH_REF)).not.toBeNull();
+		expect(refIn(w.checkoutB, BRANCH_REF)).not.toBeNull();
+	});
+
+	test("an operator call under a key with no stored operation is refused as operation-not-found and runs no git", async () => {
+		const w = world();
+		const runner = runnerWith();
+		const outcome = await compensateBranchFanout("no-such-op", depsFor(w, runner.run), true);
+		expect(outcome).toMatchObject({ ok: false, reason: "operation-not-found" });
+		expect(runner.writes).toHaveLength(0);
+	});
+
+	test("an operator with no surface is refused by the repository gate before any git call, and the refs are left in place", async () => {
+		const w = world();
+		await runBranchFanout(request(), depsFor(w, runnerWith().run));
+		const runner = runnerWith();
+		const outcome = await compensateBranchFanout("op-1", depsFor(w, runner.run, null), true);
+		expect(outcome).toMatchObject({ ok: false, reason: "repo-not-granted" });
+		expect(runner.writes).toHaveLength(0);
+		expect(refIn(w.checkoutA, BRANCH_REF)).not.toBeNull();
+	});
+});
+
+/** A store that counts every call it receives, so a test can prove the engine never reached it. */
+function countingStore(inner: CrossRepoStore): { store: CrossRepoStore; calls: () => number } {
+	let count = 0;
+	const store: CrossRepoStore = {
+		create: (input) => {
+			count += 1;
+			return inner.create(input);
+		},
+		load: (key) => {
+			count += 1;
+			return inner.load(key);
+		},
+		moveStep: (...args) => {
+			count += 1;
+			return inner.moveStep(...args);
+		},
+		setStatus: (key, status, at) => {
+			count += 1;
+			return inner.setStatus(key, status, at);
+		},
+	};
+	return { store, calls: () => count };
 }

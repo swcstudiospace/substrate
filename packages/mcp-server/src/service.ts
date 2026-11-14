@@ -184,7 +184,7 @@ import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
 import { corpusNeardupReply } from "./corpus/neardup.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusPlanReply, corpusProofReply, corpusReconcileReply, corpusRootReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
-import { type CrossRepoDeps, type CrossRepoReply, crossRepoFanoutReply, crossRepoStatusReply } from "./cross-repo-ops.ts";
+import { type CrossRepoDeps, type CrossRepoReply, crossRepoCompensateReply, crossRepoFanoutReply, crossRepoStatusReply } from "./cross-repo-ops.ts";
 import { authorizeRepo, authorizeRepoPath, grantedRepos, isSurfaceName, REPO_REFUSAL_MESSAGES, repoRefusalPayload, type RepoRefusalReason, type RepoScopeRefusal, rowsInGrant } from "./repo-scope.ts";
 import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
@@ -6811,6 +6811,11 @@ export class Substrate {
 		return this.withCrossRepo(callerSurface, (deps) => crossRepoStatusReply(key, deps));
 	}
 
+	/** `POST /cross-repo/compensate` (operator only): undoes a stored operation under a key. The engine refuses a non-operator before it reads the store. */
+	crossRepoCompensate(raw: unknown, callerSurface: Surface | null, isOperator: boolean): Promise<CrossRepoReply> {
+		return this.withCrossRepo(callerSurface, (deps) => crossRepoCompensateReply(raw, deps, isOperator));
+	}
+
 	/**
 	 * The engine's deps for one call. The operation log lives in the index store, so with no index configured the call is
 	 * answered 503 and nothing is written.
@@ -7635,7 +7640,10 @@ export class Substrate {
 	 * exactly as they were signed, each with its own verdict, so a receiving agent
 	 * can pick up a handoff it never saw being written. A packet that does not
 	 * verify is still returned — hiding it would leave a gap in the history with
-	 * no explanation for it — with the reason attached.
+	 * no explanation for it — with the reason attached. A row whose `payload.handoff`
+	 * is not a well-formed packet ({@link isStoredHandoff}) is skipped alone, as
+	 * {@link recentHandoffsForGraph} skips it: the ledger takes any payload from
+	 * `events_emit`, so one hostile row must not reach the caller or fail the replay.
 	 */
 	async handoffsForGraph(graphId: string): Promise<
 		Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }>
@@ -7647,14 +7655,14 @@ export class Substrate {
 		const out: Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }> = [];
 		for (const row of rows) {
 			if (String(row.kind) !== "handoff") continue;
-			const event = rowToEvent(row);
-			const packet = (event.payload.handoff ?? null) as HandoffPacket | null;
-			out.push({
-				event_id: event.id,
-				ts: event.ts,
-				packet,
-				verdict: packet ? this.verifyHandoffPacket(packet) : { ok: false, reason: "malformed" },
-			});
+			try {
+				const event = rowToEvent(row);
+				const packet: unknown = event.payload.handoff;
+				if (!isStoredHandoff(packet)) continue;
+				out.push({ event_id: event.id, ts: event.ts, packet, verdict: this.verifyHandoffPacket(packet) });
+			} catch {
+				// One row the ledger returned malformed is one fewer packet, not a thrown replay.
+			}
 		}
 		return out;
 	}

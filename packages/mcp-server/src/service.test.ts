@@ -2041,7 +2041,7 @@ describe("handoff", () => {
 						surface: "grok-bot",
 						kind: "handoff",
 						summary: "handoff to hermes: x",
-						payload: JSON.stringify({ handoff: { goal: "x", signature: null } }),
+						payload: JSON.stringify({ handoff: { goal: "x", files: [], dod: [], blockers: [], from: { surface: "grok-bot" }, to: { surface: "hermes" }, signature: null } }),
 						hash: "h",
 						prev: null,
 						actor: "agent",
@@ -2055,6 +2055,36 @@ describe("handoff", () => {
 
 		expect(handoffs).toHaveLength(1);
 		expect(handoffs[0]?.verdict).toEqual({ ok: false, reason: "unsigned" });
+	});
+
+	test("a stored row whose handoff is not a well-formed packet is skipped, and the valid one still comes back", async () => {
+		// The ledger takes any payload from events_emit, so a malformed row is one fewer packet, never a value cast to
+		// HandoffPacket and handed to the caller.
+		const { written, greptime } = ledger();
+		await new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never }).handoff(input);
+		const row = defined(written[0], "written ledger row");
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), {
+			index: null,
+			greptime: {
+				readEvents: async () => [
+					{ ...row, ts: Date.parse(row.ts), payload: JSON.stringify(row.payload), step: null },
+					{
+						...row,
+						id: "evt_malformed",
+						summary: "handoff to hermes: malformed",
+						payload: JSON.stringify({ handoff: { goal: "x", signature: null } }),
+						ts: Date.parse(row.ts),
+						step: null,
+					},
+				],
+			} as never,
+		});
+
+		const handoffs = await substrate.handoffsForGraph("ut-1");
+
+		expect(handoffs.map((entry) => entry.event_id)).toEqual([row.id]);
+		expect(handoffs[0]?.packet?.goal).toBe("finish the lease CAS path");
+		expect(handoffs[0]?.verdict).toEqual({ ok: true, key_id: "k1" });
 	});
 });
 

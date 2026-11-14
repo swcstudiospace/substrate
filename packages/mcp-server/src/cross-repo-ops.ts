@@ -129,7 +129,7 @@ export interface CrossRepoDeps {
 	readonly now?: (() => Date) | undefined;
 }
 
-export type CrossRepoRefusal = RepoRefusalReason | "request-invalid" | "base-unresolved" | "branch-invalid" | "key-reused";
+export type CrossRepoRefusal = RepoRefusalReason | "request-invalid" | "base-unresolved" | "branch-invalid" | "key-reused" | "operator-required" | "operation-not-found";
 
 /** One fixed message per refusal. Never the requested value: the name of the field that is wrong is the most a message says. */
 const REFUSAL_MESSAGES: Readonly<Record<CrossRepoRefusal, string>> = {
@@ -138,6 +138,8 @@ const REFUSAL_MESSAGES: Readonly<Record<CrossRepoRefusal, string>> = {
 	"base-unresolved": "the base does not name a commit in that repository",
 	"branch-invalid": "the branch name is not a valid git branch name",
 	"key-reused": "the key was used for a different request; a new attempt needs a new key",
+	"operator-required": "this route is for an operator; nothing was changed",
+	"operation-not-found": "no operation is stored under that key",
 };
 
 export type CrossRepoOutcome = { ok: true; operation: CrossRepoOperation } | { ok: false; reason: CrossRepoRefusal; problem: string };
@@ -413,6 +415,34 @@ async function drive(ctx: Context, key: string): Promise<CrossRepoOperation> {
 	return requireOperation(ctx, key);
 }
 
+/**
+ * Undoes a stored operation without applying any step forward. A step found `applying` is parked as `apply-unknown` and left in
+ * place: its create cannot be told apart from one that never ran, and the undo deletes only a ref it can prove it wrote. The
+ * other steps the operation may have written are undone newest first, as {@link drive} undoes them. The status is `rolled-back`,
+ * or `needs-attention` when a step is parked. A `rolled-back` operation is returned untouched, so a repeat performs no git call.
+ */
+async function compensate(ctx: Context, key: string): Promise<CrossRepoOperation> {
+	let op = await requireOperation(ctx, key);
+	if (op.status === "rolled-back") return op;
+
+	const inFlight = new Set<number>();
+	for (const step of op.steps) {
+		if (step.state !== "applying") continue;
+		inFlight.add(step.index);
+		if (!(await ctx.store.moveStep(key, step.index, ["applying"], "parked", "apply-unknown", ctx.now()))) return requireOperation(ctx, key);
+	}
+	op = await requireOperation(ctx, key);
+	for (const step of [...op.steps].reverse()) {
+		if (inFlight.has(step.index)) continue;
+		if (step.state !== "applied" && step.state !== "compensating" && step.state !== "parked") continue;
+		if ((await undoStep(ctx, op, step)) === "busy") return requireOperation(ctx, key);
+	}
+	op = await requireOperation(ctx, key);
+	const parked = op.steps.some((step) => step.state === "parked");
+	await ctx.store.setStatus(key, parked ? "needs-attention" : "rolled-back", ctx.now());
+	return requireOperation(ctx, key);
+}
+
 function refused(reason: CrossRepoRefusal, problem?: string): CrossRepoOutcome {
 	return { ok: false, reason, problem: problem ?? REFUSAL_MESSAGES[reason] };
 }
@@ -476,11 +506,36 @@ export async function crossRepoStatus(key: string, deps: CrossRepoDeps): Promise
 	return visible ? op : null;
 }
 
-/** The HTTP status of one refusal: a malformed request is 400, a repository the caller may not address is 403, a reused key is 409, and any other refusal is 422. */
+/**
+ * The operator's compensation of a stored operation (`POST /cross-repo/compensate`). Refused before the store is read or any git
+ * call runs unless `isOperator` is true, and refused as `operation-not-found` when no operation is stored under `key`. Every
+ * repository the operation names must be granted to the caller's surface and listed in its session allowlist, or nothing runs.
+ * The run holds the key's lock and only undoes (see {@link compensate}); it never applies a step forward.
+ */
+export async function compensateBranchFanout(key: string, deps: CrossRepoDeps, isOperator: boolean): Promise<CrossRepoOutcome> {
+	if (!isOperator) return refused("operator-required");
+	if (typeof key !== "string" || !KEY_PATTERN.test(key)) return refused("request-invalid", KEY_PROBLEM);
+	return operationLocks.run<CrossRepoOutcome>(key, async () => {
+		const ctx = contextOf(deps);
+		const stored = await ctx.store.load(key);
+		if (stored === null) return refused("operation-not-found");
+		for (const step of stored.steps) {
+			const gate = gateRepo(ctx, step.repo);
+			if (!gate.ok) return refused(gate.reason);
+		}
+		return { ok: true, operation: await compensate(ctx, key) };
+	});
+}
+
+/**
+ * The HTTP status of one refusal: a malformed request is 400, a repository the caller may not address or a non-operator on an
+ * operator route is 403, an unknown operation is 404, a reused key is 409, and any other refusal is 422.
+ */
 function refusalStatus(reason: CrossRepoRefusal): number {
 	if (reason === "request-invalid") return 400;
-	if (reason === "repo-not-granted") return 403;
+	if (reason === "repo-not-granted" || reason === "operator-required") return 403;
 	if (reason === "key-reused") return 409;
+	if (reason === "operation-not-found") return 404;
 	return 422;
 }
 
@@ -505,4 +560,19 @@ export async function crossRepoStatusReply(key: unknown, deps: CrossRepoDeps): P
 	const operation = await crossRepoStatus(key, deps);
 	if (operation === null) return { status: 404, body: { ok: false, reason: "not-found", problem: "no operation under that key is visible to this surface" } };
 	return { status: 200, body: { ok: true, operation } };
+}
+
+/** `POST /cross-repo/compensate` (operator only): the body is `{"key": "..."}` and no other field. */
+export async function crossRepoCompensateReply(raw: unknown, deps: CrossRepoDeps, isOperator: boolean): Promise<CrossRepoReply> {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return { status: 400, body: { ok: false, reason: "request-invalid", problem: "the request must be a JSON object with key" } };
+	}
+	for (const field of Object.keys(raw)) {
+		if (field !== "key") return { status: 400, body: { ok: false, reason: "request-invalid", problem: "the request has a field it does not accept: only key is read" } };
+	}
+	const key = "key" in raw ? raw.key : undefined;
+	if (typeof key !== "string" || !KEY_PATTERN.test(key)) return { status: 400, body: { ok: false, reason: "request-invalid", problem: KEY_PROBLEM } };
+	const outcome = await compensateBranchFanout(key, deps, isOperator);
+	if (!outcome.ok) return { status: refusalStatus(outcome.reason), body: { ok: false, reason: outcome.reason, problem: outcome.problem } };
+	return { status: 200, body: { ok: true, operation: outcome.operation } };
 }

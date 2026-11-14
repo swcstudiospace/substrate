@@ -184,7 +184,7 @@ A status read is refused as not found for a surface that is not granted every re
 
 A 200 answers `{"ok": true, "operation": ...}`, and `operation.status` is `done`, `rolled-back` or `needs-attention`. A 200 does not mean `done`: read the status. The operation carries `key`, `fingerprint`, `branch`, `status`, `steps` (each with `index`, `repo`, `base`, `plannedSha`, `state`, `detail`, `updatedAt`), `createdAt` and `updatedAt`. A step `state` is `pending`, `applying`, `applied`, `compensating`, `compensated`, `failed` or `parked`; `detail` is a closed reason or `null`.
 
-Every refusal answers `{"ok": false, "reason": "<code>", "problem": "<fixed message>"}`. The tools answer any non-200 as an error result.
+Every refusal of the fan-out and status routes answers `{"ok": false, "reason": "<code>", "problem": "<fixed message>"}`. The compensate route answers the same shape, except for its 401 and 403, which are described below. The tools answer any non-200 as an error result.
 
 | Status | Reason | Route | When |
 | --- | --- | --- | --- |
@@ -196,5 +196,30 @@ Every refusal answers `{"ok": false, "reason": "<code>", "problem": "<fixed mess
 | 422 | the gate's reason, `branch-invalid` or `base-unresolved` | fan-out | any other refusal: `repo-not-registered`, `path-not-registered`, `all-repos-not-granted` and the like from the surface grant; `branch-invalid` (not a git branch name); `base-unresolved` (the base is not a commit in that repository). Refused before the store is written. |
 | 503 | `cross-repo.disabled` | both | no index store: `SUBSTRATE_PG_URL` is not set. Nothing runs. |
 | 503 | `error` (the audit reason) | both | the audit sink refused the record; the route is fail-closed and nothing runs. |
+
+### Compensation route (phase 74, operator only)
+
+`POST /cross-repo/compensate` undoes a stored fan-out under its key. It is an operator's decision and a REST route only: no MCP tool is registered for it. It never runs a step forward; it only undoes steps that were applied. The body is `{"key": "..."}`, and any other field is a 400.
+
+The checks run in this order, and the first refusal stops the run:
+
+| Status | Reason | When |
+| --- | --- | --- |
+| 401 | `{"error": "cross_repo_compensate needs an authenticated surface; nothing was changed"}` | no surface. Refused before the body is read or audited. |
+| 403 | `{"error": "cross_repo_compensate needs an operator token; nothing was changed"}` | the caller is not an operator. Refused before the body is read or audited. |
+| 400 | `request-invalid` | the body is not valid JSON. Not audited. |
+| 503 | `error` (the audit reason) | the audit sink refused the record; `cross_repo_compensate` is fail-closed (`packages/audit/src/policy.ts`). Nothing runs. |
+| 503 | `cross-repo.disabled` | no index store: `SUBSTRATE_PG_URL` is not set. Nothing runs. The audit record was already written. |
+| 400 | `request-invalid` | the body is not an object, carries a field other than `key`, or `key` is missing or malformed. |
+| 403 | `operator-required` | the engine's own operator check. The route refuses the same caller first, so this is not reached through it. |
+| 404 | `operation-not-found` | no operation is stored under the key. Nothing runs. |
+| 403 | `repo-not-granted` | a repository the stored operation names is not granted to the caller's surface, or is not in its `SUBSTRATE_REPO_ALLOWLIST` session. |
+| 422 | the gate's reason | any other gate refusal, such as `repo-not-registered`, `path-not-registered` or `all-repos-not-granted`. |
+
+Every repository the operation names is gated before any git call runs. A refusal from the gate runs no git and changes no ref.
+
+A 200 answers `{"ok": true, "operation": ...}`. The operation's `status` is `rolled-back` (every applied step was undone; terminal) or `needs-attention` (a step was parked and left in place). It is never `done`. A repeat call on a `rolled-back` operation returns it unchanged and makes no git call. A repeat call on a `needs-attention` operation undoes the steps still `applied`, `compensating` or `parked`, again under the key's lock.
+
+A step is parked, not deleted, when the undo cannot prove it wrote the ref: `ref-moved` (the ref is no longer at the planned commit), `undo-failed` (the ref is still at the planned commit after the delete), `undo-unknown` (the ref could not be read), and `apply-unknown` (the step was found mid-create, so it cannot be told apart from one that never ran). Persisted reasons are closed codes, as for the fan-out.
 
 

@@ -214,6 +214,7 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/corpus/root": "read",
 	"/cross-repo/fanout": "write",
 	"/cross-repo/status": "read",
+	"/cross-repo/compensate": "write",
 	"/corpus/proof": "read",
 	"/corpus/anchor": "read",
 };

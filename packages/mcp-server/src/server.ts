@@ -329,6 +329,7 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/worktrees/report": true,
 	"/corpus/neardup": true,
 	"/cross-repo/fanout": true,
+	"/cross-repo/compensate": true,
 	"/mcp": true,
 };
 
@@ -350,6 +351,10 @@ const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; n
 const APPROVAL_NEEDS_SURFACE = "skills_approve needs an authenticated surface; nothing was changed";
 /** Why a non-operator approval is refused: the same words the service uses. */
 const APPROVAL_NEEDS_OPERATOR = "skills_approve needs an operator token; nothing was changed";
+/** Why an anonymous compensation is refused, even on a run that allows anonymous callers. */
+const COMPENSATE_NEEDS_SURFACE = "cross_repo_compensate needs an authenticated surface; nothing was changed";
+/** Why a non-operator compensation is refused: the route is operator-only and is not an MCP tool. */
+const COMPENSATE_NEEDS_OPERATOR = "cross_repo_compensate needs an operator token; nothing was changed";
 /** Why an anonymous registry read is refused, even on a run that allows anonymous callers. */
 const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
 /** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
@@ -1826,6 +1831,31 @@ export function createHttpServer(
 			if (req.method === "GET" && url.pathname === "/cross-repo/status") {
 				if (!(await auditedRest(res, observability, surface, "cross_repo_status", { op: "status" }))) return;
 				const reply = await substrate.crossRepoStatus(url.searchParams.get("key"), surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			// Phase 74: the operator's compensation of a stored operation: undo only, under the key's lock, never a forward apply. This is an
+			// operator's decision, so a caller with no surface is refused 401 and one that is not an operator 403, both before the body is
+			// read or audited. It is not an MCP tool. The engine repeats the operator check, so a refusal never reaches the store or git.
+			if (req.method === "POST" && url.pathname === "/cross-repo/compensate") {
+				if (surface === null) {
+					sendJson(res, 401, { error: COMPENSATE_NEEDS_SURFACE });
+					return;
+				}
+				if (!caller.isOperator) {
+					sendJson(res, 403, { error: COMPENSATE_NEEDS_OPERATOR });
+					return;
+				}
+				const raw = await readBody(req);
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(raw);
+				} catch {
+					sendJson(res, 400, { ok: false, reason: "request-invalid", problem: "the body is not valid JSON" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "cross_repo_compensate", { op: "compensate" }))) return;
+				const reply = await substrate.crossRepoCompensate(parsed, surface, caller.isOperator);
 				sendJson(res, reply.status, reply.body);
 				return;
 			}

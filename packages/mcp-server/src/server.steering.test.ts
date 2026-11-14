@@ -2,11 +2,12 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { AuditUnavailableError, type AuditRecord } from "@substrate/audit";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { LONG_POLL_SLOTS_MAX } from "./admission.ts";
 import { loadConfig } from "./config.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
 import { auditToolCalls, createObservability } from "./observe.ts";
 import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
-import { SteeringWaiters, type SteeringWaitTimers } from "./planning/steering-waiters.ts";
+import { STEERING_WAIT_PER_SESSION_MAX, SteeringWaiters, type SteeringWaitTimers } from "./planning/steering-waiters.ts";
 import type { LiveSessionAuditPort } from "./planning/steering-tools.ts";
 import type { SteeringAuditEntry, SteeringHistorySink } from "./planning/steering.ts";
 import { createHttpServer } from "./server.ts";
@@ -311,6 +312,31 @@ describe("bounded long-poll release and cleanup", () => {
 		expect(h.timers.live.size).toBe(0);
 		const another = h.get(h.path, h.headers); await settle(() => h.waiters.size === 1); await h.stop();
 		expect((await another).status).toBe(204); expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
+	});
+	test("a poll past the long-poll bound is refused at once in the budget's shape; reads still answer; the bound frees on release", async () => {
+		const h = await serve();
+		// Eight sessions of four waiters each: the per-session bound is four, so this holds exactly LONG_POLL_SLOTS_MAX polls.
+		const sessions: Array<{ sessionId: string; sessionBinding: string }> = [];
+		const held: Array<Promise<Response>> = [];
+		for (let n = 0; n < LONG_POLL_SLOTS_MAX / STEERING_WAIT_PER_SESSION_MAX; n += 1) {
+			const row = await issueLiveSession(h.authority, { caller: OWNER });
+			sessions.push({ sessionId: row.sessionId, sessionBinding: row.sessionBinding });
+			for (let k = 0; k < STEERING_WAIT_PER_SESSION_MAX; k += 1) held.push(h.get(`/steering/wait?session_id=${row.sessionId}&timeout_ms=5000`, proof(row.sessionBinding)));
+		}
+		await settle(() => h.waiters.size === LONG_POLL_SLOTS_MAX);
+		const extra = await issueLiveSession(h.authority, { caller: OWNER });
+		const refused = await h.get(`/steering/wait?session_id=${extra.sessionId}&timeout_ms=5000`, proof(extra.sessionBinding));
+		expect(refused.status).toBe(429);
+		expect(refused.headers.get("retry-after")).toBe("1");
+		expect(await refused.json()).toEqual({ error: "budget", class: "poll", retry_after_s: 1 });
+		expect(h.waiters.size).toBe(LONG_POLL_SLOTS_MAX);
+		expect((await h.get("/session/context?repo_id=owner/name&session_id=historical-label")).status).toBe(200);
+		for (const session of sessions) h.waiters.closeSession(session.sessionId);
+		expect((await Promise.all(held)).map(response => response.status)).toEqual(Array(LONG_POLL_SLOTS_MAX).fill(204));
+		expect(h.waiters.size).toBe(0);
+		await queue(h, extra.sessionId);
+		expect((await h.get(`/steering/wait?session_id=${extra.sessionId}&timeout_ms=5000`, proof(extra.sessionBinding))).status).toBe(200);
+		expect(h.waiters.size).toBe(0);
 	});
 });
 
