@@ -523,7 +523,6 @@ describe("six narrowed event rules: real values stay refused, prose and placehol
 	test("assignment: prose, env references, placeholders and _FILE/_PATH keys are accepted", () => {
 		for (const text of [
 			"the token: is required before deploy",
-			"set `secret:` in the vault",
 			"SUBSTRATE_TOKEN=${SUBSTRATE_TOKEN}",
 			"SUBSTRATE_TOKEN=<token>",
 			"LINEAR_API_KEY=YOUR_TOKEN_HERE",
@@ -588,9 +587,18 @@ describe("six narrowed event rules: real values stay refused, prose and placehol
 	});
 
 	test("authorization: env references and templates after the header are accepted", () => {
-		for (const text of ["Authorization: Bearer $PARALLEL_API_KEY", "authorization: ${AUTH_HEADER}", "Authorization: <token>", "Authorization: `token`"]) {
+		for (const text of ["Authorization: Bearer $PARALLEL_API_KEY", "authorization: ${AUTH_HEADER}", "Authorization: <token>"]) {
 			expect({ text, fires: fires("authorization", text) }).toEqual({ text, fires: false });
 		}
+	});
+
+	test("a backticked real value is still refused on the redaction path", () => {
+		// A backtick is a value wrapper, not a placeholder: a real value inside it is refused (fail-closed).
+		expect(fires("password", `password: \`${SECRET}\``)).toBe(true);
+		expect(fires("assignment", `LINEAR_API_KEY=\`${SECRET}\``)).toBe(true);
+		expect(fires("authorization", `Authorization: \`${SECRET}\``)).toBe(true);
+		expect(fires("assignment", "set `secret:` in the vault")).toBe(true);
+		expect(redact(`password: \`${SECRET}\``)).not.toContain(SECRET);
 	});
 
 	test("bearer: a real token, including one with a digit in a lowercase run, is still refused", () => {
@@ -679,6 +687,98 @@ const SKILL_PEM_MIDDLE = rnd(ALNUM, 32);
 const SKILL_PEM = ["-----BEGIN " + "RSA PRIVATE KEY-----", SKILL_PEM_MIDDLE, "-----END " + "RSA PRIVATE KEY-----"].join("\n");
 const SKILL_JWT_LAST = rnd(ALNUM, 27);
 const SKILL_JWT = ["eyJ" + "hbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", SKILL_JWT_LAST].join(".");
+describe("skill rules narrowed for false positives: real values stay refused, listed shapes pass", () => {
+	const SECRET = rnd(ALNUM, 40);
+	/** Any skill finding or redaction on the text: the skill path's own verdict. */
+	const skillHits = (text: string) => {
+		const result = redactSkillContent(text);
+		return [...result.redactions, ...result.findings];
+	};
+	const refused = (text: string) => skillHits(text).length > 0;
+	const accepted = (text: string) => {
+		expect({ text, hits: skillHits(text), out: redactSkillContent(text).text }).toEqual({ text, hits: [], out: text });
+	};
+
+	test("assignment: a real value on a spaced separator, a lowercase key or a backtick-wrapped mixed secret is refused", () => {
+		expect(refused(`LINEAR_API_KEY = ${SECRET}`)).toBe(true);
+		expect(refused(`client_secret: ${SECRET}`)).toBe(true);
+		expect(refused("SUBSTRATE_TOKEN=`" + SECRET + "`")).toBe(true);
+	});
+
+	test("assignment: prose, placeholders, env references, _FILE keys and backtick identifiers are accepted", () => {
+		for (const text of [
+			"the token: is required before deploy",
+			"SUBSTRATE_TOKEN=${SUBSTRATE_TOKEN}",
+			"SUBSTRATE_TOKEN=<token>",
+			"LINEAR_API_KEY=YOUR_TOKEN_HERE",
+			"SUBSTRATE_TOKEN_FILE=/tmp/t",
+			"SUBSTRATE_TOKEN=`API_KEY_NAME`",
+		]) {
+			accepted(text);
+		}
+	});
+
+	test("password: a real value on a spaced separator is refused; placeholder values are accepted", () => {
+		expect(refused(`password = ${SECRET}`)).toBe(true);
+		expect(refused(`"password" :  ${SECRET}`)).toBe(true);
+		for (const text of ["password: $DB_PASSWORD", "password: <your-password>", 'password: "changeme"']) accepted(text);
+	});
+
+	test("password-env: real values are refused; lowercase pass counters and placeholders are accepted", () => {
+		expect(refused(`DB_PASSWORD=${SECRET}`)).toBe(true);
+		expect(refused(`db_pass=${SECRET}`)).toBe(true);
+		for (const text of ["pass=2 fail=0", "pass=1234", "pass=x", "DB_PASS=$DB_PASS_VALUE"]) accepted(text);
+	});
+
+	test("api-key-lower: real keys are refused; env references and placeholder words are accepted", () => {
+		expect(refused(`apiKey: ${SECRET}`)).toBe(true);
+		expect(refused(`api-key = ${SECRET}`)).toBe(true);
+		for (const text of [
+			"apiKey: process.env.OPENAI_API_KEY",
+			"apiKey: os.environ.get",
+			"api_key: $OPENAI_API_KEY_VALUE_ENV",
+			"api_key: <your-api-key-value>",
+			"api_key: your-api-key-goes-here",
+		]) {
+			accepted(text);
+		}
+	});
+
+	test("authorization: real credentials are refused with or without a scheme; templates and placeholders are accepted", () => {
+		expect(refused(`Authorization: Bearer ${SECRET}`)).toBe(true);
+		expect(refused(`authorization = ${SECRET}`)).toBe(true);
+		for (const text of [
+			"Authorization: Bearer <token>.",
+			"Authorization: Bearer $PARALLEL_API_KEY",
+			"authorization: ${AUTH_HEADER}",
+			"Authorization: <token>",
+		]) {
+			accepted(text);
+		}
+	});
+
+	test("bearer: a bare lowercase token is refused; the listed prose words are accepted", () => {
+		expect(refused(`Bearer ${"z".repeat(64)}`)).toBe(true);
+		expect(refused(`Bearer ${SECRET}`)).toBe(true);
+		expect(refused("Bearer authenticationK7p2mX9qL4vR8tY1")).toBe(true);
+		for (const text of ["Bearer authentication", "Bearer authorization", "Bearer authenticated"]) accepted(text);
+	});
+
+	test("a real value on the next line after a line-ending key is refused on the event path; the skill path stays on its line", () => {
+		// The gate refuses a file when the event redactor changes it, so the next-line value is refused through redact().
+		expect(redact(`password:\n${SECRET}`)).not.toContain(SECRET);
+		expect(redact(`api_key:\n${SECRET}`)).not.toContain(SECRET);
+		expect(skillHits(`password:\n${SECRET}`)).toEqual([]);
+		expect(skillHits(`api_key:\n${SECRET}`)).toEqual([]);
+	});
+
+	test("a backticked real value is still refused on the skill path", () => {
+		expect(refused(`password: \`${SECRET}\``)).toBe(true);
+		expect(refused(`LINEAR_API_KEY=\`${SECRET}\``)).toBe(true);
+		expect(refused(`Authorization: \`${SECRET}\``)).toBe(true);
+	});
+});
+
 describe("redactSkillContent keeps env references and placeholders", () => {
 	test("working auth lines and placeholder values come back unchanged with nothing reported", () => {
 		for (const line of [
