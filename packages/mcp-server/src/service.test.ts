@@ -1322,6 +1322,48 @@ describe("append-mode enforcement", () => {
 		expect(uploads).toHaveLength(1);
 	});
 
+	test("a planning page's checkout survives Substrate.ingestDocs, and a non-string checkout is dropped and refused", async () => {
+		const uploads: string[] = [];
+		const repos = repoSeam();
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
+			{
+				index: null,
+				greptime: null,
+				...repos.stores,
+				ragflowFetch: async () => {
+					throw new Error("connect ECONNREFUSED");
+				},
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const body = "# Plan\n\nThe loose plan.\n";
+		const kept = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", pages: [{ path: ".planning/PLAN.md", source_url: "file:///wt/loose/.planning/PLAN.md", body, checkout: "wt-0123456789abcdef01234567" }] },
+			"omp",
+			[".planning/"],
+		);
+		expect(kept.ok).toBe(true);
+		expect(uploads).toHaveLength(1);
+		const dropped = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", pages: [{ path: ".planning/OTHER.md", source_url: "file:///wt/loose/.planning/OTHER.md", body, checkout: 42 }] },
+			"omp",
+			[".planning/"],
+		);
+		expect(JSON.stringify(dropped)).toContain("planning page carries no checkout");
+		expect(uploads).toHaveLength(1);
+	});
+
 	test("a RAGFlow refresh does not move a LightRAG dataset's records to RAGFlow's id: an unchanged page stays unchanged", async () => {
 		// Under the lightrag backend the refresh records the dataset's name as its id (recordLightragVersion). The LightRAG
 		// ingest keys its records by that same name, so the next ingest of the same page finds the record and uploads nothing.

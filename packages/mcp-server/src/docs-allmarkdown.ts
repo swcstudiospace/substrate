@@ -6,7 +6,8 @@
  * Selection (the dry run's method): the children of each root are units. A child of the repos root is a repo
  * checkout. Any other child is a worktree, attributed to its repo through its `.git` file, or else a standalone
  * group of its own. Only `*.md` regular files are read. Symlinks are skipped and counted. `node_modules`, `.git`,
- * `dist`, `build` and the other excluded directory names are pruned. Paths under `/.planning/milestones/` are
+ * `dist`, `build` and the other excluded directory names are pruned. A directory whose name starts with `.` is not a
+ * repo or a worktree: discovery skips it at both levels and counts it. Paths under `/.planning/milestones/` are
  * counted and never read. A file over {@link INGEST_PAGE_MAX_BYTES} is counted from its stat and never read.
  *
  * Dedup is by raw-byte sha256 within one group, so a repo and its worktrees share one copy: the first copy in unit
@@ -174,6 +175,14 @@ export interface DiscoveredGroups {
 	errors: AllMarkdownError[];
 	/** Directory names under a root that the excluded list pruned. */
 	excluded_root_entries: string[];
+	/** Dot-named directories skipped at discovery under the repos root or a root: never a repo, never a worktree. */
+	dot_dirs_skipped: number;
+}
+
+/** What discovery set aside: excluded directory names by name, and dot-named directories by count. */
+interface DiscoverySkips {
+	excluded: string[];
+	dot_dirs: number;
 }
 
 interface Attribution {
@@ -188,12 +197,12 @@ interface Attribution {
  */
 export async function discoverGroups(fs: MarkdownFs, options: { roots: readonly string[]; reposRoot: string }): Promise<DiscoveredGroups> {
 	const errors: AllMarkdownError[] = [];
-	const excluded: string[] = [];
+	const skipped: DiscoverySkips = { excluded: [], dot_dirs: 0 };
 	const repoRoot = resolvePath(options.reposRoot);
 	const repoNames = new Set<string>();
 	const groups = new Map<string, AllMarkdownGroup>();
 	const seenPaths = new Set<string>();
-	for (const name of await childDirectories(fs, repoRoot, errors, excluded)) {
+	for (const name of await childDirectories(fs, repoRoot, errors, skipped)) {
 		const path = join(repoRoot, name);
 		repoNames.add(name);
 		seenPaths.add(path);
@@ -201,7 +210,7 @@ export async function discoverGroups(fs: MarkdownFs, options: { roots: readonly 
 	}
 	for (const root of options.roots.map((entry) => resolvePath(entry))) {
 		if (root === repoRoot) continue;
-		for (const name of await childDirectories(fs, root, errors, excluded)) {
+		for (const name of await childDirectories(fs, root, errors, skipped)) {
 			const path = join(root, name);
 			if (seenPaths.has(path)) continue;
 			seenPaths.add(path);
@@ -221,11 +230,11 @@ export async function discoverGroups(fs: MarkdownFs, options: { roots: readonly 
 		const primary = group.units[0];
 		group.commit = primary === undefined ? undefined : await fs.headCommit(primary.path);
 	}
-	return { groups: list, errors, excluded_root_entries: excluded.sort() };
+	return { groups: list, errors, excluded_root_entries: skipped.excluded.sort(), dot_dirs_skipped: skipped.dot_dirs };
 }
 
-/** The sorted names of the directories directly under `dir`, following links. Excluded names are set aside. */
-async function childDirectories(fs: MarkdownFs, dir: string, errors: AllMarkdownError[], excluded: string[]): Promise<string[]> {
+/** The sorted names of the directories directly under `dir`, following links. Excluded and dot-named names are set aside and counted. */
+async function childDirectories(fs: MarkdownFs, dir: string, errors: AllMarkdownError[], skipped: DiscoverySkips): Promise<string[]> {
 	let entries: Array<{ name: string; kind: EntryKind }>;
 	try {
 		entries = await fs.list(dir);
@@ -237,8 +246,13 @@ async function childDirectories(fs: MarkdownFs, dir: string, errors: AllMarkdown
 	for (const entry of entries) {
 		const isDir = entry.kind === "dir" || (entry.kind === "symlink" && (await fs.isDirectory(join(dir, entry.name))));
 		if (!isDir) continue;
+		// A dot-named directory is neither a repo checkout nor a worktree (`.bg-shell`, `.gsd`, `.pytest_cache`).
+		if (entry.name.startsWith(".")) {
+			skipped.dot_dirs++;
+			continue;
+		}
 		if (EXCLUDED.has(entry.name)) {
-			excluded.push(entry.name);
+			skipped.excluded.push(entry.name);
 			continue;
 		}
 		names.push(entry.name);
@@ -391,7 +405,8 @@ async function inspectCandidate(fs: MarkdownFs, group: AllMarkdownGroup, candida
 	let body: string;
 	let rules: string[];
 	const sourceUrl = pathToFileURL(abs).href;
-	const graph = isPlanningPage(candidate.rel) ? extractPlanningGraphHint(candidate.rel, raw) : undefined;
+	const planning = isPlanningPage(candidate.rel);
+	const graph = planning ? extractPlanningGraphHint(candidate.rel, raw) : undefined;
 	try {
 		body = stripRemoteImages(raw).body;
 	} catch (cause) {
@@ -413,7 +428,15 @@ async function inspectCandidate(fs: MarkdownFs, group: AllMarkdownGroup, candida
 		size,
 		sha,
 		rules: [],
-		page: { path: candidate.rel, source_url: sourceUrl, body: raw, ...(graph !== undefined ? { graph } : {}) },
+		// A planning page carries the key of the checkout it was read from, which the ingest requires. The key names the
+		// unit the file sits in (the checkout, or the worktree), so one path in two checkouts never shares a name.
+		page: {
+			path: candidate.rel,
+			source_url: sourceUrl,
+			body: raw,
+			...(graph !== undefined ? { graph } : {}),
+			...(planning ? { checkout: fs.checkoutKey(candidate.unit.path) } : {}),
+		},
 	};
 }
 
@@ -475,6 +498,8 @@ export interface AllMarkdownPlan {
 	leave_out: LeaveOutGroup[];
 	errors: Array<AllMarkdownError & { group: string }>;
 	excluded_root_entries: string[];
+	/** Dot-named directories skipped at discovery, counted for the report. */
+	dot_dirs_skipped: number;
 	/** The batches each sending group posts, in order. Not written to the report. */
 	batches: Map<string, IngestPage[][]>;
 }
@@ -608,7 +633,7 @@ export async function planAllMarkdown(input: PlanInput): Promise<AllMarkdownPlan
 			excluded_dir_names: ALL_MARKDOWN_EXCLUDED_DIRS,
 			page_cap_bytes: INGEST_PAGE_MAX_BYTES,
 			selection:
-				"*.md regular files under each root's children (repo checkouts under the repos root; worktrees elsewhere, attributed by .git); symlinks skipped and counted; excluded directory names pruned; /.planning/milestones/ counted, never read; files over the page cap counted from stat, never read",
+				"*.md regular files under each root's children (repo checkouts under the repos root; worktrees elsewhere, attributed by .git); symlinks skipped and counted; excluded directory names pruned; dot-named directories skipped at discovery and counted; /.planning/milestones/ counted, never read; files over the page cap counted from stat, never read",
 			gate: "findingRules over stripped body, file:// source URL, commit, empty heading and planning-graph strings, the ingest's composition; refused pages are never sent",
 			dedup: "raw-byte sha256 within one group (checkout plus its worktrees); the first copy in unit order is sent",
 		},
@@ -616,6 +641,7 @@ export async function planAllMarkdown(input: PlanInput): Promise<AllMarkdownPlan
 		leave_out: leaveOut,
 		errors,
 		excluded_root_entries: input.discovered.excluded_root_entries,
+		dot_dirs_skipped: input.discovered.dot_dirs_skipped,
 		batches,
 	};
 }
@@ -719,7 +745,7 @@ async function writeOutputs(stateDir: string, plan: AllMarkdownPlan, applied: Gr
 	const report = {
 		meta: { generated_at: plan.generated_at, mode: applied === null ? "dry-run" : "apply", read_only: applied === null },
 		scope: plan.scope,
-		totals: { groups: plan.groups.length, ...statusCounts, ...totals, refused_pages: plan.leave_out.reduce((sum, group) => sum + group.refused.length, 0), errors: plan.errors.length },
+		totals: { groups: plan.groups.length, ...statusCounts, ...totals, dot_dirs_skipped: plan.dot_dirs_skipped, refused_pages: plan.leave_out.reduce((sum, group) => sum + group.refused.length, 0), errors: plan.errors.length },
 		excluded_root_entries: plan.excluded_root_entries,
 		groups: plan.groups,
 		errors: plan.errors,
@@ -750,6 +776,7 @@ function summaryMarkdown(plan: AllMarkdownPlan, totals: Record<(typeof COUNT_KEY
 	row(".planning/ files", totals.planning_files);
 	row("milestone files excluded", totals.milestone_md_excluded);
 	row("symlinked markdown skipped", totals.symlinks_skipped);
+	row("dot-named directories skipped at discovery", plan.dot_dirs_skipped);
 	row("over page cap (not read)", `${totals.over_cap_files} (${totals.over_cap_bytes} bytes)`);
 	row("over page cap after strip", totals.over_cap_after_strip_files);
 	row("unreadable", totals.unreadable_files);

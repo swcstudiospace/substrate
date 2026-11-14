@@ -12,7 +12,8 @@ import {
 	type IngestCall,
 	type MarkdownFs,
 } from "./docs-allmarkdown.ts";
-import { INGEST_PAGE_MAX_BYTES, type IngestInput } from "./docs-ingest.ts";
+import { ingestDocs, INGEST_PAGE_MAX_BYTES, type IngestDeps, type IngestInput } from "./docs-ingest.ts";
+import type { FetchLike } from "./planes/ragflow.ts";
 
 const REPOS = "/repos";
 const SESSION = "docs-allmarkdown:test";
@@ -206,6 +207,46 @@ describe("docs-allmarkdown selection", () => {
 		expect(fs.reads).not.toContain("/repos/alpha/big.md");
 		expect(sentPaths(plan, "alpha")).toEqual(["small.md"]);
 	});
+
+	test("a planning page carries the checkout key of the unit it was read from, a worktree's copy included", async () => {
+		const { plan } = await planTree(
+			{
+				"/repos/alpha/README.md": "# alpha\n",
+				"/repos/alpha/.planning/PROJECT.md": "# repo project\n",
+				"/wt/alpha-feat/.git": "gitdir: /repos/alpha/.git/worktrees/alpha-feat\n",
+				"/wt/alpha-feat/.planning/PROJECT.md": "# feature project\n",
+				"/wt/loose/.planning/PLAN.md": "# loose plan\n",
+			},
+			{ roots: ["/wt"], datasets: { alpha: "alpha", "key:/wt/loose": "loose" }, known: ["alpha", "loose"] },
+		);
+		const alpha = sentPages(plan, "alpha").map((page) => `${page.path} ${page.checkout ?? "-"}`).sort();
+		expect(alpha).toEqual([".planning/PROJECT.md key:/repos/alpha", ".planning/PROJECT.md key:/wt/alpha-feat", "README.md -"]);
+		expect(sentPages(plan, "key:/wt/loose").map((page) => page.checkout)).toEqual(["key:/wt/loose"]);
+	});
+
+	test("a dot-named directory is not a group at either level, is skipped whole, and is counted in the report", async () => {
+		await withStateDir(async (dir) => {
+			const { plan } = await planTree(
+				{
+					"/repos/alpha/README.md": "# alpha\n",
+					"/repos/.bg-shell/README.md": "# shell\n",
+					"/repos/.gsd/notes.md": "# gsd\n",
+					"/repos/alpha/.github/ISSUE.md": "# issue template\n",
+					"/wt/.superpowers/notes.md": "# superpowers\n",
+					"/wt/.pytest_cache/README.md": "# cache\n",
+					"/wt/loose/notes.md": "# loose\n",
+				},
+				{ roots: ["/wt"], datasets: { alpha: "alpha", "key:/wt/loose": "loose" }, known: ["alpha", "loose"] },
+			);
+			expect(plan.groups.map((group) => group.group)).toEqual(["alpha", "key:/wt/loose"]);
+			expect(plan.dot_dirs_skipped).toBe(4);
+			expect(sentPaths(plan, "alpha")).toEqual([".github/ISSUE.md", "README.md"]);
+			expect(await runAllMarkdownIngest({ plan, apply: false, stateDir: dir, sessionId: SESSION, ...quiet })).toBe(0);
+			const report = JSON.parse(await readFile(join(dir, "report.json"), "utf8"));
+			expect(report.totals.dot_dirs_skipped).toBe(4);
+			expect(report.groups.map((group: { group: string }) => group.group)).toEqual(["alpha", "key:/wt/loose"]);
+		});
+	});
 });
 
 describe("docs-allmarkdown gate", () => {
@@ -297,5 +338,62 @@ describe("docs-allmarkdown run", () => {
 			const report = JSON.parse(await readFile(join(dir, "report.json"), "utf8"));
 			expect(report.applied[0]).toMatchObject({ group: "alpha", batches_refused: 1, refusal: "unknown-dataset" });
 		});
+	});
+});
+
+describe("docs-allmarkdown planning checkout through the ingest guard", () => {
+	/** A LightRAG plane whose upload routes answer 500: every upload attempt is recorded. */
+	function uploadProbe() {
+		const attempts: string[] = [];
+		const fetchImpl: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && (url.pathname === "/documents/upload" || url.pathname === "/documents/text")) {
+				attempts.push(url.pathname);
+				return Response.json({ detail: "upload refused" }, { status: 500 });
+			}
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+		return { attempts, fetchImpl };
+	}
+
+	function ingestDeps(fetchImpl: FetchLike, dataset: string): IngestDeps {
+		return {
+			config: null,
+			knownDatasets: [dataset],
+			backend: "lightrag",
+			lightragConfig: { url: "http://lightrag.test" },
+			lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: dataset, name: dataset }] }), invalidate: () => undefined },
+			lightragFetch: fetchImpl,
+			seen: new Map(),
+			poll: { intervalMs: 0 },
+			emit: async (): Promise<unknown> => ({ stored: false }),
+			surface: "omp",
+		};
+	}
+
+	test("a worktree's planning page reaches the upload through the real guard, not refused for want of a checkout", async () => {
+		const { plan } = await planTree(
+			{ "/wt/loose/.planning/PLAN.md": "# Plan\n\nThe loose plan.\n" },
+			{ roots: ["/wt"], datasets: { "key:/wt/loose": "loose" }, known: ["loose"] },
+		);
+		const batch = plan.batches.get("key:/wt/loose")?.[0] ?? [];
+		expect(batch.map((page) => page.path)).toEqual([".planning/PLAN.md"]);
+		expect(batch[0]?.checkout).toBe("key:/wt/loose");
+		const probe = uploadProbe();
+		const outcome = await ingestDocs(ingestDeps(probe.fetchImpl, "loose"), { dataset: "loose", pages: batch });
+		expect(probe.attempts.length).toBeGreaterThan(0);
+		expect(JSON.stringify(outcome)).not.toContain("carries no checkout");
+	});
+
+	test("a real planning page with no checkout is still refused by the guard and never uploaded", async () => {
+		const probe = uploadProbe();
+		const outcome = await ingestDocs(ingestDeps(probe.fetchImpl, "loose"), {
+			dataset: "loose",
+			pages: [{ path: ".planning/PLAN.md", source_url: "file:///wt/loose/.planning/PLAN.md", body: "# Plan\n\nThe loose plan.\n" }],
+		});
+		expect(outcome).toMatchObject({ ok: false, reason: "planning page carries no checkout" });
+		expect(probe.attempts).toEqual([]);
 	});
 });

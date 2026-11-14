@@ -6548,6 +6548,7 @@ export class Substrate {
 							...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
 							...("expected_version" in page && typeof page.expected_version === "number" && Number.isInteger(page.expected_version) && page.expected_version >= 0 ? { expected_version: page.expected_version } : {}),
 							...(graph !== undefined ? { graph } : {}),
+							...("checkout" in page && typeof page.checkout === "string" ? { checkout: page.checkout } : {}),
 						};
 					}),
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
