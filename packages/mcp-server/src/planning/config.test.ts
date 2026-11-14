@@ -11,11 +11,13 @@ import {
 	DEFAULT_SCAN_INTERVAL_MS,
 	PLANNING_MAX_BYTES_ENV,
 	PLANNING_MAX_FILES_ENV,
+	PLANNING_PASS_ENV,
 	PLANNING_PRESENCE_TTL_ENV,
 	PLANNING_ROOTS_ENV,
 	PLANNING_SCAN_INTERVAL_ENV,
 	loadPlanningSettings,
 	planningConfigWarnings,
+	planningPassSetting,
 } from "./config.ts";
 
 const DEFAULTS = { presenceTtlS: 90, maxFiles: 500, maxBytes: 262_144, scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS };
@@ -201,5 +203,30 @@ describe("loadPlanningSettings: numeric settings", () => {
 				{ key: PLANNING_ROOTS_ENV, reason: "not-absolute" },
 			],
 		});
+	});
+});
+
+describe("planningPassSetting: the pass switch is on unless it is set to off", () => {
+	test("unset is on, and on or off is read in any case and around spaces", () => {
+		expect(planningPassSetting({})).toBe("on");
+		expect(planningPassSetting({ [PLANNING_PASS_ENV]: "off" })).toBe("off");
+		expect(planningPassSetting({ [PLANNING_PASS_ENV]: " OFF " })).toBe("off");
+		expect(planningPassSetting({ [PLANNING_PASS_ENV]: "On" })).toBe("on");
+	});
+
+	test("the switch leaves the settings and the checkouts as they are: with it off the roots still derive their checkouts", () => {
+		const withoutSwitch = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/a" });
+		const withSwitch = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/a", [PLANNING_PASS_ENV]: "off" });
+		expect(withSwitch).toEqual(withoutSwitch);
+		expect(withSwitch.ok ? withSwitch.settings.checkouts.map((checkout) => checkout.root) : []).toEqual(["/srv/a"]);
+	});
+
+	test("an unrecognised value, a blank one included, refuses the planning settings with a typed error, and the value is never echoed", () => {
+		for (const value of ["pause-now", "0", "maybe", ""]) {
+			const result = loadPlanningSettings({ [PLANNING_ROOTS_ENV]: "/srv/secret-checkout", [PLANNING_PASS_ENV]: value });
+			expect(result).toEqual({ ok: false, errors: [{ key: PLANNING_PASS_ENV, reason: "unrecognised" }] });
+			if (value !== "") expect(JSON.stringify(result)).not.toContain(value);
+			expect(planningConfigWarnings(result)).toEqual([`${PLANNING_PASS_ENV} is unrecognised; the planning plane stays off until it is fixed`]);
+		}
 	});
 });

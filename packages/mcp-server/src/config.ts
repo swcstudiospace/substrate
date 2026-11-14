@@ -25,7 +25,7 @@ import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
-import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningCheckout, type PlanningConfigResult } from "./planning/config.ts";
+import { loadCheckpointDirectory, loadPlanningSettings, planningPassSetting, type CheckpointDirectoryResult, type PlanningCheckout, type PlanningConfigResult } from "./planning/config.ts";
 import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
@@ -772,6 +772,8 @@ export interface SubstrateConfig {
 	planning: PlanningConfigResult;
 	/** `SUBSTRATE_PLANNING_ROOTS`: the checkouts whose `.planning/` the plane reads, each keyed by `planningSessionId`. Empty when the plane is off or its settings are refused. */
 	planningCheckouts: readonly PlanningCheckout[];
+	/** `SUBSTRATE_PLANNING_PASS=off` (planning/config.ts): no planning pass runs, so nothing under `.planning/` is read or written for LightRAG. The checkouts and the dataset registry are unchanged. */
+	planningPassOn: boolean;
 	/** `SUBSTRATE_PLANNING_CHECKPOINT_DIR` (phase 53, SOTA-09): where completion checkpoints are kept durably. Unset keeps them in memory. See `planning/checkpoint-store.ts`. */
 	planningCheckpoint: CheckpointDirectoryResult;
 	/** `SUBSTRATE_PLANNING_STEERING*` (phase 53, SOTA-09): the steering switch, principal allowlist and rate. See `planning/steering.ts`. */
@@ -1307,6 +1309,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// Phase 52 (SOTA-08): the planning plane's roots and limits. Environment only; a bad value is a typed result.
 		planning,
 		planningCheckouts: planning.ok ? planning.settings.checkouts : [],
+		// SUBSTRATE_PLANNING_PASS: a refused value already turns planning off through `planning`, so it reads as on here.
+		planningPassOn: planningPassSetting(env) !== "off",
 		// Phase 53 (SOTA-09): the durable checkpoint directory. Unset keeps checkpoints in memory; a bad value is a typed result.
 		planningCheckpoint: loadCheckpointDirectory(env),
 		// Phase 53 (SOTA-09): the steering switch, allowlist and rate. Environment only; a bad value is a typed result.

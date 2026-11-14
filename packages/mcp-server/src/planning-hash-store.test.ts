@@ -41,6 +41,8 @@ interface Run {
 	/** The dataset each `ingestDocs` call named, in order: a planning page is filed under its checkout's dataset. */
 	datasets: string[];
 	events: EventInput[];
+	/** The server under test, for the calls a refresh does not make: the known datasets, a direct request. */
+	substrate: Substrate;
 	refresh(): Promise<void>;
 }
 
@@ -74,6 +76,7 @@ function server(env: Record<string, string>, store: PlanningHashStore, failing: 
 		batches,
 		datasets,
 		events,
+		substrate,
 		async refresh() {
 			substrate.startPlanningPoll();
 			await substrate.planningRefreshIdle();
@@ -198,6 +201,52 @@ describe("the planning refresh with the hash store on", () => {
 		await write.refresh();
 		expect(write.batches.flat().sort()).toEqual([ROADMAP, STATE]);
 		expect(defined(write.events[0], "the planning note").payload?.action).toBe("docs.planning");
+	});
+});
+
+describe("the planning pass switch", () => {
+	test("off: no pass runs at boot, the poll timer never starts, and nothing is read or written", async () => {
+		const intervals = spyOn(globalThis, "setInterval");
+		try {
+			const run = server({ SUBSTRATE_PLANNING_PASS: "off", SUBSTRATE_LIGHTRAG_POLL_MS: "7777" }, memoryPlanningHashStore());
+			await run.refresh();
+			expect(intervals.mock.calls.some((call) => call[1] === 7777)).toBe(false);
+			expect(run.batches).toEqual([]);
+			expect(run.events).toEqual([]);
+		} finally {
+			intervals.mockRestore();
+		}
+	});
+
+	test("off: a direct planning request runs no pass and sends nothing", async () => {
+		const run = server({ SUBSTRATE_PLANNING_PASS: "off" }, memoryPlanningHashStore());
+		// The private entry point every planning trigger goes through, reached directly; the cast is only to name it.
+		const seam = run.substrate as unknown as { requestPlanningRefresh(reason: string): void };
+		seam.requestPlanningRefresh("planning-changed");
+		await run.substrate.planningRefreshIdle();
+		expect(run.batches).toEqual([]);
+		expect(run.events).toEqual([]);
+	});
+
+	test("on, named explicitly, runs the pass as it did before the switch existed", async () => {
+		const run = server({ SUBSTRATE_PLANNING_PASS: "on" }, memoryPlanningHashStore());
+		await run.refresh();
+		expect(run.batches.flat().sort()).toEqual([ROADMAP, STATE]);
+		expect(defined(run.events[0], "the planning note").payload?.action).toBe("docs.planning");
+	});
+
+	test("the registry is derived from the roots either way: the known datasets match with the switch off and on", async () => {
+		const off = server({ SUBSTRATE_PLANNING_PASS: "off" }, memoryPlanningHashStore());
+		const on = server({}, memoryPlanningHashStore());
+		expect(await off.substrate.knownDocsDatasets()).toContain(planningSessionId(nodePlanningFs(), dir));
+		expect(await off.substrate.knownDocsDatasets()).toEqual(await on.substrate.knownDocsDatasets());
+	});
+
+	test("an unrecognised value refuses the planning settings at load: the plane is off and the value is never echoed", () => {
+		const config = loadConfig({ SUBSTRATE_PLANNING_ROOTS: dir, SUBSTRATE_PLANNING_PASS: "pause-now" });
+		expect(config.planning).toEqual({ ok: false, errors: [{ key: "SUBSTRATE_PLANNING_PASS", reason: "unrecognised" }] });
+		expect(config.planningCheckouts).toEqual([]);
+		expect(JSON.stringify(config.planning)).not.toContain("pause-now");
 	});
 });
 

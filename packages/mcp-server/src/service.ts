@@ -7185,9 +7185,13 @@ export class Substrate {
 		await this.planningPass;
 	}
 
-	/** Whether planning changes refresh this process's docs plane: the LightRAG plane only. */
+	/**
+	 * Whether the planning pass runs: the LightRAG plane only, and not while `SUBSTRATE_PLANNING_PASS=off`. The boot pass, the
+	 * poll timer and the planning events all answer through here, and `requestPlanningRefresh` is reached only from them, so
+	 * with the switch off none of them reads `.planning/` for LightRAG or writes to it.
+	 */
 	private planningEnabled(): boolean {
-		return this.config.docsBackend === "lightrag" && this.config.lightrag !== null;
+		return this.config.docsBackend === "lightrag" && this.config.lightrag !== null && this.config.planningPassOn;
 	}
 
 	/**
