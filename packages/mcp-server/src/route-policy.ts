@@ -23,6 +23,7 @@ export const REST_ROUTE_POLICY: Readonly<Record<string, Declaration>> = {
 	"/memory/recall": GATED("scopedRepoRefusal: the named repository must be granted"),
 	"/session/context": GATED("scopedRepoRefusal: the named repository must be granted"),
 	"/handoff": GATED("scopedWriteRefusal: the named repository and any named graph's repository must be granted and agree"),
+	"/handoffs": GATED("scopedGraphRefusal: the graph's repository must be granted before its packets are read"),
 	"/drift": GATED("scopedDriftScan: the repository and any path must be granted"),
 	"/worktrees": GATED("listWorktrees: a named repository must be granted; otherwise the store reads granted rows only"),
 	"/corpus/proof": GATED("corpusProofReply: the named repository must be granted before the tree is read"),

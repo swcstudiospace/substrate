@@ -188,6 +188,7 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/skills": "read",
 	"/skills/approve": "write",
 	"/handoff": "write",
+"/handoffs": "read",
 	"/slo/history": "read",
 	"/docs/lightrag/query": "read",
 	// Phase 67 (live steering GA): the steering routes are classed as the steering tools are. `GET /steering/wait` is not in

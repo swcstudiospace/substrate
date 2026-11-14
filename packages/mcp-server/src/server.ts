@@ -385,6 +385,8 @@ const SESSION_CONTEXT_NEEDS_SURFACE = "session_context needs an authenticated su
 const WORKTREE_REPORT_NEEDS_SURFACE = "worktree report needs an authenticated surface; nothing was stored";
 /** Why an anonymous claims read is refused: it names the sessions holding a graph's nodes. */
 const WORKTREE_CLAIMS_NEEDS_SURFACE = "worktree claims need an authenticated surface";
+/** Why an anonymous handoff replay is refused: the packets name who handed what to whom. */
+const HANDOFFS_NEEDS_SURFACE = "handoff replay needs an authenticated surface";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
@@ -1576,6 +1578,30 @@ export function createHttpServer(
 				// still returned, because an unstorable handoff is better handed to the
 				// caller than lost, and the caller owes its user the truth either way.
 				sendJson(res, result.stored ? 202 : 503, result);
+				return;
+			}
+
+			// The replay of a graph's handoffs (SPE-5714): the REST door on `coord_handoff_list`, for a hook with no MCP client. Same audit
+			// name, same graph gate, same packets; each comes back with the verdict it verifies under.
+			if (req.method === "GET" && url.pathname === "/handoffs") {
+				if (surface === null) {
+					sendJson(res, 401, { error: HANDOFFS_NEEDS_SURFACE });
+					return;
+				}
+				const query = parseClaimsQuery(url.searchParams.get("graph") ?? undefined);
+				if (!query.ok) {
+					sendJson(res, 400, { error: "handoffs.invalid", problem: query.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "coord_handoff_list", { graph_id: query.value }))) return;
+				const graphScope = await substrate.scopedGraphRefusal("handoffs_for_graph", surface, query.value);
+				if (graphScope !== null) {
+					sendJson(res, graphScope.status, graphScope.body);
+					return;
+				}
+				// The same full-history read as the `coord_handoff_list` tool, oldest first, so both doors return one chain. Each packet
+				// comes back with the verdict it verifies under; a packet that does not verify is listed with its reason.
+				sendJson(res, 200, await substrate.handoffsForGraph(query.value));
 				return;
 			}
 
