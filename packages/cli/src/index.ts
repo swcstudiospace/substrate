@@ -63,6 +63,7 @@ import { driftExitCode, parseEmitPayload, parseEvidenceBundle } from "./guards.t
 import { resolveBearer } from "./token.ts";
 import { docsTimeout, runDocs } from "./docs.ts";
 import { runDocsFeedback } from "./docs/feedback.ts";
+import { runDocsIngestAll } from "./docs/ingest-all.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
@@ -732,6 +733,16 @@ switch (command) {
 		);
 		break;
 	case "docs":
+		if (rest[0] === "ingest-all") {
+			process.exit(
+				await runDocsIngestAll(rest.slice(1), {
+					out: (text) => process.stdout.write(text),
+					err: (text) => process.stderr.write(text),
+					invokedFromCli: true,
+				}),
+			);
+			break;
+		}
 		if (rest[0] === "feedback") {
 			process.exit(
 				await runDocsFeedback(rest.slice(1), {
@@ -869,6 +880,7 @@ switch (command) {
 				"substrate skills approve --name N --pr NUMBER --decision approve|decline|retire [--reason R]\n" +
 				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
 				"substrate docs feedback <document> <verdict> [--session ID] [--json]\n" +
+				"substrate docs ingest-all --state-dir DIR [--roots DIR,DIR] [--group NAME] [--dry-run | --apply]\n" +
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
