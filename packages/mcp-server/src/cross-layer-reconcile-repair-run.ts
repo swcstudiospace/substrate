@@ -4,6 +4,8 @@
  *
  *   bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts [--plan]
  *   bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts --apply PLAN_ID --confirm
+ *   bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts --cache-index GRAPH_ID
+ *   bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts --cache-index --apply PLAN_ID --confirm
  *
  * `--plan` (the default) reads the ledger window, the index and the cache as the scheduled tick does, prints what it found,
  * and prints the repairs it calls for. `planRepair` records them as ONE `reconcile.plan` note whose event id is the plan id;
@@ -15,13 +17,19 @@
  * nowhere else (the store lock). The CLI package spawns this file. It opens no `Substrate`: one would load and drain the live
  * event buffer and retain outbox beside the running server, so the note writes are direct ledger appends (`directNoteWriter`).
  *
+ * `--cache-index GRAPH_ID` (the cache -> index pair) reads that graph's cached views and index nodes. When they drift it records ONE
+ * `reconcile.plan.cache-index` note and prints the two generation bumps it calls for. `--cache-index --apply PLAN_ID --confirm`
+ * re-reads both layers and bumps those two keys only when the state still digests as the plan's; otherwise it refuses. The
+ * scheduled tick never runs either form.
+ *
  * Exit codes: 0 nothing to repair, or applied; 1 failed: the configuration or a store could not be set up, a layer could not be read, the read was incomplete, the plan id is
  * not a reconcile plan, the plan no longer matches a fresh read, or the apply's own record or cache mark was not confirmed;
  * 2 usage or missing configuration; 3 the layers disagree: a plan was printed, or only report-only findings were read and nothing is planned for them.
  */
 import { createReadThroughCache } from "./cache.ts";
 import { loadConfig } from "./config.ts";
-import { EXIT, reconcileOptionsFor, renderReport } from "./cross-layer-reconcile-run.ts";
+import { type CacheIndexArgs, EXIT, parseCacheIndexArgs, reconcileOptionsFor, renderReport, runCacheIndexApply, runCacheIndexPlan } from "./cross-layer-reconcile-run.ts";
+import { type CacheIndexRepairPorts, pairCacheFrom, pairIndexFrom } from "./cross-layer-reconcile-pairs.ts";
 import {
 	type ApplyRun,
 	type Mismatch,
@@ -42,12 +50,13 @@ import { GreptimeClient, IngestNotRecorded } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { redact } from "./redact.ts";
 
-const USAGE = "usage: cross-layer-reconcile-repair-run.ts [--plan] | --apply PLAN_ID --confirm\n";
+const USAGE = "usage: cross-layer-reconcile-repair-run.ts [--plan] | --apply PLAN_ID --confirm | --cache-index GRAPH_ID | --cache-index --apply PLAN_ID --confirm\n";
 
-export type RepairArgs = { mode: "plan" } | { mode: "apply"; planId: string } | { mode: "refused"; problem: string };
+export type RepairArgs = { mode: "plan" } | { mode: "apply"; planId: string } | CacheIndexArgs;
 
-/** `--plan`, or nothing, or `--apply PLAN_ID --confirm` in that order. Anything else is refused before a store is opened. */
+/** `--plan`, or nothing, or `--apply PLAN_ID --confirm` in that order, or the `--cache-index` forms. Anything else is refused before a store is opened. */
 export function parseRepairArgs(argv: readonly string[]): RepairArgs {
+	if (argv[0] === "--cache-index") return parseCacheIndexArgs(argv.slice(1));
 	if (argv.length === 0 || (argv.length === 1 && argv[0] === "--plan")) return { mode: "plan" };
 	const [flag, planId, confirm, ...extra] = argv;
 	if (flag !== "--apply" || extra.length > 0) return { mode: "refused", problem: "unknown arguments" };
@@ -194,7 +203,18 @@ async function main(argv: string[]): Promise<number> {
 		// The note writes go straight to the ledger. A `Substrate` here would load and drain the live queue files (see `directNoteWriter`).
 		const deps: ReconcileDeps = { ledger: ledgerFromSubstrate("substrate", greptime, directNoteWriter(greptime, config.allowDeduplicatingLedger)), index, cache, now: () => Date.now() };
 		const options = reconcileOptionsFor(config);
-		return parsed.mode === "plan" ? await runPlan(deps, options) : await runApply(deps, options, parsed.planId);
+		if (parsed.mode === "plan") return await runPlan(deps, options);
+		if (parsed.mode === "apply") return await runApply(deps, options, parsed.planId);
+		// The cache -> index repair reads the cache the scheduled tick reads, and bumps it through the same client.
+		const ports: CacheIndexRepairPorts = {
+			ledger: deps.ledger,
+			index: pairIndexFrom(index),
+			cache: { ...pairCacheFrom(cache.redisClient()), bump: (key: string) => cache.bump(key) },
+		};
+		const result = parsed.mode === "cache-index-plan" ? await runCacheIndexPlan(ports, parsed.graphId) : await runCacheIndexApply(ports, parsed.planId);
+		process.stdout.write(result.stdout);
+		process.stderr.write(result.stderr);
+		return result.code;
 	} catch (cause) {
 		process.stderr.write(`[cross-layer-reconcile] failed: ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300)}\n`);
 		return EXIT.failed;

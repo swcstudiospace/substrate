@@ -12,7 +12,9 @@
  * (`store-lock.test.ts`), and the ledger port below is built from it.
  *
  * Read-only. The ledger port built here refuses every write, so a clean run and a dirty run both leave all three layers as
- * they were. A repair is a separate, operator-confirmed plan (`planRepair` / `applyRepair`); this tick never plans one.
+ * they were. A repair is a separate, operator-confirmed plan: `planRepair` / `applyRepair` for the forget pair, and
+ * `planCacheIndexRepair` / `applyCacheIndexRepair` for the cache -> index pair (both run from `cross-layer-reconcile-repair-run.ts`).
+ * This tick never plans or applies either.
  *
  * Exit codes: 0 every judged note matched and the read was complete; 3 the run found mismatches (named on stdout, and they
  * outrank an incomplete read); 1 the run was not clean and found no mismatch: a layer could not be read, or the read was
@@ -21,13 +23,18 @@
 import { createReadThroughCache, forgetMarkTtlS } from "./cache.ts";
 import { type SubstrateConfig, loadConfig } from "./config.ts";
 import {
+	type CacheIndexRepairPorts,
 	type CacheIndexReport,
 	type IndexLedgerReport,
 	type PairDeps,
 	type PairOptions,
+	type PairReport,
+	applyCacheIndexRepair,
 	pairCacheFrom,
 	pairIndexFrom,
 	pairLedgerFrom,
+	planCacheIndexRepair,
+	reconcileCacheIndex,
 	runPairReconcile,
 } from "./cross-layer-reconcile-pairs.ts";
 import {
@@ -160,16 +167,16 @@ export async function runPairsTick(deps: PairDeps, graphIds: string[], options: 
 	return { reports, mismatches, incomplete };
 }
 
+/** One line per pair report: its verdict, its mismatch count, and its first mismatching key (with its surface, for the cache). */
+export function renderPairLine(report: PairReport): string {
+	const first = report.mismatches.first;
+	const surface = first !== null && "surface" in first ? ` surface=${first.surface}` : "";
+	return `pair ${report.pair} graph=${report.graphId}: ${report.verdict}, mismatches=${report.mismatches.count}${first ? ` first=${first.key}${surface}` : ""}\n`;
+}
+
 /** The text the journal shows for the pairs: one line per graph and pair, with the first mismatching key (and its surface, for the cache). */
 export function renderPairs(outcome: PairsOutcome): string {
-	return outcome.reports
-		.flatMap((pair) => [pair.indexLedger, pair.cacheIndex])
-		.map((report) => {
-			const surface = report.pair === "cache-index" && report.mismatches.first !== null ? ` surface=${report.mismatches.first.surface}` : "";
-			const first = report.mismatches.first ? ` first=${report.mismatches.first.key}${surface}` : "";
-			return `pair ${report.pair} graph=${report.graphId}: ${report.verdict}, mismatches=${report.mismatches.count}${first}\n`;
-		})
-		.join("");
+	return outcome.reports.flatMap((pair) => [pair.indexLedger, pair.cacheIndex]).map(renderPairLine).join("");
 }
 
 /** The exit code of a tick that ran the forget pair and the graph pairs. Mismatches outrank an incomplete read, as in `runTick`. */
@@ -177,6 +184,54 @@ export function combineExit(forget: TickResult, pairs: PairsOutcome | null): num
 	if (forget.code === EXIT.mismatch || (pairs !== null && pairs.mismatches > 0)) return EXIT.mismatch;
 	if (forget.code !== EXIT.clean || (pairs !== null && pairs.incomplete.length > 0)) return EXIT.failed;
 	return EXIT.clean;
+}
+
+/** The arguments after `--cache-index`: `GRAPH_ID` plans the repair; `--apply PLAN_ID --confirm` applies a printed plan. */
+export type CacheIndexArgs = { mode: "cache-index-plan"; graphId: string } | { mode: "cache-index-apply"; planId: string } | { mode: "refused"; problem: string };
+
+const GRAPH_ID = /^\S{1,200}$/;
+
+/** Anything other than the two forms above is refused before a store is opened. */
+export function parseCacheIndexArgs(argv: readonly string[]): CacheIndexArgs {
+	const [first, ...rest] = argv;
+	if (first === "--apply") {
+		const [planId, confirm, ...extra] = rest;
+		if (planId === undefined || planId.startsWith("--")) return { mode: "refused", problem: "--apply needs the PLAN_ID that a --cache-index run printed" };
+		if (confirm !== "--confirm") return { mode: "refused", problem: "--apply writes the repair and needs --confirm after the plan id" };
+		if (extra.length > 0) return { mode: "refused", problem: "unknown arguments after --confirm" };
+		return { mode: "cache-index-apply", planId };
+	}
+	if (rest.length === 0 && first !== undefined && GRAPH_ID.test(first) && !first.startsWith("--")) return { mode: "cache-index-plan", graphId: first };
+	return { mode: "refused", problem: "--cache-index takes one GRAPH_ID to plan, or --apply PLAN_ID --confirm to apply a printed plan" };
+}
+
+/**
+ * The cache-index repair's plan run: one read of the graph's cache and index, then ONE `reconcile.plan.cache-index` note when that read
+ * is drift. Repairs nothing. An incomplete or unavailable read plans nothing and says why.
+ */
+export async function runCacheIndexPlan(ports: CacheIndexRepairPorts, graphId: string): Promise<TickResult> {
+	const report = await reconcileCacheIndex(graphId, ports);
+	const line = renderPairLine(report);
+	if (report.verdict === "incomplete" || report.verdict === "unavailable") {
+		const reason = report.reason === null ? "" : ` (${report.reason})`;
+		return { code: EXIT.failed, stdout: line, stderr: `[cross-layer-reconcile] cache-index read is ${report.verdict}${reason}: nothing was planned\n` };
+	}
+	const run = await planCacheIndexRepair(ports.ledger, report);
+	if (!run.ok) return { code: EXIT.failed, stdout: line, stderr: `[cross-layer-reconcile] cache-index plan failed (${run.reason}): ${run.detail}\n` };
+	if (run.planId === null) return { code: EXIT.clean, stdout: `${line}nothing to repair: the cache and the index agree for graph ${graphId}\n`, stderr: "" };
+	const bumps = run.items.map((item) => `  bump ${item.key}\n`).join("");
+	return {
+		code: EXIT.mismatch,
+		stdout: `${line}plan ${run.planId}: ${run.items.length} bump(s) recorded as a reconcile.plan.cache-index note; nothing repaired yet\n${bumps}apply with: cross-layer-reconcile-repair-run.ts --cache-index --apply ${run.planId} --confirm\n`,
+		stderr: "",
+	};
+}
+
+/** The cache-index repair's apply: the confirmed plan, re-checked against a fresh read, then its two bumps and nothing else. */
+export async function runCacheIndexApply(ports: CacheIndexRepairPorts, planId: string): Promise<TickResult> {
+	const run = await applyCacheIndexRepair(ports, { planId, confirm: planId });
+	if (!run.ok) return { code: EXIT.failed, stdout: "", stderr: `[cross-layer-reconcile] cache-index apply failed (${run.reason}): ${run.detail}\n` };
+	return { code: EXIT.clean, stdout: `applied cache-index plan ${run.planId}: bumped ${run.bumped.join(", ")}\n`, stderr: "" };
 }
 
 async function main(argv: string[]): Promise<number> {

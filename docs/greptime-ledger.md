@@ -1003,6 +1003,18 @@ forgets. Its scheduled entry is `packages/mcp-server/src/cross-layer-reconcile-r
   does not re-send a Hindsight document deletion; a plane document a repaired entry still holds is the plane's pending
   work, as it is for a forget that stopped part way.
 
+### Cache-to-index repair
+
+`--cache-index GRAPH_ID` checks the cache -> index pair for one graph. `reconcileCacheIndex` reads the graph's cached view under each surface in `PAIR_SURFACES`, at the graph's current generation, and the index's nodes. A node cached but not indexed is `cache-only`; a node in both with another `leaseEpoch` is `version-mismatch`; a node indexed but not cached is `index-only`. This pair is the only one with a repair. The forget pair and the index -> ledger pair are report-only.
+
+- **Plan.** `planCacheIndexRepair` writes ONE `reconcile.plan.cache-index` note whose event id is the plan id. The note holds two `bump` items, `graphGenerationKey(graphId)` and `GRAPHS_GENERATION_KEY`, a digest of those items, and a digest of the state the read saw (verdict, counts and mismatches). A plan comes only from a complete read that is `drift`. A clean read exits 0 and writes nothing. An incomplete or unavailable read (`generation-moved`, `cache-disabled`, `cache-malformed`, or a layer that could not be reached) exits 1 and writes nothing. A plan note the ledger does not store is `plan-not-recorded`: no plan id is printed and nothing is repaired.
+- **Apply.** `--cache-index --apply PLAN_ID --confirm` is refused with exit 2, before any store opens, unless `--confirm` follows the plan id. The plan note is then read back. It must be a `reconcile.plan.cache-index` note whose items are the two keys it names and whose items digest matches; otherwise the apply refuses as `plan-invalid`. The cache and the index are read afresh. An incomplete or unavailable read is refused. A fresh state whose digest differs from the plan's is refused as `plan-invalid`: the cache or the index changed after planning, so plan again. Every refusal writes nothing.
+- **What apply writes.** Two `INCR`s, in order: the graph's generation, then the graphs generation. Nothing else. The repair deletes no cache entry, writes no index row, and writes no `reconcile.applied` note, because this pair records none.
+- **Partial apply.** If the second bump fails, the run exits 1 and names how many keys moved. Re-applying the same plan re-reads the state. If it still digests as the plan's, the repeat bumps both keys again, which only retires the same entries once more. Otherwise it is refused as `plan-invalid`, and the operator plans again.
+- **Scheduled tick.** `runPairsTick` is read-only. The timer never plans, applies or bumps.
+- **Exit codes.** Plan: 0 the layers agree; 3 a plan is printed, with its id and its two bumps; 1 failed (a read was unavailable or incomplete, or the plan was not recorded); 2 usage or missing configuration. Apply: 0 applied; 1 refused or failed; 2 usage.
+- **Operator path.** `bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts --cache-index GRAPH_ID` plans, and `bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts --cache-index --apply PLAN_ID --confirm` applies. The `substrate reconcile` CLI does not yet forward `--cache-index`, so the runner file is the path for this repair.
+
 ### Scheduled run
 
 - **Units.** `infra/vps/substrate-cross-layer-reconcile.service` (`Type=oneshot`, `ExecStart=bun packages/mcp-server/src/cross-layer-reconcile-run.ts --json` in `/opt/agent-substrate/current`, `EnvironmentFile=/etc/substrate/substrate.env`) and its timer `infra/vps/substrate-cross-layer-reconcile.timer`. The entry point is `packages/mcp-server/src/cross-layer-reconcile-run.ts`.

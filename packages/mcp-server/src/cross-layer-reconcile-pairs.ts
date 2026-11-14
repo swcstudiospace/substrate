@@ -16,17 +16,19 @@
  *
  * Repair is a separate, confirmed step and is never called from a comparison. Only the cache -> index pair has a repair: a
  * stale cached graph view is made unreachable by bumping the graph's generation (and the graphs generation, which briefs
- * embed), the cache's own invalidation. Nothing is deleted. The plan is a digest-named record of exactly those two keys;
- * `applyCacheIndexRepair` refuses unless the caller passes the plan's id back as `confirm`, and refuses a plan whose items
- * no longer match its digest. An index -> ledger mismatch has no automatic repair: a provenance key that names no event of
- * the graph is a fact about a caller's write, and the reconcile reports it without choosing a fix for it.
+ * embed), the cache's own invalidation. Nothing is deleted. Planning writes ONE `reconcile.plan.cache-index` ledger note whose
+ * event id is the plan id; the note holds exactly those two keys, a digest of them, and a digest of the cache and index state
+ * the plan was made from. `applyCacheIndexRepair` refuses unless the caller passes the plan id back as `confirm`, refuses a note
+ * whose items no longer match their digest, and refuses when a fresh read digests differently from the recorded state. An index
+ * -> ledger mismatch has no automatic repair: a provenance key that names no event of the graph is a fact about a caller's
+ * write, and the reconcile reports it without choosing a fix for it.
  */
 import { createHash } from "node:crypto";
 import { BreakerOpenError } from "@substrate/observability";
 import { type CacheRedis, cacheKey, GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
 import { isRecord } from "./corpus/validate.ts";
 import { type EventQuery, MAX_QUERY_LIMIT } from "./greptime.ts";
-import { type LedgerReads, RECONCILE_REPORT_MAX } from "./cross-layer-reconcile.ts";
+import { type LedgerNote, type LedgerReads, RECONCILE_REPORT_MAX, type ReconcileLedger } from "./cross-layer-reconcile.ts";
 import { redact } from "./redact.ts";
 import type { IndexStore } from "./index-store.ts";
 import { SURFACES } from "./types.ts";
@@ -293,7 +295,7 @@ const EMPTY_CACHE_INDEX: CacheIndexCounts = {
  * compare, and it stands in for no other surface: a stale entry under a named surface is drift even when the anonymous surface
  * holds nothing. A disabled or unreadable cache, or a malformed entry under any surface, is `unavailable`.
  */
-export async function reconcileCacheIndex(graphId: string, deps: PairDeps): Promise<CacheIndexReport> {
+export async function reconcileCacheIndex(graphId: string, deps: Pick<PairDeps, "index" | "cache">): Promise<CacheIndexReport> {
 	const unavailable = (reason: "cache-disabled" | "cache-malformed"): CacheIndexReport => ({
 		pair: "cache-index",
 		graphId,
@@ -380,12 +382,20 @@ export interface CacheBumpItem {
 	key: string;
 }
 
-/** The repair plan: the two generation keys a drifted graph view is invalidated through. `planId` is its digest. */
+/** The ledger note action a cache-index repair plan is recorded under. The plan's id is the event id of its note. */
+export const CACHE_INDEX_PLAN_ACTION = "reconcile.plan.cache-index";
+/** A plan id is a ledger event id, so it has the shape the forget repair's plan ids have. */
+const EVENT_ID = /^[A-Za-z0-9_-]{1,200}$/;
+
+/** A cache-index plan as the ledger holds it. `planId` is the event id of its `reconcile.plan.cache-index` note. */
 export interface CacheIndexRepairPlan {
 	planId: string;
-	pair: "cache-index";
 	graphId: string;
 	items: CacheBumpItem[];
+	/** Digest of the graph and its items: a note whose items were changed after planning does not match it. */
+	itemsSha256: string;
+	/** Digest of the cache and index state the plan was made from. Apply refuses when a fresh read digests differently. */
+	stateSha256: string;
 }
 
 /** The one write the repair makes. `ReadThroughCache.bump` satisfies it. */
@@ -393,65 +403,122 @@ export interface PairCacheBumper {
 	bump(key: string): Promise<void>;
 }
 
+/** The ledger the plan is recorded in and read back from. `ReconcileLedger` satisfies it. */
+export type CacheIndexLedger = Pick<ReconcileLedger, "emitNote" | "readEvent">;
+
+/** What a repair reads and writes: the ledger for the plan record, the index and cache for the fresh read, and the cache for the bumps. */
+export interface CacheIndexRepairPorts {
+	ledger: CacheIndexLedger;
+	index: PairIndex;
+	cache: PairCache & PairCacheBumper;
+}
+
+/** Outcome of applying a repair. `not-confirmed` writes nothing; `plan-not-found` and `plan-invalid` mean the record is not a usable plan. */
 export type PairRepairRun =
 	| { ok: true; planId: string; bumped: string[] }
-	| { ok: false; reason: "not-confirmed" | "plan-invalid" | "unavailable"; detail: string };
+	| { ok: false; reason: "not-confirmed" | "plan-not-found" | "plan-invalid" | "unavailable"; detail: string };
 
-function planDigest(pair: "cache-index", graphId: string, items: CacheBumpItem[]): string {
-	return createHash("sha256").update(JSON.stringify({ pair, graphId, items })).digest("hex");
+/** Outcome of planning: a plan id when the report is drift; nothing when it is not; a failure when the plan record was not stored. */
+export type CacheIndexPlanRun =
+	| { ok: true; planId: string; items: CacheBumpItem[] }
+	| { ok: true; planId: null; refused: "not-drift" }
+	| { ok: false; reason: "unavailable" | "plan-not-recorded"; detail: string };
+
+/** The confirmation a repair needs: the plan id, passed back as `confirm`. Mirrors the forget repair's request. */
+export interface CacheIndexApplyRequest {
+	planId: string;
+	confirm?: string;
 }
 
-/**
- * The plan a drifted cache-index report calls for, or null when the report is not drift. A plan is made from a report only:
- * `drift` is a claim the reconcile makes on a complete read, so an incomplete or unavailable pair plans nothing.
- */
-export function planCacheIndexRepair(report: CacheIndexReport): CacheIndexRepairPlan | null {
-	if (report.verdict !== "drift") return null;
-	const items: CacheBumpItem[] = [
-		{ action: "bump", key: graphGenerationKey(report.graphId) },
+function cacheBumpItems(graphId: string): CacheBumpItem[] {
+	const generation = graphGenerationKey(graphId);
+	return [
+		{ action: "bump", key: generation },
 		{ action: "bump", key: GRAPHS_GENERATION_KEY },
 	];
-	return { planId: planDigest("cache-index", report.graphId, items), pair: "cache-index", graphId: report.graphId, items };
 }
 
-function parsePlan(raw: unknown): CacheIndexRepairPlan | null {
-	if (!isRecord(raw)) return null;
-	const { planId, pair, graphId, items } = raw;
-	if (typeof planId !== "string" || pair !== "cache-index" || typeof graphId !== "string" || graphId.length < 1) return null;
-	if (!Array.isArray(items) || items.length < 1 || items.length > 2) return null;
-	const allowed = new Set([graphGenerationKey(graphId), GRAPHS_GENERATION_KEY]);
-	const parsed: CacheBumpItem[] = [];
-	for (const item of items) {
-		if (!isRecord(item) || item.action !== "bump" || typeof item.key !== "string" || !allowed.has(item.key)) return null;
-		parsed.push({ action: "bump", key: item.key });
-	}
-	return { planId, pair, graphId, items: parsed };
+function planDigest(graphId: string, items: readonly CacheBumpItem[]): string {
+	const canonical = JSON.stringify({ pair: "cache-index", graphId, items });
+	return createHash("sha256").update(canonical).digest("hex");
+}
+
+/** What a cache-index read observed, digested. Planning records it; apply reads again and refuses when it digests differently. */
+function stateDigest(report: CacheIndexReport): string {
+	const state = { verdict: report.verdict, counts: report.counts, mismatches: report.mismatches };
+	return createHash("sha256").update(JSON.stringify(state)).digest("hex");
 }
 
 /**
- * Apply a cache-index repair. Refuses, writing nothing, when there is no plan, when `confirm` is not the plan's id, or when the
- * plan's items no longer match its digest. Only then does it bump the planned keys, and nothing else.
+ * Plan the cache -> index repair of a drifted report. Writes ONE `reconcile.plan.cache-index` ledger note and returns its event id
+ * as the plan id. Bumps nothing. A report that is not drift (clean, incomplete or unavailable) plans nothing and writes nothing.
  */
-export async function applyCacheIndexRepair(deps: { cache: PairCacheBumper }, plan: unknown, confirm: unknown): Promise<PairRepairRun> {
-	if (plan === null || plan === undefined) return { ok: false, reason: "not-confirmed", detail: "no repair plan was given; nothing was changed" };
-	const parsed = parsePlan(plan);
-	if (parsed === null) return { ok: false, reason: "plan-invalid", detail: "the plan record is not a cache-index repair plan; nothing was changed" };
-	if (typeof confirm !== "string" || confirm !== parsed.planId) {
-		return { ok: false, reason: "not-confirmed", detail: "confirm must equal the plan id; nothing was changed" };
+export async function planCacheIndexRepair(ledger: Pick<ReconcileLedger, "emitNote">, report: CacheIndexReport): Promise<CacheIndexPlanRun> {
+	if (report.verdict !== "drift") return { ok: true, planId: null, refused: "not-drift" };
+	const items = cacheBumpItems(report.graphId);
+	const plan = { pair: "cache-index", graphId: report.graphId, items, itemsSha256: planDigest(report.graphId, items), stateSha256: stateDigest(report) };
+	let written: { id: string; stored: boolean };
+	try {
+		written = await ledger.emitNote(`reconcile plan: cache-index drift for ${report.graphId}: ${items.length} bump(s)`, { action: CACHE_INDEX_PLAN_ACTION, plan });
+	} catch (cause) {
+		return { ok: false, reason: "unavailable", detail: detailOf(cause) };
 	}
-	if (planDigest("cache-index", parsed.graphId, parsed.items) !== parsed.planId) {
-		return { ok: false, reason: "plan-invalid", detail: "the plan items do not match its digest; nothing was changed" };
+	if (!written.stored) return { ok: false, reason: "plan-not-recorded", detail: "the plan record was not stored (it may be parked); nothing was repaired" };
+	return { ok: true, planId: written.id, items };
+}
+
+/** The plan a ledger note holds, or null when the note is not a cache-index plan, its items are not the two it names, or its digest does not match. */
+function parseStoredPlan(planId: string, payload: Record<string, unknown> | null): CacheIndexRepairPlan | null {
+	if (payload === null || payload.action !== CACHE_INDEX_PLAN_ACTION) return null;
+	const raw = payload.plan;
+	if (!isRecord(raw)) return null;
+	const { graphId, items, itemsSha256, stateSha256 } = raw;
+	if (typeof graphId !== "string" || graphId.length < 1) return null;
+	if (typeof itemsSha256 !== "string" || typeof stateSha256 !== "string") return null;
+	const expected = cacheBumpItems(graphId);
+	if (!Array.isArray(items) || items.length !== expected.length) return null;
+	if (!items.every((item, i) => isRecord(item) && item.action === "bump" && item.key === expected[i]?.key)) return null;
+	if (planDigest(graphId, expected) !== itemsSha256) return null;
+	return { planId, graphId, items: expected, itemsSha256, stateSha256 };
+}
+
+/**
+ * Apply a cache-index repair. Refuses, writing nothing, unless `confirm` equals `planId` and the plan record is a valid cache-index
+ * plan. Then it reads the cache and index afresh: an incomplete or unavailable read is refused, and so is one whose state digests
+ * differently from the plan's, because the plan was made from other state. Only then does it bump the planned keys, and nothing else.
+ */
+export async function applyCacheIndexRepair(ports: CacheIndexRepairPorts, request: CacheIndexApplyRequest): Promise<PairRepairRun> {
+	if (typeof request.planId !== "string" || request.confirm !== request.planId) {
+		return { ok: false, reason: "not-confirmed", detail: "repair needs a confirmed plan: pass the plan id as planId and again as confirm; nothing was changed" };
+	}
+	const planId = request.planId;
+	if (!EVENT_ID.test(planId)) return { ok: false, reason: "plan-invalid", detail: "the plan id is malformed; nothing was changed" };
+	let note: LedgerNote | null;
+	try {
+		note = await ports.ledger.readEvent(planId);
+	} catch (cause) {
+		return { ok: false, reason: "unavailable", detail: detailOf(cause) };
+	}
+	if (note === null || note.kind !== "note") return { ok: false, reason: "plan-not-found", detail: "no ledger note has this plan id; nothing was changed" };
+	const plan = parseStoredPlan(planId, note.payload);
+	if (plan === null) return { ok: false, reason: "plan-invalid", detail: "the event is not a cache-index repair plan, or its items do not match its digest; nothing was changed" };
+	const fresh = await reconcileCacheIndex(plan.graphId, ports);
+	if (fresh.verdict === "incomplete" || fresh.verdict === "unavailable") {
+		return { ok: false, reason: "unavailable", detail: `the fresh read is ${fresh.verdict}${fresh.reason === null ? "" : ` (${fresh.reason})`}; nothing was changed` };
+	}
+	if (stateDigest(fresh) !== plan.stateSha256) {
+		return { ok: false, reason: "plan-invalid", detail: "the cache or index no longer matches the state this plan was made from; plan again. Nothing was changed" };
 	}
 	const bumped: string[] = [];
-	for (const item of parsed.items) {
+	for (const item of plan.items) {
 		try {
-			await deps.cache.bump(item.key);
+			await ports.cache.bump(item.key);
 		} catch (cause) {
-			return { ok: false, reason: "unavailable", detail: `${detailOf(cause)}; bumped ${bumped.length} of ${parsed.items.length}` };
+			return { ok: false, reason: "unavailable", detail: `${detailOf(cause)}; bumped ${bumped.length} of ${plan.items.length}` };
 		}
 		bumped.push(item.key);
 	}
-	return { ok: true, planId: parsed.planId, bumped };
+	return { ok: true, planId, bumped };
 }
 
 // ---------------------------------------------------------------------------

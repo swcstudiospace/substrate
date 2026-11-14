@@ -8,8 +8,8 @@ import { describe, expect, test } from "bun:test";
 import { BreakerOpenError } from "@substrate/observability";
 import { type CacheRedis, cacheKey, GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
 import {
+	type CacheIndexRepairPorts,
 	type CachedGraph,
-	type CacheIndexRepairPlan,
 	type PairCache,
 	type PairCacheBumper,
 	type PairDeps,
@@ -17,6 +17,7 @@ import {
 	type PairLedger,
 	type PairMemoryRow,
 	type PairNode,
+	CACHE_INDEX_PLAN_ACTION,
 	PAIR_DEFAULT_SURFACE,
 	PAIR_INDEX_ROWS,
 	PAIR_SURFACES,
@@ -28,8 +29,8 @@ import {
 	reconcileCacheIndex,
 	reconcileIndexLedger,
 	runPairReconcile,
-	type CacheIndexReport,
 } from "./cross-layer-reconcile-pairs.ts";
+import type { LedgerNote, ReconcileLedger } from "./cross-layer-reconcile.ts";
 import type { IndexStore } from "./index-store.ts";
 
 const NOW = Date.parse("2026-11-11T12:00:00.000Z");
@@ -459,91 +460,170 @@ describe("the scheduled comparison", () => {
 	});
 });
 
+/** A ledger that keeps the plan notes it is given, so a plan can be read back by its event id. Every write it takes is recorded. */
+class PlanLedger implements Pick<ReconcileLedger, "emitNote" | "readEvent"> {
+	readonly notes = new Map<string, LedgerNote>();
+	constructor(
+		private readonly spy: WriteSpy,
+		private readonly stored = true,
+	) {}
+	async emitNote(_summary: string, payload: Record<string, unknown>): Promise<{ id: string; stored: boolean }> {
+		const id = `evt_${this.notes.size + 1}`;
+		this.spy.writes.push(`ledger.note:${id}`);
+		if (this.stored) this.notes.set(id, { id, ts: minutesAgo(0), kind: "note", payload });
+		return { id, stored: this.stored };
+	}
+	async readEvent(id: string): Promise<LedgerNote | null> {
+		return this.notes.get(id) ?? null;
+	}
+}
+
+/** The ports over a drifted graph: the index holds n1 at epoch 3, the anonymous cache view holds it at epoch 2. */
+function driftPorts(ledger: PlanLedger, spy: WriteSpy, cacheNodes: PairNode[] = [node("n1", 2)]): CacheIndexRepairPorts {
+	return { ledger, index: new FakeIndex([], [node("n1", 3)], spy), cache: new FakeCache({ state: "present", nodes: cacheNodes }, spy) };
+}
+
+async function planDrift(ledger: PlanLedger, spy: WriteSpy) {
+	return planCacheIndexRepair(ledger, await reconcileCacheIndex(GRAPH, driftPorts(ledger, spy)));
+}
+
+async function driftPlanId(ledger: PlanLedger, spy: WriteSpy): Promise<string> {
+	const run = await planDrift(ledger, spy);
+	if (!run.ok || run.planId === null) throw new Error("expected a plan for a drifted report");
+	return run.planId;
+}
+
+/** Rewrites the plan a stored note holds, keeping its action and digests, so the stored record no longer matches them. */
+function editStoredPlan(ledger: PlanLedger, planId: string, edit: (plan: Record<string, unknown>) => Record<string, unknown>): void {
+	const note = ledger.notes.get(planId);
+	const payload = note?.payload;
+	if (note === undefined || payload === null || payload === undefined) throw new Error("no stored plan to edit");
+	ledger.notes.set(planId, { ...note, payload: { ...payload, plan: edit(payload.plan as Record<string, unknown>) } });
+}
+
+describe("repair: planning writes one plan note and no bump", () => {
+
+	test("a drifted report writes exactly one reconcile.plan.cache-index note whose event id is the plan id, and bumps nothing", async () => {
+		const spy = new WriteSpy();
+		const ledger = new PlanLedger(spy);
+		const run = await planDrift(ledger, spy);
+		expect(run).toEqual({
+			ok: true,
+			planId: "evt_1",
+			items: [
+				{ action: "bump", key: graphGenerationKey(GRAPH) },
+				{ action: "bump", key: GRAPHS_GENERATION_KEY },
+			],
+		});
+		expect(spy.writes).toEqual(["ledger.note:evt_1"]);
+		expect(ledger.notes.size).toBe(1);
+		expect(ledger.notes.get("evt_1")?.payload).toMatchObject({ action: CACHE_INDEX_PLAN_ACTION, plan: { pair: "cache-index", graphId: GRAPH } });
+	});
+
+	test("a clean or unavailable report plans nothing and writes nothing", async () => {
+		const spy = new WriteSpy();
+		const ledger = new PlanLedger(spy);
+		const clean = await reconcileCacheIndex(GRAPH, { index: new FakeIndex([], [node("n1", 1)], spy), cache: new FakeCache({ state: "absent" }, spy) });
+		expect(await planCacheIndexRepair(ledger, clean)).toEqual({ ok: true, planId: null, refused: "not-drift" });
+		const down = await reconcileCacheIndex(GRAPH, { index: new FakeIndex([], [node("n1", 1)], spy), cache: new FakeCache(new BreakerOpenError("cache", 1), spy) });
+		expect(await planCacheIndexRepair(ledger, down)).toEqual({ ok: true, planId: null, refused: "not-drift" });
+		expect(spy.writes).toEqual([]);
+		expect(ledger.notes.size).toBe(0);
+	});
+
+	test("a plan the ledger does not store is refused, and no bump follows", async () => {
+		const spy = new WriteSpy();
+		const run = await planDrift(new PlanLedger(spy, false), spy);
+		expect(run).toMatchObject({ ok: false, reason: "plan-not-recorded" });
+		expect(spy.writes.filter((write) => write.startsWith("cache.bump"))).toEqual([]);
+	});
+});
+
 describe("repair: refused without a confirmed plan", () => {
-	async function driftReport(): Promise<CacheIndexReport> {
+	test("apply without a confirmation writes nothing", async () => {
 		const spy = new WriteSpy();
-		return reconcileCacheIndex(
-			GRAPH,
-			deps({
-				ledger: new FakeLedger([]),
-				index: new FakeIndex([], [node("n1", 3)], spy),
-				cache: new FakeCache({ state: "present", nodes: [node("n1", 2)] }, spy),
-			}),
-		);
-	}
-
-	async function driftPlan(): Promise<CacheIndexRepairPlan> {
-		const plan = planCacheIndexRepair(await driftReport());
-		if (plan === null) throw new Error("expected a plan for a drifted report");
-		return plan;
-	}
-
-	test("a clean or unavailable report plans nothing", async () => {
-		const spy = new WriteSpy();
-		const clean = await reconcileCacheIndex(
-			GRAPH,
-			deps({ ledger: new FakeLedger([]), index: new FakeIndex([], [node("n1", 1)], spy), cache: new FakeCache({ state: "absent" }, spy) }),
-		);
-		expect(planCacheIndexRepair(clean)).toBeNull();
-		const down = await reconcileCacheIndex(
-			GRAPH,
-			deps({ ledger: new FakeLedger([]), index: new FakeIndex([], [node("n1", 1)], spy), cache: new FakeCache(new BreakerOpenError("cache", 1), spy) }),
-		);
-		expect(planCacheIndexRepair(down)).toBeNull();
+		const ledger = new PlanLedger(spy);
+		const planId = await driftPlanId(ledger, spy);
+		const applySpy = new WriteSpy();
+		const ports = driftPorts(ledger, applySpy);
+		expect(await applyCacheIndexRepair(ports, { planId })).toMatchObject({ ok: false, reason: "not-confirmed" });
+		expect(await applyCacheIndexRepair(ports, { planId, confirm: "not-the-plan" })).toMatchObject({ ok: false, reason: "not-confirmed" });
+		expect(applySpy.writes).toEqual([]);
 	});
 
-	test("no plan, a missing confirmation or a wrong one is refused and writes nothing", async () => {
-		const plan = await driftPlan();
+	test("a plan id that is not on the ledger, or that names a note which is not a cache-index plan, is refused", async () => {
 		const spy = new WriteSpy();
-		const bumper = new SpyBumper(spy);
-		expect(await applyCacheIndexRepair({ cache: bumper }, null, plan.planId)).toMatchObject({ ok: false, reason: "not-confirmed" });
-		expect(await applyCacheIndexRepair({ cache: bumper }, plan, undefined)).toMatchObject({ ok: false, reason: "not-confirmed" });
-		expect(await applyCacheIndexRepair({ cache: bumper }, plan, "not-the-plan")).toMatchObject({ ok: false, reason: "not-confirmed" });
-		expect(spy.writes).toEqual([]);
+		const ledger = new PlanLedger(spy);
+		const applySpy = new WriteSpy();
+		const ports = driftPorts(ledger, applySpy);
+		expect(await applyCacheIndexRepair(ports, { planId: "evt_404", confirm: "evt_404" })).toMatchObject({ ok: false, reason: "plan-not-found" });
+		expect(await applyCacheIndexRepair(ports, { planId: "not a plan!", confirm: "not a plan!" })).toMatchObject({ ok: false, reason: "plan-invalid" });
+		// A forget plan is a different action: its note is not a cache-index plan, whatever its items.
+		ledger.notes.set("evt_forget", { id: "evt_forget", ts: minutesAgo(0), kind: "note", payload: { action: "reconcile.plan", plan: { items: [], itemsSha256: "x" } } });
+		expect(await applyCacheIndexRepair(ports, { planId: "evt_forget", confirm: "evt_forget" })).toMatchObject({ ok: false, reason: "plan-invalid" });
+		expect(applySpy.writes).toEqual([]);
 	});
 
-	test("a plan whose items were altered after it was made is refused and writes nothing", async () => {
-		const plan = await driftPlan();
+	test("a plan whose recorded items were altered after it was made is refused and writes nothing", async () => {
 		const spy = new WriteSpy();
-		const swapped: CacheIndexRepairPlan = { ...plan, items: [...plan.items].reverse() };
-		expect(await applyCacheIndexRepair({ cache: new SpyBumper(spy) }, swapped, plan.planId)).toMatchObject({ ok: false, reason: "plan-invalid" });
-		expect(spy.writes).toEqual([]);
+		const ledger = new PlanLedger(spy);
+		const planId = await driftPlanId(ledger, spy);
+		editStoredPlan(ledger, planId, (plan) => ({ ...plan, items: [...(plan.items as unknown[])].reverse() }));
+		const applySpy = new WriteSpy();
+		expect(await applyCacheIndexRepair(driftPorts(ledger, applySpy), { planId, confirm: planId })).toMatchObject({ ok: false, reason: "plan-invalid" });
+		expect(applySpy.writes).toEqual([]);
+	});
+
+	test("apply with a stale digest refuses: the cache or index has moved since the plan was made, and nothing is written", async () => {
+		const spy = new WriteSpy();
+		const ledger = new PlanLedger(spy);
+		const planId = await driftPlanId(ledger, spy);
+		const applySpy = new WriteSpy();
+		// The cache has since been repaired under another epoch: the same node, now agreeing with the index. The plan's state is gone.
+		const moved = driftPorts(ledger, applySpy, [node("n1", 3)]);
+		expect(await applyCacheIndexRepair(moved, { planId, confirm: planId })).toMatchObject({ ok: false, reason: "plan-invalid" });
+		expect(applySpy.writes).toEqual([]);
+	});
+
+	test("a fresh read that cannot be taken refuses, and writes nothing", async () => {
+		const spy = new WriteSpy();
+		const ledger = new PlanLedger(spy);
+		const planId = await driftPlanId(ledger, spy);
+		const applySpy = new WriteSpy();
+		const down = { ...driftPorts(ledger, applySpy), cache: new FakeCache(new BreakerOpenError("cache", 1), applySpy) };
+		expect(await applyCacheIndexRepair(down, { planId, confirm: planId })).toMatchObject({ ok: false, reason: "unavailable" });
+		expect(applySpy.writes).toEqual([]);
 	});
 });
 
 describe("repair: a confirmed plan touches only the planned keys", () => {
-	test("a confirmed plan bumps exactly its two generation keys, in order, and nothing else", async () => {
+	test("apply with confirmation bumps only the two generation keys, in order, and writes no other note", async () => {
 		const spy = new WriteSpy();
-		const plan = planCacheIndexRepair({
-			pair: "cache-index",
-			graphId: GRAPH,
-			verdict: "drift",
-			reason: null,
-			layer: null,
-			counts: { cacheState: "present", surfacesCompared: 1, cacheNodes: 1, indexNodes: 1, matched: 0, versionMismatch: 1, cacheOnly: 0, indexOnly: 0 },
-			mismatches: { count: 1, first: null, items: [] },
-		});
-		if (plan === null) throw new Error("expected a plan");
-		const run = await applyCacheIndexRepair({ cache: new SpyBumper(spy) }, plan, plan.planId);
-		expect(run).toEqual({ ok: true, planId: plan.planId, bumped: [graphGenerationKey(GRAPH), GRAPHS_GENERATION_KEY] });
-		expect(spy.writes).toEqual([`cache.bump:${graphGenerationKey(GRAPH)}`, `cache.bump:${GRAPHS_GENERATION_KEY}`]);
+		const ledger = new PlanLedger(spy);
+		const planId = await driftPlanId(ledger, spy);
+		const applySpy = new WriteSpy();
+		const run = await applyCacheIndexRepair(driftPorts(ledger, applySpy), { planId, confirm: planId });
+		expect(run).toEqual({ ok: true, planId, bumped: [graphGenerationKey(GRAPH), GRAPHS_GENERATION_KEY] });
+		expect(applySpy.writes).toEqual([`cache.bump:${graphGenerationKey(GRAPH)}`, `cache.bump:${GRAPHS_GENERATION_KEY}`]);
+		expect(ledger.notes.size).toBe(1);
 	});
 
 	test("a cache that cannot write stops the repair and reports how far it got", async () => {
 		const spy = new WriteSpy();
-		const plan = planCacheIndexRepair({
-			pair: "cache-index",
-			graphId: GRAPH,
-			verdict: "drift",
-			reason: null,
-			layer: null,
-			counts: { cacheState: "present", surfacesCompared: 1, cacheNodes: 1, indexNodes: 1, matched: 0, versionMismatch: 1, cacheOnly: 0, indexOnly: 0 },
-			mismatches: { count: 1, first: null, items: [] },
-		});
-		if (plan === null) throw new Error("expected a plan");
-		const run = await applyCacheIndexRepair({ cache: new SpyBumper(spy, GRAPHS_GENERATION_KEY) }, plan, plan.planId);
-		expect(run).toMatchObject({ ok: false, reason: "unavailable" });
-		expect(spy.writes).toEqual([`cache.bump:${graphGenerationKey(GRAPH)}`]);
+		const ledger = new PlanLedger(spy);
+		const planId = await driftPlanId(ledger, spy);
+		const applySpy = new WriteSpy();
+		const base = new FakeCache({ state: "present", nodes: [node("n1", 2)] }, applySpy);
+		// Reads like `base`; the bump of the graphs generation key fails.
+		const writes = new SpyBumper(applySpy, GRAPHS_GENERATION_KEY);
+		const cache: PairCache & PairCacheBumper = {
+			graphGeneration: (graphId) => base.graphGeneration(graphId),
+			cachedGraph: (graphId, surface) => base.cachedGraph(graphId, surface),
+			bump: (key) => writes.bump(key),
+		};
+		const run = await applyCacheIndexRepair({ ledger, index: new FakeIndex([], [node("n1", 3)], applySpy), cache }, { planId, confirm: planId });
+		expect(run).toMatchObject({ ok: false, reason: "unavailable", detail: expect.stringContaining("bumped 1 of 2") });
+		expect(applySpy.writes).toEqual([`cache.bump:${graphGenerationKey(GRAPH)}`]);
 	});
 });
 
