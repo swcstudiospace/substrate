@@ -299,6 +299,7 @@ import {
 } from "./skills/registry.ts";
 import {
 	ACTORS,
+	EDGE_KINDS,
 	EVENT_KINDS,
 	SURFACES,
 	isSwarmSurface,
@@ -1015,6 +1016,48 @@ export const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
 export const GRAPH_ID_PATTERN = /^ut-[a-z0-9]+-[0-9a-f]{8}$/;
 
 export class InvalidBindError extends Error {}
+
+/** A graph's edge set that the graph cannot hold. The message names the offending edge; nothing was written. */
+export class InvalidGraphEdgesError extends Error {}
+
+type PlannedEdge = Pick<GraphEdge, "from_node" | "to_node" | "kind">;
+
+/**
+ * Refuse an edge set that cannot hold: a self-loop, an edge to a node outside `nodeIds`, or a cycle over the
+ * `requires` and `gated_by` edges. A `requires` or `gated_by` edge makes `from_node` wait on `to_node`, so a cycle
+ * waits on itself and never finishes. `blocks` edges sit outside the cycle check.
+ */
+function assertGraphEdges(edges: readonly PlannedEdge[], nodeIds: ReadonlySet<string>): void {
+	for (const edge of edges) {
+		const named = `${edge.from_node} ${edge.kind} ${edge.to_node}`;
+		if (edge.from_node === edge.to_node) throw new InvalidGraphEdgesError(`edge ${named} is a self-loop`);
+		for (const node of [edge.from_node, edge.to_node]) {
+			if (!nodeIds.has(node)) throw new InvalidGraphEdgesError(`edge ${named} names node ${node}, which is not in the graph`);
+		}
+	}
+	const waitsOn = new Map<string, PlannedEdge[]>();
+	for (const edge of edges) {
+		if (edge.kind === "blocks") continue;
+		waitsOn.set(edge.from_node, [...(waitsOn.get(edge.from_node) ?? []), edge]);
+	}
+	const finished = new Set<string>();
+	const path: string[] = [];
+	const walk = (node: string): void => {
+		path.push(node);
+		for (const edge of waitsOn.get(node) ?? []) {
+			if (path.includes(edge.to_node)) {
+				const cycle = [...path.slice(path.indexOf(edge.to_node)), edge.to_node].join(" -> ");
+				throw new InvalidGraphEdgesError(`edge ${edge.from_node} ${edge.kind} ${edge.to_node} closes a cycle: ${cycle}`);
+			}
+			if (!finished.has(edge.to_node)) walk(edge.to_node);
+		}
+		path.pop();
+		finished.add(node);
+	};
+	for (const node of waitsOn.keys()) {
+		if (!finished.has(node)) walk(node);
+	}
+}
 
 /**
  * Why `proposeSkill` would not act for this caller. `status` is the HTTP class the route
@@ -4650,16 +4693,39 @@ export class Substrate {
 		// the old graph on show. Relations are written for a request that carried edges, or
 		// that gives a node a Linear reference: a saved edge may have waited for that link.
 		// An update that does neither changes no relation.
-		const view = await (async () => {
+		// Edges are checked before the write, so a refused graph writes nothing.
+		if (plan.edges) await this.checkPlannedEdges(index, plan.graph_id, plan.nodes ?? [], plan.edges);
+		const written = await (async () => {
 			try {
-				return withoutLeaseIds(await index.registerGraph(plan));
+				return await index.registerGraph(plan);
 			} finally {
 				await this.bumpGraph(plan.graph_id);
 			}
 		})();
+		// `removed` is the edge set this write dropped. It is not part of the reply.
+		const { removed = [], ...graph } = written;
+		const view = withoutLeaseIds(graph);
 		const tracker = (plan.nodes ?? []).some((node) => node.linear_issue_id != null || node.linear_identifier != null);
+		if (removed.length > 0) await this.unmirrorEdges(written);
 		if (plan.edges !== undefined || tracker) await this.mirrorEdges(view);
 		return view;
+	}
+
+	/**
+	 * Refuse a request whose edges the graph cannot hold, before the index write. An edge may name a node this
+	 * request registers or one an earlier register of the same graph left in place, since nodes upsert and stay.
+	 */
+	private async checkPlannedEdges(
+		index: IndexStore,
+		graphId: string,
+		nodes: Array<{ node_id: string }>,
+		edges: Array<Pick<GraphEdge, "from_node" | "to_node" | "kind">>,
+	): Promise<void> {
+		const kept = edges.filter((edge) => (EDGE_KINDS as readonly string[]).includes(edge.kind));
+		if (kept.length === 0) return;
+		const stored = await index.getGraph(graphId);
+		const known = new Set([...(stored?.nodes ?? []), ...nodes].map((node) => node.node_id));
+		assertGraphEdges(kept, known);
 	}
 
 	/**
@@ -5217,6 +5283,45 @@ export class Substrate {
 					...(outcome.reason ? { reason: outcome.reason } : {}),
 				},
 			}).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * Drop the Linear relations of edges a register just removed. It runs after the index write, so the index
+	 * already holds the new edge set. Never throws, like `mirrorEdges`: a Linear failure must not fail the
+	 * registration behind it. A failure leaves one warning per edge on the node that waited on it.
+	 */
+	private async unmirrorEdges(result: GraphView & { removed: GraphEdge[] }): Promise<void> {
+		const { removed } = result;
+		const mirror = this.mirror;
+		if (!mirror) return;
+		try {
+			await mirror.removeEdges(removed, result);
+		} catch (cause) {
+			const reason = (cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+			for (const edge of removed) {
+				const waiting = edge.kind === "blocks" ? edge.to_node : edge.from_node;
+				const blocker = edge.kind === "blocks" ? edge.from_node : edge.to_node;
+				await this.emit({
+					surface: "substrate",
+					kind: "warning",
+					summary: `linear relation removal failed: ${blocker} blocks ${waiting} (${edge.kind})`,
+					graph_id: edge.graph_id,
+					node_id: waiting,
+					session_id: `unrelate:${edge.graph_id}:${blocker}:${waiting}:${edge.kind}`,
+					actor: "agent",
+					payload: {
+						action: "mirror",
+						target: "linear",
+						op: "unrelate",
+						edge_kind: edge.kind,
+						blocker_node: blocker,
+						waiting_node: waiting,
+						status: "failed",
+						reason,
+					},
+				}).catch(() => undefined);
+			}
 		}
 	}
 

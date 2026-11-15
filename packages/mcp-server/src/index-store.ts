@@ -1308,7 +1308,7 @@ export class IndexStore implements MemoryStore {
 		nodes?: Array<{ [K in keyof GraphNode]?: GraphNode[K] | undefined } & { node_id: string }> | undefined;
 		steps?: Array<{ [K in keyof GraphStep]?: GraphStep[K] | undefined } & { node_id: string; step: number }> | undefined;
 		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }> | undefined;
-	}): Promise<GraphView> {
+	}): Promise<GraphView & { removed: GraphEdge[] }> {
 		await this.sql`
 			insert into graph_index (graph_id, notion_task_page, repo, branch, surface, status, pr_url, updated)
 			values (${plan.graph_id}, ${plan.notion_task_page ?? null}, ${plan.repo ?? null}, ${plan.branch ?? null},
@@ -1353,6 +1353,9 @@ export class IndexStore implements MemoryStore {
 		// went on reporting a held node as blocked by a relation that no longer
 		// existed. So `edges` present is the authoritative set for this graph, and
 		// `edges` absent leaves them untouched.
+		// `removed` is what this replace dropped: the edges stored before it that are absent from the new set. The
+		// caller takes the matching Linear relations down with them. Empty when `edges` is absent.
+		let removed: GraphEdge[] = [];
 		if (plan.edges) {
 			// An unknown kind is dropped rather than stored: `drift_scan` reads these
 			// to decide whether a claim is premature, and a kind it cannot interpret
@@ -1369,6 +1372,8 @@ export class IndexStore implements MemoryStore {
 				// that matches no row locks nothing, so the lock has to come from
 				// somewhere that does exist, and the parent row always does by here.
 				await tx`select graph_id from graph_index where graph_id = ${plan.graph_id} for update`;
+				const before = (await tx`
+					select graph_id, from_node, to_node, kind from graph_edges where graph_id = ${plan.graph_id}`) as GraphEdge[];
 				await tx`delete from graph_edges where graph_id = ${plan.graph_id}`;
 				for (const edge of edges) {
 					await tx`
@@ -1376,12 +1381,14 @@ export class IndexStore implements MemoryStore {
 						values (${plan.graph_id}, ${edge.from_node}, ${edge.to_node}, ${edge.kind})
 						on conflict (graph_id, from_node, to_node, kind) do nothing`;
 				}
+				const kept = new Set(edges.map((edge) => JSON.stringify([edge.from_node, edge.to_node, edge.kind])));
+				removed = before.filter((edge) => !kept.has(JSON.stringify([edge.from_node, edge.to_node, edge.kind])));
 			});
 		}
 
 		const view = await this.getGraph(plan.graph_id);
 		if (!view) throw new Error(`graph ${plan.graph_id} vanished after register`);
-		return view;
+		return { ...view, removed };
 	}
 
 	async getGraph(graphId: string): Promise<GraphView | null> {

@@ -29,7 +29,7 @@ import {
 } from "./linear.ts";
 import { NotionClient, notionPageId, type PropertyValue } from "./notion.ts";
 import { redact } from "./redact.ts";
-import { type EdgeKind, isSwarmSurface, type Surface } from "./types.ts";
+import { type EdgeKind, type GraphEdge, type GraphView, isSwarmSurface, type Surface } from "./types.ts";
 
 export type MirrorOp = "claim" | "steal" | "release" | "expire" | "force" | "review" | "done" | "close";
 
@@ -117,6 +117,28 @@ export interface EdgeRelation {
 /** What one edge did. `skipped` means a side has no tracker issue, so nothing was asked of Linear. */
 export interface EdgeOutcome extends EdgeRelation {
 	status: "created" | "existing" | "skipped" | "failed";
+	reason?: string;
+}
+
+/**
+ * The waiting and blocking node of one stored edge. `blocks` is written from the blocking side; `requires` and
+ * `gated_by` from the waiting side.
+ */
+export function edgeSides(edge: Pick<GraphEdge, "from_node" | "to_node" | "kind">): { waiting: string; blocker: string } {
+	return edge.kind === "blocks"
+		? { waiting: edge.to_node, blocker: edge.from_node }
+		: { waiting: edge.from_node, blocker: edge.to_node };
+}
+
+/**
+ * What one dropped edge did to its Linear relation. `kept`: another edge still holds the same pair. `skipped`: a side
+ * has no tracker issue, or no relation exists in Linear.
+ */
+export interface RelationRemoval {
+	kind: EdgeKind;
+	waitingNode: string;
+	blockerNode: string;
+	status: "removed" | "kept" | "skipped" | "failed";
 	reason?: string;
 }
 
@@ -454,6 +476,59 @@ export class Mirror {
 			} catch (cause) {
 				const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
 				outcomes.push({ ...edge, status: "failed", reason });
+			}
+		}
+		return outcomes;
+	}
+
+	/**
+	 * Take down the Linear `blocks` relations of edges a graph replace dropped. `view` is the graph as the replace left
+	 * it: a pair that another edge still holds keeps its relation, since a Linear relation is one pair of issues. An
+	 * edge with no tracker issue on either side, or with no relation in Linear, is skipped. Each edge stands alone: a
+	 * failure on one never stops the rest. Never throws.
+	 */
+	async removeEdges(removed: GraphEdge[], view: Pick<GraphView, "nodes" | "edges">): Promise<RelationRemoval[]> {
+		const byNode = new Map(view.nodes.map((node) => [node.node_id, node] as const));
+		const trackerRef = (nodeId: string): string | null => {
+			const node = byNode.get(nodeId);
+			return node?.linear_issue_id ?? node?.linear_identifier ?? null;
+		};
+		const held = new Set(
+			view.edges.map((edge) => {
+				const { waiting, blocker } = edgeSides(edge);
+				return JSON.stringify([blocker, waiting]);
+			}),
+		);
+		const outcomes: RelationRemoval[] = [];
+		for (const edge of removed) {
+			const { waiting, blocker } = edgeSides(edge);
+			const base = { kind: edge.kind, waitingNode: waiting, blockerNode: blocker };
+			if (held.has(JSON.stringify([blocker, waiting]))) {
+				outcomes.push({ ...base, status: "kept" });
+				continue;
+			}
+			const linear = this.linear;
+			const waitingRef = trackerRef(waiting);
+			const blockerRef = trackerRef(blocker);
+			if (!linear || !waitingRef || !blockerRef) {
+				outcomes.push({ ...base, status: "skipped" });
+				continue;
+			}
+			try {
+				const blockerIssue = await linear.issueRelations(blockerRef);
+				const waitingIssue = await linear.issueRelations(waitingRef);
+				const matching = blockerIssue.relations.filter(
+					(relation) => relation.type === "blocks" && relation.relatedIssueId === waitingIssue.id,
+				);
+				if (matching.length === 0) {
+					outcomes.push({ ...base, status: "skipped", reason: "no Linear relation" });
+					continue;
+				}
+				for (const relation of matching) await linear.deleteIssueRelation(relation.id);
+				outcomes.push({ ...base, status: "removed" });
+			} catch (cause) {
+				const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+				outcomes.push({ ...base, status: "failed", reason });
 			}
 		}
 		return outcomes;
