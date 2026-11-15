@@ -4,6 +4,16 @@ Shipped changes, newest first. Each entry names the switch or command an operato
 
 ## 2026-11-14
 
+### Claim refused while a prerequisite is open (SPE-5717)
+
+- `graph_claim` is refused with reason `prerequisite-open` while a `requires` or `gated_by` prerequisite of the node is open. A prerequisite is open until its node is `completed`. The reply names it in `prerequisite`.
+- A refused claim grants no lease and writes nothing: no index write, no event, no mirror. A holder's renewal is refused the same way while a prerequisite is open.
+- `blocks` edges do not hold a claim.
+
+### Cycles refused before the index write
+
+- Cycles through any edge kind are refused before the index write.
+
 ### Operator all-markdown docs ingest: `substrate docs ingest-all` (707bc903, d2f573fe)
 
 - Operator-run only. The CLI is the only entry. The server boot path never imports the job, and no timer runs it.

@@ -69,7 +69,7 @@ function stubStores(
 				},
 			};
 		},
-		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null } : null),
+		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null, nodes: [], edges: [] } : null),
 		releaseNode: async (graph_id: string, node_id: string) => {
 			released.push({ graph_id, node_id });
 			return { released: true };
@@ -112,8 +112,8 @@ describe("claimNode", () => {
 		expect(emitted[0]?.summary).not.toContain("n4");
 	});
 
-	test("still claims when the graph lookup fails — the claim matters more than its event", async () => {
-		const { emitted, index, greptime } = stubStores(null);
+	test("refuses the claim when the graph lookup fails: the prerequisites cannot be read, so nothing is granted", async () => {
+		const { emitted, index, greptime, callers } = stubStores(null);
 		index.getGraph = async () => {
 			throw new Error("postgres blipped");
 		};
@@ -121,8 +121,11 @@ describe("claimNode", () => {
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
-		expect(result.claimed).toBe(true);
-		expect(emitted[0]?.repo).toBeNull();
+		expect(result).toMatchObject({ claimed: false, action: "refused", reason: "prerequisite-unknown", prerequisite: null, ttl_seconds: null });
+		expect(result.lease.lease_id).toBeNull();
+		// The index was never asked to grant, and no event is written for a refused claim.
+		expect(callers).toEqual([]);
+		expect(emitted).toEqual([]);
 	});
 
 	test("hands the caller the lease it is now holding, and the TTL it was granted", async () => {
@@ -292,6 +295,137 @@ describe("claimNode", () => {
 			expect(result.decision).toBe("revoked");
 			expect(stores.released).toEqual([{ graph_id: "ut-1", node_id: "n4" }]);
 		});
+	});
+});
+
+describe("claimNode waits on open prerequisites", () => {
+	type Edge = { from_node: string; to_node: string; kind: "requires" | "gated_by" | "blocks" };
+
+	function graphNode(node_id: string, state: string) {
+		return {
+			graph_id: "ut-1",
+			node_id,
+			linear_identifier: `SPE-${node_id}`,
+			linear_issue_id: null,
+			notion_page: null,
+			state,
+			claimed_by: null,
+			claimed_at: null,
+			claim_session: null,
+			lease_id: null,
+			lease_expires_at: null,
+			lease_heartbeat_at: null,
+			lease_epoch: 0,
+		};
+	}
+
+	/**
+	 * A graph the claim reads afresh on every call, as the index does: a test completes a prerequisite by setting its
+	 * state in `states`. `grants` records every hold the index made; `emitted` every event the ledger took.
+	 */
+	function world(edges: Edge[], states: Record<string, string>) {
+		const grants: string[] = [];
+		const emitted: SubstrateEvent[] = [];
+		const index = {
+			getGraph: async () => ({
+				graph_id: "ut-1",
+				repo: "swcstudiospace/x",
+				branch: "main",
+				steps: [],
+				edges: edges.map((edge) => ({ graph_id: "ut-1", ...edge })),
+				nodes: Object.entries(states).map(([node_id, state]) => graphNode(node_id, state)),
+			}),
+			claimNode: async (_graph_id: string, node_id: string, surface: string, session_id: string) => {
+				grants.push(node_id);
+				return {
+					claimed: true,
+					node: graphNode(node_id, states[node_id] ?? "unstarted"),
+					lease: { lease_id: "lse_1", epoch: 1, expires_at: "2026-09-30T12:15:00.000Z", state: "held" },
+					decision: {
+						action: "granted",
+						granted: true,
+						lease_id: "lse_1",
+						epoch: 1,
+						observed_epoch: 0,
+						ttl_seconds: 900,
+						evicted: null,
+						holder: { surface, session_id },
+						observed_expiry: null,
+						reason: null,
+					},
+				};
+			},
+			releaseNode: async () => ({ released: true }),
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				emitted.push(event);
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
+		return { substrate, grants, emitted };
+	}
+
+	test("a requires prerequisite that is open refuses the claim, and the claim is granted once it completes", async () => {
+		const states = { n3: "started", n4: "unstarted" };
+		const { substrate, grants, emitted } = world([{ from_node: "n4", to_node: "n3", kind: "requires" }], states);
+
+		const refused = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(refused).toMatchObject({ claimed: false, decision: "contended", action: "refused", reason: "prerequisite-open", ttl_seconds: null });
+		expect(refused.prerequisite).toEqual({ kind: "requires", node_id: "n3", linear_identifier: "SPE-n3", state: "started" });
+		expect(refused.lease.lease_id).toBeNull();
+		expect(grants).toEqual([]);
+		expect(emitted).toEqual([]);
+
+		states.n3 = "completed";
+		const granted = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(granted).toMatchObject({ claimed: true, decision: "granted", reason: null, prerequisite: null });
+		expect(grants).toEqual(["n4"]);
+		expect(emitted.map((event) => event.kind)).toEqual(["claim"]);
+	});
+
+	test("a gated_by prerequisite holds the claim the same way", async () => {
+		const states = { n3: "started_review", n4: "unstarted" };
+		const { substrate, grants } = world([{ from_node: "n4", to_node: "n3", kind: "gated_by" }], states);
+
+		const refused = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(refused).toMatchObject({ claimed: false, reason: "prerequisite-open" });
+		expect(refused.prerequisite?.kind).toBe("gated_by");
+		expect(grants).toEqual([]);
+
+		states.n3 = "completed";
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, reason: null });
+		expect(grants).toEqual(["n4"]);
+	});
+
+	test("a blocks edge does not hold the blocked node: only requires and gated_by are claim prerequisites", async () => {
+		const { substrate, grants } = world([{ from_node: "n3", to_node: "n4", kind: "blocks" }], { n3: "started", n4: "unstarted" });
+
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, reason: null, prerequisite: null });
+		expect(grants).toEqual(["n4"]);
+	});
+
+	test("a claim with no prerequisites is unchanged", async () => {
+		const { substrate, grants, emitted } = world([], { n4: "unstarted" });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(result).toMatchObject({ claimed: true, decision: "granted", action: "granted", reason: null, prerequisite: null });
+		expect(grants).toEqual(["n4"]);
+		expect(emitted.map((event) => event.kind)).toEqual(["claim"]);
+	});
+
+	test("what waits on a node does not hold that node's own claim", async () => {
+		// n3 requires n4: n3 is the waiter, so n4 has no prerequisite and its claim stands even though n3 is open.
+		const { substrate, grants } = world([{ from_node: "n3", to_node: "n4", kind: "requires" }], { n3: "unstarted", n4: "started" });
+
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, reason: null });
+		expect(grants).toEqual(["n4"]);
 	});
 });
 
@@ -491,7 +625,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 				lease,
 				decision: granted,
 			}),
-			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main", nodes: [], edges: [] }),
 			releaseNode: async (graph_id: string, node_id: string, request: { lease_id?: string | null }, caller: Surface | null) => {
 				if (options.releaseFails) throw new Error("postgres is down");
 				// Held to the holder's surface like any release, so a withdrawal made as
@@ -3380,7 +3514,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 					observed_expiry: null,
 				},
 			}),
-			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main", nodes: [], edges: [] }),
 			releaseNode: async (graph_id: string, node_id: string) => ({
 				released: true,
 				node: { graph_id, node_id },

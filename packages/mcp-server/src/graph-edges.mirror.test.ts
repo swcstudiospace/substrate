@@ -345,7 +345,57 @@ describe("graph edges are checked before the index write", () => {
 			edges: [
 				{ from_node: "n2", to_node: "n1", kind: "requires" },
 				{ from_node: "n3", to_node: "n2", kind: "gated_by" },
-				{ from_node: "n1", to_node: "n3", kind: "blocks" },
+				{ from_node: "n3", to_node: "n1", kind: "blocks" },
+			],
+		} as never);
+		expect(registered.graph_id).toBe(GRAPH);
+		expect(writes).toHaveLength(1);
+	});
+
+	test("a cycle over blocks edges is refused, naming the edge that closes it, and writes nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate, writes, emitted } = harness(viewOf(REFS, []), recordingMirror(calls));
+		const error = await refusalOf(
+			substrate.registerGraph({
+				graph_id: GRAPH,
+				edges: [
+					{ from_node: "n1", to_node: "n2", kind: "blocks" },
+					{ from_node: "n2", to_node: "n3", kind: "blocks" },
+					{ from_node: "n3", to_node: "n1", kind: "blocks" },
+				],
+			} as never),
+		);
+		expect(error.message).toBe("edge n3 blocks n1 closes a cycle: n1 -> n2 -> n3 -> n1");
+		expect(writes).toEqual([]);
+		expect(calls).toEqual([]);
+		expect(emitted).toEqual([]);
+	});
+
+	test("a cycle that mixes blocks with requires and gated_by edges is refused, and writes nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate, writes } = harness(viewOf(REFS, []), recordingMirror(calls));
+		const error = await refusalOf(
+			substrate.registerGraph({
+				graph_id: GRAPH,
+				edges: [
+					{ from_node: "n1", to_node: "n2", kind: "blocks" },
+					{ from_node: "n2", to_node: "n3", kind: "requires" },
+					{ from_node: "n3", to_node: "n1", kind: "blocks" },
+				],
+			} as never),
+		);
+		expect(error.message).toBe("edge n3 blocks n1 closes a cycle: n1 -> n2 -> n3 -> n1");
+		expect(writes).toEqual([]);
+		expect(calls).toEqual([]);
+	});
+
+	test("an acyclic chain of blocks edges is accepted and written", async () => {
+		const { substrate, writes } = harness(viewOf(REFS, []), mirrorAnswering((edges) => edges.map((edge) => ({ ...edge, status: "skipped" }))));
+		const registered = await substrate.registerGraph({
+			graph_id: GRAPH,
+			edges: [
+				{ from_node: "n1", to_node: "n2", kind: "blocks" },
+				{ from_node: "n2", to_node: "n3", kind: "blocks" },
 			],
 		} as never);
 		expect(registered.graph_id).toBe(GRAPH);

@@ -56,7 +56,7 @@ const claimedAs: string[] = [];
 const claimCallers: Array<Surface | null> = [];
 
 const index = {
-	getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }),
+	getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main", nodes: [], edges: [] }),
 	// The throwing read `completeNode` gates on: unknown rows come back null
 	// (the fenced path refuses in its own words).
 	readNode: async () => ({ ...heldNode }),

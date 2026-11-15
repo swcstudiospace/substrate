@@ -1008,6 +1008,8 @@ export interface ClaimResult {
 	reason: string | null;
 	/** The TTL the hold was granted for, after clamping, so a holder can pace its heartbeats; null when no hold stands. */
 	ttl_seconds: number | null;
+	/** The open prerequisite a refused claim waits on, so the caller can finish it first; null on every other reply. */
+	prerequisite: { kind: "requires" | "gated_by"; node_id: string; linear_identifier: string | null; state: NodeState | null } | null;
 }
 
 /** A swarm run's correlation id: 1..200 characters of `[A-Za-z0-9._:-]`. */
@@ -1023,9 +1025,9 @@ export class InvalidGraphEdgesError extends Error {}
 type PlannedEdge = Pick<GraphEdge, "from_node" | "to_node" | "kind">;
 
 /**
- * Refuse an edge set that cannot hold: a self-loop, an edge to a node outside `nodeIds`, or a cycle over the
- * `requires` and `gated_by` edges. A `requires` or `gated_by` edge makes `from_node` wait on `to_node`, so a cycle
- * waits on itself and never finishes. `blocks` edges sit outside the cycle check.
+ * Refuse an edge set that cannot hold: a self-loop, an edge to a node outside `nodeIds`, or a cycle over edges of
+ * any kind. Each edge runs from `from_node` to `to_node`, so a cycle never finishes: every node in it waits on the
+ * next. `requires`, `gated_by` and `blocks` edges are all checked the same way.
  */
 function assertGraphEdges(edges: readonly PlannedEdge[], nodeIds: ReadonlySet<string>): void {
 	for (const edge of edges) {
@@ -1035,16 +1037,15 @@ function assertGraphEdges(edges: readonly PlannedEdge[], nodeIds: ReadonlySet<st
 			if (!nodeIds.has(node)) throw new InvalidGraphEdgesError(`edge ${named} names node ${node}, which is not in the graph`);
 		}
 	}
-	const waitsOn = new Map<string, PlannedEdge[]>();
+	const outgoing = new Map<string, PlannedEdge[]>();
 	for (const edge of edges) {
-		if (edge.kind === "blocks") continue;
-		waitsOn.set(edge.from_node, [...(waitsOn.get(edge.from_node) ?? []), edge]);
+		outgoing.set(edge.from_node, [...(outgoing.get(edge.from_node) ?? []), edge]);
 	}
 	const finished = new Set<string>();
 	const path: string[] = [];
 	const walk = (node: string): void => {
 		path.push(node);
-		for (const edge of waitsOn.get(node) ?? []) {
+		for (const edge of outgoing.get(node) ?? []) {
 			if (path.includes(edge.to_node)) {
 				const cycle = [...path.slice(path.indexOf(edge.to_node)), edge.to_node].join(" -> ");
 				throw new InvalidGraphEdgesError(`edge ${edge.from_node} ${edge.kind} ${edge.to_node} closes a cycle: ${cycle}`);
@@ -1054,7 +1055,7 @@ function assertGraphEdges(edges: readonly PlannedEdge[], nodeIds: ReadonlySet<st
 		path.pop();
 		finished.add(node);
 	};
-	for (const node of waitsOn.keys()) {
+	for (const node of outgoing.keys()) {
 		if (!finished.has(node)) walk(node);
 	}
 }
@@ -5488,6 +5489,10 @@ export class Substrate {
 	 * returns its id, so it must come from the holder's own surface: any other
 	 * token is refused `not-holder`, with nothing changed, no id and no event.
 	 *
+	 * **Prerequisites come first.** A node waits on each prerequisite its `requires` and `gated_by` edges name, until that
+	 * prerequisite is completed. While one is open the claim is refused `prerequisite-open`, naming it in `prerequisite`,
+	 * before the index is asked: no lease is granted and nothing is written.
+	 *
 	 * See `decideClaim` in `@substrate/audit` and `docs/observability.md`.
 	 */
 	async claimNode(
@@ -5500,6 +5505,69 @@ export class Substrate {
 	): Promise<ClaimResult> {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
+		// A node waits on each prerequisite its `requires` and `gated_by` edges name, from the waiting side, until that
+		// prerequisite is completed. `blocks` edges are not claim prerequisites. This is checked before the index is asked,
+		// so a refusal grants no lease and writes nothing: no index write, no event, no mirror.
+		let graph: GraphView | null;
+		try {
+			graph = await this.index.getGraph(graphId);
+		} catch (cause) {
+			// Fail closed: without the graph there is no telling whether a prerequisite is open, so the claim is refused
+			// rather than granted blind. Nothing is written: no lease, no index write, no event, no mirror.
+			process.stderr.write(`[substrate] claim ${graphId}/${nodeId} refused: the prerequisite graph could not be read — ${redact(String(cause))}\n`);
+			const unread: GraphNode = {
+				graph_id: graphId,
+				node_id: nodeId,
+				linear_issue_id: null,
+				linear_identifier: null,
+				notion_page: null,
+				state: null,
+				claimed_by: null,
+				claimed_at: null,
+				claim_session: null,
+				lease_id: null,
+				lease_expires_at: null,
+				lease_heartbeat_at: null,
+				lease_epoch: 0,
+			};
+			this.observer.claimed?.({ surface, graph_id: graphId, node_id: nodeId, decision: "contended", action: "refused", reason: "prerequisite-unknown", quarantineReason: null });
+			return {
+				claimed: false,
+				node: unread,
+				lease: leaseView(leaseSnapshot(unread)),
+				action: "refused",
+				evicted: null,
+				decision: "contended",
+				reason: "prerequisite-unknown",
+				prerequisite: null,
+				ttl_seconds: null,
+			};
+		}
+		const subject = graph?.nodes.find((node) => node.node_id === nodeId) ?? null;
+		let prerequisite: ClaimResult["prerequisite"] = null;
+		if (graph && subject) {
+			for (const edge of graph.edges) {
+				if (edge.from_node !== nodeId || (edge.kind !== "requires" && edge.kind !== "gated_by")) continue;
+				const upstream = graph.nodes.find((node) => node.node_id === edge.to_node);
+				if (upstream?.state === "completed") continue;
+				prerequisite = { kind: edge.kind, node_id: edge.to_node, linear_identifier: upstream?.linear_identifier ?? null, state: upstream?.state ?? null };
+				break;
+			}
+		}
+		if (subject && prerequisite) {
+			this.observer.claimed?.({ surface, graph_id: graphId, node_id: nodeId, decision: "contended", action: "refused", reason: "prerequisite-open", quarantineReason: null });
+			return {
+				claimed: false,
+				node: { ...subject, lease_id: null },
+				lease: leaseView(leaseSnapshot(subject)),
+				action: "refused",
+				evicted: null,
+				decision: "contended",
+				reason: "prerequisite-open",
+				prerequisite,
+				ttl_seconds: null,
+			};
+		}
 		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, caller, ttl);
 		const { decision } = result;
 		const identifier = result.node.linear_identifier;
@@ -5626,6 +5694,7 @@ export class Substrate {
 			decision: verdict.decision,
 			reason,
 			ttl_seconds: granted ? ttl : null,
+			prerequisite: null,
 		};
 	}
 

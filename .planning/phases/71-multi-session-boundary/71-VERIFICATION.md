@@ -1,163 +1,178 @@
 ---
 phase: 71-multi-session-boundary
-verified: "2026-10-31"
+verified: "2026-11-15T00:00:00Z"
 status: human_needed
-local_status: passed
-score: "5/5 roadmap success criteria verified locally"
-requirements_verified_locally: [HARD-S1]
-behavior_unverified: 0
-behavior_unverified_items: []
-gaps: []
+score: "1/5 roadmap success criteria verified by source inspection; 3 behavior-unverified (present and wired, runtime invariant not exercised); 1 uncertain (regression execution record required)"
+covered_files: [".env.example", ".planning/REQUIREMENTS.md", ".planning/phases/71-multi-session-boundary/71-01-PLAN.md", ".planning/phases/71-multi-session-boundary/71-01-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-02-PLAN.md", ".planning/phases/71-multi-session-boundary/71-02-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-03-PLAN.md", ".planning/phases/71-multi-session-boundary/71-03-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-04-DOCS-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-04-PLAN.md", ".planning/phases/71-multi-session-boundary/71-04-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-05-SUMMARY.md", "docs/config-reference.md", "docs/coordination.md", "docs/data-planes.md", "docs/event-vocabulary.md", "docs/live-steering.md", "docs/runbooks/index-archive.md", "docs/runbooks/rollback-compat.md", "docs/runbooks/session-rollback.md", "packages/audit/src/policy.test.ts", "packages/audit/src/policy.ts", "packages/audit/src/record.test.ts", "packages/cli/src/session/command.test.ts", "packages/cli/src/session/command.ts", "packages/cli/src/session/hook-config.test.ts", "packages/cli/src/session/hook-config.ts", "packages/cli/src/session/hook.test.ts", "packages/cli/src/session/hook.ts", "packages/cli/src/session/steering-consumed.test.ts", "packages/cli/src/session/steering-consumed.ts", "packages/cli/src/steer/binding-record.test.ts", "packages/cli/src/steer/binding-record.ts", "packages/cli/src/steer/client.test.ts", "packages/cli/src/steer/client.ts", "packages/cli/src/steer/index.test.ts", "packages/cli/src/steer/index.ts", "packages/cli/src/steer/render.test.ts", "packages/cli/src/steer/render.ts", "packages/mcp-server/src/admission.test.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/brief-fast-path.test.ts", "packages/mcp-server/src/brief-sessions.test.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/docs-plane-hardening.test.ts", "packages/mcp-server/src/docs-search.test.ts", "packages/mcp-server/src/docs-search.ts", "packages/mcp-server/src/event-sources.test.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/flag-registry.test.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/http.admission.test.ts", "packages/mcp-server/src/index-store.migrate-contract.test.ts", "packages/mcp-server/src/index-store.migrate.test.ts", "packages/mcp-server/src/index-store.migrations.digests.json", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/live-session-boundary.test.ts", "packages/mcp-server/src/live-session-consumer.test-support.ts", "packages/mcp-server/src/live-session-isolation.test.ts", "packages/mcp-server/src/live-session-restart.pg.test.ts", "packages/mcp-server/src/mcp.brief.test.ts", "packages/mcp-server/src/mcp.steering.test.ts", "packages/mcp-server/src/mcp.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/planning/live-session-authority.pg.test.ts", "packages/mcp-server/src/planning/live-session-authority.test.ts", "packages/mcp-server/src/planning/live-session.test-support.ts", "packages/mcp-server/src/planning/session-state.test.ts", "packages/mcp-server/src/planning/session-state.ts", "packages/mcp-server/src/planning/steering-delivery.test.ts", "packages/mcp-server/src/planning/steering-delivery.ts", "packages/mcp-server/src/planning/steering-rest.test.ts", "packages/mcp-server/src/planning/steering-rest.ts", "packages/mcp-server/src/planning/steering-session-gate.test.ts", "packages/mcp-server/src/planning/steering-sessions-store.ts", "packages/mcp-server/src/planning/steering-tools.test.ts", "packages/mcp-server/src/planning/steering-tools.ts", "packages/mcp-server/src/planning/steering-waiters.test.ts", "packages/mcp-server/src/planning/steering-waiters.ts", "packages/mcp-server/src/server.steering.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/session-context.service.test.ts", "packages/mcp-server/src/session-context.test.ts", "packages/mcp-server/src/session-events.test.ts", "packages/mcp-server/src/steering-wiring.test.ts"]
+covered_digest: "v3:sha256:27a1356a70b299b4d1548b0a3704759d852b86e0085d6bb9fe4804495781b050"
+behavior_unverified: 3
 overrides_applied: 0
-external_gate: "Desk Quality / Programming Lead review WAIVED by the user on 2026-11-12 (answers what=not_real, needs=greptile_only). Remaining gate: Greptile review with no open threads, not yet observed."
+re_verification:
+  previous_status: human_needed
+  previous_score: "5/5 roadmap success criteria verified locally (prior report; its run logs were not reproduced here)"
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
+behavior_unverified_items:
+  - truth: "SC1: foreign, unknown, wrong-proof, expired and closed targets return the identical 404 (status, body, headers) on every private read/write, with no directive, acknowledgement or session-state change on refusal"
+    test: "Run packages/mcp-server/src/live-session-isolation.test.ts and packages/mcp-server/src/mcp.steering.test.ts with SUBSTRATE_TEST_PG_URL set; confirm the variant matrix executes (not skipped) and passes"
+    expected: "Every denied variant returns status 404 and the NOT_FOUND body; authority snapshots and inbox state are unchanged after each refusal"
+    why_human: "Single 404 builder and effect-after-prepare ordering are visible in source, but the no-effect and cross-transport byte-identity claims are only asserted by tests this verifier was not permitted to execute"
+  - truth: "SC2: principal-keyed limiting runs before any binding lookup or refusal audit, including when general admission is off/shadow or the cache is down"
+    test: "Run packages/mcp-server/src/admission.test.ts flood case (around lines 590-612) and the mcp.steering.test.ts principal-429 case"
+    expected: "Over-limit principal receives 429 with zero authority reads (read called once) and zero refusal audit writes"
+    why_human: "Ordering invariant; reserve() precedes prepareReserved() in source, but the zero-lookup behaviour requires execution"
+  - truth: "SC3 / HARD-S1: durable ownership, lease, revocation and closed-session tombstones survive a fresh service and SQL pool with the optional cache disabled; authority outage fails closed"
+    test: "Run packages/mcp-server/src/live-session-restart.pg.test.ts and packages/mcp-server/src/planning/live-session-authority.pg.test.ts against a controlled PostgreSQL (SUBSTRATE_TEST_PG_URL); confirm they execute, not skip"
+    expected: "Closed identities stay permanently closed; issuance cannot reuse a retained session_id; unavailable SQL returns session-unavailable, never a grant"
+    why_human: "State transition and restart invariants cannot be established by presence checks; both suites are skipped when no PostgreSQL URL is set"
+coincidental_reliance_items: []
 human_verification:
-  - item: "Greptile review of the phase 71 remediation on PR #199 reaches 5/5 with no open threads"
-    expected: "Review observed; findings addressed; a FAILED, SKIPPED or unavailable review is not a pass"
-    reason: "Greptile is the only remaining delivery gate after the user's Desk waiver"
-    status: "open"
-  - item: "Local gates re-run 2026-11-12 at commit 033c9694 (docs-only change after code commit 067f094b)"
-    expected: "bunx tsc --noEmit exit 0; bun run lint exit 0 (1727 files); bun run check:phase-close exit 0; npm run test:py 341 passed"
-    reason: "Recorded as evidence for the waiver; full bun test was last run at 067f094b (11,901 pass, 0 fail, 282 skip)"
-    status: "passed"
+  - test: "Greptile review of the phase 71 remediation (PR #199 / gsd/v18-p71-greptile-fixes) with no open threads"
+    expected: "A completed review observed with findings addressed; a FAILED, SKIPPED or unavailable review is a blocker, not a pass"
+    why_human: "Required by generic desk rules and 71-VALIDATION; not observed by this verifier"
+  - test: "Controlled-PostgreSQL execution record for the named HARD-S1 suites and the steering regression set named in 71-04-PLAN and ROADMAP SC5"
+    expected: "Recorded pass/skip counts per file; zero failures; no suite skipped for lack of SUBSTRATE_TEST_PG_URL"
+    why_human: "ROADMAP SC5 requires re-running the regression set and recording counts; this verifier executed nothing"
+  - test: "Confirm the two deleted regression suites are an accepted contract change for SC5"
+    expected: "Owner acceptance that packages/mcp-server/src/planning/session-state.durable.test.ts and packages/mcp-server/src/planning/steering-sessions-store.pg.test.ts (listed in 71-04-PLAN files_modified) are removed as obsolete, with coverage moved to live-session-authority.pg.test.ts and live-session-restart.pg.test.ts"
+    expected: "Explicit decision recorded; SC5 record names the removal"
+    why_human: "71-04-SUMMARY records the removal as intentional; ROADMAP SC5 asks that deliberate contract changes be recorded by the owner"
+  - test: "Confirm migration 42 digest entry in packages/mcp-server/src/index-store.migrations.digests.json is generated by the pure digest generator, not hand-written"
+    expected: "Generator output equals the recorded value 83874f58abcca8a9796696318b6c2210ca2b30cbcd57468485462c5005188b28 for key \"42\""
+    why_human: "71-01-SUMMARY states the parent owns digest generation; the value could not be checked without running the generator"
+  - test: "Owner decision: operator private-read override"
+    expected: "Confirm D71-01 intent that an operator may read any live session's private snapshot without its proof (authorized() in steering-sessions-store.ts returns true for isOperator on private-read, close, operator-queue, operator-ack)"
+    why_human: "Explicit policy exception to the uniform not-found rule; correct by design per the plan but a security-relevant owner decision"
+advisory:
+  - finding: "Expiry pass emits no steering.session_ended event"
+    category: other
+    reason: "71-05 follow-up 4; downstream consumers needing the event have no mechanism"
+    evidence_status: "documented follow-up; no defect evidenced in this review"
+  - finding: "Capacity refusal reuses PERSISTENCE_FAILED text stating an unused identity expires, which is inaccurate when nothing was issued"
+    category: other
+    reason: "71-05 Decision 4; wording change needs owner decision"
+    evidence_status: "documented; the text is in the CLI binding path (packages/cli/src/steer/index.ts)"
+  - finding: "Partial index on expires_at for open rows may be needed under load"
+    category: architectural
+    reason: "71-05 follow-up 2 requires a migration and its own review"
+    evidence_status: "none provided; EXPLAIN not run"
+  - finding: "Pool connection held by a stalled FOR UPDATE until statement timeout"
+    category: architectural
+    reason: "71-05 follow-up 5; sharedDeadline has no abort handle"
+    evidence_status: "none provided; no load evidence"
 ---
 
-# Phase 71: Multi-Session Boundary — Independent Verification
+# Phase 71: Multi-Session Boundary — Verification Report (regenerated)
 
-**Goal:** Enforce authenticated bindings on private live-session reads/writes; make foreign and unknown targets indistinguishable; issue unguessable, never-reused live identities; preserve operator-only steering writes and the redacted repository-wide context digest.
+**Phase Goal:** Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Decision: local implementation and exercised acceptance PASSED; overall sign-off HUMAN_NEEDED.** All five corrected roadmap success criteria and HARD-S1 are met within the isolated local scope described below. No remaining evidence-backed implementation gap was found. This is **not** an external-review pass, a deployment/recovery certification, phase-completion authorization, or a merge-ready claim. `71-VALIDATION.md` requires the Desk Quality / Programming Lead Greptile gate; no successful review of the new draft is observed. That outstanding delivery gate is why the overall status is `human_needed`, despite the local score of 5/5.
+**Verified:** 2026-11-15
+**Status:** human_needed
+**Re-verification:** Yes. A prior `71-VERIFICATION.md` (2026-10-31, status `human_needed`, local score 5/5) exists. Its claims were re-derived from source here; its run logs were not reproduced.
+
+## Decision
+
+The implementation is present and wired for all five roadmap success criteria and for HARD-S1. I found **no FAILED truth, no missing or stub artifact, no unwired key link, and no blocker**, so the decision tree does not return `gaps_found`.
+
+The status is `human_needed` for three reasons:
+
+1. **Behavior is not established by execution here.** Three criteria (SC1, SC2, SC3) assert runtime invariants: identical refusals with no side effects, ordering of limiting before lookup, and durability across restart. Those are behavior-dependent and are classified ⚠️ PRESENT_BEHAVIOR_UNVERIFIED. This verifier was not permitted to run the suites.
+2. **SC5 requires a recorded regression run** that this verifier did not perform. It is classified UNCERTAIN.
+3. **The Greptile gate for the remediation is not observed.** Under the desk rules, a missing review is a blocker to any merge-ready claim.
+
+Nothing here claims merge-readiness, phase completion, deployment, or security certification.
 
 ## Evidence boundary and method
 
-Independent goal-backward inspection used the installed verifier role, `71-CONTEXT.md` decisions D71-01..10, `.planning/REQUIREMENTS.md` HARD-S1 and delivery requirements, corrected `.planning/ROADMAP.md` Phase 71, all four PLAN/SUMMARY pairs, `71-04-DOCS-SUMMARY.md`, `71-VALIDATION.md`, the previous verification, implemented consumers, substantive test assertions, and the parent's actual final log outputs. Execution summaries were treated as implementation inventories, **not** proof of passing tests. Their earlier pending/failed wording is retained history, superseded for local execution only by the final evidence here.
+- Read: the four PLAN files (must_haves), the SUMMARY files for 01–04, `71-04-DOCS-SUMMARY.md`, and `71-05-SUMMARY.md`. 71-05 has no PLAN; it is treated as a Greptile-remediation summary and its claimed code changes were checked directly.
+- Read the authority, the service gate, the REST and MCP adapters, the CLI record and client, the hook, the digest, migration 42 and its digest entry, and the named test files.
+- **Not run:** no tests, builds, typecheck, lint, formatters, installs, SQL, or runtime probes. Test assertions were read, not executed. Anything that depends only on execution is marked *not confirmed by execution*.
+- Scoped debt-marker gate (TBD, FIXME, XXX, TODO, HACK, PLACEHOLDER) over the phase's implementation and test-support files returned no matches.
+- Fingerprint computed with `gsd_run query verification.fingerprint` over the phase PLAN and SUMMARY files, REQUIREMENTS.md, and the implementation and test files the plans and 71-05 touched. Digest copied verbatim (see Fingerprint).
 
-This verifier ran **no** tests, builds, linters, formatters, installations, runtime probes, SQL commands, git writes, or production operations. Only this report was written. Counts below are parent-executed results, inspected from the supplied logs. Ephemeral log locations and credential paths are intentionally not repository links; evidence is identified by command label, output, and repository-relative source/test paths. No verification fingerprint or automated decision-coverage command was executed or fabricated.
+## Roadmap success criteria
 
-## Goal achievement
+| # | Criterion | Status | Evidence (source) | Not confirmed by execution |
+|---|---|---|---|---|
+| 1 | Foreign and unknown live session IDs produce the same 404 status, body and headers on every private read or write. No directive, acknowledgement or session state changes on refusal. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Single denial builder `liveSessionNotFound()` at `packages/mcp-server/src/planning/steering-tools.ts:47`; `deny()`/`recordDenial()` at `steering-tools.ts:145-148`; authority returns one `notFound()` for missing, wrong-proof, foreign, closed and expired rows (`packages/mcp-server/src/planning/steering-sessions-store.ts`, `authorized`/`locked`); REST maps `not-found` to 404 via `steeringHttpStatus` (`packages/mcp-server/src/planning/steering-rest.ts:266-285`) and `sendSteeringResult` (`packages/mcp-server/src/server.ts:741-744`); MCP folds it into `liveBatchRefusal` (`server.ts:751-765`); effects only after `prepare`/`recheck` (`service.ts` `executeLiveCall`, `updateLiveSession` at ~2120, `heartbeatLiveSession` ~2150, `closeLiveSession` ~2161). Routes covered: `server.ts:2293-2308` (sessions, heartbeat, close), `server.ts:2320` directives, `server.ts:2332-2353` queue/acknowledge, `server.ts:2375` wait. | Yes. Asserted by `packages/mcp-server/src/live-session-isolation.test.ts:40,49,89,104` (`status` 404 and body equal to `NOT_FOUND`), `packages/mcp-server/src/mcp.steering.test.ts`, `packages/mcp-server/src/server.steering.test.ts`. |
+| 2 | Operator authority is explicit; permitted cross-session operations stay available. Refusal audits hash identifiers and record no private body. Principal limiting runs before binding lookup. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Operator policy as a table, `OPERATOR_OPERATIONS` in `steering-sessions-store.ts` (`private-read`, `close`, `operator-queue`, `operator-ack`); non-operator queue/ack refused as `forbidden operator-required` at `steering-tools.ts:120-122`; refusal audit stores `target_sha256` only (`steering-tools.ts:148`, digest of target sliced to 128); `prepare()` calls `reserve()` before `prepareReserved()` so limiting precedes any authority read. | Yes. Ordering ("zero authority reads on 429") asserted by `packages/mcp-server/src/admission.test.ts` ~594-610 (`read` called once across 200 refusals) and `mcp.steering.test.ts` principal-429 case. |
+| 3 | Server-issued identities have ≥128 bits of randomness. Durable ownership and closed-session tombstones prevent reissue or takeover, including after restart. Unavailable authority fails closed. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Identifier and proof each `entropy(32)` (256 bits) in `bunLiveSessionAuthority.issue` (`steering-sessions-store.ts`); only SHA-256 domain-separated `binding_proof_hash` stored; `on conflict (session_id) do nothing` with 4-attempt retry, so a retained session_id is never reissued; closed rows kept (no `delete from live_session_bindings` anywhere in non-test code, grep confirmed); migration 42 `live_session_bindings` primary key on `session_id` (`packages/mcp-server/src/index-store.ts:893-915`). Fail-closed: `authority === null` or any driver error yields `session-unavailable` (`steering-tools.ts` `prepareReserved`; `steering-sessions-store.ts` catch blocks); service wiring `service.ts:1941` only from `IndexStore.liveSessions` (`index-store.ts:1176`). The former cache port is absent from the authority. | Yes. Restart/tombstone behaviour in `packages/mcp-server/src/live-session-restart.pg.test.ts` (`describeLive`, gated on `SUBSTRATE_TEST_PG_URL` at line 19-20) and `packages/mcp-server/src/planning/live-session-authority.pg.test.ts` (two-store race at 176-181; unissued legacy row denied at 217-225). Both skip without a PostgreSQL URL. |
+| 4 | Operator-only queue/ack and the legacy unkeyed command shape are unchanged. All affected callers migrate to the explicit identity lifecycle; no alias bypasses binding. | ✓ VERIFIED (presence and wiring) | Operator gate on queue/ack (`steering-tools.ts:120-122`; queue `operation: "operator-queue"` at `steering-tools.ts:164` and `service.ts:1554`; ack `operator-ack` at `steering-tools.ts:290` and `service.ts:1555`). Unkeyed directive path preserved (`steering-tools.ts:168` `if (key === undefined) return enqueueDirective(...)`). Migrated callers: CLI sends the proof only in `X-Substrate-Session-Binding` (`packages/cli/src/steer/client.ts:419-432`; heartbeat and close forward `request.sessionBinding` at `client.ts:515-522`); MCP takes `session_binding` (`packages/mcp-server/src/mcp.ts:659-690`). No production `registry.put`/`registry.get` used as authority (grep found only `repo-executor.ts:90`, unrelated). | Not required for presence; the operator/unkeyed behaviour is asserted by 71-04 suites, which are not executed here. |
+| 5 | The redacted repo-wide `session_context` digest remains; re-run the recorded steering regression set and the new isolation, revocation and restart cases; record pass/skip counts and deliberate contract changes. | ? UNCERTAIN | Digest unchanged in design: every string through `redact` and `clean` (`packages/mcp-server/src/session-context.ts:198`); steering source is the proof-free metadata projection `listMetadata` (`packages/mcp-server/src/service.ts` ~3810-3812), selecting only `session_id, owner_surface, repo_id, state, updated_at, expires_at`. Regression re-run: **not executed by this verifier.** Two regression files named in 71-04-PLAN (`session-state.durable.test.ts`, `steering-sessions-store.pg.test.ts`) were deleted as obsolete (see Warnings); pass/skip counts are not recorded in this verification. | Yes. |
 
-### Corrected roadmap success criteria
+### HARD-S1 cross-reference (`.planning/REQUIREMENTS.md:112`)
 
-| # | Required truth | Status | Substantive implementation and exercised evidence |
-|---|---|---|---|
-| 1 | Every private read/write has indistinguishable not-found denial and no refused effects, including directives, wait, MCP, docs transitions and augmentation | VERIFIED locally | `packages/mcp-server/src/planning/steering-tools.ts` provides the shared typed refusal and checked boundary. `service.ts` routes lifecycle, directives, waits, docs and brief through it; `server.ts` and `mcp.ts` call those consumers. `live-session-isolation.test.ts` compares status, body and application headers across missing/wrong/sibling proof, foreign surface, unknown, expired and closed targets; checks inbox/audit effect counts and unchanged authority state. `mcp.steering.test.ts` exercises the actual HTTP MCP interceptor and registered tools. These cases passed in the 602-test acceptance rerun and final root suite. |
-| 2 | Explicit operator permissions remain; refusal audit is hash-only; principal admission precedes lookup | VERIFIED locally | `LiveSessionBoundary.reserve/prepareBatch/prepareReserved` charges surface/read-write buckets before authority or directive inference. `service.ts` prepares before its injected generic audit, consumes one-use argument/caller-bound dispatch entries, and rechecks before effects. `observe.ts` omits private live targets from plaintext generic context. Actual REST/HTTP-MCP/direct-service tests passed for off/shadow/cache-outage limiting, no lookup/audit on 429, target refusal before audit outage, required-audit-before-effect, duplicate invocations, batch cancellation and preserved historical batches. Operator private-read/close/queue/ack overrides are explicit; owner transition/heartbeat cannot borrow them. |
-| 3 | CSPRNG identities, durable owner/tombstone/non-reuse across restart, unavailable authority fails closed | VERIFIED locally | `planning/steering-sessions-store.ts` independently draws two 32-byte values, hashes proof with a separate domain, inserts without upsert, bounds collision retries, locks rows and obtains SQL wall time after the lock. `index-store.ts` migration 42 and `IndexStore.liveSessions` are real mandatory factory wiring. Controlled PostgreSQL authority/restart suites actually passed with independent pools, cache migration off, reconnect, collisions, expiry-after-lock, close races, legacy rows, missing schema, disconnected authority and lost commit responses. No in-memory helper is used as the durability proof. |
-| 4 | Operator queue/ack and legacy unkeyed shapes preserved; all affected callers migrate without bypass aliases | VERIFIED locally | Queue/ack retain existing inbox allowlist/confirmation/audit policy through `queueSteering` and `acknowledgeSteeringWithState`; REST acknowledgement still infers the target from the directive only after principal admission. CLI `steer/index.ts`, `steer/client.ts`, private `binding-record.ts` and session hook consumers use exact selected credentials. Historical labels remain separate. Removed registry/cache granting APIs and TTL configuration are not compatibility authorization shims. CLI/HTTP tracer, actual native CLI smoke, hook/client tests, steering/delivery tests and root regression passed. |
-| 5 | Public-redacted context preserved; steering regression and new isolation/revocation/restart cases exercised | VERIFIED locally | `service.ts` uses `authority.listMetadata` for public context, not fake operator credentials; `session-context.ts` remains the public assembler. Existing digest, historical/public and operator tests run in the final complete root suite. New release tests cover docs retrieval/ledger awaits, brief full/fast/snapshot/last-good/conditional paths, durable history and held/immediate/queued/timeout/closed waits. Final root result: 11,596 pass, 2 unrelated opt-in skips, 0 fail. Acceptance rerun: 602 pass, 0 fail, no skips. |
-
-**Local score: 5/5.** No truth is credited solely for file existence, export presence, mocked route success, a proposed command, or an earlier preliminary pass.
-
-### Original S1 facets and accepted protocol
-
-The S1-* names are the research/validation facets of **HARD-S1**, not additional upstream requirements.
-
-| Facet | Met/unmet locally | Evidence and scope |
+| Clause | Status | Evidence |
 |---|---|---|
-| S1-IDENTITY | MET | Server-only issuance in `planning/steering-sessions-store.ts`; independent 256-bit public ID/private proof, domain-separated hash and timing-safe fixed-length comparison. Authority unit/PG tests cover entropy failure, active/terminal collisions, bounded exhaustion and no caller-selected adoption. |
-| S1-BINDING | MET | SQL read/transition/heartbeat/close plus shared boundary on actual REST/MCP/service consumers. Same-surface sibling isolation requires proof even when the public ID is discovered. Direct docs/brief calls without trusted live context refuse; historical attribution alone grants nothing. |
-| S1-NOTFOUND | MET | Common `{status:"refused",error:{code:"not-found"}}`; REST 404 and equal application headers, MCP same typed tool result with `isError` in its normal JSON-RPC envelope. MCP HTTP itself remains the normal transport status, not a fabricated REST 404. Syntax 400, bearer 401, operator-required 403, principal 429 and authority 503 remain separate. |
-| S1-DURABLE | MET | Mandatory migration 42 `live_session_bindings`, global primary key, immutable adapter owner/repo, retained terminal rows, no legacy backfill or runtime cache grant. Controlled PG reconstructs separate services/pools and preserves active state and tombstones. Applied migration digest contract passes; parent records versions 1..41 unchanged, 42 appended. Non-reuse depends on retaining complete authority history; lost/stale backup is not covered. |
-| S1-LIVENESS | MET | SQL wall clock after row lock; owner-proof heartbeat/ordinary transition renew, operator observation/queue/ack do not. Closed/expired identity cannot revive. Bounded wait rechecks use at most 1000 ms slices and no transaction held across socket wait. Controlled independent-instance close/expiry/outage release cases and cleanup passed. |
-| S1-LIMITER | MET | Mandatory bounded principal/class map in `planning/steering-tools.ts`, independent of general admission/cache. HTTP MCP reserves all live costs before target resolution; release rechecks do not recharge. Spies and actual transport tests assert zero target/inference/audit work after 429. |
-| S1-AUDIT | MET | `target_sha256` uses the refusal-specific domain; no raw requested live identifier/body/proof in refusal fields. Generic live audit context excludes live `session_id`; canonical argument values remain a digest, not plaintext. Real generic audit delegation is injected in `index.ts`. Refused target remains identical if refusal/generic sinks fail; admitted required mutations fail closed. |
-| S1-COMPAT | MET | Operator-only unkeyed queue/ack/confirm/allowlist and public-redacted context retained. CLI/hooks explicitly distinguish historical `--session` from live `--steering-session`; exact URL/surface/handle record selection, no sibling fanout, no proof argv/reset. Existing historical event/checkpoint/query authorization and previously published rows remain unchanged; no retroactive confidentiality is claimed. |
-| HARD-S1 proof privacy | MET | SQL stores only proof hash; public discovery selects metadata only, including for operators. Private docs bypass shared docs/memory-result storage, brief private sections stay outside reusable snapshots, proof is absent from prompts/events/audit/cache/output. Actual producer/query tests inspect new transition/ack/retrieval/close events through sibling REST and HTTP MCP payload queries. Native CLI confirms proof not printed and retained file 0600 then removed on close. |
+| Server-issued identifiers and binding credentials use cryptographic randomness | Met (source) | `randomBytes(32)` via `entropy` in `steering-sessions-store.ts`, two independent 32-byte values per issuance |
+| Durable ownership, revocation and tombstones prevent takeover or reuse across restart | Met (source); behavior unverified | migration 42 (`index-store.ts:893-915`); rows retained with `closed_at`/`close_reason`; `expireDue` marks expired rows terminal, keeps identity (`steering-sessions-store.ts`, `EXPIRY_PASS_LIMIT` at line 169) |
+| Foreign, unknown, wrong-proof, expired and closed yield the same not-found | Met (source); behavior unverified | Single `notFound()` in `authorized`/`locked`; single `liveSessionNotFound()` in `steering-tools.ts:47` |
+| Keep only credential hashes in the authority | Met (source) | `binding_proof_hash` = domain-separated SHA-256 (`bindingHash`, `steering-sessions-store.ts`); no plaintext column |
+| Never leak proofs through logs, discovery, cache keys, audit or prompts | Met (source) | Discovery selects public columns only (`listing`); refusal audit records `target_sha256` only (`steering-tools.ts:148`); expiry-pass log carries correlation id and error class, not SQL text or proof (`steering-sessions-store.ts`, `failureKind`); no cache in authority; CLI `open` output omits the proof (`packages/cli/src/steer/index.ts` ~329, `publicResult`) |
+| Preserve redacted repository-wide context digest; keep historical event/checkpoint labels separate | Met (source) | `session-context.ts`; hook uses historical `session_id` for checkpoints and `steering_session_id` plus a binding file for private hints, and rejects a `session_binding` in the envelope (`packages/cli/src/session/hook.ts:141`, `:321-336`) |
 
-**Requirements coverage:** HARD-S1 is locally satisfied, with no waived facet. Phases 72..78 and the eight-feature milestone/audit are not certified by this report.
+## Plan must-haves
 
-## Artifact substance and consumer reachability
-
-| Producer / artifact | Real consumer / key link | Verification result |
+| Plan | Must-have truths | Assessment |
 |---|---|---|
-| `index-store.ts` migration 42 and `liveSessions()` | `Substrate` constructor → `bunLiveSessionAuthority` on the existing SQL pool | WIRED. Migration is additive, not opt-in; authority failures do not grant from cache. Controlled factory/PG/restart cases exercise this exact path. |
-| `planning/steering-sessions-store.ts` seven-method authority | Boundary reads; lifecycle mutations; caller-filtered discovery; public `listMetadata` | SUBSTANTIVE + WIRED. Real transactional insert/read/update/heartbeat/terminal close/list queries, not an unused port. |
-| `planning/steering-tools.ts` and `service.ts` | REST handlers; registered MCP wrappers; direct service methods | WIRED. `prepareLiveBatch` → `auditPreparedBatch` → one-use `executeLiveCall` → final SQL check/effect. Missing/failed required audit is a typed refusal, not no-op success. |
-| `server.ts`, `mcp.ts`, production `index.ts` | Header-only REST proof; validated MCP proof; trusted bearer caller; original audit implementation | WIRED. Native/real HTTP plus HTTP MCP tests cover transport and interception, not helper-only invocation. |
-| `service.ts` docs/brief/directives/wait orchestration | Checked snapshot before private retrieval/augmentation; recheck after retrieval/history/cache/brief/wait awaits | WIRED. Private denial escapes degraded/fallback/ETag paths; test barriers close/expire/fail authority before final release. |
-| `planning/session-state.ts`, steering delivery/waiters | Authoritative acknowledgement-driven transitions; explicit close wakes; independent-instance SQL polling | WIRED. Ack may remain effective while transition refuses; no fabricated hint. No historical session-end revocation or writable registry remains. |
-| `event.ts` safe payload and service/docs producers; `observe.ts` context policy | Actual new ledger events and generic audit sink → sibling historical queries | WIRED. Safe allowlists are used at real producers; actual queried rows omit synthetic private markers. Historical query authorization and old rows are intentionally unchanged. |
-| CLI `steer/{index,client,binding-record}.ts` | Native CLI entrypoint and `session/hook.ts` | WIRED. Exact record validation, atomic private persistence, proof header, typed terminal refusal, heartbeat expiry update, matching removal on close. Native smoke adds actual process-to-HTTP-to-PG evidence. |
-| Existing runbooks, environment/config reference | Implemented lifecycle/recovery/operator procedures | SUBSTANTIVE. `docs/live-steering.md`, `docs/data-planes.md`, `docs/event-vocabulary.md`, `docs/coordination.md`, `docs/runbooks/{session-rollback,index-archive,rollback-compat}.md`, `.env.example`, `docs/config-reference.md` document the cutover, lease and real limits. Their unverified wording is an earlier publication-state caveat, not production evidence. |
+| 71-01 (SQL authority) | Issuance returns independent 256-bit identity and one-time proof, only hash persisted; state survives restart without cache; foreign/unknown/wrong-proof/expired/closed cannot act; authority failure is unavailable | Source met. Restart clause behavior unverified (PG suite not executed). Migration 42 digest entry present at `packages/mcp-server/src/index-store.migrations.digests.json` line 43 (value `83874f58…8b28`); whether it was generated by the pure generator is **not confirmed** (71-01-SUMMARY says the parent owned generation). |
+| 71-02 (CLI private records) | Proof stays private (never stdout/stderr, URL, or checkpoint journal); selected record only; typed 404 terminates requests; operator queue/ack and historical contracts unchanged | Source met. `binding-record.ts` writes exclusively, fsyncs, mode 0600, validates identity; `index.ts` `open` prints no proof; hook rejects proof in envelope. Not executed. |
+| 71-03 (service and transports) | One durable boundary for REST, MCP and direct service; uniform 404 and sanitized 503; principal limiting first; docs/brief recheck; revocation stops live delivery; operator queue/ack and digest intact | Source met (`service.ts` `waitLiveDirectives` recheck each ≤1000 ms slice at ~2201-2206; `steering-tools.ts` boundary; `server.ts` adapters). Not executed. |
+| 71-04 (consumer verification and docs) | Consumer matrix tests; fixtures issue real authority; real HTTP+CLI round trip; documentation truthful | Test files present (`live-session-isolation.test.ts`, `live-session-restart.pg.test.ts`, `mcp.steering.test.ts`). `docs/live-steering.md:5` states the change is "implementation unverified and not deployed." Two named suites deleted (Warning 1). |
+| 71-05 (Greptile remediation, summary only) | Six P2 threads addressed | Verified in source: expiry pass (`steering-sessions-store.ts`, `EXPIRY_PASS_LIMIT`=100, issue path only); dead-record sweep only on `session-not-found` and only at capacity (`packages/cli/src/steer/binding-record.ts:185` `reclaimDeadBindingRecords`; `index.ts:251-255`); MCP invalid-argument `isError` replies (`server.ts:751-765`). Not inspected in this pass: brief-budget race, steering-direction precedence, handle-width rendering. Not executed. |
 
-### Concurrency and truthful receipts
+## Artifacts and key links
 
-The final accepted distinction is enforced and exercised: **private reads linearize at the final authority check; committed writes return truthful public metadata receipts**. A later close/outage does not turn an already committed queue/update/renewal into a false no-effect 404. Issuance returns the once-only creator proof even if a concurrent close already made it terminal; it cannot revive that identity. Acknowledgement already committed is not rolled back if subsequent state movement refuses; movement already committed remains truthfully reported, while a failed final check withholds its private checkpoint hint.
+- Artifacts present: all `files_modified` entries in plans 01–04 exist, except the two deleted suites (Warning 1).
+- Key links wired: `IndexStore.liveSessions` → `bunLiveSessionAuthority` (`index-store.ts:1176`); `service.ts:1941` → liveSessions; boundary → authority in every private path; CLI `client.ts` → REST lifecycle endpoints with header-only proof; hook → binding file for private hints.
+- No orphaned artifact found in the authority, boundary, adapters, CLI record or client.
 
-The actual queue-race probe initially returned not-found with one retained inbox record; after correction the unchanged probe returned `{"response":"queued","queued":1}`. Permanent REST queue/issuance receipt tests and controlled two-pool transition/queue/heartbeat/close races passed in the final evidence. This is not a new distributed transaction, automatic retry, proof recovery or rollback guarantee.
+## Warnings
 
-## Checks actually exercised by parent — final evidence
+1. **Two named regression suites deleted.** `packages/mcp-server/src/planning/session-state.durable.test.ts` and `packages/mcp-server/src/planning/steering-sessions-store.pg.test.ts` were in 71-04-PLAN `files_modified` and are absent. 71-04-SUMMARY ("Intentional removals") records them as obsolete suites pinned to the removed registry and cache. Coverage is moved to `live-session-authority.pg.test.ts` and `live-session-restart.pg.test.ts`. This is recorded, not silent, but SC5 asks for the recorded regression set, so the owner should accept the change (Human item 3).
+2. **Operator read override is by design, not a bypass.** `authorized()` returns true for an operator on `private-read`, `close`, `operator-queue` and `operator-ack` without proof. Unknown and foreign targets still produce the uniform not-found. Owner confirmation requested (Human item 5).
+3. **Migration 42 digest provenance.** The digest entry exists; its generation is not confirmed (Human item 4).
+4. **Capacity-refusal wording.** `PERSISTENCE_FAILED` text claims an unused issued identity expires, which is inaccurate when none was issued (71-05 Decision 4). Advisory.
+5. **Documentation claims are bounded.** Docs say "implementation unverified and not deployed" and warn that a lost tombstone cannot be reconstructed from a logical archive (`docs/runbooks/index-archive.md`; `index-store.migrate-contract.test.ts:70`). Consistent with the code.
 
-| Command / evidence label | Observed result | What it proves / limitation |
+## Anti-patterns and debt markers
+
+- Debt-marker gate: no `TBD`, `FIXME`, `XXX`, `TODO`, `HACK` or `PLACEHOLDER` in the scoped phase implementation and test-support files. Gate passes.
+- No stub returns on the authority or boundary paths. Every denial path reaches `notFound()` or `liveSessionNotFound()`; no path returns success on a missing row.
+- No secret or proof in logs found on server or CLI paths reviewed.
+
+## Behavior-unverified and human verification
+
+Items are listed in the frontmatter (`behavior_unverified_items`, `human_verification`). Summary:
+
+1. Execute `live-session-isolation.test.ts` and `mcp.steering.test.ts` (SC1, SC2 ordering).
+2. Execute `live-session-restart.pg.test.ts` and `live-session-authority.pg.test.ts` against a controlled PostgreSQL, confirming no skip (SC3, HARD-S1 durability).
+3. Owner acceptance of the two deleted suites as a recorded SC5 contract change.
+4. Verify the migration 42 digest by the generator.
+5. Owner confirmation of the operator private-read override.
+6. Greptile review of PR #199 remediation, observed with no open threads. A failed, skipped or unavailable review is a blocker, not a pass.
+7. SC5 regression run with recorded pass/skip counts.
+
+## Gaps summary
+
+No blocking gaps. The goal is implemented in source across the authority, the service gate, the REST and MCP adapters, the CLI record and client, and the hook. The open items are evidence and decisions, not missing implementation.
+
+## Requirements coverage
+
+| Requirement | Phase | Status |
 |---|---|---|
-| Frozen dependency install | PASS, parent-attested | Existing frozen lock installation prerequisite; not run by this verifier, no new dependency claimed. |
-| Final acceptance rerun, `bun test --timeout 30000` over the 14 acceptance/authority/CLI files | **602 pass, 0 fail**, 4,043 assertions, **39.10 s**, no skips | Includes actual HTTP/MCP/CLI consumer matrices, lifecycle/private records/hooks, authority unit tests and controlled PG authority/restart suites. |
-| Final complete root Bun suite | **11,596 pass, 2 skip, 0 fail**; 11,598 tests across **427 files**, 214,985 assertions, **360.84 s** | Covers the existing planning/steering/server/digest/brief/CLI regression file set and additional MCP/docs/policy/config/audit/migration cases. This is the final full-root run, not a claim that the earlier broad command independently reported these counts. |
-| Remaining repository components: `bun scripts/verify.ts --skip "install,tests" --keep-going` | **PASS: types, lint, python, locks** | Final log: Typecheck 22.7 s; Biome 1.3 s, **0 warnings/0 infos**; Python miner/dispatcher 3.3 s; repo locks 1.1 s. |
-| Native CLI smoke, actual `packages/cli/src/index.ts` process against ephemeral HTTP + native PostgreSQL 16 / real IndexStore, migration 42 and durable inbox SQL audit | `cliOpen:0`, `cliList:0`, `cliHeartbeat:0`, `cliClose:0`; closed list exit **3**; same-surface unproved **404**; old closed proof **404**; file **0600**, removed; durable tombstone **true**, hash-only **true**, proof printed **false** | Real native entrypoint evidence beyond the in-runner command tracer. Not a deployed endpoint or real host credential test. |
-| Independent `Phase71CodeSecurity` source review | Parent reports no remaining evidence-backed findings after final corrections | SOURCE ONLY. Not an executed security probe, independent test run, or Desk Quality Greptile gate. |
+| HARD-S1 | 71 | Satisfied in source; durable and behavioral clauses await execution evidence and the Greptile gate. Not merge-ready. |
 
-The two final root skips are precisely the externally guarded rehearsal-twin round-trip and live Redis conformance (`SUBSTRATE_CONFORMANCE_REDIS_URL` unset). **Neither is a PostgreSQL S1 case.** Controlled PostgreSQL authority and service-restart cases have explicit passing rows in both the acceptance rerun and final root run; they are not silently credited from skip-capable test declarations.
+## Fingerprint
 
-The original single `bun run verify` attempt timed out its test step; it is **not** recorded as a successful monolithic command. Final gate recovery comprises the complete successful root test run plus separately successful frozen install and remaining repository components. No omitted test failure is hidden by `--skip "install,tests"`.
-
-### Test-quality assessment
-
-| Coverage family | Evidence strength | Disposition |
-|---|---|---|
-| `live-session-isolation.test.ts`, `mcp.steering.test.ts`, `live-session-boundary.test.ts` | Multi-step real HTTP/registered-MCP workflows; exact refusal fingerprints; no-effect/sink/lookup assertions; emitted event queries | Behavioral/value-level, exercised, not existence-only. Deterministic authority seams test policy; they are not offered as SQL durability proof. |
-| `planning/live-session-authority.pg.test.ts`, `live-session-restart.pg.test.ts` | Actual migration/factory, independent pools/services, reconstructed authority, SQL rows and deterministic lock/release barriers | Behavioral durable proof, exercised with no S1 skips; no shared-map substitute. |
-| `brief-fast-path.test.ts`, steering/delivery/waiter suites | Close/expiry/outage during full/fast/snapshot/last-good/conditional release; ack effect/state/hint correlation and cleanup | Behavioral invariant coverage passed in final root run. |
-| CLI binding/client/index/hook suites and native smoke | File permissions/content/selection/overwrite safety; header/output secrecy; retained proof across heartbeat; removal/terminal refusal; historical split | Behavioral filesystem/transport coverage, plus actual native process evidence. |
-| Existing digest, migration-contract, policy/config/audit/event suites | Public output/provenance/caps, digest fixture enforcement, explicit safe projections, method classes and audit policy | Existing regression coverage passed. Digest consistency alone is not the claim that earlier baseline history is immutable; that also relies on the parent's preserved 1..41 change inventory. |
-
-No disabled-only S1 requirement, circular generated-expected-output proof, helper-only substitute, or insufficient existence-only assertion was identified in the inspected acceptance sources. PG guards exist but their cases actually ran. Scoped incomplete-marker inspection found no TODO/FIXME/TBD/XXX/placeholder/disabled-test markers in the authority, boundary, state port, principal acceptance suites or credential-record implementation. This is scoped inspection, not a claim that every repository line was audited.
-
-## Decision coverage
-
-Source/artifact inspection honors D71-01..10: retain unkeyed/operator policy and seven other phases; use approved available-tool GSD artifacts; reuse bearer/operator/index infrastructure; uniform denial/hash audit; mandatory server issuance and durable terminal authority; public digest unchanged; no operational production actions; separate per-session credential and migrated callers; independent 32-byte values/public ID/OS limitation; explicit historical/live separation. No decision is silently replaced by the research's superseded surface-only alternative. Automated decision-coverage tooling was not run, so no machine-gate count is claimed.
-
-Parent reconciliation remains necessary for stale ROADMAP/REQUIREMENTS/STATE/VALIDATION/SUMMARY completion flags. This verifier intentionally changes none of those files and does not infer completed status from their existence.
-
-## External / operator gates still outstanding
-
-1. **BLOCKER TO UNQUALIFIED DELIVERY SIGN-OFF: mandated draft review.** Parent must open the draft PR into the default branch and route it through Desk Quality / Programming Lead's Greptile gate. No successful new-draft review is observed. Address findings and record the actual outcome; unavailable, skipped or failed review stays a blocker. Independent source review cannot substitute. **No merge, auto-merge, force-push or branch deletion.**
-2. **Not exercised, operator-gated:** deployed migration/rehearsal, complete PostgreSQL-native backup/restore including every issued identity/tombstone, real host hooks/timers and delivery, real credential/flag enablement, deployment/funding/devnet. These are explicit release/environment exclusions, not missing local S1 implementation tests. Do not mark them green from the controlled PG/native CLI result.
-3. **Recovery limit:** the closed logical archive does not cover live bindings/tombstones. Lost or stale tombstone history cannot be declared safe for identity reuse; quiescence/complete-history recovery and invalidating restored active credentials remain operator procedures in the runbooks. Same-OS-account/root record compromise is outside the network-session isolation guarantee.
-
-**Implementation gaps:** none found within the accepted local contract. **External gap:** review evidence/sign-off unavailable. No new implementation gap-closure plan is recommended solely for that external gate. Other hardening phases and the milestone audit remain separate.
-
-### Advisory (new scope, unevidenced)
-
-None. No speculative architecture concern was promoted into a new blocker or used to narrow the accepted criteria.
-
-## Dated history — earlier gaps and gate recovery (2026-10-31)
-
-### Preliminary ownership-gate verification: gaps_found
-
-These are **historical results for preliminary code**, not evidence for the final credential cutover:
-
-| Earlier check | Earlier observed result |
-|---|---|
-| Targeted ownership/steering HTTP tests, 7 files | 177 passed, zero failed |
-| Broader planning/steering/session-context/brief/CLI/hook tests, 38 files | 1,076 passed, 10 skipped, zero failed |
-| `bunx tsc --noEmit --pretty false` | Passed after missing fixture-port repair |
-| `bun run lint` | Passed; no fixes applied |
-| Real ephemeral HTTP server | Owner 200; foreign 403; unknown 403; equal foreign/unknown JSON bodies |
-
-The historical broader command was:
-
-```text
-bun test --timeout 30000 packages/mcp-server/src/planning packages/mcp-server/src/server.steering.test.ts packages/mcp-server/src/session-context.test.ts packages/mcp-server/src/brief-sessions.test.ts packages/cli/src/steer packages/cli/src/session/hook.test.ts
+```
+covered_digest: v3:sha256:27a1356a70b299b4d1548b0a3704759d852b86e0085d6bb9fe4804495781b050
 ```
 
-It was not identical to the archived 575-test/7-skip baseline; their counts cannot be compared as identical suites. No live production stores/deployed endpoint were exercised.
+Computed with `gsd_run query verification.fingerprint /root/src/repos/agent-substrate/.planning/phases/71-multi-session-boundary` over the covered files listed in the frontmatter.
 
-Seven original gaps were: (1) 403 instead of required 404; (2) caller-chosen reusable identities; (3) process-local authority with best-effort persistence; (4) incomplete docs/live-consumer map; (5) raw requested identifiers in refusal audit; (6) unproven principal-before-lookup ordering; (7) missing CONTEXT/PLAN execution sequence. The current source, four plans/summaries and final exercised evidence close those local gaps; the earlier passes did not.
+---
 
-**Original launcher recovery:** the detached three-worktree gate launcher never created its logs. Its watcher was stopped; the claimed launch was not validation evidence. Fresh tracked checks produced the preliminary results above. No implementation phase or milestone was marked complete by that historical record.
-
-### Integrated failures and later recovery
-
-The first integrated acceptance run was **588 pass / 13 fail** across 14 files, with typecheck/lint failures. Its subsequent fixture/parser corrections and narrow 107-test pass were not a full-gate pass. A repository-wrapper test step later timed out at **900.1 s**; a subsequent complete root run reported **11,574 pass / 22 fail / 2 skip**. Those are retained failures, not relabeled green. Corrections included real fixture transport/timestamp issues, missed partial-index test seams, and restoration of ordinary untokened REST brief attribution compatibility without changing trusted live authorization.
-
-Only the final rerun outputs in the evidence table establish current local passing status: acceptance **602/0**, root **11,596 pass / 2 unrelated skips / 0 fail**, and **types/lint/python/locks passed**, followed by the actual native CLI smoke. No previous code's pass, narrow correction run, unlogged launch, or source-only review is used as a substitute.
+_Verified: 2026-11-15_
+_Verifier: Claude (gsd-verifier), regeneration from source; no tests executed_

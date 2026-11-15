@@ -133,7 +133,7 @@ const PLACEHOLDER_PREFIX = String.raw`\\?["']?(?:[$<{…]|${PLACEHOLDER_WORD})`;
  * The skill path's placeholder prefix. A backtick-wrapped value is not a placeholder here (the identifier guard and
  * `isPlaceholder()` judge it), and an escaped quote is left to `isPlaceholder()`, which unescapes it first.
  */
-const SKILL_PLACEHOLDER = String.raw`["']?(?:[$<{…]|${PLACEHOLDER_WORD})`;
+const SKILL_PLACEHOLDER = `["']?(?:[$<{…]|${PLACEHOLDER_WORD})`;
 
 /**
  * Ordered: broader structural patterns first, then token shapes.
