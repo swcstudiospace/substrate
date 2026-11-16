@@ -77,14 +77,14 @@ describe("fabric tools", () => {
 			"dragonfly",
 			"timescaledb-index",
 			"greptime",
-			"ragflow",
+			"lightrag",
 			"lightrag",
 			"hindsight",
 			"tei",
 			"tailscale-proxy",
 			"corpus",
 		]);
-		for (const name of ["dragonfly", "timescaledb-index", "greptime", "ragflow", "lightrag", "tei", "tailscale-proxy", "corpus"]) {
+		for (const name of ["dragonfly", "timescaledb-index", "greptime", "lightrag", "lightrag", "tei", "tailscale-proxy", "corpus"]) {
 			expect(body.resources.find((row) => row.resource === name)?.state).toBe("unconfigured");
 		}
 	});
@@ -127,7 +127,7 @@ describe("fabric tools", () => {
 		expect(reply.text).not.toContain(TOKEN);
 		const body = reply.json() as { checks: Array<{ id: string; status: string; evidence: string }> };
 		const statusOf = (id: string) => body.checks.find((check) => check.id === id)?.status;
-		for (const id of ["resource-state.greptime", "resource-state.timescaledb-index", "resource-state.dragonfly", "resource-state.ragflow", "resource-state.lightrag", "resource-state.tei"]) {
+		for (const id of ["resource-state.greptime", "resource-state.timescaledb-index", "resource-state.dragonfly", "resource-state.lightrag", "resource-state.lightrag", "resource-state.tei"]) {
 			expect(statusOf(id)).toBe("NOT_APPLICABLE");
 		}
 		expect(statusOf("resource-state.tailscale-proxy")).toBe("NOT_APPLICABLE");
@@ -138,7 +138,7 @@ describe("fabric tools", () => {
 	});
 });
 
-/** A substrate with LightRAG configured (and RAGFlow not), reached only through `lightragFetch`. */
+/** A substrate with LightRAG configured (and lightrag not), reached only through `lightragFetch`. */
 function substrateWithLightrag(lightragFetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) {
 	const { fetch } = recordingFetch(() => ({}));
 	return new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
@@ -150,7 +150,7 @@ function substrateWithLightrag(lightragFetch: (input: string | URL | Request, in
 }
 
 describe("the LightRAG fabric row", () => {
-	test("LightRAG configured and answering healthy is ok, and an unset RAGFlow stays unconfigured", async () => {
+	test("LightRAG configured and answering healthy is ok, and an unset lightrag stays unconfigured", async () => {
 		const paths: string[] = [];
 		const client = await connect(
 			substrateWithLightrag(async (input, init) => {
@@ -161,7 +161,7 @@ describe("the LightRAG fabric row", () => {
 		const body = (await call(client, "fabric_status")).json() as { resources: Array<{ resource: string; state: string; endpointClass: string; source: string }> };
 		const row = (name: string) => body.resources.find((candidate) => candidate.resource === name);
 		expect(row("lightrag")).toMatchObject({ state: "ok", endpointClass: "not-applicable", source: "health().planes.lightrag" });
-		expect(row("ragflow")?.state).toBe("unconfigured");
+		expect(row("lightrag")?.state).toBe("unconfigured");
 		expect(paths).toEqual(["GET /health"]);
 	});
 

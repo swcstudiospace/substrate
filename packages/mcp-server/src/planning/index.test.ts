@@ -639,9 +639,9 @@ Status: Executing
 		const PHASE_46_FILES: Record<string, string> = {
 			[`${P}/STATE.md`]: PHASE_46_STATE,
 			[`${P}/ROADMAP.md`]: POSITION_ROADMAP,
+			[`${P}/phases/46-docs-cutover/46-01-PLAN.md`]: "# docs cutover plan\n",
 			[`${P}/phases/46-lightrag-hybrid/46-01-PLAN.md`]: "# lightrag plan\n",
-			[`${P}/phases/46-ragflow-hybrid/46-01-PLAN.md`]: "# ragflow plan\n",
-			[`${P}/phases/46-ragflow-hybrid/46-01-SUMMARY.md`]: "# ragflow summary\n",
+			[`${P}/phases/46-lightrag-hybrid/46-01-SUMMARY.md`]: "# lightrag summary\n",
 		};
 
 		test("both unmarked: the position stays ambiguous and has no slug", async () => {
@@ -649,11 +649,11 @@ Status: Executing
 			const result = positionOf(index);
 			expect(result.ok).toBe(false);
 			expect(result.position.phase).toEqual({ name: "lightrag-hybrid", number: "46", slug: null });
-			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-lightrag-hybrid, 46-ragflow-hybrid", where: "phases" });
+			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-docs-cutover, 46-lightrag-hybrid", where: "phases" });
 		});
 
 		test("one directory holds SUPERSEDED.md: it is ignored, the other gives the slug and its plan, and the position is ok", async () => {
-			const files = { ...PHASE_46_FILES, [`${P}/phases/46-ragflow-hybrid/SUPERSEDED.md`]: "# superseded by 46-lightrag-hybrid\n" };
+			const files = { ...PHASE_46_FILES, [`${P}/phases/46-docs-cutover/SUPERSEDED.md`]: "# superseded by 46-lightrag-hybrid\n" };
 			const { index } = await indexOf(files);
 			const result = positionOf(index);
 			expect(result.ok).toBe(true);
@@ -673,19 +673,19 @@ Status: Executing
 			const result = positionOf(index);
 			expect(result.ok).toBe(false);
 			expect(result.position.phase?.slug).toBeNull();
-			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-lightrag-hybrid, 46-ragflow-hybrid", where: "phases" });
+			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-lightrag-hybrid, 46-lightrag-hybrid", where: "phases" });
 		});
 
 		test("a lone directory that holds SUPERSEDED.md is still the phase's directory", async () => {
 			const files = {
 				[`${P}/STATE.md`]: PHASE_46_STATE,
 				[`${P}/ROADMAP.md`]: POSITION_ROADMAP,
-				[`${P}/phases/46-ragflow-hybrid/SUPERSEDED.md`]: "# superseded\n",
+				[`${P}/phases/46-lightrag-hybrid/SUPERSEDED.md`]: "# superseded\n",
 			};
 			const { index } = await indexOf(files);
 			const result = positionOf(index);
 			expect(result.ok).toBe(true);
-			expect(result.position.phase?.slug).toBe("ragflow-hybrid");
+			expect(result.position.phase?.slug).toBe("lightrag-hybrid");
 		});
 	});
 

@@ -1,6 +1,6 @@
 /**
  * The LightRAG HTTP adapter against recorded-shape fixtures. Every fake is
- * an injected `fetchImpl` (the same seam `ragflow.test.ts` uses); no network.
+ * an injected `fetchImpl` (the same seam `lightrag.test.ts` uses); no network.
  * Each route is answered from a per-test queue keyed by `METHOD /path`, and
  * every request is recorded so the wire contract (method, path, headers,
  * body, multipart fields) is asserted, not just the parsed outcome.
@@ -172,7 +172,7 @@ describe("retrieval (POST /query)", () => {
 		expect(fake.calls[0]?.body).toMatchObject({ mode: "naive" });
 	});
 
-	test("parses the { data: { chunks } } envelope into the RAGFlow chunk shape", async () => {
+	test("parses the { data: { chunks } } envelope into the lightrag chunk shape", async () => {
 		const fake = fakeLightrag({
 			"POST /query": [
 				json({
@@ -260,13 +260,13 @@ describe("retrieval (POST /query)", () => {
 					status: "success",
 					data: {
 						chunks: [{ content: "graph-backed chunk", document_id: "d1", chunk_id: "c1" }],
-						entities: [{ name: "Hindsight" }, "RAGFlow"],
-						relations: [{ source: "Hindsight", target: "RAGFlow", kind: "fallback" }],
+						entities: [{ name: "Hindsight" }, "lightrag"],
+						relations: [{ source: "Hindsight", target: "lightrag", kind: "fallback" }],
 					},
 				}),
 			],
 		});
-		const outcome = await queryWithGraph(KEYED, "/mix Hindsight and RAGFlow?", fake.fetch);
+		const outcome = await queryWithGraph(KEYED, "/mix Hindsight and lightrag?", fake.fetch);
 		if (!outcome.ok) throw new Error(`expected chunks: ${outcome.reason}`);
 		expect(outcome.chunks).toEqual([
 			{ content: "graph-backed chunk", document_name: "doc", document_id: "d1", chunk_id: "c1" },
@@ -274,7 +274,7 @@ describe("retrieval (POST /query)", () => {
 		expect(outcome.detail).toEqual({
 			mode: "mix",
 			counts: { entities: 2, relations: 1 },
-			provenance: { entities: ["Hindsight", "RAGFlow"], relations: 1 },
+			provenance: { entities: ["Hindsight", "lightrag"], relations: 1 },
 		});
 	});
 
@@ -381,11 +381,11 @@ describe("upload (POST /documents/upload, text fallback)", () => {
 		});
 		await uploadDocument(
 			KEYED,
-			{ ...UPLOAD_REQUEST, metadata: { ...UPLOAD_META, graph_entities: ["Hindsight", "", "RAGFlow"] } },
+			{ ...UPLOAD_REQUEST, metadata: { ...UPLOAD_META, graph_entities: ["Hindsight", "", "lightrag"] } },
 			fake.fetch,
 		);
 		const form = formOf(fake.calls[0]);
-		expect(form.get("graph_entities")).toBe(JSON.stringify(["Hindsight", "RAGFlow"]));
+		expect(form.get("graph_entities")).toBe(JSON.stringify(["Hindsight", "lightrag"]));
 	});
 
 	test("on a 404 from the multipart route, falls back to POST /documents/text with the same metadata", async () => {

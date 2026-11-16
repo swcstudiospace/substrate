@@ -65,13 +65,59 @@ import {
 	runDirFor,
 	withNameLock,
 } from "./rehearsal.ts";
-import {
-	confirmFixtureSpawn,
-	mayStopFixture,
-	parseFixtureCounts,
-	RAGFLOW_FIXTURE_SCRIPT,
-} from "../packages/mcp-server/src/rehearsal-ragflow.ts";
 import { procStartSeconds } from "../packages/worktree-snapshot/src/proc-stat.ts";
+interface FixtureCounts {
+	requests: number;
+	retrievals: number;
+	uploads: number;
+	documents: number;
+}
+
+export function parseFixtureCounts(body: unknown): FixtureCounts | null {
+	if (body === null || typeof body !== "object") return null;
+	const record = body as Record<string, unknown>;
+	const fields = ["requests", "retrievals", "uploads", "documents"] as const;
+	const out: Record<string, number> = {};
+	for (const field of fields) {
+		const value = record[field];
+		if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+		out[field] = value;
+	}
+	return { requests: out.requests ?? 0, retrievals: out.retrievals ?? 0, uploads: out.uploads ?? 0, documents: out.documents ?? 0 };
+}
+
+function mayStopFixture(
+	proc: { pid: number; argv: string[]; cwd: string; cgroup: string; startSeconds: number | null; listensOn: number[] },
+	state: { pid: number; startSeconds: number | null; cwd: string; script: string },
+	productionPorts: readonly number[],
+): string | null {
+	if (proc.pid !== state.pid) return "fixture pid differs from state.json";
+	if (state.startSeconds === null) return "fixture birth identity is unverified";
+	if (proc.startSeconds !== state.startSeconds) return "fixture pid was reused (start time differs)";
+	if (proc.argv.at(-1) !== state.script) return "not the fixture entry point";
+	if (proc.cwd !== state.cwd) return "fixture cwd is not the recorded checkout";
+	if (proc.cgroup.includes("/system.slice/")) return "fixture process is in system.slice";
+	if (proc.listensOn.some((port) => productionPorts.includes(port))) return "fixture process owns a production port";
+	return null;
+}
+
+function confirmFixtureSpawn(
+	pid: number,
+	port: number,
+	startSeconds: number,
+	deps: { alive: (pid: number) => boolean; startOf: (pid: number) => number | null; listensOn: (pid: number) => number[] | null },
+): string | null {
+	if (!deps.alive(pid)) return `fixture pid ${pid} is gone; refusing to save state for a dead process`;
+	const start = deps.startOf(pid);
+	if (start === null) return `could not verify the start of fixture pid ${pid}`;
+	if (start !== startSeconds) return `fixture pid ${pid} was reused (start time differs)`;
+	const ports = deps.listensOn(pid);
+	if (ports === null) return `could not read the listeners of fixture pid ${pid}`;
+	if (!ports.includes(port)) return `fixture pid ${pid} does not own port ${port}; refusing to claim a stranger's listener`;
+	return null;
+}
+
+const FIXTURE_ENTRY = "packages/mcp-server/src/rehearsal-ragflow-server.ts";
 
 /** The smoke refused to drive this target; the message names hosts and ports, never values. */
 export class SmokeRefused extends Error {}
@@ -648,7 +694,7 @@ function loadContext(name: string, runDir: string, scriptCheckout: string): Smok
 		PRODUCTION_PORTS,
 	);
 	if (fixtureStopReason !== null) throw new SmokeRefused(`refusing foreign stand-in pid ${fixture.pid}: ${fixtureStopReason}`);
-	if (fixtureFacts.argv.at(-1) !== RAGFLOW_FIXTURE_SCRIPT) {
+	if (fixtureFacts.argv.at(-1) !== FIXTURE_ENTRY) {
 		throw new SmokeRefused(`refusing foreign stand-in pid ${fixture.pid}: not the fixture entry point`);
 	}
 	const fixtureConfirm = confirmFixtureSpawn(fixture.pid, fixturePort, fixture.startSeconds, deps);

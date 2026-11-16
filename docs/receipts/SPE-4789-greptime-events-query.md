@@ -6,7 +6,7 @@
 | Run | `20260930T065417Z-39274714` (Grok Bot → Claude Code) |
 | Branch | `claude/greptime-events-ledger-7kwlr2`, from `main` |
 | Scope | GreptimeDB events ledger behind `substrate-mcp` only |
-| Untouched | Timescale SoR, Dragonfly, Hindsight, RAGflow, and every open PR |
+| Untouched | Timescale SoR, Dragonfly, Hindsight, and every open PR |
 
 ## What this run found, and what it did
 

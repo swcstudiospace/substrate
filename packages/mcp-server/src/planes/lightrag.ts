@@ -1,14 +1,11 @@
 /**
- * The LightRAG HTTP client, parallel to `ragflow.ts` (drop-in adapter).
+ * The LightRAG HTTP client. LightRAG replaced lightrag; request and response handling is unchanged.
  *
- * Reached ONLY through substrate-mcp, like the RAGFlow plane: no agent
- * config registers a LightRAG MCP server and no package outside
- * `mcp-server` imports this module. Every function mirrors the RAGFlow
- * plane's contract so callers can swap planes without reshaping data:
- * retrieval resolves to the exact `RagflowChunk` shape and
- * `RetrievalOutcome`, uploads resolve to `{ track_id }`, and every
- * failure is a `{ ok: false, reason }` — never a throw inside an agent's
- * turn, never a secret in a reason string.
+ * Reached ONLY through substrate-mcp: no agent config registers a LightRAG MCP
+ * server and no package outside `mcp-server` imports this module. Retrieval
+ * resolves to `DocsChunk` and uploads resolve to `{ track_id }`. Every failure
+ * is a `{ ok: false, reason }` — never a throw inside an agent's turn, never a
+ * secret in a reason string.
  *
  * Endpoint map (LightRAG server v1.5.7; the contract is the upstream source,
  * recorded in `__fixtures__/lightrag-v1.5.7-routes.json` and enforced by
@@ -26,25 +23,25 @@
  *   document ids once the background enqueue has written them.
  * - parse/scan: `POST /documents/scan` (the pipeline trigger; LightRAG
  *   has no per-document parse call, so `parseDocuments` keeps the
- *   RAGFlow `(datasetId, documentIds)` signature and fans in).
+ *   `(datasetId, documentIds)` signature and fans in).
  * - poll: `GET /documents/pipeline_status` until `busy` is false.
  * - delete: `DELETE /documents/delete_document` `{ doc_ids }` (runs in the
  *   background). `DELETE /documents` is the clear-ALL route; the one
  *   choke point `call` refuses it before any network I/O, permanently.
  * - health: `GET /health`.
  *
- * Wire pattern matches `ragflow.ts`: one `call` with an injected
- * `fetchImpl` (production hands in a `gatedFetch` over the plane's
- * circuit breaker), `lightragOp` as the bounded metric label, and the
- * business `status` in the body checked independently of the HTTP
- * status. Auth is `X-API-Key` only: an `Authorization` bearer would be
- * validated as a JWT first and fail every call in API-key mode.
+ * Wire pattern: one `call` with an injected `fetchImpl` (production hands in
+ * a `gatedFetch` over the plane's circuit breaker), `lightragOp` as the
+ * bounded metric label, and the business `status` in the body checked
+ * independently of the HTTP status. Auth is `X-API-Key` only: an
+ * `Authorization` bearer would be validated as a JWT first and fail every
+ * call in API-key mode.
  */
 import type { LightragConfig } from "../config.ts";
 import { planningPageKey } from "../planning-hash-store.ts";
 import { redact } from "../redact.ts";
 import type { CitationGraphProvenance, PlanningGraphRelation, RagLightragChunk, SearchGraphStats } from "../types.ts";
-import type { RagflowChunk } from "./ragflow.ts";
+import type { DocsChunk } from "./docs-wire.ts";
 
 /** The LightRAG query modes; `hybrid` and `mix` are the graph modes. */
 export type LightragQueryMode = "naive" | "local" | "global" | "hybrid" | "mix";
@@ -105,8 +102,8 @@ function unreachable(cause: unknown): string {
 // optional). This plane never defines its own reader — one reader, no
 // drift — and the key never appears in a reason string.
 
-/** Drop-in chunk shape: exactly the RAGFlow plane's chunk. */
-export type LightragChunk = RagflowChunk;
+/** Chunk shape shared with search and ingest (`DocsChunk`). */
+export type LightragChunk = DocsChunk;
 
 export interface LightragRetrievalRequest {
 	question: string;
@@ -120,11 +117,11 @@ export interface LightragRetrievalRequest {
 	topK?: number;
 	/**
 	 * Accepted and ignored: LightRAG serves one knowledge base per
-	 * server, so there is nothing to scope. Present only so RAGFlow
+	 * server, so there is nothing to scope. Present only so lightrag
 	 * call sites type-check unchanged.
 	 */
 	dataset_ids?: string[];
-	/** Accepted and mapped to `top_k`, for RAGFlow call-site parity. */
+	/** Accepted and mapped to `top_k`, for lightrag call-site parity. */
 	page_size?: number;
 }
 
@@ -162,7 +159,7 @@ export function resolveQueryMode(
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 /**
- * The business result inside a LightRAG body: `code: 0` (RAGFlow-style)
+ * The business result inside a LightRAG body: `code: 0` (lightrag-style)
  * or `status: "success"` is success; any other code, or a
  * `status: "error" | "failed" | "failure"`, is a failure whatever the
  * HTTP status said. Bodies without either signal carry no verdict.
@@ -322,12 +319,12 @@ function readNumber(entry: object, ...names: string[]): number | undefined {
 }
 
 /**
- * Map one LightRAG context entry onto the exact `RagflowChunk` shape:
+ * Map one LightRAG context entry onto `DocsChunk`:
  * `title`/`file_path` become `document_name`, `snippet`/`text` become
  * `content`, `url` becomes `source_url`, `score` stays `score`. Entries
  * without usable text are skipped; entries without a title cite `"doc"`.
  */
-function toChunk(entry: unknown): RagflowChunk | null {
+function toChunk(entry: unknown): DocsChunk | null {
 	if (entry === null || typeof entry !== "object") return null;
 	if (Array.isArray(entry)) return null;
 	const content = readString(entry, "content", "text", "snippet", "excerpt", "chunk_content", "chunk");
@@ -457,7 +454,7 @@ export function readGraphDetail(data: unknown, mode: LightragQueryMode): Lightra
 }
 
 export type LightragQueryOutcome =
-	| { ok: true; chunks: RagflowChunk[]; detail: LightragGraphDetail }
+	| { ok: true; chunks: DocsChunk[]; detail: LightragGraphDetail }
 	| { ok: false; reason: string };
 
 /**
@@ -483,7 +480,7 @@ export async function queryWithGraph(
 	});
 	if (!answered.ok) return answered;
 	const data = dataOf(answered.body);
-	const chunks: RagflowChunk[] = [];
+	const chunks: DocsChunk[] = [];
 	for (const entry of contextEntries(data, answered.body)) {
 		const chunk = toChunk(entry);
 		if (chunk !== null) chunks.push(chunk);
@@ -497,11 +494,11 @@ export async function queryWithGraph(
 }
 
 /**
- * Injector-shaped retrieval for the docs-search LightRAG dispatch:
- * `(question, datasetIds, fetchImpl) → RetrievalOutcome` with the exact
- * `RagflowChunk` shape. LightRAG serves one knowledge base per server,
- * so `datasetIds` select nothing and are accepted-ignored (never the
- * RAGFlow throw): scope is a no-op, not an error, on this plane.
+ * Injector-shaped retrieval for docs search:
+ * `(question, datasetIds, fetchImpl) → LightragQueryOutcome` with the
+ * `DocsChunk` shape. LightRAG serves one knowledge base per server,
+ * so `datasetIds` select nothing and are accepted-ignored: scope is a
+ * no-op, not an error, on this plane.
  */
 export async function retrieveForSearch(
 	config: LightragConfig,
@@ -692,7 +689,7 @@ function defaultSleep(ms: number): Promise<void> {
 /**
  * Trigger the LightRAG pipeline over newly uploaded documents
  * (`POST /documents/scan`). The plane scans the input directory rather
- * than named documents, so `documentIds` are accepted for the RAGFlow
+ * than named documents, so `documentIds` are accepted for the lightrag
  * drop-in signature and ignored on the wire.
  */
 export async function scanDocuments(
@@ -711,7 +708,7 @@ export async function scanDocuments(
 
 /**
  * Start parsing uploaded documents. Drop-in alias for `scanDocuments`
- * keeping the RAGFlow `(datasetId, documentIds)` signature: LightRAG
+ * keeping the lightrag `(datasetId, documentIds)` signature: LightRAG
  * has one knowledge base per server, so both arguments are accepted
  * and ignored on the wire.
  */
@@ -787,7 +784,7 @@ function readPipeline(body: unknown): PipelineReading {
  * `lightrag: unexpected pipeline shape` and stops at once — never a hang,
  * never a throw. After a delete the pipeline stays busy while the
  * background job runs, so a caller that needs the delete to be complete
- * polls with this same function. `document` is accepted for the RAGFlow
+ * polls with this same function. `document` is accepted for the lightrag
  * drop-in signature (the status is server-global) and never enters the
  * reason.
  */
@@ -950,7 +947,7 @@ export async function deleteDocuments(
  * The document name a page uploads under: its repo path with `/`
  * flattened to `__`, so `docs/a/README.md` and `README.md` never
  * collide and the suffix (`.md`) survives for the plane's type
- * detection. Identical to the RAGFlow plane's mapping so both planes
+ * detection. Identical to the lightrag plane's mapping so both planes
  * address the same logical document.
  */
 export function documentName(path: string): string {

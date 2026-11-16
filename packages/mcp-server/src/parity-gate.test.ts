@@ -148,7 +148,7 @@ describe("manifestRecords", () => {
 			version: 2,
 			records: {
 				"lightrag::ds::docs/a.md": { document_id: "doc-1", dataset_id: "ds", source_url: "docs/a.md", sha: SHA, version: 1 },
-				"ragflow::ds::docs/a.md": { document_id: "old", dataset_id: "ds", source_url: "docs/a.md", sha: SHA, version: 1 },
+				"retired::ds::docs/a.md": { document_id: "old", dataset_id: "ds", source_url: "docs/a.md", sha: SHA, version: 1 },
 			},
 		};
 		expect(manifestRecords(state)).toEqual([{ documentId: "doc-1", datasetId: "ds", sourceUrl: "docs/a.md", sha: SHA }]);
@@ -217,7 +217,7 @@ describe("Part B sample", () => {
 	});
 
 	test("the frozen sample matches the Frozen sample table in 46-PLAN.md, so the two cannot drift", () => {
-		const plan = readFileSync(new URL("../../../.planning/phases/46-ragflow-hybrid/46-PLAN.md", import.meta.url), "utf8");
+		const plan = readFileSync(new URL("../../../.planning/phases/46-lightrag-hybrid/46-PLAN.md", import.meta.url), "utf8");
 		const section = plan.slice(plan.indexOf("## Frozen sample"));
 		const rows = section
 			.split("\n")

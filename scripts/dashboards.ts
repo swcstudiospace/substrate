@@ -140,7 +140,6 @@ export const FABRIC_SERIES: Readonly<Record<FabricResourceName, { series: string
 	dragonfly: { series: "cache.hit_ratio", note: "Dragonfly is the cache plane, so this is its read-through hit ratio over every key class." },
 	"timescaledb-index": { series: "capacity.runway_days", note: "The index volume's runway in days, fitted over its size history." },
 	greptime: { series: "plane.availability", note: "The greptime line is the ledger's call availability." },
-	ragflow: { series: "plane.p95", note: "The ragflow line is RAGFlow's call latency at p95." },
 	lightrag: { series: "plane.p95", note: "The lightrag line is LightRAG's call latency at p95." },
 	tei: { series: "plane.p95", note: "The tei line is the embedding service's call latency at p95." },
 	hindsight: { series: "hindsight.outbox_size", note: "Retain forwards parked for replay. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },

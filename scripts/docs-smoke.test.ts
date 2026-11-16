@@ -19,11 +19,11 @@ import {
 	refuseFixtureTarget,
 	refuseOwnedBinding,
 	toolVerdict,
+	parseFixtureCounts,
 	type BindingFacts,
 	type FixtureTarget,
 } from "./docs-smoke.ts";
 import { DEFAULT_MCP_PORT, PRODUCTION_PORTS, UNIT_WORKING_DIRECTORY } from "./rehearsal.ts";
-import { parseFixtureCounts } from "../packages/mcp-server/src/rehearsal-ragflow.ts";
 
 function target(over: Partial<FixtureTarget> = {}): FixtureTarget {
 	return {

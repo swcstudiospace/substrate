@@ -14,7 +14,7 @@ import {
 } from "./docs-allmarkdown.ts";
 import { corpusDocumentName } from "@substrate/corpus";
 import { changeSha, ingestDocs, INGEST_PAGE_MAX_BYTES, type IngestDeps, type IngestInput } from "./docs-ingest.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
+import type { FetchLike } from "./planes/docs-wire.ts";
 
 const REPOS = "/repos";
 const SESSION = "docs-allmarkdown:test";

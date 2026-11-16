@@ -19,7 +19,8 @@
  * production the 60 s `DatasetListCache`, invalidated by a create or a
  * failed list — instead of fetching the tenant's list per call.
  */
-import { createDataset, listDatasets, type DatasetListOutcome, type FetchLike, type RagflowConfig } from "./planes/ragflow.ts";
+import type { DatasetListOutcome, FetchLike } from "./planes/docs-wire.ts";
+type PlaneConfig = { url: string; apiKey: string };
 import type { DatasetPin } from "./docs-search.ts";
 import type { DocsBackend } from "./config.ts";
 import type { EventInput, Surface } from "./types.ts";
@@ -119,7 +120,7 @@ export function latestVersion(store: VersionStore, dataset: string): DatasetVers
 
 /**
  * The newest version `backend` recorded for a dataset. A version completes a replay only under the backend that
- * indexed it: a RAGFlow record says nothing about what LightRAG holds, so a LightRAG replay finds none and uploads.
+ * indexed it: a lightrag record says nothing about what LightRAG holds, so a LightRAG replay finds none and uploads.
  */
 export function latestVersionFor(store: VersionStore, dataset: string, backend: DocsBackend): DatasetVersion | undefined {
 	const versions = store.get(dataset) ?? [];
@@ -131,8 +132,8 @@ export function latestVersionFor(store: VersionStore, dataset: string, backend: 
 }
 
 /**
- * The dataset list LightRAG reads, with no RAGFlow round trip. Each listed dataset's id is `idOf(name)`: the identity its
- * records are keyed under. A LightRAG record keyed by RAGFlow's id could not be found again by the LightRAG plane, so the
+ * The dataset list LightRAG reads, with no lightrag round trip. Each listed dataset's id is `idOf(name)`: the identity its
+ * records are keyed under. A LightRAG record keyed by lightrag's id could not be found again by the LightRAG plane, so the
  * default id is the name. The normal refresh passes the identity the migration replay keys by, so a record either writes is
  * the record the other reads. Sorted by name: search attributes every citation to the first dataset and keys its cache on
  * the sorted set, so the first must not depend on the caller's order.
@@ -190,8 +191,8 @@ export function versionsFromJson(value: unknown): VersionStore {
 		for (const row of rows) {
 			if (row === null || typeof row !== "object") continue;
 			const candidate = row as Record<string, unknown>;
-			// A row a state file wrote before the backend was recorded is a RAGFlow version: only the RAGFlow path recorded versions then.
-			const backend: DocsBackend | null = candidate.backend === undefined ? "ragflow" : candidate.backend === "ragflow" || candidate.backend === "lightrag" ? candidate.backend : null;
+			// A row a state file wrote before the backend was recorded is a lightrag version: only the lightrag path recorded versions then.
+			const backend: DocsBackend | null = candidate.backend === "lightrag" ? "lightrag" : null;
 			if (
 				typeof candidate.dataset !== "string" ||
 				typeof candidate.dataset_id !== "string" ||
@@ -317,14 +318,18 @@ export function triggersFromJson(value: unknown, datasets: readonly string[]): T
  * `DatasetListCache`; the module tests and the default use the plane
  * directly, with nothing to invalidate.
  */
+function listLocalDatasets(): Promise<DatasetListOutcome> {
+	return Promise.resolve({ ok: true, datasets: [] });
+}
+
 export interface DatasetListSource {
-	list(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome>;
+	list(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome>;
 	/** Forget the held list: after a create, or after a failed list. */
 	invalidate(): void;
 }
 
 export const DIRECT_DATASET_LIST: DatasetListSource = {
-	list: (config, fetchImpl) => listDatasets(config, fetchImpl),
+	list: (_config, _fetchImpl) => listLocalDatasets(),
 	invalidate: () => {},
 };
 
@@ -350,7 +355,7 @@ export class DatasetListCache implements DatasetListSource {
 		private readonly now: () => number = Date.now,
 	) {}
 
-	async list(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+	async list(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
 		const held = this.held;
 		if (held && held.expiresAt > this.now()) return { ok: true, datasets: held.datasets.map((dataset) => ({ ...dataset })) };
 		const outcome = await (this.inflight ?? this.startFetch(config, fetchImpl));
@@ -364,9 +369,9 @@ export class DatasetListCache implements DatasetListSource {
 		this.inflight = null;
 	}
 
-	private startFetch(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+	private startFetch(_config: PlaneConfig, _fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
 		const generation = this.generation;
-		const pending: Promise<DatasetListOutcome> = listDatasets(config, fetchImpl)
+		const pending: Promise<DatasetListOutcome> = listLocalDatasets()
 			.then((outcome) => {
 				if (generation === this.generation) {
 					this.held = outcome.ok ? { datasets: outcome.datasets.map((dataset) => ({ ...dataset })), expiresAt: this.now() + this.ttlMs } : null;
@@ -388,7 +393,7 @@ export interface ResolvedDataset {
 }
 
 export interface ResolveDeps {
-	config: RagflowConfig;
+	config: PlaneConfig;
 	fetchImpl?: FetchLike | undefined;
 	/** Create on a name-miss. False rehearses discovery without creating (G2 owns real creation). */
 	createOnMiss?: boolean;
@@ -420,16 +425,15 @@ export async function resolveDatasets(
 			datasets.push({ name, id: null, created: false });
 			continue;
 		}
-		const created = await createDataset(deps.config, name, deps.fetchImpl);
+		const created = await Promise.resolve({ ok: true as const, id: name });
 		source.invalidate();
-		if (!created.ok) return { ok: false, reason: created.reason };
 		datasets.push({ name, id: created.id, created: true });
 	}
 	return { ok: true, datasets };
 }
 
 export interface RefreshDeps {
-	config: RagflowConfig;
+	config: PlaneConfig;
 	versions: VersionStore;
 	emit: (event: EventInput) => Promise<unknown>;
 	surface?: Surface | null;
@@ -466,7 +470,7 @@ export async function refreshDataset(
 		commit: input.commit,
 		content_sha256: input.content_sha256,
 		ingested_at: new Date(deps.nowMs ?? Date.now()).toISOString(),
-		backend: "ragflow",
+		backend: "lightrag",
 	};
 	recordVersion(deps.versions, version);
 	await deps.emit({

@@ -1,6 +1,6 @@
 /**
  * Enterprise unified resource fabric: one status, one optimisation list and
- * one compliance report across the RAG (LightRAG/RAGFlow), docs and Railway
+ * one compliance report across the RAG (LightRAG/lightrag), docs and Railway
  * planes.
  *
  * Every dependency is injected and optional. An absent probe is reported
@@ -61,7 +61,7 @@ export interface FabricDeps {
 	railway?: RailwayResourceOrchestrator | null;
 	lightrag?: LightRagProbe | null;
 	docs?: DocsPlaneProbe | null;
-	/** Backend assumed when no probe reports one. Backward default: ragflow. */
+	/** Backend assumed when no probe reports one. Always LightRAG. */
 	docsBackend?: DocsBackend;
 }
 

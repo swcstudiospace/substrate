@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * The RAGFlow → LightRAG migration job (phase 46, criterion 4, migration clause). Offline unless the operator sets the
+ * The lightrag → LightRAG migration job (phase 46, criterion 4, migration clause). Offline unless the operator sets the
  * live reach: every LightRAG call goes through the injected fetch, and nothing reaches a plane without `LIGHTRAG_URL`.
  *
  *   bun scripts/docs-migrate.ts --archive <dir>
@@ -11,7 +11,7 @@
  * runs PARITY_GATE (parity-run.ts: Part A, then Part B) as a precondition of any ingestion. Part A checks that
  * each `lightrag::` record of the docs state matches its LightRAG document by dataset, source URL and version; Part B
  * checks that the frozen sample answers from its expected sources at the threshold. A failed gate refuses ingestion.
- * Each archived RAGFlow record must map to an archived dataset, and each archived document must name its commit and
+ * Each archived lightrag record must map to an archived dataset, and each archived document must name its commit and
  * source URL, or the replay cannot reproduce it. Both refusals come before the gate.
  *
  * The dry run writes nothing. `--apply` needs the dry run's recorded pass (`--part-a` names a file with the marker line
@@ -32,10 +32,10 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { type LightragConfig, lightragFromEnv, ragflowArchiveFromEnv } from "./config.ts";
+import { type LightragConfig, lightragFromEnv } from "./config.ts";
 import { CORPUS_DATASET } from "@substrate/corpus";
 import { DATASET_REPOS, datasetIdentity } from "./dataset-identity.ts";
-import { gitAtCommit, type ReadAtCommit, verifyArchive } from "./docs-archive.ts";
+import { gitAtCommit, lightragArchiveFromEnv, type ReadAtCommit, verifyArchive } from "./docs-archive.ts";
 import { type DatasetVersion, recordVersion, type VersionStore } from "./docs-datasets.ts";
 import { DEFAULT_INGEST_ROOTS, type IngestPage, type IngestRecord, ingestDocs, loadIngestRecords, saveIngestRecords } from "./docs-ingest.ts";
 import { sha256Hex } from "./event.ts";
@@ -142,7 +142,7 @@ function parseInventory(raw: unknown): Inventory | null {
 export interface ArchivedDocument {
 	id: string;
 	name: string;
-	/** The repo path: RAGFlow names a document by its path with `/` written as `__` (see docs-archive.ts `pageCheck`). */
+	/** The repo path: lightrag names a document by its path with `/` written as `__` (see docs-archive.ts `pageCheck`). */
 	path: string;
 	source_url: string | null;
 	commit: string | null;
@@ -206,13 +206,13 @@ export function migrationKnown(archived: readonly string[]): string[] {
 }
 
 export interface RecordMapping {
-	/** The archived RAGFlow records (the non-`lightrag::` keys) whose dataset the inventory names. */
+	/** The archived lightrag records (the non-`lightrag::` keys) whose dataset the inventory names. */
 	migrated: Array<{ dataset: string; source_url: string; version: number }>;
-	/** Archived RAGFlow records whose dataset id the inventory does not list. Any one refuses the job. */
+	/** Archived lightrag records whose dataset id the inventory does not list. Any one refuses the job. */
 	unmapped: Array<{ dataset_id: string; source_url: string }>;
 }
 
-/** Maps each archived RAGFlow record to its LightRAG dataset by logical name. The inventory resolves id to name. */
+/** Maps each archived lightrag record to its LightRAG dataset by logical name. The inventory resolves id to name. */
 export function mapRecords(archive: ArchiveLoad): RecordMapping {
 	const nameById = new Map(archive.datasets.map((dataset) => [dataset.id, dataset.name] as const));
 	const migrated: RecordMapping["migrated"] = [];
@@ -309,7 +309,7 @@ async function precondition(input: JobInput): Promise<Precondition> {
 		dataset.documents.filter((document) => document.commit === null || document.source_url === null).map((document) => ({ dataset: dataset.name, document: document.id })),
 	);
 	const base: Record<string, unknown> = { verify: { ok: true, mismatches: [] }, load: { ok: true }, unmapped: mapping.unmapped, undocumented };
-	if (mapping.unmapped.length > 0) return { ok: false, reason: "archived RAGFlow records map to no archived dataset", report: base };
+	if (mapping.unmapped.length > 0) return { ok: false, reason: "archived lightrag records map to no archived dataset", report: base };
 	if (undocumented.length > 0) return { ok: false, reason: "archived documents without a commit or source URL cannot be replayed", report: base };
 	const gate = await runGate(input.config, input.stateFile, input.fetchImpl);
 	const report = { ...base, gate_ok: gate.ok, records: gate.records, gate: gate.parts };
@@ -467,12 +467,12 @@ function carryVersions(archive: ArchiveLoad, seen: Map<string, IngestRecord>, wr
 	return carried;
 }
 
-/** The archived RAGFlow pin becomes the LightRAG pin, so citations keep their commit and a refresh replaces rather than renumbers. */
+/** The archived lightrag pin becomes the LightRAG pin, so citations keep their commit and a refresh replaces rather than renumbers. */
 function recordPins(archive: ArchiveLoad, versions: VersionStore, wanted: ReadonlySet<string> | null, now: number): number {
 	let pins = 0;
 	for (const [dataset, list] of archive.versions) {
 		if (wanted !== null && !wanted.has(dataset)) continue;
-		const latest: DatasetVersion | undefined = [...list].reverse().find((version) => version.backend === "ragflow");
+		const latest: DatasetVersion | undefined = [...list].reverse().find((version) => version.backend === "lightrag");
 		if (latest === undefined) continue;
 		recordVersion(versions, {
 			dataset,
@@ -564,9 +564,9 @@ export async function runApply(options: ApplyOptions, io: MigrateIo): Promise<Mi
 			? {
 					surface: "substrate",
 					kind: "note",
-					summary: "docs backend cutover ragflow → lightrag",
+					summary: "docs backend cutover lightrag → lightrag",
 					session_id: `docs-migrate:${at}`,
-					payload: { action: "docs.cutover", from: "ragflow", to: "lightrag", at, parity_sha: sha256Hex(partAText) },
+					payload: { action: "docs.cutover", from: "lightrag", to: "lightrag", at, parity_sha: sha256Hex(partAText) },
 				}
 			: null,
 	};
@@ -586,9 +586,9 @@ export async function main(argv: readonly string[], env: Record<string, string |
 		io.err(`docs-migrate: ${parsed.reason}\n`);
 		return 2;
 	}
-	const archiveDir = parsed.archive ?? ragflowArchiveFromEnv(env).dir;
+	const archiveDir = parsed.archive ?? lightragArchiveFromEnv(env).dir;
 	if (archiveDir === null) {
-		io.err("docs-migrate: no archive configured; pass --archive <dir> or set SUBSTRATE_RAGFLOW_ARCHIVE_DIR\n");
+		io.err("docs-migrate: no archive configured; pass --archive <dir> or set SUBSTRATE_lightrag_ARCHIVE_DIR\n");
 		return 2;
 	}
 	const config = lightragFromEnv(env);

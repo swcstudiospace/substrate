@@ -2,7 +2,7 @@
 
 This is the durable record of the docs-plane cutover to LightRAG. STATE.md Run 11 (2026-10-28) holds the full narrative; this file keeps the facts an operator needs. It names environment keys only. It records no key value, host name or internal address.
 
-Decided by the operator: nothing in this file. Pending, each an agent default awaiting operator confirmation in `.planning/phases/46-ragflow-hybrid/46-PLAN.md`: the reversal limit and rollback procedure (D4, stated below as facts), the RAGFlow code removal and its waivers (D6), and hybrid query mode in production (D5).
+Decided by the operator: nothing in this file. Pending, each an agent default awaiting operator confirmation in the phase 46 plan: the reversal limit and rollback procedure (D4, stated below as facts), removal of the retired docs-plane client and its waivers (D6), and hybrid query mode in production (D5).
 
 ## Cutover facts
 
@@ -22,9 +22,9 @@ Naive mode is required in this state. STATE.md Run 11 records that hybrid fails 
 
 ## Reversal limits (decision D4, pending operator)
 
-- RAGFlow cannot be restored. Its `ragflow` Railway service was deleted on 2026-10-25, three days before the cutover, so `SUBSTRATE_DOCS_BACKEND=ragflow` has no plane behind it and is not a reversal.
+- The retired docs plane cannot be restored. LightRAG replaced RAGFlow; there is no fallback that calls the retired plane.
 - The rollback procedure in the plan is app-only: redeploy release `702ed32e`, which has no LightRAG client, and restore `substrate.env` from its backup. That step does not restore the index. The `pg_dump` archive above is the only index backup.
-- Whether these limits are accepted is decision D4 in `.planning/phases/46-ragflow-hybrid/46-PLAN.md`, an agent default pending the operator.
+- Whether these limits are accepted is decision D4 in the phase 46 plan, an agent default pending the operator.
 
 ## Backups taken before the cutover
 

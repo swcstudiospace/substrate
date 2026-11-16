@@ -1,12 +1,12 @@
 /**
- * uplift-2 R6: the RAGFlow docs plane speaks the documented HTTP API shapes
+ * uplift-2 R6: the lightrag docs plane speaks the documented HTTP API shapes
  * (the fake enforces them), versions and pins survive a restart through the
  * v2 state file, the dataset list and `docs_search` answers are cached and
  * invalidated by a refresh, superseded documents are pruned only behind the
  * flag, and `POST /docs/merge-trigger` answers 202 at once with the ingest
  * in the background (`?wait=1` keeps the synchronous answer).
  *
- * Everything here runs against `RagflowFake`; no network, no store. The
+ * Everything here runs against `DocsPlaneFake`; no network, no store. The
  * live proof stays operator-gated (Phase 25 G1–G4).
  */
 import { describe, expect, test } from "bun:test";
@@ -19,20 +19,9 @@ import { DATASET_LIST_TTL_MS, DatasetListCache, createVersionStore, recordVersio
 import { ingestDocs, loadIngestRecords, saveIngestRecords, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestDeps, type IngestRecord } from "./docs-ingest.ts";
 import { searchDocs } from "./docs-search.ts";
 import { createObservability } from "./observe.ts";
-import {
-	DATASET_CHUNK_METHOD,
-	DATASET_EMBEDDING_MODEL,
-	DEFAULT_RETRIEVAL_KNOBS,
-	createDataset,
-	deleteDocuments,
-	documentName,
-	parseDocuments,
-	pollParseStatus,
-	retrieveChunks,
-	uploadDocument,
-	type FetchLike,
-} from "./planes/ragflow.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { documentName, type FetchLike } from "./planes/lightrag.ts";
+import { DEFAULT_RETRIEVAL_KNOBS } from "./planes/docs-wire.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import { nodePlanningFs } from "./planning/fs.ts";
 import { planningSessionId } from "./planning/checkout.ts";
 import { FakeTree } from "./planning/tree.fixtures.ts";
@@ -40,7 +29,7 @@ import { createHttpServer, type HttpServerOptions } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
 
-const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
+const CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
 const PAGE = { path: "docs/data-planes.md", source_url: "https://example.com/agent-substrate/data-planes", body: "The substrate is the only door." };
 const UNIT_FILE = join(import.meta.dir, "../../../infra/vps/substrate-mcp.service");
 
@@ -84,7 +73,7 @@ class FakeRedis implements CacheRedis {
 	}
 }
 
-function ingestHarness(fake: RagflowFake, over: Partial<IngestDeps> = {}) {
+function ingestHarness(fake: DocsPlaneFake, over: Partial<IngestDeps> = {}) {
 	const { events, emit } = eventSink();
 	const seen = new Map<string, IngestRecord>();
 	const lines: string[] = [];
@@ -102,141 +91,15 @@ function ingestHarness(fake: RagflowFake, over: Partial<IngestDeps> = {}) {
 	return { events, seen, lines, ingest: (pages: typeof PAGE[]) => ingestDocs(deps, { dataset: "agent-substrate", commit: "c1", pages }) };
 }
 
-describe("the client speaks the documented shapes (fake-enforced)", () => {
-	test("upload is one multipart `file` part named from the page path, then a meta_fields PATCH", async () => {
-		const fake = new RagflowFake();
-		const uploaded = await uploadDocument(
-			CONFIG,
-			{ dataset_id: "ds-berlin-agent-substrate", name: documentName("docs/data-planes.md"), content: "body text", metadata: { source_url: "https://example.com/x", commit: "c1", heading_path: "" } },
-			fake.fetch,
-		);
-		if (!uploaded.ok) throw new Error(`expected upload: ${uploaded.reason}`);
-		expect(uploaded.document_id).toBe("doc-upload-1");
-		const [post, patch] = fake.requests;
-		expect(post?.method).toBe("POST");
-		expect(post?.path).toBe("/api/v1/datasets/ds-berlin-agent-substrate/documents");
-		expect(post?.body).toEqual({ multipart: { file: [{ name: "docs__data-planes.md", bytes: 9 }] } });
-		expect(patch?.method).toBe("PATCH");
-		expect(patch?.path).toBe("/api/v1/datasets/ds-berlin-agent-substrate/documents/doc-upload-1");
-		expect(patch?.body).toEqual({ meta_fields: { source_url: "https://example.com/x", commit: "c1", heading_path: "" } });
-		expect(fake.uploads[0]).toMatchObject({ name: "docs__data-planes.md", content: "body text", metadata: { source_url: "https://example.com/x" } });
-		expect(fake.documents["doc-upload-1"]?.run).toBe("UNSTART");
-	});
 
-	test("the fake refuses the pre-R6 JSON upload body with the documented failure", async () => {
-		const fake = new RagflowFake();
-		const response = await fake.fetch("http://ragflow.test/api/v1/datasets/ds-berlin-agent-substrate/documents", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ content: "x", metadata: {} }),
-		});
-		expect(response.status).toBe(400);
-		expect(await response.json()).toEqual({ code: 101, message: "No file part!" });
-		const gone = await fake.fetch("http://ragflow.test/api/v1/documents/doc-1/parse");
-		expect(gone.status).toBe(404);
-	});
-
-	test("a failed meta_fields PATCH deletes the orphan and is the upload's reason", async () => {
-		const fake = new RagflowFake();
-		fake.failMetaWith = 500;
-		const uploaded = await uploadDocument(
-			CONFIG,
-			{ dataset_id: "ds-berlin-agent-substrate", name: "a.md", content: "x", metadata: { source_url: "u", commit: "c", heading_path: "" } },
-			fake.fetch,
-		);
-		if (uploaded.ok) throw new Error("expected a reason");
-		expect(uploaded.reason).toBe("ragflow meta_fields: ragflow 500");
-		expect(fake.deleted).toEqual(["doc-upload-1"]);
-	});
-
-	test("parse is the chunks call with document_ids; the status poll reads `run` from list-by-id", async () => {
-		const fake = new RagflowFake();
-		const uploaded = await uploadDocument(CONFIG, { dataset_id: "ds-berlin-agent-substrate", name: "a.md", content: "x", metadata: { source_url: "u", commit: "c", heading_path: "" } }, fake.fetch);
-		if (!uploaded.ok) throw new Error(uploaded.reason);
-		// Never parsed: the document stays UNSTART and the poll times out rather than passing.
-		const unparsed = await pollParseStatus(CONFIG, { dataset_id: "ds-berlin-agent-substrate", document_id: uploaded.document_id }, fake.fetch, { maxPolls: 3, intervalMs: 0 });
-		expect(unparsed).toEqual({ ok: false, reason: "parse-timeout" });
-		const started = await parseDocuments(CONFIG, "ds-berlin-agent-substrate", [uploaded.document_id], fake.fetch);
-		expect(started).toEqual({ ok: true });
-		expect(fake.parses()).toEqual([{ document_ids: ["doc-upload-1"] }]);
-		expect(fake.documents["doc-upload-1"]?.run).toBe("RUNNING");
-		const parsed = await pollParseStatus(CONFIG, { dataset_id: "ds-berlin-agent-substrate", document_id: uploaded.document_id }, fake.fetch, { intervalMs: 0 });
-		expect(parsed).toEqual({ ok: true });
-		const polls = fake.requests.filter((request) => request.method === "GET" && request.path === "/api/v1/datasets/ds-berlin-agent-substrate/documents");
-		expect(polls.length).toBeGreaterThanOrEqual(2);
-		expect(polls.every((request) => request.query.id === "doc-upload-1")).toBe(true);
-		expect(fake.documents["doc-upload-1"]?.run).toBe("DONE");
-	});
-
-	test("a FAIL run state is a named failure, and the business code is read under HTTP 200", async () => {
-		const fake = new RagflowFake();
-		fake.parseBehavior = "fail";
-		const uploaded = await uploadDocument(CONFIG, { dataset_id: "ds-berlin-agent-substrate", name: "a.md", content: "x", metadata: { source_url: "u", commit: "c", heading_path: "" } }, fake.fetch);
-		if (!uploaded.ok) throw new Error(uploaded.reason);
-		await parseDocuments(CONFIG, "ds-berlin-agent-substrate", [uploaded.document_id], fake.fetch);
-		const failed = await pollParseStatus(CONFIG, { dataset_id: "ds-berlin-agent-substrate", document_id: uploaded.document_id }, fake.fetch, { intervalMs: 0 });
-		if (failed.ok) throw new Error("expected a failure");
-		expect(failed.reason).toStartWith("parse-failed: FAIL");
-		const unknown = await parseDocuments(CONFIG, "ds-berlin-agent-substrate", ["doc-nope"], fake.fetch);
-		expect(unknown).toEqual({ ok: false, reason: "ragflow code 102: You don't own the document doc-nope." });
-	});
-
-	test("delete is the documented DELETE with ids", async () => {
-		const fake = new RagflowFake();
-		const uploaded = await uploadDocument(CONFIG, { dataset_id: "ds-berlin-agent-substrate", name: "a.md", content: "x", metadata: { source_url: "u", commit: "c", heading_path: "" } }, fake.fetch);
-		if (!uploaded.ok) throw new Error(uploaded.reason);
-		expect(await deleteDocuments(CONFIG, "ds-berlin-agent-substrate", [uploaded.document_id], fake.fetch)).toEqual({ ok: true });
-		const call = fake.requests[fake.requests.length - 1];
-		expect(call?.method).toBe("DELETE");
-		expect(call?.path).toBe("/api/v1/datasets/ds-berlin-agent-substrate/documents");
-		expect(call?.body).toEqual({ ids: ["doc-upload-1"] });
-		expect(fake.deleted).toEqual(["doc-upload-1"]);
-		expect(await deleteDocuments(CONFIG, "ds-berlin-agent-substrate", [], fake.fetch)).toEqual({ ok: true });
-		expect(fake.requests.filter((request) => request.method === "DELETE")).toHaveLength(1);
-	});
-
-	test("retrieval carries the three documented knobs — RAGFlow's defaults, or the env overrides", async () => {
-		const fake = new RagflowFake();
-		const outcome = await retrieveChunks(CONFIG, { question: "q", dataset_ids: ["ds-berlin-agent-substrate"] }, fake.fetch);
-		if (!outcome.ok) throw new Error(outcome.reason);
-		expect(fake.retrievals()[0]).toEqual({
-			question: "q",
-			dataset_ids: ["ds-berlin-agent-substrate"],
-			page: 1,
-			page_size: 10,
-			similarity_threshold: 0.2,
-			vector_similarity_weight: 0.3,
-			top_k: 1024,
-		});
-		// The documented chunk names map onto the citation's fields.
-		expect(outcome.chunks[0]).toMatchObject({ document_name: "data-planes.md", chunk_id: "chunk-ds-berlin-agent-substrate-1", score: 0.91 });
-		expect(outcome.chunks[0]?.source_url).toBeUndefined();
-
+describe("retrieval knobs", () => {
+	test("env overrides the documented retrieval knobs; junk falls back", () => {
 		const config = loadConfig({ SUBSTRATE_DOCS_SIMILARITY_THRESHOLD: "0.35", SUBSTRATE_DOCS_VECTOR_WEIGHT: "0.5", SUBSTRATE_DOCS_TOP_K: "256" });
 		expect(config.docsRetrieval).toEqual({ similarityThreshold: 0.35, vectorSimilarityWeight: 0.5, topK: 256 });
-		await retrieveChunks(CONFIG, { question: "q", dataset_ids: ["ds-berlin-agent-substrate"], retrieval: config.docsRetrieval }, fake.fetch);
-		expect(fake.retrievals()[1]).toMatchObject({ similarity_threshold: 0.35, vector_similarity_weight: 0.5, top_k: 256 });
-		// Junk and out-of-range values fall back to RAGFlow's own defaults.
 		expect(loadConfig({ SUBSTRATE_DOCS_SIMILARITY_THRESHOLD: "7", SUBSTRATE_DOCS_VECTOR_WEIGHT: "x", SUBSTRATE_DOCS_TOP_K: "0" }).docsRetrieval).toEqual(DEFAULT_RETRIEVAL_KNOBS);
 	});
-
-	test("dataset create sends the documented chunk_method with the pinned model; a taken name is never reused", async () => {
-		const fake = new RagflowFake();
-		const created = await createDataset(CONFIG, "kanbanos", fake.fetch);
-		if (!created.ok) throw new Error(created.reason);
-		expect(fake.requests[0]?.body).toEqual({ name: "kanbanos", embedding_model: DATASET_EMBEDDING_MODEL, chunk_method: DATASET_CHUNK_METHOD });
-		expect(DATASET_CHUNK_METHOD).toBe("naive");
-		// The reference suffixes a duplicate; resolve-by-name is what keeps us from making one.
-		const again = await createDataset(CONFIG, "kanbanos", fake.fetch);
-		if (!again.ok) throw new Error(again.reason);
-		expect(fake.datasets.map((dataset) => dataset.name)).toContain("kanbanos(1)");
-		const resolved = await resolveDatasets({ config: CONFIG, fetchImpl: fake.fetch }, ["kanbanos"]);
-		if (!resolved.ok) throw new Error(resolved.reason);
-		expect(resolved.datasets[0]).toEqual({ name: "kanbanos", id: created.id, created: false });
-		// The list is read with the documented pagination query.
-		expect(fake.datasetLists()[0]?.query).toEqual({ page: "1", page_size: "100" });
-	});
 });
+
 
 describe("durable versions and real pins", () => {
 	test("the state file round-trips records and versions at version 2 and migrates a version-1 file", async () => {
@@ -249,7 +112,7 @@ describe("durable versions and real pins", () => {
 			expect(v1.records.size).toBe(1);
 			expect(v1.versions.size).toBe(0);
 			const versions = createVersionStore();
-			recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds-1", version: "v1", commit: "c1", content_sha256: "s", ingested_at: "2026-10-13T00:00:00.000Z", backend: "ragflow" });
+			recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds-1", version: "v1", commit: "c1", content_sha256: "s", ingested_at: "2026-10-13T00:00:00.000Z", backend: "lightrag" });
 			await saveIngestRecords(file, v1.records, versions);
 			const written = JSON.parse(readFileSync(file, "utf8")) as { version: number; versions: unknown };
 			expect(written.version).toBe(2);
@@ -267,13 +130,13 @@ describe("durable versions and real pins", () => {
 	test("citations carry the real commit pin as dataset_commit after one recorded version, and the pin survives a restart", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
-			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: join(dir, "docs-ingest.json") };
+			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: join(dir, "docs-ingest.json") };
 			// `Substrate` polls at the production cadence (2 s between polls): one poll keeps the test inside the runner's budget.
-			const fake = new RagflowFake();
+			const fake = new DocsPlaneFake();
 			fake.parseDonePolls = 1;
 			const repos = repoSeam();
-			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
-			const before = await first.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
+			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
+			const before = await first.searchDocs({ question: "who reads lightrag?", datasets: ["agent-substrate"] }, "omp");
 			expect(before.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
 			expect(before.chunks[0]?.dataset_commit).toBeUndefined();
 			const ingested = await first.ingestDocs({ dataset: "agent-substrate", commit: "c-real", pages: [PAGE] }, "omp");
@@ -285,7 +148,7 @@ describe("durable versions and real pins", () => {
 			const seeded = fake.chunks["ds-berlin-agent-substrate"]?.[0];
 			if (!seeded) throw new Error("expected a seeded chunk");
 			fake.chunks["ds-berlin-agent-substrate"] = [{ ...seeded, document_id: ownId, chunk_id: "chunk-own" }, seeded];
-			const after = await first.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
+			const after = await first.searchDocs({ question: "who reads lightrag?", datasets: ["agent-substrate"] }, "omp");
 			expect(after.chunks.length).toBe(2);
 			// Every citation names the dataset's recorded version separately …
 			expect(after.chunks.every((citation) => citation.dataset_commit === "c-real")).toBe(true);
@@ -295,8 +158,8 @@ describe("durable versions and real pins", () => {
 			expect(byDocument[seeded.document_id ?? ""]).toBe("dataset-pin:agent-substrate:unrecorded");
 
 			// A new process: pins hydrate from the file, idempotency holds.
-			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
-			const restarted = await second.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
+			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
+			const restarted = await second.searchDocs({ question: "who reads lightrag?", datasets: ["agent-substrate"] }, "omp");
 			expect(restarted.chunks.map((citation) => [citation.document_id, citation.commit, citation.dataset_commit])).toEqual(after.chunks.map((citation) => [citation.document_id, citation.commit, citation.dataset_commit]));
 			const newest = await second.latestDocsVersion("agent-substrate");
 			expect(newest).toMatchObject({ version: "v1", commit: "c-real", content_sha256: "sha-real" });
@@ -306,7 +169,7 @@ describe("durable versions and real pins", () => {
 	});
 
 	test("a chunk without a source URL is cited from the ingest record of its document, redacted", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.chunks["ds-berlin-agent-substrate"] = [{ content: "clean", document_name: "a.md", document_id: "doc-rec", chunk_id: "c", source_url: "", score: 0.5 }];
 		const { emit } = eventSink();
 		const reply = await searchDocs(
@@ -330,11 +193,11 @@ describe("durable versions and real pins", () => {
 		// The fake serves whatever `chunks` holds: after each ingest, point the
 		// dataset's chunks at the documents the plane actually holds, as a
 		// retrieval over an unpruned corpus would.
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseDonePolls = 1;
 		const chunkFor = (documentId: string) => ({ content: `from ${documentId}`, document_name: "data-planes.md", document_id: documentId, chunk_id: `chunk-${documentId}`, source_url: "", score: 0.5 });
 		const repos = repoSeam();
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
 		const old = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "c-old", pages: [PAGE] }, "omp");
 		if (!old.ok) throw new Error(old.reason);
 		const oldId = old.results[0]?.document_id ?? "";
@@ -378,11 +241,11 @@ describe("durable versions and real pins", () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
 			const file = join(dir, "docs-ingest.json");
-			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
-			const fake = new RagflowFake();
+			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
+			const fake = new DocsPlaneFake();
 			fake.parseDonePolls = 1;
 			const repos = repoSeam();
-			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
+			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
 			const v1 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
 			const v2 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c2", pages: [{ ...PAGE, body: "two" }] }, "omp");
 			if (!v1.ok || !v2.ok) throw new Error("expected both ingests");
@@ -390,12 +253,12 @@ describe("durable versions and real pins", () => {
 			const record = [...loaded.records.values()][0];
 			expect(record).toMatchObject({ document_id: v2.results[0]?.document_id, commit: "c2", superseded: [{ document_id: v1.results[0]?.document_id, commit: "c1" }] });
 			// A new process resolves the old document from the hydrated lineage.
-			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
+			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
 			fake.chunks["ds-berlin-agent-substrate"] = [{ content: "x", document_name: "d", document_id: v1.results[0]?.document_id ?? "", chunk_id: "c", source_url: "", score: 1 }];
 			const reply = await second.searchDocs({ question: "q", datasets: ["agent-substrate"] }, "omp");
 			expect(reply.chunks[0]?.commit).toBe("c1");
 			// With the prune on, the deleted predecessor is not kept in the lineage.
-			const pruning = new Substrate(loadConfig({ ...env, ...repos.env, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" }), { index: null, greptime: null, ragflowFetch: fake.fetch, ...repos.stores });
+			const pruning = new Substrate(loadConfig({ ...env, ...repos.env, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
 			const v3 = await pruning.ingestDocs({ dataset: "agent-substrate", commit: "c3", pages: [{ ...PAGE, body: "three" }] }, "omp");
 			if (!v3.ok) throw new Error(v3.reason);
 			expect(v3.results[0]?.pruned_document_id).toBe(v2.results[0]?.document_id);
@@ -409,7 +272,7 @@ describe("durable versions and real pins", () => {
 
 describe("cached reads", () => {
 	test("the dataset list is served from memory for 60 s, and dropped by a create or a failed list", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		let now = 1_000_000;
 		const cache = new DatasetListCache(DATASET_LIST_TTL_MS, () => now);
 		const a = await cache.list(CONFIG, fake.fetch);
@@ -438,7 +301,7 @@ describe("cached reads", () => {
 		await cache.list(CONFIG, fake.fetch);
 		expect(fake.datasetLists()).toHaveLength(3);
 		now += DATASET_LIST_TTL_MS + 1;
-		expect(await cache.list(CONFIG, fake.fetch)).toEqual({ ok: false, reason: "ragflow 503" });
+		expect(await cache.list(CONFIG, fake.fetch)).toEqual({ ok: false, reason: "lightrag 503" });
 		expect(fake.datasetLists()).toHaveLength(4);
 		fake.failListWith = null;
 		const recovered = await cache.list(CONFIG, fake.fetch);
@@ -451,12 +314,12 @@ describe("cached reads", () => {
 	});
 
 	test("one docs_search costs N retrievals with the list cached, and 0 plane calls on a cache hit", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
 		const repos = repoSeam();
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache, ...repos.stores });
-		const first = await substrate.searchDocs({ question: "who reads  RAGFlow?" }, "omp");
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, cache, ...repos.stores });
+		const first = await substrate.searchDocs({ question: "who reads  lightrag?" }, "omp");
 		expect(first.degraded).toBeUndefined();
 		expect(fake.datasetLists()).toHaveLength(1);
 		expect(fake.retrievals()).toHaveLength(3);
@@ -464,18 +327,18 @@ describe("cached reads", () => {
 		expect(redis.commands.find((command) => command.startsWith("SET substrate:v1:docs-search:"))).toEndWith(`ttl=${CACHE_TTL["docs-search"]}`);
 		const before = fake.requests.length;
 		// Same question up to whitespace and case: a hit, no plane call at all.
-		const second = await substrate.searchDocs({ question: "  Who reads RAGFlow? " }, "omp");
+		const second = await substrate.searchDocs({ question: "  Who reads lightrag? " }, "omp");
 		expect(second.chunks).toEqual(first.chunks);
 		expect(fake.requests.length).toBe(before);
 		expect(cache.health().hits).toBe(1);
 	});
 
 	test("a degraded answer is never stored, and an ingest or a recorded version bumps gen:docs", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
 		const repos = repoSeam();
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...repos.env }), { index: null, greptime: null, ragflowFetch: fake.fetch, cache, ...repos.stores });
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, cache, ...repos.stores });
 		fake.failRetrievalWith = 503;
 		const degraded = await substrate.searchDocs({ question: "q" }, "omp");
 		expect(degraded.degraded).toBe(true);
@@ -515,7 +378,7 @@ describe("cached reads", () => {
 
 describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 	test("off (the default) keeps the superseded document and makes no delete call", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		expect(loadConfig({}).docsPruneSuperseded).toBe(false);
 		const { ingest } = ingestHarness(fake);
 		const first = await ingest([PAGE]);
@@ -529,7 +392,7 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 	});
 
 	test("on, the superseded document is deleted after the replacement parsed, and the result says so", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		expect(loadConfig({ SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" }).docsPruneSuperseded).toBe(true);
 		const { events, ingest } = ingestHarness(fake, { prune: true });
 		const first = await ingest([PAGE]);
@@ -549,7 +412,7 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 	});
 
 	test("a failed prune is recorded on the result and logged, and the ingest still succeeds", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, lines, ingest } = ingestHarness(fake, { prune: true });
 		const first = await ingest([PAGE]);
 		if (!first.ok) throw new Error(first.reason);
@@ -558,7 +421,7 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 		if (!changed.ok) throw new Error(`expected success: ${changed.reason}`);
 		expect(changed.results[0]?.status).toBe("replaced");
 		expect(changed.results[0]?.pruned_document_id).toBeUndefined();
-		expect(changed.results[0]?.prune).toBe("failed: ragflow 500");
+		expect(changed.results[0]?.prune).toBe("failed: lightrag 500");
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("not pruned");
 		expect(events.some((event) => event.kind === "warning")).toBe(false);
@@ -569,7 +432,7 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 	// fails at upload. The fake has no per-document failure knob, so the
 	// wrapper refuses the one multipart upload whose file carries B's name.
 	const PAGE_B = { path: "docs/b.md", source_url: "https://example.com/agent-substrate/b", body: "page b" };
-	const failingUploadOf = (fake: RagflowFake, fileName: string): FetchLike => async (input, init) => {
+	const failingUploadOf = (fake: DocsPlaneFake, fileName: string): FetchLike => async (input, init) => {
 		if (init?.body instanceof FormData && init.body.getAll("file").some((part) => part instanceof File && part.name === fileName)) {
 			return Response.json({ code: 100, message: "injected upload failure" }, { status: 500 });
 		}
@@ -577,7 +440,7 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 	};
 
 	test("Greptile round 2: a page failing after an earlier page pruned its predecessor reports changed: true; a refusal that touched nothing reports false", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { seen, ingest } = ingestHarness(fake, { prune: true, fetchImpl: failingUploadOf(fake, documentName(PAGE_B.path)) });
 		const first = await ingest([PAGE]);
 		if (!first.ok) throw new Error(first.reason);
@@ -609,13 +472,13 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
 			const file = join(dir, "docs-ingest.json");
-			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" };
-			const fake = new RagflowFake();
+			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" };
+			const fake = new DocsPlaneFake();
 			fake.parseDonePolls = 1;
 			const redis = new FakeRedis();
 			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
 			const bumps = () => redis.commands.filter((command) => command === `INCR ${DOCS_GENERATION_KEY}`).length;
-			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: failingUploadOf(fake, documentName(PAGE_B.path)), cache });
+			const first = new Substrate(loadConfig(env), { index: null, greptime: null, lightragFetch: failingUploadOf(fake, documentName(PAGE_B.path)), cache });
 			const v1 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
 			if (!v1.ok) throw new Error(v1.reason);
 			const oldId = v1.results[0]?.document_id ?? "";
@@ -632,7 +495,7 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 			expect(fake.documents[saved?.document_id ?? ""]).toBeDefined();
 			// A restart re-submitting page A's old content replaces the recorded
 			// document rather than answering `unchanged` for the deleted one.
-			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch, cache });
+			const second = new Substrate(loadConfig(env), { index: null, greptime: null, lightragFetch: fake.fetch, cache });
 			const resubmitted = await second.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
 			if (!resubmitted.ok) throw new Error(resubmitted.reason);
 			expect(resubmitted.results[0]).toMatchObject({ status: "replaced", superseded_document_id: saved?.document_id });
@@ -650,13 +513,13 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 });
 
 describe("the asynchronous merge-trigger", () => {
-	async function serve(fake: RagflowFake, docs: string, env: Record<string, string> = {}, options: HttpServerOptions = {}) {
-		const fullEnv = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", ...env };
+	async function serve(fake: DocsPlaneFake, docs: string, env: Record<string, string> = {}, options: HttpServerOptions = {}) {
+		const fullEnv = { SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...env };
 		const repos = repoSeam();
 		const config = loadConfig({ ...fullEnv, ...repos.env });
 		const observability = createObservability(config, fullEnv);
 		await observability.start();
-		const substrate = new Substrate(config, { index: null, greptime: null, ragflowFetch: fake.fetch as FetchLike, ...repos.stores }, observability.observer);
+		const substrate = new Substrate(config, { index: null, greptime: null, lightragFetch: fake.fetch as FetchLike, ...repos.stores }, observability.observer);
 		const server = createHttpServer(substrate, config, observability, { docsIngestBaseDir: docs, ...options });
 		const listening = Promise.withResolvers<void>();
 		server.listen(0, "127.0.0.1", listening.resolve);
@@ -683,8 +546,8 @@ describe("the asynchronous merge-trigger", () => {
 	}
 
 	/** A fake whose parse never finishes until released, so the job is observably in flight. */
-	function gatedFake(): { fake: RagflowFake; release: () => void } {
-		const fake = new RagflowFake();
+	function gatedFake(): { fake: DocsPlaneFake; release: () => void } {
+		const fake = new DocsPlaneFake();
 		const inner = fake.fetch;
 		const gate = Promise.withResolvers<void>();
 		let released = false;
@@ -756,7 +619,7 @@ describe("the asynchronous merge-trigger", () => {
 	});
 
 	test("the refusals are unchanged: 401 untokened, 403 off-loopback-only guest, 400 bad body; ?wait=1 answers 503 on a refused ingest", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const docs = fixture();
 		writeFileSync(join(docs, "README.md"), "password: hunter2 in the shipped config");
 		const { post, stop } = await serve(fake, docs, { SUBSTRATE_VM_GUEST: "" });
@@ -782,7 +645,7 @@ describe("the asynchronous merge-trigger", () => {
 	});
 
 	test("a background job's failure is logged, recorded on ?wait=1, and records no version", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseBehavior = "fail";
 		const docs = fixture();
 		const lines: string[] = [];
@@ -810,7 +673,7 @@ describe("the asynchronous merge-trigger", () => {
 	});
 
 	test("an agent-skills trigger is the fast-forward evidence: its citations stop carrying pin_age_ms", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const docs = fixture();
 		const { substrate, post, stop } = await serve(fake, docs);
 		try {
@@ -831,7 +694,7 @@ describe("the asynchronous merge-trigger", () => {
 
 describe("an agent-skills refresh ingests the checkout at the commit it was asked for", () => {
 	test("a queued refresh whose checkout moved on records no version and reports commit-mismatch", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseDonePolls = 1;
 		const checkout = mkdtempSync(join(tmpdir(), "substrate-skills-queued-"));
 		try {
@@ -848,7 +711,7 @@ describe("an agent-skills refresh ingests the checkout at the commit it was aske
 				}
 				return fake.fetch(input, init);
 			};
-			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: parked });
+			const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), { index: null, greptime: null, lightragFetch: parked });
 			// The checkout's HEAD, read when each job runs: the live value the queued job must not outrun.
 			let live = "c0";
 			const refreshOf = (commit: string) => ({

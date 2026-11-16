@@ -1211,7 +1211,7 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 		expect((await call(client, "docs_rag_state")).json().state).toBe("ERROR");
 	});
 
-	test("a refusal for a dataset with no RAGFlow configured never reaches a plane, so the machine stays out of ERROR", async () => {
+	test("a refusal for a dataset with no lightrag configured never reaches a plane, so the machine stays out of ERROR", async () => {
 		const { client } = await connect(ledger().greptime, "omp", {});
 
 		for (const n of [1, 2, 3, 4]) {
@@ -1220,7 +1220,7 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 				pages: [{ ...PAGE_FOR_INGEST, source_url: `https://example.com/agent-substrate/unconfigured-${n}` }],
 			});
 			expect(refused.isError).toBe(true);
-			expect(refused.json()).toMatchObject({ ok: false, reason: "ragflow-not-configured" });
+			expect(refused.json()).toMatchObject({ ok: false, reason: "lightrag-not-configured" });
 		}
 
 		const state = (await call(client, "docs_rag_state")).json();
@@ -1267,10 +1267,10 @@ describe("docs_ingest refusals do not count against the RAG breaker", () => {
 	});
 
 	test("the refusals that never reach a plane are gate refusals, and a plane error is not", () => {
-		for (const reason of ["dataset-lock-timeout", "lightrag-not-configured", "ragflow-not-configured", "version.stale"]) {
+		for (const reason of ["dataset-lock-timeout", "lightrag-not-configured", "lightrag-not-configured", "version.stale"]) {
 			expect(ingestRefusalIsGate(reason)).toBe(true);
 		}
-		expect(ingestRefusalIsGate("ragflow 500")).toBe(false);
+		expect(ingestRefusalIsGate("lightrag 500")).toBe(false);
 		expect(ingestRefusalIsGate("parse-timeout")).toBe(false);
 	});
 });

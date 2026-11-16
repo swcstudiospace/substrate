@@ -20,7 +20,7 @@ It does not restore, and nothing in `deploy-release.sh` ever touches:
 - `/etc/substrate/*.env`;
 - state files under `/var/lib/substrate`;
 - cache values in the loopback redis;
-- ledger tables, Postgres tables and the remote Hindsight and RAGFlow state.
+- ledger tables, Postgres tables and the remote Hindsight and LightRAG state.
 
 `previous` is also the only older tree kept: `readlink /opt/agent-substrate/previous` names the release a rollback returns to. Any deploy that replaces a non-empty `current` points `previous` at it, whether or not it restarted (`SUBSTRATE_RELEASE_RESTART=0` only skips the restart, health and store checks, and the prune). Only the very first deploy on a host leaves no `previous`, and `rollback` then exits with `no previous release`.
 

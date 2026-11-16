@@ -425,7 +425,7 @@ const FIXTURES: Record<RedactionRuleName, readonly RuleFixture[]> = {
 	"openai-proj": [{ text: "sk-proj-" + rnd(ALNUM, 40), secret: "sk-proj-" + rnd(ALNUM, 40) }],
 	// The key prefix is a literal like the other provider prefixes above; the
 	// tail is deterministic runtime output, never a real credential.
-	ragflow: [{ text: "ragflow-" + rnd(ALNUM, 40), secret: "ragflow-" + rnd(ALNUM, 40) }],
+	lightrag: [{ text: "lightrag-" + rnd(ALNUM, 40), secret: "lightrag-" + rnd(ALNUM, 40) }],
 	// Provider shapes added with the SOTA pass; the skill pass shares each name.
 	stripe: [{ text: "sk_live_" + rnd(ALNUM, 24), secret: "sk_live_" + rnd(ALNUM, 24) }],
 	huggingface: [{ text: "hf_" + rnd(ALNUM, 34), secret: "hf_" + rnd(ALNUM, 34) }],
@@ -871,7 +871,7 @@ describe("redactSkillContent rejects high-confidence secrets", () => {
 			gitlab: "glpat-" + rnd(ALNUM, 20),
 			digitalocean: "dop_v1_" + rnd(HEX, 64),
 			"openai-proj": "sk-proj-" + rnd(ALNUM, 40),
-			ragflow: "ragflow-" + rnd(ALNUM, 40),
+			lightrag: "lightrag-" + rnd(ALNUM, 40),
 			stripe: "sk_live_" + rnd(ALNUM, 24),
 			huggingface: "hf_" + rnd(ALNUM, 34),
 			"google-oauth": "ya29." + rnd(ALNUM, 40),

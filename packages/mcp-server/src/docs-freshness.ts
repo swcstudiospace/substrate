@@ -3,7 +3,7 @@
  *
  * Pure and offline: everything here is computed from the persisted docs state
  * (the version store and the accepted-trigger store) and a caller-supplied
- * clock. No RAGFlow call; the only side effects are the injected ones.
+ * clock. No lightrag call; the only side effects are the injected ones.
  *
  * What it proves, and what it does not:
  * - `freshness_seconds` is the age of the newest recorded ingest per dataset.

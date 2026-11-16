@@ -177,8 +177,8 @@ function docsStateInputs(withFreshness: boolean): { file: string; seen: Map<stri
 		version: 1,
 	});
 	const versions = createVersionStore();
-	recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds_agent_substrate", version: "v1", commit: "b".repeat(40), content_sha256: "e".repeat(64), ingested_at: "2026-10-13T08:00:00.000Z", backend: "ragflow" });
-	recordVersion(versions, { dataset: "agent-skills", dataset_id: "ds_agent_skills", version: "v1", commit: "c".repeat(40), content_sha256: "f".repeat(64), ingested_at: "2026-10-13T09:00:00.000Z", backend: "ragflow" });
+	recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds_agent_substrate", version: "v1", commit: "b".repeat(40), content_sha256: "e".repeat(64), ingested_at: "2026-10-13T08:00:00.000Z", backend: "lightrag" });
+	recordVersion(versions, { dataset: "agent-skills", dataset_id: "ds_agent_skills", version: "v1", commit: "c".repeat(40), content_sha256: "f".repeat(64), ingested_at: "2026-10-13T09:00:00.000Z", backend: "lightrag" });
 	const freshness = createFreshnessState();
 	if (withFreshness) {
 		recordTrigger(freshness.triggers, "agent-substrate", { commit: "c".repeat(40), content_sha256: "e".repeat(64), received_at: "2026-10-14T08:00:00.000Z" });
@@ -204,7 +204,7 @@ describe("docs state file (docs-ingest.json): the current writer against the 923
 			expect(extraKeys(record, OLD_DOCS_RECORD).sort()).toEqual([...NEW_DOCS_RECORD_KEYS].sort());
 		}
 		for (const rows of Object.values(parsed.versions as Record<string, Array<Record<string, unknown>>>)) {
-			// The backend stamp is the one row addition. A row without it loads as ragflow, so an older state still completes RAGFlow replays.
+			// The backend stamp is the one row addition. A row without it loads as lightrag, so an older state still completes lightrag replays.
 			for (const row of rows) expect(Object.keys(row).sort()).toEqual([...OLD_DOCS_VERSION, "backend"].sort());
 		}
 		expect(parsed.version).toBe(2);

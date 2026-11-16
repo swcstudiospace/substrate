@@ -3,8 +3,8 @@
 | | |
 | --- | --- |
 | Requirement | uplift-2 R2 (Build Plan A-5 "Runbooks: substrate red", A-3, SPE-10665 / SPE-10667) |
-| Symptoms | `GET /healthz` answers non-200; `bun run parity:check` FAIL on the healthz criterion; a `planes.<name>.breaker.state` of `open` in `/healthz`; a `plane.<name>.availability` objective `breached` in `/slo`; a `warning` event on the ledger with `payload.runtime: "slo"` (uplift-3 N2, step 3); a Railway store down (Greptime, TimescaleDB, Hindsight, RAGFlow) or the loopback redis stopped; agents reporting degraded briefs, recalls or docs searches |
-| Measured | 2026-10-13 baseline (`.planning/uplift-2/BASELINES.md`): `/healthz` mean 598 ms; brief p95 3,116 ms; Greptime / Hindsight / RAGFlow edge TTFB ≈ 220–250 ms; TimescaleDB cold connect 1,057 ms; time-to-degraded answer during an outage 4–5 s before breakers, < 50 ms once a breaker is open |
+| Symptoms | `GET /healthz` answers non-200; `bun run parity:check` FAIL on the healthz criterion; a `planes.<name>.breaker.state` of `open` in `/healthz`; a `plane.<name>.availability` objective `breached` in `/slo`; a `warning` event on the ledger with `payload.runtime: "slo"` (uplift-3 N2, step 3); a Railway store down (Greptime, TimescaleDB, Hindsight, LightRAG) or the loopback redis stopped; agents reporting degraded briefs, recalls or docs searches |
+| Measured | 2026-10-13 baseline (`.planning/uplift-2/BASELINES.md`): `/healthz` mean 598 ms; brief p95 3,116 ms; Greptime / Hindsight / LightRAG edge TTFB ≈ 220–250 ms; TimescaleDB cold connect 1,057 ms; time-to-degraded answer during an outage 4–5 s before breakers, < 50 ms once a breaker is open |
 | Scope | `substrate-mcp.service` on `127.0.0.1:7410` and the five data planes it reaches |
 | Untouched | The collectors, dispatcher, host, skills sync, surface tokens, event mapping, the stores' own data |
 
@@ -13,7 +13,7 @@
 The status code of `/healthz` comes from two things only: a configured ledger
 that cannot be written (`eventsWritable: false` → 503) and neither the index nor
 the ledger answering (→ 503). Everything else in the body — `planes`,
-`capacity`, `cache`, `auditDurable` — is **report-only**. A Hindsight or RAGFlow
+`capacity`, `cache`, `auditDurable` — is **report-only**. A Hindsight or LightRAG
 outage never turns `/healthz` red; it turns the plane's row red and degrades the
 reads that plane serves. So the first question is always *which plane*, and
 `/healthz` now answers it.
@@ -110,7 +110,7 @@ names only.
    | `graph_claim` | **fail-closed**: `decision: revoked`, node quarantined, both halves on the audit chain | `/evidence`, `substrate.lease.claims` |
    | `POST /brief` | **fail-open**: 200 inside the hook's budget; the source that failed is left out | `substrate.brief.duration{outcome=error}` |
    | `memory_recall` | **fail-open**: `degraded: true`, reason containing `circuit open` or `unreachable` | `/memory/recall` |
-   | `docs_search` | **fail-open**: `{chunks: [], degraded: true, reason: "ragflow circuit open"}` | `/docs/search` |
+   | `docs_search` | **fail-open**: `{chunks: [], degraded: true, reason: "lightrag circuit open"}` | `/docs/search` |
    | cache | **fail-open**: `mode: degraded`, every read bypasses to the source | `substrate.cache.operations{result=bypass}` |
 
    `bun run smoke:chaos -- --plane <name>` asserts exactly this over the wire
@@ -179,7 +179,7 @@ old release (if it predates R2) are simply absent.
   alone, claims and memory writes refuse. Check `capacity.index` on recovery —
   a database near its 500 MB volume is the next incident
   ([`disk-pressure.md`](disk-pressure.md) for the host side).
-- **Hindsight / RAGFlow**: `planes.<name>.ok: false`; recalls and docs searches
+- **Hindsight / LightRAG**: `planes.<name>.ok: false`; recalls and docs searches
   answer degraded, retains warn. No status change; agents keep working from the
   index.
 - **loopback redis** (cache): `cache.mode: degraded`, `cooldownUntil` set;

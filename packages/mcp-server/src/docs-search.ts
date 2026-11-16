@@ -1,5 +1,6 @@
+/** LightRAG replaced RAGFlow; there is no fallback that calls the retired plane. */
 /**
- * DOCS-01: substrate-only docs search over RAGFlow (D25-03, D25-04).
+ * DOCS-01: substrate-only docs search over lightrag (D25-03, D25-04).
  *
  * Every retrieval carries explicit `dataset_ids` resolved from configured
  * dataset names — never caller-supplied raw ids, never an open-ended tenant
@@ -19,7 +20,7 @@
  * (never the dataset's newest pin, which that document may predate); a
  * document the records never uploaded → `dataset-pin:<name>:unrecorded`
  * (Greptile round 2: never the dataset pin either — a document ingested
- * before the state file existed, or directly through RAGFlow, may predate
+ * before the state file existed, or directly through lightrag, may predate
  * or postdate it). The dataset's newest recorded pin travels separately
  * as `dataset_commit`, documented as the dataset's version, not the
  * document's. With the prune off, retrieval can return a replaced
@@ -39,22 +40,12 @@ import type { DatasetListSource } from "./docs-datasets.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { DEFAULT_TANDEM_OPTIONS, mergeTandem, type TandemCounts, type TandemOptions, type TandemOrigin, type TandemProvenance } from "./tandem-recall.ts";
-import {
-	listDatasets,
-	retrieveChunks,
-	type DatasetListOutcome,
-	type FetchLike,
-	type RagflowChunk,
-	type RagflowConfig,
-	type RagflowDataset,
-	type RetrievalKnobs,
-	type RetrievalOutcome,
-} from "./planes/ragflow.ts";
+import type { DatasetListOutcome, DocsChunk, FetchLike, RetrievalKnobs } from "./planes/docs-wire.ts";
 /**
  * LightRAG cutover, import-ready: the LightRAG retriever resolves to a
- * `LightragQueryOutcome` (the `RagflowChunk` list plus the graph detail), so the
+ * `LightragQueryOutcome` (the `DocsChunk` list plus the graph detail), so the
  * backend dispatch can swap it in without reshaping citations or dropping graph counts. Re-exported here so
- * the dispatch owner has one hub import; this module's RAGFlow path is
+ * the dispatch owner has one hub import; this module's lightrag path is
  * unchanged.
  */
 import { retrieveForSearch as retrieveForSearchLightrag, type LightragGraphDetail, type LightragQueryOutcome } from "./planes/lightrag.ts";
@@ -90,7 +81,7 @@ export interface SearchCitation {
 	/**
 	 * Graph nodes backing this citation; present only on the LightRAG path,
 	 * when the backend or a planning-graph hint attributes the citation. Absent
-	 * on RAGFlow citations, so existing readers are unaffected.
+	 * on lightrag citations, so existing readers are unaffected.
 	 */
 	graph?: CitationGraphProvenance;
 	/** Tandem replies only: which plane the citation came from. Absent otherwise. */
@@ -112,7 +103,7 @@ export interface SearchCitation {
 
 /**
  * One dataset the search could not read (uplift-3 N5). `reason` is the plane
- * client's own bounded reason (`ragflow 503`, `ragflow circuit open`, the
+ * client's own bounded reason (`lightrag 503`, `lightrag circuit open`, the
  * `deadline (… ms docs budget)` of a dataset that outlived the shared
  * budget), redacted and capped so no transport message grows past 200
  * characters.
@@ -163,7 +154,7 @@ export interface SearchReply {
 	reason?: string;
 	/**
 	 * The plane that answered. Present only on the LightRAG path, so
-	 * RAGFlow replies are byte-identical to before. `hindsight` when the
+	 * lightrag replies are byte-identical to before. `hindsight` when the
 	 * LightRAG plane failed and Hindsight recall answered in its place.
 	 */
 	backend?: DocsBackend | "hindsight";
@@ -180,7 +171,7 @@ export interface SearchReply {
 	/**
 	 * Graph coverage behind the citations (LightRAG path). Present when the
 	 * caller passed `graphHints` or the backend reported graph detail; absent
-	 * on pure RAGFlow replies, so existing readers are unaffected.
+	 * on pure lightrag replies, so existing readers are unaffected.
 	 */
 	graph?: SearchGraphStats;
 	/**
@@ -277,7 +268,7 @@ export type LightragRetriever = (
 	timeoutMs?: number,
 ) => Promise<LightragQueryOutcome>;
 
-/** Dataset list reader for the LightRAG plane; the service wiring owns it, like `datasets` for RAGFlow. */
+/** Dataset list reader for the LightRAG plane; the service wiring owns it, like `datasets` for lightrag. */
 export interface LightragDatasetList {
 	list(): Promise<DatasetListOutcome>;
 	invalidate(): void;
@@ -322,7 +313,7 @@ export interface DatasetPin {
 }
 
 export interface SearchDeps {
-	config: RagflowConfig | null;
+	config: { url: string; apiKey: string } | null;
 	/** The dataset names this search reads: the known datasets the caller asked for (`knownDatasets`). */
 	datasetNames: readonly string[];
 	pins?: Record<string, DatasetPin>;
@@ -338,7 +329,7 @@ export interface SearchDeps {
 	nowMs?: number;
 	/** The dataset list reader; the plane directly when omitted (uplift-2 R6). */
 	datasets?: DatasetListSource;
-	/** The documented retrieval tuning; RAGFlow's defaults when omitted (uplift-2 R6). */
+	/** The documented retrieval tuning; lightrag's defaults when omitted (uplift-2 R6). */
 	retrieval?: RetrievalKnobs;
 	/** The ingest record of a document id — source URL and the commit it was uploaded under (uplift-2 R6). */
 	provenanceOf?: (documentId: string) => DocumentProvenance | undefined;
@@ -354,7 +345,7 @@ export interface SearchDeps {
 	 */
 	budgetMs?: number;
 	/**
-	 * The RAGFlow breaker's state at search time (Greptile round 1, PR #61);
+	 * The lightrag breaker's state at search time (Greptile round 1, PR #61);
 	 * `closed` when omitted. Only `half-open` changes anything: the first
 	 * dataset is retrieved alone as the probe before the rest fan out.
 	 */
@@ -362,7 +353,7 @@ export interface SearchDeps {
 	/**
 	 * Planning-graph hints biasing this search (LightRAG path). When present
 	 * the reply carries `graph` counts and citations whose heading a hint
-	 * names carry `graph`; the RAGFlow citations are otherwise
+	 * names carry `graph`; the lightrag citations are otherwise
 	 * unchanged.
 	 */
 	graphHints?: PlanningGraphHint[];
@@ -395,7 +386,7 @@ export interface SearchDeps {
 	lightrag?: (question: string) => Promise<unknown>;
 	/**
 	 * Which plane serves this search. Unset follows the configured reach: a
-	 * `lightragConfig` present means lightrag, otherwise ragflow — the same
+	 * `lightragConfig` present means lightrag, otherwise lightrag — the same
 	 * rule `resolveDocsBackend` applies to the environment.
 	 */
 	backend?: DocsBackend;
@@ -427,7 +418,7 @@ export interface SearchDeps {
 	lightragHindsight?: (question: string) => Promise<readonly DerivedMemoryHit[]>;
 	/**
 	 * The RAG machine refused the plane: its breaker is cooling, or a half-open probe holds it. LightRAG is not asked;
-	 * the search answers from Hindsight, or degraded, as it does for an open breaker. The RAGFlow path ignores it.
+	 * the search answers from Hindsight, or degraded, as it does for an open breaker. The lightrag path ignores it.
 	 */
 	lightragCooling?: boolean;
 	/**
@@ -476,8 +467,6 @@ function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDat
 /** The most characters a per-dataset reason carries into a reply or an event. */
 const REASON_CAP = 200;
 
-/** The reason the plane client gives a call its open (or probe-less half-open) breaker refused (`planes/ragflow.ts`). */
-const CIRCUIT_OPEN = "ragflow circuit open";
 
 /** The bounded, redacted form of why one dataset was not served. */
 function datasetReason(cause: unknown): string {
@@ -492,7 +481,7 @@ function pinAgeMs(pin: DatasetPin | undefined, nowMs: number): number | undefine
 }
 
 function cite(
-	chunk: RagflowChunk,
+	chunk: DocsChunk,
 	datasetName: string,
 	pin: DatasetPin | undefined,
 	markPinAge: boolean,
@@ -523,7 +512,7 @@ function cite(
  * one workspace, so without this the result would be attributed to the first dataset searched. `heading_path` keeps what
  * LightRAG returned and every other result is returned as it was.
  */
-function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation): SearchCitation {
+function withCorpusProvenance(chunk: DocsChunk, citation: SearchCitation): SearchCitation {
 	const parsed = parseCorpusDocumentName(chunk.source_url ?? "") ?? parseCorpusDocumentName(chunk.document_name);
 	if (parsed === null) return citation;
 	return {
@@ -597,7 +586,7 @@ export interface LightRagHit {
  * `{ results: [...] }` or a bare array; each entry takes `content` (or
  * `text`), `source_url` (or `url`) and `score`. Anything else — wrong
  * shape, wrong types, unparseable — is zero hits, never a throw, so the
- * RAGFlow path simply serves without them.
+ * lightrag path simply serves without them.
  */
 export function parseLightRagJson(raw: unknown): LightRagHit[] {
 	const candidates: unknown = raw !== null && typeof raw === "object" && !Array.isArray(raw)
@@ -617,7 +606,7 @@ export function parseLightRagJson(raw: unknown): LightRagHit[] {
 	return hits;
 }
 
-/** A LightRAG hit as a citation: redacted, capped, framed exactly like a RAGFlow one. */
+/** A LightRAG hit as a citation: redacted, capped, framed exactly like a lightrag one. */
 export function lightRagCite(hit: LightRagHit, datasetName: string, index: number): SearchCitation {
 	return {
 		title: redact(hit.source_url ?? datasetName),
@@ -656,7 +645,7 @@ export function hindsightCite(hit: DerivedMemoryHit, index: number): SearchCitat
  * failures open it for `resetTimeoutMs`, during which calls refuse fast
  * with `docs circuit open`; the next call after the window is the
  * half-open probe, whose outcome closes or re-opens the breaker. Small
- * and in-memory on purpose: the plane gate in `planes/ragflow.ts` stays
+ * and in-memory on purpose: the plane gate in `planes/lightrag.ts` stays
  * the authority, this only stops a hot loop from paying per search.
  */
 export type DocsBreakerState = "closed" | "open" | "half-open";
@@ -716,146 +705,8 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	const surface = deps.surface ?? "claude-code";
 	const sessionId = deps.sessionId ?? `docs-search:${randomUUID()}`;
 	if (question.trim().length === 0) return failed(deps, sessionId, "question is required");
-	// Backend selection: explicit `backend` wins, else the configured reach
-	// decides — a `lightragConfig` present means lightrag, otherwise ragflow
-	// (the `resolveDocsBackend` rule, dependency-injected via deps).
-	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
-	if (backend === "lightrag") return searchDocsLightrag(deps, question, surface, sessionId);
-	if (deps.config === null) return failed(deps, sessionId, "ragflow-not-configured");
-	const config = deps.config;
-	// Live steering (SPE-19390): the session's directions ride inside the
-	// retrieval question as described-but-untrusted text. The raw question
-	// still keys nothing here — the service cache keys on it — so steering
-	// changes what the plane ranks without changing what the caller asked.
-	const effectiveQuestion = augmentQuestionWithSteering(question, deps.steering ?? null);
-	const repoId = normalizeRepoId(deps.repoId ?? null);
-
-	const listed = deps.datasets ? await deps.datasets.list(config, deps.fetchImpl) : await listDatasets(config, deps.fetchImpl);
-	if (!listed.ok) return failed(deps, sessionId, listed.reason);
-	const wanted = deps.datasetNames;
-	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
-	if (readable.length === 0) return failed(deps, sessionId, "no-readable-datasets");
-
-	const deadline = sharedDeadline(deps.budgetMs ?? 0, "docs budget");
-	// A client that throws synchronously is a failed dataset too, not an
-	// exception out of the search.
-	const retrieve = (dataset: RagflowDataset): Promise<RetrievalOutcome> => {
-		let flight: Promise<RetrievalOutcome>;
-		try {
-			flight = retrieveChunks(
-				config,
-				{ question: effectiveQuestion, dataset_ids: [dataset.id], ...(deps.retrieval ? { retrieval: deps.retrieval } : {}) },
-				deps.fetchImpl,
-			);
-		} catch (cause) {
-			flight = Promise.reject(cause);
-		}
-		return deadline.race(flight);
-	};
-	// Greptile round 1 (PR #61): a half-open breaker admits exactly one probe,
-	// so a fan-out that left together would see one dataset admitted and the
-	// rest refused as `ragflow circuit open` even when the probe succeeds —
-	// every recovery search would drop healthy datasets. While the gate is
-	// half-open the first dataset goes alone as the probe; the siblings leave
-	// once it has settled (closing or re-opening the breaker), still under
-	// the one shared deadline, so the budget bounds the total as before.
-	const [probe, ...rest] = readable;
-	const settled: PromiseSettledResult<RetrievalOutcome>[] = [];
-	if (probe !== undefined && rest.length > 0 && deps.breakerState?.() === "half-open") {
-		settled.push(...(await Promise.allSettled([retrieve(probe)])));
-		settled.push(...(await Promise.allSettled(rest.map(retrieve))));
-	} else {
-		settled.push(...(await Promise.allSettled(readable.map(retrieve))));
-	}
-	// A dataset refused `ragflow circuit open` while another probe held the
-	// half-open slot (a concurrent search, or one that left before the
-	// breaker went half-open) was not unhealthy. If the breaker has closed
-	// since, it is retried once under the same deadline; a breaker that is
-	// still open or half-open means the refusal stands.
-	if (deps.breakerState?.() === "closed") {
-		const refused = readable.flatMap((dataset, position) => {
-			const outcome = settled[position];
-			return outcome?.status === "fulfilled" && !outcome.value.ok && outcome.value.reason === CIRCUIT_OPEN ? [{ dataset, position }] : [];
-		});
-		if (refused.length > 0) {
-			const again = await Promise.allSettled(refused.map(({ dataset }) => retrieve(dataset)));
-			refused.forEach(({ position }, index) => {
-				const outcome = again[index];
-				if (outcome !== undefined) settled[position] = outcome;
-			});
-		}
-	}
-	deadline.clear();
-
-	const citations: SearchCitation[] = [];
-	const ids: string[] = [];
-	const degradedDatasets: DegradedDataset[] = [];
-	const nowMs = deps.nowMs ?? Date.now();
-	// Walked in scope order, so equal scores keep the order the sequential
-	// search produced.
-	readable.forEach((dataset, position) => {
-		const outcome = settled[position];
-		if (outcome === undefined) return;
-		if (outcome.status === "rejected") {
-			degradedDatasets.push({ dataset: dataset.name, reason: datasetReason(outcome.reason) });
-			return;
-		}
-		if (!outcome.value.ok) {
-			degradedDatasets.push({ dataset: dataset.name, reason: datasetReason(outcome.value.reason) });
-			return;
-		}
-		ids.push(dataset.id);
-		const pinAged = deps.degradedDatasets?.includes(dataset.name) ?? false;
-		for (const chunk of outcome.value.chunks) {
-			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], pinAged, nowMs, deps.provenanceOf));
-		}
-	});
-	// The LightRAG REST/JSON path (SPE-19388): raw JSON for this question is
-	// parsed tolerantly and merged below the RAGFlow citations. A missing
-	// source, a parse miss or a throw is zero hits — the RAGFlow answer
-	// stands on its own, and the search never throws for the extra source.
-	if (deps.lightrag !== undefined) {
-		try {
-			const raw = await deps.lightrag(effectiveQuestion);
-			const scopeName = repoId !== null ? scopedDatasetName(repoId, "lightrag") : "lightrag";
-			parseLightRagJson(raw).forEach((hit, index) => {
-				citations.push(lightRagCite(hit, scopeName, index));
-			});
-		} catch {
-			// LightRAG down: RAGFlow citations stand alone.
-		}
-	}
-	if (ids.length === 0 && citations.length === 0) {
-		return failed(deps, sessionId, degradedDatasets[0]?.reason ?? "no-dataset-answered", degradedDatasets);
-	}
-	citations.sort((left, right) => right.score - left.score);
-	const chunks = citations.slice(0, 10);
-
-	const graph = attachGraphHints(chunks, deps.graphHints);
-
-	await deps.emit({
-		surface,
-		kind: "note",
-		summary: `docs search returned ${chunks.length} chunk(s) from ${ids.length} dataset(s)`,
-		session_id: sessionId,
-		payload: {
-			action: "docs.search",
-			dataset_ids: ids,
-			...(repoId !== null ? { repo_id: repoId, scope: repoScopePrefix(repoId) } : {}),
-			...(deps.eventQuestion === undefined ? {} : { question: deps.eventQuestion }),
-			...(deps.steering ? { steered: true } : {}),
-			urls: chunks.map((citation) => citation.source_url),
-			count: chunks.length,
-			...(degradedDatasets.length > 0 ? { degraded_datasets: degradedDatasets } : {}),
-			...(graph !== undefined ? { graph } : {}),
-		},
-	});
-	return {
-		chunks,
-		untrusted: UNTRUSTED_DOCS_NOTICE,
-		...(degradedDatasets.length > 0 ? { degraded_datasets: degradedDatasets } : {}),
-		...(graph !== undefined ? { graph } : {}),
-	};
+	// LightRAG replaced lightrag. Unconfigured LightRAG degrades; there is no other docs backend.
+	return searchDocsLightrag(deps, question, surface, sessionId);
 }
 
 /** The reason the LightRAG plane client gives a call its open breaker refused (`planes/lightrag.ts`). */
@@ -1042,8 +893,8 @@ const LIGHTRAG_RECORD_PREFIX = "lightrag::";
 
 /**
  * The dataset id a LightRAG document was ingested under, read from the record key that holds it. The document is its
- * record's current document or one of the record's unpruned predecessors. RAGFlow records carry no `lightrag::` prefix
- * and never answer, so a cutover cannot attribute a LightRAG chunk to a RAGFlow upload. Undefined when no LightRAG record holds it.
+ * record's current document or one of the record's unpruned predecessors. lightrag records carry no `lightrag::` prefix
+ * and never answer, so a cutover cannot attribute a LightRAG chunk to a lightrag upload. Undefined when no LightRAG record holds it.
  */
 export function lightragDocumentDataset(records: ReadonlyMap<string, IngestRecord>, documentId: string): string | undefined {
 	for (const [key, record] of records) {
@@ -1060,7 +911,7 @@ export function lightragDocumentDataset(records: ReadonlyMap<string, IngestRecor
  * The configured dataset a LightRAG chunk belongs to: the one whose ingest identity (`datasetIdentity`, the key its records are
  * filed under) is the dataset id of the chunk's record. Undefined when the record names no configured dataset.
  */
-function chunkDataset(deps: SearchDeps, chunk: RagflowChunk): string | undefined {
+function chunkDataset(deps: SearchDeps, chunk: DocsChunk): string | undefined {
 	if (chunk.document_id === undefined || deps.lightragRecords === undefined) return undefined;
 	const datasetId = lightragDocumentDataset(deps.lightragRecords, chunk.document_id);
 	if (datasetId === undefined) return undefined;
@@ -1074,15 +925,15 @@ function chunkDataset(deps: SearchDeps, chunk: RagflowChunk): string | undefined
  * knowledge base per server, so dataset scope is accepted-ignored (never
  * an error). Each citation is attributed to the dataset its own LightRAG
  * record names (`lightragDocumentDataset`) and cites that dataset's pin; a chunk
- * no record names is unattributed and cites no pin. Everything else is the RAGFlow shape: redacted capped
+ * no record names is unattributed and cites no pin. Everything else is the lightrag shape: redacted capped
  * citations, score sort, the ten-citation cap, pins via `provenanceOf`,
  * the single `note` event, and the `graph` counts: the backend's graph detail
  * merged with the caller's `graphHints` (either alone is kept), with each
  * citation's graph nodes from the backend provenance and any hint. The SPE-19388
- * raw-JSON merge stays on the RAGFlow path: here the plane already
+ * raw-JSON merge stays on the lightrag path: here the plane already
  * answered. A failed retrieval is retried on the LightRAG backoff (`lightragRetry`). Once the retries are spent,
  * Hindsight recall answers in its place when it can (`lightragFallback`); otherwise the reply degrades exactly like
- * the RAGFlow path (`degraded: true` with a reason, never a throw). A refused search (breaker open) falls back the
+ * the lightrag path (`degraded: true` with a reason, never a throw). A refused search (breaker open) falls back the
  * same way. An unconfigured plane is answered likewise: Hindsight recall when it finds something, else the degraded reply.
  */
 async function searchDocsLightrag(deps: SearchDeps, question: string, surface: Surface, sessionId: string): Promise<SearchReply> {
@@ -1091,12 +942,12 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 	if (lightrag == null) return lightragFallback(deps, sessionId, question, "lightrag-not-configured");
 	// The RAG machine refused the plane (see `lightragCooling`): the search answers without asking LightRAG.
 	if (deps.lightragCooling === true) return lightragFallback(deps, sessionId, question, RAG_BREAKER_OPEN);
-	// Only the LightRAG plane's own breaker is consulted: the RAGFlow state never
-	// stands in for it, so a RAGFlow outage cannot refuse a LightRAG search.
+	// Only the LightRAG plane's own breaker is consulted: the lightrag state never
+	// stands in for it, so a lightrag outage cannot refuse a LightRAG search.
 	const breakerState = deps.lightragBreakerState;
 	if (breakerState?.() === "open") return lightragFallback(deps, sessionId, question, LIGHTRAG_CIRCUIT_OPEN);
 	const wanted = deps.datasetNames;
-	// Dataset resolution never touches RAGFlow: a search must not depend on its
+	// Dataset resolution never touches lightrag: a search must not depend on its
 	// reachability. The service injects the list (`lightragSearchDatasets`), keyed
 	// by dataset name: the key its pin is filed under (`pinsByName`). Otherwise the
 	// wanted names stand as their own ids, sorted like the cache key. LightRAG
@@ -1121,7 +972,7 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 			return Promise.reject(cause);
 		}
 	};
-	// One attempt. Half-open recovery, mirroring the RAGFlow fan-out: a refusal
+	// One attempt. Half-open recovery, mirroring the lightrag fan-out: a refusal
 	// that landed while another probe held the slot is retried once when the
 	// breaker has since closed.
 	const attempt = async (): Promise<PromiseSettledResult<LightragQueryOutcome>> => {

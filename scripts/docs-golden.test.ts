@@ -138,7 +138,7 @@ describe("the scorer", () => {
 		expect(forbidden.failures).toEqual(["redaction_clean"]);
 		const leaked = scoreReply(fixture, { chunks: [{ title: "sk-proj-abcdefghij1234567890", source_url: "u", heading_path: "", commit: "c", snippet: "s", score: 1 }] });
 		expect(leaked.redaction_clean).toBe(false);
-		const degraded = scoreReply(fixture, { chunks: [], degraded: true, reason: "ragflow 503" });
+		const degraded = scoreReply(fixture, { chunks: [], degraded: true, reason: "lightrag 503" });
 		expect(degraded.failures).toEqual(["degraded"]);
 	});
 
@@ -480,9 +480,9 @@ describe("the live canary (uplift-4 S7)", () => {
 
 	test("a degraded reply is an outage, not a regression: exit 3, a line on stderr, nothing posted and the dedupe record untouched", async () => {
 		const degraded = canary({ state: JSON.stringify({ failing: ["earlier"] }) });
-		degraded.overrides.set(answerable().id, (reply) => ({ ...reply, degraded: true, reason: "ragflow-unavailable" }));
+		degraded.overrides.set(answerable().id, (reply) => ({ ...reply, degraded: true, reason: "lightrag-unavailable" }));
 		expect(await main(["--live", "--emit"], degraded.goldenIo)).toBe(3);
-		expect(degraded.err[0]).toContain("answered degraded (ragflow-unavailable)");
+		expect(degraded.err[0]).toContain("answered degraded (lightrag-unavailable)");
 		expect(events(degraded.requests)).toEqual([]);
 		expect(JSON.parse(degraded.state() ?? "{}")).toEqual({ failing: ["earlier"] });
 

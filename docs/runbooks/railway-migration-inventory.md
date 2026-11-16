@@ -40,7 +40,7 @@ Host-bound items that are not units:
 
 ## 2. On-disk state versus Railway-hosted state
 
-Railway project and service names are as `docs/data-planes.md` gives them. The Ultrathink project holds GreptimeDB, TimescaleDB and DragonflyDB. The Agent Substrate project holds Hindsight and RAGFlow. `hindsight-ui` is a Hindsight browser UI in the Agent Substrate project.
+Railway project and service names are as `docs/data-planes.md` gives them. The Ultrathink project holds GreptimeDB, TimescaleDB and DragonflyDB. The Agent Substrate project holds Hindsight and LightRAG. `hindsight-ui` is a Hindsight browser UI in the Agent Substrate project.
 
 | Store | Plane | Where it is today | Railway service (project) | Railway-hosted? | Migration note |
 | --- | --- | --- | --- | --- | --- |
@@ -50,7 +50,7 @@ Railway project and service names are as `docs/data-planes.md` gives them. The U
 | Cache, budget counters, generation counters | Read-through cache | Via `DRAGONFLY_URL`, which points at the VPS loopback redis in production | DragonflyDB (Ultrathink), idle | No (production cache is on the VPS) | Budget counters rely on `volatile-lru`, which Dragonfly does not express. Keep, repurpose or retire is an operator decision |
 | Planning presence (session heartbeats) | Dragonfly keys, bounded `SCAN` | Same cache endpoint | DragonflyDB (Ultrathink), idle | No | Presence history is not yet written to Timescale |
 | Memory recall (banks) | Hindsight | Server env `HINDSIGHT_URL` and `HINDSIGHT_API_KEY` | Hindsight (Agent Substrate) | Yes | `hindsight-ui` keeps a domain only if browser access without the tailnet is wanted (an access change) |
-| Documents | RAGFlow | Server env `RAGFLOW_URL` and `RAGFLOW_API_KEY` | RAGFlow (Agent Substrate) | Yes | Docs state file on local disk, see below |
+| Documents | LightRAG | Server env `LIGHTRAG_URL` and `LIGHTRAG_API_KEY` | LightRAG (Agent Substrate) | Yes | Docs state file on local disk, see below |
 | Refusal journal | Collector refusals, rotated at 1 MiB by default | `/var/lib/substrate/refused-emits.jsonl` and its `.1` file | None | No: local disk | Needs a volume if collectors move off the host |
 | Event spool | Parked events, opt-in | `/var/lib/substrate/event-spool.jsonl` | None | No: local disk | Present only when the spool is enabled and has parked an event |
 | Hindsight retain outbox | Pending memory writes | `/var/lib/substrate/retain-outbox.jsonl` | None | No: local disk | Must survive a restart; loss means lost retains |
@@ -62,7 +62,7 @@ Railway project and service names are as `docs/data-planes.md` gives them. The U
 | Sandbox worktrees | Dispatcher and sandbox checkouts | `/var/lib/substrate/worktrees` | None | No: local disk | Subject to the disk-pressure runbook |
 | Dispatcher state | Given-up issues, VM task records, dispatcher lock, session logs | `/var/lib/substrate/dispatcher` (`given_up.json`, `vm_tasks.json`, `dispatcher.lock`, `sessions/`); `SUBSTRATE_STATE_DIR` overrides the directory | None | No: local disk | Needs a durable volume. Losing `given_up.json` lets abandoned issues be relaunched; losing `vm_tasks.json` stops a new dispatcher re-adopting persisted VM tasks. A restart ends every dispatched session, by design |
 | SLO checkpoint and runtime state | Doctor, docs canary, SLO | `/var/lib/substrate/slo-checkpoint.json`, `doctor-last.json`, `docs-canary-last.json` | None | No: local disk | Dedupe records. Losing them re-announces drift once |
-| Docs ingest records and version pins | RAGFlow document ingest | `/var/lib/substrate/docs-ingest.json`, set by `SUBSTRATE_DOCS_STATE_FILE` (the unit sets it) | None | No: local disk | Losing it drops the version pins and the merge-trigger's idempotency. Unset keeps the records process-local |
+| Docs ingest records and version pins | LightRAG document ingest | `/var/lib/substrate/docs-ingest.json`, set by `SUBSTRATE_DOCS_STATE_FILE` (the unit sets it) | None | No: local disk | Losing it drops the version pins and the merge-trigger's idempotency. Unset keeps the records process-local |
 | Index archive | Off-box snapshot of the index | `/mnt/index-archive` (off-box mount) | None | No | Operator-chosen off-box mount. Archive commands refuse by name when unset |
 | Ledger archive | Off-box snapshot of the ledger | `/mnt/ledger-archive`, set by `SUBSTRATE_LEDGER_ARCHIVE_DIR` | None | No | Same refusal rule as the index archive |
 | Backups | Cutover and pre-sweep backups | Lane-B cutover backups under the operator's `/root/backups`. Pre-sweep index backup is a manual Railway volume snapshot | Volume snapshot (Railway) | Partly | Snapshot is taken by hand before a sweep apply |
@@ -71,7 +71,7 @@ Railway project and service names are as `docs/data-planes.md` gives them. The U
 
 ## 3. Environment-only configuration check
 
-**Method.** Non-test source under `packages/**` and `scripts/**` was searched for three things: fallback values in environment reads (`env.X ?? "..."`), string constants holding a loopback address, a URL, or an absolute path, and any read of a `PORT` variable. Test files were excluded by reading the match paths. The store URLs (`GREPTIME_URL`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`, `HINDSIGHT_URL`, `RAGFLOW_URL`) have no literal default in `packages/mcp-server/src/config.ts`, `greptime.ts`, `cache.ts` or `planes/*.ts`, so they are environment-only already. No code reads `PORT`. This is a sampled census, not an exhaustive one: the broadest pass was paged and not read to the end. Before any cutover, a complete literal census should be run.
+**Method.** Non-test source under `packages/**` and `scripts/**` was searched for three things: fallback values in environment reads (`env.X ?? "..."`), string constants holding a loopback address, a URL, or an absolute path, and any read of a `PORT` variable. Test files were excluded by reading the match paths. The store URLs (`GREPTIME_URL`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`, `HINDSIGHT_URL`, `LIGHTRAG_URL`) have no literal default in `packages/mcp-server/src/config.ts`, `greptime.ts`, `cache.ts` or `planes/*.ts`, so they are environment-only already. No code reads `PORT`. This is a sampled census, not an exhaustive one: the broadest pass was paged and not read to the end. Before any cutover, a complete literal census should be run.
 
 **Permitted defaults (no follow-up).**
 

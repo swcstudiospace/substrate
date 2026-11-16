@@ -8,12 +8,12 @@ import type { SloBreach, SloReadings, SloThresholds } from "@substrate/corpus";
 import type { DbPlane, EndpointClass } from "../db-endpoints.ts";
 import type { TeiModelSource } from "../planes/tei.ts";
 
-/** The nine resources the fabric reports, in report order. */
+/** The resources the fabric reports, in report order. */
 export const FABRIC_RESOURCES = [
 	"dragonfly",
 	"timescaledb-index",
 	"greptime",
-	"ragflow",
+
 	"lightrag",
 	"hindsight",
 	"tei",
@@ -169,7 +169,7 @@ export interface FabricHealthView {
 	eventBus: { enabled: boolean };
 	/** What the embedding client has seen (phase 64). */
 	tei: FabricTeiDetail;
-	breakers: Record<"greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag" | "tei", { readonly state: "closed" | "open" | "half-open" } | null>;
+	breakers: Record<"greptime" | "index" | "cache" | "hindsight" | "lightrag" | "tei", { readonly state: "closed" | "open" | "half-open" } | null>;
 }
 
 /**
@@ -181,7 +181,7 @@ export interface FabricHealthParts {
 	greptime: Promise<{ readonly up: boolean; readonly eventsWritable: boolean; readonly writeTimedOut: boolean; readonly writeUnread: boolean }>;
 	index: Promise<boolean>;
 	hindsight: Promise<boolean | null>;
-	ragflow: Promise<boolean | null>;
+
 	lightrag: Promise<boolean | null>;
 	/** `null` when TEI is not configured; otherwise whether `/health` and `/info` answered and the model is the pinned one. */
 	tei: Promise<boolean | null>;

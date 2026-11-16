@@ -72,8 +72,6 @@ import {
 	recordVersion,
 	recordTrigger,
 	TRIGGER_FIELD_MAX,
-	refreshDataset,
-	resolveDatasets,
 	knownDatasets,
 	planningDatasetRegistry,
 	type PlanningDatasetRegistry,
@@ -177,7 +175,7 @@ import {
 } from "./session-rollback.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
-import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
+import type { FetchLike } from "./planes/docs-wire.ts";
 import { lightragOp, probeLightrag, queryForTool, type LightragQueryMode, type LightragToolOutcome } from "./planes/lightrag.ts";
 import { createTeiClient, teiOp, type TeiClient } from "./planes/tei.ts";
 import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
@@ -1587,19 +1585,17 @@ export class Substrate {
 	private preloader: Preloader | null = null;
 	/**
 	 * One circuit breaker per data plane (uplift-2 R2). Every outbound call —
-	 * ledger SQL, index query, cache command, Hindsight and RAGFlow request —
+	 * ledger SQL, index query, cache command, Hindsight and LightRAG request —
 	 * goes through its gate, which is what lets an outage cost microseconds
 	 * instead of a timeout per caller and lets `/healthz` name the plane.
 	 */
 	readonly planes: PlaneRegistry;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
-	/** RAGFlow fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
-	private readonly ragflowFetch: FetchLike;
+	/** LightRAG fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
+	private readonly lightragFetch: FetchLike;
 	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
-	/** LightRAG fetch, gated on the LightRAG plane's own breaker: a RAGFlow outage never refuses a LightRAG call. Tests inject the fake underneath; production uses the global fetch. */
-	private readonly lightragFetch: FetchLike;
 	/** TEI fetch, gated on the embedding plane's own breaker. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly teiFetch: FetchLike;
 	/** The TEI client (phase 64): unconfigured without `TEI_URL`, when every call answers `not-configured` and sends nothing. */
@@ -1653,7 +1649,7 @@ export class Substrate {
 	private docsSeenReady: Promise<void> | null = null;
 	/** Serialized state-file saves, so overlapping ingests cannot interleave snapshots. */
 	private docsSaveChain: Promise<void> = Promise.resolve();
-	// uplift-2 R6 — RAGFlow docs plane
+	// uplift-2 R6 — LightRAG docs plane
 	/**
 	 * Per-dataset version lists (the pins), hydrated with the ingest records
 	 * from the same state file and saved with them. Lived in the HTTP server
@@ -1749,9 +1745,8 @@ export class Substrate {
 			mirror?: Mirror | null;
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
-			ragflowFetch?: FetchLike;
-			hindsightFetch?: FetchLike;
 			lightragFetch?: FetchLike;
+			hindsightFetch?: FetchLike;
 			teiFetch?: FetchLike;
 			/** Tests inject the planning refresh's hash store; it is used only while `SUBSTRATE_PLANNING_HASH_STORE` is on. Production uses the index's table, or memory without an index. */
 			planningHashes?: PlanningHashStore;
@@ -1848,9 +1843,8 @@ export class Substrate {
 		this.desktop = stores?.desktop ?? null;
 		this.railway = stores?.railway ?? new RailwayClient(config.railway);
 		this.dodGateTest = stores?.dodGate ?? {};
-		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
-		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.lightragFetch = gatedFetch(this.planes.gate("lightrag"), stores?.lightragFetch ?? fetch, lightragOp);
+		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.corpusSeam = stores?.corpus ?? null;
 		this.planningHashSeam = stores?.planningHashes ?? null;
 		this.reflectSeam = stores?.reflect ?? null;
@@ -6261,7 +6255,7 @@ export class Substrate {
 	/**
 	 * DOCS-01: search the docs datasets through the substrate (D25-01).
 	 *
-	 * Read-only and fail-open: an unconfigured plane, an unreachable RAGFlow
+	 * Read-only and fail-open: an unconfigured plane, an unreachable LightRAG
 	 * or an unknown dataset scope yields `{chunks: [], degraded: true, reason}`
 	 * with a warning event, never a throw. `datasets` names configured
 	 * datasets; unknown names are ignored and raw ids are never accepted.
@@ -6358,7 +6352,7 @@ export class Substrate {
 			noteLoaded();
 			return searchDocs(
 				{
-					config: this.config.ragflow,
+					config: null,
 					backend: this.config.docsBackend,
 					lightragConfig: this.config.lightrag,
 					lightragDatasets: { list: async () => lightragSearchDatasets(names), invalidate: () => undefined },
@@ -6373,14 +6367,14 @@ export class Substrate {
 					...(sessionId !== undefined ? { sessionId } : {}),
 					repoId,
 					eventQuestion: originalQuestion,
-					fetchImpl: this.ragflowFetch,
+					fetchImpl: this.lightragFetch,
 					lightragFetch: this.lightragFetch,
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
 					lightragRecords: this.docsIngestSeen,
 					budgetMs: this.config.docsSearchBudgetMs,
-					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
+					breakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
 					lightragBreakerState: () => this.planes.gate("lightrag").breaker?.state() ?? "closed",
 					lightragRetry: this.config.ragMachine,
 					lightragCooling: input.cooling === true,
@@ -6414,7 +6408,7 @@ export class Substrate {
 		// reach the plane, or a cached reply would clear ERROR without the plane answering. A refused search (`cooling`)
 		// keeps the cache: a reply cached for its question is served, and a miss runs `load`, which answers from
 		// Hindsight on the cooling path, so LightRAG is not asked.
-		const configured = this.config.docsBackend === "lightrag" ? this.config.lightrag !== null : this.config.ragflow !== null;
+		const configured = this.config.lightrag !== null;
 		const served = prepared !== undefined || typeof input.steering === "string" || question.trim().length === 0 || !configured || input.probe === true ? await load() : await cached();
 		// The re-rank reads the answer after the cache, per call, so the stored answer never carries it and a manifest change shows at once.
 		const reflected = await this.reflectAnswer(served);
@@ -6793,7 +6787,7 @@ export class Substrate {
 	}
 
 	/**
-	 * The docs corpus (RAGFlow datasets, LightRAG and their Hindsight fallback) spans every repository, and a reply carries no
+	 * The docs corpus (LightRAG datasets, LightRAG and their Hindsight fallback) spans every repository, and a reply carries no
 	 * repository to filter on. Under scope it is refused to every scoped caller, unnamed or named, before any retrieval.
 	 */
 	async scopedDocsRefusal(route: string, surface: Surface | null): Promise<RepoScopeRefusal | null> {
@@ -7090,11 +7084,11 @@ export class Substrate {
 	 * guard checks pages against, and the caller's surface. A refresh's preflight and each of its calls share
 	 * these, so they refuse the same pages for the same reasons.
 	 * `dataset` is the one LightRAG dataset the ingest resolves, identified by its name, so a LightRAG
-	 * ingest never lists datasets through the RAGFlow gate (its breaker and outages do not refuse uploads).
+	 * ingest never lists datasets through the LightRAG gate (its breaker and outages do not refuse uploads).
 	 */
 	private async docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string, options: { corpusNames?: boolean } = {}): Promise<IngestDeps> {
 		return {
-			config: this.config.ragflow,
+			config: null,
 			knownDatasets: await this.knownDocsDatasets(),
 			backend: this.config.docsBackend,
 			lightragConfig: this.config.lightrag,
@@ -7108,7 +7102,7 @@ export class Substrate {
 			emit: (event) => this.emit(event),
 			surface,
 			...(sessionId !== undefined ? { sessionId } : {}),
-			fetchImpl: this.ragflowFetch,
+			fetchImpl: this.lightragFetch,
 			lightragFetch: this.lightragFetch,
 			lightragDatasets: { list: async () => lightragSearchDatasets([dataset], datasetIdentity), invalidate: () => undefined },
 			datasets: this.docsDatasetList,
@@ -7140,35 +7134,17 @@ export class Substrate {
 	 * and bump the docs generation. The version store is the service's, so
 	 * the pin reaches the next search and the next trigger's idempotency
 	 * check, restart or not.
-	 * The selected backend decides the record: LightRAG names its own dataset, RAGFlow resolves it by name.
+	 * The selected backend decides the record: LightRAG names its own dataset, LightRAG resolves it by name.
 	 */
 	async recordDocsVersion(
 		fields: { dataset: string; commit: string; content_sha256: string },
 		surface: Surface,
 	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
-		if (this.config.docsBackend === "lightrag") return this.recordLightragVersion(fields, surface);
-		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
-		await this.hydrateDocsSeen();
-		const refreshed = await refreshDataset(
-			{
-				config: this.config.ragflow,
-				versions: this.docsVersions,
-				emit: (event) => this.emit(event),
-				surface,
-				fetchImpl: this.ragflowFetch,
-				datasets: this.docsDatasetList,
-			},
-			fields,
-		);
-		if (refreshed.ok) {
-			await this.persistDocsSeen();
-			await this.cache.bump(DOCS_GENERATION_KEY);
-		}
-		return refreshed;
+		return this.recordLightragVersion(fields, surface);
 	}
 
 	/**
-	 * The version record of a LightRAG deployment, RAGFlow configured or not. LightRAG names its datasets, so the dataset's id
+	 * The version record of a LightRAG deployment, LightRAG configured or not. LightRAG names its datasets, so the dataset's id
 	 * is its name, the id the LightRAG search and ingest already use for it. Stamped `backend: "lightrag"`, numbered, stored,
 	 * noted and persisted as `refreshDataset` does, and the docs generation is bumped the same way.
 	 */
@@ -7279,10 +7255,8 @@ export class Substrate {
 			return outcome;
 		};
 		try {
-			// LightRAG-only: no RAGFlow list to ensure against, so the ingest and the version record
-			// below go to the selected plane under the dataset's name.
-			if (this.config.ragflow === null && this.config.docsBackend !== "lightrag") {
-				return finish({ ok: false, reason: "ragflow-not-configured", job });
+			if (this.config.lightrag === null) {
+				return finish({ ok: false, reason: "lightrag-not-configured", job });
 			}
 			// The checkout's roots are read before any plane call: a checkout that cannot be read
 			// fails this job alone, and the pinned version keeps serving with its age (D42-5).
@@ -7296,16 +7270,7 @@ export class Substrate {
 			// checkout, which may have moved on since the trigger was accepted; it is checked again below.
 			const refusedBefore = await this.checkoutRefusal(request);
 			if (refusedBefore !== null) return finish({ ok: false, reason: refusedBefore, job });
-			// With RAGFlow configured the dataset is discovered first and created only on a
-			// name-miss, so ids stay aligned with the list the search reads. Order stays honest:
-			// ensure, ingest, and only then record the version. A LightRAG-only plane has no RAGFlow
-			// list to ensure against.
-			let created = false;
-			if (this.config.docsBackend === "ragflow" && this.config.ragflow !== null) {
-				const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
-				if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
-				created = ensured.datasets[0]?.created === true;
-			}
+			const created = false;
 			// A path that exists but cannot be read fails the job here, not as a smaller page set.
 			let pages: IngestPage[];
 			try {
@@ -7474,7 +7439,7 @@ export class Substrate {
 	 */
 	private planningHashStore(): PlanningHashStore | null {
 		if (!this.config.planningHashStore) return null;
-		const url = this.config.docsBackend === "lightrag" ? (this.config.lightrag?.url ?? "") : (this.config.ragflow?.url ?? "");
+		const url = this.config.lightrag?.url ?? "";
 		this.planningHashStoreCache ??= this.planningHashSeam ?? this.index?.planningHashStore(planningDestinationKey(url)) ?? memoryPlanningHashStore();
 		return this.planningHashStoreCache;
 	}
@@ -7529,7 +7494,7 @@ export class Substrate {
 
 	/**
 	 * The freshness and trigger-lag verdict per dataset, from the persisted docs
-	 * state alone (no RAGFlow call). A pure read for `/slo` and `/metrics`: it
+	 * state alone (no LightRAG call). A pure read for `/slo` and `/metrics`: it
 	 * answers at once from the in-memory state, never awaits the state-file
 	 * hydrate (a slow disk must not slow a monitor route; the hydrate is only
 	 * started in the background, so the first answers after boot can be empty),
@@ -8822,7 +8787,6 @@ export class Substrate {
 			index: this.index !== null,
 			cache: this.cache.health().enabled,
 			hindsight: hindsightFromEnv() !== null,
-			ragflow: this.config.ragflow !== null,
 			lightrag: this.config.lightrag !== null,
 		};
 	}
@@ -8862,7 +8826,7 @@ export class Substrate {
 	 *
 	 * `planes` (uplift-2 R2) is report-only: one row per data plane with its
 	 * reachability (`null` when the plane is not configured), its breaker and
-	 * when it last failed. Hindsight and RAGFlow get one `HEALTH_PROBE_MS`-bounded
+	 * when it last failed. Hindsight and LightRAG get one `HEALTH_PROBE_MS`-bounded
 	 * probe each, only when configured, so `/healthz` costs at most one round
 	 * trip per configured plane; the cache is never pinged. `capacity.index`
 	 * is the index's own size report, raced against the same bound and `null`
@@ -8891,14 +8855,13 @@ export class Substrate {
 		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
 		const probes = this.healthProbes(timeoutMs, true);
 		const indexStore = this.index;
-		const [greptimeReading, index, hindsightOk, ragflowOk, capacity, ledgerCapacity, lightragOk] = await Promise.all([
+		const [greptimeReading, index, hindsightOk, lightragOk, capacity, ledgerCapacity] = await Promise.all([
 			probes.greptime,
 			probes.index,
 			probes.hindsight,
-			probes.ragflow,
+			probes.lightrag,
 			indexStore ? this.indexCapacityForHealth(indexStore) : Promise.resolve(null),
 			probes.ledgerCapacity,
-			probes.lightrag,
 		]);
 		// The jobs and archive reads run after the probes, as on main: the Greptime ping has its verdict before the ledger's
 		// coverage read asks the same breaker for a call.
@@ -8921,7 +8884,6 @@ export class Substrate {
 			// while no command has run yet, so a fresh process is not reported down.
 			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
 			hindsight: hindsightOk,
-			ragflow: ragflowOk,
 			lightrag: lightragOk,
 		};
 		const planes = {} as SubstrateHealth["planes"];
@@ -8978,11 +8940,6 @@ export class Substrate {
 			hindsight: hindsight
 				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
 				: Promise.resolve(null),
-			ragflow: this.config.ragflow
-				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
-				: Promise.resolve(null),
-			// `GET /health` on the LightRAG plane, only when configured, bounded like the other planes' probes and fail-open: a
-			// probe that throws reads as down, and `null` stays "not configured". `/healthz` and the fabric share this one probe.
 			lightrag: this.config.lightrag
 				? probeLightrag(this.config.lightrag, this.lightragFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
 				: Promise.resolve(null),
@@ -9101,7 +9058,6 @@ export class Substrate {
 					})),
 					index: probes.index,
 					hindsight: probes.hindsight,
-					ragflow: probes.ragflow,
 					lightrag: probes.lightrag,
 					tei: this.teiProbe(FABRIC_HEALTH_WINDOW_MS),
 				};
@@ -9135,7 +9091,6 @@ export class Substrate {
 					greptime: this.config.greptime !== null,
 					dragonfly: this.config.dragonflyUrl !== undefined || this.config.dragonflyRefused !== null,
 					hindsight: hindsightFromEnv() !== null,
-					ragflow: this.config.ragflow !== null,
 					lightrag: this.config.lightrag !== null,
 					tei: this.config.tei !== null,
 				},
@@ -9325,7 +9280,6 @@ export interface HealthProbes {
 	readonly ledgerCapacity: Promise<LedgerCapacity | null>;
 	readonly index: Promise<boolean>;
 	readonly hindsight: Promise<boolean | null>;
-	readonly ragflow: Promise<boolean | null>;
 	/** `GET /health` on the LightRAG plane: `null` when not configured, `false` for a probe that failed or threw. */
 	readonly lightrag: Promise<boolean | null>;
 }

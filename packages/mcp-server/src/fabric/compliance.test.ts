@@ -61,9 +61,9 @@ describe("buildFabricCompliance", () => {
 
 	test("a degraded or unavailable resource fails its check, and an ok one passes", () => {
 		const facts = healthyFacts({
-			services: { ...healthyFacts().services, ragflow: { configured: true, held: false, answered: false, breaker: "closed", degraded: false, source: "health().planes.ragflow" } },
+			services: { ...healthyFacts().services, lightrag: { configured: true, held: false, answered: false, breaker: "closed", degraded: false, source: "health().planes.lightrag" } },
 		});
-		expect(check(facts, "resource-state.ragflow")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.ragflow" });
+		expect(check(facts, "resource-state.lightrag")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.lightrag" });
 		expect(check(facts, "resource-state.greptime").status).toBe("PASS");
 	});
 

@@ -67,7 +67,7 @@ describe("retrievalRowOf", () => {
 	});
 
 	test("an answer with no citation has a null best score, a zero count and keeps its degraded flag", () => {
-		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "ragflow", reply: { chunks: [], degraded: true }, shadow: null });
+		const row = retrievalRowOf({ surface: "omp", question: "q", backend: "lightrag", reply: { chunks: [], degraded: true }, shadow: null });
 		expect(row).toMatchObject({ topScore: null, returnedCount: 0, returned: [], degraded: true });
 	});
 

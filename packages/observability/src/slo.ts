@@ -1039,7 +1039,7 @@ export interface DocsFreshnessEvalOptions {
 
 /**
  * The `docs.freshness` row `GET /slo` serves beside `docs.search.p95`: no
- * RAGFlow call, only the persisted ingest times and accepted triggers. It is
+ * docs-plane call, only the persisted ingest times and accepted triggers. It is
  * report-only (the `docs` array is never folded into `breached`) and it
  * appears only when at least one dataset has a reading — a deployment that
  * never ingested sees nothing rather than a false `ok`. Like every objective

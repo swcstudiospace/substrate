@@ -197,14 +197,11 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_HINDSIGHT_INVENTORY_INTERVAL_S` | number | 60 | 30..3600 | 60 s. See `docs/data-planes.md` | mcp-server/hindsight-inventory.ts | yes |
 | `HINDSIGHT_MENTAL_MODELS` | list | none | bank=id[,id...] entries separated by semicolon; bank must be in HINDSIGHT_BANKS; id matches A-Za-z0-9_- up to 80 characters; at most 20 models | no weekly refresh; no timer starts. See `docs/memory-governance.md` | mcp-server/config.ts | no |
 
-## Documents plane (LightRAG when LIGHTRAG_URL is set; RAGFlow is the legacy fallback)
+## Documents plane (LightRAG)
 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `RAGFLOW_URL` | string | none | RAGFlow base URL | docs_search answers degraded, docs_ingest refuses. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
-| `RAGFLOW_API_KEY` | secret-ref | none | API key | the plane is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
-| `RAGFLOW_DATASET_ID` | string | none | dataset id | nothing: no code reads it today (docs_ingest names the dataset after the repo) (UNREAD: no code reads it today). See `docs/docs-search-ingest.md` | none | yes |
-| `LIGHTRAG_URL` | string | none | LightRAG base URL | the LightRAG path is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `LIGHTRAG_URL` | string | none | LightRAG base URL | the docs plane is unconfigured: search degrades, ingest refuses. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `LIGHTRAG_API_KEY` | secret-ref | none | API key, sent as a bearer on the LightRAG health probe | LightRAG is reached unauthenticated. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_URL` | string | none | LightRAG base URL override for the Railway hosting layer | LIGHTRAG_URL applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_API_KEY` | secret-ref | none | API key override for the Railway hosting layer | LIGHTRAG_API_KEY applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
@@ -212,7 +209,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LIGHTRAG_POLL_MS` | number | 5000 | positive integer ms | 5000 ms | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_QUERY_MODE` | string | hybrid | naive \| local \| global \| hybrid \| mix | hybrid (graph) unless a question starts with /mix or /hybrid or a caller names a mode; an unrecognised value is named in the boot warnings and also means hybrid. A LightRAG with no real LLM (the Railway bypass LLM) builds no graph and needs naive. See `docs/runbooks/lightrag-storage-topology.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | .planning/ | mcp-server/config.ts | yes |
-| `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag \| ragflow | LIGHTRAG_URL presence decides: set means lightrag, else ragflow. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag | LightRAG if `LIGHTRAG_URL` is set, otherwise the docs plane is unconfigured (search degrades, ingest refuses). See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `TEI_URL` | string | none | TEI base URL, loopback or a host:port in SUBSTRATE_DB_PROXY_ALLOW | the embedding service is unconfigured: every embed answers not-configured, nothing is sent and the tei fabric row is unconfigured; a direct URL refuses boot under SUBSTRATE_DB_ENDPOINT_POLICY=enforce. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
 | `TEI_API_KEY` | secret-ref | none | API key, sent as a bearer token to TEI and never logged or reported | TEI is reached unauthenticated. See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_TEI_MODEL` | string | learned | the model_id TEI's /info reports | the first model_id /info reports is learned and held; a TEI that later reports another is refused (model-mismatch). See `docs/embedding-fabric.md` | mcp-server/config.ts | yes |
@@ -229,14 +226,10 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_AGENT_SKILLS_ROOT` | path | none | absolute path to an agent-skills checkout | the merge-trigger for agent-skills is a noop: no checkout, no version recorded. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
-| `SUBSTRATE_RAGFLOW_ARCHIVE_DIR` | path | none | directory path on a dedicated mount | the RAGFlow archive refuses by name and writes nothing. See `docs/docs-plane.md` | mcp-server/config.ts | yes |
-| `SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS` | toggle | false | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused. See `docs/docs-plane.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | toggle | off | 1 | off: every superseded document stays on the plane. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` | number | 0.2 | [0, 1] | 0.2. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_TOP_K` | number | 1024 | positive integer | 1024. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
-| `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
-| `SUBSTRATE_RAGFLOW_RERANK_ID` | string | none | reranker model id | no reranker: no rerank_id is sent. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` | number | 4000 | 0 = no shared deadline | 4000 ms. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_TANDEM` | toggle | off | off \| on (case- and space-insensitive; anything else is off, named at boot) | off: a docs search answers from its own plane only, as before; on adds the caller's Hindsight memory to a LightRAG answer as derived, never-cached items. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_TANDEM_LIMIT` | number | 5 | 1..10 whole number (outside it is capped, not a number is 5, both named at boot) | 5 Hindsight hits asked for and merged. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
@@ -267,7 +260,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_DOCS_SLO_RECALL5` | number | 0.6 | above 0 up to 1 | 0.6: a golden-set recall at 5 below it degrades the corpus row and fails the canary and `substrate corpus eval`; a value outside the range is the default too. See `docs/corpus-eval.md` | corpus/src/slo.ts | yes |
 | `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S` | number | 0.2 | above 0 (documents per second) | 0.2: an ingest request that sent documents and averaged below it degrades the corpus row; a request that sent none is not judged; an invalid value is the default too. See `docs/corpus-eval.md` | corpus/src/slo.ts | yes |
 | `SUBSTRATE_DOCS_EVAL_REPO` | string | swcstudiospace/agent-substrate | owner/name | swcstudiospace/agent-substrate: the repository name `scripts/docs-eval.ts --live` and the canary expect this checkout's docs to be ingested under. See `docs/corpus-eval.md` | scripts/docs-eval.ts | yes |
-| `SUBSTRATE_DOCS_MIGRATE_APPROVED` | toggle | unset | 1 | unset: the RAGFlow to LightRAG migration refuses to apply. See `docs/rehearsal.md` | scripts/docs-migrate.ts | yes |
+| `SUBSTRATE_DOCS_MIGRATE_APPROVED` | toggle | unset | 1 | unset: the docs migration refuses to apply. See `docs/rehearsal.md` | scripts/docs-migrate.ts | yes |
 
 ## Admission budgets and circuit breakers
 
@@ -440,11 +433,6 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | path | none | harness-owned | the smokes refuse to run. See `docs/rehearsal.md` | scripts/desktop-smoke.ts, skills-sync-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_NAME` | string | none | run name the rehearsal wrote to consumer.env | empty: the run-name comparison is skipped. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_DOCS_STATE_FILE` | path | none | file inside the rehearsal run directory | empty: the docs state is read as absent. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
-| `SUBSTRATE_RAGFLOW_FIXTURE_URL` | string | none | loopback http URL of the RAGFlow stand-in | empty: the docs smoke refuses the fixture target. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
-| `SUBSTRATE_RAGFLOW_FIXTURE_READY` | string | none | 1 once the stand-in answers its health probe | empty: the fixture is not marked ready. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
-| `SUBSTRATE_RAGFLOW_FIXTURE_PID` | number | none | process id of the RAGFlow stand-in | empty: the fixture pid check refuses. See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow.ts, scripts/docs-smoke.ts | no |
-| `RAGFLOW_FIXTURE_KEY` | secret-ref | none | per-run scratch key, at least 32 characters | the stand-in refuses to start (exit 2). See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow-server.ts | no |
-| `RAGFLOW_FIXTURE_PORT` | number | none | TCP port 1-65535 | the stand-in refuses to start (exit 2). See `docs/rehearsal.md` | packages/mcp-server/src/rehearsal-ragflow-server.ts | no |
 | `SUBSTRATE_GATE_INDEX_DRILL` | toggle | off | 1 | off: gate:boot does not archive or restore the scratch index. See `docs/runbooks/release-gate.md` | scripts/rehearsal.ts | no |
 | `SUBSTRATE_GATE_CHAOS_PLANES` | toggle | off | 1 | off: the rehearsal does not pause the scratch index or probe the other planes. See `docs/runbooks/release-gate.md` | scripts/chaos-planes.ts | no |
 | `CHAOS_REHEARSAL` | toggle | off | 1 \| true \| yes (case-insensitive) | the chaos smoke asserts a degraded deployment. See `docs/observability.md` | scripts/chaos-smoke.ts | yes |
@@ -478,7 +466,7 @@ The policy flags: the value that preserves today's behaviour or only reports (**
 | `SUBSTRATE_BRIEF_PROFILE` | `shadow` | `enforce` | set SUBSTRATE_BRIEF_PROFILE=enforce in the unit env and restart substrate-mcp; callers may still pass profile=full | set SUBSTRATE_BRIEF_PROFILE=shadow (or off) and restart; cached entries need no flush | bytes saved per brief (extended) |
 | `SUBSTRATE_BRIEF_RECALL` | `off` | `enforce` | off to shadow: set SUBSTRATE_BRIEF_RECALL=shadow and restart, soak at least three days; then, if the advisor says ready, set SUBSTRATE_BRIEF_RECALL=enforce and restart (needs the cache) | set SUBSTRATE_BRIEF_RECALL=off and restart | would-include share of briefs (extended); cold plus stale share of briefs (extended); prefetch error share (extended); ALSO manual (applies even when the advisor says ready): brief.p95 must not move while the mode is shadow (compare against the pre-flag week) |
 | `SUBSTRATE_HINDSIGHT_INVENTORY` | `off` | `on` | set SUBSTRATE_HINDSIGHT_INVENTORY=on in the unit env and restart; the inventory is read-only against Hindsight | set SUBSTRATE_HINDSIGHT_INVENTORY=off and restart | manual: substrate.hindsight.bank.* gauges (facts, pending_operations, failed_operations, last_write_age_seconds) appear in /metrics under gauges only, never in the history, and /healthz.hindsight carries the drift report |
-| `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | `unset` | `1` | set SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1 in the unit env and restart; a failed delete is logged and recorded, never a refusal | unset it and restart; documents already deleted from RAGFlow are not restored (re-ingest) | manual: the docs_ingest result records pruned and failed per call, and /slo.docs freshness stays within SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H |
+| `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | `unset` | `1` | set SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1 in the unit env and restart; a failed delete is logged and recorded, never a refusal | unset it and restart; documents already deleted from the docs plane are not restored (re-ingest) | manual: the docs_ingest result records pruned and failed per call, and /slo.docs freshness stays within SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H |
 | `SUBSTRATE_BUDGETS` | `shadow` | `enforce` | set SUBSTRATE_BUDGETS=enforce in the unit env and restart substrate-mcp | set SUBSTRATE_BUDGETS=shadow and restart | shadow-limited share of decisions (core); ALSO manual (applies even when the advisor says ready): per surface and class shadow-limited counts from /metrics (substrate.admission.decisions); none for coordination |
 | `SUBSTRATE_SLO_NOTIFY` | `unset` | `1` | set SUBSTRATE_SLO_NOTIFY=1 in the unit env and restart; it emits one warning or note per sustained SLO transition | unset it and restart | manual: transition events on the ledger (surface substrate, payload.runtime=slo) are the output; read /slo for the verdicts they announce |
 | `SUBSTRATE_METRICS_HISTORY` | `off` | `on` | decide the Greptime volume first (500 MB is recorded in one place and 5 GB in the plan), then set SUBSTRATE_METRICS_HISTORY=on in the unit env and restart; it is the enabler for every history-based criterion | set SUBSTRATE_METRICS_HISTORY=off and restart; the table stays and its rows expire on the TTL | manual: none: this flag is what makes the advisor's evidence exist; before it is on every criterion reads series-unavailable |

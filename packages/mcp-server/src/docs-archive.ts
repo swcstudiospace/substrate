@@ -1,14 +1,15 @@
+/** LightRAG replaced lightrag; there is no fallback that calls the retired plane. */
 /**
- * The RAGFlow archive (SOTA-02, Phase 46, Task 3): a checksummed copy of what the RAGFlow plane holds, written and
- * read back before any RAGFlow deletion. It keeps the dataset and document inventory, the substrate's docs state
+ * The lightrag archive (SOTA-02, Phase 46, Task 3): a checksummed copy of what the lightrag plane holds, written and
+ * read back before any lightrag deletion. It keeps the dataset and document inventory, the substrate's docs state
  * file, the baseline citations for the frozen queries, and a check of every document against its committed object.
  * `verifyArchive` re-reads the directory and refuses any drift from its manifest, so a deletion gated on a passing
  * verification is gated on the archive that is actually on disk.
  *
  * Page bytes are not archived. Each page is re-read from git at its recorded commit (OD-4), and only the sha256 of
- * its sanitised body is kept, computed by the ingest's own `changeSha`. The RAGFlow reads go through
- * {@link RagflowArchiveSource}: production uses {@link ragflowArchiveSource}, and tests drive the same writer with the
- * RAGFlow fake.
+ * its sanitised body is kept, computed by the ingest's own `changeSha`. The lightrag reads go through
+ * {@link DocsArchiveSource}: production uses {@link docsArchiveSource}, and tests drive the same writer with the
+ * lightrag fake.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -19,21 +20,25 @@ import { stripRemoteImages } from "@substrate/corpus";
 import { changeSha, loadIngestRecords, type IngestRecord } from "./docs-ingest.ts";
 import { refusedMount, type DevReader } from "./ledger-archive.ts";
 import { redact } from "./redact.ts";
-import {
-	DEFAULT_RETRIEVAL_KNOBS,
-	listDatasets,
-	listDocuments,
-	MAX_RETRIEVAL_PAGE_SIZE,
-	retrieveChunks,
-	type DatasetListOutcome,
-	type DocumentListOutcome,
-	type FetchLike,
-	type RagflowChunk,
-	type RagflowConfig,
-	type RagflowDataset,
-	type RagflowDocument,
-	type RetrievalOutcome,
-} from "./planes/ragflow.ts";
+import type { DatasetListOutcome, DocsChunk, DocsDataset, FetchLike, RetrievalOutcome } from "./planes/docs-wire.ts";
+
+interface DocsDocument {
+	id: string;
+	name: string;
+	meta_fields: { source_url: string | undefined; commit: string | undefined; heading_path: string | undefined };
+}
+type DocumentListOutcome = { ok: true; documents: DocsDocument[] } | { ok: false; reason: string };
+type PlaneConfig = { url: string; apiKey: string };
+
+/** Production source refuses: LightRAG replaced lightrag, and this archive does not call the retired plane. */
+export function docsArchiveSource(_config: PlaneConfig, _fetchImpl: FetchLike): DocsArchiveSource {
+	const retired = async (): Promise<{ ok: false; reason: string }> => ({ ok: false, reason: "docs-archive-retired" });
+	return {
+		listDatasets: retired,
+		listDocuments: async () => retired(),
+		retrieve: async () => retired(),
+	};
+}
 
 export const ARCHIVE_VERSION = 1;
 export const MANIFEST_FILE = "manifest.json";
@@ -41,6 +46,13 @@ export const MANIFEST_FILE = "manifest.json";
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 /** A dataset name or query id becomes a file name, so it must be a plain token. */
+
+/** Where `docs-migrate` writes when `--archive` is omitted. */
+export function lightragArchiveFromEnv(env: Record<string, string | undefined>): { dir: string | null; allowRootfs: boolean } {
+	const raw = env.SUBSTRATE_LIGHTRAG_ARCHIVE_DIR?.trim() ?? "";
+	const flag = (env.SUBSTRATE_LIGHTRAG_ARCHIVE_ALLOW_ROOTFS ?? "").trim().toLowerCase();
+	return { dir: raw.length > 0 ? raw : null, allowRootfs: flag === "1" || flag === "true" || flag === "yes" };
+}
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{7,40}$/;
 /** The largest page read back from git; the ingest refuses pages over its own cap long before this. */
@@ -54,18 +66,18 @@ export interface ArchiveQuery {
 	question: string;
 }
 
-/** The RAGFlow reads the archive makes. Production wraps the plane's client; tests may script it. */
-export interface RagflowArchiveSource {
+/** The lightrag reads the archive makes. Production wraps the plane's client; tests may script it. */
+export interface DocsArchiveSource {
 	listDatasets(): Promise<DatasetListOutcome>;
 	listDocuments(datasetId: string): Promise<DocumentListOutcome>;
 	retrieve(question: string, datasetIds: readonly string[]): Promise<RetrievalOutcome>;
 }
 
 export interface ArchiveDeps {
-	source: RagflowArchiveSource;
+	source: DocsArchiveSource;
 	/** `SUBSTRATE_DOCS_STATE_FILE`: the docs state file that is copied. The archive refuses without one. */
 	stateFile: string | null;
-	/** The frozen sample. Each query's RAGFlow citations are kept as its baseline. */
+	/** The frozen sample. Each query's lightrag citations are kept as its baseline. */
 	queries: readonly ArchiveQuery[];
 	/** The repo the pages are read from at their recorded commits, and where the git reads run. */
 	repoRoot: string;
@@ -74,7 +86,7 @@ export interface ArchiveDeps {
 	/** Overrides for `refusedMount`: the device reader and the release root it compares against. */
 	dev?: DevReader;
 	releaseRoot?: string;
-	/** `SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS`: waives only the dedicated-mount gate. */
+	/** `SUBSTRATE_DOCS_ARCHIVE_ALLOW_ROOTFS`: waives only the dedicated-mount gate. */
 	allowRootfs?: boolean;
 }
 
@@ -149,23 +161,14 @@ export function gitAtCommit(repoRoot: string): ReadAtCommit {
 	};
 }
 
-/** The production source: the plane's own RAGFlow client, with the archive's retrieval knobs. */
-export function ragflowArchiveSource(config: RagflowConfig, fetchImpl: FetchLike): RagflowArchiveSource {
-	return {
-		listDatasets: () => listDatasets(config, fetchImpl),
-		listDocuments: (datasetId) => listDocuments(config, datasetId, fetchImpl),
-		retrieve: (question, datasetIds) =>
-			retrieveChunks(config, { question, dataset_ids: [...datasetIds], page_size: MAX_RETRIEVAL_PAGE_SIZE, retrieval: DEFAULT_RETRIEVAL_KNOBS }, fetchImpl),
-	};
-}
 
 /**
- * Write the archive of the RAGFlow plane into `dir`. Nothing is written until every RAGFlow read and every baseline
+ * Write the archive of the lightrag plane into `dir`. Nothing is written until every lightrag read and every baseline
  * query has succeeded, so a failed read leaves no partial archive. The directory is refused when it is unset, not
  * empty, or on the root filesystem (unless `allowRootfs`). The manifest is written last.
  */
-export async function archiveRagflow(deps: ArchiveDeps, dir: string | null): Promise<ArchiveResult> {
-	if (dir === null) return refused("SUBSTRATE_RAGFLOW_ARCHIVE_DIR is unset: the archive refuses by name and writes nothing");
+export async function archiveDocs(deps: ArchiveDeps, dir: string | null): Promise<ArchiveResult> {
+	if (dir === null) return refused("SUBSTRATE_DOCS_ARCHIVE_DIR is unset: the archive refuses by name and writes nothing");
 	const stateFile = deps.stateFile;
 	if (stateFile === null) return refused("SUBSTRATE_DOCS_STATE_FILE is unset: there is no docs state to archive");
 	const refusal = preflight(deps, dir, stateFile);
@@ -198,12 +201,12 @@ async function gather(deps: ArchiveDeps, stateFile: string): Promise<Gathered> {
 	const listed = await deps.source.listDatasets();
 	if (!listed.ok) return refused(listed.reason);
 	const datasets = listed.datasets;
-	if (datasets.length === 0) return refused("RAGFlow lists no datasets to archive");
+	if (datasets.length === 0) return refused("lightrag lists no datasets to archive");
 	const names = datasets.map((dataset) => dataset.name);
-	if (names.some((name) => !SAFE_NAME.test(name))) return refused("a RAGFlow dataset name is not usable as a file name");
-	if (new Set(names).size !== names.length) return refused("RAGFlow lists two datasets under one name");
+	if (names.some((name) => !SAFE_NAME.test(name))) return refused("a lightrag dataset name is not usable as a file name");
+	if (new Set(names).size !== names.length) return refused("lightrag lists two datasets under one name");
 
-	const listings: Array<{ dataset: RagflowDataset; documents: RagflowDocument[] }> = [];
+	const listings: Array<{ dataset: DocsDataset; documents: DocsDocument[] }> = [];
 	for (const dataset of datasets) {
 		const documents = await deps.source.listDocuments(dataset.id);
 		if (!documents.ok) return refused(documents.reason);
@@ -235,7 +238,7 @@ async function gather(deps: ArchiveDeps, stateFile: string): Promise<Gathered> {
 	return { ok: true, files, pageMismatches: checks.filter((check) => !check.match).length };
 }
 
-function documentEntry(document: RagflowDocument) {
+function documentEntry(document: DocsDocument) {
 	return {
 		id: document.id,
 		name: redact(document.name),
@@ -245,7 +248,7 @@ function documentEntry(document: RagflowDocument) {
 	};
 }
 
-function citationEntry(chunk: RagflowChunk) {
+function citationEntry(chunk: DocsChunk) {
 	return {
 		document_id: chunk.document_id ?? null,
 		chunk_id: chunk.chunk_id ?? null,
@@ -257,11 +260,11 @@ function citationEntry(chunk: RagflowChunk) {
 }
 
 /**
- * Check one document against the object it was ingested from. RAGFlow names a document by its repo path with `/`
+ * Check one document against the object it was ingested from. lightrag names a document by its repo path with `/`
  * written as `__` (`documentName`), so the path is that name reversed. The page is hashed with the ingest's own
  * `changeSha` over the sanitised body, and matched against the state record for its dataset and source URL.
  */
-function pageCheck(dataset: RagflowDataset, document: RagflowDocument, records: ReadonlyMap<string, IngestRecord>, readAt: ReadAtCommit): ArchivedPageCheck {
+function pageCheck(dataset: DocsDataset, document: DocsDocument, records: ReadonlyMap<string, IngestRecord>, readAt: ReadAtCommit): ArchivedPageCheck {
 	const sourceUrl = document.meta_fields.source_url ?? null;
 	const commit = document.meta_fields.commit ?? null;
 	const path = document.name.replace(/__/g, "/");

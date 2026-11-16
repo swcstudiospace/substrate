@@ -61,7 +61,7 @@ function version(dataset: string, commit: string, agoMs: number, n = 1): Dataset
 		commit,
 		content_sha256: `sha-${commit}`,
 		ingested_at: new Date(NOW - agoMs).toISOString(),
-		backend: "ragflow",
+		backend: "lightrag",
 	};
 }
 

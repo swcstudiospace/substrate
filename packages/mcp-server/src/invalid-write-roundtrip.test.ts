@@ -30,7 +30,7 @@
  * make every zero-delta assertion meaningless, so the control is what shows the counter works.
  *
  * The Postgres-backed suites (memory, skills) are skipped without `SUBSTRATE_TEST_PG_URL`, the
- * way the `index-store.*.test.ts` files are. The docs suite runs against the RAGFlow fake and
+ * way the `index-store.*.test.ts` files are. The docs suite runs against the lightrag fake and
  * needs no database.
  *
  * Isolation: every write carries `ut-iwr-<RUN>` in its scope, skill name or explicit
@@ -52,7 +52,7 @@ import type { AuditRecord } from "@substrate/audit";
 import { loadConfig } from "./config.ts";
 import { IndexStore } from "./index-store.ts";
 import { createObservability, type Observability } from "./observe.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { ProposeResult, Runner, SkillProposer } from "./skills/propose.ts";
@@ -72,8 +72,8 @@ const BASE_ENV: Record<string, string> = {
 	SUBSTRATE_TOKEN_OMP: "tok-omp",
 	SUBSTRATE_OPERATOR_TOKENS: "tok-omp",
 	SUBSTRATE_BUDGETS: "off",
-	RAGFLOW_URL: "http://ragflow.test",
-	RAGFLOW_API_KEY: "k",
+	LIGHTRAG_URL: "http://lightrag.test",
+	LIGHTRAG_API_KEY: "k",
 };
 
 const TOKEN = "tok-omp";
@@ -773,7 +773,7 @@ describeLive("skill approvals: POST /skills/approve and MCP skills_approve", () 
 });
 
 // ── POST /docs/ingest and MCP docs_ingest ───────────────────────────────────────────────────────
-// No database. The stored content a refusal could change is every upload with its metadata, every document on the RAGFlow
+// No database. The stored content a refusal could change is every upload with its metadata, every document on the lightrag
 // fake, and the docs state file (SUBSTRATE_DOCS_STATE_FILE), which an ingest writes only after it succeeds.
 
 /** The docs state file's text, or null while no ingest has written one. */
@@ -782,7 +782,7 @@ function docsStateOf(file: string): string | null {
 }
 
 /** What a docs write can change: every upload with its metadata, every document on the plane, and the state file. */
-function storedDocs(fake: RagflowFake, file: string) {
+function storedDocs(fake: DocsPlaneFake, file: string) {
 	return { uploads: structuredClone(fake.uploads), documents: structuredClone(fake.documents), state: docsStateOf(file) };
 }
 
@@ -832,11 +832,11 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 	 * `storedDocs`, not a count.
 	 */
 	async function seeded(env: Record<string, string> = {}) {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseDonePolls = 1;
 		const file = stateFile();
 		const http = await startHttp(
-			{ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch },
+			{ index: null, greptime: ledgerStub().greptime, lightragFetch: fake.fetch },
 			{ ...env, SUBSTRATE_DOCS_STATE_FILE: file },
 		);
 		const stored = await http.send("/docs/ingest", seed);
@@ -846,10 +846,10 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 	}
 
 	test("a valid control is stored, makes exactly one upload, writes the state file, and is audited once", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const file = stateFile();
 		const http = await startHttp(
-			{ index: null, greptime: ledgerStub().greptime, ragflowFetch: fake.fetch },
+			{ index: null, greptime: ledgerStub().greptime, lightragFetch: fake.fetch },
 			{ SUBSTRATE_DOCS_STATE_FILE: file },
 		);
 		const stateBefore = docsStateOf(file);
@@ -913,16 +913,16 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 		};
 	}
 
-	test("POST /docs/ingest on the LightRAG plane refuses a batch with an invalid page as RAGFlow does, with no LightRAG request and an unchanged state file", async () => {
+	test("POST /docs/ingest on the LightRAG plane refuses a batch with an invalid page as lightrag does, with no LightRAG request and an unchanged state file", async () => {
 		const batch = { dataset: "agent-substrate", pages: [page({ path: "docs/first.md" }), without(page({ path: "docs/second.md" }), "source_url")] };
-		const ragflow = new RagflowFake();
-		const ragflowHttp = await startHttp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: ragflow.fetch }, { SUBSTRATE_DOCS_STATE_FILE: stateFile() });
-		const expected = await ragflowHttp.send("/docs/ingest", batch);
+		const plane = new DocsPlaneFake();
+		const planeHttp = await startHttp({ index: null, greptime: ledgerStub().greptime, lightragFetch: plane.fetch }, { SUBSTRATE_DOCS_STATE_FILE: stateFile() });
+		const expected = await planeHttp.send("/docs/ingest", batch);
 
-		const lightrag = lightragRecorder();
+		const recorder = lightragRecorder();
 		const file = stateFile();
 		const http = await startHttp(
-			{ index: null, greptime: ledgerStub().greptime, lightragFetch: lightrag.fetch },
+			{ index: null, greptime: ledgerStub().greptime, lightragFetch: recorder.fetch },
 			{ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_STATE_FILE: file },
 		);
 		const mark = http.audit.seq;
@@ -933,7 +933,7 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 		const refusal = await response.json();
 		expect(refusal).toMatchObject({ ok: false, refused: true });
 		expect(refusal).toEqual(await expected.json());
-		expect(lightrag.requests).toEqual([]);
+		expect(recorder.requests).toEqual([]);
 		expect(docsStateOf(file)).toBeNull();
 		expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "rest"));
 	});

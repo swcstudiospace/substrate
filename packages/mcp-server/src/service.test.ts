@@ -11,7 +11,7 @@ import { EVENT_SOURCES } from "./event-sources.ts";
 import { createEventBus, MAX_HINT_BYTES, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
 import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type EmitResult, type SkillProposalRequest } from "./service.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
@@ -1153,7 +1153,7 @@ describe("append-mode enforcement", () => {
 	test("healthz separates reachability from writability", async () => {
 		// The state a monitor has to see: `ping` succeeds while every append is refused.
 		const { greptime } = ledger(false);
-		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag") =>
+		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "lightrag" | "lightrag") =>
 			({ plane, state: "closed" as const, failures: 0, openedAt: null, lastErrorAt: null, lastError: null });
 		expect(await substrateWith(greptime).health()).toEqual({
 			index: false,
@@ -1189,7 +1189,6 @@ describe("append-mode enforcement", () => {
 				index: { ok: null, breaker: closed("index"), lastErrorAt: null },
 				cache: { ok: null, breaker: closed("cache"), lastErrorAt: null },
 				hindsight: { ok: null, breaker: closed("hindsight"), lastErrorAt: null },
-				ragflow: { ok: null, breaker: closed("ragflow"), lastErrorAt: null },
 				lightrag: { ok: null, breaker: closed("lightrag"), lastErrorAt: null },
 			},
 			capacity: { index: null, ledger: null },
@@ -1311,39 +1310,39 @@ describe("append-mode enforcement", () => {
 		expect(bare.capacity).toEqual({ index: null, ledger: null });
 	});
 
-	test("healthz probes a configured Hindsight and RAGFlow once each, bounded, and reports the breaker", async () => {
+	test("healthz probes a configured Hindsight and lightrag once each, bounded, and reports the breaker", async () => {
 		const { greptime } = ledger(true);
 		const saved = { HINDSIGHT_URL: process.env.HINDSIGHT_URL, HINDSIGHT_API_KEY: process.env.HINDSIGHT_API_KEY };
 		process.env.HINDSIGHT_URL = "http://fake";
 		process.env.HINDSIGHT_API_KEY = "test-bearer";
 		try {
 			const hindsight = new HindsightFake();
-			const ragflow = new RagflowFake();
-			const config = loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_BREAKER_FAILURES: "1" });
-			const substrate = new Substrate(config, { index: null, greptime: greptime as never, hindsightFetch: hindsight.fetch, ragflowFetch: ragflow.fetch });
+			const lightrag = new DocsPlaneFake();
+			const config = loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_BREAKER_FAILURES: "1" });
+			const substrate = new Substrate(config, { index: null, greptime: greptime as never, hindsightFetch: hindsight.fetch, lightragFetch: lightrag.fetch });
 			const up = await substrate.health();
 			expect(up.planes.hindsight).toMatchObject({ ok: true, lastErrorAt: null });
-			expect(up.planes.ragflow).toMatchObject({ ok: true, breaker: { state: "closed" } });
+			expect(up.planes.lightrag).toMatchObject({ ok: true, breaker: { state: "closed" } });
 			expect(hindsight.requests.filter((request) => request.path === "/health")).toHaveLength(1);
-			expect(ragflow.requests.filter((request) => request.path === "/api/v1/datasets")).toHaveLength(1);
+			expect(lightrag.requests.filter((request) => request.path === "/api/v1/datasets")).toHaveLength(1);
 
-			// RAGFlow goes away: the probe fails, the breaker opens on the first failure, and both are reported.
+			// lightrag goes away: the probe fails, the breaker opens on the first failure, and both are reported.
 			const down = new Substrate(config, {
 				index: null,
 				greptime: greptime as never,
 				hindsightFetch: hindsight.fetch,
-				ragflowFetch: async () => {
+				lightragFetch: async () => {
 					throw new Error("connect ECONNREFUSED");
 				},
 			});
 			const failed = await down.health();
-			expect(failed.planes.ragflow.ok).toBe(false);
-			expect(failed.planes.ragflow.breaker).toMatchObject({ state: "open", failures: 1 });
-			expect(failed.planes.ragflow.lastErrorAt).toBe(failed.planes.ragflow.breaker?.lastErrorAt ?? -1);
-			expect(typeof failed.planes.ragflow.lastErrorAt).toBe("number");
+			expect(failed.planes.lightrag.ok).toBe(false);
+			expect(failed.planes.lightrag.breaker).toMatchObject({ state: "open", failures: 1 });
+			expect(failed.planes.lightrag.lastErrorAt).toBe(failed.planes.lightrag.breaker?.lastErrorAt ?? -1);
+			expect(typeof failed.planes.lightrag.lastErrorAt).toBe("number");
 			// Still 200-eligible: the status rule reads ledger and index only.
 			expect(failed.eventsWritable).toBe(true);
-			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, ragflow: true, lightrag: false });
+			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, lightrag: true });
 		} finally {
 			for (const [name, value] of Object.entries(saved)) {
 				if (value === undefined) delete process.env[name];
@@ -1354,22 +1353,22 @@ describe("append-mode enforcement", () => {
 
 	test("SUBSTRATE_BREAKER=0 leaves every breaker null and every call reaching the plane", async () => {
 		let calls = 0;
-		const substrate = new Substrate(loadConfig({ SUBSTRATE_BREAKER: "0", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BREAKER: "0", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
 			index: null,
 			greptime: null,
-			ragflowFetch: async () => {
+			lightragFetch: async () => {
 				calls += 1;
 				throw new Error("connect ECONNREFUSED");
 			},
 		});
 		for (let i = 0; i < 7; i++) {
-			const reply = await substrate.searchDocs({ question: "who reads RAGFlow?" }, "omp");
+			const reply = await substrate.searchDocs({ question: "who reads lightrag?" }, "omp");
 			expect(reply).toMatchObject({ chunks: [], degraded: true });
-			expect(reply.reason).toContain("ragflow unreachable");
+			expect(reply.reason).toContain("lightrag unreachable");
 		}
 		expect(calls).toBe(7);
 		const health = await substrate.health();
-		expect(health.planes.ragflow).toEqual({ ok: false, breaker: null, lastErrorAt: null });
+		expect(health.planes.lightrag).toEqual({ ok: false, breaker: null, lastErrorAt: null });
 	});
 
 	test("docs search and memory recall degrade with `circuit open` once a plane's breaker is open", async () => {
@@ -1378,15 +1377,15 @@ describe("append-mode enforcement", () => {
 		process.env.HINDSIGHT_API_KEY = "test-bearer";
 		process.env.HINDSIGHT_BANKS = "sub-cursor";
 		try {
-			let ragflowCalls = 0;
+			let lightragCalls = 0;
 			let hindsightCalls = 0;
 			const substrate = new Substrate(
-				loadConfig({ SUBSTRATE_BREAKER_FAILURES: "2", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }),
+				loadConfig({ SUBSTRATE_BREAKER_FAILURES: "2", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }),
 				{
 					index: null,
 					greptime: null,
-					ragflowFetch: async () => {
-						ragflowCalls += 1;
+					lightragFetch: async () => {
+						lightragCalls += 1;
 						throw new Error("connect ECONNREFUSED");
 					},
 					hindsightFetch: async () => {
@@ -1397,8 +1396,8 @@ describe("append-mode enforcement", () => {
 			);
 			for (let i = 0; i < 2; i++) await substrate.searchDocs({ question: "q" }, "omp");
 			const search = await substrate.searchDocs({ question: "q" }, "omp");
-			expect(search).toMatchObject({ chunks: [], degraded: true, reason: "ragflow circuit open" });
-			expect(ragflowCalls).toBe(2);
+			expect(search).toMatchObject({ chunks: [], degraded: true, reason: "lightrag circuit open" });
+			expect(lightragCalls).toBe(2);
 
 			for (let i = 0; i < 2; i++) await substrate.recallMemories({ query: "lease" }, "cursor");
 			const recall = await substrate.recallMemories({ query: "lease" }, "cursor");
@@ -1418,21 +1417,16 @@ describe("append-mode enforcement", () => {
 		expect((await substrateWith(greptime).health()).eventsWritable).toBe(true);
 	});
 
-	test("a LightRAG ingest with RAGFlow configured never lists datasets through the RAGFlow gate", async () => {
-		// The RAGFlow outage refuses every RAGFlow call; the LightRAG ingest must neither list through it nor be refused by it.
-		let ragflowCalls = 0;
+	test("a LightRAG ingest with lightrag configured never lists datasets through the lightrag gate", async () => {
+		// The lightrag outage refuses every lightrag call; the LightRAG ingest must neither list through it nor be refused by it.
 		const uploads: string[] = [];
 		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
 				...repos.stores,
-				ragflowFetch: async () => {
-					ragflowCalls += 1;
-					throw new Error("connect ECONNREFUSED");
-				},
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
@@ -1451,7 +1445,6 @@ describe("append-mode enforcement", () => {
 			"omp",
 			["docs/"],
 		);
-		expect(ragflowCalls).toBe(0);
 		expect(outcome.ok).toBe(true);
 		expect(uploads).toHaveLength(1);
 	});
@@ -1460,14 +1453,11 @@ describe("append-mode enforcement", () => {
 		const uploads: string[] = [];
 		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
 				...repos.stores,
-				ragflowFetch: async () => {
-					throw new Error("connect ECONNREFUSED");
-				},
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
@@ -1498,19 +1488,17 @@ describe("append-mode enforcement", () => {
 		expect(uploads).toHaveLength(1);
 	});
 
-	test("a RAGFlow refresh does not move a LightRAG dataset's records to RAGFlow's id: an unchanged page stays unchanged", async () => {
+	test("a lightrag refresh does not move a LightRAG dataset's records to lightrag's id: an unchanged page stays unchanged", async () => {
 		// Under the lightrag backend the refresh records the dataset's name as its id (recordLightragVersion). The LightRAG
 		// ingest keys its records by that same name, so the next ingest of the same page finds the record and uploads nothing.
-		const ragflow = new RagflowFake();
 		const uploads: string[] = [];
 		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
 				...repos.stores,
-				ragflowFetch: ragflow.fetch,
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
@@ -1535,20 +1523,15 @@ describe("append-mode enforcement", () => {
 		expect(uploads).toHaveLength(1);
 	});
 
-	test("a LightRAG refresh does not resolve datasets through RAGFlow: an unreachable RAGFlow does not block it, and it records a LightRAG version", async () => {
-		let ragflowCalls = 0;
+	test("a LightRAG refresh does not resolve datasets through lightrag: an unreachable lightrag does not block it, and it records a LightRAG version", async () => {
 		const uploads: string[] = [];
 		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
 				...repos.stores,
-				ragflowFetch: async () => {
-					ragflowCalls += 1;
-					throw new Error("connect ECONNREFUSED");
-				},
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
@@ -1568,7 +1551,6 @@ describe("append-mode enforcement", () => {
 			"omp",
 			{ wait: true },
 		);
-		expect(ragflowCalls).toBe(0);
 		expect(outcome).toMatchObject({ status: 200, body: { ok: true, version: { version: "v1", backend: "lightrag", dataset_id: "agent-substrate" } } });
 		expect(uploads).toHaveLength(1);
 	});
@@ -6064,58 +6046,58 @@ describe("private reads under the request budget and the docs steering precedenc
 
 	describe("docs_search directions", () => {
 		async function rig(stored?: string) {
-			const ragflow = new RagflowFake();
+			const lightrag = new DocsPlaneFake();
 			const authority = createTestLiveSessionAuthority();
 			const session = await issueLiveSession(authority, { caller, ...(stored === undefined ? {} : { steering: stored }) });
-			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+			const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
 				index: null,
 				greptime: null,
-				ragflowFetch: ragflow.fetch,
+				lightragFetch: lightrag.fetch,
 				steering: { history: null, liveSessions: authority },
 			});
-			return { substrate, ragflow, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
+			return { substrate, lightrag, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
 		}
-		const askedWith = (ragflow: RagflowFake): string => JSON.stringify(ragflow.retrievals());
+		const askedWith = (lightrag: DocsPlaneFake): string => JSON.stringify(lightrag.retrievals());
 
 		test("a supplied direction wins over the stored one for that search", async () => {
 			const h = await rig("STORED-DIRECTION");
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "PER-CALL-DIRECTION" }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).toContain("PER-CALL-DIRECTION");
-			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId, steering: "PER-CALL-DIRECTION" }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).toContain("PER-CALL-DIRECTION");
+			expect(askedWith(h.lightrag)).not.toContain("STORED-DIRECTION");
 		});
 
 		test("stored directions answer a search that supplies none", async () => {
 			const h = await rig("STORED-DIRECTION");
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).toContain("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).toContain("STORED-DIRECTION");
 		});
 
 		test("a search with no directions anywhere asks the plain question", async () => {
 			const h = await rig();
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).toContain("who reads RAGFlow?");
-			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).toContain("who reads lightrag?");
+			expect(askedWith(h.lightrag)).not.toContain("Steering context");
 		});
 
 		test("an explicitly empty direction replaces the stored one with none", async () => {
 			const h = await rig("STORED-DIRECTION");
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "" }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
-			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId, steering: "" }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).not.toContain("STORED-DIRECTION");
+			expect(askedWith(h.lightrag)).not.toContain("Steering context");
 		});
 
 		test("a supplied direction steers a search outside any steering session", async () => {
-			const ragflow = new RagflowFake();
-			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: ragflow.fetch });
-			await substrate.searchDocs({ question: "who reads RAGFlow?", steering: "PER-CALL-DIRECTION" }, "cursor");
-			expect(askedWith(ragflow)).toContain("PER-CALL-DIRECTION");
+			const lightrag = new DocsPlaneFake();
+			const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), { index: null, greptime: null, lightragFetch: lightrag.fetch });
+			await substrate.searchDocs({ question: "who reads lightrag?", steering: "PER-CALL-DIRECTION" }, "cursor");
+			expect(askedWith(lightrag)).toContain("PER-CALL-DIRECTION");
 		});
 
 		test("a directions value that is not a string of at most 16000 characters is refused at the boundary", async () => {
 			const h = await rig("STORED-DIRECTION");
 			await expect(h.substrate.searchDocs({ question: "q", steering: 42 }, caller.surface)).rejects.toBeInstanceOf(ZodError);
 			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
-			expect(askedWith(h.ragflow)).toBe("[]");
+			expect(askedWith(h.lightrag)).toBe("[]");
 		});
 	});
 });

@@ -11,14 +11,14 @@ Railway private networking is scoped to one project and environment, so each
 project's `production` environment runs a Tailscale Forwarder that joins the
 tailnet and forwards mapped ports to private service names
 (`docs/railway-tailscale.md`). The Agent Substrate forwarder maps
-`8888` to Hindsight and `9380` to RAGFlow (see `docs/data-planes.md`,
+`8888` to Hindsight and `80` to LightRAG (see `docs/data-planes.md`,
 "Access path"). Only the VPS and the operator's admin machines reach the
 forwarders; the Programming Desk's Grok Bot computers are not on the tailnet
 and reach the desk gateway over HTTPS instead.
 
 Bearers travel over the WireGuard-encrypted tailnet hop to the forwarder
-(D11). Hindsight and RAGFlow keys live only in the server env file for the
-substrate's own paths (`planes/hindsight.ts`, `planes/ragflow.ts`) and in
+(D11). Hindsight and LightRAG keys live only in the server env file for the
+substrate's own paths (`planes/hindsight.ts`, `planes/lightrag.ts`) and in
 the gateway's own environment for the gateway's paths — never in an agent
 config, a repo file, or a prompt. Production `DRAGONFLY_URL` points at a
 co-located loopback redis after a measured 180–310 ms tailnet RTT made the

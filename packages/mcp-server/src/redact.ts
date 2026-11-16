@@ -257,9 +257,9 @@ const RULES = [
 	{ name: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/g, replacement: REDACTED },
 	// openai-proj: OpenAI project and service-account keys (the sk- rule above stops at its second hyphen).
 	{ name: "openai-proj", pattern: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
-	// ragflow: RAGFlow API key (D25-23). High-confidence on both passes, so a
+	// lightrag: lightrag API key (D25-23). High-confidence on both passes, so a
 	// key pasted into a doc page is refused, never uploaded.
-	{ name: "ragflow", pattern: /\bragflow-[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "lightrag", pattern: /\blightrag-[A-Za-z0-9]{20,}/g, replacement: REDACTED },
 	// Provider shapes added with the SOTA pass; each has a skill counterpart with the same name.
 	{ name: "stripe", pattern: /\b(?:sk|rk)_live_[A-Za-z0-9]{24,}/g, replacement: REDACTED },
 	{ name: "huggingface", pattern: /\bhf_[A-Za-z0-9]{20,}/g, replacement: REDACTED },
@@ -444,7 +444,7 @@ export type SkillRedactionRule =
 	| "gitlab"
 	| "digitalocean"
 	| "openai-proj"
-	| "ragflow"
+	| "lightrag"
 	| "stripe"
 	| "huggingface"
 	| "google-oauth"
@@ -478,7 +478,7 @@ export const SKILL_HIGH_CONFIDENCE_RULES: readonly SkillRedactionRule[] = [
 	"gitlab",
 	"digitalocean",
 	"openai-proj",
-	"ragflow",
+	"lightrag",
 	"stripe",
 	"huggingface",
 	"google-oauth",
@@ -558,7 +558,7 @@ const SKILL_RULES: readonly SkillRule[] = [
 	{ name: "gitlab", rule: "gitlab", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
 	{ name: "digitalocean", rule: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/dg, value: 0, replacement: REDACTED },
 	{ name: "openai-proj", rule: "openai-proj", pattern: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
-	{ name: "ragflow", rule: "ragflow", pattern: /\bragflow-[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "lightrag", rule: "lightrag", pattern: /\blightrag-[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
 	// Provider shapes shared with RULES under the same names (D-04 / SOTA pass).
 	{ name: "stripe", rule: "stripe", pattern: /\b(?:sk|rk)_live_[A-Za-z0-9]{24,}/dg, value: 0, replacement: REDACTED },
 	{ name: "huggingface", rule: "huggingface", pattern: /\bhf_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },

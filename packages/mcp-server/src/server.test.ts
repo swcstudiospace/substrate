@@ -10,8 +10,8 @@ import { scanIngestPages } from "./docs-ingest.ts";
 import type { EventQuery } from "./greptime.ts";
 import { memoryToolWriter, resetRagMachine, surfaceClaimRefusal } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import type { FetchLike } from "./planes/docs-wire.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import { FakeTree } from "./planning/tree.fixtures.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import {
@@ -82,7 +82,7 @@ function repoSeam(names: readonly string[] = ["agent-substrate", "programming-de
 async function serve(
 	greptime: unknown,
 	env: Record<string, string | undefined> = {},
-	stores: { ragflowFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null; planning?: { fs: FakeTree; presence: null } } = {},
+	stores: { lightragFetch?: FetchLike; hindsightFetch?: FetchLike; eventBus?: () => EventBus | null; planning?: { fs: FakeTree; presence: null } } = {},
 	options: HttpServerOptions = {},
 ) {
 	const config = loadConfig(env);
@@ -292,15 +292,15 @@ describe("routes", () => {
 
 	test("POST /docs/search answers cited results against the fake", async () => {
 		const { greptime } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ ...repos.env, RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{ ragflowFetch: fake.fetch, ...repos.stores },
+			{ ...repos.env, LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
+			{ lightragFetch: fake.fetch, ...repos.stores },
 		);
 		try {
-			const response = await post("/docs/search", { question: "who reads RAGFlow?" });
+			const response = await post("/docs/search", { question: "who reads lightrag?" });
 			const body: unknown = await response.json();
 			const chunks = body !== null && typeof body === "object" && "chunks" in body ? body.chunks : null;
 			const untrusted = body !== null && typeof body === "object" && "untrusted" in body ? body.untrusted : null;
@@ -363,17 +363,17 @@ describe("routes", () => {
 		}
 	}
 
-	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" };
+	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" };
 	const OMP_AUTH = { authorization: "Bearer tok-omp" };
 
 	test("POST /docs/search historical attribution retains public memory context without private ledger reads", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
-		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		const { post, stop } = await serve(greptime, OMP_ENV, { lightragFetch: fake.fetch, hindsightFetch: hindsight.fetch });
 		try {
 			const response = await withHindsightEnv("sub-omp", () =>
-				post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context: true }, OMP_AUTH),
+				post("/docs/search", { question: "who reads lightrag?", session_id: "s-1", context: true }, OMP_AUTH),
 			);
 			const body = (await response.json()) as Record<string, unknown>;
 			expect(response.status).toBe(200);
@@ -387,14 +387,14 @@ describe("routes", () => {
 	});
 
 	test("POST /docs/search with context false or absent answers without a context key and reads neither source", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
-		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		const { post, stop } = await serve(greptime, OMP_ENV, { lightragFetch: fake.fetch, hindsightFetch: hindsight.fetch });
 		try {
 			await withHindsightEnv("sub-omp", async () => {
 				for (const extra of [{ context: false }, {}]) {
-					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", ...extra }, OMP_AUTH);
+					const response = await post("/docs/search", { question: "who reads lightrag?", session_id: "s-1", ...extra }, OMP_AUTH);
 					const body = (await response.json()) as Record<string, unknown>;
 					expect(response.status).toBe(200);
 					expect(Object.hasOwn(body, "context")).toBe(false);
@@ -408,14 +408,14 @@ describe("routes", () => {
 	});
 
 	test("POST /docs/search refuses a string or null context with a 400, before recall or the ledger", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
-		const { post, stop } = await serve(greptime, OMP_ENV, { ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch });
+		const { post, stop } = await serve(greptime, OMP_ENV, { lightragFetch: fake.fetch, hindsightFetch: hindsight.fetch });
 		try {
 			await withHindsightEnv("sub-omp", async () => {
 				for (const context of ["true", null]) {
-					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context }, OMP_AUTH);
+					const response = await post("/docs/search", { question: "who reads lightrag?", session_id: "s-1", context }, OMP_AUTH);
 					expect(response.status).toBe(400);
 				}
 			});
@@ -428,11 +428,11 @@ describe("routes", () => {
 
 	test("POST /docs/ingest stores a page against the fake", async () => {
 		const { greptime } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{ ragflowFetch: fake.fetch },
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
+			{ lightragFetch: fake.fetch },
 		);
 		try {
 			const response = await post(
@@ -492,11 +492,11 @@ describe("routes", () => {
 
 	test("POST /docs/ingest refuses an out-of-roots real path", async () => {
 		const { greptime } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{ ragflowFetch: fake.fetch },
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
+			{ lightragFetch: fake.fetch },
 		);
 		try {
 			const response = await post(
@@ -531,11 +531,11 @@ describe("routes", () => {
 
 	test("POST /docs/ingest refuses a stale expected_version with a 409 conflict, and uploads nothing", async () => {
 		const { greptime } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
-			{ ragflowFetch: fake.fetch },
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
+			{ lightragFetch: fake.fetch },
 		);
 		try {
 			// Nothing is on record for this source URL, so expecting version 1 is stale.
@@ -565,7 +565,7 @@ describe("routes", () => {
 		const original = globalThis.fetch;
 		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-			if (url.includes("ragflow.test")) return impl(input, init);
+			if (url.includes("lightrag.test")) return impl(input, init);
 			return original(input, init);
 		}) as typeof fetch;
 		return () => {
@@ -608,7 +608,7 @@ describe("routes", () => {
 	}
 
 	/** The uploads the fake plane took for a dataset id, in order. */
-	function uploadsFor(fake: RagflowFake, datasetId: string): Array<{ content: string; metadata: Record<string, string> }> {
+	function uploadsFor(fake: DocsPlaneFake, datasetId: string): Array<{ content: string; metadata: Record<string, string> }> {
 		return fake.uploads.filter((upload) => upload.dataset_id === datasetId);
 	}
 
@@ -623,7 +623,7 @@ describe("routes", () => {
 		const { greptime } = ledger();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 		);
 		try {
 			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" });
@@ -635,7 +635,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger answers 401 untokened even on a run that allows anonymous callers", async () => {
 		const { greptime } = ledger();
-		const { post, stop } = await serve(greptime, { SUBSTRATE_ALLOW_ANONYMOUS: "1", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" });
+		const { post, stop } = await serve(greptime, { SUBSTRATE_ALLOW_ANONYMOUS: "1", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" });
 		try {
 			// The global gate passes an untokened caller here; the route's own refusal is the 401.
 			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" });
@@ -653,7 +653,7 @@ describe("routes", () => {
 		const { greptime } = ledger();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_VM_GUEST: "1", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_VM_GUEST: "1", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 		);
 		try {
 			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
@@ -675,13 +675,13 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger ingests the local roots, then records the version", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
 		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
@@ -712,7 +712,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger creates the missing dataset before the first ingest", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		// A configured plane that does not yet hold the dataset this checkout
 		// ingests into: the ingest reads by name and refuses unknown-dataset, so
 		// the trigger must create it before the first ingest can ever succeed.
@@ -723,7 +723,7 @@ describe("routes", () => {
 		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
@@ -753,7 +753,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger ingests the agent-skills checkout when SUBSTRATE_AGENT_SKILLS_ROOT names one, then records the version", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		// The library layout: each skill is a `<name>/` directory holding SKILL.md and a references/ tree. A
@@ -763,7 +763,7 @@ describe("routes", () => {
 			"demo-skill/references/api.md": "The demo API reference.\n",
 			"notes/scratch.md": "Not a skill.\n",
 		});
-		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
 		try {
 			const head = git(checkout, "rev-parse", "HEAD");
 			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: head, content_sha256: "sha-skills" }, { authorization: "Bearer tok-omp" });
@@ -786,7 +786,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger for agent-skills refuses a checkout that moved past the requested commit: commit-mismatch, nothing recorded", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const checkout = gitCheckout({ "demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n" });
@@ -794,7 +794,7 @@ describe("routes", () => {
 		// The trigger names `requested`, then the checkout advances: the job must not ingest the newer content under that name.
 		writeFileSync(join(checkout, "demo-skill", "SKILL.md"), "---\nname: demo-skill\n---\nRevised skill body.\n");
 		git(checkout, "commit", "-q", "-am", "revise skill");
-		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: checkout });
 		try {
 			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: requested, content_sha256: "sha-moved" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; reason?: string };
@@ -811,12 +811,12 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger for agent-skills is a truthful noop when SUBSTRATE_AGENT_SKILLS_ROOT is unset", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door." });
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 			{},
 			{ docsIngestBaseDir: docs },
 		);
@@ -842,12 +842,12 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger for agent-skills fails with checkout-unreadable when the named checkout is gone", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const restore = patchFetch(fake.fetch);
 		// The named checkout does not exist, so its roots cannot be listed: the job fails before any plane call.
 		const gone = docsFixture({ "demo-skill/SKILL.md": "Demo skill body.\n" });
 		rmSync(gone, { recursive: true, force: true });
-		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: gone });
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_AGENT_SKILLS_ROOT: gone });
 		try {
 			const response = await post("/docs/merge-trigger?wait=1", { dataset: "agent-skills", commit: "c-gone", content_sha256: "sha-gone" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; reason?: string };
@@ -863,14 +863,14 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger dedupes the default dataset by content hash", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
 		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
@@ -927,7 +927,7 @@ describe("routes", () => {
 		}
 	});
 
-	test("POST /docs/merge-trigger refreshes a LightRAG-only deployment: the selected plane decides, RAGFlow is not required", async () => {
+	test("POST /docs/merge-trigger refreshes a LightRAG-only deployment: the selected plane decides, lightrag is not required", async () => {
 		const { greptime, written } = ledger();
 		const realFetch = globalThis.fetch;
 		const uploads: string[] = [];
@@ -976,7 +976,7 @@ describe("routes", () => {
 		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);
@@ -985,7 +985,7 @@ describe("routes", () => {
 			const body = (await response.json()) as { ok: boolean; reason?: string };
 			expect(response.status).toBe(503);
 			expect(body.ok).toBe(false);
-			expect(body.reason).toContain("ragflow unreachable");
+			expect(body.reason).toContain("lightrag unreachable");
 			// The ingest the refresh starts with is what refused, so nothing moved:
 			// no refresh event, no version recorded over a refused ingest.
 			expect(refreshEvents(written)).toHaveLength(0);
@@ -1001,7 +1001,7 @@ describe("routes", () => {
 		const docs = docsFixture({ "README.md": "The substrate is the only door." });
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 			{},
 			{ docsIngestBaseDir: docs },
 		);
@@ -1027,13 +1027,13 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger records no version when the ingest is refused", async () => {
 		const { greptime, written } = ledger();
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/leak.md": "password: hunter2 in the shipped config" });
 		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
 			repos.stores,
 			{ docsIngestBaseDir: docs },
 		);

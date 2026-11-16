@@ -5,7 +5,7 @@
 | Scope | Where LightRAG keeps its state when it is hosted as the docs plane, what an operator checks before the first ingest, and how an upgrade or an embedding change is done |
 | Phase | 56 |
 | Status | Decision record plus operator checklist. Nothing here is run by an agent. Every live step is OPERATOR-GATED |
-| Untouched | The RAGFlow plane, the phase 46 parity gate (T4, T5), `DELETE /documents` (never used), every Railway service |
+| Untouched | The retired docs plane, the phase 46 parity gate (T4, T5), `DELETE /documents` (never used), every Railway service |
 
 Evidence labels. **Repo** means read in this repository. **Upstream** means
 read in the LightRAG source at tag v1.5.7 (`env.example`,
@@ -18,12 +18,7 @@ runbook's author did not re-read it. **UNVERIFIED** means nobody read it.
 
 ## Facts that frame the decision
 
-- Railway, project "Agent Substrate", production: Hindsight 0.9.1 (api,
-  worker, control-plane), TEI cpu-1.8, one Postgres service
-  (`railwayapp-templates/postgres-ssl:18`), a tailscale-forwarder and two
-  `ragflow-oauth` function services. No LightRAG service exists in any
-  project, and the RAGFlow service was deleted on 2026-10-25. Which services
-  use the Postgres service is UNVERIFIED.
+- Railway, project "Agent Substrate", production: Hindsight 0.9.1 (api, worker, control-plane), TEI cpu-1.8, one Postgres service (`railwayapp-templates/postgres-ssl:18`) and a tailscale-forwarder. No LightRAG service exists in any project. LightRAG replaced RAGFlow; there is no fallback that calls the retired plane. Which services use the Postgres service is UNVERIFIED.
 - Railway, project "Ultrathink", production: a Timescale service
   (`timescale-postgis-ssl:pg16-ts2.13`, 500 MB volume), GreptimeDB v1.1.4
   (500 MB volume), Dragonfly (image tag `latest`, 5000 MB volume) and an
@@ -450,5 +445,4 @@ operator's SuperGrok subscription login.
 
 - `docs/docs-plane.md` — the client contract and the failure and fallback path.
 - `docs/data-planes.md` — topology, owner decisions, forwarder reach.
-- `docs/runbooks/docs-proof.md` — the RAGFlow-era operator gates; the phase 46
-  parity gate (T4, T5) lives with the cutover plan.
+- `docs/runbooks/docs-proof.md` — the operator gates; the phase 46 parity gate (T4, T5) lives with the cutover plan.

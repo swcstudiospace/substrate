@@ -1,21 +1,20 @@
 # Docs plane — cited answers from LightRAG (hybrid) with Hindsight context
 
 Tracked as DOCS-01/02/03 (Phase 25). Agents get cited docs answers through
-the substrate only: no agent holds `LIGHTRAG_API_KEY`, `LIGHTRAG_URL`,
-`RAGFLOW_API_KEY` or `RAGFLOW_MCP_URL`, and nothing secret, unsourced,
-out-of-root or oversize reaches a dataset.
+the substrate only: no agent holds `LIGHTRAG_API_KEY` or `LIGHTRAG_URL`,
+and nothing secret, unsourced, out-of-root or oversize reaches a dataset.
 
-The plane is chosen in `resolveDocsBackend` in `packages/mcp-server/src/config.ts`.
-`SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`, case-insensitive) wins.
-Otherwise a set `LIGHTRAG_URL` selects `lightrag`, and an unset one selects
-`ragflow`. LightRAG is the live production backend: it was cut over on
-2026-10-28 (Run 11) with `SUBSTRATE_DOCS_BACKEND=lightrag`, in naive query mode
-until the operator decides on a real LLM for graph and hybrid retrieval. The dated cutover record is `docs/runbooks/lightrag-cutover.md`.
-RAGFlow is only the legacy fallback when `LIGHTRAG_URL` is unset (`resolveDocsBackend`).
-`lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional
-`LIGHTRAG_API_KEY`. The RAGFlow service was deleted on 2026-10-25; its code stays
-until the operator approves removal (phase 46), and it is not a runtime fallback
-for LightRAG (see "Failure and fallback" below).
+The plane is LightRAG. LightRAG replaced RAGFlow; there is no fallback that calls the retired plane.
+
+`resolveDocsBackend` in `packages/mcp-server/src/config.ts` accepts only
+`lightrag`. `SUBSTRATE_DOCS_BACKEND` must be `lightrag` when set. Otherwise
+a set `LIGHTRAG_URL` selects LightRAG, and an unset one leaves the docs
+plane unconfigured: search degrades and ingest refuses. LightRAG is the
+live production backend: it was cut over on 2026-10-28 (Run 11) with
+`SUBSTRATE_DOCS_BACKEND=lightrag`, in naive query mode until the operator
+decides on a real LLM for graph and hybrid retrieval. The dated cutover
+record is `docs/runbooks/lightrag-cutover.md`. `lightragFromEnv` in the
+same file reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`.
 
 ## The two tools
 
@@ -28,10 +27,9 @@ instructions — cite `source_url`), `results`, and `reason` only when empty
 through error or refusal. Each result carries `title`, `source_url`,
 `heading_path`, `commit`, `snippet` (redacted, then cut to 1,200 chars),
 `score`, and `ids`. Failures never throw: 200 with `results: []` and a
-closed-list reason. On the RAGFlow plane that list is `not-configured`,
-`unauthenticated`, `unknown-dataset`, `invalid-request`, `ragflow-timeout`,
-`ragflow-unreachable`, `ragflow-error`, `ragflow-bad-response`. On the
-LightRAG plane a failed query reads `lightrag unreachable: …` or
+closed-list reason. That list is `not-configured`, `unauthenticated`,
+`unknown-dataset`, `invalid-request`, `lightrag unreachable`, and
+`lightrag circuit open`. A failed query reads `lightrag unreachable: …` or
 `lightrag circuit open` (`unreachable` and `LIGHTRAG_CIRCUIT_OPEN` in `planes/lightrag.ts`), and the reply is the
 Hindsight fallback when recall finds something. Anonymous callers get
 `unauthenticated` with no plane call and no event; every authenticated
@@ -53,8 +51,7 @@ order is fixed — authenticate, shape/roots/caps, strip every image, run
 `redactSkillContent` (a high-confidence finding refuses as `secret` with
 `findings: [{line, rule}]`, never a value), then hash/split/idempotency check
 and upload+parse. Caps: 1 MB body (413), 256 KiB content, 200 sections,
-200-char title. The status mapping and the RAGFlow failure codes described
-here apply to the RAGFlow ingest path. The MCP tool returns the same JSON
+200-char title. The MCP tool returns the same JSON
 with `isError` on every non-200 case.
 
 ## Registry, versions, refresh, triggers
@@ -67,8 +64,8 @@ until then the live DOCS-03 proof covers the first three only).
 harness and tests use it. `docs/receipts/**` is excluded everywhere and
 pinned by the smoke.
 
-Idempotency on the RAGFlow path is by content hash (stripped, redacted,
-normalised path — commit excluded) recorded in RAGFlow itself, so it survives
+Idempotency is by content hash (stripped, redacted,
+normalised path — commit excluded) recorded in the docs state file, so it survives
 loss of local state. A version is one refresh run at a commit, cut by a final
 `finalize: true` ingest: that commit's pages become current, absent pages
 stop being searchable (post-filter against the manifest), the last five
@@ -157,8 +154,7 @@ falls back to Hindsight recall (`lightragFallback` in `docs-search.ts`):
   Hindsight chunk, `reason` also records that recall was empty. Their replies
   keep `backend: "lightrag"`, `graph` and the RAG machine `state`.
 
-A failed LightRAG query does not retry against RAGFlow. RAGFlow serves only
-when it is the selected plane, and its service was deleted on 2026-10-25, so a selected `ragflow` plane cannot answer.
+A failed LightRAG query does not call another docs backend.
 
 ## The `corpus` dataset (phase 63)
 
@@ -174,8 +170,6 @@ when it is the selected plane, and its service was deleted on 2026-10-25, so a s
 ## Proof
 
 Isolated: unit tests against in-process fakes, and `bun run smoke:docs`
-(`scripts/docs-smoke.ts`) against a twin started with
-`rehearsal up --ragflow-fixture` — a loopback fake RAGFlow with scriptable
-timeout/error-code/malformed modes, run-dir manifest and fixture registry
-(see `docs/rehearsal.md`). Live (operator-approved, explicitly not run here):
-the five gated steps in `docs/rehearsal.md`.
+(`scripts/docs-smoke.ts`) against a twin (see `docs/rehearsal.md`). Live
+(operator-approved, explicitly not run here): the gated steps in
+`docs/rehearsal.md`.

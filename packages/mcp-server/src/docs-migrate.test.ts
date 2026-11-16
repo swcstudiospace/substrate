@@ -1,5 +1,5 @@
 /**
- * The migration job's offline proof. The archive is written by the real writer (`archiveRagflow`) from the RAGFlow fake,
+ * The migration job's offline proof. The archive is written by the real writer (`archiveDocs`) from the docs-plane fake,
  * and the LightRAG plane is a fake that serves PARITY_GATE's reads, the frozen sample and the ingest routes. The cases
  * prove the job refuses before any upload when the archive, the mapping, the replayability or the gate fails; a passing apply
  * replays only the missing page, carries the archived version and records the pin; rehearsal persists nothing; and a replay
@@ -12,18 +12,18 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { corpusDocumentName, parseCorpusDocumentName, stripRemoteImages } from "../../corpus/src/index.ts";
-import { type ArchiveQuery, archiveRagflow, type ReadAtCommit, ragflowArchiveSource, verifyArchive } from "./docs-archive.ts";
+import { archiveDocs, type ArchiveQuery, docsArchiveSource, type ReadAtCommit, verifyArchive } from "./docs-archive.ts";
 import { createVersionStore, lightragSearchDatasets, recordVersion } from "./docs-datasets.ts";
 import { changeSha, DEFAULT_INGEST_ROOTS, type IngestRecord, ingestDocs, loadIngestRecords, saveIngestRecords } from "./docs-ingest.ts";
 import type { FetchLike } from "./planes/lightrag.ts";
 import { FROZEN_SAMPLE } from "./parity-gate.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import { datasetIdentity } from "./dataset-identity.ts";
 import { main, mapRecords, loadArchive, migrationKnown, parseMigrateArgs, partAMarker, runApply, runDryRun, type MigrateIo } from "./docs-migrate.ts";
 
 const REPO = "agent-substrate";
 const PLANE_REPO = "swcstudiospace/agent-substrate";
-const RAG_CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
+const RAG_CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
 const LR_URL = "http://lightrag.test";
 const COMMIT = "a1b2c3d4e5f60718";
 const PLAN = "docs/plan.md";
@@ -77,74 +77,74 @@ interface Fixture {
 }
 
 /**
- * A production docs state holding the plan's LightRAG record (already matched by the plane), and the RAGFlow-era notes
- * record at version 3, then the archive of both. `extraRecords` adds archived records; `undocumented` adds a RAGFlow
+ * A production docs state holding the plan's LightRAG record (already matched by the plane), and the lightrag-era notes
+ * record at version 3, then the archive of both. `extraRecords` adds archived records; `undocumented` adds a lightrag
  * document with no commit, which the replay cannot reproduce; `desk` adds an archived programming-desk page at the same commit, at `deskPath` (default `docs/desk.md`);
  * `skills` adds an archived agent-skills skill at `demo-skill/SKILL.md` and `demo-skill/references/api.md`, at the same commit.
  */
 async function buildFixture(options: { extraRecords?: Array<[string, IngestRecord]>; undocumented?: boolean; desk?: boolean; deskPath?: string; skills?: boolean; extra?: { commit: string } } = {}): Promise<Fixture> {
 	const root = scratchDir();
 	const stateFile = join(root, "docs-ingest.json");
-	const fake = new RagflowFake();
-	const ragflowId = fake.datasets.find((dataset) => dataset.name === REPO)?.id ?? "";
-	if (ragflowId === "") throw new Error("the RAGFlow fake lists no agent-substrate dataset");
+	const fake = new DocsPlaneFake();
+	const lightragId = fake.datasets.find((dataset) => dataset.name === REPO)?.id ?? "";
+	if (lightragId === "") throw new Error("the lightrag fake lists no agent-substrate dataset");
 
 	const versions = createVersionStore();
 	recordVersion(versions, {
 		dataset: REPO,
-		dataset_id: ragflowId,
+		dataset_id: lightragId,
 		version: "v4",
 		commit: COMMIT,
 		content_sha256: shaOf("pinned"),
 		ingested_at: "2026-10-28T00:00:00.000Z",
-		backend: "ragflow",
+		backend: "lightrag",
 	});
 	const deskId = fake.datasets.find((dataset) => dataset.name === "programming-desk")?.id ?? "";
-	if (options.desk === true && deskId === "") throw new Error("the RAGFlow fake lists no programming-desk dataset");
+	if (options.desk === true && deskId === "") throw new Error("the lightrag fake lists no programming-desk dataset");
 	const deskPath = options.deskPath ?? DESK;
-	const desk: Array<[string, IngestRecord]> = options.desk === true ? [[`${deskId}::${sourceOf(deskPath)}`, { sha: shaOf(DESK_BODY), dataset_id: deskId, source_url: sourceOf(deskPath), document_id: "ragflow-desk", version: 1 }]] : [];
+	const desk: Array<[string, IngestRecord]> = options.desk === true ? [[`${deskId}::${sourceOf(deskPath)}`, { sha: shaOf(DESK_BODY), dataset_id: deskId, source_url: sourceOf(deskPath), document_id: "lightrag-desk", version: 1 }]] : [];
 	const skillsId = fake.datasets.find((dataset) => dataset.name === "agent-skills")?.id ?? "";
-	if (options.skills === true && skillsId === "") throw new Error("the RAGFlow fake lists no agent-skills dataset");
+	if (options.skills === true && skillsId === "") throw new Error("the lightrag fake lists no agent-skills dataset");
 	const skillSource = (path: string): string => `file:///srv/agent-skills/${path}`;
 	const skills: Array<[string, IngestRecord]> =
 		options.skills === true
 			? [
-					[`${skillsId}::${skillSource(SKILL)}`, { sha: shaOf(SKILL_BODY), dataset_id: skillsId, source_url: skillSource(SKILL), document_id: "ragflow-skill", version: 1 }],
-					[`${skillsId}::${skillSource(SKILL_API)}`, { sha: shaOf(SKILL_API_BODY), dataset_id: skillsId, source_url: skillSource(SKILL_API), document_id: "ragflow-skill-api", version: 1 }],
+					[`${skillsId}::${skillSource(SKILL)}`, { sha: shaOf(SKILL_BODY), dataset_id: skillsId, source_url: skillSource(SKILL), document_id: "lightrag-skill", version: 1 }],
+					[`${skillsId}::${skillSource(SKILL_API)}`, { sha: shaOf(SKILL_API_BODY), dataset_id: skillsId, source_url: skillSource(SKILL_API), document_id: "lightrag-skill-api", version: 1 }],
 				]
 			: [];
 	const records = new Map<string, IngestRecord>([
 		[`lightrag::${PLANE_REPO}::${sourceOf(PLAN)}`, { sha: shaOf(PLAN_BODY), dataset_id: PLANE_REPO, source_url: sourceOf(PLAN), document_id: "doc-plan", version: 1 }],
-		[`${ragflowId}::${sourceOf(NOTES)}`, { sha: shaOf(NOTES_BODY), dataset_id: ragflowId, source_url: sourceOf(NOTES), document_id: "ragflow-notes", version: 3 }],
+		[`${lightragId}::${sourceOf(NOTES)}`, { sha: shaOf(NOTES_BODY), dataset_id: lightragId, source_url: sourceOf(NOTES), document_id: "lightrag-notes", version: 3 }],
 		...(options.extraRecords ?? []),
 		...desk,
 		...skills,
-		...(options.extra === undefined ? [] : [[`${ragflowId}::${sourceOf(EXTRA)}`, { sha: shaOf(EXTRA_BODY), dataset_id: ragflowId, source_url: sourceOf(EXTRA), document_id: "ragflow-extra", version: 1 }] as [string, IngestRecord]]),
+		...(options.extra === undefined ? [] : [[`${lightragId}::${sourceOf(EXTRA)}`, { sha: shaOf(EXTRA_BODY), dataset_id: lightragId, source_url: sourceOf(EXTRA), document_id: "lightrag-extra", version: 1 }] as [string, IngestRecord]]),
 	]);
 	await saveIngestRecords(stateFile, records, versions);
 
-	fake.documents["ragflow-notes"] = {
-		id: "ragflow-notes",
-		dataset_id: ragflowId,
+	fake.documents["lightrag-notes"] = {
+		id: "lightrag-notes",
+		dataset_id: lightragId,
 		name: "docs__notes.md",
 		run: "DONE",
 		polls: 0,
 		meta_fields: { source_url: sourceOf(NOTES), commit: COMMIT, heading_path: "Notes" },
 	};
 	if (options.undocumented === true) {
-		fake.documents["doc-orphan"] = { id: "doc-orphan", dataset_id: ragflowId, name: "docs__orphan.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(ORPHAN) } };
+		fake.documents["doc-orphan"] = { id: "doc-orphan", dataset_id: lightragId, name: "docs__orphan.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(ORPHAN) } };
 	}
 	if (options.extra !== undefined) {
-		fake.documents["ragflow-extra"] = { id: "ragflow-extra", dataset_id: ragflowId, name: "docs__extra.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(EXTRA), commit: options.extra.commit, heading_path: "Extra" } };
+		fake.documents["lightrag-extra"] = { id: "lightrag-extra", dataset_id: lightragId, name: "docs__extra.md", run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(EXTRA), commit: options.extra.commit, heading_path: "Extra" } };
 	}
 	if (options.desk === true) {
-		fake.documents["ragflow-desk"] = { id: "ragflow-desk", dataset_id: deskId, name: deskPath.replace(/\//g, "__"), run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(deskPath), commit: COMMIT, heading_path: "Desk" } };
+		fake.documents["lightrag-desk"] = { id: "lightrag-desk", dataset_id: deskId, name: deskPath.replace(/\//g, "__"), run: "DONE", polls: 0, meta_fields: { source_url: sourceOf(deskPath), commit: COMMIT, heading_path: "Desk" } };
 	}
 	if (options.skills === true) {
-		fake.documents["ragflow-skill"] = { id: "ragflow-skill", dataset_id: skillsId, name: "demo-skill__SKILL.md", run: "DONE", polls: 0, meta_fields: { source_url: skillSource(SKILL), commit: COMMIT, heading_path: "Demo skill" } };
-		fake.documents["ragflow-skill-api"] = { id: "ragflow-skill-api", dataset_id: skillsId, name: "demo-skill__references__api.md", run: "DONE", polls: 0, meta_fields: { source_url: skillSource(SKILL_API), commit: COMMIT, heading_path: "Demo API" } };
+		fake.documents["lightrag-skill"] = { id: "lightrag-skill", dataset_id: skillsId, name: "demo-skill__SKILL.md", run: "DONE", polls: 0, meta_fields: { source_url: skillSource(SKILL), commit: COMMIT, heading_path: "Demo skill" } };
+		fake.documents["lightrag-skill-api"] = { id: "lightrag-skill-api", dataset_id: skillsId, name: "demo-skill__references__api.md", run: "DONE", polls: 0, meta_fields: { source_url: skillSource(SKILL_API), commit: COMMIT, heading_path: "Demo API" } };
 	}
-	fake.chunks[ragflowId] = [{ document_id: "ragflow-notes", document_name: "docs__notes.md", content: NOTES_BODY, source_url: sourceOf(NOTES), heading_path: "Notes", score: 0.9 }];
+	fake.chunks[lightragId] = [{ document_id: "lightrag-notes", document_name: "docs__notes.md", content: NOTES_BODY, source_url: sourceOf(NOTES), heading_path: "Notes", score: 0.9 }];
 
 	const bodies: Record<string, string> = { [`${COMMIT}:${PLAN}`]: PLAN_BODY, [`${COMMIT}:${NOTES}`]: NOTES_BODY };
 	if (options.extra !== undefined) bodies[`${options.extra.commit}:${EXTRA}`] = EXTRA_BODY;
@@ -158,8 +158,8 @@ async function buildFixture(options: { extraRecords?: Array<[string, IngestRecor
 		return body === undefined ? null : Buffer.from(body, "utf8");
 	};
 	const archiveDir = join(root, "archive");
-	const outcome = await archiveRagflow(
-		{ source: ragflowArchiveSource(RAG_CONFIG, fake.fetch), stateFile, queries: QUERIES, repoRoot: root, readAtCommit, releaseRoot: NO_RELEASE_ROOT, allowRootfs: true },
+	const outcome = await archiveDocs(
+		{ source: docsArchiveSource(RAG_CONFIG, fake.fetch), stateFile, queries: QUERIES, repoRoot: root, readAtCommit, releaseRoot: NO_RELEASE_ROOT, allowRootfs: true },
 		archiveDir,
 	);
 	if (!outcome.ok) throw new Error(`fixture archive refused: ${outcome.reason}`);
@@ -328,14 +328,14 @@ describe("docs-migrate: dry run", () => {
 		expect(plane.calls.some((call) => call.includes("/documents/upload"))).toBe(false);
 	});
 
-	test("an archived RAGFlow record whose dataset the inventory does not list refuses the job", async () => {
+	test("an archived lightrag record whose dataset the inventory does not list refuses the job", async () => {
 		const fixture = await buildFixture({
 			extraRecords: [["ds-gone::file:///srv/agent-substrate/docs/gone.md", { sha: shaOf("gone"), dataset_id: "ds-gone", source_url: sourceOf("docs/gone.md"), document_id: "doc-gone", version: 1 }]],
 		});
 		const plane = matchedPlane();
 		const { io } = captureIo();
 		const outcome = await runDryRun({ archiveDir: fixture.archiveDir, stateFile: fixture.stateFile, config: CONFIG, fetchImpl: plane.fetch }, io);
-		expect(outcome).toMatchObject({ ok: false, refused: "archived RAGFlow records map to no archived dataset" });
+		expect(outcome).toMatchObject({ ok: false, refused: "archived lightrag records map to no archived dataset" });
 		expect(plane.calls).toEqual([]);
 	});
 
@@ -394,7 +394,7 @@ describe("docs-migrate: apply", () => {
 		expect(plane.uploads).toEqual([NOTES_BODY]);
 		const report = outcome.report as { state_file_persisted: boolean; versions_carried: number; versions_recorded: number; cutover_event: { payload: { action: string; from: string; to: string } } | null };
 		expect(report).toMatchObject({ state_file_persisted: true, versions_carried: 1, versions_recorded: 1 });
-		expect(report.cutover_event?.payload).toMatchObject({ action: "docs.cutover", from: "ragflow", to: "lightrag" });
+		expect(report.cutover_event?.payload).toMatchObject({ action: "docs.cutover", from: "lightrag", to: "lightrag" });
 
 		const persisted = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });

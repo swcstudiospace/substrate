@@ -2172,8 +2172,8 @@ export function createHttpServer(
 				// is decided under — a merge-trigger nobody recorded is an unrecorded
 				// publication, same as an ingest nobody recorded.
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
-				// The selected plane decides: a LightRAG deployment with RAGFlow unset still refreshes.
-				if (config.docsBackend === "lightrag" ? config.lightrag === null : config.ragflow === null) {
+				// The selected plane decides: a LightRAG deployment with lightrag unset still refreshes.
+				if (config.docsBackend === "lightrag" ? config.lightrag === null : config.lightrag === null) {
 					// The null-block idiom: no docs plane is configured, so the trigger
 					// asks for nothing that exists — answered quietly, no plane call made.
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });

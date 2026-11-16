@@ -98,7 +98,7 @@ describe("CircuitBreaker", () => {
 
 	test("a successful probe closes; a failed probe re-opens for a fresh window", () => {
 		const c = clock();
-		const breaker = new CircuitBreaker("ragflow", { failureThreshold: 1, openMs: 1000 }, c.now);
+		const breaker = new CircuitBreaker("lightrag", { failureThreshold: 1, openMs: 1000 }, c.now);
 		breaker.onFailure("down");
 		c.advance(1000);
 		expect(breaker.allow()).toBe(true);
@@ -156,7 +156,7 @@ describe("callPlane", () => {
 
 	test("open: the function is never called, open is observed with no duration, BreakerOpenError thrown", async () => {
 		const c = clock();
-		const { gate, samples } = gateFor("ragflow", new CircuitBreaker("ragflow", { failureThreshold: 1, openMs: 30_000 }, c.now));
+		const { gate, samples } = gateFor("lightrag", new CircuitBreaker("lightrag", { failureThreshold: 1, openMs: 30_000 }, c.now));
 		await expect(callPlane(gate, "retrieve", () => Promise.reject(new Error("down")))).rejects.toThrow("down");
 		let called = false;
 		const refused = callPlane(gate, "retrieve", async () => {
@@ -165,9 +165,9 @@ describe("callPlane", () => {
 		});
 		await expect(refused).rejects.toBeInstanceOf(BreakerOpenError);
 		expect(called).toBe(false);
-		expect(samples[1]).toEqual({ plane: "ragflow", op: "retrieve", outcome: "open", durationMs: 0 });
+		expect(samples[1]).toEqual({ plane: "lightrag", op: "retrieve", outcome: "open", durationMs: 0 });
 		await refused.catch((error: BreakerOpenError) => {
-			expect(error.plane).toBe("ragflow");
+			expect(error.plane).toBe("lightrag");
 			expect(error.retryAfterMs).toBe(30_000);
 			expect(error.message).toContain("circuit open");
 		});
@@ -191,7 +191,7 @@ describe("callPlane", () => {
 		// Still every call reaches the plane: no BreakerOpenError, ever.
 		expect(await callPlane(gate, "get", async () => "value")).toBe("value");
 		expect(samples.map((sample) => sample.outcome)).toEqual(["error", "error", "error", "ok"]);
-		expect(registry.snapshots()).toEqual({ greptime: null, index: null, cache: null, hindsight: null, ragflow: null, lightrag: null });
+		expect(registry.snapshots()).toEqual({ greptime: null, index: null, cache: null, hindsight: null, lightrag: null });
 	});
 
 	test("the registry hands out one gate per plane, and snapshots every plane", () => {
@@ -214,7 +214,7 @@ describe("gatedFetch", () => {
 	});
 
 	test("a 5xx counts as a failure yet is returned to the caller; a 4xx counts as ok", async () => {
-		const { gate, samples } = gateFor("ragflow", new CircuitBreaker("ragflow", { failureThreshold: 2 }));
+		const { gate, samples } = gateFor("lightrag", new CircuitBreaker("lightrag", { failureThreshold: 2 }));
 		let status = 503;
 		const fetchImpl = gatedFetch(gate, async () => new Response("", { status }), opOf);
 		const first = await fetchImpl("http://plane.test/api/v1/datasets");
@@ -256,7 +256,7 @@ describe("gatedFetch", () => {
 		// Greptile round 1: headers arrived, so the gate used to record ok and the
 		// caller timed out alone. The body is now read inside the gate under the
 		// request's own signal.
-		const { gate, samples } = gateFor("ragflow", new CircuitBreaker("ragflow", { failureThreshold: 1 }));
+		const { gate, samples } = gateFor("lightrag", new CircuitBreaker("lightrag", { failureThreshold: 1 }));
 		const stalled = new ReadableStream<Uint8Array>({ start: () => {} });
 		const fetchImpl = gatedFetch(gate, async () => new Response(stalled, { status: 200, headers: { "content-type": "application/json" } }), opOf);
 		const started = performance.now();

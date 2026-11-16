@@ -1,6 +1,6 @@
 # Grok Bot
 
-How the `grok-bot` surface reaches memory, documents, briefs, and events. Grok Bot is a Programming Desk seat. It reaches the desk gateway over HTTPS. The gateway calls Hindsight and RAGFlow directly for memory and documents when those planes are configured, and calls `substrate-mcp` over loopback for the brief, for events, for the governed memory write that runs beside every retain, and as the fallback for memory and document reads. Since Phases 25 and 26 `substrate-mcp` has its own Hindsight and RAGFlow adapters, so the fallback is a real read of the same planes, not an index-only answer.
+How the `grok-bot` surface reaches memory, documents, briefs, and events. Grok Bot is a Programming Desk seat. It reaches the desk gateway over HTTPS. The gateway calls Hindsight and LightRAG directly for memory and documents when those planes are configured, and calls `substrate-mcp` over loopback for the brief, for events, for the governed memory write that runs beside every retain, and as the fallback for memory and document reads. Since Phases 25 and 26 `substrate-mcp` has its own Hindsight and LightRAG adapters, so the fallback is a real read of the same planes, not an index-only answer.
 
 This note cites [`swcstudiospace/programming-desk`](https://github.com/swcstudiospace/programming-desk) at `61c7900` (`61c79005b4c71504845e7f3a92a4830bd7237c03`) for the gateway, and this repository for what `substrate-mcp` actually implements. It does not add a client, a route, or an environment variable.
 
@@ -18,9 +18,9 @@ The gateway process on the VPS can. `Settings` in programming-desk `services/des
 
 ## Access path
 
-[`docs/railway-tailscale.md`](railway-tailscale.md) places Grok Bot computers off the tailnet. They reach the desk gateway over HTTPS. The gateway, on the VPS, is what can reach Hindsight, RAGFlow, and loopback `substrate-mcp`. Grok Bots do not receive the Hindsight or RAGFlow keys. Those keys are gateway settings: `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `RAGFLOW_URL`, and `RAGFLOW_API_KEY` in programming-desk `config.py`.
+[`docs/railway-tailscale.md`](railway-tailscale.md) places Grok Bot computers off the tailnet. They reach the desk gateway over HTTPS. The gateway, on the VPS, is what can reach Hindsight, LightRAG, and loopback `substrate-mcp`. Grok Bots do not receive the Hindsight or LightRAG keys. Those keys are gateway settings: `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `LIGHTRAG_URL`, and `LIGHTRAG_API_KEY` in programming-desk `config.py`.
 
-Ming's Q2 decision is this route. Memory and documents run through the gateway calling Hindsight and RAGFlow directly with the gateway's own keys. `substrate-mcp` holds its own copies of the same keys (`HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `RAGFLOW_URL`, `RAGFLOW_API_KEY` in `/etc/substrate/substrate.env`, read only by `packages/mcp-server/src/planes/hindsight.ts` and `planes/ragflow.ts`) for the paths it serves itself: `memory_recall`, the derived leg of `memory_search`, the retain forward, `docs_search` and `docs_ingest`. Neither process reads the other's env file, and no Grok Bot computer receives either set.
+Ming's Q2 decision is this route. Memory and documents run through the gateway calling Hindsight and LightRAG directly with the gateway's own keys. `substrate-mcp` holds its own copies of the same keys (`HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `LIGHTRAG_URL`, `LIGHTRAG_API_KEY` in `/etc/substrate/substrate.env`, read only by `packages/mcp-server/src/planes/hindsight.ts` and `planes/lightrag.ts`) for the paths it serves itself: `memory_recall`, the derived leg of `memory_search`, the retain forward, `docs_search` and `docs_ingest`. Neither process reads the other's env file, and no Grok Bot computer receives either set. An unset `LIGHTRAG_URL` leaves document search degraded and ingest refused; it does not call another docs backend.
 
 Tool names below are the core roster in programming-desk `contracts/tool-rosters/_core.yaml` at the same commit. The functions are in `services/desk-gateway/src/desk_gateway/tools/core.py`.
 
@@ -28,11 +28,11 @@ Tool names below are the core roster in programming-desk `contracts/tool-rosters
 
 `desk_memory_recall` (`memory_recall`, lines 109–125) is the primary memory read. `Hindsight` in `upstreams.py` (lines 336–343) is configured only when both `HINDSIGHT_URL` and `HINDSIGHT_API_KEY` are set: the client is given a base URL when the key is present, and `HttpUpstream.configured` is that URL. When it is configured, recall queries the seat's own bank and, unless `include_shared` is false, its shared banks, then returns. When it is not configured, the same tool calls substrate `memory_search`.
 
-`desk_docs_search` (`docs_search`, lines 52–81) is the primary document read. `RAGFlow` in `upstreams.py` (lines 359–366) is configured only when both `RAGFLOW_URL` and `RAGFLOW_API_KEY` are set, on the same rule. When it is configured, retrieval uses the RAGFlow datasets named `programming-desk` and `agent-substrate`, plus the last path segment of `repo` when the caller passes one. When it is not configured, the tool calls substrate `docs_search`.
+`desk_docs_search` (`docs_search`, lines 52–81) is the primary document read. `LightRAG` in `upstreams.py` is configured only when both `LIGHTRAG_URL` and `LIGHTRAG_API_KEY` are set. When it is configured, retrieval uses the docs datasets named `programming-desk` and `agent-substrate`, plus the last path segment of `repo` when the caller passes one. When it is not configured, the tool calls substrate `docs_search`.
 
 `desk_memory_retain` (`memory_retain`, lines 84–106) writes to Hindsight when that client is configured, into the seat's own bank, and also calls substrate `memory_write` on every retain. The tool succeeds when either write is accepted. The substrate write uses scope `graph:<graph_id>` when a graph id is present, and `agent:grok-bot` otherwise.
 
-A configured Hindsight or RAGFlow call stays on that plane. The substrate call is the path taken when the corresponding URL and key are unset, and, for retain, the write that runs alongside Hindsight.
+A configured Hindsight or LightRAG call stays on that plane. The substrate call is the path taken when the corresponding URL and key are unset, and, for retain, the write that runs alongside Hindsight.
 
 ### Brief and events
 
@@ -42,7 +42,7 @@ A configured Hindsight or RAGFlow call stays on that plane. The substrate call i
 
 ## What substrate-mcp implements
 
-`packages/mcp-server/src/planes/hindsight.ts` (Phase 26) and `planes/ragflow.ts` (Phase 25) are the substrate's own plane clients. `hindsightFromEnv` reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` and the routing-only `HINDSIGHT_BANK_PREFIX` / `HINDSIGHT_BANKS`; `ragflowFromEnv` reads `RAGFLOW_URL` / `RAGFLOW_API_KEY` / `RAGFLOW_DATASET_ID`. `store-lock.test.ts` fails the build if any file outside `packages/mcp-server/src` names `HINDSIGHT_`, and the legacy single-bank `HINDSIGHT_BANK` is unread (the server warns at boot when it is set). Every call to either plane goes through the plane's circuit breaker (uplift-2 R2), so an outage answers `degraded` in microseconds rather than a timeout per caller.
+`packages/mcp-server/src/planes/hindsight.ts` (Phase 26) and `planes/lightrag.ts` are the substrate's own plane clients. `hindsightFromEnv` reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` and the routing-only `HINDSIGHT_BANK_PREFIX` / `HINDSIGHT_BANKS`; `lightragFromEnv` reads `LIGHTRAG_URL` / `LIGHTRAG_API_KEY`. `store-lock.test.ts` fails the build if any file outside `packages/mcp-server/src` names `HINDSIGHT_`. Every call to either plane goes through the plane's circuit breaker (uplift-2 R2), so an outage answers `degraded` in microseconds rather than a timeout per caller.
 
 `memory_write`, `memory_search`, `memory_recall`, `docs_search` and `docs_ingest` are registered in `packages/mcp-server/src/mcp.ts`, with REST twins at `POST /memory`, `POST /memory/recall`, `POST /docs/search`, `POST /docs/ingest` and `POST /docs/merge-trigger` in `server.ts`. The README and [`docs/memory-governance.md`](memory-governance.md) describe the write gate over the Postgres index: default-deny RBAC, quarantine, an idempotency key, and a conflict strategy. Postgres stays the governed store; Hindsight holds a derived copy.
 
@@ -93,7 +93,7 @@ The server side of the contract is complete; what the bot sees still depends on 
 
 1. **Conditional brief with a stored ETag per request context.** `Substrate.brief` in `services/desk-gateway/src/desk_gateway/upstreams.py` keeps the last `ETag` per (seat, repo, branch, graph) and sends it as `If-None-Match` on the next `POST /brief`; a `304` means keep the copy held. The key is the request context, not the seat alone: one seat briefing two repos holds two tags.
 2. **Propagate `X-Substrate-Brief`** (and `X-Substrate-Brief-Failed` when present) onto the `desk_brief` reply, so a seat can tell a `degraded` or `snapshot` brief from a `complete` one and say so instead of acting on thin text as if it were whole. Over MCP the same facts are `structuredContent.state` / `failed_sources`.
-3. **Docs via substrate `docs_search`** (K5'): route `desk_docs_search` through `substrate-mcp`'s `docs_search` / `POST /docs/search` instead of the gateway's own RAGFlow call, so the fan-out, budget, provenance and `docs.search.p95` verdict of uplift-3 N5 cover the bot's reads too. Until then the gateway's direct RAGFlow path is unmeasured by the substrate.
+3. **Docs via substrate `docs_search`** (K5'): route `desk_docs_search` through `substrate-mcp`'s `docs_search` / `POST /docs/search` instead of the gateway's own LightRAG call, so the fan-out, budget, provenance and `docs.search.p95` verdict of uplift-3 N5 cover the bot's reads too. Until then the gateway's direct LightRAG path is unmeasured by the substrate.
 
 Until step 1 lands, `substrate.brief.result{surface=grok-bot,result=not_modified}` stays at zero and the smoke is the only conditional caller; its `rest.brief.304` check is what the gateway's change should make true in production traffic.
 
@@ -161,7 +161,7 @@ What the gateway sees when a bucket is empty depends on `SUBSTRATE_BUDGETS`. In 
 
 ## `docs/data-planes.md` records this route
 
-[`docs/data-planes.md`](data-planes.md) keeps the per-plane wiring table. The current row is this route: the desk gateway calls Hindsight and RAGFlow with its own keys for its own tools, and `substrate-mcp` calls them with its own for `memory_recall`, the retain forward, `docs_search` and `docs_ingest`. `writeMemory` and `searchMemory` use the Postgres `IndexStore` (`packages/mcp-server/src/service.ts`, `packages/mcp-server/src/index-store.ts`) as the governed store and append derived Hindsight hits after the index rows. The gateway code at programming-desk `61c7900` is the route above.
+[`docs/data-planes.md`](data-planes.md) keeps the per-plane wiring table. The current row is this route: the desk gateway calls Hindsight and LightRAG with its own keys for its own tools, and `substrate-mcp` calls them with its own for `memory_recall`, the retain forward, `docs_search` and `docs_ingest`. `writeMemory` and `searchMemory` use the Postgres `IndexStore` (`packages/mcp-server/src/service.ts`, `packages/mcp-server/src/index-store.ts`) as the governed store and append derived Hindsight hits after the index rows. The gateway code at programming-desk `61c7900` is the route above.
 
 Programming Desk seats use HTTPS to the desk gateway, and substrate-mcp stays on loopback. `substrate-mcp` does read `DRAGONFLY_URL` for the read-through cache described in that document.
 

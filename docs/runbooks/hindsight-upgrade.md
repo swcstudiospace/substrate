@@ -5,7 +5,7 @@
 | Trigger | An open issue labelled `hindsight-lag`, opened by the weekly `Hindsight lag` workflow because a newer stable Hindsight release has existed for at least `lag_alert_days` (`.github/hindsight-pin.json`) |
 | Scope | The three Railway services that run Hindsight: `hindsight-api`, `hindsight-worker`, `hindsight-control-plane`, and the Postgres they share |
 | Blast radius | Recall and retain through `planes/hindsight.ts`. A Hindsight outage never turns `/healthz` red; it turns the plane's row red and degrades the reads that plane serves (`docs/runbooks/substrate-red.md`) |
-| Untouched | The Postgres index, the ledger, leases, RAGFlow. Accepted memories are kept in the index first and forwarded to Hindsight afterwards (`docs/data-planes.md`) |
+| Untouched | The Postgres index, the ledger, leases, LightRAG. Accepted memories are kept in the index first and forwarded to Hindsight afterwards (`docs/data-planes.md`) |
 | Who | The operator. Every step marked **OPERATOR ONLY** touches Railway or production; no agent, workflow or script in this repository performs one |
 
 ## What is true today (2026-10-27) and what automates nothing

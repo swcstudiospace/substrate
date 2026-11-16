@@ -48,7 +48,6 @@ function breakers(index: BreakerSnapshot["state"] | null = "closed"): Record<Pla
 		index: index === null ? null : { plane: "index", state: index, failures: index === "closed" ? 0 : 5, openedAt: T0, lastErrorAt: T0, lastError: "timed out" },
 		cache: closed("cache"),
 		hindsight: null,
-		ragflow: null,
 		lightrag: null,
 	};
 }

@@ -402,7 +402,7 @@ const INGEST_GATE_REFUSALS: Record<string, true> = {
 	"version.stale": true,
 	"dataset-lock-timeout": true,
 	"lightrag-not-configured": true,
-	"ragflow-not-configured": true,
+
 };
 
 /** Whether an ingest refusal is a gate refusal. A LightRAG secret finding carries its rule names after a colon. */
@@ -1631,7 +1631,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Ingest pages into a docs dataset",
 			description:
 				"Publish pages into a substrate docs dataset (agent-substrate, programming-desk, agent-skills) " +
-				"through the configured docs backend (LightRAG, or RAGFlow as the legacy fallback). Fail-closed: a redactor finding, a missing source URL, an out-of-roots path, " +
+				"through the configured docs backend (LightRAG, or lightrag as the legacy fallback). Fail-closed: a redactor finding, a missing source URL, an out-of-roots path, " +
 				"an over-cap page, an unauthenticated caller or a VM guest is refused and nothing is uploaded. " +
 				"Needs an authenticated surface. Unchanged content hashes answer `unchanged`, changed ones are " +
 				"replaced. `dataset` names a configured dataset; raw ids are never accepted.",
@@ -2349,7 +2349,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "Status of the nine fabric resources",
 			description:
-				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, LightRAG, Hindsight, TEI (the embedding service), the Tailscale proxy layer and the corpus. " +
+				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, lightrag, LightRAG, Hindsight, TEI (the embedding service), the Tailscale proxy layer and the corpus. " +
 				"Each row has its endpoint class (loopback, proxy, direct, unset or not-applicable), a state (ok, degraded, unavailable " +
 				"or unconfigured) and a fixed phrase naming its source. A resource that is not configured is unconfigured, never ok. The corpus row carries " +
 				"the docs plane's three objectives (freshness, golden-set recall at 5, ingest throughput) as readings against their thresholds. " +

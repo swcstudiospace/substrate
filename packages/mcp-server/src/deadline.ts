@@ -5,7 +5,7 @@
  * `race` settles a read against the deadline; a read that misses rejects
  * with `DeadlineError`, which the caller treats like any other failed read.
  * The underlying promise is not cancelled — a Postgres query has no abort
- * handle, and a RAGFlow fetch carries its own per-call timeout — but nobody
+ * handle, and a lightrag fetch carries its own per-call timeout — but nobody
  * waits for it any more, so the caller's wait is bounded by the budget
  * rather than by the sum of its reads.
  */

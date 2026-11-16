@@ -95,7 +95,7 @@ export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 		serviceRow("dragonfly", facts.endpoints.dragonfly ?? "unset", facts.services.dragonfly, at),
 		serviceRow("timescaledb-index", facts.endpoints.postgres ?? "unset", facts.services["timescaledb-index"], at),
 		serviceRow("greptime", facts.endpoints.greptime ?? "unset", facts.services.greptime, at),
-		serviceRow("ragflow", "not-applicable", facts.services.ragflow, at),
+		serviceRow("lightrag", "not-applicable", facts.services.lightrag, at),
 		serviceRow("lightrag", "not-applicable", facts.services.lightrag, at),
 		serviceRow("hindsight", "not-applicable", facts.services.hindsight, at),
 		teiRow(facts, at),

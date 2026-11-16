@@ -36,15 +36,15 @@ import {
 import { corpusDocumentName } from "@substrate/corpus";
 import { lightragSearchDatasets } from "./docs-datasets.ts";
 import { createMcpServer } from "./mcp.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
+import type { FetchLike } from "./planes/docs-wire.ts";
 
-const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
+const CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
 
 function harness(
-	fake: RagflowFake,
+	fake: DocsPlaneFake,
 	over: Partial<Pick<IngestDeps, "surface" | "vmGuest" | "roots" | "config" | "seen" | "locks" | "poll" | "fetchImpl" | "datasetLockWaitMs">> = {},
 ) {
 	const events: EventInput[] = [];
@@ -74,7 +74,7 @@ const PAGE = {
 
 describe("docs_ingest gates", () => {
 	test("ingests a clean page with metadata and a note event", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, ingest } = harness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", commit: "abc123", pages: [PAGE] });
 		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
@@ -92,7 +92,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses on a redactor finding and never uploads", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -111,7 +111,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses a page without a source URL", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", pages: [{ path: PAGE.path, body: PAGE.body }] });
 		if (outcome.ok) throw new Error("expected a refusal");
@@ -120,7 +120,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses a path outside the configured roots", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -132,7 +132,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses a page over 1 MB and a call over 5 MB", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const big = await ingest({
 			dataset: "agent-substrate",
@@ -149,14 +149,14 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses unauthenticated callers and VM guests before any network call", async () => {
-		const anonymous = new RagflowFake();
+		const anonymous = new DocsPlaneFake();
 		const anonymousHarness = harness(anonymous, { surface: null });
 		const denied = await anonymousHarness.ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (denied.ok) throw new Error("expected a refusal");
 		expect(denied.reason).toBe("unauthenticated");
 		expect(anonymous.requests).toHaveLength(0);
 
-		const guest = new RagflowFake();
+		const guest = new DocsPlaneFake();
 		const guestHarness = harness(guest, { vmGuest: true });
 		const refused = await guestHarness.ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (refused.ok) throw new Error("expected a refusal");
@@ -167,7 +167,7 @@ describe("docs_ingest gates", () => {
 
 describe("docs_ingest idempotency and images", () => {
 	test("skips unchanged hashes and replaces changed ones", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -184,7 +184,7 @@ describe("docs_ingest idempotency and images", () => {
 	});
 
 	test("strips remote images pre-upload and counts them", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -202,7 +202,7 @@ describe("docs_ingest idempotency and images", () => {
 	});
 
 	test("a parse that never finishes is a timeout refusal", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		fake.parseBehavior = "never";
 		const { ingest } = harness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
@@ -213,11 +213,11 @@ describe("docs_ingest idempotency and images", () => {
 
 describe("docs_ingest wiring", () => {
 	test("Substrate.ingestDocs ingests and refuses anonymous callers", async () => {
-		const fake = new RagflowFake();
-		const live = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+		const fake = new DocsPlaneFake();
+		const live = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
 			index: null,
 			greptime: null,
-			ragflowFetch: fake.fetch,
+			lightragFetch: fake.fetch,
 		});
 		const reply = await live.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
 		if (!reply.ok) throw new Error(`expected ingest: ${reply.reason}`);
@@ -229,11 +229,11 @@ describe("docs_ingest wiring", () => {
 	});
 
 	test("docs_ingest is callable over MCP and refusals are errors", async () => {
-		const fake = new RagflowFake();
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+		const fake = new DocsPlaneFake();
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
 			index: null,
 			greptime: null,
-			ragflowFetch: fake.fetch,
+			lightragFetch: fake.fetch,
 		});
 		const server = createMcpServer(substrate, "omp");
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
@@ -266,7 +266,7 @@ describe("docs_ingest wiring", () => {
 
 describe("docs_ingest review hardening", () => {
 	test("refuses a secret smuggled in the heading metadata", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -280,7 +280,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("refuses dot-segment escapes and out-of-roots real paths", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const escaped = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, path: "docs/../private.md" }] });
 		if (escaped.ok) throw new Error("expected a refusal");
@@ -295,7 +295,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("refuses a secret in graph strings on the LightRAG path before any upload", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const events: EventInput[] = [];
 		const outcome = await ingestDocs(
 			{
@@ -322,7 +322,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("keys records by dataset so a second dataset ingests and the first still skips", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -336,7 +336,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("concurrent retries for one page share a single upload", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const locks = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 		const left = harness(fake, { locks, poll: { intervalMs: 0 } });
 		const right = harness(fake, { locks, seen: left.seen, poll: { intervalMs: 0 } });
@@ -350,7 +350,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("a concurrent retry with different content uploads its own page", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const locks = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 		const left = harness(fake, { locks, poll: { intervalMs: 0 } });
 		const right = harness(fake, { locks, seen: left.seen, poll: { intervalMs: 0 } });
@@ -366,7 +366,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("a replacement reports the superseded document id", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -458,12 +458,12 @@ describe("ingest record persistence", () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
 			const file = join(dir, "ingest.json");
-			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
-			const fake = new RagflowFake();
-			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
+			const fake = new DocsPlaneFake();
+			const first = new Substrate(loadConfig(env), { index: null, greptime: null, lightragFetch: fake.fetch });
 			const ingested = await first.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
 			if (!ingested.ok) throw new Error(`expected ingest: ${ingested.reason}`);
-			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const second = new Substrate(loadConfig(env), { index: null, greptime: null, lightragFetch: fake.fetch });
 			const skipped = await second.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
 			if (!skipped.ok) throw new Error(`expected skip: ${skipped.reason}`);
 			expect(skipped.results[0]?.status).toBe("unchanged");
@@ -619,7 +619,7 @@ describe("agent-skills checkout roots and scan", () => {
 describe("docs_ingest expected_version (memory's contract)", () => {
 	// Each test builds its own harness: its own record map and fake, so no state is shared between them.
 	test("a stale expected_version is refused with nothing written: the stored record is byte-identical", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -644,7 +644,7 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 	});
 
 	test("a stale docs write is refused with outcome conflict and uploads nothing", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -657,7 +657,7 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 	});
 
 	test("a matching expected_version is accepted and the record version increments", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -675,7 +675,7 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 	});
 
 	test("an absent expected_version keeps today's behaviour: the write proceeds and the version still counts", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { seen, ingest } = harness(fake);
 		await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		const replaced = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.` }] });
@@ -693,7 +693,7 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 
 describe("docs_ingest expected_version on the LightRAG plane", () => {
 	test("a page expecting a version nothing has on record is refused before any upload", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const events: EventInput[] = [];
 		const seen = new Map<string, IngestRecord>();
 		const outcome = await ingestDocs(
@@ -726,7 +726,7 @@ describe("docs_ingest atomic batch", () => {
 	const SECOND = { ...PAGE, path: "docs/data-planes-2.md" };
 
 	test("a batch with one stale page is refused whole: the matching page is neither uploaded nor recorded", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE, OTHER] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -755,7 +755,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a batch whose pages all match is stored, each record advancing one version", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE, OTHER] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -774,7 +774,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a later page of one source URL is checked against the version an earlier page of the batch leaves", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -795,7 +795,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a repeated URL whose later page is stale against the batch reports the saved version and conflict_with, and stores nothing", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, seen, ingest } = harness(fake);
 		await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		const replaced = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.`, expected_version: 1 }] });
@@ -828,7 +828,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a batch may chain expected versions on one source URL", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -846,7 +846,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a call that cannot take its dataset's lock in time is refused with nothing written, and the lock frees afterwards", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		let openGate!: () => void;
 		const gate = new Promise<void>((resolve) => {
 			openGate = resolve;
@@ -899,7 +899,7 @@ describe("a refresh's ingest calls (split under the call limit)", () => {
 	});
 
 	test("preflightIngestPages refuses a page's secret before any call uploads, so earlier pages are not stored", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const events: EventInput[] = [];
 		const deps: IngestDeps = {
 			config: CONFIG,
@@ -921,7 +921,7 @@ describe("a refresh's ingest calls (split under the call limit)", () => {
 	});
 
 	test("preflightIngestPages passes a clean set and refuses an empty one", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const deps: IngestDeps = { config: CONFIG, knownDatasets: ["agent-substrate"], emit: async (): Promise<unknown> => ({ stored: false }), surface: "omp", seen: new Map(), poll: { intervalMs: 0 }, fetchImpl: fake.fetch };
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: wideSkills() })).toBeUndefined();
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [] })).toBe("no-pages");
@@ -1024,8 +1024,8 @@ describe("planning scan graph hints (LightRAG path)", () => {
 		}
 	});
 
-	test("ingest accepts call-level graphHints on the RAGFlow path unchanged", async () => {
-		const fake = new RagflowFake();
+	test("ingest accepts call-level graphHints on the lightrag path unchanged", async () => {
+		const fake = new DocsPlaneFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",

@@ -718,7 +718,7 @@ describe("brief profile metrics and the estimated spend", () => {
 		const substrate = new Substrate(loadConfig({ SUBSTRATE_VM_GUEST: "1" }), { index: null, greptime: null }, observer);
 		const recall = await substrate.recallMemories({ query: "lease" }, "grok-bot");
 		expect(counterSum(instruments, METRIC.servedTokensEst, { surface: "grok-bot", tool: "recall" })).toBe(Math.ceil(Buffer.byteLength(JSON.stringify(recall), "utf8") / 4));
-		const docs = await substrate.searchDocs({ question: "who reads RAGFlow?" }, "grok-bot");
+		const docs = await substrate.searchDocs({ question: "who reads lightrag?" }, "grok-bot");
 		expect(counterSum(instruments, METRIC.servedTokensEst, { surface: "grok-bot", tool: "docs" })).toBe(Math.ceil(Buffer.byteLength(JSON.stringify(docs), "utf8") / 4));
 		expect(counterSum(instruments, METRIC.servedTokensEst, { tool: "brief" })).toBe(0);
 	});

@@ -13,7 +13,7 @@ import { FakeReflectStore } from "./corpus/reflect-testkit.ts";
 import type { ManifestRow } from "./corpus/store.ts";
 import { FakeStore, makeRow, sha256Hex } from "./corpus/testkit.ts";
 import type { SearchReply } from "./docs-search.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
+import type { FetchLike } from "./planes/docs-wire.ts";
 import { Substrate } from "./service.ts";
 import { defined } from "./test-support.ts";
 

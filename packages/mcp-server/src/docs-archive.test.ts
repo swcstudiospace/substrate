@@ -1,5 +1,5 @@
 /**
- * The RAGFlow archive writer and checksum verifier (SOTA-02, Phase 46, Task 3), driven by the RAGFlow fake and a real
+ * The lightrag archive writer and checksum verifier (SOTA-02, Phase 46, Task 3), driven by the lightrag fake and a real
  * git repository. The checks are behavioural: a verified round trip, a refusal on each kind of drift, refusals that
  * happen before any write, and a page whose committed bytes no longer match the hash the ingest recorded.
  */
@@ -10,12 +10,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripRemoteImages } from "@substrate/corpus";
-import { ragflowArchiveFromEnv } from "./config.ts";
-import { archiveRagflow, gitAtCommit, MANIFEST_FILE, ragflowArchiveSource, verifyArchive, type ArchiveDeps, type RagflowArchiveSource } from "./docs-archive.ts";
+import { archiveDocs, docsArchiveSource, gitAtCommit, lightragArchiveFromEnv, MANIFEST_FILE, verifyArchive, type ArchiveDeps, type DocsArchiveSource } from "./docs-archive.ts";
 import { changeSha, saveIngestRecords, type IngestRecord } from "./docs-ingest.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 
-const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
+const CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
 const DATASET = "ds-berlin-agent-substrate";
 const SOURCE = "https://example.com/plan";
 const PAGE = "# Plan\n\nThe plan lives in PLAN.md.\n";
@@ -57,15 +56,15 @@ async function stateFile(root: string, sha: string): Promise<string> {
 	return file;
 }
 
-/** A RAGFlow plane holding the page as one document with its ingest metadata, and a retrieval answer for it. */
-function plane(commit: string): RagflowFake {
-	const fake = new RagflowFake();
+/** A lightrag plane holding the page as one document with its ingest metadata, and a retrieval answer for it. */
+function plane(commit: string): DocsPlaneFake {
+	const fake = new DocsPlaneFake();
 	fake.documents["doc-plan"] = { id: "doc-plan", dataset_id: DATASET, name: "docs__plan.md", run: "DONE", polls: 0, meta_fields: { source_url: SOURCE, commit, heading_path: "Plan" } };
 	fake.chunks[DATASET] = [{ document_id: "doc-plan", document_name: "docs__plan.md", content: PAGE, source_url: SOURCE, heading_path: "Plan", score: 0.9 }];
 	return fake;
 }
 
-function depsFor(source: RagflowArchiveSource, repoRoot: string, stateFilePath: string | null, overrides: Partial<ArchiveDeps> = {}): ArchiveDeps {
+function depsFor(source: DocsArchiveSource, repoRoot: string, stateFilePath: string | null, overrides: Partial<ArchiveDeps> = {}): ArchiveDeps {
 	return { source, stateFile: stateFilePath, queries: QUERIES, repoRoot, releaseRoot: NO_RELEASE_ROOT, allowRootfs: true, ...overrides };
 }
 
@@ -74,17 +73,17 @@ async function archived(): Promise<{ dir: string }> {
 	const repo = repoWith(PAGE);
 	const file = await stateFile(repo.root, changeSha(stripRemoteImages(PAGE).body, undefined));
 	const dir = join(scratchDir(), "archive");
-	const outcome = await archiveRagflow(depsFor(ragflowArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file), dir);
+	const outcome = await archiveDocs(depsFor(docsArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file), dir);
 	if (!outcome.ok) throw new Error(outcome.reason);
 	return { dir };
 }
 
-describe("RAGFlow archive writer", () => {
-	test("the manifest checksums every file it lists, reads back verified, and names no RAGFlow hostname or key", async () => {
+describe("lightrag archive writer", () => {
+	test("the manifest checksums every file it lists, reads back verified, and names no lightrag hostname or key", async () => {
 		const repo = repoWith(PAGE);
 		const file = await stateFile(repo.root, changeSha(stripRemoteImages(PAGE).body, undefined));
 		const dir = join(scratchDir(), "archive");
-		const outcome = await archiveRagflow(depsFor(ragflowArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file), dir);
+		const outcome = await archiveDocs(depsFor(docsArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file), dir);
 		if (!outcome.ok) throw new Error(outcome.reason);
 		expect(outcome.page_mismatches).toBe(0);
 		expect(verifyArchive(dir)).toEqual({ ok: true, mismatches: [] });
@@ -100,7 +99,7 @@ describe("RAGFlow archive writer", () => {
 			expect(data.length).toBe(entry.bytes);
 			expect(createHash("sha256").update(data).digest("hex")).toBe(entry.sha256);
 		}
-		expect(manifestBytes.toString("utf8")).not.toContain("ragflow.test");
+		expect(manifestBytes.toString("utf8")).not.toContain("lightrag.test");
 		expect(manifestBytes.toString("utf8")).not.toContain("test-key");
 
 		expect(statSync(dir).mode & 0o777).toBe(0o700);
@@ -113,7 +112,7 @@ describe("RAGFlow archive writer", () => {
 		const repo = repoWith(PAGE);
 		const file = await stateFile(repo.root, changeSha(stripRemoteImages("# Plan\n\nAn older body.\n").body, undefined));
 		const dir = join(scratchDir(), "archive");
-		const outcome = await archiveRagflow(depsFor(ragflowArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file), dir);
+		const outcome = await archiveDocs(depsFor(docsArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file), dir);
 		if (!outcome.ok) throw new Error(outcome.reason);
 		expect(outcome.page_mismatches).toBe(1);
 		const pages = JSON.parse(readFileSync(join(dir, "pages.json"), "utf8")) as { checks: Array<Record<string, unknown>> };
@@ -125,13 +124,13 @@ describe("RAGFlow archive writer", () => {
 	test("refusals come before any write: an unset directory, no docs state, a non-empty target and a root-filesystem target", async () => {
 		const repo = repoWith(PAGE);
 		const file = await stateFile(repo.root, changeSha(stripRemoteImages(PAGE).body, undefined));
-		const source = ragflowArchiveSource(CONFIG, plane(repo.commit).fetch);
+		const source = docsArchiveSource(CONFIG, plane(repo.commit).fetch);
 
-		expect(await archiveRagflow(depsFor(source, repo.root, file), null)).toEqual({
+		expect(await archiveDocs(depsFor(source, repo.root, file), null)).toEqual({
 			ok: false,
-			reason: expect.stringContaining("SUBSTRATE_RAGFLOW_ARCHIVE_DIR"),
+			reason: expect.stringContaining("SUBSTRATE_LIGHTRAG_ARCHIVE_DIR"),
 		});
-		expect(await archiveRagflow(depsFor(source, repo.root, null), join(scratchDir(), "no-state"))).toEqual({
+		expect(await archiveDocs(depsFor(source, repo.root, null), join(scratchDir(), "no-state"))).toEqual({
 			ok: false,
 			reason: expect.stringContaining("SUBSTRATE_DOCS_STATE_FILE"),
 		});
@@ -139,12 +138,12 @@ describe("RAGFlow archive writer", () => {
 		const busy = join(scratchDir(), "busy");
 		mkdirSync(busy);
 		writeFileSync(join(busy, "keep.txt"), "already here");
-		expect(await archiveRagflow(depsFor(source, repo.root, file), busy)).toEqual({ ok: false, reason: expect.stringContaining("not empty") });
+		expect(await archiveDocs(depsFor(source, repo.root, file), busy)).toEqual({ ok: false, reason: expect.stringContaining("not empty") });
 		expect(readFileSync(join(busy, "keep.txt"), "utf8")).toBe("already here");
 		expect(existsSync(join(busy, MANIFEST_FILE))).toBe(false);
 
 		const onRoot = join(scratchDir(), "root-disk");
-		expect(await archiveRagflow(depsFor(source, repo.root, file, { allowRootfs: false, dev: () => 7 }), onRoot)).toEqual({
+		expect(await archiveDocs(depsFor(source, repo.root, file, { allowRootfs: false, dev: () => 7 }), onRoot)).toEqual({
 			ok: false,
 			reason: expect.stringContaining("root filesystem"),
 		});
@@ -155,30 +154,30 @@ describe("RAGFlow archive writer", () => {
 		const repo = repoWith(PAGE);
 		const file = await stateFile(repo.root, changeSha(stripRemoteImages(PAGE).body, undefined));
 		const dir = join(scratchDir(), "mounted");
-		const outcome = await archiveRagflow(
-			depsFor(ragflowArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file, { allowRootfs: false, dev: (path) => (path === "/" ? 1 : 2) }),
+		const outcome = await archiveDocs(
+			depsFor(docsArchiveSource(CONFIG, plane(repo.commit).fetch), repo.root, file, { allowRootfs: false, dev: (path) => (path === "/" ? 1 : 2) }),
 			dir,
 		);
 		expect(outcome.ok).toBe(true);
 		expect(verifyArchive(dir).ok).toBe(true);
 	});
 
-	test("a RAGFlow listing failure and a failed baseline query each refuse the whole archive, and nothing is written", async () => {
+	test("a lightrag listing failure and a failed baseline query each refuse the whole archive, and nothing is written", async () => {
 		const repo = repoWith(PAGE);
 		const file = await stateFile(repo.root, changeSha(stripRemoteImages(PAGE).body, undefined));
-		const real = ragflowArchiveSource(CONFIG, plane(repo.commit).fetch);
+		const real = docsArchiveSource(CONFIG, plane(repo.commit).fetch);
 
 		const listing = join(scratchDir(), "listing");
-		const unreachable: RagflowArchiveSource = { ...real, listDatasets: async () => ({ ok: false, reason: "ragflow: unreachable" }) };
-		expect(await archiveRagflow(depsFor(unreachable, repo.root, file), listing)).toEqual({ ok: false, reason: "ragflow: unreachable" });
+		const unreachable: DocsArchiveSource = { ...real, listDatasets: async () => ({ ok: false, reason: "lightrag: unreachable" }) };
+		expect(await archiveDocs(depsFor(unreachable, repo.root, file), listing)).toEqual({ ok: false, reason: "lightrag: unreachable" });
 		expect(existsSync(listing)).toBe(false);
 
 		const baseline = join(scratchDir(), "baseline");
-		const partial: RagflowArchiveSource = {
+		const partial: DocsArchiveSource = {
 			...real,
-			retrieve: (question, ids) => (question === "who reads the plan?" ? Promise.resolve({ ok: false, reason: "ragflow 500" }) : real.retrieve(question, ids)),
+			retrieve: (question, ids) => (question === "who reads the plan?" ? Promise.resolve({ ok: false, reason: "lightrag 500" }) : real.retrieve(question, ids)),
 		};
-		expect(await archiveRagflow(depsFor(partial, repo.root, file), baseline)).toEqual({ ok: false, reason: "baseline q-02: ragflow 500" });
+		expect(await archiveDocs(depsFor(partial, repo.root, file), baseline)).toEqual({ ok: false, reason: "baseline q-02: lightrag 500" });
 		expect(existsSync(baseline)).toBe(false);
 	});
 
@@ -191,7 +190,7 @@ describe("RAGFlow archive writer", () => {
 	});
 });
 
-describe("RAGFlow archive verifier", () => {
+describe("lightrag archive verifier", () => {
 	test("passes on an untouched archive", async () => {
 		const { dir } = await archived();
 		expect(verifyArchive(dir)).toEqual({ ok: true, mismatches: [] });
@@ -237,12 +236,12 @@ describe("RAGFlow archive verifier", () => {
 	});
 });
 
-describe("RAGFlow archive environment", () => {
+describe("lightrag archive environment", () => {
 	test("the directory is unset unless named, and the root-filesystem override accepts only 1, true or yes", () => {
-		expect(ragflowArchiveFromEnv({})).toEqual({ dir: null, allowRootfs: false });
-		expect(ragflowArchiveFromEnv({ SUBSTRATE_RAGFLOW_ARCHIVE_DIR: "   " })).toEqual({ dir: null, allowRootfs: false });
-		expect(ragflowArchiveFromEnv({ SUBSTRATE_RAGFLOW_ARCHIVE_DIR: "/mnt/archive" }).dir).toBe("/mnt/archive");
-		for (const value of ["1", "true", "YES"]) expect(ragflowArchiveFromEnv({ SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS: value }).allowRootfs).toBe(true);
-		for (const value of ["0", "no", "on", ""]) expect(ragflowArchiveFromEnv({ SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS: value }).allowRootfs).toBe(false);
+		expect(lightragArchiveFromEnv({})).toEqual({ dir: null, allowRootfs: false });
+		expect(lightragArchiveFromEnv({ SUBSTRATE_LIGHTRAG_ARCHIVE_DIR: "   " })).toEqual({ dir: null, allowRootfs: false });
+		expect(lightragArchiveFromEnv({ SUBSTRATE_LIGHTRAG_ARCHIVE_DIR: "/mnt/archive" }).dir).toBe("/mnt/archive");
+		for (const value of ["1", "true", "YES"]) expect(lightragArchiveFromEnv({ SUBSTRATE_LIGHTRAG_ARCHIVE_ALLOW_ROOTFS: value }).allowRootfs).toBe(true);
+		for (const value of ["0", "no", "on", ""]) expect(lightragArchiveFromEnv({ SUBSTRATE_LIGHTRAG_ARCHIVE_ALLOW_ROOTFS: value }).allowRootfs).toBe(false);
 	});
 });

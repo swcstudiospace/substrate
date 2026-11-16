@@ -12,7 +12,7 @@
  *
  * Offline (the default, and what `docs-golden.test.ts` asserts in CI) runs
  * every fixture through `packages/mcp-server/src/docs-golden.ts`: the real
- * `searchDocs` against a `RagflowFake` that retrieves by lexical overlap
+ * `searchDocs` against an in-memory retriever that retrieves by lexical overlap
  * from `fixtures/docs-golden/corpus/`. That proves the pipeline — scope
  * isolation, provenance, ordering, the cap, redaction — and this scorer;
  * it says nothing about the deployment's relevance, and the fixture
@@ -38,7 +38,7 @@
  * (`SUBSTRATE_TOKEN_OMP`, first entry of a list, else the tokens dir, else
  * `SUBSTRATE_TOKEN`), ASSERTS every fixture (exit 1 on any regression) and
  * posts one `warning` as `substrate` when the failing set changed since the
- * last run (`SUBSTRATE_DOCS_CANARY_STATE`). Read-only against RAGFlow.
+ * last run (`SUBSTRATE_DOCS_CANARY_STATE`). Read-only against LightRAG.
  *
  * ## Scores
  *

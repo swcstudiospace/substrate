@@ -5,7 +5,7 @@
  * breaker opens, `/healthz` names it, the brief still answers in time**.
  *
  *   bun run smoke:chaos                      # the ledger, as before
- *   bun run smoke:chaos -- --plane hindsight # one of index|hindsight|ragflow|cache
+ *   bun run smoke:chaos -- --plane hindsight # one of index|hindsight|lightrag|cache
  *
  * The deterministic proof of the *decisions* is `packages/audit/src/chaos.test.ts`,
  * which runs in CI with no network and gates the build. This script proves the same
@@ -52,7 +52,7 @@
  * assumes.
  */
 
-export const CHAOS_PLANES = ["greptime", "index", "hindsight", "ragflow", "cache"] as const;
+export const CHAOS_PLANES = ["greptime", "index", "hindsight", "lightrag", "cache"] as const;
 export type ChaosPlane = (typeof CHAOS_PLANES)[number];
 
 /** `--plane <name>` or `--plane=<name>`; the ledger when absent. Anything else is a usage error. */
@@ -131,7 +131,7 @@ export function degradedIn(body: unknown): boolean {
 /** The read that must degrade while `plane` is down, if any; the brief covers the rest. */
 export function degradedReadFor(plane: ChaosPlane): { path: string; body: Record<string, unknown> } | null {
 	if (plane === "hindsight") return { path: "/memory/recall", body: { query: "chaos smoke" } };
-	if (plane === "ragflow") return { path: "/docs/search", body: { question: "chaos smoke" } };
+	if (plane === "lightrag") return { path: "/docs/search", body: { question: "chaos smoke" } };
 	return null;
 }
 
@@ -474,7 +474,7 @@ async function main(argv: string[]): Promise<number> {
 
 	/**
 	 * The per-plane half (uplift-2 R2): during the window, every tick reads
-	 * `/healthz`, asks for a brief as `grok-bot`, and — for Hindsight and RAGFlow
+	 * `/healthz`, asks for a brief as `grok-bot`, and — for Hindsight and LightRAG
 	 * — makes the read that plane serves. Nothing is appended.
 	 */
 	async function planeSmoke(): Promise<void> {

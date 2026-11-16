@@ -1,11 +1,11 @@
 /**
  * The offline docs-golden harness (uplift-3 N5): the real `searchDocs` over
- * a question-aware `RagflowFake` seeded from a small Markdown corpus.
+ * a question-aware `lightragFake` seeded from a small Markdown corpus.
  *
  * `scripts/docs-golden.ts` holds the fixtures, the scorer and the CLI; this
  * module holds the part that must live inside `mcp-server` — the store lock
  * (`store-lock.test.ts`) lets no file outside this package import the
- * RAGFlow client or its fake, and the rehearsal fixtures (`rehearsal-skills.ts`)
+ * lightrag client or its fake, and the rehearsal fixtures (`rehearsal-skills.ts`)
  * already follow the same split.
  *
  * What the offline run proves, and what it cannot: the fake retrieves by
@@ -26,7 +26,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { searchDocs, type SearchReply } from "./docs-search.ts";
-import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
+import { DocsPlaneFake, type FakeChunk } from "./docs-plane-fake.ts";
 import type { EventInput } from "./types.ts";
 
 /** The reserved host every corpus document is cited under (RFC 2606), as the fake's own seeds are. */
@@ -37,7 +37,7 @@ export interface GoldenDocument {
 	slug: string;
 	source_url: string;
 	document_id: string;
-	/** The file name, which is what RAGFlow reports as `document_keyword`. */
+	/** The file name, which is what lightrag reports as `document_keyword`. */
 	name: string;
 	body: string;
 }
@@ -151,8 +151,8 @@ export function lexicalChunk(document: GoldenDocument, question: string): FakeCh
  * first. The fake's own three datasets are the scope; a corpus directory
  * named after one of them fills it.
  */
-export function goldenFake(corpus: GoldenCorpus): RagflowFake {
-	const fake = new RagflowFake();
+export function goldenFake(corpus: GoldenCorpus): DocsPlaneFake {
+	const fake = new DocsPlaneFake();
 	fake.echoHeadings = true;
 	fake.answer = (datasetId, question) => {
 		const dataset = fake.datasets.find((entry) => entry.id === datasetId);
@@ -202,7 +202,7 @@ export async function searchGoldenOffline(
 	);
 	const reply = await searchDocs(
 		{
-			config: { url: "http://ragflow.test", apiKey: "golden" },
+			config: { url: "http://lightrag.test", apiKey: "golden" },
 			datasetNames: fixture.datasets,
 			pins,
 			emit: async (event) => {
