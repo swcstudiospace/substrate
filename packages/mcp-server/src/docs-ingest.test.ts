@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import {
 	INGEST_CALL_MAX_BYTES,
+	changeSha,
 	INGEST_PAGE_MAX_BYTES,
 	extractPlanningGraphHint,
 	batchIngestPages,
@@ -32,6 +33,7 @@ import {
 	type PageSettlement,
 	type ScanIo,
 } from "./docs-ingest.ts";
+import { corpusDocumentName } from "@substrate/corpus";
 import { lightragSearchDatasets } from "./docs-datasets.ts";
 import { createMcpServer } from "./mcp.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -1162,7 +1164,7 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		if (!outcome.ok) throw new Error(`expected a partial ingest: ${outcome.reason}`);
 		const [first, second, other] = outcome.results;
 		expect(first).toMatchObject({ path: PAGE.path, status: "failed" });
-		expect(first?.error).toMatch(/lightrag 500/);
+		expect(first?.error).toBe("lightrag 500: upload refused");
 		expect(second).toMatchObject({ path: PAGE.path, status: "failed" });
 		expect(second?.error).toMatch(/earlier page/);
 		expect(other).toMatchObject({ path: "docs/other.md", status: "ingested" });
@@ -1221,7 +1223,7 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		const { seen, ingest } = lightragHarness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (outcome.ok) throw new Error("expected a refusal: the document id could not be resolved");
-		expect(outcome.reason).toBe("lightrag 503");
+		expect(outcome.reason).toBe("lightrag 503: track store down");
 		expect(seen.size).toBe(0);
 	});
 
@@ -1234,5 +1236,82 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		if (!second.ok) throw new Error(`expected ingest: ${second.reason}`);
 		expect(second.results[0]).toMatchObject({ status: "replaced", document_id: "doc-2", pruned_document_id: "doc-1" });
 		expect(fake.deletes).toEqual([{ path: "/documents/delete_document", body: { doc_ids: ["doc-1"], delete_file: false, delete_llm_cache: false } }]);
+	});
+});
+
+describe("docs_ingest on the LightRAG plane: corpus-named bulk mode", () => {
+	const PLANNING_PATH = ".planning/phases/01-graph/PLAN.md";
+	const PLANNING_BODY = "# Plan\n\nThe plan body.";
+	const HINT = { phase: "01-graph", entities: ["Graph entity"], relations: [{ source: "A", target: "B", kind: "depends_on" }] };
+
+	/** A LightRAG that records the name and graph form each upload carries. */
+	function recordingPlane() {
+		const uploads: Array<{ name: string; entities: string; relations: string }> = [];
+		const fetchImpl: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && url.pathname === "/documents/upload") {
+				const form = init.body as FormData;
+				uploads.push({
+					name: String(form.get("file_source")),
+					entities: String(form.get("graph_entities") ?? ""),
+					relations: String(form.get("graph_relations") ?? ""),
+				});
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json(trackStatusBody(url.pathname));
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+		return { uploads, fetchImpl };
+	}
+
+	function ingestWith(fetchImpl: FetchLike, corpusNames: boolean) {
+		const deps: IngestDeps = {
+			config: null,
+			knownDatasets: ["agent-substrate"],
+			backend: "lightrag",
+			lightragConfig: { url: "http://lightrag.test" },
+			lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "owner/agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
+			lightragFetch: fetchImpl,
+			seen: new Map<string, IngestRecord>(),
+			poll: { intervalMs: 0 },
+			...(corpusNames ? { corpusNames: true } : {}),
+			emit: async (): Promise<unknown> => ({ stored: false }),
+			surface: "omp",
+		};
+		return (input: IngestInput): Promise<IngestOutcome> => ingestDocs(deps, input);
+	}
+
+	const planningPage = {
+		path: PLANNING_PATH,
+		source_url: "file:///repo/.planning/phases/01-graph/PLAN.md",
+		checkout: "wt-0123456789abcdef01234567",
+		body: PLANNING_BODY,
+		graph: HINT,
+	};
+
+	test("a planning page with a graph hint is named by the corpus scheme and keeps its graph entities and relations", async () => {
+		const plane = recordingPlane();
+		const outcome = await ingestWith(plane.fetchImpl, true)({ dataset: "agent-substrate", pages: [planningPage] });
+		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
+		expect(outcome.results[0]).toMatchObject({ path: PLANNING_PATH, status: "ingested" });
+		expect(plane.uploads).toHaveLength(1);
+		const [upload] = plane.uploads;
+		expect(upload?.name).toBe(corpusDocumentName("owner/agent-substrate", PLANNING_PATH, changeSha(PLANNING_BODY, HINT)));
+		expect(upload?.name.startsWith("corpus:")).toBe(true);
+		expect(upload?.name).not.toContain(".planning__");
+		expect(JSON.parse(upload?.entities ?? "null")).toEqual(["Graph entity"]);
+		expect(JSON.parse(upload?.relations ?? "null")).toEqual([{ source: "A", target: "B", kind: "depends_on" }]);
+	});
+
+	test("outside corpus mode the same planning page keeps its flat checkout-keyed name", async () => {
+		const plane = recordingPlane();
+		const outcome = await ingestWith(plane.fetchImpl, false)({ dataset: "agent-substrate", pages: [planningPage] });
+		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
+		expect(plane.uploads).toHaveLength(1);
+		expect(plane.uploads[0]?.name.startsWith("corpus:")).toBe(false);
+		expect(plane.uploads[0]?.name).toContain("wt-0123456789abcdef01234567");
+		expect(plane.uploads[0]?.name).toContain(".planning__phases__01-graph__PLAN.md");
 	});
 });

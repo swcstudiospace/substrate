@@ -221,6 +221,35 @@ export function isClearAllRequest(method: string, path: string): boolean {
 	return segments.length === 1 && segments[0]?.toLowerCase() === "documents";
 }
 
+/** The longest body detail a failed call carries. */
+const FAILURE_DETAIL_CAP = 200;
+
+/**
+ * The cause an upstream non-2xx body names: FastAPI's `detail` when the body is JSON (a non-string `detail`, such as a
+ * 422 validation list, is its JSON text), else the raw body text. Redacted, then capped, and absent when the body is
+ * empty or unreadable. Never throws.
+ */
+async function failureDetail(response: Response): Promise<string | undefined> {
+	let text: string;
+	try {
+		text = await response.text();
+	} catch {
+		return undefined;
+	}
+	let picked = text;
+	try {
+		const parsed: unknown = JSON.parse(text);
+		const detail = readMember(parsed, "detail");
+		if (typeof detail === "string") picked = detail;
+		else if (detail !== undefined) picked = JSON.stringify(detail) ?? text;
+	} catch {
+		// Not JSON: the raw text is the detail.
+	}
+	// Redact before the cap, so a token cut at the boundary is not left half-matched.
+	const detail = redact(picked.trim()).slice(0, FAILURE_DETAIL_CAP);
+	return detail.length > 0 ? detail : undefined;
+}
+
 /**
  * The single request choke point: every LightRAG call goes through here,
  * so the clear-all denylist and the auth header live in exactly one place.
@@ -228,14 +257,16 @@ export function isClearAllRequest(method: string, path: string): boolean {
  * `combined_auth` validates any bearer as a JWT first and answers 401 when
  * it is not one). The key is optional (`lightragFromEnv` allows keyless
  * reach) and never enters a reason string. Never throws: a transport
- * failure is the reason.
+ * failure is the reason. A non-2xx answer other than 401/403 keeps its
+ * `reason` (`lightrag <status>`, matched exactly elsewhere) and adds the
+ * redacted, capped body as `detail`.
  */
 async function call(
 	config: LightragConfig,
 	fetchImpl: FetchLike,
 	path: string,
 	init: { method: string; body?: RequestInit["body"]; json?: boolean; timeoutMs: number },
-): Promise<{ ok: true; body: unknown } | { ok: false; reason: string }> {
+): Promise<{ ok: true; body: unknown } | { ok: false; reason: string; detail?: string }> {
 	if (isClearAllRequest(init.method, path)) return { ok: false, reason: LIGHTRAG_CLEAR_ALL_REFUSED };
 	let response: Response;
 	try {
@@ -252,7 +283,10 @@ async function call(
 		return { ok: false, reason: unreachable(cause) };
 	}
 	if (response.status === 401 || response.status === 403) return { ok: false, reason: `lightrag ${response.status}` };
-	if (!response.ok) return { ok: false, reason: `lightrag ${response.status}` };
+	if (!response.ok) {
+		const detail = await failureDetail(response);
+		return { ok: false, reason: `lightrag ${response.status}`, ...(detail !== undefined ? { detail } : {}) };
+	}
 	let body: unknown;
 	try {
 		body = await response.json();
@@ -514,7 +548,7 @@ export interface LightragUploadRequest {
  */
 export type LightragUploadOutcome =
 	| { ok: true; track_id: string }
-	| { ok: false; reason: string; conflict?: true };
+	| { ok: false; reason: string; detail?: string; conflict?: true };
 
 /** The reason an upload (or text insert) gets when LightRAG answers HTTP 409. */
 export const LIGHTRAG_SAME_NAME_CONFLICT = "lightrag 409 same-name conflict";
@@ -526,7 +560,7 @@ function uploadTrackId(data: unknown): string | undefined {
 }
 
 /** An upload failure as the outcome: HTTP 409 is the typed same-name conflict, anything else passes through. */
-function uploadFailure(failure: { ok: false; reason: string }): LightragUploadOutcome {
+function uploadFailure(failure: { ok: false; reason: string; detail?: string }): LightragUploadOutcome {
 	return failure.reason === "lightrag 409" ? { ok: false, reason: LIGHTRAG_SAME_NAME_CONFLICT, conflict: true } : failure;
 }
 
@@ -599,6 +633,8 @@ export async function uploadDocument(
 export interface StorePlanningPageRequest {
 	/** The page's repo path, e.g. `.planning/phases/03-x/PLAN.md`. */
 	path: string;
+	/** The exact document name to store under, replacing the one derived from `checkout` and `path` (the bulk corpus scheme). */
+	name?: string;
 	/** The page's source URL (the scan's `file://` URL). */
 	sourceUrl: string;
 	/** The planning checkout key a `.planning/` page is held under: its document is named `<checkout>:<path>`. Other pages leave it unset. */
@@ -624,7 +660,7 @@ export async function storePlanningPage(
 	return uploadDocument(
 		config,
 		{
-			name: documentName(request.checkout === undefined ? request.path : planningPageKey(request.checkout, request.path)),
+			name: request.name ?? documentName(request.checkout === undefined ? request.path : planningPageKey(request.checkout, request.path)),
 			content: request.body,
 			metadata: {
 				source_url: request.sourceUrl,
@@ -663,7 +699,7 @@ export async function scanDocuments(
 	config: LightragConfig,
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 8000,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }> {
 	const answered = await call(config, fetchImpl, "/documents/scan", {
 		method: "POST",
 		json: true,
@@ -685,7 +721,7 @@ export async function parseDocuments(
 	documentIds: readonly string[],
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 8000,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }> {
 	void datasetId;
 	void documentIds;
 	return scanDocuments(config, fetchImpl, timeoutMs);
@@ -760,7 +796,7 @@ export async function pollParseStatus(
 	document: { dataset_id: string; document_id: string },
 	fetchImpl: FetchLike = fetch,
 	opts: LightragPollOptions = {},
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true } | { ok: false; reason: string; detail?: string }> {
 	void document;
 	const maxPolls = opts.maxPolls ?? 10;
 	const intervalMs = opts.intervalMs ?? 100;
@@ -812,7 +848,7 @@ export interface LightragTrackOptions {
 
 export type LightragTrackOutcome =
 	| { ok: true; ids: string[]; documents: LightragTrackedDocument[] }
-	| { ok: false; reason: string };
+	| { ok: false; reason: string; detail?: string };
 
 /**
  * Resolve the real document ids behind an upload's `track_id`
@@ -887,7 +923,7 @@ export async function deleteDocuments(
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 8000,
 	options: { deleteFile?: boolean } = {},
-): Promise<{ ok: true } | { ok: false; reason: string; retryable?: true }> {
+): Promise<{ ok: true } | { ok: false; reason: string; detail?: string; retryable?: true }> {
 	void datasetId;
 	if (documentIds.length === 0) return { ok: true };
 	const ids = [...new Set(documentIds.map((documentId) => documentId.trim()))];
@@ -898,7 +934,7 @@ export async function deleteDocuments(
 		body: JSON.stringify({ doc_ids: ids, delete_file: options.deleteFile ?? false, delete_llm_cache: false }),
 		timeoutMs,
 	});
-	if (!answered.ok) return answered;
+	if (!answered.ok) return { ok: false, reason: answered.reason, ...(answered.detail !== undefined ? { detail: answered.detail } : {}) };
 	const rawStatus = readMember(answered.body, "status");
 	const status = typeof rawStatus === "string" ? rawStatus : undefined;
 	const rawMessage = readMember(answered.body, "message");
@@ -968,7 +1004,7 @@ export const LIGHTRAG_SNIPPET_CAP = 1200;
 
 export type LightragToolOutcome =
 	| { ok: true; chunks: RagLightragChunk[]; mode: LightragQueryMode }
-	| { ok: false; reason: string };
+	| { ok: false; reason: string; detail?: string };
 
 /**
  * The query the `docs_lightrag_query` tool and `POST /docs/lightrag/query`

@@ -658,6 +658,8 @@ export interface GroupApply {
 	unchanged: number;
 	failed: number;
 	refusal?: string;
+	/** The first failed page and its recorded error, so a group's cause is not lost to the count. */
+	first_failure?: string;
 }
 
 export interface RunOptions {
@@ -709,11 +711,16 @@ export async function runAllMarkdownIngest(options: RunOptions): Promise<number>
 				if (result.status === "ingested") row.ingested++;
 				else if (result.status === "replaced") row.replaced++;
 				else if (result.status === "unchanged") row.unchanged++;
-				else row.failed++;
+				else {
+					row.failed++;
+					// The first failure's page and recorded error (already redacted and capped by the ingest) says why a group failed.
+					if (row.first_failure === undefined) row.first_failure = `${result.path}: ${result.error ?? result.status}`;
+				}
 			}
 		}
 		applied.push(row);
 		options.out(`${group.group} -> ${group.dataset}: ${row.batches_sent} batch(es) sent${row.refusal !== undefined ? `, refused: ${row.refusal}` : ""}\n`);
+		if (row.first_failure !== undefined) options.out(`${group.group}: ${row.failed} page(s) failed; first: ${row.first_failure}\n`);
 	}
 	await writeOutputs(stateDir, plan, applied);
 	const failed = applied.some((row) => row.batches_refused > 0 || row.failed > 0);

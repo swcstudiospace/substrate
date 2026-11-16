@@ -440,7 +440,7 @@ export interface IngestPageResult {
 /** One page's upload, shared with concurrent retries for the same key. */
 export type PageSettlement =
 	| { ok: true; result: IngestPageResult }
-	| { ok: false; reason: string };
+	| { ok: false; reason: string; detail?: string };
 
 /**
  * `changed` says whether this call mutated state — uploaded, replaced or
@@ -1392,7 +1392,7 @@ async function ingestDocsLightrag(
 	// Keys with a write that failed in this call. The version plan assumed every planned write landed, so a later
 	// page of such a key is recorded failed and not written: writing it would store a version the plan never reached.
 	const failedKeys = new Set<string>();
-	const recordFailed = (key: string, pagePath: string, source: string, hash: string, reason: string): void => {
+	const recordFailed = (key: string, pagePath: string, source: string, hash: string, reason: string, detail?: string): void => {
 		failed += 1;
 		failedKeys.add(key);
 		results.push({
@@ -1401,9 +1401,15 @@ async function ingestDocsLightrag(
 			status: "failed",
 			document_id: "",
 			content_sha256: hash,
-			error: redact(reason).slice(0, 200),
+			error: redact(detail !== undefined && detail.length > 0 ? `${reason}: ${detail}` : reason).slice(0, 200),
 		});
 	};
+	// A failed plane call as the page's settlement: the reason as it is, with the upstream detail when the plane read one.
+	const failedSettlement = (failure: { reason: string; detail?: string }): PageSettlement => ({
+		ok: false,
+		reason: failure.reason,
+		...(failure.detail !== undefined ? { detail: failure.detail } : {}),
+	});
 	// The record a page is versioned from: its owner/name key, else the legacy bare-name key. The replay keys by
 	// owner/name only, so it never reads a legacy key.
 	const savedRecord = (sourceUrl: string): IngestRecord | undefined => {
@@ -1443,7 +1449,7 @@ async function ingestDocsLightrag(
 			if (running && running.sha === sha) {
 				const settled = await running.task;
 				if (!settled.ok) {
-					recordFailed(key, page.path, sourceUrl, sha, settled.reason);
+					recordFailed(key, page.path, sourceUrl, sha, settled.reason, settled.detail);
 					break;
 				}
 				results.push(settled.result);
@@ -1459,6 +1465,8 @@ async function ingestDocsLightrag(
 							? await storePlanningPage(
 									lightrag,
 									{
+										// The bulk corpus scheme names every page, a planning page included: the corpus name replaces the flat one.
+										...(deps.corpusNames === true ? { name } : {}),
 										path: page.path,
 										sourceUrl,
 										...(isPlanning && checkout !== undefined ? { checkout } : {}),
@@ -1480,17 +1488,17 @@ async function ingestDocsLightrag(
 									},
 									fetchImpl,
 								);
-					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
+					if (!uploaded.ok) return failedSettlement(uploaded);
 					// LightRAG's upload answers a track id, not a document id. The scan and the pipeline poll are server-global (the ids
 					// they take are ignored on this plane), so no document id is passed; the real id is read from track_status once the
 					// pipeline is idle, and only that id is stored, cited and deleted.
 					const started = await parseLightragDocuments(lightrag, dataset.id, [], fetchImpl);
-					if (!started.ok) return { ok: false, reason: started.reason };
+					if (!started.ok) return failedSettlement(started);
 					const pollOptions = pollBudget(deps.poll);
 					const parsed = await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: uploaded.track_id }, fetchImpl, pollOptions);
-					if (!parsed.ok) return { ok: false, reason: parsed.reason };
+					if (!parsed.ok) return failedSettlement(parsed);
 					const tracked = await resolveLightragDocumentIds(lightrag, uploaded.track_id, fetchImpl, pollOptions);
-					if (!tracked.ok) return { ok: false, reason: tracked.reason };
+					if (!tracked.ok) return failedSettlement(tracked);
 					const failedDocument = tracked.documents.find((document) => document.status?.toLowerCase() === "failed");
 					if (failedDocument !== undefined) {
 						return { ok: false, reason: `lightrag: document failed to process${failedDocument.error_msg ? `: ${failedDocument.error_msg}` : ""}` };
@@ -1551,7 +1559,7 @@ async function ingestDocsLightrag(
 					if (locks.get(key)?.task === task) locks.delete(key);
 				}
 				if (!settled.ok) {
-					recordFailed(key, page.path, sourceUrl, sha, settled.reason);
+					recordFailed(key, page.path, sourceUrl, sha, settled.reason, settled.detail);
 					break;
 				}
 				results.push(settled.result);
@@ -1559,7 +1567,7 @@ async function ingestDocsLightrag(
 			}
 			const settled = await running.task;
 			if (!settled.ok) {
-				recordFailed(key, page.path, sourceUrl, sha, settled.reason);
+				recordFailed(key, page.path, sourceUrl, sha, settled.reason, settled.detail);
 				break;
 			}
 		}

@@ -340,6 +340,32 @@ describe("docs-allmarkdown run", () => {
 			expect(report.applied[0]).toMatchObject({ group: "alpha", batches_refused: 1, refusal: "unknown-dataset" });
 		});
 	});
+
+	test("a group with a failed page prints the first failure's path and recorded error, once", async () => {
+		await withStateDir(async (dir) => {
+			const { plan } = await planTree({ "/repos/alpha/a.md": "# a\n", "/repos/alpha/b.md": "# b\n" }, { datasets: { alpha: "alpha" }, known: ["alpha"] });
+			const ingest: IngestCall = async (input) => ({
+				ok: true,
+				changed: false,
+				stripped_images: 0,
+				partial: true,
+				results: input.pages.map((page) => ({
+					path: page.path,
+					source_url: page.source_url ?? "",
+					status: "failed" as const,
+					document_id: "",
+					content_sha256: "x",
+					error: `lightrag 400: bad name for ${page.path}`,
+				})),
+			});
+			const lines: string[] = [];
+			expect(await runAllMarkdownIngest({ plan, apply: true, stateDir: dir, ingest, sessionId: SESSION, out: (text) => lines.push(text), err: () => undefined })).toBe(1);
+			const firsts = lines.filter((line) => line.includes("first:"));
+			expect(firsts).toHaveLength(1);
+			expect(firsts[0]).toContain("2 page(s) failed");
+			expect(firsts[0]).toContain("lightrag 400: bad name for a.md");
+		});
+	});
 });
 
 describe("docs-allmarkdown planning checkout through the ingest guard", () => {
@@ -438,6 +464,18 @@ describe("docs-allmarkdown planning checkout through the ingest guard", () => {
 			];
 			expect(expected[0]).not.toBe(expected[1]);
 			expect([...new Set(sent)].sort()).toEqual([...expected].sort());
+		});
+	});
+
+	test("an apply run whose uploads all fail prints the upstream cause in the group's refusal line", async () => {
+		await withStateDir(async (dir) => {
+			const { plan } = await planTree({ "/repos/alpha/docs/a.md": "# alpha\n" }, { datasets: { alpha: "alpha" }, known: ["alpha"] });
+			const probe = uploadProbe();
+			const ingest: IngestCall = (input, roots) => ingestDocs({ ...ingestDeps(probe.fetchImpl, input.dataset), roots }, input);
+			const lines: string[] = [];
+			expect(await runAllMarkdownIngest({ plan, apply: true, stateDir: dir, ingest, sessionId: SESSION, out: (text) => lines.push(text), err: () => undefined })).toBe(1);
+			const refusal = lines.find((line) => line.includes("refused:")) ?? "";
+			expect(refusal).toContain("lightrag 500: upload refused");
 		});
 	});
 });
