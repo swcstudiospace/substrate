@@ -8,6 +8,7 @@ import { CORPUS_PROTOCOL, corpusLeafHex, isRecord, type CorpusProofResponse } fr
 import { verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
 import { loadConfig } from "../config.ts";
 import { createObservability, type Observability } from "../observe.ts";
+import { REPO_SCOPES_ENV } from "../repo-scope.ts";
 import { createHttpServer } from "../server.ts";
 import { Substrate } from "../service.ts";
 import { defined } from "../test-support.ts";
@@ -118,6 +119,28 @@ describe("GET /corpus/root and GET /corpus/proof", () => {
 		expect({ status: response.status, rootScope: proof.rootScope, treeSize: proof.treeSize }).toEqual({ status: 200, rootScope: "repository", treeSize: 2 });
 		expect(proof.root).not.toBe(root.root as string);
 		expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: proof.root, count: 2 })).toBe(true);
+	});
+	test("a caller granted one repository does not observe another repository in the corpus root or count", async () => {
+		const harness = await start({ ...ON, [REPO_SCOPES_ENV]: JSON.stringify({ omp: [REPO] }) });
+		seedDocuments(harness, ["docs/a.md", "docs/b.md"]);
+		harness.store.seed(makeRow({ repo: "swcstudiospace/other", path: "docs/x.md", sha256: sha256Hex("body of docs/x.md") }));
+		const root = await jsonOf(await get(harness, "/corpus/root"));
+		expect(root).toMatchObject({ count: 2, skipped: 0 });
+		const unscoped = await start(ON);
+		seedDocuments(unscoped, ["docs/a.md", "docs/b.md"]);
+		unscoped.store.seed(makeRow({ repo: "swcstudiospace/other", path: "docs/x.md", sha256: sha256Hex("body of docs/x.md") }));
+		const wide = await jsonOf(await get(unscoped, "/corpus/root"));
+		expect(wide.count).toBe(3);
+		expect(root.root).not.toBe(wide.root);
+	});
+
+	test("a caller granted no repository is refused the same way as the other corpus reads", async () => {
+		const harness = await start({ ...ON, [REPO_SCOPES_ENV]: JSON.stringify({ cursor: [REPO] }) });
+		seedDocuments(harness, ["docs/a.md"]);
+		const response = await get(harness, "/corpus/root");
+		expect(response.status).toBe(403);
+		expect(await jsonOf(response)).toMatchObject({ reason: "all-repos-not-granted" });
+		expect(harness.store.leafReads).toBe(0);
 	});
 
 	test("a document that is not active is 404 not-in-corpus, and a bad name is 400", async () => {

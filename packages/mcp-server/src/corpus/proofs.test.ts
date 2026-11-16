@@ -8,11 +8,12 @@ import { CORPUS_PROTOCOL, corpusLeafHex, shortRoot, type CorpusDocument } from "
 import { merkleRootHex, verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
 import type { AnchorVerifyPorts } from "../anchor-verify-deps.ts";
 import { loadConfig, loadCorpusSettings } from "../config.ts";
+import { REPO_SCOPES_ENV, repoScopeFromEnv } from "../repo-scope.ts";
 import { Substrate } from "../service.ts";
 import { defined } from "../test-support.ts";
 import type { EventInput } from "../types.ts";
 import type { AnchorVerifier } from "./anchor.ts";
-import { CorpusRootKeeper, corpusRoot, type RootClock } from "./root.ts";
+import { CorpusRootKeeper, corpusRoot, grantRootOf, buildCorpusTree, type RootClock } from "./root.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusProofReply, corpusRootReply, type CorpusServiceDeps } from "./service.ts";
 import { FakePlane, FakeStore, makeDocument, makeRow, sha256Hex } from "./testkit.ts";
 
@@ -135,6 +136,35 @@ describe("the root and proof doors", () => {
 		expect(proof.root).not.toBe(rootReply.body.root);
 		expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: proof.root, count: 3 })).toBe(true);
 		expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: rootReply.body.root, count: 4 })).toBe(false);
+	});
+	test("a caller granted some repositories cannot observe another repository's contribution to the root or count", async () => {
+		const OTHER_REPO = "swcstudiospace/other";
+		const THIRD = "swcstudiospace/third";
+		const { store, deps } = world();
+		const rows = [
+			makeRow({ repo: REPO, path: "docs/a.md", sha256: sha256Hex("a") }),
+			makeRow({ repo: REPO, path: "docs/b.md", sha256: sha256Hex("b") }),
+			makeRow({ repo: OTHER_REPO, path: "docs/x.md", sha256: sha256Hex("x") }),
+			makeRow({ repo: THIRD, path: "docs/y.md", sha256: sha256Hex("y") }),
+			makeRow({ repo: OTHER_REPO, path: "docs/bad.md", sha256: "not-a-hash" }),
+		];
+		for (const row of rows) store.seed(row);
+		const parsed = repoScopeFromEnv({ [REPO_SCOPES_ENV]: JSON.stringify({ "claude-code": [REPO, THIRD] }) });
+		if (!parsed.ok) throw new Error(parsed.problem);
+		const reply = await corpusRootReply({ ...deps, repoScope: parsed.value }, "claude-code");
+		if (!reply.ok) throw new Error("a granted caller should receive a root");
+		const granted = grantRootOf(buildCorpusTree(rows), new Set([REPO, THIRD]));
+		const whole = corpusRoot(rows);
+		expect(reply.body).toMatchObject({ protocol: CORPUS_PROTOCOL, root: granted.root, count: granted.count, skipped: granted.skipped });
+		expect(reply.body.root).not.toBe(whole.root);
+		expect(reply.body.count).toBe(3);
+		expect(reply.body.skipped).toBe(0);
+		expect(whole.count).toBe(4);
+		expect(whole.skipped).toBe(1);
+		const before = store.leafReads;
+		const empty = await corpusRootReply({ ...deps, repoScope: parsed.value }, "omp");
+		expect(empty).toMatchObject({ ok: false, status: 403, body: { reason: "all-repos-not-granted" } });
+		expect(store.leafReads).toBe(before);
 	});
 
 	test("a missing document and a tombstoned one are 404 not-in-corpus; a malformed name is 400", async () => {

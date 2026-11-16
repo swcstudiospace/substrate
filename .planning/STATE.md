@@ -729,3 +729,15 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Phase 75: NOT planned. Planner dispatch is unavailable to leaf subagents; ROADMAP says merged in PR #200 while CONTEXT says pending. Owner must decide whether to plan retroactively or close against merged work.
 - Postgres: test container substrate-test-pg-5432 restarted; round-trip suite 21/21 pass.
 - v1.7 phases 63–70: NOT re-planned. STATE records them as shipped and v1.7 owner decisions 1–11 open; no work was done on them in this session.
+
+## Owner decisions (2026-11-16, autonomous HITL)
+
+- Phase 72 allowlist unit: surface-scoped grants satisfy the roadmap criterion. The 2026-11-12 grant model stands. Do not build a session-scoped allowlist.
+- GET /corpus/root: scope the root and count to the caller's repository grant. A granted caller must not observe another repository's contribution.
+- Phase 74: keep compensating actions module-only. Do not add a route or MCP tool.
+- Credential rotation: rotate the LightRAG API key and the LightRAG Postgres password now. Both were exposed in a scout transcript.
+- Ship: stopped. Assess stays not done until the roadmap and human_needed verification gaps close. Do not pass --ignore-gsd. Do not open a PR from this decision.
+
+- Rotation done 2026-11-16: LightRAG API key and the shared Postgres superuser password were replaced. Copies updated in the LightRAG env, the production env, and the stack env files. The old API key is rejected on an authenticated LightRAG route. `/healthz` after restart: index true, lightrag true. Rollback material is a mode-600 file under `/root/backups`, not in the repo.
+
+

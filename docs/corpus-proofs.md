@@ -61,7 +61,7 @@ It goes through the ordinary emit path, so the existing redaction and hash chain
 - **Settled states only.** While an ingest is writing, the manifest is between versions, so no root is recorded and a search does not name one; the event follows the ingest's last write.
 - **Not in the request's path.** The event is scheduled on a timer and written after the ingest has answered. A failure of any kind (the manifest unreadable, the ledger unavailable) is swallowed: a root event never fails an ingest.
 - **One per state.** A root is written only when it differs from the root written last, so a request that changed nothing writes nothing and a state is never written twice by one process, whatever order concurrent batches committed in.
-- **What can be lost.** A root event still waiting in its timer when the server stops is dropped, and one that failed to reach the ledger is not retried. The next change writes the then-current root. `GET /corpus/root` always answers the live manifest, so the root of a document you can prove is the one to ask `GET /corpus/anchor` about.
+- **What can be lost.** A root event still waiting in its timer when the server stops is dropped, and one that failed to reach the ledger is not retried. The next change writes the then-current root. `GET /corpus/root` answers the live manifest (the caller's granted repositories only, while repository scoping is on), so the root of a document you can prove is the one to ask `GET /corpus/anchor` about only when that proof's repository is the whole active manifest.
 - **Not emitted** for the empty manifest, or when the manifest is too large for a root.
 
 ## Prove and verify
@@ -70,13 +70,13 @@ Routes (all need a bearer token, are reads audited under `corpus_status`, and an
 
 | Route | Answer |
 | --- | --- |
-| `GET /corpus/root` | `{ protocol: 1, root, count, manifestVersion, skipped }` |
+| `GET /corpus/root` | `{ protocol: 1, root, count, manifestVersion, skipped }`. While repository scoping is off this is the whole-corpus root. While it is on, `root`, `count` and `skipped` cover the caller's granted repositories only; a caller granted none is refused `403 all-repos-not-granted`, the same refusal as `GET /corpus/status` |
 | `GET /corpus/proof?repo=R&path=P` | `{ protocol: 1, repo, documentPath, sha256, leaf, index, treeSize, path: string[], root, manifestVersion, rootScope: "repository" }`, the root of `repo`'s own tree (see below); `404 not-in-corpus` for a missing or tombstoned document; `400 bad-repo` / `bad-path` for a name that is not a repository or a normal relative path |
 | `GET /corpus/anchor?root=HEX64` | `{ protocol: 1, root, status, reasons, eventId, count, manifestVersion, hourStart, evidence }`; `400 bad-root` for anything but 64 lowercase hex characters |
 
 In the proof, `path` is the RFC 6962 audit path (sibling hashes, leaf to root), **not** the document's path, which is `documentPath`. The proof is taken from one read of the manifest, so its leaf, path and root belong together.
 
-`rootScope` is always `"repository"`. The proof is over the active documents of `repo` alone: its root is the RFC 6962 root of that repository's leaves, and its audit path holds only hashes derived from those leaves, so no other repository's leaf or sibling hash appears in it. The hashes reveal nothing about another repository's documents. `manifestVersion` is still the whole manifest's version. The whole-corpus tree and its root are unchanged: `GET /corpus/root`, the `docs.corpus.root` events and `GET /corpus/anchor` all name that root. A served proof's root is therefore **not** the anchored root, and a caller cannot verify a served proof against the anchored root (the two match only when `repo` holds every active row).
+`rootScope` is always `"repository"`. The proof is over the active documents of `repo` alone: its root is the RFC 6962 root of that repository's leaves, and its audit path holds only hashes derived from those leaves, so no other repository's leaf or sibling hash appears in it. The hashes reveal nothing about another repository's documents. `manifestVersion` is still the whole manifest's version. The whole-corpus tree the ledger anchors is unchanged: the `docs.corpus.root` events and `GET /corpus/anchor` name that root. `GET /corpus/root` names it only while repository scoping is off. While scoping is on, that route answers the RFC 6962 root, leaf count and skipped rows of the caller's granted repositories alone (one tree over every repository in the grant, and no other), and a caller granted none is refused `403 all-repos-not-granted`, the same refusal as the other corpus reads that span every repository. A served proof's root is therefore **not** the anchored root, and a caller cannot verify a served proof against the anchored root (the two match only when `repo` holds every active row).
 
 ```sh
 substrate corpus prove --repo swcstudiospace/agent-substrate --path docs/corpus.md --out proof.json

@@ -24,12 +24,12 @@ import type { AnchorVerifyPorts } from "../anchor-verify-deps.ts";
 import type { CorpusSettings } from "../config.ts";
 import type { LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import type { EventInput, Surface } from "../types.ts";
-import { authorizeRepo, REPO_REFUSAL_MESSAGES, REPO_SCOPE_OFF, type RepoRefusalReason, type RepoScope } from "../repo-scope.ts";
+import { authorizeRepo, grantedRepos, REPO_REFUSAL_MESSAGES, REPO_SCOPE_OFF, type RepoRefusalReason, type RepoScope } from "../repo-scope.ts";
 import { corpusAnchorStatus, type AnchorVerifier } from "./anchor.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { planCorpus, planRepos } from "./plan.ts";
 import { reconcileCorpus } from "./reconcile.ts";
-import { inclusionOf, repositoryTreeOf, type CorpusRootKeeper } from "./root.ts";
+import { grantRootOf, inclusionOf, repositoryTreeOf, type CorpusRootKeeper } from "./root.ts";
 import type { CorpusStore } from "./store.ts";
 import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type RequestRefusal } from "./validate.ts";
 
@@ -277,24 +277,36 @@ export async function corpusReconcileReply(deps: CorpusServiceDeps, raw: unknown
 	}
 }
 
-/** `GET /corpus/root`: the Merkle root over the active manifest, from the cache while it matches the manifest's version. */
+/**
+ * `GET /corpus/root`: the Merkle root over the active manifest, from the cache while it matches the manifest's version.
+ * While repository scoping is on, the root and count cover the caller's granted repositories only. A caller granted none
+ * is refused before the tree is read, the same way as the other corpus reads that have no repository to place in a grant.
+ */
 export async function corpusRootReply(deps: CorpusServiceDeps, surface: Surface | null): Promise<CorpusReply<CorpusRootResponse>> {
 	const gated = gateOf(deps, surface, false);
 	if (gated !== null) return gated;
+	const granted = grantedRepos(deps.repoScope ?? REPO_SCOPE_OFF, surface);
+	if (granted !== null && granted.length === 0) return refusal(403, "all-repos-not-granted");
 	try {
-		const current = await deps.roots.current();
-		if (!current.ok) return refusal(503, "corpus.too-large");
-		const { root, count, manifestVersion, skipped } = current.snapshot;
-		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, root, count, manifestVersion, skipped } };
+		if (granted === null) {
+			const current = await deps.roots.current();
+			if (!current.ok) return refusal(503, "corpus.too-large");
+			const { root, count, manifestVersion, skipped } = current.snapshot;
+			return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, root, count, manifestVersion, skipped } };
+		}
+		const read = await deps.roots.read();
+		if (!read.ok) return refusal(503, "corpus.too-large");
+		const { root, count, skipped } = grantRootOf(read.tree, new Set(granted));
+		return { ok: true, status: 200, body: { protocol: CORPUS_PROTOCOL, root, count, manifestVersion: read.snapshot.manifestVersion, skipped } };
 	} catch {
 		return refusal(503, "corpus.index-unavailable");
 	}
 }
 
 /**
- * `GET /corpus/proof`'s body. The root is the root of `repo`'s active documents alone (`repositoryTreeOf`), never the whole-corpus
- * root `GET /corpus/root` and the ledger's root events name. `rootScope` says so; a verifier must not check this root against
- * the anchored whole-corpus root, which it cannot match.
+ * `GET /corpus/proof`'s body. The root is the root of `repo`'s active documents alone (`repositoryTreeOf`), never the
+ * anchored whole-corpus root the ledger's root events name. `rootScope` says so; a verifier must not check this root against
+ * the anchored whole-corpus root, which it cannot match. A scoped `GET /corpus/root` is likewise only the caller's grant.
  */
 export interface CorpusRepoProofResponse extends CorpusProofResponse {
 	rootScope: "repository";

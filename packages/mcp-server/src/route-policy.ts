@@ -26,6 +26,7 @@ export const REST_ROUTE_POLICY: Readonly<Record<string, Declaration>> = {
 	"/handoffs": GATED("scopedGraphRefusal: the graph's repository must be granted before its packets are read"),
 	"/drift": GATED("scopedDriftScan: the repository and any path must be granted"),
 	"/worktrees": GATED("listWorktrees: a named repository must be granted; otherwise the store reads granted rows only"),
+	"/corpus/root": GATED("corpusRootReply: a scoped caller receives the root and count of granted repositories only; a caller granted none is refused"),
 	"/corpus/proof": GATED("corpusProofReply: the named repository must be granted before the tree is read"),
 	"/corpus/plan": GATED("corpusPlanReply: every repository the plan reads must be granted"),
 	"/corpus/ingest": GATED("corpusIngestReply: every repository the ingest writes must be granted"),
