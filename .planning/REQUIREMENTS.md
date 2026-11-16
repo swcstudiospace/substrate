@@ -80,7 +80,7 @@
 ## Out of scope and deferred
 
 - Graph and hybrid LightRAG modes: they need an LLM route that only the operator can provide (production runs naive mode). Nothing in this milestone requires one; REFLECT-05 is deterministic.
-- Removing the RAGFlow code (TODO register D-15), deploys, Railway writes, funding the anchor key, devnet sends outside the existing anchor job, and installing hooks or timers on a host: all operator-gated. This milestone ships the code, the staged units and the runbooks.
+- Removing the RAG-backend code (TODO register D-15), deploys, Railway writes, funding the anchor key, devnet sends outside the existing anchor job, and installing hooks or timers on a host: all operator-gated. This milestone ships the code, the staged units and the runbooks.
 - Agents queueing steering directives for other agents: directive authors stay human (v1.6 decision); STEER-02 shares context, it does not delegate authority.
 - A new on-chain memo format: PROOF-02 rides the existing hourly anchor.
 - Moving `packages/collectors/src/cursor-stop.ts` and the cli to collectors import cycle, `noPropertyAccessFromIndexSignature` and coverage thresholds stay deferred as recorded in Run 13.

@@ -131,7 +131,7 @@ Nothing is missing from main for these; they are candidates for pruning by the o
 | `gsd/v1.3-p22-execute` | #40 |
 | `gsd/v1.3-p23-claim-mirror` | #36 |
 | `gsd/v1.3-p24-dispatcher` | #41 |
-| `gsd/v1.3-p25-docs-ragflow` | #34 |
+| `gsd/v1.3-p25-docs-RAG-backend` | #34 |
 | `gsd/v1.3-p27-ledger-primitives` | #29 |
 | `gsd/v1.3-p28-anchor-job` | #35 |
 | `gsd/v1.3-p29-agent-cards` | #42 |

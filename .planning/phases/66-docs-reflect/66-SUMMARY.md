@@ -39,7 +39,7 @@ Merged to main by PR #184 (squash 80afb6e5, parent 8af55c5e, 76 files, +7199 / -
 - **Digest sources.** ROADMAP success criterion 5 names STATE and ROADMAP. The code also reads PROJECT.md when it exists.
 - **Gap wording.** `docs/corpus-reflect.md` says a query that returned nothing "counts as best 0". The code and `reflect-routes.test.ts` show `best: null`. The SQL counts such a query as a gap either way.
 - **Column name collision.** `corpus_documents.superseded_by` holds a repo-relative marker path. The citation field `superseded_by` holds a document key (`repo:path`). The same name carries two different shapes.
-- **Re-rank scope.** Only citations with `dataset: "corpus"` are touched. Those come from the LightRAG path (`docs-search.ts` `withCorpusProvenance`). RAGFlow answers are never re-ranked or annotated.
+- **Re-rank scope.** Only citations with `dataset: "corpus"` are touched. Those come from the LightRAG path (`docs-search.ts` `withCorpusProvenance`). RAG-backend answers are never re-ranked or annotated.
 
 ## Findings
 

@@ -9,7 +9,7 @@
 v1.3 needs almost no new third-party dependencies. The September code already chose a small, mostly dependency-free stack, and most of it is still current:
 
 - **Ledger (E):** solana-cli for signing, raw `fetch` JSON-RPC for read-back, RFC 6962 Merkle on `Bun.CryptoHasher`. No `@solana/*` package.
-- **Planes (D):** `fetch` for RAGFlow and Hindsight. For Dragonfly, Bun's built-in `RedisClient` should replace the hand-rolled RESP socket in `21652a2`.
+- **Planes (D):** `fetch` for RAG-backend and Hindsight. For Dragonfly, Bun's built-in `RedisClient` should replace the hand-rolled RESP socket in `21652a2`.
 - **Skills (F):** `git` and `gh` invoked with argv arrays, no shell.
 - **Desktop (G):** `docker exec` + xdotool/xwd into the webtop container that is already running.
 - **Dispatcher and miner:** Python with `httpx` as the only runtime dependency.
@@ -18,7 +18,7 @@ The one heavy dependency is **Lane A (H)**: `@rivet-dev/agentos` with rivetkit a
 
 Port sources (inspect read-only in `/root/src/worktrees/agent-substrate-v13`):
 - `acc30a8` (`docs/data-planes-tailscale`, a superset of `substrate/ut-mughkkc0-73909228`) is the primary source for A, B, C, E, F, G and H.
-- `21652a2` is the only source for the RAGFlow, Hindsight and Dragonfly clients in D.
+- `21652a2` is the only source for the RAG-backend, Hindsight and Dragonfly clients in D.
 
 ## Recommended Stack
 
@@ -97,16 +97,16 @@ Port sources (inspect read-only in `/root/src/worktrees/agent-substrate-v13`):
 - `SOLANA_ANCHOR_KEYPAIR` resolves to an existing file named `ledger-devnet.json`.
 - `21652a2:.env.example` documents `/etc/substrate/anchor-keypair.json` and a second name, `SOLANA_KEYPAIR_PATH`. Reconcile `.env.example` to the one real variable (`SOLANA_ANCHOR_KEYPAIR`) when porting.
 
-### D. Docs plane: RAGFlow, Hindsight, Dragonfly
+### D. Docs plane: RAG-backend, Hindsight, Dragonfly
 
 **Endpoints in this deployment** (classified from `/etc/substrate/substrate.env`, values not printed):
-- `RAGFLOW_URL`, `RAGFLOW_MCP_URL` and `HINDSIGHT_URL` are public `https` Railway URLs.
-- `RAGFLOW_MCP_URL` ends in `/mcp`.
+- `RAG-backend_URL`, `RAG-backend_MCP_URL` and `HINDSIGHT_URL` are public `https` Railway URLs.
+- `RAG-backend_MCP_URL` ends in `/mcp`.
 - `DRAGONFLY_URL` is a `redis://` URL on a non-Railway host.
 - `HINDSIGHT_BANK` is set; `HINDSIGHT_BANK_PREFIX` is not.
 - `docs/data-planes.md` lines 14–16 and 69 describe tailnet forwarders and `HINDSIGHT_BANK_PREFIX`, so the doc and the live env disagree. Phase planning must pick one and fix the other.
 
-**RAGFlow HTTP API** ([ragflow.io/docs/http_api_reference](https://ragflow.io/docs/http_api_reference)), all with `Authorization: Bearer <RAGFLOW_API_KEY>` and the `{code, data}` envelope (`code: 0` = success):
+**RAG-backend HTTP API** ([RAG-backend.io/docs/http_api_reference](https://RAG-backend.io/docs/http_api_reference)), all with `Authorization: Bearer <RAG-backend_API_KEY>` and the `{code, data}` envelope (`code: 0` = success):
 
 | Purpose | Call | Notes |
 |---------|------|-------|
@@ -116,12 +116,12 @@ Port sources (inspect read-only in `/root/src/worktrees/agent-substrate-v13`):
 | Parse after upload | `POST /api/v1/datasets/{dataset_id}/chunks` with `{document_ids:[…]}` | Required before anything is searchable `[UNVERIFIED path: confirm against the deployed version's reference]` |
 | Update metadata | `PUT /api/v1/datasets/{dataset_id}/documents/{document_id}` | Attach source URL/commit for citations `[UNVERIFIED field name: meta_fields]` |
 
-**RAGFlow MCP server:** tools `ragflow_retrieval` (args mirror `/api/v1/retrieval`; `dataset_ids` empty = all datasets the key can see; page×page_size ≤ 512), plus `ragflow_list_datasets` and `ragflow_list_chats` on the Go runtime ([ragflow.io/docs/mcp_tools](https://ragflow.io/docs/mcp_tools)).
+**RAG-backend MCP server:** tools `RAG-backend_retrieval` (args mirror `/api/v1/retrieval`; `dataset_ids` empty = all datasets the key can see; page×page_size ≤ 512), plus `RAG-backend_list_datasets` and `RAG-backend_list_chats` on the Go runtime ([RAG-backend.io/docs/mcp_tools](https://RAG-backend.io/docs/mcp_tools)).
 - Python server: port 9382, `/mcp` streamable HTTP (`/sse` legacy).
 - Go runtime: also `/api/v1/mcp` on the API port.
-- Known break: RAGFlow **v0.26.1**'s Python MCP server fails every call because its internal `list_datasets(page_size=1000)` exceeds the REST cap (issue #16369).
-- Recommendation: `docs_search` calls the **HTTP** `/api/v1/retrieval` directly (one fewer hop, no MCP session handshake, works regardless of MCP-server version). Expose `RAGFLOW_MCP_URL` only through the projector's `substrate.yaml` `ragflow` MCP entry for agents that want it directly.
-- The deployed RAGFlow version is `[UNVERIFIED]`. Query it read-only before the docs phase.
+- Known break: RAG-backend **v0.26.1**'s Python MCP server fails every call because its internal `list_datasets(page_size=1000)` exceeds the REST cap (issue #16369).
+- Recommendation: `docs_search` calls the **HTTP** `/api/v1/retrieval` directly (one fewer hop, no MCP session handshake, works regardless of MCP-server version). Expose `RAG-backend_MCP_URL` only through the projector's `substrate.yaml` `RAG-backend` MCP entry for agents that want it directly.
+- The deployed RAG-backend version is `[UNVERIFIED]`. Query it read-only before the docs phase.
 
 **Hindsight REST** ([hindsight.vectorize.io/api-reference](https://hindsight.vectorize.io/api-reference)):
 
@@ -235,7 +235,7 @@ python3 -m pytest packages/dispatcher packages/miner -m "not live"
 | solana-cli + `fetch` JSON-RPC | `@solana/kit` 8.4.0 + `@solana-program/memo` 0.15.0 | Signing must happen where no CLI exists, or many tx/s (CLI spawn ≈ seconds) |
 | RFC 6962 Merkle (`acc30a8:packages/ledger/src/merkle.ts`) | `@openzeppelin/merkle-tree` 1.0.8 | Proofs must verify inside an EVM contract (keccak + ABI encoding) |
 | Bun `RedisClient` | `ioredis` 6.0.0 | Dragonfly behind Cluster/Sentinel, or a Bun `RedisClient` incompatibility found in the smoke test |
-| `fetch` → RAGFlow `/api/v1/retrieval` | RAGFlow MCP `ragflow_retrieval` at `RAGFLOW_MCP_URL` | An agent outside substrate-mcp wants RAGFlow directly (projector `substrate.yaml` entry) |
+| `fetch` → RAG-backend `/api/v1/retrieval` | RAG-backend MCP `RAG-backend_retrieval` at `RAG-backend_MCP_URL` | An agent outside substrate-mcp wants RAG-backend directly (projector `substrate.yaml` entry) |
 | webtop + xdotool/xwd | cua (`cua-sandbox` 0.9.0 + `trycua/cua-ubuntu` 1.81 GB compressed) | After disk is recovered (>40 GB free) and a VLM-driven computer-use agent is actually wanted |
 | Static Agent Card JSON | `@a2a-js/sdk` 1.3.0 | Substrate starts serving A2A `message/send` / task RPCs |
 | System python3 + `PYTHONPATH` | uv-managed venv per package | A Python dependency beyond httpx appears, or the system Python changes |
@@ -254,8 +254,8 @@ python3 -m pytest packages/dispatcher packages/miner -m "not live"
 | `rivet-agentos` / `@rivetkit/agentos` package names | 404 on npm; the build plan's name is a label, not the package | `@rivet-dev/agentos` |
 | Running `packages/host` under Bun | Native `better-sqlite3` + rivetkit expect Node; `engines.node >=22` | `/usr/bin/node src/main.ts` (Node 24) |
 | `@linear/sdk`, `@notionhq/client` | Adds dependency surface for 3–4 GraphQL/REST calls the September code already makes with `fetch`/httpx | `fetch` (TS), `httpx` (Python) |
-| `@vectorize-io/hindsight-client`, `ragflow-sdk` | Two or three endpoints each; `fetch` is already written | `fetch` with `AbortSignal.timeout` fail-open |
-| RAGFlow MCP as the `docs_search` backend | Extra hop + session; v0.26.1 Python MCP server is broken on every call (#16369) | HTTP `/api/v1/retrieval` |
+| `@vectorize-io/hindsight-client`, `RAG-backend-sdk` | Two or three endpoints each; `fetch` is already written | `fetch` with `AbortSignal.timeout` fail-open |
+| RAG-backend MCP as the `docs_search` backend | Extra hop + session; v0.26.1 Python MCP server is broken on every call (#16369) | HTTP `/api/v1/retrieval` |
 | TypeScript 7.x bump, MCP SDK bump, dockerode 5, sandbox-agent 0.5 during ports | Unrelated churn in a port milestone; image rebuild for sandbox-agent | Keep pins; bump in dedicated tasks later |
 | ioredis | Duplicates a Bun built-in; 6.0.0 is a two-day-old major | Bun `RedisClient` |
 | A2A v0.3 card shape (`url`, `preferredTransport`, top-level `protocolVersion`) or `/.well-known/agent.json` | Superseded by v1.0 (`supportedInterfaces[]`, `/.well-known/agent-card.json`) | v1.0 card |
@@ -301,8 +301,8 @@ python3 -m pytest packages/dispatcher packages/miner -m "not live"
 - npm registry (`npm view`, 2026-10-08): @solana/kit 8.4.0, @solana/web3.js 1.99.0, @solana-program/memo 0.15.0, @solana-program/system 0.15.0, @solana/spl-memo 0.3.1, @a2a-js/sdk 1.3.0, ioredis 6.0.0, @rivet-dev/agentos 0.2.22 (+ deps/engines/exports), @rivet-dev/agentos-core 0.2.22, @rivet-dev/agentos-sandbox 0.2.22, @rivet-dev/agentos-sidecar 0.2.22, rivetkit 2.3.25, sandbox-agent 0.5.1, dockerode 5.0.1, @agentos-software/claude-code 0.2.7, @trycua/computer 0.2.1, @trycua/core 0.1.6, @noble/hashes 2.4.0, merkletreejs 0.6.0, @openzeppelin/merkle-tree 1.0.8, @vectorize-io/hindsight-client 0.10.3, @modelcontextprotocol/sdk 1.32.1, zod 4.6.5, typescript 7.0.2; 404 for `rivet-agentos`, `@rivetkit/agentos`.
 - PyPI (`pip index versions`): cua 0.4.1, cua-sandbox 0.9.0, cua-computer 0.5.19, cua-agent 0.9.0, httpx 0.28.1, pytest 9.1.1, a2a-sdk 1.2.2.
 - Docker Hub tags API: trycua/cua-xfce 7.89 GB, trycua/cua-ubuntu 1.81 GB, trycua/cua-linux 0.19 GB, linuxserver/webtop:ubuntu-xfce 1.28 GB (all compressed).
-- [ragflow.io/docs/http_api_reference](https://ragflow.io/docs/http_api_reference): datasets, upload, retrieval (MEDIUM; deployed version unknown).
-- [ragflow.io/docs/mcp_tools](https://ragflow.io/docs/mcp_tools), [ragflow.io/docs/dev/launch_mcp_server](https://ragflow.io/docs/dev/launch_mcp_server), [infiniflow/ragflow#16369](https://github.com/infiniflow/ragflow/issues/16369), [#9114](https://github.com/infiniflow/ragflow/issues/9114).
+- [RAG-backend.io/docs/http_api_reference](https://RAG-backend.io/docs/http_api_reference): datasets, upload, retrieval (MEDIUM; deployed version unknown).
+- [RAG-backend.io/docs/mcp_tools](https://RAG-backend.io/docs/mcp_tools), [RAG-backend.io/docs/dev/launch_mcp_server](https://RAG-backend.io/docs/dev/launch_mcp_server), [infiniflow/RAG-backend#16369](https://github.com/infiniflow/RAG-backend/issues/16369), [#9114](https://github.com/infiniflow/RAG-backend/issues/9114).
 - [hindsight.vectorize.io/api-reference](https://hindsight.vectorize.io/api-reference), [vectorize-io/hindsight#4696](https://github.com/vectorize-io/hindsight/issues/4696).
 - [bun.com/docs/runtime/redis](https://bun.com/docs/runtime/redis), [bun.sh/blog/bun-v1.2.9](https://bun.sh/blog/bun-v1.2.9).
 - [a2a-protocol.org/latest/specification](https://a2a-protocol.org/latest/specification/), [A2A v1.0 announcement](https://a2a-protocol.org/latest/blog/2026/03/12/a2a-protocol-ships-v10-production-ready-standard-for-agent-to-agent-communication/), [a2aproject/A2A releases](https://github.com/a2aproject/A2A/releases).

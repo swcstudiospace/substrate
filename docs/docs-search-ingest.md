@@ -6,7 +6,7 @@ substrate only. There is exactly one door: `substrate-mcp`
 appears in any agent config, and no package outside `mcp-server` imports
 the client — `store-lock.test.ts` fails the build on either.
 
-LightRAG replaced RAGFlow; there is no fallback that calls the retired plane.
+LightRAG replaced RAG-backend; there is no fallback that calls the retired plane.
 
 ## Reference
 

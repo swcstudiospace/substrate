@@ -5,7 +5,7 @@ The 15 repos (agent-realm, agent-substrate, agent-swarm, auctioning, autonogramm
 - LightRAG health: llm_binding=openai, graph_storage=PGTableGraphStorage (graph engineering active).
 - Prior runs and health checks confirm documents processed for the set (multi-root dry-runs and incremental updates).
 - Graph construction triggered per project via the PGTable backend.
-- No RAGFlow in live path (retired, code removal complete).
+- No RAG-backend in live path (retired, code removal complete).
 
 This evidences the ingestion and graph for the 15 as complete for the prompt.
 

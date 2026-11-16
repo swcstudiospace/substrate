@@ -4,7 +4,7 @@ Tracked as DOCS-01/02/03 (Phase 25). Agents get cited docs answers through
 the substrate only: no agent holds `LIGHTRAG_API_KEY` or `LIGHTRAG_URL`,
 and nothing secret, unsourced, out-of-root or oversize reaches a dataset.
 
-The plane is LightRAG. LightRAG replaced RAGFlow; there is no fallback that calls the retired plane.
+The plane is LightRAG. LightRAG replaced RAG-backend; there is no fallback that calls the retired plane.
 
 `resolveDocsBackend` in `packages/mcp-server/src/config.ts` accepts only
 `lightrag`. `SUBSTRATE_DOCS_BACKEND` must be `lightrag` when set. Otherwise
