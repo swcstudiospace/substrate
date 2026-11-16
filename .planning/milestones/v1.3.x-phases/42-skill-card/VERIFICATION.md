@@ -10,7 +10,7 @@ covered_digest: "v3:sha256:963d69a5003849e2973bfc3bc5e8d6078739e3d3308d9c4f13c32
 human_verification:
   - test: "Live fast-forward proof: install the substrate-skills-sync unit, set SUBSTRATE_AGENT_SKILLS_ROOT to the absolute agent-skills checkout path, fast-forward the checkout, let the trigger run, then docs_search for a term that exists only in the new skill version"
     expected: "docs_search returns that document from the new agent-skills version recorded by POST /docs/merge-trigger"
-    why_human: "Requires the operator-gated RAGFlow/LightRAG agent-skills dataset, host keys and a host fast-forward; not runnable in the repo (fake RAGFlow only)"
+    why_human: "Requires the operator-gated RAGFlow (retired)/LightRAG agent-skills dataset, host keys and a host fast-forward; not runnable in the repo (fake RAGFlow (retired) only)"
 ---
 
 # Phase 42: SKILL-CARD Verification Report
@@ -27,7 +27,7 @@ human_verification:
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
 | 1 | `skills_list` and an approve/decline audit trail exist (ROADMAP criterion 1, F-D3) | ✓ VERIFIED | Tools: `packages/mcp-server/src/mcp.ts:2066` (`skills_approve`), `mcp.ts:2102` (`skills_list`). REST audit: `server.ts:2169` (approve audited before decision), `server.ts:2193` (list audited). Service: `service.ts:4834` (`skill.approve.refused`), `service.ts:4858` (`approveSkill`), `service.ts:4968` (`listSkills`). Behavioral: `skills-approve.test.ts` runs in the 283-pass batch (see Behavioral Spot-Checks), including "an operator approves and lists; the list tool is read-only, the approve tool is not" (`skills-approve.test.ts:982`). No change made in this phase. |
-| 2 | Skills become searchable through `docs_search` after each `agent-skills` fast-forward re-ingest (ROADMAP criterion 2, F-D4) | ✓ VERIFIED (in-repo, fake RAGFlow) | Trigger route `server.ts:2047`; per-dataset source `server.ts:405-419` (`agent-skills` reads `config.agentSkillsRoot` via `readSkillsCheckoutPages` and `checkoutHead`); unset is a noop `server.ts:2102-2109` (`no-configured-ingest-root`). Config: `config.ts:1511-1515` (`agentSkillsRootFromEnv`, absolute only). Commit fail-closed: `service.ts:6980-6981` (`commit-mismatch`, `checkout-unreadable`). Behavioral: `docs-search.test.ts:1198` "docs_search answers from the new agent-skills version after the refresh" — PASS (named run). `server.test.ts` agent-skills trigger tests (ingest+record, commit-mismatch, unset noop, checkout-unreadable) — 4 PASS. Live fast-forward against the real docs plane is NOT run (see Human Verification). |
+| 2 | Skills become searchable through `docs_search` after each `agent-skills` fast-forward re-ingest (ROADMAP criterion 2, F-D4) | ✓ VERIFIED (in-repo, fake RAGFlow (retired)) | Trigger route `server.ts:2047`; per-dataset source `server.ts:405-419` (`agent-skills` reads `config.agentSkillsRoot` via `readSkillsCheckoutPages` and `checkoutHead`); unset is a noop `server.ts:2102-2109` (`no-configured-ingest-root`). Config: `config.ts:1511-1515` (`agentSkillsRootFromEnv`, absolute only). Commit fail-closed: `service.ts:6980-6981` (`commit-mismatch`, `checkout-unreadable`). Behavioral: `docs-search.test.ts:1198` "docs_search answers from the new agent-skills version after the refresh" — PASS (named run). `server.test.ts` agent-skills trigger tests (ingest+record, commit-mismatch, unset noop, checkout-unreadable) — 4 PASS. Live fast-forward against the real docs plane is NOT run (see Human Verification). |
 
 **Score:** 2/2 truths verified in-repo (0 behavior-unverified; live proof human_needed)
 
@@ -66,7 +66,7 @@ None (initial verification).
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 | -------- | ------------- | ------ | ------------------ | ------ |
 | `readSkillsCheckoutPages` | skill pages | checkout `SKILL.md` + `references/` on disk | Yes (real git checkout in test) | ✓ FLOWING |
-| `docs_search` | results | dataset version from fake RAGFlow | Yes (fake plane, in-repo test) | ✓ FLOWING (fake plane) |
+| `docs_search` | results | dataset version from fake RAGFlow (retired) | Yes (fake plane, in-repo test) | ✓ FLOWING (fake plane) |
 
 ### Behavioral Spot-Checks
 
@@ -112,7 +112,7 @@ No orphaned requirements: REQUIREMENTS.md maps only F-D3 and F-D4 to Phase 42.
 
 **Test:** Install the `substrate-skills-sync` unit (example only: `infra/vps/substrate-skills-sync.service.d/30-sandbox.conf.example`), set `SUBSTRATE_AGENT_SKILLS_ROOT` to the absolute agent-skills checkout, fast-forward the checkout, let the trigger run, then `docs_search` for a term that exists only in the new skill version.
 **Expected:** The result comes from the new agent-skills version recorded by `POST /docs/merge-trigger`.
-**Why human:** Needs the operator-gated RAGFlow/LightRAG `agent-skills` dataset, its keys and a host fast-forward. Not run.
+**Why human:** Needs the operator-gated RAGFlow (retired)/LightRAG `agent-skills` dataset, its keys and a host fast-forward. Not run.
 
 ### Gaps Summary
 

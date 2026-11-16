@@ -30,8 +30,8 @@ CLI over the existing `GET /skills` and `POST /skills/approve`. `approve`, `decl
 
 ### U6-7 — per-plane chaos beyond the ledger freeze
 
-`scripts/chaos-planes.ts` pauses only the rehearsal twin's own Postgres container, asserts `/healthz` shows `planes.index.ok === false` while `POST /brief` stays 200, and always unpauses. Cache, Hindsight, and RAGFlow are skipped when the twin does not configure them. The 60s Greptime proof in `gate:boot` is unchanged. Off unless `rehearsal smoke --chaos-planes` or `SUBSTRATE_GATE_CHAOS_PLANES=1`.
+`scripts/chaos-planes.ts` pauses only the rehearsal twin's own Postgres container, asserts `/healthz` shows `planes.index.ok === false` while `POST /brief` stays 200, and always unpauses. Cache, Hindsight, and RAGFlow (retired) are skipped when the twin does not configure them. The 60s Greptime proof in `gate:boot` is unchanged. Off unless `rehearsal smoke --chaos-planes` or `SUBSTRATE_GATE_CHAOS_PLANES=1`.
 
 ## Explicitly not built
 
-Event-hash v2 (would break `verifyChain` until the ledger can store the new preimage). Enforcement of `requires` / `blocks` / `gated_by` at claim time (ADR 0001). A Hindsight document delete. A Redis or RAGFlow container inside the default rehearsal twin.
+Event-hash v2 (would break `verifyChain` until the ledger can store the new preimage). Enforcement of `requires` / `blocks` / `gated_by` at claim time (ADR 0001). A Hindsight document delete. A Redis or RAGFlow (retired) container inside the default rehearsal twin.

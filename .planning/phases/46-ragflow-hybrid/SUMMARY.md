@@ -1,4 +1,4 @@
-# Phase 46 (ragflow-hybrid) summary
+# Phase 46 (ragflow (retired)-hybrid) summary
 
 Plan: `46-PLAN.md`. Branch: `reconcile/main-2026-11-11`. Date: 2026-11-12 (UTC).
 
@@ -40,7 +40,7 @@ Not run: `bunx tsc --noEmit` and the full `bun test` (not required for the offli
 
 ## Changed files
 
-- `.planning/phases/46-ragflow-hybrid/SUMMARY.md` (new)
+- `.planning/phases/46-ragflow (retired)-hybrid/SUMMARY.md` (new)
 
 No other files were edited. `STATE.md` and `VERIFICATION.md` were not touched. No commits, pushes or staging.
 
@@ -49,8 +49,8 @@ No other files were edited. `STATE.md` and `VERIFICATION.md` were not touched. N
 - D1 archive path: (a) volume-level archive, (b) attestation, or (c) keep as debt and retire `docs-archive.ts`. Plan default is (c).
 - D2 parity source: LightRAG records (default) or waive as not applicable to the empty source.
 - D3 sample and threshold: 10 queries at 100 percent (default) or 20 at 0.85.
-- D4 reversibility: accept that RAGFlow reversal is impossible (default), which the cutover record does not yet state as decided.
+- D4 reversibility: accept that RAGFlow (retired) reversal is impossible (default), which the cutover record does not yet state as decided.
 - D5 hybrid in production: stay naive until an LLM route exists (default).
-- D6 RAG-dependent gate and removal: waive or re-scope phases 25, 40, 42; exclude 34; approve removing `ragflow` from FABRIC_RESOURCES as a phase 51 contract change; keep the folder name or rename.
+- D6 RAG-dependent gate and removal: waive or re-scope phases 25, 40, 42; exclude 34; approve removing `ragflow (retired)` from FABRIC_RESOURCES as a phase 51 contract change; keep the folder name or rename.
 - Approval for each live checkpoint C1 to C7, recorded in STATE.md before it runs.
 - Whether the plan's commit-per-task rule still applies. This run did not commit.

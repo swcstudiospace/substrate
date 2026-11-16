@@ -99,7 +99,7 @@ The ROADMAP criteria are met, but the code differs from `PLAN.md`/`CONTEXT.md` p
 - Tool name `fabric_optimize` (`mcp.ts:2316`), not the PLAN's `fabric_suggest`. The roadmap's wording ("optimization suggestions") fits either.
 - Nine resources, not six. Later phases added `tei` (phase 64) and `corpus` (phase 70); Railway feeds suggestions and is not a row. `tailscale-proxy` is a row.
 - States are `ok, degraded, unavailable, unconfigured` (no `unknown`). Compliance verdicts are `PASS, FAIL, NOT_APPLICABLE`.
-- CONTEXT D51-b said "no new probe". The fabric still issues live read probes (ping, dialect and append-mode reads, Hindsight and RAGFlow GETs). They are reads, not writes.
+- CONTEXT D51-b said "no new probe". The fabric still issues live read probes (ping, dialect and append-mode reads, Hindsight and RAGFlow (retired) GETs). They are reads, not writes.
 - The PLAN's `service.ts` scope grew beyond one `fabricSources()` method. This is the `/healthz` path (`service.ts:8581-8790` area).
 
 ## Human Verification Required

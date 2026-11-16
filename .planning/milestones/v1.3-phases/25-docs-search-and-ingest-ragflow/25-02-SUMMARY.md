@@ -1,8 +1,8 @@
 ---
-phase: 25-docs-search-and-ingest-ragflow
+phase: 25-docs-search-and-ingest-ragflow (retired)
 plan: "02"
 subsystem: docs-ingest
-tags: [ragflow, docs-ingest, redaction-gates, store-lock, cli]
+tags: [ragflow (retired), docs-ingest, redaction-gates, store-lock, cli]
 requires: [25-01]
 provides: [fail-closed-ingest, ingest-cli, substrate-only-door-lock]
 affects: [25-03-datasets]
@@ -16,8 +16,8 @@ key-files:
     - packages/cli/src/docs.ts
     - packages/cli/src/docs.test.ts
   modified:
-    - packages/mcp-server/src/planes/ragflow.ts
-    - packages/mcp-server/src/ragflow-fake.ts
+    - packages/mcp-server/src/planes/ragflow (retired).ts
+    - packages/mcp-server/src/ragflow (retired)-fake.ts
     - packages/mcp-server/src/service.ts
     - packages/mcp-server/src/mcp.ts
     - packages/mcp-server/src/server.ts
@@ -29,7 +29,7 @@ key-files:
     - packages/cli/src/index.ts
 decisions:
   - "VM-guest refusal is an environment signal (SUBSTRATE_VM_GUEST=1): no guest concept existed in the tree; server refuses via config.vmGuest, CLI refuses pre-post"
-  - "RAGFLOW credential store-lock scoped to non-test files: the service/MCP/REST proofs legitimately pass RAGFLOW_URL into loadConfig with reserved example hosts"
+  - "RAGFLOW (retired) credential store-lock scoped to non-test files: the service/MCP/REST proofs legitimately pass RAGFLOW (retired)_URL into loadConfig with reserved example hosts"
   - "CLI cap pin is text-based: importing the engine module from packages/cli would itself break the substrate-only door"
 metrics:
   duration: "~90 min across two sessions"
@@ -49,7 +49,7 @@ DOCS-02 publication path: gated redacting idempotent ingest over MCP plus REST p
 
 | # | Name | Commit | Files |
 |---|------|--------|-------|
-| 1 | Build docs_ingest gates plus hash idempotency against the fake | b3bcaf6 | docs-ingest.ts, docs-ingest.test.ts, planes/ragflow.ts (upload/poll), ragflow-fake.ts (upload/parse) |
+| 1 | Build docs_ingest gates plus hash idempotency against the fake | b3bcaf6 | docs-ingest.ts, docs-ingest.test.ts, planes/ragflow (retired).ts (upload/poll), ragflow (retired)-fake.ts (upload/parse) |
 | 2 | Register MCP tool plus REST route plus CLI with fail-closed audit | 295e40e | mcp.ts, server.ts, observe.ts, config.ts, service.ts, cli/docs.ts, cli/docs.test.ts, cli/index.ts |
 | 3 | Extend the store lock for the substrate-only door | f372925 | store-lock.test.ts |
 | — | Ingest transport proofs (MCP + REST) | 23eeee0 | docs-ingest.test.ts, server.test.ts |
@@ -58,7 +58,7 @@ DOCS-02 publication path: gated redacting idempotent ingest over MCP plus REST p
 
 - docs_ingest (MCP, POST /docs/ingest, substrate docs ingest) redacts before upload, strips remote images and is idempotent by content hash: TRUE (findingRules over REDACTION_RULES + skill scan pre-upload; strip counts; source_url-keyed sha records skip/replace)
 - Refuses a page without a source URL, outside the configured roots or over the size caps, and any unauthenticated caller or VM guest: TRUE (all six proven; refusals carry rule names + hashes only, refused values never logged)
-- No RAGFlow MCP exists in any agent config and no package outside mcp-server imports the client: TRUE (store-lock: config scan, import scan, credential scan — 23/23 green)
+- No RAGFlow (retired) MCP exists in any agent config and no package outside mcp-server imports the client: TRUE (store-lock: config scan, import scan, credential scan — 23/23 green)
 
 ## Deviations from Plan
 

@@ -2,7 +2,7 @@
 
 ## Where keys live
 
-RAGFlow credentials live only in the server env file and are referenced
+RAGFlow (retired) credentials live only in the server env file and are referenced
 by name. No command in the documentation prints a credential value.
 
 ## What the redactor does

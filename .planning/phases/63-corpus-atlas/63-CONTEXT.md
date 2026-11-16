@@ -21,4 +21,4 @@ Discover, classify, de-duplicate and record the documentation of every repositor
 - `packages/audit/src/policy.ts` (fail-open and fail-closed lists), `packages/mcp-server/src/admission.ts` (tool classes), `packages/mcp-server/src/index-store.ts:350` (`MIGRATION_STEPS`, latest is 34)
 
 ## Deferred
-Graph-mode entity extraction (needs an LLM route), one LightRAG workspace per repository, deleting the legacy RAGFlow code.
+Graph-mode entity extraction (needs an LLM route), one LightRAG workspace per repository, deleting the legacy RAGFlow (retired) code.

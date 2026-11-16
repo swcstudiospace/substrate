@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Docs migration CLI. LightRAG replaced RAGFlow; the job lives in `packages/mcp-server/src/docs-migrate.ts`.
+ * Docs migration CLI. LightRAG replaced RAGFlow (retired); the job lives in `packages/mcp-server/src/docs-migrate.ts`.
  * Usage and exit codes are documented there. This file only runs it.
  *
  */

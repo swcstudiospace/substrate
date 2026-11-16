@@ -22,7 +22,7 @@ One PR on agent-substrate (DOCS-04, DOCS-05, DOCS-06, DOCS-07). Gate-accepted me
 **Out of scope:**
 - Per-surface counters and the 24 h idempotency mirror as new cache keys (`docs/data-planes.md` names both a target, not a current key — this phase holds that line and does not build them).
 - Any new `EVENT_KINDS` or `SURFACES` entry (Phase 17 lock); any Hindsight MCP server in any agent config (store-lock rule D9).
-- RAGFlow retrieval/ingest (Phase 25 owns `planes/ragflow.ts`); the skills-sync LIVE cutover (Phase 22's deferred gate — recall serves pinned/index answers until then, no special degradation arm needed here).
+- RAGFlow (retired) retrieval/ingest (Phase 25 owns `planes/ragflow (retired).ts`); the skills-sync LIVE cutover (Phase 22's deferred gate — recall serves pinned/index answers until then, no special degradation arm needed here).
 - Hindsight 0.10.x (recall hang `vectorize-io/hindsight#4696` — the client keeps the fail-open timeout and the G1 probe records the deployed version; never assume it).
 - Production credential values (Phase 20 provisioned names; this phase reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` from the server env file only). Agents never prune the on-disk 5.91 GB `hindsight-api:0.9.1` image (operator decision D25).
 
@@ -31,7 +31,7 @@ One PR on agent-substrate (DOCS-04, DOCS-05, DOCS-06, DOCS-07). Gate-accepted me
 - Phase 17: `event-sources.ts` memory rows, `docs/event-vocabulary.md`, `policy.ts` `memory_recall` entry, `observe.ts` registration points.
 - Phase 18: `redact.ts` full engine, `redact-lock.test.ts`, store-lock rules.
 - Phase 20: `infra/identity/clients.json`, `packages/cli/src/token.ts` resolver, `docs/runbooks/production-identity.md` agent-query rules.
-- Phase 25: `planes/ragflow.ts` as the planes-module pattern to mirror (env trim + trailing-slash strip, bearer carriage, recording fake, four-point registration).
+- Phase 25: `planes/ragflow (retired).ts` as the planes-module pattern to mirror (env trim + trailing-slash strip, bearer carriage, recording fake, four-point registration).
 </domain>
 
 <decisions>
@@ -40,12 +40,12 @@ One PR on agent-substrate (DOCS-04, DOCS-05, DOCS-06, DOCS-07). Gate-accepted me
 ### Reach and credentials (the substrate-second-door)
 - **D26-01: The substrate reads Hindsight through `planes/hindsight.ts`; no Hindsight MCP in any agent config.**
   - Source: operator decision 2026-10-08 ("the data planes are reached only through the substrate") + Phase 18 store-lock D9 + research SUMMARY D9 (substrate-only; no plane MCP in agent configs).
-  - `packages/mcp-server/src/planes/hindsight.ts` is the single substrate-side client. A store-lock test fails when any agent config registers a Hindsight MCP server, and when any package outside `mcp-server` imports the Hindsight client (mirrors the D25-01 ragflow pin; PITFALLS already names the `ragflow|hindsight` extension).
+  - `packages/mcp-server/src/planes/hindsight.ts` is the single substrate-side client. A store-lock test fails when any agent config registers a Hindsight MCP server, and when any package outside `mcp-server` imports the Hindsight client (mirrors the D25-01 ragflow (retired) pin; PITFALLS already names the `ragflow (retired)|hindsight` extension).
   - Grey area (desk gateway's direct reads) auto-accepted: the gateway keeps its own keys for its own paths per `docs/data-planes.md` "Current wiring" and `docs/grok-bot.md`; agent-facing recall/retain through the substrate does not change gateway code. This answers D9's "Yes — Grok Bot gateway route" user-visible flag with: route unchanged, reader added.
 - **D26-02: Plane credentials live only in `/etc/substrate/substrate.env`; `substrate-mcp` reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` starting this phase.**
   - Source: `docs/data-planes.md` "Environment keys" + DOCS-06 (credentials live only in `substrate.env`) + host fact (`HINDSIGHT_URL`, `HINDSIGHT_API_KEY` present in the server env file, documented unused-by-substrate).
   - Only `planes/hindsight.ts` names those variables (store-lock: no `HINDSIGHT_*` string outside `mcp-server`). A comment at the read site records that the gateway holds its own copies for its own paths.
-  - This changes the `docs/data-planes.md` "Current wiring" Hindsight row from "not read by `substrate-mcp`" to "read by `substrate-mcp` `planes/hindsight.ts`; gateway keeps its own keys for its own paths"; the doc hunk ships in plan 26-03 (D25-02 precedent). Grey area (whether to keep the `.env.example` "unused" note) auto-accepted: update the note to name the new reader, same as D25-02 did for RAGFlow.
+  - This changes the `docs/data-planes.md` "Current wiring" Hindsight row from "not read by `substrate-mcp`" to "read by `substrate-mcp` `planes/hindsight.ts`; gateway keeps its own keys for its own paths"; the doc hunk ships in plan 26-03 (D25-02 precedent). Grey area (whether to keep the `.env.example` "unused" note) auto-accepted: update the note to name the new reader, same as D25-02 did for RAGFlow (retired).
 
 ### Bank strategy (D8 settled: per-surface prefix)
 - **D26-03: Retain into the writer's `sub-<surface>` bank; recall as a bounded, cached fan-out over the `sub-*` banks.**
@@ -91,7 +91,7 @@ One PR on agent-substrate (DOCS-04, DOCS-05, DOCS-06, DOCS-07). Gate-accepted me
 - `claude-ultrathink:src/hindsight/{client,types}.ts` — the tested-against-0.9.1 surface this phase ports from: bank URL shape, `GET /health` + `GET /version` (unauthenticated), `GET {bank}/config` → 404-create-then-`PATCH retain_extraction_mode: "chunks"`, retain `{items: [{content, context, tags, metadata, document_id, timestamp, update_mode: "replace"}], async: false}` → `{success, items_count}`, recall `{query, types, budget, max_tokens, tags, tags_match, tag_groups}` → `{results[]}`, document GET/DELETE/PATCH, `Result` returns (never reject), FastAPI-array-`detail` never shown. Plus `client.test.ts` (498 lines): routed-`fetch` fake banks server, unrouted → 500, per-call bearer assertions — the fixture pattern plan 26-01 mirrors.
 - `claude-ultrathink:.planning/research/hindsight-0.9.1-openapi.json` — the spec to check the port against when the G1 probe returns the deployed version.
 - `packages/mcp-server/src/cache.ts` — the shipped cache taken as-is (coverage, `COMMAND_TIMEOUT_MS=800`, healthz, generations); plan 26-03 extends it, never rewrites it.
-- `packages/mcp-server/src/planes/ragflow.ts` (Phase 25) — the planes-module pattern to mirror: env trim + trailing-slash strip, bearer carriage, recording fake, four-point registration, `.env.example` + data-planes wiring-row doc hunks.
+- `packages/mcp-server/src/planes/ragflow (retired).ts` (Phase 25) — the planes-module pattern to mirror: env trim + trailing-slash strip, bearer carriage, recording fake, four-point registration, `.env.example` + data-planes wiring-row doc hunks.
 - `docs/data-planes.md` — Hindsight-banks table, "Current wiring" Hindsight row (changed by D26-02), cache table + fail-open budget, forwarder table for the runbook.
 - `docs/grok-bot.md` — the gateway-is-the-Hindsight-client route this phase leaves unchanged (D26-01 grey area).
 - `docs/railway-tailscale.md` — the forwarder-hop source for the plan-26-03 runbook.

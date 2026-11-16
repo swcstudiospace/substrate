@@ -15,7 +15,7 @@
   warnings on surface `substrate` with rule-name-only payloads. Production-port/path grep
   gate clean; scratch removed in `finally`; twin torn down with containers removed.
 - `docs/skills-sync-bridge-miners.md`: hygiene section (gated cache cleanup + ignore rule
-  via owner PR + Phase 25 RAGFlow hook note) and the SKILL-07 live tail (real PR, owner
+  via owner PR + Phase 25 RAGFlow (retired) hook note) and the SKILL-07 live tail (real PR, owner
   merge + first tick, restarts + cron rebind, key deletion) — 9 OPERATOR-GATED markers,
   each with proof read and rollback. `docs/rehearsal.md` smoke list updated.
 - `22-VALIDATION.md`: every SKILL-02..05/07 clause mapped to a real plan task or a named gate.

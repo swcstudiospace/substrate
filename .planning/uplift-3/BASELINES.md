@@ -8,7 +8,7 @@ Live release: `9231f43` (tag `release-20261013-9231f43`, uplift-2 + its deploy f
 |---|---|---|
 | `brief.p95` | **700 ms** vs 800 target (n 10, `insufficient-data` until 20) — was 3,115 ms on the pre-uplift-2 release | `/slo` |
 | `emit.success` | 1.0 (n 7) | `/slo` |
-| plane availability (rolling hour) | greptime 1.0 (n 16), index 1.0 (n 4), cache 1.0 (n 5), hindsight 1.0 (n 1), ragflow 1.0 (n 1) | `/slo.planes` |
+| plane availability (rolling hour) | greptime 1.0 (n 16), index 1.0 (n 4), cache 1.0 (n 5), hindsight 1.0 (n 1), ragflow (retired) 1.0 (n 1) | `/slo.planes` |
 | breakers | all five `closed`; one `plane.errors{plane=index}` since start | `/healthz.planes`, `/metrics` |
 | cache | enabled, connected, hits 8 · misses 2 (first complete briefs were cached and served at 3 ms) | `/healthz.cache` |
 | `/healthz` | 704 ms cold, 1 ms from the 5 s memo | curl |
@@ -27,7 +27,7 @@ Live release: `9231f43` (tag `release-20261013-9231f43`, uplift-2 + its deploy f
 | GreptimeDB (ledger) | `ledger.writable: true`, write probe ok; `substrate-anchor.timer` **not installed** → BP-7 hourly Merkle anchoring is not scheduled on this host; `SUBSTRATE_LEDGER_TTL` unset; export is a manual runbook (`docs/greptime-ledger.md:605-624`) | `/healthz.ledger`, `systemctl list-timers` |
 | loopback redis (cache) | `used_memory` 1.07 MiB; **`maxmemory 0`, policy `noeviction`, RDB `save 3600 1 300 100 60 10000` still on, `appendonly no`, unit `MemoryMax=infinity`** — the R7 redis drop-in and conf are not installed (rollout debt, HANDOFF step 3) | `redis-cli info memory`, `config get save`, `systemctl show redis-server` |
 | Hindsight (recall) | boot warning `HINDSIGHT_BANK is set but legacy and unread; recall fans out over HINDSIGHT_BANKS`; retain outbox file absent (nothing parked yet); no outbox/backlog gauge exported | journal, `stat /var/lib/substrate/retain-outbox.jsonl` |
-| RAGFlow (docs) | no docs_search in this process; per-dataset retrieval runs **sequentially**, each under its own 4 s timeout (`docs-search.ts:146-174`, `planes/ragflow.ts:223-247`) | code |
+| RAGFlow (retired) (docs) | no docs_search in this process; per-dataset retrieval runs **sequentially**, each under its own 4 s timeout (`docs-search.ts:146-174`, `planes/ragflow (retired).ts:223-247`) | code |
 
 ## VPS
 

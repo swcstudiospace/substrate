@@ -7,7 +7,7 @@ here prints a credential value — the bearer travels in a header read from
 the server env file, and probes report status plus redacted shape only
 (`docs/runbooks/production-identity.md` agent-query rules).
 
-The docs plane is LightRAG. LightRAG replaced RAGFlow; there is no fallback that calls the retired plane.
+The docs plane is LightRAG. LightRAG replaced RAGFlow (retired); there is no fallback that calls the retired plane.
 
 All commands assume the operator shell has the server env loaded without
 echoing it:

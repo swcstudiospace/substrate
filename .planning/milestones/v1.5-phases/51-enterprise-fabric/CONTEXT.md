@@ -24,7 +24,7 @@ The six resources are the five services in `docs/data-planes.md` ("The five serv
 | `postgres` | index / coordination | `health().index` | `dbEndpoints` class for the postgres plane |
 | `dragonfly` | cache and pub/sub hints | `health().cache`, `health().eventBus` | `dbEndpoints` class for the dragonfly plane |
 | `hindsight` | memory / recall | `health().planes.hindsight`, `hindsightInventoryHealth()` | not applicable (HTTP plane, no endpoint policy) |
-| `ragflow` | documents | `health().planes.ragflow` | not applicable (HTTP plane, no endpoint policy) |
+| `ragflow (retired)` | documents | `health().planes.ragflow (retired)` | not applicable (HTTP plane, no endpoint policy) |
 
 Tailscale is the network dimension: the endpoint class (`loopback`, `proxy`, `direct`, `unset`) from phase 48 is reported for the three database planes. No separate Tailscale probe exists or is added.
 

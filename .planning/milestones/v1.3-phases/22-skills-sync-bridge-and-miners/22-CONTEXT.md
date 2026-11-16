@@ -23,7 +23,7 @@ One PR on agent-substrate (SKILL-02, SKILL-03, SKILL-04, SKILL-05, SKILL-07). Mi
 - Any change to `skills/propose.ts`, `frontmatter.ts`, the route, tool or CLI (Phase 21 owns them; this phase only calls them).
 - Any new `EVENT_KINDS` or `SURFACES` entry (Phase 17 lock).
 - New redaction rules (Phase 18 owns `redact.ts`).
-- The docs plane RAGFlow `agent-skills` dataset refresh trigger (Phase 25 consumes the sync fast-forward; this phase only documents the hook point).
+- The docs plane RAGFlow (retired) `agent-skills` dataset refresh trigger (Phase 25 consumes the sync fast-forward; this phase only documents the hook point).
 - A per-surface proposal allowlist or rate limit (deferred in Phase 21).
 - Removing `/var/lib/substrate/skills/propose.key` from the host (done here as D22-01 cutover cleanup, operator-gated: the file is deleted only after the bridge cutover is proven).
 - Production token values (Phase 20 provisioned them by name; this phase only reads the token files).
@@ -135,7 +135,7 @@ One PR on agent-substrate (SKILL-02, SKILL-03, SKILL-04, SKILL-05, SKILL-07). Mi
 - A per-surface proposal allowlist or rate limit if the owner's review queue gets noisy (deferred in Phase 21; unchanged here).
 - Skill exports over 1 MB (deferred in Phase 21; queues hold oversize bodies for the owner rather than splitting them).
 - Mirror bootstrap as a command (`substrate skills init`): the host mirror exists; a fresh host still follows September's 04-02 bootstrap by hand.
-- RAGFlow `agent-skills` dataset auto-refresh on sync fast-forward (Phase 25's trigger; this phase only documents the hook point where the sync tick would call it).
+- RAGFlow (retired) `agent-skills` dataset auto-refresh on sync fast-forward (Phase 25's trigger; this phase only documents the hook point where the sync tick would call it).
 - Library-in-VM mounts (September 04-06 D-08): not a v1.3 requirement; not re-planned here.
 </deferred>
 

@@ -19,7 +19,7 @@ Each item has exactly one disposition, decided under the uplift's routing rules 
 | ID | Source | Item | Disposition | Target |
 |----|--------|------|-------------|--------|
 | D-01 | v1.0 audit, tech_debt | Full live cross-surface handoff proof | DEFERRED, operator-gated, accepted as debt | v1.0 debt |
-| D-02 | v1.0 audit, tech_debt | Railway apps (hindsight, ragflow, dragonfly) wiring | ADOPTED into phase 46 (migration) | phase 46 |
+| D-02 | v1.0 audit, tech_debt | Railway apps (hindsight, ragflow (retired), dragonfly) wiring | ADOPTED into phase 46 (migration) | phase 46 |
 | D-03 | v1.0 audit, tech_debt | Solana mainnet for anchors | DEFERRED, human-only | none |
 | D-04 | v1.0 audit, tech_debt | Nyquist validation not run | DEFERRED, orphan | none |
 | D-05 | v1.1 audit, deferred | ADR 0001 S2, S4, S5 | DEFERRED, orphan | none |
@@ -32,7 +32,7 @@ Each item has exactly one disposition, decided under the uplift's routing rules 
 | D-12 | phase 16 review, IN-05 | unused or dead params and properties | DONE: `noUnusedLocals` and `noUnusedParameters` are on (PR #155) and the dead inputs the compiler cannot see (`refusePort`'s always-empty list, the unread watched ports and systemd properties) are gone (PR #170) | quality program |
 | D-13 | phase 16 review, IN-06 | refuseCheckoutDir exact string comparison | DONE: compares canonical paths (`path.resolve` plus `realpath` of the longest existing prefix); subdirectories of the protected checkout are still not refused (PR #170) | quality program |
 | D-14 | PR #112 residual | docs_search and docs_lightrag_query disagree on degraded semantics | DONE: both answer `degraded: true` with the fallback and the reason (`2c821769`, via #126; `docs/docs-plane.md`) | phase 46 |
-| D-15 | PR #112 residual | SearchDeps.hindsight never wired on the RAGFlow path | ADOPTED into phase 46; closes when the RAGFlow path is removed | phase 46 |
+| D-15 | PR #112 residual | SearchDeps.hindsight never wired on the RAGFlow (retired) path | ADOPTED into phase 46; closes when the RAGFlow (retired) path is removed | phase 46 |
 | D-16 | PR #112 residual | phase-close ledger-scan timeout is load-sensitive | DONE: measured 2026-10-29 (load average 19 to 28: two store-lock scans failed at 5065 and 5005 ms, Bun's 5-second default, with no assertion failing; all 204 lock tests pass with a longer timeout). The scans are memoised per pattern and per file and carry an explicit 60-second timeout (PR #172); two runs of `bun run check:phase-close` then took 5.7 and 6.3 s | quality program |
 | D-17 | quality baseline | noUnusedLocals and noUnusedParameters not enabled | DONE: enabled in `tsconfig.json` (PR #155) | quality program |
 | D-18 | quality baseline | 34 explicit any | DONE: 0 real explicit `any` (the 34 regex hits are 30 fixtures in `code-ratchet.test.ts` and 4 prose); `biome.json` has `noExplicitAny: error`, ratchet baseline 0 | quality program |
@@ -45,7 +45,7 @@ Each item has exactly one disposition, decided under the uplift's routing rules 
 ## Status at the end of Run 13 (2026-10-29)
 
 - **Closed, with evidence in the rows above:** D-06, D-09 to D-14, D-16 to D-21. Real TODO or FIXME markers in source remain 0 (re-scanned in Run 13).
-- **Open, operator-gated:** D-01 (live cross-surface handoff proof), D-02 (Railway apps wiring), D-07 (Phase 0 UAT scenarios, to be checked against phase 20 evidence), D-08 (21 held compound live criteria), D-15 (closes when the RAGFlow code is removed) and D-03 (mainnet anchors, human-only).
+- **Open, operator-gated:** D-01 (live cross-surface handoff proof), D-02 (Railway apps wiring), D-07 (Phase 0 UAT scenarios, to be checked against phase 20 evidence), D-08 (21 held compound live criteria), D-15 (closes when the RAGFlow (retired) code is removed) and D-03 (mainnet anchors, human-only).
 - **Deferred by decision:** D-04 (Nyquist validation) and D-05 (ADR 0001 S2, S4, S5): orphans with no owner or phase.
 - **Confirmed, no change:** D-22, D-23.
 - **Also closed in Run 13:** the v1.6 audit's open item that `substrate session hook-config` printed two of the four checkpoint triggers (PR #166 prints all four).

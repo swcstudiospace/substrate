@@ -1,6 +1,6 @@
 # S5 Cross-session recall in the brief (BP-5.0): warm snapshot plus Hindsight inventory and gauges (plan, trimmed)
 
-Worktree `/root/src/repos/.wt/u4-s5`, branch `u4/s5`. Evidence: `recon-4-D-hindsight-ragflow.md` (facts, candidates 1 and 2); spec S5 in `uplift-4-PROPOSAL.md`; Build Plan BP-5.0.
+Worktree `/root/src/repos/.wt/u4-s5`, branch `u4/s5`. Evidence: `recon-4-D-hindsight-ragflow (retired).md` (facts, candidates 1 and 2); spec S5 in `uplift-4-PROPOSAL.md`; Build Plan BP-5.0.
 
 ## Target
 New `recall-snapshot.ts` (+ test): prefetcher, (surface, repo) wanted registry, snapshot value. New `hindsight-inventory.ts` (+ test): read-only probe, gauges, drift report. `planes/hindsight.ts` (read-only GETs, closed op labels). `brief.ts`, `brief-profile.ts` (a `recall` section and an injected cache-read closure only; no plane import). `service.ts` (briefDetailed wiring, `afterLiveRetain`, start/stop). `cache.ts` + `instruments.ts` (class `recall-snapshot`). `config.ts`, `index.ts`, `server.ts` (additive `/healthz` block, gauges on `/metrics`). `docs/data-planes.md`, `memory-governance.md`, `observability.md`, `grok-bot.md`.

@@ -1,6 +1,6 @@
 ---
 phase: 46
-name: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration
+name: LightRAG hybrid RAG with Hindsight context and the RAGFlow (retired) migration
 milestone: v1.5
 status: partial
 recorded: 2026-10-24
@@ -13,8 +13,8 @@ Phase 46 is partial. Criterion 1 is complete in the repository. Criteria 2, 3, 5
 ## Changes
 
 - Tests: `packages/mcp-server/src/docs-search.test.ts` lines 1607-1701, four tests in a new describe block. They cover a LightRAG success with `context: true` (Hindsight memories and events), the same success without context, the same success with `context: false`, and the default upstream query mode `hybrid`. Commit `5e3c694`.
-- Docs: `docs/docs-plane.md` rewritten for the LightRAG hybrid plane. It states the plane selection, that context is opt-in on every backend, and that a failed LightRAG query falls back to Hindsight recall and does not retry RAGFlow. `docs/docs-search-ingest.md` hybrid and context section rewritten to the same facts. Commit `2a29aed`.
-- Planning: `.planning/phases/46-lightrag-hybrid/CONTEXT.md` (decisions D46-1 to D46-5 with all record fields), `.planning/phases/46-lightrag-hybrid/PLAN.md` (criteria 1-6 quoted verbatim, tasks T1-T8), and `.planning/phases/46-ragflow-hybrid/SUPERSEDED.md`. Commit `c30456a`.
+- Docs: `docs/docs-plane.md` rewritten for the LightRAG hybrid plane. It states the plane selection, that context is opt-in on every backend, and that a failed LightRAG query falls back to Hindsight recall and does not retry RAGFlow (retired). `docs/docs-search-ingest.md` hybrid and context section rewritten to the same facts. Commit `2a29aed`.
+- Planning: `.planning/phases/46-lightrag-hybrid/CONTEXT.md` (decisions D46-1 to D46-5 with all record fields), `.planning/phases/46-lightrag-hybrid/PLAN.md` (criteria 1-6 quoted verbatim, tasks T1-T8), and `.planning/phases/46-ragflow (retired)-hybrid/SUPERSEDED.md`. Commit `c30456a`.
 - Production code: none changed. The success path already attaches Hindsight context through the service gate (`packages/mcp-server/src/service.ts` around line 4554); the new tests confirm it.
 
 ## Verification, this session
@@ -28,7 +28,7 @@ Phase 46 is partial. Criterion 1 is complete in the repository. Criteria 2, 3, 5
 | # | Status | Evidence or blocker |
 |---|--------|---------------------|
 | 1 | pass in repository | Tests `5e3c694`; docs `2a29aed`; default mode `hybrid` at `packages/mcp-server/src/planes/lightrag.ts` line 40; context opt-in at `service.ts` around line 4554 |
-| 2 | blocked: HARD_STOP | Archive the RAGFlow dataset with a verified checksum. Needs operator approval for this run (task T5) |
+| 2 | blocked: HARD_STOP | Archive the RAGFlow (retired) dataset with a verified checksum. Needs operator approval for this run (task T5) |
 | 3 | blocked: HARD_STOP | Deploy LightRAG and pass a timed health probe. Needs operator approval for this run (task T6) |
 | 4 | not met | T3 sample list drafted: ten queries, match rate 100 percent, fail closed. Sample document content not yet read. T4 comparator deferred. T7 live gate is a HARD_STOP |
 | 5 | not met | Cutover needs criteria 1-4 and every RAG-dependent phase. Phase 25 has no artifact folder in this worktree. T8 is a HARD_STOP |
@@ -37,7 +37,7 @@ Phase 46 is partial. Criterion 1 is complete in the repository. Criteria 2, 3, 5
 ## Deviations
 
 - `Skill()` is not a tool in this environment. The discuss and plan artifacts were produced directly from the workflow steps, a recorded fallback.
-- The re-scope brief says a failed LightRAG query falls back to RAGFlow. The code falls back to Hindsight recall. The docs describe the code.
+- The re-scope brief says a failed LightRAG query falls back to RAGFlow (retired). The code falls back to Hindsight recall. The docs describe the code.
 - The phrase "phase 46 cutover" in `docs/docs-plane.md` comes from the brief. No document under `docs/` defines it; it needs confirmation before merge.
 
 ## Decisions (full records in CONTEXT.md)
@@ -50,11 +50,11 @@ Phase 46 is partial. Criterion 1 is complete in the repository. Criteria 2, 3, 5
 
 ## Deferred and blocked, with unblock steps
 
-- T4 comparator: BLOCKED (reclassified from deferred on 2026-10-24). Unblock: the operator approves T5; a read-only RAGFlow export is then captured and the comparator is tested against it.
+- T4 comparator: BLOCKED (reclassified from deferred on 2026-10-24). Unblock: the operator approves T5; a read-only RAGFlow (retired) export is then captured and the comparator is tested against it.
 - T5 to T8 live steps: HARD_STOP. Unblock: operator approval for each run.
 - T3 sample content: checked 2026-10-24. 9 of 10 pairings confirmed; Q8 fails, because docs/skills-propose.md has no expected-version concept. Unblock: the operator approves the Q8 amendment recorded in PLAN T3; the check is then re-run and its result recorded.
-- Phase 25 artifacts: archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow/ (located 2026-10-24). 25-VERIFICATION read 2026-10-24: the live G1 to G4 RAGFlow gates are operator-gated and never run.
-- Criterion 5 RAG-dependent candidates, from the VERIFICATION content read 2026-10-24, to be confirmed in the PLAN before cutover: 25 (live G1 to G4 gates, 25-VERIFICATION line 73); 40 (live RAGFlow health and TCP probe, 40-VERIFICATION lines 29-30); 42 (live fast-forward and agent-skills dataset not run, 42-VERIFICATION lines 36, 40, 83); 51 (live RAGFlow GET probes, 51-VERIFICATION line 61). Not counted: 18 (test pins), 20 (config fields), 34 (states it reads no live RAGFlow).
+- Phase 25 artifacts: archived at .planning/milestones/v1.3-phases/25-docs-search-and-ingest-ragflow (retired)/ (located 2026-10-24). 25-VERIFICATION read 2026-10-24: the live G1 to G4 RAGFlow (retired) gates are operator-gated and never run.
+- Criterion 5 RAG-dependent candidates, from the VERIFICATION content read 2026-10-24, to be confirmed in the PLAN before cutover: 25 (live G1 to G4 gates, 25-VERIFICATION line 73); 40 (live RAGFlow (retired) health and TCP probe, 40-VERIFICATION lines 29-30); 42 (live fast-forward and agent-skills dataset not run, 42-VERIFICATION lines 36, 40, 83); 51 (live RAGFlow (retired) GET probes, 51-VERIFICATION line 61). Not counted: 18 (test pins), 20 (config fields), 34 (states it reads no live RAGFlow (retired)).
 
 ## Residual risks
 

@@ -1,6 +1,6 @@
 # Phase 5 PLAN
 
-- Add docs.search stub in cli that calls hypothetical RAGFlow.
+- Add docs.search stub in cli that calls hypothetical RAGFlow (retired).
 - Wire redaction in ingest path (reuse existing redact).
 - Desktop fallback in docs.
 - Create artifacts.

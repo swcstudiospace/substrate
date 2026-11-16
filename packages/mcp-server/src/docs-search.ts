@@ -1,4 +1,4 @@
-/** LightRAG replaced RAGFlow; there is no fallback that calls the retired plane. */
+/** LightRAG replaced RAGFlow (retired); there is no fallback that calls the retired plane. */
 /**
  * DOCS-01: substrate-only docs search over lightrag (D25-03, D25-04).
  *

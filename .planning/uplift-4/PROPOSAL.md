@@ -1,6 +1,6 @@
 # Uplift 4 — seven improvements, proposed 2026-10-14
 
-Graph `ut-mv7ciy6p-4429f130` (Notion task https://app.notion.com/p/3f9bc1a0c7ae81d7839bdda1bf8b91be; nodes n1 SPE-11083 … n8 SPE-11090). Recon: 8 read-only lanes (A Timescale · B Greptime · C cache · D Hindsight+RAGFlow · E VPS · F Grok Bot · G Build Plan gap audit · H Greptile history), reports kept in the session; every claim below cites a file:line the lanes read, a probe run on 2026-10-14, or is marked [INFERENCE].
+Graph `ut-mv7ciy6p-4429f130` (Notion task https://app.notion.com/p/3f9bc1a0c7ae81d7839bdda1bf8b91be; nodes n1 SPE-11083 … n8 SPE-11090). Recon: 8 read-only lanes (A Timescale · B Greptime · C cache · D Hindsight+RAGFlow (retired) · E VPS · F Grok Bot · G Build Plan gap audit · H Greptile history), reports kept in the session; every claim below cites a file:line the lanes read, a probe run on 2026-10-14, or is marked [INFERENCE].
 
 Standing rules (unchanged since uplift-2): every policy ships behind a flag whose default preserves today's behaviour or only reports; nothing deletes production data; Railway variables, units, timers and live mutations are operator steps; cost-neutral (no new service, replica or plan tier); EVENT_KINDS 12 / SURFACES 27 stay closed; Greptime SQL only in `greptime.ts`/`brief.ts`; memory tables only via `index-store.ts`/`memory-write.ts`.
 
@@ -12,7 +12,7 @@ Uplift-1..3 delivered the guard rails (breakers, budgets, archive, SLO history, 
 - One `memory_write` bumps `gen:memory`, which changes **every** brief key for every surface and argument set; each miss re-runs four source reads under a 1,200 ms deadline, with no single-flight and no stale-while-revalidate (`cache.ts` getOrLoad, `service.ts:1150-1190`). Live 2026-10-14: `brief.p95` 759 ms against the 800 ms SLO (n 67, the verdict rests on the 400–800 ms bucket) and cache hits 20 / misses 47 (30 %).
 - BP-5.0 "Hindsight cross-session recall feeding memory.brief" is **not implemented** (the brief has four sources, none Hindsight; `brief.ts:41,156-166`), and Hindsight has no inventory, no outbox gauge, no drift report.
 - Metrics history lives only in a local checkpoint; the OTLP exporter is JSON-only and Greptime's OTLP endpoint needs protobuf (`otlp.ts:1-5`), so no SLO history is queryable off the box (A-3, A-7 #3).
-- RAGFlow has a golden harness that proves the pipeline offline but nothing detects a **stale corpus** or a merge-trigger that fired without an ingest (`docs-datasets.ts`, `docs-golden.ts`).
+- RAGFlow (retired) has a golden harness that proves the pipeline offline but nothing detects a **stale corpus** or a merge-trigger that fired without an ingest (`docs-datasets.ts`, `docs-golden.ts`).
 - The VPS runs at load 10 on 8 vCPU with 12.8 GiB of swap held by co-tenant `omp` processes, equal CPU/IO weight for every cgroup (`CPUWeight`/`IOWeight` unset), no watchdog (`WatchdogUSec=0`), a 330 MB uncapped journal and 94 % disk (all probed 2026-10-14).
 
 ## The seven (ranked by impact ÷ risk)
@@ -59,11 +59,11 @@ Uplift-1..3 delivered the guard rails (breakers, budgets, archive, SLO history, 
 - **Failure / security:** Greptime down → samples dropped and counted, no request-path cost; no labels beyond the existing bounded set (no prompt or payload text). **Rollback:** env off; `DROP TABLE` stays an operator action.
 - **Files:** `greptime.ts` (+test), `observe.ts`, `config.ts`, `server.ts`, `docs/observability.md`. **Effort:** M · **Risk:** low · **Depends on:** PR #61 merged (N2 snapshot hook).
 
-### S7 — RAGFlow: docs freshness SLI, trigger-lag detection and an opt-in live golden canary
-- **Resource:** RAGFlow · **Build Plan:** BP-5.1, DP-docs ("re-ingest on merge"), A-4 docs path, A-3.
-- **Design:** `docs.freshness_seconds{dataset}` from the persisted `versions[].ingested_at` (offline, no RAGFlow call) with a report-only staleness threshold; `POST /docs/merge-trigger` records `received_at`, so "trigger accepted but ingest not recorded within N minutes" becomes the true lag SLI (HEAD is not knowable in-process; only the hook sees it); `/slo` row `docs.freshness`; a `warning` event on first breach per dataset; an opt-in **live** canary (`SUBSTRATE_DOCS_CANARY=1`, operator-attested corpus manifest) that runs the golden questions through `POST /docs/search` on a staged timer and emits `warning` on regression. The offline harness stays a CI proof of the pipeline, not of relevance.
-- **Evidence → target:** only `plane.duration{ragflow}` exists; a silent merge-trigger failure is invisible → freshness visible per dataset, a missed ingest flagged within the threshold, canary pass-rate recorded.
-- **Failure / security:** all reads local; the canary is read-only against RAGFlow with the existing breaker; no new keys. **Rollback:** env off, uninstall the timer.
+### S7 — RAGFlow (retired): docs freshness SLI, trigger-lag detection and an opt-in live golden canary
+- **Resource:** RAGFlow (retired) · **Build Plan:** BP-5.1, DP-docs ("re-ingest on merge"), A-4 docs path, A-3.
+- **Design:** `docs.freshness_seconds{dataset}` from the persisted `versions[].ingested_at` (offline, no RAGFlow (retired) call) with a report-only staleness threshold; `POST /docs/merge-trigger` records `received_at`, so "trigger accepted but ingest not recorded within N minutes" becomes the true lag SLI (HEAD is not knowable in-process; only the hook sees it); `/slo` row `docs.freshness`; a `warning` event on first breach per dataset; an opt-in **live** canary (`SUBSTRATE_DOCS_CANARY=1`, operator-attested corpus manifest) that runs the golden questions through `POST /docs/search` on a staged timer and emits `warning` on regression. The offline harness stays a CI proof of the pipeline, not of relevance.
+- **Evidence → target:** only `plane.duration{ragflow (retired)}` exists; a silent merge-trigger failure is invisible → freshness visible per dataset, a missed ingest flagged within the threshold, canary pass-rate recorded.
+- **Failure / security:** all reads local; the canary is read-only against RAGFlow (retired) with the existing breaker; no new keys. **Rollback:** env off, uninstall the timer.
 - **Files:** `docs-datasets.ts`, `service.ts`, `server.ts` (trigger bookkeeping), `slo.ts`, `scripts/docs-golden.ts`, `infra/vps/substrate-docs-canary.{service,timer}`. **Effort:** S/M · **Risk:** low · **Depends on:** none.
 
 ## Sequencing

@@ -57,7 +57,7 @@ What phase 68 changes: `SUBSTRATE_WORKTREE_ROOTS` replaces the hard-coded root; 
 
 ## Memory and docs planes
 
-- Docs plane: LightRAG v1.5.7 (route list in `packages/mcp-server/src/planes/__fixtures__/lightrag-v1.5.7-routes.json`), cut over from RAGFlow per `docs/docs-plane.md`; the RAGFlow code remains (TODO register D-15).
+- Docs plane: LightRAG v1.5.7 (route list in `packages/mcp-server/src/planes/__fixtures__/lightrag-v1.5.7-routes.json`), cut over from RAGFlow (retired) per `docs/docs-plane.md`; the RAGFlow (retired) code remains (TODO register D-15).
 - Naive mode with an LLM bypass: `infra/railway/lightrag-llm-bypass.ts` answers only `<|COMPLETE|>`, so no graph is built, and the runbook requires `SUBSTRATE_LIGHTRAG_QUERY_MODE=naive` with it. Ingestion therefore sends document text to the embedding model only; no extraction LLM sees it. While that stays true, the egress question for an LLM is moot. It returns the day graph modes are enabled.
 - One LightRAG workspace holds every dataset; `dataset` is a record-key label (`docs-search.ts` about 1020-1025, `service.ts:5427`).
 - Ingest is serial per page: upload, scan, pipeline poll, track status (`planes/lightrag.ts:548-578`). One dataset lock with a 180 s wait. Write admission is 10 requests per second.

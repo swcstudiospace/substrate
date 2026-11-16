@@ -1,4 +1,4 @@
-/** In-memory docs plane double for tests. LightRAG replaced RAGFlow; this fake does not speak to the retired plane. */
+/** In-memory docs plane double for tests. LightRAG replaced RAGFlow (retired); this fake does not speak to the retired plane. */
 /**
  * The recording lightrag fake for rehearsal (D25-10).
  *

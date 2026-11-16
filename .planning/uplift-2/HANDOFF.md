@@ -8,7 +8,7 @@
 
 ## Stage 2 — recon, baselines, proposal, acceptance
 
-[CONTEXT.md](CONTEXT.md) (per-service record, Build Plan citable index, q1–q4 resolved from evidence), [BASELINES.md](BASELINES.md) (read-only production measurements: `brief.p95` **3,116 ms** vs 800, cache **1 %** hit ratio, 172 ms warm / 1 s cold Postgres round trips over the public proxy, ≈ 220–250 ms Greptime/Hindsight/RAGFlow edges, no retention on two 500 MB volumes, every substrate unit `MemoryMax=infinity`), [PROPOSAL.md](PROPOSAL.md) (12 candidates → 7 ranked by alignment × impact ÷ risk). Operator answer: **Accept all 7 and implement**.
+[CONTEXT.md](CONTEXT.md) (per-service record, Build Plan citable index, q1–q4 resolved from evidence), [BASELINES.md](BASELINES.md) (read-only production measurements: `brief.p95` **3,116 ms** vs 800, cache **1 %** hit ratio, 172 ms warm / 1 s cold Postgres round trips over the public proxy, ≈ 220–250 ms Greptime/Hindsight/RAGFlow (retired) edges, no retention on two 500 MB volumes, every substrate unit `MemoryMax=infinity`), [PROPOSAL.md](PROPOSAL.md) (12 candidates → 7 ranked by alignment × impact ÷ risk). Operator answer: **Accept all 7 and implement**.
 
 ## Stage 3 — the seven (one commit series each; merged in three waves)
 
@@ -19,7 +19,7 @@
 | R3 | Hindsight outbox + bounded recall | durable JSONL retain outbox (0600 under StateDirectory) with 30 s→1 h backoff, replay by entry id; recall budgets 4000/1500 ms; cross-bank dedupe; bank re-ensure on 404; boot warnings for `HINDSIGHT_BANK` / missing `HINDSIGHT_BANKS`; `docs/grok-bot.md` corrected | outbox path unset = memory-only; attempts 1 = pre-R3 |
 | R4 | TimescaleDB hygiene + retention sweeper | `SUBSTRATE_PG_*` pool/timeouts/`application_name`; `capacity()`; `index.sweep` dry-run by default (`substrate index sweep`, daily timer, two keys to apply); runbooks lease-stuck, quarantine-spike; `docs/data-planes.md` index row corrected | `SUBSTRATE_INDEX_SWEEP=off\|dry-run\|apply` |
 | R5 | GreptimeDB ledger efficiency + honest health | per-session chain-tip LRU + emit serialisation (no forks); bounded `lastHash`, brief and SSE reads; `substrate_health` write probe folded into `eventsWritable`; `capacity.ledger`; opt-in `SUBSTRATE_LEDGER_TTL` (ALTER only on difference, `UNSET` to roll back) | chain cache 0; probe 0; TTL unset |
-| R6 | RAGFlow docs plane | client aligned to the documented HTTP API shapes (multipart upload, parse, list status, delete, retrieval knobs) with the fake enforcing them; versions/pins persisted (state file v2) so citations carry real commits; dataset-list + `docs-search` caches; opt-in superseded-document prune; `POST /docs/merge-trigger` → 202 + background job (`?wait=1` keeps sync); unit sets the state file | prune off; knobs = RAGFlow defaults |
+| R6 | RAGFlow (retired) docs plane | client aligned to the documented HTTP API shapes (multipart upload, parse, list status, delete, retrieval knobs) with the fake enforcing them; versions/pins persisted (state file v2) so citations carry real commits; dataset-list + `docs-search` caches; opt-in superseded-document prune; `POST /docs/merge-trigger` → 202 + background job (`?wait=1` keeps sync); unit sets the state file | prune off; knobs = RAGFlow (retired) defaults |
 | R7 | VPS guardrails | `substrate.slice` + per-unit `MemoryHigh/Max`, `TasksMax`, `CPUQuota`; `deploy-release.sh` free-disk floor + store-aware health gate; loopback redis drop-in config; in-process audit-chain rollover with `bun run audit:verify` across segments; `docs/runbooks/disk-pressure.md` | rollover unset; gate `SUBSTRATE_HEALTH_REQUIRE_STORES=0` |
 
 ## Green-check evidence (final head)
@@ -40,4 +40,4 @@
 
 ## Explicitly out of scope (recorded)
 
-Backlog from PROPOSAL.md: per-surface rate limiting, `tenant=swc`, tiered memory/context budget (programming-desk side), RAG golden-question harness. Live RAGFlow and Hindsight proofs (Phase 25/26 G1–G4) stay operator-gated; the forwarder cutover (D-T6) is the operator's networking task.
+Backlog from PROPOSAL.md: per-surface rate limiting, `tenant=swc`, tiered memory/context budget (programming-desk side), RAG golden-question harness. Live RAGFlow (retired) and Hindsight proofs (Phase 25/26 G1–G4) stay operator-gated; the forwarder cutover (D-T6) is the operator's networking task.

@@ -1,20 +1,20 @@
 ---
-phase: 46-ragflow-hybrid
+phase: 46-ragflow (retired)-hybrid
 requirements: [SOTA-02]
 status: planned; units U1 and U2 run in parallel, U3 follows
 ---
 
-# 46-PLAN: RAGFlow hybrid retrieval with Hindsight and Greptime context
+# 46-PLAN: RAGFlow (retired) hybrid retrieval with Hindsight and Greptime context
 
 ## Units (disjoint files)
 
-### U1 — hybrid knobs (RAGFlow plane and config)
+### U1 — hybrid knobs (RAGFlow (retired) plane and config)
 
-Files: `packages/mcp-server/src/planes/ragflow.ts`, `packages/mcp-server/src/planes/ragflow.test.ts`, `packages/mcp-server/src/config.ts` (the RAGFlow settings only), `packages/mcp-server/src/flag-registry.ts` (new rows only), `.env.example` (new lines only).
+Files: `packages/mcp-server/src/planes/ragflow (retired).ts`, `packages/mcp-server/src/planes/ragflow (retired).test.ts`, `packages/mcp-server/src/config.ts` (the RAGFlow (retired) settings only), `packages/mcp-server/src/flag-registry.ts` (new rows only), `.env.example` (new lines only).
 
-- Add `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` (number in [0, 1], default 0.3) and `SUBSTRATE_RAGFLOW_RERANK_ID` (string, default unset). Parse them in the same style as the existing RAGFlow settings; an out-of-range weight is a config error with the variable named.
+- Add `SUBSTRATE_RAGFLOW (retired)_VECTOR_WEIGHT` (number in [0, 1], default 0.3) and `SUBSTRATE_RAGFLOW (retired)_RERANK_ID` (string, default unset). Parse them in the same style as the existing RAGFlow (retired) settings; an out-of-range weight is a config error with the variable named.
 - `retrieveChunks` sends `vector_similarity_weight` from the setting. It sends `rerank_id` only when the setting is set.
-- Tests in `ragflow.test.ts`, using the existing `RagflowFake`: with weight 0.7 and rerank id set, the captured body carries both; with defaults, the body carries 0.3 and no `rerank_id`; an out-of-range weight throws before any request.
+- Tests in `ragflow (retired).test.ts`, using the existing `RagflowFake`: with weight 0.7 and rerank id set, the captured body carries both; with defaults, the body carries 0.3 and no `rerank_id`; an out-of-range weight throws before any request.
 
 Acceptance: the hybrid tests pass; the default body is unchanged from main.
 
@@ -44,4 +44,4 @@ Acceptance: `config:reference -- --check` passes; the docs describe exactly the 
 - `bunx tsc --noEmit` exit 0.
 - `bun test` full suite against a phase-46 verification database, plus `bun run check:phase-close`.
 - `bun run config:reference -- --check` exit 0.
-- Records: CONTEXT, PLAN, SUMMARY, VERIFICATION under `.planning/phases/46-ragflow-hybrid/`.
+- Records: CONTEXT, PLAN, SUMMARY, VERIFICATION under `.planning/phases/46-ragflow (retired)-hybrid/`.

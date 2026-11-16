@@ -8,7 +8,7 @@
 **Goal:** Leverage existing resources (Railway, RAGflow, Hindsight, TailscaleDB, GreptimeDB, DragonflyDB) for more utility. Production-grade, enterprise-ready.
 
 From investigation:
-- Current usage: RAGFlow for docs (search/ingest), Hindsight for recall, Dragonfly for cache (VPS loopback, Railway idle), Greptime for ledger, Railway for hosting, Tailscale for private forwarders.
+- Current usage: RAGFlow (retired) for docs (search/ingest), Hindsight for recall, Dragonfly for cache (VPS loopback, Railway idle), Greptime for ledger, Railway for hosting, Tailscale for private forwarders.
 - Gaps: Idle resources, limited cross-integration, no advanced SOTA (predictive, graph, pub/sub, unified fabric), degraded paths, basic access.
 
 ## The 7 Enhancements
@@ -20,11 +20,11 @@ From investigation:
    - Target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md
    - Acceptance: MCP tool lists Railway resources, basic scale suggestion, cost report in /slo.
 
-2. **RAGFlow Advanced Hybrid RAG with Hindsight Context**
+2. **RAGFlow (retired) Advanced Hybrid RAG with Hindsight Context**
    - SOTA: Hybrid search, reranking, memory-augmented retrieval.
    - Utility: Context from Hindsight + Greptime events for personalized docs answers.
-   - Changes: Extend ragflow.ts retrieval, integrate with hindsight recall in search path.
-   - Target files: packages/mcp-server/src/planes/ragflow.ts, planes/hindsight.ts, docs/docs-plane.md
+   - Changes: Extend ragflow (retired).ts retrieval, integrate with hindsight recall in search path.
+   - Target files: packages/mcp-server/src/planes/ragflow (retired).ts, planes/hindsight.ts, docs/docs-plane.md
    - Acceptance: docs_search returns context-augmented results; tests for hybrid.
 
 3. **GreptimeDB + Dragonfly Predictive Analytics & Cache**

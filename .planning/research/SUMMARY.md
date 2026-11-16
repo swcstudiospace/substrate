@@ -13,7 +13,7 @@ v1.3 is mostly a **port plus re-implementation** onto `main`, not greenfield. Th
 
 The recommended approach: first restore production parity and land the cross-cutting guards (unit files with crash-loop guards, policy enums and fail-open/closed table, store-lock extensions, test-isolation convention, disk gate) as small separate PRs (PITFALLS 1, 2, 3, 7, 8, 13, 14). Then port area by area along the critical path **baseline → claim mirror → dispatcher → Lane A**, with collectors → skills → A2A cards and ledger → A2A cards as side chains, and docs plane and `desktop_run` floating (ARCHITECTURE Suggested Build Order). Almost no new dependencies are needed: `fetch`, Bun built-ins (`RedisClient`, `CryptoHasher`), solana-cli argv, `git`/`gh` argv, `docker exec`, and Python `httpx`; only Lane A adds `@rivet-dev/agentos` under Node 24 (STACK headline).
 
-Key risks: merging to main is a deploy (PITFALLS 1); cherry-picked core hunks reintroduce unfenced ownership (PITFALLS 2); fail-open/closed misassignment (PITFALLS 3); `lease_id` leaks and lapsed leases not mirrored (PITFALLS 4); publication paths (RAGFlow ingest, devnet memos) leaking content (PITFALLS 6); a 95%-full disk with no KVM (PITFALLS 11); and stubs recorded as complete (PITFALLS 15). Each phase below therefore ends in an observable proof, isolated first and live only with operator approval.
+Key risks: merging to main is a deploy (PITFALLS 1); cherry-picked core hunks reintroduce unfenced ownership (PITFALLS 2); fail-open/closed misassignment (PITFALLS 3); `lease_id` leaks and lapsed leases not mirrored (PITFALLS 4); publication paths (RAGFlow (retired) ingest, devnet memos) leaking content (PITFALLS 6); a 95%-full disk with no KVM (PITFALLS 11); and stubs recorded as complete (PITFALLS 15). Each phase below therefore ends in an observable proof, isolated first and live only with operator approval.
 
 ## Port sources and status
 
@@ -21,7 +21,7 @@ Key risks: merging to main is a deploy (PITFALLS 1); cherry-picked core hunks re
 |---|---|---|---|
 | `acc30a8`, branch `docs/data-planes-tailscale` (merge-base `31d236a`; superset of `ut-mughkkc0`) | Real GSD runs of phases 01–06 with live proofs (01 passed 10/10; 02 proof run 5 approved; 03 83/91; 04 6/6; 05 22/25, docs half skipped; 06 46/48, anchoring skipped; 07 14/19; 08 0/7). ~35.7k insertions under `packages/` and `infra/`. No `lease.ts`. | **Primary** port source for A, B, C, E, F, G, H. Port leaf modules whole; rewrite call sites; never cherry-pick `service.ts`/`mcp.ts`/`index-store.ts`/`server.ts`/`types.ts` hunks; never port `.planning/` archives (they contain hostnames) | FEATURES Port sources; ARCHITECTURE Port Map; PITFALLS 2, 14; STACK |
 | `substrate/ut-mughkkc0-73909228` | Ancestor of `acc30a8`; where both have a file, D's copy is newer | Don't port separately; its 0-UAT results (2026-09-24: 5 pass, 4 partial, 5 and 6 issues) feed the UAT phase | ARCHITECTURE scope correction, row pl-2 |
-| `21652a2` (`claude/greptime-events-ledger-7j1so8`) | **Stubs**: RAGFlow retrieval without `dataset_ids` returning raw body; Hindsight recall inside the brief with 4 s timeout; hand-rolled RESP Dragonfly client never called; devnet memo carrying free text; `teachable.ts` stubs; `prev_event_hash: "TODO-chain"` | Not cherry-picked. **Exception:** the only source for the D-plane clients: keep `planesFromEnv`, `parseRedisUrl`, `hindsightRecall`, `ragflowSearch` as adapted helpers split into `planes/`; replace RESP with Bun `RedisClient`; drop `anchorMemoOnDevnet` and `teachable.ts` | FEATURES Port sources; ARCHITECTURE Port Map B; STACK headline, D |
+| `21652a2` (`claude/greptime-events-ledger-7j1so8`) | **Stubs**: RAGFlow (retired) retrieval without `dataset_ids` returning raw body; Hindsight recall inside the brief with 4 s timeout; hand-rolled RESP Dragonfly client never called; devnet memo carrying free text; `teachable.ts` stubs; `prev_event_hash: "TODO-chain"` | Not cherry-picked. **Exception:** the only source for the D-plane clients: keep `planesFromEnv`, `parseRedisUrl`, `hindsightRecall`, `ragflow (retired)Search` as adapted helpers split into `planes/`; replace RESP with Bun `RedisClient`; drop `anchorMemoOnDevnet` and `teachable.ts` | FEATURES Port sources; ARCHITECTURE Port Map B; STACK headline, D |
 | **Greenfield (on no branch)** | — | Hourly **anchor job** `anchor.ts` + timer + `verify` anchor wiring + a new ledger package entry point (`index.ts`, which no branch has); **A2A Agent Cards** (only stub types in `8db99f9`/`21652a2`, not spec-valid); **docs plane on main** (`docs_search` with citations, redacting/refusing `docs_ingest`, governed Hindsight retain/recall, Dragonfly cache); B-T3 mirroring of lease expiry/steal/force; durable dispatch record; lease-aware launcher prompt and host client | STACK E, F; ARCHITECTURE Component Responsibilities (A2A row), Port Map E; FEATURES D-T1, B-T3, E-T3, F-D1; PITFALLS 5 |
 
 ## Production hazards and the phase that addresses each
@@ -55,7 +55,7 @@ No new npm packages for A, B, D, E, F, G. Keep pins in a port milestone (no MCP 
 - **solana-cli 4.2.2 (absolute path) + `fetch` JSON-RPC** — key never enters process memory (D-06); `@solana/kit` only if anchoring moves off-host.
 - **RFC 6962 Merkle** from the ledger package's `merkle.ts` at commit `acc30a8` — domain-separated, odd leaf promoted.
 - **Python 3.12 system + httpx 0.28.1 + pytest 9.1.1** — no venv; add a root `test:py` script (main has no Python test entry point).
-- **RAGFlow HTTP `/api/v1/retrieval`** behind `docs_search`, not RAGFlow MCP (v0.26.1 Python MCP broken, #16369).
+- **RAGFlow (retired) HTTP `/api/v1/retrieval`** behind `docs_search`, not RAGFlow (retired) MCP (v0.26.1 Python MCP broken, #16369).
 - **A2A v1.0 static Agent Card JSON** at `/.well-known/agent-card.json`; no SDK. Current `makeAgentCard` output is not spec-valid.
 - **Webtop + `docker exec` xdotool/xwd** for `desktop_run`; not cua (7.89 GB image, no KVM/runsc).
 
@@ -69,7 +69,7 @@ No new npm packages for A, B, D, E, F, G. Keep pins in a port milestone (no MCP 
 
 **Defer (v2+):** A-D2 herdr-hosted dispatch, A-D3 Orca tee, B-D2 Linear Agent Sessions, C-D3 extra launchers, D-D2 ingest on merge, G-D1 cua, H-D2 Codex/OpenCode/Pi VMs.
 
-**Anti-features to hold:** substrate sending Done itself; `labelIds` overwrite; rolling back a lease on tracker failure; dispatcher claiming for the agent; issue text in prompts; RAGFlow MCP as backend; Hindsight as store of record; Dragonfly as queue/lock; recall inside the synchronous brief; event contents on chain; porting `chain.ts`; auto-merging skills; stopping production for UAT scenario 7; proof rows in the production ledger.
+**Anti-features to hold:** substrate sending Done itself; `labelIds` overwrite; rolling back a lease on tracker failure; dispatcher claiming for the agent; issue text in prompts; RAGFlow (retired) MCP as backend; Hindsight as store of record; Dragonfly as queue/lock; recall inside the synchronous brief; event contents on chain; porting `chain.ts`; auto-merging skills; stopping production for UAT scenario 7; proof rows in the production ledger.
 
 ### Architecture Approach (ARCHITECTURE.md)
 
@@ -83,7 +83,7 @@ All side effects hang off main's lease verdicts (`claimNode`/`releaseNode`/`comp
 2. **Porting by merge** — reference implementations only; policy enum changes in a dedicated PR (Pitfall 2).
 3. **Fail-open/closed misassignment** — per-tool table in `docs/mcp-audit.md` + `policy.ts` tests; DoD gate fail-closed; mirror fail-open after the claim (Pitfall 3).
 4. **Lease authority vs mirror/dispatcher** — mirror off lease events (never `renewed`), no `lease_id` in any payload, agent claims with its own token (Pitfall 4).
-5. **Publication paths** — `docs_ingest` refuses on findings; memos only `substrate:v1:<hour>:<root>:<count>`; one shared redactor (Pitfall 6). Plus double dispatch (5), store-lock bypass (8), devnet funding/verify semantics (9), RAGFlow churn (10), disk (11), test isolation (13), PR size ≤ ~1,500 added lines (14), stubs as complete (15), brief cache hiding claims (16), `desktop_run` reach (17).
+5. **Publication paths** — `docs_ingest` refuses on findings; memos only `substrate:v1:<hour>:<root>:<count>`; one shared redactor (Pitfall 6). Plus double dispatch (5), store-lock bypass (8), devnet funding/verify semantics (9), RAGFlow (retired) churn (10), disk (11), test isolation (13), PR size ≤ ~1,500 added lines (14), stubs as complete (15), brief cache hiding claims (16), `desktop_run` reach (17).
 
 ## Implications for Roadmap
 
@@ -100,7 +100,7 @@ All side effects hang off main's lease verdicts (`claimNode`/`releaseNode`/`comp
 | 22 Skills sync, bridge, miner package, timers | 18 (part) | F | 21 |
 | 23 Claim mirror and DoD gate | 19 | B | 17 |
 | 24 substrate-dispatcher | 20 | C | 23 |
-| 25 Docs search and ingest (RAGFlow) | 21 (part) | D | 18 |
+| 25 Docs search and ingest (RAGFlow (retired)) | 21 (part) | D | 18 |
 | 26 Hindsight recall/retain and Dragonfly cache | 21 (part) | D | 25 |
 | 27 Ledger primitives, ingest order, anchors DDL | 22 (part) | E | 18 |
 | 28 Hourly anchor job and verify | 22 (part) | E | 27 |
@@ -125,7 +125,7 @@ All side effects hang off main's lease verdicts (`claimNode`/`releaseNode`/`comp
 
 ### Phase 18: Guard rails
 **Rationale:** new planes reach around the store lock; tests must never touch production (PITFALLS 7, 8, 13).
-**Delivers:** store-lock rules (plane credential names with literal values, 64-byte keypair arrays, `-----BEGIN`, no RAGFlow/Hindsight MCP in agent configs, `RAGFLOW_*`/`HINDSIGHT_*`/`DRAGONFLY_*` read only in `mcp-server/src`, `SOLANA_*` only in the anchor module, Hindsight retain only via memory-write); production-path scan for tests and `SUBSTRATE_TEST_<PLANE>_*` convention; shared disk-gate helper (5 GiB worktree, 10 GiB image); redaction merge into main's `redact.ts` — D-04 rules + `redactSkillContent`/`scanSkillFiles`, base58 and hostname rules, **keep `COUNTER_KEY`** (ARCHITECTURE Anti-Pattern 2); `.env.example` reconciled to `SOLANA_ANCHOR_KEYPAIR` and the chosen Hindsight bank variable (STACK E; PITFALLS 9).
+**Delivers:** store-lock rules (plane credential names with literal values, 64-byte keypair arrays, `-----BEGIN`, no RAGFlow (retired)/Hindsight MCP in agent configs, `RAGFLOW (retired)_*`/`HINDSIGHT_*`/`DRAGONFLY_*` read only in `mcp-server/src`, `SOLANA_*` only in the anchor module, Hindsight retain only via memory-write); production-path scan for tests and `SUBSTRATE_TEST_<PLANE>_*` convention; shared disk-gate helper (5 GiB worktree, 10 GiB image); redaction merge into main's `redact.ts` — D-04 rules + `redactSkillContent`/`scanSkillFiles`, base58 and hostname rules, **keep `COUNTER_KEY`** (ARCHITECTURE Anti-Pattern 2); `.env.example` reconciled to `SOLANA_ANCHOR_KEYPAIR` and the chosen Hindsight bank variable (STACK E; PITFALLS 9).
 **Note:** ARCHITECTURE puts the redact merge in its collectors phase; PITFALLS puts the shared library in foundation. Placed here so 20, 21, 25 all consume it [synthesis]. If it exceeds ~1,500 lines, split redaction into its own PR.
 **Proof:** `bun test store-lock`, `redact.test.ts` (incl. `input_tokens` not redacted). **Live:** no.
 
@@ -162,10 +162,10 @@ All side effects hang off main's lease verdicts (`claimNode`/`releaseNode`/`comp
 **Size risk:** the Python package plus 7 test files is likely > 1,500 lines; split into (a) `graph_find` + `findNodesByLinear`, (b) package + unit [INFERENCE].
 **Proof:** label `dispatch:hermes` → launch ≤ 30 s, claim under Hermes token, `agent:hermes`, Notion Agent hermes, brief shows it ≤ 60 s; restart mid-launch does not re-dispatch. **Live:** Linear, Notion, Hermes quota, a bounded kill-switch-off window; `--once --dry-run` rehearsal isolated.
 
-### Phase 25: Docs search and ingest — RAGFlow (area D, part 1)
+### Phase 25: Docs search and ingest — RAGFlow (retired) (area D, part 1)
 **Rationale:** independent of 23–24 (ARCHITECTURE 21).
-**Delivers:** `planes/ragflow.ts`; `docs_search` with explicit `dataset_ids`, `{chunk, heading_path, source_url, commit}`, `{chunks: [], degraded}` on error; `docs_ingest` + `POST /docs/ingest` that scans and **refuses** on findings, sets metadata, polls parse status; datasets resolved by name/alias with pinned embedding model; ingest triggered from the VPS (PITFALLS 10). Query the deployed RAGFlow version first.
-**Proof:** headless session cites a URL that `docs_search` returned; planted-secret ingest refused; version-swap test against a fake. **Live:** RAGFlow.
+**Delivers:** `planes/ragflow (retired).ts`; `docs_search` with explicit `dataset_ids`, `{chunk, heading_path, source_url, commit}`, `{chunks: [], degraded}` on error; `docs_ingest` + `POST /docs/ingest` that scans and **refuses** on findings, sets metadata, polls parse status; datasets resolved by name/alias with pinned embedding model; ingest triggered from the VPS (PITFALLS 10). Query the deployed RAGFlow (retired) version first.
+**Proof:** headless session cites a URL that `docs_search` returned; planted-secret ingest refused; version-swap test against a fake. **Live:** RAGFlow (retired).
 
 ### Phase 26: Hindsight and Dragonfly (area D, part 2)
 **Delivers:** `planes/hindsight.ts` (recall outside the 1.5 s brief or as cached async section; retain only after `accepted` via the gate); `planes/dragonfly.ts` on Bun `RedisClient`; `/healthz` hit/miss/bypass; claims section never served from cache (PITFALLS 16); private hop/TLS before enabling (D-T6).
@@ -214,7 +214,7 @@ Need `--research-phase` during planning:
 - **19:** cross-repo dependencies (claude-ultrathink v1.4 unmerged; kickoff dry-run unknown).
 - **23:** mirror on lease events is new (B-T3); Notion rate limit `[UNVERIFIED]`.
 - **24:** poller rate budget and echo behaviour `[UNVERIFIED]`; durable dispatch schema.
-- **25/26:** deployed RAGFlow/Hindsight versions, parse endpoint and `meta_fields` `[UNVERIFIED]`; bank model; Bun `RedisClient` API on 1.4 `[UNVERIFIED]`.
+- **25/26:** deployed RAGFlow (retired)/Hindsight versions, parse endpoint and `meta_fields` `[UNVERIFIED]`; bank model; Bun `RedisClient` API on 1.4 `[UNVERIFIED]`.
 - **28:** memo program ID written by solana-cli 4.2.2 `[UNVERIFIED]`; devnet history retention.
 - **29:** A2A v1.0 extension shape `[UNVERIFIED]`; teachables vs gate.
 - **31:** agentos without KVM `[UNVERIFIED]`; Bun workspace vs host lock.
@@ -235,7 +235,7 @@ Standard patterns (skip research): **16, 17, 18, 20, 21, 22, 27, 30** — ports 
 | D8 | Hindsight banks: `HINDSIGHT_BANK` (live env, 21652a2) vs `HINDSIGHT_BANK_PREFIX` per-surface `sub-<surface>` (main, docs) | Per-surface prefix; operator edits `substrate.env` | No | STACK D; ARCHITECTURE B; PITFALLS 9 |
 | D9 | Who owns plane calls (substrate-only vs desk gateway direct); `memory_search` merging Hindsight | Substrate-only; retain as async forward after `accepted`; no plane MCP in agent configs | Yes — Grok Bot gateway route | FEATURES Open 4, D anti-features; PITFALLS 8 |
 | D10 | Cache TTLs and claim freshness | `data-planes.md` TTLs (brief 5 min, search/recall 10 min); claims section composed fresh | No | FEATURES Open 4; PITFALLS 16 |
-| D11 | Dragonfly transport | Bypass until private hop/TLS exists; RAGFlow/Hindsight may start on public HTTPS with bearer key | No | FEATURES D-T6, P7; STACK D |
+| D11 | Dragonfly transport | Bypass until private hop/TLS exists; RAGFlow (retired)/Hindsight may start on public HTTPS with bearer key | No | FEATURES D-T6, P7; STACK D |
 | D12 | `docs/data-planes.md` (forwarders, prefix) vs live env | Fix the doc to the chosen state; remove forwarder machine names (desk rule) | No | STACK D; PITFALLS Security |
 | D13 | Anchor job placement: separate process reading Greptime directly vs through substrate-mcp | **Sources conflict.** ARCHITECTURE: separate process with operator creds; FEATURES E-T6/PITFALLS 8: typed methods in mcp-server. Default: store-lock compliant (timer → loopback route or typed methods) | No | ARCHITECTURE Internal Boundaries; FEATURES E-T6; PITFALLS 8 |
 | D14 | Hour membership and leaf order | ARCHITECTURE Pattern 4: `ingested_at` (already live) ordered by (`ingested_at`, `id`) with lag; PITFALLS alternative: sort by hash. Default ARCHITECTURE's; record anchored ids/digest | No | ARCHITECTURE Pattern 4; PITFALLS 9; FEATURES Open 3 |
@@ -258,7 +258,7 @@ Standard patterns (skip research): **16, 17, 18, 20, 21, 22, 27, 30** — ports 
 | Stack | HIGH | Versions from host commands and git objects; external API shapes MEDIUM |
 | Features | HIGH / MEDIUM | Existence checked in git and on host; port effort and design choices MEDIUM |
 | Architecture | HIGH / MEDIUM | Port map verified against git objects; phase sizing MEDIUM |
-| Pitfalls | HIGH / MEDIUM | Repo/host facts cited; Linear/Solana/RAGFlow limits from public docs |
+| Pitfalls | HIGH / MEDIUM | Repo/host facts cited; Linear/Solana/RAGFlow (retired) limits from public docs |
 
 **Overall confidence:** HIGH for what to port and in what order; MEDIUM for PR sizing.
 
@@ -267,7 +267,7 @@ Standard patterns (skip research): **16, 17, 18, 20, 21, 22, 27, 30** — ports 
 - **:7410 state conflict** (FEATURES P1 vs ARCHITECTURE): re-check read-only at Phase 16 start.
 - **Live `anchors` shape** `[UNVERIFIED]` in FEATURES, asserted from D's 06-05 SUMMARY in ARCHITECTURE: confirm with a read-only `DESCRIBE` in 27.
 - **Mixed-chain verify breaks** `[INFERENCE]`: run `events_verify` read-only on a D-era graph in 19.
-- Deployed RAGFlow / Hindsight versions; RAGFlow `dataset_ids` requirement and parse path; Bun `RedisClient` behaviour on 1.4.
+- Deployed RAGFlow (retired) / Hindsight versions; RAGFlow (retired) `dataset_ids` requirement and parse path; Bun `RedisClient` behaviour on 1.4.
 - Muse plugin CLI contract `[UNVERIFIED]`; Muse version (1.4.3 STACK vs 1.4.4 PITFALLS).
 - Whether hermes-linear-poller starts work on state changes (second dispatch path) `[UNVERIFIED]`.
 - agentos without KVM, and Bun workspace interaction with the host lock `[UNVERIFIED]`.
@@ -281,7 +281,7 @@ Standard patterns (skip research): **16, 17, 18, 20, 21, 22, 27, 30** — ports 
 - Repo docs: `docs/{data-planes,coordination,greptime-ledger,memory-governance,mcp-audit,observability,grok-bot}.md`, ADR 0001, `store-lock.test.ts`.
 
 ### Secondary (MEDIUM confidence)
-- RAGFlow HTTP API and MCP docs; Hindsight API reference; A2A v1.0 specification; Linear rate limiting; Solana faucet and Anza clusters; solana.com memo cookbook (STACK, PITFALLS).
+- RAGFlow (retired) HTTP API and MCP docs; Hindsight API reference; A2A v1.0 specification; Linear rate limiting; Solana faucet and Anza clusters; solana.com memo cookbook (STACK, PITFALLS).
 - `npm view` / PyPI version checks (STACK).
 
 ### Tertiary (LOW confidence)

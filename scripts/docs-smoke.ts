@@ -117,7 +117,7 @@ function confirmFixtureSpawn(
 	return null;
 }
 
-const FIXTURE_ENTRY = "packages/mcp-server/src/rehearsal-ragflow-server.ts";
+const FIXTURE_ENTRY = "packages/mcp-server/src/rehearsal-ragflow (retired)-server.ts";
 
 /** The smoke refused to drive this target; the message names hosts and ports, never values. */
 export class SmokeRefused extends Error {}
@@ -175,9 +175,9 @@ function shaped<T>(value: unknown): T | null {
 }
 
 /** Consumer keys this script reads. The plane key is deliberately absent. */
-const FIXTURE_URL_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_URL";
-const FIXTURE_READY_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_READY";
-const FIXTURE_PID_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_PID";
+const FIXTURE_URL_KEY = "SUBSTRATE_RAGFLOW (retired)_FIXTURE_URL";
+const FIXTURE_READY_KEY = "SUBSTRATE_RAGFLOW (retired)_FIXTURE_READY";
+const FIXTURE_PID_KEY = "SUBSTRATE_RAGFLOW (retired)_FIXTURE_PID";
 const OPERATOR_TOKEN_KEY = "SUBSTRATE_REHEARSAL_OPERATOR_TOKEN";
 const RUN_NAME_KEY = "SUBSTRATE_REHEARSAL_NAME";
 
@@ -546,7 +546,7 @@ interface TwinIdentity {
 	startSeconds?: unknown;
 	checkout?: unknown;
 	mcpPort?: unknown;
-	ragflowFixture?: { enabled?: unknown; endpoint?: unknown; pid?: unknown; startSeconds?: unknown; cwd?: unknown; script?: unknown };
+	ragflow (retired)Fixture?: { enabled?: unknown; endpoint?: unknown; pid?: unknown; startSeconds?: unknown; cwd?: unknown; script?: unknown };
 }
 
 /** Process start epoch from /proc: btime plus stat field 22 over the tick rate. */
@@ -643,7 +643,7 @@ function loadContext(name: string, runDir: string, scriptCheckout: string): Smok
 	const fixtureUrl = (record[FIXTURE_URL_KEY] ?? "").replace(/\/+$/, "");
 	const fixtureReady = record[FIXTURE_READY_KEY] ?? "";
 	const recordName = record[RUN_NAME_KEY] ?? "";
-	const fixture = state.ragflowFixture;
+	const fixture = state.ragflow (retired)Fixture;
 	const enabled = fixture?.enabled === true && typeof fixture.endpoint === "string" && fixture.endpoint.replace(/\/+$/, "") === fixtureUrl;
 	const refused = refuseFixtureTarget({ base, fixtureUrl, fixtureEnabled: enabled, fixtureReady, operatorToken: token, recordName, name });
 	if (refused !== null) throw new SmokeRefused(refused);

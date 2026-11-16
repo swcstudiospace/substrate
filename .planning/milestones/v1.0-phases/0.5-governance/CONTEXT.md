@@ -40,7 +40,7 @@ Locked scope (full v0.3): memory governance · leases / signed handoffs / drift 
 - mcp-server/src/service.ts , mcp.ts , memory paths (from baseline)
 - Greptime for events, Postgres for index (external Railway)
 - Redact.ts already in path
-- Current substrate.env has GREPTIME, PG, RAGFLOW; add DRAGONFLY_URL etc.
+- Current substrate.env has GREPTIME, PG, RAGFLOW (retired); add DRAGONFLY_URL etc.
 - Phase 0 shipped memory_brief/write with basic redaction.
 
 ## Specific Ideas
