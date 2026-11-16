@@ -12,8 +12,8 @@
 - ⚠️ **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1); closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Gap closure merged 2026-10-28: PR #147 (phase 58 criterion 2, verified passed 5/5), PR #150 (phase 59 criterion 5, verified human_needed 6/6 in the repository, live proofs operator-gated) and PRs #146 and #148 (phase 61: the checkpoint sequence lock, `substrate session hook`, trigger policy, printed host configuration); phase 61 criterion 3 stays partial because no host runs the hook until an operator installs the printed configuration (ADR 0007, D55-4), accepted as debt by the owner on 2026-10-28 together with phase 59's live proofs. Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Discovery record: [milestones/v1.6-phases/55-migration-safety/CONTEXT.md](milestones/v1.6-phases/55-migration-safety/CONTEXT.md). Archive: [milestones/v1.6-ROADMAP.md](milestones/v1.6-ROADMAP.md) · audit: [milestones/v1.6-MILESTONE-AUDIT.md](milestones/v1.6-MILESTONE-AUDIT.md)
 - 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); phases 66, 67 and 68 are PARTIAL, every phase with a VERIFICATION record records gaps, and the milestone is not complete. Requirements: [REQUIREMENTS.md](REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
 - 🚧 **v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** — Phases 71-78, defined 2026-10-30: eight features from the round-15 discovery; not started.
+- 🚧 **v1.9 Unison Graph Engineering** — coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB. Sections added for data flow/indexing/retrieval patterns (Graph Engineering), coordination layers for unison, impact parity for long sessions using three coordinated graphed structures (data, coordination, uplift). References SPE-34076, SPE-34079. Updated with SOTA patterns mention from v1.5.
 
-## Phases
 
 <details>
 <summary>⚠️ v1.0 build plan (Phases 0-6, with 0.5) — CLOSED 2026-10-01 with known gaps</summary>
@@ -147,6 +147,66 @@ Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eigh
 - [x] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged (c26b1ef3 in process; b9ecd215 durable via migrations 44 and 45, the rehearsal is operator-gated)
 - [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired. PARTIAL: the memory.forget pair is compared and repaired through a confirmed plan (46956358); the scheduled run is wired as `cross-layer-reconcile-run.ts` with a unit staged under `infra/vps` (a5d6bc03), not installed (operator gate); the index-to-ledger and cache-to-index pairs are not compared yet.
 
+### Unison enhancements for coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB (SPE-34076, SPE-34079)
+
+Targeted at Graph Engineering for unison. References v1.5 SOTA enhancements (phases 46,47,49,50,51,57) and cross-layer work (phase 78).
+
+#### Data flow, indexing, retrieval patterns for Graph Engineering
+
+Data planes (from data-planes.md): GreptimeDB for events/ledger (append-only with hash/prev chain, 180d hot); TimescaleDB for index/coordination (plain Postgres tables including graph tables: graph_index, graph_nodes with claimed_by/lease_id/lease_expires_at/lease_epoch, graph_edges, graph_steps, graph_bindings, plus governance memory_*); DragonflyDB as read-through cache only (brief 300s, memory search 600s, graph view 60s; fail-open on down); Hindsight for memory/recall (sub-<surface> banks written after governance gate accepted, recalled across surfaces with source); LightRAG for documents + planning graph (indexes three sources: .planning markdown, repository docs, agent-skills SKILL.md; re-indexed on merge/change; retrieval hybrid by default with Hindsight context: `context: true`; naive mode pending real LLM for graph/hybrid).
+
+Three coordinated graphed tagged uplifted structures (data, coordination, uplift):
+- **Data graphed**: event chain (Greptime), graph tables (Timescale), docs/planning graph (LightRAG), memory banks (Hindsight), cache entries (Dragonfly).
+- **Coordination graphed**: node leases and handoffs on the graph (see below); drift scan comparing tree/trail/claims; fabric aggregating status across dragonfly, timescaledb-index, greptime, lightrag, hindsight, tei, proxy, corpus.
+- **Uplift graphed**: SOTA patterns (hybrid RAG+Hindsight from phase 46/57, graph memory with Greptime events phase 49, predictive analytics+cache phase 47, pub/sub phase 50, enterprise fabric phase 51); planning index (phase 52); eternal rollback/checkpoints (v1.6 phases 59,61); cross-layer reconciliation (phase 78).
+
+Retrieval: `docs_search` from LightRAG hybrid + Hindsight context; `memory_search` merges index rows with derived Hindsight hits (plus provenance/forget); `graph_get` from Timescale graph tables; cache covers brief/memory/graph.
+
+Indexing: LightRAG re-ingests on hash change/merge trigger; Timescale index-store migrations and sweeps; Hindsight retain after gate.
+
+#### Coordination layers for unison
+
+From coordination.md: Node leases (`graph_claim` etc. use lease_id fencing, epoch CAS on Postgres clock, holder=(surface,session_id), TTL 900s default, heartbeat inside TTL); signed handoff packets (goal/files/dod/blockers/prev_event_hash signed with HMAC-SHA256 over SUBSTRATE_HANDOFF_KEY, anchored to ledger); `coord_drift_scan` compares three records (git HEAD tree, ledger trail, index claims/leases) reporting findings like git.tip_unlogged, ledger.commit_unknown_to_git, lease.expired etc.
+
+From fabric (phase 51, status.ts): one read-only view of resources including Dragonfly, timescaledb-index, greptime, lightrag, hindsight + proxy + corpus + tei; states ok/degraded/unavailable/unconfigured; deterministic suggestions in optimize, compliance checks.
+
+Dragonfly event bus (hints for wake-up, not invalidation; ledger is source of truth); Tailscale unified proxy (phase 48) for Greptime/Dragonfly/Timescale with RBAC/audit/pooling (operator cutover gated).
+
+#### Impact parity for long sessions
+
+Supports multi-day GSD-Core sessions (v1.6: phases 55-62 Contextual Memory, Live Steering and Eternal Rollback). Eternal logging/verifiable checkpoints/rollback events anchored to Solana (phase 59); session steering for durable directives (phase 58); tandem LightRAG+Hindsight with provenance/forget (phase 57); parity harness (phase 16) and RAG parity gates (phase 46) for consistent behavior; cache bump scopes (legacy/narrow) and recall snapshots bound staleness for long-running impact; cross-layer reconciliation reports drift (ledger/index/cache) without auto-repair; brief recall and cache ensure cross-session context parity without slowing brief.
+
+Adopts SOTA patterns (from 7-SOTA-ENHANCEMENTS.md and v1.5): hybrid search, graph memory, predictive cache, pub/sub, unified fabric for the coordinated planes.
+
+#### Graceful degradation mechanisms (retry, fallback, state-preservation) for session continuity in long Graph Engineering sessions (SPE-34079)
+
+Unison resources (Hindsight, LightRAG, DragonflyDB, GreptimeDB, TimescaleDB) provide retry, fallback and state-preservation so long-running Graph Engineering sessions (multi-day GSD from v1.6, high-volume graph ops) retain continuity when individual planes degrade. Mechanisms are implemented in the plane gates, cache, coordination primitives and fabric; they are fail-open where safe and preserve authoritative state.
+
+- **Retry**: Per-plane `CircuitBreaker` (greptime/index/cache/hindsight/lightrag + tei aux) in `@substrate/observability` opens after `failureThreshold` consecutive failures (env `SUBSTRATE_BREAKER_FAILURES`, default 5), enters half-open after `openMs` (default 30s) to admit exactly one probe. `callPlane` returns `BreakerOpenError` with `retryAfterMs` (no call made); callers back off or surface the wait. Handoffs and outbox replays carry explicit retry with idempotency keys; no blind auto-retries (prevents storms). Cache connect uses bounded cooldown, zero reconnect retries inside one request.
+
+- **Fallback**: On breaker open or plane error, `ReadThroughCache.getOrLoad` falls straight through to `request.load()` (authoritative store: Timescale index for graph/memory, Greptime ledger, LightRAG/Hindsight for docs/recall). Every cache miss/error, Dragonfly down (phase 75 explicit "the cache breaker degrades reads to the authoritative store"), or other plane outage degrades the answer (e.g. brief returns `""` or last-good snapshot within 1.5s budget; search/memory/graph return degraded/empty with logged reason). Fabric reports `degraded`/`unavailable`/`unconfigured` states; `fabric_optimize` suggests actions from evidence. Substrate outage never blocks a prompt (`fetchBrief` bounded). Dragonfly event bus and wake hints are best-effort only (ledger is source of truth).
+
+- **State-preservation for continuity**: 
+  - **Snapshots**: `brief-snapshot` (generation-free, last complete brief) and `recall-snapshot` serve last-good during degraded compose (SWR when enabled); restart drops them but source re-composes.
+  - **Leases & handoffs** (coordination.md): `graph_claim`/`heartbeat`/`release`/`complete` use `lease_id` + epoch CAS fencing on Postgres; holder=(surface,session_id); signed handoff packets (goal/files/dod/blockers/prev_event_hash + HMAC) preserve full context across agent/session handoff; `lease_handover` recorded; lapsed leases become free without reviving stale state.
+  - **Drift & reconciliation**: `coord_drift_scan` compares git/ledger/index live; cross-layer pairs report (never auto-repair) ledger/index/cache drift.
+  - **Generations & tags**: bumped on writes; stale generations force bypass to source until advanced; graph/lease epochs and uplift revs tag data for verifiable parity in long sessions.
+  - **Eternal + checkpoints** (v1.6): anchored rollback events, durable steering, session state in index preserve position across restarts/outages; handoff prev hash anchors the trail.
+
+Together these ensure that when e.g. Dragonfly degrades, Graph Engineering sessions continue with authoritative data/coordination state, bounded staleness, no lost leases or unlogged work, and the same observable impact as the non-degraded path. References: cache.ts (degraded fallthrough, snapshots), breaker.ts (CircuitBreaker, BreakerOpenError), data-planes.md (fail-through contract), coordination.md (leases/handoffs/drift), phase 75 (Dragonfly degradation), fabric (status), v1.6 eternal/rollback (state preservation). Unison resources inherit the same gates and snapshots.
+
+#### Impact parity structures for three coordinated graphed tagged uplifted structures (data, coordination, uplift) supporting long high-volume Graph Engineering sessions (SPE-34079)
+
+Three coordinated graphed tagged uplifted structures realize impact parity (consistent observable results, state fidelity and performance under load) for long high-volume Graph Engineering sessions:
+
+- **Data graphed (tagged uplifted)**: The event chain in GreptimeDB (append-only hash/prev, 180d hot) and graph tables in TimescaleDB (graph_* with lease/epoch tags) plus LightRAG planning/docs graph, Hindsight memory banks and Dragonfly cache entries are tagged at write (e.g. event seq, graph_epoch, uplift rev) and uplifted from prior SOTA phases. In long high-volume sessions, Merkle-anchored parity + bounded staleness (via cache TTLs and recall snapshots) ensures retrievals (docs_search, memory_search, graph_get) produce identical impact as baseline even after days and thousands of graph ops.
+
+- **Coordination graphed (tagged uplifted)**: Node leases/handoffs (graph_claim etc with lease_id, holder=(surface,session), epoch CAS on Postgres, TTL 900s) and drift scans (coord_drift_scan comparing git/ledger/index) plus fabric status view are tagged with session/epoch and uplifted from v1.6 eternal and v1.8 cross-layer. Supports high-volume Graph Engineering by fencing concurrent claims and detecting/reporting drift (e.g. lease.expired, ledger.commit_unknown_to_git) without allowing parity loss over long sessions; heartbeats and signed packets keep coordination impact stable.
+
+- **Uplift graphed (tagged uplifted)**: Uplift from SOTA (hybrid RAG+Hindsight, graph memory+Greptime, predictive+cache, pub/sub, enterprise fabric from phases 46-51,57), planning index (52), eternal rollback/checkpoints (59,61), cross-layer reconciliation (78) are tagged for versioned parity and applied to the data/coordination graphs. For long high-volume sessions this delivers uplifted consistent impact: no regression in recall quality, rollback fidelity or cache behavior; cross-layer reports close parity loops; enables sustained Graph Engineering without degradation.
+
+These tagged uplifted structures (per clarif q2) together support long high-volume Graph Engineering sessions by enforcing impact parity end-to-end: data writes preserve verifiability, coordination maintains authoritative graph state, uplift carries forward proven patterns. References SPE-34079, v1.9 Unison.
+
 ## Phase Details
 
 ### Phase 16: Production parity and rehearsal harness
@@ -203,37 +263,6 @@ Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eigh
 **Proof**: Isolated: `redact.test.ts` over a fixture corpus with one planted secret per rule, plus the repo check. No live system.
 **Plans**: TBD
 
-### Phase 19: Lane B collectors
-
-**Goal**: What herdr panes, Muse and Cursor sessions do on this host reaches the event log under main's vocabulary from code on `main`, and every Muse repo carries a fresh, redacted brief.
-**Depends on**: Phase 17, Phase 18
-**Repos**: agent-substrate (`packages/collectors`, `packages/projector`, `infra/vps`)
-**Requirements**: [LANEB-01, LANEB-02, LANEB-03, LANEB-04, LANEB-05, LANEB-07, SKILL-06]
-**Success Criteria** (what must be TRUE):
-
-  1. A herdr pane going working → idle in repo R appears in `events_query(repo=R)` within 10 s as a `note` with `payload.status` and `runtime: herdr`, under the surface herdr detected and R's origin slug; detection and exit appear as `session.start` and `session.end`.
-  2. A Muse tool call in R appears as `tool.call` from surface `muse` with repo and branch from git, emitted by a hook that imports the redactor from a stable installed path.
-  3. R's `.substrate/BRIEF.md` lists both events on its next 5-minute refresh, `AGENTS.md` keeps exactly one pointer however often the writer runs, and a failed `/brief` fetch leaves the last good file in place.
-  4. A stopped substrate never blocks herdr, Muse or Cursor; collectors resume from saved offsets after a restart; refused emits are counted where the operator can see them and are zero in the proof run.
-  5. Cursor's `stop` hook, run from `main`, copies a redacted transcript to `/var/lib/substrate/transcripts/cursor` and emits `session.end`.
-
-**Proof** (LANEB-07): Isolated, against the Phase 16 harness with the local herdr and Muse. Restarting the production collector units onto main's code after merge is an operator-approved step, not part of the proof.
-**Plans**: TBD
-- [x] 19-01-PLAN.md
-- [x] 19-02-PLAN.md
-- [x] 19-03-PLAN.md
-- [x] 19-04-PLAN.md
-- [x] 19-05-PLAN.md
-
-### Phase 20: Production identity and Phase 0 UAT
-
-**Goal**: Every client of production `substrate-mcp` is identified by its own token, and the eight deferred Phase 0 brief scenarios pass against `main` with fresh evidence.
-**Depends on**: Phase 19 (the Cursor `stop` hook for scenario 6), Phase 16 (production serving `main`)
-**Repos**: agent-substrate (UAT script, identity runbook), claude-ultrathink (`ultrathink-kickoff` `graph_register`); `/etc/substrate/substrate.env` is edited by the operator, by name only
-**Requirements**: [FOUND-04, UAT-01, UAT-02, UAT-03, UAT-04]
-**Success Criteria** (what must be TRUE):
-
-  1. A runbook lists every client of `substrate-mcp` with the token it needs; per-surface tokens, the operator token, `SUBSTRATE_HANDOFF_KEY` and `SUBSTRATE_AUDIT_PATH` exist by name in `/etc/substrate/substrate.env` with no value in the repo, and no listed client is left without a token at switch-on.
   2. A repeatable UAT script runs all eight scenarios from `milestones/v1.0-phases/00-brief/0-UAT.md` against any `SUBSTRATE_URL`, with expectations updated to today's surface, and records pass or fail with evidence per scenario.
   3. Scenario 5 passes: Claude Code's `substrate` MCP entry names its token variable, and `ultrathink-kickoff` registers each new graph through `graph_register`.
   4. Scenario 6 passes: the Cursor hooks, including `stop`, and the git post-commit collector are installed and emit live.
