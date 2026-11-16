@@ -742,7 +742,7 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 
 ## Owner decisions (2026-11-16, second HITL)
 
-- Phase 46 D1: volume-level archive. Not the debt default. Not attestation-only. Checked this host: no RAGFlow volume and no RAGFlow container. No archive was written. Criterion 2 stays unmet until a volume exists to archive.
+- Phase 46 D1: volume-level archive was chosen. This host has no RAGFlow volume and no RAGFlow container. Owner decision 2026-11-16, follow-up: criterion 2 is waived. The service was empty and deleted on 2026-10-25. No archive was written.
 - Phase 46 D2/D3: parity source is LightRAG records, 10 queries at 100 percent.
 - Phase 46 D4: RAGFlow reversal is impossible. Record that in the cutover record.
 - Phase 68: the disclosed 300-pair cap stands. Do not remove it.
