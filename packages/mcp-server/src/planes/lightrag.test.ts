@@ -440,7 +440,7 @@ describe("upload (POST /documents/upload, text fallback)", () => {
 
 	test("storePlanningPage names a planning page by its checkout and flattened path, and defaults commit and heading_path", async () => {
 		const fake = fakeLightrag({
-			"POST /documents/upload": [json({ data: { track_id: "trk-p" } })],
+			"POST /documents/text": [json({ data: { track_id: "trk-p" } })],
 		});
 		const outcome = await storePlanningPage(
 			PLAIN,
@@ -448,25 +448,25 @@ describe("upload (POST /documents/upload, text fallback)", () => {
 			fake.fetch,
 		);
 		expect(outcome).toEqual({ ok: true, track_id: "trk-p" });
-		const form = formOf(fake.calls[0]);
-		const file = form.get("file");
-		if (!(file instanceof File)) throw new Error("file part missing");
-		expect(file.name).toBe("wt-a:.planning__phases__03-x__PLAN.md");
-		expect(form.get("commit")).toBe("unpinned");
-		expect(form.get("heading_path")).toBe("");
+		expect(fake.calls[0]?.path).toBe("/documents/text");
+		expect(fake.calls[0]?.body).toMatchObject({
+			file_source: "wt-a:.planning__phases__03-x__PLAN.md",
+			commit: "unpinned",
+			heading_path: "",
+		});
 	});
 
 	test("two checkouts with the same relative planning path upload under two names", async () => {
 		const fake = fakeLightrag({
-			"POST /documents/upload": [json({ data: { track_id: "trk-a" } }), json({ data: { track_id: "trk-b" } })],
+			"POST /documents/text": [json({ data: { track_id: "trk-a" } }), json({ data: { track_id: "trk-b" } })],
 		});
 		const page = { path: ".planning/STATE.md", body: "state" } as const;
 		await storePlanningPage(PLAIN, { ...page, checkout: "wt-a", sourceUrl: "file:///a/.planning/STATE.md" }, fake.fetch);
 		await storePlanningPage(PLAIN, { ...page, checkout: "wt-b", sourceUrl: "file:///b/.planning/STATE.md" }, fake.fetch);
 		const names = fake.calls.map((call) => {
-			const file = formOf(call).get("file");
-			if (!(file instanceof File)) throw new Error("file part missing");
-			return file.name;
+			const body = call.body;
+			if (body === null || typeof body !== "object" || !("file_source" in body)) throw new Error("text body missing");
+			return body.file_source;
 		});
 		expect(names).toEqual(["wt-a:.planning__STATE.md", "wt-b:.planning__STATE.md"]);
 	});

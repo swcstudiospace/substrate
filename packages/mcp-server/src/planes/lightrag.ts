@@ -562,14 +562,12 @@ function uploadFailure(failure: { ok: false; reason: string; detail?: string }):
 }
 
 /**
- * Upload one redacted page as a document (`POST /documents/upload`,
- * multipart form field `file`, → `{ status, message, track_id }`),
- * falling back to `POST /documents/text` (`{ text, file_source }`)
- * where the multipart route is absent. The ingest metadata travels as
- * trailing form fields on the upload and as members of the text body,
- * so retrieval can echo the source URL either way. A missing track id in
- * a success body is a shape failure, not a silent empty upload. HTTP 409
- * is the typed `conflict` outcome ({@link LIGHTRAG_SAME_NAME_CONFLICT}).
+ * Upload one redacted page as a document. Names that are safe filenames go
+ * through `POST /documents/upload`. LightRAG rejects `:` in that filename
+ * (`Unsafe filename detected`) even though `POST /documents/text` stores the
+ * same string as `file_source`. Corpus names contain colons, so they take
+ * the text route. A missing multipart route (404) also falls back to text.
+ * HTTP 409 is the typed `conflict` outcome ({@link LIGHTRAG_SAME_NAME_CONFLICT}).
  */
 export async function uploadDocument(
 	config: LightragConfig,
@@ -577,20 +575,35 @@ export async function uploadDocument(
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 8000,
 ): Promise<LightragUploadOutcome> {
+	const graphEntities = request.metadata.graph_entities?.filter((entity) => entity.length > 0) ?? [];
+	const graphRelations = request.metadata.graph_relations?.filter(
+		(relation) => relation.source.length > 0 && relation.target.length > 0 && relation.kind.length > 0,
+	) ?? [];
+	const textBody = JSON.stringify({
+		text: request.content,
+		file_source: request.name,
+		source_url: request.metadata.source_url,
+		commit: request.metadata.commit,
+		heading_path: request.metadata.heading_path,
+		...(graphEntities.length > 0 ? { graph_entities: graphEntities } : {}),
+		...(graphRelations.length > 0 ? { graph_relations: graphRelations } : {}),
+	});
+	const viaText = async (): Promise<LightragUploadOutcome> => {
+		const texted = await call(config, fetchImpl, "/documents/text", { method: "POST", json: true, body: textBody, timeoutMs });
+		if (!texted.ok) return uploadFailure(texted);
+		const trackId = uploadTrackId(dataOf(texted.body));
+		if (trackId === undefined) return { ok: false, reason: "lightrag: unexpected upload shape" };
+		return { ok: true, track_id: trackId };
+	};
+	// The upload route treats the multipart filename as a single basename and rejects `:`.
+	if (request.name.includes(":") || request.name.includes("/") || request.name.includes("\\")) return viaText();
 	const form = new FormData();
 	form.append("file", new Blob([request.content], { type: "text/markdown" }), request.name);
 	form.append("file_source", request.name);
 	form.append("source_url", request.metadata.source_url);
 	form.append("commit", request.metadata.commit);
 	form.append("heading_path", request.metadata.heading_path);
-	// Graph attribution rides along only when the scrape extracted it;
-	// the form and the text fallback carry the same list, so a plane that
-	// serves either route indexes the same vectors.
-	const graphEntities = request.metadata.graph_entities?.filter((entity) => entity.length > 0) ?? [];
 	if (graphEntities.length > 0) form.append("graph_entities", JSON.stringify(graphEntities));
-	const graphRelations = request.metadata.graph_relations?.filter(
-		(relation) => relation.source.length > 0 && relation.target.length > 0 && relation.kind.length > 0,
-	) ?? [];
 	if (graphRelations.length > 0) form.append("graph_relations", JSON.stringify(graphRelations));
 	const uploaded = await call(config, fetchImpl, "/documents/upload", { method: "POST", body: form, timeoutMs });
 	if (uploaded.ok) {
@@ -599,24 +612,7 @@ export async function uploadDocument(
 		return { ok: true, track_id: trackId };
 	}
 	if (!uploaded.reason.startsWith("lightrag 404")) return uploadFailure(uploaded);
-	const texted = await call(config, fetchImpl, "/documents/text", {
-		method: "POST",
-		json: true,
-		body: JSON.stringify({
-			text: request.content,
-			file_source: request.name,
-			source_url: request.metadata.source_url,
-			commit: request.metadata.commit,
-			heading_path: request.metadata.heading_path,
-			...(graphEntities.length > 0 ? { graph_entities: graphEntities } : {}),
-			...(graphRelations.length > 0 ? { graph_relations: graphRelations } : {}),
-		}),
-		timeoutMs,
-	});
-	if (!texted.ok) return uploadFailure(texted);
-	const trackId = uploadTrackId(dataOf(texted.body));
-	if (trackId === undefined) return { ok: false, reason: "lightrag: unexpected upload shape" };
-	return { ok: true, track_id: trackId };
+	return viaText();
 }
 
 /**
