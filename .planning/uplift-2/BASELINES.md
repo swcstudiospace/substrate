@@ -21,7 +21,7 @@ n4 [SPE-10664](https://linear.app/swcstudio/issue/SPE-10664). Every number below
 |---|---|---|
 | GreptimeDB public edge | TLS connect / TTFB on `/health` | 40 ms / **223 ms** |
 | Hindsight public edge | TLS connect / TTFB on `/health` | 40 ms / **218 ms** |
-| RAGFlow (retired) public edge | TLS connect / TTFB on `/health` | 41 ms / **253 ms** |
+| RAGFlow public edge | TLS connect / TTFB on `/health` | 41 ms / **253 ms** |
 | TimescaleDB public TCP proxy | `select 1` cold / warm (Bun SQL) | **1,057 ms** cold (first connect), **172 ms** warm |
 | loopback redis | — | sub-millisecond (same host) |
 
@@ -46,7 +46,7 @@ Implication: an uncached brief costs 3 sequential Postgres reads (≈520 ms warm
 | loopback redis | memory · keys · config | 1.0 MB used, peak 1.0 MB · 8 keys · `maxmemory 0`, `noeviction`, RDB save on, AOF off, keyspace hits 388 / misses 192 |
 | Railway Dragonfly | use | **unused by production** (5 GB volume provisioned) |
 | Hindsight | retain/recall volumes, tokens injected per prompt | **unknown** (no per-plane metric exists; see R2) |
-| RAGFlow (retired) | datasets, chunk/embedding settings, retrieval p95 | **unknown** (no live ingest attested; Phase 25 G1–G4 gated; no per-plane metric) |
+| RAGFlow | datasets, chunk/embedding settings, retrieval p95 | **unknown** (no live ingest attested; Phase 25 G1–G4 gated; no per-plane metric) |
 
 ## VPS
 
@@ -68,8 +68,8 @@ Deployed with `infra/vps/deploy-release.sh release-20261013-91487e7` (free-disk 
 | Measure | Value | Source |
 |---|---|---|
 | `/healthz` duration | first probe 704 ms (Greptime write probe + index ping + capacity); the next three 1.0–1.3 ms from the 5 s memo | curl |
-| `/healthz` shape | `planes` greptime/index/cache/hindsight/ragflow (retired) all `closed`; `capacity.index` 11.9 MB; `ledger.writable: true`; `auditDurable: true` | `/healthz` |
-| plane availability | greptime 100 % (n 7), index 100 % (n 13), cache 100 % (n 21); hindsight/ragflow (retired) no samples yet | `/slo.planes` |
+| `/healthz` shape | `planes` greptime/index/cache/hindsight/ragflow all `closed`; `capacity.index` 11.9 MB; `ledger.writable: true`; `auditDurable: true` | `/healthz` |
+| plane availability | greptime 100 % (n 7), index 100 % (n 13), cache 100 % (n 21); hindsight/ragflow no samples yet | `/slo.planes` |
 | `POST /brief` (repo `swcstudiospace/agent-substrate`) | 6 calls 1.20–1.22 s, every one `X-Substrate-Brief: degraded`; ETag stable, `If-None-Match` → 304 in 1.20 s; `brief.p95` 1,560 ms (n 7) | curl, `/slo` |
 | cache | enabled, connected; hits 0 · misses 14 — a degraded brief is never stored, so nothing was cached | `/healthz.cache` |
 | boot warnings | `HINDSIGHT_BANK is set but legacy and unread; recall fans out over HINDSIGHT_BANKS` (operator env step 4) | journal |

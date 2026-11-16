@@ -28,4 +28,4 @@ Every item is a flag or an uninstalled unit: `SUBSTRATE_BUDGETS=off`, `SUBSTRATE
 
 ## Explicitly out of scope (recorded)
 
-Backlog from PROPOSAL.md: Hindsight outbox gauges + bank inventory, cache miss coalescing, chaos smoke in CI, usage/spend views, recall-to-brief snapshot, snapshot-gated sweep apply, lifecycle purge, `tenant=swc`, the gateway docs cutover. Live RAGFlow (retired) and Hindsight proofs (Phase 25/26 G1–G4) stay operator-gated.
+Backlog from PROPOSAL.md: Hindsight outbox gauges + bank inventory, cache miss coalescing, chaos smoke in CI, usage/spend views, recall-to-brief snapshot, snapshot-gated sweep apply, lifecycle purge, `tenant=swc`, the gateway docs cutover. Live RAGFlow and Hindsight proofs (Phase 25/26 G1–G4) stay operator-gated.

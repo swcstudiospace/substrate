@@ -1,4 +1,4 @@
-/** LightRAG replaced RAGFlow (retired); there is no fallback that calls the retired plane. */
+/** LightRAG replaced RAGFlow; there is no fallback that calls the retired plane. */
 /**
  * `substrate docs ingest` — ingest one page into a docs dataset (DOCS-02).
  *

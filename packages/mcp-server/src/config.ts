@@ -1,4 +1,4 @@
-/** LightRAG replaced RAGFlow (retired); there is no fallback that calls the retired plane. */
+/** LightRAG replaced RAGFlow; there is no fallback that calls the retired plane. */
 /**
  * Configuration, loaded from the environment.
  *

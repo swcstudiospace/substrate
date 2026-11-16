@@ -362,7 +362,7 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "substrate-slo-history"
       },
-      "description": "The ragflow (retired) line is RAGFlow (retired)'s call latency at p95. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
+      "description": "The ragflow line is RAGFlow's call latency at p95. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -465,7 +465,7 @@
           }
         }
       ],
-      "title": "Fabric: ragflow (retired)",
+      "title": "Fabric: ragflow",
       "transformations": [
         {
           "id": "partitionByValues",
@@ -1287,7 +1287,7 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "substrate-slo-history"
       },
-      "description": "Per data plane (greptime, index, cache, hindsight, ragflow (retired), lightrag); a refused call (breaker open) carries no duration and is not in it. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
+      "description": "Per data plane (greptime, index, cache, hindsight, ragflow, lightrag); a refused call (breaker open) carries no duration and is not in it. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
       "fieldConfig": {
         "defaults": {
           "color": {

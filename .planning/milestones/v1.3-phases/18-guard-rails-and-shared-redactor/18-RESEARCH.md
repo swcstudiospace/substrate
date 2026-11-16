@@ -117,7 +117,7 @@
 - Splitting into plans: for example, merge and skill engine; then lock and `lessons.ts` migration; then docs and harness proof.
 
 ### Deferred Ideas (OUT OF SCOPE)
-- Redaction rules for RAGFlow (retired) and Hindsight key formats, base58 secret keys, and Railway and tailnet hostnames (PITFALLS 6). They belong to the phase that first handles each class (25, 26, 27/28), and are added to `redact.ts` under the lock.
+- Redaction rules for RAGFlow and Hindsight key formats, base58 secret keys, and Railway and tailnet hostnames (PITFALLS 6). They belong to the phase that first handles each class (25, 26, 27/28), and are added to `redact.ts` under the lock.
 - A docs-specific scan profile and the refuse-on-findings policy for `docs_ingest` (Phase 25).
 - Reconciling `grok-hermes-connector`'s `redactor.py` with this module (another repository; a cross-repo test-vector exchange is a candidate for a later milestone).
 </user_constraints>

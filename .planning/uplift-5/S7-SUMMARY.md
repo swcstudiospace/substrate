@@ -13,7 +13,7 @@ Slice branch `u5/s7`. The first pass was edit-only; the orchestrator's verificat
 | `scripts/config-reference.ts` + `.test.ts` | NEW. Generator and `--check`. `package.json`: `config:reference`. |
 | `docs/config-reference.md` | NEW, generated: a table per plane, the promotion policies, the name families, the exempt names. |
 | `docs/runbooks/flag-promotion.md` | NEW. Procedure, verdicts, caveats, offline fixture format; its evidence table is generated between two markers and checked. |
-| `.env.example` | One block of 61 COMMENTED `# NAME=default` lines appended (names the code reads that had no line), one comment on `RAGFLOW (retired)_DATASET_ID=`. No live line added or changed. |
+| `.env.example` | One block of 61 COMMENTED `# NAME=default` lines appended (names the code reads that had no line), one comment on `RAGFLOW_DATASET_ID=`. No live line added or changed. |
 | `.planning/uplift-5/env-notes/S7.md` | What the orchestrator adds at integration (other slices' flags). |
 
 ## Flags and defaults
@@ -49,7 +49,7 @@ Flags with no history evidence (`SUBSTRATE_LEDGER_TTL`, `SUBSTRATE_INDEX_SWEEP`,
 `packages/mcp-server/src/flag-registry.test.ts`
 - Lock: no name read by `packages/**` or `scripts/**` (tests excluded) is missing from the registry. A planted fixture proves the scanner catches six read forms (dot, index, nested `io.env`, constant, `env("…")` call, composed prefix), and again through `scanFiles` on a file in a temp dir with its line number; comments and prose are not reads (and the real reads in the same fixture are still seen, so an empty result is not blindness).
 - The scanner sees this repo's own declaration styles: `SUBSTRATE_INDEX_ARCHIVE_ALLOW_ROOTFS` and `SUBSTRATE_BURN_TOKENS_PER_HOUR` (constants) and the `SUBSTRATE_TOKEN_` and `SUBSTRATE_BUDGET_` prefixes.
-- No rot: names unique; every row (except `unread`) is read; `RAGFLOW (retired)_DATASET_ID` stays `unread` until something reads it; every family prefix is live; every exemption is used and has a reason; every `doc` exists.
+- No rot: names unique; every row (except `unread`) is read; `RAGFLOW_DATASET_ID` stays `unread` until something reads it; every family prefix is live; every exemption is used and has a reason; every `doc` exists.
 - `.env.example`: `documented` rows have a `NAME=` line and non-documented rows have none; every documented family member is listed; every name the file lists is registered.
 - Defaults: each mode flag's registry default equals `loadConfig({})` (and `sweepModeFromEnv({})`); each policy's `safe` is the default; the numeric boot defaults match.
 - Policies: every criterion is a proposal with a valid window; core series and labels exist in `METRIC_SERIES`; extended series are not in it and their labels are in the instrument's closed vocabulary; `safe`/`enforcing` are values the flag accepts and differ; a flag without evidence has a manual check.
@@ -99,7 +99,7 @@ None are performed by code. The advisor prints the flip for each flag as text: s
 - Brief profile: the recon's "bytes saved >= 20 % of full bytes over >= 30 briefs" cannot be computed, because no series records the full size (U5-6 confirmed the same). The proposal is 700 bytes saved per brief (20 % of the 3500-byte compact cap), over brief counts from `brief.p95`; documented as diluted and conservative.
 - Budgets: the history is aggregated over surfaces and classes, so "per surface and class, and zero for coordination" is not decidable from it. The criterion is the aggregate; the runbook says the per-surface check needs `GET /metrics` (`substrate.admission.decisions`).
 - Memory expiry: the history series is not split by memory kind, so "zero served for decision kinds" is "zero served at all" over a covered week, plus the manual sweep dry-run check.
-- `RAGFLOW (retired)_MCP_URL` (lane L2: "read but undocumented"): the code names it only in two comments (`config.ts`, `planes/ragflow (retired).ts`: "never read"), so it is not an environment read and is not registered or listed. `RAGFLOW (retired)_DATASET_ID` is the opposite: listed in `.env.example` but read by nothing, so it is registered as `unread` (and the lock fails if something starts reading it without the row being updated).
+- `RAGFLOW_MCP_URL` (lane L2: "read but undocumented"): the code names it only in two comments (`config.ts`, `planes/ragflow.ts`: "never read"), so it is not an environment read and is not registered or listed. `RAGFLOW_DATASET_ID` is the opposite: listed in `.env.example` but read by nothing, so it is registered as `unread` (and the lock fails if something starts reading it without the row being updated).
 - The registry file is excluded from the scan (it would otherwise vouch for itself); `scanFiles` and `envReadSources` take their own file lists.
 - Lane count: the lane estimated ~223 names read and ~179 documented. The scan finds 245 distinct read names (counting the composed families by prefix) and the registry has 226 rows plus 196 family members.
 

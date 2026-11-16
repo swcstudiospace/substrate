@@ -1,8 +1,8 @@
 ---
-phase: 25-docs-search-and-ingest-ragflow (retired)
+phase: 25-docs-search-and-ingest-ragflow
 plan: "03"
 subsystem: docs-datasets
-tags: [ragflow (retired), datasets, refresh, degradation, runbook]
+tags: [ragflow, datasets, refresh, degradation, runbook]
 requires: [25-02]
 provides: [dataset-lifecycle, plane-docs, gated-live-inventory]
 affects: []
@@ -15,15 +15,15 @@ key-files:
     - packages/mcp-server/src/docs-datasets.test.ts
     - docs/docs-search-ingest.md
     - docs/runbooks/docs-proof.md
-    - .planning/phases/25-docs-search-and-ingest-ragflow (retired)/25-VALIDATION.md
+    - .planning/phases/25-docs-search-and-ingest-ragflow/25-VALIDATION.md
   modified:
-    - packages/mcp-server/src/planes/ragflow (retired).ts
-    - packages/mcp-server/src/ragflow (retired)-fake.ts
+    - packages/mcp-server/src/planes/ragflow.ts
+    - packages/mcp-server/src/ragflow-fake.ts
     - packages/mcp-server/src/docs-search.ts
     - docs/data-planes.md
     - .env.example
 decisions:
-  - "createDataset lives in planes/ragflow (retired).ts and the fake grows a create route (both outside the plan's file list — the client is the natural home; noted, not hidden)"
+  - "createDataset lives in planes/ragflow.ts and the fake grows a create route (both outside the plan's file list — the client is the natural home; noted, not hidden)"
   - "DatasetPin.ingested_at and citation pin_age_ms are optional: pre-ingest replies are unchanged, degraded serves carry the age"
   - "Version numbers derive from max existing + 1 so retention eviction never reuses a number"
   - "No service.ts hook wiring this phase: the sync tick's projection step (Phase 22 code) calls noteSkillsSyncFastForward; the entry point ships, the call site is not this phase's"
@@ -37,7 +37,7 @@ actuals:
 status: complete
 ---
 
-| 1 | Build dataset resolve plus refresh plus degradation hook | 446d50d | docs-datasets.ts, docs-datasets.test.ts, planes/ragflow (retired).ts (createDataset), ragflow (retired)-fake.ts (create), docs-search.ts (pin age) |
+| 1 | Build dataset resolve plus refresh plus degradation hook | 446d50d | docs-datasets.ts, docs-datasets.test.ts, planes/ragflow.ts (createDataset), ragflow-fake.ts (create), docs-search.ts (pin age) |
 | 2 | Document the plane and update the data-planes wiring row | 1274c30 | docs-search-ingest.md, data-planes.md, .env.example |
 | 3 | Map the G1-G4 gated live steps and stop (checkpoint) | 79dc28c | docs-proof.md, 25-VALIDATION.md |
 documentation, and the G1-G4 gated inventory — rehearsal proven, live
@@ -47,7 +47,7 @@ steps untouched.
 
 | # | Name | Commit | Files |
 |---|------|--------|-------|
-| 1 | Build dataset resolve plus refresh plus degradation hook | (lifecycle) | docs-datasets.ts, docs-datasets.test.ts, planes/ragflow (retired).ts (createDataset), ragflow (retired)-fake.ts (create), docs-search.ts (pin age) |
+| 1 | Build dataset resolve plus refresh plus degradation hook | (lifecycle) | docs-datasets.ts, docs-datasets.test.ts, planes/ragflow.ts (createDataset), ragflow-fake.ts (create), docs-search.ts (pin age) |
 | 2 | Document the plane and update the data-planes wiring row | (docs) | docs-search-ingest.md, data-planes.md, .env.example |
 | 3 | Map the G1-G4 gated live steps and stop (checkpoint) | (gates) | docs-proof.md, 25-VALIDATION.md |
 
@@ -55,7 +55,7 @@ steps untouched.
 
 - Datasets exist by name and refresh as documented, keeping the last five versions: TRUE (resolve reuses, create only on miss with TEI bge-small; 7 refreshes keep v3–v7 with monotonic numbers)
 - agent-skills refresh degrades explicitly with warning and pin-aged serve while sync is not live: TRUE (warn-once `skills-sync-not-live`; serve carries pin + age; age in search reply; fast-forward flips live)
-- Every real RAGFlow (retired) touch is an explicit OPERATOR-GATED step the executor performed none of: TRUE (G1–G4 mapped with commands, proof reads, rollbacks; zero live calls)
+- Every real RAGFlow touch is an explicit OPERATOR-GATED step the executor performed none of: TRUE (G1–G4 mapped with commands, proof reads, rollbacks; zero live calls)
 
 ## Deviations from Plan
 
@@ -73,7 +73,7 @@ a test over-asserted the commit fallback across unpinned datasets
 - `bun test` datasets (9 tests) plus all 25-01/25-02 suites: green
 - `bunx tsc --noEmit`: clean
 - `grep -c OPERATOR-GATED`: 5 in runbook, 2 in validation map
-- `grep -c planes/ragflow (retired).ts`: data-planes + plane doc name the new reader
+- `grep -c planes/ragflow.ts`: data-planes + plane doc name the new reader
 
 ## Threat Flags
 

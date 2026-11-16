@@ -27,9 +27,9 @@ status: scoped in-repo on origin/main acb6767. The live fast-forward proof is op
 - D42-3. Ingest roots become a per-dataset map: `agent-substrate` keeps its current base directory and roots, byte for byte in behaviour. `agent-skills` uses `SUBSTRATE_AGENT_SKILLS_ROOT`.
 - D42-4. F-D3 needs no code change. Criterion 1 is proven by the existing tests, cited in the records. The gap noted in FEATURES (how `declined` is reported) stays as it is.
 - D42-5. Fail closed. If the checkout cannot be read, the trigger records a failure and the pinned version keeps serving with its age, as `degradedAgentSkillsServe` already does.
-- D42-6. The fake RAGFlow (retired) in tests stands in for the plane. A test proves that `docs_search` returns a document from the new agent-skills version after the refresh.
+- D42-6. The fake RAGFlow in tests stands in for the plane. A test proves that `docs_search` returns a document from the new agent-skills version after the refresh.
 
 ## Out of scope
 
-- Creating the RAGFlow (retired) `agent-skills` dataset, RAGFlow (retired) keys, installing the `substrate-skills-sync` unit on the host, and a live fast-forward proof. These are operator-gated.
+- Creating the RAGFlow `agent-skills` dataset, RAGFlow keys, installing the `substrate-skills-sync` unit on the host, and a live fast-forward proof. These are operator-gated.
 - Changing the decline-reporting semantics.

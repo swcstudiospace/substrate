@@ -44,14 +44,14 @@ Diff from `7fb8335` to `b0feacc` (the fix-up round): 15 files, +908 −48. Diff 
 ## Deviations from PLAN.md (remaining)
 
 1. **Tool name.** PLAN and CONTEXT D51-a pin `fabric_suggest`; the code registers `fabric_optimize` (`mcp.ts:1369`). The ROADMAP criterion says "optimization suggestions", so the name is a fair reading.
-2. **Six resources.** PLAN lists `railway, greptime, postgres, dragonfly, hindsight, ragflow (retired)`. The code reports `dragonfly, timescaledb-index, greptime, ragflow (retired), hindsight, tailscale-proxy` (`fabric/types.ts:10-17`). Railway is not a row; it feeds `fabric_optimize` only (`optimize.ts`). `tailscale-proxy` is a row, although CONTEXT.md treats Tailscale as a dimension.
+2. **Six resources.** PLAN lists `railway, greptime, postgres, dragonfly, hindsight, ragflow`. The code reports `dragonfly, timescaledb-index, greptime, ragflow, hindsight, tailscale-proxy` (`fabric/types.ts:10-17`). Railway is not a row; it feeds `fabric_optimize` only (`optimize.ts`). `tailscale-proxy` is a row, although CONTEXT.md treats Tailscale as a dimension.
 3. **States.** PLAN has `ok, degraded, down, unconfigured, unknown`. The code has `ok, degraded, unavailable, unconfigured` (`fabric/types.ts:33`). There is no `unknown` state.
 4. **Compliance verdicts.** PLAN has `pass | finding | not-applicable`. The code has `PASS | FAIL | NOT_APPLICABLE` (`fabric/types.ts:66`), which matches the task wording and the docs.
 5. **Compliance checks.** PLAN's `railway-writes-gated` and `auth-configured` are absent. The code adds `audit-policy-fabric-tools`, `report-redaction`, and `resource-state.<resource>` (`compliance.ts:31-37`).
 6. **Suggestion shape.** PLAN pins `id, resource, severity, message, reference`. The code has `id, resource, action, evidence, severity` (`fabric/types.ts:58-64`). No docs `reference` anchor is emitted.
 7. **Test layout.** PLAN has one `fabric/fabric.test.ts`. The code has `status.test.ts`, `optimize.test.ts`, `compliance.test.ts`, `gather.test.ts`, and `fabric/fixtures.ts`.
 8. **`service.ts` scope.** PLAN limits the change to one `fabricSources()` method. The diff rewrites `health()` into `healthProbes`, `greptimeProbe`, `writeProbeReading`, and `sharedHealthProbes` (`service.ts:5932-6150`). This is the `/healthz` path; parity rests on the commit messages.
-9. **"No new probe" (D51-b).** Resolved for writes (fix-up `4f9468d`). The fabric still issues live read probes: a ping, the dialect and append-mode reads, Hindsight and RAGFlow (retired) GETs. CONTEXT.md D51-b says "performs no new probe".
+9. **"No new probe" (D51-b).** Resolved for writes (fix-up `4f9468d`). The fabric still issues live read probes: a ping, the dialect and append-mode reads, Hindsight and RAGFlow GETs. CONTEXT.md D51-b says "performs no new probe".
 10. **Sequencing.** PLAN says code starts after PRs 102 and 103 are merged to `origin/main`. The base `96d23ef` is a merge into `gsd/p48-ci`, which contains the phase 48 and 50 commits. Whether those reached `origin/main` was not checked.
 
 Resolved since the first pass: docs (PLAN required a section in `docs/observability.md`; it is now present, `docs/observability.md:997`), and dashboards (PLAN deferred them under D51-f; the six panels are now built).

@@ -1,19 +1,19 @@
 ---
-phase: 25-docs-search-and-ingest-ragflow (retired)
+phase: 25-docs-search-and-ingest-ragflow
 plan: "01"
 subsystem: docs-search
-tags: [ragflow (retired), docs-search, retrieval, rehearsal-fake]
+tags: [ragflow, docs-search, retrieval, rehearsal-fake]
 requires: []
-provides: [ragflow (retired)-plane-client, recording-ragflow (retired)-fake, docs-search-tool-route]
+provides: [ragflow-plane-client, recording-ragflow-fake, docs-search-tool-route]
 affects: [25-02-ingest, 25-03-datasets]
 tech-stack:
   added: []
   patterns: [recording-fake-fetch-injection, fail-open-read, citation-reply]
 key-files:
   created:
-    - packages/mcp-server/src/planes/ragflow (retired).ts
-    - packages/mcp-server/src/planes/ragflow (retired).test.ts
-    - packages/mcp-server/src/ragflow (retired)-fake.ts
+    - packages/mcp-server/src/planes/ragflow.ts
+    - packages/mcp-server/src/planes/ragflow.test.ts
+    - packages/mcp-server/src/ragflow-fake.ts
     - packages/mcp-server/src/docs-search.ts
     - packages/mcp-server/src/docs-search.test.ts
   modified:
@@ -37,15 +37,15 @@ actuals:
 status: complete
 ---
 
-# Phase 25 Plan 01: Substrate-only RAGFlow (retired) retrieval path Summary
+# Phase 25 Plan 01: Substrate-only RAGFlow retrieval path Summary
 
-JWT-free read path for docs: RAGFlow (retired) retrieval through `substrate-mcp` only, proven against a recording fake — explicit dataset ids, <= 10 cited redacted results, untrusted framing, URL-listing event, empty-plus-reason errors.
+JWT-free read path for docs: RAGFlow retrieval through `substrate-mcp` only, proven against a recording fake — explicit dataset ids, <= 10 cited redacted results, untrusted framing, URL-listing event, empty-plus-reason errors.
 
 ## Tasks Completed
 
 | # | Name | Commit | Files |
 |---|------|--------|-------|
-| 1 | Port planesFromEnv plus bearer carriage into planes/ragflow (retired).ts with the recording fake | 8817bab | planes/ragflow (retired).ts, planes/ragflow (retired).test.ts, ragflow (retired)-fake.ts |
+| 1 | Port planesFromEnv plus bearer carriage into planes/ragflow.ts with the recording fake | 8817bab | planes/ragflow.ts, planes/ragflow.test.ts, ragflow-fake.ts |
 | 2 | Build docs_search with citation shape, untrusted framing and fail-open errors | d53c098 | docs-search.ts, docs-search.test.ts |
 | 3 | Register MCP tool plus REST route plus metric and audit names | a51d3c8 | mcp.ts, server.ts, server.test.ts, observe.ts, config.ts, service.ts |
 
@@ -64,7 +64,7 @@ None - plan executed exactly as written. Two implementation details worth noting
 
 ## Verification
 
-- `bun test planes/ragflow (retired).test.ts docs-search.test.ts server.test.ts event-sources.test.ts observe.test.ts mcp.test.ts config.test.ts store-lock.test.ts policy.test.ts`: all green
+- `bun test planes/ragflow.test.ts docs-search.test.ts server.test.ts event-sources.test.ts observe.test.ts mcp.test.ts config.test.ts store-lock.test.ts policy.test.ts`: all green
 - `bunx tsc --noEmit`: clean
 - Anti-pattern gate: fake returns 400 for retrieval without dataset_ids; client throws before any network call
 

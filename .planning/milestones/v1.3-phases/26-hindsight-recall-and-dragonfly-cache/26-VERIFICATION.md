@@ -85,7 +85,7 @@ None. No failed truths, missing artifacts, or unwired key links found.
 ## Not run
 
 - Full `bun test`, `bunx tsc --noEmit`, pytest, and `check:phase-close` were not re-run here (the prior report recorded them).
-- Any live Hindsight/Dragonfly/RAGFlow (retired) step (G1–G4): intentionally not run.
+- Any live Hindsight/Dragonfly/RAGFlow step (G1–G4): intentionally not run.
 - No `*-SECURITY.md` exists in the phase dir. Not a blocker under the verifier rule, which applies only when the file is present. Flagged for the parent.
 
 ## Notes

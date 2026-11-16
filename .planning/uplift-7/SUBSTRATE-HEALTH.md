@@ -4,7 +4,7 @@ Date: 2026-10-15. Basis: a read-only baseline of the code (shared access layer `
 
 ## Live status (read-only)
 
-- Planes: greptime, index, cache, hindsight, ragflow (retired) all report ok, with breakers closed.
+- Planes: greptime, index, cache, hindsight, ragflow all report ok, with breakers closed.
 - Ledger: writable, about 27,960 rows. Anchors: 0 rows, so no hour has ever been anchored.
 - Cache: 74 hits and 477 misses.
 - Services active: substrate-mcp, the herdr, muse, and grok collectors, the dispatcher, the Hermes bridge, and the connector units. The skills sync and bridge timers are installed but disabled.
@@ -18,7 +18,7 @@ Date: 2026-10-15. Basis: a read-only baseline of the code (shared access layer `
 | Routines | none | none | MISSING. No store, route, tool, or CLI. |
 | Skills | Postgres `skills_registry` | REST and MCP propose, approve, list; CLI `substrate skills` | Works. No version check. |
 | Tools | none; code-registered MCP tools (`mcp.ts`) | MCP `tools/list` | Declared in code only. No data read route. |
-| Documentation | RAGFlow (retired) datasets; ingest state file | REST and MCP `docs_search`, `docs_ingest`; CLI | Works. No version check. |
+| Documentation | RAGFlow datasets; ingest state file | REST and MCP `docs_search`, `docs_ingest`; CLI | Works. No version check. |
 | Lessons | `memory_entries` with `lesson:` subjects; no table | CLI `substrate lessons`; `/memory`; `memory_search` | Works. Supersession and dedupe are partial. |
 
 ## Findings

@@ -77,7 +77,7 @@ Three `dormant:22` rows, each delivered by per-unit env file naming `SUBSTRATE_T
 
 1. **Merge = deploy** (SUMMARY Pitfall 1): staging unit files is safe; restarting production units is gated. Every plan states its live effect (none, until 22-04's gated steps).
 2. **Porting by merge** (Pitfall 2): reference implementations only; the auth call sites are rewritten, never cherry-picked — the key header must not survive anywhere (`rg propose-key` clean except historical docs).
-3. **Store-lock bypass** (Pitfall 8): bridge/ext read only their surface token file + `SUBSTRATE_URL`; no `GREPTIME_*`/`RAGFLOW (retired)_*`/`HINDSIGHT_*` names in new code; token paths in prose, never `NAME=<path>` (Phase 20 spelling rule).
+3. **Store-lock bypass** (Pitfall 8): bridge/ext read only their surface token file + `SUBSTRATE_URL`; no `GREPTIME_*`/`RAGFLOW_*`/`HINDSIGHT_*` names in new code; token paths in prose, never `NAME=<path>` (Phase 20 spelling rule).
 4. **Fail-open/closed misassignment** (Pitfall 3): collection/bridge transport errors keep-and-retry (fail-open for the tick); proposal audit stays fail-closed (Phase 21); sync refusals exit 0 as policy outcomes, git failures exit 1.
 5. **PR size** (Pitfall 14): four plans; P-01+P-02 tests (~700 lines) ride with their engines, not in a separate test plan.
 6. **Test isolation** (Pitfall 13): Python tests never touch `/root` paths (monkeypatch tmp); Bun tests use injected runners; the smoke runs in a detached worktree against the twin.

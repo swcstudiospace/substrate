@@ -14,7 +14,7 @@ isolated namespace, then count the rows the write would have touched) was never 
 | MCP skills_propose | mcp.ts:1044-1080 | zod, then service | same |
 | POST /skills/approve | server.ts:1432-1447 | `approvalBodyProblem` (skills/registry.ts:238), then `validateApproval` (registry.ts:259) | skills_registry |
 | MCP skills_approve | mcp.ts:1084-1118 | zod (`pr_number: z.number()`), then service | skills_registry |
-| POST /docs/ingest | server.ts:1248-1300 | route shape, then `ingestDocs` per-page loop (docs-ingest.ts:386-404) | RAGFlow (retired) uploads, docs ingest state |
+| POST /docs/ingest | server.ts:1248-1300 | route shape, then `ingestDocs` per-page loop (docs-ingest.ts:386-404) | RAGFlow uploads, docs ingest state |
 | MCP docs_ingest | mcp.ts:887-919 | zod, then `ingestDocs` | same |
 
 Not in the assignment list and not covered here: `/events`, `/handoff`, graph claim/bind routes.

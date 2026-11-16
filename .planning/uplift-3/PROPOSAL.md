@@ -4,7 +4,7 @@ Scope and rules as in [CONTEXT.md](CONTEXT.md); numbers from [BASELINES.md](BASE
 
 ## Why these: the measured problem
 
-Uplift-2 made the brief fast and the planes guarded; what is left is **durability of the evidence and enforcement of the policies the Build Plan already states**: SLO history vanishes on every restart and nothing alerts; memory TTLs are declared but never honoured on read; the ledger has no verified archive, so its 180-day TTL cannot be switched on; anchoring is not scheduled and nobody can see that; the cache still has no admission budgets; RAGFlow (retired) retrieval is sequential and unmeasured; the Grok Bot contract (etag + explicit degraded) is not carried through MCP nor proven by a connector smoke; and the host's declared runtime policy (redis limits, timers) drifted from what runs, silently.
+Uplift-2 made the brief fast and the planes guarded; what is left is **durability of the evidence and enforcement of the policies the Build Plan already states**: SLO history vanishes on every restart and nothing alerts; memory TTLs are declared but never honoured on read; the ledger has no verified archive, so its 180-day TTL cannot be switched on; anchoring is not scheduled and nobody can see that; the cache still has no admission budgets; RAGFlow retrieval is sequential and unmeasured; the Grok Bot contract (etag + explicit degraded) is not carried through MCP nor proven by a connector smoke; and the host's declared runtime policy (redis limits, timers) drifted from what runs, silently.
 
 ## Candidates considered (16) and ranking
 
@@ -69,7 +69,7 @@ Score = Build-Plan alignment × impact ÷ risk (1–5 each). Selected = top 7 un
 
 ### N5 — Docs retrieval fan-out, outcome metrics and an offline golden-question harness
 - **Build Plan:** A-4 ("Docs: only substrate `docs.search`"), BP-5.1, A-3.
-- **Problem / evidence:** retrieval is sequential per dataset (3 datasets = up to 12 s worst case) and the only metric is per-call plane latency; no zero-hit or citation-coverage signal; C12 open (CONTEXT.md RAGFlow (retired) row).
+- **Problem / evidence:** retrieval is sequential per dataset (3 datasets = up to 12 s worst case) and the only metric is per-call plane latency; no zero-hit or citation-coverage signal; C12 open (CONTEXT.md RAGFlow row).
 - **Design:** (a) `searchDocs` retrieves all datasets concurrently under one shared budget (`SUBSTRATE_DOCS_SEARCH_BUDGET_MS`, default 4000) with per-dataset failure isolation (a timed-out dataset degrades that dataset, not the reply). (b) bounded metrics `substrate.docs.search{surface,outcome=hit|empty|degraded,cached}` and `substrate.docs.citations{provenance=recorded|unrecorded}`; `/slo` row `docs.search.p95`. (c) `scripts/docs-golden.ts` + `fixtures/docs-golden/*.json` (question, datasets, expected source URLs/commits, grades) run offline in `bun test` against `RagflowFake` with question-aware scripted chunks — proving scorer, ordering, scope isolation, redaction, provenance and cache invalidation — and `--live` (opt-in, operator-attested corpus manifest) through substrate `/docs/search` only.
 - **Resource impact:** docs p95 bounded by the slowest dataset instead of the sum; zero-hit visibility for the grok-bot surface.
 - **Risk / rollback:** concurrency bounded to the dataset count (≤ 3); budget env; harness is test-only.
@@ -96,7 +96,7 @@ Score = Build-Plan alignment × impact ÷ risk (1–5 each). Selected = top 7 un
 
 ## Execution plan
 
-Wave A (file-disjoint, parallel): N1 (`scripts/doctor-runtime*`, `infra/vps/substrate-doctor.*`), N3 (`admission.ts`, server seam), N4 (`memory-policy.ts`, `index-store.ts` reads, sweep classes), N5 (`docs-search.ts`, `planes/ragflow (retired).ts`, golden fixtures), N6 (`packages/cli` ledger commands, `greptime.ts` paging seams). Wave B (after A, both touch `/slo`, `observe.ts`, `instruments.ts`): N2 then N7 (N7 reads N2's per-surface series). Verification per wave: `bunx tsc --noEmit`, `bun test` with a scratch Postgres, `bun run check:phase-close`, `bun run test:py`; a rehearsal twin only for N6's archive run. Then PR → CI → Greptile 5/5 → `ultrathink-ship` merge → tag → `deploy-release.sh` → post-deploy readings into BASELINES.md.
+Wave A (file-disjoint, parallel): N1 (`scripts/doctor-runtime*`, `infra/vps/substrate-doctor.*`), N3 (`admission.ts`, server seam), N4 (`memory-policy.ts`, `index-store.ts` reads, sweep classes), N5 (`docs-search.ts`, `planes/ragflow.ts`, golden fixtures), N6 (`packages/cli` ledger commands, `greptime.ts` paging seams). Wave B (after A, both touch `/slo`, `observe.ts`, `instruments.ts`): N2 then N7 (N7 reads N2's per-surface series). Verification per wave: `bunx tsc --noEmit`, `bun test` with a scratch Postgres, `bun run check:phase-close`, `bun run test:py`; a rehearsal twin only for N6's archive run. Then PR → CI → Greptile 5/5 → `ultrathink-ship` merge → tag → `deploy-release.sh` → post-deploy readings into BASELINES.md.
 
 ## Backlog note (not implemented this series)
 

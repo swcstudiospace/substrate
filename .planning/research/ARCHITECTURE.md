@@ -40,7 +40,7 @@
 │ worktree/<gid>  │   │   + graph_find, issue_get, docs_search,   │   leases (lease.ts)     │
 │ launch:         │   │     docs_ingest, skills_propose,          ├── GreptimeClient        │
 │  hermes chat ───┼─┐ │     desktop_run                           │   agent_events, anchors │
-│  host /tasks ───┼┐│ │  mirror.ts→linear.ts/notion.ts/dod-gate.ts├── planes/ (RAGFlow (retired),     │
+│  host /tasks ───┼┐│ │  mirror.ts→linear.ts/notion.ts/dod-gate.ts├── planes/ (RAGFlow,     │
 └─────────────────┘││ │  desktop/ (docker exec substrate-desktop) │   Hindsight, Dragonfly) │
                    ││ │  skills/propose.ts (git+gh → agent-skills)└── observer/audit       │
                    ││ └───────▲───────────────▲───────────────▲────────────────────────────┘
@@ -67,7 +67,7 @@
 | Collectors (`packages/collectors`) | herdr socket → `agent.*` events; Muse brief writer → `.substrate/BRIEF.md`; Cursor stop transcript | D's `herdr.ts`, `herdr-map.ts`, `muse.ts`, `cursor-stop.ts` as-is, plus additions to `types.ts`. |
 | Projector (`packages/projector`) | Muse plugin, Cursor hooks, per-skill symlinks, skills sync | D's `muse.ts`, `skills.ts`, `skills-sync.ts` and `omp/substrate-skills.ts`, plus the `cursor.ts` hunk. |
 | Miner (`packages/miner`, Python) | Hermes pending-skill bridge, Omp/Grok queue drain, the Hermes hourly precheck | D's `substrate_miner/*`. P's `teachable.ts` is dropped. |
-| Planes (`packages/mcp-server/src/planes/`, new) | RAGFlow (retired) retrieval/ingest, Hindsight recall/retain, Dragonfly cache | Pure helpers from P's `planes.ts`, reshaped to main's `docs/data-planes.md` contract. |
+| Planes (`packages/mcp-server/src/planes/`, new) | RAGFlow retrieval/ingest, Hindsight recall/retain, Dragonfly cache | Pure helpers from P's `planes.ts`, reshaped to main's `docs/data-planes.md` contract. |
 | Ledger (`packages/ledger`) | Merkle root, memo v1, hour buckets, solana argv, RPC reader, **anchor job** | D's primitives as-is. `anchor.ts` and the verify integration are **new**. |
 | Desktop (`mcp-server/src/desktop/`) | `desktop_run` against the `substrate-desktop` webtop over `docker exec` with xdotool and xwd | D's files. The guard moves to main's `McpCaller`. |
 | `substrate-host` (`packages/host`, node) | Lane A: one agentOS VM per Graph ID, `/tasks` API, resume, the approvals broker | D's package (`@rivet-dev/agentos` 0.2.21). Its substrate client is rewritten for tokens, `lease_id` and heartbeat. |
@@ -79,7 +79,7 @@
 packages/
 ├── mcp-server/src/
 │   ├── mirror.ts, linear.ts, notion.ts, dod-gate.ts   # B: from D, as-is
-│   ├── planes/ragflow (retired).ts, hindsight.ts, dragonfly.ts  # D: split from P planes.ts
+│   ├── planes/ragflow.ts, hindsight.ts, dragonfly.ts  # D: split from P planes.ts
 │   ├── skills/{propose,propose-auth,frontmatter}.ts   # F: from D
 │   ├── desktop/{actions,driver}.ts                    # G: from D
 │   ├── agent-card.ts                                  # F2: new (A2A cards)
@@ -165,11 +165,11 @@ Totals: 104 files = 66 planning or state files (pl-1..pl-5, all dropped; the 0-U
 
 | File (Δ) | Main changed? | Verdict | Target / reason |
 |---|---|---|---|
-| `.env.example` (+21/−4) | yes | **adapt** | Main already lists `DRAGONFLY_URL`, `HINDSIGHT_URL`/`HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_PREFIX` and `RAGFLOW (retired)_DATASET_ID`. P's single `HINDSIGHT_BANK` contradicts main's per-surface `sub-<surface>` banks (`docs/data-planes.md` §Hindsight banks). The host's `substrate.env` defines `HINDSIGHT_BANK` and not the prefix, so decide which one wins and record it in REQUIREMENTS. |
+| `.env.example` (+21/−4) | yes | **adapt** | Main already lists `DRAGONFLY_URL`, `HINDSIGHT_URL`/`HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_PREFIX` and `RAGFLOW_DATASET_ID`. P's single `HINDSIGHT_BANK` contradicts main's per-surface `sub-<surface>` banks (`docs/data-planes.md` §Hindsight banks). The host's `substrate.env` defines `HINDSIGHT_BANK` and not the prefix, so decide which one wins and record it in REQUIREMENTS. |
 | `packages/cli/src/index.ts` (+33/−12) | yes | **rewrite** | The hunk edits `docs`/`anchor` stub cases from `8db99f9` that main does not have. Main's CLI switch is at `cli/src/index.ts` :369 (brief, emit, run, verify, drift, handoff, evidence, lessons). Add `docs search`, `docs ingest` and `skills propose`, and extend `verify`. Do not add `anchor --graph`. |
 | `packages/mcp-server/src/config.ts` (+7) | yes | **adapt** (`config.ts`) | Re-add `planesFromEnv` fields by hand. The hunk context relies on `8db99f9`'s `loadMemoryPolicy`, which main lacks. |
 | `packages/mcp-server/src/mcp.ts` (+26) | yes | **rewrite** (tool registration) | P's `docs_search` returns raw `{ok,status,body}`. Main's contract requires chunk, heading path, source URL and commit, with a 10-minute Dragonfly cache. It also needs registration in `KNOWN_TOOLS` and the audit policy (FAIL_OPEN). |
-| `packages/mcp-server/src/planes.ts` (+194) | n/a (new) | **adapt** → `planes/` | Keep `planesFromEnv`, `parseRedisUrl`, `hindsightRecall` and `ragflow (retired)Search` (`POST {RAGFLOW (retired)_URL}/api/v1/retrieval`, which needs `dataset_ids` `[UNVERIFIED]`). Replace the raw RESP client, which has no TLS for `rediss://` and no caller, with Bun's built-in Redis client `[UNVERIFIED API in bun 1.4]`. Drop `anchorMemoOnDevnet`: it uses `solana` from PATH with no `--output json` and scrapes the signature with a regex. D's `ledger/src/solana.ts` uses an absolute path, `--fee-payer` and JSON output. |
+| `packages/mcp-server/src/planes.ts` (+194) | n/a (new) | **adapt** → `planes/` | Keep `planesFromEnv`, `parseRedisUrl`, `hindsightRecall` and `ragflowSearch` (`POST {RAGFLOW_URL}/api/v1/retrieval`, which needs `dataset_ids` `[UNVERIFIED]`). Replace the raw RESP client, which has no TLS for `rediss://` and no caller, with Bun's built-in Redis client `[UNVERIFIED API in bun 1.4]`. Drop `anchorMemoOnDevnet`: it uses `solana` from PATH with no `--output json` and scrapes the signature with a regex. D's `ledger/src/solana.ts` uses an absolute path, `--fee-payer` and JSON output. |
 | `packages/mcp-server/src/planes.test.ts` (+55) | n/a | **adapt** | Follows the split. |
 | `packages/mcp-server/src/service.ts` (+10) | yes | **rewrite** (`service.ts`) | Main's `brief()` wraps `composeBrief` in observer/SLO timing. Add Hindsight recall as a fail-open section inside the 1.5 s brief budget (`docs/data-planes.md` §Fail-open), reading cross-bank as the docs specify. |
 | `packages/miner/src/teachable.ts` (+18/−6) | n/a (no `packages/miner` on main) | **drop** | It depends on `8db99f9` stub types (`TeachableMoment`, `AgentCard`), and its per-teachable memo `substrate:<graph_id>:<framing>` cannot be checked by D's `memo.ts` `parseMemo`. Teachable anchoring is redesigned below (E). |
@@ -281,15 +281,15 @@ return this.releaseNode(graphId, nodeId, { lease_id }, caller, "completed");
    3. `vmFor(gid)` gives one agentOS actor per Graph ID, with `permissionPolicy: "ask"`.
    4. The host heartbeats the lease while the VM works, and the host functions commit, push and open the PR.
 3. **Docs (D)**
-   - `docs_search(query)`: a Dragonfly cache lookup (10 min). On a miss, RAGFlow (retired) `/api/v1/retrieval` with `RAGFLOW (retired)_DATASET_ID`. It returns `{chunk, heading_path, source_url, commit}`. Any error returns an empty result with a reason (fail-open).
-   - `docs_ingest(path|repo)`: `redact()` plus the D-04 rules run, then the RAGFlow (retired) dataset upload and parse. It emits `docs.ingest` and is fail-closed for the caller. `POST /docs/ingest` is the GitHub Action route that `docs/data-planes.md` §What goes where describes.
+   - `docs_search(query)`: a Dragonfly cache lookup (10 min). On a miss, RAGFlow `/api/v1/retrieval` with `RAGFLOW_DATASET_ID`. It returns `{chunk, heading_path, source_url, commit}`. Any error returns an empty result with a reason (fail-open).
+   - `docs_ingest(path|repo)`: `redact()` plus the D-04 rules run, then the RAGFlow dataset upload and parse. It emits `docs.ingest` and is fail-closed for the caller. `POST /docs/ingest` is the GitHub Action route that `docs/data-planes.md` §What goes where describes.
 4. **Brief recall (D):** `brief()` asks Hindsight for recall across banks within the remaining part of the 1.5 s budget. The result is cached in Dragonfly for 10 min, and the brief snapshot for 5 min. A Dragonfly outage counts as a bypass, reported in `/healthz` as hit/miss/bypass.
 5. **Skills (F)**
    1. Omp, Grok or Hermes produce a skill. The Omp extension or `bridge.py` posts it to `POST /skills/propose`.
    2. `propose.ts` redacts, scans and locks; works in a shared clone; pushes `skill/<surface>/<name>-<ts>`; and runs `gh pr create`.
    3. A human merges.
    4. `skills-sync.timer` fast-forwards `/root/agent-skills` and projects symlinks into `~/.claude/skills`, `~/.grok/skills`, `~/.agents/skills` and `~/.config/muse/skills`.
-   5. The `agent-skills` RAGFlow (retired) dataset is re-ingested (D).
+   5. The `agent-skills` RAGFlow dataset is re-ingested (D).
 6. **Anchor (E)**
    1. `substrate-ledger-anchor.timer` fires hourly.
    2. For each closed hour without an anchor: read the hour's hashes by ingest time, compute `merkleRootHex`, `formatMemo`, run `solana transfer … --with-memo … --output json`, and insert into `anchors` (with `slot`, `signer`, `cluster`).
@@ -313,7 +313,7 @@ return this.releaseNode(graphId, nodeId, { lease_id }, caller, "completed");
 | Postgres | No new tables. `findNodesByLinear` uses existing `graph_nodes` columns. | C |
 | Greptime | `agent_events.ingested_at` (already live), period-keyed `anchors` (already live, empty) made canonical in `migrate()` | E |
 | systemd | `substrate-collector-herdr`, `-collector-muse`, `-dispatcher`, `-skills-sync` (+timer), `-skills-bridge` (+timer), `-host`, **new** `-ledger-anchor` (+hourly timer). Hermes hourly miner = Hermes cron skill. `substrate-desktop` = Docker `restart=unless-stopped`. | A, C, F, H, E, G |
-| Env names | `HERMES_LINEAR_URL`, `SUBSTRATE_DOD_GATE_TIMEOUT_MS`, `SUBSTRATE_MUSE_REPOS`, `SUBSTRATE_PROPOSE_KEY_FILE`, `RAGFLOW (retired)_URL`/`RAGFLOW (retired)_API_KEY`/`RAGFLOW (retired)_DATASET_ID`, `HINDSIGHT_URL`/`HINDSIGHT_API_KEY`/`HINDSIGHT_BANK[_PREFIX]`, `DRAGONFLY_URL`, `SOLANA_RPC_URL`, `SOLANA_ANCHOR_KEYPAIR`, `SOLANA_ANCHOR_PUBKEY`, `SUBSTRATE_VERIFY_TIMEOUT_MS`, `SUBSTRATE_HOST_URL`, `SUBSTRATE_DISPATCH_DISABLED`, `SUBSTRATE_DISPATCH_MODEL`, plus the host set (`SUBSTRATE_HOST_ROUTE`, `RIVETKIT_STORAGE_PATH`, `SUBSTRATE_APPROVAL_*`, …) | all |
+| Env names | `HERMES_LINEAR_URL`, `SUBSTRATE_DOD_GATE_TIMEOUT_MS`, `SUBSTRATE_MUSE_REPOS`, `SUBSTRATE_PROPOSE_KEY_FILE`, `RAGFLOW_URL`/`RAGFLOW_API_KEY`/`RAGFLOW_DATASET_ID`, `HINDSIGHT_URL`/`HINDSIGHT_API_KEY`/`HINDSIGHT_BANK[_PREFIX]`, `DRAGONFLY_URL`, `SOLANA_RPC_URL`, `SOLANA_ANCHOR_KEYPAIR`, `SOLANA_ANCHOR_PUBKEY`, `SUBSTRATE_VERIFY_TIMEOUT_MS`, `SUBSTRATE_HOST_URL`, `SUBSTRATE_DISPATCH_DISABLED`, `SUBSTRATE_DISPATCH_MODEL`, plus the host set (`SUBSTRATE_HOST_ROUTE`, `RIVETKIT_STORAGE_PATH`, `SUBSTRATE_APPROVAL_*`, …) | all |
 
 ## Suggested Build Order (phases from 16; one reviewable PR each)
 
@@ -324,7 +324,7 @@ return this.releaseNode(graphId, nodeId, { lease_id }, caller, "completed");
 | **18** | Skills sync, propose and bridge | F (part 1) | 17 (redact) | Skill redaction engine; `skills/*`; `Substrate.proposeSkill`; `skills_propose` and `POST /skills/propose` on `McpCaller`; CLI `skills propose`; projector `skills.ts`/`skills-sync.ts`; Omp extension; `packages/miner`; the 4 units | Stops the two timers that fail every 5 minutes. Self-contained. |
 | **19** | Claim mirror and DoD gate | B | 16 | `linear.ts`, `notion.ts`, `mirror.ts`, `dod-gate.ts`; config fields; mirror hooks in main's claim/release/complete; `graph_complete.dod`; a rewritten `service.test.ts` | The dispatcher's label swap is `mirror.claim` removing `dispatch:*`, so this phase must come first. |
 | **20** | substrate-dispatcher | C | 19 | `findNodesByLinear` + `graph_find`; `packages/dispatcher` with bearer auth and a lease-aware prompt (heartbeat); the unit; the dispatcher surface token | Proof: label an issue `dispatch:hermes`; a session claims, Linear shows `agent:hermes`, Notion shows Agent hermes. |
-| **21** | Docs plane | D | 17 (redact) | `planes/` (RAGFlow (retired), Hindsight, Dragonfly); `docs_search` with citations and cache; redacting `docs_ingest` and `POST /docs/ingest`; brief recall; `/healthz` cache stats; CLI `docs` | Independent of 19–20; can run in parallel. Its bank-model decision comes from REQUIREMENTS. |
+| **21** | Docs plane | D | 17 (redact) | `planes/` (RAGFlow, Hindsight, Dragonfly); `docs_search` with citations and cache; redacting `docs_ingest` and `POST /docs/ingest`; brief recall; `/healthz` cache stats; CLI `docs` | Independent of 19–20; can run in parallel. Its bank-model decision comes from REQUIREMENTS. |
 | **22** | Ledger anchor and verify | E | 16 | `packages/ledger` primitives + `index.ts`; `ingested_at` stamping; canonical `anchors` DDL; `anchor.ts` and the hourly timer; `verify` checking anchors through `rpc.ts`; the legacy D-segment verifier | Independent. The live devnet run needs operator approval and a funded `SOLANA_ANCHOR_PUBKEY`; funding was owner-skipped in 06-03. |
 | **23** | A2A Agent Cards, teachable moments, Hermes hourly miner | F (part 2), E (teachable) | 18, 22 | `agent-card.ts` and its routes; teachable `fact` writes; the Hermes cron miner with `substrate-skill-miner/SKILL.md` | Needs the library (18) and anchoring (22) for "teachable anchors". Only stubs exist anywhere, so this is new design. |
 | **24** | desktop_run | G | 17 | `desktop/*`, `desktop.action` kind, `runDesktop`, a fail-closed audit entry, `substrate-desktop.sh` | Small and independent. Could run in parallel from 18 onward. |
@@ -380,7 +380,7 @@ return this.releaseNode(graphId, nodeId, { lease_id }, caller, "completed");
 | Linear GraphQL | `linear.ts` (server), `linear.py` (dispatcher) | Label changes are additive only (`addedLabelIds`/`removedLabelIds`), never `labelIds`. `LINEAR_API_KEY` is in `substrate.env`. |
 | Notion API | `notion.ts` | Writes only 4 properties. Refuses pages outside `NOTION_TASK_GRAPH_DS`. |
 | hermes-linear-connector | `dod-gate.ts` → `:8792/v1/complete-issue` | Listening on loopback. The 35 s timeout must exceed the connector's own 30 s. |
-| RAGFlow (retired) / Hindsight / Dragonfly | `planes/*` over Tailscale forwarders | Fail-open, except `docs_ingest`. Production endpoint names are in `docs/railway-tailscale.md`. |
+| RAGFlow / Hindsight / Dragonfly | `planes/*` over Tailscale forwarders | Fail-open, except `docs_ingest`. Production endpoint names are in `docs/railway-tailscale.md`. |
 | Solana devnet | `ledger/solana.ts` (CLI argv) + `rpc.ts` (fetch) | Uses the absolute CLI path, because systemd's PATH lacks it. Keypair path from `SOLANA_ANCHOR_KEYPAIR`; `/etc/substrate/ledger-devnet.json` exists. |
 | GitHub `swcstudiospace/agent-skills` | git + `gh` (stored credential, `HOME=/root`) | No token env var. |
 | herdr 0.9.1 | Unix socket ND-JSON | Not the CLI. |

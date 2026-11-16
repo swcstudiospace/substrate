@@ -21,7 +21,7 @@ idempotency key, and `afterAll` deletes by that marker.
 | MCP skills_propose | protocol or tool refusal; zero git calls | skills_registry |
 | POST /skills/approve | 400 | skills_registry |
 | MCP skills_approve | protocol or tool refusal | skills_registry |
-| POST /docs/ingest | 400; zero RAGFlow (retired) uploads (RagflowFake) | uploads (no DB) |
+| POST /docs/ingest | 400; zero RAGFlow uploads (RagflowFake) | uploads (no DB) |
 | MCP docs_ingest | refusal; zero uploads | uploads |
 
 Each suite covers a missing required field, a wrong type, and a non-object body. Docs also
@@ -53,7 +53,7 @@ non-object list (400 REST, protocol MCP). Skills propose: REST and MCP, with the
 and a git spy that must see no calls, plus a fake-seam control that moves the registry by one.
 Skills approve: REST and MCP, with five value refusals and a non-object list. Docs ingest:
 REST and MCP, with a valid control, seven refusals (including a valid page followed by an
-invalid one) and five non-object bodies, counted by RAGFlow (retired) uploads. The Postgres suites are
+invalid one) and five non-object bodies, counted by RAGFlow uploads. The Postgres suites are
 skipped without `SUBSTRATE_TEST_PG_URL`; the docs suite is not.
 PR #72's oversize tests are not duplicated: no body here is near the size cap.
 
@@ -78,9 +78,9 @@ it is out of scope here.
 
 ## Addendum: audit-found changes (2026-10-24)
 
-Commit `76f2707` (`fix(mcp-server): refuse a LightRAG docs batch with an invalid page before any write`) was made after this phase's verification. It closes criterion 34.1 on the LightRAG plane. The read-verified claim under "Partial persistence" that docs ingest refuses every page before the first upload held for RAGFlow (retired) only. Before this commit, LightRAG recorded an invalid page as `failed` and uploaded the rest.
+Commit `76f2707` (`fix(mcp-server): refuse a LightRAG docs batch with an invalid page before any write`) was made after this phase's verification. It closes criterion 34.1 on the LightRAG plane. The read-verified claim under "Partial persistence" that docs ingest refuses every page before the first upload held for RAGFlow only. Before this commit, LightRAG recorded an invalid page as `failed` and uploaded the rest.
 
-**Behavior change.** A LightRAG docs ingest batch with one invalid page now returns the same refusal as RAGFlow (retired) and persists nothing: no LightRAG request, and the state file is unchanged. An upstream write failure still reports per page.
+**Behavior change.** A LightRAG docs ingest batch with one invalid page now returns the same refusal as RAGFlow and persists nothing: no LightRAG request, and the state file is unchanged. An upstream write failure still reports per page.
 
 ## Files changed
 - `packages/mcp-server/src/docs-ingest.ts`: `ingestDocs` runs the per-page gates on both planes before the first write (comment at line 843). The LightRAG `rejected` list is removed, and `failed` in `ingestDocsLightrag` counts only upstream write failures.

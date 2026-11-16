@@ -28,7 +28,7 @@
 | 22 Skills sync, bridge, miners | complete | passed/partial (bu=6) | cutover chain + client rebinds (8 steps, runbook) |
 | 23 Claim mirror & DoD gate | complete | passed (refreshed) | MIRROR-08 live proof (SWC-467) scripted, NOT RUN |
 | 24 substrate-dispatcher | complete | passed/partial (bu=8) | env provisioning, DISP-08 window, unit restart, state review |
-| 25 Docs search & ingest (RAGFlow (retired)) | complete | passed | G1–G4 (probe, datasets, ingest, served search) |
+| 25 Docs search & ingest (RAGFlow) | complete | passed | G1–G4 (probe, datasets, ingest, served search) |
 | 26 Hindsight recall & Dragonfly cache | complete | passed | G1–G4 (probe, bank/recall, retain, topology + headless proof) |
 | 27 Ledger primitives & ingest order | complete | passed (refreshed) | gap unchanged (bu=1) |
 | 28 Hourly anchor job & verify | complete | passed (refreshed) | devnet L1–L10 deferred; v1.1.4 anchors cadence acceptance |
@@ -56,4 +56,4 @@ Runbooks holding every proof + rollback: `docs/runbooks/production-identity.md` 
 
 ## Non-goals held
 
-RAGFlow (retired)/Hindsight MCP in agent configs (D9/D25-01/D26-01); Hindsight as store of record; new EVENT_KINDS (12 held); Dragonfly as queue/lock; auto-merging skills; agent-side credential handling.
+RAGFlow/Hindsight MCP in agent configs (D9/D25-01/D26-01); Hindsight as store of record; new EVENT_KINDS (12 held); Dragonfly as queue/lock; auto-merging skills; agent-side credential handling.

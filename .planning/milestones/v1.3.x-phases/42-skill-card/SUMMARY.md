@@ -1,7 +1,7 @@
 ---
 phase: 42-skill-card
 requirements: [F-D3, F-D4]
-status: merge-ready on 02261d7 (CI, Greptile and threads to be re-confirmed on the pushed head). F-D3 satisfied by existing code and tests. F-D4 satisfied in-repo with a fake RAGFlow (retired). The live fast-forward proof is operator-gated and not run
+status: merge-ready on 02261d7 (CI, Greptile and threads to be re-confirmed on the pushed head). F-D3 satisfied by existing code and tests. F-D4 satisfied in-repo with a fake RAGFlow. The live fast-forward proof is operator-gated and not run
 ---
 
 # 42-SUMMARY: SKILL-CARD
@@ -30,7 +30,7 @@ status: merge-ready on 02261d7 (CI, Greptile and threads to be re-confirmed on t
 ## Criteria
 
 - **F-D3 (criterion 1: `skills_list` and an approve/decline audit trail).** Satisfied by existing code and tests, with no change: `skills_list` (`mcp.ts`), `skills_approve` and the `skill.approve`, `skill.decline` and `skill.approve.refused` events (`server.ts`), and the fail-closed and fail-open policy classes (`policy.ts`, pinned by `policy.test.ts`). The gap noted in FEATURES, how `declined` is reported, is unchanged.
-- **F-D4 (criterion 2: searchable through `docs_search` after each fast-forward re-ingest).** Satisfied in-repo: `docs_search` answers from the new agent-skills version after a refresh, proven with a fake RAGFlow (retired).
+- **F-D4 (criterion 2: searchable through `docs_search` after each fast-forward re-ingest).** Satisfied in-repo: `docs_search` answers from the new agent-skills version after a refresh, proven with a fake RAGFlow.
 
 ## Known gaps
 
@@ -53,6 +53,6 @@ status: merge-ready on 02261d7 (CI, Greptile and threads to be re-confirmed on t
 
 ## Operator-gated (not run)
 
-- Creating the RAGFlow (retired) `agent-skills` dataset, and its keys.
+- Creating the RAGFlow `agent-skills` dataset, and its keys.
 - Installing the `substrate-skills-sync` unit on the host (`infra/vps/substrate-skills-sync.service.d/30-sandbox.conf.example` is an example only), and setting `SUBSTRATE_AGENT_SKILLS_ROOT`.
 - A live fast-forward proof on the host.

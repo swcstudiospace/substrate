@@ -25,7 +25,7 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
   - skills sync and miners (22);
   - `docs_ingest` and its refuse-on-findings policy (25);
   - the anchor job (28).
-- New credential shapes that September did not have: RAGFlow (retired) and Hindsight keys, base58 secret keys, Railway and tailnet hostnames (PITFALLS 6). The phase that first handles each one adds its rule to this module, and the lock enforces that.
+- New credential shapes that September did not have: RAGFlow and Hindsight keys, base58 secret keys, Railway and tailnet hostnames (PITFALLS 6). The phase that first handles each one adds its rule to this module, and the lock enforces that.
 - `grok-hermes-connector`'s `redactor.py`, which lives in another repository.
 - `EVENT_KINDS` and the audit policy: unchanged (Phase 17).
 - Restarting production onto the new rules. The PR changes write-path behaviour only when the operator restarts `substrate-mcp` in an approved window.
@@ -203,7 +203,7 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
 <deferred>
 ## Deferred Ideas
 
-- Redaction rules for RAGFlow (retired) and Hindsight key formats, base58 secret keys, and Railway and tailnet hostnames (PITFALLS 6). They belong to the phase that first handles each class (25, 26, 27/28), and are added to `redact.ts` under the lock.
+- Redaction rules for RAGFlow and Hindsight key formats, base58 secret keys, and Railway and tailnet hostnames (PITFALLS 6). They belong to the phase that first handles each class (25, 26, 27/28), and are added to `redact.ts` under the lock.
 - A docs-specific scan profile and the refuse-on-findings policy for `docs_ingest` (Phase 25).
 - Reconciling `grok-hermes-connector`'s `redactor.py` with this module (another repository; a cross-repo test-vector exchange is a candidate for a later milestone).
 

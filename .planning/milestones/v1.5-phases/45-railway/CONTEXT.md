@@ -65,7 +65,7 @@ Unconfirmed by introspection (not guessed; each has a decision that handles it):
   - `positiveIntOr` (~line 1677): a positive integer string.
   - `nonNegativeOr` (~line 998).
   - There is NO `boundedNumber`. The brief's name does not exist.
-  - All of these are module-private (not exported). The RAGFlow (retired) block is `ragflow (retired): ragflow (retired)FromEnv(env)` (config.ts ~line 692), and `ragflow (retired)FromEnv` is exported from `packages/mcp-server/src/planes/ragflow (retired).ts:65`. That is the precedent for a plane config read from a helper module.
+  - All of these are module-private (not exported). The RAGFlow block is `ragflow: ragflowFromEnv(env)` (config.ts ~line 692), and `ragflowFromEnv` is exported from `packages/mcp-server/src/planes/ragflow.ts:65`. That is the precedent for a plane config read from a helper module.
 - Tool declaration, `packages/mcp-server/src/mcp.ts`:
   - `createMcpServer(substrate: Substrate, caller)` (line 200). Tools are `server.registerTool(name, { title, description, inputSchema: { ...zod }, annotations }, async (request) => { try { return json(await substrate.X(...)) } catch (cause) { ... return { ...json(...), isError: true } } })`.
   - Precedents: `skills_approve` (line ~1127, annotations `destructiveHint: false, openWorldHint: true`, operator-only) and `skills_list` (line ~1163, `readOnlyHint: true`).

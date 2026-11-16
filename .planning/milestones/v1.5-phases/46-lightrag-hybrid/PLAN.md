@@ -6,17 +6,17 @@ rescoped: 2026-10-23
 status: planned; T1 and T2 in progress elsewhere; T3 recorded here; T4 deferred; T5 to T8 HARD_STOP
 ---
 
-# 46-PLAN: LightRAG hybrid RAG with Hindsight context and the RAGFlow (retired) migration
+# 46-PLAN: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration
 
-Governing decisions: `46-lightrag-hybrid/CONTEXT.md` (D46-1 to D46-5). The RAG-hybrid plan in `46-ragflow (retired)-hybrid/` is superseded (D46-4).
+Governing decisions: `46-lightrag-hybrid/CONTEXT.md` (D46-1 to D46-5). The RAG-hybrid plan in `46-ragflow-hybrid/` is superseded (D46-4).
 
 ## Success criteria (ROADMAP Phase 46, verbatim)
 
 1. docs_search answers from LightRAG with hybrid search and Hindsight context, with tests.
-2. The RAGFlow (retired) dataset is archived, with a verified checksum, before any deletion.
+2. The RAGFlow dataset is archived, with a verified checksum, before any deletion.
 3. LightRAG is deployed to Agent Substrate production and passes a timed health probe.
 4. The migration job and parity comparator pass PARITY_GATE before any ingestion. PARITY_GATE checks, in order: every migrated record keeps its dataset, source URL and version (zero mismatches allowed); a fixed sample of queries, listed in the phase 46 PLAN, returns citations from the same source documents at the match rate the PLAN sets before the run.
-5. Cutover is a logged, reversible switch with a delta pass. RAGFlow (retired) code and service are removed only after cutover, after criteria 1 to 4 pass, and after every other RAG-dependent phase passes. The RAG-dependent phases are 25 and 42, plus any other phase whose VERIFICATION names a live RAGFlow (retired) call (the phase 46 PLAN confirms that list before cutover). Storage deletion needs its own approval.
+5. Cutover is a logged, reversible switch with a delta pass. RAGFlow code and service are removed only after cutover, after criteria 1 to 4 pass, and after every other RAG-dependent phase passes. The RAG-dependent phases are 25 and 42, plus any other phase whose VERIFICATION names a live RAGFlow call (the phase 46 PLAN confirms that list before cutover). Storage deletion needs its own approval.
 6. Every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run.
 
 ## Criteria to tasks and verification
@@ -27,7 +27,7 @@ Governing decisions: `46-lightrag-hybrid/CONTEXT.md` (D46-1 to D46-5). The RAG-h
 | 2 | T5 | Archive checksum recorded and matched before any deletion | HARD_STOP. Not run. |
 | 3 | T6 | Timed health probe of the production LightRAG endpoint | HARD_STOP. Not run. |
 | 4 | T3 (sample and rate, recorded here), T4 (comparator, deferred), T7 (migration job and gate, live) | Zero dataset, source URL and version mismatches; sampled queries return citations from the same source documents at 100 percent | T3 recorded. T4 deferred. T7 HARD_STOP. Criterion 4 is NOT met in this run. |
-| 5 | T8 | Logged cutover with delta pass; RAGFlow (retired) removal only after 1 to 4 and the RAG-dependent phases | HARD_STOP. Not run. Blocked by 2, 3, 4 and the phase list below. |
+| 5 | T8 | Logged cutover with delta pass; RAGFlow removal only after 1 to 4 and the RAG-dependent phases | HARD_STOP. Not run. Blocked by 2, 3, 4 and the phase list below. |
 | 6 | T5, T6, T7, T8 | Operator approval recorded for each run before the run | Each live task carries its own approval gate. |
 
 ## Tasks
@@ -81,15 +81,15 @@ Content check, 2026-10-24 (read-only; each sample document was read at its openi
 
 ### T4 — Parity comparator (BLOCKED)
 
-- Status: BLOCKED. Reclassified from DEFERRED on 2026-10-24, because only the user can defer a task. Unblock: the operator approves T5, and a read-only export of the RAGFlow (retired) dataset is captured.
-- Reason: the comparator must be checked against the live RAGFlow (retired) dataset. A fixture-level design is out of this run's budget, and a fixture design would not prove PARITY_GATE against the real dataset anyway.
-- Unblock step: (1) T5 archive completes with a verified checksum (operator approval); (2) a read-only export of the RAGFlow (retired) dataset's document list (dataset, source URL, version) is captured for the comparator; (3) the comparator is written against that export and tested against the export; (4) the comparator is then reviewed before T7.
+- Status: BLOCKED. Reclassified from DEFERRED on 2026-10-24, because only the user can defer a task. Unblock: the operator approves T5, and a read-only export of the RAGFlow dataset is captured.
+- Reason: the comparator must be checked against the live RAGFlow dataset. A fixture-level design is out of this run's budget, and a fixture design would not prove PARITY_GATE against the real dataset anyway.
+- Unblock step: (1) T5 archive completes with a verified checksum (operator approval); (2) a read-only export of the RAGFlow dataset's document list (dataset, source URL, version) is captured for the comparator; (3) the comparator is written against that export and tested against the export; (4) the comparator is then reviewed before T7.
 - Files when unblocked: to be set in a follow-up PLAN, not this one.
 
-### T5 — Archive the RAGFlow (retired) dataset with a verified checksum (HARD_STOP)
+### T5 — Archive the RAGFlow dataset with a verified checksum (HARD_STOP)
 
 - Approval: the operator must approve this run in writing before it starts. Not approved.
-- Change: export the RAGFlow (retired) dataset to archive storage and record a checksum; re-read the archive and match the checksum before any deletion.
+- Change: export the RAGFlow dataset to archive storage and record a checksum; re-read the archive and match the checksum before any deletion.
 - Verification: checksum match recorded in the phase folder.
 - Commit boundary: none in repo; the evidence is recorded in the phase folder.
 - Rollback: the archive is not deleted by this task. Restoring from it is a separate operator action.
@@ -100,7 +100,7 @@ Content check, 2026-10-24 (read-only; each sample document was read at its openi
 - Change: deploy LightRAG to Agent Substrate production; run a timed health probe against the deployed endpoint.
 - Verification: probe result, with its time, recorded.
 - Commit boundary: deployment configuration commit, if any, is separate.
-- Rollback: undeploy the LightRAG service. RAGFlow (retired) is still in place, so docs search keeps answering from it.
+- Rollback: undeploy the LightRAG service. RAGFlow is still in place, so docs search keeps answering from it.
 
 ### T7 — Migration job and parity gate before ingestion (HARD_STOP)
 
@@ -109,31 +109,31 @@ Content check, 2026-10-24 (read-only; each sample document was read at its openi
 - Change: run the migration job, then PARITY_GATE in its two checks, in order: (1) zero mismatches on dataset, source URL and version; (2) the ten T3 queries return citations from the expected documents at 100 percent. No ingestion runs unless both pass.
 - Verification: the PARITY_GATE result recorded in the phase folder, with the mismatch count and per-query results.
 - Commit boundary: none in repo for the live run.
-- Rollback: LightRAG ingestion is not used until cutover, so a failed gate leaves RAGFlow (retired) serving.
+- Rollback: LightRAG ingestion is not used until cutover, so a failed gate leaves RAGFlow serving.
 
-### T8 — Cutover and RAGFlow (retired) removal (HARD_STOP)
+### T8 — Cutover and RAGFlow removal (HARD_STOP)
 
 - Approval: the operator must approve cutover and approve removal separately. Storage deletion needs its own approval (criterion 5). Not approved.
 - Preconditions (all required):
   1. Criteria 1 to 4 pass.
   2. RAG-dependent phases pass. Confirmed list for this PLAN, from the phase VERIFICATION files and the ROADMAP:
      - Phase 25 (named in criterion 5; ROADMAP line 299 onwards). No phase folder or VERIFICATION exists in this worktree. Blocker, see Blockers.
-     - Phase 42 (named in criterion 5): `.planning/phases/42-skill-card/VERIFICATION.md` line 40 records that the RAGFlow (retired) `agent-skills` dataset and the live fast-forward are not run.
-     - Phase 40 (`.planning/phases/40-docs-memory/VERIFICATION.md` line 30): live TCP reachability to RAGFlow (retired).
-     - Phase 51 (`.planning/phases/51-enterprise-fabric/VERIFICATION.md` line 61): live RAGFlow (retired) GET probes; also a RAGFlow (retired) panel (line 28).
-     - Phase 34 (`.planning/phases/34-invalid-write-round-trip/VERIFICATION.md` line 34) names RAGFlow (retired) only as a fake and is NOT a live dependency, so it is excluded from the list. This exclusion is a judgement, to be confirmed by the operator.
+     - Phase 42 (named in criterion 5): `.planning/phases/42-skill-card/VERIFICATION.md` line 40 records that the RAGFlow `agent-skills` dataset and the live fast-forward are not run.
+     - Phase 40 (`.planning/phases/40-docs-memory/VERIFICATION.md` line 30): live TCP reachability to RAGFlow.
+     - Phase 51 (`.planning/phases/51-enterprise-fabric/VERIFICATION.md` line 61): live RAGFlow GET probes; also a RAGFlow panel (line 28).
+     - Phase 34 (`.planning/phases/34-invalid-write-round-trip/VERIFICATION.md` line 34) names RAGFlow only as a fake and is NOT a live dependency, so it is excluded from the list. This exclusion is a judgement, to be confirmed by the operator.
   3. A logged, reversible cutover switch with a delta pass.
-- Change: switch the default docs backend to LightRAG with a logged switch; run the delta pass; then remove the RAGFlow (retired) code and service in a separate commit after cutover.
-- Verification: delta pass recorded; RAGFlow (retired) references removed; `store-lock` and config tests still pass (run by the orchestrator).
+- Change: switch the default docs backend to LightRAG with a logged switch; run the delta pass; then remove the RAGFlow code and service in a separate commit after cutover.
+- Verification: delta pass recorded; RAGFlow references removed; `store-lock` and config tests still pass (run by the orchestrator).
 - Commit boundary: cutover switch commit, then a separate removal commit.
-- Rollback: the switch is reversible until removal. After removal, rollback means restoring the RAGFlow (retired) code and service from the archive (T5).
+- Rollback: the switch is reversible until removal. After removal, rollback means restoring the RAGFlow code and service from the archive (T5).
 
 ## Risks
 
 - Criterion 4 is not met in this run. The comparator is deferred (T4), so no ingestion can start yet.
 - The ten-query sample is small. A 100 percent rate fails closed on any single miss, so a poor sample would block the gate. Pairings are unconfirmed by content (T3 limit).
 - Phase 25 has no in-repo evidence of passing other than its ROADMAP entry, so criterion 5 cannot be checked from the repo.
-- The list of RAG-dependent phases was built from VERIFICATION text search. A phase that names RAGFlow (retired) in another file would be missed; the operator should confirm the list before T8.
+- The list of RAG-dependent phases was built from VERIFICATION text search. A phase that names RAGFlow in another file would be missed; the operator should confirm the list before T8.
 - Hindsight context is per call and not cached. Its latency is bounded by `searchRecallBudgetMs` (`service.ts:238-239` margin, `docs-search.ts:248-249` ledger budget). A slow recall adds latency to context answers.
 - D46-3 (success-path context) and D46-5 (rate) are flagged for review. Both are reversible.
 

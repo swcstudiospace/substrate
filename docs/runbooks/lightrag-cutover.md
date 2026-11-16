@@ -22,7 +22,7 @@ Naive mode is required in this state. STATE.md Run 11 records that hybrid fails 
 
 ## Reversal limits (decision D4, pending operator)
 
-- The retired docs plane cannot be restored. LightRAG replaced RAGFlow (retired); there is no fallback that calls the retired plane.
+- The retired docs plane cannot be restored. LightRAG replaced RAGFlow; there is no fallback that calls the retired plane.
 - The rollback procedure in the plan is app-only: redeploy release `702ed32e`, which has no LightRAG client, and restore `substrate.env` from its backup. That step does not restore the index. The `pg_dump` archive above is the only index backup.
 - Whether these limits are accepted is decision D4 in the phase 46 plan, an agent default pending the operator.
 

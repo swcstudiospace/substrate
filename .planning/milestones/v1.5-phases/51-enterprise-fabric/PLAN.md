@@ -35,12 +35,12 @@ No event kind, no surface, no flag, no schema, no route. `docs/config-reference.
 ## Types (pinned)
 
 ```ts
-export type FabricResourceName = "railway" | "greptime" | "postgres" | "dragonfly" | "hindsight" | "ragflow (retired)";
+export type FabricResourceName = "railway" | "greptime" | "postgres" | "dragonfly" | "hindsight" | "ragflow";
 export type FabricState = "ok" | "degraded" | "down" | "unconfigured" | "unknown";
 export type FabricEndpoint = "loopback" | "proxy" | "direct" | "unset" | "not-applicable";
 export type RailwayCostStatus = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured" | "unknown";
 export type DbPlaneName = "greptime" | "postgres" | "dragonfly";
-export type HttpPlaneName = "hindsight" | "ragflow (retired)";
+export type HttpPlaneName = "hindsight" | "ragflow";
 
 export interface FabricPlaneFact {
   configured: boolean;   // a URL or endpoint is set; a refused URL counts as configured
@@ -70,7 +70,7 @@ export interface FabricResource {
 
 export interface FabricStatus {
   checkedAt: string;
-  resources: FabricResource[];   // exactly six, in the order railway, greptime, postgres, dragonfly, hindsight, ragflow (retired)
+  resources: FabricResource[];   // exactly six, in the order railway, greptime, postgres, dragonfly, hindsight, ragflow
   counts: Record<FabricState, number>;
 }
 

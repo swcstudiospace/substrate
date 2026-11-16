@@ -88,7 +88,7 @@ Net: U-01..U-03 are explicitly gated live steps with rehearsal coverage for ever
 <locks>
 ## Store-Lock, Planes, and Vocabulary Notes for Plans
 
-- No plane MCP in agent configs (operator D9; Phase 18 store-lock rule): cards are served from the governed index, never from Hindsight/RAGFlow (retired)/Dragonfly reads. Plans carry a negative gate — no `planes/` import in `agent-card.ts`/`teachable.ts`.
+- No plane MCP in agent configs (operator D9; Phase 18 store-lock rule): cards are served from the governed index, never from Hindsight/RAGFlow/Dragonfly reads. Plans carry a negative gate — no `planes/` import in `agent-card.ts`/`teachable.ts`.
 - `SOLANA_*` names appear only in the anchor module (Phase 18 rule; D28-11): plans carry a negative gate — no `SOLANA_*` in new files, tests, or fixtures.
 - Vocabulary: `teachable.accepted` already mapped (`event-sources.ts:367-382`); `agent_card` already recorded as emit-nothing (`:595`). Plans add no `EVENT_SOURCES` entry and touch neither `types.ts` enums — `check:phase-close` + `vocabulary-smoke` stay green by construction, and every plan re-runs them.
 - Redaction: skill descriptions re-pass shared `redact.ts` (Phase 18 owns it; no new rules). Finding-shaped payloads (`{file, line, rule}`, never values) for any refusal the route could surface — the route has no refusals beyond 400s, which carry names, not content.
