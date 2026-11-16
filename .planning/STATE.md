@@ -740,4 +740,13 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 
 - Rotation done 2026-11-16: LightRAG API key and the shared Postgres superuser password were replaced. Copies updated in the LightRAG env, the production env, and the stack env files. The old API key is rejected on an authenticated LightRAG route. `/healthz` after restart: index true, lightrag true. Rollback material is a mode-600 file under `/root/backups`, not in the repo.
 
+## Owner decisions (2026-11-16, second HITL)
+
+- Phase 46 D1: volume-level archive. Not the debt default. Not attestation-only. Checked this host: no RAGFlow volume and no RAGFlow container. No archive was written. Criterion 2 stays unmet until a volume exists to archive.
+- Phase 46 D2/D3: parity source is LightRAG records, 10 queries at 100 percent.
+- Phase 46 D4: RAGFlow reversal is impossible. Record that in the cutover record.
+- Phase 68: the disclosed 300-pair cap stands. Do not remove it.
+- Phases 16-30, 34-36, and 51-54: the owner accepts the prior verification as passed for this milestone. Do not re-execute those phases. A later digest refresh may still mark a report stale; that does not reopen the phase.
+
+
 
