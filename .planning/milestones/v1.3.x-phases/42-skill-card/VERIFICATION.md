@@ -9,8 +9,10 @@ covered_files: [".env.example", ".planning/milestones/v1.3.x-phases/42-skill-car
 covered_digest: "v3:sha256:963d69a5003849e2973bfc3bc5e8d6078739e3d3308d9c4f13c326019a968f6f"
 human_verification:
   - test: "Live fast-forward proof: install the substrate-skills-sync unit, set SUBSTRATE_AGENT_SKILLS_ROOT to the absolute agent-skills checkout path, fast-forward the checkout, let the trigger run, then docs_search for a term that exists only in the new skill version"
-    expected: "docs_search returns that document from the new agent-skills version recorded by POST /docs/merge-trigger"
-    why_human: "Requires the operator-gated RAGFlow/LightRAG agent-skills dataset, host keys and a host fast-forward; not runnable in the repo (fake RAGFlow only)"
+    why_human: "Requires the operator-gated RAGFlow (retired, superseded by LightRAG)/LightRAG agent-skills dataset, host keys and a host fast-forward; not runnable in the repo (fake RAGFlow (retired, superseded by LightRAG) only)"
+    why_human: "Requires the operator-gated RAGFlow (retired, superseded by LightRAG)/LightRAG agent-skills dataset, host keys and a host fast-forward; not runnable in the repo (fake RAGFlow (retired, superseded by LightRAG) only)"
+    why_human: "Requires the operator-gated RAGFlow (retired, superseded by LightRAG)/LightRAG agent-skills dataset, host keys and a host fast-forward; not runnable in the repo (fake RAGFlow (retired, superseded by LightRAG) only)"
+    why_human: "Requires the operator-gated RAGFlow (retired, superseded by LightRAG)/LightRAG agent-skills dataset, host keys and a host fast-forward; not runnable in the repo (fake RAGFlow (retired, superseded by LightRAG) only)"
 ---
 
 # Phase 42: SKILL-CARD Verification Report

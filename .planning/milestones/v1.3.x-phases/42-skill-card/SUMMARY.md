@@ -1,7 +1,9 @@
 ---
 phase: 42-skill-card
 requirements: [F-D3, F-D4]
-status: merge-ready on 02261d7 (CI, Greptile and threads to be re-confirmed on the pushed head). F-D3 satisfied by existing code and tests. F-D4 satisfied in-repo with a fake RAGFlow. The live fast-forward proof is operator-gated and not run
+status: merge-ready on 02261d7 (CI, Greptile and threads to be re-confirmed on the pushed head). F-D3 satisfied by existing code and tests. F-D4 satisfied in-repo with a fake RAGFlow (retired, superseded by LightRAG). The live fast-forward proof is operator-gated and not run
+PUT 22? no line, use summary lines
+ (skip for now if not exact)
 ---
 
 # 42-SUMMARY: SKILL-CARD

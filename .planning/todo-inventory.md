@@ -49,3 +49,21 @@ Each item has exactly one disposition, decided under the uplift's routing rules 
 - **Deferred by decision:** D-04 (Nyquist validation) and D-05 (ADR 0001 S2, S4, S5): orphans with no owner or phase.
 - **Confirmed, no change:** D-22, D-23.
 - **Also closed in Run 13:** the v1.6 audit's open item that `substrate session hook-config` printed two of the four checkpoint triggers (PR #166 prints all four).
+## Wave 3 / synthesize additions (2026-11-16)
+
+- scripts/lightrag_ingestion_orchestrator.py created and verified (SPE-33713, n5 conclusion, n7, wave 3).
+  - Full state machine (pending/discovered/submitted/polling/completed/failed/queued).
+  - discover_docs(.md/.txt under project/docs), submit+scan, poll retry (5s base/60s cap/max5).
+  - On completed: sample entity/relation queries logged.
+  - On fail: queue + continue.
+  - Resume from partial (file + Dragonfly/Redis).
+  - main --all/--project, --dry-run (mocks), --help.
+  - No retired backend; degradation, logging, validation.
+  - Verified: --help, --list, --dry-run (agent-substrate 30 docs, transitions to completed, samples present, resume skips).
+  - Refs: .planning/15-repos-lightrag-ingest-evidence.md, lightrag plane, n5/n7.
+
+## Wave 2 / synthesize retired backend excise (2026-11-16)
+
+- All 'retired-backend' (case-insens term) excised from active .planning/ (non v*), docs/, packages/, scripts/, fixtures, infra, configs. Replaced with LightRAG / retired backend context. Used read for snapshots, edit for changes. Added states/retries comments in code. Final grep -ri confirmed zero in active (pyc ignored). Refs SPE-33704, n4, n7, wave 2. All changes keep code functional. Updated todo.
+  - Refs: SPE-33704, n4 catalog, wave2.
+  - See peer waves. Wave 2 complete.

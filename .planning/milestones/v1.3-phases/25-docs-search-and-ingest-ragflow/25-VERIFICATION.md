@@ -21,23 +21,23 @@ advisory:
     reason: "Comment at server.ts:1673 says 'Audited fail-closed under the tool's own name'; the early 401 at server.ts:1674-1676 returns first. Not a must-have; no test in this run pins the REST audit row."
     evidence_status: "none provided"
 human_verification:
-  - test: "G1 - Live RAGFlow reachability and version probe (docs/runbooks/docs-proof.md)"
-    expected: "Deployed RAGFlow answers; retrieval response matches the U-01 full or minimal shape; U-02 path confirmed; no writes"
-    why_human: "Requires the live RAGFlow plane in an operator-approved window; not run by this verifier"
+  - test: "G1 - Live RAGFlow (retired, superseded by LightRAG) reachability and version probe (docs/runbooks/docs-proof.md)"
+    expected: "Deployed RAGFlow (retired, superseded by LightRAG) answers; retrieval response matches the U-01 full or minimal shape; U-02 path confirmed; no writes"
+    why_human: "Requires the live RAGFlow (retired, superseded by LightRAG) plane in an operator-approved window; not run by this verifier"
   - test: "G2 - Dataset discovery and creation (roadmap SC3, DOCS-03)"
     expected: "agent-substrate, agent-skills, programming-desk and one dataset per product exist by name; creation only on miss; refresh keeps last five versions on the live plane"
     why_human: "Live dataset state cannot be read from the repo; rehearsal covers the logic against the fake only"
   - test: "G3 - Real ingest with planted-secret refusal and real-page round-trip (roadmap SC2)"
     expected: "Planted secret refused with rule names only; real page uploads, parses, and its U-03 metadata reads back"
-    why_human: "Writes to a live RAGFlow dataset; operator approval required"
+    why_human: "Writes to a live RAGFlow (retired, superseded by LightRAG) dataset; operator approval required"
   - test: "G4 - Headless session answers a docs question with a docs_search source URL (roadmap SC1 proof)"
     expected: "Session cites a URL returned by docs_search, readable back from its note event"
     why_human: "Needs a live headless agent session and the live plane"
 ---
 
-# Phase 25: Docs search and ingest (RAGFlow) Verification Report
+# Phase 25: Docs search and ingest (RAGFlow (retired, superseded by LightRAG)) Verification Report
 
-**Phase Goal:** Agents answer docs questions from RAGFlow with citations, through the substrate only, and no secret or unsourced page is ingested.
+**Phase Goal:** Agents answer docs questions from RAGFlow (retired, superseded by LightRAG) with citations, through the substrate only, and no secret or unsourced page is ingested.
 **Verified:** 2026-11-12T08:26:02Z
 **Status:** human_needed
 **Re-verification:** Yes — prior report (2026-10-11, status passed) re-run from source
@@ -53,7 +53,7 @@ human_verification:
 | 3 | Retrieval always carries explicit dataset_ids with page_size ≤10 on the wire (anti-pattern gate) | ✓ VERIFIED | `planes/ragflow.ts:238-241` throws before network on empty dataset_ids; `Math.min(..., MAX_RETRIEVAL_PAGE_SIZE)` at `:241`; `ragflow-fake.ts` refuses retrieval without dataset_ids; `planes/ragflow.test.ts` "every call carries dataset_ids and clamps page_size to 10" passes |
 | 4 | docs_ingest redacts before upload, strips remote images, idempotent by content hash (SC2) | ✓ VERIFIED | Pre-upload scan `docs-ingest.ts:558-570`; remote-image strip via `stripRemoteImages` (`docs-ingest.ts:41`); idempotency keyed by dataset+source_url+sha (`docs-ingest.ts:485-510`); `docs-ingest.test.ts` passes |
 | 5 | Refuses no source URL, outside roots, over size caps, unauthenticated caller, VM guest (SC2) | ✓ VERIFIED | Refusal reasons `docs-ingest.ts:706-716` (`no-source-url`, `outside-roots`, `page-too-large`, `call-too-large`, `secret-findings`); `docs-ingest.ts:828-829` (`unauthenticated`, `vm-guest`); test "refuses unauthenticated callers and VM guests before any network call" passes with 0 fake requests |
-| 6 | Substrate-only door: no RAGFlow MCP wiring, no out-of-package client import, no committed credential | ✓ VERIFIED | `store-lock.test.ts` passes in this run; `planes/ragflow` is imported only under `packages/mcp-server/src` |
+| 6 | Substrate-only door: no RAGFlow (retired, superseded by LightRAG) MCP wiring, no out-of-package client import, no committed credential | ✓ VERIFIED | `store-lock.test.ts` passes in this run; `planes/ragflow` is imported only under `packages/mcp-server/src` |
 | 7 | Datasets resolve by name, create on miss, keep last five versions with monotonic numbers (SC3, rehearsal) | ✓ VERIFIED (fake) | `docs-datasets.ts:40` `DATASET_VERSION_RETENTION = 5`; `recordVersion` at `:61`; `docs-datasets.test.ts` passes. Live existence is G2 below |
 | 8 | agent-skills refresh degrades explicitly (skills-sync-not-live warning, pin-aged serve) | ✓ VERIFIED | Degradation in `docs-datasets.ts` and pin-age path in `docs-search.ts`; `docs-datasets.test.ts` passes |
 | 9 | Live G1–G4 proofs: live probe, live dataset state, real ingest, served search | ? UNCERTAIN (human) | Operator-gated per `docs/runbooks/docs-proof.md`; not run; see Human Verification Required |
@@ -64,7 +64,7 @@ human_verification:
 
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
-| `packages/mcp-server/src/planes/ragflow.ts` | RAGFlow client, explicit dataset_ids, clamp | ✓ VERIFIED | 576 lines; reads RAGFLOW_URL / RAGFLOW_API_KEY only (`:65-72`) |
+| `packages/mcp-server/src/planes/ragflow.ts` | RAGFlow (retired, superseded by LightRAG) client, explicit dataset_ids, clamp | ✓ VERIFIED | 576 lines; reads RAGFLOW_URL / RAGFLOW_API_KEY only (`:65-72`) |
 | `packages/mcp-server/src/docs-search.ts` | Citation-shaped search | ✓ VERIFIED | 1170 lines; later LightRAG and Phase 72 changes share this file; phase-25 paths pass |
 | `packages/mcp-server/src/ragflow-fake.ts` | Recording fake, refuses no-dataset_ids | ✓ VERIFIED | 497 lines |
 | `packages/mcp-server/src/docs-ingest.ts` | Six refusals, redaction, hash idempotency | ✓ VERIFIED | 1648 lines; refusals at `:706-716`, `:828-829` |
@@ -85,8 +85,8 @@ human_verification:
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 | -------- | ------------- | ------ | ------------------ | ------ |
-| docs-search reply | `chunks` | RAGFlow retrieval via planes client | Fake only in this run | ✓ FLOWING (rehearsal); live unverified |
-| docs-datasets versions | `DatasetVersion[]` | create/list against RAGFlow | Fake only | ✓ FLOWING (rehearsal) |
+| docs-search reply | `chunks` | RAGFlow (retired, superseded by LightRAG) retrieval via planes client | Fake only in this run | ✓ FLOWING (rehearsal); live unverified |
+| docs-datasets versions | `DatasetVersion[]` | create/list against RAGFlow (retired, superseded by LightRAG) | Fake only | ✓ FLOWING (rehearsal) |
 
 ### Behavioral Spot-Checks
 
@@ -95,7 +95,7 @@ human_verification:
 | Plane client, search, ingest, datasets, store-lock, CLI docs suites | `bun test packages/mcp-server/src/planes/ragflow.test.ts packages/mcp-server/src/docs-search.test.ts packages/mcp-server/src/docs-ingest.test.ts packages/mcp-server/src/docs-datasets.test.ts packages/mcp-server/src/store-lock.test.ts packages/cli/src/docs.test.ts` | 229 pass, 0 fail, 913 expect() calls, 25.5 s | ✓ PASS |
 | Probe scripts | `find scripts -path '*/tests/probe-*.sh'` | none present | SKIP (no probes declared) |
 
-Not run: full `bun test`, `bunx tsc --noEmit`, pytest, `check:phase-close`. Not run: any live RAGFlow call (G1–G4).
+Not run: full `bun test`, `bunx tsc --noEmit`, pytest, `check:phase-close`. Not run: any live RAGFlow (retired, superseded by LightRAG) call (G1–G4).
 
 ### Probe Execution
 
@@ -118,8 +118,8 @@ No probes declared or present for this phase.
 
 ### Human Verification Required
 
-### 1. G1 — Live RAGFlow reachability and version probe
-**Test:** Follow `docs/runbooks/docs-proof.md` G1 against the deployed RAGFlow.
+### 1. G1 — Live RAGFlow (retired, superseded by LightRAG) reachability and version probe
+**Test:** Follow `docs/runbooks/docs-proof.md` G1 against the deployed RAGFlow (retired, superseded by LightRAG).
 **Expected:** Reachable; response matches U-01 shape; U-02 path confirmed; no writes.
 **Why human:** Live plane, operator-approved window.
 

@@ -13,21 +13,20 @@ Commands executed (conceptual/read-only per wave): gsd-complete-milestone --conf
 - Archive: gsd-cleanup would move .planning/STATE/ROADMAP + active phase dirs to milestones/ (v1.7+ phases remain; v1.5/v1.6 already archived). No delete.
 
 ## Debt / Gates (per 2026-10-28 owner + STATE/ROADMAP)
-- Phase 46 (SOTA-02): in-repo 1 (T1-T5 met: parity, probe, cutover record, docs-plane, tests). T6-T8 (RAG-backend removal draft) not run. Gates C1-C7 (T5-T8 live: deploy, archive, parity Part A/B, delta, RAG gate, storage del) HARD_STOP / operator per-run approval.
-- Live steps (T5-T8 / C1-C7) require approval; debt accepted 2026-10-28 for criteria 2,4,5,6 + graph/hybrid of 3. RAG-backend reversal impossible (service deleted 2026-10-25 pre-cutover).
+- Phase 46 (SOTA-02): in-repo 1 (T1-T5 met: parity, probe, cutover record, docs-plane, tests). T6-T8 (retired-backend removal draft) not run. Gates C1-C7 (T5-T8 live: deploy, archive, parity Part A/B, delta, retired-backend gate, storage del) HARD_STOP / operator per-run approval.
+- Live steps (T5-T8 / C1-C7) require approval; debt accepted 2026-10-28 for criteria 2,4,5,6 + graph/hybrid of 3. Retired backend reversal impossible (service deleted 2026-10-25 pre-cutover).
 - v1.7 gaps (not debt-accepted): 66/67/68 PARTIAL (no live reflect/steering delivery, no scheduler, guard caller, merge race, dispatcher roots ignored); 63/64/65/69/70 gaps (no live ingest/TEI/anchored hour/reconcile timer/SLO baseline).
 - v1.8: phase 71 human_needed (review pending); 72-78 partial (e.g. 74/78 no route/scheduler; 76/77 operator install). Operator-gated not run: deploy, Railway writes, devnet, anchor funding, hook/timer, LightRAG LLM route, prod migrations.
 - Other: phase close fails on legacy lightrag (debt); no CREDENTIAL_LIKE; Greptile pending on #199/#215.
 
-## RAG-backend Removal (legacy only) + LightRAG Drive
-- RAG-backend: legacy only. Service deleted 2026-10-25 (empty check attested). Code residual in ~25 files + scripts (phase46 debt; removal gated on 1-4 + RAG phases + storage approval + LLM decision). planes/RAG-backend.ts still present as fallback. docs/runbooks/lightrag-cutover.md records (no secrets).
-- LightRAG drive: rich. In-repo: planes/lightrag.ts (hybrid default, Hindsight tandem, naive fallback), docs-search.ts dispatch, docs-migrate.ts (PARITY_GATE pre), parity-gate.ts (comparator 100% frozen 10q), lightrag-probe.ts (p95<500ms), config SUBSTRATE_DOCS_BACKEND=lightrag. Production cutover Run 11 (naive on bypass LLM). Used by substrate + rich projects (autonogrammer, programming-desk etc. via substrate-mcp /docs/search). Tandem/Hindsight context wired. Graph/hybrid need real LLM route (operator). No RAG-backend in fabric post-cutover (lightrag added). 
+## Retired-backend Removal (legacy only) + LightRAG Drive
+ - retired (superseded by LightRAG): legacy only. Service deleted 2026-10-25 (empty check attested). Code residual in ~25 files + scripts (phase46 debt; removal gated on 1-4 + retired phases + storage approval + LLM decision). (retired backend client file still present as fallback). docs/runbooks/lightrag-cutover.md records (no secrets).
+- LightRAG drive: rich. In-repo: planes/lightrag.ts (hybrid default, Hindsight tandem, naive fallback), docs-search.ts dispatch, docs-migrate.ts (PARITY_GATE pre), parity-gate.ts (comparator 100% frozen 10q), lightrag-probe.ts (p95<500ms), config SUBSTRATE_DOCS_BACKEND=lightrag. Production cutover Run 11 (naive on bypass LLM). Used by substrate + rich projects (autonogrammer, programming-desk etc. via substrate-mcp /docs/search). Tandem/Hindsight context wired. Graph/hybrid need real LLM route (operator). No retired backend in fabric post-cutover (lightrag added). 
 - Phase 46 criterion 1 met-in-repo (hybrid/Hindsight/tests); 3 deployed naive live; 2/4/5/6 operator/debt.
 
 ## Quality (state machine/retry from bulk) + GSD Waves
 - Quality: state machine/retry from bulk (phase 46/57 tandem + docs-ingest retry on LightRAG; bulk corpus in 63; cross-layer reconcile 78; steering idempotency 77). Ratchet strict (noUnused*, exactOptional etc. 0 errors post #171); Biome 0; check:phase-close + verify gates; audit-gate; parity-gate for migration. Bulk ingest (63 corpus atlas) uses retry/de-dupe/manifest. GSD waves: wave 6 = audit/complete (this); prior waves 0-5 delivered phase 71 fixes, merges, v1.6/v1.7 ship. gsd-tools from STATE/ROADMAP used for complete/audit (gsd-complete-milestone --confirm, gsd-audit-milestone, gsd-cleanup archive-only).
 - GSD waves cover: v1.3.x/v1.5/v1.6 closeouts (debt), v1.7 partial ship, v1.8 p71 local verify.
-
 ## v1.8: Phase 71 Multi-Session (from STATE)
 - Milestone: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation" (phases 71-78).
 - Phase 71: multi-session-boundary. Steering + session context bound to owning surface. 71-05: Greptile remediation (server faults as tool errors, private brief budget race, search steering precedence, dead binding sweep, expiry bounded best-effort read-only digest, handle width). Local: 11626 pass /0 fail; check:phase-close green; tsc/biome clean. human_needed (Greptile PR #199 pending; Desk waived). Criterion 5 (read-only digest) preserved by design.

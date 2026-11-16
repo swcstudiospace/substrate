@@ -1,15 +1,15 @@
-/** LightRAG replaced lightrag; there is no fallback that calls the retired plane. */
+/** The docs archive writer (SOTA-02): checksummed snapshot of the docs plane state for verification and migration replay. */
 /**
- * The lightrag archive (SOTA-02, Phase 46, Task 3): a checksummed copy of what the lightrag plane holds, written and
- * read back before any lightrag deletion. It keeps the dataset and document inventory, the substrate's docs state
+ * The docs archive (SOTA-02, Phase 46, Task 3): a checksummed copy of what the docs plane holds, written and
+ * read back before any deletion. It keeps the dataset and document inventory, the substrate's docs state
  * file, the baseline citations for the frozen queries, and a check of every document against its committed object.
  * `verifyArchive` re-reads the directory and refuses any drift from its manifest, so a deletion gated on a passing
  * verification is gated on the archive that is actually on disk.
  *
  * Page bytes are not archived. Each page is re-read from git at its recorded commit (OD-4), and only the sha256 of
- * its sanitised body is kept, computed by the ingest's own `changeSha`. The lightrag reads go through
+ * its sanitised body is kept, computed by the ingest's own `changeSha`. The reads go through
  * {@link DocsArchiveSource}: production uses {@link docsArchiveSource}, and tests drive the same writer with the
- * lightrag fake.
+ * docs plane fake.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -30,7 +30,7 @@ interface DocsDocument {
 type DocumentListOutcome = { ok: true; documents: DocsDocument[] } | { ok: false; reason: string };
 type PlaneConfig = { url: string; apiKey: string };
 
-/** Production source refuses: LightRAG replaced lightrag, and this archive does not call the retired plane. */
+/** Production archive source is stubbed (archive only used in migration tooling against captured data). */
 export function docsArchiveSource(_config: PlaneConfig, _fetchImpl: FetchLike): DocsArchiveSource {
 	const retired = async (): Promise<{ ok: false; reason: string }> => ({ ok: false, reason: "docs-archive-retired" });
 	return {

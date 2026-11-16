@@ -55,7 +55,7 @@ steps untouched.
 
 - Datasets exist by name and refresh as documented, keeping the last five versions: TRUE (resolve reuses, create only on miss with TEI bge-small; 7 refreshes keep v3–v7 with monotonic numbers)
 - agent-skills refresh degrades explicitly with warning and pin-aged serve while sync is not live: TRUE (warn-once `skills-sync-not-live`; serve carries pin + age; age in search reply; fast-forward flips live)
-- Every real RAGFlow touch is an explicit OPERATOR-GATED step the executor performed none of: TRUE (G1–G4 mapped with commands, proof reads, rollbacks; zero live calls)
+- Every real RAGFlow (retired, superseded by LightRAG) touch is an explicit OPERATOR-GATED step the executor performed none of: TRUE (G1–G4 mapped with commands, proof reads, rollbacks; zero live calls)
 
 ## Deviations from Plan
 

@@ -22,7 +22,7 @@ One PR on agent-substrate (DOCS-04, DOCS-05, DOCS-06, DOCS-07). Gate-accepted me
 **Out of scope:**
 - Per-surface counters and the 24 h idempotency mirror as new cache keys (`docs/data-planes.md` names both a target, not a current key — this phase holds that line and does not build them).
 - Any new `EVENT_KINDS` or `SURFACES` entry (Phase 17 lock); any Hindsight MCP server in any agent config (store-lock rule D9).
-- RAGFlow retrieval/ingest (Phase 25 owns `planes/ragflow.ts`); the skills-sync LIVE cutover (Phase 22's deferred gate — recall serves pinned/index answers until then, no special degradation arm needed here).
+- RAGFlow (retired, superseded by LightRAG) retrieval/ingest (Phase 25 owns `planes/ragflow.ts`); the skills-sync LIVE cutover (Phase 22's deferred gate — recall serves pinned/index answers until then, no special degradation arm needed here).
 - Hindsight 0.10.x (recall hang `vectorize-io/hindsight#4696` — the client keeps the fail-open timeout and the G1 probe records the deployed version; never assume it).
 - Production credential values (Phase 20 provisioned names; this phase reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` from the server env file only). Agents never prune the on-disk 5.91 GB `hindsight-api:0.9.1` image (operator decision D25).
 
@@ -45,7 +45,7 @@ One PR on agent-substrate (DOCS-04, DOCS-05, DOCS-06, DOCS-07). Gate-accepted me
 - **D26-02: Plane credentials live only in `/etc/substrate/substrate.env`; `substrate-mcp` reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` starting this phase.**
   - Source: `docs/data-planes.md` "Environment keys" + DOCS-06 (credentials live only in `substrate.env`) + host fact (`HINDSIGHT_URL`, `HINDSIGHT_API_KEY` present in the server env file, documented unused-by-substrate).
   - Only `planes/hindsight.ts` names those variables (store-lock: no `HINDSIGHT_*` string outside `mcp-server`). A comment at the read site records that the gateway holds its own copies for its own paths.
-  - This changes the `docs/data-planes.md` "Current wiring" Hindsight row from "not read by `substrate-mcp`" to "read by `substrate-mcp` `planes/hindsight.ts`; gateway keeps its own keys for its own paths"; the doc hunk ships in plan 26-03 (D25-02 precedent). Grey area (whether to keep the `.env.example` "unused" note) auto-accepted: update the note to name the new reader, same as D25-02 did for RAGFlow.
+  - This changes the `docs/data-planes.md` "Current wiring" Hindsight row from "not read by `substrate-mcp`" to "read by `substrate-mcp` `planes/hindsight.ts`; gateway keeps its own keys for its own paths"; the doc hunk ships in plan 26-03 (D25-02 precedent). Grey area (whether to keep the `.env.example` "unused" note) auto-accepted: update the note to name the new reader, same as D25-02 did for RAGFlow (retired, superseded by LightRAG).
 
 ### Bank strategy (D8 settled: per-surface prefix)
 - **D26-03: Retain into the writer's `sub-<surface>` bank; recall as a bounded, cached fan-out over the `sub-*` banks.**

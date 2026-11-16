@@ -1,6 +1,5 @@
-/** LightRAG replaced lightrag; there is no fallback that calls the retired plane. */
 /**
- * Shared docs-plane wire types. LightRAG replaced lightrag; these shapes are what search and ingest still exchange.
+ * Shared docs-plane wire types. These shapes are what search and ingest exchange with the LightRAG backend.
  */
 export interface DocsChunk {
 	content: string;

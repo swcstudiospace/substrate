@@ -1,5 +1,5 @@
 /**
- * The LightRAG HTTP client. LightRAG replaced lightrag; request and response handling is unchanged.
+ * The LightRAG HTTP client. Request and response handling for the current backend.
  *
  * Reached ONLY through substrate-mcp: no agent config registers a LightRAG MCP
  * server and no package outside `mcp-server` imports this module. Retrieval

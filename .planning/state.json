@@ -50,7 +50,7 @@
     },
     {
       "number": "25",
-      "name": "Docs search and ingest (RAGFlow)",
+      "name": "Docs search and ingest",
       "status": "complete"
     },
     {
@@ -155,7 +155,7 @@
     },
     {
       "number": "46",
-      "name": "LightRAG hybrid RAG and the RAGFlow migration",
+      "name": "LightRAG hybrid RAG migration",
       "status": "pending"
     },
     {

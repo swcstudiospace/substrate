@@ -18,7 +18,7 @@ runbook's author did not re-read it. **UNVERIFIED** means nobody read it.
 
 ## Facts that frame the decision
 
-- Railway, project "Agent Substrate", production: Hindsight 0.9.1 (api, worker, control-plane), TEI cpu-1.8, one Postgres service (`railwayapp-templates/postgres-ssl:18`) and a tailscale-forwarder. No LightRAG service exists in any project. LightRAG replaced RAG-backend; there is no fallback that calls the retired plane. Which services use the Postgres service is UNVERIFIED.
+- Railway, project "Agent Substrate", production: Hindsight 0.9.1 (api, worker, control-plane), TEI cpu-1.8, one Postgres service (`railwayapp-templates/postgres-ssl:18`) and a tailscale-forwarder. No LightRAG service exists in any project. LightRAG is the docs backend; retired (superseded by LightRAG) had no fallback that calls the retired plane. Which services use the Postgres service is UNVERIFIED.
 - Railway, project "Ultrathink", production: a Timescale service
   (`timescale-postgis-ssl:pg16-ts2.13`, 500 MB volume), GreptimeDB v1.1.4
   (500 MB volume), Dragonfly (image tag `latest`, 5000 MB volume) and an

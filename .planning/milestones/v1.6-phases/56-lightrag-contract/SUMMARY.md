@@ -41,4 +41,4 @@ Commit a573641 (17 files, 1911 insertions, 229 deletions).
 
 ## What remains (operator-gated)
 
-LightRAG deploy, ingest and cutover (phase 46 T5 to T8); RAGFlow code removal; the live `/openapi.json` diff against the fixture; any hosting decision or cost; the LLM route (a key, or the bridge `/chat` contract). The docs plane has no live backend until then (RAGFlow is deleted, LightRAG is not deployed).
+LightRAG deploy, ingest and cutover (phase 46 T5 to T8); RAGFlow (retired, superseded by LightRAG) code removal; the live `/openapi.json` diff against the fixture; any hosting decision or cost; the LLM route (a key, or the bridge `/chat` contract). The docs plane has no live backend until then (RAGFlow (retired, superseded by LightRAG) is deleted, LightRAG is not deployed).

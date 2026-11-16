@@ -8,19 +8,19 @@ status: decisions recorded; in-repo tasks in progress; live steps operator-gated
 supersedes: .planning/phases/46-ragflow-hybrid/ (see SUPERSEDED.md there)
 ---
 
-# 46-CONTEXT: LightRAG hybrid RAG with Hindsight context and the RAGFlow migration
+# 46-CONTEXT: LightRAG hybrid RAG with Hindsight context and the (retired) RAG backend migration
 
 ## Scope
 
-Phase 46 (ROADMAP.md, Phase 46 block, around lines 662-681) makes docs answers come from LightRAG with hybrid search and Hindsight context. It also carries the RAGFlow to LightRAG migration inside the phase: archive, LightRAG deploy, migration job, parity gate, cutover, then RAGFlow removal once the RAG-dependent phases pass.
+Phase 46 (ROADMAP.md, Phase 46 block, around lines 662-681) makes docs answers come from LightRAG with hybrid search and Hindsight context. It also carries the RAGFlow (retired, superseded by LightRAG) to LightRAG migration inside the phase: archive, LightRAG deploy, migration job, parity gate, cutover, then RAGFlow (retired, superseded by LightRAG) removal once the RAG-dependent phases pass.
 
-This phase replaces the RAGFlow hybrid design in `.planning/phases/46-ragflow-hybrid/`. That design targeted RAGFlow and is superseded by the 2026-10-23 re-scope (D46-4).
+This phase replaces the RAGFlow (retired, superseded by LightRAG) hybrid design in `.planning/phases/46-ragflow-hybrid/`. That design targeted RAGFlow (retired, superseded by LightRAG) and is superseded by the 2026-10-23 re-scope (D46-4).
 
 ## Locked inputs
 
 - ROADMAP Phase 46, success criteria 1 to 6 (copied verbatim in PLAN.md).
 - ROADMAP criterion 6: every live step (deploy, ingestion, cutover, storage deletion) runs only after the operator approves it for that run. Approval does not carry over to a later run.
-- The 2026-10-23 re-scope: the RAGFlow VERIFICATION in `46-ragflow-hybrid/` covers the RAGFlow path and no longer applies to Phase 46 (ROADMAP line 681).
+- The 2026-10-23 re-scope: the RAGFlow (retired, superseded by LightRAG) VERIFICATION in `46-ragflow-hybrid/` covers the RAGFlow (retired, superseded by LightRAG) path and no longer applies to Phase 46 (ROADMAP line 681).
 - Code facts used by the decisions below, each checked in this worktree:
   - `packages/mcp-server/src/planes/lightrag.ts:40` `DEFAULT_QUERY_MODE: LightragQueryMode = "hybrid"`.
   - `packages/mcp-server/src/planes/lightrag.ts:273-276` doc comment: graph modes `hybrid` (the default) and `mix`; `/mix` prefix selects `mix`.

@@ -505,7 +505,7 @@ export interface GraphView extends GraphIndexRow {
 }
 
 /**
- * Which docs plane serves a retrieval. LightRAG replaced lightrag.
+ * Which docs plane serves a retrieval. LightRAG backend.
  */
 export const RETRIEVAL_BACKENDS = ["lightrag"] as const;
 export type RetrievalBackend = (typeof RETRIEVAL_BACKENDS)[number];

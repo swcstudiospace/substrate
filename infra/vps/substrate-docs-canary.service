@@ -1,5 +1,5 @@
 [Unit]
-Description=Agent Substrate live docs golden canary (opt-in: refuses until SUBSTRATE_DOCS_CANARY=1 and an attested corpus manifest are set; read-only against RAGFlow)
+Description=Agent Substrate live docs golden canary (opt-in: refuses until SUBSTRATE_DOCS_CANARY=1 and an attested corpus manifest are set; read-only against retired backend; LightRAG sole)
 Documentation=https://github.com/swcstudiospace/agent-substrate
 After=network-online.target substrate-mcp.service
 Wants=network-online.target

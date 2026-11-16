@@ -1,4 +1,4 @@
-/** LightRAG replaced RAGFlow; there is no fallback that calls the retired plane. */
+/** DOCS-01: substrate docs search over the LightRAG backend. */
 /**
  * DOCS-01: substrate-only docs search over lightrag (D25-03, D25-04).
  *
@@ -705,7 +705,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	const surface = deps.surface ?? "claude-code";
 	const sessionId = deps.sessionId ?? `docs-search:${randomUUID()}`;
 	if (question.trim().length === 0) return failed(deps, sessionId, "question is required");
-	// LightRAG replaced lightrag. Unconfigured LightRAG degrades; there is no other docs backend.
+	// LightRAG is the only docs backend; unconfigured degrades to Hindsight when available.
 	return searchDocsLightrag(deps, question, surface, sessionId);
 }
 

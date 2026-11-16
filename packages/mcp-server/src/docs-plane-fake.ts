@@ -1,4 +1,4 @@
-/** In-memory docs plane double for tests. LightRAG replaced RAGFlow; this fake does not speak to the retired plane. */
+/** In-memory docs plane double for tests. Serves the LightRAG API shapes for rehearsal and client tests. */
 /**
  * The recording lightrag fake for rehearsal (D25-10).
  *

@@ -1,4 +1,4 @@
-/** LightRAG replaced RAGFlow; there is no fallback that calls the retired plane. */
+/** LightRAG is the docs backend. */
 /**
  * Configuration, loaded from the environment.
  *
@@ -48,7 +48,7 @@ function parseDodGateTimeoutMs(raw: string | undefined): number {
 	return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : DEFAULT_DOD_GATE_TIMEOUT_MS;
 }
 
-/** The docs plane that serves `docs_search` / `docs_ingest`. LightRAG replaced lightrag. */
+/** The docs plane that serves `docs_search` / `docs_ingest`. Always LightRAG. */
 export const DOCS_BACKENDS = ["lightrag"] as const;
 export type DocsBackend = (typeof DOCS_BACKENDS)[number];
 
