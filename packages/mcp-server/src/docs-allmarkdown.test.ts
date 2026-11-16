@@ -12,7 +12,8 @@ import {
 	type IngestCall,
 	type MarkdownFs,
 } from "./docs-allmarkdown.ts";
-import { ingestDocs, INGEST_PAGE_MAX_BYTES, type IngestDeps, type IngestInput } from "./docs-ingest.ts";
+import { corpusDocumentName } from "@substrate/corpus";
+import { changeSha, ingestDocs, INGEST_PAGE_MAX_BYTES, type IngestDeps, type IngestInput } from "./docs-ingest.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 
 const REPOS = "/repos";
@@ -395,5 +396,48 @@ describe("docs-allmarkdown planning checkout through the ingest guard", () => {
 		});
 		expect(outcome).toMatchObject({ ok: false, reason: "planning page carries no checkout" });
 		expect(probe.attempts).toEqual([]);
+	});
+
+	test("a corpus-named apply run names each page by its corpusDocumentName, and one path in two repos never shares a name", async () => {
+		await withStateDir(async (dir) => {
+			const alpha = "# alpha\n";
+			const beta = "# beta\n";
+			const { plan } = await planTree(
+				{ "/repos/alpha/docs/a.md": alpha, "/repos/beta/docs/a.md": beta },
+				{ datasets: { alpha: "alpha", beta: "beta" }, known: ["alpha", "beta"] },
+			);
+			const probe = uploadProbe();
+			const sent: string[] = [];
+			// The multipart upload is tried first; `/documents/text` is only the fallback for a plane without that route.
+			const fileSourceOf = (body: NonNullable<Parameters<FetchLike>[1]>["body"]): unknown => {
+				if (body instanceof FormData) return body.get("file_source");
+				if (typeof body !== "string") return undefined;
+				const parsed: unknown = JSON.parse(body);
+				return parsed !== null && typeof parsed === "object" && "file_source" in parsed ? parsed.file_source : undefined;
+			};
+			const recording: FetchLike = async (input, init) => {
+				const url = new URL(String(input));
+				const name = fileSourceOf(init?.body);
+				if (init?.method === "POST" && (url.pathname === "/documents/upload" || url.pathname === "/documents/text") && typeof name === "string") sent.push(name);
+				return probe.fetchImpl(input, init);
+			};
+			const ingest: IngestCall = (input, roots) =>
+				ingestDocs(
+					{
+						...ingestDeps(recording, input.dataset),
+						corpusNames: true,
+						roots,
+						lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: `owner/${input.dataset}`, name: input.dataset }] }), invalidate: () => undefined },
+					},
+					input,
+				);
+			await runAllMarkdownIngest({ plan, apply: true, stateDir: dir, ingest, sessionId: SESSION, ...quiet });
+			const expected = [
+				corpusDocumentName("owner/alpha", "docs/a.md", changeSha(alpha, undefined)),
+				corpusDocumentName("owner/beta", "docs/a.md", changeSha(beta, undefined)),
+			];
+			expect(expected[0]).not.toBe(expected[1]);
+			expect([...new Set(sent)].sort()).toEqual([...expected].sort());
+		});
 	});
 });

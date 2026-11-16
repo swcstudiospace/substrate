@@ -107,7 +107,8 @@ export async function runDocsIngestAll(argv: string[], deps: IngestAllDeps): Pro
 		}
 		const { Substrate } = await import("../../../mcp-server/src/service.ts");
 		const substrate = new Substrate(config);
-		const ingest: IngestCall = (input, batchRoots) => substrate.ingestDocs(input, "substrate", batchRoots);
+		// Corpus-style names: each document is `owner/name`, path and sha, so one path in two repos never shares a name.
+		const ingest: IngestCall = (input, batchRoots) => substrate.ingestDocs(input, "substrate", batchRoots, { corpusNames: true });
 		return runAllMarkdownIngest({ plan, apply: true, stateDir, ingest, sessionId, out: deps.out, err: deps.err });
 	} catch (cause) {
 		deps.err(`[substrate] docs ingest-all failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);

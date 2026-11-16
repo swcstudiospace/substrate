@@ -6696,17 +6696,19 @@ export class Substrate {
 	 * deleted its predecessor) — persists the records and bumps the docs
 	 * generation, so every cached `docs_search` answer is invalidated and a
 	 * restart never names a pruned document (Greptile round 2).
+	 * `options.corpusNames` names each document by the corpus scheme (`corpusDocumentName`). Only the bulk all-markdown job sets it.
 	 */
 	async ingestDocs(
 		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
 		callerSurface: Surface | null,
 		roots?: readonly string[],
+		options: { corpusNames?: boolean } = {},
 	): Promise<IngestOutcome> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
 		const outcome = await ingestDocs(
-			await this.docsIngestDeps(typeof input.dataset === "string" ? input.dataset : "", roots, callerSurface, sessionId),
+			await this.docsIngestDeps(typeof input.dataset === "string" ? input.dataset : "", roots, callerSurface, sessionId, options),
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
 				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
@@ -7090,7 +7092,7 @@ export class Substrate {
 	 * `dataset` is the one LightRAG dataset the ingest resolves, identified by its name, so a LightRAG
 	 * ingest never lists datasets through the RAGFlow gate (its breaker and outages do not refuse uploads).
 	 */
-	private async docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string): Promise<IngestDeps> {
+	private async docsIngestDeps(dataset: string, roots: readonly string[] | undefined, surface: Surface | null, sessionId?: string, options: { corpusNames?: boolean } = {}): Promise<IngestDeps> {
 		return {
 			config: this.config.ragflow,
 			knownDatasets: await this.knownDocsDatasets(),
@@ -7111,6 +7113,7 @@ export class Substrate {
 			lightragDatasets: { list: async () => lightragSearchDatasets([dataset], datasetIdentity), invalidate: () => undefined },
 			datasets: this.docsDatasetList,
 			prune: this.config.docsPruneSuperseded,
+			...(options.corpusNames === true ? { corpusNames: true } : {}),
 		};
 	}
 
