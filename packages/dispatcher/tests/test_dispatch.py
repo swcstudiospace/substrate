@@ -331,7 +331,7 @@ def test_make_launch_fn_composes_checkout_ensure_launch_in_order():
 
 def test_make_launch_fn_propagates_worktree_refused():
     def ensure(*_a):
-        raise WorktreeRefused("only 1.0 GB free", "low-disk")
+        raise WorktreeRefused("only 1.0 GB free", "low-disk", fields={"path": "/", "gb": "5"})
 
     def launch(**_k):  # pragma: no cover - must not be reached
         raise AssertionError("launch after a refused worktree")
@@ -534,7 +534,7 @@ def test_at_capacity_skips_and_decides_again_next_tick(env_file):
 
 def test_worktree_refused_becomes_one_once_only_marker_comment(env_file):
     linear, mcp = FakeLinear([cand()]), FakeMcp()
-    refusing = RecordingLaunch(raises=WorktreeRefused("only 1.0 GB free on /", "low-disk"))
+    refusing = RecordingLaunch(raises=WorktreeRefused("only 1.0 GB free on /", "low-disk", fields={"path": "/", "gb": "5"}))
     _, lines, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=refusing)
     run_tick(linear, mcp, env_file=env_file, launch_fn=refusing)
     posted = linear.named("comment")

@@ -131,7 +131,7 @@ With `--report`, each row also carries `files`: the paths the worktree changed a
 
 ## The disk floor
 
-`worktree provision` (this package) and `ensure_worktree` (`packages/dispatcher/src/substrate_dispatcher/worktree.py`) read the same `SUBSTRATE_WORKTREE_MIN_FREE_GB`. The dispatcher checks `/` as before and refuses with the marker `low-disk` before it runs any git command.
+`worktree provision` (this package) and `ensure_worktree` (`packages/dispatcher/src/substrate_dispatcher/worktree.py`) read the same `SUBSTRATE_WORKTREE_MIN_FREE_GB`. The dispatcher checks the filesystem holding the first `SUBSTRATE_WORKTREE_ROOTS` entry, or `/` when none is set, and refuses with the marker `low-disk` before it runs any git command.
 
 `bun run doctor:runtime` adds one report-only row, `worktree disk`, when `SUBSTRATE_WORKTREE_ROOTS` is set: `ok`, or a warning naming the free space, the floor and the three largest worktrees. It never fails the run and changes nothing.
 

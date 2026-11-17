@@ -85,6 +85,7 @@ function stubGreptime(worlds: HourWorld[], anchors: Record<number, Record<string
 		readEvents: async () => worlds.flatMap((world) => world.rows),
 		graphIngest: async () => worlds.flatMap((world) => world.records),
 		firstIngestMs: async () => H,
+		graphChainLeafHours: async () => [],
 		hourLeaves: async (startMs: number) => {
 			const found = worlds.find((world) => world.hour === startMs);
 			if (!found) throw new Error(`no fixture hour for ${String(startMs)}`);

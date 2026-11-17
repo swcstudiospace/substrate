@@ -167,7 +167,7 @@ function world(env: Record<string, string>, options: { redis?: FakeRedis; fake?:
 		},
 		hindsightOutbox: (sample) => instruments.setHindsightOutbox(sample),
 	};
-	const substrate = new Substrate(loadConfig(env), { index: (options.index ?? indexOf()) as never, greptime: null, cache, hindsightFetch: fake.fetch }, observer);
+	const substrate = new Substrate(loadConfig(env), { index: (options.index ?? indexOf()) as never, greptime: null, cache, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } }, observer);
 	return { substrate, redis, cache, fake, instruments, briefRecall, prefetch };
 }
 
@@ -848,7 +848,7 @@ function retainWorld(env: Record<string, string>) {
 	const prefetch: Array<{ surface: string; result: string }> = [];
 	const substrate = new Substrate(
 		loadConfig({ SUBSTRATE_MEMORY_GRANTS: GRANTS, ...env }),
-		{ index: store as never, greptime: null, cache, hindsightFetch: fake.fetch },
+		{ index: store as never, greptime: null, cache, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } },
 		{
 			recallPrefetch: (sample) => prefetch.push(sample),
 			hindsightOutbox: (sample) => instruments.setHindsightOutbox(sample),

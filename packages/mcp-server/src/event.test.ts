@@ -1,14 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import {
 	canonicalJson,
+	type ChainLink,
+	compareToAnchoredHead,
 	eventHash,
+	headRecordsFromLeaves,
 	inChainOrder,
 	InvalidEventError,
 	normalizeEvent,
 	normalizeIdentifier,
+	steeringSessionPayload,
+	type SteeringSession,
 	verifyChain,
 } from "./event.ts";
 import { REDACTED } from "./redact.ts";
+import { steeringSessionEvent } from "./planning/session-state.ts";
+import { steeringQueuedEvent } from "./planning/steering-delivery.ts";
+import { defined } from "./test-support.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const base: EventInput = {
@@ -259,5 +267,134 @@ describe("normalizeIdentifier", () => {
 	test("leaves an ordinary identifier untouched", () => {
 		expect(normalizeIdentifier("ut-mz3k1q-8a1f2c3d")).toBe("ut-mz3k1q-8a1f2c3d");
 		expect(normalizeIdentifier(undefined)).toBeNull();
+	});
+});
+
+describe("new live events expose public metadata only", () => {
+	const privateFields = {
+		steering: "PRIVATE_DIRECTION_MARKER_71",
+		planning_hash: "a1".repeat(32),
+		session_binding: "sb_PRIVATE_PROOF_MARKER_71",
+		proof_hash: "b2".repeat(32),
+		body: "PRIVATE_DIRECTIVE_BODY_MARKER_71",
+		directive_count: 731,
+		question: "PRIVATE_AUGMENTED_QUESTION_MARKER_71",
+		nested: { steering: "PRIVATE_NESTED_MARKER_71" },
+	};
+	const session: SteeringSession & typeof privateFields = {
+		session_id: `ls_${"c3".repeat(32)}`,
+		repo_id: "owner/repo",
+		state: "CONTEXT_REFRESH",
+		updated_at: "2026-10-31T12:00:00.000Z",
+		...privateFields,
+	};
+	const publicPayload = {
+		action: "docs.steering",
+		repo_id: session.repo_id,
+		session_id: session.session_id,
+		state: session.state,
+		updated_at: session.updated_at,
+		non_blocking: true,
+	};
+
+	function expectNoPrivateFields(value: unknown): void {
+		const serialized = JSON.stringify(value);
+		for (const marker of [
+			privateFields.steering,
+			privateFields.planning_hash,
+			privateFields.session_binding,
+			privateFields.proof_hash,
+			privateFields.body,
+			privateFields.question,
+			privateFields.nested.steering,
+		]) expect(serialized).not.toContain(marker);
+	}
+
+	test("the transition payload is an exact allowlist, with previous state only when supplied", () => {
+		expect(steeringSessionPayload(session)).toEqual(publicPayload);
+		expect(steeringSessionPayload(session, "ACTIVE")).toEqual({ ...publicPayload, previous_state: "ACTIVE" });
+		expectNoPrivateFields(steeringSessionPayload(session, "ACTIVE"));
+	});
+
+	test("the actual transition producer ignores private snapshot fields and arbitrary acknowledgement extras", () => {
+		for (const state of ["CONTEXT_REFRESH", "PAUSED"] as const) {
+			const event = steeringSessionEvent("omp", { ...session, state }, "ACTIVE", {
+				...privateFields,
+				directive_id: "steer-public-71",
+				via: "steering_acknowledge",
+			});
+			expect(event.kind).toBe(state === "PAUSED" ? "warning" : "note");
+			expect(event.session_id).toBe(session.session_id);
+			expect(event.repo).toBe(session.repo_id);
+			expect(event.payload).toEqual({
+				...publicPayload,
+				state,
+				previous_state: "ACTIVE",
+				directive_id: "steer-public-71",
+				via: "steering_acknowledge",
+			});
+			const stored = normalizeEvent(event, null);
+			expect(stored.payload).toEqual(defined(event.payload, "transition event payload"));
+			expectNoPrivateFields(stored);
+		}
+	});
+
+	test("unknown transition extras cannot overwrite public metadata or become a via marker", () => {
+		const event = steeringSessionEvent("omp", session, undefined, {
+			...privateFields,
+			action: "private-action-marker-71",
+			session_id: "private-target-marker-71",
+			repo_id: "private/repo",
+			state: "PAUSED",
+			updated_at: "private-time-marker-71",
+			non_blocking: false,
+			via: "PRIVATE_NESTED_MARKER_71",
+			directive_id: { body: privateFields.body },
+		});
+		expect(event.payload).toEqual(publicPayload);
+		expectNoPrivateFields(normalizeEvent(event, null));
+	});
+
+	test("the queued wake event omits command action, priority, body, counts and nested extras", () => {
+		const directive = {
+			id: "steer-public-71",
+			targetSessionId: session.session_id,
+			action: "pause" as const,
+			priority: "high" as const,
+			...privateFields,
+		};
+		const event = steeringQueuedEvent(directive);
+		expect(event.payload).toEqual({
+			action: "steering.queued",
+			directive_id: directive.id,
+			session_id: session.session_id,
+			non_blocking: true,
+		});
+		const stored = normalizeEvent(event, null);
+		expect(stored.payload).toEqual(defined(event.payload, "queued event payload"));
+		expect(stored.payload).not.toHaveProperty("priority");
+		expect(stored.payload).not.toHaveProperty("directive_action");
+		expectNoPrivateFields(stored);
+	});
+});
+
+describe("historical event payload compatibility", () => {
+	test("generic historical append does not retroactively apply the new live-producer allowlist", () => {
+		const payload = {
+			action: "docs.steering",
+			steering: "historically-published-direction-71",
+			planning_hash: "d4".repeat(32),
+			directive_count: 7,
+			nested: { body: "historically-published-body-71" },
+		};
+		const stored = normalizeEvent({
+			surface: "omp",
+			kind: "note",
+			session_id: "historical-session-71",
+			summary: "historical caller-controlled payload",
+			payload,
+		}, null);
+		expect(stored.session_id).toBe("historical-session-71");
+		expect(stored.payload).toEqual(payload);
 	});
 });

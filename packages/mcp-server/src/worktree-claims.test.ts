@@ -93,7 +93,7 @@ async function start(env: Record<string, string | undefined>, index: unknown) {
 		graphIngest: async () => [],
 		firstIngestMs: async () => null,
 	};
-	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never }, observability.observer);
+	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }, observability.observer);
 	const server = createHttpServer(substrate, config, observability);
 	const listening = Promise.withResolvers<void>();
 	server.listen(0, "127.0.0.1", () => listening.resolve());

@@ -24,13 +24,23 @@ export {
 
 export {
 	formatMemo,
+	formatMemoV2,
 	type Memo,
+	type MemoV2,
 	MEMO_PREFIX,
+	MEMO_PREFIX_V2,
 	MEMO_PROGRAM_IDS,
 	MEMO_RE,
+	MEMO_V2_RE,
 	parseMemo,
 	stripListingPrefix,
 } from "./memo.ts";
+
+export {
+	type GraphHeadRecord,
+	headRecordHash,
+	headsRoot,
+} from "./heads.ts";
 
 export {
 	closedHours,

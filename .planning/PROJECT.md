@@ -6,7 +6,9 @@
 
 ## Current State
 
-**In progress: v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** (phases 63-70, defined 2026-10-29, Run 14). Eight features: ingest the documentation of every repository into the docs plane and keep it current (Corpus Atlas, Doc Watch), use the owner's TEI service (Embedding fabric), make the docs RAG learn from use (Docs Reflect), make Live Steering visible and cross-session, optimise many sessions' worktrees (Worktree Fleet), prove the corpus from the hourly devnet anchor (Doc Proofs) and measure and guard docs quality (Docs SLO and eval). Requirements: [REQUIREMENTS.md](REQUIREMENTS.md); roadmap: [ROADMAP.md](ROADMAP.md).
+**In progress: v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** (phases 71-78). The eight accepted features and full criteria are recorded in [REQUIREMENTS.md](REQUIREMENTS.md). Phase 71's independent-credential session boundary is locally verified; sign-off remains `human_needed`, awaiting Desk Quality / Programming Lead review. No v1.8 phase or milestone is signed off. Progress and the review blocker are in [STATE.md](STATE.md) and [ROADMAP.md](ROADMAP.md).
+
+**Prior v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** (phases 63-70, defined 2026-10-29, Run 14): phases shipped with recorded gaps and owner decisions still open; the milestone is not complete. Its eight features ingest documentation and keep it current (Corpus Atlas, Doc Watch), use TEI (Embedding fabric), improve retrieval context (Docs Reflect), expose Live Steering and cross-session context, optimise worktrees (Worktree Fleet), prove the corpus from hourly devnet anchors (Doc Proofs), and guard docs quality (Docs SLO and eval). Existing production/operator limitations below remain in force.
 
 Shipped **v1.3.x, v1.5 and v1.6** (2026-10-28, override closeouts): Should-have hardening (phases 37-44), SOTA enhancements (phases 45-54) and Contextual Memory, Live Steering and Eternal Rollback (phases 55-62). Each closed on the owner's decision of 2026-10-28 with its open items recorded as accepted debt (`STATE.md`, "Accepted debt (owner decision, 2026-10-28)"); archives are in `.planning/milestones/`.
 
@@ -220,4 +222,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-28 after the v1.6 milestone*
+*Last updated: 2026-10-31 for v1.8 and Phase 71 local verification; external sign-off remains pending*

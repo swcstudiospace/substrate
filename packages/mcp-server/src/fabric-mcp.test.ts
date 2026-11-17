@@ -352,7 +352,7 @@ function indexProbe() {
 
 /** A substrate with the given index and Greptime probes. Greptime is configured through GREPTIME_URL, so the fabric reads it as configured. */
 function substrateWithProbes(index: unknown, greptime: unknown) {
-	return new Substrate(loadConfig({ [GREPTIME_URL_KEY]: "http://127.0.0.1:4000" }), { index: index as never, greptime: greptime as never });
+	return new Substrate(loadConfig({ [GREPTIME_URL_KEY]: "http://127.0.0.1:4000" }), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 }
 
 describe("fabric health probes", () => {
@@ -421,7 +421,7 @@ function greptimeWithJobs() {
 /** A substrate whose breakers open on the first failure and go half-open after one second: the smallest the config allows. */
 function substrateWithFastBreakers(index: unknown, greptime: unknown) {
 	const config = loadConfig({ [GREPTIME_URL_KEY]: "http://127.0.0.1:4000", SUBSTRATE_BREAKER_FAILURES: "1", SUBSTRATE_BREAKER_OPEN_MS: "1000" });
-	return new Substrate(config, { index: index as never, greptime: greptime as never });
+	return new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 }
 
 /** Opens the Greptime breaker and waits until it is half-open. */

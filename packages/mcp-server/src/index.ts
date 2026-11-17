@@ -37,7 +37,7 @@ import { planningConfigWarnings } from "./planning/config.ts";
 import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
 import { briefRecallConfigWarnings } from "./recall-snapshot.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
-import { createObservability } from "./observe.ts";
+import { auditToolCalls, createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SloNotifier } from "./slo-notify.ts";
@@ -68,6 +68,7 @@ const substrate = new Substrate(
 	config,
 	{ desktop: createDesktopDriver({ run: bufferRunner, dir: config.desktopDir }) },
 	observability.observer,
+	{ auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) },
 );
 substrate.startPlanningPoll();
 

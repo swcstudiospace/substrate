@@ -6,11 +6,12 @@
  * per-hour digest failures continue, systemic failures stop the run.
  */
 import { describe, expect, test } from "bun:test";
-import { formatMemo } from "@substrate/ledger";
-import { GreptimeError, INGEST_LAG_MS } from "./greptime.ts";
+import { formatMemo, formatMemoV2, headsRoot, parseMemo } from "@substrate/ledger";
+import { GreptimeError, type GraphChainLeafRow, INGEST_LAG_MS } from "./greptime.ts";
 import {
 	ADDRESS_MEMO_LIMIT,
 	ANCHOR_LOOKBACK_MS,
+	buildGraphHeads,
 	DEVNET_GENESIS_HASH,
 	MAX_HOURS_PER_RUN,
 	UsageError,
@@ -18,7 +19,9 @@ import {
 	runAnchorJob,
 	type AnchorDeps,
 	type AnchorEnv,
+	type ChainMember,
 } from "./anchor.ts";
+import { headRecordsFromLeaves } from "./event.ts";
 import type { NewAnchor } from "./greptime.ts";
 import type { EmitResult, HourDigest } from "./service.ts";
 import type { EventInput } from "./types.ts";
@@ -48,6 +51,16 @@ function digest(hour: number, root: string | null = ROOT, count = 3): HourDigest
 	};
 }
 
+const hashOf = (id: string): string => new Bun.CryptoHasher("sha256").update(id).digest("hex");
+
+/** The member rows `eventsByIds` answers with: one graph and one session, a chain in id order. */
+function memberRows(ids: readonly string[]): ChainMember[] {
+	return ids.map((id) => {
+		const n = Number(id.slice("evt_".length));
+		return { id, hash: hashOf(id), prev: n > 1 ? hashOf(`evt_${n - 1}`) : null, graph_id: "graph-a", session_id: "session-1" };
+	});
+}
+
 interface Emitted {
 	surface: string;
 	kind: string;
@@ -56,16 +69,26 @@ interface Emitted {
 	repo?: string;
 }
 
-function deps(overrides: Partial<AnchorDeps> & { digests?: Map<number, HourDigest | Error> } = {}): {
+function deps(
+	overrides: Partial<AnchorDeps> & {
+		digests?: Map<number, HourDigest | Error>;
+		/** The member rows `eventsByIds` answers with; by default each id is one event of one chain. */
+		eventRows?: (ids: readonly string[]) => ChainMember[];
+		/** What `insertGraphChainLeaves` throws, so a test can fail the leaves write. */
+		leavesError?: Error;
+	} = {},
+): {
 	deps: AnchorDeps;
 	emitted: Emitted[];
 	inserts: Array<Record<string, unknown>>;
 	invocations: string[][];
+	leafInserts: GraphChainLeafRow[];
 } {
 	const emitted: Emitted[] = [];
 	const inserts: Array<Record<string, unknown>> = [];
 	const invocations: string[][] = [];
-	const { digests, ...rest } = overrides;
+	const leafInserts: GraphChainLeafRow[] = [];
+	const { digests, eventRows = memberRows, leavesError, ...rest } = overrides;
 	// What the stub CLI was last asked to send: the read-back answers with
 	// that memo, the way a real RPC answers with what the signature carries.
 	// This keeps the stub independent of digest call order (the job peeks
@@ -78,6 +101,11 @@ function deps(overrides: Partial<AnchorDeps> & { digests?: Map<number, HourDiges
 			anchorForPeriod: async () => null,
 			insertAnchor: async (row: NewAnchor) => {
 				inserts.push({ ...row });
+			},
+			eventsByIds: async (ids: readonly string[]) => eventRows(ids),
+			insertGraphChainLeaves: async (rows: GraphChainLeafRow[]) => {
+				if (leavesError !== undefined) throw leavesError;
+				leafInserts.push(...rows);
 			},
 		} as unknown as AnchorDeps["greptime"],
 		substrate: {
@@ -116,7 +144,7 @@ function deps(overrides: Partial<AnchorDeps> & { digests?: Map<number, HourDiges
 		clock: () => NOW,
 		...rest,
 	};
-	return { deps: full, emitted, inserts, invocations };
+	return { deps: full, emitted, inserts, invocations, leafInserts };
 }
 
 function written(emitted: Emitted[]) {
@@ -155,6 +183,8 @@ describe("runAnchorJob candidates and exits", () => {
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => null,
 				insertAnchor: async () => {},
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 			} as unknown as AnchorDeps["greptime"],
 			substrate: {
 				hourDigest: async (hour: number) => {
@@ -191,6 +221,8 @@ describe("runAnchorJob candidates and exits", () => {
 				insertAnchor: async (row: NewAnchor) => {
 					inserts.push({ ...row });
 				},
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 			} as unknown as AnchorDeps["greptime"],
 		});
 		await runAnchorJob(d);
@@ -208,6 +240,8 @@ describe("runAnchorJob candidates and exits", () => {
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => null,
 				insertAnchor: async () => {},
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 			} as unknown as AnchorDeps["greptime"],
 			substrate: {
 				hourDigest: async (hour: number) => {
@@ -379,6 +413,8 @@ describe("runAnchorJob send path", () => {
 				insertAnchor: async () => {
 					throw new Error("must never write an anchored hour again");
 				},
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 			} as unknown as AnchorDeps["greptime"],
 			rpc: {
 				transactionMemo: async () => null,
@@ -486,7 +522,12 @@ describe("runAnchorJob adopt and alarm", () => {
 
 	test("a hint for another hour never blocks the send", async () => {
 		const otherMemo = formatMemo({ periodStartMs: H10 + HOUR, rootHex: ROOT, count: 3 });
-		const sentMemo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
+		const sentMemo = formatMemoV2({
+			periodStartMs: H10,
+			rootHex: ROOT,
+			count: 3,
+			headsRootHex: headsRoot(buildGraphHeads(memberRows(["evt_1", "evt_2", "evt_3"]), H10).records),
+		});
 		const hintSig = "6".repeat(87);
 		const { deps: d, inserts, invocations } = deps({
 			rpc: {
@@ -747,17 +788,22 @@ describe("runAnchorJob failures", () => {
 	});
 
 	test("a store failure on insert stops the run", async () => {
+		let insertReached = false;
 		const { deps: d, emitted } = deps({
 			greptime: {
 				firstIngestMs: async () => H10,
 				anchorsBetween: async () => [],
 				anchorForPeriod: async () => null,
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 				insertAnchor: async () => {
-					throw new Error("unreachable");
+					insertReached = true;
+					throw new Error("insert refused");
 				},
 			} as unknown as AnchorDeps["greptime"],
 		});
 		const result = await runAnchorJob(d);
+		expect(insertReached).toBe(true);
 		expect(result.code).toBe(1);
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
 	});
@@ -888,6 +934,8 @@ describe("parseAnchorArgs", () => {
 				insertAnchor: async (row: NewAnchor) => {
 					inserts.push({ ...row });
 				},
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 			} as unknown as AnchorDeps["greptime"],
 			rpc: {
 				transactionMemo: async () => ({
@@ -939,6 +987,8 @@ describe("parseAnchorArgs", () => {
 				insertAnchor: async (row: NewAnchor) => {
 					inserts.push({ ...row });
 				},
+				eventsByIds: async (ids: readonly string[]) => memberRows(ids),
+				insertGraphChainLeaves: async () => {},
 			} as unknown as AnchorDeps["greptime"],
 			rpc: {
 				transactionMemo: async () => null,
@@ -1013,5 +1063,134 @@ describe("parseAnchorArgs", () => {
 		expect(emitted).toEqual([]);
 		expect(inserts).toEqual([]);
 		expect(invocations).toEqual([]);
+	});
+});
+
+describe("anchor heads (D73-01, D73-02)", () => {
+	const member = (id: string, prev: string | null, graph: string | null = "graph-a", session: string | null = "session-1"): ChainMember => ({
+		id,
+		hash: hashOf(id),
+		prev,
+		graph_id: graph,
+		session_id: session,
+	});
+	const chain = [member("evt_1", null), member("evt_2", hashOf("evt_1")), member("evt_3", hashOf("evt_2"))];
+
+	test("the same hour gives the same heads and leaves every time", () => {
+		expect(buildGraphHeads(chain, H10)).toStrictEqual(buildGraphHeads(chain, H10));
+	});
+
+	test("two sessions of one graph give two records, each with its own chain", () => {
+		const { records, leaves } = buildGraphHeads([...chain, member("evt_4", null, "graph-a", "session-2")], H10);
+		expect(records.map((record) => record.sessionId)).toEqual(["session-1", "session-2"]);
+		expect(records[0]).toMatchObject({ count: 3, headEventId: "evt_3", headHashHex: hashOf("evt_3") });
+		expect(records[1]).toMatchObject({ count: 1, headEventId: "evt_4" });
+		expect(leaves.filter((leaf) => leaf.session_id === "session-2")).toHaveLength(1);
+	});
+
+	test("a permuted read order gives identical heads and leaves, forks included", () => {
+		// evt_a and evt_b both claim no predecessor: inChainOrder would start from whichever it meets first.
+		const a = member("evt_a", null);
+		const b = member("evt_b", null);
+		const c = member("evt_c", hashOf("evt_a"));
+		const expected = buildGraphHeads([a, b, c], H10);
+		for (const order of [
+			[b, c, a],
+			[c, a, b],
+			[a, c, b],
+		]) {
+			expect(buildGraphHeads(order, H10)).toStrictEqual(expected);
+		}
+		expect(buildGraphHeads([...chain].reverse(), H10)).toStrictEqual(buildGraphHeads(chain, H10));
+	});
+
+	test("a graph-less event gets no head and no leaf", () => {
+		const { records, leaves } = buildGraphHeads([...chain, member("evt_9", null, null, null)], H10);
+		expect(records).toHaveLength(1);
+		expect(leaves).toHaveLength(3);
+	});
+
+	test("the anchor and the verifier derive the same head records from the same leaves", () => {
+		const { records, leaves } = buildGraphHeads(chain, H10);
+		expect(headRecordsFromLeaves(leaves, H10)).toStrictEqual(records);
+	});
+
+	test("an hour with events anchors a v2 memo carrying the heads root", async () => {
+		const { deps: d, inserts, leafInserts } = deps();
+		const result = await runAnchorJob(d);
+		expect(result.anchored).toBe(1);
+		const { records } = buildGraphHeads(chain, H10);
+		expect(parseMemo(String(inserts[0]?.memo))).toStrictEqual({
+			periodStartMs: H10,
+			rootHex: ROOT,
+			count: 3,
+			headsRootHex: headsRoot(records),
+		});
+		expect(leafInserts).toHaveLength(3);
+	});
+
+	test("an hour no graph owns anchors the v1 memo and writes no leaves", async () => {
+		const { deps: d, inserts, leafInserts } = deps({
+			eventRows: (ids) => memberRows(ids).map((row) => ({ ...row, graph_id: null })),
+		});
+		const result = await runAnchorJob(d);
+		expect(result.anchored).toBe(1);
+		expect(inserts[0]?.memo).toBe(formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 }));
+		expect(leafInserts).toEqual([]);
+	});
+
+	test("a leaves write failure stops the anchor: no row is written", async () => {
+		const { deps: d, emitted, inserts } = deps({ leavesError: new GreptimeError("ledger down") });
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(inserts).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
+	});
+
+	test("an empty hour writes neither leaves nor a row", async () => {
+		const { deps: d, inserts, leafInserts, invocations } = deps({ digests: new Map([[H10, digest(H10, null, 0)]]) });
+		await runAnchorJob(d);
+		expect(inserts).toEqual([]);
+		expect(leafInserts).toEqual([]);
+		expect(invocations).toEqual([]);
+	});
+});
+
+describe("anchored hours and the heads read", () => {
+	test("an already-anchored hour whose member rows cannot be read does not fail the run", async () => {
+		const anchored = {
+			period_start: new Date(H10).toISOString(),
+			period_end: new Date(H10 + HOUR).toISOString(),
+			root: ROOT,
+			event_count: 3,
+			memo: formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 }),
+			tx_sig: SIG,
+			signer: PUBKEY,
+			cluster: "devnet",
+			slot: 77,
+			anchored_at: new Date(H10).toISOString(),
+			stale_hashes: null,
+		};
+		const { deps: d, emitted, inserts, invocations } = deps({
+			greptime: {
+				firstIngestMs: async () => H10,
+				anchorsBetween: async () => [anchored],
+				anchorForPeriod: async () => anchored,
+				insertAnchor: async () => {
+					throw new Error("must never write an anchored hour again");
+				},
+				eventsByIds: async () => {
+					throw new GreptimeError("member rows unreadable");
+				},
+				insertGraphChainLeaves: async () => {
+					throw new Error("must never write leaves for an anchored hour");
+				},
+			} as unknown as AnchorDeps["greptime"],
+		});
+		const result = await runAnchorJob(d);
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(invocations).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(emitted).toEqual([]);
 	});
 });

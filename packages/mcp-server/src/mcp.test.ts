@@ -14,6 +14,8 @@ import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
 import { createMcpServer, ingestRefusalIsGate, resetRagMachine } from "./mcp.ts";
 import { Substrate } from "./service.ts";
+import { auditToolCalls, createObservability } from "./observe.ts";
+import { createTestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { SubstrateEvent, Surface } from "./types.ts";
@@ -36,6 +38,7 @@ function ledger(rows: Array<Record<string, unknown>> = []) {
 				return rows;
 			},
 			readEvents: async () => rows,
+			graphChainLeafHours: async () => [],
 			// No ingest table concept here: with no coverage start every event
 			// is pre-coverage legacy, so the hour report stays empty.
 			graphIngest: async () => [],
@@ -51,12 +54,17 @@ async function connect(
 	env: Record<string, string> = {},
 	deps: { cache?: ReadThroughCache; lightragFetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response> } = {},
 ) {
-	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never, ...deps });
+	const config = loadConfig(env);
+	const authority = createTestLiveSessionAuthority();
+	const observability = createObservability(config, {});
+	const substrate = new Substrate(config, { index: null, greptime: greptime as never, steering: { history: null, liveSessions: authority }, ...deps }, observability.observer, {
+		auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport),
+	});
 	const server = createMcpServer(substrate, surface);
 	const client = new Client({ name: "substrate-test", version: "0.0.0" });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-	return { client, substrate };
+	return { client, substrate, authority, observability };
 }
 
 /** Another caller on a substrate that already exists: the steering sessions live on the substrate, so two callers meet there. */
@@ -266,7 +274,7 @@ describe("a swarm token names the caller", () => {
 	}
 
 	async function connectWith(surface: Surface | null, index: unknown, greptime: unknown) {
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const server = createMcpServer(substrate, surface);
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
 		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -414,7 +422,7 @@ describe("a lease id reaches only its holder", () => {
 
 	async function connectAs(surface: Surface | null) {
 		const index = { getGraph: async () => graph, registerGraph: async () => graph };
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: ledger().greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: ledger().greptime as never, steering: { history: null, liveSessions: null } });
 		const server = createMcpServer(substrate, surface);
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
 		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -467,7 +475,7 @@ describe("memory_search", () => {
 	}
 
 	async function connectIndex(index: unknown, caller: Surface | { surface: Surface; isOperator: boolean } = "omp", greptime: unknown = null) {
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const server = createMcpServer(substrate, caller);
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
 		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1021,6 +1029,7 @@ describe("graph_find and issue_get wiring", () => {
 			index: index as never,
 			greptime: greptime as never,
 			mirror: mirror as never,
+			steering: { history: null, liveSessions: null },
 		});
 		const server = createMcpServer(substrate, "omp");
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
@@ -1056,78 +1065,72 @@ describe("graph_find and issue_get wiring", () => {
 	});
 });
 
-describe("docs_steering_session keeps what a transition omits", () => {
-	test("a state-only transition keeps the stored steering and planning hash; an explicit value replaces it", async () => {
-		const { client } = await connect(ledger().greptime);
-		const base = { session_id: "steer-carry-1", repo_id: "owner/name" };
-
+describe("docs_steering_session issued authority", () => {
+	test("state-only transitions preserve private fields without publishing them in transition events", async () => {
+		const stub = ledger();
+		const { client, authority } = await connect(stub.greptime);
 		const active = await call(client, "docs_steering_session", {
-			...base,
-			state: "ACTIVE",
-			steering: "stay on the planning slice",
-			planning_hash: "plan-a",
+			repo_id: "owner/name", state: "ACTIVE", steering: "PRIVATE-CARRY-DIRECTION", planning_hash: "PRIVATE-CARRY-PLAN",
 		});
 		expect(active.isError).toBe(false);
-
+		const issued = active.json();
+		expect(issued.status).toBe("issued");
+		expect(issued.session_id).toMatch(/^ls_[a-f0-9]{64}$/);
+		expect(issued.session_binding).toMatch(/^[a-f0-9]{64}$/);
+		const base = { session_id: issued.session_id, session_binding: issued.session_binding, repo_id: "owner/name" };
 		const refreshed = await call(client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH" });
-		expect(refreshed.json()).toMatchObject({
-			state: "CONTEXT_REFRESH",
-			steering: "stay on the planning slice",
-			planning_hash: "plan-a",
-		});
-
-		const replaced = await call(client, "docs_steering_session", {
-			...base,
-			state: "PAUSED",
-			steering: "hold for review",
-		});
-		expect(replaced.json()).toMatchObject({ state: "PAUSED", steering: "hold for review", planning_hash: "plan-a" });
+		expect(refreshed).toMatchObject({ isError: false });
+		expect(refreshed.json()).toMatchObject({ status: "updated", state: "CONTEXT_REFRESH" });
+		const access = { caller: { surface: "omp", isOperator: false } as const, sessionId: String(issued.session_id), sessionBinding: String(issued.session_binding) };
+		const carried = await authority.read(access, "private-read");
+		expect(carried.ok && carried.snapshot.session).toMatchObject({ steering: "PRIVATE-CARRY-DIRECTION", planning_hash: "PRIVATE-CARRY-PLAN" });
+		const replaced = await call(client, "docs_steering_session", { ...base, state: "PAUSED", steering: "PRIVATE-REPLACED-DIRECTION" });
+		expect(replaced.json()).toMatchObject({ status: "updated", state: "PAUSED" });
+		expect(replaced.text).not.toContain("PRIVATE-");
+		expect(replaced.json()).not.toHaveProperty("session_binding");
+		const read = await authority.read({ caller: { surface: "omp", isOperator: false }, sessionId: String(issued.session_id), sessionBinding: String(issued.session_binding) }, "private-read");
+		expect(read.ok && read.snapshot.session).toMatchObject({ state: "PAUSED", steering: "PRIVATE-REPLACED-DIRECTION", planning_hash: "PRIVATE-CARRY-PLAN" });
+		for (const event of stub.written.filter((event) => event.payload.action === "docs.steering")) {
+			expect(Object.keys(event.payload).sort()).toEqual(["action", "non_blocking", ...(event.payload.previous_state === undefined ? [] : ["previous_state"]), "repo_id", "session_id", "state", "updated_at"]);
+			expect(JSON.stringify(event)).not.toContain("PRIVATE-");
+			expect(JSON.stringify(event)).not.toContain(String(issued.session_binding));
+		}
 	});
-});
 
-
-describe("docs_steering_session belongs to the caller's surface", () => {
-	test("an anonymous caller cannot read or overwrite a session an authenticated caller holds", async () => {
-		const { greptime } = ledger();
-		const owner = await connect(greptime, "claude-code");
-		const anonymous = { client: await attach(owner.substrate, null) };
-		const base = { session_id: "shared-steer-1", repo_id: "owner/name" };
-
-		const held = await call(owner.client, "docs_steering_session", {
-			...base,
-			state: "ACTIVE",
-			steering: "keep the planning slice",
-			planning_hash: "plan-a",
-		});
-		expect(held.isError).toBe(false);
-
-		const read = await call(anonymous.client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH" });
-		expect(read.isError).toBe(true);
-		expect(read.text).not.toContain("keep the planning slice");
-
-		const overwrite = await call(anonymous.client, "docs_steering_session", { ...base, state: "PAUSED", steering: "ignore the plan" });
-		expect(overwrite.isError).toBe(true);
-
-		const after = await call(owner.client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH", previous_state: "ACTIVE" });
+	test("anonymous, sibling missing/wrong proof, foreign and unissued updates share not-found", async () => {
+		const owner = await connect(ledger().greptime, "claude-code");
+		const active = (await call(owner.client, "docs_steering_session", { repo_id: "owner/name", state: "ACTIVE", steering: "PRIVATE-OWNER-DIRECTION" })).json();
+		const base = { session_id: active.session_id, repo_id: "owner/name", state: "PAUSED" };
+		const sibling = await attach(owner.substrate, "claude-code");
+		const foreign = await attach(owner.substrate, "hermes");
+		const anonymous = await attach(owner.substrate, null);
+		for (const [client, args] of [
+			[anonymous, base],
+			[sibling, base],
+			[sibling, { ...base, session_binding: "f".repeat(64) }],
+			[foreign, { ...base, session_binding: active.session_binding }],
+			[owner.client, { ...base, session_id: `ls_${"e".repeat(64)}`, session_binding: active.session_binding }],
+		] as const) {
+			const denied = await call(client, "docs_steering_session", args);
+			expect(denied.isError).toBe(true);
+			expect(denied.json()).toEqual({ status: "refused", error: { code: "not-found" } });
+			expect(denied.text).not.toContain("PRIVATE-OWNER-DIRECTION");
+		}
+		const after = await call(owner.client, "docs_steering_session", { ...base, state: "CONTEXT_REFRESH", previous_state: "ACTIVE", session_binding: active.session_binding });
 		expect(after.isError).toBe(false);
-		expect(after.json()).toMatchObject({ state: "CONTEXT_REFRESH", steering: "keep the planning slice", planning_hash: "plan-a" });
+		expect(after.json()).toMatchObject({ state: "CONTEXT_REFRESH" });
+		const held = await owner.authority.read({ caller: { surface: "claude-code", isOperator: false }, sessionId: String(active.session_id), sessionBinding: String(active.session_binding) }, "private-read");
+		expect(held.ok && held.snapshot.session).toMatchObject({ steering: "PRIVATE-OWNER-DIRECTION" });
 	});
-});
 
-describe("docs_steering_session sessions belong to one substrate", () => {
-	test("a second substrate does not see a session the first holds, so one process's sessions never leak into another's", async () => {
-		const { greptime } = ledger();
-		const first = await connect(greptime);
-		const second = await connect(greptime);
-		const base = { session_id: "per-substrate-1", repo_id: "owner/name" };
-
-		expect((await call(first.client, "docs_steering_session", { ...base, state: "ACTIVE" })).isError).toBe(false);
-		expect(first.substrate.steeringSessions.get("omp", "per-substrate-1")?.state).toBe("ACTIVE");
-		expect(second.substrate.steeringSessions.get("omp", "per-substrate-1")).toBeUndefined();
-
-		// The second substrate has never seen the session, so a claim about its previous state is refused there.
-		const claim = await call(second.client, "docs_steering_session", { ...base, state: "PAUSED", previous_state: "ACTIVE" });
+	test("an independent authority cannot adopt a public handle issued elsewhere", async () => {
+		const first = await connect(ledger().greptime);
+		const second = await connect(ledger().greptime);
+		const active = (await call(first.client, "docs_steering_session", { repo_id: "owner/name", state: "ACTIVE" })).json();
+		const claim = await call(second.client, "docs_steering_session", { session_id: active.session_id, session_binding: active.session_binding, repo_id: "owner/name", state: "PAUSED", previous_state: "ACTIVE" });
 		expect(claim.isError).toBe(true);
+		expect(claim.json()).toEqual({ status: "refused", error: { code: "not-found" } });
+		expect((await first.authority.read({ caller: { surface: "omp", isOperator: false }, sessionId: String(active.session_id), sessionBinding: String(active.session_binding) }, "private-read")).ok).toBe(true);
 	});
 });
 

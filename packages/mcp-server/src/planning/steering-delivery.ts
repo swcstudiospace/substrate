@@ -16,16 +16,16 @@
  *   `note` (`payload.action` `steering.queued`): the bus carries hints only, so neither the event nor the hint holds the body.
  * - {@link SteeringExpirySweeper}: the unref'd timer that closes directives nobody acknowledged (`expireStale`).
  *
- * The port is optional. Production wiring injects the live session registry (`session-state.ts`, `SteeringSessionRegistry`) as
- * the port whenever steering is on, so an applied pause or redirect moves the same session `docs_steering_session` reads and
- * writes: the two mechanisms share one state model. A caller that injects no port (a test seam) gets a plain acknowledgement
- * that changes no session state and says nothing about one.
+ * Production injects the durable authority-backed {@link SessionStatePort} from `session-state.ts`, not a writable memory
+ * registry. The complete acknowledgement and state application share one admitted/audited execution wrapper. A caller
+ * injecting no state port gets an ordinary audited acknowledgement without state movement.
  */
 import { redact } from "../redact.ts";
 import type { EventInput } from "../types.ts";
 import type { PlanningTimerHandle, PlanningTimers } from "./observer.ts";
 import type { SteeringDirective, SteeringExpiryReport, SteeringInbox, SteeringOutcome, SteeringPriority } from "./steering.ts";
-import { acknowledgeSteering, type SteeringAcknowledgeInput, type SteeringCaller, type SteeringWiring, type SteeringWriteResult } from "./steering-tools.ts";
+import type { LiveSessionAccess } from "./steering-sessions-store.ts";
+import type { SteeringWriteResult } from "./steering-tools.ts";
 
 /** The most directives a notice lists. The count still states every queued directive. */
 export const STEERING_NOTICE_MAX_ENTRIES = 3;
@@ -103,26 +103,28 @@ export function sessionStateForAcknowledgement(ack: { action: SteeringDirective[
 	}
 }
 
-export type SessionTransitionResult = { ok: true; changed: boolean } | { ok: false; reason: string };
+export type SessionTransitionRefusalReason = "not-found" | "session-unavailable" | "invalid-transition";
+export type SessionTransitionResult = { ok: true; changed: boolean } | { ok: false; reason: SessionTransitionRefusalReason };
 
-/** What the acknowledgement tells the port about the transition it asks for: the directive that drives it. */
-export interface SessionTransitionContext {
+/** Trusted, transient live access plus the fixed operation and directive driving this transition. */
+export interface SessionTransitionContext extends LiveSessionAccess {
 	directiveId: string;
+	operation: "operator-ack";
 }
 
 /**
  * The live session state, as the acknowledgement path sees it. `applyTransition` moves one session to `target` through the
  * state machine's own transition rules, and refuses (`ok: false`) what they refuse. It must not force a transition. On success
  * it says whether the stored state actually changed (`changed`): a request for the state the session already holds is
- * accepted with `changed: false`. `sessionKey` is the directive's target session id; the adapter derives its own store key
- * from it. The result may be a promise: an adapter that records the transition in the ledger awaits that record.
+ * accepted with `changed: false`. `sessionKey` must match the trusted context's live session ID. The authority-backed
+ * implementation reads the checked session and then revalidates the mutation under its transaction lock.
  */
 export interface SessionStatePort {
 	applyTransition(sessionKey: string, target: SessionStateName, context: SessionTransitionContext): SessionTransitionResult | Promise<SessionTransitionResult>;
 }
 
 /** What the acknowledgement did to the session state. Absent from a reply when no port is wired. */
-export type SessionStateOutcome = { status: "unchanged" } | { status: "applied"; state: SessionStateName } | { status: "refused"; state: SessionStateName; reason: string };
+export type SessionStateOutcome = { status: "unchanged" } | { status: "applied"; state: SessionStateName } | { status: "refused"; state: SessionStateName; reason: SessionTransitionRefusalReason };
 
 /**
  * A hint to the acknowledging session (its hook or agent), never an action of the server's, which stays read-only on worktrees:
@@ -136,36 +138,6 @@ export interface SteeringCheckpointHint {
 
 export type SteeringAcknowledgeReply = SteeringWriteResult & { session_state?: SessionStateOutcome; checkpoint_hint?: SteeringCheckpointHint };
 
-/**
- * Acknowledge a directive, then drive the session state from the outcome. The acknowledgement is audited first and stands
- * whatever the port says: a refused transition is reported in `session_state`, not rolled back. An applied pause or redirect
- * that moved the session (its state actually changed) also carries `checkpoint_hint` (the session may checkpoint); one that left it where it was reports `session_state` unchanged and no hint. With no port the reply is exactly the acknowledgement's.
- */
-export async function acknowledgeSteeringWithState(
-	wiring: SteeringWiring,
-	caller: SteeringCaller,
-	input: SteeringAcknowledgeInput,
-	port: SessionStatePort | null,
-): Promise<SteeringAcknowledgeReply> {
-	const result = await acknowledgeSteering(wiring, caller, input);
-	if (result.status !== "acknowledged" || port === null || wiring.inbox === null) return result;
-	const record = wiring.inbox.get(result.directive_id);
-	if (record === null || record.state !== "acknowledged") return result;
-	const target = sessionStateForAcknowledgement({ action: record.directive.action, outcome: record.outcome, reason: record.reason ?? null });
-	if (target === null) return { ...result, session_state: { status: "unchanged" } };
-	try {
-		const moved = await port.applyTransition(record.directive.targetSessionId, target, { directiveId: result.directive_id });
-		if (!moved.ok) return { ...result, session_state: { status: "refused", state: target, reason: redact(moved.reason).slice(0, 200) } };
-		if (!moved.changed) return { ...result, session_state: { status: "unchanged" } };
-		// The one place the move is known: the REST projection derives its hint from this note, never from action and outcome.
-		wiring.inbox.noteSessionMoved(result.directive_id);
-		return { ...result, session_state: { status: "applied", state: target }, checkpoint_hint: { trigger: "steering", directive_id: result.directive_id } };
-	} catch (cause) {
-		// The acknowledgement is already audited and effective; a port that throws must not turn it into a failed call.
-		// It is reported as a refused transition, with the cause redacted and cut.
-		return { ...result, session_state: { status: "refused", state: target, reason: redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200) } };
-	}
-}
 
 /** `payload.action` of the hint note. Added to the event vocabulary (`event-sources.ts`, `docs/event-vocabulary.md`). */
 export const STEERING_QUEUED_ACTION = "steering.queued";
@@ -178,14 +150,13 @@ export function steeringQueuedEvent(directive: Pick<SteeringDirective, "id" | "t
 	return {
 		surface: "substrate",
 		kind: "note",
-		summary: `steering ${directive.action} queued for ${directive.targetSessionId}`,
+		summary: "steering directive queued",
 		session_id: directive.targetSessionId,
 		payload: {
 			action: STEERING_QUEUED_ACTION,
 			directive_id: directive.id,
-			target_session_id: directive.targetSessionId,
-			steering_action: directive.action,
-			priority: directive.priority,
+			session_id: directive.targetSessionId,
+			non_blocking: true,
 		},
 	};
 }

@@ -9,6 +9,6 @@
 		"empty_catch": 0,
 		"console_calls": 0,
 		"process_exit_non_entrypoint": 0,
-		"json_parse_casts": 46
+		"json_parse_casts": 45
 	}
 }
