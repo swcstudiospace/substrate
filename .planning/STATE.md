@@ -1,20 +1,20 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.8
-milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-current_phase_name: ""
+current_phase_name: milestones/v1.7-REQUIREMENTS-AUDIT.md, one grading rule
 status: "v1.8 complete (2026-11-17). Phases 71-78 closed with no open blockers. human_needed bypassed via owner decisions (D71, phase72 grant, phase74 module-only, 76/77/78 op gates); Greptile (PR#199) skipped as passed per user waiver 2026-11-12 (greptile_only); all CI green (bun test/lint/tsc/py/phase-close/ratchet). Audit via gsd-verifier equiv + reads complete."
 stopped_at: "2026-11-17: v1.8 milestone audit+complete run; all phases 71-78 marked closed; no blockers; prepare cleanup."
-last_updated: "2026-11-17T12:00:00Z"
+last_updated: "2026-11-17T00:54:24.554Z"
 last_activity: 2026-11-17
 last_activity_desc: "v1.8 complete: audit logic (audit-open, roadmap queries, verif reads) listed 71-78; human_needed bypassed owner decs+Greptile skip+CI green; STATE/ROADMAP/MILESTONES updated; phases closed; progress 100%; no open blockers."
-state_head: a2f438f9768cadf9ffc601ba942fd92325dc4da1
+state_head: f72078530659e06b807b279a2d958e8b1ad0cfe5
 progress:
   total_phases: 61
   completed_phases: 55
-  total_plans: 12
+  total_plans: 1
   completed_plans: 10
-  percent: 100
+  percent: 90
+milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
 current_phase: 0
 ---
 
@@ -404,6 +404,7 @@ Resume file: None
 | Phase 16 P16-02 | 9min | 3 tasks | 4 files |
 | Phase 16 P16-03 | 14min | 3 tasks | 3 files |
 | Phase 16 P16-04 | 5min | 3 tasks | 4 files |
+| Phase 72 P01 | 1800 | 3 tasks | 6 files |
 
 ## Decisions
 
@@ -415,6 +416,7 @@ Resume file: None
 - [Phase 16]: 16-03: requirements-completed left empty, FOUND-01 stays open until the 16-05 live proof
 - [Phase 16]: 16-04: docs carry key names only, no connection-string shapes; production-mutating steps framed operator-only
 - [Phase 71]: Wave 3 synthesize: graceful degradation mechanisms (retry/fallback/state-preservation for Graph Engineering session continuity) inserted into ROADMAP.md after impact parity (SPE-34079). Unison resources detailed. File-disjoint.
+- [Phase 0]: Phase 74 partial closed: added cross_repo_compensate MCP tool (operator), updated verif/roadmap/state/REQUIREMENTS/docs; owner decision on operator gate respected.
 
 ## Post-milestone uplift (graph ut-mv5r71hp-65f7b012, 2026-10-12)
 
