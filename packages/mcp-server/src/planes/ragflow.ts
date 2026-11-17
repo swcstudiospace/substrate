@@ -323,6 +323,61 @@ export async function listDatasets(
 	return { ok: true, datasets };
 }
 
+/** One document as the dataset's document list names it. `name` is the repo path with `/` written as `__` (documentName); `meta_fields` is what the ingest attached. */
+export interface RagflowDocument {
+	id: string;
+	name: string;
+	meta_fields: { source_url: string | undefined; commit: string | undefined; heading_path: string | undefined };
+}
+
+export type DocumentListOutcome = { ok: true; documents: RagflowDocument[] } | { ok: false; reason: string };
+
+/** The most documents one list page asks for, and the most pages one listing may take. */
+const DOCUMENT_LIST_PAGE_SIZE = 100;
+const DOCUMENT_LIST_MAX_PAGES = 100;
+
+/**
+ * Every document in one dataset (`GET /api/v1/datasets/{id}/documents?page=&page_size=` → `{code, data: {docs, total}}`),
+ * paged until the reported total is reached or a short page ends the listing. Transport failures are a reason, not a throw.
+ */
+export async function listDocuments(
+	config: RagflowConfig,
+	datasetId: string,
+	fetchImpl: FetchLike = fetch,
+	timeoutMs = 4000,
+): Promise<DocumentListOutcome> {
+	const documents: RagflowDocument[] = [];
+	for (let page = 1; page <= DOCUMENT_LIST_MAX_PAGES; page += 1) {
+		const answered = await call(config, fetchImpl, `/api/v1/datasets/${encodeURIComponent(datasetId)}/documents?page=${page}&page_size=${DOCUMENT_LIST_PAGE_SIZE}`, {
+			method: "GET",
+			timeoutMs,
+		});
+		if (!answered.ok) return answered;
+		const data = dataOf(answered.body);
+		if (data === null || typeof data !== "object" || !("docs" in data) || !Array.isArray(data.docs)) {
+			return { ok: false, reason: "ragflow: unexpected document list shape" };
+		}
+		for (const entry of data.docs) {
+			const document = documentOf(entry);
+			if (document !== null) documents.push(document);
+		}
+		const total = readNumber(data, "total");
+		const reached = total === undefined ? data.docs.length < DOCUMENT_LIST_PAGE_SIZE : documents.length >= total;
+		if (reached || data.docs.length === 0) return { ok: true, documents };
+	}
+	return { ok: false, reason: "ragflow: document list exceeds the page cap" };
+}
+
+/** One listed document, or null when it carries no id or name. */
+function documentOf(entry: unknown): RagflowDocument | null {
+	if (entry === null || typeof entry !== "object") return null;
+	const id = readString(entry, "id");
+	const name = readString(entry, "name");
+	if (id === undefined || name === undefined) return null;
+	const meta: object = "meta_fields" in entry && entry.meta_fields !== null && typeof entry.meta_fields === "object" ? entry.meta_fields : {};
+	return { id, name, meta_fields: { source_url: readString(meta, "source_url"), commit: readString(meta, "commit"), heading_path: readString(meta, "heading_path") } };
+}
+
 /** The ingest metadata every upload carries, so retrieval can echo it (U-03). */
 export interface UploadMetadata {
 	source_url: string;

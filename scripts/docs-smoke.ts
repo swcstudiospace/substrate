@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Repeatable docs proof (`bun run smoke:docs -- --name <owned>`, 25-06 Task 2).
+ * Repeatable docs proof (`bun scripts/docs-smoke.ts --name <owned>`, 25-06 Task 2).
  *
  * Drives the twin named by `--name` (required, never defaulted) through the
  * actual search/ingest surface: REST (`/docs/search`, `/docs/ingest`,
@@ -154,7 +154,7 @@ export function isLoopbackHost(host: string): boolean {
 	return bare === "127.0.0.1" || bare === "::1" || bare === "localhost";
 }
 
-/** `bun run smoke:docs -- --name <owned>`; `--name` is required, unknown flags refuse (exit 2), never ignored. */
+/** `bun scripts/docs-smoke.ts --name <owned>`; `--name` is required, unknown flags refuse (exit 2), never ignored. */
 export function parseDocsSmokeArgs(argv: string[]): { name: string } {
 	let nameRaw: string | undefined;
 	for (let index = 0; index < argv.length; index += 1) {
@@ -165,7 +165,7 @@ export function parseDocsSmokeArgs(argv: string[]): { name: string } {
 			nameRaw = value;
 			index += 1;
 		} else {
-			throw new SmokeRefused(`unknown flag ${arg}: usage smoke:docs -- --name <owned>`);
+			throw new SmokeRefused(`unknown flag ${arg}: usage bun scripts/docs-smoke.ts --name <owned>`);
 		}
 	}
 	if (nameRaw === undefined) throw new SmokeRefused("--name <owned> is required: the smoke never picks a twin on its own");
