@@ -394,7 +394,7 @@ function briefRig() {
 		memoryForBrief: async () => [],
 	};
 	const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-	const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+	const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 	return { substrate, redis, state };
 }
 

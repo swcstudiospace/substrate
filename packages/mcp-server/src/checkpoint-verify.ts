@@ -318,7 +318,7 @@ async function verifyAnchoredEvent(deps: CheckpointVerifyDeps, event: SubstrateE
 	if (Date.parse(row.period_start) !== hour) findings.push(`the anchors row names ${row.period_start}, not ${hourIso(hour)}`);
 	const rowMemo = parseMemo(row.memo);
 	if (rowMemo === null) {
-		findings.push("the anchors row's memo is not a v1 anchor memo");
+		findings.push("the anchors row's memo is not a v1 or v2 anchor memo");
 	} else if (rowMemo.periodStartMs !== hour || rowMemo.rootHex !== row.root || rowMemo.count !== row.event_count) {
 		findings.push("the anchors row disagrees with its own memo (period, root or count)");
 	}
@@ -404,7 +404,7 @@ async function verifyAnchoredEvent(deps: CheckpointVerifyDeps, event: SubstrateE
 	if (transaction.memo === null) {
 		findings.push("the anchor transaction carries no memo-program instruction");
 	} else if (memo === null) {
-		findings.push("the anchor transaction's memo is not a v1 anchor memo");
+		findings.push("the anchor transaction's memo is not a v1 or v2 anchor memo");
 	} else {
 		evidence.anchored_root = memo.rootHex;
 		evidence.count = memo.count;

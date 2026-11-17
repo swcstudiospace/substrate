@@ -11,6 +11,7 @@ import { buildHandoff, type HandoffPacket } from "./handoff.ts";
 import type { EventQuery } from "./greptime.ts";
 import { HANDOFF_READ_LIMIT } from "./session-context.ts";
 import { Substrate } from "./service.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
 
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
 
@@ -81,7 +82,7 @@ describe("the digest's handoff read", () => {
 	test("is a bounded, handoff-only ledger query per graph, never a graph's whole history", async () => {
 		const { fake, greptime } = ledger();
 		fake.rowsByGraph.set("g1", [handoffRow("e1", "finish the parser", "g1")]);
-		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1", "g2"]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1", "g2"]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const digest = await substrate.sessionContext({ repoId: "owner/name", sessionId: null });
 
@@ -99,7 +100,7 @@ describe("the digest's handoff read", () => {
 			"g1",
 			Array.from({ length: HANDOFF_READ_LIMIT }, (_, n) => handoffRow(`e${n}`, `goal ${n}`, "g1")),
 		);
-		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1"]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1"]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		expect((await substrate.sessionContext({ repoId: "owner/name", sessionId: null })).truncated.handoffs).toBe(true);
 	});
 
@@ -107,7 +108,7 @@ describe("the digest's handoff read", () => {
 		const { fake, greptime } = ledger();
 		fake.rowsByGraph.set("g1", [handoffRow("e1", "finish the parser", "g1")]);
 		fake.failGraphs.add("g2");
-		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1", "g2"]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1", "g2"]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const digest = await substrate.sessionContext({ repoId: "owner/name", sessionId: null });
 
@@ -120,7 +121,7 @@ describe("the digest's handoff read", () => {
 		const { fake, greptime } = ledger();
 		fake.failGraphs.add("g1");
 		fake.failGraphs.add("g2");
-		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1", "g2"]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1", "g2"]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const digest = await substrate.sessionContext({ repoId: "owner/name", sessionId: null });
 
@@ -160,7 +161,7 @@ describe("a hostile handoff payload in the ledger", () => {
 	test("is skipped alone: the digest and the typed read keep the good packet and report no failure", async () => {
 		const { fake, greptime } = ledger();
 		fake.rowsByGraph.set("g1", hostile("g1"));
-		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1"]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: indexWith(["g1"]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const digest = await substrate.sessionContext({ repoId: "owner/name", sessionId: null });
 		expect(digest.handoffs.map((handoff) => handoff.goal)).toEqual(["the good packet"]);
@@ -173,7 +174,7 @@ describe("a hostile handoff payload in the ledger", () => {
 	test("does not fail the brief: the good packet is listed and the section is not replaced by a note", async () => {
 		const { fake, greptime } = ledger();
 		fake.rowsByGraph.set("ut-1", hostile("ut-1"));
-		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on" }), { index: indexWith([]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on" }), { index: indexWith([]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const text = await substrate.brief({ surface: "cursor", repo: "owner/name", graph_id: "ut-1" });
 
@@ -186,7 +187,7 @@ describe("a repository is looked up as the caller spelled it", () => {
 	test("the index and the ledger see Acme/Widgets, while the digest scopes it in lower case", async () => {
 		const { fake, greptime } = ledger();
 		const asked: string[] = [];
-		const substrate = new Substrate(loadConfig({}), { index: indexWith([], asked) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: indexWith([], asked) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const digest = await substrate.sessionContext({ repoId: "Acme/Widgets", sessionId: null });
 
@@ -200,7 +201,7 @@ describe("the brief's live sections run under the brief's deadline", () => {
 	test("a handoff read that never answers is cut at the deadline and named, and the rest of the brief is served", async () => {
 		const { fake, greptime } = ledger();
 		fake.hang = true;
-		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on", SUBSTRATE_BRIEF_BUDGET_MS: "40" }), { index: indexWith([]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on", SUBSTRATE_BRIEF_BUDGET_MS: "40" }), { index: indexWith([]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const text = await substrate.brief({ surface: "cursor", repo: "owner/name", graph_id: "ut-1" });
 
@@ -213,11 +214,38 @@ describe("the brief's live sections run under the brief's deadline", () => {
 	test("with the flag off the live reads are not started at all", async () => {
 		const { fake, greptime } = ledger();
 		fake.hang = true;
-		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "40" }), { index: indexWith([]) as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "40" }), { index: indexWith([]) as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const text = await substrate.brief({ surface: "cursor", repo: "owner/name", graph_id: "ut-1" });
 
 		expect(fake.queries).toEqual([]);
 		expect(text).not.toContain("Live handoffs");
+	});
+});
+
+describe("public digest metadata does not require a private proof", () => {
+	test("cross-surface metadata retains self-label exclusion and omits all private fields", async () => {
+		const authority = createTestLiveSessionAuthority({ nowMs: Date.now() });
+		const own = await issueLiveSession(authority, { caller: { surface: "cursor", isOperator: false }, steering: "PRIVATE-DIGEST-OWN", planningHash: "PRIVATE-DIGEST-HASH" });
+		const other = await issueLiveSession(authority, { caller: { surface: "hermes", isOperator: false }, steering: "PRIVATE-DIGEST-OTHER" });
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null, steering: { history: null, liveSessions: authority } });
+		const digest = await substrate.sessionContext({ repoId: "owner/name", sessionId: own.sessionId });
+		expect(digest.for_session).toBe(own.sessionId);
+		expect(digest.sessions).toHaveLength(1);
+		expect(digest.sessions[0]).toMatchObject({ session_id: other.sessionId, surface: "hermes", source: "steering", state: "ACTIVE" });
+		expect(Object.keys(digest.sessions[0] ?? {}).sort()).toEqual(["age_s", "branch", "last_heartbeat", "session_id", "source", "state", "surface", "worktree"]);
+		expect(JSON.stringify(digest)).not.toContain("PRIVATE-DIGEST");
+		expect(JSON.stringify(digest)).not.toContain(own.sessionBinding);
+		expect(JSON.stringify(digest)).not.toContain(other.sessionBinding);
+	});
+
+	test("authority outage degrades steering metadata without making the whole public digest private or unavailable", async () => {
+		const authority = createTestLiveSessionAuthority();
+		authority.unavailable = true;
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null, steering: { history: null, liveSessions: authority } });
+		const digest = await substrate.sessionContext({ repoId: "owner/name", sessionId: null });
+		expect(digest.sessions).toEqual([]);
+		expect(digest.notes).toContain("steering: unavailable");
+		expect(digest.repo_id).toBe("owner/name");
 	});
 });

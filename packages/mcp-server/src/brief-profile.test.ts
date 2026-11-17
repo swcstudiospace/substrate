@@ -116,7 +116,7 @@ class FakeRedis implements CacheRedis {
 
 function substrateOf(env: Record<string, string>, index: object, redis: FakeRedis, observer: SubstrateObserver = {}) {
 	const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-	return new Substrate(loadConfig(env), { index: index as never, greptime: null, cache }, observer);
+	return new Substrate(loadConfig(env), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } }, observer);
 }
 
 function observed(): { observer: SubstrateObserver; instruments: SubstrateInstruments } {

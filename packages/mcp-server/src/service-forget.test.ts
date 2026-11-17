@@ -165,6 +165,7 @@ function world(options: { env?: Record<string, string>; ledger?: boolean; index?
 	};
 	const substrate = new Substrate(loadConfig({ SUBSTRATE_MEMORY_GRANTS: GRANTS, ...options.env }), {
 		index: (options.index === false ? null : store) as never,
+		steering: { history: null, liveSessions: null },
 		greptime: (options.ledger === false ? null : ledger) as never,
 		cache,
 		hindsightFetch,

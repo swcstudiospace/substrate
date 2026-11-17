@@ -6,6 +6,7 @@
  * append-only log. So `hash` and `prev` are computed here, on ingest, from day one.
  */
 import { randomUUID } from "node:crypto";
+import { merkleRootHex, type GraphHeadRecord } from "@substrate/ledger";
 import { redact, redactValue } from "./redact.ts";
 import { EVENT_KINDS, SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
 
@@ -279,10 +280,10 @@ export function normalizeEvent(input: EventInput, prev: string | null, idempoten
  * branch unlinked and is reported. What it stops reporting is a database's
  * arbitrary tie-break, which was never an integrity property.
  */
-export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
+export function inChainOrder<T extends { hash: string; prev: string | null }>(events: T[]): T[] {
 	if (events.length < 2) return events;
 
-	const next = new Map<string | null, SubstrateEvent>();
+	const next = new Map<string | null, T>();
 	for (const event of events) if (!next.has(event.prev)) next.set(event.prev, event);
 	const present = new Set(events.map((event) => event.hash));
 
@@ -292,9 +293,9 @@ export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
 		events.find((event) => event.prev === null) ?? events.find((event) => !present.has(event.prev ?? ""));
 	if (!start) return events; // every event is claimed: a cycle, for verifyChain to report
 
-	const ordered: SubstrateEvent[] = [];
+	const ordered: T[] = [];
 	const seen = new Set<string>();
-	let current: SubstrateEvent | undefined = start;
+	let current: T | undefined = start;
 	while (current && !seen.has(current.hash)) {
 		ordered.push(current);
 		seen.add(current.hash);
@@ -304,6 +305,125 @@ export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
 	// than quietly dropped from the count.
 	for (const event of events) if (!seen.has(event.hash)) ordered.push(event);
 	return ordered;
+}
+
+/** One stored chain leaf of an hour, as `graph_chain_leaves` holds it (D73-02). */
+export interface StoredLeaf {
+	graph_id: string;
+	session_id: string;
+	seq: number;
+	event_id: string;
+	hash: string;
+}
+
+/** What a ledger row contributes to a chain walk: its id, the hash its content gives, the hash its row stores, and its predecessor. */
+export interface ChainLink {
+	id: string;
+	hash: string;
+	storedHash: string;
+	prev: string | null;
+}
+
+const HASH_HEX_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The commitment one chain position contributes to the leaves root: the SHA-256 of the JSON `[event_id, hash]`. Committing to the id as
+ * well as the hash means a stored `event_id` cannot change without changing the root (D73-02). `buildGraphHeads` uses the same function.
+ */
+export function chainLeafCommitment(eventId: string, hash: string): string {
+	return sha256Hex(JSON.stringify([eventId, hash]));
+}
+
+/**
+ * The leaves in seq order. The table is append-only with no key, so exact duplicates collapse. Two rows that disagree about one
+ * seq, an event id that is not a non-empty string, a hash that is not 64 lowercase hex, or seqs that are not 0 … n-1 make the
+ * stored chain invalid: null.
+ */
+export function orderedLeaves(leaves: readonly StoredLeaf[]): StoredLeaf[] | null {
+	const bySeq = new Map<number, StoredLeaf>();
+	for (const leaf of leaves) {
+		if (typeof leaf.event_id !== "string" || leaf.event_id === "") return null;
+		if (!HASH_HEX_RE.test(leaf.hash)) return null;
+		const prior = bySeq.get(leaf.seq);
+		if (prior === undefined) bySeq.set(leaf.seq, leaf);
+		else if (prior.event_id !== leaf.event_id || prior.hash !== leaf.hash) return null;
+	}
+	const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+	return ordered.every((leaf, i) => leaf.seq === i) ? ordered : null;
+}
+
+/**
+ * The head record each (graph, session) pair's stored leaves give for one hour (D73-01), or null when any pair's leaves do not form
+ * one chain. The records come out in input order; `headsRoot` sorts them.
+ */
+export function headRecordsFromLeaves(leaves: readonly StoredLeaf[], periodStartMs: number): GraphHeadRecord[] | null {
+	const pairs = new Map<string, { graphId: string; sessionId: string; leaves: StoredLeaf[] }>();
+	for (const leaf of leaves) {
+		const key = JSON.stringify([leaf.graph_id, leaf.session_id]);
+		const pair = pairs.get(key);
+		if (pair) pair.leaves.push(leaf);
+		else pairs.set(key, { graphId: leaf.graph_id, sessionId: leaf.session_id, leaves: [leaf] });
+	}
+	const records: GraphHeadRecord[] = [];
+	for (const pair of pairs.values()) {
+		const ordered = orderedLeaves(pair.leaves);
+		const last = ordered?.at(-1);
+		if (ordered === null || last === undefined || pair.graphId === "") return null;
+		records.push({
+			graphId: pair.graphId,
+			sessionId: pair.sessionId,
+			periodStartMs,
+			count: ordered.length,
+			leavesRootHex: merkleRootHex(ordered.map((leaf) => chainLeafCommitment(leaf.event_id, leaf.hash))),
+			headEventId: last.event_id,
+			headHashHex: last.hash,
+		});
+	}
+	return records;
+}
+
+/** Where one (graph, session) pair's chain stands against its anchored leaves (D73-03). */
+export type HeadComparison =
+	| { ok: true }
+	| { ok: false; kind: "stored-leaves-mismatch"; reason: string }
+	| { ok: false; kind: "first-differing"; eventId: string }
+	| { ok: false; kind: "first-missing"; eventId: string };
+
+/**
+ * D73-03 for one pair. `events` are the pair's ledger rows for the hour: `hash` is each one's recomputed content hash, `storedHash` the
+ * hash its row holds. `leaves` are its stored leaves and `head` the anchored head. The stored leaves must reproduce the head first.
+ * Then the committed order is walked: a leaf whose event is absent is first-missing; a leaf whose event's recomputed hash or stored
+ * hash differs from the leaf hash is first-differing. Events the leaves do not name come after the chain's end, and the first of them,
+ * in chain order, is first-differing too.
+ */
+export function compareToAnchoredHead(events: readonly ChainLink[], leaves: readonly StoredLeaf[], head: GraphHeadRecord): HeadComparison {
+	const stored = orderedLeaves(leaves);
+	const last = stored?.at(-1);
+	if (
+		stored === null ||
+		last === undefined ||
+		stored.length !== head.count ||
+		merkleRootHex(stored.map((leaf) => chainLeafCommitment(leaf.event_id, leaf.hash))) !== head.leavesRootHex ||
+		last.event_id !== head.headEventId ||
+		last.hash !== head.headHashHex
+	) {
+		return { ok: false, kind: "stored-leaves-mismatch", reason: "the stored leaves do not reproduce the anchored head" };
+	}
+	const byId = new Map<string, ChainLink>();
+	for (const event of events) {
+		// Two rows under one id: the ledger holds an event the anchored chain does not.
+		if (byId.has(event.id)) return { ok: false, kind: "first-differing", eventId: event.id };
+		byId.set(event.id, event);
+	}
+	for (const leaf of stored) {
+		const event = byId.get(leaf.event_id);
+		if (event === undefined) return { ok: false, kind: "first-missing", eventId: leaf.event_id };
+		if (event.hash !== leaf.hash || event.storedHash !== leaf.hash) return { ok: false, kind: "first-differing", eventId: leaf.event_id };
+	}
+	const committed = new Set(stored.map((leaf) => leaf.event_id));
+	const extras = events.filter((event) => !committed.has(event.id)).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	const extra = inChainOrder(extras)[0];
+	return extra === undefined ? { ok: true } : { ok: false, kind: "first-differing", eventId: extra.id };
 }
 
 /**
@@ -384,10 +504,8 @@ export function repoScopePrefix(repoId: string): string {
 }
 
 /**
- * The non-blocking context payload a steering transition carries on its
- * event: the action, the repo scope, both states and — on a planning
- * trigger — the old and new planning hashes. Emitting it never throws;
- * callers that cannot read it ignore unknown payload keys as before.
+ * Public metadata only: live events remain readable through historical queries.
+ * Private directions, planning hashes and proof material never belong here.
  */
 export function steeringSessionPayload(session: SteeringSession, previous?: SteeringSessionState): Record<string, unknown> {
 	return {
@@ -395,9 +513,8 @@ export function steeringSessionPayload(session: SteeringSession, previous?: Stee
 		repo_id: session.repo_id,
 		session_id: session.session_id,
 		state: session.state,
+		updated_at: session.updated_at,
 		...(previous !== undefined ? { previous_state: previous } : {}),
-		...(session.planning_hash !== undefined ? { planning_hash: session.planning_hash } : {}),
-		...(session.steering !== undefined ? { steering: session.steering.slice(0, 2000) } : {}),
 		non_blocking: true,
 	};
 }

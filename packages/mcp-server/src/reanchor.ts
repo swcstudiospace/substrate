@@ -24,8 +24,8 @@
  *     is accepted by the set at THAT transaction's block time (a missing block time refuses, `rpc-unreadable`), and discovery lists the
  *     signatures of every key in the set, so an hour an earlier key re-anchored before a rotation is adopted, not sent again.
  *  4. For every plan hour the digest is recomputed from the ledger and refused as `root-mismatch` unless the stored row, the
- *     recomputed root and count, and the stored memo (exactly `formatMemo` of the hour, root and count) all agree with the plan
- *     byte for byte.
+ *     recomputed root and count, and the stored memo agree with the plan byte for byte. A v1 memo must be `formatMemo` of the hour,
+ *     root and count; a v2 memo must be the one the anchor job builds from the heads its members give.
  *  5. The run's lock (`deps.lock`; the entry builds `fileLock`: ONE file per host, `<SUBSTRATE_STATE_DIR or /var/lib/substrate>/substrate-reanchor.lock`,
  *     create-exclusive, stale after a dead pid or 30 minutes) is held from here to the end of the run, across discovery, send and recording, so two
  *     overlapping runs cannot both pass discovery before either send is visible; the second refuses as `reanchor-locked`.
@@ -51,10 +51,10 @@ import {
 	AMOUNT_ZERO,
 	assertDevnetRpcUrl,
 	formatMemo,
+	parseMemo,
 	HOUR_MS,
 	hourIso,
 	keygenPath,
-	parseMemo,
 	parseSignature,
 	pubkeyArgv,
 	transferMemoArgv,
@@ -68,7 +68,7 @@ import {
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { newestBoundNote, reanchorSessionId, type ReanchorNotes } from "./anchor-verify-deps.ts";
-import { ADDRESS_MEMO_LIMIT, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, REQUIRED_BALANCE_LAMPORTS } from "./anchor.ts";
+import { ADDRESS_MEMO_LIMIT, anchorMemo, DEVNET_GENESIS_HASH, MAX_HOURS_PER_RUN, readHourHeads, REQUIRED_BALANCE_LAMPORTS, type HourHeads } from "./anchor.ts";
 import type { AnchorRow, GreptimeClient } from "./greptime.ts";
 import { buildReanchorEvent } from "./reanchor-plan.ts";
 import { redact } from "./redact.ts";
@@ -217,8 +217,9 @@ function planHour(raw: unknown, index: number, observedGenesis: string): SavedPl
 	if (typeof period_start !== "string" || period_start !== hourIso(period_start_ms)) throw new ReanchorPlanError(`${at}.period_start does not name the hour of period_start_ms`);
 	if (typeof root !== "string" || !ROOT_RE.test(root)) throw new ReanchorPlanError(`${at}.root is not 64 lowercase hex`);
 	if (typeof event_count !== "number" || !Number.isSafeInteger(event_count) || event_count < 1) throw new ReanchorPlanError(`${at}.event_count is not a positive integer`);
-	if (typeof memo !== "string" || memo !== formatMemo({ periodStartMs: period_start_ms, rootHex: root, count: event_count })) {
-		throw new ReanchorPlanError(`${at}.memo is not the v1 memo of its own period, root and count`);
+	const parsedMemo = typeof memo === "string" ? parseMemo(memo) : null;
+	if (typeof memo !== "string" || parsedMemo === null || parsedMemo.periodStartMs !== period_start_ms || parsedMemo.rootHex !== root || parsedMemo.count !== event_count) {
+		throw new ReanchorPlanError(`${at}.memo is not a v1 or v2 memo of its own period, root and count`);
 	}
 	if (typeof previous_tx_sig !== "string" || !SIGNATURE_RE.test(previous_tx_sig)) throw new ReanchorPlanError(`${at}.previous_tx_sig is not a base58 signature`);
 	if (typeof previous_signer !== "string" || previous_signer.length === 0) throw new ReanchorPlanError(`${at}.previous_signer is missing`);
@@ -228,7 +229,7 @@ function planHour(raw: unknown, index: number, observedGenesis: string): SavedPl
 
 /**
  * Parse the JSON `reanchor-plan-run.ts --json` printed. Refuses anything that is not a schema-1 dry-run report with an observed
- * genesis, or whose hours are not each self-consistent (memo = `formatMemo` of the hour, root and count). A plan with no hours is
+ * genesis, or whose hours are not each self-consistent (a v1 or v2 memo of the hour's own period, root and count). A plan with no hours is
  * valid: there is nothing to do, and the planner then reads no chain, so its observed genesis is `null` and that is accepted for
  * an empty plan only.
  */
@@ -338,8 +339,8 @@ export interface ReanchorLock {
 }
 
 export interface ReanchorDeps {
-	/** `anchorForPeriod` is the only ledger read the executor makes; it never writes the `anchors` table. */
-	ledger: Pick<GreptimeClient, "anchorForPeriod">;
+	/** `anchorForPeriod` and `eventsByIds` are the only ledger reads the executor makes; neither writes the `anchors` table. */
+	ledger: Pick<GreptimeClient, "anchorForPeriod" | "eventsByIds">;
 	rpc: Rpc;
 	runner: Runner;
 	substrate: Pick<Substrate, "hourDigest" | "emit">;
@@ -506,8 +507,24 @@ async function checkHour(hour: SavedPlanHour, deps: ReanchorDeps, now: number): 
 	if (digest.root === null || digest.memo === null || digest.root !== hour.root || digest.event_count !== hour.event_count) {
 		throw new Refusal("root-mismatch", `${hour.period_start}: the ledger now recomputes root ${String(digest.root)} over ${digest.event_count} events, not the stored ${hour.root} over ${hour.event_count}`);
 	}
-	if (digest.memo !== hour.memo || hour.memo !== formatMemo({ periodStartMs: hour.period_start_ms, rootHex: digest.root, count: digest.event_count })) {
-		throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed memo is not byte for byte the stored memo`);
+	const storedV2 = parseMemo(hour.memo)?.headsRootHex !== undefined;
+	if (!storedV2) {
+		// A v1 hour carries formatMemo of its period, root and count, whatever graphs wrote in it.
+		if (digest.memo !== hour.memo || hour.memo !== formatMemo({ periodStartMs: hour.period_start_ms, rootHex: digest.root, count: digest.event_count })) {
+			throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed memo is not byte for byte the stored memo`);
+		}
+		return;
+	}
+	// A v2 hour: the memo must be the one the anchor job builds from the heads its members give, read through the same ledger port.
+	let heads: HourHeads | null;
+	try {
+		heads = await readHourHeads(deps.ledger, hour.period_start_ms, digest.event_ids);
+	} catch (cause) {
+		throw new Refusal("digest-failed", `${hour.period_start}: the hour's heads could not be recomputed: ${reasonOf(cause)}`);
+	}
+	const expected = heads === null ? null : anchorMemo(hour.period_start_ms, digest.root, digest.event_count, heads);
+	if (expected !== hour.memo) {
+		throw new Refusal("root-mismatch", `${hour.period_start}: the recomputed heads do not reproduce the stored memo byte for byte`);
 	}
 }
 
@@ -542,6 +559,24 @@ export const DISCOVERY_MAX_PAGES = 100;
 interface RecordedState {
 	signature: string | null;
 	stale: string | null;
+}
+
+/** The heads root a saved hour's memo commits to, or undefined for a v1 memo. */
+function savedHeadsRoot(hour: SavedPlanHour): string | undefined {
+	return parseMemo(hour.memo)?.headsRootHex;
+}
+
+/**
+ * The refusal for a memo by the signer that has this hour's period, root and count but not its heads root. The signer already sent a
+ * memo for this hour, so sending again would duplicate it, and adopting it would record a memo the verifier rejects. A v1 and a v2 memo
+ * are different memos, so neither matches the other.
+ */
+function headsRootRefusal(hour: SavedPlanHour, onChain: string | undefined): Refusal {
+	const headsText = (heads: string | undefined): string => (heads === undefined ? "no heads root (a v1 memo)" : `heads root ${heads}`);
+	return new Refusal(
+		"root-mismatch",
+		`${hour.period_start}: the cluster already holds a memo by the signer for this hour with ${headsText(onChain)}, not the stored ${headsText(savedHeadsRoot(hour))}`,
+	);
 }
 
 /**
@@ -589,6 +624,7 @@ async function recordedSignature(hour: SavedPlanHour, deps: ReanchorDeps, signer
 			memo.count === hour.event_count &&
 			signedByAcceptedKey(found, signers, hour, newest.payload.new_tx_sig)
 		) {
+			if (memo.headsRootHex !== savedHeadsRoot(hour)) throw headsRootRefusal(hour, memo.headsRootHex);
 			return { signature: newest.payload.new_tx_sig, stale: null };
 		}
 	}
@@ -640,8 +676,8 @@ async function listEarlierSends(hours: readonly SavedPlanHour[], deps: ReanchorD
 }
 
 /**
- * Gate 6c, for one hour: the hinted transactions are confirmed by reading them. The same root and count adopt; a different root or
- * count for this hour is refused. Returns the signature to adopt, or null when no hinted transaction is this hour's memo by the signer.
+ * Gate 6c, for one hour: the hinted transactions are confirmed by reading them. The same period, root, count and heads root adopt (a v1
+ * memo has no heads root, so it adopts only a v1 hour); any other memo by the signer for this hour is refused. Returns the signature to adopt, or null when no hinted transaction is this hour's memo by the signer.
  */
 async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly string[], deps: ReanchorDeps, signers: SignerSet): Promise<string | null> {
 	const { rpc } = deps;
@@ -658,7 +694,10 @@ async function confirmEarlierSend(hour: SavedPlanHour, signatures: readonly stri
 		const memo = parseMemo(confirmed.memo);
 		if (memo === null || memo.periodStartMs !== hour.period_start_ms) continue;
 		if (!signedByAcceptedKey(confirmed, signers, hour, signature)) continue;
-		if (memo.rootHex === hour.root && memo.count === hour.event_count) return signature;
+		if (memo.rootHex === hour.root && memo.count === hour.event_count) {
+			if (memo.headsRootHex !== savedHeadsRoot(hour)) throw headsRootRefusal(hour, memo.headsRootHex);
+			return signature;
+		}
 		throw new Refusal("root-mismatch", `${hour.period_start}: the cluster already holds a memo by the signer for this hour with root ${memo.rootHex} over ${memo.count} events, not the stored ${hour.root} over ${hour.event_count}`);
 	}
 	return null;
@@ -706,17 +745,7 @@ async function sendMemo(hour: SavedPlanHour, deps: ReanchorDeps): Promise<string
 	} catch (cause) {
 		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back failed (re-run to adopt it if it landed): ${reasonOf(cause)}; ${MAY_STILL_LAND}`);
 	}
-	const back = readBack?.memo !== null && readBack?.memo !== undefined ? parseMemo(readBack.memo) : null;
-	if (
-		readBack === null ||
-		back === null ||
-		back.periodStartMs !== hour.period_start_ms ||
-		back.rootHex !== hour.root ||
-		back.count !== hour.event_count ||
-		readBack.payer !== env.pubkey ||
-		!readBack.payerSigned ||
-		readBack.err !== null
-	) {
+	if (readBack === null || readBack.memo !== hour.memo || readBack.payer !== env.pubkey || !readBack.payerSigned || readBack.err !== null) {
 		throw new Refusal("send-failed", `${hour.period_start}: sent ${signature} but its read-back does not match the memo (re-run to adopt it if it landed); ${MAY_STILL_LAND}`);
 	}
 	return signature;

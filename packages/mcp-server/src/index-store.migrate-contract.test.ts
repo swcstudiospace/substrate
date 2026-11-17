@@ -62,9 +62,10 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		corpus_documents: "step 35 is the corpus manifest, rebuilt by re-running the corpus scan and ingest; it is not part of the archive's closed table list and archiving it is a separate change",
 		worktrees: "step 36 is the worktree registry, rebuilt by the next report from each host; archiving stale paths would only restore them, and the closed table list stays as it is",
 		planning_page_hashes: "step 39 holds the planning refresh's page hashes, rebuilt by the next planning scan (a missing row only re-ingests that page); it is not part of the archive's closed table list and archiving it is a separate change",
-		steering_sessions: "step 37 is an opt-in (steering-sessions) restart cache of live steering session state; it is not part of the archive's closed table list and is rebuilt from the live registry, not archived",
+		steering_sessions: "step 37 is a historical opt-in (steering-sessions) restart-cache table whose runtime consumers were removed; its immutable migration and rows remain for compatibility, never grant authority, and remain outside the archive's closed table list",
 		corpus_retrievals: "step 38 is the retrieval telemetry, written only under SUBSTRATE_DOCS_TELEMETRY: a bounded, redacted log that the retention sweep ages out; it is not part of the archive's closed table list, and adding it would change the schema hash that every earlier archive was verified against",
 		corpus_feedback: "step 38 holds the readers' verdicts on corpus documents; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and a lost verdict only costs the re-rank some evidence it collects again",
+		live_session_bindings: "step 42 is durable security authority, including permanent terminal non-reuse records, not reconstructible cache; the legacy logical archive has a closed compatibility hash and excludes it, so complete PostgreSQL-native backup including tombstones is required (this exclusion provides no backup coverage)",
 	},
 };
 

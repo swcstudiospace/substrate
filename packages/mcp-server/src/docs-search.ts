@@ -330,6 +330,8 @@ export interface SearchDeps {
 	emit: (event: EventInput) => Promise<unknown>;
 	surface?: Surface | null;
 	sessionId?: string;
+	/** Safe original question for public notes, supplied separately from any privately augmented retrieval question. */
+	eventQuestion?: string;
 	fetchImpl?: FetchLike;
 	/** Datasets serving from a stale pin: their citations carry pin_age_ms (D25-07). */
 	degradedDatasets?: readonly string[];
@@ -373,8 +375,6 @@ export interface SearchDeps {
 	 * untrusted as before.
 	 */
 	steering?: string | null;
-	/** The planning hash the steering session holds; echoed on the note event so a refresh can be told apart. */
-	planningHash?: string | null;
 	/**
 	 * Hindsight fallback (SPE-19390): when every dataset fails, this is
 	 * tried before the degraded reply. Null means no fallback answered;
@@ -838,7 +838,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 			action: "docs.search",
 			dataset_ids: ids,
 			...(repoId !== null ? { repo_id: repoId, scope: repoScopePrefix(repoId) } : {}),
-			...(deps.planningHash ? { planning_hash: deps.planningHash } : {}),
+			...(deps.eventQuestion === undefined ? {} : { question: deps.eventQuestion }),
 			...(deps.steering ? { steered: true } : {}),
 			urls: chunks.map((citation) => citation.source_url),
 			count: chunks.length,
@@ -1152,7 +1152,7 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 			backend: "lightrag",
 			dataset_ids: readable.map((dataset) => dataset.id),
 			...(repoId !== null ? { repo_id: repoId, scope: repoScopePrefix(repoId) } : {}),
-			...(deps.planningHash ? { planning_hash: deps.planningHash } : {}),
+			...(deps.eventQuestion === undefined ? {} : { question: deps.eventQuestion }),
 			...(deps.steering ? { steered: true } : {}),
 			urls: chunks.map((citation) => citation.source_url),
 			count: chunks.length,

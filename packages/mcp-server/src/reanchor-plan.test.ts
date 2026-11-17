@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { buildSignerRotateEvent, classifyChainEvidence, formatMemo, HOUR_MS, parseRotationPayload } from "@substrate/ledger";
+import { buildSignerRotateEvent, classifyChainEvidence, formatMemo, formatMemoV2, HOUR_MS, parseRotationPayload } from "@substrate/ledger";
 import { normalizeEvent } from "./event.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
 import type { AnchorRow } from "./greptime.ts";
@@ -93,6 +93,18 @@ describe("planReanchor", () => {
 			expect(hour.why).toContain(NEW_GENESIS);
 		}
 		expect(plan.notes.join(" ")).toContain("no transaction was sent and this plan cannot send one");
+	});
+
+	test("a v2 row is planned with its own memo carried byte for byte", () => {
+		const memo = formatMemoV2({ periodStartMs: hourOf(0), rootHex: rootFor(0), count: 3, headsRootHex: "cd".repeat(32) });
+		const plan = planReanchor({
+			anchorRows: [row(0, { memo })],
+			chainEvidenceByHour: new Map([[hourOf(0), evidence("not-found", NEW_GENESIS, 0)]]),
+			nowMs: NOW,
+		});
+		expect(plan.skipped).toEqual([]);
+		expect(plan.hours).toHaveLength(1);
+		expect(plan.hours[0]?.memo).toBe(memo);
 	});
 
 	test("each other situation is skipped with its own code, and only the reset hour is planned", () => {

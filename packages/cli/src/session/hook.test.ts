@@ -4,6 +4,8 @@
  * stdout. The clock is injected; nothing sleeps.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { type Runner, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import { cleanupTemp, git, makeRepo, tempDir, writeFiles } from "../../../worktree-snapshot/src/testkit.ts";
 import { type LocalCheckpoint, listLocalCheckpoints } from "./checkpoint.ts";
@@ -13,16 +15,21 @@ import { resolvePendingDir } from "./pending.ts";
 import { consumedPath, readConsumed, writeConsumed } from "./steering-consumed.ts";
 import { FakeServer, FakeTranscript, fetchFor, seededRandomBytes } from "./testkit.ts";
 import type { SteerDirective, SteerFetch } from "../steer/client.ts";
+import { saveBindingRecord, serverIdentity } from "../steer/binding-record.ts";
 
 afterAll(cleanupTemp);
 setDefaultTimeout(300_000);
 
 const SESSION = "sess-1";
+const LIVE = `ls_${"a".repeat(64)}`;
+const SIBLING = `ls_${"b".repeat(64)}`;
+const PROOF = "c".repeat(64);
 const T0 = Date.parse("2026-01-01T00:00:00.000Z");
 
 interface Rig {
 	dir: string;
 	server: FakeServer;
+	bindingFile: string;
 	steer: SteerStub;
 	out: string[];
 	err: string[];
@@ -32,18 +39,19 @@ interface Rig {
 
 /** What the REST routes the steering and context triggers read answer with. `down` throws like a refused connection; `garbage` answers 200 with HTML. */
 interface SteerStub {
-	mode: "up" | "down" | "garbage";
+	mode: "up" | "down" | "garbage" | "denied";
 	directives: unknown[];
 	context: unknown;
-	calls: Array<{ path: string; search: string; authorization: string | undefined }>;
+	calls: Array<{ path: string; search: string; authorization: string | undefined; sessionBinding: string | undefined }>;
 }
 
 function steerFetchFor(stub: SteerStub): SteerFetch {
 	return async (input, init) => {
 		const url = new URL(input);
-		stub.calls.push({ path: url.pathname, search: url.search, authorization: init.headers.authorization });
+		stub.calls.push({ path: url.pathname, search: url.search, authorization: init.headers.authorization, sessionBinding: init.headers["X-Substrate-Session-Binding"] });
 		if (stub.mode === "down") throw new TypeError("fetch failed");
 		if (stub.mode === "garbage") return new Response("<html>not json</html>", { status: 200 });
+		if (stub.mode === "denied") return Response.json({ status: "refused", error: { code: "not-found" } }, { status: 404 });
 		if (url.pathname === "/steering/directives") return Response.json({ directives: stub.directives });
 		if (url.pathname === "/session/context") return Response.json(stub.context);
 		return new Response("{}", { status: 404 });
@@ -72,11 +80,15 @@ function rig(overrides: Partial<SessionDeps> = {}, repo = true): Rig {
 		steerFetch: steerFetchFor(steer),
 		...overrides,
 	};
-	return { dir, server, steer, out, err, clock, deps };
+	const bindingFile = saveBindingRecord({
+		version: 1, server_identity: serverIdentity(deps.url), surface: "claude-code",
+		session_id: LIVE, session_binding: PROOF, expires_at: "2026-01-01T01:00:00.000Z",
+	}, { directory: tempDir() });
+	return { dir, server, steer, bindingFile, out, err, clock, deps };
 }
 
 const envelope = (r: Rig, extra: Record<string, unknown> = {}): string =>
-	JSON.stringify({ session_id: SESSION, cwd: r.dir, transcript_path: "/home/someone/.claude/projects/x/t.jsonl", ...extra });
+	JSON.stringify({ session_id: SESSION, steering_session_id: LIVE, binding_file: r.bindingFile, cwd: r.dir, transcript_path: "/home/someone/.claude/projects/x/t.jsonl", ...extra });
 
 /** Run the hook with `stdin` as the envelope text. */
 async function hook(r: Rig, stdin: string, ...argv: string[]): Promise<number> {
@@ -366,6 +378,7 @@ describe("runHook directly", () => {
 			trigger: "turn",
 			worktree: r.dir,
 			surface: "claude-code",
+			url: r.deps.url,
 			client: new FakeServer(),
 			now: () => {
 				throw new Error("clock exploded");
@@ -386,6 +399,7 @@ describe("overlapping hooks and the number of snapshots", () => {
 		trigger,
 		worktree: r.dir,
 		surface: "claude-code",
+		url: r.deps.url,
 		client: r.server,
 		now: r.deps.now,
 		randomBytes: seededRandomBytes(seed),
@@ -442,6 +456,20 @@ describe("overlapping hooks and the number of snapshots", () => {
 });
 
 describe("parseEnvelope", () => {
+	test("reads separate live identity and record path; proof values are never accepted as envelope fields", () => {
+		expect(parseEnvelope(JSON.stringify({ session_id: "history", steering_session_id: LIVE, binding_file: "/private/live.json" })))
+			.toEqual({ session_id: "history", steering_session_id: LIVE, binding_file: "/private/live.json" });
+		for (const field of ["steering_session_id", "binding_file"]) {
+			expect(typeof parseEnvelope(JSON.stringify({ [field]: 7 }))).toBe("string");
+			expect(typeof parseEnvelope(JSON.stringify({ [field]: "" }))).toBe("string");
+		}
+		for (const field of ["session_binding", "sessionBinding"]) {
+			const result = parseEnvelope(JSON.stringify({ [field]: PROOF }));
+			expect(typeof result).toBe("string");
+			expect(result).not.toContain(PROOF);
+		}
+	});
+
 	test("reads the Claude Code fields and ignores the rest", () => {
 		expect(parseEnvelope(JSON.stringify({ session_id: "s", cwd: "/x", transcript_path: "/t", hook_event_name: "Stop", stop_hook_active: false }))).toEqual({ session_id: "s", cwd: "/x" });
 	});
@@ -456,7 +484,7 @@ describe("parseEnvelope", () => {
 
 const directive = (id: string, over: Partial<SteerDirective> = {}): SteerDirective => ({
 	id,
-	session_id: SESSION,
+	session_id: LIVE,
 	action: "pause",
 	body: "stop and wait",
 	priority: "normal",
@@ -470,9 +498,164 @@ const directive = (id: string, over: Partial<SteerDirective> = {}): SteerDirecti
 });
 
 const stepsOf = async (r: Rig): Promise<Array<string | undefined>> => (await mine(r)).filter((c) => c.trigger === "steering").map((c) => c.plan_ref?.step);
-const consumedOf = async (r: Rig): Promise<string[]> => readConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION));
+const consumedOf = async (r: Rig, live = LIVE): Promise<string[]> => readConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION, live));
 
 describe("the checkpoint_hint reader of the steering trigger", () => {
+	test("a well-shaped wrong proof is sent only as a header and a target refusal grants no hints", async () => {
+		const r = rig();
+		const wrongProof = "e".repeat(64);
+		const record = JSON.parse(readFileSync(r.bindingFile, "utf8")) as Record<string, unknown>;
+		record.session_binding = wrongProof;
+		writeFileSync(r.bindingFile, JSON.stringify(record));
+		const requests: Array<{ url: string; proof: string | undefined; body: string | undefined }> = [];
+		r.deps.steerFetch = async (url, init) => {
+			requests.push({ url, proof: init.headers["X-Substrate-Session-Binding"], body: init.body });
+			return init.headers["X-Substrate-Session-Binding"] === PROOF
+				? Response.json({ directives: [directive("must-not-consume")] })
+				: Response.json({ status: "refused", error: { code: "not-found" } }, { status: 404 });
+		};
+		await hook(r, envelope(r), "steering", "--verbose");
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.proof).toBe(wrongProof);
+		expect(requests[0]?.url).not.toContain(wrongProof);
+		expect(requests[0]?.body).toBeUndefined();
+		expect(await stepsOf(r)).toEqual([undefined]);
+		expect(await consumedOf(r)).toEqual([]);
+		expect(verboseLine(r)).toContain("private steering hints skipped");
+		expect(r.out.join("") + r.err.join("")).not.toContain(wrongProof);
+	});
+
+	test("proof remains outside checkpoint records and the replay journal when the checkpoint server is down", async () => {
+		const r = rig();
+		r.server.down = true;
+		r.steer.directives = [directive("pending-hint")];
+		await hook(r, envelope(r), "steering", "--verbose");
+		expect(await stepsOf(r)).toEqual(["directive:pending-hint"]);
+		const pendingDir = await resolvePendingDir(r.dir);
+		const pending = readdirSync(pendingDir).filter((name) => name.endsWith(".json"));
+		expect(pending.length).toBeGreaterThan(0);
+		for (const name of pending) {
+			const body = readFileSync(join(pendingDir, name), "utf8");
+			expect(body).not.toContain(PROOF);
+			expect(body).not.toContain("session_binding");
+			expect(body).not.toContain(r.bindingFile);
+		}
+		expect(r.err.join("")).not.toContain(PROOF);
+	});
+
+	test("a historical label alone, even one shaped like a live handle, never requests private hints", async () => {
+		const r = rig();
+		r.steer.directives = [directive("must-not-read")];
+		await hook(r, JSON.stringify({ session_id: LIVE, binding_file: r.bindingFile, cwd: r.dir }), "steering");
+		expect(r.steer.calls).toEqual([]);
+		const checkpoints = (await listLocalCheckpoints({ worktree: r.dir })).checkpoints;
+		expect(checkpoints.map((checkpoint) => ({ session: checkpoint.session_id, step: checkpoint.plan_ref?.step }))).toEqual([{ session: LIVE, step: undefined }]);
+	});
+
+	test("live and file flags override the envelope without changing the historical --session override", async () => {
+		const r = rig();
+		r.steer.directives = [directive("flag-selected"), directive("foreign", { session_id: SIBLING })];
+		await hook(r, envelope(r, { steering_session_id: SIBLING, binding_file: "/missing-envelope-record" }), "steering",
+			"--session", "historical-flag", "--steering-session", LIVE, "--binding-file", r.bindingFile);
+		expect(r.steer.calls.map((call) => [call.search, call.sessionBinding])).toEqual([[`?session_id=${LIVE}&status=acknowledged`, PROOF]]);
+		expect((await listLocalCheckpoints({ worktree: r.dir })).checkpoints.map((checkpoint) => [checkpoint.session_id, checkpoint.plan_ref?.step]))
+			.toEqual([["historical-flag", "directive:flag-selected"]]);
+		expect(r.out.join("") + r.err.join("")).not.toContain(PROOF);
+	});
+
+	const badRecords: Array<[string, (r: Rig) => string]> = [
+		["missing", () => join(tempDir(), "absent.json")],
+		["corrupt", (r) => { writeFileSync(r.bindingFile, `{broken ${PROOF}`); return r.bindingFile; }],
+		...(["server_identity", "surface", "session_id"] as const).map((field): [string, (r: Rig) => string] => [
+			`mismatched ${field}`,
+			(r) => {
+				const record = JSON.parse(readFileSync(r.bindingFile, "utf8")) as Record<string, unknown>;
+				record[field] = field === "server_identity" ? serverIdentity("http://127.0.0.1:9999") : field === "surface" ? "omp" : SIBLING;
+				writeFileSync(r.bindingFile, JSON.stringify(record));
+				return r.bindingFile;
+			},
+		]),
+	];
+	for (const [name, arrange] of badRecords) {
+		test(`${name} record skips hints locally, leaves consumption untouched and still checkpoints with a sanitized note`, async () => {
+			const r = rig();
+			r.steer.directives = [directive("must-not-read")];
+			const statePath = consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE);
+			writeConsumed(statePath, SESSION, LIVE, ["remembered"]);
+			const bindingFile = arrange(r);
+			expect(await hook(r, envelope(r, { binding_file: bindingFile, directive_id: "ordinary" }), "steering", "--verbose")).toBe(EXIT_DONE);
+			expect(r.steer.calls).toEqual([]);
+			expect(await stepsOf(r)).toEqual(["directive:ordinary"]);
+			expect(readConsumed(statePath)).toEqual(["remembered"]);
+			expect(verboseLine(r)).toContain("created checkpoint");
+			expect(verboseLine(r)).toContain("private steering hints skipped (matching private binding record missing or invalid)");
+			expect(r.out).toEqual([]);
+			expect(r.err.join("")).not.toContain(PROOF);
+			expect(r.err.join("")).not.toContain(bindingFile);
+		});
+	}
+
+	test("the selected surface and configured server URL scope the record and header", async () => {
+		const r = rig({ url: "http://127.0.0.1:7543/" });
+		const file = saveBindingRecord({
+			version: 1, server_identity: serverIdentity(r.deps.url), surface: "omp",
+			session_id: LIVE, session_binding: PROOF, expires_at: "2026-01-01T01:00:00.000Z",
+		}, { directory: tempDir() });
+		r.steer.directives = [directive("scoped")];
+		await hook(r, envelope(r), "steering", "--surface", "omp", "--binding-file", file);
+		expect(await stepsOf(r)).toEqual(["directive:scoped"]);
+		expect(r.steer.calls[0]?.sessionBinding).toBe(PROOF);
+	});
+
+	test("a sibling live incarnation cannot prune or consume another incarnation's decisions", async () => {
+		const r = rig();
+		const firstPath = consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE);
+		writeConsumed(firstPath, SESSION, LIVE, ["remembered-a"]);
+		const siblingProof = "d".repeat(64);
+		const file = saveBindingRecord({
+			version: 1, server_identity: serverIdentity(r.deps.url), surface: "claude-code",
+			session_id: SIBLING, session_binding: siblingProof, expires_at: "2026-01-01T01:00:00.000Z",
+		}, { directory: tempDir() });
+		r.steer.directives = [directive("sibling-hint", { session_id: SIBLING }), directive("foreign-a")];
+		await hook(r, envelope(r, { steering_session_id: SIBLING, binding_file: file }), "steering");
+		expect(readConsumed(firstPath)).toEqual(["remembered-a"]);
+		expect(await consumedOf(r, SIBLING)).toEqual(["sibling-hint"]);
+		expect(await stepsOf(r)).toEqual(["directive:sibling-hint"]);
+		expect(r.steer.calls[0]?.sessionBinding).toBe(siblingProof);
+		const state = readFileSync(consumedPath(await resolvePendingDir(r.dir), SESSION, SIBLING), "utf8");
+		expect(state).not.toContain(siblingProof);
+		expect(state).not.toContain("session_binding");
+		expect(JSON.stringify([...r.server.checkpoints.values()])).not.toContain(siblingProof);
+	});
+
+	test("a typed authorization refusal preserves existing decisions and takes only the ordinary checkpoint", async () => {
+		const r = rig();
+		const path = consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE);
+		writeConsumed(path, SESSION, LIVE, ["kept"]);
+		r.steer.mode = "denied";
+		await hook(r, envelope(r), "steering", "--verbose");
+		expect(await stepsOf(r)).toEqual([undefined]);
+		expect(readConsumed(path)).toEqual(["kept"]);
+		expect(r.steer.calls).toHaveLength(1);
+		expect(verboseLine(r)).toContain("private steering hints skipped (private hint lookup refused or unavailable)");
+	});
+
+	test("private client exceptions cannot echo a binding proof into the verbose checkpoint outcome", async () => {
+		const r = rig({ steerFetch: async () => { throw new Error(`private request failed ${PROOF}`); } });
+		await hook(r, envelope(r), "steering", "--verbose");
+		expect(await stepsOf(r)).toEqual([undefined]);
+		expect(verboseLine(r)).toContain("private steering hints skipped");
+		expect(r.err.join("")).not.toContain(PROOF);
+	});
+
+	test("only five matching hints are acted on in one run; foreign live hints are not consumed", async () => {
+		const r = rig();
+		r.steer.directives = [directive("foreign", { session_id: SIBLING }), ...Array.from({ length: 7 }, (_, index) => directive(`bounded-${index}`))];
+		await hook(r, envelope(r), "steering");
+		expect(await consumedOf(r)).toEqual(["bounded-0", "bounded-1", "bounded-2", "bounded-3", "bounded-4"]);
+		expect(await stepsOf(r)).toEqual(["directive:bounded-0"]);
+	});
+
 	test("an acknowledged directive with a hint gets exactly the checkpoint it names, with no envelope directive id", async () => {
 		const r = rig();
 		r.steer.directives = [directive("dir-1")];
@@ -481,7 +664,8 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 		expect(await stepsOf(r)).toEqual(["directive:dir-1"]);
 		expect(r.steer.calls).toHaveLength(1);
 		expect(r.steer.calls[0]?.path).toBe("/steering/directives");
-		expect(r.steer.calls[0]?.search).toBe(`?session_id=${SESSION}&status=acknowledged`);
+		expect(r.steer.calls[0]?.search).toBe(`?session_id=${LIVE}&status=acknowledged`);
+		expect(r.steer.calls[0]?.sessionBinding).toBe(PROOF);
 		expect(r.steer.calls[0]?.authorization).toBe("Bearer tok-CANARY-0123456789abcdef-secret");
 		expect(await consumedOf(r)).toEqual(["dir-1"]);
 	});
@@ -531,7 +715,7 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 	test("a skipped hint stays consumed after more than 200 later decisions, while the server still lists it", async () => {
 		const r = rig();
 		const earlier = Array.from({ length: 250 }, (_, index) => (index === 0 ? "old-skipped" : `filler-${index}`));
-		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION), SESSION, earlier);
+		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE), SESSION, LIVE, earlier);
 		r.steer.directives = [...earlier.map((id) => directive(id)), directive("dir-new")];
 		await hook(r, envelope(r), "steering");
 		expect(await stepsOf(r)).toEqual(["directive:dir-new"]);
@@ -546,7 +730,7 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 
 	test("the decision of a directive the server no longer lists is forgotten, and an unreadable listing forgets nothing", async () => {
 		const r = rig();
-		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION), SESSION, ["kept", "gone"]);
+		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE), SESSION, LIVE, ["kept", "gone"]);
 		r.steer.mode = "down";
 		await hook(r, envelope(r), "steering");
 		expect(await consumedOf(r)).toEqual(["kept", "gone"]);
@@ -596,9 +780,10 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 		expect(await consumedOf(r)).toEqual([]);
 	});
 
-	test("a session id the server's registry would not accept never reaches the routes", async () => {
+	test("an invalid live handle never reaches private routes and does not invalidate the historical checkpoint label", async () => {
 		const r = rig();
-		await hook(r, JSON.stringify({ session_id: "has spaces", cwd: r.dir }), "steering");
+		await hook(r, envelope(r, { session_id: "has spaces", steering_session_id: "not-live" }), "steering", "--verbose");
+		expect(verboseLine(r)).toContain("private steering hints skipped (invalid live session handle)");
 		expect(r.steer.calls).toEqual([]);
 		expect((await listLocalCheckpoints({ worktree: r.dir })).checkpoints.map((c) => c.trigger)).toEqual(["steering"]);
 	});
@@ -613,7 +798,7 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 describe("unconsumedHints", () => {
 	test("keeps the order of the list, drops consumed, repeated, foreign and non-steering hints, and stops at five", () => {
 		const many = Array.from({ length: 8 }, (_, index) => directive(`d${index}`));
-		const picked = unconsumedHints([directive("a", { checkpoint_hint: null }), directive("c"), directive("c"), directive("d", { session_id: "x" }), ...many], SESSION, new Set(["d0"]));
+		const picked = unconsumedHints([directive("a", { checkpoint_hint: null }), directive("c"), directive("c"), directive("d", { session_id: "x" }), ...many], LIVE, new Set(["d0"]));
 		expect(picked).toEqual(["c", "d1", "d2", "d3", "d4"]);
 	});
 });
@@ -650,6 +835,8 @@ describe("the context trigger", () => {
 		expect(r.steer.calls).toHaveLength(1);
 		expect(r.steer.calls[0]?.path).toBe("/session/context");
 		expect(r.steer.calls[0]?.search).toBe(`?repo_id=acme%2Fwidgets&session_id=${SESSION}`);
+		expect(r.steer.calls[0]?.sessionBinding).toBeUndefined();
+		expect(r.steer.calls[0]?.search).not.toContain(LIVE);
 		expect(await mine(r)).toEqual([]);
 		expect(r.server.calls).toEqual([]);
 	});

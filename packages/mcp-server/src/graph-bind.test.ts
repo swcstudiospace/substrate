@@ -136,7 +136,7 @@ describe("Substrate.bindGraph", () => {
 	test("both ids, first time: created, and the binding is recorded as a note", async () => {
 		const { index } = fakeIndex();
 		const { written, greptime } = ledger();
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch");
 
@@ -163,8 +163,9 @@ describe("Substrate.bindGraph", () => {
 			// is pre-coverage legacy, so the hour report stays empty.
 			graphIngest: async () => [],
 			firstIngestMs: async () => null,
+			graphChainLeafHours: async () => [],
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: stored as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: stored as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch");
 		await substrate.bindGraph({ correlation_id: "run-2", graph_id: GRAPH_A }, "swarm-a01-orch");
@@ -182,7 +183,7 @@ describe("Substrate.bindGraph", () => {
 	test("both ids, same pair again: existing, no conflict, and not announced twice", async () => {
 		const { index } = fakeIndex();
 		const { written, greptime } = ledger();
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch");
 		const again = await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch");
@@ -194,7 +195,7 @@ describe("Substrate.bindGraph", () => {
 	test("both ids, a different graph offered: the stored winner comes back with conflict", async () => {
 		const { index } = fakeIndex();
 		const { written, greptime } = ledger();
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch");
 		const loser = await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_B }, "swarm-a05-be");
@@ -207,7 +208,7 @@ describe("Substrate.bindGraph", () => {
 	test("two concurrent binds of one correlation id: exactly one created and one existing", async () => {
 		const { index } = fakeIndex();
 		const { greptime } = ledger();
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const results = (await Promise.all([
 			substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch"),
@@ -220,7 +221,7 @@ describe("Substrate.bindGraph", () => {
 
 	test("forward lookup: existing with the graph, or unbound with null", async () => {
 		const { index } = fakeIndex();
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		expect(await substrate.bindGraph({ correlation_id: "run-1" }, null)).toEqual({
 			status: "unbound",
@@ -237,7 +238,7 @@ describe("Substrate.bindGraph", () => {
 
 	test("reverse lookup: every correlation id bound to the graph, none for a stranger", async () => {
 		const { index } = fakeIndex();
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 		await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, null);
 		await substrate.bindGraph({ correlation_id: "run-2", graph_id: GRAPH_A }, null);
 		await substrate.bindGraph({ correlation_id: "run-3", graph_id: GRAPH_B }, null);
@@ -255,7 +256,7 @@ describe("Substrate.bindGraph", () => {
 	test("fail-open on the record: a ledger that is down costs the note, never the bind", async () => {
 		const { index } = fakeIndex();
 		const { greptime } = ledger({ fail: true });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch");
 
@@ -264,7 +265,7 @@ describe("Substrate.bindGraph", () => {
 
 	test("invalid input is refused before the index is touched", async () => {
 		const { index, calls } = fakeIndex();
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		await expect(substrate.bindGraph({}, null)).rejects.toThrow(InvalidBindError);
 		await expect(substrate.bindGraph({ graph_id: "nope" }, null)).rejects.toThrow(InvalidBindError);
@@ -282,7 +283,7 @@ describe("Substrate.bindGraph", () => {
 
 describe("the graph_bind tool", () => {
 	async function connect(index: unknown, greptime: unknown, surface: Surface | null = "swarm-a01-orch") {
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const server = createMcpServer(substrate, surface);
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
 		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

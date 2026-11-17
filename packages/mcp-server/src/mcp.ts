@@ -23,17 +23,14 @@ import { buildFabricSuggestions } from "./fabric/optimize.ts";
 import { buildFabricStatus } from "./fabric/status.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
-import { queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
-import { acknowledgeSteeringWithState } from "./planning/steering-delivery.ts";
-import { steeringSessionEvent } from "./planning/session-state.ts";
+import { acknowledgeSteeringWithState, DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundaryError, SESSION_BINDING_INPUT, queueSteering, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, listSteering, steeringFailed, type PreparedLiveDispatch, type SteeringCaller, type SteeringWriteResult } from "./planning/steering-tools.ts";
 import { MemoryVerifyError } from "./memory-verify.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
 import { reservedEmitRefusal } from "./reserved-actions.ts";
 import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISABLED_MESSAGE } from "./session-context.ts";
 import { approvalRefValid, RailwayRequestError, type ServiceRef, type WriteGate, type WriteOutcome, type WriteRefusal } from "./railway.ts";
 import { redact, redactValue } from "./redact.ts";
-import { augmentQuestionWithSteering, normalizeRepoId, UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
-import { nextSteeringSession, scopeRepoId, STEERING_STATES, type SteeringSessionState } from "./event.ts";
+import { UNTRUSTED_DOCS_NOTICE } from "./docs-search.ts";
 import {
 	CORRELATION_ID_PATTERN,
 	GRAPH_ID_PATTERN,
@@ -487,14 +484,6 @@ function lightragReply(result: RagLightragResult) {
 	return json(withLightragNotice(result));
 }
 
-/**
- * Live steering sessions live on the `Substrate` (`substrate.steeringSessions`, `planning/session-state.ts`): the surface that
- * holds a session and its `session_id`. A transition is checked against the stored state; a caller's `previous_state` only
- * ever confirms or refuses it. Process-local, so a restart forgets them, and past the cap the oldest is forgotten; the ledger
- * keeps every transition as an event. The same registry is what an acknowledged steering directive drives.
- */
-/** Why a steering write from an anonymous caller is refused: it has no surface to hold a session under. */
-const STEERING_NEEDS_SURFACE = "docs_steering_session needs an authenticated surface; nothing was changed";
 
 
 /** Snippets are redacted and capped before reply, like docs_search (D25-04); the plane client applies the same cap. */
@@ -610,7 +599,7 @@ export interface McpCaller {
 	tokenedSurfaces?: ReadonlySet<Surface>;
 }
 
-export function createMcpServer(substrate: Substrate, caller: McpCaller | Surface | null): McpServer {
+export function createMcpServer(substrate: Substrate, caller: McpCaller | Surface | null, context?: { preparedLiveDispatch?: PreparedLiveDispatch | undefined }): McpServer {
 	// A bare surface is still accepted so existing callers and tests keep working;
 	// it means "authenticated as this surface, not an operator".
 	const { surface: callerSurface, isOperator, tokenedSurfaces: bridgeSurfaces } =
@@ -632,6 +621,12 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		return null;
 	}
 	const server = new McpServer({ name: "substrate", version: "0.1.0" });
+	const liveCaller = { surface: callerSurface, isOperator };
+	const liveOptions = (args: unknown, sessionBinding?: string) => ({ caller: liveCaller, sessionBinding, preparedLiveDispatch: context?.preparedLiveDispatch, invocationArgs: args });
+	const liveReply = async (run: () => Promise<unknown>) => {
+		try { const result = await run(); return result !== null && typeof result === "object" && "status" in result && result.status === "refused" ? { ...json(result), isError: true } : json(result); }
+		catch (cause) { if (cause instanceof LiveSessionBoundaryError) return { ...json(cause.refusal), isError: true }; throw cause; }
+	};
 
 	server.registerTool(
 		"memory_brief",
@@ -659,7 +654,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 							"a match answers `not_modified: true` and no text",
 					),
 				profile: z.string().optional().describe("full | compact. Unknown values are refused, never coerced; full is always honoured, compact only while the substrate enforces profiles."),
-				session_id: z.string().optional().describe("your own session id. With SUBSTRATE_BRIEF_SESSIONS on it adds your pending steering directives and leaves your own session out of the sessions section; with SUBSTRATE_WORKTREE_REGISTRY on and `repo` named it adds the worktrees of other sessions that touch files your own worktree touches; otherwise it changes nothing."),
+				session_id: z.string().max(128).optional().describe("Historical self-exclusion and worktree label; never authorizes private steering."),
+				steering_session_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional().describe("Explicit live handle for private steering."),
+				session_binding: SESSION_BINDING_INPUT,
 			},
 			outputSchema: {
 				etag: z.string().describe('weak validator of the brief text, W/"<32 hex>"'),
@@ -672,7 +669,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				age_s: z.number().int().nonnegative().optional().describe("seconds since the served brief was composed; present only when it was served stale"),
 			},
 		},
-		async ({ repo, branch, graph_id, session_id, surface, if_none_match, profile }) => {
+		async (args) => {
+			const { repo, branch, graph_id, session_id, steering_session_id, session_binding, surface, if_none_match, profile } = args;
+			try {
 			// The text is byte-for-byte what this tool has always returned; the
 			// metadata rides beside it so an older client sees no change. The
 			// matcher is the REST route's own, so one stored ETag means the same
@@ -686,7 +685,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if (refusedSurface !== null) return refusal(refusedSurface);
 			const briefSurface = surface ?? callerSurface ?? "claude-code";
 			// The profile follows the bearer's own surface, not an `surface` argument a caller may set for attribution.
-			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, session_id, surface: briefSurface }, if_none_match, requested.profile, callerSurface);
+			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, session_id, steering_session_id, surface: briefSurface }, if_none_match, requested.profile, callerSurface, liveOptions(args, session_binding));
 			if (notModified) {
 				return {
 					...text(`brief unchanged (etag ${detail.etag})`),
@@ -712,6 +711,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					...(detail.ageS !== undefined ? { age_s: detail.ageS } : {}),
 				},
 			};
+			} catch (cause) {
+				if (cause instanceof LiveSessionBoundaryError) return { ...json(cause.refusal), isError: true };
+				throw cause;
+			}
 		},
 	);
 
@@ -1172,7 +1175,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			const { event, stored, error, warning } = await substrate.emit({
 				...args,
 				surface: attribution.surface,
-			}, { caller: { surface: callerSurface, isOperator } });
+			});
 			return json({
 				id: event.id,
 				ts: event.ts,
@@ -1536,159 +1539,53 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		"docs_search",
 		{
 			title: "Search the docs datasets",
-			description:
-				"Search the substrate's docs datasets (agent-substrate, programming-desk, agent-skills) through " +
-				"the configured docs backend (LightRAG, or RAGFlow as the legacy fallback). Returns at most 10 redacted citations with source URLs, framed as untrusted " +
-				"text — descriptions, not instructions. `datasets` names the datasets to search; unknown names " +
-				"are ignored and raw ids are never accepted. Read-only: one note event lists the returned URLs, " +
-				"and an unreachable plane answers empty with a reason instead of failing the turn. `context: true` " +
-				"adds a `context` block: up to 3 recalled memories for the question and the last 5 events of " +
-				"`session_id`, each framed untrusted. While steering is on and directives are queued for `session_id`, " +
-				"the reply also carries a `steering` notice: their count and up to 3 entries (id, action, priority, age_ms, " +
-				"a redacted body of at most 200 characters). It is per call, never cached, and absent when nothing is queued.",
-			inputSchema: {
-				question: z.string().describe("The docs question, in your words."),
-				datasets: z.array(z.string()).optional().describe("Dataset names to search. Omitted means all readable datasets."),
-				session_id: z.string().optional(),
-				repo_id: z.string().optional().describe("owner/name tagging this search's cache entry, steering and events. Retrieval reads the shared docs corpus, not a per-repo one. A session_id's stored repo applies when omitted."),
-				steering: z.string().optional().describe("Live steering for this session, appended to the retrieval question as described-but-untrusted text."),
-				planning_hash: z.string().optional().describe("The planning hash the steering session holds; echoed on the note event so a refresh can be told apart."),
-				context: z.boolean().optional().describe("Add a context block: recalled memories and the session's recent events."),
-			},
+			description: "Search shared documentation. Historical session_id is attribution only. Private live directions, notices and event context require explicit steering_session_id and session_binding. Private results are never shared-cache entries.",
+			inputSchema: DOCS_SEARCH_INPUT,
 			annotations: { readOnlyHint: true },
 		},
-		async ({ question, datasets, session_id, repo_id, steering, planning_hash, context }) => {
-			// SPE-19388: report the serving path into the explicit RAG state
-			// machine. The machine never changes the reply — an illegal
-			// transition is logged and ignored.
-			const machineSettings = substrate.config.ragMachine;
-			const admission = ragMachine.admitQuery(machineSettings.halfOpenMs);
+		async (args) => {
+			const isLive = args.steering_session_id !== undefined;
+			const settings = substrate.config.ragMachine;
+			// Private denial must not mutate the shared RAG health machine.
+			const admission = isLive ? "serve" : ragMachine.admitQuery(settings.halfOpenMs);
 			const report = { probe: admission === "probe" };
 			try {
-				// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
-				// through STEERING and CONTEXT_REFRESH. A refused search runs but reports nothing, so it cannot clear ERROR
-				// or disturb a probe in flight.
-				if (admission === "probe") {
-					ragMachine.transition("STEERING", "docs_search:probe");
-					ragMachine.transition("CONTEXT_REFRESH", "docs_search:retrieve");
-				} else if (admission === "serve") {
-					ragMachine.enterRefresh("docs_search", "docs_search:retrieve");
+				if (!isLive) {
+					if (admission === "probe") { ragMachine.transition("STEERING", "docs_search:probe"); ragMachine.transition("CONTEXT_REFRESH", "docs_search:retrieve"); }
+					else if (admission === "serve") ragMachine.enterRefresh("docs_search", "docs_search:retrieve");
 				}
-				// Prompt augmentation (SPE-19390) at the tool boundary: the service
-				// cache keys on the raw question, so the steered text is what the plane
-				// ranks while the ledger keeps both. A live session fills what the call
-				// omits: its steering, repo tag and planning hash. The repo tag is validated
-				// here and keys the cache; retrieval always reads the shared corpus.
-				// An anonymous caller holds no steering session of its own, so it reads none.
-				const live = session_id === undefined || callerSurface === null ? undefined : substrate.steeringSessions.get(callerSurface, session_id);
-				const scoped = normalizeRepoId(repo_id ?? live?.repo_id ?? null);
-				const steered = augmentQuestionWithSteering(question, steering ?? live?.steering ?? null);
-				const reply = await substrate.searchDocs(
-					{
-						question: steered,
-						datasets,
-						session_id: session_id ?? (scoped !== null ? `docs-search:${scoped}` : undefined),
-						repo_id: scoped,
-						planning_hash: planning_hash ?? live?.planning_hash,
-						context,
-						probe: admission === "probe",
-						cooling: admission === "refuse",
-					},
-					callerSurface,
-				);
+				const reply = await substrate.searchDocs({ ...args, probe: admission === "probe", cooling: admission === "refuse" }, callerSurface, liveOptions(args, args.session_binding));
 				if (admission !== "refuse") {
-					if (reply.degraded === true) {
-						ragMachine.recordFailure(machineSettings, `docs_search: ${reply.reason ?? "degraded"}`, report);
-					} else {
-						ragMachine.recordSuccess("docs_search:served", report);
-					}
+					if (isLive) ragMachine.enterRefresh("docs_search", "docs_search:retrieve");
+					if (reply.degraded === true) ragMachine.recordFailure(settings, "docs_search: degraded", report);
+					else ragMachine.recordSuccess("docs_search:served", report);
 				}
 				return json(reply);
 			} catch (cause) {
-				if (admission !== "refuse") {
-					ragMachine.recordFailure(
-						machineSettings,
-						`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
-						report,
-					);
-				}
+				if (cause instanceof LiveSessionBoundaryError) return { ...json(cause.refusal), isError: true };
+				if (admission !== "refuse") ragMachine.recordFailure(settings, "docs_search: failed", report);
 				throw cause;
-			} finally {
-				if (admission === "probe") ragMachine.settleProbe();
-			}
+			} finally { if (admission === "probe") ragMachine.settleProbe(); }
 		},
 	);
-
 	server.registerTool(
 		"docs_steering_session",
 		{
-			title: "Steer a live docs session",
-			description:
-				"Move a live steering session between ACTIVE, CONTEXT_REFRESH, PAUSED and RESUMED. " +
-				"A planning update triggers CONTEXT_REFRESH without blocking the session; steering text rides " +
-				"the next docs_search as described-but-untrusted prompt augmentation, tagged with repo_id. " +
-				"Every transition is recorded as one non-blocking note event carrying the repo scope and both " +
-				"states, so cross-session propagation is visible in the ledger. Illegal transitions are refused, " +
-				"never stored; a refused transition changes nothing.",
-			inputSchema: {
-				session_id: z.string().describe("This steering session's id; stable for its lifetime."),
-				repo_id: z.string().describe("owner/name tagging this session's steering, events and searches; retrieval is not repo-filtered."),
-				state: z.enum(STEERING_STATES).describe("ACTIVE | CONTEXT_REFRESH | PAUSED | RESUMED."),
-				steering: z.string().optional().describe("Directions the next retrieval should respect; capped and redacted in the ledger."),
-				planning_hash: z.string().optional().describe("The .planning hash this transition was computed against."),
-				previous_state: z
-					.string()
-					.optional()
-					.describe("The state the caller believes this session holds. Checked against the stored state, which governs: a mismatch, or a claim about a session the server has not seen, refuses the transition. Omitted uses the stored state."),
-			},
+			title: "Issue or update a live docs session",
+			description: "Omit session_id to issue an independent public handle and one-time private session_binding. A supplied ID updates only an active issued owner-proof session; it never registers an unknown ID. Heartbeat every 300 seconds by default, before expiry for leases below 600 seconds.",
+			inputSchema: LIVE_SESSION_UPDATE_INPUT,
 		},
-		async ({ session_id, repo_id, state, steering, planning_hash, previous_state }) => {
-			// Steering sessions are keyed by the caller's own surface. An anonymous caller holds none, so it may not
-			// read or write one; it is refused, as `docs_ingest` refuses an anonymous write.
-			if (callerSurface === null) return refusal(STEERING_NEEDS_SURFACE);
-			const previous =
-				previous_state === undefined
-					? null
-					: (STEERING_STATES as readonly string[]).includes(previous_state)
-						? (previous_state as SteeringSessionState)
-						: null;
-			if (previous_state !== undefined && previous === null) return refusal(`unknown steering state: ${JSON.stringify(previous_state).slice(0, 80)}`);
-			const known = substrate.steeringSessions.get(callerSurface, session_id);
-			if (known !== undefined && scopeRepoId(repo_id) !== known.repo_id) {
-				return refusal(`session ${session_id.slice(0, 80)} belongs to ${known.repo_id}, not ${repo_id.slice(0, 80)}`);
-			}
-			if (known === undefined && previous !== null) {
-				return refusal(`session ${session_id.slice(0, 80)} is not known here, so its previous_state cannot be checked`);
-			}
-			if (known !== undefined && previous !== null && previous !== known.state) {
-				return refusal(`previous_state ${previous} does not match the stored state ${known.state}`);
-			}
-			// A transition that omits steering or planning_hash keeps the stored values: a state-only
-			// pause or resume must not erase the context the next docs_search reads.
-			const carriedPlanningHash = planning_hash ?? known?.planning_hash;
-			const carriedSteering = steering ?? known?.steering;
-			const next = nextSteeringSession(
-				known ?? null,
-				{
-					session_id,
-					repo_id,
-					state,
-					...(carriedPlanningHash !== undefined ? { planning_hash: carriedPlanningHash } : {}),
-					...(carriedSteering !== undefined ? { steering: carriedSteering } : {}),
-				},
-				Date.now(),
-			);
-			if (!next.ok) return refusal(next.reason);
-			substrate.steeringSessions.put(callerSurface, session_id, next.session);
-			const { event, stored, error, warning } = await substrate.emit(steeringSessionEvent(callerSurface, next.session, next.previous));
-			return json({
-				...next.session,
-				stored,
-				event_id: event.id,
-				...(error ? { error } : {}),
-				...(warning ? { warning } : {}),
-			});
-		},
+		async (args) => liveReply(() => substrate.updateLiveSession(liveCaller, args, liveOptions(args, args.session_binding))),
+	);
+	server.registerTool(
+		"steering_session_heartbeat",
+		{ title: "Renew a live session lease", description: "Owner plus exact session binding only; operator observation does not renew another session.", inputSchema: LIVE_SESSION_TARGET_INPUT },
+		async (args) => liveReply(() => substrate.heartbeatLiveSession(liveCaller, args, liveOptions(args, args.session_binding))),
+	);
+	server.registerTool(
+		"steering_session_close",
+		{ title: "Close a live session permanently", description: "Owner plus binding, or explicit trusted operator override. Retains a terminal tombstone; historical session.end never closes live identity.", inputSchema: LIVE_SESSION_TARGET_INPUT },
+		async (args) => liveReply(() => substrate.closeLiveSession(liveCaller, args, liveOptions(args, args.session_binding))),
 	);
 
 	server.registerTool(
@@ -2457,14 +2354,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"Queues one directive to a planning session, as the calling operator. The principal is the caller's surface and must be on " +
 					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The server assigns the directive id, returned as " +
 					"directive_id; the caller cannot choose it. The directive is audited before it is queued. A refusal carries a typed error: " +
-					"forbidden (operator-required or caller-identity-missing), principal-not-allowed, rate-limited, invalid-directive or " +
-					"audit-unavailable (its code is the driver's, or AUDIT_CONFLICT when the audit row was saved with other content). Answers " +
-					"misconfigured, naming the settings keys, while the steering settings are invalid, and not-configured while no audit sink is injected.",
+					"not-found for any denied or inactive target, forbidden operator-required after a valid binding, principal-not-allowed, " +
+					"rate-limited, invalid-directive or audit-unavailable. Invalid settings answer misconfigured; absent inbox audit answers not-configured.",
 				inputSchema: STEERING_QUEUE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
 			async (args) => {
-				const queued = await queueSteering(steering, steeringCaller, args);
+				const queued = await queueSteering(steering, steeringCaller, args, context?.preparedLiveDispatch);
 				// A queued directive wakes its session two ways, neither of which can fail the queue (it is already audited): any
 				// long-poll waiter of the session is released, and one hint (a stored `note`, no body) is announced.
 				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
@@ -2487,7 +2383,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
-			async (args) => steeringReply(await acknowledgeSteeringWithState(steering, steeringCaller, args, substrate.sessionState)),
+			async (args) => steeringReply(await acknowledgeSteeringWithState(steering, steeringCaller, args, substrate.sessionState, context?.preparedLiveDispatch)),
 		);
 		server.registerTool(
 			"steering_list",
@@ -2496,18 +2392,14 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				description:
 					"The directives for one planning session, queued and acknowledged, highest priority first. Each carries its state; an acknowledged " +
 					"directive keeps its outcome and confirm flag. The author is the operator who queued it, never an argument. A listed reply also " +
-					"carries session_state: the live docs_steering_session state held under that session id (held with its state, none, or ambiguous " +
-					"when two surfaces hold the id). A read: it changes nothing. Answers misconfigured, naming the settings keys, while the steering settings are invalid.",
+					"carries the checked live session_state. Owner plus exact session_binding, or explicit trusted operator read override, is required. " +
+					"Missing/wrong proof, foreign, unknown, expired and closed targets share not-found. Authority failure is session-unavailable.",
 				inputSchema: STEERING_LIST_INPUT,
 				annotations: { readOnlyHint: true },
 			},
 			async (args) => {
-				const listed = listSteering(steering, args);
-				if (listed.status === "misconfigured") return { ...json(listed), isError: true };
-				if (listed.status !== "listed") return json(listed);
-				const held = substrate.steeringSessions.lookup(args.session_id);
-				const sessionState = held.status === "one" ? { status: "held", state: held.session.state } : { status: held.status };
-				return json({ ...listed, session_state: sessionState });
+				const listed = await listSteering(steering, steeringCaller, args, context?.preparedLiveDispatch);
+				return listed.status === "listed" || listed.status === "not-configured" ? json(listed) : { ...json(listed), isError: true };
 			},
 		);
 	}

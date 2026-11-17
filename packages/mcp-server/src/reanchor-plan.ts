@@ -10,9 +10,9 @@
  * the input of the operator runbook; nothing in this file (or anything it imports) sends a
  * transaction, so there is no path that could.
  *
- * The memo is never recomputed: a re-anchor carries the stored row's v1 memo byte for byte (same
+ * The memo is never recomputed: a re-anchor carries the stored row's memo (v1 or v2) byte for byte (same
  * period, same root, same count), so the commitment is the one the hourly job originally made. A row
- * whose memo is not exactly `formatMemo` of its own period, root and count is refused (skipped as
+ * whose memo is not a v1 or v2 memo of its own period, root and count is refused (skipped as
  * `invalid-row`), never "repaired".
  *
  * Which hours qualify: only `reset-suspected` evidence (the cluster's genesis hash differs from the
@@ -24,7 +24,7 @@
  * operator records AFTER a real re-anchor; the builder and validator live here, pure like
  * `session-events.ts`.
  */
-import { formatMemo, HOUR_MS, hourIso, type ChainVerdict, type SignatureStatus } from "@substrate/ledger";
+import { HOUR_MS, hourIso, parseMemo, type ChainVerdict, type SignatureStatus } from "@substrate/ledger";
 import type { AnchorRow } from "./greptime.ts";
 
 export const ANCHOR_REANCHOR_ACTION = "anchor.reanchor";
@@ -101,8 +101,9 @@ function parseHour(periodStart: unknown): number | null {
 function rowProblem(row: AnchorRow, hour: number): string | null {
 	if (!ROOT_RE.test(row.root)) return "the row's root is not 64 lowercase hex";
 	if (!Number.isSafeInteger(row.event_count) || row.event_count < 1) return "the row's event count is not a positive integer";
-	if (row.memo !== formatMemo({ periodStartMs: hour, rootHex: row.root, count: row.event_count })) {
-		return "the row's memo is not the v1 memo of its own period, root and count";
+	const memo = parseMemo(row.memo);
+	if (memo === null || memo.periodStartMs !== hour || memo.rootHex !== row.root || memo.count !== row.event_count) {
+		return "the row's memo is not a v1 or v2 memo of its own period, root and count";
 	}
 	if (typeof row.tx_sig !== "string" || row.tx_sig.length === 0) return "the row has no transaction signature";
 	return null;

@@ -80,6 +80,11 @@ function fleet(): Fleet {
 
 const withRoot = (root: string): Record<string, string> => ({ SUBSTRATE_WORKTREE_ROOTS: root });
 
+/** Git's own exclude file of the repository: every worktree of it ignores the pattern, as a `.gitignore` would. */
+function excludeFor(repo: TestRepo, pattern: string): void {
+	write(repo.dir, ".git/info/exclude", `${pattern}\n`);
+}
+
 /** Git verbs that write to a repository or a worktree, plus the worktree, branch, remote and config forms that do. */
 const WRITE_VERBS = ["add", "commit", "push", "reset", "checkout", "switch", "restore", "clean", "gc", "stash", "fetch", "pull", "merge", "rebase", "cherry-pick", "revert", "tag", "update-ref", "rm", "mv", "init", "clone", "prune"];
 const BRANCH_WRITE_FLAGS = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream"];
@@ -248,6 +253,78 @@ describe("prune", () => {
 		const row = defined(result.worktrees.find((item) => item.path === fresh), "row");
 		expect(row.class).toBe("review");
 		expect(row.reasons.join(" ")).toContain("ignored-files: .planning/STATE.md");
+	});
+
+	test("a clean merged worktree is still removed when the repository tracks .planning/", async () => {
+		const f = fleet();
+		write(f.repo.dir, ".planning/ROADMAP.md", "# roadmap\n");
+		git(f.repo.dir, ["add", ".planning/ROADMAP.md"]);
+		git(f.repo.dir, ["commit", "-q", "-m", "track planning"]);
+		git(f.repo.dir, ["push", "-q", "origin", "main"]);
+		git(f.merged, ["merge", "-q", "--ff-only", "main"]);
+		expect(existsSync(join(f.merged, ".planning", "ROADMAP.md"))).toBe(true);
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["prune", "--execute", "--json", "--idle-days", "0"], h.deps)).toBe(0);
+		const result: { removed: Array<{ path: string }>; skipped: Array<{ path: string; reasons: string[] }> } = JSON.parse(h.out.join(""));
+		expect(result.skipped).toEqual([]);
+		expect(result.removed.map((item) => item.path).sort()).toEqual([f.merged, f.mergedToo].sort());
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(f.mergedToo)).toBe(false);
+	});
+
+	test("a linked worktree nested in a regenerable ignored directory keeps the outer worktree, and the reason names it", async () => {
+		const f = fleet();
+		excludeFor(f.repo, "node_modules/");
+		mkdirSync(join(f.merged, "node_modules"));
+		const inner = addWorktree(f.repo, join(f.merged, "node_modules"), "inner");
+		write(inner, "unsaved.txt", "work\n");
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["prune", "--execute", "--json", "--idle-days", "0"], h.deps)).toBe(0);
+		const result: { removed: Array<{ path: string }>; skipped: Array<{ path: string; reasons: string[] }> } = JSON.parse(h.out.join(""));
+		expect(result.skipped).toEqual([{ path: f.merged, reasons: [`contains linked worktree ${inner}`] }]);
+		expect(result.removed.map((item) => item.path)).toEqual([f.mergedToo]);
+		expect(existsSync(join(inner, "unsaved.txt"))).toBe(true);
+	});
+
+	test("an ignored file the primary does not hold keeps its worktree, and the reason names the file", async () => {
+		const f = fleet();
+		excludeFor(f.repo, ".env");
+		write(f.merged, ".env", "TOKEN=merged\n");
+		const dry = harness({}, withRoot(f.root));
+		expect(await runWorktree(["prune", "--json", "--idle-days", "0"], dry.deps)).toBe(0);
+		const review: { worktrees: Array<{ path: string; class: string; reasons: string[] }> } = JSON.parse(dry.out.join(""));
+		const row = defined(review.worktrees.find((item) => item.path === f.merged), "row");
+		expect(row.class).toBe("review");
+		expect(row.reasons).toContain("ignored-files: .env");
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["prune", "--execute", "--json", "--idle-days", "0"], h.deps)).toBe(0);
+		const result: { removed: Array<{ path: string }>; skipped: Array<{ path: string; reasons: string[] }> } = JSON.parse(h.out.join(""));
+		expect(result.skipped).toEqual([]);
+		expect(result.removed.map((item) => item.path)).toEqual([f.mergedToo]);
+		expect(existsSync(join(f.merged, ".env"))).toBe(true);
+	});
+
+	test("an ignored file the primary holds with identical bytes does not block removal", async () => {
+		const f = fleet();
+		excludeFor(f.repo, ".env");
+		write(f.merged, ".env", "TOKEN=same\n");
+		write(f.repo.dir, ".env", "TOKEN=same\n");
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["prune", "--execute", "--json", "--idle-days", "0"], h.deps)).toBe(0);
+		const result: { removed: Array<{ path: string }>; skipped: Array<{ path: string; reasons: string[] }> } = JSON.parse(h.out.join(""));
+		expect(result.skipped).toEqual([]);
+		expect(result.removed.map((item) => item.path).sort()).toEqual([f.merged, f.mergedToo].sort());
+	});
+
+	test("a regenerable node_modules directory does not block removal", async () => {
+		const f = fleet();
+		excludeFor(f.repo, "node_modules/");
+		write(f.merged, "node_modules/pkg/index.js", "module.exports = 1;\n");
+		const h = harness({}, withRoot(f.root));
+		expect(await runWorktree(["prune", "--execute", "--json", "--idle-days", "0"], h.deps)).toBe(0);
+		const result: { removed: Array<{ path: string }>; skipped: Array<{ path: string; reasons: string[] }> } = JSON.parse(h.out.join(""));
+		expect(result.skipped).toEqual([]);
+		expect(result.removed.map((item) => item.path).sort()).toEqual([f.merged, f.mergedToo].sort());
 	});
 });
 

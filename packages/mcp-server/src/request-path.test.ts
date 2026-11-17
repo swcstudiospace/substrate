@@ -307,8 +307,8 @@ describe("SUBSTRATE_BRIEF_GRAPH_READ=lite", () => {
 			memoryForBrief: async () => [],
 		};
 		const request = { surface: "cursor" as const, repo: "acme/app", graph_id: "g1" };
-		await new Substrate(loadConfig({}), { index: index as never, greptime: null }).brief(request);
-		await new Substrate(loadConfig({ SUBSTRATE_BRIEF_GRAPH_READ: "lite" }), { index: index as never, greptime: null }).brief(request);
+		await new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }).brief(request);
+		await new Substrate(loadConfig({ SUBSTRATE_BRIEF_GRAPH_READ: "lite" }), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }).brief(request);
 		expect(calls).toEqual(["full", "lite"]);
 	});
 });
@@ -453,6 +453,7 @@ function build(env: Record<string, string>): World {
 	const redis = new FakeRedis();
 	const substrate = new Substrate(loadConfig({ SUBSTRATE_MEMORY_GRANTS: GRANTS, ...env }), {
 		index: index as never,
+		steering: { history: null, liveSessions: null },
 		greptime: null,
 		cache: new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => 1_000 }),
 		hindsightFetch: fetch,
@@ -657,7 +658,7 @@ describe("GET /healthz single flight", () => {
 		});
 		const observability = createObservability(config, env);
 		await observability.start();
-		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, observability.observer);
 		const server = createHttpServer(substrate, config, observability, { now: () => 1_000_000 });
 		const listening = Promise.withResolvers<void>();
 		server.listen(0, "127.0.0.1", listening.resolve);
@@ -758,7 +759,7 @@ describe("SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S", () => {
 				return capacity();
 			},
 		};
-		const substrate = new Substrate(loadConfig(env), { index: index as never, greptime: null }, { capacity: (sample: { databaseBytes: number }) => samples.push(sample.databaseBytes) });
+		const substrate = new Substrate(loadConfig(env), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, { capacity: (sample: { databaseBytes: number }) => samples.push(sample.databaseBytes) });
 		return { substrate, calls, samples };
 	}
 

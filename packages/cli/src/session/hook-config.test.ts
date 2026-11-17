@@ -44,9 +44,15 @@ const STEERING_TEXT = `#!/bin/sh
 # Run this from the session's worktree, by the host that applies a steering directive. ADR 0007 maps no Claude Code or git event to it:
 # wire it to the place your host handles the \`checkpoint_hint\` of a \`steering_acknowledge\` reply, which carries the directive_id.
 # After a directive it takes a steering checkpoint, once per directive id; it is skipped when the tree is unchanged.
-# Set SESSION_ID (the string the surface uses for its memory writes), SURFACE (the surface name the host's memory writes use, e.g. omp or claude-code) and DIRECTIVE_ID; none may contain a quote or a backslash.
+# Set HISTORICAL_SESSION_ID (the checkpoint/memory label), STEERING_SESSION_ID (the server-issued live handle), BINDING_FILE (the private record path), SURFACE and DIRECTIVE_ID.
+# DIRECTIVE_ID must not contain a quote or backslash. Never put a binding proof in this script, its envelope or argv; only reference the record path.
+# At host start: substrate steer open --repo OWNER/REPO --surface "$SURFACE" --binding-file "$BINDING_FILE" --json
+# Retain its public session_id as STEERING_SESSION_ID; open writes the proof privately to BINDING_FILE, never to stdout.
+# While active: substrate steer heartbeat --session "$STEERING_SESSION_ID" --surface "$SURFACE" --binding-file "$BINDING_FILE"
+# At host end: substrate steer close --session "$STEERING_SESSION_ID" --surface "$SURFACE" --binding-file "$BINDING_FILE"
+# Use the same configured server URL and surface for open, heartbeat, hook and close; a lost record cannot be recovered from the historical label.
 # The command runs in the foreground so the checkpoint reflects the tree as it stood when the directive was applied; it ends itself within its own timeout and is fail-open (\`|| true\`), so it never blocks the host.
-printf '{"directive_id":"%s"}' "$DIRECTIVE_ID" | substrate session hook steering --session "$SESSION_ID" --surface "$SURFACE" >/dev/null 2>&1 || true
+printf '{"directive_id":"%s"}' "$DIRECTIVE_ID" | substrate session hook steering --session "$HISTORICAL_SESSION_ID" --steering-session "$STEERING_SESSION_ID" --binding-file "$BINDING_FILE" --surface "$SURFACE" >/dev/null 2>&1 || true
 exit 0
 `;
 
@@ -105,7 +111,10 @@ describe("the printed text", () => {
 	test("the steering script pipes the directive id as the envelope, runs the steering hook in the foreground with --surface, fail-open, and exits 0", () => {
 		const script = renderHookConfig("steering");
 		expect(script.startsWith("#!/bin/sh\n")).toBe(true);
-		expect(script).toContain(`| ${STEERING_HOOK_COMMAND} --session "$SESSION_ID" --surface "$SURFACE" >/dev/null 2>&1 || true`);
+		expect(script).toContain(`| ${STEERING_HOOK_COMMAND} --session "$HISTORICAL_SESSION_ID" --steering-session "$STEERING_SESSION_ID" --binding-file "$BINDING_FILE" --surface "$SURFACE" >/dev/null 2>&1 || true`);
+		for (const lifecycle of ["open --repo", "heartbeat --session", "close --session"]) expect(script).toContain(`substrate steer ${lifecycle}`);
+		expect(script).not.toContain("$SESSION_BINDING");
+		expect(script).not.toContain('"session_binding"');
 		expect(script).not.toContain("2>&1 &");
 		expect(script).toContain(`'{"directive_id":"%s"}'`);
 		expect(script.endsWith("exit 0\n")).toBe(true);
@@ -166,7 +175,7 @@ describe("only commands that exist", () => {
 		}
 		// The script adds the plan-step reference the shell substitutes.
 		expect(typeof parseSessionArgs(["hook", "plan-step", "--plan-step", "abc1234"])).toBe("object");
-		expect(typeof parseSessionArgs(["hook", "steering", "--session", "ID"])).toBe("object");
+		expect(typeof parseSessionArgs(["hook", "steering", "--session", "HISTORY", "--steering-session", `ls_${"a".repeat(64)}`, "--binding-file", "/private/live.json", "--surface", "omp"])).toBe("object");
 		expect(typeof parseSessionArgs(["hook", "baseline", "--session", "ID"])).toBe("object");
 		expect(typeof parseSessionArgs(["hook", "context", "--session", "ID", "--surface", "omp"])).toBe("object");
 	});
