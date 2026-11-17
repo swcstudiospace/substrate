@@ -323,6 +323,72 @@ export async function listDatasets(
 	return { ok: true, datasets };
 }
 
+/** One document as the list endpoint names it: identity, parse state, and the ingest metadata it echoes. */
+export interface RagflowDocument {
+	id: string;
+	name: string;
+	/** The documented parse progression (`UNSTART` → `RUNNING` → `DONE` or `FAIL`). */
+	run: string;
+	/** The metadata the upload PATCH attached (`source_url`, `commit`, `heading_path`). */
+	meta_fields: Record<string, string>;
+}
+
+export type DocumentListOutcome =
+	| { ok: true; documents: RagflowDocument[] }
+	| { ok: false; reason: string };
+
+/** The most documents one listing page asks for; a dataset holds at most the ingest roots' pages. */
+const DOCUMENT_LIST_PAGE_SIZE = 1000;
+
+/**
+ * List a dataset's documents (§List documents: `GET /api/v1/datasets/{dataset_id}/documents?page=&page_size=`
+ * → `{code, data: {docs: [...]}}`), so the phase-46 archive can inventory the plane without deleting or
+ * rewriting anything. Transport and shape failures come back as `{ok: false, reason}` — never a throw.
+ */
+export async function listDocuments(
+	config: RagflowConfig,
+	datasetId: string,
+	fetchImpl: FetchLike = fetch,
+	timeoutMs = 8000,
+): Promise<DocumentListOutcome> {
+	// Paginate until a short page comes back: the archive step must see every
+	// document in the dataset, and RAGFlow caps each page (page_size up to
+	// DOCUMENT_LIST_PAGE_SIZE).
+	const documents: RagflowDocument[] = [];
+	const seenIds = new Set<string>();
+	for (let page = 1; ; page += 1) {
+		const answered = await call(
+			config,
+			fetchImpl,
+			`/api/v1/datasets/${encodeURIComponent(datasetId)}/documents?page=${page}&page_size=${DOCUMENT_LIST_PAGE_SIZE}`,
+			{ method: "GET", timeoutMs },
+		);
+		if (!answered.ok) return answered;
+		const data = dataOf(answered.body);
+		if (data === null || typeof data !== "object" || !("docs" in data) || !Array.isArray(data.docs)) {
+			return { ok: false, reason: "ragflow: unexpected document list shape" };
+		}
+		if (data.docs.length === 0) break;
+		for (const entry of data.docs) {
+			if (entry === null || typeof entry !== "object") continue;
+			const id = readString(entry, "id");
+			const name = readString(entry, "name", "location");
+			if (id === undefined || name === undefined || seenIds.has(id)) continue;
+			seenIds.add(id);
+			const rawMeta = (entry as Record<string, unknown>).meta_fields;
+			const metaFields: Record<string, string> = {};
+			if (rawMeta !== null && typeof rawMeta === "object" && !Array.isArray(rawMeta)) {
+				for (const [key, value] of Object.entries(rawMeta as Record<string, unknown>)) {
+					if (typeof value === "string") metaFields[key] = value;
+				}
+			}
+			documents.push({ id, name, ...(readString(entry, "run") !== undefined ? { run: readString(entry, "run") as string } : { run: "UNKNOWN" }), meta_fields: metaFields });
+		}
+		if (data.docs.length < DOCUMENT_LIST_PAGE_SIZE) break;
+	}
+	return { ok: true, documents };
+}
+
 /** The ingest metadata every upload carries, so retrieval can echo it (U-03). */
 export interface UploadMetadata {
 	source_url: string;

@@ -162,6 +162,10 @@ export function resolveDocsBackend(env: Record<string, string | undefined> = pro
 
 /** Default ms between LightRAG planning polls (SPE-19385). */
 export const DEFAULT_LIGHTRAG_POLL_MS = 5_000;
+/** Default ms a planning page the plane refused waits before the poll retries it (one day). */
+export const DEFAULT_PLANNING_REFUSAL_COOLDOWN_MS = 86_400_000;
+/** Upper bound on the planning refusal cooldown (90 days); overrides past it fall back to the default. */
+export const MAX_PLANNING_REFUSAL_COOLDOWN_MS = 7_776_000_000;
 /** Default roots a LightRAG planning poll sweeps. */
 export const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
 
@@ -334,6 +338,15 @@ export interface SubstrateConfig {
 	 * scans once per call, so this never changes tick cost.
 	 */
 	lightragPollMs: number;
+	/**
+	 * Ms a planning page the plane refused (a redactor `secret-findings` verdict)
+	 * waits before the planning poll retries it; 0 retries every pass.
+	 *
+	 * From `SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS`, default 86 400 000 (one day),
+	 * capped at 7 776 000 000 (90 days). The cooldown keys on the page's content
+	 * sha, so an edit retries immediately.
+	 */
+	planningRefusalCooldownMs: number;
 	/**
 	 * Roots a planning poll sweeps (SPE-19385).
 	 *
@@ -1138,6 +1151,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		embedCache: embedCacheFromEnv(env),
 		railwayHosting: railwayHostingFromEnv(env),
 		lightragPollMs: positiveOr(env.SUBSTRATE_LIGHTRAG_POLL_MS, DEFAULT_LIGHTRAG_POLL_MS),
+		planningRefusalCooldownMs: integerRangeOr(
+			env.SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS,
+			DEFAULT_PLANNING_REFUSAL_COOLDOWN_MS,
+			MAX_PLANNING_REFUSAL_COOLDOWN_MS,
+		),
 		lightragPlanningRoots: lightragPlanningRoots.length > 0 ? lightragPlanningRoots : [...DEFAULT_LIGHTRAG_PLANNING_ROOTS],
 		railway: railwayFromEnv(env),
 		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
@@ -1486,6 +1504,13 @@ function nonNegativeOr(raw: string | undefined, fallback: number): number {
 function positiveOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+/** An integer in [0, max] (max included; 0 is a valid "off"); blank or anything else is the default. */
+function integerRangeOr(raw: string | undefined, fallback: number, max: number): number {
+	if (raw === undefined || raw.trim() === "") return fallback;
+	const value = Number(raw.trim());
+	return Number.isInteger(value) && value >= 0 && value <= max ? value : fallback;
 }
 
 /** A finite number > 0, kept as written (a fraction is fine); anything else is the default. The fleet package reads `SUBSTRATE_WORKTREE_IDLE_DAYS` the same way. */

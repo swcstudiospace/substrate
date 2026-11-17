@@ -19,6 +19,15 @@ import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionA
 import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
 import { ZodError } from "zod";
 import { defined } from "./test-support.ts";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { FetchLike } from "./planes/lightrag.ts";
+import { scrubPlaneEnv } from "./scrub-plane-env.ts";
+
+// The data-plane URL variables name real planes for the session that runs the
+// suite by hand; literals below assume a bare config (see scrub-plane-env.ts).
+scrubPlaneEnv();
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -5761,5 +5770,160 @@ describe("private reads under the request budget and the docs steering precedenc
 			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
 			expect(askedWith(h.ragflow)).toBe("[]");
 		});
+	});
+});
+
+describe("planning refresh: refusal cooldown and note dedup", () => {
+	// A body the redactor refuses (`openai-proj` finding), built rather than written as a key-shaped literal.
+	const secretish = `sk-proj-${"x".repeat(24)}`;
+	const CLEAN = "# Clean\n\nordinary planning prose";
+
+	async function planningCheckout(files: Record<string, string>): Promise<string> {
+		const dir = await mkdtemp(join(tmpdir(), "substrate-planning-"));
+		await mkdir(join(dir, ".planning"), { recursive: true });
+		for (const [name, body] of Object.entries(files)) await writeFile(join(dir, ".planning", name), body);
+		return dir;
+	}
+
+	/** The LightRAG plane: one upload per stored page (named by its `file_source`), pipeline calls answered. */
+	function planeRecording(uploads: string[]): FetchLike {
+		return async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && url.pathname === "/documents/upload" && init.body instanceof FormData) {
+				uploads.push(String(init.body.get("file_source")));
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+	}
+
+	function planningSubstrate(dir: string, uploads: string[], env: Record<string, string> = {}, plane?: FetchLike) {
+		const { emitted, index, greptime } = stubStores(null);
+		const substrate = new Substrate(
+			loadConfig({
+				RAGFLOW_URL: "http://ragflow.test",
+				RAGFLOW_API_KEY: "k",
+				LIGHTRAG_URL: "http://lightrag.test",
+				SUBSTRATE_DOCS_BACKEND: "lightrag",
+				...env,
+			}),
+			{
+				index: index as never,
+				greptime: greptime as never,
+				steering: { history: null, liveSessions: null },
+				ragflowFetch: async () => {
+					throw new Error("connect ECONNREFUSED");
+				},
+				lightragFetch: plane ?? planeRecording(uploads),
+				planningBaseDir: dir,
+			},
+		);
+		return { substrate, emitted };
+	}
+
+	/** One pass, requested the way the live wiring does it: a stored event naming a planning page. */
+	async function runPlanningPass(substrate: Substrate): Promise<void> {
+		await substrate.emit({ surface: "omp", kind: "note", summary: "planning tree moved", payload: { paths: [".planning/secret.md"] } });
+		await substrate.planningRefreshIdle();
+	}
+
+	const planningNotes = (emitted: SubstrateEvent[]) => emitted.filter((event) => event.kind === "note" && event.payload?.action === "docs.planning");
+	const refusalWarnings = (emitted: SubstrateEvent[]) => emitted.filter((event) => event.kind === "warning" && event.summary === "docs ingest refused: secret-findings");
+	const uploadsOf = (uploads: string[], marker: string) => uploads.filter((source) => source.includes(marker)).length;
+
+	test("a refused page is attempted once, parked across passes, and retried when its content moves", async () => {
+		const dir = await planningCheckout({ "secret.md": `# Secret\n\nalpha ${secretish}`, "clean.md": CLEAN });
+		const uploads: string[] = [];
+		const { substrate, emitted } = planningSubstrate(dir, uploads);
+		try {
+			await runPlanningPass(substrate);
+			expect(refusalWarnings(emitted)).toHaveLength(1); // first refusal warns immediately
+			expect(uploadsOf(uploads, "clean.md")).toBe(0); // main's gates refuse the call before the first write
+			await runPlanningPass(substrate); // refusal still fresh, content unmoved: parked, the clean neighbour lands alone
+			expect(refusalWarnings(emitted)).toHaveLength(1);
+			expect(uploadsOf(uploads, "clean.md")).toBe(1);
+			await writeFile(join(dir, ".planning", "secret.md"), `# Secret\n\nbeta ${secretish}`); // content moved
+			await runPlanningPass(substrate);
+			expect(refusalWarnings(emitted)).toHaveLength(2); // re-attempted despite the fresh refusal entry
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("the note fires once for an unchanged pending set and again when it changes", async () => {
+		const dir = await planningCheckout({ "secret.md": `# Secret\n\n${secretish}`, "clean.md": CLEAN });
+		const uploads: string[] = [];
+		const { substrate, emitted } = planningSubstrate(dir, uploads);
+		try {
+			await runPlanningPass(substrate);
+			expect(planningNotes(emitted)).toHaveLength(1);
+			expect(planningNotes(emitted)[0]?.summary).toBe("planning refresh (planning-changed): 2 changed page(s) under .planning/");
+			expect(planningNotes(emitted)[0]?.payload).toMatchObject({ action: "docs.planning", paths: [".planning/clean.md", ".planning/secret.md"] });
+			await runPlanningPass(substrate); // the parked refusal leaves the clean page as the only attempt: it notes, once
+			const notes = planningNotes(emitted);
+			expect(notes).toHaveLength(2);
+			expect(notes[1]?.summary).toBe("planning refresh (planning-changed): 1 changed page(s) under .planning/");
+			expect(notes[1]?.payload).toMatchObject({ paths: [".planning/clean.md"] });
+			await runPlanningPass(substrate); // identical pending set: the parked refusal notes nothing
+			expect(planningNotes(emitted)).toHaveLength(2);
+			await writeFile(join(dir, ".planning", "clean.md"), `${CLEAN}, revised`);
+			await runPlanningPass(substrate); // content moved: the attempt set's hash moves with it
+			const revised = planningNotes(emitted);
+			expect(revised).toHaveLength(3);
+			expect(revised[2]?.summary).toBe("planning refresh (planning-changed): 1 changed page(s) under .planning/");
+			expect(revised[2]?.payload).toMatchObject({ paths: [".planning/clean.md"] });
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("cooldown zero retries the refused page every pass", async () => {
+		const dir = await planningCheckout({ "secret.md": `# Secret\n\n${secretish}` });
+		const uploads: string[] = [];
+		const { substrate, emitted } = planningSubstrate(dir, uploads, { SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS: "0" });
+		try {
+			await runPlanningPass(substrate);
+			expect(refusalWarnings(emitted)).toHaveLength(1);
+			await runPlanningPass(substrate);
+			expect(refusalWarnings(emitted)).toHaveLength(2); // two attempts across two passes
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a transient upload error backs off briefly and is retried when the window lapses", async () => {
+		const dir = await planningCheckout({ "clean.md": CLEAN });
+		const uploads: string[] = [];
+		let uploadAttempts = 0;
+		const flaky: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && url.pathname === "/documents/upload" && init.body instanceof FormData) {
+				uploadAttempts += 1;
+				return Response.json({ detail: "lightrag unavailable" }, { status: 503 });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+		const { substrate, emitted } = planningSubstrate(dir, uploads, {}, flaky);
+		try {
+			await runPlanningPass(substrate); // pass 1: the upload 503s — a plane fault, never a gate refusal
+			const attemptsAfterPass1 = uploadAttempts;
+			expect(attemptsAfterPass1).toBeGreaterThan(0);
+			expect(refusalWarnings(emitted)).toHaveLength(0);
+			expect(planningNotes(emitted)).toHaveLength(1); // the first pass notes the pending set
+			await runPlanningPass(substrate); // pass 2 inside the backoff window: parked, the page is not attempted
+			expect(uploadAttempts).toBe(attemptsAfterPass1);
+			expect(planningNotes(emitted)).toHaveLength(1); // and the unchanged pending set notes nothing
+			// Backoff expiry: the window lapses, so the next pass attempts again.
+			const refusals = (substrate as unknown as { planningRefusals: Map<string, { at: number }> }).planningRefusals;
+			for (const entry of refusals.values()) entry.at = Date.now() - 31_000;
+			await runPlanningPass(substrate);
+			expect(uploadAttempts).toBeGreaterThan(attemptsAfterPass1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 });

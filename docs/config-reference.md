@@ -78,6 +78,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | number | 2 | 0..100000 | 2 hours. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | path | none | off-box mount | substrate ledger archive refuses by name unless --out is given. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS` | toggle | false | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused. See `docs/greptime-ledger.md` | mcp-server/ledger-run.ts, index-archive.ts | yes |
+| `SUBSTRATE_GREPTIME_TIMEOUT_MS` | number | unset | integer 1000..999999 (parsed only by the ledger runner) | every statement waits the client default (5000 ms); a deliberate slow-store allowance for archive and recovery runs, the unit never sets it. See `docs/config-reference.md` | mcp-server/ledger-run.ts | yes |
 | `SOLANA_RPC_URL` | string | https://api.devnet.solana.com | URL | public devnet | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_KEYPAIR` | path | none | keypair file path | the hourly anchor job is not configured | mcp-server/config.ts | yes |
 | `SOLANA_ANCHOR_PUBKEY` | string | none | public key | anchors are not verified against a key | mcp-server/config.ts | yes |
@@ -195,12 +196,14 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `RAGFLOW_URL` | string | none | RAGFlow base URL | docs_search answers degraded, docs_ingest refuses. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_API_KEY` | secret-ref | none | API key | the plane is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/planes/ragflow.ts | yes |
 | `RAGFLOW_DATASET_ID` | string | none | dataset id | nothing: no code reads it today (docs_ingest names the dataset after the repo) (UNREAD: no code reads it today). See `docs/docs-search-ingest.md` | none | yes |
+| `RAGFLOW_MCP_URL` | string | none | URL | nothing: no product code reads it today (the unused MCP transport), but the test suites scrub it with the rest of the data plane. See `docs/docs-search-ingest.md` | mcp-server/src/scrub-plane-env.ts (the test suites scrub the operator's ambient value) | yes |
 | `LIGHTRAG_URL` | string | none | LightRAG base URL | the LightRAG path is unconfigured. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `LIGHTRAG_API_KEY` | secret-ref | none | API key, sent as a bearer on the LightRAG health probe | LightRAG is reached unauthenticated. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_URL` | string | none | LightRAG base URL override for the Railway hosting layer | LIGHTRAG_URL applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_API_KEY` | secret-ref | none | API key override for the Railway hosting layer | LIGHTRAG_API_KEY applies. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PROJECT` | string | none | Railway project label, report-only: it names the project in Railway plans and status and never scopes ingest or search | no project label. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_POLL_MS` | number | 5000 | positive integer ms | 5000 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS` | number | 86400000 | integer 0..7776000000 (0 retries every pass) | one day | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_QUERY_MODE` | string | hybrid | naive \| local \| global \| hybrid \| mix | hybrid (graph) unless a question starts with /mix or /hybrid or a caller names a mode; an unrecognised value is named in the boot warnings and also means hybrid. A LightRAG with no real LLM (the Railway bypass LLM) builds no graph and needs naive. See `docs/runbooks/lightrag-storage-topology.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | .planning/ | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_BACKEND` | string | reach-derived | lightrag \| ragflow | LIGHTRAG_URL presence decides: set means lightrag, else ragflow. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
@@ -220,6 +223,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_AGENT_SKILLS_ROOT` | path | none | absolute path to an agent-skills checkout | the merge-trigger for agent-skills is a noop: no checkout, no version recorded. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RAGFLOW_ARCHIVE_DIR` | path | none | archive directory path | the archive refuses by name before any write (phase 46 SC2). See `docs/data-planes.md` | mcp-server/docs-archive.ts, scripts/docs-migrate.ts | yes |
+| `SUBSTRATE_RAGFLOW_ARCHIVE_ALLOW_ROOTFS` | toggle | off | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused (phase 46 SC2; mirrors SUBSTRATE_INDEX_ARCHIVE_ALLOW_ROOTFS). See `docs/data-planes.md` | mcp-server/docs-archive.ts | yes |
 | `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | toggle | off | 1 | off: every superseded document stays on the plane. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` | number | 0.2 | [0, 1] | 0.2. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |

@@ -722,3 +722,25 @@ describe("authoritative live-session lease", () => {
 		}
 	});
 });
+
+describe("SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS", () => {
+	test("unset parks a refused planning page for one day", () => {
+		expect(loadConfig({}).planningRefusalCooldownMs).toBe(86_400_000);
+	});
+
+	test("a whole number of milliseconds up to 90 days is kept", () => {
+		expect(loadConfig({ SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS: "60000" }).planningRefusalCooldownMs).toBe(60_000);
+		expect(loadConfig({ SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS: " 3600000 " }).planningRefusalCooldownMs).toBe(3_600_000);
+		expect(loadConfig({ SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS: "7776000000" }).planningRefusalCooldownMs).toBe(7_776_000_000);
+	});
+
+	test("zero retries a refused page every pass", () => {
+		expect(loadConfig({ SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS: "0" }).planningRefusalCooldownMs).toBe(0);
+	});
+
+	test("out of range, fractional or non-numeric falls back to the default", () => {
+		for (const raw of ["-1", "7776000001", "1.5", "a day", ""]) {
+			expect(loadConfig({ SUBSTRATE_PLANNING_REFUSAL_COOLDOWN_MS: raw }).planningRefusalCooldownMs).toBe(86_400_000);
+		}
+	});
+});
