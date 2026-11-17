@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
+current_phase_name: multi-session-boundary
 status: "v1.8 Phase 71 locally verified; Greptile review of PR #199 pending; Desk Quality / Programming Lead review waived by the user 2026-11-12 (what=not_real, needs=greptile_only); phase 72 still human_needed for HARD-S2 credential clause and corpus proof disclosure (owner decisions)"
 stopped_at: "2026-11-12: Desk Quality gate waived by user (answers what=not_real, needs=greptile_only). Remaining open: Greptile review on PR #199 and PR #215; phase 72 owner decisions (HARD-S2, corpus proof disclosure); v1.7 owner decisions open."
-last_updated: "2026-11-01"
+last_updated: "2026-11-16T23:59:49.095Z"
 last_activity: 2026-11-01
 last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); expiry pass moved to issue so discovery and the digest stay read-only; one full run 11623 pass, 0 fail; phase remains human_needed"
-state_head: 9d3f20851a85
+state_head: a2f438f9768cadf9ffc601ba942fd92325dc4da1
 progress:
-  total_phases: 8
-  completed_phases: 0
-  total_plans: 4
-  completed_plans: 4
-  percent: 0
+  total_phases: 61
+  completed_phases: 47
+  total_plans: 12
+  completed_plans: 10
+  percent: 77
 current_phase: 71
-current_phase_name: multi-session-boundary
 ---
 
 # State
@@ -36,31 +36,37 @@ current_phase_name: multi-session-boundary
 The live State records the mechanism that propagates .planning/ and repository markdown into the LightRAG Graph RAG so that planning artifacts and documentation remain first-class, queryable citizens with immediate reflection.
 
 ### Change Detection Pipeline
+
 - Hash- and timestamp-based delta detection over .planning markdown, phase artifacts, ROADMAP, STATE, docs/ trees and related sources.
 - Pipeline: detect → batch → incremental ingest (texts or document endpoints) → graph entity/relation update → index refresh.
 - Events are emitted to the ledger for traceability; Dragonfly/timescale used for coordination state as needed.
 
 ### Triggers from Documentation Updates
+
 - Direct triggers on file modification or git change events affecting .planning files and markdown sources.
 - Planning-state mutations (e.g., SUMMARY writes, owner decision records) and docs updates automatically enqueue propagation.
 - Coordinated via post-write hooks and explicit merge/doc-update signals.
 
 ### Immediate Reflection Validation
+
 - Post-ingest probe queries issued immediately to confirm the changed content is retrievable and correctly reflected in the graph.
 - Validation steps: payload checksum match, entity presence in LightRAG graph, cross-check against Hindsight recall for the same source, freshness SLI update.
 - Fail-closed on validation error with retry; results recorded for audit.
 
 ### Integration with Unison
+
 - Unison supplies the cross-surface, cross-session coordination for propagation tasks.
 - Shared claims, leases and event ledger entries prevent duplicate work and ensure ordered reflection.
 - Unison handoff and heartbeat patterns keep propagation state visible to all active sessions and surfaces.
 
 ### Graceful Degradation
+
 - LightRAG unavailability or missing LLM route causes fallback to Hindsight banks, prior graph snapshot, or in-memory brief cache.
 - Queries degrade to naive or cached results while still succeeding; breakers open on repeated ingest or validation failures.
 - Propagation continues in report/shadow mode; no data loss on the source side.
 
 ### SOTA Patterns
+
 - Incremental graph updates (no full re-ingest on every change).
 - Entity- and relation-aware indexing with reflection feedback loops.
 - Event-sourced change log for replay, audit and drift detection.
@@ -74,18 +80,21 @@ Acceptance evidence for this mechanism lives in the State: the change detection 
 The live State records the security and validation protocols that govern resource exchanges in the Substrate. These protocols ensure input integrity, tamper-evident auditability and safe, coordinated exchange of planning artifacts, state mutations and coordination claims across surfaces and sessions. They complement the propagation mechanism (SPE-34077/SPE-34080) with explicit security controls.
 
 ### Input Validation
+
 - All resource exchange inputs (payloads for memory writes, graph operations, handoffs, propagation events and docs ingest) are subject to schema-driven validation prior to acceptance or further processing.
 - Validation enforces type correctness, presence of integrity hashes, size and cardinality bounds, and structural conformance to documented exchange schemas.
 - Failures are rejected with no side-effects (fail-closed); validation results and errors are recorded for audit but never leak sensitive details.
 - Cross-session and cross-surface exchanges carry evidence of having passed validation at the originating surface.
 
 ### Audit Logging
+
 - Every accepted resource exchange is appended to the immutable event ledger with full attribution: actor/surface identity, session correlation, timestamp, operation, input hash, outcome and relevant context.
 - Audit records participate in the hash chain; the ledger remains append-only and is the source of truth for post-facto verification, drift detection and compliance queries.
 - Redaction is applied consistently with the redaction policy at write time for any credential-like or PII-bearing fields.
 - Ledger appends for audits are themselves coordinated through Unison claims and leases to guarantee ordering and absence of duplication.
 
 ### Exchange Protocols
+
 - Resource exchanges use signed, lease-protected handoff packets (goal, files/paths, Definition of Done, known blockers) or equivalent event-sourced messages.
 - Receiving surfaces must verify signature, lease currency, hash integrity and prior validation before mutating local state or propagating further.
 - Propagation of .planning/ and markdown artifacts follows the change-detection + immediate-reflection pipeline, with validation steps as described in the Documentation Propagation section.
@@ -404,6 +413,7 @@ Resume file: None
 - [Phase 16]: 16-03: smoke reads only consumer.env and refuses :7410/non-loopback before any request; claim needs claimed true plus granted
 - [Phase 16]: 16-03: requirements-completed left empty, FOUND-01 stays open until the 16-05 live proof
 - [Phase 16]: 16-04: docs carry key names only, no connection-string shapes; production-mutating steps framed operator-only
+- [Phase 71]: Wave 3 synthesize: graceful degradation mechanisms (retry/fallback/state-preservation for Graph Engineering session continuity) inserted into ROADMAP.md after impact parity (SPE-34079). Unison resources detailed. File-disjoint.
 
 ## Post-milestone uplift (graph ut-mv5r71hp-65f7b012, 2026-10-12)
 
@@ -814,7 +824,6 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Behaviour changes to review: a rollback retry drains a session's parked event before writing (b023d2a0); a repeated forget with the same forget_id no longer writes a second memory.forget note (the note is re-written only when the plane deletions progressed); a claim is withdrawn only when its event is dead-lettered or refused outright, never when parked (e20f3634); the greptime client takes an injected fetch and the soak testkit closes its tick (067f094b).
 - Milestone audit and completion are NOT run: they need the owner's sign-off (q2).
 
-
 ## Milestone pass re-run (2026-11-11, graph ut-9b281c843a-3add8e6f)
 
 - Stray folders: none remain under `~/src/repos/agent-substrate-*`. The four worktrees were removed earlier, after their unique work was ported (see Reconciliation record above). Nothing left to reconcile.
@@ -848,6 +857,3 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Phase 46 D4: RAG-backend (retired, superseded by LightRAG) reversal is impossible. Record that in the cutover record.
 - Phase 68: the disclosed 300-pair cap stands. Do not remove it.
 - Phases 16-30, 34-36, and 51-54: the owner accepts the prior verification as passed for this milestone. Do not re-execute those phases. A later digest refresh may still mark a report stale; that does not reopen the phase.
-
-
-
