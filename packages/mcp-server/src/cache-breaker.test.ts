@@ -80,6 +80,8 @@ describe("the cache breaker is open (phase 75)", () => {
 			},
 			openGraphs: async () => [],
 			memoryForBrief: async () => [],
+			// The constructor asks the index for its live-session authority; this test never uses it.
+			liveSessions: () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
 		const request = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
