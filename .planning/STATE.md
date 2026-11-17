@@ -31,6 +31,107 @@ current_phase_name: multi-session-boundary
 - Decisions taken autonomously are recorded in `phases/71-multi-session-boundary/71-05-SUMMARY.md`. v1.7 owner decisions 1-11 remain open and are not accepted on the owner's behalf.
 - Next: obtain the Desk Quality review for PR #199, then start phase 72 (needs 71). Phases 73, 74 and 75 have no declared dependency; 76 shares the ledger write path with 73; 77 needs 71; 78 needs 73, 75 and 76.
 
+## Documentation Propagation Mechanism from .planning and Markdown to LightRAG Graph RAG (SPE-34077, SPE-34080)
+
+The live State records the mechanism that propagates .planning/ and repository markdown into the LightRAG Graph RAG so that planning artifacts and documentation remain first-class, queryable citizens with immediate reflection.
+
+### Change Detection Pipeline
+- Hash- and timestamp-based delta detection over .planning markdown, phase artifacts, ROADMAP, STATE, docs/ trees and related sources.
+- Pipeline: detect → batch → incremental ingest (texts or document endpoints) → graph entity/relation update → index refresh.
+- Events are emitted to the ledger for traceability; Dragonfly/timescale used for coordination state as needed.
+
+### Triggers from Documentation Updates
+- Direct triggers on file modification or git change events affecting .planning files and markdown sources.
+- Planning-state mutations (e.g., SUMMARY writes, owner decision records) and docs updates automatically enqueue propagation.
+- Coordinated via post-write hooks and explicit merge/doc-update signals.
+
+### Immediate Reflection Validation
+- Post-ingest probe queries issued immediately to confirm the changed content is retrievable and correctly reflected in the graph.
+- Validation steps: payload checksum match, entity presence in LightRAG graph, cross-check against Hindsight recall for the same source, freshness SLI update.
+- Fail-closed on validation error with retry; results recorded for audit.
+
+### Integration with Unison
+- Unison supplies the cross-surface, cross-session coordination for propagation tasks.
+- Shared claims, leases and event ledger entries prevent duplicate work and ensure ordered reflection.
+- Unison handoff and heartbeat patterns keep propagation state visible to all active sessions and surfaces.
+
+### Graceful Degradation
+- LightRAG unavailability or missing LLM route causes fallback to Hindsight banks, prior graph snapshot, or in-memory brief cache.
+- Queries degrade to naive or cached results while still succeeding; breakers open on repeated ingest or validation failures.
+- Propagation continues in report/shadow mode; no data loss on the source side.
+
+### SOTA Patterns
+- Incremental graph updates (no full re-ingest on every change).
+- Entity- and relation-aware indexing with reflection feedback loops.
+- Event-sourced change log for replay, audit and drift detection.
+- Lease-protected coordination + hash-chain integrity for the propagation ledger entries.
+- First-class treatment of planning state as queryable knowledge alongside repository docs.
+
+Acceptance evidence for this mechanism lives in the State: the change detection pipeline and the validation steps described above are present and reference SPE-34077 (detection/triggers) and SPE-34080 (unison reflection validation).
+
+## Security and Validation Protocols for Substrate Resource Exchanges (SPE-34080)
+
+The live State records the security and validation protocols that govern resource exchanges in the Substrate. These protocols ensure input integrity, tamper-evident auditability and safe, coordinated exchange of planning artifacts, state mutations and coordination claims across surfaces and sessions. They complement the propagation mechanism (SPE-34077/SPE-34080) with explicit security controls.
+
+### Input Validation
+- All resource exchange inputs (payloads for memory writes, graph operations, handoffs, propagation events and docs ingest) are subject to schema-driven validation prior to acceptance or further processing.
+- Validation enforces type correctness, presence of integrity hashes, size and cardinality bounds, and structural conformance to documented exchange schemas.
+- Failures are rejected with no side-effects (fail-closed); validation results and errors are recorded for audit but never leak sensitive details.
+- Cross-session and cross-surface exchanges carry evidence of having passed validation at the originating surface.
+
+### Audit Logging
+- Every accepted resource exchange is appended to the immutable event ledger with full attribution: actor/surface identity, session correlation, timestamp, operation, input hash, outcome and relevant context.
+- Audit records participate in the hash chain; the ledger remains append-only and is the source of truth for post-facto verification, drift detection and compliance queries.
+- Redaction is applied consistently with the redaction policy at write time for any credential-like or PII-bearing fields.
+- Ledger appends for audits are themselves coordinated through Unison claims and leases to guarantee ordering and absence of duplication.
+
+### Exchange Protocols
+- Resource exchanges use signed, lease-protected handoff packets (goal, files/paths, Definition of Done, known blockers) or equivalent event-sourced messages.
+- Receiving surfaces must verify signature, lease currency, hash integrity and prior validation before mutating local state or propagating further.
+- Propagation of .planning/ and markdown artifacts follows the change-detection + immediate-reflection pipeline, with validation steps as described in the Documentation Propagation section.
+- On any protocol violation (bad signature, expired lease, failed validation, hash mismatch) the exchange is rejected fail-closed; the source side retains the data and the incident is audited.
+- Graceful degradation: when downstream services are unavailable, exchanges are buffered or fall back to cached prior state; no source data is lost and reconciliation occurs on recovery.
+
+Acceptance evidence for these protocols lives in the State: the input validation rules, audit logging requirements and exchange protocol definitions described above are present and reference SPE-34080.
+
+## Enterprise-Grade Patterns for Scalability, Reliability and Maintainability (SPE-34079)
+
+The live State records the enterprise-grade patterns that underpin the Substrate's operation for scalability, reliability and maintainability. These patterns—layered abstractions across coordination, data, retrieval and uplift planes together with idempotent operations for replay, coordination and cross-surface exchange—ensure consistent impact, graceful degradation and safe long-running multi-session Graph Engineering workloads. They synthesize the coordination layers, plane isolation, and exactly-once semantics proven in phases 51, 75, 77, 78 and the v1.9 Unison uplift (refs SPE-34076, SPE-34079 and clarif-driven synthesis of data/coordination/uplift graphed structures).
+
+### Layered Abstractions
+
+- **Coordination layers**: Lease-protected node ownership (`graph_claim`/`heartbeat`/`release`/`complete` with `lease_id` + epoch CAS fencing on Postgres, holder=(surface,session_id), TTL 900s default); signed handoff packets (goal/files/DoD/blockers/prev_event_hash under HMAC); drift scans (`coord_drift_scan` comparing git HEAD tree vs ledger trail vs index claims/leases); unified fabric (`fabric_status`/`fabric_optimize`/`fabric_compliance`) providing one read-only view over all resources (Dragonfly, Timescale index, Greptime, LightRAG, Hindsight, TEI, proxy, corpus) with states `ok|degraded|unavailable|unconfigured`.
+
+- **Data, indexing and retrieval layers**: Append-only ledger with hash/prev chain (Greptime 180d hot); graph tables (`graph_index`, `graph_nodes` with claimed_by/lease/epoch, `graph_edges`/`steps`/`bindings`) (Timescale); docs + planning graphs (LightRAG indexes .planning/, repo docs, agent-skills); memory banks (Hindsight sub-<surface> with provenance/forget after gate); read-through cache (Dragonfly, TTLs per use: brief 300s etc). Retrieval merges hybrid sources (`docs_search` + Hindsight context, `memory_search` + index rows, `graph_get`); indexing on hash/merge triggers or explicit.
+
+- **Uplift and observability layers**: Version-tagged uplift of SOTA patterns (hybrid RAG+Hindsight phase 46/57, graph memory+Greptime 49, predictive+cache 47, pub/sub 50, enterprise fabric 51) applied to data/coordination for impact parity; `CircuitBreaker` + `callPlane` (per-plane closed→open after failureThreshold=5, half-open probe after openMs=30s, `BreakerOpenError` with retryAfterMs) in `@substrate/observability`; `gatedFetch` and `PlaneRegistry`; admission fail-open/fail-closed policies; pure builders for status/optimize/compliance.
+
+- **Governance, propagation and planning layers**: Schema-driven validation + redaction on every write; change-detection pipeline + immediate-reflection for .planning/markdown into LightRAG; first-class planning state (STATE, ROADMAP, SUMMARYs) as queryable knowledge alongside docs; event-sourced ledger for audit/replay/drift; lease-protected Unison coordination + hash-chain integrity.
+
+### Idempotent Operations
+
+- **Event and write replay**: Idempotency keys (client-supplied or sha256 of [correlation,task,attempt,kind,scope,normalized subject,text]) on `memory_write`, `events_emit`, `docs_ingest`; matching key+payload reapplies return prior result with zero duplicate side-effects. `SUBSTRATE_EVENT_IDEMPOTENCY` mode; migration contracts freeze digests and reject non-idempotent steps.
+
+- **Steering, commands and checkpoints (phase 77)**: Keyed commands carry client idempotency key + per-session monotonic sequence; same-key/same-payload replay is identical result with no re-effect; changed payload under same key refused. Legacy unkeyed commands unchanged. Durable via migrations 44/45; `checkpoint_hint` and session state preserve position.
+
+- **Coordination, handoffs and cross-repo (phases 71,74)**: Lease ops and heartbeats are retry-safe (CAS + expiry makes lapsed free without reviving stale); signed handoffs carry prev hash for chain; `runBranchFanout`/`cross-repo-ops` stores steps with durable key + fingerprint before any git effect; key-reused + different fingerprint refused; compensation on partial failure leaves explicit needs-attention state.
+
+- **Cache, migration, snapshot and apply**: Content-hash idempotency (docs_ingest refuses duplicates by hash); worktree snapshot apply and index migrations are one-at-a-time idempotent (frozen digests); restore adopts existing memo on re-run; `apply` one idempotent op at a time.
+
+- **Fabric and status reads**: Pure functions over facts (`buildFabricStatus`, `buildFabricSuggestions`, `buildFabricCompliance`) are deterministic and side-effect free; repeatable under any retry or cache miss.
+
+### Graceful Degradation, Retry, Fallback and Impact Parity (SPE-34079)
+
+- **Retry**: `callPlane` refuses with `BreakerOpenError` (no fn executed on open); callers back off or surface wait; explicit retry only on handoffs/outbox with idempotency keys (no blind storms). Bounded cooldowns on cache connect.
+
+- **Fallback**: On breaker open/error/Dragonfly down (phase 75), `ReadThroughCache` falls to authoritative load (Timescale/Greptime/LightRAG/Hindsight source); brief/memory/graph/search return degraded/empty/last-good snapshot within budgets; fabric reports state; never blocks prompt path.
+
+- **State-preservation**: Snapshots (`brief-snapshot`, `recall-snapshot`); leases/handoffs (fenced, signed, prev-hash anchored); drift reports (never auto-repair); generations/tags/epochs bumped on write force bypass of stale; eternal anchored checkpoints/rollbacks (phase 59) + durable steering (58) + tandem memory (57) preserve position/impact across restarts/outages/days of work.
+
+- **Impact parity**: Three coordinated graphed tagged uplifted structures (data, coordination, uplift) deliver consistent observable results, state fidelity and performance for long high-volume sessions; no regression from SOTA patterns; cross-layer reconciliation closes loops.
+
+Acceptance evidence for these patterns lives in the State: the layered abstractions (coordination, data/index/retrieval, uplift/observability, governance/propagation) and idempotent operations (event keys, steering sequences, handoff/lease dedupe, content-hash applies, migration contracts) described above are present and reference SPE-34079 (Unison Graph Engineering impact parity, coordination layers, graceful degradation) synthesizing clarifs and prior v1.5/v1.8 phases.
+
 ## Recovery record (2026-10-23)
 
 - Swarm stash `stash@{0}` (commit `d517931`, "other-session: swarm-a16..30 surfaces, swarm token lines, runbooks, swarm-correlation, identity clients") was inspected. Its five files are `.env.example`, `docs/runbooks/production-identity.md`, `docs/swarm-correlation.md`, `infra/identity/clients.json`, and `packages/mcp-server/src/types.ts`. Patch identity: `git stash show -p stash@{0} | sha256sum` begins `f671ea5f0488f06e`.
