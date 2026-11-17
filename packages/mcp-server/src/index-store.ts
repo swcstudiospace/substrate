@@ -1063,6 +1063,35 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			$$;
 			create index concurrently if not exists memory_forgotten_at_idx on memory_entries (forgotten_at) where forgotten_at is not null`,
 	},
+	// Context matrix entries: one row per candidate decision, fact, warning or todo extracted from a planning source document.
+	// A row is written as `candidate` and moves to `accepted` or `superseded`; `superseded_by` names the entry that replaced it.
+	// `source_sha256` is the digest of the source file the row was extracted from. Additive: one new table and two indexes.
+	// Writes no rows and changes no existing row. Rollback (additive table, no data migration): DROP TABLE IF EXISTS context_matrix_entries.
+	// OPERATORS: rehearse on a restored dump before production, like the other expand steps.
+	{
+		version: 49,
+		name: "context_matrix_entries",
+		phase: "expand",
+		down: `drop table if exists context_matrix_entries`,
+		sql: `
+			create table if not exists context_matrix_entries (
+				entry_id         text primary key,
+				realm            text not null default 'default',
+				milestone        text not null,
+				phase            text not null,
+				source_path      text not null,
+				source_sha256    text not null,
+				entry_kind       text not null check (entry_kind in ('decision', 'fact', 'warning', 'todo')),
+				body_redacted    text not null,
+				status           text not null default 'candidate' check (status in ('candidate', 'accepted', 'superseded')),
+				superseded_by    text null,
+				created_at       timestamptz not null default now()
+			);
+			create index if not exists context_matrix_entries_realm_milestone_phase_idx
+				on context_matrix_entries (realm, milestone, phase);
+			create index if not exists context_matrix_entries_source_sha256_idx
+				on context_matrix_entries (source_sha256)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */

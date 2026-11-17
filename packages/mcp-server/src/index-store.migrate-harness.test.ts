@@ -382,7 +382,8 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		const at = events.indexOf("check 48");
 		expect(events[at - 1]).toBe("check 47");
 		expect(events.slice(at, at + 4)).toEqual(["check 48", "ddl 48", "ddl 48", "ledger 48"]);
-		expect(events[at + 4]).toBe("drop memory_reviews_hash_idx");
+		expect(events[at + 4]).toBe("check 49");
+		expect(events.indexOf("drop memory_reviews_hash_idx")).toBeGreaterThan(events.indexOf("check 49"));
 		expect(ledger.has(48)).toBe(true);
 	});
 
