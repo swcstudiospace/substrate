@@ -1,5 +1,5 @@
 /**
- * `substrate steer open|heartbeat|close|sessions|status|queue|ack|list|listen|context`: Live Steering from a terminal.
+ * `substrate steer open|heartbeat|close|forget|sessions|status|queue|ack|list|listen|context`: Live Steering from a terminal.
  *
  * The commands are thin: they call the REST routes the server mounts for the steering MCP tools and print what comes
  * back. The server decides who may queue and acknowledge (operators on the allow-listed principals); an agent's token
@@ -50,6 +50,7 @@ export const EXIT_REFUSED = 3;
 export const STEER_USAGE =
 	"usage: substrate steer open [--repo R] [--binding-file PATH] [--json]\n" +
 	"       substrate steer heartbeat|close --session ID [--binding-file PATH] [--json]\n" +
+	"       substrate steer forget HANDLE [--binding-file PATH] [--surface S] [--json]   (removes the local record only; the server is not contacted)\n" +
 	"       substrate steer sessions [--repo R] [--limit N] [--json]\n" +
 	"       substrate steer status [--repo R] [--session ID [--binding-file PATH]] [--json]\n" +
 	"       substrate steer queue --session ID --action pause|redirect|annotate --body TEXT [--priority low|normal|high] [--conflicts] [--json]   (operators only)\n" +
@@ -97,14 +98,15 @@ export interface SteerDeps {
 // Grammar
 // ---------------------------------------------------------------------------
 
-type Sub = "open" | "heartbeat" | "close" | "sessions" | "status" | "queue" | "ack" | "list" | "listen" | "context";
+type Sub = "open" | "heartbeat" | "close" | "forget" | "sessions" | "status" | "queue" | "ack" | "list" | "listen" | "context";
 
-const SUBCOMMANDS: readonly Sub[] = ["open", "heartbeat", "close", "sessions", "status", "queue", "ack", "list", "listen", "context"];
+const SUBCOMMANDS: readonly Sub[] = ["open", "heartbeat", "close", "forget", "sessions", "status", "queue", "ack", "list", "listen", "context"];
 const VALUE_FLAGS: readonly string[] = ["repo", "limit", "session", "binding-file", "action", "body", "priority", "status", "max-wait-ms", "after", "format", "surface"];
 const ALLOWED: Record<Sub, readonly string[]> = {
 	open: ["repo", "binding-file", "json", "surface"],
 	heartbeat: ["session", "binding-file", "json", "surface"],
 	close: ["session", "binding-file", "json", "surface"],
+	forget: ["binding-file", "json", "surface"],
 	sessions: ["repo", "limit", "json", "surface"],
 	status: ["repo", "session", "binding-file", "json", "surface"],
 	queue: ["session", "action", "body", "priority", "conflicts", "json", "surface"],
@@ -168,6 +170,9 @@ function validate(parsed: ParsedSteer): string | undefined {
 		if (!DIRECTIVE_ID_PATTERN.test(positional[0] as string)) return `the directive id must be ${DIRECTIVE_ID_HINT}`;
 		if (flags.has("applied") === flags.has("declined")) return "ack needs exactly one of --applied or --declined";
 		if (flags.has("confirm") && !flags.has("applied")) return "--confirm only goes with --applied";
+	} else if (sub === "forget") {
+		if (positional.length !== 1) return "forget takes exactly one session handle";
+		if (!LIVE_SESSION_ID_PATTERN.test(positional[0] as string)) return "forget needs a server-issued live handle (ls_ followed by 64 lowercase hexadecimal characters)";
 	} else if (positional.length > 0) {
 		return `\`steer ${sub}\` takes no positional argument`;
 	}
@@ -344,6 +349,28 @@ export async function runSteer(argv: readonly string[], deps: SteerDeps): Promis
 				catch { deps.err("substrate steer close: closed on server; the matching local record could not be removed\n"); return EXIT_FAILED; }
 			}
 			if (json) jsonLine(result.value); else deps.out(`closed ${result.value.session_id}; at ${result.value.closed_at}\n`);
+			return EXIT_DONE;
+		}
+		case "forget": {
+			const handle = parsed.positional[0] as string;
+			const options: BindingRecordOptions = {
+				...(deps.bindingDirectory === undefined ? {} : { directory: deps.bindingDirectory }),
+				...(flag(parsed, "binding-file") === undefined ? {} : { path: flag(parsed, "binding-file") as string }),
+			};
+			let path: string;
+			let record: LiveSessionBindingRecord;
+			try {
+				const identity = serverIdentity(deps.url);
+				path = bindingRecordPath(identity, surface, handle, options);
+				record = loadBindingRecord(path, { server_identity: identity, surface, session_id: handle });
+			} catch {
+				deps.err("substrate steer forget: the private binding record is missing, unsafe or mismatched; nothing was removed\n");
+				return EXIT_FAILED;
+			}
+			try { removeBindingRecord(path, record); }
+			catch { deps.err("substrate steer forget: the matching local record could not be removed\n"); return EXIT_FAILED; }
+			if (json) jsonLine({ session_id: handle, forgotten: true });
+			else deps.out(`forgot ${handle}; the local record was removed; the server was not contacted\n`);
 			return EXIT_DONE;
 		}
 		case "sessions": {

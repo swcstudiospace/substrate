@@ -124,11 +124,12 @@ export class SteeringWaiters {
 		const finish = (result: SteeringWaitResult): void => {
 			if (done) return;
 			done = true;
-			if (timerSet) this.timers.clear(timer);
 			request.signal?.removeEventListener("abort", onAbort);
 			held.delete(waiter);
 			if (held.size === 0 && this.bySession.get(request.sessionId) === held) this.bySession.delete(request.sessionId);
 			this.total -= 1;
+			// Cleared last: a timer observer runs synchronously here, and must already see this waiter gone from `size`.
+			if (timerSet) this.timers.clear(timer);
 			resolve(result);
 		};
 		const onAbort = (): void => finish({ status: "aborted" });

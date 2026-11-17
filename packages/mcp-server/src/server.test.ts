@@ -1638,13 +1638,13 @@ describe("GET /events/stream", () => {
 			{ id: "e2", ts: BASE + 1, summary: "second" },
 			{ id: "e3", ts: BASE + 2, summary: "third" },
 		]);
-		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, {}, { streamPollMs: 10, streamIdleMs: 100 });
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, {}, { streamPollMs: 10, streamIdleMs: 1000 });
 		try {
 			const controller = new AbortController();
 			const response = await get("/events/stream?cursor=e1", { authorization: "Bearer tok-omp" }, controller.signal);
 			expect(response.status).toBe(200);
-			// The replay drains (e2, e3), then 100 ms of silence closes the stream
-			// from the server side — the client reconnects with Last-Event-ID and
+			// The replay drains (e2, e3), then the stream closes from the server side after 1 s of silence. The window is wide so a
+			// stalled event loop cannot cut the replay short; the client reconnects with Last-Event-ID and
 			// resumes, the ledger having held the gap.
 			const got = frames(await streamText(response, controller));
 			expect(got.map((frame) => frame.id)).toEqual(["e2", "e3"]);

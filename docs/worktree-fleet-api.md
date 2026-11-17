@@ -140,3 +140,22 @@ All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MI
 3. Run the reporter; `GET /worktrees?host=<host>` shows what it sent.
 
 To turn it off set the variable back to `off`: the routes answer 503 again and the rows stay, unread, until the next time it is on or an operator drops the table.
+
+## Repository scope (phase 72)
+
+Two JSON variables decide which repositories a surface may address, and where each repository lives on this host. Both are read once at boot; a malformed value refuses the boot, so a scope that cannot be read never defaults to open.
+
+- `SUBSTRATE_REPO_REGISTRY`: `{"owner/name": {"checkouts": ["/abs"], "worktrees": ["/abs"]}}`. A path is placed in a repository only by this table. Two repositories may not share or nest a directory.
+- `SUBSTRATE_REPO_SCOPES`: `{"<surface>": ["owner/name"]}`. Unset means scoping is off and every caller may address every repository, as before. Set, a surface missing from the object, and every anonymous caller, is granted nothing.
+
+What is refused, and before what:
+
+- `POST /drift` and `drift_scan` refuse a repository outside the grant, or a path that does not resolve (through symlinks and `..`) into a registered directory of the named repository. The refusal runs no git and reads no trail.
+- `GET /worktrees` and `worktree_list` filter in the store to the granted repositories; naming another repository is a 403.
+- `GET /corpus/proof`, `POST /corpus/plan`, `POST /corpus/ingest` refuse a repository outside the grant before any manifest or plane read. `GET /corpus/status` and `POST /corpus/reconcile` read every repository at once, so they are refused to a scoped surface.
+- A live session issued or changed for an ungranted repository answers the same `not-found` an unknown session does.
+- `substrate worktree` runs as surface `claude-code` and reads the same two variables. Every root must lie in a registered directory of a granted repository, and `--repo`, `provision`, `merge-back` and `guard` paths must too. A refusal exits 2 before any git call.
+
+A refusal is recorded as a `repo.scope-refused` ledger warning with the route, the reason code and a 16-hex digest of what was asked for; the requested path or repository is never written. An anonymous refusal is recorded by the route audit. The corpus root and anchor are not gated: they are digests over every repository and reveal no document content.
+
+The scoped credential is the surface bearer plus its grant. No per-repository secret exists; that is a recorded open decision.

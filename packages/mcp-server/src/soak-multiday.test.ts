@@ -73,7 +73,8 @@ import {
 } from "./soak.testkit.ts";
 
 afterAll(cleanupTemp);
-setDefaultTimeout(300_000);
+// The 72 hour simulation is CPU-bound and takes about 280 s on this host; 900 s keeps host load from failing it.
+setDefaultTimeout(900_000);
 
 type Json = Record<string, unknown>;
 

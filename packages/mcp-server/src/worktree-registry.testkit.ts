@@ -46,7 +46,7 @@ function record(repo: string, path: string, overrides: Partial<ReportedWorktree>
 }
 
 function filter(overrides: Partial<WorktreeStoreFilter>): WorktreeStoreFilter {
-	return { repo: null, host: null, state: "all", limit: 500, staleBefore: new Date(0), ...overrides };
+	return { repo: null, host: null, state: "all", limit: 500, staleBefore: new Date(0), repos: null, ...overrides };
 }
 
 export function worktreeStoreContract(harness: () => ContractHarness): void {

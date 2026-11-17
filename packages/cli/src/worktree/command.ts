@@ -71,6 +71,7 @@ import {
 import type { EventInput } from "../../../mcp-server/src/types.ts";
 import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { parseWorktreeArgs, type WorktreeArgs } from "./args.ts";
+import { provisionTarget, scopeRefusal } from "./scope.ts";
 import { commandMergeBack } from "./merge-back.ts";
 
 export const WORKTREE_USAGE =
@@ -507,13 +508,8 @@ async function commandProvision(args: WorktreeArgs, deps: WorktreeDeps): Promise
 	const branch = args.branch;
 	if (branch.startsWith("-") || (await deps.git(["check-ref-format", "--branch", branch], deps.cwd)).code !== 0) return usageError(deps, `${branch} is not a valid branch name\n`);
 	if ((await gitOut(deps.git, ["rev-parse", "--git-dir"], repoDir)) === null) return usageError(deps, `${repoDir} is not a git repository\n`);
-	let target: string;
-	if (args.path !== undefined) target = resolve(deps.cwd, args.path);
-	else {
-		const first = roots(args, deps)[0];
-		if (first === undefined) return usageError(deps, `${NO_ROOT.trim()}, or pass --path DIR\n`);
-		target = resolve(first, branch.replace(/[\\/]/g, "-"));
-	}
+	const target = provisionTarget(args, deps.cwd, roots(args, deps)[0]);
+	if (target === null) return usageError(deps, `${NO_ROOT.trim()}, or pass --path DIR\n`);
 	try {
 		assertDiskFloor(target, minFreeGbFromEnv(deps.env), deps.freeBytes);
 	} catch (error) {
@@ -582,6 +578,8 @@ export async function runWorktree(argv: readonly string[], deps: WorktreeDeps): 
 		return 2;
 	}
 	const args = parsed.args;
+	const refused = await scopeRefusal(args, deps, roots(args, deps));
+	if (refused !== null) return usageError(deps, refused);
 	switch (args.command) {
 		case "list":
 		case "status":

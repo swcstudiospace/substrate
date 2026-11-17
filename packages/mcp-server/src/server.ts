@@ -109,6 +109,8 @@ import {
 } from "./observe.ts";
 import { MetricHistoryMemo, bucketedValues, metricHistoryAnswer } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
+import { restDeclaration, toolDeclaration } from "./route-policy.ts";
+import { refusalDigest } from "./repo-scope.ts";
 import { LIVE_BRIEF_INPUT, type Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
@@ -959,6 +961,13 @@ export function createHttpServer(
 			sendJson(res, 415, { error: "request body must be application/json" });
 			return;
 		}
+		// Phase 72, default deny: under scoping a route no declaration names is refused to every caller before its handler runs.
+		if (config.repoScope.enforced && restDeclaration(url.pathname) === undefined) {
+			if (surface === null) await auditRest(observability, null, "not-declared-for-scope", { route_sha256: refusalDigest(url.pathname) });
+			const refusal = await substrate.refuseUndeclared(url.pathname, surface);
+			sendJson(res, refusal.status, refusal.body);
+			return;
+		}
 
 		// uplift-3 N3: admission, after the bearer is known and before any handler.
 		// Monitor GETs are not metered; `/mcp` is metered per tool call in
@@ -1236,6 +1245,12 @@ export function createHttpServer(
 					sendJson(res, 403, { error: briefRefusal });
 					return;
 				}
+				// Phase 72: a brief names a repository and an unnamed brief can span them, so a scoped caller must name a granted one.
+				const briefScope = await substrate.scopedBriefRefusal(surface, { repo: typeof body.repo === "string" ? body.repo : null, graph_id: typeof body.graph_id === "string" ? body.graph_id : null });
+				if (briefScope !== null) {
+					sendJson(res, briefScope.status, briefScope.body);
+					return;
+				}
 				if (body.steering_session_id === undefined && !(await auditedRest(res, observability, surface, "brief", body))) return;
 				// uplift-4 S1: an unknown profile is the caller's mistake, refused here
 				// and never coerced to one the caller did not ask for.
@@ -1329,6 +1344,12 @@ export function createHttpServer(
 				}
 				// `x-substrate-replay: 1` marks a re-send of an earlier attempt (U5-4a). Read here, honoured
 				// (or ignored, under `off`) by `Substrate.emit`.
+				// Phase 72: an event is a write to the repository it names, or to its graph's repository; under scope it must be granted.
+				const writeGate = await substrate.scopedWriteRefusal("events", surface, { repo: typeof body.repo === "string" ? body.repo : null, graph_id: typeof body.graph_id === "string" ? body.graph_id : null });
+				if (writeGate !== null) {
+					sendJson(res, writeGate.status, writeGate.body);
+					return;
+				}
 				const result = await substrate.emit(
 					{
 						...(body as object),
@@ -1367,7 +1388,12 @@ export function createHttpServer(
 				// A read, so fail-open — but recorded. `/events/query` was the one REST door
 				// to a store that left no trace of who read it.
 				if (!(await auditedRest(res, observability, surface, "events_query", body))) return;
-				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
+				const outcome = await substrate.queryEventsFor(body as Parameters<Substrate["queryEvents"]>[0], surface);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				const result = outcome.result;
 				// An empty window is a real answer, so 200; 503 is the ledger not answering.
 				sendJson(res, result.error ? 503 : 200, result);
 				return;
@@ -1459,6 +1485,11 @@ export function createHttpServer(
 			const repo = "repo" in parsed && typeof parsed.repo === "string" ? parsed.repo : undefined;
 			const fields: Record<string, unknown> = { query: parsed.query };
 			if (!(await auditedRest(res, observability, surface, "memory_recall", repo === undefined ? fields : { ...fields, repo }))) return;
+			const memoryScope = await substrate.scopedRepoRefusal("memory_recall", surface, repo ?? null, true);
+			if (memoryScope !== null) {
+				sendJson(res, memoryScope.status, memoryScope.body);
+				return;
+			}
 			sendJson(res, 200, await substrate.recallMemories(fields, surface, repo));
 			return;
 		}
@@ -1513,6 +1544,13 @@ export function createHttpServer(
 					});
 					return;
 				}
+				// Phase 72: a handoff is a write to the repository it names or to its graph's; the one it lands in must be granted, and a
+				// named graph must belong to the named repository.
+				const handoffScope = await substrate.scopedWriteRefusal("handoff", surface, { repo: typeof body.repo === "string" ? body.repo : null, graph_id: typeof body.graph_id === "string" ? body.graph_id : null });
+				if (handoffScope !== null) {
+					sendJson(res, handoffScope.status, handoffScope.body);
+					return;
+				}
 				const result = await substrate.handoff({
 					from: { surface: sender, session_id: typeof body.session_id === "string" ? body.session_id : null },
 					to: { surface: to, session_id: typeof body.to_session_id === "string" ? body.to_session_id : null },
@@ -1545,14 +1583,19 @@ export function createHttpServer(
 					return;
 				}
 				if (!(await auditedRest(res, observability, surface, "drift", body))) return;
-				const report = await substrate.driftScan({
+				const outcome = await substrate.scopedDriftScan({
 					repo: body.repo,
 					path: typeof body.path === "string" ? body.path : null,
 					git_tip: typeof body.git_tip === "string" ? body.git_tip : null,
 					branch: typeof body.branch === "string" ? body.branch : null,
 					...(typeof body.idle_seconds === "number" ? { idle_seconds: body.idle_seconds } : {}),
 					...(typeof body.limit === "number" ? { limit: body.limit } : {}),
-				});
+				}, surface);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				const report = outcome.report;
 				if (body.format === "text") {
 					send(res, 200, `${formatDrift(report)}\n`, "text/plain; charset=utf-8");
 					return;
@@ -1579,6 +1622,12 @@ export function createHttpServer(
 			// answers degraded rather than refusing the turn.
 			if (req.method === "POST" && url.pathname === "/docs/search") {
 				const fields = DOCS_SEARCH_INPUT.omit({ session_binding: true }).parse(JSON.parse(await readBody(req)));
+				// Phase 72: the docs corpus spans every repository, so a scoped caller is refused before any retrieval.
+				const docsScope = await substrate.scopedDocsRefusal("docs_search", surface);
+				if (docsScope !== null) {
+					sendJson(res, docsScope.status, docsScope.body);
+					return;
+				}
 				if (fields.steering_session_id === undefined && !(await auditedRest(res, observability, surface, "docs_search", fields))) return;
 				// SPE-19388: the REST search reports into the same process-wide
 				// RAG machine as the MCP tool. Replies are unchanged.
@@ -1829,6 +1878,12 @@ export function createHttpServer(
 			// like `/docs/search`: anonymous callers reach the audit gate and
 			// an unreachable plane degrades rather than refusing the turn.
 			if (req.method === "POST" && url.pathname === "/docs/lightrag/query") {
+				// Phase 72: the LightRAG corpus and its Hindsight fallback span every repository, so a scoped caller is refused first.
+				const lightragScope = await substrate.scopedDocsRefusal("docs_lightrag_query", surface);
+				if (lightragScope !== null) {
+					sendJson(res, lightragScope.status, lightragScope.body);
+					return;
+				}
 				const parsed: unknown = JSON.parse(await readBody(req));
 				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 					sendJson(res, 400, { error: "request body must be a JSON object" });
@@ -2268,6 +2323,11 @@ export function createHttpServer(
 					return;
 				}
 				if (!(await auditedRest(res, observability, surface, "session_context", { repo_id: parsed.value.repoId, session_id: parsed.value.sessionId, limit: parsed.value.limit ?? null }))) return;
+				const contextScope = await substrate.scopedRepoRefusal("session_context", surface, parsed.value.repoId, true);
+				if (contextScope !== null) {
+					sendJson(res, contextScope.status, contextScope.body);
+					return;
+				}
 				sendJson(res, 200, await substrate.sessionContext(parsed.value));
 				return;
 			}
@@ -2343,7 +2403,7 @@ export function createHttpServer(
 				}
 				const { repo, host, state, limit } = query.value;
 				if (!(await auditedRest(res, observability, surface, "worktree_list", { ...(repo === null ? {} : { repo }), ...(host === null ? {} : { host }), state, limit }))) return;
-				const outcome = await substrate.listWorktrees(query.value);
+				const outcome = await substrate.listWorktrees(query.value, surface);
 				if (!outcome.ok) {
 					sendJson(res, outcome.status, outcome.body);
 					return;
@@ -2686,6 +2746,17 @@ async function handleMcp(
 	// any member runs and before the audit, which records actions, not refusals.
 	// One request token alone would let a batch of fifty calls cost one.
 	const calls = toolCallsIn(body);
+	// Phase 72, default deny: under scoping a tool no declaration names is refused before any member of the batch runs.
+	if (substrate.config.repoScope.enforced) {
+		for (const call of calls) {
+			if (toolDeclaration(call.tool) === undefined) {
+				if (caller.surface === null) await auditRest(observability, null, "not-declared-for-scope", { tool_sha256: refusalDigest(call.tool) });
+				const refusal = await substrate.refuseUndeclared(call.tool, caller.surface);
+				sendJson(res, refusal.status, refusal.body);
+				return;
+			}
+		}
+	}
 	const refused = await admitBatch(admission, caller.surface, calls);
 	if (refused !== null) {
 		sendBudgetRefusal(res, refused, budgetRefusal(body, refused));

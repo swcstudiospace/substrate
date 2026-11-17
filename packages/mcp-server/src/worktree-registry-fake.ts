@@ -53,6 +53,7 @@ export class MemoryWorktreeRegistry implements WorktreeRegistryStore {
 		const staleBefore = filter.staleBefore.getTime();
 		const matching = [...this.rows.values()].filter((row) => {
 			if (filter.repo !== null && row.record.repo !== filter.repo) return false;
+			if (filter.repos !== null && !filter.repos.includes(row.record.repo.toLowerCase())) return false;
 			if (filter.host !== null && row.host !== filter.host) return false;
 			if (filter.state === "dirty") return row.record.dirty;
 			if (filter.state === "stale") return row.record.last_commit_at !== null && Date.parse(row.record.last_commit_at) < staleBefore;
