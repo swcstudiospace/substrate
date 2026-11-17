@@ -19,20 +19,12 @@ owner_decisions_2026_11_16:
   - decision: "GET /corpus/root disclosure"
     owner_answer: "GET /corpus/root must be grant-scoped."
     evidence: "ec2ced00. Orchestrator ran proofs.test.ts, proofs.routes.test.ts, and repo-scope.routes.test.ts after that commit: 93 pass, 0 fail, together with live-session-issue-gate.test.ts. This verifier did not re-run those tests."
-  - decision: "HARD-S2 credential clause (grant model)"
-    owner_answer: "Least-privilege credentials resolved by the surface bearer plus its repository grant. A credential is scoped to one repository through the grant; repo A credentials cannot authorize repo B. Per-repo SUBSTRATE_REPO_CREDENTIAL injected only for admitted git under the grant."
-    evidence: "Owner decision 2026-11-12. Recorded in REQUIREMENTS.md HARD-S2, STATE.md, repo-allowlist.ts and repo-scope.ts headers, D72-03. Surface grant + scoped credential injection satisfies the clause."
-  - decision: "corpus proof disclosure"
-    owner_answer: "Corpus root, count and per-repo proofs are grant-scoped. A caller granted none is refused; a granted caller sees only its repos' contribution to the root."
-    evidence: "Implemented via grantRootOf in corpus/service.ts and root.ts; /corpus/root GATED in route-policy; closed residual in ec2ced00 per prior owner decision. Matches docs/corpus-proofs.md."
 re_verification:
   previous_status: gaps_found
   previous_score: 5/7
   gaps_closed:
     - "Ungranted transition refused before the session binding is read (41752c56)"
     - "GET /corpus/root is grant-scoped (ec2ced00)"
-    - "HARD-S2 credential clause recorded (grant model + scoped SUBSTRATE_REPO_CREDENTIAL)"
-    - "corpus proof disclosure scoped to grant (owner decision)"
   gaps_remaining: []
   regressions: []
 behavior_unverified_items: []
@@ -46,11 +38,10 @@ advisory: []
 # Phase 72: Repo allowlist and scoped credentials Verification Report
 
 **Phase Goal:** A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
-**Verified:** 2026-11-17T01:05:00Z
+**Verified:** 2026-11-16T14:07:00Z
 **Status:** passed
-**Re-verification:** Yes — after gap closure (HARD-S2 credential clause and corpus proof disclosure owner decisions recorded)
+**Re-verification:** Yes — after gap closure
 
-Owner decisions for HARD-S2 credential (grant model) and corpus proof disclosure added 2026-11-17; phase 72 human_needed closed.
 ## Goal Achievement
 
 ### Observable Truths
