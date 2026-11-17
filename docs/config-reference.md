@@ -74,6 +74,12 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LEDGER_CHAIN_CACHE_MAX` | number | 10000 | 1..1000000 | 10000 sessions. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS` | number | 30 | 1..3650 | 30 days. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_WRITE_PROBE_S` | number | 60 | 0..86400 (0 never probes) | 60 s. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_MAX` | number | 256 | positive integer | 256 entries (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_PATH` | path | none | file path | buffer off: a failed write answers stored: false, as before. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` | number | 10 | positive integer | 10 attempts (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` | number | 1000 | positive integer ms | 1000 ms (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` | number | 60000 | positive integer ms | 60000 ms (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_DEAD_LETTER_PATH` | path | none | file path, required while SUBSTRATE_EVENT_BUFFER_PATH is set | no dead-letter file: boot refuses while the buffer is on. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_TTL` | string | none | Greptime duration (180d, 4320h, 1h30m) | no ALTER: retention is left as the table has it; a malformed value refuses to boot. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | number | 2 | 0..100000 | 2 hours. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | path | none | off-box mount | substrate ledger archive refuses by name unless --out is given. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |

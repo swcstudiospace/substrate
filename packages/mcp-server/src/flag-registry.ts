@@ -351,6 +351,12 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_LEDGER_CHAIN_CACHE_MAX", kind: "number", plane: "ledger", default: "10000", allowed: "1..1000000", unset: "10000 sessions", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS", kind: "number", plane: "ledger", default: "30", allowed: "1..3650", unset: "30 days", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{ name: "SUBSTRATE_LEDGER_WRITE_PROBE_S", kind: "number", plane: "ledger", default: "60", allowed: "0..86400 (0 never probes)", unset: "60 s", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_MAX", kind: "number", plane: "ledger", default: "256", allowed: "positive integer", unset: "256 entries (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path", unset: "buffer off: a failed write answers stored: false, as before", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS", kind: "number", plane: "ledger", default: "10", allowed: "positive integer", unset: "10 attempts (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_BACKOFF_MS", kind: "number", plane: "ledger", default: "1000", allowed: "positive integer ms", unset: "1000 ms (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS", kind: "number", plane: "ledger", default: "60000", allowed: "positive integer ms", unset: "60000 ms (read only while the buffer is on)", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
+	{ name: "SUBSTRATE_EVENT_DEAD_LETTER_PATH", kind: "path", plane: "ledger", default: "none", allowed: "file path, required while SUBSTRATE_EVENT_BUFFER_PATH is set", unset: "no dead-letter file: boot refuses while the buffer is on", readBy: "mcp-server/config.ts", documented: true, doc: "docs/greptime-ledger.md" },
 	{
 		name: "SUBSTRATE_LEDGER_TTL",
 		kind: "string",
