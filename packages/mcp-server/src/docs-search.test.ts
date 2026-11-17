@@ -1790,4 +1790,114 @@ describe("docs_search tandem recall (phase 57c)", () => {
 		expect(on.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
 		expect(searchReplyStorable(on)).toBe(false);
 	});
+
+	describe("on the LightRAG backend (SC1)", () => {
+		const lightragConfig = loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", SUBSTRATE_RAG_RETRY_BASE_MS: "1" });
+
+		/** A LightRAG `/query` stand-in: answers one chunk, or 503 when `down`, and counts every query it gets. */
+		function lightragPlane(options: { down?: boolean } = {}): { fetch: FetchLike; queries: () => number } {
+			let queries = 0;
+			const fetch: FetchLike = async (input, init) => {
+				const url = new URL(String(input));
+				if (init?.method !== "POST" || url.pathname !== "/query") return Response.json({ detail: "no route" }, { status: 404 });
+				queries += 1;
+				if (options.down === true) return new Response("unavailable", { status: 503 });
+				return Response.json({ status: "success", data: { chunks: [{ content: "Served by LightRAG.", document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
+			};
+			return { fetch, queries: () => queries };
+		}
+
+		function lightragSubstrate(options: { lightrag: FetchLike; hindsight: HindsightFake; greptime: GreptimeClient | null; cache?: ReadThroughCache }): Substrate {
+			return new Substrate(lightragConfig, {
+				index: null,
+				greptime: options.greptime,
+				lightragFetch: options.lightrag,
+				hindsightFetch: options.hindsight.fetch,
+				cache: options.cache ?? new ReadThroughCache({ redis: null, enabled: false, log: () => {} }),
+			});
+		}
+
+		test("with the flag, chunks come from LightRAG and the context carries recalled memories and the session's last five events", async () => {
+			const lightrag = lightragPlane();
+			const { greptime, reads } = ledgerStub(sessionRows(7));
+			const reply = await lightragSubstrate({ lightrag: lightrag.fetch, hindsight: recallable(), greptime }).searchDocs(
+				{ question: "where is the plan?", session_id: "s-1", context: true },
+				"cursor",
+			);
+			expect(reply).toMatchObject({ backend: "lightrag" });
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+			expect(lightrag.queries()).toBe(1);
+			expect(reply.context?.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+			expect(reply.context?.degraded).toBeUndefined();
+			expect(reply.context?.memories.map((memory) => memory.id)).toEqual(["m2", "m4", "m3"]);
+			expect(reply.context?.events.map((event) => event.id)).toEqual(["evt-2", "evt-3", "evt-4", "evt-5", "evt-6"]);
+			expect(reads).toEqual([["session_id", "s-1"]]);
+		});
+
+		test("without the flag the LightRAG reply has no context key, and neither recall nor the ledger is read", async () => {
+			const lightrag = lightragPlane();
+			const hindsight = recallable();
+			const { greptime, reads } = ledgerStub(sessionRows(7));
+			const reply = await lightragSubstrate({ lightrag: lightrag.fetch, hindsight, greptime }).searchDocs(
+				{ question: "where is the plan?", session_id: "s-1" },
+				"cursor",
+			);
+			expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["Served by LightRAG."]);
+			expect(Object.hasOwn(reply, "context")).toBe(false);
+			expect(hindsight.recalls()).toEqual([]);
+			expect(reads).toEqual([]);
+		});
+
+		test("with no session, the LightRAG context has no events, names no-session, and keeps the memories", async () => {
+			const lightrag = lightragPlane();
+			const { greptime, reads } = ledgerStub(sessionRows(7));
+			const reply = await lightragSubstrate({ lightrag: lightrag.fetch, hindsight: recallable(), greptime }).searchDocs(
+				{ question: "where is the plan?", context: true },
+				"cursor",
+			);
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.context?.events).toEqual([]);
+			expect(reply.context?.degraded).toBe("no-session");
+			expect(reply.context?.memories).toHaveLength(3);
+			expect(reads).toEqual([]);
+		});
+
+		test("a LightRAG context reply is never stored: the cache keeps the LightRAG answer, and a repeat keeps its own events", async () => {
+			const lightrag = lightragPlane();
+			const redis = new FakeRedis();
+			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+			const { greptime } = ledgerStub(sessionRows(7));
+			const substrate = lightragSubstrate({ lightrag: lightrag.fetch, hindsight: recallable(), greptime, cache });
+			const request = { question: "where is the plan?", session_id: "s-1", context: true };
+			const first = await substrate.searchDocs(request, "cursor");
+			expect(first.context?.memories).toHaveLength(3);
+			const stored = [...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"));
+			expect(stored).toHaveLength(1);
+			const envelope: { v?: Record<string, unknown> } = JSON.parse(stored[0]?.[1] ?? "{}");
+			expect(envelope.v).toBeDefined();
+			expect(Object.hasOwn(envelope.v ?? {}, "context")).toBe(false);
+			const second = await substrate.searchDocs(request, "cursor");
+			expect(second.chunks).toEqual(first.chunks);
+			expect(second.context?.events).toHaveLength(5);
+			expect(lightrag.queries()).toBe(1);
+		});
+
+		test("a LightRAG search that fails its retries is answered from Hindsight, is never stored, and names the LightRAG reason", async () => {
+			const lightrag = lightragPlane({ down: true });
+			const redis = new FakeRedis();
+			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+			const substrate = lightragSubstrate({ lightrag: lightrag.fetch, hindsight: recallable(), greptime: null, cache });
+			const request = { question: "where is the plan?" };
+			const first = await substrate.searchDocs(request, "cursor");
+			expect(first).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight" });
+			expect(first.reason).toMatch(/^lightrag/);
+			expect(first.chunks.length).toBeGreaterThan(0);
+			expect(first.chunks.every((citation) => citation.source_url.startsWith("hindsight:"))).toBe(true);
+			expect([...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"))).toHaveLength(0);
+			const second = await substrate.searchDocs(request, "cursor");
+			expect(second).toMatchObject({ degraded: true, fallback: "hindsight" });
+			expect([...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"))).toHaveLength(0);
+		});
+	});
 });

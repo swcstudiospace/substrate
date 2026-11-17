@@ -44,6 +44,8 @@ session's recent events, framed as untrusted. The section "Hybrid retrieval
 and context augmentation" in `docs/docs-search-ingest.md` sets out its
 budgets and degraded reasons.
 
+**Open item D46-i.** The paragraph above names `query` and `limit` as the `docs_search` arguments. The server's input schema takes `question`, `datasets`, `session_id` and `context`, and it does not accept `limit`. This page keeps that wording until a separate docs change corrects it.
+
 `docs_ingest` (DOCS-02) is a publication path: only `substrate` and operator
 tokens (anonymous 401 before the body is read, agent surfaces 403). The page
 carries `dataset`, `source_url` (canonical
@@ -173,8 +175,8 @@ when it is the selected plane.
 
 ## Proof
 
-Isolated: unit tests against in-process fakes, and `bun run smoke:docs`
-(`scripts/docs-smoke.ts`) against a twin started with
+Isolated: unit tests against in-process fakes, and `bun scripts/docs-smoke.ts --name <owned>`
+against a twin started with
 `rehearsal up --ragflow-fixture` — a loopback fake RAGFlow with scriptable
 timeout/error-code/malformed modes, run-dir manifest and fixture registry
 (see `docs/rehearsal.md`). Live (operator-approved, explicitly not run here):
