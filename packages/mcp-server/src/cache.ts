@@ -178,6 +178,12 @@ export interface CacheRedis {
 	eval?(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown>;
 	/** When the client is refusing to reconnect, epoch ms; absent or null otherwise. */
 	cooldownUntil?(): number | null;
+	/**
+	 * One SCAN step over `match` from `cursor` (`"0"` to start), at most `count` keys a page. Returns the next cursor and the page. Read-only: used by the reconcile scan.
+	 */
+	scan?(match: string, count: number, cursor: string): Promise<[string, string[]]>;
+	/** Remove keys with UNLINK. Returns how many were removed. Used only by the confirmed reconcile repair. */
+	unlink?(keys: readonly string[]): Promise<number>;
 }
 
 export interface ReadThroughOptions {
@@ -397,7 +403,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	// is one outcome — a failed connect still charges the breaker, a successful
 	// one on its own never clears it — and an open breaker refuses before any
 	// socket is opened, so no cooldown starts from a refusal.
-	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
+	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval" | "scan" | "unlink", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
 		if (cooldownUntil !== null && now() < cooldownUntil) {
 			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
@@ -422,6 +428,8 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 		// sent each time rather than `EVALSHA`, so a flushed or restarted server
 		// never answers NOSCRIPT inside the one command budget a request has.
 		eval: (script, keys, args) => run("eval", (redis) => redis.eval(script, keys.length, ...keys, ...args)),
+		scan: (match, count, cursor) => run("scan", (redis) => redis.scan(cursor, "MATCH", match, "COUNT", count)),
+		unlink: (keys) => run("unlink", (redis) => redis.unlink(...keys)),
 		cooldownUntil: () => (cooldownUntil !== null && now() < cooldownUntil ? cooldownUntil : null),
 	};
 }
@@ -1043,6 +1051,54 @@ export class ReadThroughCache {
 			const reason = redact(stripRedisUrl(cause instanceof Error ? cause.message : String(cause)));
 			return cause instanceof BreakerOpenError ? { ok: false, reason, breakerRetryAfterMs: cause.retryAfterMs } : { ok: false, reason };
 		}
+	}
+
+	/**
+	 * Keys under `match`, read-only: a SCAN loop that stops at the end of the cursor or once `limit` keys are in hand.
+	 * `truncated` is true when keys remained past the limit, so a partial list is never read as a whole one. Empty when
+	 * the cache is off. A client without SCAN, or a failed command, throws: a scan that did not run must not read as clean.
+	 */
+	async scanKeys(match: string, limit: number): Promise<{ keys: string[]; truncated: boolean }> {
+		const redis = this.redis;
+		// A cache that is off cannot be enumerated, so the scan is incomplete: a reconcile over it is never clean.
+		if (!this.enabled || !redis) return { keys: [], truncated: true };
+		const scan = redis.scan;
+		if (!scan) throw new Error("cache client has no SCAN");
+		const cap = Math.max(1, Math.floor(limit));
+		const scanCount = 500;
+		const found = new Set<string>();
+		let cursor = "0";
+		do {
+			const [next, page] = await this.attempt(() => scan.call(redis, match, scanCount, cursor));
+			cursor = next;
+			for (const key of page) found.add(key);
+		} while (cursor !== "0" && found.size <= cap);
+		this.noteConnected();
+		const keys = [...found];
+		return { keys: keys.slice(0, cap), truncated: cursor !== "0" || keys.length > cap };
+	}
+
+	/**
+	 * Remove keys with UNLINK in batches of at most 500 and return how many went. The only write the reconcile path makes,
+	 * and only from the confirmed repair. Nothing is removed when the cache is off; a client without UNLINK throws. `onBatch`
+	 * is called once after each batch with that batch's removed count, before the next batch starts, so a caller whose later
+	 * batch fails still knows what the earlier ones removed.
+	 */
+	async unlinkKeys(keys: readonly string[], onBatch?: (removed: number) => void): Promise<number> {
+		const redis = this.redis;
+		if (!this.enabled || !redis) return 0;
+		const unlink = redis.unlink;
+		if (!unlink) throw new Error("cache client has no UNLINK");
+		const batchSize = 500;
+		let removed = 0;
+		for (let from = 0; from < keys.length; from += batchSize) {
+			const batch = keys.slice(from, from + batchSize);
+			const batchRemoved = await this.attempt(() => unlink.call(redis, batch));
+			removed += batchRemoved;
+			onBatch?.(batchRemoved);
+		}
+		if (keys.length > 0) this.noteConnected();
+		return removed;
 	}
 
 	private mode(): CacheMode {

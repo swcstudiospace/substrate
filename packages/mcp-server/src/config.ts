@@ -31,6 +31,7 @@ import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
 import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
+import { DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
 
@@ -648,6 +649,11 @@ export interface SubstrateConfig {
 	 */
 	retainOutbox: { path: string | null; max: number; maxAttempts: number; drainMs: number };
 	/**
+	 * The telemetry buffer (phase 76). `null` unless `SUBSTRATE_EVENT_BUFFER_PATH` is set: then a failed event write is buffered,
+	 * and the buffer refuses to boot without its dead-letter file. Unset, a failed write answers `stored: false` as it always has.
+	 */
+	eventBuffer: EventBufferSettings | null;
+	/**
 	 * Which Hindsight routing keys were present, for the boot warnings only:
 	 * the legacy single-bank key is unread, and a URL without a bank list means
 	 * recall reads the caller's own bank only. Presence, never a value.
@@ -664,6 +670,8 @@ export interface SubstrateConfig {
 	corpus: CorpusSettings;
 	/** The docs learning loop (v1.7 phase 66): telemetry, the authority re-rank and the gap threshold. Every switch is off by default. */
 	docsReflect: DocsReflectSettings;
+	/** The scheduled reconcile (Phase 78, D78-7): `SUBSTRATE_RECONCILE_INTERVAL_S` and `SUBSTRATE_RECONCILE_WINDOW_HOURS`. Off by default. */
+	reconcile: ReconcileSettings;
 	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
 	docsSlo: SloThresholds;
 	/**
@@ -1200,6 +1208,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			maxAttempts: positiveIntOr(env.SUBSTRATE_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_MAX_ATTEMPTS),
 			drainMs: positiveIntOr(env.SUBSTRATE_RETAIN_DRAIN_MS, DEFAULT_RETAIN_DRAIN_MS),
 		},
+		eventBuffer: loadEventBufferSettings(env),
 		hindsightEnv: {
 			legacyBankSet: (env.HINDSIGHT_BANK?.trim() ?? "") !== "",
 			urlSet: (env.HINDSIGHT_URL?.trim() ?? "") !== "",
@@ -1210,6 +1219,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		corpus: loadCorpusSettings(env),
 		planningHashStore: (env.SUBSTRATE_PLANNING_HASH_STORE?.trim().toLowerCase() ?? "") === "on",
 		docsReflect: loadDocsReflectSettings(env),
+		reconcile: loadReconcileSettings(env),
 		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
@@ -1563,6 +1573,41 @@ export function loadDocsReflectSettings(env: Record<string, string | undefined>)
 		rerank: rerank === "shadow" || rerank === "on" ? rerank : "off",
 		gapScore: unitIntervalOr(env.SUBSTRATE_DOCS_GAP_SCORE, DOCS_GAP_SCORE_DEFAULT),
 	};
+}
+
+/** The scheduled reconcile's two knobs (Phase 78, D78-7). */
+export interface ReconcileSettings {
+	/** Seconds between scheduled runs (`SUBSTRATE_RECONCILE_INTERVAL_S`); `0` is off, and a value above 0 is at least 60. */
+	intervalS: number;
+	/** Hours of ledger and index history each run compares (`SUBSTRATE_RECONCILE_WINDOW_HOURS`), from 1 to 168. */
+	windowHours: number;
+}
+
+/** The default window in hours (`SUBSTRATE_RECONCILE_WINDOW_HOURS`). */
+export const DEFAULT_RECONCILE_WINDOW_HOURS = 24;
+/** The longest interval `setInterval` can hold: its delay is a signed 32-bit count of milliseconds, and a longer one fires at once. */
+export const RECONCILE_MAX_INTERVAL_S = 2_147_483;
+
+/**
+ * `SUBSTRATE_RECONCILE_*` as the server reads them. An unset or blank interval is 0 (off); a value above 0 is clamped into
+ * 60 to `RECONCILE_MAX_INTERVAL_S` seconds. The window is clamped into 1 to 168 hours, 24 by default. A value that is not a
+ * whole number, a negative one included, refuses boot with a ConfigError that names the variable.
+ */
+export function loadReconcileSettings(env: Record<string, string | undefined> = process.env): ReconcileSettings {
+	const interval = wholeNumberOrRefuse("SUBSTRATE_RECONCILE_INTERVAL_S", env.SUBSTRATE_RECONCILE_INTERVAL_S);
+	const hours = wholeNumberOrRefuse("SUBSTRATE_RECONCILE_WINDOW_HOURS", env.SUBSTRATE_RECONCILE_WINDOW_HOURS);
+	return {
+		intervalS: interval === null || interval === 0 ? 0 : Math.min(RECONCILE_MAX_INTERVAL_S, Math.max(60, interval)),
+		windowHours: hours === null ? DEFAULT_RECONCILE_WINDOW_HOURS : Math.min(168, Math.max(1, hours)),
+	};
+}
+
+/** A whole number, or null when the variable is unset or blank. Anything else, a negative number included, refuses boot. */
+function wholeNumberOrRefuse(name: string, raw: string | undefined): number | null {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return null;
+	if (!/^\d+$/.test(trimmed)) throw new ConfigError(`${name}=${JSON.stringify(trimmed)} is not a whole number; set one, or unset it for the default`);
+	return Number(trimmed);
 }
 
 /**
@@ -2504,6 +2549,41 @@ function positiveIntOr(raw: string | undefined, fallback: number): number {
 	if (!/^\d+$/.test(trimmed)) return fallback;
 	const value = Number(trimmed);
 	return value > 0 ? value : fallback;
+}
+
+/** The telemetry buffer's settings, present only while the buffer is on. */
+export interface EventBufferSettings {
+	path: string;
+	deadLetterPath: string;
+	max: number;
+	maxAttempts: number;
+	backoffMs: number;
+	backoffCapMs: number;
+}
+
+/**
+ * The telemetry buffer's settings (phase 76). The buffer is opt-in: with no `SUBSTRATE_EVENT_BUFFER_PATH` there is nothing to read,
+ * and a failed write answers `stored: false` as it always has. A buffer with no dead-letter file is refused at boot, because a
+ * buffered event that exhausts its retries would have no record to be kept in.
+ */
+function loadEventBufferSettings(env: Record<string, string | undefined>): EventBufferSettings | null {
+	const path = env.SUBSTRATE_EVENT_BUFFER_PATH?.trim() ?? "";
+	if (path === "") return null;
+	const deadLetterPath = env.SUBSTRATE_EVENT_DEAD_LETTER_PATH?.trim() ?? "";
+	if (deadLetterPath === "") {
+		throw new ConfigError(
+			"SUBSTRATE_EVENT_BUFFER_PATH is set, so SUBSTRATE_EVENT_DEAD_LETTER_PATH must be set too: a buffered event that exhausts its " +
+				"retries needs a file to be recorded in. Set SUBSTRATE_EVENT_DEAD_LETTER_PATH, or unset SUBSTRATE_EVENT_BUFFER_PATH",
+		);
+	}
+	return {
+		path,
+		deadLetterPath,
+		max: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX),
+		maxAttempts: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS),
+		backoffMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS),
+		backoffCapMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS),
+	};
 }
 
 /**

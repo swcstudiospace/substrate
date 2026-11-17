@@ -63,7 +63,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
-import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import { Admission, admitBatch, budgetBody, budgetRefusal, isRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
 import type { SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
 import { parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, SteeringReadUnavailableError } from "./planning/steering-rest.ts";
 import { acknowledgeSteeringWithState, DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundaryError, queueSteering, type LiveCallFailure, type PreparedLiveDispatch, type SteeringWriteResult } from "./planning/steering-tools.ts";
@@ -1352,6 +1352,8 @@ export function createHttpServer(
 					...(result.error ? { error: result.error } : {}),
 					...(result.warning ? { warning: result.warning } : {}),
 					...(result.deduplicated ? { deduplicated: true } : {}),
+					...(result.buffered ? { buffered: true } : {}),
+					...(result.deadLettered ? { deadLettered: true } : {}),
 				});
 				return;
 			}

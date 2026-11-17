@@ -74,6 +74,12 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_LEDGER_CHAIN_CACHE_MAX` | number | 10000 | 1..1000000 | 10000 sessions. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS` | number | 30 | 1..3650 | 30 days. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_WRITE_PROBE_S` | number | 60 | 0..86400 (0 never probes) | 60 s. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_MAX` | number | 256 | positive integer | 256 entries (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_PATH` | path | none | file path | buffer off: a failed write answers stored: false, as before. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` | number | 10 | positive integer | 10 attempts (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` | number | 1000 | positive integer ms | 1000 ms (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` | number | 60000 | positive integer ms | 60000 ms (read only while the buffer is on). See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_EVENT_DEAD_LETTER_PATH` | path | none | file path, required while SUBSTRATE_EVENT_BUFFER_PATH is set | no dead-letter file: boot refuses while the buffer is on. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_TTL` | string | none | Greptime duration (180d, 4320h, 1h30m) | no ALTER: retention is left as the table has it; a malformed value refuses to boot. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | number | 2 | 0..100000 | 2 hours. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | path | none | off-box mount | substrate ledger archive refuses by name unless --out is given. See `docs/greptime-ledger.md` | mcp-server/config.ts | yes |
@@ -310,6 +316,8 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_SLO_NOTIFY` | toggle | off | 1 | off: no transition notifier. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SLO_NOTIFY_S` | number | 60 | 5..86400 | 60 s. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SLO_NOTIFY_SUSTAIN_S` | number | 300 | 0..86400 (0 announces at once) | 300 s. See `docs/observability.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RECONCILE_INTERVAL_S` | number | 0 | 0 (off) or whole seconds, at least 60 above 0; not a whole number refuses boot | off: no scheduled reconcile. Above 0 the cross-layer report runs on that interval and writes one JSON log line per run; the reconcile writes nothing to the ledger, the index or the cache. See `docs/reconcile.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_RECONCILE_WINDOW_HOURS` | number | 24 | 1..168 whole hours (outside it is clamped; not a whole number refuses boot) | 24 hours of ledger and index history per scheduled run; the reconcile only reads, and writes nothing. See `docs/reconcile.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_SLO_WEBHOOK_URL` | secret-ref | none | http(s) URL | no webhook; the URL may carry a token and is never printed. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BURN_TOKENS_PER_HOUR` | number | none | tokens per rolling hour | the burn.tokens row is unconfigured and never judged. See `docs/observability.md` | observability/burn.ts | yes |
 | `SUBSTRATE_BURN_COST_USD_PER_HOUR` | number | none | USD per rolling hour | the burn.cost_usd row is unconfigured and never judged. See `docs/observability.md` | observability/burn.ts | yes |
