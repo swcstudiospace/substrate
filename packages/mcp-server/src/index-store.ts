@@ -9,6 +9,7 @@
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
 import { callPlane, type PlaneGate } from "@substrate/observability";
+import type { CandidateEntry } from "./context-matrix-gate.ts";
 import { normalizeIdentifier } from "./event.ts";
 import {
 	TERMINAL_GRAPH_STATUSES,
@@ -2591,6 +2592,38 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * Store one candidate. An `entry_id` already stored is left exactly as it is, so a re-extraction of the same
+	 * source never rewrites a row a reviewer may already have accepted.
+	 */
+	async insertContextCandidate(entry: CandidateEntry): Promise<"inserted" | "existing"> {
+		const rows = (await this.sql`
+			insert into context_matrix_entries (entry_id, realm, milestone, phase, source_path, source_sha256, entry_kind, body_redacted)
+			values (${entry.entryId}, ${entry.realm}, ${entry.milestone}, ${entry.phase}, ${entry.sourcePath}, ${entry.sourceSha256}, ${entry.entryKind}, ${entry.bodyRedacted})
+			on conflict (entry_id) do nothing
+			returning entry_id`) as Array<Record<string, unknown>>;
+		return rows.length > 0 ? "inserted" : "existing";
+	}
+
+	/** The accepted entries in one slot: a realm, a kind and a source file, ordered by `entry_id` so the answer does not depend on insertion order. */
+	async listAcceptedContext(realm: string, entryKind: CandidateEntry["entryKind"], sourcePath: string): Promise<CandidateEntry[]> {
+		const rows = (await this.sql`
+			select entry_id, realm, milestone, phase, source_path, source_sha256, entry_kind, body_redacted
+			from context_matrix_entries
+			where status = 'accepted' and realm = ${realm} and entry_kind = ${entryKind} and source_path = ${sourcePath}
+			order by entry_id`) as Array<Record<string, unknown>>;
+		return rows.map(toContextCandidate);
+	}
+
+	/** Move a candidate to accepted. Only a row still in `candidate` moves; true when this call moved it. */
+	async acceptContextCandidate(entryId: string): Promise<boolean> {
+		const rows = (await this.sql`
+			update context_matrix_entries set status = 'accepted'
+			where entry_id = ${entryId} and status = 'candidate'
+			returning entry_id`) as Array<Record<string, unknown>>;
+		return rows.length > 0;
+	}
+
+	/**
 	 * Close the loop: a reviewed write that landed resolves the proposal it came from.
 	 *
 	 * Safe to run when this content was approved once before — the uniqueness on
@@ -3441,6 +3474,19 @@ function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {
 		version: Number(row.version),
 		created: timestamp(row.created),
 		updated: timestamp(row.updated),
+	};
+}
+
+function toContextCandidate(row: Record<string, unknown>): CandidateEntry {
+	return {
+		entryId: String(row.entry_id),
+		realm: String(row.realm),
+		milestone: String(row.milestone),
+		phase: String(row.phase),
+		sourcePath: String(row.source_path),
+		sourceSha256: String(row.source_sha256),
+		entryKind: row.entry_kind as CandidateEntry["entryKind"],
+		bodyRedacted: String(row.body_redacted),
 	};
 }
 
