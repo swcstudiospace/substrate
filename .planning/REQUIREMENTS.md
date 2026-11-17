@@ -115,7 +115,7 @@ Checkbox convention: a ticked requirement is satisfied or waived by the operator
 
 ### Redundancy
 
-- [ ] **HARD-R1 — Cross-repo compensating actions (Phase 74):** Execute a real operation across at least two registered repositories with a durable per-step transaction log and idempotent retries. Forced failure leaves compensated state or explicit needs-attention state; no silent partial success. Absence of an existing transaction path is not delivery.
+- [x] **HARD-R1 — Cross-repo compensating actions (Phase 74):** Execute a real operation across at least two registered repositories with a durable per-step transaction log and idempotent retries. Forced failure leaves compensated state or explicit needs-attention state; no silent partial success. Absence of an existing transaction path is not delivery. (MCP compensate added; verif complete)
 - [ ] **HARD-R2 — DragonflyDB degradation (Phase 75):** Reuse the existing cache-plane circuit breaker and bounded timeouts. On outage, private authority remains durable; reads fall back to the documented source or report degradation. Reject writes that cannot be made durable with retryable errors. No authoritative state exists only in the cache or an in-memory fallback.
 - [ ] **HARD-R3 — Telemetry buffer/dead-letter (Phase 76):** Each destination has a bounded queue with backpressure. Failed batches retry with exponential backoff and jitter, then retain original payload and error in a durable dead-letter store. Per-record dedupe makes replay idempotent; export queue depth/dead-letter metrics. Preserve event-chain ordering and truthful write acknowledgements.
 
@@ -131,9 +131,9 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 | Requirement | Category | Phase | Status |
 |-------------|----------|-------|--------|
 | HARD-S1 | Security | 71 | Locally verified (5/5); awaiting-review / pending QUALITY |
-| HARD-S2 | Security | 72 | Amended 2026-11-12 (grant model, owner decision); code and tests in progress; open: corpus proof decision applied, Postgres filter run passed, live-session transition ordering gap open |
+| HARD-S2 | Security | 72 | Satisfied (grant model per owner decision 2026-11-12); code/tests complete; HARD-S2 credential clause and corpus proof disclosure recorded; Postgres filter passed; live-session gap closed |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
-| HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
+| HARD-R1 | Redundancy | 74 | Complete (MCP compensate added; routes/MCP deliver op; verif/roadmap closed) | 2026-11-17 |
 | HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |
 | HARD-R3 | Redundancy | 76 | Not started |
 | HARD-H1 | Hardening | 77 | Not started |

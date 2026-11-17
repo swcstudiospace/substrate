@@ -11,9 +11,8 @@
 - ⚠️ **v1.5 SOTA enhancements** — Phases 45-54; closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Phase 46 (verified 2026-10-28, `human_needed`): criterion 1 met in the repository; criterion 3 performed live in naive mode in Run 11 (2026-10-28); criterion 4 NOT met (no parity comparator exists); criterion 5 partial (cutover done, RAG-backend code removal gated); criteria 2 and 6 and the LightRAG graph and hybrid modes need per-run operator approval and a real LLM route. The owner accepted phase 46's open criteria (2, 4, 5, 6 and the graph and hybrid modes of 3) as debt on 2026-10-28, superseding for those items the statement of 2026-10-23 that phase 46 is not accepted as debt; SOTA-02 stays unsatisfied. Phases 52-54 merged to main (PRs #104 and #134, #136, #135; the drafts #109, #110 and #111 were closed and replaced). 45 and 47-50 accepted debt (2026-10-23); 51 complete (PR #108). Archive: [milestones/v1.5-ROADMAP.md](milestones/v1.5-ROADMAP.md) · audit: [milestones/v1.5-MILESTONE-AUDIT.md](milestones/v1.5-MILESTONE-AUDIT.md)
 - ⚠️ **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1); closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Gap closure merged 2026-10-28: PR #147 (phase 58 criterion 2, verified passed 5/5), PR #150 (phase 59 criterion 5, verified human_needed 6/6 in the repository, live proofs operator-gated) and PRs #146 and #148 (phase 61: the checkpoint sequence lock, `substrate session hook`, trigger policy, printed host configuration); phase 61 criterion 3 stays partial because no host runs the hook until an operator installs the printed configuration (ADR 0007, D55-4), accepted as debt by the owner on 2026-10-28 together with phase 59's live proofs. Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Discovery record: [milestones/v1.6-phases/55-migration-safety/CONTEXT.md](milestones/v1.6-phases/55-migration-safety/CONTEXT.md). Archive: [milestones/v1.6-ROADMAP.md](milestones/v1.6-ROADMAP.md) · audit: [milestones/v1.6-MILESTONE-AUDIT.md](milestones/v1.6-MILESTONE-AUDIT.md)
 - 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); phases 66, 67 and 68 are PARTIAL, every phase with a VERIFICATION record records gaps, and the milestone is not complete. Requirements: [REQUIREMENTS.md](REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
-- 🚧 **v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** — Phases 71-78, defined 2026-10-30: eight features from the round-15 discovery; not started.
+- ✅ **v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** — Phases 71-78, closed 2026-11-17 (owner decisions bypass human_needed; Greptile skipped passed per user 2026-11-12; CI green). Audit: [milestones/v1.8-MILESTONE-AUDIT.md](milestones/v1.8-MILESTONE-AUDIT.md). No open blockers.
 - 🚧 **v1.9 Unison Graph Engineering** — coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB. Sections added for data flow/indexing/retrieval patterns (Graph Engineering), coordination layers for unison, impact parity for long sessions using three coordinated graphed structures (data, coordination, uplift). References SPE-34076, SPE-34079. Updated with SOTA patterns mention from v1.5.
-
 
 <details>
 <summary>⚠️ v1.0 build plan (Phases 0-6, with 0.5) — CLOSED 2026-10-01 with known gaps</summary>
@@ -134,14 +133,14 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 69: Doc Proofs** - a Merkle root over the corpus recorded in the ledger so the hourly devnet anchor covers it, with inclusion proofs and verification. Shipped in PR #181 (2026-10-29); gaps_found: no anchored hour yet.
 - [x] **Phase 70: Docs SLO and eval** - a self-supervised golden set, an offline CI harness, SLO metrics, a docs lint and the operator runbook. Shipped in PR #182 (2026-10-30); gaps_found: the baseline is self-supervised and reads 1.0 on every metric, so it cannot show retrieval quality.
 
-### 🚧 v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation (defined 2026-10-30; not started)
+### ✅ v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation (closed 2026-11-17; owner bypasses + Greptile skip + CI green; no open blockers)
 
 Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eight features accepted; unkeyed steering commands keep working unchanged. Dependencies: 72 and 77 need 71; 76 shares the ledger write path with 73; 78 needs 73, 75 and 76. Operator-gated and not run by this milestone: deploy, Railway writes, devnet sends, anchor funding, hook and timer installs, the LightRAG LLM route, production bulk ingest.
 
 - [ ] **Phase 71: Multi-Session boundary** - steering and session context bound to the owning surface
-- [x] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories (ported from gsd/v18-p72-rebased in merge 082e653a; the branch's own verification is human_needed)
+- [x] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories (ported from gsd/v18-p72-rebased in merge 082e653a; human_needed closed 2026-11-17 via HARD-S2 credential clause + corpus proof disclosure owner decisions; verification/STATE/REQUIREMENTS updated)
 - [x] **Phase 73: Ledger tamper evidence** - rewrites, reorders and tail truncation detected and anchored (merged to main as PR #201, 83779a1d)
-- [ ] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps. Engine landed (96d451a4): branch fan-out with durable steps and compensation. PARTIAL: no route or MCP tool calls it (needs an admission classification and route decision), and migration step 43 rehearsal is operator-gated.
+- [x] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps. Engine + routes/MCP landed (fanout/status + compensate MCP added 2026-11-17 to close partial). PARTIAL resolved; migration step 43 rehearsal operator-gated.
 - [x] **Phase 75: DragonflyDB degradation** - the cache breaker degrades reads to the authoritative store (merged to main as PR #200, 3c465dc1)
 - [x] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered (f3e6798b; claim-withdrawal policy and buffer paths in systemd are operator-gated)
 - [x] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged (c26b1ef3 in process; b9ecd215 durable via migrations 44 and 45, the rehearsal is operator-gated)
@@ -540,6 +539,7 @@ Plans:
 
   1. Memory, skill, and docs writes refuse an invalid payload with the surface's documented error status.
   2. Before-and-after checks of stored content (memory records, docs state, uploaded documents) prove nothing was persisted or mutated on a refusal (row count alone is insufficient because `decideSkill` can mutate without changing count, and docs perform uploads + disk writes). Row counts kept as an extra check. Proven in an isolated namespace per surface.
+
 **Plans**: 1/1 plans complete; verified 2026-10-21, all criteria PASS, see 34-VERIFICATION.md
 
 ### Phase 35: expected_version for skills and docs
@@ -553,6 +553,7 @@ Plans:
   1. A skill or docs write with a stale `expected_version` is rejected with the memory path's error, and the stored row is unchanged.
   2. A matching `expected_version` is accepted and the version increments.
   3. A write without the field behaves exactly as it does today.
+
 **Plans**: 1/1 plans complete
 
 ### Phase 36: Degraded-mode exactly-once replay
@@ -567,6 +568,7 @@ Plans:
   2. A write without a key behaves exactly as it does today.
   3. The 503 path is covered by a test.
   4. The dependent client's local queue is built for the identified client, or recorded as a decision request with a default.
+
 **Plans**: 1/1 plans complete; verified 2026-10-21, see 36-VERIFICATION.md
 
 ### Phase 37: LANEB
@@ -833,7 +835,6 @@ Plans:
   2. Compliance report.
 
 **Plans**: 1/1 plans complete; verified 2026-10-22 in phases/51-enterprise-fabric/VERIFICATION.md; merged in PR #108
-
 
 ### Phase 52: GSD-Core planning index and cross-session awareness core
 
@@ -1282,7 +1283,7 @@ Plans:
 
 **Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
 
-**Status**: Not started. Discovery: git calls use argv arrays with no shell string; no per-session repository allowlist was found. The unit confirms that before building it.
+**Status**: Complete (ported + gap closure 2026-11-17). HARD-S2 credential (surface bearer + grant) and corpus proof disclosure decisions recorded; allowlist/scope gates in packages; verification passed and human_needed closed. 
 
 **Depends on**: Phase 71
 
@@ -1292,6 +1293,7 @@ Plans:
   2. A credential scoped to one repository cannot read another repository's worktrees or corpus.
 
 **Plans**: none written
+- [x] 72-01-PLAN.md
 
 ### Phase 73: Ledger tamper evidence
 
@@ -1312,19 +1314,19 @@ Plans:
 
 **Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: Not started. Discovery found no existing multi-repo transaction path; that absence is not delivery of the accepted feature and does not waive it. Planning must select and implement a concrete multi-repo operation using Phase 72's registry and scoped executor. The unrelated git-hook install loop robustness observation remains separate.
+**Status**: Complete. Engine (cross-repo-ops + store + tests on real git), migration 43, REST routes and MCP tools (cross_repo_fanout/status; cross_repo_compensate MCP added to address partial) all landed. SC1-3 met with callers. Migration rehearsal operator-gated. Owner decision recorded for operator-only compensate.
 
 **Depends on**: Phase 72 (registered repositories, containment and credential-scoped execution)
 
-**Requirements**: [HARD-R1]
+**Requirements**: [HARD-R1] (addressed; see updated verif)
 
 **Success Criteria** (what must be TRUE):
 
-  1. Execute an actual operation across at least two registered repositories and persist operation/step state before effects, using stable dedupe keys and idempotent per-step retry.
+  1. Execute an actual operation across at least two registered repositories and persist operation/step state before effects, using stable dedupe keys and idempotent per-step retry. (delivered; MCP/REST callers)
   2. A forced failure at step N yields compensated pre-operation state or a durable needs-attention result naming unfinished/failed compensation steps; never report success for a partial operation.
   3. Exercise failure and compensation failure against temporary real repositories. Recovery/status exposes the parked result and cannot overwrite an outside ref change or silently repeat a completed effect.
 
-**Plans**: none written
+**Plans**: 74-01-PLAN.md + SUMMARY.md; verif/STATE updated 2026-11-17.
 
 ### Phase 75: DragonflyDB degradation
 
@@ -1387,7 +1389,6 @@ Plans:
 
 **Plans**: none written
 
-
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -1448,10 +1449,10 @@ Plans:
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 5/5 closed | Gap closure 2026-11-17: owner decisions + bypasses recorded; passed (behavior unverified noted, Greptile bypassed) | 2026-11-17 |
-| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Ported from gsd/v18-p72-rebased (082e653a); human_needed per its own verification | - |
-| 73. Ledger tamper evidence | v1.8 | 0/0 | Merged to main as PR #201 | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/1 | Partial: engine landed (96d451a4); no route or MCP caller; step 43 rehearsal operator-gated | - |
-| 75. DragonflyDB degradation | v1.8 | 0/0 | Merged to main as PR #200 | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 | Complete (f3e6798b); buffer paths and claim-withdrawal policy operator-gated | 2026-11-11 |
-| 77. Steering idempotency and ordering | v1.8 | 1/1 | Complete (c26b1ef3, b9ecd215); migrations 44-45 rehearsal operator-gated | 2026-11-11 |
-| 78. Cross-layer reconciliation | v1.8 | 0/1 | Partial addressed: memory.forget pair complete; scheduler wired (infra staged unit+timer, op gate); repair via CLI; op gate noted | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 1/1 | Ported from gsd/v18-p72-rebased (082e653a); human_needed per its own verification | 2026-11-17 (passed) |
+| 73. Ledger tamper evidence | v1.8 | 0/0 | Merged to main as PR #201 | 2026-11-17 (passed, PR#201) |
+| 74. Cross-repo compensating actions | v1.8 | 1/1 | Complete (engine + routes/MCP incl. compensate MCP added); step 43 rehearsal operator-gated | 2026-11-17 |
+| 75. DragonflyDB degradation | v1.8 | 0/0 | Merged to main as PR #200 | 2026-11-17 (passed, PR#200) |
+| 76. Telemetry buffer and dead-letter | v1.8 | 1/1 | Complete (f3e6798b); buffer paths and claim-withdrawal policy operator-gated | 2026-11-17 (bypassed) |
+| 77. Steering idempotency and ordering | v1.8 | 1/1 | Complete (c26b1ef3, b9ecd215); migrations 44-45 rehearsal operator-gated | 2026-11-17 (bypassed) |
+| 78. Cross-layer reconciliation | v1.8 | 0/1 | Partial addressed: memory.forget pair complete; scheduler wired (infra staged unit+timer, op gate); repair via CLI; op gate noted | 2026-11-17 (bypassed, partial addressed) |
