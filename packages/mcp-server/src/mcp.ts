@@ -1726,6 +1726,23 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	server.registerTool(
+		"cross_repo_compensate",
+		{
+			title: "Compensate (undo) a cross-repository operation",
+			description:
+				"Operator-only: undo a stored branch fan-out under its key without applying any forward steps. Only undoes applied/parked steps; returns the final status (`rolled-back` or `needs-attention`). Refused to non-operators. Body is `{\"key\": \"...\"}`. Every repository named by the operation must be granted. (phase 74 compensating action).",
+			inputSchema: {
+				key: z.string().describe("The operation's dedupe key."),
+			},
+			annotations: { destructiveHint: true, openWorldHint: false },
+		},
+		async (args) => {
+			const reply = await substrate.crossRepoCompensate(args, callerSurface, isOperator);
+			return reply.status === 200 ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
 		"corpus_status",
 		{
 			title: "Status of the corpus manifest",

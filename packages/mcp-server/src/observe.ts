@@ -701,7 +701,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"corpus_ingest",
 	"cross_repo_fanout",
 	"cross_repo_status",
-	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
+	"cross_repo_compensate",
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",
 	"events",

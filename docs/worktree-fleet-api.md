@@ -197,10 +197,9 @@ Every refusal of the fan-out and status routes answers `{"ok": false, "reason": 
 | 503 | `cross-repo.disabled` | both | no index store: `SUBSTRATE_PG_URL` is not set. Nothing runs. |
 | 503 | `error` (the audit reason) | both | the audit sink refused the record; the route is fail-closed and nothing runs. |
 
-### Compensation route (phase 74, operator only)
+### Compensation (phase 74, operator only)
 
-`POST /cross-repo/compensate` undoes a stored fan-out under its key. It is an operator's decision and a REST route only: no MCP tool is registered for it. It never runs a step forward; it only undoes steps that were applied. The body is `{"key": "..."}`, and any other field is a 400.
-
+`POST /cross-repo/compensate` and the `cross_repo_compensate` MCP tool undo a stored fan-out under its key. Operator-only (refused before effects for non-operators). It never runs a step forward; it only undoes steps that were applied. The body/arg is `{"key": "..."}`, and any other field is a 400.
 The checks run in this order, and the first refusal stops the run:
 
 | Status | Reason | When |
