@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
+import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
+import { buildGraphHeads } from "./anchor.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
@@ -14,6 +15,10 @@ import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
+import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
+import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
+import { ZodError } from "zod";
+import { defined } from "./test-support.ts";
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -67,7 +72,7 @@ describe("claimNode", () => {
 		// Regression: the claim event used to carry no repo, so it was invisible to
 		// every repo-scoped brief — the one place a claim most needs to be seen.
 		const { emitted, index, greptime } = stubStores({ repo: "swcstudiospace/x", branch: "main" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -80,7 +85,7 @@ describe("claimNode", () => {
 
 	test("does not repeat the node id the brief already renders", async () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -93,7 +98,7 @@ describe("claimNode", () => {
 		index.getGraph = async () => {
 			throw new Error("postgres blipped");
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -103,7 +108,7 @@ describe("claimNode", () => {
 
 	test("hands the caller the lease it is now holding, and the TTL it was granted", async () => {
 		const { index, greptime } = stubStores({ repo: "r" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null, 5);
 
@@ -118,7 +123,7 @@ describe("claimNode", () => {
 		// An event per renewal would bury the trail under the one thing in it that
 		// carries no information, and a heartbeating agent renews for hours.
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "renewed" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -134,7 +139,7 @@ describe("claimNode", () => {
 			{ repo: "swcstudiospace/x" },
 			{ action: "stolen", evicted: { surface: "grok-bot", session_id: "sess-dead" } },
 		);
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
@@ -149,7 +154,7 @@ describe("claimNode", () => {
 
 	test("a re-claim after its own lease lapsed says so, and evicts nobody", async () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "reclaimed" });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
@@ -160,7 +165,7 @@ describe("claimNode", () => {
 
 	test("a refused claim writes nothing, reports the holder and hides its lease id", async () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "denied", claimed: false });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
@@ -178,7 +183,7 @@ describe("claimNode", () => {
 			{ repo: "r" },
 			{ action: "denied", claimed: false, reason: "not-holder" },
 		);
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n2", "swarm-a05-be", "A05@r0:ut-1", "hermes");
 
@@ -262,7 +267,7 @@ describe("releaseNode and completeNode", () => {
 	}
 
 	function substrateFor(stores: ReturnType<typeof leasedIndex>) {
-		return new Substrate(loadConfig({}), { index: stores.index as never, greptime: stores.greptime as never });
+		return new Substrate(loadConfig({}), { index: stores.index as never, greptime: stores.greptime as never, steering: { history: null, liveSessions: null } });
 	}
 
 	test("the holder's release writes a note naming the node", async () => {
@@ -446,7 +451,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		// A dropped event costs a line in the trail; a claim whose event dropped costs
 		// mutual exclusion — no other agent's brief would show the node as taken.
 		const { released, index, greptime } = stores({ stored: false });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -464,7 +469,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		// and the failed append. An unconditional release would clear *their* live claim
 		// and break the mutual exclusion this withdrawal exists to protect.
 		const { released, index, greptime } = stores({ stored: false, heldByAnother: true });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		return substrate.claimNode("ut-1", "n4", "omp", "sess-1", null).then((result) => {
 			expect(result.claimed).toBe(false);
@@ -475,7 +480,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 
 	test("grants it when the ledger took the event", async () => {
 		const { released, index, greptime } = stores({ stored: true });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -486,7 +491,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 	test("does not require a recording when no ledger is configured at all", async () => {
 		// A local run with no ledger would otherwise have every claim withdrawn.
 		const { index } = stores({ stored: false });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, decision: "granted" });
 	});
@@ -494,7 +499,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 	test("an operator can force fail-closed even with no ledger", async () => {
 		const { index } = stores({ stored: false });
 		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "true" });
-		const substrate = new Substrate(config, { index: index as never, greptime: null });
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).decision).toBe("revoked");
 	});
@@ -502,14 +507,14 @@ describe("claimNode is fail-closed on the ledger", () => {
 	test("an operator can force fail-open with a ledger that is refusing", async () => {
 		const { index, greptime } = stores({ stored: false });
 		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "false" });
-		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).decision).toBe("granted");
 	});
 
 	test("says so when the withdrawal itself failed, so the node is known to need a manual release", async () => {
 		const { index, greptime } = stores({ stored: false, releaseFails: true });
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -537,7 +542,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 				observed_expiry: null,
 			},
 		});
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
@@ -553,7 +558,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const claimed: unknown[] = [];
 		const substrate = new Substrate(
 			loadConfig({}),
-			{ index: index as never, greptime: greptime as never },
+			{ index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } },
 			{ claimed: (sample) => claimed.push(sample) },
 		);
 
@@ -954,6 +959,24 @@ describe("append-mode enforcement", () => {
 		});
 	});
 
+	test("healthz probes LightRAG GET /health when it is configured: ok, a refused key reads down, and an unconfigured plane stays null", async () => {
+		const { greptime } = ledger(false);
+		const calls: string[] = [];
+		let answer = 200;
+		const lightragFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			calls.push(`${init?.method ?? "GET"} ${new URL(String(input)).pathname}`);
+			return answer === 200
+				? Response.json({ status: "healthy", core_version: "1.5.7", pipeline_busy: false })
+				: Response.json({ detail: "Invalid API Key" }, { status: answer });
+		};
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), { index: null, greptime: greptime as never, lightragFetch });
+		expect((await substrate.health()).planes.lightrag.ok).toBe(true);
+		answer = 403;
+		expect((await substrate.health()).planes.lightrag.ok).toBe(false);
+		expect(calls).toEqual(["GET /health", "GET /health"]);
+		expect((await substrateWith(greptime).health()).planes.lightrag.ok).toBeNull();
+	});
+
 	test("healthz.jobs.ledger comes from one coverage read a minute, and is null with a reason when the ledger cannot be read (uplift-3 N6)", async () => {
 		const { greptime } = ledger(true);
 		let reads = 0;
@@ -1032,20 +1055,20 @@ describe("append-mode enforcement", () => {
 		const { greptime } = ledger(true);
 		const capacity = { databaseBytes: 11_000_000, tables: [{ name: "memory_entries", totalBytes: 400_000, liveRows: 64, deadRows: 0 }] };
 		const quick = { ping: async () => true, capacity: async () => capacity };
-		const answered = await new Substrate(loadConfig({}), { index: quick as never, greptime: greptime as never }).health();
+		const answered = await new Substrate(loadConfig({}), { index: quick as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }).health();
 		expect(answered.index).toBe(true);
 		expect(answered.capacity).toEqual({ index: capacity, ledger: null });
 		expect(answered.planes.index).toMatchObject({ ok: true });
 
 		const slow = { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise };
 		const started = Date.now();
-		const timedOut = await new Substrate(loadConfig({}), { index: slow as never, greptime: greptime as never }).health();
+		const timedOut = await new Substrate(loadConfig({}), { index: slow as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }).health();
 		expect(Date.now() - started).toBeLessThan(HEALTH_PROBE_MS + 500);
 		expect(timedOut.capacity).toEqual({ index: null, ledger: null });
 		expect(timedOut.index).toBe(true);
 
 		// An index without the method at all (an older fake) is null too, never a throw.
-		const bare = await new Substrate(loadConfig({}), { index: { ping: async () => true } as never, greptime: greptime as never }).health();
+		const bare = await new Substrate(loadConfig({}), { index: { ping: async () => true } as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }).health();
 		expect(bare.capacity).toEqual({ index: null, ledger: null });
 	});
 
@@ -1177,6 +1200,7 @@ describe("append-mode enforcement", () => {
 					}
 					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 					return Response.json({ detail: "no route" }, { status: 404 });
 				},
 			},
@@ -1210,6 +1234,7 @@ describe("append-mode enforcement", () => {
 					}
 					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 					return Response.json({ detail: "no route" }, { status: 404 });
 				},
 			},
@@ -1245,6 +1270,7 @@ describe("append-mode enforcement", () => {
 					}
 					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 					return Response.json({ detail: "no route" }, { status: 404 });
 				},
 			},
@@ -1326,7 +1352,7 @@ describe("memory.write is fail-closed", () => {
 				throw new Error("connect failed: postgres://user:hunter2@host/db");
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory(entry);
 
@@ -1341,7 +1367,7 @@ describe("memory.write is fail-closed", () => {
 		// denial is otherwise visible only to the agent that was denied, which is the
 		// one party with an interest in not mentioning it.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, scope: "person:ove" });
 
@@ -1356,7 +1382,7 @@ describe("memory.write is fail-closed", () => {
 		// The body may be exactly the secret that got the write quarantined, and copying
 		// it into an append-only ledger to record that it was quarantined is absurd.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		await substrate.writeMemory({ ...entry, writer: "unknown", text: "PGPASSWORD=s3cr3t-do-not-log" });
 
@@ -1367,7 +1393,7 @@ describe("memory.write is fail-closed", () => {
 		// `unknown` is not a surface, so there is nothing to attribute the audit event
 		// to; the stderr line is its trail. The refusal still happens.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, writer: "unknown" });
 
@@ -1385,7 +1411,7 @@ describe("memory.write is fail-closed", () => {
 				throw new Error("greptime unreachable");
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		expect((await substrate.writeMemory({ ...entry, scope: "person:ove" })).outcome).toBe("denied");
 	});
@@ -1395,7 +1421,7 @@ describe("memory.write is fail-closed", () => {
 		// verdict with no ledger trace. Same emitter, so the hour's anchor sees the
 		// writes that landed beside the ones that did not.
 		const { emitted, greptime } = auditing();
-		const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory(entry);
 
@@ -1417,7 +1443,7 @@ describe("memory.write is fail-closed", () => {
 		const config = loadConfig({
 			SUBSTRATE_MEMORY_GRANTS: JSON.stringify([{ name: "operator", surfaces: ["mystery-bot"], scopes: ["graph"], kinds: ["fact"] }]),
 		});
-		const substrate = new Substrate(config, { index: acceptingIndex() as never, greptime: greptime as never });
+		const substrate = new Substrate(config, { index: acceptingIndex() as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, writer: "mystery-bot" });
 
@@ -1432,7 +1458,7 @@ describe("memory.write is fail-closed", () => {
 			enqueueReview: async () => "memr_1",
 			finishWrite: async () => undefined,
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...entry, scope: "global" });
 
@@ -1447,6 +1473,7 @@ describe("memory.write is fail-closed", () => {
 		const { emitted, greptime } = auditing();
 		const substrate = new Substrate(loadConfig({}), {
 			index: { quarantineEntry: async () => "memq_1" } as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 		});
 
@@ -1460,6 +1487,79 @@ describe("memory.write is fail-closed", () => {
 		expect(emitted[0]?.kind).toBe("warning");
 		expect(emitted[0]?.payload).toMatchObject({ outcome: "quarantined", quarantine_id: "memq_1" });
 		expect(JSON.stringify(emitted)).not.toContain("ghp_");
+	});
+
+	describe("the accepted audit event names the stored entry", () => {
+		/** An index whose stored row carries an id the gate did not mint, so the id in the event can only have come from the stored result. */
+		function storingAs(storedId: string) {
+			let row: Record<string, unknown> | null = null;
+			return {
+				claimWrite: async () => ({ claimed: true, holder: "service-test" }),
+				finishWrite: async () => undefined,
+				insertEntry: async (candidate: Record<string, unknown>) => {
+					row = { ...candidate, id: storedId };
+					return { ok: true, entry: row };
+				},
+				readEntry: async () => row,
+			};
+		}
+
+		test("an accepted write carries the id of the entry the result stored, as snake_case entry_id", async () => {
+			const { emitted, greptime } = auditing();
+			const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
+
+			const result = await substrate.writeMemory(entry);
+
+			expect(result.outcome).toBe("accepted");
+			expect(typeof result.entry?.id).toBe("string");
+			expect(emitted).toHaveLength(1);
+			expect(emitted[0]?.payload).toMatchObject({ outcome: "accepted", entry_id: result.entry?.id });
+		});
+
+		test("the id comes from the stored result even when the caller supplies a conflicting one", async () => {
+			const { emitted, greptime } = auditing();
+			const substrate = new Substrate(loadConfig({}), { index: storingAs("mem_stored_by_index") as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
+
+			// `id` and `entry_id` are not request fields; a JSON caller can still send them, and neither may reach the ledger.
+			const result = await substrate.writeMemory({ ...entry, id: "mem_forged_by_caller", entry_id: "mem_forged_by_caller" } as never);
+
+			expect(result.outcome).toBe("accepted");
+			expect(result.entry?.id).toBe("mem_stored_by_index");
+			expect(emitted).toHaveLength(1);
+			expect(((emitted[0]?.payload ?? {}) as Record<string, unknown>).entry_id).toBe("mem_stored_by_index");
+			expect(JSON.stringify(emitted)).not.toContain("mem_forged_by_caller");
+		});
+
+		test("a denied, conflicting or quarantined write stored nothing and carries no entry_id", async () => {
+			const denied = auditing();
+			await new Substrate(loadConfig({}), { index: {} as never, greptime: denied.greptime as never, steering: { history: null, liveSessions: null } }).writeMemory({ ...entry, scope: "person:ove", id: "mem_forged_by_caller" } as never);
+
+			const conflicted = auditing();
+			const reviewIndex = {
+				claimWrite: async () => ({ claimed: true, holder: "service-test" }),
+				enqueueReview: async () => "memr_1",
+				finishWrite: async () => undefined,
+			};
+			await new Substrate(loadConfig({}), { index: reviewIndex as never, greptime: conflicted.greptime as never, steering: { history: null, liveSessions: null } }).writeMemory({ ...entry, scope: "global", entry_id: "mem_forged_by_caller" } as never);
+
+			const quarantined = auditing();
+			await new Substrate(loadConfig({}), { index: { quarantineEntry: async () => "memq_1" } as never, greptime: quarantined.greptime as never, steering: { history: null, liveSessions: null } }).writeMemory({
+				...entry,
+				text: "poller needs GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				entry_id: "mem_forged_by_caller",
+			} as never);
+
+			for (const [outcome, { emitted }] of [
+				["denied", denied],
+				["conflict", conflicted],
+				["quarantined", quarantined],
+			] as const) {
+				expect(emitted).toHaveLength(1);
+				const payload = emitted[0]?.payload as Record<string, unknown>;
+				expect(payload.outcome).toBe(outcome);
+				expect("entry_id" in payload).toBe(false);
+			}
+		});
 	});
 });
 
@@ -1565,7 +1665,7 @@ describe("handoff", () => {
 				return { released: true };
 			},
 		};
-		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
@@ -1596,7 +1696,7 @@ describe("handoff", () => {
 		};
 
 		// No ledger at all, so the append cannot land.
-		const unstorable = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: null });
+		const unstorable = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 		const refused = await unstorable.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
 		expect(refused.stored).toBe(false);
@@ -1605,7 +1705,7 @@ describe("handoff", () => {
 
 		// And with a ledger that takes it, the release happens.
 		const { greptime } = ledger();
-		const stored = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const stored = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const done = await stored.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
 		expect(done.stored).toBe(true);
@@ -1652,7 +1752,7 @@ describe("handoff", () => {
 		};
 		const { greptime } = ledger();
 		const env = { ...SIGNING_ENV, SUBSTRATE_TOKEN_HERMES: "tok-h", SUBSTRATE_TOKEN_GROK_BOT: "tok-g" };
-		const substrate = new Substrate(loadConfig(env), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(env), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const release = { handover_lease_id: "lse_h", release_lease: true };
 
 		const stranger = await substrate.handoff({ ...input, ...release });
@@ -1685,7 +1785,7 @@ describe("handoff", () => {
 			},
 		};
 		const { greptime } = ledger();
-		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const done = await substrate.handoff({ ...input, handover_lease_id: "lse_o", release_lease: true });
 
@@ -1732,7 +1832,7 @@ describe("handoff", () => {
 	test("takes the repo from the graph, so the handoff shows up in that repo's brief", async () => {
 		const { written, greptime } = ledger();
 		const index = { getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }) };
-		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.handoff(input);
 
@@ -1757,7 +1857,7 @@ describe("handoff", () => {
 
 		// The ledger hands back loosely typed rows; the replay has to rebuild the
 		// packet from them and verify what it rebuilt.
-		const row = written[0]!;
+		const row = defined(written[0], "written ledger row");
 		const replay = new Substrate(loadConfig(SIGNING_ENV), {
 			index: null,
 			greptime: {
@@ -1900,6 +2000,7 @@ describe("driftScan", () => {
 				edgesForRepo: async () => [],
 			} as never,
 			greptime: null,
+			steering: { history: null, liveSessions: null },
 		});
 
 		const report = await substrate.driftScan({ repo: "swcstudiospace/agent-substrate" });
@@ -1921,6 +2022,7 @@ describe("driftScan", () => {
 				},
 			} as never,
 			greptime: null,
+			steering: { history: null, liveSessions: null },
 		});
 
 		const report = await substrate.driftScan({ repo: "swcstudiospace/agent-substrate" });
@@ -1955,6 +2057,7 @@ describe("identifier lookups", () => {
 
 	test("verifyGraph reads by the stored form of the graph id", async () => {
 		const asked: Array<[string, string]> = [];
+		const leafAsked: string[] = [];
 		const greptime = {
 			ensureAppendMode: async () => true,
 			readEvents: async (column: "graph_id", value: string) => {
@@ -1962,6 +2065,10 @@ describe("identifier lookups", () => {
 				return [];
 			},
 			graphIngest: async () => [],
+			graphChainLeafHours: async (graphId: string) => {
+				leafAsked.push(graphId);
+				return [];
+			},
 			firstIngestMs: async () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
@@ -1969,6 +2076,8 @@ describe("identifier lookups", () => {
 		await substrate.verifyGraph("ut-1".padEnd(900, "x"));
 
 		expect(asked[0]?.[1].length).toBe(512);
+		expect(leafAsked).toEqual([asked[0]?.[1] ?? ""]);
+		expect(leafAsked[0]?.length).toBe(512);
 	});
 });
 
@@ -2214,6 +2323,7 @@ describe("the governance queue withholds what quarantine was protecting", () => 
 	function substrateWithTokens(tokens?: string) {
 		return new Substrate(loadConfig(tokens ? { SUBSTRATE_MEMORY_REVIEW_TOKENS: tokens } : {}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: null,
 		});
 	}
@@ -2270,7 +2380,7 @@ describe("the audit line is redacted", () => {
 			return true;
 		}) as typeof process.stderr.write;
 		try {
-			const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null });
+			const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null, steering: { history: null, liveSessions: null } });
 			await substrate.writeMemory({
 				scope: "graph:GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				kind: "fact",
@@ -2733,7 +2843,8 @@ describe("proposeSkill", () => {
 
 	test("every success status is recorded, and a proposal without a session gets its own", async () => {
 		for (const status of ["existing", "unchanged", "declined"] as const) {
-			const { substrate, events } = world({ ...opened, status, pr_url: undefined });
+			const { pr_url: _prUrl, ...unlinked } = opened;
+			const { substrate, events } = world({ ...unlinked, status });
 			await substrate.proposeSkill(request, asAgent);
 			expect(events[0]?.payload).toMatchObject({ action: "skill.propose", status });
 			expect(events[0]?.payload).not.toHaveProperty("pr_url");
@@ -2756,7 +2867,8 @@ describe("proposeSkill", () => {
 	});
 
 	test("a dry run reaches the proposer with dryRun set and emits nothing, whatever it returns", async () => {
-		const dry: ProposeResult = { ...opened, status: "dry_run", pr_url: undefined, diff_added: 2 };
+		const { pr_url: _prUrl, ...unlinked } = opened;
+		const dry: ProposeResult = { ...unlinked, status: "dry_run", diff_added: 2 };
 		const ok = world(dry);
 		const result = await ok.substrate.proposeSkill({ ...request, dry_run: true }, asAgent);
 		expect(result.status).toBe("dry_run");
@@ -2947,6 +3059,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		const stores = stubStores({ repo: "swcstudiospace/x", branch: "main" }, claim);
 		const substrate = new Substrate(loadConfig(env), {
 			index: stores.index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: stores.greptime as never,
 			mirror: mirror.mirror as never,
 		});
@@ -3060,6 +3173,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		};
 		const revokedSubstrate = new Substrate(loadConfig({}), {
 			index: revokedIndex as never,
+			steering: { history: null, liveSessions: null },
 			greptime: {
 				ensureAppendMode: async () => true,
 				lastHash: async () => null,
@@ -3097,7 +3211,6 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 				_n: string,
 				request: { lease_id?: string | null; force?: boolean },
 				caller: Surface | null,
-				alsoSetState?: string,
 			) => {
 				const decision = decideRelease(leaseSnapshot(node as never), { ...request, caller }, Date.now());
 				if (!decision.ok || decision.action === "noop") return { released: decision.ok, node, decision };
@@ -3111,6 +3224,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			mirror: mirror.mirror as never,
 		});
@@ -3237,6 +3351,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			mirror: mirror.mirror as never,
 		});
@@ -3434,6 +3549,7 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			// No tracker keys: the gate's required checks are unavailable.
 			mirror: (knobs.mirrorOff ? null : mirror) as never,
@@ -3921,6 +4037,7 @@ describe("graph_find and issue_get (D23-22..24)", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
+			steering: { history: null, liveSessions: null },
 			greptime: greptime as never,
 			mirror: mirror as never,
 		});
@@ -4052,7 +4169,9 @@ describe("verifyGraph hour report", () => {
 	const HOUR = 3_600_000;
 	const START_ISO = "2026-10-01T10:00:00.000Z";
 	const END_ISO = "2026-10-01T11:00:00.000Z";
-	const PUBKEY = "TestPubkey1111111111111111111111111111111";
+	const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+	/** The block time (seconds) of the fixtures' anchor transaction: the hour's end plus five minutes. The signer set always has a block time to judge by. */
+	const BLOCK_S = (H + HOUR + 5 * 60_000) / 1000;
 
 	/** Two chained events in one session, stored as Greptime returns them. */
 	function sessionRows(session = "sess-1", graph = "ut-1") {
@@ -4095,8 +4214,8 @@ describe("verifyGraph hour report", () => {
 
 	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}) {
 		return {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
-			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null, ...over }),
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S, ...over }),
 		};
 	}
 
@@ -4110,6 +4229,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4128,6 +4248,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
@@ -4146,6 +4267,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				digested = true;
 				return world.leaves;
@@ -4164,6 +4286,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => null,
 		});
@@ -4180,6 +4303,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4195,12 +4319,13 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
-			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }),
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S }),
 		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 		expect(verdict.hours[0]?.status).toBe("mismatch");
@@ -4214,6 +4339,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4228,6 +4354,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world, { root: "1".repeat(64) }),
 		});
@@ -4242,6 +4369,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				throw new Error("hour member evt_1 has no event row");
 			},
@@ -4259,11 +4387,12 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => {
 				throw new Error("fetch failed");
 			},
@@ -4279,11 +4408,12 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: async () => null,
 		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
@@ -4297,6 +4427,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		} as never });
@@ -4316,6 +4447,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4336,6 +4468,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4364,6 +4497,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => [...world.rows, extraRow],
 			graphIngest: async () => (++ingests === 1 ? world.records : [...world.records, extraRecord]),
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4399,6 +4533,7 @@ describe("verifyGraph hour report", () => {
 				return world.records;
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4419,7 +4554,7 @@ describe("verifyGraph hour report", () => {
 	});
 
 	test("empty graph verifies with no hours", async () => {
-		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null });
+		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] });
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours).toEqual([]);
@@ -4434,6 +4569,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => [],
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => {
 				throw new Error(`hour member ${missing} has no event row`);
 			},
@@ -4454,6 +4590,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4462,7 +4599,7 @@ describe("verifyGraph hour report", () => {
 		const rpc = {
 			transactionMemo: async () => {
 				rpcCalls += 1;
-				return { memo: world.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null };
+				return { memo: world.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S };
 			},
 		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
@@ -4479,13 +4616,14 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
 			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) },
 		);
 		const rpc = {
-			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
 			transactionMemo: (): Promise<never> => Promise.withResolvers<never>().promise,
 		};
 		const started = Date.now();
@@ -4505,6 +4643,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => {
 					throw new Error("an open hour must never be digested");
 				},
@@ -4527,6 +4666,7 @@ describe("verifyGraph hour report", () => {
 				readEvents: async () => world.rows,
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4548,6 +4688,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows.slice(0, 1),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4576,6 +4717,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, liveRow]),
 			graphIngest: async () => [...world.records, liveRecord],
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4618,6 +4760,7 @@ describe("verifyGraph hour report", () => {
 				return ingests === 1 ? [...world.records, secondRecord] : [...world.records, firstRecord, secondRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4656,6 +4799,7 @@ describe("verifyGraph hour report", () => {
 				return [...world.records, secondRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4699,6 +4843,7 @@ describe("verifyGraph hour report", () => {
 				return ingests === 1 ? [...world.records, gapRecord] : [...world.records, gapRecord, foreignRecord];
 			},
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4718,6 +4863,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows,
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4740,6 +4886,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => world.rows.slice(0, 1),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4767,6 +4914,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [forgedRow]),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4791,6 +4939,7 @@ describe("verifyGraph hour report", () => {
 			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [world.rows[0], restored]),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
+			graphChainLeafHours: async () => [],
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
@@ -4825,6 +4974,7 @@ describe("verifyGraph hour report", () => {
 				})(),
 				graphIngest: async () => [...world.records, liveRecord],
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4854,6 +5004,7 @@ describe("verifyGraph hour report", () => {
 				},
 				graphIngest: async () => world.records,
 				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
 				hourLeaves: async () => world.leaves,
 				anchorForPeriod: async () => anchorRow(world),
 			},
@@ -4863,6 +5014,542 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
 		expect(verdict.hours[0]?.reason).toContain("timed out before this hour was checked");
 		expect(verdict.ok).toBe(false);
+	});
+
+	describe("the signer is judged by the signer set at the transaction's block time (as checkpoint_verify judges it)", () => {
+		const KEY_A = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+		const KEY_B = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
+		const KEY_C = "SysvarC1ock11111111111111111111111111111111";
+		const ROTATED_AT = H + 3 * HOUR;
+		const BEFORE_S = (H + 2 * HOUR) / 1000;
+		const AFTER_S = (H + 4 * HOUR) / 1000;
+		/** Key A until the rotation, key B (the job's configured key) from it. */
+		const ROTATED = JSON.stringify([
+			{ pubkey: KEY_A, valid_from_ms: 0, valid_until_ms: ROTATED_AT },
+			{ pubkey: KEY_B, valid_from_ms: ROTATED_AT, valid_until_ms: null },
+		]);
+		const OPERATOR = { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_OPERATOR_TOKENS: "tok-omp" };
+
+		function stub(world: ReturnType<typeof sessionRows>, extra: Record<string, unknown> = {}) {
+			return {
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+				...extra,
+			};
+		}
+
+		async function hourOf(world: ReturnType<typeof sessionRows>, over: Record<string, unknown>, env: Record<string, string | undefined> = {}, extra: Record<string, unknown> = {}) {
+			const substrate = substrateWith(stub(world, extra), { SOLANA_ANCHOR_PUBKEY: KEY_B, SUBSTRATE_ANCHOR_SIGNER_SET: ROTATED, ...env });
+			const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo, over) as never });
+			return verdict.hours[0];
+		}
+
+		test("an hour key A anchored before the rotation stays anchored once the job key is B", async () => {
+			const hour = await hourOf(sessionRows(), { payer: KEY_A, blockTime: BEFORE_S });
+			expect(hour).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		});
+
+		test("a payer outside its window at the block time is a mismatch carrying the window rule's reason; so is the configured key before its window", async () => {
+			const late = await hourOf(sessionRows(), { payer: KEY_A, blockTime: AFTER_S });
+			expect(late?.status).toBe("mismatch");
+			expect(late?.reason).toContain("outside its valid window");
+
+			const early = await hourOf(sessionRows(), { payer: KEY_B, blockTime: BEFORE_S });
+			expect(early?.status).toBe("mismatch");
+			expect(early?.reason).toContain("outside its valid window");
+
+			const current = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S });
+			expect(current?.status).toBe("anchored");
+		});
+
+		test("a payer that is in no window of the set is a mismatch", async () => {
+			const hour = await hourOf(sessionRows(), { payer: KEY_C, blockTime: BEFORE_S });
+			expect(hour?.status).toBe("mismatch");
+			expect(hour?.reason).toContain("is not in the signer set");
+		});
+
+		test("an unsigned fee payer stays the old mismatch, whatever the set says", async () => {
+			const hour = await hourOf(sessionRows(), { payer: KEY_A, payerSigned: false, blockTime: BEFORE_S });
+			expect(hour).toMatchObject({ status: "mismatch", reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" });
+		});
+
+		test("a block time the cluster did not report leaves the hour unverified for every payer, the configured key included", async () => {
+			for (const payer of [KEY_A, KEY_B]) {
+				const hour = await hourOf(sessionRows(), { payer, blockTime: null });
+				expect(hour?.status).toBe("unverified");
+				expect(hour?.reason).toContain("no block time yet");
+			}
+		});
+
+		test("a transaction that already disagrees with the ledger is a mismatch, not hidden behind an unverifiable signer (no block time, an incomplete rotation read, a failed transaction)", async () => {
+			const wrongRoot = formatMemo({ periodStartMs: H, rootHex: "0".repeat(64), count: 2 });
+			const noTime = await hourOf(sessionRows(), { payer: KEY_B, blockTime: null, memo: wrongRoot });
+			expect(noTime?.status).toBe("mismatch");
+			expect(noTime?.reason).toContain("chain root");
+
+			const down = {
+				queryEvents: async () => {
+					throw new Error("ledger down");
+				},
+			};
+			const gap = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S, memo: wrongRoot }, OPERATOR, down);
+			expect(gap?.status).toBe("mismatch");
+			expect(gap?.reason).toContain("chain root");
+
+			const failed = await hourOf(sessionRows(), { payer: KEY_B, blockTime: null, err: { InstructionError: [0, "Custom"] } });
+			expect(failed?.status).toBe("mismatch");
+			expect(failed?.reason).toBe("anchor transaction failed");
+
+			// The same transaction with a correct memo and no block time is still only unverified.
+			const clean = await hourOf(sessionRows(), { payer: KEY_B, blockTime: null });
+			expect(clean?.status).toBe("unverified");
+		});
+
+		test("a rotation read that may be incomplete leaves every payer's hour unverified, whether the signer would pass or fail its window, the configured key included", async () => {
+			const down = {
+				queryEvents: async () => {
+					throw new Error("ledger down");
+				},
+			};
+			const cases: Array<{ payer: string; blockTime: number }> = [
+				{ payer: KEY_A, blockTime: BEFORE_S },
+				{ payer: KEY_A, blockTime: AFTER_S },
+				{ payer: KEY_B, blockTime: AFTER_S },
+				{ payer: KEY_B, blockTime: BEFORE_S },
+				{ payer: KEY_C, blockTime: BEFORE_S },
+			];
+			for (const over of cases) {
+				const hour = await hourOf(sessionRows(), over, OPERATOR, down);
+				expect(hour?.status).toBe("unverified");
+				expect(hour?.reason).toContain("rotation-read-incomplete");
+			}
+		});
+
+		test("a signer set that cannot be built leaves the hour unverified with the cause, the configured key included", async () => {
+			const malformed = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S }, { SUBSTRATE_ANCHOR_SIGNER_SET: "not json" });
+			expect(malformed?.status).toBe("unverified");
+			expect(malformed?.reason).toContain("signer set cannot be built");
+			expect(malformed?.reason).toContain("malformed");
+
+			const invalidKey = await hourOf(sessionRows(), { payer: KEY_B, blockTime: AFTER_S }, { SOLANA_ANCHOR_PUBKEY: "not-a-public-key", SUBSTRATE_ANCHOR_SIGNER_SET: undefined });
+			expect(invalidKey?.status).toBe("unverified");
+			expect(invalidKey?.reason).toContain("signer set cannot be built");
+		});
+
+		test("a single-key deployment with a valid key anchors its own signature at a block time, and a foreign key is a mismatch", async () => {
+			const world = sessionRows();
+			const single = (over: Record<string, unknown>) => hourOf(world, over, { SOLANA_ANCHOR_PUBKEY: KEY_B, SUBSTRATE_ANCHOR_SIGNER_SET: undefined });
+			expect((await single({ payer: KEY_B, blockTime: BEFORE_S }))?.status).toBe("anchored");
+			expect((await single({ payer: KEY_B, blockTime: null }))?.status).toBe("unverified");
+			const foreign = await single({ payer: KEY_A, blockTime: BEFORE_S });
+			expect(foreign?.status).toBe("mismatch");
+		});
+
+		test("the signer set is read once per verify, and only when an hour has a transaction to judge", async () => {
+			const world = sessionRows();
+			// A rotation read is the per-surface note query with no session; the re-anchor notes of an hour are read inside its session.
+			let rotationReads = 0;
+			const counting = {
+				queryEvents: async (query: { match?: Record<string, unknown> }) => {
+					if (query.match?.["session_id"] === undefined) rotationReads += 1;
+					return [];
+				},
+			};
+			const anchored = await hourOf(world, { payer: KEY_B, blockTime: AFTER_S }, OPERATOR, counting);
+			expect(anchored?.status).toBe("anchored");
+			expect(rotationReads).toBe(1);
+
+			rotationReads = 0;
+			const pending = substrateWith(stub(world, { ...counting, anchorForPeriod: async () => null }), { SOLANA_ANCHOR_PUBKEY: KEY_B, SUBSTRATE_ANCHOR_SIGNER_SET: ROTATED, ...OPERATOR });
+			const verdict = await pending.verifyGraph("ut-1", { now: H + 2 * HOUR, rpc: rpcReturning(world.memo) as never });
+			expect(verdict.hours[0]?.status).toBe("pending");
+			expect(rotationReads).toBe(0);
+		});
+	});
+
+	describe("heads trust (D73-03, D73-04)", () => {
+		const asRow = (event: SubstrateEvent) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+
+		/**
+		 * One v2 hour: the sessions chained in the order given, each event ingested after the last, its leaves stored, and the memo
+		 * carrying the heads root over those leaves. The fixture's own memo, root and leaves are the honest answer every case edits.
+		 */
+		function v2World(sessions: Array<{ session: string; count: number }>, hour = H): World {
+			const events: SubstrateEvent[] = [];
+			const records: Array<{ event_id: string; event_ts: number; ingested_at: number }> = [];
+			const leaves: Array<{ event_id: string; ingested_at: number; hash: string }> = [];
+			for (const { session, count } of sessions) {
+				let prev: string | null = null;
+				for (let i = 0; i < count; i++) {
+					const event = normalizeEvent({ surface: "omp", kind: "note", summary: `${session}-${i}`, session_id: session, graph_id: "ut-1", actor: "agent" }, prev);
+					prev = event.hash;
+					events.push(event);
+					const ingested_at = hour + 1000 * events.length;
+					records.push({ event_id: event.id, event_ts: Date.parse(event.ts), ingested_at });
+					leaves.push({ event_id: event.id, ingested_at, hash: event.hash });
+				}
+			}
+			const members = events.map((event) => ({ id: event.id, hash: event.hash, prev: event.prev, graph_id: event.graph_id, session_id: event.session_id }));
+			const built = buildGraphHeads(members, hour);
+			const root = merkleRootHex(events.map((event) => event.hash));
+			const memo = formatMemoV2({ periodStartMs: hour, rootHex: root, count: events.length, headsRootHex: headsRoot(built.records) });
+			return { events, rows: events.map(asRow), records, leaves, root, memo, stored: built.leaves };
+		}
+		/** The honest hour every case edits: its events, the ledger rows and ingest records, the stored leaves and the anchored memo. */
+		interface World {
+			events: SubstrateEvent[];
+			rows: Array<Omit<SubstrateEvent, "ts" | "payload"> & { ts: number; payload: string }>;
+			records: Array<{ event_id: string; event_ts: number; ingested_at: number }>;
+			leaves: Array<{ event_id: string; ingested_at: number; hash: string }>;
+			root: string;
+			memo: string;
+			stored: Array<{ graph_id: string; session_id: string; seq: number; event_id: string; hash: string }>;
+		}
+
+		function anchorOf(world: World, over: Record<string, unknown> = {}) {
+			return {
+				period_start: START_ISO,
+				period_end: END_ISO,
+				root: world.root,
+				event_count: world.events.length,
+				memo: world.memo,
+				tx_sig: "sig1",
+				signer: PUBKEY,
+				cluster: "devnet",
+				slot: 42,
+				anchored_at: new Date(H + 5 * HOUR).toISOString(),
+				...over,
+			};
+		}
+
+		function stubOf(world: World, over: Record<string, unknown> = {}) {
+			return {
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [],
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorOf(world),
+				hourChainLeaves: async () => world.stored,
+				...over,
+			};
+		}
+
+		const verify = (world: World, over: Record<string, unknown> = {}, memo: string = world.memo) =>
+			substrateWith(stubOf(world, over)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(memo) as never });
+
+		test("an honest v2 hour is trusted, and each session matches its own head", async () => {
+			const world = v2World([
+				{ session: "s1", count: 3 },
+				{ session: "s2", count: 2 },
+			]);
+			const verdict = await verify(world);
+			expect(verdict.ok).toBe(true);
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: true });
+			expect(verdict.hours[0]?.pairs).toEqual([
+				{ session_id: "s1", trusted: true },
+				{ session_id: "s2", trusted: true },
+			]);
+			expect(verdict.trusted).toBe(true);
+		});
+
+		test("an edited payload parts the chain at that event: first_differing_event_id", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const edited = defined(world.events[1], "event 2").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: edited }]);
+			expect(verdict.hours[0]?.trusted).toBe(false);
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a deleted middle event is first_missing_event_id, and the verdict fails", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const deleted = defined(world.events[1], "event 2").id;
+			// The event row is gone while its ingest record remains, so the whole-hour digest throws naming it, as the store does.
+			const verdict = await verify(world, {
+				readEvents: async () => world.rows.filter((row) => row.id !== deleted),
+				hourLeaves: async () => {
+					throw new Error(`hour member ${deleted} has no event row`);
+				},
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: deleted }]);
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("truncated last events are first_missing_event_id at the first one gone, and the verdict fails", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const gone = defined(world.events[1], "event 2").id;
+			const verdict = await verify(world, {
+				readEvents: async () => world.rows.slice(0, 1),
+				hourLeaves: async () => {
+					throw new Error(`hour member ${gone} has no event row`);
+				},
+			});
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: gone }]);
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a full rewrite with every hash and prev recalculated parts at the first event, and the verdict fails", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			let prev: string | null = null;
+			const rewritten = world.events.map((event) => {
+				const content = { ...event, summary: `${event.summary} rewritten`, prev };
+				const { hash: _old, ...rest } = content;
+				const hash = eventHash(rest);
+				prev = hash;
+				return { ...content, hash };
+			});
+			// The store holds the rewritten hashes, so the whole-hour digest recomputes over them and no longer matches the memo.
+			const verdict = await verify(world, {
+				readEvents: async () => rewritten.map(asRow),
+				hourLeaves: async () => world.leaves.map((leaf, i) => ({ ...leaf, hash: defined(rewritten[i], "rewritten event").hash })),
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_differing_event_id: defined(world.events[0], "event 1").id }]);
+			expect(verdict.ok).toBe(false);
+			expect(verdict.chain).toEqual({ ok: true });
+		});
+
+		test("sessions verify one by one, and the verdict is the same for every read order", async () => {
+			const world = v2World([
+				{ session: "s1", count: 2 },
+				{ session: "s2", count: 2 },
+			]);
+			const edited = defined(world.events[3], "s2's second event").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const forward = await verify(world, { readEvents: async () => rows });
+			expect(forward.hours[0]?.pairs).toEqual([
+				{ session_id: "s1", trusted: true },
+				{ session_id: "s2", trusted: false, first_differing_event_id: edited },
+			]);
+			expect(await verify(world, { readEvents: async () => [...rows].reverse() })).toEqual(forward);
+			expect(await verify(world, { readEvents: async () => [...rows.slice(2), ...rows.slice(0, 2)] })).toEqual(forward);
+		});
+
+		test("an unanchored hour is untrusted, with the reason", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			expect(verdict.hours[0]?.status).toBe("unanchored");
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "hour is unanchored: no anchored head to trust" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a v1-only anchored hour is untrusted with its reason, and the chain verdict is unchanged", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const v1 = formatMemo({ periodStartMs: H, rootHex: world.root, count: world.events.length });
+			const verdict = await verify(world, { anchorForPeriod: async () => anchorOf(world, { memo: v1 }) }, v1);
+			expect(verdict.hours[0]?.status).toBe("anchored");
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "anchored with a v1 memo: no heads commitment on chain" });
+			expect(verdict.ok).toBe(true);
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("stored leaves that no longer reproduce the on-chain heads root are a stored-leaves-mismatch for the whole hour", async () => {
+			const world = v2World([
+				{ session: "s1", count: 3 },
+				{ session: "s2", count: 2 },
+			]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 && leaf.session_id === "s1" ? { ...leaf, hash: "f".repeat(64) } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]).toMatchObject({
+				status: "mismatch",
+				head_failed: true,
+				trusted: false,
+				trusted_reason: "stored leaves do not reproduce the on-chain heads root",
+				pairs: [],
+			});
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("ok is false for an edited payload, though the hour root still matches", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const edited = defined(world.events[1], "event 2").id;
+			const rows = world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row));
+			const verdict = await verify(world, { readEvents: async () => rows });
+			expect(verdict.hours[0]?.status).toBe("mismatch");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a trailing hour whose rows and ingest records are gone, with its leaves still stored, fails the verdict", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				readEvents: async () => [],
+				graphIngest: async () => [],
+				hourLeaves: async () => [],
+				graphChainLeafHours: async () => [H],
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.hours).toHaveLength(1);
+			expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "mismatch", head_failed: true });
+			expect(verdict.hours[0]?.pairs).toEqual([{ session_id: "s1", trusted: false, first_missing_event_id: defined(world.events[0], "event 1").id }]);
+		});
+
+		test("an empty event id among the stored leaves is untrusted, and the verdict does not throw", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 ? { ...leaf, event_id: "" } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, head_failed: true });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a failing graph_chain_leaves lookup resolves as an untrusted verdict with reason store-failed, and the anchored hour is still reported", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				graphChainLeafHours: async () => {
+					throw new Error("relation graph_chain_leaves does not exist");
+				},
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.reason).toBe("store-failed");
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("store-failed");
+			expect(verdict.hours).toHaveLength(1);
+			expect(verdict.hours[0]?.status).toBe("anchored");
+		});
+
+		test("a graph_chain_leaves lookup that outlasts the verify budget resolves as an untrusted verdict with reason budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			// A one-millisecond budget leaves no allowance for the lookup, and a lookup that never answers cannot win the race.
+			const verdict = await substrateWith(stubOf(world, { graphChainLeafHours: () => new Promise<never>(() => {}) }), { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(verdict.ok).toBe(false);
+			expect(verdict.reason).toBe("budget exhausted");
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("budget exhausted");
+		});
+
+		test("a trailing hour whose rows and ingest records are deleted, with its anchor and leaves kept, fails the verdict; the intact graph verifies", async () => {
+			const NEXT = H + HOUR;
+			const first = v2World([{ session: "s1", count: 2 }]);
+			const last = v2World([{ session: "s2", count: 2 }], NEXT);
+			const lastBlockS = (NEXT + HOUR + 5 * 60_000) / 1000;
+			const stubFor = (lastIntact: boolean) => ({
+				readEvents: async () => (lastIntact ? [...first.rows, ...last.rows] : first.rows),
+				graphIngest: async () => (lastIntact ? [...first.records, ...last.records] : first.records),
+				firstIngestMs: async () => H,
+				graphChainLeafHours: async () => [H, NEXT],
+				hourLeaves: async (startMs: number) => (startMs === H ? first.leaves : lastIntact ? last.leaves : []),
+				anchorForPeriod: async (startMs: number) =>
+					startMs === H
+						? anchorOf(first)
+						: startMs === NEXT
+							? anchorOf(last, { period_start: new Date(NEXT).toISOString(), period_end: new Date(NEXT + HOUR).toISOString(), tx_sig: "sig2" })
+							: null,
+				hourChainLeaves: async (startMs: number) => (startMs === H ? first.stored : last.stored),
+			});
+			const rpc = {
+				getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+				transactionMemo: async (signature: string) =>
+					signature === "sig2"
+						? { memo: last.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: lastBlockS }
+						: { memo: first.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: BLOCK_S },
+			};
+			const verdictFor = (lastIntact: boolean) =>
+				substrateWith(stubFor(lastIntact)).verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+
+			const intact = await verdictFor(true);
+			expect(intact.ok).toBe(true);
+			expect(intact.hours.map((hour) => hour.status)).toEqual(["anchored", "anchored"]);
+
+			const deleted = await verdictFor(false);
+			expect(deleted.ok).toBe(false);
+			expect(deleted.hours.find((hour) => hour.period_start === new Date(H).toISOString())?.status).toBe("anchored");
+			expect(deleted.hours.find((hour) => hour.period_start === new Date(NEXT).toISOString())).toMatchObject({ status: "mismatch", head_failed: true });
+		});
+
+		test("ok is false when one session of two is edited", async () => {
+			const world = v2World([
+				{ session: "s1", count: 2 },
+				{ session: "s2", count: 2 },
+			]);
+			const edited = defined(world.events[3], "s2's second event").id;
+			const verdict = await verify(world, { readEvents: async () => world.rows.map((row) => (row.id === edited ? { ...row, summary: "edited" } : row)) });
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok is false when the stored leaves are edited against an unchanged on-chain root", async () => {
+			const world = v2World([{ session: "s1", count: 3 }]);
+			const stored = world.stored.map((leaf) => (leaf.seq === 1 ? { ...leaf, hash: "f".repeat(64) } : leaf));
+			const verdict = await verify(world, { hourChainLeaves: async () => stored });
+			expect(verdict.hours[0]?.status).toBe("mismatch");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("ok stays true for an honest anchored hour, and for an unanchored one it is the hour that fails, not a trust proof", async () => {
+			const honest = v2World([{ session: "s1", count: 2 }]);
+			expect((await verify(honest)).ok).toBe(true);
+			const unanchored = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(unanchored, { anchorForPeriod: async () => null });
+			expect(verdict.hours[0]?.status).toBe("unanchored");
+			expect(verdict.ok).toBe(false);
+		});
+
+		test("a graph with no events is untrusted: no events", async () => {
+			const verdict = await substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null, graphChainLeafHours: async () => [] }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+			});
+			expect(verdict.ok).toBe(true);
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("no events");
+		});
+
+		test("a graph with no anchored hour is untrusted: no anchored hour", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, { anchorForPeriod: async () => null });
+			expect(verdict.trusted).toBe(false);
+			expect(verdict.trusted_reason).toBe("no anchored hour");
+		});
+
+		test("a zero verify budget leaves every hour untrusted as budget exhausted, and reads no stored leaves", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			let reads = 0;
+			const stub = stubOf(world, {
+				hourChainLeaves: async () => {
+					reads += 1;
+					return world.stored;
+				},
+			});
+			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: "1" }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(reads).toBe(0);
+			expect(verdict.hours[0]).toMatchObject({ trusted: false, trusted_reason: "budget exhausted" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a stored-leaves read that outlives the allowance is untrusted as budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const stub = stubOf(world, { hourChainLeaves: () => new Promise<never>(() => {}) });
+			const verdict = await substrateWith(stub, { SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) }).verifyGraph("ut-1", {
+				now: H + 5 * HOUR,
+				rpc: rpcReturning(world.memo) as never,
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "budget exhausted" });
+			expect(verdict.trusted).toBe(false);
+		});
+
+		test("a stored-leaves read that throws is untrusted as store-failed, not as budget exhausted", async () => {
+			const world = v2World([{ session: "s1", count: 2 }]);
+			const verdict = await verify(world, {
+				hourChainLeaves: async () => {
+					throw new Error("greptime unreachable");
+				},
+			});
+			expect(verdict.hours[0]).toMatchObject({ status: "anchored", trusted: false, trusted_reason: "store-failed" });
+			expect(verdict.trusted).toBe(false);
+		});
 	});
 });
 
@@ -4966,5 +5653,113 @@ describe("boot endpoint notes (phase 48)", () => {
 			await expect(substrate.emitDbEndpoints()).resolves.toBeUndefined();
 			expect(calls).toBe(3);
 		}
+	});
+});
+
+describe("private reads under the request budget and the docs steering precedence", () => {
+	const caller = { surface: "cursor", isOperator: false } as const;
+	const briefRequest = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
+	const briefIndex = {
+		getGraph: async () => ({ graph_id: "ut-1", notion_task_page: null, repo: "acme/app", branch: null, surface: "cursor", status: "active", pr_url: null, created: null, updated: null, nodes: [], steps: [], edges: [] }),
+		openGraphs: async () => [],
+		memoryForBrief: async () => [],
+	};
+
+	/** The authority answers its first `answered` reads and never again, so only the request budget can end the call. */
+	function stallAfter(authority: TestLiveSessionAuthority, answered: number): void {
+		const read = authority.read.bind(authority);
+		let calls = 0;
+		Object.assign(authority, {
+			read: (access: LiveSessionAccess, operation: LiveSessionOperation) => {
+				calls += 1;
+				return calls > answered ? new Promise<never>(() => {}) : read(access, operation);
+			},
+		});
+	}
+
+	function briefOf(substrate: Substrate, sessionId: string, sessionBinding: string) {
+		return substrate.briefDetailed({ ...briefRequest, steering_session_id: sessionId }, undefined, caller.surface, { caller, sessionBinding });
+	}
+
+	test("a private brief whose authority check stalls after composition is session-unavailable within the brief budget", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller, steering: "PRIVATE-BUDGET-DIRECTION" });
+		stallAfter(authority, 1);
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "50" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		await expect(briefOf(substrate, session.sessionId, session.sessionBinding)).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "session-unavailable" } } });
+	});
+
+	test("a private brief whose authority check stalls before composition is session-unavailable within the brief budget", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller, steering: "PRIVATE-BUDGET-DIRECTION" });
+		stallAfter(authority, 0);
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "50" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		await expect(briefOf(substrate, session.sessionId, session.sessionBinding)).rejects.toMatchObject({ refusal: { status: "refused", error: { code: "session-unavailable" } } });
+	});
+
+	test("a private brief inside its budget composes as before", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const session = await issueLiveSession(authority, { caller });
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BRIEF_BUDGET_MS: "5000" }), { index: briefIndex as never, greptime: null, steering: { history: null, liveSessions: authority } });
+		const detail = await briefOf(substrate, session.sessionId, session.sessionBinding);
+		expect(detail.state).toBe("complete");
+		expect(detail.failed).toEqual([]);
+	});
+
+	describe("docs_search directions", () => {
+		async function rig(stored?: string) {
+			const ragflow = new RagflowFake();
+			const authority = createTestLiveSessionAuthority();
+			const session = await issueLiveSession(authority, { caller, ...(stored === undefined ? {} : { steering: stored }) });
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+				index: null,
+				greptime: null,
+				ragflowFetch: ragflow.fetch,
+				steering: { history: null, liveSessions: authority },
+			});
+			return { substrate, ragflow, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
+		}
+		const askedWith = (ragflow: RagflowFake): string => JSON.stringify(ragflow.retrievals());
+
+		test("a supplied direction wins over the stored one for that search", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "PER-CALL-DIRECTION" }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("PER-CALL-DIRECTION");
+			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+		});
+
+		test("stored directions answer a search that supplies none", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("STORED-DIRECTION");
+		});
+
+		test("a search with no directions anywhere asks the plain question", async () => {
+			const h = await rig();
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).toContain("who reads RAGFlow?");
+			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+		});
+
+		test("an explicitly empty direction replaces the stored one with none", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "" }, caller.surface, h.live);
+			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+		});
+
+		test("a supplied direction steers a search outside any steering session", async () => {
+			const ragflow = new RagflowFake();
+			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: ragflow.fetch });
+			await substrate.searchDocs({ question: "who reads RAGFlow?", steering: "PER-CALL-DIRECTION" }, "cursor");
+			expect(askedWith(ragflow)).toContain("PER-CALL-DIRECTION");
+		});
+
+		test("a directions value that is not a string of at most 16000 characters is refused at the boundary", async () => {
+			const h = await rig("STORED-DIRECTION");
+			await expect(h.substrate.searchDocs({ question: "q", steering: 42 }, caller.surface)).rejects.toBeInstanceOf(ZodError);
+			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
+			expect(askedWith(h.ragflow)).toBe("[]");
+		});
 	});
 });

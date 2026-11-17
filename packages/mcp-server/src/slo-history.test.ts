@@ -24,6 +24,7 @@ import { loadConfig } from "./config.ts";
 import { createObservability, type CheckpointFiles, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 interface Harness {
 	base: string;
@@ -39,7 +40,7 @@ async function start(env: Record<string, string | undefined> = {}, stores: Parti
 	const config = loadConfig(env);
 	const observability = createObservability(config, env);
 	const warnings = await observability.start();
-	const substrate = new Substrate(config, { index: null, greptime: null, ...stores } as ConstructorParameters<typeof Substrate>[1], observability.observer);
+	const substrate = new Substrate(config, { index: null, greptime: null, ...stores, steering: { history: null, liveSessions: null } } as ConstructorParameters<typeof Substrate>[1], observability.observer);
 	const server = createHttpServer(substrate, config, observability);
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const { port } = server.address() as AddressInfo;
@@ -351,7 +352,7 @@ describe("/slo.capacity", () => {
 		);
 		const harness = await start({ SUBSTRATE_SLO_CHECKPOINT: path, SUBSTRATE_INDEX_VOLUME_BYTES: String(10 * 1024 * MB) });
 		const body = await slo(harness);
-		const current = samples[samples.length - 1]!.databaseBytes;
+		const current = defined(samples[samples.length - 1], "last capacity sample").databaseBytes;
 		expect(body.capacity[0]).toMatchObject({ status: "ok", samples: samples.length });
 		expect(body.capacity[0]?.observed).toBeCloseTo((10 * 1024 * MB - current) / (100 * MB), 0);
 		expect(body.breached).toEqual([]);

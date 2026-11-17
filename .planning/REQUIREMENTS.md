@@ -1,129 +1,140 @@
-# Requirements: Agent Substrate — v1.3.x and v1.5 programs
+# Requirements: Agent Substrate — v1.7 and v1.8
 
-**Defined:** 2026-10-21
+**Defined:** 2026-10-29
 **Core Value:** Every agent on the host shares one brief, one event log, one governed memory plane, one skills library and one Graph ID.
+**Archived:** the v1.3.x, v1.5 and v1.6 requirements moved to `milestones/v1.3.x-REQUIREMENTS.md`, `milestones/v1.5-REQUIREMENTS.md` and `milestones/v1.6-REQUIREMENTS.md` when this milestone was defined; earlier programs are archived beside them.
 
 ## Sources
 
-- `.planning/research/SUMMARY.md` lines 64–72: must-have (64–66), should-have (68), defer (70), anti-features to hold (72).
-- `.planning/research/FEATURES.md` Differentiators table, rows for the 15 v1.3.x IDs at lines 197–222 (table header at line 195).
-- `.planning/milestones/v1.3-REQUIREMENTS.md` line 85 (DOCS-04), cited only for the D-D1 conflict.
-- `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements)`: the seven SOTA enhancements, lines 12–59.
+- The owner's request of 2026-10-29 (Run 14): eight features and process improvements that use Solana devnet, GreptimeDB, TimescaleDB, DragonflyDB and TEI; ingest the documentation of every repository on the VPS, on GitHub and in the Greptile knowledge bases; re-ingest automatically when documentation changes; make the docs RAG self-improving the way Hindsight is; present Live Steering, which has not been demonstrated to the owner; and optimise many sessions working in git worktrees.
+- Run 14 scout evidence, read from main at 9d3f2085: the docs plane ingests one page at a time and cannot delete, rename or filter by repository; the planning refresh keeps its hashes in memory; steering is pull-only and has no command or view; no component knows the worktrees under `/root/src/worktrees`; TEI has no client in the repository. Each phase's CONTEXT.md lists the file and line evidence.
+- `.planning/milestones/v1.6-REQUIREMENTS.md` (SOTA-13 to SOTA-18) and `.planning/PROJECT.md` "Next Milestone Goals": the `checkpoint_hint` reader and the `steering` and `baseline` hook triggers are carried into STEER-05.
 
-Column mapping. The FEATURES.md Differentiators header is `| ID | Area | Feature | Value Proposition | Complexity | Notes |` (line 195). This file uses: Item = Feature; Outcome = Value Proposition; Notes = the FEATURES.md Notes column, verbatim; it sometimes names a dependency and sometimes gives a rationale. Where Notes is empty, the value is "not stated".
+## v1.7 requirements
 
-## v1.3.x should-have requirements
+### Corpus Atlas (phase 63)
 
-Source for all entries: `.planning/research/FEATURES.md` lines 197–222 and `.planning/research/SUMMARY.md` line 68. Phase mapping is set by the program plan, not by the sources.
+- [ ] **ATLAS-01**: A scan of the repositories on the VPS lists every documentation file with repo, path, kind, tier, sha256 and size, and collapses clones, linked worktrees and byte-identical copies into one canonical entry.
+- [ ] **ATLAS-02**: `substrate corpus plan` reports what a bulk ingest would add, change, rename or tombstone against the server's manifest, without sending a document body.
+- [ ] **ATLAS-03**: A bulk ingest route puts new and changed documents into the docs plane with repo, path, kind, tier and commit provenance and without a serial wait per page, and refuses secrets the way `docs_ingest` does.
+- [ ] **ATLAS-04**: A document removed or renamed in its repository is tombstoned: its docs-plane document is deleted (unless another active row shares it) and its manifest row says so; a scan that is narrower than the manifest, or that failed on a repository, never tombstones anything outside what it covered.
+- [ ] **ATLAS-05**: Running the same scan and ingest again changes nothing, and an interrupted run resumes where it stopped.
+- [ ] **ATLAS-06**: Greptile knowledge-base documents and GitHub repositories with no local clone enter the same manifest through documented source adapters.
 
-- [x] **A-D1**: Lane B events reach the graph's brief and evidence without agents passing ids
-  - Item: Infer the graph from the per-Graph-ID worktree path for herdr and Muse events. Area: A (Lane B collectors). Complexity: LOW. Notes: Needs C-T3. Phase: 37. Source: FEATURES.md:197
-- [x] **B-D1**: Closes `coordination.md:321` "Not done"
-  - Item: Mirror graph edges (`requires` / `blocks` / `gated_by`) into Linear relations. Area: B (claim mirror). Complexity: MEDIUM. Notes: not stated. Phase: 38. Source: FEATURES.md:200
-- [x] **B-D3**: One artifact shows claim → Linear → Notion → DoD
-  - Item: Put mirror outcomes in `substrate evidence` per node. Area: B (claim mirror). Complexity: LOW. Notes: M6. Phase: 38. Source: FEATURES.md:202
-- [x] **C-D2**: The dispatched context can be replayed from the ledger (v0.3 §2)
-  - Item: Dispatch as a signed handoff packet (goal from the issue, DoD lines, files). Area: C (dispatcher). Complexity: LOW-MEDIUM. Notes: M2. Phase: 39. Source: FEATURES.md:204. Decision (2026-10-21): the goal is the issue identifier and the DoD lines are fixed; issue prose stays out of the packet (DISP-07).
-- [x] **C-D4**: A stale-brief warning before acting (v0.3 §2)
-  - Item: Run `coord_drift_scan` on the worktree before launch. Area: C (dispatcher). Complexity: LOW. Notes: M2. Phase: 39. Source: FEATURES.md:206
-- [ ] **D-D1**: `data-planes.md:34`
-  - Item: Cross-surface recall in the brief: a bounded, cached fan-out over the `sub-*` banks. Area: D (docs plane). Complexity: MEDIUM. Notes: `agentId:"*"` is an Agentmemory idiom, and Hindsight banks are isolated ([docs](https://docs.hindsight.vectorize.io/memory-banks/)). Phase: 40. Source: FEATURES.md:207
-  - Decision (2026-10-21): DOCS-04 is amended to allow recall inside the brief, as a bounded, cached fan-out (this item). The original DOCS-04 wording is in `.planning/milestones/v1.3-REQUIREMENTS.md:85`. The research anti-feature at `.planning/research/SUMMARY.md:72` still reads "recall inside the synchronous brief"; this decision accepts it for this bounded case only. Open for the phase 40 discuss step: whether the 1.5 s brief budget still applies.
-- [ ] **D-D3**: One memory plane (the §5.0 no-silo rule)
-  - Item: Retire Claude Code's global `hindsight` stdio MCP and Hermes supermemory once the `sub-*` banks answer, with restore routes recorded first. Area: D (docs plane). Complexity: MEDIUM. Notes: P10. Phase: 40. Source: FEATURES.md:209
-- [ ] **D-D4**: Mental models replace stale detail (`data-planes.md:27,39`)
-  - Item: A weekly `reflect` per bank. Area: D (docs plane). Complexity: LOW. Notes: not stated. Phase: 40. Source: FEATURES.md:210
-- [ ] **E-D1**: PR and incident evidence anyone can check outside the system (v0.3 6.x)
-  - Item: Anchors in the evidence bundle: a tx signature and an explorer link per hour. Area: E (ledger anchor). Complexity: LOW. Notes: M6. Phase: 41. Source: FEATURES.md:211
-- [ ] **E-D2**: A user addition carried in the brief's area E
-  - Item: Anchor teachable moments (graph id plus an observation digest). Area: E/F (as written in source). Complexity: MEDIUM. Notes: Needs F-D2 and E-T4. Phase: 41. Source: FEATURES.md:212
-- [ ] **F-D3**: §5.1; v0.3 "4.x Skill approve audit"
-  - Item: `skills_list` and an approve/decline audit trail. Area: F (skills plane). Complexity: LOW-MEDIUM. Notes: In September, approval meant the owner merging the PR (D-16). How `declined` is reported was left unspecified. Phase: 42. Source: FEATURES.md:215
-- [ ] **F-D4**: Skills become searchable through `docs_search`
-  - Item: Re-ingest the `agent-skills` dataset after each fast-forward. Area: F/D (as written in source). Complexity: LOW. Notes: D-T3. Phase: 42. Source: FEATURES.md:216
-- [ ] **H-D1**: September N3: the container could reach example.com
-  - Item: An enforced egress allowlist for the sandbox container. Area: H (Lane A). Complexity: MEDIUM. Notes: not stated. Phase: 43. Source: FEATURES.md:219
-- [ ] **H-D3**: No orphaned VMs
-  - Item: Re-adopt running tasks after a dispatcher restart (N4). Area: H (Lane A). Complexity: LOW-MEDIUM. Notes: not stated. Phase: 43. Source: FEATURES.md:221
-- [ ] **I-D1**: A regression check for every later phase
-  - Item: The UAT as a repeatable script run against any `SUBSTRATE_URL`. Area: I (Phase 0 UAT). Complexity: LOW-MEDIUM. Notes: not stated. Phase: 44. Source: FEATURES.md:222
+### Embedding fabric (phase 64)
 
-## v1.5 SOTA requirements
+- [ ] **EMB-01**: Substrate has a TEI client with batching, timeout, retry and a breaker, and refuses a model or dimension that differs from the pinned one.
+- [ ] **EMB-02**: Embeddings are cached in Dragonfly by model and content hash, and every key carries a TTL.
+- [ ] **EMB-03**: TEI is a fabric resource: `fabric_status` reports its health, model and dimension, and the compliance check names an endpoint that is not private.
+- [ ] **EMB-04**: The server reports near-duplicate documents by cosine similarity of their TEI embeddings, the plan output can show them, and no document is dropped on that signal alone.
 
-Source for all entries: `.planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements)`. The Acceptance and Target files lines are copied verbatim.
+### Doc Watch (phase 65)
 
-- [ ] **SOTA-01**: Railway Resource Orchestrator. Phase: 45. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):12–17
-  - Acceptance: MCP tool lists Railway resources, basic scale suggestion, cost report in /slo.
-  - Target files: packages/mcp-server/src (new railway.ts), docs/data-planes.md, config-reference.md
-  - Budget: $50 per month at test scale, confirmed 2026-10-21 (uplift-7/BLOCKING-UNKNOWNS.md item 8).
-- [ ] **SOTA-02**: RAGFlow Advanced Hybrid RAG with Hindsight Context. Phase: 46. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):19–24
-  - Acceptance: docs_search returns context-augmented results; tests for hybrid.
-  - Target files: packages/mcp-server/src/planes/ragflow.ts, planes/hindsight.ts, docs/docs-plane.md
-- [ ] **SOTA-03**: GreptimeDB + Dragonfly Predictive Analytics & Cache. Phase: 47. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):26–31
-  - Acceptance: /slo has predictive rows; cache preloads based on patterns.
-  - Target files: packages/mcp-server/src/cache.ts, greptime code, observability, data-planes.md
-- [ ] **SOTA-04**: TailscaleDB Secure Unified Proxy Layer. Phase: 48. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):33–38
-  - Acceptance: All DBs accessed via secure proxy; audit events for access.
-  - Target files: docs/railway-tailscale.md, data-planes.md, config for DBs
-- [ ] **SOTA-05**: Hindsight Graph Memory with Greptime Events. Phase: 49. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):40–45
-  - Acceptance: memory_search returns graph-linked results; recall uses causal.
-  - Target files: packages/mcp-server/src/planes/hindsight.ts, memory code, greptime
-- [ ] **SOTA-06**: Dragonfly Pub/Sub for Real-time Events. Phase: 50. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):47–52
-  - Acceptance: Real-time notifications for events via Dragonfly; tests.
-  - Target files: packages/mcp-server/src/cache.ts, event emit code
-- [ ] **SOTA-07**: Enterprise Unified Resource Fabric. Phase: 51. Source: .planning/7-SOTA-ENHANCEMENTS.md (branch feature/7-sota-enhancements):54–59
-  - Acceptance: New MCP tools for fabric status, optimization suggestions; compliance report.
-  - Target files: packages/mcp-server/src (new fabric/), observability, docs, config-reference
+- [ ] **WATCH-01**: A documentation change in a registered repository reaches the docs plane within a configured lag with no manual command.
+- [ ] **WATCH-02**: Triggers coalesce: a burst of edits costs one sync per repository, and a restart re-ingests nothing that has not changed.
+- [ ] **WATCH-03**: The default triggers write nothing into any repository; git hooks are an operator-run opt-in, and neither hooks nor the filesystem watcher ever block or fail the user's git command or editor.
+- [ ] **WATCH-04**: A reconcile timer finds changes that no trigger saw, including a push made from another machine that the local checkout has not pulled (read through a Substrate-managed mirror, never a fetch into the user's clone), without the local and remote views overwriting each other and without a local edit hiding an unrelated remote update.
+- [ ] **WATCH-05**: A sync reports its outcome, lag and failures as events and metrics, and a freshness breach raises the existing `docs.freshness` warning.
 
-- [ ] **SOTA-08**: GSD-Core planning index and cross-session awareness core. Phase: 52. Source: .planning/ROADMAP.md Phase 52 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
-  - Acceptance: deterministic content-hash index of `.planning` artifacts where a full rebuild equals the incremental result; session presence with server-time TTL, stale derived at read time and never deleted; planning-change diffs on the existing event bus carrying paths and hashes, never bodies; read-only MCP tools `planning_status` and `planning_sessions`, each with an entry in `packages/audit/src/policy.ts`; file-only mode works with every backing service disabled; environment-only configuration.
-  - Target files: packages/mcp-server/src (new planning/ modules), packages/audit/src/policy.ts, docs, config-reference
-- [ ] **SOTA-09**: Steering, conflict control and checkpoint/resume. Phase: 53. Source: .planning/ROADMAP.md Phase 53 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
-  - Acceptance: steering directives queued, then acknowledged, then audited in TimescaleDB before any file change, and held with no file change when the audit cannot be written; conflicts between sessions on the same parsed phase or plan id emit events and never auto-resolve; a watcher gap marks the session view unknown until a full rescan; kill-and-restart at a plan-step boundary yields exactly one completion record keyed by phase id, plan step and file hash.
-  - Target files: packages/mcp-server/src (planning steering and checkpoint modules), TimescaleDB index schema, config-reference
-- [ ] **SOTA-10**: Planning observability and migration inventory. Phase: 54. Source: .planning/ROADMAP.md Phase 54 (defined 2026-10-22; not in .planning/7-SOTA-ENHANCEMENTS.md, which lists items 1–7 only)
-  - Acceptance: each phase transition emits a GreptimeDB metric with a stdout fallback when GreptimeDB is disabled or unreachable; the session view reports exactly one of LOADING, EMPTY, STALE, DEGRADED, ERROR, SUCCESS; a documented inventory separates disk state from Railway-hosted state and lists host-bound paths and units; no cutover, DNS change or production deploy in scope.
-  - Target files: packages/observability, docs, config-reference
+### Docs Reflect (phase 66)
+
+- [ ] **REFLECT-01**: Every `docs_search` is recorded as a bounded, redacted retrieval event.
+- [ ] **REFLECT-02**: A session can mark a citation helpful, unhelpful, stale, wrong or duplicate through `docs_feedback`.
+- [ ] **REFLECT-03**: Documents carry an authority score from tier, kind, recency, supersession and feedback, and `docs_search` can re-rank by it, in shadow first.
+- [ ] **REFLECT-04**: A document that a newer version, an archive or an explicit marker supersedes is flagged in its citations.
+- [ ] **REFLECT-05**: A reflect run writes per-repository digests into the docs plane and retains them in Hindsight, and lists the queries the corpus could not answer.
+
+### Live Steering GA (phase 67)
+
+- [ ] **STEER-01**: `substrate steer` lists live sessions and their steering state, and queues, acknowledges and lists directives for an operator.
+- [ ] **STEER-02**: A session can ask what the other live sessions of its repository are doing and receives a bounded, redacted digest that carries its provenance.
+- [ ] **STEER-03**: `memory_brief` carries sessions, steering and handoff sections behind a flag.
+- [ ] **STEER-04**: Steering session state survives a server restart.
+- [ ] **STEER-05**: The session hook reads `checkpoint_hint` and writes the checkpoint it names, and a context trigger injects the digest at session start.
+- [ ] **STEER-06**: A session can wait for a directive with a long poll instead of polling `docs_search`.
+
+### Worktree Fleet (phase 68)
+
+- [ ] **FLEET-01**: Worktree locations are configurable, and every worktree of a repository is found through git, not through a path convention.
+- [ ] **FLEET-02**: A worktree registry records path, repo, branch, head, base, dirty state, ahead and behind, last activity, size and the attributed session or graph.
+- [ ] **FLEET-03**: `substrate worktree prune` removes only worktrees that are clean (ignored files that hold work count), pushed and whose current head is merged (not merely whose branch once was), never the primary checkout, and records each removal.
+- [ ] **FLEET-04**: `substrate worktree conflicts` predicts textual conflicts between the active worktrees of a repository and suggests a merge order.
+- [ ] **FLEET-05**: Worktree creation refuses below a configured free-disk floor, and the doctor reports disk pressure from worktrees.
+- [ ] **FLEET-06**: A session's brief names other sessions' worktrees that touch the same files.
+
+### Doc Proofs (phase 69)
+
+- [ ] **PROOF-01**: The corpus manifest has a deterministic Merkle root over (repo, path, sha256) leaves.
+- [ ] **PROOF-02**: Each sync records the root as a ledger event, so the existing hourly anchor covers it without a new memo format.
+- [ ] **PROOF-03**: `substrate corpus prove` gives an inclusion proof for one document and `substrate corpus verify` checks it offline and against the anchored hour when chain evidence exists.
+- [ ] **PROOF-04**: `docs_search` replies carry the short corpus root of what the session saw.
+
+### Docs SLO and eval (phase 70)
+
+- [ ] **EVAL-01**: A self-supervised golden set generated from the corpus is scored for recall at k, MRR and latency.
+- [ ] **EVAL-02**: A deterministic offline harness guards ranking, dedupe and re-rank regressions in CI.
+- [ ] **EVAL-03**: Freshness, ingest throughput and retrieval quality are metrics with SLO thresholds visible in `fabric_status` and the docs canary.
+- [ ] **EVAL-04**: A broken relative link in `docs/` or `.planning/`, or a missing level-1 title in `docs/` or the live planning files, fails a test.
+- [ ] **EVAL-05**: An operator runbook covers deploy, first ingest, timers, rollback and the check that proves each.
 
 ## Out of scope and deferred
 
-Defer (v2+), from `.planning/research/SUMMARY.md` line 70:
+- Graph and hybrid LightRAG modes: they need an LLM route that only the operator can provide (production runs naive mode). Nothing in this milestone requires one; REFLECT-05 is deterministic.
+- Removing the RAGFlow code (TODO register D-15), deploys, Railway writes, funding the anchor key, devnet sends outside the existing anchor job, and installing hooks or timers on a host: all operator-gated. This milestone ships the code, the staged units and the runbooks.
+- Agents queueing steering directives for other agents: directive authors stay human (v1.6 decision); STEER-02 shares context, it does not delegate authority.
+- A new on-chain memo format: PROOF-02 rides the existing hourly anchor.
+- Moving `packages/collectors/src/cursor-stop.ts` and the cli to collectors import cycle, `noPropertyAccessFromIndexSignature` and coverage thresholds stay deferred as recorded in Run 13.
 
-**Defer (v2+):** A-D2 herdr-hosted dispatch, A-D3 Orca tee, B-D2 Linear Agent Sessions, C-D3 extra launchers, D-D2 ingest on merge, G-D1 cua, H-D2 Codex/OpenCode/Pi VMs.
+## Traceability (v1.7)
 
-Anti-features, from `.planning/research/SUMMARY.md` line 72:
-
-**Anti-features to hold:** substrate sending Done itself; `labelIds` overwrite; rolling back a lease on tracker failure; dispatcher claiming for the agent; issue text in prompts; RAGFlow MCP as backend; Hindsight as store of record; Dragonfly as queue/lock; recall inside the synchronous brief; event contents on chain; porting `chain.ts`; auto-merging skills; stopping production for UAT scenario 7; proof rows in the production ledger.
-
-## Traceability
+Checkbox convention: a ticked requirement is satisfied or waived by the operator (its row says which); an unticked one is not yet delivered, partial or operator-gated, and its row carries the reason and the date.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| A-D1 | 37 | Complete (PR #89) |
-| B-D1 | 38 | Complete (PR #90) |
-| B-D3 | 38 | Complete (PR #90) |
-| C-D2 | 39 | Complete (PR #91); signing needs `SUBSTRATE_HANDOFF_KEY` |
-| C-D4 | 39 | Complete (PR #91) |
-| D-D1 | 40 | In review (draft PR); no live effect until `SUBSTRATE_BRIEF_RECALL` and `HINDSIGHT_BANKS` are set |
-| D-D3 | 40 | Blocked: restore drill and approval |
-| D-D4 | 40 | In review (draft PR); narrowed to config-named models, see the phase 40 SUMMARY |
-| E-D1 | 41 | Pending |
-| E-D2 | 41 | Pending |
-| F-D3 | 42 | Pending |
-| F-D4 | 42 | Pending |
-| H-D1 | 43 | Pending |
-| H-D3 | 43 | Pending |
-| I-D1 | 44 | Pending |
-| SOTA-01 | 45 | Pending |
-| SOTA-02 | 46 | Pending |
-| SOTA-03 | 47 | Pending |
-| SOTA-04 | 48 | Pending |
-| SOTA-05 | 49 | Pending |
-| SOTA-06 | 50 | Pending |
-| SOTA-07 | 51 | Pending |
-| SOTA-08 | 52 | Pending |
-| SOTA-09 | 53 | Pending |
-| SOTA-10 | 54 | Pending |
+| ATLAS-01 to ATLAS-06 | 63 | Shipped (PR #177); audit: 2 MET, 4 PARTIAL (milestones/v1.7-REQUIREMENTS-AUDIT.md) |
+| EMB-01 to EMB-04 | 64 | Shipped (PRs #179, #183); audit: 4 MET |
+| WATCH-01 to WATCH-05 | 65 | Shipped (PR #186); audit: 3 MET, 2 PARTIAL |
+| REFLECT-01 to REFLECT-05 | 66 | Shipped (PR #184); audit: 2 MET, 3 PARTIAL |
+| STEER-01 to STEER-06 | 67 | Shipped (PRs #180, #192); audit: 5 MET, 1 PARTIAL |
+| FLEET-01 to FLEET-06 | 68 | Shipped (PRs #178, #185, #188 to #190, #193); audit: 4 MET, 2 PARTIAL |
+| PROOF-01 to PROOF-04 | 69 | Shipped (PR #181); audit: 1 MET, 3 PARTIAL |
+| EVAL-01 to EVAL-05 | 70 | Shipped (PR #182); audit: 4 MET, 1 PARTIAL |
 
 ---
-*Requirements defined: 2026-10-21*
+*Requirements defined: 2026-10-29*
+
+## v1.8 Hardening requirements
+
+**Accepted:** 2026-10-30; session-credential protocol and direct installed-workflow execution approved 2026-10-31. Exactly eight features: three security, three redundancy, two hardening. None is complete. These criteria preserve the accepted request; the abbreviated milestone-definition text does not waive them.
+
+### Security
+
+- [ ] **HARD-S1 — Session boundary enforcement (Phase 71):** Recheck authenticated per-session binding on each private live-session operation. Server-issued identifiers and separate binding credentials use cryptographic randomness; durable ownership, revocation, and tombstones prevent takeover/reuse across restart. Foreign, unknown, wrong-proof, expired, and closed targets yield the same not-found response. Keep only credential hashes in the authority; never leak proofs through logs, discovery, cache keys, audit, or prompts. Preserve the redacted repository-wide context digest and keep historical event/checkpoint labels separate.
+- [ ] **HARD-S2 — Repository allowlist and scoped credentials (Phase 72):** Address registered repositories by identifier, not user-supplied raw paths/URLs. Canonicalize paths and enforce component-wise allowed roots on each operation; reject traversal and symlink escape, including after registration. Resolve least-privilege credentials by repository-specific references; repo A credentials cannot authorize repo B. Use argv-only git execution.
+- [ ] **HARD-S3 — Ledger tamper evidence (Phase 73):** Chain canonical content checksums using a standard hash; on-demand and scheduled verification detect modified, deleted, gapped, or reordered entries and report the first bad position. State explicitly which trusted earlier proof supports truncation/rewrite detection; never claim hashes recomputed solely from modified rows prove the missing history.
+
+### Redundancy
+
+- [ ] **HARD-R1 — Cross-repo compensating actions (Phase 74):** Execute a real operation across at least two registered repositories with a durable per-step transaction log and idempotent retries. Forced failure leaves compensated state or explicit needs-attention state; no silent partial success. Absence of an existing transaction path is not delivery.
+- [ ] **HARD-R2 — DragonflyDB degradation (Phase 75):** Reuse the existing cache-plane circuit breaker and bounded timeouts. On outage, private authority remains durable; reads fall back to the documented source or report degradation. Reject writes that cannot be made durable with retryable errors. No authoritative state exists only in the cache or an in-memory fallback.
+- [ ] **HARD-R3 — Telemetry buffer/dead-letter (Phase 76):** Each destination has a bounded queue with backpressure. Failed batches retry with exponential backoff and jitter, then retain original payload and error in a durable dead-letter store. Per-record dedupe makes replay idempotent; export queue depth/dead-letter metrics. Preserve event-chain ordering and truthful write acknowledgements.
+
+### Hardening
+
+- [ ] **HARD-H1 — Steering idempotency and ordering (Phase 77):** Keyed commands carry a client-generated idempotency key and per-session monotonic sequence. Same-key/same-payload replay returns the identical original result without another effect; changed payload under the same key is refused. Follow one documented out-of-order rule. Enforce schema/size caps and durable replay state. The owner explicitly retained legacy unkeyed commands; they receive no false idempotency guarantee.
+- [ ] **HARD-H2 — Cross-layer reconciliation (Phase 78):** A scheduled, bounded read-only job compares counts and checksums for records that should exist in multiple layers. It reports missing/orphaned/mismatched records with evidence, run/window limits, and suggested repairs; it never mutates authoritative data automatically or treats unavailable probes as clean.
+
+### Delivery and traceability
+
+Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised verification. Run the repository test, lint, and typecheck commands plus targeted failure-injection cases; live-service checks follow existing guards. Preserve the existing Live-Steering behavior except the explicitly approved secure-session lifecycle. No new unpinned dependency. Do not mark the milestone complete without all eight criteria and its audit. Deployment, real credentials, production migrations, timers/hooks, funding, and devnet sends remain operator-gated.
+
+| Requirement | Category | Phase | Status |
+|-------------|----------|-------|--------|
+| HARD-S1 | Security | 71 | Locally verified (5/5); awaiting-review / pending QUALITY |
+| HARD-S2 | Security | 72 | Not started |
+| HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
+| HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
+| HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |
+| HARD-R3 | Redundancy | 76 | Not started |
+| HARD-H1 | Hardening | 77 | Not started |
+| HARD-H2 | Hardening | 78 | Not started |

@@ -97,7 +97,7 @@ export function estimateTokens(bytes: number): number {
  * cache does not know is recorded as `unknown`, never as the raw string.
  * `would_serve_stale` is only ever counted under `SUBSTRATE_CACHE_SWR=shadow`.
  */
-export const CACHE_METRIC_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "budget", "gen"] as const;
+export const CACHE_METRIC_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
 export const CACHE_METRIC_RESULTS = ["hit", "miss", "bypass", "error", "coalesced", "stale", "refresh", "would_serve_stale"] as const;
 export type CacheMetricResult = (typeof CACHE_METRIC_RESULTS)[number];
 
@@ -173,8 +173,10 @@ export type AdmissionClass = (typeof ADMISSION_CLASSES)[number];
 /**
  * What the bucket decided. `shadow_limited` is a refusal that was not enforced
  * (`SUBSTRATE_BUDGETS=shadow`); `bypass` is the cache not answering, which admits.
+ * `refused` is a request the cache plane's open breaker refused in a class whose
+ * `SUBSTRATE_BUDGET_<CLASS>_BREAKER` is `fail-closed`: answered 503, never in shadow.
  */
-export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "bypass"] as const;
+export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "bypass", "refused"] as const;
 export type AdmissionDecision = (typeof ADMISSION_DECISIONS)[number];
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
@@ -394,7 +396,7 @@ export class SubstrateInstruments {
 			unit: "{call}",
 		});
 		this.admissionDecisions = registry.counter(METRIC.admissionDecisions, {
-			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass).",
+			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass|refused).",
 			unit: "{decision}",
 		});
 		this.docsSearch = registry.counter(METRIC.docsSearch, {
@@ -480,8 +482,8 @@ export class SubstrateInstruments {
 
 	recordUsage(sample: {
 		surface: string;
-		graph_id?: string | null;
-		payload?: Record<string, unknown>;
+		graph_id?: string | null | undefined;
+		payload?: Record<string, unknown> | undefined;
 	}): Usage | null {
 		const usage = extractUsage(sample.payload);
 		if (!usage) return null;
@@ -669,6 +671,41 @@ export class SubstrateInstruments {
 		this.registry.gauge(ENDPOINT_PROXY_PLANES_METRIC, { description: "Data planes whose endpoint is a configured proxy", unit: "{plane}" }).set(count);
 	}
 
+	/**
+	 * The lag the newest corpus sync reported (v1.7 phase 65), in seconds: from the change it saw to the moment its ingest
+	 * finished. One unlabelled gauge, so a repository name never becomes a label. The caller bounds and sanitises the number;
+	 * a value that is not finite or is negative is dropped here as well, so the gauge only ever holds a real lag.
+	 */
+	setCorpusSyncLag(seconds: number): void {
+		if (!Number.isFinite(seconds) || seconds < 0) return;
+		this.registry.gauge(CORPUS_SYNC_LAG_METRIC, { description: "Lag the newest reported corpus sync had behind its source change", unit: "s" }).set(seconds);
+	}
+
+	/**
+	 * The age of the newest manifest change of the corpus atlas, in seconds (phase 70). `newestAtMs` answers its time or `null`
+	 * while nothing has been read; the age is computed when the registry is snapshotted, so it grows between reads. No point
+	 * until there is a change to age.
+	 */
+	observeCorpusFreshness(newestAtMs: () => number | null, now: () => number = Date.now): void {
+		const gauge = this.registry.gauge(CORPUS_FRESHNESS_METRIC, { description: "Age of the newest corpus manifest change", unit: "s" });
+		gauge.observe = () => {
+			const at = newestAtMs();
+			return at === null ? null : Math.max(0, (now() - at) / 1000);
+		};
+	}
+
+	/** Documents per second of the last corpus ingest request's wall time, 0 when it sent nothing (phase 70). A negative or non-finite rate is not stored. */
+	setCorpusIngestRate(docsPerSecond: number): void {
+		if (!Number.isFinite(docsPerSecond) || docsPerSecond < 0) return;
+		this.registry.gauge(CORPUS_INGEST_RATE_METRIC, { description: "Documents per second of the last corpus ingest request", unit: "{document}/s" }).set(docsPerSecond);
+	}
+
+	/** Recall at 5 of the golden set, as the docs canary last reported it (phase 70). A value outside [0, 1] is not stored. */
+	setCorpusGoldenRecall5(recall: number): void {
+		if (!Number.isFinite(recall) || recall < 0 || recall > 1) return;
+		this.registry.gauge(CORPUS_GOLDEN_RECALL5_METRIC, { description: "Golden-set recall at 5 as the docs canary last reported it", unit: "1" }).set(recall);
+	}
+
 	/** One brief's use of the recall snapshot (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
 	recordBriefRecall(sample: { surface: string; result: BriefRecallResult }): void {
 		if (!(BRIEF_RECALL_RESULTS as readonly string[]).includes(sample.result)) return;
@@ -692,3 +729,10 @@ export const OUTBOX_DURABLE_METRIC = "substrate.hindsight.retain_outbox.durable"
 
 /** The gauge `setEndpointProxyPlanes` sets (phase 51, SOTA-07). */
 export const ENDPOINT_PROXY_PLANES_METRIC = "substrate.endpoint.proxy_planes";
+
+/** The gauge `setCorpusSyncLag` sets (v1.7 phase 65): how far behind its source the newest reported corpus sync was, seconds. No repository label. */
+export const CORPUS_SYNC_LAG_METRIC = "substrate.corpus.sync_lag_seconds";
+/** The three gauges of the corpus atlas SLOs (phase 70). */
+export const CORPUS_FRESHNESS_METRIC = "substrate.corpus.freshness_seconds";
+export const CORPUS_INGEST_RATE_METRIC = "substrate.corpus.ingest_docs_per_second";
+export const CORPUS_GOLDEN_RECALL5_METRIC = "substrate.corpus.golden_recall5";

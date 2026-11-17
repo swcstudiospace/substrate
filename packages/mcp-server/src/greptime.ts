@@ -25,7 +25,7 @@
 import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import { DEFAULT_LEDGER_SETTINGS, isGreptimeDuration, type GreptimeConfig, type LedgerSettings } from "./config.ts";
 import { redact, redactKnown } from "./redact.ts";
-import { IDEMPOTENCY_KEY_PATTERN, IDEMPOTENCY_PAYLOAD_KEY } from "./event.ts";
+import { IDEMPOTENCY_KEY_PATTERN, IDEMPOTENCY_PAYLOAD_KEY, type StoredLeaf } from "./event.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { HOUR_MS, hourEnd, hourIso, hourStart, isClosed } from "@substrate/ledger";
 import { DEFAULT_METRICS_HISTORY_TTL, parseMetricsHistoryTtl } from "./config.ts";
@@ -42,7 +42,19 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
-export class GreptimeError extends Error {}
+export class GreptimeError extends Error {
+	/**
+	 * The store said the table does not exist. Decided from the text the store sent, before
+	 * any credential scrub, because scrubbing a configured user such as `found` replaces that
+	 * word inside `Table not found` with the redaction marker and the wording is gone from `message`.
+	 */
+	readonly missingTable: boolean;
+
+	constructor(message: string, options: { missingTable?: boolean } = {}) {
+		super(message);
+		this.missingTable = options.missingTable === true;
+	}
+}
 
 /**
  * The ledger did not answer, or answered broken: unreachable, timed out, a 5xx,
@@ -308,7 +320,8 @@ export function chainTip(rows: Array<Record<string, unknown>>): string | null {
  */
 export function ttlOf(ddl: string): string | null {
 	const match = /\bttl'?\s*=\s*'([^']*)'/i.exec(ddl);
-	return match ? match[1]!.trim() : null;
+	const ttl = match?.[1];
+	return ttl === undefined ? null : ttl.trim();
 }
 
 /** Two TTL spellings that mean the same retention: suffixes are case-insensitive and spaces optional. */
@@ -500,6 +513,20 @@ export interface NewAnchor {
 	anchored_at: string;
 }
 
+/** One row of `graph_chain_leaves`: an event's place in its (graph, session) chain for one hour (D73-02). */
+export interface GraphChainLeafRow {
+	period_start: string;
+	graph_id: string;
+	session_id: string;
+	/** Position in chain order, from 0. */
+	seq: number;
+	event_id: string;
+	hash: string;
+}
+
+/** Leaf rows one `graph_chain_leaves` INSERT carries. */
+const LEAF_INSERT_BATCH = 500;
+
 /** The SELECT list every anchors read uses, in DDL column order. */
 const ANCHOR_COLUMNS =
 	`"period_start", "period_end", "root", "event_count", "memo", "tx_sig", ` +
@@ -616,7 +643,7 @@ export interface ExportWindowQuery {
 	/** Exclusive ISO upper bound on `ts`. */
 	to: string;
 	/** Resume strictly after this `(ts, id)`; omit for the first page. */
-	after?: ExportCursor;
+	after?: ExportCursor | undefined;
 	/** Rows per page, clamped like every other read (`queryLimit`). */
 	limit?: number;
 }
@@ -671,6 +698,49 @@ function assertIsoWindow(from: string, to: string): { fromMs: number; toMs: numb
 	return { fromMs, toMs };
 }
 
+/**
+ * The shortest raw user or password worth scrubbing as a bare substring. Replacing a one-
+ * or two-character value would splice a marker into every word of a diagnostic and still
+ * leave the credential recoverable by elimination; such a value is covered through the
+ * longer forms below (`user:password`, the `Basic` token) and by the redactor's own
+ * patterns instead.
+ */
+const MIN_BARE_SECRET_LENGTH = 4;
+
+/**
+ * Every spelling of the endpoint's credentials a diagnostic could quote: the whole URL (it may
+ * carry `user:password@`), the URL's userinfo parts raw and percent-decoded, the configured
+ * user and password, the `user:password` pair, and the base64 `Basic` token the client sends.
+ */
+function credentialNeedles(config: GreptimeConfig): string[] {
+	const needles: string[] = [config.url];
+	if (config.user !== undefined) {
+		const pair = `${config.user}:${config.password ?? ""}`;
+		needles.push(config.user, pair, Buffer.from(pair).toString("base64"));
+	}
+	if (config.password !== undefined) needles.push(config.password);
+	try {
+		const { username, password } = new URL(config.url);
+		for (const part of [username, password]) {
+			needles.push(part);
+			try {
+				needles.push(decodeURIComponent(part));
+			} catch {
+				// A malformed escape has no decoded spelling to scrub.
+			}
+		}
+	} catch {
+		// A URL that does not parse has no userinfo to extract; the whole string is already listed.
+	}
+	const bare = needles.filter((needle) => needle === config.url || needle.length >= MIN_BARE_SECRET_LENGTH);
+	// A JSON error body echoes a value in its escaped spelling (`pa"ss` arrives as `pa\"ss`),
+	// which no longer contains the raw value. Longest first so the longer spelling is listed
+	// ahead of any shorter one it overlaps.
+	const spellings = new Set(bare);
+	for (const needle of bare) spellings.add(JSON.stringify(needle).slice(1, -1));
+	return [...spellings].sort((a, b) => b.length - a.length);
+}
+
 export class GreptimeClient {
 	/** Whether the server reads `\` in a literal as an escape. Assumed until probed. */
 	private backslashEscapes = true;
@@ -710,6 +780,9 @@ export class GreptimeClient {
 	/** The current export window's first ingest records; see {@link exportWindow}. Dropped when the last page is served. */
 	private exportIngest: { window: string; since: number; first: Map<string, { ingested_at: number; event_ts: number }> } | null = null;
 
+	/** Credential text scrubbed from every diagnostic; see {@link credentialNeedles}. */
+	private readonly knownSecrets: string[];
+
 	/** The last write probe's verdict; see {@link probeWritable}. */
 	private probe: LedgerProbe = { lastProbeAt: null, lastProbeOk: null, lastProbeError: null };
 	private probeInFlight: Promise<LedgerProbe> | null = null;
@@ -723,11 +796,42 @@ export class GreptimeClient {
 		this.gate = options.gate ?? null;
 		this.ledger = options.ledger ?? DEFAULT_LEDGER_SETTINGS;
 		this.chainTips = this.ledger.chainCache ? new ChainTipCache(this.ledger.chainCacheMax) : null;
+		this.knownSecrets = credentialNeedles(this.config);
 	}
 
 	/** How many sessions' tips are remembered right now; a test seam, and cheap to report. */
 	get chainTipsCached(): number {
 		return this.chainTips?.size ?? 0;
+	}
+
+	/**
+	 * Scrub the configured credentials, then credential-shaped text, out of a diagnostic.
+	 *
+	 * Every message `send` builds from a URL, a response body or a transport error passes
+	 * through here: a proxy that echoes the request, or a fetch error that quotes the URL it
+	 * tried, must not carry the endpoint's credentials into an error, a warning, the breaker's
+	 * `lastError` or a health body.
+	 */
+	private scrub(text: string): string {
+		return redact(redactKnown(text, this.knownSecrets));
+	}
+
+	/**
+	 * A response body as it may appear in a diagnostic: scrubbed whole, then cut to `limit`.
+	 * Clipping first would cut a secret that straddles the limit, leave `redactKnown` unable
+	 * to match its complete value and let the surviving prefix through; clipping the scrubbed
+	 * text can only cut redaction markers or harmless text.
+	 */
+	private clippedBody(text: string, limit: number): string {
+		return this.scrub(text).slice(0, limit);
+	}
+
+	/** A transport failure with its message scrubbed and its `name` kept (`TimeoutError`, `AbortError`). */
+	private scrubTransportError(cause: unknown): unknown {
+		if (!(cause instanceof Error)) return this.scrub(String(cause));
+		const error = new Error(this.scrub(cause.message));
+		error.name = cause.name;
+		return error;
 	}
 
 	private headers(): Record<string, string> {
@@ -779,14 +883,23 @@ export class GreptimeClient {
 			// timeout, a 5xx — so the gate counts all of it. The raw fetch error is
 			// thrown as-is so a timeout is observed as one, and wrapped below.
 			answer = await callPlane(this.gate, op, async () => {
-				const response = await fetch(url, {
-					method: "POST",
-					headers: this.headers(),
-					body: new URLSearchParams({ sql: statement }),
-					signal: AbortSignal.timeout(timeoutMs),
-				});
-				const text = await response.text();
-				if (response.status >= 500) throw new GreptimeUnavailable(`greptime ${response.status}: ${text.slice(0, 500)}`);
+				let response: Response;
+				let text: string;
+				try {
+					response = await fetch(url, {
+						method: "POST",
+						headers: this.headers(),
+						body: new URLSearchParams({ sql: statement }),
+						signal: AbortSignal.timeout(timeoutMs),
+					});
+					text = await response.text();
+				} catch (cause) {
+					// The gate records this error's message as the breaker's `lastError` and in the
+					// observer's `reason` before the catch below ever runs, so the scrub has to happen
+					// here, on the way in. The name survives: `callPlane` reads it to tell a timeout.
+					throw this.scrubTransportError(cause);
+				}
+				if (response.status >= 500) throw new GreptimeUnavailable(`greptime ${response.status}: ${this.clippedBody(text, 500)}`);
 				return { status: response.status, text };
 			});
 		} catch (cause) {
@@ -796,15 +909,20 @@ export class GreptimeClient {
 		}
 
 		const { status, text } = answer;
-		if (status < 200 || status >= 300) throw new GreptimeError(`greptime ${status}: ${text.slice(0, 500)}`);
+		if (status < 200 || status >= 300) {
+			throw new GreptimeError(`greptime ${status}: ${this.clippedBody(text, 500)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 500)) });
+		}
 
 		let body: GreptimeResponse;
 		try {
 			body = JSON.parse(text) as GreptimeResponse;
 		} catch {
-			throw new GreptimeError(`greptime returned non-JSON: ${text.slice(0, 200)}`);
+			throw new GreptimeError(`greptime returned non-JSON: ${this.clippedBody(text, 200)}`, { missingTable: MISSING_TABLE.test(text.slice(0, 200)) });
 		}
-		if (body.error) throw new GreptimeError(`greptime: ${body.error}`);
+		if (body.error) {
+			const reported = `greptime: ${body.error}`;
+			throw new GreptimeError(this.scrub(reported), { missingTable: MISSING_TABLE.test(reported) });
+		}
 
 		const records = body.output?.[0]?.records;
 		if (!records?.rows) return [];
@@ -896,6 +1014,17 @@ export class GreptimeClient {
 			// the time index alone, so two events ingested in the same millisecond
 			// would silently lose a record. A warning is cheaper than that loss.
 			warnings.push(`event_ingest not created in append_mode: ${String(cause)}`);
+		}
+
+		// Chain leaves of each closed hour (D73-02), read back by the heads check. Append-only, as the
+		// ledger requires: without append_mode two leaves that share a period and a timestamp would be
+		// merged. No plain-CREATE fallback, for the same reason as event_ingest above.
+		try {
+			await this.sql(
+				`CREATE TABLE IF NOT EXISTS "graph_chain_leaves" ("period_start" TIMESTAMP TIME INDEX, "graph_id" STRING, "session_id" STRING, "seq" BIGINT, "event_id" STRING, "hash" STRING) WITH ('append_mode' = 'true')`,
+			);
+		} catch (cause) {
+			warnings.push(`graph_chain_leaves not created in append_mode: ${String(cause)}`);
 		}
 
 		await this.sql(`
@@ -1254,7 +1383,7 @@ export class GreptimeClient {
 	): Promise<{ id: string; hash: string } | null> {
 		if (!IDEMPOTENCY_KEY_PATTERN.test(key)) throw new GreptimeError("refusing an idempotency lookup for a malformed key");
 		await this.probeDialect();
-		if (!this.dialectProbed && [cell.repo, cell.graph_id].some((value) => value !== null && value.includes("\\"))) {
+		if (!this.dialectProbed && [cell.repo, cell.graph_id].some((value) => value?.includes("\\") === true)) {
 			// The same refusal `insertEvent` makes: until the dialect is known a backslash cannot be quoted
 			// safely, so a lookup could silently miss the row the original attempt stored.
 			throw new GreptimeError("refusing an idempotency lookup on a value containing a backslash before the server's quoting dialect is known");
@@ -1282,7 +1411,7 @@ export class GreptimeClient {
 			if (found !== null) return found;
 			// A short page is the whole rest of the cell: no exact match there is a genuine miss.
 			if (rows.length < IDEMPOTENCY_LOOKUP_LIMIT) return null;
-			const last = rows[rows.length - 1]!.id;
+			const last = rows[rows.length - 1]?.id;
 			if (typeof last !== "string" || !IDEMPOTENCY_ID.test(last)) {
 				throw new GreptimeError("idempotency lookup refused a row id it cannot page past safely");
 			}
@@ -1664,6 +1793,57 @@ export class GreptimeClient {
 				`${v(row.memo)}, ${v(row.tx_sig)}, ${v(row.signer)}, ${v(row.cluster)}, ` +
 				`${v(row.slot)}, ${v(row.anchored_at)}, NULL)`,
 		);
+	}
+
+	/**
+	 * Write one hour's chain leaves (D73-02): one row per event, at its place in its (graph, session)
+	 * chain. Append-only, like every ledger write. The anchor job calls this before the anchors row, so no
+	 * anchors row exists for an hour whose leaves were not stored.
+	 */
+	async insertGraphChainLeaves(rows: readonly GraphChainLeafRow[]): Promise<void> {
+		const v = (value: string | number): string => this.q(value);
+		for (let i = 0; i < rows.length; i += LEAF_INSERT_BATCH) {
+			const values = rows
+				.slice(i, i + LEAF_INSERT_BATCH)
+				.map((row) => `(${v(row.period_start)}, ${v(row.graph_id)}, ${v(row.session_id)}, ${v(row.seq)}, ${v(row.event_id)}, ${v(row.hash)})`)
+				.join(", ");
+			await this.sql(
+				`INSERT INTO "graph_chain_leaves" ("period_start", "graph_id", "session_id", "seq", "event_id", "hash") VALUES ${values}`,
+			);
+		}
+	}
+
+	/**
+	 * Every stored chain leaf of one hour, across graphs, in the order the table returns them. The verifier orders and dedupes
+	 * them; nothing here decides which rows count (D73-03, D73-04).
+	 */
+	async hourChainLeaves(periodStartMs: number): Promise<StoredLeaf[]> {
+		const rows = await this.sql(
+			`SELECT "graph_id", "session_id", "seq", "event_id", "hash" FROM "graph_chain_leaves" ` +
+				`WHERE "period_start" = ${this.q(new Date(periodStartMs).toISOString())}`,
+		);
+		return rows.map((row) => ({
+			graph_id: row.graph_id === null || row.graph_id === undefined ? "" : String(row.graph_id),
+			session_id: row.session_id === null || row.session_id === undefined ? "" : String(row.session_id),
+			seq: Number(row.seq),
+			event_id: String(row.event_id),
+			hash: String(row.hash),
+		}));
+	}
+
+	/**
+	 * The distinct hours that hold one graph's chain leaves, ascending. Verify reads these as well as the event and ingest rows, so an
+	 * hour whose rows were deleted but whose leaves remain is still checked. Quoted by the stored graph id, as every graph read is.
+	 */
+	async graphChainLeafHours(storedGraphId: string): Promise<number[]> {
+		const rows = await this.sql(`SELECT DISTINCT "period_start" FROM "graph_chain_leaves" WHERE "graph_id" = ${this.q(storedGraphId)}`);
+		return rows
+			.map((row) => {
+				const at = epochMs(row.period_start);
+				if (!Number.isFinite(at)) throw new GreptimeError(`a chain leaf of ${storedGraphId} has a period that is not a number`);
+				return at;
+			})
+			.sort((a, b) => a - b);
 	}
 
 	/**
@@ -2216,17 +2396,19 @@ export class GreptimeClient {
 		const drop = (reason: MetricDropReason, count: number): void => {
 			if (count > 0) drops[reason] = (drops[reason] ?? 0) + count;
 		};
-		const accepted: Array<{ row: MetricSampleRow; labels: string }> = [];
+		const accepted: Array<{ row: MetricSampleRow; labels: string; kind: string }> = [];
 		let invalid = 0;
 		let capped = 0;
 		for (const row of rows) {
 			const labels = validMetricRow(row);
-			if (labels === null) {
+			// Look the spec up only for a row validMetricRow accepted: a null or undefined entry must be counted as invalid, not throw on `row.series`.
+			const kind = labels === null ? undefined : ALL_METRIC_SERIES[row.series]?.kind;
+			if (labels === null || kind === undefined) {
 				invalid += 1;
 			} else if (accepted.length >= MAX_METRIC_BATCH) {
 				capped += 1;
 			} else {
-				accepted.push({ row, labels });
+				accepted.push({ row, labels, kind });
 			}
 		}
 		drop("invalid", invalid);
@@ -2241,9 +2423,9 @@ export class GreptimeClient {
 			stage = "insert";
 			const values = accepted
 				.map(
-					({ row, labels }) =>
+					({ row, labels, kind }) =>
 						`(${this.q(new Date(row.tsMs).toISOString())}, ${this.q(row.series)}, ${this.q(labels)}, ` +
-						`${this.q(ALL_METRIC_SERIES[row.series]!.kind)}, ${this.q(row.value)}, ${this.q(row.count)})`,
+						`${this.q(kind)}, ${this.q(row.value)}, ${this.q(row.count)})`,
 				)
 				.join(", ");
 			await this.sql(
@@ -2273,8 +2455,8 @@ export class GreptimeClient {
 	 * through the ledger's breaker.
 	 */
 	async readMetricHistory(query: MetricHistoryQuery): Promise<MetricHistoryResult> {
-		if (!Object.hasOwn(ALL_METRIC_SERIES, query.series)) throw new MetricHistoryInputError("the series is not one this substrate records");
-		const spec = ALL_METRIC_SERIES[query.series]!;
+		const spec = Object.hasOwn(ALL_METRIC_SERIES, query.series) ? ALL_METRIC_SERIES[query.series] : undefined;
+		if (spec === undefined) throw new MetricHistoryInputError("the series is not one this substrate records");
 		const retention = parseMetricsHistoryTtl(query.ttl ?? DEFAULT_METRICS_HISTORY_TTL);
 		if (retention === null) throw new MetricHistoryInputError("the metrics history ttl is not a whole number of days from 1d to 90d");
 		const limit = 8.64e15;
@@ -2307,7 +2489,7 @@ export class GreptimeClient {
 			);
 		} catch (cause) {
 			// Only the store's own "no such table" answer: it was never created (the history was never on), which is an empty history.
-			if (cause instanceof GreptimeError && !(cause instanceof GreptimeUnavailable) && MISSING_TABLE.test(cause.message)) return { points: [], stepS };
+			if (cause instanceof GreptimeError && !(cause instanceof GreptimeUnavailable) && cause.missingTable) return { points: [], stepS };
 			throw cause;
 		}
 		const points: MetricHistoryPoint[] = [];

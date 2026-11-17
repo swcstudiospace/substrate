@@ -9,8 +9,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_STATE, fakeGh, fakeGhScript, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
+import { EMPTY_STATE, OWNERLESS_LOCK_GRACE_MS, acquireStateLock, fakeGh, fakeGhScript, lockIsStale, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
 import { FIXTURE_REPO, SEED_SKILL, buildSkillsFixture, removeSkillsFixture, skillsPaths } from "./rehearsal-skills.ts";
+import { defined } from "./test-support.ts";
 
 const made: string[] = [];
 afterAll(() => {
@@ -48,7 +49,7 @@ describe("fakeGh", () => {
 		expect(view.code).toBe(0);
 		expect(JSON.parse(view.stdout)).toEqual({ state: "OPEN", url, number: 1 });
 
-		state.prs[0]!.state = "CLOSED";
+		defined(state.prs[0], "first PR").state = "CLOSED";
 		expect(JSON.parse(fakeGh(["pr", "view", url, "--json", "state,url,number"], state).stdout).state).toBe("CLOSED");
 
 		const missing = fakeGh(["pr", "view", `https://github.com/${FIXTURE_REPO}/pull/99`], state);
@@ -59,7 +60,7 @@ describe("fakeGh", () => {
 	test("pr list answers only the open PRs for that head in that library", () => {
 		const state = freshState();
 		fakeGh(createArgv("skill/omp/a-1-abcd"), state);
-		state.prs[0]!.state = "CLOSED";
+		defined(state.prs[0], "first PR").state = "CLOSED";
 		fakeGh(createArgv("skill/omp/a-1-abcd"), state);
 		fakeGh(createArgv("skill/omp/other"), state);
 		fakeGh(createArgv("skill/omp/a-1-abcd", "someone/else"), state);
@@ -139,6 +140,111 @@ describe("fakeGh", () => {
 		expect(final.prs).toHaveLength(count);
 		expect(new Set(final.prs.map((pr) => pr.number)).size).toBe(count);
 		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a lock directory reclaimed between mkdir and the pid write is a lost race: retry, never throw", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		let writes = 0;
+		const release = acquireStateLock(statePath, {
+			writePid: (pidPath, pid) => {
+				writes++;
+				// Another child saw our pid-less directory and removed it as ownerless.
+				if (writes === 1) rmSync(lock, { recursive: true, force: true });
+				writeFileSync(pidPath, pid);
+			},
+		});
+		expect(writes).toBe(2);
+		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(String(process.pid));
+		release();
+		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a lock directory replaced by a successor's own before our pid write is a lost race: one holder at a time", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		const events: string[] = [];
+		let writes = 0;
+		let waits = 0;
+		const release = acquireStateLock(statePath, {
+			writePid: (pidPath, pid) => {
+				writes++;
+				if (writes === 1) {
+					// A has made its directory. B reclaims it as ownerless, makes its OWN
+					// directory at the same path and writes its pid there.
+					rmSync(lock, { recursive: true, force: true });
+					mkdirSync(lock);
+					writeFileSync(join(lock, "pid"), String(process.pid), { flag: "wx" });
+					events.push("B acquired");
+				} else {
+					events.push("A acquired");
+				}
+				// A's exclusive pid create: inside B's directory it must fail with EEXIST.
+				writeFileSync(pidPath, pid, { flag: "wx" });
+			},
+			wait: () => {
+				waits++;
+				// B finishes its critical section while A waits to retry.
+				if (waits === 1) {
+					events.push("B released");
+					rmSync(lock, { recursive: true, force: true });
+				}
+			},
+		});
+		expect(events).toEqual(["B acquired", "B released", "A acquired"]);
+		expect(writes).toBe(2);
+		expect(waits).toBeGreaterThanOrEqual(1);
+		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(String(process.pid));
+		release();
+		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a stale holder's release never removes a successor's lock", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		const releaseStale = acquireStateLock(statePath);
+		// The lock was reclaimed and a successor (another pid) now owns a fresh instance.
+		rmSync(lock, { recursive: true, force: true });
+		mkdirSync(lock);
+		writeFileSync(join(lock, "pid"), String(process.pid + 1), { flag: "wx" });
+		releaseStale();
+		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(String(process.pid + 1));
+		// A successor still mid-acquisition (no pid yet) is equally untouched.
+		rmSync(lock, { recursive: true, force: true });
+		mkdirSync(lock);
+		releaseStale();
+		expect(existsSync(lock)).toBe(true);
+	});
+
+	test("a pid write failing for any reason but a reclaimed directory still propagates and leaves no lock", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		const lock = `${statePath}.lock`;
+		const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+		expect(() =>
+			acquireStateLock(statePath, {
+				writePid: () => {
+					throw denied;
+				},
+			}),
+		).toThrow("denied");
+		expect(existsSync(lock)).toBe(false);
+	});
+
+	test("a pid-less lock directory younger than the grace window is never judged ownerless", () => {
+		const run = tempRun();
+		const lock = join(run, "gh-state.json.lock");
+		mkdirSync(lock);
+		expect(lockIsStale(lock)).toBe(false);
+		const young = new Date(Date.now() - OWNERLESS_LOCK_GRACE_MS / 2);
+		utimesSync(lock, young, young);
+		expect(lockIsStale(lock)).toBe(false);
+		const old = new Date(Date.now() - OWNERLESS_LOCK_GRACE_MS - 5_000);
+		utimesSync(lock, old, old);
+		expect(lockIsStale(lock)).toBe(true);
 	});
 
 	test("pr create and pr list refuse missing arguments instead of guessing", () => {

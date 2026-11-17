@@ -216,9 +216,10 @@ async function mcpTool(
 	name: string,
 	args: Record<string, unknown>,
 ): Promise<Record<string, unknown> | null> {
+	toolId += 1;
 	const attempt = await httpCall(base, bearer, "/mcp", {
 		jsonrpc: "2.0",
-		id: (toolId += 1),
+		id: toolId,
 		method: "tools/call",
 		params: { name, arguments: args },
 	});
@@ -226,7 +227,8 @@ async function mcpTool(
 }
 
 async function mcpToolList(base: string, bearer: string | null): Promise<string[] | null> {
-	const attempt = await httpCall(base, bearer, "/mcp", { jsonrpc: "2.0", id: (toolId += 1), method: "tools/list", params: {} });
+	toolId += 1;
+	const attempt = await httpCall(base, bearer, "/mcp", { jsonrpc: "2.0", id: toolId, method: "tools/list", params: {} });
 	const body = attempt.body as { result?: { tools?: Array<{ name?: unknown }> } } | null;
 	const tools = body?.result?.tools;
 	if (!Array.isArray(tools)) return null;
@@ -669,7 +671,7 @@ export async function runChild(
 	const started = performance.now();
 	const childEnv = childProcessEnv(env);
 	try {
-		const proc = Bun.spawn(argv, { env: childEnv, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", cwd });
+		const proc = Bun.spawn(argv, { env: childEnv, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", ...(cwd === undefined ? {} : { cwd }) });
 		if (stdin !== undefined && proc.stdin) {
 			const writer = proc.stdin as unknown as { write(s: string): void; end(): void };
 			writer.write(stdin);

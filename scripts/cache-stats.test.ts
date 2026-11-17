@@ -42,7 +42,7 @@ class FakeServer implements StatsClient {
 		if (command === "TYPE") return this.entries.get(args[0] as string)?.type ?? "none";
 		if (command === "STRLEN") {
 			const entry = this.entries.get(args[0] as string);
-			if (!entry || entry.type !== "string") throw new Error("WRONGTYPE");
+			if (entry?.type !== "string") throw new Error("WRONGTYPE");
 			return entry.length;
 		}
 		if (command === "INFO") {

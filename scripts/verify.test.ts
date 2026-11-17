@@ -13,6 +13,7 @@ import {
 	GATE_STEPS,
 	main,
 	parseArgs,
+	parseLintCounts,
 	parseTestCounts,
 	runStep,
 	selectSteps,
@@ -37,20 +38,20 @@ const ids = (argv: string[]): string[] => {
 };
 
 describe("parseArgs", () => {
-	test("defaults select the four gate steps and leave the audit out", () => {
+	test("defaults select the six gate steps and leave the audit out", () => {
 		expect(options([])).toEqual({ audit: false, only: null, skip: [], keepGoing: false, list: false, help: false });
-		expect(ids([])).toEqual(["install", "types", "tests", "locks"]);
+		expect(ids([])).toEqual(["install", "types", "lint", "tests", "python", "locks"]);
 	});
 
 	test("--audit appends the audit; --only names exactly the steps asked for, in gate order", () => {
-		expect(ids(["--audit"])).toEqual(["install", "types", "tests", "locks", "audit"]);
+		expect(ids(["--audit"])).toEqual(["install", "types", "lint", "tests", "python", "locks", "audit"]);
 		expect(ids(["--only", "locks,types"])).toEqual(["types", "locks"]);
 		expect(ids(["--only=audit"])).toEqual(["audit"]);
 	});
 
 	test("--skip removes steps, repeats accumulate, and --only plus --skip compose", () => {
-		expect(ids(["--skip", "install"])).toEqual(["types", "tests", "locks"]);
-		expect(ids(["--skip=install", "--skip", "tests"])).toEqual(["types", "locks"]);
+		expect(ids(["--skip", "install"])).toEqual(["types", "lint", "tests", "python", "locks"]);
+		expect(ids(["--skip=install", "--skip", "tests"])).toEqual(["types", "lint", "python", "locks"]);
 		expect(ids(["--only", "types,tests", "--skip", "tests"])).toEqual(["types"]);
 	});
 
@@ -63,7 +64,7 @@ describe("parseArgs", () => {
 		expect(parseArgs(["--only"])).toEqual({ error: "--only needs a value" });
 		expect(parseArgs(["--only", "--audit"])).toEqual({ error: "--only needs a value" });
 		expect(parseArgs(["--skip="])).toEqual({ error: "--skip needs at least one step id" });
-		expect(parseArgs(["--only=lint"])).toEqual({ error: expect.stringContaining("unknown step lint") });
+		expect(parseArgs(["--only=nope"])).toEqual({ error: expect.stringContaining("unknown step nope") });
 		expect(parseArgs(["--onlyfoo"])).toEqual({ error: "unknown option --onlyfoo" });
 	});
 
@@ -94,6 +95,21 @@ describe("parseTestCounts and skipNote", () => {
 		expect(skipNote(counts, { SUBSTRATE_TEST_PG_URL: "postgres://scratch" })).toBeNull();
 		expect(skipNote({ pass: 10, skip: 0, fail: 0 }, {})).toBeNull();
 		expect(skipNote(null, {})).toBeNull();
+	});
+});
+
+describe("parseLintCounts", () => {
+	test("reads the warning and info totals from Biome's summary", () => {
+		expect(parseLintCounts("Checked 300 files in 1s.\nFound 657 warnings.\nFound 6 infos.\n")).toEqual({ warnings: 657, infos: 6 });
+	});
+
+	test("accepts the singular form and colour codes", () => {
+		expect(parseLintCounts("\u001b[33mFound 1 warning.\u001b[0m\nFound 1 info.\n")).toEqual({ warnings: 1, infos: 1 });
+	});
+
+	test("is zero when the summary lines are absent", () => {
+		expect(parseLintCounts("Checked 300 files in 1s. No fixes applied.\n")).toEqual({ warnings: 0, infos: 0 });
+		expect(parseLintCounts("")).toEqual({ warnings: 0, infos: 0 });
 	});
 });
 
@@ -182,16 +198,25 @@ describe("main", () => {
 		expect(empty.written).toContain("no steps selected");
 	});
 
-	test("an all-pass run runs the four gate steps in order, reports the suite counts and exits 0", async () => {
+	test("an all-pass run runs the six gate steps in order, reports the suite counts and exits 0", async () => {
 		const { ran, run } = fakeRun();
 		const { result, written } = await quietly(() => main([], { run, env: { SUBSTRATE_TEST_PG_URL: "postgres://scratch" } }));
 
 		expect(result).toBe(0);
-		expect(ran).toEqual(["install", "types", "tests", "locks"]);
+		expect(ran).toEqual(["install", "types", "lint", "tests", "python", "locks"]);
 		expect(written).toContain("ok   Test suite (0.0s): 12 pass, 3 skip, 0 fail");
-		expect(written).toContain("[verify] pass: install, types, tests, locks");
+		expect(written).toContain("[verify] pass: install, types, lint, tests, python, locks");
 		expect(written).not.toContain("FAIL");
 		expect(written).not.toContain("note");
+	});
+
+	test("a passing lint step keeps Biome's warning and info counts visible", async () => {
+		const output = "Checked 300 files in 1s.\nFound 657 warnings.\nFound 6 infos.\n";
+		const { run } = fakeRun({ lint: { output } });
+		const { result, written } = await quietly(() => main(["--only", "lint"], { run }));
+
+		expect(result).toBe(0);
+		expect(written).toContain("ok   Lint (Biome) (0.0s): 657 warnings, 6 infos");
 	});
 
 	test("the first failing step stops the run, shows its output tail and exits 1", async () => {
@@ -212,7 +237,7 @@ describe("main", () => {
 		const { result, written } = await quietly(() => main(["--keep-going"], { run }));
 
 		expect(result).toBe(1);
-		expect(ran).toEqual(["install", "types", "tests", "locks"]);
+		expect(ran).toEqual(["install", "types", "lint", "tests", "python", "locks"]);
 		expect(written).toContain("[verify] FAIL: Typecheck, Repo locks");
 	});
 
@@ -227,11 +252,11 @@ describe("main", () => {
 	test("--audit adds the audit step and --skip leaves one out", async () => {
 		const audited = fakeRun();
 		await quietly(() => main(["--audit"], { run: audited.run }));
-		expect(audited.ran).toEqual(["install", "types", "tests", "locks", "audit"]);
+		expect(audited.ran).toEqual(["install", "types", "lint", "tests", "python", "locks", "audit"]);
 
 		const skipped = fakeRun();
 		await quietly(() => main(["--skip", "install,tests"], { run: skipped.run }));
-		expect(skipped.ran).toEqual(["types", "locks"]);
+		expect(skipped.ran).toEqual(["types", "lint", "python", "locks"]);
 	});
 
 	test("skipped live tests are noted unless a scratch database is configured (blank counts as unset)", async () => {
@@ -270,9 +295,7 @@ describe("the gate matches the CI workflow", () => {
 		expect(runLines(between("dependency-audit", "boot-gate"))).toEqual(["bun install --frozen-lockfile --ignore-scripts", audit.argv.join(" ")]);
 	});
 
-	test("the boot-gate job is last, report-only, opt-in on its own variable, and runs only the install and `bun run gate:boot`", () => {
-		const jobNames = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^ {2}([a-z][a-z-]*):$/gm)].map((match) => match[1] as string);
-		expect(jobNames).toEqual(["verify", "dependency-audit", "boot-gate"]);
+	test("the boot-gate job is report-only, opt-in on its own variable, and runs only the install and `bun run gate:boot`", () => {
 		const job = between("boot-gate");
 		// The harness refuses a checkout without node_modules, so the install is a prerequisite, not part of the gate.
 		expect(runLines(job)).toEqual(["bun install --frozen-lockfile", "bun run gate:boot"]);
@@ -287,8 +310,26 @@ describe("the gate matches the CI workflow", () => {
 
 	test("every job stays behind the CI_ENABLED switch", () => {
 		const ifLines = [...workflow.matchAll(/^ {4}if: (.+)$/gm)].map((match) => match[1] as string);
-		expect(ifLines).toHaveLength(3);
+		const jobCount = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^ {2}[a-z][a-z-]*:$/gm)].length;
+		expect(ifLines).toHaveLength(jobCount);
 		for (const line of ifLines) expect(line).toContain("vars.CI_ENABLED == 'true'");
+	});
+
+	test("every job's `if:` is exactly its reviewed expression, so only same-repo pull requests reach the shared runner", () => {
+		const sameRepoOnly = "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)";
+		// A deliberate table: adding, removing or editing a job's condition must be reflected here.
+		const expected: Record<string, string> = {
+			verify: `vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
+			"dependency-audit": "vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'",
+			"boot-gate": `vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule' && ${sameRepoOnly}`,
+		};
+		const jobsSection = workflow.slice(workflow.indexOf("\njobs:\n"));
+		const ids = [...jobsSection.matchAll(/^ {2}([a-z][a-z-]*):$/gm)].map((match) => match[1] as string);
+		expect([...ids].sort()).toEqual(Object.keys(expected).sort());
+		ids.forEach((id, index) => {
+			const ifLines = [...between(id, ids[index + 1]).matchAll(/^ {4}if: (.+)$/gm)].map((match) => match[1] as string);
+			expect(ifLines).toEqual([expected[id] as string]);
+		});
 	});
 
 	test("package.json exposes the gate as `bun run verify`", () => {

@@ -24,6 +24,7 @@ import {
 	scanSkillFiles,
 	type RedactionRuleName,
 } from "./redact.ts";
+import { defined } from "./test-support.ts";
 
 /** Milliseconds `work` takes. */
 function took(work: () => void): number {
@@ -90,7 +91,7 @@ describe("redactKnown", () => {
 
 describe("the single-pass event rules match what their patterns match", () => {
 	const names: RedactionRuleName[] = ["private-tag", "pem", "pk-rk", "url-password"];
-	const pattern = (name: RedactionRuleName) => REDACTION_RULES.find((rule) => rule.name === name)!;
+	const pattern = (name: RedactionRuleName) => defined(REDACTION_RULES.find((rule) => rule.name === name), name);
 	const run = (name: RedactionRuleName, text: string) => {
 		const rule = pattern(name);
 		return { applied: applyRule(name, text), direct: text.replace(rule.pattern, rule.replacement) };

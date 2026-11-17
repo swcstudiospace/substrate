@@ -1,0 +1,136 @@
+{
+	"documents": [
+		{
+			"repo": "acme/atlas",
+			"path": "docs/backup-restore.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/cache-tuning-notes.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/cache-tuning.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/certificate-rotation.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/feature-flags.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/getting-started.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/incident-response.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/log-retention.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/oncall-rota.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/rate-limiting.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "docs/schema-migrations.md"
+		},
+		{
+			"repo": "acme/atlas",
+			"path": "milestones/v1.1/docs/backup-restore.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "README.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/berth-scheduling.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/container-labels.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/crane-maintenance.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/customs-declarations.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/getting-started.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/hazmat-handling.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/incident-response.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/invoice-reconciliation.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/rate-limiting.md"
+		},
+		{
+			"repo": "acme/harbor",
+			"path": "docs/tide-tables.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/accessibility.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/biometric-login.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/crash-reporting.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/deep-links.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/device-backup.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/localisation.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/offline-sync.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/push-notifications-draft.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/push-notifications.md"
+		},
+		{
+			"repo": "acme/lantern",
+			"path": "docs/release-train.md"
+		}
+	]
+}

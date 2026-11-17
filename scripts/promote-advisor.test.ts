@@ -25,6 +25,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { EXTENDED_COVERAGE_SERIES, type Evidence, flagByName, policyFlags } from "../packages/mcp-server/src/flag-registry.ts";
+import { defined } from "./test-support.ts";
 import {
 	type Criterion,
 	type FlagVerdict,
@@ -69,7 +70,7 @@ function steady(points: readonly PointSpec[]): PointSpec[] {
 	if (points.length === 0) return [...points];
 	const oldest = Math.max(...points.map((point) => point.ago));
 	// The rows carry the first point's label: a sampler row is about one label value, and coverage is judged per label.
-	const label = points[0]!.label;
+	const label = defined(points[0]).label;
 	const fillers: PointSpec[] = [{ ago: 0.1, value: 0, count: 0, ...(label === undefined ? {} : { label }) }];
 	for (let ago = oldest - 3; ago > 0.5; ago -= 3) fillers.push({ ago, value: 0, count: 0, ...(label === undefined ? {} : { label }) });
 	return [...points, ...fillers];
@@ -148,10 +149,10 @@ async function run(argv: readonly string[], files: Record<string, string>, env: 
 		stderr: (text) => {
 			stderr += text;
 		},
-		fetchImpl,
+		...(fetchImpl === undefined ? {} : { fetchImpl }),
 		readFile: (path) => {
 			if (!Object.hasOwn(files, path)) throw new Error("ENOENT");
-			return files[path]!;
+			return defined(files[path], path);
 		},
 	});
 	let json: Report | null = null;
@@ -159,7 +160,7 @@ async function run(argv: readonly string[], files: Record<string, string>, env: 
 	return { code, stdout, stderr, json };
 }
 
-const verdictOf = (report: Report | null, flag: string): FlagVerdict => report!.flags.find((entry) => entry.flag === flag)!;
+const verdictOf = (report: Report | null, flag: string): FlagVerdict => defined(defined(report).flags.find((entry) => entry.flag === flag), flag);
 
 describe("verdicts for the admission budgets (shadow share of decisions)", () => {
 	const budgets = (counts: Record<string, number>) => fixtureOf({ "admission.decisions": decisions(counts) });
@@ -183,8 +184,8 @@ describe("verdicts for the admission budgets (shadow share of decisions)", () =>
 		// If bypass (not a decision) were in the denominator: 40 / 6000 = 0.67 %, which would read ready.
 		const verdict = await judge({ allowed: 960, shadow_limited: 30, limited: 10, bypass: 5000 });
 		expect(verdict.verdict).toBe("hold");
-		expect(verdict.criteria[0]!.observed).toBeCloseTo(0.04, 12);
-		expect(verdict.criteria[0]!.samples).toBe(1000);
+		expect(defined(verdict.criteria[0]).observed).toBeCloseTo(0.04, 12);
+		expect(defined(verdict.criteria[0]).samples).toBe(1000);
 	});
 
 	test("the bound is inclusive: exactly 10 of 1000 is 1 % and ready; 11 of 1000 holds", async () => {
@@ -195,8 +196,8 @@ describe("verdicts for the admission budgets (shadow share of decisions)", () =>
 	test("insufficient-data below the 100-decision floor, whatever the share (2 of 80 is 2.5 %, not a hold)", async () => {
 		const verdict = await judge({ allowed: 78, shadow_limited: 2 });
 		expect(verdict.verdict).toBe("insufficient-data");
-		expect(verdict.criteria[0]!.observed).toBeNull();
-		expect(verdict.criteria[0]!.samples).toBe(80);
+		expect(defined(verdict.criteria[0]).observed).toBeNull();
+		expect(defined(verdict.criteria[0]).samples).toBe(80);
 	});
 
 	test("the floor is inclusive: exactly 100 decisions is judged", async () => {
@@ -230,7 +231,7 @@ describe("verdicts for the admission budgets (shadow share of decisions)", () =>
 		const verdictFor = async (last: number): Promise<Criterion> => {
 			const body = ok("admission.decisions", "decision", everyThreeHours(last), 24, { fill: false });
 			const report = (await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json", "--json"], { "f.json": fixtureOf({ "admission.decisions": body }) })).json;
-			return verdictOf(report, "SUBSTRATE_BUDGETS").criteria[0]!;
+			return defined(verdictOf(report, "SUBSTRATE_BUDGETS").criteria[0]);
 		};
 		// Rows 23.5, 20.5, ..., 5.5 h ago: every gap is 3 h and 5.5 h of the window are after the last row.
 		expect(await verdictFor(5.5)).toMatchObject({ verdict: "ready", observed: 0 });
@@ -272,10 +273,10 @@ describe("verdicts and precedence for the cache stale-while-revalidate flag", ()
 		// share = would_serve_stale / miss = 100 / 900: the shadow probe counts would_serve_stale IN ADDITION to the miss of the same request; hits are not misses.
 		const verdict = await judge(swr(cacheOps({ hit: 2000, miss: 900, would_serve_stale: 100 }), briefP95([400, 650, 700])));
 		expect(verdict.verdict).toBe("ready");
-		expect(verdict.criteria[0]!.observed).toBeCloseTo(100 / 900, 12);
-		expect(verdict.criteria[0]!.samples).toBe(900);
-		expect(verdict.criteria[1]!.observed).toBe(700);
-		expect(verdict.criteria[1]!.samples).toBe(120);
+		expect(defined(verdict.criteria[0]).observed).toBeCloseTo(100 / 900, 12);
+		expect(defined(verdict.criteria[0]).samples).toBe(900);
+		expect(defined(verdict.criteria[1]).observed).toBe(700);
+		expect(defined(verdict.criteria[1]).samples).toBe(120);
 	});
 
 	test("hold outranks every other outcome: a ready cache share cannot carry a 1600 ms p95", async () => {
@@ -296,7 +297,7 @@ describe("verdicts and precedence for the cache stale-while-revalidate flag", ()
 		// One p95 sample interval of 40 briefs is below the floor of 100: insufficient. The cache series answers 400: unavailable.
 		const verdict = await judge(swr(NOT_RECORDED, briefP95([400])));
 		expect(verdict.verdict).toBe("series-unavailable");
-		expect(verdict.criteria[0]!.hint).toContain("SUBSTRATE_METRICS_HISTORY_SERIES=extended");
+		expect(defined(verdict.criteria[0]).hint).toContain("SUBSTRATE_METRICS_HISTORY_SERIES=extended");
 	});
 
 	test("insufficient-data outranks ready: one thin criterion keeps the flag from ready", async () => {
@@ -316,8 +317,8 @@ describe("verdicts and precedence for the cache stale-while-revalidate flag", ()
 	test("the share is a lower bound and says so, in the JSON and on the printed line", async () => {
 		const fixture = swr(cacheOps({ miss: 900, would_serve_stale: 100 }), briefP95([400, 650, 700]));
 		const verdict = await judge(fixture);
-		expect(verdict.criteria[0]!.note).toContain("lower bound");
-		expect(verdict.criteria[1]!.note).toBeNull();
+		expect(defined(verdict.criteria[0]).note).toContain("lower bound");
+		expect(defined(verdict.criteria[1]).note).toBeNull();
 		const text = (await run(["--flag", "SUBSTRATE_CACHE_SWR", "--offline", "f.json"], { "f.json": fixture })).stdout;
 		expect(text).toContain("(lower bound: cache.operations sums every cache class, would_serve_stale is brief-only)");
 	});
@@ -328,7 +329,7 @@ describe("verdicts and precedence for the cache stale-while-revalidate flag", ()
 		const mixed = ok("brief.p95", "surface", [...everyHour, ...burst], 24, { fill: false });
 		const verdict = await judge(swr(cacheOps({ miss: 900, would_serve_stale: 100 }), mixed));
 		expect(verdict.criteria[1]).toMatchObject({ verdict: "insufficient-data", observed: null });
-		expect(verdict.criteria[1]!.detail).toContain("brief.p95 covers 2.0 h of the 24h window");
+		expect(defined(verdict.criteria[1]).detail).toContain("brief.p95 covers 2.0 h of the 24h window");
 		// The same day for grok-bot itself is judged on the numbers.
 		const own = ok("brief.p95", "surface", everyHour.map((point) => ({ ...point, label: "grok-bot" })), 24, { fill: false });
 		expect((await judge(swr(cacheOps({ miss: 900, would_serve_stale: 100 }), own))).criteria[1]).toMatchObject({ verdict: "ready", observed: 300 });
@@ -342,7 +343,7 @@ describe("the manual check still applies when the history says ready", () => {
 		const json = (await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json", "--json"], { "f.json": readyBudgets })).json;
 		const flag = verdictOf(json, "SUBSTRATE_BUDGETS");
 		expect(flag.verdict).toBe("ready");
-		expect(flag.manual).toBe(flagByName("SUBSTRATE_BUDGETS")!.policy!.manual!);
+		expect(flag.manual).toBe(defined(defined(flagByName("SUBSTRATE_BUDGETS")).policy?.manual));
 		const text = (await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json"], { "f.json": readyBudgets })).stdout;
 		expect(text).toContain("READY");
 		expect(text).toContain("also check: per surface and class shadow-limited counts");
@@ -352,9 +353,9 @@ describe("the manual check still applies when the history says ready", () => {
 
 	test("every policy flag with both history evidence and a manual check reports it, and one without a manual check reports null", async () => {
 		const json = (await run(["--offline", "f.json", "--json"], { "f.json": fixtureOf({}) })).json;
-		const both = policyFlags().filter((flag) => flag.policy!.evidence.length > 0 && flag.policy!.manual !== undefined).map((flag) => flag.name);
+		const both = policyFlags().filter((flag) => defined(flag.policy).evidence.length > 0 && defined(flag.policy).manual !== undefined).map((flag) => flag.name);
 		expect(both).toEqual(expect.arrayContaining(["SUBSTRATE_MEMORY_EXPIRY", "SUBSTRATE_BRIEF_RECALL", "SUBSTRATE_BUDGETS"]));
-		for (const name of both) expect(verdictOf(json, name).manual).toBe(flagByName(name)!.policy!.manual!);
+		for (const name of both) expect(verdictOf(json, name).manual).toBe(defined(defined(flagByName(name)).policy?.manual));
 		expect(verdictOf(json, "SUBSTRATE_CACHE_SWR").manual).toBeNull();
 		const text = (await run(["--offline", "f.json"], { "f.json": fixtureOf({}) })).stdout;
 		expect(text.match(/also check:/g)?.length).toBe(both.length);
@@ -362,9 +363,9 @@ describe("the manual check still applies when the history says ready", () => {
 });
 
 describe("ratio, sum and share criteria with hand-computed boundaries", () => {
-	const profile = flagByName("SUBSTRATE_BRIEF_PROFILE")!.policy!.evidence[0]!;
-	const expiry = flagByName("SUBSTRATE_MEMORY_EXPIRY")!.policy!.evidence[0]!;
-	const recall = flagByName("SUBSTRATE_BRIEF_RECALL")!.policy!.evidence;
+	const profile = defined(defined(defined(flagByName("SUBSTRATE_BRIEF_PROFILE")).policy).evidence[0]);
+	const expiry = defined(defined(defined(flagByName("SUBSTRATE_MEMORY_EXPIRY")).policy).evidence[0]);
+	const recall = defined(defined(flagByName("SUBSTRATE_BRIEF_RECALL")).policy).evidence;
 	/** Answers keyed by series for one window; an extended criterion also gets the extended coverage gauge, spanning 98 % of the window, unless the entries bring their own. */
 	const results = (entries: Record<string, { status: number; body: unknown }>, window: string, needs: Evidence["needs"] = "core") => {
 		const hours = Number(window.slice(0, -1)) * (window.endsWith("d") ? 24 : 1);
@@ -449,17 +450,17 @@ describe("ratio, sum and share criteria with hand-computed boundaries", () => {
 	test("recall: own history that starts inside the first 10 % of the window passes; just after it does not", () => {
 		const startingAt = (ago: number) => ok("brief.recall", "result", [{ ago, label: "would_include", value: 80 }, { ago: ago - 1, label: "cold", value: 20 }], 72);
 		// 72 h window: 10 % is 7.2 h, so a first point 65 h ago is inside the allowance and 64 h ago is not.
-		expect(judgeCriterion(recall[0]!, results({ "brief.recall": startingAt(65) }, "3d")).verdict).toBe("ready");
-		expect(judgeCriterion(recall[0]!, results({ "brief.recall": startingAt(64) }, "3d")).verdict).toBe("insufficient-data");
+		expect(judgeCriterion(defined(recall[0]), results({ "brief.recall": startingAt(65) }, "3d")).verdict).toBe("ready");
+		expect(judgeCriterion(defined(recall[0]), results({ "brief.recall": startingAt(64) }, "3d")).verdict).toBe("insufficient-data");
 	});
 
 	test("recall: a young own series with a measured miss is still a hold (only a pass needs the proof)", () => {
 		const young = ok("brief.recall", "result", [{ ago: 3, label: "would_include", value: 10 }, { ago: 2, label: "cold", value: 90 }], 72);
-		expect(judgeCriterion(recall[1]!, results({ "brief.recall": young }, "3d"))).toMatchObject({ verdict: "hold", observed: 0.9 });
+		expect(judgeCriterion(defined(recall[1]), results({ "brief.recall": young }, "3d"))).toMatchObject({ verdict: "hold", observed: 0.9 });
 	});
 
 	test("recall cold+stale is strictly under 30 %: exactly 30 of 100 holds, 29 passes", () => {
-		const coldStale = recall[1]!;
+		const coldStale = defined(recall[1]);
 		const counts = (cold: number) => ok("brief.recall", "result", [{ ago: 70, label: "cold", value: cold }, { ago: 69, label: "would_include", value: 100 - cold }], 72);
 		expect(judgeCriterion(coldStale, results({ "brief.recall": counts(30) }, "3d")).verdict).toBe("hold");
 		expect(judgeCriterion(coldStale, results({ "brief.recall": counts(29) }, "3d")).verdict).toBe("ready");
@@ -467,7 +468,7 @@ describe("ratio, sum and share criteria with hand-computed boundaries", () => {
 });
 
 describe("answers that must never read as ready", () => {
-	const budgets = flagByName("SUBSTRATE_BUDGETS")!.policy!.evidence[0]!;
+	const budgets = defined(defined(defined(flagByName("SUBSTRATE_BUDGETS")).policy).evidence[0]);
 	const judge = (fixture: { status: number; body: unknown }) => judgeCriterion(budgets, new Map([[keyOf("admission.decisions", "24h"), answer(fixture)]]));
 	const good = decisions({ allowed: 990, shadow_limited: 6 });
 
@@ -548,7 +549,7 @@ describe("the advisor is read-only", () => {
 		const result = await run(["--json", "--flag", "SUBSTRATE_BUDGETS"], {}, {}, fetchImpl);
 		expect(sent).toBeNull();
 		expect(result.code).toBe(0);
-		expect(verdictOf(result.json, "SUBSTRATE_BUDGETS").criteria[0]!.detail).toContain("bearer refused");
+		expect(defined(verdictOf(result.json, "SUBSTRATE_BUDGETS").criteria[0]).detail).toContain("bearer refused");
 	});
 
 	test("a failing network is series-unavailable for every criterion, exit 0, and the error text is not echoed", async () => {
@@ -557,8 +558,8 @@ describe("the advisor is read-only", () => {
 		}) as unknown as typeof fetch;
 		const result = await run(["--json"], {}, {}, fetchImpl);
 		expect(result.code).toBe(0);
-		expect(result.json!.flags.length).toBeGreaterThan(0);
-		expect(result.json!.flags.map((flag) => flag.verdict)).toEqual(result.json!.flags.map(() => "series-unavailable"));
+		expect(defined(result.json).flags.length).toBeGreaterThan(0);
+		expect(defined(result.json).flags.map((flag) => flag.verdict)).toEqual(defined(result.json).flags.map(() => "series-unavailable"));
 		expect(result.stdout + result.stderr).not.toContain("boom-secret-detail");
 	});
 
@@ -570,7 +571,7 @@ describe("the advisor is read-only", () => {
 
 	test("an unparseable 200 body is a malformed answer, not an empty history", async () => {
 		const result = await run(["--json", "--flag", "SUBSTRATE_BUDGETS"], {}, {}, answerAll(200, "not an object"));
-		expect(verdictOf(result.json, "SUBSTRATE_BUDGETS").criteria[0]!.verdict).toBe("series-unavailable");
+		expect(defined(verdictOf(result.json, "SUBSTRATE_BUDGETS").criteria[0]).verdict).toBe("series-unavailable");
 	});
 
 	test("liveGetter exposes no way to name a method", async () => {
@@ -596,21 +597,21 @@ describe("the CLI", () => {
 		const result = await run(["--offline", "f.json", "--json"], { "f.json": fixtureOf({}) }, {}, fetchImpl);
 		expect(requests).toBe(0);
 		expect(result.code).toBe(0);
-		expect(result.json!.source).toBe("offline");
-		const judged = policyFlags().filter((flag) => flag.policy!.evidence.length > 0).map((flag) => flag.name);
-		expect(result.json!.flags.map((flag) => flag.flag)).toEqual(judged);
-		expect(result.json!.notJudged.map((entry) => entry.flag)).toEqual(policyFlags().filter((flag) => flag.policy!.evidence.length === 0).map((flag) => flag.name));
+		expect(defined(result.json).source).toBe("offline");
+		const judged = policyFlags().filter((flag) => defined(flag.policy).evidence.length > 0).map((flag) => flag.name);
+		expect(defined(result.json).flags.map((flag) => flag.flag)).toEqual(judged);
+		expect(defined(result.json).notJudged.map((entry) => entry.flag)).toEqual(policyFlags().filter((flag) => defined(flag.policy).evidence.length === 0).map((flag) => flag.name));
 		// A series the fixture does not name is a series this substrate does not record.
-		expect(new Set(result.json!.flags.map((flag) => flag.verdict))).toEqual(new Set(["series-unavailable"]));
+		expect(new Set(defined(result.json).flags.map((flag) => flag.verdict))).toEqual(new Set(["series-unavailable"]));
 	});
 
 	test("--flag narrows to one flag, and a flag with no history evidence prints its manual check", async () => {
 		const one = await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json", "--json"], { "f.json": fixtureOf({}) });
-		expect(one.json!.flags.map((flag) => flag.flag)).toEqual(["SUBSTRATE_BUDGETS"]);
+		expect(defined(one.json).flags.map((flag) => flag.flag)).toEqual(["SUBSTRATE_BUDGETS"]);
 		const manual = await run(["--flag", "SUBSTRATE_INDEX_SWEEP", "--offline", "f.json", "--json"], { "f.json": fixtureOf({}) });
-		expect(manual.json!.flags).toEqual([]);
-		expect(manual.json!.notJudged.map((entry) => entry.flag)).toEqual(["SUBSTRATE_INDEX_SWEEP"]);
-		expect(manual.json!.notJudged[0]!.manual.length).toBeGreaterThan(0);
+		expect(defined(manual.json).flags).toEqual([]);
+		expect(defined(manual.json).notJudged.map((entry) => entry.flag)).toEqual(["SUBSTRATE_INDEX_SWEEP"]);
+		expect(defined(defined(manual.json).notJudged[0]).manual.length).toBeGreaterThan(0);
 	});
 
 	test("usage errors exit 2 and name the problem; --help exits 0", async () => {
@@ -639,9 +640,9 @@ describe("the CLI", () => {
 	test("/slo context is reported when present and ignored when malformed", async () => {
 		const slo = { status: 200, body: { history: { epoch: 3, since: "2026-10-13T09:12:04.118Z" } } };
 		const withSlo = await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json", "--json"], { "f.json": fixtureOf({}, slo) });
-		expect(withSlo.json!.history).toEqual({ epoch: 3, since: "2026-10-13T09:12:04.118Z" });
+		expect(defined(withSlo.json).history).toEqual({ epoch: 3, since: "2026-10-13T09:12:04.118Z" });
 		const broken = await run(["--flag", "SUBSTRATE_BUDGETS", "--offline", "f.json", "--json"], { "f.json": fixtureOf({}, { status: 200, body: { history: { epoch: "x" } } }) });
-		expect(broken.json!.history).toBeNull();
+		expect(defined(broken.json).history).toBeNull();
 	});
 
 	test("the text report carries the verdict, the observed number, the proposal marker and the operator step", async () => {
@@ -664,7 +665,7 @@ describe("buildReport and parseFixture", () => {
 			asked.push(path);
 			return { status: 404, body: { enabled: false } };
 		};
-		await buildReport([flagByName("SUBSTRATE_MEMORY_EXPIRY")!], get, "live");
+		await buildReport([defined(flagByName("SUBSTRATE_MEMORY_EXPIRY"))], get, "live");
 		expect(asked).toEqual([`/slo/history?series=memory.expired&window=7d`, `/slo/history?series=${EXTENDED_COVERAGE_SERIES}&window=7d`, "/slo"]);
 	});
 
@@ -674,7 +675,7 @@ describe("buildReport and parseFixture", () => {
 	});
 
 	test("judgeFlag with no answers at all is series-unavailable for each criterion and never ready", () => {
-		const verdict = judgeFlag(flagByName("SUBSTRATE_BRIEF_RECALL")!, new Map());
+		const verdict = judgeFlag(defined(flagByName("SUBSTRATE_BRIEF_RECALL")), new Map());
 		expect(verdict.verdict).toBe("series-unavailable");
 		expect(verdict.criteria.every((criterion) => criterion.verdict === "series-unavailable")).toBe(true);
 	});

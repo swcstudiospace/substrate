@@ -5,10 +5,11 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT, type SignerSet } from "@substrate/ledger";
+import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
-import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
+import { ADMISSION_BREAKER_POLICIES, ADMISSION_MODES, type AdmissionBreakerPolicy, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
 import { classifyEndpoint, parseProxyAllow, type DbPlane, type EndpointClass, type ProxyAllow } from "./db-endpoints.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { loadInventoryConfig, type InventoryConfig } from "./hindsight-inventory.ts";
@@ -19,11 +20,19 @@ import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { isLightragQueryMode, type LightragQueryMode } from "./planes/lightrag.ts";
 import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
-import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
+import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
+import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
+import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
+import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
+import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
+import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
+import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
+import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
 export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
@@ -44,22 +53,93 @@ export type DocsBackend = (typeof DOCS_BACKENDS)[number];
  * LightRAG reach. `LIGHTRAG_URL` names it; `LIGHTRAG_API_KEY` is sent when
  * the deployment guards reads/writes. Null leaves the LightRAG path
  * unconfigured (the RAGFlow path is unchanged).
+ *
+ * `queryMode` is the default mode for a query that names none and has no
+ * `/mix` or `/hybrid` prefix (`SUBSTRATE_LIGHTRAG_QUERY_MODE`); absent means
+ * `hybrid`. A LightRAG with no real LLM builds no knowledge graph and must use
+ * `naive`.
  */
 export interface LightragConfig {
 	url: string;
 	apiKey?: string;
+	queryMode?: LightragQueryMode;
+}
+
+/**
+ * `SUBSTRATE_LIGHTRAG_QUERY_MODE`, case- and space-insensitive. Unset or blank
+ * is no default (`mode` null); an unrecognised value is no default too, and is
+ * carried back as `rejected` so a typo never silently picks a mode.
+ */
+export function resolveLightragQueryMode(env: Record<string, string | undefined> = process.env): { mode: LightragQueryMode | null; rejected: boolean } {
+	const raw = env.SUBSTRATE_LIGHTRAG_QUERY_MODE?.trim().toLowerCase();
+	if (!raw) return { mode: null, rejected: false };
+	return isLightragQueryMode(raw) ? { mode: raw, rejected: false } : { mode: null, rejected: true };
 }
 
 /**
  * The substrate's LightRAG reach, or null when it has none.
  *
- * Reads `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` only.
+ * Reads `LIGHTRAG_URL` / `LIGHTRAG_API_KEY` and the `SUBSTRATE_LIGHTRAG_QUERY_MODE` default only.
  */
 export function lightragFromEnv(env: Record<string, string | undefined> = process.env): LightragConfig | null {
 	const url = env.LIGHTRAG_URL?.trim().replace(/\/+$/, "");
 	if (!url) return null;
 	const apiKey = env.LIGHTRAG_API_KEY?.trim();
-	return apiKey ? { url, apiKey } : { url };
+	const { mode } = resolveLightragQueryMode(env);
+	return { url, ...(apiKey ? { apiKey } : {}), ...(mode !== null ? { queryMode: mode } : {}) };
+}
+
+/** Default per-request timeout of the TEI client, ms (`SUBSTRATE_TEI_TIMEOUT_MS`). */
+export const DEFAULT_TEI_TIMEOUT_MS = 10_000;
+/** Default most texts per `/embed` request (`SUBSTRATE_TEI_BATCH`); the server's own limit can only lower it. */
+export const DEFAULT_TEI_BATCH = 32;
+/** Default seconds a cached embedding lives (`SUBSTRATE_EMBED_CACHE_TTL_S`): one week. */
+export const DEFAULT_EMBED_CACHE_TTL_S = 604_800;
+
+/**
+ * The TEI (text-embeddings-inference) reach. `TEI_URL` names it; `TEI_API_KEY` is sent as a bearer token when set and
+ * is never logged or reported. `model` and `dim` are the pins (`SUBSTRATE_TEI_MODEL`, `SUBSTRATE_TEI_DIM`): vectors of
+ * two models are not comparable, so a server whose `/info` or answers differ from a pin is refused. A pin left unset is
+ * learned from the first good answer and then held for the life of the process.
+ */
+export interface TeiConfig {
+	url: string;
+	apiKey?: string;
+	model?: string;
+	dim?: number;
+	timeoutMs: number;
+	batch: number;
+}
+
+/** The substrate's TEI reach, or null when `TEI_URL` is unset. A bad number falls back to its default, never a crash. */
+export function teiFromEnv(env: Record<string, string | undefined> = process.env): TeiConfig | null {
+	const url = env.TEI_URL?.trim().replace(/\/+$/, "");
+	if (!url) return null;
+	const apiKey = env.TEI_API_KEY?.trim();
+	const model = env.SUBSTRATE_TEI_MODEL?.trim();
+	const dimRaw = env.SUBSTRATE_TEI_DIM?.trim() ?? "";
+	const dim = /^\d+$/.test(dimRaw) && Number(dimRaw) >= 1 && Number(dimRaw) <= 8192 ? Number(dimRaw) : undefined;
+	return {
+		url,
+		...(apiKey ? { apiKey } : {}),
+		...(model ? { model } : {}),
+		...(dim !== undefined ? { dim } : {}),
+		timeoutMs: boundedInt(env.SUBSTRATE_TEI_TIMEOUT_MS, DEFAULT_TEI_TIMEOUT_MS, 100, 120_000),
+		batch: boundedInt(env.SUBSTRATE_TEI_BATCH, DEFAULT_TEI_BATCH, 1, 512),
+	};
+}
+
+/** The embedding cache switch and TTL: `SUBSTRATE_EMBED_CACHE` is `on` or off (anything else is off), the TTL is seconds. */
+export interface EmbedCacheSettings {
+	enabled: boolean;
+	ttlS: number;
+}
+
+export function embedCacheFromEnv(env: Record<string, string | undefined> = process.env): EmbedCacheSettings {
+	return {
+		enabled: (env.SUBSTRATE_EMBED_CACHE?.trim().toLowerCase() ?? "") === "on",
+		ttlS: boundedInt(env.SUBSTRATE_EMBED_CACHE_TTL_S, DEFAULT_EMBED_CACHE_TTL_S, 60, 2_592_000),
+	};
 }
 
 /**
@@ -246,6 +326,16 @@ export interface SubstrateConfig {
 	 */
 	lightrag: LightragConfig | null;
 	/**
+	 * Whether `SUBSTRATE_LIGHTRAG_QUERY_MODE` was set to a value that is not a
+	 * LightRAG query mode (it then falls back to hybrid). A flag, not the value:
+	 * the boot warning names the key only.
+	 */
+	lightragQueryModeRejected: boolean;
+	/** The TEI reach, or null when `TEI_URL` is unset (`teiFromEnv`). Null makes every embed answer `not-configured`. */
+	tei: TeiConfig | null;
+	/** `SUBSTRATE_EMBED_CACHE` and its TTL: the Dragonfly cache of embeddings, off by default. */
+	embedCache: EmbedCacheSettings;
+	/**
 	 * Ms between LightRAG planning polls (SPE-19385).
 	 *
 	 * From `SUBSTRATE_LIGHTRAG_POLL_MS`, default 5000. The poller sleeps
@@ -414,6 +504,13 @@ export interface SubstrateConfig {
 	/** The unrecognised `SUBSTRATE_SKILLS_GOVERNANCE` value, for the boot warning; null when the key parsed or was unset. */
 	skillsGovernanceRejected: string | null;
 	/**
+	 * The worktree registry (phase 68). `mode` is `SUBSTRATE_WORKTREE_REGISTRY`: `off` (the default, and anything that is not `on`)
+	 * answers `POST /worktrees/report`, `GET /worktrees` and `worktree_list` with 503 `worktrees.disabled` and writes nothing.
+	 * `ttlS` is `SUBSTRATE_WORKTREE_REGISTRY_TTL_S`, the age at which a report sweeps its own host's unrefreshed rows. `idleDays`
+	 * is `SUBSTRATE_WORKTREE_IDLE_DAYS`, how long a worktree's last commit may age before a listing calls it `stale`.
+	 */
+	worktreeRegistry: { mode: WorktreeRegistryMode; ttlS: number; idleDays: number };
+	/**
 	 * Surfaces allowed to call `desktop_run`, from `SUBSTRATE_DESKTOP_SURFACES`.
 	 *
 	 * The operator allowlist is the only gate (D30-01): unset or empty means
@@ -463,8 +560,26 @@ export interface SubstrateConfig {
 	 * operator sets them, and the job exits 2 with usage until they do. The
 	 * keypair is only ever a path the CLI reads — it is never opened or
 	 * logged here. `pubkey` is non-secret.
+	 *
+	 * `problem` is null unless `rpcUrl` is refused by the devnet-only URL guard
+	 * (`assertDevnetRpcUrl`: not http(s), userinfo, a fragment, or a mainnet/testnet
+	 * host). It never crashes boot; `configWarnings` reports it, and the anchor job
+	 * and the verify read-back refuse to touch the network while it is set.
+	 *
+	 * `signerSet` is the parsed `SUBSTRATE_ANCHOR_SIGNER_SET` (null when unset): the verifier's bootstrap signer set,
+	 * which REPLACES `[pubkey]` so a rotated job key does not drop the keys that signed earlier anchors. A malformed
+	 * value is `signerSetProblem` (a rule and a field path, NEVER the value) with `signerSet` null; verification then
+	 * answers `unverified` with a fixed reason instead of judging against a missing or empty set.
 	 */
-	solana: { rpcUrl: string; keypairPath: string | null; pubkey: string | null; cli: string };
+	solana: {
+		rpcUrl: string;
+		keypairPath: string | null;
+		pubkey: string | null;
+		cli: string;
+		problem: string | null;
+		signerSet: SignerSet | null;
+		signerSetProblem: string | null;
+	};
 	/**
 	 * Whole-verify devnet budget in milliseconds (D28-18).
 	 *
@@ -509,6 +624,13 @@ export interface SubstrateConfig {
 	 * `problems` are the boot warnings for a value that was refused or capped (`requestPathConfigWarnings`).
 	 */
 	requestPath: RequestPathSettings;
+	// v1.6 phase 57c
+	/**
+	 * The off-by-default recall flags: `SUBSTRATE_DOCS_TANDEM=off|on` with `SUBSTRATE_DOCS_TANDEM_LIMIT` (1..10, default 5)
+	 * and `SUBSTRATE_DOCS_TANDEM_BUDGET_MS` (50..10000, default 1500), and `SUBSTRATE_BRIEF_RECALL_SCOPE=off|graph`.
+	 * `problems` are the boot warnings for a value that was refused or capped (`contextualRecallConfigWarnings`).
+	 */
+	contextualRecall: ContextualRecallSettings;
 	// uplift-2 R5
 	/**
 	 * Ledger chain cache, chain-tip lookback, write-probe cadence and opt-in TTL,
@@ -547,6 +669,18 @@ export interface SubstrateConfig {
 	 * plane is deleted unless the operator turns this on.
 	 */
 	docsPruneSuperseded: boolean;
+	/** The corpus atlas bulk ingest (v1.7 phase 63): closed unless `SUBSTRATE_CORPUS=on`, with the batching knobs it runs under. */
+	corpus: CorpusSettings;
+	/** The docs learning loop (v1.7 phase 66): telemetry, the authority re-rank and the gap threshold. Every switch is off by default. */
+	docsReflect: DocsReflectSettings;
+	/** The docs plane's three objectives (v1.7 phase 70): `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`. */
+	docsSlo: SloThresholds;
+	/**
+	 * `SUBSTRATE_PLANNING_HASH_STORE=on` (v1.7 phase 65): the planning refresh keeps its per-page hashes in a store (the index
+	 * when there is one, else this process's memory) and loads them at its first pass, so a restart ingests only the pages
+	 * that changed. Off by default: the hashes live in a map in memory, as before, and every restart re-ingests every page.
+	 */
+	planningHashStore: boolean;
 	/**
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
@@ -559,7 +693,7 @@ export interface SubstrateConfig {
 	 * `SUBSTRATE_BUDGETS` (`off` | `shadow` | `enforce`, default `shadow`) and
 	 * the per-class buckets from `SUBSTRATE_BUDGET_<CLASS>_RPS` / `_BURST`, with
 	 * per-surface `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` overrides
-	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`. See `admission.ts`.
+	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`, and each class's `SUBSTRATE_BUDGET_<CLASS>_BREAKER` (what an open cache breaker does to it). See `admission.ts`.
 	 */
 	admission: AdmissionSettings;
 	/**
@@ -621,6 +755,30 @@ export interface SubstrateConfig {
 	eventIdempotencyRejected: string | null;
 	/** `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): the Dragonfly wake-up hints. See `EventBusSettings`. */
 	eventBus: EventBusSettings;
+	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08): the planning root, presence window and read bounds. See `planning/config.ts`. */
+	planning: PlanningConfigResult;
+	/** `SUBSTRATE_PLANNING_CHECKPOINT_DIR` (phase 53, SOTA-09): where completion checkpoints are kept durably. Unset keeps them in memory. See `planning/checkpoint-store.ts`. */
+	planningCheckpoint: CheckpointDirectoryResult;
+	/** `SUBSTRATE_PLANNING_STEERING*` (phase 53, SOTA-09): the steering switch, principal allowlist and rate. See `planning/steering.ts`. */
+	steering: SteeringConfigResult;
+	/** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` (phase 53, SOTA-09): on lets `migrate()` create `planning_steering_audit`. Off by default. */
+	steeringAuditTable: boolean;
+	/** Historical migration-37 selection only; no runtime session cache or live authorization role. */
+	steeringSessionsTable: boolean;
+	/** `SUBSTRATE_LIVE_SESSION_LEASE_S` (phase 71): authoritative live-session lease, whole seconds 60..86400; default 3600. */
+	liveSessionLeaseS: number;
+	/** `SUBSTRATE_STEERING_WAIT_MAX_MS` (phase 67): the longest `GET /steering/wait` holds a request. Default 30000, bound 1000..120000. */
+	steeringWaitMaxMs: number;
+	/** `SUBSTRATE_BRIEF_SESSIONS` (phase 67): on adds the `sessions`, `steering` and `handoffs` sections to the brief. Off by default: the brief is exactly what it was. */
+	briefSessions: boolean;
+	/** Whether the steering tools are registered: the switch is on, or it is malformed and so answered as `misconfigured`. Off registers none. */
+	steeringRegistered: boolean;
+	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
+	steeringExpiry: SteeringExpiryConfigResult;
+	/** `SUBSTRATE_PLANNING_BASELINE_DIR` (phase 58): where the observer keeps its publish baseline durably. Unset keeps it in memory. See `planning/baseline-store.ts`. */
+	planningBaseline: BaselineDirectoryResult;
+	/** `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` (phase 58): how often a quiet checkout refreshes its presence record. See `planning/observer.ts`. */
+	planningLiveness: LivenessConfigResult;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -726,6 +884,52 @@ function readSkills(env: Record<string, string | undefined>): SubstrateConfig["s
 		}
 	}
 	return { repo, remoteUrl, stateDir, gh, problem };
+}
+/**
+ * The anchor job's devnet identity, in the `loadConfig` trim-or-default style.
+ *
+ * Never throws: a refused `SOLANA_RPC_URL` sets `problem` (the guard's own message, which never
+ * echoes the URL) and is kept as given rather than silently replaced by the default, because a
+ * fallback would anchor to a cluster the operator did not choose.
+ */
+function readSolana(env: Record<string, string | undefined>): SubstrateConfig["solana"] {
+	const rpcUrl = env.SOLANA_RPC_URL?.trim() || "https://api.devnet.solana.com";
+	let problem: string | null = null;
+	try {
+		assertDevnetRpcUrl(rpcUrl);
+	} catch (cause) {
+		problem = `SOLANA_RPC_URL refused: ${cause instanceof Error ? cause.message : String(cause)}`;
+	}
+	const { signerSet, signerSetProblem } = readAnchorSignerSet(env.SUBSTRATE_ANCHOR_SIGNER_SET);
+	return {
+		rpcUrl,
+		keypairPath: env.SOLANA_ANCHOR_KEYPAIR?.trim() || null,
+		pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
+		cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
+		problem,
+		signerSet,
+		signerSetProblem,
+	};
+}
+
+/**
+ * `SUBSTRATE_ANCHOR_SIGNER_SET`: unset or blank is no set (the verifier's bootstrap stays `[SOLANA_ANCHOR_PUBKEY]`). A value
+ * that `parseSignerSet` refuses, and an empty array, is a problem naming the rule and the field path, never the value: an
+ * env value can be a pasted secret, and a path that would be an unknown key's own text is left out. The set is then null,
+ * never silently empty.
+ */
+function readAnchorSignerSet(raw: string | undefined): { signerSet: SignerSet | null; signerSetProblem: string | null } {
+	const text = raw?.trim() ?? "";
+	if (text === "") return { signerSet: null, signerSetProblem: null };
+	try {
+		const set = parseSignerSet(text);
+		if (set.length === 0) return { signerSet: null, signerSetProblem: "SUBSTRATE_ANCHOR_SIGNER_SET is not a valid signer set: it names no signer" };
+		return { signerSet: set, signerSetProblem: null };
+	} catch (cause) {
+		if (!(cause instanceof SignerSetError)) return { signerSet: null, signerSetProblem: "SUBSTRATE_ANCHOR_SIGNER_SET could not be read as a signer set" };
+		const where = cause.rule === "unknown_key" || cause.path === "" ? "" : ` at ${cause.path}`;
+		return { signerSet: null, signerSetProblem: `SUBSTRATE_ANCHOR_SIGNER_SET is not a valid signer set: ${cause.rule}${where}` };
+	}
 }
 /** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of the suffix mapping in `tokenConfig`. */
 export function tokenEnvName(surface: Surface): string {
@@ -901,6 +1105,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 	const docsBackendPick = resolveDocsBackend(env);
 	const cache = cacheSettings(env, dbEndpoints.allow);
 	const cachePreloadRequested = loadCachePreloadSettings(env);
+	const sloWebhookUrl = env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "";
 	if (cachePreloadRequested.enabled && !cache.cacheEnabled && (cache.cacheOff || cache.dragonflyRefused === null)) {
 		throw new ConfigError("SUBSTRATE_CACHE_PRELOAD=on needs the cache, which is off: set DRAGONFLY_URL to an accepted URL and leave SUBSTRATE_CACHE unset or not 0, or set SUBSTRATE_CACHE_PRELOAD=off");
 	}
@@ -937,6 +1142,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		lightrag: lightragFromEnv(env),
 		docsBackend: docsBackendPick.backend,
 		docsBackendRejected: docsBackendPick.rejected,
+		lightragQueryModeRejected: resolveLightragQueryMode(env).rejected,
+		tei: teiFromEnv(env),
+		embedCache: embedCacheFromEnv(env),
 		railwayHosting: railwayHostingFromEnv(env),
 		lightragPollMs: positiveOr(env.SUBSTRATE_LIGHTRAG_POLL_MS, DEFAULT_LIGHTRAG_POLL_MS),
 		lightragPlanningRoots: lightragPlanningRoots.length > 0 ? lightragPlanningRoots : [...DEFAULT_LIGHTRAG_PLANNING_ROOTS],
@@ -965,12 +1173,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		desktopDir: desktopDirRaw.startsWith("/") ? desktopDirRaw : DEFAULT_DESKTOP_DIR,
 		desktopIgnored: desktopNames.filter((name) => !isKnownDesktopSurface(name)),
 		desktopDirRejected: desktopDirRaw !== "" && !desktopDirRaw.startsWith("/") ? desktopDirRaw : null,
-		solana: {
-			rpcUrl: env.SOLANA_RPC_URL?.trim() || "https://api.devnet.solana.com",
-			keypairPath: env.SOLANA_ANCHOR_KEYPAIR?.trim() || null,
-			pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
-			cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
-		},
+		solana: readSolana(env),
 		verifyTimeoutMs: Number.isFinite(Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)) && Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS) > 0
 			? Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)
 			: 30_000,
@@ -988,6 +1191,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		cachePreload,
 		// uplift-5 U5-3
 		requestPath: loadRequestPathSettings(env),
+		// v1.6 phase 57c
+		contextualRecall: loadContextualRecallSettings(env),
 		// uplift-2 R5
 		ledger: loadLedgerSettings(env),
 		// uplift-4 S2
@@ -1011,6 +1216,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		},
 		// uplift-2 R6
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
+		corpus: loadCorpusSettings(env),
+		planningHashStore: (env.SUBSTRATE_PLANNING_HASH_STORE?.trim().toLowerCase() ?? "") === "on",
+		docsReflect: loadDocsReflectSettings(env),
+		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, ragflowRetrieval.vectorSimilarityWeight),
@@ -1029,6 +1238,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...memoryLifecycleFromEnv(env.SUBSTRATE_MEMORY_LIFECYCLE),
 		// uplift-5 S5a
 		...skillsGovernanceFromEnv(env.SUBSTRATE_SKILLS_GOVERNANCE),
+		// Phase 68
+		worktreeRegistry: {
+			mode: (env.SUBSTRATE_WORKTREE_REGISTRY?.trim().toLowerCase() ?? "") === "on" ? "on" : "off",
+			ttlS: boundedInt(env.SUBSTRATE_WORKTREE_REGISTRY_TTL_S, DEFAULT_WORKTREE_REGISTRY_TTL_S, 60, 31_536_000),
+			idleDays: positiveNumberOr(env.SUBSTRATE_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_IDLE_DAYS),
+		},
 		// uplift-3 N2
 		...sloCheckpointFromEnv(env.SUBSTRATE_SLO_CHECKPOINT, probes),
 		sloCheckpointS: boundedInt(env.SUBSTRATE_SLO_CHECKPOINT_S, 60, 0, 86_400),
@@ -1036,7 +1251,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			enabled: (env.SUBSTRATE_SLO_NOTIFY?.trim() ?? "") === "1",
 			intervalS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_S, 60, 5, 86_400),
 			sustainS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, 300, 0, 86_400),
-			webhookUrl: /^https?:\/\//i.test(env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "") ? env.SUBSTRATE_SLO_WEBHOOK_URL!.trim() : null,
+			webhookUrl: /^https?:\/\//i.test(sloWebhookUrl) ? sloWebhookUrl : null,
 		},
 		// uplift-4 S1
 		briefProfile: loadBriefProfileConfig(env),
@@ -1056,6 +1271,25 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
 		// Phase 50 (D50-g): the bus rides the cache endpoint, and is off with a reason when that endpoint is missing or refused.
 		eventBus: loadEventBusSettings(env, cache),
+		// Phase 52 (SOTA-08): the planning plane's root and limits. Environment only; a bad value is a typed result.
+		planning: loadPlanningSettings(env),
+		// Phase 53 (SOTA-09): the durable checkpoint directory. Unset keeps checkpoints in memory; a bad value is a typed result.
+		planningCheckpoint: loadCheckpointDirectory(env),
+		// Phase 53 (SOTA-09): the steering switch, allowlist and rate. Environment only; a bad value is a typed result.
+		steering: loadSteeringSettings(env),
+		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.
+		steeringAuditTable: steeringAuditTableEnabled(env),
+		steeringRegistered: steeringToolsRegistered(env),
+		// Historical schema selection, authoritative live lease, long-poll bound and public brief sections.
+		steeringSessionsTable: toggleOn(env.SUBSTRATE_STEERING_SESSIONS_TABLE),
+		liveSessionLeaseS: clampedIntOr(env.SUBSTRATE_LIVE_SESSION_LEASE_S, { min: 60, max: 86_400, fallback: 3_600 }),
+		steeringWaitMaxMs: boundedInt(env.SUBSTRATE_STEERING_WAIT_MAX_MS, 30_000, 1_000, 120_000),
+		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
+		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
+		steeringExpiry: loadSteeringExpirySettings(env),
+		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
+		planningBaseline: loadBaselineDirectory(env),
+		planningLiveness: loadLivenessSettings(env),
 	};
 }
 
@@ -1263,10 +1497,81 @@ function positiveOr(raw: string | undefined, fallback: number): number {
 	return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+/** A finite number > 0, kept as written (a fraction is fine); anything else is the default. The fleet package reads `SUBSTRATE_WORKTREE_IDLE_DAYS` the same way. */
+function positiveNumberOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 /** uplift-2 R6: a finite number in [0, 1]; anything else is the default. */
 function unitIntervalOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
+}
+
+/** The corpus atlas's switch and batching knobs (v1.7 phase 63). */
+export interface CorpusSettings {
+	/** `SUBSTRATE_CORPUS=on`. Off by default: the ingest answers `corpus.disabled` and nothing reaches the docs plane. */
+	enabled: boolean;
+	/** Batches in flight at once (`SUBSTRATE_CORPUS_CONCURRENCY`). */
+	concurrency: number;
+	/** Documents per batch (`SUBSTRATE_CORPUS_BATCH_DOCS`). */
+	batchDocs: number;
+	/** Bytes per batch (`SUBSTRATE_CORPUS_BATCH_BYTES`). */
+	batchBytes: number;
+	/** Seconds since the last ingest after which `docs.freshness` warns (`SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`); `0` switches the check off. Read only while the corpus is on. */
+	freshMaxAgeS: number;
+}
+
+export const CORPUS_CONCURRENCY_BOUNDS = { min: 1, max: 16, fallback: 4 } as const;
+export const CORPUS_BATCH_DOCS_BOUNDS = { min: 1, max: 200, fallback: 20 } as const;
+export const CORPUS_BATCH_BYTES_BOUNDS = { min: 10_000, max: 5_000_000, fallback: 1_000_000 } as const;
+/** Seconds a corpus may go without an ingest before the freshness warning (`0` judges nothing); two days by default, at most a year. */
+export const CORPUS_FRESH_MAX_AGE_BOUNDS = { min: 0, max: 31_536_000, fallback: 172_800 } as const;
+
+/** A whole number clamped into `[min, max]`; a value that is not a whole number is the fallback, so junk never widens a bound. */
+function clampedIntOr(raw: string | undefined, bounds: { min: number; max: number; fallback: number }): number {
+	const trimmed = raw?.trim() ?? "";
+	if (!/^\d+$/.test(trimmed)) return bounds.fallback;
+	return Math.min(bounds.max, Math.max(bounds.min, Number(trimmed)));
+}
+
+export function loadCorpusSettings(env: Record<string, string | undefined>): CorpusSettings {
+	return {
+		enabled: (env.SUBSTRATE_CORPUS?.trim().toLowerCase() ?? "") === "on",
+		concurrency: clampedIntOr(env.SUBSTRATE_CORPUS_CONCURRENCY, CORPUS_CONCURRENCY_BOUNDS),
+		batchDocs: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_DOCS, CORPUS_BATCH_DOCS_BOUNDS),
+		batchBytes: clampedIntOr(env.SUBSTRATE_CORPUS_BATCH_BYTES, CORPUS_BATCH_BYTES_BOUNDS),
+		freshMaxAgeS: clampedIntOr(env.SUBSTRATE_CORPUS_FRESH_MAX_AGE_S, CORPUS_FRESH_MAX_AGE_BOUNDS),
+	};
+}
+
+/** The docs learning loop's switches (v1.7 phase 66): retrieval telemetry, the authority re-rank and the gap threshold. */
+export interface DocsReflectSettings {
+	/** `SUBSTRATE_DOCS_TELEMETRY=on`. Off by default: a `docs_search` writes no `corpus_retrievals` row and no sweep runs. */
+	telemetry: boolean;
+	/** `SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS`: how long a retrieval row is kept. */
+	retentionDays: number;
+	/** `SUBSTRATE_DOCS_RERANK`: `shadow` records what the re-rank would change, `on` applies it, `off` (the default) does neither. */
+	rerank: DocsRerankMode;
+	/** `SUBSTRATE_DOCS_GAP_SCORE`: a query whose best citation scores below this is a gap in `GET /corpus/gaps`. */
+	gapScore: number;
+}
+
+export const DOCS_RERANK_MODES = ["off", "shadow", "on"] as const;
+export type DocsRerankMode = (typeof DOCS_RERANK_MODES)[number];
+
+export const DOCS_TELEMETRY_RETENTION_BOUNDS = { min: 1, max: 365, fallback: 30 } as const;
+export const DOCS_GAP_SCORE_DEFAULT = 0.2;
+
+export function loadDocsReflectSettings(env: Record<string, string | undefined>): DocsReflectSettings {
+	const rerank = env.SUBSTRATE_DOCS_RERANK?.trim().toLowerCase() ?? "";
+	return {
+		telemetry: (env.SUBSTRATE_DOCS_TELEMETRY?.trim().toLowerCase() ?? "") === "on",
+		retentionDays: clampedIntOr(env.SUBSTRATE_DOCS_TELEMETRY_RETENTION_DAYS, DOCS_TELEMETRY_RETENTION_BOUNDS),
+		rerank: rerank === "shadow" || rerank === "on" ? rerank : "off",
+		gapScore: unitIntervalOr(env.SUBSTRATE_DOCS_GAP_SCORE, DOCS_GAP_SCORE_DEFAULT),
+	};
 }
 
 /**
@@ -1417,6 +1722,63 @@ export function requestPathConfigWarnings(config: SubstrateConfig): string[] {
 	return [...config.requestPath.problems];
 }
 
+/** v1.6 phase 57c: the two off-by-default recall flags, parsed. */
+export interface ContextualRecallSettings {
+	/** `SUBSTRATE_DOCS_TANDEM` (`off` | `on`), `_LIMIT` (1..10, default 5) and `_BUDGET_MS` (50..10000, default 1500): LightRAG and Hindsight in one docs answer. */
+	tandem: TandemOptions;
+	/** `SUBSTRATE_BRIEF_RECALL_SCOPE` (`off` | `graph`): the brief's recall also shows the claimed node's graph. */
+	recallScope: RecallScope;
+	problems: string[];
+}
+
+/**
+ * v1.6 phase 57c: an unset or empty flag is the default silently. A value outside the vocabulary keeps the
+ * default and is named in `problems`, so a typo never switches a policy on. A number that is not a whole
+ * number keeps the default; one outside its range is capped to the nearest bound; both are named. A problem
+ * names the variable, the kind of problem and the value taken, NEVER the value read: an env value can be a
+ * pasted secret, and the boot log is shared.
+ */
+function loadContextualRecallSettings(env: Record<string, string | undefined>): ContextualRecallSettings {
+	const problems: string[] = [];
+	const choice = <T extends string>(name: string, raw: string | undefined, allowed: readonly [T, T], fallback: T): T => {
+		const trimmed = raw?.trim() ?? "";
+		if (trimmed === "") return fallback;
+		const value = trimmed.toLowerCase();
+		if ((allowed as readonly string[]).includes(value)) return value as T;
+		problems.push(`${name} is neither ${allowed[0]} nor ${allowed[1]}; running as ${fallback}`);
+		return fallback;
+	};
+	const whole = (name: string, raw: string | undefined, fallback: number, min: number, max: number): number => {
+		const trimmed = raw?.trim() ?? "";
+		if (trimmed === "") return fallback;
+		if (!/^\d+$/.test(trimmed)) {
+			problems.push(`${name} is not a whole number; using ${fallback}`);
+			return fallback;
+		}
+		const value = Number(trimmed);
+		if (value >= min && value <= max) return value;
+		const capped = Math.min(max, Math.max(min, value));
+		problems.push(`${name} is outside ${min}..${max}; using ${capped}`);
+		return capped;
+	};
+	const mode = choice("SUBSTRATE_DOCS_TANDEM", env.SUBSTRATE_DOCS_TANDEM, ["off", "on"], "off");
+	const scope = choice("SUBSTRATE_BRIEF_RECALL_SCOPE", env.SUBSTRATE_BRIEF_RECALL_SCOPE, ["off", "graph"], "off");
+	return {
+		tandem: parseTandemOptions({
+			enabled: mode,
+			hindsight_limit: whole("SUBSTRATE_DOCS_TANDEM_LIMIT", env.SUBSTRATE_DOCS_TANDEM_LIMIT, DEFAULT_TANDEM_OPTIONS.hindsight_limit, 1, 10),
+			budget_ms: whole("SUBSTRATE_DOCS_TANDEM_BUDGET_MS", env.SUBSTRATE_DOCS_TANDEM_BUDGET_MS, DEFAULT_TANDEM_OPTIONS.budget_ms, 50, 10_000),
+		}),
+		recallScope: parseRecallScope(scope),
+		problems,
+	};
+}
+
+/** The v1.6 recall flags that were refused or capped, for the boot log. Names, problem kinds and the value taken; never the raw value read. */
+export function contextualRecallConfigWarnings(config: SubstrateConfig): string[] {
+	return [...config.contextualRecall.problems];
+}
+
 /** uplift-3 N3: a finite rate > 0, fractions kept (0.5 rps is one call per 2 s); anything else is the default. */
 function positiveRateOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
@@ -1462,12 +1824,20 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			const rps = env[`${prefix}_RPS`];
 			const burst = env[`${prefix}_BURST`];
 			if ((rps?.trim() ?? "") === "" && (burst?.trim() ?? "") === "") continue;
-			(overrides[surface] ??= {})[klass] = {
+			const surfaceOverrides = overrides[surface] ?? {};
+			overrides[surface] = surfaceOverrides;
+			surfaceOverrides[klass] = {
 				rps: positiveRateOr(rps, classes[klass].rps),
 				burst: positiveOr(burst, classes[klass].burst),
 			};
 		}
 	}
+	const breakerPolicy = Object.fromEntries(
+		ADMISSION_CLASSES.map((klass) => {
+			const name = `SUBSTRATE_BUDGET_${klass.toUpperCase()}_BREAKER`;
+			return [klass, breakerPolicyOf(name, env[name])];
+		}),
+	) as Record<AdmissionClass, AdmissionBreakerPolicy>;
 	return {
 		mode,
 		classes,
@@ -1476,7 +1846,20 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			burst: positiveOr(env.SUBSTRATE_BUDGET_ANONYMOUS_BURST, DEFAULT_BUDGETS.anonymous.burst),
 		},
 		overrides,
+		breakerPolicy,
 	};
+}
+
+/**
+ * `SUBSTRATE_BUDGET_<CLASS>_BREAKER`, trimmed and lowercased. Unset or blank is `fail-open`, the default. `fail-open` and
+ * `fail-closed` are the only other values; anything else refuses boot, so a typo for `fail-closed` cannot silently admit.
+ * (`SUBSTRATE_BUDGETS` keeps its older fallback to `shadow`.)
+ */
+function breakerPolicyOf(name: string, raw: string | undefined): AdmissionBreakerPolicy {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "") return "fail-open";
+	if ((ADMISSION_BREAKER_POLICIES as readonly string[]).includes(value)) return value as AdmissionBreakerPolicy;
+	throw new ConfigError(`${name}=${JSON.stringify(raw)} is not fail-open or fail-closed; set one of those, or unset it for fail-open`);
 }
 
 /**
@@ -1494,6 +1877,8 @@ export interface DbEndpointSettings {
 	policy: DbEndpointPolicy;
 	allow: ProxyAllow;
 	classes: Partial<Record<DbPlane, EndpointClass>>;
+	/** The class of `TEI_URL` (phase 64), present only when it is set. Held apart: TEI is not a database plane. */
+	tei?: EndpointClass;
 }
 
 /** The configured data-plane URLs, in the order the boot names them. */
@@ -1541,7 +1926,19 @@ function loadDbEndpointSettings(env: Record<string, string | undefined>): DbEndp
 			);
 		}
 	}
-	return { policy, allow, classes };
+	const result: DbEndpointSettings = { policy, allow, classes };
+	const teiUrl = env.TEI_URL?.trim();
+	if (teiUrl) {
+		const teiClass = classifyEndpoint("tei", teiUrl, allow);
+		result.tei = teiClass;
+		if (policy === "enforce" && teiClass === "direct") {
+			throw new ConfigError(
+				"TEI_URL is a direct endpoint, which SUBSTRATE_DB_ENDPOINT_POLICY=enforce refuses; " +
+					"point it at a loopback forwarder, or list its host:port in SUBSTRATE_DB_PROXY_ALLOW",
+			);
+		}
+	}
+	return result;
 }
 
 /**
@@ -1685,6 +2082,21 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 }
 
 /**
+ * The surfaces an operator token authenticates as, by the same rule as {@link isOperator}: a swarm surface and the
+ * `substrate` host-job surface are never operators, listed or not. Empty on a bare local run (no surface tokens), where
+ * `isOperator` calls the machine's owner the operator but a ledger event carries no proof of who wrote it: a reader that
+ * must trust an operator's event (a signer rotation) fails closed there.
+ */
+export function operatorSurfaces(config: SubstrateConfig): Set<Surface> {
+	const surfaces = new Set<Surface>();
+	for (const token of config.operatorTokens) {
+		const named = config.tokens.get(token);
+		if (named !== undefined && !isSwarmSurface(named) && named !== "substrate") surfaces.add(named);
+	}
+	return surfaces;
+}
+
+/**
  * A presented bearer that names no surface, once any surface token exists.
  *
  * The bridge accepts a *missing* token. It does not accept a token that is not
@@ -1734,8 +2146,20 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	if (config.skills.problem) {
 		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
 	}
+	// Before the early return too: a refused RPC URL stops anchoring and verify on every deployment.
+	if (config.solana.problem) {
+		warnings.push(`anchoring and the verify read-back are refused until SOLANA_RPC_URL is fixed: ${config.solana.problem}`);
+	}
+	// Named by variable, rule and field path only: the value never reaches the log.
+	if (config.solana.signerSetProblem !== null) {
+		warnings.push(`checkpoint_verify and memory_verify answer unverified until SUBSTRATE_ANCHOR_SIGNER_SET is fixed: ${config.solana.signerSetProblem}`);
+	}
 	if (config.docsBackendRejected !== null) {
 		warnings.push(`SUBSTRATE_DOCS_BACKEND "${config.docsBackendRejected}" is not a docs plane; docs serve ${config.docsBackend}`);
+	}
+	// Named by key only, never by value: the warning goes to a log.
+	if (config.lightragQueryModeRejected) {
+		warnings.push("SUBSTRATE_LIGHTRAG_QUERY_MODE is not one of naive, local, global, hybrid or mix; LightRAG queries use hybrid");
 	}
 	// Named by variable and value only, never a credential; before the early return, as the skills warning is.
 	if (config.agentSkillsRootRejected !== null) {
@@ -1913,6 +2337,11 @@ function boundedInt(raw: string | undefined, fallback: number, min: number, max:
 	return Math.min(max, Math.max(min, Math.trunc(n)));
 }
 
+/** A switch that is on for `on`, `1`, `true` or `yes` (any case); anything else, unset included, is off. */
+function toggleOn(raw: string | undefined): boolean {
+	return /^(1|true|yes|on)$/i.test(raw?.trim() ?? "");
+}
+
 /**
  * `SUBSTRATE_LEDGER_*` as the client reads them. Out-of-range numbers clamp,
  * unparseable ones fall back — like the breaker settings — except the TTL: a
@@ -2059,7 +2488,9 @@ export function loadMetricsHistorySettings(env: Record<string, string | undefine
 	if (seriesRaw !== "" && seriesRaw !== "core" && seriesRaw !== "extended") {
 		problems.push("SUBSTRATE_METRICS_HISTORY_SERIES is neither `core` nor `extended`, so the core series are used");
 	}
-	const retention = parsed ?? parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL)!;
+	const retention = parsed ?? parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL);
+	// The default is a literal this module owns, so it always parses; the guard keeps the type honest.
+	if (retention === null) throw new Error("the default metrics-history TTL is not a valid retention");
 	return {
 		enabled: flag === "on" && ledgerConfigured,
 		intervalS: boundedInt(env.SUBSTRATE_METRICS_HISTORY_INTERVAL_S, 60, MIN_METRICS_HISTORY_INTERVAL_S, 3600),

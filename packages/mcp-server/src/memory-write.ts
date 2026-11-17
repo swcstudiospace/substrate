@@ -286,9 +286,9 @@ function refuse(
 }
 
 /** Constant tenant folded into a v2 preimage. Not a column. */
-const HASH_TENANT = "swc";
+export const HASH_TENANT = "swc";
 /** Hash-version marker folded into a v2 preimage. The number 2, key `hv`. */
-const HASH_VERSION_MARKER = 2;
+export const HASH_VERSION_MARKER = 2;
 
 /** Derive a key from the content, so an interrupted retry dedupes without one. */
 function derivedKey(entryHash: string, sourceEvent: string | null, reviewed: boolean): string {
@@ -310,7 +310,7 @@ function writerKey(writer: string, explicitKey: string): string {
  * a reviewer's token has to hash the same, or approval-by-resubmit could never
  * find the proposal it is approving.
  */
-function contentHash(input: {
+export function contentHash(input: {
 	scope: string;
 	kind: MemoryKind;
 	subject: string | null;
@@ -837,7 +837,13 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 	// in doubt is not.
 	let mayHaveWritten = false;
 	try {
-		const plan = conflictPlan(scope, kind, subject !== null);
+		let plan = conflictPlan(scope, kind, subject !== null);
+		// A fact with a subject still plans `append`, so a new corpus digest would land with `supersedes: null` and leave the
+		// previous row in force. Sharing a Hindsight document id does not retire the index row. `lww` looks up the standing
+		// entry and `insertEntry` retires it in the same transaction; no `expected_version` is required.
+		if (kind === "fact" && subject !== null && subject.startsWith("corpus-digest:")) {
+			plan = { ...plan, resolve: "lww" };
+		}
 		// Only a `verified-by-test` claim standing on a source event needs the ledger
 		// consulted, and only when no reviewer vouched for it — so an ordinary write pays
 		// nothing for this.
@@ -845,7 +851,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps, cut: { 
 			request.trust === "verified-by-test" && !reviewed && sourceEvent
 				? await (deps.verifySourceEvent?.(sourceEvent) ?? Promise.resolve(false)).catch(() => false)
 				: false;
-		const trust = resolveTrust({ requested: request.trust, reviewed, sourceEventVerified });
+		const trust = resolveTrust({ ...(request.trust === undefined ? {} : { requested: request.trust }), reviewed, sourceEventVerified });
 		const actor = resolveActor(request.actor, reviewed);
 
 		if (plan.requiresReview && !reviewed) {

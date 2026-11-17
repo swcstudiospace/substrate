@@ -96,6 +96,38 @@ describe("anchor-run entry process boundary", () => {
 		}
 	});
 
+	test("a refused SOLANA_RPC_URL exits 2 naming the key, with no CLI call and no request", async () => {
+		let requests = 0;
+		const trap = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => { requests += 1; return new Response("unexpected store call", { status: 500 }); },
+		});
+		try {
+			for (const url of [
+				"https://api.mainnet-beta.solana.com",
+				"https://API.TESTNET.solana.com/devnet",
+				"https://user:s3cret@api.devnet.solana.com",
+				"ftp://api.devnet.solana.com",
+			]) {
+				const env: Record<string, string> = {};
+				env["GREPTIME_URL"] = trap.url.href;
+				env["SOLANA_ANCHOR_KEYPAIR"] = "/nonexistent/keypair.json";
+				env["SOLANA_ANCHOR_PUBKEY"] = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+				env["SOLANA_RPC_URL"] = url;
+				const result = await runEntry([], env);
+				expect(result.code).toBe(2);
+				expect(result.stderr).toContain("SOLANA_RPC_URL");
+				expect(result.stderr).toContain("usage:");
+				expect(result.stderr).not.toContain("s3cret");
+				expect(result.cliInvoked).toBe(false);
+				expect(requests).toBe(0);
+			}
+		} finally {
+			trap.stop(true);
+		}
+	});
+
 	test("an unknown flag exits 2 with usage", async () => {
 		const result = await runEntry(["--bogus"]);
 		expect(result.code).toBe(2);

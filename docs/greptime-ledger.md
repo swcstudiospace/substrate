@@ -536,6 +536,44 @@ Those events are pre-coverage and `legacy` in the hour report.
 signed by that key from any other ledger would make production alarm on that
 hour forever, so the rehearsal harness never carries `SOLANA_*` names.
 
+### Verifying a checkpoint (v1.6 phase 59)
+
+`checkpoint_verify {ckpt_id | event_id, session_id?}` (MCP, read-only, audit fail-open) resolves a `session.checkpoint` to its hour, its Merkle inclusion proof, the anchors row and the devnet transaction, and answers with one status: `anchored` (the proof verifies against a root a known signer wrote on devnet, and the memo's count is the proof's tree size), `pending` (the hour is not closed, or its anchor may still land, about three hours), `unanchored` (the hour closed long ago and no anchors row exists), `unverified` (the chain or ledger could not settle it: no `SOLANA_ANCHOR_PUBKEY`, a refused or unreachable RPC, a devnet reset, an hour above 50 000 events; never a verdict of tampering) and `mismatch` (a read that succeeded disagrees with the ledger, or the event no longer hashes to its stored hash). With Solana or the ledger unconfigured the answer is `unverified` with the reason, and no network call is made. Nothing sends a transaction.
+
+The signer set is the bootstrap set (`SUBSTRATE_ANCHOR_SIGNER_SET` when set, else the configured anchor key `SOLANA_ANCHOR_PUBKEY` alone) plus the `anchor.signer.rotate` notes an operator surface wrote (read by paging each operator surface's notes, 500 a page, at most 50 pages, keeping only the rotation action); when that read is cut by the cap, cannot advance or fails, a signer is not provably current: the answer carries `signer_set_complete: false` and an anchor that would verify, or a mismatch that only the signer set explains, is reported `unverified` with reason `rotation-read-incomplete`, never `anchored`. A signer whose window closed at or before the anchored hour started is a `mismatch` with reason `signer-retired` (the read was complete, so the signature is known to be by a key that no longer spoke for the ledger; `substrate session rollback` refuses on it unless `--force`). A malformed `SUBSTRATE_ANCHOR_SIGNER_SET` answers `unverified` with a fixed reason (the boot warning names the rule and field, never the value). Every answer that judged a signer carries `signer_set: {source, entries, rotation_notes_applied, rotation_issues, read_gap}` (`checkpoint_verify` and `memory_verify`), so an ignored rotation note or a truncated read is visible; see `docs/runbooks/anchor-signer-rotation.md`. A `ckpt_id` is found in the newest 500 notes of `session_id`, else of the caller's surface in the last seven days (the ledger has no read by payload); an older or foreign checkpoint needs its `event_id`. The evidence is hashes, the proof path, public keys and the transaction signature only, never event contents.
+
+### Memo v2 and per-graph heads
+
+From phase 73 a new hour is anchored with memo v2:
+
+```
+substrate:v2:<hour start>:<root>:<count>:<headsRoot>
+```
+
+- `<root>` and `<count>` are the v1 commitment, unchanged: the RFC 6962 root over the hour's event hashes, in ingest order.
+- `<headsRoot>` is the RFC 6962 root over one head record per `(graph_id, session_id)` pair that wrote events in the hour, sorted by that pair (`packages/ledger/src/heads.ts`). A record hashes the canonical JSON of `[graphId, sessionId, periodStartMs, count, leavesRootHex, headEventId, headHashHex]` with SHA-256. `leavesRootHex` is the RFC 6962 root over one leaf per event of the pair, in chain order, where each leaf is the SHA-256 (lowercase hex) of the JSON `[event_id, hash]` for that event. Each leaf commits to the event id as well as its hash, so a stored `event_id` cannot change unseen. The head is the pair's last event in chain order. A missing `session_id` is `""`.
+
+**`graph_chain_leaves`** holds one row per event: `period_start`, `graph_id`, `session_id`, `seq` (the chain position from 0), `event_id`, `hash`. It is append-only with no primary key, so a retried write can store a row twice. Reads collapse exact duplicates; two rows that disagree about one `seq` make the stored chain invalid. The job writes an hour's leaves before its `anchors` row, so no row exists without its leaves.
+
+**Trust.** `substrate verify` trusts an anchored v2 hour only when:
+
+1. the stored leaves of every graph in that hour, rebuilt into head records, reproduce the on-chain `headsRoot`; and
+2. for each `(graph_id, session_id)` pair of the graph being verified, every stored leaf names an event of that pair whose recomputed content hash and stored hash both equal the leaf's hash, and no event of the pair lies outside the stored leaves.
+
+Only the on-chain root is trusted. A head recomputed from the ledger's rows is never trusted. If (1) fails, the whole hour is untrusted, with no localisation. If (2) fails, the verdict names the first event where the chain parts from its leaves, walking the stored order: `first_differing_event_id` (an edited or rewritten event, or the first event past the stored end) or `first_missing_event_id` (a deleted or truncated event). Any contradiction of an anchored head makes `ok` false, even when the local chain check passes; a full rewrite passes that check.
+
+**v1 hours.** Hours anchored before phase 73 carry memo v1 and no per-graph heads. They still verify for root and count, and are reported `trusted: false` with the reason `anchored with a v1 memo: no heads commitment on chain`. `ok` is unchanged for them.
+
+**Trust reasons.** `trusted` is false, with the reason, when:
+
+- the graph holds no events: `no events`;
+- no hour of the graph is anchored: `no anchored hour`;
+- an hour is pending or unanchored: `hour is <status>: no anchored head to trust`;
+- the stored-leaves read outlasts the verify budget: `budget exhausted`;
+- the stored-leaves read fails: `store-failed`.
+
+`budget exhausted` and `store-failed` claim no tampering, so `ok` is unchanged for them.
+
 ## Reading the ledger
 
 `events_query` is the read counterpart of `events_emit`, and the reason a desk seat
@@ -947,6 +985,20 @@ sent as an `Authorization: Basic` header — built per request, never placed in 
 URL, so it cannot leak through a log line, a redirect or an error this code quotes.
 This is the path INFRA probed green against the Railway service, and it is the one
 to keep using.
+
+Every error the client raises for a transport failure, a non-2xx answer, an
+unparseable body or a SQL error field is scrubbed of the endpoint's credentials
+before it leaves `send`: the URL (and any `user:password@` in it, percent-escapes
+included), the configured user and password, the `user:password` pair and the
+`Basic` token, then the redactor's patterns. Warnings, `IngestNotRecorded`, the
+breaker's `lastError` and the gate's observed `reason` all inherit it. A response body is
+scrubbed whole and only then clipped (500 characters, 200 for non-JSON text), so a
+secret that straddles the cutoff cannot leave a prefix behind; each needle is also
+matched in its JSON-escaped spelling, since a JSON error body echoes `pa"ss` as `pa\"ss`.
+A "table does not exist" answer is recognised from the text the store sent, before the
+scrub, and carried as `GreptimeError.missingTable`, so a user named `found` cannot turn
+an empty metrics history into a 503. A user or password under four characters is not
+scrubbed as a bare substring; it would mangle every word of a diagnostic.
 
 A **Tailscale forwarder** is the preferred shape later: Greptime reachable only on
 the tailnet, with the VPS talking to a tailnet address instead of a public one. It

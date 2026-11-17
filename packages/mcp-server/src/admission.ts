@@ -13,10 +13,11 @@
  *   - **Identity is the bearer's surface.** A body-claimed `surface` is never the
  *     bucket: a caller could otherwise spend another surface's budget by naming
  *     it. Accepted untokened callers on the bridge share one `anonymous` bucket.
- *   - **The cache failing is not a refusal.** Cache off, breaker open, cooldown,
- *     timeout, a malformed reply — every one admits the request and counts a
- *     `bypass`. Admission control bounds load on the planes; it must not become a
- *     way for the cache plane to fail every other plane's callers.
+ *   - **The cache failing is not a refusal.** Cache off, cooldown, timeout, a
+ *     malformed reply — every one admits the request and counts a `bypass`. So does
+ *     a breaker refusal, unless its class is `fail-closed` (`AdmissionBreakerPolicy`).
+ *     Admission control bounds load on the planes; it must not become a way for
+ *     the cache plane to fail every other plane's callers.
  *   - **Shadow first.** `shadow` evaluates and records `shadow_limited` and never
  *     refuses, so the budgets are tuned from the metric before `enforce` turns a
  *     wrong number into a 429. `off` skips the eval entirely.
@@ -41,6 +42,15 @@ export interface BucketLimit {
 	burst: number;
 }
 
+/**
+ * What a decision does when the cache plane's breaker refuses the bucket step. `fail-open` admits and counts a `bypass`
+ * (the default: the budgets always did that); `fail-closed` refuses it.
+ */
+export type AdmissionBreakerPolicy = "fail-open" | "fail-closed";
+export const ADMISSION_BREAKER_POLICIES: readonly AdmissionBreakerPolicy[] = ["fail-open", "fail-closed"];
+/** Every class fail-open: an open breaker admits, as it always has. */
+export const DEFAULT_ADMISSION_BREAKER_POLICY: Readonly<Record<AdmissionClass, AdmissionBreakerPolicy>> = { read: "fail-open", write: "fail-open", coordination: "fail-open" };
+
 /** From `SUBSTRATE_BUDGETS` and `SUBSTRATE_BUDGET_*`; parsed in `config.ts`. */
 export interface AdmissionSettings {
 	mode: AdmissionMode;
@@ -48,6 +58,8 @@ export interface AdmissionSettings {
 	classes: Record<AdmissionClass, BucketLimit>;
 	/** Every class of the shared `anonymous` bucket. */
 	anonymous: BucketLimit;
+	/** What an open cache breaker does to each class (`SUBSTRATE_BUDGET_<CLASS>_BREAKER`). */
+	breakerPolicy: Record<AdmissionClass, AdmissionBreakerPolicy>;
 	/** `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS|_BURST`, by surface then class. */
 	overrides: Partial<Record<Surface, Partial<Record<AdmissionClass, BucketLimit>>>>;
 }
@@ -178,6 +190,29 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/handoff": "write",
 	"/slo/history": "read",
 	"/docs/lightrag/query": "read",
+	// Phase 67 (live steering GA): the steering routes mirror the steering tools. A held long poll is one admission, like one read.
+	"/steering/sessions": "read",
+	"/steering/sessions/heartbeat": "write",
+	"/steering/sessions/close": "write",
+	"/steering/directives": "read",
+	"/steering/wait": "read",
+	"/steering/queue": "write",
+	"/steering/acknowledge": "write",
+	"/session/context": "read",
+	"/worktrees": "read",
+	"/worktrees/claims": "read",
+	"/worktrees/report": "write",
+	"/corpus/plan": "read",
+	"/corpus/neardup": "read",
+	"/corpus/status": "read",
+	"/corpus/ingest": "write",
+	"/corpus/reconcile": "write",
+	"/corpus/reflect": "write",
+	"/corpus/gaps": "read",
+	"/docs/feedback": "write",
+	"/corpus/root": "read",
+	"/corpus/proof": "read",
+	"/corpus/anchor": "read",
 };
 
 /** Monitoring traffic. Exempt on GET only: a POST to one of these is a 404, and a 404 is metered like any other unknown path. */
@@ -195,6 +230,9 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	memory_search: "read",
 	memory_recall: "read",
 	memory_pending: "read",
+	memory_verify: "read",
+	checkpoint_verify: "read",
+	session_rollback_plan: "read",
 	events_query: "read",
 	events_verify: "read",
 	graph_get: "read",
@@ -208,9 +246,16 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	docs_rag_state: "read",
 	memory_write: "write",
 	events_emit: "write",
+	session_checkpoint: "write",
+	session_rollback_commit: "write",
 	docs_ingest: "write",
+	corpus_status: "read",
+	corpus_ingest: "write",
+	docs_feedback: "write",
 	skills_propose: "write",
 	docs_steering_session: "write",
+	steering_session_heartbeat: "write",
+	steering_session_close: "write",
 	skills_approve: "write",
 	skills_list: "read",
 	railway_list: "read",
@@ -220,6 +265,15 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	fabric_status: "read",
 	fabric_optimize: "read",
 	fabric_compliance: "read",
+	planning_status: "read",
+	planning_sessions: "read",
+	steering_queue: "write",
+	steering_acknowledge: "write",
+	steering_list: "read",
+	live_session_discovery: "read",
+	steering_wait: "read",
+	session_context: "read",
+	worktree_list: "read",
 	railway_scale: "write",
 	railway_deploy: "write",
 	coord_handoff: "write",
@@ -243,11 +297,12 @@ export const DEFAULT_CLASS: AdmissionClass = "read";
 export function routeClass(method: string, pathname: string): AdmissionClass | null {
 	if (method === "GET" && Object.hasOwn(MONITOR_ROUTES, pathname)) return null;
 	if (pathname === MCP_ROUTE) return null;
-	return Object.hasOwn(ROUTE_CLASSES, pathname) ? ROUTE_CLASSES[pathname]! : DEFAULT_CLASS;
+	if (method === "POST" && pathname === "/steering/sessions") return "write";
+	return (Object.hasOwn(ROUTE_CLASSES, pathname) ? ROUTE_CLASSES[pathname] : undefined) ?? DEFAULT_CLASS;
 }
 
 export function toolClass(tool: string): AdmissionClass {
-	return Object.hasOwn(TOOL_CLASSES, tool) ? TOOL_CLASSES[tool]! : DEFAULT_CLASS;
+	return (Object.hasOwn(TOOL_CLASSES, tool) ? TOOL_CLASSES[tool] : undefined) ?? DEFAULT_CLASS;
 }
 
 // ── the decision ─────────────────────────────────────────────────────────────
@@ -328,7 +383,10 @@ export class Admission {
 		}
 		const reply = outcome.ok ? parseReply(outcome.value) : null;
 		let verdict: AdmissionVerdict;
-		if (reply === null) {
+		if (!outcome.ok && outcome.breakerRetryAfterMs !== undefined && this.settings.breakerPolicy[request.klass] === "fail-closed" && this.settings.mode === "enforce") {
+			// The breaker refused the bucket step on a fail-closed class, and enforce refuses it as a spent bucket is. Shadow falls through to the bypass below: the cache plane did not answer, and shadow never refuses.
+			verdict = { ...base, decision: "refused", tokensLeft: null, retryAfterMs: outcome.breakerRetryAfterMs, retryAfterS: retryAfterSeconds(outcome.breakerRetryAfterMs) };
+		} else if (reply === null) {
 			verdict = { ...base, decision: "bypass", tokensLeft: null, retryAfterMs: 0, retryAfterS: 0 };
 		} else if (reply.allowed) {
 			verdict = { ...base, decision: "allowed", tokensLeft: reply.tokensLeft, retryAfterMs: 0, retryAfterS: 0 };
@@ -354,8 +412,14 @@ export class Admission {
 function parseReply(value: unknown): { allowed: boolean; tokensLeft: number; retryAfterMs: number } | null {
 	if (!Array.isArray(value) || value.length < 3) return null;
 	const [allowed, tokensLeft, retryAfterMs] = value.map((item) => (typeof item === "number" ? item : Number(item)));
+	if (allowed === undefined || tokensLeft === undefined || retryAfterMs === undefined) return null;
 	if (![allowed, tokensLeft, retryAfterMs].every((item) => Number.isFinite(item))) return null;
-	return { allowed: allowed === 1, tokensLeft: tokensLeft!, retryAfterMs: Math.max(0, retryAfterMs!) };
+	return { allowed: allowed === 1, tokensLeft, retryAfterMs: Math.max(0, retryAfterMs) };
+}
+
+/** A verdict that refuses the request: `limited` (a spent bucket, 429) or `refused` (a fail-closed class while the cache plane is open, 503). Shadow never refuses. */
+export function isRefusal(verdict: AdmissionVerdict): boolean {
+	return verdict.decision === "limited" || verdict.decision === "refused";
 }
 
 /**
@@ -381,14 +445,14 @@ export async function admitBatch(
 		const cost = costs.get(klass);
 		if (cost === undefined) continue;
 		const verdict = await admission.admit({ surface, klass, cost });
-		if (verdict.decision === "limited") return verdict;
+		if (isRefusal(verdict)) return verdict;
 	}
 	return null;
 }
 
-/** The bounded 429 body: no identity, no limit, no payload — the class and the wait. */
-export function budgetBody(verdict: AdmissionVerdict): { error: "budget"; class: AdmissionClass; retry_after_s: number } {
-	return { error: "budget", class: verdict.klass, retry_after_s: verdict.retryAfterS };
+/** The bounded refusal body: no identity, no limit, no payload — the class and the wait. A fail-closed refusal names the cache, never a budget. */
+export function budgetBody(verdict: AdmissionVerdict): { error: "budget" | "cache_unavailable"; class: AdmissionClass; retry_after_s: number } {
+	return { error: verdict.decision === "refused" ? "cache_unavailable" : "budget", class: verdict.klass, retry_after_s: verdict.retryAfterS };
 }
 
 /**
@@ -405,7 +469,7 @@ export function budgetRefusal(body: unknown, verdict: AdmissionVerdict): unknown
 			id,
 			error: {
 				code: -32000,
-				message: `budget: the ${verdict.klass} budget of this surface is spent; retry after ${verdict.retryAfterS} s`,
+				message: verdict.decision === "refused" ? `cache_unavailable: the cache plane is open and the ${verdict.klass} class is fail-closed; retry after ${verdict.retryAfterS} s` : `budget: the ${verdict.klass} budget of this surface is spent; retry after ${verdict.retryAfterS} s`,
 				data: budgetBody(verdict),
 			},
 		};

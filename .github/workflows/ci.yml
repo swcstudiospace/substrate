@@ -37,7 +37,7 @@ permissions:
 
 jobs:
   verify:
-    name: Typecheck, tests and repo locks
+    name: Typecheck, lint, tests and repo locks
     if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux, x64, omega-ci]
     timeout-minutes: 20
@@ -74,8 +74,17 @@ jobs:
       - name: Typecheck
         run: bunx tsc --noEmit
 
+      - name: Lint (Biome)
+        run: bunx biome lint --reporter=summary .
+
       - name: Tests
         run: bun test
+
+      - name: Install uv (pinned release, checksum-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Python suites (miner, dispatcher)
+        run: uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests
 
       - name: Repo locks (event vocabulary, store lock, audit policy)
         run: bun run check:phase-close

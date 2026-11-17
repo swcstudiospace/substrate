@@ -63,19 +63,21 @@ function prefixIndex(rows: MemoryEntry[]) {
 				.sort((a, b) => (b.created === a.created ? (b.id < a.id ? -1 : 1) : b.created < a.created ? -1 : 1));
 			const limit = search.limit ?? 20;
 			let start = 0;
-			if (search.before !== undefined) {
+			const before = search.before;
+			if (before !== undefined) {
 				start = kept.findIndex(
-					(row) => row.created < search.before! || (row.created === search.before && row.id < (search.beforeId ?? "")),
+					(row) => row.created < before || (row.created === before && row.id < (search.beforeId ?? "")),
 				);
 				if (start === -1) start = kept.length;
 			}
 			const page = kept.slice(start, start + limit);
 			const rest = kept.slice(start + limit);
+			const last = page[page.length - 1];
 			return {
 				entries: page,
-				next: rest.length === 0 || page.length === 0
+				next: rest.length === 0 || last === undefined
 					? null
-					: { before: page[page.length - 1]!.created, before_id: page[page.length - 1]!.id },
+					: { before: last.created, before_id: last.id },
 			};
 		},
 	};
@@ -198,7 +200,7 @@ describe("teachablesForSurface", () => {
 	];
 
 	function substrateFor(index: unknown) {
-		return new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		return new Substrate(loadConfig({}), { index: index as never, greptime: null, steering: { history: null, liveSessions: null } });
 	}
 
 	test("returns exactly the surface's live teachable facts, newest first", async () => {
@@ -244,7 +246,7 @@ describe("GET /.well-known/agent-card.json", () => {
 		const config = loadConfig({});
 		const observability = createObservability(config, {});
 		await observability.start();
-		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, observability.observer);
 		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -341,6 +343,7 @@ describe("card end-to-end (session → card)", () => {
 		}
 		const substrate = new Substrate(loadConfig({}), {
 			index: new Searchable() as never,
+			steering: { history: null, liveSessions: null },
 			greptime: {
 				ensureAppendMode: async () => true,
 				lastHash: async () => null,

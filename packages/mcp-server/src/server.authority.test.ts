@@ -30,7 +30,7 @@ const ENV = {
 	SUBSTRATE_HANDOFF_KEY: "a-test-signing-key",
 };
 
-const released: Array<{ lease_id?: string | null; force?: boolean }> = [];
+const released: Array<{ lease_id?: string | null | undefined; force?: boolean | undefined }> = [];
 const written: SubstrateEvent[] = [];
 
 /** A node held by hermes, judged by the real lease rules, so a forced release has something to take. */
@@ -101,7 +101,7 @@ beforeAll(async () => {
 	// in front of the dispatcher is part of the boundary this file drives.
 	observability = createObservability(config, ENV);
 	await observability.start();
-	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never }, observability.observer);
+	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }, observability.observer);
 	server = createHttpServer(substrate, config, observability);
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -339,7 +339,7 @@ describe("the handoff sender is the token's surface", () => {
 		// is consulted only when *nothing* is authenticated, never merely because
 		// this particular token named no surface.
 		const config = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes", SUBSTRATE_HANDOFF_KEY: "k" });
-		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const surfaceless = createHttpServer(
 			substrate,
 			{
@@ -418,6 +418,41 @@ describe("a swarm token names the caller over the wire", () => {
 		expect(refused.error).toContain("cannot act as swarm-a09-rev");
 		expect(own.stored).toBe(true);
 		expect(written.map((event) => event.surface)).toEqual(["swarm-a05-be"]);
+	});
+
+	test("REST /events: a reserved action is refused by name for a surface token that is not an operator, even naming the operator's surface; an operator writes it as itself only", async () => {
+		written.length = 0;
+		const rotation = { payload: { action: "anchor.signer.rotate" } };
+
+		const forgedAsOperator = await postEvent("tok-hermes", { ...rotation, surface: "cursor" });
+		const forgedAsSelf = await postEvent("tok-hermes", rotation);
+		const swarm = await postEvent("tok-a05", { payload: { action: "session.rollback.forget_batch" } });
+		const forgedBody = (await forgedAsOperator.json()) as { error: string };
+
+		expect(forgedAsOperator.status).toBe(403);
+		expect(forgedBody.error).toContain("reserved-action");
+		expect(forgedAsSelf.status).toBe(403);
+		expect(swarm.status).toBe(403);
+		expect(written).toEqual([]);
+
+		const own = await postEvent("tok-operator", rotation);
+		const other = await postEvent("tok-operator", { ...rotation, surface: "hermes" });
+
+		expect(own.status).toBe(202);
+		expect(other.status).toBe(403);
+		expect(written.map((event) => event.surface)).toEqual(["cursor"]);
+	});
+
+	test("MCP events_emit: the same rule, so a hermes token cannot post a signer rotation as the operator surface", async () => {
+		written.length = 0;
+		const rotation = { kind: "note", summary: "rotation", payload: { action: "anchor.signer.rotate" } };
+
+		const forged = (await callTool("tok-hermes", "events_emit", { ...rotation, surface: "cursor" })) as { error: string };
+		const own = (await callTool("tok-operator", "events_emit", rotation)) as { stored: boolean };
+
+		expect(forged.error).toContain("reserved-action");
+		expect(own.stored).toBe(true);
+		expect(written.map((event) => event.surface)).toEqual(["cursor"]);
 	});
 
 	test("MCP graph_claim: A05's token cannot claim as A09, and can claim as itself", async () => {

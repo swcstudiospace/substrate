@@ -4,9 +4,17 @@
  * `--check` writes nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	CORPUS_BLOCK_BEGIN,
+	CORPUS_BLOCK_END,
+	CORPUS_HOOKS,
+	corpusHookBlock,
+	installCorpusHooks,
+	uninstallCorpusHooks,
+} from "./install-git-hook.ts";
 
 const INSTALLER = join(import.meta.dir, "install-git-hook.ts");
 
@@ -55,5 +63,162 @@ describe("install-git-hook", () => {
 
 		expect(run("--check", repo).out).toContain("not installed");
 		expect(existsSync(join(repo, ".git", "hooks", "post-commit"))).toBe(false);
+	});
+});
+
+function hookPath(repo: string, hook: string): string {
+	return join(repo, ".git", "hooks", hook);
+}
+
+describe("corpus hint hooks", () => {
+	test("--corpus installs the three hooks beside post-commit, executable, each holding only our block", () => {
+		const repo = emptyRepo();
+
+		const installed = run("--corpus", repo);
+
+		expect(installed.code).toBe(0);
+		expect(existsSync(hookPath(repo, "post-commit"))).toBe(true);
+		for (const hook of CORPUS_HOOKS) {
+			const body = readFileSync(hookPath(repo, hook), "utf8");
+			expect(body.startsWith("#!/bin/sh\n")).toBe(true);
+			expect(body).toContain(CORPUS_BLOCK_BEGIN);
+			expect(body).toContain(CORPUS_BLOCK_END);
+			expect(body).toContain(`(${hook})`);
+			expect(body).toContain('corpus hint --repo "$top"');
+			expect(statSync(hookPath(repo, hook)).mode & 0o777).toBe(0o755);
+		}
+	});
+
+	test("without --corpus no hint hook is written", () => {
+		const repo = emptyRepo();
+		run(repo);
+		for (const hook of CORPUS_HOOKS) expect(existsSync(hookPath(repo, hook))).toBe(false);
+	});
+
+	test("a hook that is not ours is reported and left alone, and the others are still installed", () => {
+		const repo = emptyRepo();
+		const foreign = "#!/bin/sh\necho my own post-merge\n";
+		writeFileSync(hookPath(repo, "post-merge"), foreign, { mode: 0o755 });
+
+		const reports = installCorpusHooks(repo, { check: false });
+
+		expect(reports.find((report) => report.hook === "post-merge")).toMatchObject({ state: "foreign" });
+		expect(readFileSync(hookPath(repo, "post-merge"), "utf8")).toBe(foreign);
+		expect(reports.filter((report) => report.state === "installed").map((report) => report.hook)).toEqual(["post-checkout", "post-rewrite"]);
+		expect(run("--corpus", repo).code).toBe(1);
+	});
+
+	test("a second install refreshes in place and --check writes nothing", () => {
+		const repo = emptyRepo();
+		installCorpusHooks(repo, { check: false });
+		const before = readFileSync(hookPath(repo, "post-rewrite"), "utf8");
+
+		expect(installCorpusHooks(repo, { check: true }).every((report) => report.state === "present")).toBe(true);
+		expect(installCorpusHooks(repo, { check: false }).every((report) => report.state === "refreshed")).toBe(true);
+		expect(readFileSync(hookPath(repo, "post-rewrite"), "utf8")).toBe(before);
+
+		const fresh = emptyRepo();
+		expect(installCorpusHooks(fresh, { check: true }).every((report) => report.state === "absent")).toBe(true);
+		expect(existsSync(hookPath(fresh, "post-merge"))).toBe(false);
+	});
+
+	test("uninstall removes only our block: a file of nothing else is deleted, other lines are kept", () => {
+		const repo = emptyRepo();
+		installCorpusHooks(repo, { check: false });
+		const path = hookPath(repo, "post-checkout");
+		writeFileSync(path, `${readFileSync(path, "utf8")}echo added after ours\n`, { mode: 0o755 });
+
+		const reports = uninstallCorpusHooks(repo);
+
+		expect(reports.map((report) => report.state)).toEqual(["removed", "removed", "removed"]);
+		expect(existsSync(hookPath(repo, "post-merge"))).toBe(false);
+		expect(existsSync(hookPath(repo, "post-rewrite"))).toBe(false);
+		const kept = readFileSync(path, "utf8");
+		expect(kept).toContain("echo added after ours");
+		expect(kept).not.toContain(CORPUS_BLOCK_BEGIN);
+		expect(uninstallCorpusHooks(repo).filter((report) => report.state === "absent")).toHaveLength(2);
+	});
+
+	test("uninstall never touches a foreign hook or a damaged block", () => {
+		const repo = emptyRepo();
+		writeFileSync(hookPath(repo, "post-merge"), "#!/bin/sh\necho mine\n", { mode: 0o755 });
+		writeFileSync(hookPath(repo, "post-rewrite"), `#!/bin/sh\n${CORPUS_BLOCK_BEGIN}\necho half\n`, { mode: 0o755 });
+
+		const reports = uninstallCorpusHooks(repo);
+
+		expect(reports.map((report) => report.state)).toEqual(["foreign", "absent", "foreign"]);
+		expect(readFileSync(hookPath(repo, "post-merge"), "utf8")).toBe("#!/bin/sh\necho mine\n");
+		expect(readFileSync(hookPath(repo, "post-rewrite"), "utf8")).toContain("echo half");
+	});
+
+	test("a reversed or repeated marker pair is left untouched", () => {
+		const repo = emptyRepo();
+		const path = hookPath(repo, "post-merge");
+		const reversed = `#!/bin/sh\n${CORPUS_BLOCK_END}\necho keep\n${CORPUS_BLOCK_BEGIN}\n`;
+		writeFileSync(path, reversed, { mode: 0o755 });
+		expect(installCorpusHooks(repo, { check: false }).find((report) => report.hook === "post-merge")).toMatchObject({ state: "foreign", detail: "our block is damaged" });
+		expect(readFileSync(path, "utf8")).toBe(reversed);
+		const repeated = `#!/bin/sh\n${CORPUS_BLOCK_BEGIN}\n${CORPUS_BLOCK_BEGIN}\n${CORPUS_BLOCK_END}\n`;
+		writeFileSync(path, repeated, { mode: 0o755 });
+		expect(installCorpusHooks(repo, { check: false }).find((report) => report.hook === "post-merge")?.state).toBe("foreign");
+		expect(readFileSync(path, "utf8")).toBe(repeated);
+	});
+
+	test("install creates a missing core.hooksPath; a status check does not", () => {
+		const repo = emptyRepo();
+		const hooks = join(repo, "custom-hooks");
+		const configured = Bun.spawnSync(["git", "-C", repo, "config", "core.hooksPath", hooks]);
+		expect(configured.exitCode).toBe(0);
+		expect(installCorpusHooks(repo, { check: true }).every((report) => report.state === "absent")).toBe(true);
+		expect(existsSync(hooks)).toBe(false);
+		expect(installCorpusHooks(repo, { check: false }).every((report) => report.state === "installed")).toBe(true);
+		expect(existsSync(join(hooks, "post-merge"))).toBe(true);
+	});
+
+	test("a directory that is not a repository is reported for every hook", () => {
+		const dir = mkdtempSync(join(tmpdir(), "install-hook-plain-"));
+		expect(installCorpusHooks(dir, { check: false }).map((report) => report.state)).toEqual(["not-a-repo", "not-a-repo", "not-a-repo"]);
+	});
+
+	test("a CLI path with shell metacharacters is never written into the script", () => {
+		const block = corpusHookBlock("post-merge", "/tmp/x; rm -rf /");
+		expect(block).not.toContain("rm -rf");
+		expect(block).toContain("__SUBSTRATE_CLI__");
+	});
+
+	test("the installed hook runs the hint command for the repository's top level, in the foreground under SUBSTRATE_HOOK_WAIT, and exits 0 whatever the command does", () => {
+		const repo = emptyRepo();
+		installCorpusHooks(repo, { check: false });
+		const bin = mkdtempSync(join(tmpdir(), "install-hook-bin-"));
+		const log = join(bin, "calls.log");
+		const stub = join(bin, "substrate");
+		writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexit 7\n`);
+		chmodSync(stub, 0o755);
+		const subdir = join(repo, "docs");
+		mkdirSync(subdir);
+
+		const result = Bun.spawnSync(["sh", hookPath(repo, "post-merge")], {
+			cwd: subdir,
+			env: { PATH: `${bin}:/usr/bin:/bin`, HOME: bin, SUBSTRATE_HOOK_WAIT: "1" },
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.toString()).toBe("");
+		expect(result.stderr.toString()).toBe("");
+		const top = Bun.spawnSync(["git", "-C", repo, "rev-parse", "--show-toplevel"]).stdout.toString().trim();
+		expect(readFileSync(log, "utf8")).toBe(`corpus hint --repo ${top}\n`);
+	});
+
+	test("with no substrate command and no CLI at the baked path the hook does nothing and exits 0", () => {
+		const repo = emptyRepo();
+		installCorpusHooks(repo, { check: false, cliPath: "/nonexistent/cli/index.ts" });
+		const bin = mkdtempSync(join(tmpdir(), "install-hook-empty-"));
+
+		const result = Bun.spawnSync(["sh", hookPath(repo, "post-checkout")], {
+			cwd: repo,
+			env: { PATH: `${bin}:/usr/bin:/bin`, HOME: bin, SUBSTRATE_HOOK_WAIT: "1" },
+		});
+
+		expect(result.exitCode).toBe(0);
 	});
 });

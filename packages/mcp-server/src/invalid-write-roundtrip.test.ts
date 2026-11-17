@@ -46,7 +46,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { ErrorCode, McpError, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { AuditRecord } from "@substrate/audit";
 import { loadConfig } from "./config.ts";
 import { IndexStore } from "./index-store.ts";
@@ -56,6 +57,7 @@ import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { ProposeResult, Runner, SkillProposer } from "./skills/propose.ts";
 import { APPROVAL_RULES } from "./skills/registry.ts";
+import { defined } from "./test-support.ts";
 import type { SubstrateEvent } from "./types.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -107,6 +109,41 @@ function ledgerStub() {
 	};
 }
 
+/**
+ * The SDK's HTTP client transport reports `sessionId` as `string | undefined`, which `Transport`'s optional
+ * `sessionId?: string` rejects under exactOptionalPropertyTypes. This forwards what `Client` uses and leaves
+ * `sessionId` out, which is legal for a connection the client is about to open.
+ */
+class ClientTransport implements Transport {
+	onclose?: () => void;
+	onerror?: (error: Error) => void;
+	onmessage?: (message: JSONRPCMessage) => void;
+	private readonly inner: StreamableHTTPClientTransport;
+
+	constructor(inner: StreamableHTTPClientTransport) {
+		this.inner = inner;
+		inner.onclose = () => this.onclose?.();
+		inner.onerror = (error) => this.onerror?.(error);
+		inner.onmessage = (message) => this.onmessage?.(message);
+	}
+
+	start(): Promise<void> {
+		return this.inner.start();
+	}
+
+	send(message: JSONRPCMessage, options?: TransportSendOptions): Promise<void> {
+		return this.inner.send(message, options);
+	}
+
+	close(): Promise<void> {
+		return this.inner.close();
+	}
+
+	setProtocolVersion(version: string): void {
+		this.inner.setProtocolVersion(version);
+	}
+}
+
 const stops: Array<() => void> = [];
 
 /** Starts the real REST and MCP door on an ephemeral port, over the given stores. */
@@ -136,9 +173,11 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
 		},
 		async mcp() {
 			const client = new Client({ name: "invalid-write-roundtrip", version: "0.0.0" });
-			const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
-				requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
-			});
+			const transport = new ClientTransport(
+				new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+					requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
+				}),
+			);
 			await client.connect(transport);
 			stops.push(() => {
 				client.close().catch(() => undefined);
@@ -160,15 +199,13 @@ async function startHttp(stores: Record<string, unknown>, env: Record<string, st
  * found`, or a reply that is neither shape.
  */
 async function refuses(client: Client, name: string, args: unknown): Promise<boolean> {
-	let result;
-	try {
-		result = await client.callTool({ name, arguments: args as Record<string, unknown> });
-	} catch (err: unknown) {
+	const result = await client.callTool({ name, arguments: args as Record<string, unknown> }).catch((err: unknown) => {
 		if (err instanceof McpError && err.code === ErrorCode.InternalError && /expected record/.test(err.message) && /"arguments"/.test(err.message)) {
-			return true;
+			return null;
 		}
 		throw err;
-	}
+	});
+	if (result === null) return true;
 	if (result.isError !== true) return false;
 	const text = textOf(result);
 	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -210,7 +247,7 @@ function isRefusalBody(name: string, text: string): boolean {
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
 	const refusalBody = Object.hasOwn(REFUSAL_BODY, name) ? REFUSAL_BODY[name] : undefined;
-	return refusalBody !== undefined && refusalBody(parsed as Record<string, unknown>);
+	return refusalBody?.(parsed as Record<string, unknown>) === true;
 }
 
 /** The first text block of a tool reply, parsed. A non-JSON reply parses to `undefined`. */
@@ -388,7 +425,7 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 			expect(reply).toMatchObject({ outcome: "accepted", verified_persisted: true });
 			expect(await store.readEntry(entryIdOf(reply))).not.toBeNull();
 			const after = await storedState(MEMORY_TABLES);
-			expect(after.counts.memory_entries).toBe(before.counts.memory_entries! + 1);
+			expect(after.counts.memory_entries).toBe(defined(before.counts.memory_entries, "memory_entries count") + 1);
 			expect(after.content.memory_entries).not.toBe(before.content.memory_entries);
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "rest"));
 		});
@@ -440,7 +477,7 @@ describeLive("memory writes: POST /memory and MCP memory_write", () => {
 
 			expect(reply).toMatchObject({ outcome: "accepted", verified_persisted: true });
 			const after = await storedState(MEMORY_TABLES);
-			expect(after.counts.memory_entries).toBe(before.counts.memory_entries! + 1);
+			expect(after.counts.memory_entries).toBe(defined(before.counts.memory_entries, "memory_entries count") + 1);
 			expect(after.content.memory_entries).not.toBe(before.content.memory_entries);
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("memory_write", "mcp"));
 		});
@@ -538,7 +575,7 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 			expect(response.status).toBe(200);
 			expect(await response.json()).toMatchObject({ status: "opened" });
 			const after = await storedState(SKILL_TABLES);
-			expect(after.counts.skills_registry).toBe(before.counts.skills_registry! + 1);
+			expect(after.counts.skills_registry).toBe(defined(before.counts.skills_registry, "skills_registry count") + 1);
 			expect(after.content.skills_registry).not.toBe(before.content.skills_registry);
 			expect(auditedFields(auditAfter(control.audit, mark))).toEqual(reachedGate("skills_propose", "rest"));
 		});
@@ -608,7 +645,7 @@ describeLive("skill proposals: POST /skills/propose and MCP skills_propose", () 
 
 			expect(reply).toMatchObject({ status: "opened" });
 			const after = await storedState(SKILL_TABLES);
-			expect(after.counts.skills_registry).toBe(before.counts.skills_registry! + 1);
+			expect(after.counts.skills_registry).toBe(defined(before.counts.skills_registry, "skills_registry count") + 1);
 			expect(after.content.skills_registry).not.toBe(before.content.skills_registry);
 			expect(await registryState(name)).toContainEqual({ pr_number: 4343, state: "proposed", decided_by: null, decided_at: null });
 			expect(auditedFields(auditAfter(control.audit, mark))).toEqual(reachedGate("skills_propose", "mcp"));
@@ -863,4 +900,41 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 			expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "mcp"));
 		});
 	}
+
+	/** A LightRAG stand-in that records every request it gets. A refused batch makes none, so the record stays empty. */
+	function lightragRecorder() {
+		const requests: string[] = [];
+		return {
+			requests,
+			fetch: async (input: string | URL | Request, init?: RequestInit) => {
+				requests.push(`${init?.method ?? "GET"} ${new URL(String(input)).pathname}`);
+				return Response.json({ detail: "no route" }, { status: 404 });
+			},
+		};
+	}
+
+	test("POST /docs/ingest on the LightRAG plane refuses a batch with an invalid page as RAGFlow does, with no LightRAG request and an unchanged state file", async () => {
+		const batch = { dataset: "agent-substrate", pages: [page({ path: "docs/first.md" }), without(page({ path: "docs/second.md" }), "source_url")] };
+		const ragflow = new RagflowFake();
+		const ragflowHttp = await startHttp({ index: null, greptime: ledgerStub().greptime, ragflowFetch: ragflow.fetch }, { SUBSTRATE_DOCS_STATE_FILE: stateFile() });
+		const expected = await ragflowHttp.send("/docs/ingest", batch);
+
+		const lightrag = lightragRecorder();
+		const file = stateFile();
+		const http = await startHttp(
+			{ index: null, greptime: ledgerStub().greptime, lightragFetch: lightrag.fetch },
+			{ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_STATE_FILE: file },
+		);
+		const mark = http.audit.seq;
+		const response = await http.send("/docs/ingest", batch);
+
+		expect(expected.status).toBe(400);
+		expect(response.status).toBe(expected.status);
+		const refusal = await response.json();
+		expect(refusal).toMatchObject({ ok: false, refused: true });
+		expect(refusal).toEqual(await expected.json());
+		expect(lightrag.requests).toEqual([]);
+		expect(docsStateOf(file)).toBeNull();
+		expect(auditedFields(auditAfter(http.audit, mark))).toEqual(reachedGate("docs_ingest", "rest"));
+	});
 });

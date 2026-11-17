@@ -30,15 +30,20 @@
  */
 import {
 	AMOUNT_ZERO,
+	formatMemo,
+	formatMemoV2,
+	headsRoot,
 	HOUR_MS,
 	hourIso,
 	hourStart,
 	isClosed,
 	keygenPath,
+	merkleRootHex,
 	parseMemo,
 	parseSignature,
 	pubkeyArgv,
 	transferMemoArgv,
+	type GraphHeadRecord,
 	type AddressMemo,
 	type Rpc,
 	type RunResult,
@@ -46,12 +51,12 @@ import {
 	type TransactionMemo,
 } from "@substrate/ledger";
 import { isAbsolute as isAbsPath } from "node:path";
-import { InvalidEventError } from "./event.ts";
-import { GreptimeError, INGEST_LAG_MS, type GreptimeClient, type NewAnchor } from "./greptime.ts";
+import { chainLeafCommitment, InvalidEventError, inChainOrder } from "./event.ts";
+import { GreptimeError, INGEST_LAG_MS, type GraphChainLeafRow, type GreptimeClient, type NewAnchor } from "./greptime.ts";
 import { redact } from "./redact.ts";
 import type { HourDigest, Substrate } from "./service.ts";
 
-export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 
 /** At most this many non-empty hours anchor per run; empty hours are free, older unanchored hours wait for the next tick. */
 export const MAX_HOURS_PER_RUN = 24;
@@ -348,6 +353,134 @@ function anchorRow(
 	};
 }
 
+/** The chain fields one event row contributes to the heads commitment (D73-02). */
+export interface ChainMember {
+	id: string;
+	hash: string;
+	prev: string | null;
+	graph_id: string | null;
+	session_id: string | null;
+}
+
+/** The head records and chain leaves of one hour, and the heads root over its records (D73-01). */
+export interface HourHeads {
+	headsRootHex: string;
+	records: GraphHeadRecord[];
+	leaves: GraphChainLeafRow[];
+}
+
+/** Event ids one hour-read statement carries. */
+const HEADS_READ_BATCH = 500;
+
+/** Code-unit order: the order every reader reproduces without a locale. */
+function compareText(a: string, b: string): number {
+	if (a === b) return 0;
+	return a < b ? -1 : 1;
+}
+
+function byEventId<T extends ChainMember>(a: T, b: T): number {
+	return compareText(a.id, b.id);
+}
+
+function byGroup(a: { graphId: string; sessionId: string }, b: { graphId: string; sessionId: string }): number {
+	return compareText(a.graphId, b.graphId) || compareText(a.sessionId, b.sessionId);
+}
+
+/**
+ * The hour's head records and chain leaves (D73-01, D73-02). An event with no graph_id belongs to no
+ * graph and gets no head; it stays in the hour root. Each (graph_id, session_id) group is ordered by
+ * chain, a missing session_id being "" as verifyGraph buckets it. Members are sorted by id before
+ * inChainOrder, which takes its start and resolves forks by input order, so every read order gives the
+ * same chain.
+ */
+export function buildGraphHeads<T extends ChainMember>(
+	members: readonly T[],
+	periodStartMs: number,
+): { records: GraphHeadRecord[]; leaves: GraphChainLeafRow[] } {
+	const periodStart = new Date(periodStartMs).toISOString();
+	const groups = new Map<string, { graphId: string; sessionId: string; members: T[] }>();
+	for (const member of members) {
+		if (member.graph_id === null) continue;
+		const sessionId = member.session_id ?? "";
+		const key = JSON.stringify([member.graph_id, sessionId]);
+		const group = groups.get(key);
+		if (group) group.members.push(member);
+		else groups.set(key, { graphId: member.graph_id, sessionId, members: [member] });
+	}
+	const records: GraphHeadRecord[] = [];
+	const leaves: GraphChainLeafRow[] = [];
+	for (const group of [...groups.values()].sort(byGroup)) {
+		const chain = inChainOrder(group.members.sort(byEventId));
+		const head = chain.at(-1);
+		if (head === undefined) throw new Error("buildGraphHeads: empty chain");
+		records.push({
+			graphId: group.graphId,
+			sessionId: group.sessionId,
+			periodStartMs,
+			count: chain.length,
+			leavesRootHex: merkleRootHex(chain.map((member) => chainLeafCommitment(member.id, member.hash))),
+			headEventId: head.id,
+			headHashHex: head.hash,
+		});
+		for (const [seq, member] of chain.entries()) {
+			leaves.push({
+				period_start: periodStart,
+				graph_id: group.graphId,
+				session_id: group.sessionId,
+				seq,
+				event_id: member.id,
+				hash: member.hash,
+			});
+		}
+	}
+	return { records, leaves };
+}
+
+/** The chain fields of one `agent_events` row, as `eventsByIds` returns it. */
+function chainMemberOf(row: Record<string, unknown>): ChainMember {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	return {
+		id: String(row.id),
+		hash: String(row.hash),
+		prev: text(row.prev),
+		graph_id: text(row.graph_id),
+		session_id: text(row.session_id),
+	};
+}
+
+/**
+ * Reads the member rows of one hour and returns its heads, or null when no graph owns one of its
+ * events. A member row that does not come back throws: the leaves would otherwise be partial.
+ */
+export async function readHourHeads(greptime: Pick<GreptimeClient, "eventsByIds">, periodStartMs: number, eventIds: readonly string[]): Promise<HourHeads | null> {
+	const members: ChainMember[] = [];
+	for (let i = 0; i < eventIds.length; i += HEADS_READ_BATCH) {
+		const rows = await greptime.eventsByIds(eventIds.slice(i, i + HEADS_READ_BATCH));
+		for (const row of rows) members.push(chainMemberOf(row));
+	}
+	if (members.length !== eventIds.length) {
+		throw new GreptimeError(`hour ${hourIso(periodStartMs)} read ${members.length} of ${eventIds.length} member rows`);
+	}
+	const { records, leaves } = buildGraphHeads(members, periodStartMs);
+	if (records.length === 0) return null;
+	return { headsRootHex: headsRoot(records), records, leaves };
+}
+
+/**
+ * The memo an hour is anchored with: v2 once a graph owns one of its events (D73-01), else the v1
+ * memo every hour has always carried.
+ */
+export function anchorMemo(periodStartMs: number, rootHex: string, count: number, heads: HourHeads | null): string {
+	if (heads === null) return formatMemo({ periodStartMs, rootHex, count });
+	return formatMemoV2({ periodStartMs, rootHex, count, headsRootHex: heads.headsRootHex });
+}
+
+/** One hour's chain leaves, then its anchors row: a row is never stored without its leaves (D73-02). */
+async function storeAnchor(greptime: GreptimeClient, heads: HourHeads | null, row: NewAnchor): Promise<void> {
+	await greptime.insertGraphChainLeaves(heads?.leaves ?? []);
+	await greptime.insertAnchor(row);
+}
+
 /**
  * Anchor every closed, non-empty, unanchored hour. Returns the process exit
  * code the entry point exits with: 0 when every candidate anchored or was
@@ -387,7 +520,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 	const coverageHour = hourStart(coverageMs);
 	const windowStart = Math.max(coverageHour, now - ANCHOR_LOOKBACK_MS);
 
-	let anchored: Record<string, true> = {};
+	const anchored: Record<string, true> = {};
 	try {
 		const rows = await greptime.anchorsBetween(windowStart, now);
 		for (const row of rows) anchored[row.period_start] = true;
@@ -534,7 +667,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			// alarm is reported, never rewritten over the original.
 			if (anchored[periodIso] !== true) {
 				try {
-					await greptime.insertAnchor(anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
+					await storeAnchor(greptime, await readHourHeads(greptime, hour, digest.event_ids), anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
 				} catch {
 					await failHour(periodIso, "store-failed");
 					return result;
@@ -557,14 +690,14 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			// so the row stays untouched and only the adopted event is emitted.
 			if (anchored[periodIso] !== true) {
 				try {
-					await greptime.insertAnchor(anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
+					await storeAnchor(greptime, await readHourHeads(greptime, hour, digest.event_ids), anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
 				} catch {
 					await failHour(periodIso, "store-failed");
 					return result;
 				}
 			}
 		const note = await emitWritten(substrate, digest, verdict.signature, true).catch(() => null);
-		if (!note || note.stored !== true) {
+		if (note?.stored !== true) {
 			// The store already failed one write: a later hour must not send
 			// a new transaction after that. Report and stop like the send path.
 			await failHour(periodIso, "store-failed");
@@ -614,12 +747,21 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			preconditionsOk = true;
 		}
 
+		let heads: HourHeads | null;
+		try {
+			heads = await readHourHeads(greptime, hour, digest.event_ids);
+		} catch (cause) {
+			await failHour(periodIso, "store-failed");
+			process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+			return result;
+		}
+		const sendMemo = anchorMemo(hour, digest.root, digest.event_count, heads);
 		let argv: string[];
 		try {
 			argv = transferMemoArgv({
 				cli: env.cli,
 				pubkey: env.pubkey,
-				memo: digest.memo,
+				memo: sendMemo,
 				rpcUrl: env.rpcUrl,
 				keypairPath: env.keypairPath,
 				amountSol: AMOUNT_ZERO,
@@ -666,6 +808,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			back.periodStartMs !== hour ||
 			back.rootHex !== digest.root ||
 			back.count !== digest.event_count ||
+			back.headsRootHex !== heads?.headsRootHex ||
 			readBack.payer !== env.pubkey ||
 			!readBack.payerSigned ||
 			readBack.err !== null
@@ -676,8 +819,10 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		}
 
 		try {
-			await greptime.insertAnchor(
-				anchorRow(digest, signature, env.pubkey, readBack.slot ?? 0, digest.memo, digest.root, digest.event_count, now),
+			await storeAnchor(
+				greptime,
+				heads,
+				anchorRow(digest, signature, env.pubkey, readBack.slot ?? 0, sendMemo, digest.root, digest.event_count, now),
 			);
 		} catch {
 			await failHour(periodIso, "store-failed");
@@ -687,7 +832,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		// is reported as store-failed instead, and the next sweep still skips
 		// this hour by its row.
 		const note = await emitWritten(substrate, digest, signature, false).catch(() => null);
-		if (!note || note.stored !== true) {
+		if (note?.stored !== true) {
 			await failHour(periodIso, "store-failed");
 			process.stderr.write(`[anchor] ${periodIso} anchored but the anchor note was not stored\n`);
 			return result;

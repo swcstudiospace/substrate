@@ -128,7 +128,15 @@ const floorRaw = process.env.SUBSTRATE_DEPLOY_MIN_FREE_GB?.trim() ?? "";
 const minFreeGb = /^\d{1,4}$/.test(floorRaw) ? Number(floorRaw) : undefined;
 // A deliberate local test on a one-disk machine; the unit never sets it.
 const allowRootfs = /^(1|true|yes)$/i.test(process.env[INDEX_ROOTFS_ENV]?.trim() ?? "");
-const options = { outDir, pageSize: command.pageSize, minFreeGb, allowRootfs, maxSeconds: settings.maxSeconds, maxBytes: settings.maxBytes, ...(releaseSha !== undefined ? { releaseSha } : {}) };
+const options = {
+	outDir,
+	...(command.pageSize === undefined ? {} : { pageSize: command.pageSize }),
+	...(minFreeGb === undefined ? {} : { minFreeGb }),
+	allowRootfs,
+	maxSeconds: settings.maxSeconds,
+	maxBytes: settings.maxBytes,
+	...(releaseSha !== undefined ? { releaseSha } : {}),
+};
 
 let code = 0;
 // Snapshots on disk whose note the ledger has not stored yet: reported on stderr and retried alone on the next run; the archive itself succeeded, so they never change the exit code.

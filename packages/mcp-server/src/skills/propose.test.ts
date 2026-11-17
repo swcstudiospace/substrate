@@ -514,6 +514,31 @@ describe("proposeSkill ledger idempotence", () => {
 		expect(f.steps()).toEqual(["gh pr view"]);
 	});
 
+	test("a versioned retry of an OPEN proposal is existing: the ledger replay answers before beforeWork runs", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake();
+		const beforeWork = async (): Promise<null> => {
+			throw new Error("beforeWork must not run for a recorded proposal");
+		};
+		const result = await proposeSkill(input(), options(f.run, { beforeWork }));
+		expect(result).toMatchObject({ status: "existing", pr_url: PR_URL, pr_number: 7, content_sha256: sha() });
+		expect(f.steps()).toEqual(["gh pr view"]);
+	});
+
+	test("a proposal beforeWork refuses opens nothing: no fetch, clone, push or create, and no ledger line, dry run or not", async () => {
+		for (const dryRun of [false, true]) {
+			const f = fake();
+			const refusal = new Error("stale");
+			const beforeWork = async (): Promise<null> => {
+				throw refusal;
+			};
+			const error = await proposeSkill(input(), options(f.run, { dryRun, beforeWork })).catch((e: unknown) => e);
+			expect(error).toBe(refusal);
+			expect(f.steps()).toEqual([]);
+			expect(ledgerLines()).toEqual([]);
+		}
+	});
+
 	test("a pre-tag line for another name does not decide this proposal", async () => {
 		const v = validateProposal(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
 		writeLedger({ ts: "t", content_sha256: legacyContentSha256(v.mode, v.files, v.remove), name: "other-skill", surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
@@ -555,6 +580,44 @@ describe("proposeSkill ledger idempotence", () => {
 		expect(result.status).toBe("unchanged");
 		expect(f.steps()).toContain("clone");
 		expect(f.steps()).not.toContain("push");
+	});
+
+	test("a MERGED record hands its PR to beforeWork, so a versioned retry is checked against the merged proposal", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake({
+			replies: { "gh pr view": { stdout: JSON.stringify({ state: "MERGED", url: PR_URL, number: 7 }) }, "diff-quiet": { code: 0 } },
+		});
+		const handed: Array<string | null> = [];
+		const result = await proposeSkill(input(), options(f.run, { beforeWork: async (merged) => { handed.push(merged); return null; } }));
+		expect(handed).toEqual([PR_URL]);
+		expect(result.status).toBe("unchanged");
+	});
+
+	test("a merged retry is confirmed unchanged while main still holds the content, with no commit or push", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake({
+			replies: { "gh pr view": { stdout: JSON.stringify({ state: "MERGED", url: PR_URL, number: 7 }) }, "diff-quiet": { code: 0 } },
+		});
+		const result = await proposeSkill(input(), options(f.run, { beforeWork: async () => ({ unlessUnchanged: new Error("stale") }) }));
+		expect(result.status).toBe("unchanged");
+		expect(f.steps()).not.toContain("commit");
+		expect(f.steps()).not.toContain("push");
+	});
+
+	test("a merged retry is refused as stale, before any commit or push, once main no longer holds the content", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake({
+			replies: { "gh pr view": { stdout: JSON.stringify({ state: "MERGED", url: PR_URL, number: 7 }) }, "diff-quiet": { code: 1 } },
+		});
+		const refusal = new Error("stale");
+		const ledgerBefore = ledgerLines().length;
+		const error = await proposeSkill(input(), options(f.run, { beforeWork: async () => ({ unlessUnchanged: refusal }) })).catch((e: unknown) => e);
+		expect(error).toBe(refusal);
+		expect(f.steps()).toContain("diff-quiet");
+		expect(f.steps()).not.toContain("commit");
+		expect(f.steps()).not.toContain("push");
+		expect(f.steps()).not.toContain("gh pr create");
+		expect(ledgerLines()).toHaveLength(ledgerBefore);
 	});
 
 	test("a pushed branch with no recorded PR is re-found with gh pr list --head", async () => {

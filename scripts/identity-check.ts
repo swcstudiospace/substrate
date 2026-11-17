@@ -435,7 +435,7 @@ function serverSection(manifest: Manifest, names: Map<string, NameEntry>, server
 		.sort()
 		.map((name) => {
 			const entry = names.get(name);
-			return { name, present: entry !== undefined, empty: entry !== undefined && entry.empty };
+			return { name, present: entry !== undefined, empty: entry?.empty === true };
 		});
 	const unexpected = [...names.keys()].filter((name) => name.startsWith(TOKEN_PREFIX) && !expected.has(name)).sort();
 	const warnings: string[] = [];
@@ -575,6 +575,10 @@ export function checkNames(
 			}
 			case "external":
 				return { id: client.id, surface: client.surface, state: client.state, status: "external", detail: delivery.note };
+			default: {
+				const unhandled: never = delivery;
+				throw new Error(`unhandled client delivery: ${JSON.stringify(unhandled)}`);
+			}
 		}
 	});
 	const strandedLive = clients.filter((c) => isLive(c.state) && c.status !== "ok" && c.status !== "external").map((c) => c.id);
@@ -687,7 +691,7 @@ export function checkValues(
 				: { id: client.id, surface: client.surface, state: client.state, status: "mismatch", detail: "value is not in the surface and operator lists" };
 		}
 		const set = serverHashes.get(client.surface);
-		if (set !== undefined && set.has(digest)) {
+		if (set?.has(digest)) {
 			return { id: client.id, surface: client.surface, state: client.state, status: "match", detail: "value is in the surface list" };
 		}
 		return { id: client.id, surface: client.surface, state: client.state, status: "mismatch", detail: "value is not in the surface list" };

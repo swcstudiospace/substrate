@@ -483,7 +483,7 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "substrate-slo-history"
       },
-      "description": "Retain forwards parked for replay. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended. Series `hindsight.outbox_size` (gauge, max per step, {entry}), source `substrate.hindsight.retain_outbox.size`.",
+      "description": "The lightrag line is LightRAG's call latency at p95. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -513,7 +513,7 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "ms"
         },
         "overrides": []
       },
@@ -548,6 +548,11 @@
               "selector": "value",
               "text": "Value",
               "type": "number"
+            },
+            {
+              "selector": "labels.plane",
+              "text": "plane",
+              "type": "string"
             }
           ],
           "datasource": {
@@ -567,7 +572,7 @@
             "params": [
               {
                 "key": "series",
-                "value": "hindsight.outbox_size"
+                "value": "plane.p95"
               },
               {
                 "key": "window",
@@ -581,8 +586,17 @@
           }
         }
       ],
-      "title": "Fabric: hindsight",
-      "transformations": [],
+      "title": "Fabric: lightrag",
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "plane"
+            ]
+          }
+        }
+      ],
       "type": "timeseries"
     },
     {
@@ -590,7 +604,7 @@
         "type": "yesoreyeram-infinity-datasource",
         "uid": "substrate-slo-history"
       },
-      "description": "A count of the data planes on a configured proxy (SUBSTRATE_DB_PROXY_ALLOW), set at boot from the endpoint classes. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended. Series `endpoint.proxy_planes` (gauge, max per step, {plane}), source `substrate.endpoint.proxy_planes`.",
+      "description": "Retain forwards parked for replay. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended. Series `hindsight.outbox_size` (gauge, max per step, {entry}), source `substrate.hindsight.retain_outbox.size`.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -674,6 +688,234 @@
             "params": [
               {
                 "key": "series",
+                "value": "hindsight.outbox_size"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Fabric: hindsight",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "The tei line is the embedding service's call latency at p95. Series `plane.p95` (histogram, max per step, ms), source `substrate.plane.duration`. One line per `plane`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            },
+            {
+              "selector": "labels.plane",
+              "text": "plane",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "plane.p95"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Fabric: tei",
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "plane"
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "A count of the data planes on a configured proxy (SUBSTRATE_DB_PROXY_ALLOW), set at boot from the endpoint classes. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended. Series `endpoint.proxy_planes` (gauge, max per step, {plane}), source `substrate.endpoint.proxy_planes`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
                 "value": "endpoint.proxy_planes"
               },
               {
@@ -693,14 +935,121 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "Age of the newest corpus manifest change; its objective is SUBSTRATE_DOCS_SLO_FRESHNESS_S. No point until the manifest has a change. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended. Series `corpus.freshness_seconds` (gauge, max per step, s), source `substrate.corpus.freshness_seconds`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "corpus.freshness_seconds"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Fabric: corpus",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 41
       },
-      "id": 8,
+      "id": 11,
       "panels": [],
       "title": "Planes and docs",
       "type": "row"
@@ -748,9 +1097,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 42
       },
-      "id": 9,
+      "id": 12,
       "options": {
         "legend": {
           "calcs": [],
@@ -869,9 +1218,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 42
       },
-      "id": 10,
+      "id": 13,
       "options": {
         "legend": {
           "calcs": [],
@@ -976,9 +1325,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 50
       },
-      "id": 11,
+      "id": 14,
       "options": {
         "legend": {
           "calcs": [],
@@ -1097,9 +1446,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 50
       },
-      "id": 12,
+      "id": 15,
       "options": {
         "legend": {
           "calcs": [],
@@ -1176,14 +1525,135 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "One record per detected planning change: applied when the change reached the ledger, refused when it did not. Series `planning.transition` (counter, sum per step, {transition}), source `PlanningObserver scan path (planning/observer.ts)`. One line per `outcome`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            },
+            {
+              "selector": "labels.outcome",
+              "text": "outcome",
+              "type": "string"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "planning.transition"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Planning transitions by outcome",
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "outcome"
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 42
+        "y": 66
       },
-      "id": 13,
+      "id": 17,
       "panels": [],
       "title": "Extended series (needs SUBSTRATE_METRICS_HISTORY_SERIES=extended)",
       "type": "row"
@@ -1231,9 +1701,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 67
       },
-      "id": 14,
+      "id": 18,
       "options": {
         "legend": {
           "calcs": [],
@@ -1352,9 +1822,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 67
       },
-      "id": 15,
+      "id": 19,
       "options": {
         "legend": {
           "calcs": [],
@@ -1459,9 +1929,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 51
+        "y": 75
       },
-      "id": 16,
+      "id": 20,
       "options": {
         "legend": {
           "calcs": [],
@@ -1580,9 +2050,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 51
+        "y": 75
       },
-      "id": 17,
+      "id": 21,
       "options": {
         "legend": {
           "calcs": [],
@@ -1701,9 +2171,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 59
+        "y": 83
       },
-      "id": 18,
+      "id": 22,
       "options": {
         "legend": {
           "calcs": [],
@@ -1822,9 +2292,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 59
+        "y": 83
       },
-      "id": 19,
+      "id": 23,
       "options": {
         "legend": {
           "calcs": [],
@@ -1929,9 +2399,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 67
+        "y": 91
       },
-      "id": 20,
+      "id": 24,
       "options": {
         "legend": {
           "calcs": [],
@@ -2036,9 +2506,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 67
+        "y": 91
       },
-      "id": 21,
+      "id": 25,
       "options": {
         "legend": {
           "calcs": [],
@@ -2097,6 +2567,220 @@
         }
       ],
       "title": "Index archive age",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "Documents per second of the last ingest request's wall time; 0 when it sent nothing. The objective is SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S. Series `corpus.ingest_docs_per_s` (gauge, avg per step, {document}/s), source `substrate.corpus.ingest_docs_per_second`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 99
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "corpus.ingest_docs_per_s"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Corpus ingest throughput",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "As the docs canary last reported it. No point until a first report. The objective is SUBSTRATE_DOCS_SLO_RECALL5. Series `corpus.golden_recall5` (gauge, avg per step, ratio), source `substrate.corpus.golden_recall5`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 99
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "corpus.golden_recall5"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Golden-set recall at 5",
       "transformations": [],
       "type": "timeseries"
     }

@@ -146,7 +146,7 @@ interface Attempt {
 interface Tally {
 	ok: boolean;
 	what: string;
-	detail?: string;
+	detail?: string | undefined;
 }
 
 async function main(argv: string[]): Promise<number> {

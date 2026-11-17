@@ -1,0 +1,11 @@
+{
+	"pinned": "0.9.1",
+	"pinned_since": "2026-09-29",
+	"tested_against": "0.9.1",
+	"images": ["hindsight-api", "hindsight-worker", "hindsight-control-plane"],
+	"blocked_by": [
+		{ "repo": "vectorize-io/hindsight", "issue": 4696, "reason": "recall hang in 0.10.x" }
+	],
+	"lag_alert_days": 7,
+	"notes": "Declared intent only: the three Railway services run these fixed image tags and nothing upgrades them by itself. A version changes only by an operator editing the image tags and accepting the deploy (docs/runbooks/hindsight-upgrade.md). scripts/hindsight-lag.ts compares this pin with upstream releases weekly and keeps one issue open while a newer stable release has existed for lag_alert_days. Update this file in a pull request after an upgrade or a rollback."
+}

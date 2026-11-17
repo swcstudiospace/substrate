@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, ut
 import { createConnection, createServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defined } from "../test-support.ts";
 import type { EventInput } from "../types.ts";
 import { contextArgv, geometryArgv, keyArgv, shotArgv, titleArgv, typeArgv, type DesktopRunInput } from "./actions.ts";
 import {
@@ -40,7 +41,6 @@ const res = (stdout: string | Buffer, code = 0, stderr = ""): BufferRunResult =>
 const W = 4;
 const H = 3;
 const pixel = (x: number, y: number) => [10 * x + 1, 20 * y + 2, 7 * x + 5 * y + 3] as const;
-const EXPECTED_RGB = Buffer.from(Array.from({ length: W * H }, (_, n) => [...pixel(n % W, Math.floor(n / W))]).flat());
 
 /**
  * A synthetic XWD: big-endian header, window name, ncolors × 12-byte colours, then rows of 4-byte
@@ -56,7 +56,9 @@ function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: num
 		100 + name.length, o.version ?? 7, o.format ?? 2, 24, W, H, 0, o.byteOrder, 32, o.byteOrder, 32, bpp,
 		bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, o.ncolors ?? 0, W, H, 0, 0, 0,
 	];
-	fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
+	fields.forEach((value, i) => {
+		header.writeUInt32BE(value, i * 4);
+	});
 	const pixels = Buffer.alloc(bytesPerLine * H);
 	for (let y = 0; y < H; y++) {
 		for (let x = 0; x < W; x++) {
@@ -191,11 +193,11 @@ describe("createDesktopDriver", () => {
 		expect(events.every((e) => e.kind === "tool.call" && e.surface === "omp" && e.actor === "agent")).toBe(true);
 		expect(events.map((e) => e.session_id)).toEqual(Array(4).fill(`desktop:${result.run_id}`));
 		expect(events.map((e) => e.summary)).toEqual(["desktop key ok", "desktop type ok", "desktop key ok", "desktop screenshot ok"]);
-		expect(Object.keys(events[0]!.payload!).sort()).toEqual(["action", "i", "keys", "ms", "ok", "run_id", "tool"]);
-		expect(Object.keys(events[1]!.payload!).sort()).toEqual(["action", "i", "ms", "ok", "run_id", "text_len", "text_sha256", "tool"]);
-		expect(Object.keys(events[2]!.payload!).sort()).toEqual(["action", "i", "keys", "ms", "ok", "run_id", "tool"]);
-		expect(Object.keys(events[3]!.payload!).sort()).toEqual(["action", "height", "i", "ms", "ok", "run_id", "sha256", "tool", "width"]);
-		expect(events[1]!.payload).toMatchObject({
+		expect(Object.keys(defined(defined(events[0]).payload)).sort()).toEqual(["action", "i", "keys", "ms", "ok", "run_id", "tool"]);
+		expect(Object.keys(defined(defined(events[1]).payload)).sort()).toEqual(["action", "i", "ms", "ok", "run_id", "text_len", "text_sha256", "tool"]);
+		expect(Object.keys(defined(defined(events[2]).payload)).sort()).toEqual(["action", "i", "keys", "ms", "ok", "run_id", "tool"]);
+		expect(Object.keys(defined(defined(events[3]).payload)).sort()).toEqual(["action", "height", "i", "ms", "ok", "run_id", "sha256", "tool", "width"]);
+		expect(defined(events[1]).payload).toMatchObject({
 			tool: "desktop_run",
 			action: "type",
 			run_id: result.run_id,
@@ -204,10 +206,10 @@ describe("createDesktopDriver", () => {
 			text_len: 17,
 			text_sha256: createHash("sha256").update("TYPED-SECRET-TEXT").digest("hex"),
 		});
-		expect(events[0]!.payload).toMatchObject({ keys: "ctrl+alt+t" });
-		expect(events[2]!.payload).toMatchObject({ keys: "Return" });
-		expect(events[3]!.payload).toMatchObject({
-			sha256: result.screenshots[0]!.sha256,
+		expect(defined(events[0]).payload).toMatchObject({ keys: "ctrl+alt+t" });
+		expect(defined(events[2]).payload).toMatchObject({ keys: "Return" });
+		expect(defined(events[3]).payload).toMatchObject({
+			sha256: defined(result.screenshots[0]).sha256,
 			width: W,
 			height: H,
 		});
@@ -224,7 +226,7 @@ describe("createDesktopDriver", () => {
 		);
 
 		expect(events).toHaveLength(3);
-		for (const [event, keys] of events.map((e, n) => [e, ["shift+a", "KP_1", "space"][n]!] as const)) {
+		for (const [event, keys] of events.map((e, n) => [e, defined(["shift+a", "KP_1", "space"][n], "keys")] as const)) {
 			expect(event.payload).toMatchObject({
 				keys_len: keys.length,
 				keys_sha256: createHash("sha256").update(keys).digest("hex"),
@@ -268,7 +270,7 @@ describe("createDesktopDriver", () => {
 
 		expect(result.log).toEqual([{ i: 0, type: "key", ok: false, ms: expect.any(Number), active_window: null, error: "timeout" }]);
 		expect(calls).toHaveLength(3);
-		expect(events.map((e) => e.payload!.error)).toEqual(["timeout"]);
+		expect(events.map((e) => defined(e.payload).error)).toEqual(["timeout"]);
 	});
 
 	test("the run deadline stops the remaining actions with deadline and no event for the not-started action", async () => {
@@ -292,7 +294,7 @@ describe("createDesktopDriver", () => {
 			[1, false, "deadline"],
 		]);
 		expect(calls.some((argv) => argv.at(-1) === "b" || argv.at(-1) === "c")).toBe(false);
-		expect(events.map((e) => e.payload!.i)).toEqual([0]);
+		expect(events.map((e) => defined(e.payload).i)).toEqual([0]);
 	});
 
 	test("a type action's budget grows with its text; the title read keeps the full budget after the deadline", async () => {
@@ -465,7 +467,7 @@ describe("createDesktopDriver", () => {
 			);
 
 			expect(refused).toBeInstanceOf(Error);
-			expect((refused as Error).message).toContain("refusing desktop_run");
+			expect((refused as Error).message).toContain("docker context probe failed; refusing desktop_run");
 			expect((refused as Error).message).not.toContain("other-host");
 			expect(calls).toEqual([contextArgv()]);
 		});
@@ -484,7 +486,7 @@ describe("createDesktopDriver", () => {
 				);
 
 			expect(refused).toBeInstanceOf(Error);
-			expect((refused as Error).message).toContain("docker context probe failed; refusing desktop_run");
+			expect((refused as Error).message).toContain("docker context probe timed out; refusing desktop_run");
 			expect(calls).toEqual([contextArgv()]);
 			expect(events).toEqual([]);
 

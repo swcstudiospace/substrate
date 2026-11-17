@@ -8,6 +8,7 @@ import {
 	LinearError,
 	LINEAR_API_URL,
 } from "./linear.ts";
+import { defined } from "./test-support.ts";
 
 const KEY = "lin-test-key";
 const ENDPOINT = "https://linear.test/graphql";
@@ -110,7 +111,7 @@ describe("issueContext fetches position", () => {
 
 		const ctx = await client.issueContext("SWC-1");
 
-		expect(requests[0]!.body.query).toContain("position");
+		expect(defined(requests[0]).body.query).toContain("position");
 		expect(ctx.team.states).toEqual(TEAM_STATES);
 		expect(firstStartedStateId(ctx)).toBe("st-progress");
 	});
@@ -132,7 +133,7 @@ describe("error redaction (D23-05)", () => {
 	test("the auth header is the raw key, not a Bearer token", async () => {
 		const { requests, client } = fakeLinear(() => reply({ data: { issue: null } }));
 		await client.issueState("SWC-1").catch(() => undefined);
-		expect(requests[0]!.headers.Authorization).toBe(KEY);
+		expect(defined(requests[0]).headers.Authorization).toBe(KEY);
 	});
 
 	test("an unreachable endpoint throws without the key", async () => {
@@ -155,7 +156,7 @@ describe("updateIssue is additive only", () => {
 
 		await client.updateIssue("issue-1", { stateId: "st-progress", addedLabelIds: ["l1"], removedLabelIds: ["l2"] });
 
-		const input = requests[0]!.body.variables.input as Record<string, unknown>;
+		const input = defined(requests[0]).body.variables.input as Record<string, unknown>;
 		expect(input).toEqual({ stateId: "st-progress", addedLabelIds: ["l1"], removedLabelIds: ["l2"] });
 		expect(input).not.toHaveProperty("labelIds");
 		// Adding labelIds must make this assignment fail to compile.

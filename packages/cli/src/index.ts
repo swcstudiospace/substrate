@@ -8,7 +8,7 @@
  *   substrate verify <graph_id>              recompute the hash chain for a graph
  *   substrate drift [--repo R] [--path P]    compare git, the ledger and the claims
  *   substrate handoff --to S --goal G ...    record a signed handoff packet
- *   substrate evidence --graph G             the evidence bundle, as JSON or HTML
+ *   substrate evidence --graph G [--node N]  the evidence bundle, as JSON or HTML; --node adds that node's artifact (JSON)
  *   substrate lessons add|recall|digest|outcome   the lessons bank (docs/lessons-bank.md)
  *   substrate skills propose|list|approve ...  propose, list or decide a skill (docs/runbooks/skills-governance.md)
  *   substrate docs ingest --dataset NAME --path PATH --source-url URL [...]
@@ -20,6 +20,19 @@
  *   substrate index archive|verify-archive|restore   the verified logical export of the Postgres
  *       index and its restore-to-scratch proof (docs/runbooks/index-archive.md)
  *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
+ *   substrate session checkpoint|checkpoints|rollback|recover|sync   session checkpoints and rollback
+ *       (exit 0 done, 1 failed, 2 usage, 3 refused, 4 files restored but the ledger commit is pending)
+ *   substrate steer open|heartbeat|close|sessions|status|queue|ack|list|listen|context   Live Steering from a terminal (docs/live-steering.md)
+ *       (exit 0 done, 1 failed, 2 usage, 3 refused by the server: not an operator, rate limited, bad token)
+ *   substrate corpus scan|plan|ingest|reflect|status|sync|watch|reconcile|hook|hint   the documentation corpus of every repository (docs/corpus.md, docs/corpus-watch.md, docs/corpus-reflect.md)
+ *       (exit 0 done, 1 failed, 2 usage; ingest, reflect, sync and reconcile are dry runs until --execute; status --gaps lists unanswered queries)
+ *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
+ *       the memory consistency verifier: the index, the plane and the ledger compared
+ *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
+ *   substrate memory capsule export|verify|redact ...   memory capsules (docs/runbooks/memory-capsules.md)
+ *       (exit 0 done, 1 failed or incomplete, 2 usage, 3 verify --anchors could not finish)
+ *   substrate worktree list|status|scan|prune|conflicts|provision|disk|guard   the worktree fleet (docs/worktree-fleet.md)
+ *       (exit 0 done, 1 a removal, report or creation failed, 2 usage or no worktree root configured)
  *
  * With `SUBSTRATE_EVENT_SPOOL=on`, `emit` parks an event that failed for a retryable reason
  * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
@@ -42,15 +55,29 @@
  */
 import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { list, parseArgs, str } from "./args.ts";
+import { driftExitCode, parseEmitPayload, parseEvidenceBundle } from "./guards.ts";
 import { resolveBearer } from "./token.ts";
 import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
+import { freeBytes, spawnGh, spawnGit } from "../../fleet/src/index.ts";
+import { httpClaimsLookup, httpReportPoster, runWorktree } from "./worktree/command.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
+import { runSession } from "./session/command.ts";
+import { runSteer } from "./steer/index.ts";
+import { CORPUS_TIMEOUT_MS, runCorpus } from "./corpus/index.ts";
+import type { TranscriptPort } from "./session/rollback.ts";
+import { runConsistency } from "./consistency.ts";
+import { httpCapsuleMcp, nodeCapsuleFs, runMemory } from "./capsule.ts";
+import { createTranscriptPort, resolveOmpSessionsDir } from "./session/transcript-port.ts";
+import { LocalBlobStore } from "../../mcp-server/src/blob-store.ts";
+import { postEvent as emitEvent } from "../../collectors/src/emit.ts";
 import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -58,6 +85,10 @@ const DEFAULT_URL = "http://127.0.0.1:7410";
 const DEFAULT_TIMEOUT_MS = 1500;
 /** Added to the verify budget for `/evidence`: the server builds the bundle after its hour loop, outside that budget. */
 const EVIDENCE_RESPONSE_MARGIN_MS = 5_000;
+/** A worktree report holds up to 500 rows per request, so it gets more time than a hook-sized call. */
+const WORKTREE_REPORT_TIMEOUT_MS = 10_000;
+/** A claims lookup answers from one index read, but prune waits on it before every removal, so it gets more than a hook's budget. */
+const WORKTREE_CLAIMS_TIMEOUT_MS = 5_000;
 
 function base(): string {
 	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
@@ -158,10 +189,13 @@ async function cmdEmit(args: Record<string, string | true>): Promise<void> {
 	let payload: Record<string, unknown> | undefined;
 	const rawPayload = str(args.payload);
 	if (rawPayload) {
-		try {
-			payload = JSON.parse(rawPayload) as Record<string, unknown>;
-		} catch {
+		const parsed = parseEmitPayload(rawPayload);
+		if (parsed.kind === "ok") {
+			payload = parsed.payload;
+		} else if (parsed.kind === "invalid-json") {
 			process.stderr.write("[substrate] --payload is not valid JSON; dropping it\n");
+		} else {
+			process.stderr.write("[substrate] --payload is not a JSON object; dropping it\n");
 		}
 	}
 	const surface = str(args.surface) ?? "claude-code";
@@ -290,13 +324,7 @@ async function cmdDrift(args: Record<string, string | true>): Promise<number> {
 	// `--json` always exited 0, so a hook or cron that branched on the status saw
 	// every scan as clean — the one thing the status code is for.
 	if (args.json) {
-		try {
-			const report = JSON.parse(body) as { ok?: boolean; findings?: unknown[] };
-			return report.ok === true || (report.findings?.length ?? 0) === 0 ? 0 : 1;
-		} catch {
-			// A reply that is not the report at all is not a clean scan either.
-			return 1;
-		}
+		return driftExitCode(body);
 	}
 	return body.includes("— no drift") ? 0 : 1;
 }
@@ -349,23 +377,40 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 }
 
 /**
- * `substrate evidence --graph ut-… [--format json|html] [--out PATH]`
+ * `substrate evidence --graph ut-… [--node N] [--format json|html] [--out PATH]`
  *
  * The bundle is composed by `substrate-mcp`, not here: it is the process holding the
  * metric snapshot and the audit chain, and a second composer would be a second
  * answer to the same question. This command asks for it and puts it somewhere.
  *
+ * With `--node N` the server also answers with that node's artifact (claim, Linear, Notion and
+ * Definition-of-Done steps) as the `node` member of the JSON document.
+ *
  * A stub, deliberately — the bundle says so in its own `pending` list.
  */
 async function cmdEvidence(args: Record<string, string | true>): Promise<number> {
+	const usage = "usage: substrate evidence --graph <graph_id> [--node <node_id>] [--format json|html] [--out PATH]\n";
 	const graphId = str(args.graph);
 	if (!graphId) {
-		process.stderr.write("usage: substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n");
+		process.stderr.write(usage);
+		return 2;
+	}
+	// `--node` with no value (the flag alone, or an empty string) names no node: a typo, not "every node".
+	const nodeRequested = args.node !== undefined;
+	const nodeId = str(args.node);
+	if (nodeRequested && !nodeId) {
+		process.stderr.write(usage);
 		return 2;
 	}
 	const format = str(args.format) ?? (str(args.out)?.endsWith(".html") ? "html" : "json");
 	if (format !== "json" && format !== "html") {
 		process.stderr.write(`[substrate] unknown --format ${format}; expected json or html\n`);
+		return 2;
+	}
+	// The HTML is rendered here from the bundle, and the bundle type has no node member, so the node
+	// artifact would be silently dropped. Say so instead.
+	if (nodeId && format === "html") {
+		process.stderr.write("[substrate] --node cannot be combined with --format html: the node artifact is part of the JSON document only\n");
 		return 2;
 	}
 
@@ -377,7 +422,9 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 	// document does not contain.
 	// `/evidence` runs the same hour loop as `/verify`, so it waits out the same whole-verify budget,
 	// plus a margin for the reads the server makes after that loop (teachables, audit) and the response.
-	const response = await post("/evidence", { graph_id: graphId, format: "json" }, "claude-code", verifyBudgetMs() + EVIDENCE_RESPONSE_MARGIN_MS);
+	const request: Record<string, string> = { graph_id: graphId, format: "json" };
+	if (nodeId) request.node_id = nodeId;
+	const response = await post("/evidence", request, "claude-code", verifyBudgetMs() + EVIDENCE_RESPONSE_MARGIN_MS);
 	if (!response) {
 		process.stderr.write(`[substrate] unreachable at ${base()}; evidence needs a running substrate-mcp\n`);
 		return 1;
@@ -388,13 +435,16 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		return 1;
 	}
 
-	let bundle: EvidenceBundle;
-	try {
-		bundle = JSON.parse(body) as EvidenceBundle;
-	} catch {
-		process.stderr.write("[substrate] evidence was not valid JSON\n");
+	const parsed = parseEvidenceBundle(body);
+	if (!parsed.ok) {
+		process.stderr.write(
+			parsed.reason === "invalid-json"
+				? "[substrate] evidence was not valid JSON\n"
+				: `[substrate] evidence is not an evidence bundle: ${parsed.detail}\n`,
+		);
 		return 1;
 	}
+	const bundle: EvidenceBundle = parsed.bundle;
 
 	// Rendering is not composing: the bundle is the answer, and this only presents it.
 	// `substrate-mcp` remains the only thing that decides what is in it.
@@ -412,6 +462,20 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		}
 	} else {
 		process.stdout.write(`${document}\n`);
+	}
+
+	// A requested artifact that could not be built is a failure, like a broken chain, but only after the
+	// document is out: it still carries the bundle and the server's `node: { error }` answer. The remaining
+	// checks still run so their findings are reported too.
+	let nodeFailed = false;
+	if (nodeId) {
+		if (parsed.node === undefined) {
+			process.stderr.write(`[substrate] node ${nodeId}: the server answered without a node artifact\n`);
+			nodeFailed = true;
+		} else if ("error" in parsed.node) {
+			process.stderr.write(`[substrate] node ${nodeId}: ${parsed.node.error}\n`);
+			nodeFailed = true;
+		}
 	}
 
 	// Non-zero when the evidence itself says something is wrong, so this composes in a
@@ -475,7 +539,7 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		process.stderr.write(`[substrate] ${bundle.slo_summary.breached} SLO(s) breached for ${graphId}\n`);
 		return 1;
 	}
-	return 0;
+	return nodeFailed ? 1 : 0;
 }
 
 /**
@@ -524,6 +588,55 @@ function cmdLedger(argv: string[], args: Record<string, string | true>): number 
 	});
 }
 
+/**
+ * `substrate consistency verify …` — the same spawn-the-runner shape as `ledger`: the index, plane and ledger
+ * credentials live in the server package only. The grammar check and the exit-code mapping are `runConsistency`'s.
+ */
+function cmdConsistency(argv: string[]): number {
+	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "consistency-run.ts");
+	return runConsistency(argv, {
+		// A runner that ended on a signal has no status; -1 is not an exit code `runConsistency` passes through.
+		spawn: (runnerArgs) => spawnSync(process.execPath, [runner, ...runnerArgs], { stdio: "inherit", env: process.env }).status ?? -1,
+		err: (text) => process.stderr.write(text),
+	});
+}
+
+/**
+ * The transcript adapter for `substrate session rollback`: omp gets a forked session file, every other surface a
+ * marker. All file access is the real filesystem here and nowhere else; the port itself is injected with it.
+ * Built on the first rewind, so `checkpoint`, `checkpoints`, `recover` and `sync` never look for an omp bucket.
+ */
+function transcriptPort(surface: string): TranscriptPort {
+	return {
+		rewind: (request) => {
+			const home = homedir();
+			// omp's default sessions root; an omp started with another profile or agent directory keeps its sessions elsewhere,
+			// which is reported as `unsupported` (the bucket is not found), never guessed.
+			const ompSessionsDir = resolveOmpSessionsDir({
+				candidates: [process.cwd(), git(["rev-parse", "--show-toplevel"])],
+				homeDir: home,
+				tmpRoot: tmpdir(),
+				sessionsRoot: join(home, ".omp", "agent", "sessions"),
+				realpath: (path) => realpathSync(path),
+				isDirectory: (path) => existsSync(path) && statSync(path).isDirectory(),
+			});
+			return createTranscriptPort({
+				surface,
+				...(ompSessionsDir === undefined ? {} : { ompSessionsDir }),
+				listDir: (dir) => readdir(dir),
+				readFile: async (path, maxBytes) => {
+					const info = await stat(path);
+					if (info.size > maxBytes) throw new Error(`the file is ${info.size} bytes; the limit is ${maxBytes}`);
+					return readFile(path, "utf8");
+				},
+				writeFile: (path, text, options) => writeFile(path, text, options),
+				now: () => new Date(),
+				newSessionId: () => crypto.randomUUID(),
+			}).rewind(request);
+		},
+	};
+}
+
 const [command, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
 
@@ -531,20 +644,27 @@ switch (command) {
 	case "brief":
 		await cmdBrief(args);
 		process.exit(0);
+		break;
 	case "emit":
 		await cmdEmit(args);
 		process.exit(0);
+		break;
 	case "run":
 		process.exit(await cmdRun(rest));
+		break;
 	case "verify":
 		process.exit(await cmdVerify(rest[0]));
+		break;
 	case "drift":
 		process.exit(await cmdDrift(args));
+		break;
 	case "handoff":
 		await cmdHandoff(args);
 		process.exit(0);
+		break;
 	case "evidence":
 		process.exit(await cmdEvidence(args));
+		break;
 	case "lessons":
 		process.exit(
 			await runLessons(rest, {
@@ -561,6 +681,7 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
 	case "skills":
 		process.exit(
 			await runSkills(rest, {
@@ -572,6 +693,7 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
 	case "docs":
 		process.exit(
 			await runDocs(rest, {
@@ -584,10 +706,40 @@ switch (command) {
 				vmGuest: (process.env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 			}),
 		);
+		break;
 	case "index":
 		process.exit(cmdIndex(rest, args));
+		break;
+	case "worktree":
+		process.exit(
+			await runWorktree(rest, {
+				env: process.env,
+				cwd: process.cwd(),
+				host: hostname(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+				git: spawnGit,
+				gh: spawnGh,
+				now: () => new Date(),
+				freeBytes,
+				emit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.worktree", url: base() }),
+				postReport: httpReportPoster({
+					url: base(),
+					token: resolveBearer("claude-code", process.env) ?? undefined,
+					// A report can hold hundreds of rows; the hook-sized default budget is too short for it.
+					timeoutMs: Math.max(timeout(), WORKTREE_REPORT_TIMEOUT_MS),
+				}),
+				claims: httpClaimsLookup({
+					url: base(),
+					token: resolveBearer("claude-code", process.env) ?? undefined,
+					timeoutMs: Math.max(timeout(), WORKTREE_CLAIMS_TIMEOUT_MS),
+				}),
+			}),
+		);
+		break;
 	case "ledger":
 		process.exit(cmdLedger(rest, args));
+		break;
 	case "spool":
 		process.exit(
 			await runSpool(rest, {
@@ -595,6 +747,72 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+		break;
+	case "consistency":
+		process.exit(cmdConsistency(rest));
+		break;
+	case "memory":
+		process.exit(
+			await runMemory(rest, {
+				mcpFor: (surface) =>
+					httpCapsuleMcp({ url: base(), token: resolveBearer(surface, process.env) ?? undefined, timeoutMs: lessonsTimeout(process.env.SUBSTRATE_TIMEOUT_MS) }),
+				fs: nodeCapsuleFs(),
+				openStore: (dir) => new LocalBlobStore(dir),
+				emit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.memory-capsule", url: base(), ...(event.idempotency_key === undefined ? {} : { idempotencyKey: event.idempotency_key }) }),
+				now: () => new Date(),
+				cwd: process.cwd(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
+		break;
+	case "session":
+		process.exit(
+			await runSession(rest, {
+				worktree: git(["rev-parse", "--show-toplevel"]) || process.cwd(),
+				url: base(),
+				tokenFor: (surface) => resolveBearer(surface, process.env) ?? undefined,
+				timeoutMs: timeout(),
+				now: () => new Date(),
+				randomBytes: (length) => crypto.getRandomValues(new Uint8Array(length)),
+				// The surface is the command's own `--surface` (default claude-code), the same default `runSession` applies.
+				transcript: transcriptPort(str(args.surface) ?? "claude-code"),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
+		break;
+	case "steer": {
+		// SIGINT ends `steer listen` cleanly (exit 0); an in-flight long poll is aborted with it.
+		const interrupt = new AbortController();
+		process.once("SIGINT", () => interrupt.abort());
+		process.exit(
+			await runSteer(rest, {
+				url: base(),
+				tokenFor: (surface) => resolveBearer(surface, process.env) ?? undefined,
+				timeoutMs: Math.max(timeout(), 5_000),
+				now: () => new Date(),
+				repo: () => repoSlug(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+				signalFor: (ms) => AbortSignal.any([AbortSignal.timeout(ms), interrupt.signal]),
+				interrupt: interrupt.signal,
+			}),
+		);
+		break;
+	}
+	case "corpus":
+		process.exit(
+			await runCorpus(rest, {
+				url: base(),
+				token: resolveBearer("claude-code", process.env) ?? undefined,
+				timeoutMs: CORPUS_TIMEOUT_MS,
+				env: process.env,
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
+		break;
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -604,7 +822,7 @@ switch (command) {
 				"substrate drift [--repo R] [--path P] [--idle SECONDS] [--json]\n" +
 				"substrate handoff --to S --goal G [--files a,b] [--dod 'x;y'] [--blockers 'z']\n" +
 				"                  [--graph G] [--node N] [--lease L] [--release] [--session I]\n" +
-				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n" +
+				"substrate evidence --graph <graph_id> [--node <node_id>] [--format json|html] [--out PATH]\n" +
 				"substrate lessons add|ingest|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
@@ -614,7 +832,15 @@ switch (command) {
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
-				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n",
+				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
+				"substrate steer open --repo R | heartbeat --session ID | close --session ID | sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (private commands use --binding-file PATH; substrate steer for all flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
+				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
+				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
+				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
+				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +
+				"substrate worktree list|status|scan|prune|conflicts|provision|disk|guard ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n" +
+				"substrate corpus scan | plan | ingest [--execute] | reflect [--execute] | status [--gaps] | sync [--repo R] [--execute] | watch [--once] | reconcile [--execute] | prove | verify | hook install|uninstall|status --repo DIR | hint --repo DIR\n" +
+				"                  (substrate corpus --help for the flags; ingest, reflect, sync and reconcile are dry runs without --execute)\n",
 		);
 		process.exit(command ? 2 : 0);
 }

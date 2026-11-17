@@ -6,11 +6,13 @@ import {
 	buildHandoff,
 	handoffGaps,
 	handoffSummary,
+	isStoredHandoff,
 	signHandoff,
 	verifyHandoff,
 	type HandoffPacket,
 } from "./handoff.ts";
 import { REDACTED } from "./redact.ts";
+import { defined } from "./test-support.ts";
 
 const KEYS = new Map([["k1", "a-signing-key-from-substrate-env"]]);
 const SIGNER = { key_id: "k1", key: "a-signing-key-from-substrate-env" };
@@ -134,7 +136,7 @@ describe("signing", () => {
 
 	test("the signature header is covered too — it cannot be back-dated or re-pointed", () => {
 		const signed = signHandoff(packet(), SIGNER);
-		const header = signed.signature!;
+		const header = defined(signed.signature, "signature");
 
 		expect(verifyHandoff({ ...signed, signature: { ...header, signed_at: new Date(0).toISOString() } }, KEYS)).toEqual({
 			ok: false,
@@ -204,7 +206,7 @@ describe("signing", () => {
 
 	test("an unknown algorithm is refused rather than assumed", () => {
 		const signed = signHandoff(packet(), SIGNER);
-		expect(verifyHandoff({ ...signed, signature: { ...signed.signature!, alg: "none" as never } }, KEYS)).toEqual({
+		expect(verifyHandoff({ ...signed, signature: { ...defined(signed.signature, "signature"), alg: "none" as never } }, KEYS)).toEqual({
 			ok: false,
 			reason: "unknown-alg",
 			detail: "none",
@@ -258,6 +260,38 @@ describe("replayable from the packet alone", () => {
 		const stored = event.payload.handoff as HandoffPacket;
 
 		expect(canonicalJson(stored)).toBe(canonicalJson(signed));
+		expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
+	});
+
+	test("text capped inside a redaction marker or a keyed secret is stable through event redaction: signed equals stored and still fits the guard", () => {
+		// The cap falls inside `[REDACTED]` for these: the event layer's second pass used to complete the marker and outgrow the cap.
+		for (const tail of [" password=secret", " api_key=sk-live-123456789", " token: abcdef0123456789abcdef"]) {
+			for (const filler of [1_170, 1_182, 1_185, 1_190, 1_195]) {
+				const goal = `${"A".repeat(filler)}${tail}`;
+				const signed = signHandoff(packet({ goal, notes: `${"B".repeat(filler)}${tail}`, blockers: [`${"C".repeat(filler - 780)}${tail}`] }), SIGNER);
+				const event = normalizeEvent({ surface: "grok-bot", kind: "handoff", summary: "handoff", payload: { handoff: signed } }, null);
+				const stored = event.payload.handoff as HandoffPacket;
+				expect(canonicalJson(stored)).toBe(canonicalJson(signed));
+				expect(isStoredHandoff(stored)).toBe(true);
+				expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
+				expect(signed.goal.length).toBeLessThanOrEqual(1_200);
+				// What was redacted stays redacted: the secret itself is not in the packet.
+				expect(JSON.stringify(signed)).not.toMatch(/secret|sk-live|abcdef0123456789abcdef/);
+			}
+		}
+	});
+
+	test("short text a second redaction pass would still change is settled first, so it keeps all its words and its stored form is the signed one", () => {
+		const goal = 'Rotate API_TOKEN="example", then deploy the new build and run all checks before handing over.';
+		const blocker = 'Waiting on PASSWORD="hunter2", and the staging deploy after it.';
+		const signed = signHandoff(packet({ goal, blockers: [blocker], notes: 'Use SECRET="abc", then retry once.' }), SIGNER);
+		expect(signed.goal).toContain("then deploy the new build and run all checks before handing over.");
+		expect(signed.blockers[0]).toContain("and the staging deploy after it.");
+		expect(JSON.stringify(signed)).not.toMatch(/example"|hunter2|abc"/);
+		const event = normalizeEvent({ surface: "grok-bot", kind: "handoff", summary: "handoff", payload: { handoff: signed } }, null);
+		const stored = event.payload.handoff as HandoffPacket;
+		expect(canonicalJson(stored)).toBe(canonicalJson(signed));
+		expect(isStoredHandoff(stored)).toBe(true);
 		expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
 	});
 
@@ -328,5 +362,74 @@ describe("signing keys from the environment", () => {
 	test("ids that collide leave the live key in place, not the retired one", () => {
 		const config = loadConfig({ SUBSTRATE_HANDOFF_KEY: "new-key", SUBSTRATE_HANDOFF_KEY_PREV: "old-key", SUBSTRATE_HANDOFF_KEY_PREV_ID: "k1" });
 		expect(config.handoffKeys.get("k1")).toBe("new-key");
+	});
+});
+
+describe("isStoredHandoff", () => {
+	test("a packet the builder made passes, signed or not, whatever its verdict", () => {
+		expect(isStoredHandoff(packet())).toBe(true);
+		expect(isStoredHandoff(signHandoff(packet(), SIGNER))).toBe(true);
+		expect(isStoredHandoff({ ...packet(), signature: { alg: "other", key_id: 5, value: null } })).toBe(true);
+	});
+
+	test("a packet at every bound the builder applies still passes", () => {
+		const full = packet({ goal: "g".repeat(1_200), files: Array.from({ length: 40 }, (_, n) => `f${n}`), dod: Array.from({ length: 24 }, (_, n) => `d${n}`), blockers: Array.from({ length: 16 }, (_, n) => `b${n}`) });
+		expect(isStoredHandoff(full)).toBe(true);
+	});
+
+	test("a packet that fit its budget unsigned still passes once signing has added its fields", () => {
+		// Search for a goal length that leaves the builder's packet inside the last 200 bytes of the budget: signing then crosses it.
+		const files = Array.from({ length: 40 }, (_, n) => `${n}`.padStart(3, "0").padEnd(300, "f"));
+		let found: { unsigned: HandoffPacket; signed: HandoffPacket } | null = null;
+		for (let goalLength = 20; goalLength <= 1_200 && found === null; goalLength += 7) {
+			const unsigned = packet({ goal: "g".repeat(goalLength), files });
+			const signed = signHandoff(unsigned, SIGNER);
+			if (Buffer.byteLength(canonicalJson(unsigned)) <= 12_000 && Buffer.byteLength(canonicalJson(signed)) > 12_000) found = { unsigned, signed };
+		}
+		const { unsigned, signed } = defined(found, "a packet that only crosses the budget once signed");
+		expect(isStoredHandoff(unsigned)).toBe(true);
+		expect(isStoredHandoff(signed)).toBe(true);
+		expect(verifyHandoff(signed, KEYS)).toEqual({ ok: true, key_id: "k1" });
+	});
+
+	test("the signature has a bound of its own: a packet cannot hide a large payload in it", () => {
+		const good = packet();
+		expect(isStoredHandoff({ ...good, signature: { alg: HANDOFF_ALG, key_id: "k1", signed_at: "2026-01-01T00:00:00.000Z", value: "a".repeat(64) } })).toBe(true);
+		expect(isStoredHandoff({ ...good, signature: { alg: HANDOFF_ALG, key_id: "k1", value: "a".repeat(2_000) } })).toBe(false);
+		expect(isStoredHandoff({ ...good, signature: "signed" })).toBe(false);
+		expect(isStoredHandoff({ ...good, signature: [] })).toBe(false);
+	});
+
+	test("what is not an object with a goal and lists of strings is refused, never thrown on", () => {
+		const good = packet();
+		const refused: unknown[] = [
+			undefined,
+			null,
+			5,
+			"a goal",
+			[],
+			["goal"],
+			{},
+			{ goal: 5 },
+			{ ...good, goal: "" },
+			{ ...good, goal: "   " },
+			{ ...good, goal: "g".repeat(1_201) },
+			{ ...good, files: undefined },
+			{ ...good, files: "a/b.ts" },
+			{ ...good, files: ["a/b.ts", 5] },
+			{ ...good, files: Array.from({ length: 41 }, () => "f") },
+			{ ...good, files: ["x".repeat(401)] },
+			{ ...good, dod: "done when green" },
+			{ ...good, dod: Array.from({ length: 25 }, () => "d") },
+			{ ...good, blockers: [null] },
+			{ ...good, blockers: Array.from({ length: 17 }, () => "b") },
+			{ ...good, from: null },
+			{ ...good, to: { surface: "" } },
+			{ ...good, to: "hermes" },
+			{ ...good, notes: 5 },
+			{ ...good, notes: "n".repeat(1_201) },
+			{ ...good, extra: "e".repeat(13_000) },
+		];
+		for (const value of refused) expect(isStoredHandoff(value)).toBe(false);
 	});
 });

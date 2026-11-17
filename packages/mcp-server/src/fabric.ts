@@ -95,7 +95,7 @@ export interface ComplianceCheck {
 	plane: OptimizationPlane;
 	passed: boolean;
 	detail: string;
-	advisory?: boolean;
+	advisory?: boolean | undefined;
 }
 
 export interface ComplianceReport {
@@ -250,7 +250,7 @@ export class EnterpriseUnifiedResourceFabric {
 	 * unconfigured is advisory, never a violation.
 	 */
 	async complianceReport(): Promise<ComplianceReport> {
-		const { lightrag, docs, railway } = await this.getStatus();
+		const { lightrag, docs } = await this.getStatus();
 		const checks: ComplianceCheck[] = [
 			{
 				id: "docs-plane-configured",

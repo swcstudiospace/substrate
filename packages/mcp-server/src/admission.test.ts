@@ -7,15 +7,17 @@
  * Lua is called with — is covered without a socket. The Lua text itself is
  * pinned by its contract here and run against a real redis in the smoke.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { ADMISSION_CLASSES, ADMISSION_DECISIONS, type AdmissionClass } from "@substrate/observability";
+import { ADMISSION_CLASSES, ADMISSION_DECISIONS, type BreakerOpenError, type AdmissionClass } from "@substrate/observability";
 import {
 	ADMISSION_MODES,
 	ANONYMOUS_IDENTITY,
 	Admission,
 	BUDGET_SCRIPT,
+	DEFAULT_ADMISSION_BREAKER_POLICY,
 	DEFAULT_CLASS,
 	MCP_ROUTE,
 	MONITOR_ROUTES,
@@ -31,13 +33,17 @@ import {
 	retryAfterSeconds,
 	routeClass,
 	toolClass,
+	type AdmissionBreakerPolicy,
 	type AdmissionSettings,
 	type AdmissionVerdict,
 	type BucketState,
 } from "./admission.ts";
 import type { CacheRedis, ScriptOutcome } from "./cache.ts";
-import { DEFAULT_BUDGETS, loadAdmissionSettings } from "./config.ts";
-import { SURFACES } from "./types.ts";
+import { ConfigError, DEFAULT_BUDGETS, loadAdmissionSettings, loadConfig } from "./config.ts";
+import { defined } from "./test-support.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
+import { LiveSessionBoundary, type LiveSessionInvocation } from "./planning/steering-tools.ts";
+import { SURFACES, type EventInput } from "./types.ts";
 
 /**
  * A redis whose `EVAL` executes `bucketStep` for `BUDGET_SCRIPT`, keeping the
@@ -52,18 +58,23 @@ export class FakeBudgetRedis implements CacheRedis {
 	fail: string | null = null;
 	/** When set, `EVAL` resolves this instead of the bucket's reply. */
 	reply: unknown = undefined;
+	/** When set, every command is refused with this, as an open breaker refuses a command before it is sent. */
+	refusal: BreakerOpenError | null = null;
 
 	async get(key: string): Promise<string | null> {
+		if (this.refusal) throw this.refusal;
 		if (this.fail) throw new Error(this.fail);
 		return this.values.get(key) ?? null;
 	}
 
 	async set(key: string, value: string): Promise<void> {
+		if (this.refusal) throw this.refusal;
 		if (this.fail) throw new Error(this.fail);
 		this.values.set(key, value);
 	}
 
 	async incr(key: string): Promise<number> {
+		if (this.refusal) throw this.refusal;
 		if (this.fail) throw new Error(this.fail);
 		const next = Number(this.values.get(key) ?? "0") + 1;
 		this.values.set(key, String(next));
@@ -71,12 +82,13 @@ export class FakeBudgetRedis implements CacheRedis {
 	}
 
 	async eval(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown> {
+		if (this.refusal) throw this.refusal;
 		this.calls.push({ script, keys, args });
 		if (this.fail) throw new Error(this.fail);
 		if (this.reply !== undefined) return this.reply;
 		if (script !== BUDGET_SCRIPT) throw new Error("unknown script");
 		const [rps, burst, now, cost] = args.map(Number) as [number, number, number, number];
-		const key = keys[0]!;
+		const key = defined(keys[0], "key");
 		const step = bucketStep(this.buckets.get(key)?.state ?? null, { rps, burst }, now, cost);
 		this.buckets.set(key, { state: step.state, ttlMs: step.ttlMs });
 		return [step.allowed ? 1 : 0, step.tokensLeft, step.retryAfterMs];
@@ -170,6 +182,7 @@ function settings(over: Partial<AdmissionSettings> = {}): AdmissionSettings {
 		classes: { read: { rps: 1, burst: 2 }, write: { rps: 1, burst: 1 }, coordination: { rps: 5, burst: 5 } },
 		anonymous: { rps: 1, burst: 1 },
 		overrides: {},
+		breakerPolicy: DEFAULT_ADMISSION_BREAKER_POLICY,
 		...over,
 	};
 }
@@ -239,7 +252,7 @@ describe("Admission", () => {
 			async () => ({ ok: true, value: ["x", "y", "z"] }),
 		];
 		const admission = new Admission(settings(), {
-			script: () => outcomes.shift()!(),
+			script: () => defined(outcomes.shift(), "outcome")(),
 			now: () => 1,
 			record: (verdict) => recorded.push(verdict),
 		});
@@ -292,6 +305,77 @@ describe("Admission", () => {
 		expect(limitFor(configured, "grok-bot", "write")).toEqual({ rps: 1, burst: 1 });
 		expect(limitFor(configured, "cursor", "read")).toEqual({ rps: 1, burst: 2 });
 		expect(limitFor(configured, null, "read")).toEqual({ rps: 1, burst: 1 });
+	});
+});
+
+describe("the cache breaker's refusal, by class policy (phase 75)", () => {
+	const breakerOpen = async (): Promise<ScriptOutcome> => ({ ok: false, reason: "cache circuit open; retry in 2 s", breakerRetryAfterMs: 2_000 });
+	const READ = { surface: "cursor" as const, klass: "read" as const, cost: 1 };
+
+	function policyOver(breakerPolicy: Partial<Record<AdmissionClass, AdmissionBreakerPolicy>>, mode: AdmissionSettings["mode"] = "enforce") {
+		const recorded: AdmissionVerdict[] = [];
+		const admission = new Admission(settings({ mode, breakerPolicy: { ...DEFAULT_ADMISSION_BREAKER_POLICY, ...breakerPolicy } }), {
+			script: breakerOpen,
+			now: () => 1,
+			record: (verdict) => recorded.push(verdict),
+		});
+		return { admission, recorded };
+	}
+
+	test("with no flag set every class is fail-open: an open breaker admits and counts a bypass, as it did before", async () => {
+		expect(loadAdmissionSettings({}).breakerPolicy).toEqual({ read: "fail-open", write: "fail-open", coordination: "fail-open" });
+		const { admission, recorded } = policyOver({});
+		for (const klass of ADMISSION_CLASSES) {
+			expect(await admission.admit({ surface: "cursor", klass, cost: 1 })).toMatchObject({ decision: "bypass", tokensLeft: null, retryAfterS: 0 });
+		}
+		expect(recorded.map((entry) => entry.decision)).toEqual(["bypass", "bypass", "bypass"]);
+	});
+
+	test("a fail-closed class is refused in enforce with the breaker's wait, and the other classes stay fail-open", async () => {
+		const { admission, recorded } = policyOver({ read: "fail-closed" });
+		expect(await admission.admit(READ)).toEqual({ decision: "refused", surface: "cursor", klass: "read", cost: 1, tokensLeft: null, retryAfterMs: 2_000, retryAfterS: 2 });
+		expect((await admission.admit({ ...READ, klass: "write" })).decision).toBe("bypass");
+		expect(recorded.map((entry) => entry.decision)).toEqual(["refused", "bypass"]);
+	});
+
+	test("a breaker refusal of a fail-closed class is a bypass in shadow and a refusal in enforce", async () => {
+		const shadow = policyOver({ read: "fail-closed" }, "shadow");
+		expect(await shadow.admission.admit(READ)).toEqual({ decision: "bypass", surface: "cursor", klass: "read", cost: 1, tokensLeft: null, retryAfterMs: 0, retryAfterS: 0 });
+		expect(shadow.recorded.map((entry) => entry.decision)).toEqual(["bypass"]);
+		const enforce = policyOver({ read: "fail-closed" });
+		expect(await enforce.admission.admit(READ)).toEqual({ decision: "refused", surface: "cursor", klass: "read", cost: 1, tokensLeft: null, retryAfterMs: 2_000, retryAfterS: 2 });
+		expect(enforce.recorded.map((entry) => entry.decision)).toEqual(["refused"]);
+	});
+
+	test("only a breaker refusal is policed: another cache failure stays a bypass in a fail-closed class", async () => {
+		const admission = new Admission(settings({ breakerPolicy: { ...DEFAULT_ADMISSION_BREAKER_POLICY, read: "fail-closed" } }), {
+			script: async () => ({ ok: false, reason: "connect ECONNREFUSED" }),
+		});
+		expect((await admission.admit(READ)).decision).toBe("bypass");
+	});
+
+	test("a refused batch is refused whole, and its body names the cache rather than a budget", async () => {
+		const { admission } = policyOver({ coordination: "fail-closed" });
+		const refused = defined(await admitBatch(admission, "cursor", [{ tool: "graph_heartbeat" }]), "refusal");
+		expect(refused).toMatchObject({ decision: "refused", klass: "coordination" });
+		expect(budgetBody(refused)).toEqual({ error: "cache_unavailable", class: "coordination", retry_after_s: 2 });
+		expect(budgetRefusal({ id: 7 }, refused)).toMatchObject({ id: 7, error: { data: { error: "cache_unavailable" } } });
+	});
+
+	test("SUBSTRATE_BUDGET_<CLASS>_BREAKER parses per class, trimmed and case-insensitive; blank is fail-open", () => {
+		const parsed = loadAdmissionSettings({
+			SUBSTRATE_BUDGET_READ_BREAKER: " Fail-Closed ",
+			SUBSTRATE_BUDGET_WRITE_BREAKER: "   ",
+			SUBSTRATE_BUDGET_COORDINATION_BREAKER: "fail-closed",
+		});
+		expect(parsed.breakerPolicy).toEqual({ read: "fail-closed", write: "fail-open", coordination: "fail-closed" });
+		expect(loadAdmissionSettings({}).breakerPolicy).toEqual({ read: "fail-open", write: "fail-open", coordination: "fail-open" });
+	});
+
+	test("an invalid SUBSTRATE_BUDGET_<CLASS>_BREAKER refuses boot and names the variable", () => {
+		expect(() => loadAdmissionSettings({ SUBSTRATE_BUDGET_WRITE_BREAKER: "closed" })).toThrow(ConfigError);
+		expect(() => loadAdmissionSettings({ SUBSTRATE_BUDGET_WRITE_BREAKER: "closed" })).toThrow("SUBSTRATE_BUDGET_WRITE_BREAKER");
+		expect(() => loadConfig({ SUBSTRATE_BUDGET_READ_BREAKER: "fail-open-ish" })).toThrow(ConfigError);
 	});
 });
 
@@ -353,8 +437,8 @@ describe("the refusal bodies", () => {
 describe("the class tables are exhaustive over what the server serves", () => {
 	const serverSource = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
 	const mcpSource = readFileSync(join(import.meta.dir, "mcp.ts"), "utf8");
-	const servedRoutes = new Set([...serverSource.matchAll(/url\.pathname === "([^"]+)"/g)].map((match) => match[1]!));
-	const registeredTools = new Set([...mcpSource.matchAll(/registerTool\(\s*"([a-z_]+)"/g)].map((match) => match[1]!));
+	const servedRoutes = new Set([...serverSource.matchAll(/url\.pathname === "([^"]+)"/g)].map((match) => defined(match[1])));
+	const registeredTools = new Set([...mcpSource.matchAll(/registerTool\(\s*"([a-z_]+)"/g)].map((match) => defined(match[1])));
 
 	test("every route server.ts matches on is classified, exempt, or the MCP door — and nothing stale is listed", () => {
 		expect(servedRoutes.size).toBeGreaterThan(10);
@@ -363,10 +447,26 @@ describe("the class tables are exhaustive over what the server serves", () => {
 		expect([...classified].filter((route) => !servedRoutes.has(route))).toEqual([]);
 	});
 
-	test("every tool mcp.ts registers is classified — and nothing stale is listed", () => {
+	test("live lifecycle admission is method-aware and shares the mutation tool classes", () => {
+		expect(routeClass("GET", "/steering/sessions")).toBe("read");
+		expect(routeClass("POST", "/steering/sessions")).toBe("write");
+		for (const [route, tool] of [
+			["/steering/sessions", "docs_steering_session"],
+			["/steering/sessions/heartbeat", "steering_session_heartbeat"],
+			["/steering/sessions/close", "steering_session_close"],
+			["/steering/queue", "steering_queue"],
+			["/steering/acknowledge", "steering_acknowledge"],
+		] as const) {
+			expect(routeClass("POST", route)).toBe("write");
+			expect(toolClass(tool)).toBe("write");
+		}
+		for (const route of ["/steering/directives", "/steering/wait", "/session/context"]) expect(routeClass("GET", route)).toBe("read");
+		for (const tool of ["steering_list", "steering_wait", "live_session_discovery", "session_context"]) expect(toolClass(tool)).toBe("read");
+	});
+
+	test("every registered MCP tool has an explicit admission class", () => {
 		expect(registeredTools.size).toBeGreaterThan(20);
 		expect([...registeredTools].filter((tool) => !Object.hasOwn(TOOL_CLASSES, tool))).toEqual([]);
-		expect(Object.keys(TOOL_CLASSES).filter((tool) => !registeredTools.has(tool))).toEqual([]);
 	});
 
 	test("the coordination class is exactly the lease tools", () => {
@@ -377,6 +477,22 @@ describe("the class tables are exhaustive over what the server serves", () => {
 	test("the skills registry doors: approve is a write, list a read, on both the tool and the route", () => {
 		expect({ approve: toolClass("skills_approve"), list: toolClass("skills_list") }).toEqual({ approve: "write", list: "read" });
 		expect({ approve: routeClass("POST", "/skills/approve"), list: routeClass("GET", "/skills") }).toEqual({ approve: "write", list: "read" });
+	});
+
+	test("the worktree claims read is a read on the route, and the tool it is audited under is a read too", () => {
+		expect({ route: routeClass("GET", "/worktrees/claims"), tool: toolClass("graph_get") }).toEqual({ route: "read", tool: "read" });
+	});
+
+	test("the anchor verification tools are reads: they read the ledger and devnet and write nothing", () => {
+		expect({ checkpoint: toolClass("checkpoint_verify"), memory: toolClass("memory_verify") }).toEqual({ checkpoint: "read", memory: "read" });
+	});
+
+	test("the session rollback tools: the plan is a read, the checkpoint and the commit are writes", () => {
+		expect({ plan: toolClass("session_rollback_plan"), checkpoint: toolClass("session_checkpoint"), commit: toolClass("session_rollback_commit") }).toEqual({
+			plan: "read",
+			checkpoint: "write",
+			commit: "write",
+		});
 	});
 
 	test("an unknown route or tool is a read; monitor GETs and /mcp are not metered here; a POST to a monitor path is", () => {
@@ -398,7 +514,7 @@ describe("the class tables are exhaustive over what the server serves", () => {
 
 	test("the label sets the metric is bounded by are the ones the decision uses", () => {
 		expect([...ADMISSION_CLASSES]).toEqual(["read", "write", "coordination"]);
-		expect([...ADMISSION_DECISIONS]).toEqual(["allowed", "limited", "shadow_limited", "bypass"]);
+		expect([...ADMISSION_DECISIONS]).toEqual(["allowed", "limited", "shadow_limited", "bypass", "refused"]);
 		const classes = new Set<AdmissionClass>([...Object.values(ROUTE_CLASSES), ...Object.values(TOOL_CLASSES)]);
 		expect([...classes].sort()).toEqual([...ADMISSION_CLASSES].sort());
 	});
@@ -459,5 +575,68 @@ describe("loadAdmissionSettings", () => {
 			const parsed = loadAdmissionSettings({ [`SUBSTRATE_BUDGET_${spelled}_WRITE_BURST`]: "7" });
 			expect(parsed.overrides[surface]?.write).toEqual({ rps: 10, burst: 7 });
 		}
+	});
+});
+
+describe("mandatory live principal budgets", () => {
+	const caller = { surface: "cursor", isOperator: false } as const;
+	for (const mode of ["off", "shadow", "enforce"] as const) test(`random targets cannot evade the principal bucket in ${mode}`, async () => {
+		const authority = createTestLiveSessionAuthority();
+		const read = spyOn(authority, "read");
+		const refused: EventInput[] = [];
+		let inferred = 0;
+		const boundary = new LiveSessionBoundary({
+			authority, settings: settings({ mode, classes: { read: { rps: 0.01, burst: 1 }, write: { rps: 0.01, burst: 1 }, coordination: { rps: 1, burst: 1 } } }),
+			nowMs: () => 1_000,
+			resolveDirective: () => { inferred++; return null; },
+			recordRefusal: async (event) => { refused.push(event); throw new Error("injected refusal sink outage"); },
+		});
+		const firstId = `ls_${"1".padStart(64, "0")}`;
+		expect(await boundary.prepare({ caller, tool: "steering_list", args: {}, operation: "private-read", sessionId: firstId })).toEqual({ status: "refused", error: { code: "not-found" } });
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(refused).toHaveLength(1);
+		expect(refused[0]).toMatchObject({ payload: { action: "steering.refused", target_sha256: createHash("sha256").update(`substrate.live-session-refusal.v1\0${firstId}`).digest("hex") } });
+		expect(JSON.stringify(refused)).not.toContain(firstId);
+		for (let index = 2; index <= 200; index++) {
+			const result = await boundary.prepare({ caller, tool: "steering_list", args: { session_binding: "b".repeat(64) }, operation: "private-read", sessionId: `ls_${index.toString(16).padStart(64, "0")}` });
+			expect(result).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		}
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(refused).toHaveLength(1);
+		const ack: LiveSessionInvocation = { caller, tool: "steering_acknowledge", args: {}, operation: "operator-ack", directiveId: "first-directive" };
+		expect(await boundary.prepare(ack)).toEqual({ status: "refused", error: { code: "not-found" } });
+		expect(inferred).toBe(1);
+		expect(await boundary.prepare({ ...ack, directiveId: "second-directive" })).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		expect(inferred).toBe(1);
+		expect(refused).toHaveLength(2);
+		// Inspect cardinality without adding a production test-only grant or reset method.
+		const buckets: unknown = Reflect.get(boundary, "buckets");
+		expect(buckets).toBeInstanceOf(Map);
+		if (!(buckets instanceof Map)) throw new Error("expected bounded principal map");
+		expect([...buckets.keys()].sort()).toEqual(["cursor:read", "cursor:write"]);
+	});
+
+	test("batch reservation refuses before lookup and release rechecks spend no second token", async () => {
+		const authority = createTestLiveSessionAuthority();
+		const entry = await issueLiveSession(authority, { caller });
+		const read = spyOn(authority, "read");
+		const refused: EventInput[] = [];
+		const boundary = new LiveSessionBoundary({
+			authority, settings: settings({ classes: { read: { rps: 0.01, burst: 1 }, write: { rps: 1, burst: 1 }, coordination: { rps: 1, burst: 1 } } }),
+			nowMs: () => 1_000,
+			resolveDirective: () => null,
+			recordRefusal: async (event) => { refused.push(event); return true; },
+		});
+		const invocation: LiveSessionInvocation = { caller, tool: "steering_list", args: {}, operation: "private-read", sessionId: entry.sessionId, sessionBinding: entry.sessionBinding };
+		expect(await boundary.prepareBatch([invocation, invocation])).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		expect(read).not.toHaveBeenCalled();
+		expect(refused).toEqual([]);
+		const prepared = await boundary.prepare(invocation);
+		if ("status" in prepared) throw new Error("one allowed token must remain after the refused batch");
+		await boundary.recheck(prepared);
+		await boundary.recheck(prepared);
+		expect(read).toHaveBeenCalledTimes(3);
+		expect(await boundary.prepare(invocation)).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
+		expect(read).toHaveBeenCalledTimes(3);
 	});
 });

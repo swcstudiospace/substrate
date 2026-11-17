@@ -118,6 +118,9 @@ export {
 	BRIEF_PROFILE_MODES,
 	SERVED_TOKEN_TOOLS,
 	estimateTokens,
+	CORPUS_FRESHNESS_METRIC,
+	CORPUS_GOLDEN_RECALL5_METRIC,
+	CORPUS_INGEST_RATE_METRIC,
 } from "./instruments.ts";
 
 export {
@@ -126,6 +129,7 @@ export {
 	type RecallPrefetchResult,
 	BRIEF_RECALL_MODES,
 	BRIEF_RECALL_RESULTS,
+	CORPUS_SYNC_LAG_METRIC,
 	ENDPOINT_PROXY_PLANES_METRIC,
 	OUTBOX_DURABLE_METRIC,
 	OUTBOX_OLDEST_METRIC,
@@ -143,15 +147,18 @@ export {
 } from "./slo.ts";
 
 export {
+	type AuxPlaneName,
 	type BreakerSettings,
 	type BreakerSnapshot,
 	type BreakerState,
+	type GatePlaneName,
 	type PlaneFetch,
 	type PlaneGate,
 	type PlaneName,
 	type PlaneObserver,
 	type PlaneOutcome,
 	type PlaneSample,
+	AUX_PLANES,
 	BREAKER_ENV,
 	BREAKER_FAILURES_ENV,
 	BREAKER_OPEN_MS_ENV,

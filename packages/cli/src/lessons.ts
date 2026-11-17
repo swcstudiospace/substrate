@@ -24,6 +24,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { lessonContentIssue } from "../../mcp-server/src/lesson-content.ts";
 import { redact, redactKnown, redactValue } from "../../mcp-server/src/redact.ts";
 import { list, parseArgs, str, type Args } from "./args.ts";
+import { isRecord } from "./guards.ts";
 
 /** The gate's cap. A longer body would be cut silently, so it is refused here instead. */
 export const MAX_BODY = 4000;
@@ -546,14 +547,14 @@ export function renderPriorLessons(ranked: readonly Ranked[], context: { scope: 
 
 export interface ExtractedLesson {
 	text: string;
-	slug?: string;
+	slug?: string | undefined;
 	tags: string[];
-	outcome?: string;
+	outcome?: string | undefined;
 }
 
 export interface SummaryLessons {
-	milestone?: string;
-	phase?: string;
+	milestone?: string | undefined;
+	phase?: string | undefined;
 	/** The SUMMARY's frontmatter tags, which every lesson in it inherits. */
 	tags: string[];
 	/** The bullets under `## Lessons`. */
@@ -684,7 +685,7 @@ export function parseSummary(markdown: string): SummaryLessons {
  * phase is filed under `milestones/<milestone>-phases/<phase>/`, a live one under
  * `phases/<phase>/`.
  */
-export function placeOf(path: string): { milestone?: string; phase?: string } {
+export function placeOf(path: string): { milestone?: string | undefined; phase?: string | undefined } {
 	return {
 		milestone: /(?:^|\/)milestones\/([^/]+?)-phases\//.exec(path)?.[1],
 		phase: /(?:^|\/)(?:[^/]*-)?phases\/([^/]+)\/[^/]+$/.exec(path)?.[1],
@@ -771,7 +772,7 @@ export function interpret(reply: WriteReply): Pick<WriteReport, "status" | "id" 
 
 export interface Connection {
 	url: string;
-	token?: string;
+	token?: string | undefined;
 	timeoutMs: number;
 }
 
@@ -907,22 +908,28 @@ export function httpMemory(connection: Connection): MemoryApi {
 			params: { name: "memory_search", arguments: args },
 		});
 		const data = text.split("\n").find((line) => line.startsWith("data: "))?.slice(6) ?? text;
-		let envelope: { result?: { isError?: boolean; content?: Array<{ text?: string }> }; error?: unknown };
+		let envelope: unknown;
 		try {
 			envelope = JSON.parse(data);
 		} catch {
 			throw new Error(`memory_search answered HTTP ${status} with no JSON-RPC reply: ${diagnostic(text)}`);
 		}
+		// A JSON-RPC envelope is an object. JSON that is not one (null, a number, a list) is not a reply at all.
+		if (!isRecord(envelope)) {
+			throw new Error(`memory_search answered HTTP ${status} with no JSON-RPC reply: ${diagnostic(text)}`);
+		}
 		// No `result` is a refusal: a JSON-RPC error from the audit gate, or a plain
 		// `{ error }` from the HTTP layer such as a 401 for a missing token.
-		if (!envelope?.result) {
-			const error = envelope?.error as { code?: unknown; message?: unknown } | string | undefined;
-			const reason = typeof error === "string" ? error : typeof error?.message === "string" ? error.message : JSON.stringify(redactValue(envelope));
-			const invalid = typeof error === "object" && error?.code === INVALID_PARAMS;
+		const result = isRecord(envelope.result) ? envelope.result : undefined;
+		if (!result) {
+			const error = envelope.error;
+			const reason = typeof error === "string" ? error : isRecord(error) && typeof error.message === "string" ? error.message : JSON.stringify(redactValue(envelope));
+			const invalid = isRecord(error) && error.code === INVALID_PARAMS;
 			throw new SearchRefused(`memory_search answered HTTP ${status}: ${diagnostic(reason)}`, invalid);
 		}
-		const content = envelope.result.content?.[0]?.text ?? "";
-		if (envelope.result.isError) {
+		const first: unknown = Array.isArray(result.content) ? result.content[0] : undefined;
+		const content = isRecord(first) && typeof first.text === "string" ? first.text : "";
+		if (result.isError) {
 			// The SDK's input-validation refusal, about `query`: what a server whose schema
 			// still requires it says to a paged call. A current server never refuses on
 			// `query` this way, so a malformed cursor is not taken for an older server.

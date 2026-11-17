@@ -43,7 +43,8 @@ export function parseProxyAllow(raw: string | undefined): ProxyAllow {
 	return keys;
 }
 
-export function classifyEndpoint(plane: DbPlane, url: string | undefined, allow: ProxyAllow): EndpointClass {
+/** `tei` is the embedding service (phase 64): classified by the same rules, though it is not a database plane. */
+export function classifyEndpoint(_plane: DbPlane | "tei", url: string | undefined, allow: ProxyAllow): EndpointClass {
 	if (url === undefined || url === "") return "direct";
 	const target = endpointTarget(url);
 	if (target === undefined) return "direct";

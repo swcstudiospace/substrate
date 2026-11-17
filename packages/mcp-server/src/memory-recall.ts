@@ -16,7 +16,6 @@
  * `planes/hindsight`; the service hands them the fan-out as an injected function.
  */
 import {
-	MAX_RECALL_PER_BANK,
 	recallBank,
 	type FetchLike,
 	type HindsightConfig,
@@ -44,6 +43,12 @@ export interface DerivedMemoryHit {
 	scope?: string;
 	/** The repo the memory was retained for, when the retain carried one. Agent-scope hits are read only in it. */
 	repo?: string;
+	/** The graph the memory was retained under; absent when the retain carried none. */
+	graph_id?: string;
+	/** The session that wrote the memory; absent when the retain carried none. */
+	session_id?: string;
+	/** The graph node the memory was retained under; absent when the retain carried none. */
+	node_id?: string;
 	tags: string[];
 	score?: number;
 }
@@ -64,6 +69,12 @@ export interface RecallDeps {
 	budgetMs?: number;
 	/** A guest instance never sends queries to the plane. */
 	vmGuest?: boolean;
+	/**
+	 * Which of these index entry ids are forgotten. A hit whose document names a forgotten entry (`metadata.entry_id`)
+	 * is dropped: a forget whose plane deletion is still pending must not keep serving the text. When the lookup throws,
+	 * every hit that names an entry is withheld (fail closed) and the reply is degraded.
+	 */
+	forgotten?: (entryIds: readonly string[]) => Promise<ReadonlySet<string>>;
 }
 
 /**
@@ -96,6 +107,9 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 	const tags = [...hit.tags];
 	const scope = typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined;
 	const repo = typeof hit.metadata.repo === "string" ? hit.metadata.repo : undefined;
+	const graphId = typeof hit.metadata.graph_id === "string" ? hit.metadata.graph_id : undefined;
+	const sessionId = typeof hit.metadata.session_id === "string" ? hit.metadata.session_id : undefined;
+	const nodeId = typeof hit.metadata.node_id === "string" ? hit.metadata.node_id : undefined;
 	return {
 		bank,
 		id: hit.id,
@@ -105,6 +119,9 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 		...(hit.type !== undefined ? { type: hit.type } : {}),
 		...(scope !== undefined ? { scope } : {}),
 		...(repo !== undefined ? { repo } : {}),
+		...(graphId !== undefined ? { graph_id: graphId } : {}),
+		...(sessionId !== undefined ? { session_id: sessionId } : {}),
+		...(nodeId !== undefined ? { node_id: nodeId } : {}),
 		tags,
 		...(hit.score !== undefined ? { score: hit.score } : {}),
 	};
@@ -151,6 +168,14 @@ export interface FanOutOptions {
 	keep?: (hit: RecallHit) => boolean;
 	/** Called once per bank as its answer settles, so a caller that stops waiting still holds the banks that answered. */
 	onAnswer?: (answer: BankAnswer) => void;
+	/**
+	 * Which of these index entry ids are forgotten, asked once per bank for the hits it gave, inside the fan-out's own budget. A hit whose
+	 * document names a forgotten entry (`metadata.entry_id`) is dropped before the answer settles, so `onAnswer` and a partial read never
+	 * hold it. A lookup that throws or misses the budget withholds every hit that names an entry (fail closed) and calls `onUnchecked`.
+	 */
+	forgotten?: (entryIds: readonly string[]) => Promise<ReadonlySet<string>>;
+	/** Called when a bank's forgotten-entry lookup failed or ran out of time, so the caller can decline to keep the answer. */
+	onUnchecked?: () => void;
 }
 
 /**
@@ -177,6 +202,7 @@ export async function recallAcrossBanks(
 		) && (options.keep === undefined || options.keep(hit));
 	const controller = new AbortController();
 	const budget = setTimeout(() => controller.abort(), budgetMs);
+	const deadline = Date.now() + budgetMs;
 	const ask = async (bank: string): Promise<BankAnswer> => {
 		const recalled = await recallBank(config, bank, { query, signal: controller.signal, keep }, fetchImpl);
 		if (!recalled.ok) {
@@ -186,7 +212,10 @@ export async function recallAcrossBanks(
 			if (recalled.error.kind === "timeout") return { bank, hits: [], failure: { reason: "budget exceeded", timedOut: true } };
 			return { bank, hits: [], failure: { reason: recalled.error.message, timedOut: false } };
 		}
-		return { bank, hits: recalled.value };
+		if (options.forgotten === undefined) return { bank, hits: recalled.value };
+		const checked = await withoutForgotten(options.forgotten, [{ bank, hits: recalled.value }], deadline - Date.now());
+		if (checked.unchecked) options.onUnchecked?.();
+		return { bank, hits: checked.answers[0]?.hits ?? [] };
 	};
 	let settled: PromiseSettledResult<BankAnswer>[];
 	try {
@@ -215,6 +244,46 @@ function rankedHits(answers: readonly BankAnswer[]): DerivedMemoryHit[] {
 	return best.map(({ bank, hit }) => derive(bank, hit));
 }
 
+const entryIdOf = (hit: RecallHit): string | undefined => (typeof hit.metadata.entry_id === "string" && hit.metadata.entry_id.length > 0 ? hit.metadata.entry_id : undefined);
+
+/** What the forgotten-entry lookup settled as: the forgotten ids, or why they are unknown. */
+type ForgottenLookup = { gone: ReadonlySet<string> } | { gone: null; timedOut: boolean };
+
+/**
+ * The answers without the hits whose document belongs to a forgotten index entry. `unchecked` is true when the
+ * lookup failed or ran out of time: the hits that name an entry are then withheld too, because their state is unknown.
+ * The lookup runs inside the recall's own budget: `remainingMs` is what is left of it when the lookup starts, and a lookup
+ * that has not answered by then is a failed one (`timedOut`), never waited for.
+ */
+async function withoutForgotten(
+	forgotten: (entryIds: readonly string[]) => Promise<ReadonlySet<string>>,
+	answers: readonly BankAnswer[],
+	remainingMs: number,
+): Promise<{ answers: BankAnswer[]; unchecked: boolean; timedOut: boolean }> {
+	const ids = [...new Set(answers.flatMap((answer) => answer.hits.flatMap((hit) => entryIdOf(hit) ?? [])))];
+	if (ids.length === 0) return { answers: [...answers], unchecked: false, timedOut: false };
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expired = new Promise<ForgottenLookup>((resolve) => {
+		timer = setTimeout(() => resolve({ gone: null, timedOut: true }), Math.max(0, remainingMs));
+	});
+	const looked = (async (): Promise<ForgottenLookup> => {
+		try {
+			return { gone: await forgotten(ids) };
+		} catch {
+			// Fail closed: an entry that cannot be looked up may be a forgotten one.
+			return { gone: null, timedOut: false };
+		}
+	})();
+	const outcome = await Promise.race([looked, expired]);
+	clearTimeout(timer);
+	const gone = outcome.gone;
+	const keep = (hit: RecallHit): boolean => {
+		const id = entryIdOf(hit);
+		return id === undefined || (gone !== null && !gone.has(id));
+	};
+	return { answers: answers.map((answer) => ({ ...answer, hits: answer.hits.filter(keep) })), unchecked: gone === null, timedOut: "timedOut" in outcome && outcome.timedOut };
+}
+
 export async function recallMemories(
 	deps: RecallDeps,
 	query: string,
@@ -237,15 +306,21 @@ export async function recallMemories(
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
-	const answers = await recallAcrossBanks(config, resolved.banks, query, caller, fetchImpl, deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
+	const budgetMs = deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS;
+	// One deadline for the whole recall: the forgotten-entry lookup spends what the fan-out left, never more.
+	const deadline = Date.now() + budgetMs;
+	const answered = await recallAcrossBanks(config, resolved.banks, query, caller, fetchImpl, budgetMs);
+	const checked = deps.forgotten === undefined ? { answers: answered, unchecked: false, timedOut: false } : await withoutForgotten(deps.forgotten, answered, deadline - Date.now());
+	const { answers, unchecked } = checked;
 	const failures: string[] = [];
-	let timedOut = false;
+	let timedOut = checked.timedOut;
 	for (const answer of answers) {
 		if (answer.failure === undefined) continue;
 		failures.push(`${answer.bank}: ${answer.failure.reason}`);
 		if (answer.failure.timedOut) timedOut = true;
 	}
 	const results = rankedHits(answers);
+	if (unchecked) failures.push(checked.timedOut ? "index: forgotten-entry check timed out, hits that name an index entry were withheld" : "index: forgotten-entry check unavailable, hits that name an index entry were withheld");
 	if (failures.length > 0) {
 		// A budget miss leads with its own marker whichever banks answered; the
 		// rest keep the outage / partial wording the callers already read.

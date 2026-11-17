@@ -65,7 +65,7 @@ describe("chaos planes", () => {
 			enabled: true,
 			healthz: async () => {
 				n++;
-				return body(n === 1 ? true : false);
+				return body(n === 1);
 			},
 		});
 		const result = await runChaosPlanes(deps);
@@ -95,7 +95,7 @@ describe("chaos planes", () => {
 			enabled: true,
 			healthz: async () => {
 				n++;
-				return body(n === 1 ? true : false, { cache: true, hindsight: true, ragflow: true });
+				return body(n === 1, { cache: true, hindsight: true, ragflow: true });
 			},
 		});
 		const result = await runChaosPlanes(deps);

@@ -37,7 +37,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { SQL } from "bun";
 import { dlopen, FFIType, read } from "bun:ffi";
 import {
@@ -60,6 +60,7 @@ import {
 } from "../packages/mcp-server/src/rehearsal-env.ts";
 import { buildSkillsFixture, type SkillsFixture } from "../packages/mcp-server/src/rehearsal-skills.ts";
 import { isSwarmSurface, SURFACES, type Surface } from "../packages/mcp-server/src/types.ts";
+import { procStartSeconds } from "../packages/worktree-snapshot/src/proc-stat.ts";
 
 /** The harness refused an input or a state; the message names hosts and ports, never values. */
 export class RehearsalRefused extends Error {}
@@ -129,14 +130,13 @@ const POLL_MS = 1000;
 const DOWN_WAIT_MS = 10_000;
 
 /**
- * Refuse a scratch MCP port: the production ports, or one already listening.
- * Returns the reason, or null when the port may be used. Port 0 (pick free)
- * passes here; the caller resolves it to a free port first.
+ * Refuse a scratch MCP port that is one of the production ports. Returns the reason, or null when
+ * the port may be used. Port 0 (pick free) passes here; the caller resolves it to a free port first
+ * and checks that it is free.
  */
-export function refusePort(port: number, listening: readonly number[]): string | null {
+export function refusePort(port: number): string | null {
 	if (!Number.isInteger(port) || port < 0 || port > 65535) return `bad port ${port}`;
 	if ((PRODUCTION_PORTS as readonly number[]).includes(port)) return `port ${port} is reserved`;
-	if (listening.includes(port)) return `port ${port} is already listening`;
 	return null;
 }
 
@@ -231,7 +231,7 @@ export function parseDesktopSurfaces(
  * not a known-local one, could point the harness at someone else's engine.
  * Returns the reason, or null when the daemon resolves locally.
  */
-export function refuseDockerEnv(env: { DOCKER_HOST?: string; DOCKER_CONTEXT?: string }): string | null {
+export function refuseDockerEnv(env: { DOCKER_HOST?: string | undefined; DOCKER_CONTEXT?: string | undefined }): string | null {
 	const host = (env.DOCKER_HOST ?? "").trim();
 	if (host !== "" && !host.startsWith("unix://")) {
 		return `refusing non-local DOCKER_HOST ${host}`;
@@ -285,9 +285,31 @@ export function pickSmokeToken(record: Record<string, string>): string {
 	return record["SUBSTRATE_TOKEN"] ?? "";
 }
 
-/** A checkout the twin may run from: never the production unit's checkout. */
+/**
+ * The path with symlinks resolved as far as it exists: the longest existing prefix goes through
+ * realpath and the not-yet-existing tail is appended as written. A relative path, a trailing
+ * separator or a symlink to a directory then compare equal to that directory.
+ */
+function canonicalPath(path: string): string {
+	let head = resolvePath(path);
+	const tail: string[] = [];
+	for (;;) {
+		try {
+			return join(realpathSync(head), ...tail.reverse());
+		} catch {
+			const parent = dirname(head);
+			if (parent === head) return resolvePath(path);
+			tail.push(basename(head));
+			head = parent;
+		}
+	}
+}
+
+/** A checkout the twin may run from: never the production unit's checkout, however the path is spelled. */
 export function refuseCheckoutDir(cwd: string): string | null {
-	if (cwd === UNIT_WORKING_DIRECTORY) return `refusing to run from the production checkout ${cwd}`;
+	if (canonicalPath(cwd) === canonicalPath(UNIT_WORKING_DIRECTORY)) {
+		return `refusing to run from the production checkout ${cwd}`;
+	}
 	return null;
 }
 
@@ -462,13 +484,7 @@ function readStartSeconds(pid: number): number | null {
 	if (stat === null || statLine === null) return null;
 	const btime = /^btime (\d+)$/m.exec(statLine);
 	if (!btime) return null;
-	const close = stat.lastIndexOf(")");
-	if (close < 0) return null;
-	const rest = stat.slice(close + 1).trim().split(/\s+/);
-	if (rest.length < 20) return null;
-	const ticks = Number(rest[19]);
-	if (!Number.isFinite(ticks) || ticks < 0) return null;
-	return Number(btime[1]) + ticks / 100;
+	return procStartSeconds(Number(btime[1]), stat);
 }
 
 /** Local ports a pid listens on, from `ss`; null when ss cannot be read. */
@@ -732,7 +748,7 @@ async function waitForHealth(
 
 /** A twin `up` may declare ready: /healthz reported a writable index and ledger. */
 export function isTwinHealthy(health: { index: boolean; ledger: boolean; writable: boolean } | null): boolean {
-	return health !== null && health.index && health.ledger && health.writable;
+	return health?.index === true && health.ledger && health.writable;
 }
 
 function killOwn(pid: number): void {
@@ -989,7 +1005,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	// repo's own tree the checkout refusal would otherwise hide it, and the port
 	// is illegal wherever the command is run.
 	if (opts.port !== 0) {
-		const reserved = refusePort(opts.port, []);
+		const reserved = refusePort(opts.port);
 		if (reserved !== null) throw new RehearsalRefused(reserved);
 	}
 	const checkoutRefused = refuseCheckoutDir(checkout);
@@ -1002,7 +1018,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 
 	let mcpPort = opts.port;
 	if (mcpPort === 0) mcpPort = await pickFreePort();
-	const portRefused = refusePort(mcpPort, []);
+	const portRefused = refusePort(mcpPort);
 	if (portRefused !== null) throw new RehearsalRefused(portRefused);
 	if (!(await isPortFree(mcpPort))) throw new RehearsalRefused(`port ${mcpPort} is already listening`);
 

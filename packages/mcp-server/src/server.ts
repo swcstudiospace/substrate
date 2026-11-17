@@ -35,9 +35,12 @@
  * so one surface's storm cannot spend another's brief budget. See `admission.ts`.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage, MessageExtraInfo } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
+import { MAX_NEARDUP_ITEMS, MAX_NEARDUP_TEXT_CHARS } from "@substrate/corpus";
 import {
 	classifyEventRefusal,
 	evaluateAdmissionSlo,
@@ -61,16 +64,22 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import type { SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
+import { parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, SteeringReadUnavailableError } from "./planning/steering-rest.ts";
+import { acknowledgeSteeringWithState, DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundaryError, queueSteering, type LiveCallFailure, type PreparedLiveDispatch, type SteeringWriteResult } from "./planning/steering-tools.ts";
+import { z, ZodError } from "zod";
+import { parseSessionContextArgs, SESSION_CONTEXT_DISABLED, SESSION_CONTEXT_DISABLED_MESSAGE } from "./session-context.ts";
 import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
+import { syncLagSeconds } from "./corpus/sync-event.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
 import { checkoutHead } from "./git.ts";
-import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
+import type { CursorPosition, GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import {
 	attributedSurface,
@@ -80,7 +89,6 @@ import {
 	hindsightRagFallback,
 	ingestRefusalIsGate,
 	lightragReplayKey,
-	queryLightragRest,
 	ragGraphCounts,
 	ragMachine,
 	setCachedRagResult,
@@ -88,6 +96,7 @@ import {
 	type McpCaller,
 	withLightragNotice,
 } from "./mcp.ts";
+import { isLightragQueryMode, LIGHTRAG_CIRCUIT_OPEN } from "./planes/lightrag.ts";
 import {
 	auditRefusal,
 	auditToolCalls,
@@ -100,12 +109,15 @@ import {
 } from "./observe.ts";
 import { MetricHistoryMemo, bucketedValues, metricHistoryAnswer } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
-import type { Substrate } from "./service.ts";
+import { LIVE_BRIEF_INPUT, type Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
+import { parseClaimsQuery } from "./worktree-claims.ts";
+import { parseWorktreeListQuery, validateWorktreeReport, WORKTREE_REPORT_MAX_BYTES } from "./worktree-registry.ts";
 import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
+import { reservedEmitRefusal } from "./reserved-actions.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
 const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
@@ -274,6 +286,14 @@ const MAX_BODY_BYTES = 1_000_000;
  * amplification path.
  */
 const DOCS_MAX_BODY_BYTES = 6_000_000;
+/** A reconcile request is `{protocol, execute}`; a body past this is not one. */
+const RECONCILE_MAX_BODY_BYTES = 4096;
+
+/**
+ * `POST /corpus/neardup` carries up to 1000 excerpts of 4000 characters. Four bytes per character covers any UTF-8 text with the
+ * usual JSON escapes; the room beyond that is each item's repo, path and member names. A larger body is refused 413.
+ */
+const NEARDUP_MAX_BODY_BYTES = MAX_NEARDUP_ITEMS * (MAX_NEARDUP_TEXT_CHARS * 4 + 2_500);
 
 /** How long a request may take to arrive: its headers, then the whole request. Bounds a slow client, not a response. */
 const HEADERS_TIMEOUT_MS = 30_000;
@@ -296,8 +316,17 @@ const JSON_BODY_ROUTES: Record<string, true> = {
 	"/docs/search": true,
 	"/docs/ingest": true,
 	"/docs/merge-trigger": true,
+	"/docs/feedback": true,
+	"/corpus/reflect": true,
 	"/skills/propose": true,
 	"/skills/approve": true,
+	"/steering/queue": true,
+	"/steering/acknowledge": true,
+	"/steering/sessions": true,
+	"/steering/sessions/heartbeat": true,
+	"/steering/sessions/close": true,
+	"/worktrees/report": true,
+	"/corpus/neardup": true,
 	"/mcp": true,
 };
 
@@ -323,8 +352,32 @@ const APPROVAL_NEEDS_OPERATOR = "skills_approve needs an operator token; nothing
 const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
 /** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
 const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
+/** Why an anonymous corpus request is refused, even on a run that allows anonymous callers. */
+const CORPUS_NEEDS_SURFACE = "the corpus needs an authenticated surface; nothing was read or changed";
+
+/** How many items the named member of a request body holds, for an audit record that must not carry the items. */
+function listLength(body: unknown, member: string): number {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return 0;
+	const list: unknown = (body as Record<string, unknown>)[member];
+	return Array.isArray(list) ? list.length : 0;
+}
+
+/** A string member of a request body cut to 200 characters for an audit record, or an empty string when it is not one. */
+function stringMember(body: unknown, member: string): string {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return "";
+	const value: unknown = (body as Record<string, unknown>)[member];
+	return typeof value === "string" ? value.slice(0, 200) : "";
+}
 /** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
+/** Why an anonymous call to a steering route is refused, even on a run that allows anonymous callers. */
+const STEERING_NEEDS_SURFACE = "the steering routes need an authenticated surface";
+/** Why an anonymous session-context read is refused, even on a run that allows anonymous callers. */
+const SESSION_CONTEXT_NEEDS_SURFACE = "session_context needs an authenticated surface";
+/** Why an anonymous worktree report is refused, even on a run that allows anonymous callers. */
+const WORKTREE_REPORT_NEEDS_SURFACE = "worktree report needs an authenticated surface; nothing was stored";
+/** Why an anonymous claims read is refused: it names the sessions holding a graph's nodes. */
+const WORKTREE_CLAIMS_NEEDS_SURFACE = "worktree claims need an authenticated surface";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
@@ -508,7 +561,7 @@ export function healthStatus(
  * `SUBSTRATE_TOKEN_<SURFACE>`.
  * Both are one line, and both leave a record of the decision.
  */
-export function memoryWriter(surface: Surface | null, bodyWriter: unknown): string {
+export function memoryWriter(surface: Surface | null, _bodyWriter: unknown): string {
 	return surface ?? "unknown";
 }
 
@@ -571,12 +624,12 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 }
 
 /**
- * The 429 of an enforced budget: an integer `Retry-After` and the bounded body
- * from `admission.ts`. Sent before the handler and before the audit — a refused
+ * The refusal of an enforced budget: 429 for a spent bucket, 503 for a fail-closed class while the cache plane is open;
+ * with an integer `Retry-After` and the bounded body from `admission.ts`. Sent before the handler and before the audit — a refused
  * request did nothing, so there is no action to record, only a decision to count.
  */
 function sendBudgetRefusal(res: ServerResponse, verdict: AdmissionVerdict, body: unknown = budgetBody(verdict)): void {
-	send(res, 429, JSON.stringify(body), "application/json", { "retry-after": String(verdict.retryAfterS) });
+	send(res, verdict.decision === "refused" ? 503 : 429, JSON.stringify(body), "application/json", { "retry-after": String(verdict.retryAfterS) });
 }
 
 /** A surface named in a request body. Only ever trusted on an unauthenticated run. */
@@ -656,6 +709,88 @@ async function auditedRest(
 	if (denial === null) return true;
 	sendJson(res, 503, { error: denial });
 	return false;
+}
+
+/**
+ * The shared opening of a steering route (phase 67): a bearer that names a surface, and steering switched on. Answers 401 or 404
+ * itself and returns false when it refuses. The anonymous bridge does not reach these routes: a directive and a session list are
+ * both about who is asking.
+ */
+function steeringRouteOpen(res: ServerResponse, substrate: Substrate, surface: Surface | null): boolean {
+	if (surface === null) {
+		sendJson(res, 401, { error: STEERING_NEEDS_SURFACE });
+		return false;
+	}
+	if (!substrate.steering.enabled) {
+		sendJson(res, 404, { error: "live steering is off (SUBSTRATE_PLANNING_STEERING)" });
+		return false;
+	}
+	return true;
+}
+
+/** A steering write's typed result as the response: the tool's own reply body, with the status its refusal maps to and `Retry-After` when rate-limited. */
+function sendSteeringResult(res: ServerResponse, result: SteeringWriteResult | SteeringAcknowledgeReply): void {
+	const retryAfterS = steeringRetryAfterS(result);
+	send(res, steeringHttpStatus(result), JSON.stringify(result), "application/json", retryAfterS === null ? {} : { "retry-after": String(retryAfterS) });
+}
+function sessionBindingOf(req: IncomingMessage): string | undefined {
+	const value = req.headers["x-substrate-session-binding"];
+	return typeof value === "string" ? (value.length <= 128 ? value : "invalid") : value === undefined ? undefined : "invalid";
+}
+/** A live batch that failed before any call ran, as its caller reads it: the arguments it could not parse, or an internal fault under its correlation id. */
+type LiveBatchFault = { error: "invalid arguments"; problem: string } | { error: "internal error"; correlation_id: string };
+function liveBatchRefusal(body: unknown, refusal: LiveCallFailure | LiveBatchFault): unknown {
+	const elements = Array.isArray(body) ? body : [body];
+	const replies = elements.flatMap((element: unknown) => {
+		const message = element !== null && typeof element === "object" ? element as Record<string, unknown> : {};
+		if (!Object.hasOwn(message, "id")) return [];
+		const params = message.params !== null && typeof message.params === "object" ? message.params as Record<string, unknown> : {};
+		const args = params.arguments !== null && typeof params.arguments === "object" ? params.arguments as Record<string, unknown> : {};
+		const live = typeof params.name === "string" && (["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_queue", "steering_acknowledge", "steering_list"].includes(params.name) || (["docs_search", "memory_brief"].includes(params.name) && args.steering_session_id !== undefined));
+		return [live
+			? { jsonrpc: "2.0", id: message.id ?? null, result: { content: [{ type: "text", text: JSON.stringify(refusal, null, 2) }], isError: true } }
+			: { jsonrpc: "2.0", id: message.id ?? null, error: { code: -32000, message: "batch not dispatched", data: { code: "batch-not-dispatched" } } }];
+	});
+	return Array.isArray(body) ? replies : replies[0];
+}
+
+/**
+ * Answers a live batch whose preparation or audit threw. A boundary refusal and an invalid argument list are tool errors the
+ * caller can act on. Any other throw is a dependency failure: it is logged under a correlation id and answered the same way,
+ * so the caller gets a reply rather than a crashed request.
+ */
+function sendLiveFault(res: ServerResponse, body: unknown, cause: unknown): void {
+	if (cause instanceof LiveSessionBoundaryError) {
+		sendLiveRefusal(res, liveBatchRefusal(body, cause.refusal));
+		return;
+	}
+	if (cause instanceof ZodError) {
+		const problem = cause.issues.map((issue) => `${issue.path.map(String).join(".") || "arguments"}: ${issue.message}`).join("; ");
+		sendLiveRefusal(res, liveBatchRefusal(body, { error: "invalid arguments", problem }));
+		return;
+	}
+	const correlationId = randomUUID();
+	process.stderr.write(`[substrate] POST /mcp correlation=${correlationId}: ${String(cause)}\n`);
+	sendLiveRefusal(res, liveBatchRefusal(body, { error: "internal error", correlation_id: correlationId }));
+}
+
+/** Runs one live step of an MCP batch. A throw is answered by `sendLiveFault`; `undefined` tells the caller it was answered. */
+async function settleLiveStep<T>(res: ServerResponse, body: unknown, step: () => Promise<T>): Promise<T | undefined> {
+	try {
+		return await step();
+	} catch (cause) {
+		sendLiveFault(res, body, cause);
+		return undefined;
+	}
+}
+
+/** A live batch's answer: `202` when no call expects a reply, otherwise its JSON-RPC replies at `200`. */
+function sendLiveRefusal(res: ServerResponse, answer: unknown, headers: Record<string, string> = {}): void {
+	if (answer === undefined || (Array.isArray(answer) && answer.length === 0)) {
+		res.writeHead(202).end();
+		return;
+	}
+	send(res, 200, JSON.stringify(answer), "application/json", headers);
 }
 
 export function createHttpServer(
@@ -827,12 +962,12 @@ export function createHttpServer(
 
 		// uplift-3 N3: admission, after the bearer is known and before any handler.
 		// Monitor GETs are not metered; `/mcp` is metered per tool call in
-		// `handleMcp`, where the batch is parsed. A `limited` verdict only exists in
+		// `handleMcp`, where the batch is parsed. A refusal (`limited`, or `refused` for a fail-closed class) only exists in
 		// `enforce`; `shadow` and every bypass fall through to the handler.
 		const klass = routeClass(req.method ?? "GET", url.pathname);
 		if (klass !== null) {
 			const verdict = await admission.admit({ surface, klass, cost: 1 });
-			if (verdict.decision === "limited") {
+			if (isRefusal(verdict)) {
 				sendBudgetRefusal(res, verdict);
 				return;
 			}
@@ -1091,7 +1226,9 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/brief") {
 				const raw = await readBody(req);
-				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				// REST historically permits arbitrary attribution labels; MCP keeps its closed surface enum.
+				// This label never supplies the separately resolved live caller or binding credential.
+				const body = LIVE_BRIEF_INPUT.omit({ session_binding: true, if_none_match: true }).extend({ surface: z.string().optional() }).parse(raw ? JSON.parse(raw) : {});
 				rememberClaim(claim, body);
 				// A tokened caller's brief is its own surface's: a body naming another is refused, not served as theirs.
 				const briefRefusal = surfaceClaimRefusal(surface, body.surface);
@@ -1099,7 +1236,7 @@ export function createHttpServer(
 					sendJson(res, 403, { error: briefRefusal });
 					return;
 				}
-				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
+				if (body.steering_session_id === undefined && !(await auditedRest(res, observability, surface, "brief", body))) return;
 				// uplift-4 S1: an unknown profile is the caller's mistake, refused here
 				// and never coerced to one the caller did not ask for.
 				const requested = parseBriefProfile(body.profile);
@@ -1109,15 +1246,18 @@ export function createHttpServer(
 				}
 				const { detail: brief, notModified } = await substrate.briefConditional(
 					{
-						repo: typeof body.repo === "string" ? body.repo : undefined,
-						branch: typeof body.branch === "string" ? body.branch : undefined,
-						graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
+						...(typeof body.repo === "string" ? { repo: body.repo } : {}),
+						...(typeof body.branch === "string" ? { branch: body.branch } : {}),
+						...(typeof body.graph_id === "string" ? { graph_id: body.graph_id } : {}),
+						...(typeof body.session_id === "string" ? { session_id: body.session_id } : {}),
+						...(typeof body.steering_session_id === "string" ? { steering_session_id: body.steering_session_id } : {}),
 						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 					},
 					req.headers["if-none-match"],
 					requested.profile,
 					// The profile follows the resolved bearer, never the body's `surface` (attribution only).
 					surface,
+					{ caller: { surface, isOperator: caller.isOperator }, sessionBinding: sessionBindingOf(req), invocationArgs: body, transport: "rest" },
 				);
 				// uplift-2 R1: the caller can tell a degraded or snapshot brief from a
 				// complete one and skip one it already holds. A degraded answer is still
@@ -1180,6 +1320,13 @@ export function createHttpServer(
 					sendJson(res, 403, { error: "an untokened caller cannot emit as a surface that has a token" });
 					return;
 				}
+				// A note a reader trusts by its action alone is the server's or an operator's to write (see `reserved-actions.ts`).
+				const reserved = reservedEmitRefusal({ payload: body.payload, surface: attribution.surface, callerSurface: surface, isOperator: caller.isOperator });
+				if (reserved !== null) {
+					eventRefusal = "attribution";
+					sendJson(res, 403, { error: reserved });
+					return;
+				}
 				// `x-substrate-replay: 1` marks a re-send of an earlier attempt (U5-4a). Read here, honoured
 				// (or ignored, under `off`) by `Substrate.emit`.
 				const result = await substrate.emit(
@@ -1189,6 +1336,11 @@ export function createHttpServer(
 					} as Parameters<Substrate["emit"]>[0],
 					{ replay: req.headers["x-substrate-replay"] === "1" },
 				);
+				// The sync lag the CLI reports, as a gauge: bounded and sanitised, read only from a stored `docs.sync` note.
+				if (result.stored) {
+					const lag = syncLagSeconds(body.payload);
+					if (lag !== null) observability.instruments.setCorpusSyncLag(lag);
+				}
 				// 503 when the ledger did not take it. The `substrate` CLI ignores the
 				// status and exits 0 either way — failing open is the client's job, and
 				// this surface owes its caller the truth about durability.
@@ -1363,9 +1515,9 @@ export function createHttpServer(
 					from: { surface: sender, session_id: typeof body.session_id === "string" ? body.session_id : null },
 					to: { surface: to, session_id: typeof body.to_session_id === "string" ? body.to_session_id : null },
 					goal: body.goal,
-					files: Array.isArray(body.files) ? (body.files as string[]) : undefined,
-					dod: Array.isArray(body.dod) ? (body.dod as string[]) : undefined,
-					blockers: Array.isArray(body.blockers) ? (body.blockers as string[]) : undefined,
+					...(Array.isArray(body.files) ? { files: body.files as string[] } : {}),
+					...(Array.isArray(body.dod) ? { dod: body.dod as string[] } : {}),
+					...(Array.isArray(body.blockers) ? { blockers: body.blockers as string[] } : {}),
 					graph_id: typeof body.graph_id === "string" ? body.graph_id : null,
 					node_id: typeof body.node_id === "string" ? body.node_id : null,
 					linear_identifier: typeof body.linear_identifier === "string" ? body.linear_identifier : null,
@@ -1396,8 +1548,8 @@ export function createHttpServer(
 					path: typeof body.path === "string" ? body.path : null,
 					git_tip: typeof body.git_tip === "string" ? body.git_tip : null,
 					branch: typeof body.branch === "string" ? body.branch : null,
-					idle_seconds: typeof body.idle_seconds === "number" ? body.idle_seconds : undefined,
-					limit: typeof body.limit === "number" ? body.limit : undefined,
+					...(typeof body.idle_seconds === "number" ? { idle_seconds: body.idle_seconds } : {}),
+					...(typeof body.limit === "number" ? { limit: body.limit } : {}),
 				});
 				if (body.format === "text") {
 					send(res, 200, `${formatDrift(report)}\n`, "text/plain; charset=utf-8");
@@ -1424,37 +1576,12 @@ export function createHttpServer(
 			// the audit gate like every other read and an unreachable plane
 			// answers degraded rather than refusing the turn.
 			if (req.method === "POST" && url.pathname === "/docs/search") {
-				const parsed: unknown = JSON.parse(await readBody(req));
-				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-					sendJson(res, 400, { error: "request body must be a JSON object" });
-					return;
-				}
-				if (!("question" in parsed) || typeof parsed.question !== "string") {
-					sendJson(res, 400, { error: "question is required" });
-					return;
-				}
-				const datasets = "datasets" in parsed ? parsed.datasets : undefined;
-				const sessionId = "session_id" in parsed ? parsed.session_id : undefined;
-				const context = "context" in parsed ? parsed.context : undefined;
-				if (
-					(datasets !== undefined && !(Array.isArray(datasets) && datasets.every((name) => typeof name === "string"))) ||
-					(sessionId !== undefined && typeof sessionId !== "string") ||
-					(context !== undefined && typeof context !== "boolean")
-				) {
-					sendJson(res, 400, { error: "datasets must be a string array, session_id a string and context a boolean" });
-					return;
-				}
-				const fields: Record<string, unknown> = {
-					question: parsed.question,
-					...(datasets !== undefined ? { datasets } : {}),
-					...(sessionId !== undefined ? { session_id: sessionId } : {}),
-					...(context !== undefined ? { context } : {}),
-				};
-				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
+				const fields = DOCS_SEARCH_INPUT.omit({ session_binding: true }).parse(JSON.parse(await readBody(req)));
+				if (fields.steering_session_id === undefined && !(await auditedRest(res, observability, surface, "docs_search", fields))) return;
 				// SPE-19388: the REST search reports into the same process-wide
 				// RAG machine as the MCP tool. Replies are unchanged.
 				const searchBackend = config.docsBackend;
-				const admission = ragMachine.admitQuery(config.ragMachine.halfOpenMs);
+				const admission = fields.steering_session_id === undefined ? ragMachine.admitQuery(config.ragMachine.halfOpenMs) : "serve";
 				const report = { probe: admission === "probe" };
 				try {
 					// Admission as docs_lightrag_query: after the cooldown one search is the half-open probe and leaves ERROR
@@ -1463,23 +1590,24 @@ export function createHttpServer(
 					if (admission === "probe") {
 						ragMachine.transition("STEERING", `docs_search:${searchBackend}`);
 						ragMachine.transition("CONTEXT_REFRESH", `docs_search:retrieve:${searchBackend}`);
-					} else if (admission === "serve") {
+					} else if (admission === "serve" && fields.steering_session_id === undefined) {
 						ragMachine.enterRefresh(`docs_search:${searchBackend}`, `docs_search:retrieve:${searchBackend}`);
 					}
-					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe", cooling: admission === "refuse" }, surface);
+					const reply = await substrate.searchDocs({ ...fields, probe: admission === "probe", cooling: admission === "refuse" }, surface, { caller: { surface, isOperator: caller.isOperator }, sessionBinding: sessionBindingOf(req), invocationArgs: fields, transport: "rest" });
 					if (admission !== "refuse") {
 						if (reply.degraded === true) {
-							ragMachine.recordFailure(config.ragMachine, `docs_search: ${reply.reason ?? "degraded"}`, report);
+							ragMachine.recordFailure(config.ragMachine, fields.steering_session_id === undefined ? `docs_search: ${reply.reason ?? "degraded"}` : "docs_search: degraded", report);
 						} else {
 							ragMachine.recordSuccess("docs_search:served", report);
 						}
 					}
 					sendJson(res, 200, reply);
 				} catch (cause) {
+					if (cause instanceof LiveSessionBoundaryError) throw cause;
 					if (admission !== "refuse") {
 						ragMachine.recordFailure(
 							config.ragMachine,
-							`docs_search threw: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`,
+							"docs_search failed",
 							report,
 						);
 					}
@@ -1553,6 +1681,144 @@ export function createHttpServer(
 					return;
 				}
 				sendJson(res, 200, outcome);
+				return;
+			}
+
+			// The corpus atlas doors (v1.7 phase 63): plan and status are reads (fail-open audit under `corpus_status`), ingest is
+			// the write (fail-closed audit under `corpus_ingest`). An anonymous caller is refused before the body is read. With
+			// `SUBSTRATE_CORPUS` off each answers 503 `corpus.disabled` from `substrate.corpus*` and nothing is read or sent.
+			if (req.method === "POST" && url.pathname === "/corpus/plan") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "plan", entries: listLength(parsed, "entries") }))) return;
+				const reply = await substrate.corpusPlan(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			// Advisory near-duplicate pairs (phase 64): the excerpts go to the operator's TEI service through the cached embedding
+			// service and nowhere else. Same gating and audit name as the plan (a read, `corpus_status`); the audit record carries
+			// the item count only, never a text.
+			if (req.method === "POST" && url.pathname === "/corpus/neardup") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, NEARDUP_MAX_BODY_BYTES));
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "neardup", items: listLength(parsed, "items") }))) return;
+				const reply = await substrate.corpusNeardup(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/corpus/ingest") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				// Counts only: the audit record never carries a document body.
+				const fields = { documents: listLength(parsed, "documents"), tombstones: listLength(parsed, "tombstones") };
+				if (!(await auditedRest(res, observability, surface, "corpus_ingest", fields))) return;
+				const reply = await substrate.corpusIngest(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			// The reconcile compares the manifest with the docs plane. A dry run only reads both (fail-open audit under
+			// `corpus_status`); `execute` marks rows removed and deletes `corpus:` plane documents, the ingest's own write
+			// (fail-closed audit under `corpus_ingest`). The class is `write` either way, so a dry run cannot exhaust a read budget.
+			if (req.method === "POST" && url.pathname === "/corpus/reconcile") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, RECONCILE_MAX_BODY_BYTES));
+				const execute = typeof parsed === "object" && parsed !== null && "execute" in parsed && parsed.execute === true;
+				if (!(await auditedRest(res, observability, surface, execute ? "corpus_ingest" : "corpus_status", { op: "reconcile", execute }))) return;
+				const reply = await substrate.corpusReconcile(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/status") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "status" }))) return;
+				const reply = await substrate.corpusStatus(surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			// The docs learning loop (v1.7 phase 66). Feedback is a write with a fail-open audit (a verdict must not fail an agent's turn);
+			// the digest reflect is a corpus ingest, audited fail-closed under `corpus_ingest`; the gap report is a read, audited under
+			// `corpus_status`. An anonymous caller is refused before the body is read. With `SUBSTRATE_CORPUS` off each answers 503
+			// `corpus.disabled` from `substrate.*` and nothing is read or stored.
+			if (req.method === "POST" && url.pathname === "/docs/feedback") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req));
+				// The note is never audited or stored; the audit record names the document and the verdict only.
+				const fields = { document: stringMember(parsed, "document"), verdict: stringMember(parsed, "verdict") };
+				if (!(await auditedRest(res, observability, surface, "docs_feedback", fields))) return;
+				const reply = await substrate.docsFeedback(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/corpus/reflect") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				// Counts only: the audit record never carries a digest.
+				if (!(await auditedRest(res, observability, surface, "corpus_ingest", { op: "reflect", digests: listLength(parsed, "digests") }))) return;
+				const reply = await substrate.corpusReflect(parsed, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/gaps") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "gaps" }))) return;
+				const reply = await substrate.corpusGaps(url.searchParams.get("limit"), surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			// Corpus proofs (v1.7 phase 69): the root, one document's inclusion proof and a root's anchor status. Reads, audited under
+			// `corpus_status` (fail-open) like the plan and the status; an anonymous caller is refused first.
+			if (req.method === "GET" && url.pathname === "/corpus/root") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "root" }))) return;
+				const reply = await substrate.corpusRoot(surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/proof") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "proof" }))) return;
+				const reply = await substrate.corpusProof({ repo: url.searchParams.get("repo"), path: url.searchParams.get("path") }, surface);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/corpus/anchor") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CORPUS_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "corpus_status", { op: "anchor" }))) return;
+				const reply = await substrate.corpusAnchor(url.searchParams.get("root"), surface);
+				sendJson(res, reply.status, reply.body);
 				return;
 			}
 			// SPE-19388 LightRAG query surface (SPE-19384 RAG replacement):
@@ -1659,9 +1925,9 @@ export function createHttpServer(
 					let lastReason = "lightrag unreachable";
 					for (let attempt = 0; attempt <= config.ragMachine.maxRetries; attempt += 1) {
 						if (attempt > 0) await ragRetryDelay(config.ragMachine.retryBaseMs, attempt);
-						const answered = await queryLightragRest(lightrag, {
+						const answered = await substrate.lightragQuery(lightrag, {
 							question: augmented,
-							...(typeof mode === "string" ? { mode } : {}),
+							...(isLightragQueryMode(mode) ? { mode } : {}),
 							...(typeof topK === "number" ? { topK } : {}),
 						});
 						if (answered.ok) {
@@ -1677,6 +1943,8 @@ export function createHttpServer(
 							return;
 						}
 						lastReason = answered.reason;
+						// An open plane breaker refused the call without reaching LightRAG: another attempt would be refused too, so it is not retried.
+						if (answered.reason === LIGHTRAG_CIRCUIT_OPEN) break;
 					}
 					ragMachine.recordFailure(config.ragMachine, `lightrag_query: ${lastReason}`, report);
 					const degraded = await hindsightRagFallback(
@@ -1793,7 +2061,7 @@ export function createHttpServer(
 				// permission decision about the caller: 503 with the reason. A checkout that
 				// cannot be read fails the job the same way and the pinned version keeps serving.
 				const accepted = await substrate.startDocsRefresh(
-					{ ...fields, roots: source.roots, pages: source.pages, head: source.head },
+					{ ...fields, roots: source.roots, pages: source.pages, ...(source.head === undefined ? {} : { head: source.head }) },
 					surface,
 					{ wait: url.searchParams.get("wait") === "1" },
 				);
@@ -1878,6 +2146,210 @@ export function createHttpServer(
 				return;
 			}
 
+			// ── live steering GA (phase 67): the steering tools as REST routes, running the tools' own functions with the tools' own
+			// audit class, admission class (`ROUTE_CLASSES`) and operator rule. Each needs a bearer that names a surface, and answers
+			// 404 while SUBSTRATE_PLANNING_STEERING is off, as the tools are not registered then. The author of a directive is the
+			// bearer's surface and only an operator may write: no route takes an author field.
+			if (req.method === "POST" && url.pathname === "/steering/sessions") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = LIVE_SESSION_UPDATE_INPUT.omit({ session_binding: true, session_id: true, previous_state: true }).parse(JSON.parse(await readBody(req)));
+				sendJson(res, 200, await substrate.updateLiveSession({ surface, isOperator: caller.isOperator }, input, { transport: "rest" }));
+				return;
+			}
+			if (req.method === "POST" && (url.pathname === "/steering/sessions/heartbeat" || url.pathname === "/steering/sessions/close")) {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = LIVE_SESSION_TARGET_INPUT.omit({ session_binding: true }).parse(JSON.parse(await readBody(req)));
+				const options = { sessionBinding: sessionBindingOf(req), transport: "rest" as const };
+				const result = url.pathname === "/steering/sessions/close"
+					? await substrate.closeLiveSession({ surface, isOperator: caller.isOperator }, input, options)
+					: await substrate.heartbeatLiveSession({ surface, isOperator: caller.isOperator }, input, options);
+				sendJson(res, 200, result);
+				return;
+			}
+			if (req.method === "GET" && url.pathname === "/steering/sessions") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const query = parseSessionsQuery(url.searchParams);
+				if (!query.ok) {
+					sendJson(res, 400, { error: query.error });
+					return;
+				}
+				sendJson(res, 200, await substrate.listLiveSessions({ surface, isOperator: caller.isOperator }, query.value));
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === "/steering/directives") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const query = parseDirectivesQuery(url.searchParams);
+				if (!query.ok) {
+					sendJson(res, 400, { error: query.error });
+					return;
+				}
+				const listed = await substrate.readLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req));
+				sendJson(res, 200, listed);
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/steering/queue") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = parseQueueBody(JSON.parse(await readBody(req)));
+				if (!input.ok) {
+					sendJson(res, 400, { error: input.error });
+					return;
+				}
+				const queued = await queueSteering(substrate.steering, { surface, isOperator: caller.isOperator }, { ...input.value, session_binding: sessionBindingOf(req) }, undefined, "rest");
+				// The same two wake-ups the tool gives, neither able to fail the queue: the long-poll waiters, then the hint note.
+				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
+				sendSteeringResult(res, queued);
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/steering/acknowledge") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const input = parseAcknowledgeBody(JSON.parse(await readBody(req)));
+				if (!input.ok) {
+					sendJson(res, 400, { error: input.error });
+					return;
+				}
+				sendSteeringResult(res, await acknowledgeSteeringWithState(substrate.steering, { surface, isOperator: caller.isOperator }, { ...input.value, session_binding: sessionBindingOf(req) }, substrate.sessionState, undefined, "rest"));
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === "/steering/wait") {
+				if (!steeringRouteOpen(res, substrate, surface)) return;
+				const query = parseWaitQuery(url.searchParams, config.steeringWaitMaxMs);
+				if (!query.ok) {
+					sendJson(res, 400, { error: query.error });
+					return;
+				}
+				// A client that goes away ends its wait: the waiter leaves the registry with its timer and listener.
+				const gone = new AbortController();
+				res.on("close", () => gone.abort());
+				const { timeoutMs } = query.value;
+				const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
+				switch (waited.status) {
+					case "directive":
+						sendJson(res, 200, { directive: restDirective(waited.record), wait_ms: timeoutMs });
+						return;
+					case "busy":
+						send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });
+						return;
+					case "aborted":
+						return;
+					case "timeout":
+					case "closed":
+						// No body to carry `wait_ms`, so the wait this request got rides a header.
+						res.writeHead(204, { "x-steering-wait-ms": String(timeoutMs) });
+						res.end();
+						return;
+				}
+			}
+
+			if (req.method === "GET" && url.pathname === "/session/context") {
+				if (surface === null) {
+					sendJson(res, 401, { error: SESSION_CONTEXT_NEEDS_SURFACE });
+					return;
+				}
+				// Opt-in with the sessions feature set: off, the route refuses with the typed reason the tool answers, and the call is
+				// audited as that refusal. It reads nothing.
+				if (!config.briefSessions) {
+					if (!(await auditedRest(res, observability, surface, "session_context", { refused: SESSION_CONTEXT_DISABLED }))) return;
+					sendJson(res, 503, { refused: true, reason: SESSION_CONTEXT_DISABLED, error: SESSION_CONTEXT_DISABLED_MESSAGE });
+					return;
+				}
+				const parsed = parseSessionContextArgs({
+					repo_id: url.searchParams.get("repo_id") ?? undefined,
+					session_id: url.searchParams.get("session_id") ?? undefined,
+					limit: url.searchParams.get("limit") ?? undefined,
+				});
+				if (!parsed.ok) {
+					sendJson(res, 400, { error: parsed.error });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "session_context", { repo_id: parsed.value.repoId, session_id: parsed.value.sessionId, limit: parsed.value.limit ?? null }))) return;
+				sendJson(res, 200, await substrate.sessionContext(parsed.value));
+				return;
+			}
+
+			// The worktree registry (phase 68). A report names a host's checkouts, so an anonymous caller is refused before the body
+			// is read, even on a run that allows untokened callers. A registry that is off, a VM guest and a server with no index are
+			// refused just as early, so nothing is read, audited or stored. The accepted report is audited fail-closed.
+			if (req.method === "POST" && url.pathname === "/worktrees/report") {
+				if (surface === null) {
+					sendJson(res, 401, { error: WORKTREE_REPORT_NEEDS_SURFACE });
+					return;
+				}
+				const refusal = substrate.worktreeGate(true);
+				if (refusal !== null) {
+					sendJson(res, refusal.status, refusal.body);
+					return;
+				}
+				// The cap is the contract's own constant, which the CLI's report splitter reads too, so the two cannot drift.
+				const checked = validateWorktreeReport(JSON.parse(await readBody(req, WORKTREE_REPORT_MAX_BYTES)));
+				if (!checked.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: checked.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "worktree_report", { host: checked.value.host, worktrees: checked.value.worktrees.length }))) return;
+				const outcome = await substrate.reportWorktrees(checked.value, surface);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { stored: outcome.stored, removed: outcome.removed });
+				return;
+			}
+
+			// The prune guard's question (phase 68): the unexpired leases of one graph. It reads graph data the `graph_get` tool
+			// already serves and writes nothing, so it is audited under that tool's name (fail-open, class `read`) and is not
+			// behind SUBSTRATE_WORKTREE_REGISTRY. An index that is missing or did not answer is 503, never an empty list.
+			if (req.method === "GET" && url.pathname === "/worktrees/claims") {
+				if (surface === null) {
+					sendJson(res, 401, { error: WORKTREE_CLAIMS_NEEDS_SURFACE });
+					return;
+				}
+				const query = parseClaimsQuery(url.searchParams.get("graph_id") ?? undefined);
+				if (!query.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: query.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "graph_get", { graph_id: query.value }))) return;
+				const outcome = await substrate.worktreeClaims(query.value);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { graph_id: outcome.graph_id, claims: outcome.claims });
+				return;
+			}
+
+			// The registry read, the same filters as the `worktree_list` tool and audited under its name, fail-open.
+			if (req.method === "GET" && url.pathname === "/worktrees") {
+				const refusal = substrate.worktreeGate(false);
+				if (refusal !== null) {
+					sendJson(res, refusal.status, refusal.body);
+					return;
+				}
+				const query = parseWorktreeListQuery({
+					repo: url.searchParams.get("repo") ?? undefined,
+					host: url.searchParams.get("host") ?? undefined,
+					state: url.searchParams.get("state") ?? undefined,
+					limit: url.searchParams.get("limit") ?? undefined,
+				});
+				if (!query.ok) {
+					sendJson(res, 400, { error: "worktrees.invalid", problem: query.problem });
+					return;
+				}
+				const { repo, host, state, limit } = query.value;
+				if (!(await auditedRest(res, observability, surface, "worktree_list", { ...(repo === null ? {} : { repo }), ...(host === null ? {} : { host }), state, limit }))) return;
+				const outcome = await substrate.listWorktrees(query.value);
+				if (!outcome.ok) {
+					sendJson(res, outcome.status, outcome.body);
+					return;
+				}
+				sendJson(res, 200, { worktrees: outcome.worktrees, truncated: outcome.truncated });
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
 				await handleMcp(req, res, substrate, caller, observability, claim, admission);
 				return;
@@ -1885,7 +2357,11 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp" || url.pathname === "/memory")) {
+			if (cause instanceof LiveSessionBoundaryError) { sendSteeringResult(res, cause.refusal); return; }
+			if (cause instanceof SteeringReadUnavailableError) { sendJson(res, 503, cause.result); return; }
+			if (cause instanceof ZodError) { sendJson(res, 400, { error: "invalid request fields" }); return; }
+			if (cause instanceof BodyTooLargeError && url.pathname.startsWith("/steering/")) { sendJson(res, 413, { error: "request body too large" }); return; }
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/docs/feedback" || url.pathname === "/corpus/plan" || url.pathname === "/corpus/neardup" || url.pathname === "/corpus/ingest" || url.pathname === "/corpus/reconcile" || url.pathname === "/corpus/reflect" || url.pathname === "/mcp" || url.pathname === "/memory" || url.pathname === "/worktrees/report")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
@@ -1917,6 +2393,8 @@ export function createHttpServer(
 		anonymousLog.stop();
 		refusalLog.stop();
 		loopLag.stop();
+		// A held `GET /steering/wait` would keep `close` waiting for its connection: end every waiter so none outlives the server.
+		substrate.steeringWaiters.closeAll();
 		// A request still in flight can finish after the timers stop. Flush once more when
 		// the server has actually closed, so its count still reaches stderr.
 		return close((err?: Error) => {
@@ -2134,6 +2612,38 @@ async function openEventStream(
 }
 
 /**
+ * The SDK's Node transport in stateless mode (no session id generator), behind the `Transport` interface.
+ *
+ * The SDK declares that transport's three callbacks as accessors typed `T | undefined`, which the interface's
+ * optional fields refuse under `exactOptionalPropertyTypes`. This holds the callbacks as plain optional fields
+ * and forwards each callback and each call to the SDK transport one for one, so the wire behaviour is the SDK's.
+ */
+class StatelessHttpTransport implements Transport {
+	onclose?: () => void;
+	onerror?: (error: Error) => void;
+	onmessage?: <T extends JSONRPCMessage>(message: T, extra?: MessageExtraInfo) => void;
+	readonly inner = new StreamableHTTPServerTransport({});
+
+	constructor() {
+		this.inner.onclose = () => this.onclose?.();
+		this.inner.onerror = (error) => this.onerror?.(error);
+		this.inner.onmessage = (message, extra) => this.onmessage?.(message, extra);
+	}
+
+	start(): Promise<void> {
+		return this.inner.start();
+	}
+
+	send(message: JSONRPCMessage, options?: TransportSendOptions): Promise<void> {
+		return this.inner.send(message, options);
+	}
+
+	close(): Promise<void> {
+		return this.inner.close();
+	}
+}
+
+/**
  * Stateless MCP: a fresh server and transport per request. The substrate holds
  * no per-session state of its own — everything it knows lives in Postgres and
  * Greptime — so there is nothing for a long-lived session to protect.
@@ -2180,20 +2690,30 @@ async function handleMcp(
 		return;
 	}
 
-	const { denials } = await auditToolCalls(observability, caller.surface, calls);
-	if (denials.size > 0) {
-		// 200 with a JSON-RPC error, not an HTTP error: the request was well-formed and
-		// the refusal is the answer to it, which is what an MCP client knows how to read.
-		sendJson(res, 200, auditRefusal(body, denials));
+	const prepared = await settleLiveStep(res, body, () => substrate.prepareLiveBatch(caller, calls));
+	if (prepared === undefined) return;
+	if (!prepared.ok) {
+		const retry: Record<string, string> = prepared.refusal.status === "refused" && prepared.refusal.error.code === "principal-rate-limited" ? { "retry-after": String(prepared.refusal.error.retry_after_s) } : {};
+		sendLiveRefusal(res, liveBatchRefusal(body, prepared.refusal), retry);
 		return;
 	}
-
-	const server = createMcpServer(substrate, caller);
-	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+	let preparedLiveDispatch: PreparedLiveDispatch | undefined;
+	if (prepared.live) {
+		const batch = prepared.batch;
+		const audited = await settleLiveStep(res, body, () => substrate.auditPreparedBatch(batch, calls, "mcp"));
+		if (audited === undefined) return;
+		if (!audited.ok) { sendJson(res, 200, auditRefusal(body, audited.denials)); return; }
+		preparedLiveDispatch = audited.dispatch;
+	} else {
+		const { denials } = await auditToolCalls(observability, caller.surface, calls);
+		if (denials.size > 0) { sendJson(res, 200, auditRefusal(body, denials)); return; }
+	}
+	const server = createMcpServer(substrate, caller, { preparedLiveDispatch });
+	const transport = new StatelessHttpTransport();
 	res.on("close", () => {
 		void transport.close();
 		void server.close();
 	});
 	await server.connect(transport);
-	await transport.handleRequest(req, res, body);
+	await transport.inner.handleRequest(req, res, body);
 }

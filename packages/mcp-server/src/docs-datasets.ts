@@ -33,6 +33,7 @@ export const DATASET_TRIGGERS: Readonly<Record<string, string>> = {
 	desklanes: "merge to main of desklanes",
 	clippyos: "merge to main of clippyos",
 	auctioning: "merge to main of auctioning",
+	corpus: "SUBSTRATE_CORPUS bulk ingest (substrate corpus ingest --execute); no merge trigger",
 };
 
 /** How many versions each dataset keeps (D25-06). */
@@ -330,7 +331,7 @@ export interface ResolvedDataset {
 
 export interface ResolveDeps {
 	config: RagflowConfig;
-	fetchImpl?: FetchLike;
+	fetchImpl?: FetchLike | undefined;
 	/** Create on a name-miss. False rehearses discovery without creating (G2 owns real creation). */
 	createOnMiss?: boolean;
 	/** The dataset list reader; the plane directly when omitted. */

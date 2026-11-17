@@ -1070,7 +1070,7 @@ describe("reconcileSandboxes (U2)", () => {
 	});
 
 	test("a known sandbox that is no longer running is dead weight, not a re-attach", async () => {
-		const { result, removed, warnings, forgotten } = await reconcileHarness({
+		const { result, warnings, forgotten } = await reconcileHarness({
 			live: [box("box-a", { [GRAPH_LABEL]: GID }, "exited")],
 			entries: [entry("box-a", GID)],
 		});

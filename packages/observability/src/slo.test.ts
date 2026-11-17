@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
+import { defined } from "./test-support.ts";
 import { findCounter, sumCounter } from "./metrics.ts";
 import {
 	DOCS_FRESHNESS_ID,
@@ -69,15 +70,16 @@ describe("the catalogue", () => {
 });
 
 describe("admission.limited_rate (uplift-3 N3), beside the catalogue", () => {
-	function decided(counts: { allowed?: number; limited?: number; shadow?: number; bypass?: number }): SubstrateInstruments {
+	function decided(counts: { allowed?: number; limited?: number; shadow?: number; bypass?: number; refused?: number }): SubstrateInstruments {
 		const instruments = new SubstrateInstruments();
-		const record = (decision: "allowed" | "limited" | "shadow_limited" | "bypass", times = 0) => {
+		const record = (decision: "allowed" | "limited" | "shadow_limited" | "bypass" | "refused", times = 0) => {
 			for (let index = 0; index < times; index += 1) instruments.recordAdmission({ surface: "cursor", klass: "read", decision });
 		};
 		record("allowed", counts.allowed);
 		record("limited", counts.limited);
 		record("shadow_limited", counts.shadow);
 		record("bypass", counts.bypass);
+		record("refused", counts.refused);
 		return instruments;
 	}
 
@@ -103,6 +105,13 @@ describe("admission.limited_rate (uplift-3 N3), beside the catalogue", () => {
 		expect(result).toMatchObject({ status: "insufficient-data", samples: 92 });
 		const judged = evaluateAdmissionSlo(decided({ allowed: 97, limited: 3, bypass: 900 }).snapshot());
 		expect(judged).toMatchObject({ status: "breached", samples: 100, observed: 0.03 });
+	});
+
+	test("a refused decision is not a decision either: a cache outage that refuses 900 keeps the 3 % breach", () => {
+		expect(evaluateAdmissionSlo(decided({ allowed: 90, limited: 2, refused: 500 }).snapshot())).toMatchObject({ status: "insufficient-data", samples: 92 });
+		const judged = evaluateAdmissionSlo(decided({ allowed: 97, limited: 3, refused: 900 }).snapshot());
+		expect(judged).toMatchObject({ status: "breached", samples: 100, observed: 0.03 });
+		expect(judged.detail).toBe("3 of 100 (3.000 %); objective is at most 1.000 %");
 	});
 });
 
@@ -775,57 +784,57 @@ describe("the capacity runway objective (uplift-3 N2)", () => {
 	test("48 h growing 100 MB/day against a 10 GB volume is (10 GB - current) / 100 MB days", () => {
 		const samples = ring(48, 100 * MB);
 		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
-		const current = samples.samples().at(-1)!.databaseBytes;
-		expect(result!.id).toBe("capacity.index.runway_days");
-		expect(result!.status).toBe("ok");
-		expect(result!.bytesPerDay).toBeCloseTo(100 * MB, -3);
-		expect(result!.observed).toBeCloseTo((10 * GB - current) / (100 * MB), 1);
-		expect(result!.unit).toBe("days");
-		expect(result!.target).toBe(14);
-		expect(result!.samples).toBe(samples.size);
-		expect(result!.volumeBytes).toBe(10 * GB);
-		expect(result!.currentBytes).toBe(current);
-		expect(result!.detail).toContain("days of runway");
+		const current = defined(samples.samples().at(-1)).databaseBytes;
+		expect(defined(result).id).toBe("capacity.index.runway_days");
+		expect(defined(result).status).toBe("ok");
+		expect(defined(result).bytesPerDay).toBeCloseTo(100 * MB, -3);
+		expect(defined(result).observed).toBeCloseTo((10 * GB - current) / (100 * MB), 1);
+		expect(defined(result).unit).toBe("days");
+		expect(defined(result).target).toBe(14);
+		expect(defined(result).samples).toBe(samples.size);
+		expect(defined(result).volumeBytes).toBe(10 * GB);
+		expect(defined(result).currentBytes).toBe(current);
+		expect(defined(result).detail).toContain("days of runway");
 	});
 
 	test("under 24 h of samples is insufficient-data, whatever the growth", () => {
 		const [result] = evaluateCapacitySlos(ring(23, 100 * GB), { volumeBytes: 10 * GB });
-		expect(result!.status).toBe("insufficient-data");
-		expect(result!.observed).toBeNull();
-		expect(result!.detail).toContain("23.0 h");
-		expect(result!.detail).toContain("24 h apart");
+		expect(defined(result).status).toBe("insufficient-data");
+		expect(defined(result).observed).toBeNull();
+		expect(defined(result).detail).toContain("23.0 h");
+		expect(defined(result).detail).toContain("24 h apart");
 	});
 
 	test("an unset volume is insufficient-data and names the variable", () => {
 		const [result] = evaluateCapacitySlos(ring(48, 100 * MB), { volumeBytes: null });
-		expect(result!.status).toBe("insufficient-data");
-		expect(result!.detail).toContain(INDEX_VOLUME_ENV);
-		expect(result!.statement).toContain("unset");
-		expect(result!.volumeBytes).toBeNull();
+		expect(defined(result).status).toBe("insufficient-data");
+		expect(defined(result).detail).toContain(INDEX_VOLUME_ENV);
+		expect(defined(result).statement).toContain("unset");
+		expect(defined(result).volumeBytes).toBeNull();
 	});
 
 	test("less runway than the floor is breached; a full volume has none", () => {
 		const [tight] = evaluateCapacitySlos(ring(48, 1 * GB, 2 * GB), { volumeBytes: 10 * GB });
-		expect(tight!.status).toBe("breached");
-		expect(tight!.observed).toBeCloseTo(6, 0);
+		expect(defined(tight).status).toBe("breached");
+		expect(defined(tight).observed).toBeCloseTo(6, 0);
 		const [full] = evaluateCapacitySlos(ring(48, 1 * MB, 10 * GB), { volumeBytes: 10 * GB });
-		expect(full!.status).toBe("breached");
-		expect(full!.observed).toBe(0);
-		expect(full!.detail).toContain("no runway remains");
+		expect(defined(full).status).toBe("breached");
+		expect(defined(full).observed).toBe(0);
+		expect(defined(full).detail).toContain("no runway remains");
 	});
 
 	test("an index that is not growing has an unbounded runway and is ok", () => {
 		const [result] = evaluateCapacitySlos(ring(48, -50 * MB, 5 * GB), { volumeBytes: 10 * GB });
-		expect(result!.status).toBe("ok");
-		expect(result!.observed).toBeNull();
-		expect(result!.bytesPerDay).toBeLessThan(0);
-		expect(result!.detail).toContain("not growing");
+		expect(defined(result).status).toBe("ok");
+		expect(defined(result).observed).toBeNull();
+		expect(defined(result).bytesPerDay).toBeLessThan(0);
+		expect(defined(result).detail).toContain("not growing");
 	});
 
 	test("the floor is a threshold", () => {
 		const [result] = evaluateCapacitySlos(ring(48, 100 * MB), { volumeBytes: 10 * GB, targetDays: 1000 });
-		expect(result!.status).toBe("breached");
-		expect(result!.target).toBe(1000);
+		expect(defined(result).status).toBe("breached");
+		expect(defined(result).target).toBe(1000);
 	});
 
 	test("one bulk ingest at the end does not set the rate alone", () => {
@@ -833,7 +842,7 @@ describe("the capacity runway objective (uplift-3 N2)", () => {
 		samples.record(T0 + 48 * 60 * 60_000 + 60_000 * 15, 2 * GB + 500 * MB);
 		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
 		// First-to-last would say 250 MB/day; the fit over 289 flat samples says far less.
-		expect(result!.bytesPerDay).toBeLessThan(30 * MB);
+		expect(defined(result).bytesPerDay).toBeLessThan(30 * MB);
 	});
 
 	test("the ring keeps the first read of each minute bucket, ignores junk and a clock behind it, and is bounded", () => {
@@ -873,19 +882,19 @@ describe("the capacity runway objective (uplift-3 N2)", () => {
 		expect(retained.length).toBeGreaterThan(24 * 60);
 		// Never two samples in one bucket, and timestamps stay on first reads.
 		for (let i = 1; i < retained.length; i++) {
-			expect(Math.floor(retained[i]!.at / 60_000)).toBeGreaterThan(Math.floor(retained[i - 1]!.at / 60_000));
+			expect(Math.floor(defined(retained[i]).at / 60_000)).toBeGreaterThan(Math.floor(defined(retained[i - 1]).at / 60_000));
 		}
-		expect(retained[retained.length - 1]!.at - retained[0]!.at).toBeGreaterThanOrEqual(24 * 3_600_000);
+		expect(defined(retained.at(-1)).at - defined(retained[0]).at).toBeGreaterThanOrEqual(24 * 3_600_000);
 		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
-		expect(result!.status).toBe("ok");
-		expect(result!.bytesPerDay).toBeCloseTo(100 * MB, -3);
-		expect(result!.observed).toBeGreaterThan(70);
+		expect(defined(result).status).toBe("ok");
+		expect(defined(result).bytesPerDay).toBeCloseTo(100 * MB, -3);
+		expect(defined(result).observed).toBeGreaterThan(70);
 	});
 
 	test("a 5 s poller for 23 h is still insufficient-data", () => {
 		const samples = new CapacityRing();
 		for (let t = 0; t <= 23 * 3_600_000; t += 5_000) samples.record(T0 + t, 2 * GB);
-		expect(evaluateCapacitySlos(samples, { volumeBytes: 10 * GB })[0]!.status).toBe("insufficient-data");
+		expect(defined(evaluateCapacitySlos(samples, { volumeBytes: 10 * GB })[0]).status).toBe("insufficient-data");
 	});
 });
 
@@ -911,8 +920,8 @@ describe("served.tokens_est per surface (uplift-4 S1)", () => {
 			["grok-bot", "served.tokens_est", "unconfigured", null, null],
 			["omp", "served.tokens_est", "unconfigured", null, null],
 		]);
-		expect(rows[0]!.detail).toContain(SERVED_TOKENS_ENV);
-		expect(rows[0]!.statement).toContain("(unset)");
+		expect(defined(rows[0]).detail).toContain(SERVED_TOKENS_ENV);
+		expect(defined(rows[0]).statement).toContain("(unset)");
 	});
 
 	test("judged like the burn objectives: a rate from the delta of successive reads, per surface, never breaching another's", () => {
@@ -922,8 +931,8 @@ describe("served.tokens_est per surface (uplift-4 S1)", () => {
 
 		// 600k estimated tokens in a half hour is 1.2M an hour for the bot; the other surface stayed small.
 		const rows = servedTokensBySurface(served({ "grok-bot": 600_001, omp: 11 }).snapshot(), { env: CEILING, ledger, now: HOUR / 2 });
-		const bot = rows.find((row) => row.surface === "grok-bot")!;
-		const omp = rows.find((row) => row.surface === "omp")!;
+		const bot = defined(rows.find((row) => row.surface === "grok-bot"));
+		const omp = defined(rows.find((row) => row.surface === "omp"));
 		expect(bot.status).toBe("breached");
 		expect(bot.observed).toBe(1_200_000);
 		expect(bot.samples).toBe(2);
@@ -935,15 +944,15 @@ describe("served.tokens_est per surface (uplift-4 S1)", () => {
 	test("it is labelled estimated everywhere, and is never the model-reported burn", () => {
 		const instruments = served({ "grok-bot": 5_000_000 });
 		const [row] = servedTokensBySurface(instruments.snapshot(), { env: CEILING, ledger: new BurnLedger(HOUR, 0), now: 0 });
-		expect(row!.unit).toBe("tokens/h (estimated)");
-		expect(row!.title).toContain("Estimated");
-		expect(row!.statement).toContain("estimated");
-		expect(row!.statement).toContain(METRIC.servedTokensEst);
+		expect(defined(row).unit).toBe("tokens/h (estimated)");
+		expect(defined(row).title).toContain("Estimated");
+		expect(defined(row).statement).toContain("estimated");
+		expect(defined(row).statement).toContain(METRIC.servedTokensEst);
 		// The burn objective reads substrate.tokens only: served-only traffic gives it no series.
 		const burn = evaluateBurnSlos(instruments.snapshot(), { env: { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1" }, ledger: new BurnLedger(HOUR, 0), now: 0 }).find((result) => result.id === "burn.tokens");
 		expect(burn?.status).toBe("insufficient-data");
 		// The model-reported counter holds nothing: the served estimate never reached it.
-		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.tokens)!)).toBe(0);
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.tokens)))).toBe(0);
 	});
 
 	test("sharing the burn ledger keeps the series apart", () => {
@@ -960,7 +969,7 @@ describe("served.tokens_est per surface (uplift-4 S1)", () => {
 	test("a malformed ceiling is unset, with one warning", () => {
 		const warnings: string[] = [];
 		const [row] = servedTokensBySurface(served({ omp: 1 }).snapshot(), { env: { [SERVED_TOKENS_ENV]: "plenty" }, ledger: new BurnLedger(HOUR, 0), now: 0, warn: (message) => warnings.push(message) });
-		expect(row!.status).toBe("unconfigured");
+		expect(defined(row).status).toBe("unconfigured");
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain(SERVED_TOKENS_ENV);
 		expect(warnings[0]).toContain("the served-tokens objective it configures is treated as unset");

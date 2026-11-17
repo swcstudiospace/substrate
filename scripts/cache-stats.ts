@@ -103,7 +103,7 @@ export interface Stats {
 }
 
 export interface CollectOptions {
-	now?: () => number;
+	now?: (() => number) | undefined;
 	keyBudget?: number;
 	wallBudgetMs?: number;
 	scanCount?: number;
@@ -312,7 +312,8 @@ export async function collectStats(client: StatsClient, options: CollectOptions 
 }
 
 export function renderTable(stats: Stats): string {
-	const rows = [["class", "keys", "sized", "bytes", "p99", "max", "types"]];
+	const header = ["class", "keys", "sized", "bytes", "p99", "max", "types"];
+	const rows = [header];
 	for (const entry of stats.classes) {
 		rows.push([
 			entry.class,
@@ -326,7 +327,7 @@ export function renderTable(stats: Stats): string {
 				.join(","),
 		]);
 	}
-	const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => (row[column] ?? "").length)));
+	const widths = header.map((_, column) => Math.max(...rows.map((row) => (row[column] ?? "").length)));
 	const lines = rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column] ?? 0)).join("  ").trimEnd());
 	const { recommendation: rec, server } = stats;
 	lines.push(
@@ -451,11 +452,22 @@ function parseArgs(argv: readonly string[], env: Record<string, string | undefin
 		if (flag === "--json") parsed.json = true;
 		else if (flag === "--allow-remote") parsed.allowRemote = true;
 		else if (flag === "--help" || flag === "-h") parsed.help = true;
-		else if (flag === "--url") parsed.url = argv[(at += 1)]?.trim() || undefined;
-		else if (flag === "--keys") parsed.keys = positive(argv[(at += 1)], KEY_BUDGET, 100_000);
-		else if (flag === "--wall-ms") parsed.wallMs = positive(argv[(at += 1)], WALL_BUDGET_MS, 10_000);
-		else if (flag === "--healthz-url") parsed.healthzUrl = argv[(at += 1)]?.trim() || parsed.healthzUrl;
-		else if (flag === "--headroom") parsed.headroom = positive(argv[(at += 1)], DEFAULT_HEADROOM, 100);
+		else if (flag === "--url") {
+			at += 1;
+			parsed.url = argv[at]?.trim() || undefined;
+		} else if (flag === "--keys") {
+			at += 1;
+			parsed.keys = positive(argv[at], KEY_BUDGET, 100_000);
+		} else if (flag === "--wall-ms") {
+			at += 1;
+			parsed.wallMs = positive(argv[at], WALL_BUDGET_MS, 10_000);
+		} else if (flag === "--healthz-url") {
+			at += 1;
+			parsed.healthzUrl = argv[at]?.trim() || parsed.healthzUrl;
+		} else if (flag === "--headroom") {
+			at += 1;
+			parsed.headroom = positive(argv[at], DEFAULT_HEADROOM, 100);
+		}
 		// The argument is never echoed: a positional `redis://:password@host` must not reach the output.
 		else throw new Error("unknown argument");
 	}

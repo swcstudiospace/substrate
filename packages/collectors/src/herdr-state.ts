@@ -26,10 +26,10 @@ export interface HerdrPaneRecord {
 	/** Last status the snapshot reported, including `unknown`. */
 	raw_status: string;
 	session_id: string;
-	repo?: string;
-	branch?: string;
+	repo?: string | undefined;
+	branch?: string | undefined;
 	/** The graph whose worktree holds the pane's working directory (worktree-graph.ts). */
-	graph_id?: string;
+	graph_id?: string | undefined;
 	started_at: string;
 	pane_id: string;
 	terminal_id: string;
@@ -55,7 +55,7 @@ export interface PlannedTransition {
 	rowId: HerdrTransition["rowId"];
 	event: EventInput;
 	/** Set to keep the pane; omit to drop it (session.end). */
-	pane?: HerdrPaneRecord;
+	pane?: HerdrPaneRecord | undefined;
 }
 
 export interface ReconcileResult {
@@ -73,7 +73,7 @@ export interface ReconcileOptions {
 	seed?: boolean;
 	now?: string;
 	/** Repo and branch for a pane. Runs Git, so it is called only where a transition needs it. */
-	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string };
+	attribute?: (pane: HerdrPane) => { repo?: string | undefined; branch?: string | undefined };
 	/** The graph a pane's directory names. Pure path work, checked on every snapshot. Defaults to `graphOfPane`. */
 	graphOf?: (pane: HerdrPane) => string | undefined;
 }
@@ -109,7 +109,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * a string on the next bump.
  */
 function unmappedCount(map: Record<string, number>, agent: string): number {
-	const count = Object.prototype.hasOwnProperty.call(map, agent) ? map[agent] : 0;
+	const count = Object.hasOwn(map, agent) ? map[agent] : 0;
 	return typeof count === "number" ? count : 0;
 }
 
@@ -214,7 +214,7 @@ function graphFor(pane: HerdrPane, options: ReconcileOptions): string | undefine
 	return (options.graphOf ?? graphOfPane)(pane);
 }
 
-function attribute(pane: HerdrPane, options: ReconcileOptions): { repo?: string; branch?: string } {
+function attribute(pane: HerdrPane, options: ReconcileOptions): { repo?: string | undefined; branch?: string | undefined } {
 	const cwd = pane.cwd ?? pane.foreground_cwd;
 	if (!cwd || !options.attribute) return {};
 	return options.attribute(pane);
@@ -238,6 +238,15 @@ function recordFor(pane: HerdrPane, agent: string, surface: Surface, now: string
 	};
 }
 
+/** The attribution fields a transition carries: a key per value that is present, none for `undefined`. */
+function attributionOf(record: Pick<HerdrPaneRecord, "repo" | "branch" | "graph_id">): { repo?: string; branch?: string; graph_id?: string } {
+	return {
+		...(record.repo === undefined ? {} : { repo: record.repo }),
+		...(record.branch === undefined ? {} : { branch: record.branch }),
+		...(record.graph_id === undefined ? {} : { graph_id: record.graph_id }),
+	};
+}
+
 function planned(identity: string, transition: HerdrTransition, pane?: HerdrPaneRecord): PlannedTransition {
 	return { identity, rowId: transition.rowId, event: transitionToEvent(transition), pane };
 }
@@ -251,9 +260,7 @@ function startOf(identity: string, pane: HerdrPane, agent: string, surface: Surf
 		pane_id: pane.pane_id,
 		terminal_id: pane.terminal_id ?? "",
 		session_id: next.session_id,
-		repo: next.repo,
-		branch: next.branch,
-		graph_id: next.graph_id,
+		...attributionOf(next),
 		status: next.status,
 		herdr_type: "pane.agent_detected",
 	}, next);
@@ -267,9 +274,7 @@ function endOf(identity: string, prev: HerdrPaneRecord, reason: "pane_gone" | "a
 		pane_id: prev.pane_id,
 		terminal_id: prev.terminal_id,
 		session_id: prev.session_id,
-		repo: prev.repo,
-		branch: prev.branch,
-		graph_id: prev.graph_id,
+		...attributionOf(prev),
 		end_reason: reason,
 		herdr_type: "pane.exited",
 	});
@@ -363,9 +368,7 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 				pane_id: pane.pane_id,
 				terminal_id: pane.terminal_id,
 				session_id: prev.session_id,
-				repo: next.repo,
-				branch: next.branch,
-				graph_id: next.graph_id,
+				...attributionOf(next),
 				status: raw,
 				previous_status: prev.status,
 				herdr_type: "pane.agent_status_changed",

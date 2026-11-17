@@ -22,7 +22,7 @@ export type ContainerSpecOptions = {
 	token: string;
 	image?: string;
 	network: SandboxNetwork;
-	readOnlyBinds?: string[];
+	readOnlyBinds?: string[] | undefined;
 };
 
 export function isValidGraphId(graphId: unknown): graphId is string {

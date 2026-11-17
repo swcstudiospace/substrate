@@ -21,7 +21,7 @@ import { join } from "node:path";
 const SCRIPT = join(import.meta.dir, "..", "infra", "desktop", "substrate-desktop.sh");
 const GATE_BYTES = 10737418240;
 
-const DOCKER_STUB = String.raw`#!/usr/bin/env bash
+const DOCKER_STUB = `#!/usr/bin/env bash
 echo "docker $*" >>"$STUB_LOG"
 	if [ -z "$STUB_IMAGE" ]; then STUB_IMAGE=present; fi
 	if [ -z "$STUB_ENDPOINT" ]; then STUB_ENDPOINT=local; fi
@@ -32,6 +32,10 @@ echo "docker $*" >>"$STUB_LOG"
 		remote) echo "tcp://other-host:2375" ;;
 		broken) exit 1 ;;
 		empty) : ;;
+		hang) exec sleep 30 ;;
+		# A client that ignores SIGTERM: the ignore is inherited by the sleep, so
+		# only the forced kill after the grace period can end it.
+		ignore-term) trap '' TERM; sleep 30 ;;
 		*) echo "unix:///var/run/docker.sock" ;;
 		esac
 		;;
@@ -84,7 +88,7 @@ echo "df $*" >>"$STUB_LOG"
 printf '%s\n' "Avail" "$STUB_DF_AVAIL"
 `;
 
-const OPENSSL_STUB = String.raw`#!/usr/bin/env bash
+const OPENSSL_STUB = `#!/usr/bin/env bash
 echo "openssl $*" >>"$STUB_LOG"
 printf '%s' "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 `;
@@ -112,7 +116,7 @@ type Knobs = {
 	dfAvail?: string;
 	image?: "present" | "absent";
 	container?: ContainerKnob;
-	endpoint?: "local" | "remote" | "broken" | "empty";
+	endpoint?: "local" | "remote" | "broken" | "empty" | "hang" | "ignore-term";
 	geometry?: "ok" | "hang";
 };
 
@@ -124,7 +128,7 @@ interface Rig {
 }
 type RunResult = { code: number; out: string; err: string; log: string; envFile: string };
 
-function makeRig(knobs: Knobs = {}): Rig {
+function makeRig(): Rig {
 	const stubDir = mkdtempSync(join(tmpdir(), "substrate-desktop-stub-"));
 	made.push(stubDir);
 	writeFileSync(join(stubDir, "docker"), DOCKER_STUB, { mode: 0o755 });
@@ -151,7 +155,7 @@ function baseEnv(rig: Rig, knobs: Knobs): Record<string, string> {
 }
 
 function runScript(sub: string, knobs: Knobs = {}, extraEnv: Record<string, string> = {}): RunResult {
-	const rig = makeRig(knobs);
+	const rig = makeRig();
 	const child = Bun.spawnSync(["bash", SCRIPT, sub], {
 		env: { ...baseEnv(rig, knobs), ...extraEnv },
 		stdout: "pipe",
@@ -279,9 +283,39 @@ describe("substrate-desktop.sh up", () => {
 		assertCleanArgv(r.log);
 	});
 
-	itRoot("a failed endpoint probe proceeds; later calls fail truthfully", () => {
+	itRoot("a failed endpoint probe refuses before any later docker call", () => {
 		const r = runScript("up", { endpoint: "broken" });
-		expect(r.code).toBe(0);
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("could not prove the local docker endpoint");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker start "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker image "))).toBe(false);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("a hung endpoint probe is bounded and refuses", () => {
+		const start = Date.now();
+		const r = runScript("up", { endpoint: "hang" }, { SUBSTRATE_DESKTOP_PROBE_TIMEOUT_S: "1" });
+		expect(Date.now() - start).toBeLessThan(15_000);
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("could not prove the local docker endpoint");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("a probe that ignores SIGTERM is force-killed and refuses", () => {
+		const start = Date.now();
+		const r = runScript(
+			"up",
+			{ endpoint: "ignore-term" },
+			{ SUBSTRATE_DESKTOP_PROBE_TIMEOUT_S: "1", SUBSTRATE_DESKTOP_PROBE_KILL_AFTER_S: "1" },
+		);
+		// The stub sleeps 30 s and shrugs off SIGTERM; without the kill-after the
+		// script would wait the full sleep.
+		expect(Date.now() - start).toBeLessThan(15_000);
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("could not prove the local docker endpoint");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
 		assertCleanArgv(r.log);
 	});
 

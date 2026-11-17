@@ -25,12 +25,14 @@ import {
 	DEFAULT_SKILLS_REPO,
 	DEFAULT_SKILLS_STATE,
 	configWarnings,
+	embedCacheFromEnv,
 	isOperator,
 	loadConfig,
 	loadLedgerSettings,
 	parseRedisUrl,
 	railwayHostingFromEnv,
 	surfaceForToken,
+	teiFromEnv,
 } from "./config.ts";
 
 // Generated for each run, so no token-shaped literal sits in the repository.
@@ -288,6 +290,9 @@ describe("SOLANA_* anchor config", () => {
 			keypairPath: null,
 			pubkey: null,
 			cli: SOLANA_CLI_DEFAULT,
+			problem: null,
+			signerSet: null,
+			signerSetProblem: null,
 		});
 	});
 
@@ -303,7 +308,32 @@ describe("SOLANA_* anchor config", () => {
 			keypairPath: "/etc/substrate/anchor-keypair.json",
 			pubkey: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
 			cli: "/usr/local/bin/solana",
+			problem: null,
+			signerSet: null,
+			signerSetProblem: null,
 		});
+	});
+
+	test("a local test-validator URL is accepted", () => {
+		expect(loadConfig({ SOLANA_RPC_URL: "http://localhost:8899" }).solana.problem).toBeNull();
+	});
+
+	test("a refused SOLANA_RPC_URL sets problem, keeps the value, never throws, and is warned about", () => {
+		for (const url of [
+			"https://api.mainnet-beta.solana.com",
+			"https://API.TESTNET.SOLANA.COM",
+			"https://user:s3cret@api.devnet.solana.com",
+			"https://api.devnet.solana.com/#frag",
+			"ftp://api.devnet.solana.com",
+		]) {
+			const config = loadConfig({ SOLANA_RPC_URL: url });
+			expect(config.solana.rpcUrl).toBe(url);
+			expect(config.solana.problem).toContain("SOLANA_RPC_URL refused");
+			expect(config.solana.problem).not.toContain("s3cret");
+			const warnings = configWarnings(config).join("\n");
+			expect(warnings).toContain("SOLANA_RPC_URL");
+			expect(warnings).not.toContain("s3cret");
+		}
 	});
 });
 
@@ -354,6 +384,48 @@ describe("railwayHostingFromEnv: the LightRAG key without a public URL", () => {
 	test("a blank LIGHTRAG_API_KEY is no key", () => {
 		const railway = railwayHostingFromEnv({ RAILWAY_PROJECT_ID: "proj", LIGHTRAG_API_KEY: "   " });
 		expect(railway?.apiKey).toBeNull();
+	});
+});
+
+describe("SUBSTRATE_LIGHTRAG_QUERY_MODE", () => {
+	const REACH = { LIGHTRAG_URL: "http://lightrag.test/" };
+
+	test("unset leaves the reach exactly as before: no queryMode key, no warning", () => {
+		expect(loadConfig(REACH).lightrag).toStrictEqual({ url: "http://lightrag.test" });
+		expect(loadConfig({ ...REACH, LIGHTRAG_API_KEY: "k" }).lightrag).toStrictEqual({ url: "http://lightrag.test", apiKey: "k" });
+		expect(configWarnings(loadConfig(REACH))).toEqual([]);
+	});
+
+	test("each valid mode is parsed, case- and space-insensitively", () => {
+		for (const mode of ["naive", "local", "global", "hybrid", "mix"] as const) {
+			expect(loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: mode }).lightrag?.queryMode).toBe(mode);
+		}
+		const config = loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: "  NaIvE " });
+		expect(config.lightrag?.queryMode).toBe("naive");
+		expect(config.lightragQueryModeRejected).toBe(false);
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("an invalid value falls back to the default and is named by key, never by value", () => {
+		const config = loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: "bypass-secret-value" });
+		expect(config.lightrag).toStrictEqual({ url: "http://lightrag.test" });
+		expect(config.lightragQueryModeRejected).toBe(true);
+		const warnings = configWarnings(config);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_LIGHTRAG_QUERY_MODE");
+		expect(warnings.join("\n")).not.toContain("bypass-secret-value");
+	});
+
+	test("an empty or blank value is unset: default, no warning", () => {
+		for (const raw of ["", "   "]) {
+			const config = loadConfig({ ...REACH, SUBSTRATE_LIGHTRAG_QUERY_MODE: raw });
+			expect(config.lightrag).toStrictEqual({ url: "http://lightrag.test" });
+			expect(configWarnings(config)).toEqual([]);
+		}
+	});
+
+	test("an invalid value warns even with no LightRAG reach configured", () => {
+		expect(configWarnings(loadConfig({ SUBSTRATE_LIGHTRAG_QUERY_MODE: "nope" }))).toEqual([expect.stringContaining("SUBSTRATE_LIGHTRAG_QUERY_MODE")]);
 	});
 });
 
@@ -563,5 +635,90 @@ describe("HINDSIGHT_MENTAL_MODELS", () => {
 		const config = loadConfig({ HINDSIGHT_BANKS: "sub-omp", HINDSIGHT_MENTAL_MODELS: `sub-omp=${ids.join(",")};sub-omp=mm_0` });
 		expect(config.mentalModels.models).toHaveLength(20);
 		expect(config.mentalModels.warnings).toHaveLength(2);
+	});
+});
+
+describe("TEI and the embedding cache (phase 64)", () => {
+	test("with TEI_URL unset there is no TEI, whatever else is set, and no endpoint class", () => {
+		const config = loadConfig({ TEI_API_KEY: "k", SUBSTRATE_TEI_MODEL: "m", SUBSTRATE_TEI_DIM: "384" });
+		expect(config.tei).toBeNull();
+		expect(config.dbEndpoints.tei).toBeUndefined();
+		expect(config.embedCache).toEqual({ enabled: false, ttlS: 604_800 });
+	});
+
+	test("a configured TEI reads its pins and limits, trims the URL, and keeps defaults for a missing or bad number", () => {
+		expect(teiFromEnv({ TEI_URL: " http://127.0.0.1:8080/// " })).toEqual({ url: "http://127.0.0.1:8080", timeoutMs: 10_000, batch: 32 });
+		expect(
+			teiFromEnv({
+				TEI_URL: "http://127.0.0.1:8080",
+				TEI_API_KEY: " key ",
+				SUBSTRATE_TEI_MODEL: " bge ",
+				SUBSTRATE_TEI_DIM: "384",
+				SUBSTRATE_TEI_TIMEOUT_MS: "2500",
+				SUBSTRATE_TEI_BATCH: "8",
+			}),
+		).toEqual({ url: "http://127.0.0.1:8080", apiKey: "key", model: "bge", dim: 384, timeoutMs: 2500, batch: 8 });
+		const bad = teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_DIM: "wide", SUBSTRATE_TEI_TIMEOUT_MS: "soon", SUBSTRATE_TEI_BATCH: "" });
+		expect(bad).toEqual({ url: "http://127.0.0.1:8080", timeoutMs: 10_000, batch: 32 });
+		expect(teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_DIM: "0" })?.dim).toBeUndefined();
+		expect(teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_DIM: "99999" })?.dim).toBeUndefined();
+	});
+
+	test("timeout and batch are clamped, not refused", () => {
+		const high = teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_TIMEOUT_MS: "9999999", SUBSTRATE_TEI_BATCH: "9999" });
+		expect(high).toMatchObject({ timeoutMs: 120_000, batch: 512 });
+		const low = teiFromEnv({ TEI_URL: "http://127.0.0.1:8080", SUBSTRATE_TEI_TIMEOUT_MS: "1", SUBSTRATE_TEI_BATCH: "0" });
+		expect(low).toMatchObject({ timeoutMs: 100, batch: 1 });
+	});
+
+	test("the embedding cache is off unless exactly `on`, and its TTL is clamped", () => {
+		expect(embedCacheFromEnv({}).enabled).toBe(false);
+		for (const value of ["", "off", "1", "true", "yes", "onn"]) expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE: value }).enabled).toBe(false);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE: " ON " }).enabled).toBe(true);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "3600" }).ttlS).toBe(3600);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "1" }).ttlS).toBe(60);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "99999999" }).ttlS).toBe(2_592_000);
+		expect(embedCacheFromEnv({ SUBSTRATE_EMBED_CACHE_TTL_S: "forever" }).ttlS).toBe(604_800);
+	});
+
+	test("TEI_URL is classed like a data-plane endpoint: loopback, a listed proxy or direct", () => {
+		expect(loadConfig({ TEI_URL: "http://127.0.0.1:8080" }).dbEndpoints.tei).toBe("loopback");
+		expect(loadConfig({ TEI_URL: "http://tei.example.test:8080", SUBSTRATE_DB_PROXY_ALLOW: "tei.example.test:8080" }).dbEndpoints.tei).toBe("proxy");
+		expect(loadConfig({ TEI_URL: "http://tei.example.test:8080" }).dbEndpoints.tei).toBe("direct");
+		// The database planes' own classes are untouched by it.
+		expect(loadConfig({ TEI_URL: "http://tei.example.test:8080" }).dbEndpoints.classes).toEqual({});
+	});
+
+	test("enforce refuses a direct TEI_URL with a ConfigError that names the variable and not the host", () => {
+		const refuse = () => loadConfig({ TEI_URL: "http://tei.example.test:8080", SUBSTRATE_DB_ENDPOINT_POLICY: "enforce" });
+		expect(refuse).toThrow(ConfigError);
+		let message = "";
+		try {
+			refuse();
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("TEI_URL");
+		expect(message).not.toContain("example.test");
+	});
+});
+
+describe("authoritative live-session lease", () => {
+	test("the loader supplies the default independently of optional historical storage", () => {
+		expect(loadConfig({}).liveSessionLeaseS).toBe(3_600);
+		expect(loadConfig({ SUBSTRATE_STEERING_SESSIONS_TABLE: "off" }).liveSessionLeaseS).toBe(3_600);
+		expect(loadConfig({ SUBSTRATE_STEERING_SESSIONS_TABLE: "on", SUBSTRATE_LIVE_SESSION_LEASE_S: "600" }).liveSessionLeaseS).toBe(600);
+	});
+
+	test("whole-second bounds are inclusive and out-of-range integers clamp", () => {
+		for (const [raw, expected] of [["60", 60], ["86400", 86_400], ["59", 60], ["86401", 86_400], ["0", 60], [" 300 ", 300]] as const) {
+			expect(loadConfig({ SUBSTRATE_LIVE_SESSION_LEASE_S: raw }).liveSessionLeaseS).toBe(expected);
+		}
+	});
+
+	test("missing, blank, fractional and nonnumeric leases use the default", () => {
+		for (const raw of [undefined, "", " ", "-1", "60.5", "NaN", "Infinity", "forever"]) {
+			expect(loadConfig({ SUBSTRATE_LIVE_SESSION_LEASE_S: raw }).liveSessionLeaseS).toBe(3_600);
+		}
 	});
 });

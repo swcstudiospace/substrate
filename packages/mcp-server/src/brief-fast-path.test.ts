@@ -6,7 +6,7 @@
  * round trip for generation keys, and the memoised `/healthz`. Every store is
  * a fake; nothing here opens a socket to anything but its own server.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import type { AddressInfo } from "node:net";
 import { BRIEF_SOURCES, composeBrief, recentActionsSql, type BriefSource } from "./brief.ts";
 import {
@@ -19,9 +19,10 @@ import {
 	type CacheRedis,
 } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
-import { createObservability, type Observability } from "./observe.ts";
+import { auditToolCalls, createObservability, type Observability } from "./observe.ts";
 import { createHttpServer, type HttpServerOptions } from "./server.ts";
 import { Substrate, briefEtag, etagMatches } from "./service.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
 
 /** A redis that answers after `delayMs`, remembers every command and may lack MGET. */
 class FakeRedis implements CacheRedis {
@@ -221,7 +222,7 @@ describe("composeBrief runs its reads together", () => {
 describe("Substrate.briefDetailed", () => {
 	function substrateWith(index: Record<string, unknown>, redis: FakeRedis = new FakeRedis(), env: Record<string, string> = {}) {
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-		return { substrate: new Substrate(loadConfig(env), { index: index as never, greptime: null, cache }), cache, redis };
+		return { substrate: new Substrate(loadConfig(env), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } }), cache, redis };
 	}
 	const request = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
 
@@ -291,6 +292,59 @@ describe("Substrate.briefDetailed", () => {
 		expect(redis.commands.filter((command) => command === "SET")).toHaveLength(2);
 	});
 
+	test("snapshot: a directive queued while a source is down still reaches the degraded reply, and is never stored in the snapshot", async () => {
+		let down = false;
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const index = {
+			getGraph: async () => {
+				if (down) throw new Error("postgres is down");
+				return graphView("ut-1");
+			},
+			openGraphs: async () => [],
+			memoryForBrief: async () => [],
+		};
+		const authority = createTestLiveSessionAuthority();
+		const caller = { surface: "cursor", isOperator: false } as const;
+		const session = await issueLiveSession(authority, { caller, repoId: "acme/app" });
+		const config = loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on", SUBSTRATE_PLANNING_STEERING: "on", SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp" });
+		const observability = createObservability(config, {});
+		const substrate = new Substrate(
+			config,
+			{ index: index as never, greptime: null, cache, steering: { liveSessions: authority, history: { append: async (): Promise<void> => undefined } } },
+			observability.observer,
+			{ auditCalls: (principal, calls, transport) => auditToolCalls(observability, principal.surface, calls, transport) },
+		);
+		const own = { ...request, session_id: "historical-brief-label", steering_session_id: session.sessionId };
+		const access = { caller, sessionBinding: session.sessionBinding };
+		const complete = await substrate.briefDetailed(own, undefined, caller.surface, access);
+		expect(complete.state).toBe("complete");
+		const queued = await substrate.steering.inbox?.enqueue({
+			id: "d-late",
+			author: { principalId: "omp", kind: "human" },
+			createdAtMs: Date.now(),
+			priority: "normal",
+			targetSessionId: session.sessionId,
+			action: "annotate",
+			body: "Read the migration notes first.",
+			conflictsWithActivePlan: false,
+		});
+		expect(queued?.ok).toBe(true);
+
+		down = true;
+		await redis.incr(graphGenerationKey("ut-1"));
+		const served = await substrate.briefDetailed(own, undefined, caller.surface, access);
+		expect(served.state).toBe("snapshot");
+		expect(served.text).toContain("Steering: 1 queued directive for this session");
+		expect(served.text).toContain("Read the migration notes first.");
+		const stored = redis.values.get(snapshotKey("brief-snapshot", "cursor", { repo: "acme/app", branch: null, graph_id: "ut-1" }));
+		expect(stored).toBeDefined();
+		expect(stored).not.toContain("Read the migration notes first.");
+		expect(JSON.stringify([...redis.values])).not.toContain(session.sessionBinding);
+		await authority.close(session.access);
+		await expect(substrate.briefConditional(own, served.etag, undefined, caller.surface, access)).rejects.toMatchObject({ refusal: { error: { code: "not-found" } } });
+	});
+
 	test("SUBSTRATE_BRIEF_SNAPSHOT_TTL_S=0 writes no snapshot and reads none", async () => {
 		let down = false;
 		const { substrate, redis } = substrateWith(
@@ -339,7 +393,7 @@ describe("heartbeat invalidation scope", () => {
 		const index = {
 			heartbeatNode: async () => ({ ok: true, lease, decision: { ok: true } }),
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 		const result = await substrate.heartbeatNode("ut-1", "n1", "lease-1", "cursor");
 		expect(result.ok).toBe(true);
 		expect(bumps).toEqual([graphGenerationKey("ut-1")]);
@@ -356,7 +410,7 @@ describe("heartbeat invalidation scope", () => {
 		const index = {
 			heartbeatNode: async () => ({ ok: false, lease: null, decision: { ok: false, reason: "not-holder" } }),
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 		await substrate.heartbeatNode("ut-1", "n1", "lease-1", "cursor");
 		expect(bumps).toEqual([]);
 	});
@@ -451,7 +505,7 @@ describe("over HTTP", () => {
 		const config: SubstrateConfig = loadConfig(env);
 		const observability = createObservability(config, env);
 		await observability.start();
-		const substrate = new Substrate(config, { index: null, greptime: null, ...stores } as ConstructorParameters<typeof Substrate>[1], observability.observer);
+		const substrate = new Substrate(config, { index: null, greptime: null, steering: { history: null, liveSessions: null }, ...stores } as ConstructorParameters<typeof Substrate>[1], observability.observer);
 		const server = createHttpServer(substrate, config, observability, options);
 		const listening = Promise.withResolvers<void>();
 		server.listen(0, "127.0.0.1", listening.resolve);
@@ -617,4 +671,76 @@ describe("config knobs", () => {
 			briefRecentWindowDays: 7,
 		});
 	});
+});
+
+describe("private brief final-release authority across real cache paths", () => {
+	for (const path of ["full", "fast", "snapshot", "last-good"] as const) {
+		for (const terminal of ["close", "expire", "outage"] as const) test(`${path} cannot release private text or 304 after ${terminal}`, async () => {
+			const redis = new FakeRedis();
+			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {}, swr: { mode: path === "last-good" ? "enforce" : "off", windowS: 30 } });
+			const authority = createTestLiveSessionAuthority({ nowMs: Date.now(), leaseSeconds: 60 });
+			const caller = { surface: "cursor", isOperator: false } as const;
+			const session = await issueLiveSession(authority, { caller, repoId: "acme/app", steering: "PRIVATE-BRIEF-DIRECTION", planningHash: "PRIVATE-BRIEF-PLAN" });
+			const config = loadConfig({ SUBSTRATE_BRIEF_SESSIONS: "on", SUBSTRATE_PLANNING_STEERING: "on" });
+			const observability = createObservability(config, {});
+			const reached = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let down = false;
+			let armed = false;
+			let paused = false;
+			const pause = async () => {
+				if (!armed || paused) return;
+				paused = true;
+				reached.resolve();
+				await release.promise;
+			};
+			const index = {
+				getGraph: async () => {
+					if (path === "full") await pause();
+					if (down) throw new Error("isolated graph unavailable");
+					return graphView("ut-1");
+				},
+				openGraphs: async () => [],
+				memoryForBrief: async () => [],
+			};
+			const substrate = new Substrate(config, {
+				index: index as never, greptime: null, cache,
+				steering: { liveSessions: authority, history: { append: async () => undefined } },
+			}, observability.observer, { auditCalls: (principal, calls, transport) => auditToolCalls(observability, principal.surface, calls, transport) });
+			const request = { surface: caller.surface, repo: "acme/app", graph_id: "ut-1", session_id: "historical-brief-label", steering_session_id: session.sessionId };
+			const live = { caller, sessionBinding: session.sessionBinding };
+			if (path !== "full") {
+				const warm = await substrate.briefDetailed(request, undefined, caller.surface, live);
+				expect(warm.state).toBe("complete");
+				expect(warm.text).toContain("PRIVATE-BRIEF-DIRECTION");
+				expect([...redis.values.keys()].some((key) => key.includes(":brief:"))).toBe(true);
+				expect([...redis.values.keys()].some((key) => key.includes(":brief-snapshot:"))).toBe(true);
+			}
+			const get = redis.get.bind(redis);
+			const read = spyOn(redis, "get").mockImplementation(async (key) => {
+				const value = await get(key);
+				if ((path === "fast" && key.includes(":brief:")) || ((path === "snapshot" || path === "last-good") && key.includes(":brief-snapshot:"))) await pause();
+				return value;
+			});
+			if (path === "snapshot" || path === "last-good") {
+				down = true;
+				await redis.incr(graphGenerationKey("ut-1"));
+			}
+			armed = true;
+			const pending = substrate.briefConditional(request, "*", undefined, caller.surface, live);
+			try {
+				await reached.promise;
+				expect(paused).toBe(true);
+				if (terminal === "close") expect((await authority.close(session.access)).ok).toBe(true);
+				else if (terminal === "expire") authority.advance(60_000);
+				else authority.unavailable = true;
+				release.resolve();
+				await expect(pending).rejects.toMatchObject({ refusal: { status: "refused", error: { code: terminal === "outage" ? "session-unavailable" : "not-found" } } });
+				const stored = JSON.stringify([...redis.values]);
+				expect(stored).not.toContain(session.sessionBinding);
+				expect(stored).not.toContain("PRIVATE-BRIEF-DIRECTION");
+				expect(stored).not.toContain("PRIVATE-BRIEF-PLAN");
+			} finally { release.resolve(); read.mockRestore(); observability.stop(); }
+		});
+	}
 });

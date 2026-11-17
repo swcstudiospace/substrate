@@ -64,8 +64,6 @@ const STATES = [
 ] as const;
 const TEAM_ID = "team-rh";
 const DONE_ID = "state-done";
-const stateName = (id: string): string =>
-	id === DONE_ID ? "Done" : (STATES.find((s) => s.id === id)?.name ?? id);
 
 interface FakeWorld {
 	issues: Map<string, LinearIssue>;
@@ -286,9 +284,14 @@ export async function main(argv: string[]): Promise<number> {
 		world.byIdentifier.set(identifier, issue);
 		return { node_id: nodeId, linear_issue_id: id, linear_identifier: identifier, notion_page: pageHex(`${i + 1}`) };
 	});
-	const issueOf = (nodeId: string): LinearIssue => world.byIdentifier.get(`RHM-${100 + Number(nodeId.slice(1)) - 1}`)!;
+	const issueOf = (nodeId: string): LinearIssue => {
+		const issue = world.byIdentifier.get(`RHM-${100 + Number(nodeId.slice(1)) - 1}`);
+		if (issue === undefined) throw new Error(`no rehearsal issue for node ${nodeId}`);
+		return issue;
+	};
 
-	const index = new IndexStore(config.postgresUrl!);
+	if (config.postgresUrl === undefined) throw new Error("SUBSTRATE_PG_URL is not set for the mirror rehearsal");
+	const index = new IndexStore(config.postgresUrl);
 	await index.migrate();
 	const substrate = new Substrate(config, { index, greptime: null });
 	await index.registerGraph({ graph_id: GRAPH, repo: REPO, branch: "main", nodes });

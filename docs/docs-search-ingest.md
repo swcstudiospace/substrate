@@ -148,9 +148,25 @@ no `note`.
 
 ## Hybrid retrieval and context augmentation
 
-Every retrieval is a hybrid search: RAGFlow combines keyword and vector similarity, and `vector_similarity_weight` sets the vector share. The keyword share is its complement, and the two sum to 1. `docs_search` can also add a `context` block built from recalled memories and the caller's session ledger. The context is read-side only and is never stored.
+The docs plane is `lightrag` or `ragflow`, chosen by `resolveDocsBackend` in `packages/mcp-server/src/config.ts`: `SUBSTRATE_DOCS_BACKEND` wins when set to a usable value; otherwise a set `LIGHTRAG_URL` selects `lightrag` and an unset one selects `ragflow`, the legacy fallback. `lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. Production has served docs from LightRAG since the cutover of 2026-10-28 (`SUBSTRATE_DOCS_BACKEND=lightrag`, naive query mode until the operator decides on a real LLM). The RAGFlow service was deleted on 2026-10-25; its code stays until the operator approves removal.
 
-### Vector weight
+### LightRAG query
+
+On `lightrag`, each retrieval is one `POST /query` with body `{query, mode, top_k, only_need_context: true}` (`packages/mcp-server/src/planes/lightrag.ts:382`). `top_k` is clamped to 1–10 (`MAX_LIGHTRAG_TOP_K`, `lightrag.ts:106`, `:378`). The request sets `only_need_context: true`, so the returned chunks are what the citations quote.
+
+The query mode is resolved by `resolveQueryMode` (`lightrag.ts:118-130`):
+
+1. An explicit `mode` argument wins. Only in-substrate callers pass one (`queryWithGraph`, `lightrag.ts:373`); `docs_search` has no `mode` field.
+2. Else a leading `/mix` or `/hybrid` in the question selects that mode and is stripped from the query.
+3. Else the deployment default: `SUBSTRATE_LIGHTRAG_QUERY_MODE` (`naive`, `local`, `global`, `hybrid` or `mix`, case-insensitive; `LightragConfig.queryMode`), and `hybrid` (`DEFAULT_QUERY_MODE`, `lightrag.ts:40`) when it is unset or not a mode. A LightRAG with no real LLM builds no knowledge graph and must use `naive`, which retrieves vector chunks only.
+
+The modes are `naive`, `local`, `global`, `hybrid` and `mix` (`lightrag.ts:37`). `hybrid` and `mix` fuse the knowledge graph (`isGraphMode`, `lightrag.ts:50`). `dataset_ids` is accepted and ignored: LightRAG serves one knowledge base per server (`lightrag.ts:95-99`).
+
+### RAGFlow hybrid search
+
+On `ragflow`, every retrieval is a hybrid search: RAGFlow combines keyword and vector similarity, and `vector_similarity_weight` sets the vector share. The keyword share is its complement, and the two sum to 1.
+
+#### Vector weight
 
 The weight sent as `vector_similarity_weight` resolves in `loadConfig` (`config.ts`). The first match wins:
 
@@ -165,21 +181,36 @@ The two variables do not validate alike:
 - `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` must be a number in [0, 1]. Anything else makes `loadConfig` throw a `ConfigError` that names `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`. The check runs even when `SUBSTRATE_DOCS_VECTOR_WEIGHT` is also set.
 - `SUBSTRATE_DOCS_VECTOR_WEIGHT` is not a configuration error. A value that is not a number, or lies outside [0, 1], falls back to the RAGFlow weight (then 0.3).
 
-### Reranker
+#### Reranker
 
 `SUBSTRATE_RAGFLOW_RERANK_ID` names a reranker model. The value is trimmed. Unset or blank, the retrieval request carries no `rerank_id` field. When set, every `POST /api/v1/retrieval` carries `rerank_id` with that id. The reranker is opt-in: the code records that RAGFlow ships no reranker by default (D46-b), and the deployed RAGFlow version is not attested, so the substrate never turns one on by itself.
 
+### Failure and fallback
+
+On `lightrag`, a failed query is retried under the plane's retry policy (`docs-search.ts:989`). If it still fails, or the LightRAG breaker is open, the search answers from Hindsight recall (`lightragFallback`, `docs-search.ts:895-921`, entered at `:945` and `:949`, `:998`, `:1002`):
+
+- The reply carries `backend: "hindsight"`, `fallback: "hindsight"`, `degraded: true`, and `reason` naming the LightRAG failure. Its notice reads "Served from Hindsight fallback: <reason>." (`hindsightFallbackReply`, `docs-search.ts:617-626`).
+- One `warning` event, `docs search failed: <reason>`, carries `payload.fallback: "hindsight"` (`docs-search.ts:908-917`).
+- A degraded reply is never stored (`docs-search.ts:144`).
+- If recall returns nothing, the plain degraded reply stands, with the LightRAG reason and no Hindsight citations (`docs-search.ts:903`).
+
+A failed LightRAG query does not retry against RAGFlow. The RAGFlow failure reasons and the per-dataset fan-out below describe the `ragflow` plane only.
+
+### Fan-out under one budget (RAGFlow)
+
+The datasets are retrieved **concurrently** on the RAGFlow plane (one retrieval per resolved dataset, at most the configured three) under one shared deadline, `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` (default 4000; `0` keeps only the plane client's own 4 s per-call timeout, the pre-N5 behaviour and the rollback). A search costs its slowest dataset, not the sum, and a stalled dataset costs the budget. Failure is isolated per dataset: a dataset that fails or outlives the deadline is listed as `degraded_datasets: [{dataset, reason}]`, while the other datasets' citations are returned, score-sorted and capped at 10. The reply is `degraded: true` only when **no** dataset answered; then `reason` is the first failure. A partially served reply is never cached.
+
 ### The `context` block
 
-`docs_search` takes an optional `context` boolean, default `false`. `POST /docs/search` takes the same field, and the MCP input schema declares it a boolean.
+`docs_search` takes an optional `context` boolean, default `false`, on both planes. `POST /docs/search` takes the same field, and the MCP input schema declares it a boolean.
 
-- Unset or `false`: the reply has no `context` key, and nothing is read from memory or the ledger.
-- `true`: the reply gains `context`, computed for that call.
+- Unset or `false`: the reply has no `context` key, and no memory or ledger read is made for context. The gate is `service.ts:4554`, applied after the chunk answer on either backend. The chunk answer is separate: when the LightRAG backend is unconfigured, `docs_search` answers chunks from Hindsight recall, with or without `context`.
+- `true`: the reply gains `context`, computed for that call. A successful LightRAG answer carries it beside its citations.
 
 | Field | Content |
 |---|---|
-| `memories` | The first 3 recall hits for the question, in the order recall returns them, each `{id, text, scope, repo}`. `scope` and `repo` are `null` when the hit has none. `text` is redacted, then cut to 400 characters. |
-| `events` | Up to 5 of the most recent ledger rows of the `session_id`, in time order, each `{id, ts, kind, surface, summary}`. `ts` is ISO-8601. `summary` is redacted, then cut to 200 characters. |
+| `memories` | The first 3 recall hits for the question (`DOCS_CONTEXT_MEMORY_LIMIT`, `docs-search.ts:244`), in the order recall returns them, each `{id, text, scope, repo}`. `scope` and `repo` are `null` when the hit has none. `text` is redacted, then cut to 400 characters (`DOCS_CONTEXT_MEMORY_CHARS`, `:246`). |
+| `events` | Up to 5 of the most recent ledger rows of the `session_id` (`DOCS_CONTEXT_EVENT_LIMIT`, `:245`), in time order, each `{id, ts, kind, surface, summary}`. `ts` is ISO-8601. `summary` is redacted, then cut to 200 characters (`DOCS_CONTEXT_SUMMARY_CHARS`, `:247`). |
 | `untrusted` | The notice the chunks carry (`UNTRUSTED_DOCS_NOTICE`). |
 | `degraded` | Absent when every source answered. Otherwise the reasons, joined by `; `, redacted and capped at 300 characters. |
 
@@ -194,18 +225,18 @@ The reasons in `degraded` are:
 
 | Read | Bound | Where it is set |
 |---|---|---|
-| Recall | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS`, default 1500 ms | `hindsightBudgets.searchRecallBudgetMs` |
-| Ledger read | 1000 ms, fixed | `DOCS_CONTEXT_LEDGER_BUDGET_MS` |
+| Recall | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS`, default 1500 ms; hard deadline at that budget plus 500 ms | `DEFAULT_SEARCH_RECALL_BUDGET_MS` (`config.ts:2066`), `hindsightBudgets.searchRecallBudgetMs` (`config.ts:989`), `CONTEXT_RECALL_MARGIN_MS` (`service.ts:239`, `:4583`) |
+| Ledger read | 1000 ms, fixed | `DOCS_CONTEXT_LEDGER_BUDGET_MS` (`docs-search.ts:249`, used at `service.ts:4608`) |
 
-The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the chunk retrieval fan-out only.
+The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the chunk search on either plane: the RAGFlow dataset fan-out, and the LightRAG query (`docs-search.ts:965`).
 
 The ledger read has no row limit: `readEvents` returns every row of the session in time order, and the last five are kept. The 1000 ms budget is the only bound on that read.
 
-The two reads run in parallel, and both start after the chunk answer is ready. A `context: true` reply therefore takes the chunk search time plus the slower of the two reads, which is at most 1500 ms with the default recall budget.
+The two context reads run in parallel (`service.ts:4565`), both after the chunk answer is ready. A `context: true` reply therefore takes the chunk search time plus the slower of the two reads: at most 2,000 ms with the default recall budget.
 
 ### Cache and ordering
 
-The chunk answer is cached as before, and that store happens before any context leg starts, so the cache entry never carries `context`. Context does not change the datasets searched, the cache key or the chunks. A cache hit still reads the context for that call. An empty question skips the cache for the chunks, and its context is still read. A reply with `context` is never stored.
+The chunk answer is cached as before, and that store happens before any context leg starts, so the cache entry never carries `context` (`service.ts:4551-4555`). Context does not change the datasets searched, the cache key or the chunks. A cache hit still reads the context for that call. An empty question skips the cache for the chunks, and its context is still read. A reply with `context` is never stored.
 
 The `substrate.docs.duration` and `substrate.docs.search` measurements wrap the whole call, so they include the context legs.
 
@@ -213,9 +244,25 @@ The `substrate.docs.duration` and `substrate.docs.search` measurements wrap the 
 
 Memory text and event summaries are untrusted evidence. Both are redacted before they are cut, so a cut never shows text the redactor removes. The context carries no source URL and is never cited as a source. Nothing in it is an instruction: a caller must not act on a directive found in a memory or an event.
 
+### The `steering` notice
+
+While `SUBSTRATE_PLANNING_STEERING` is on and the steering inbox holds directives still queued for the call's `session_id`, the reply gains `steering`, on both `docs_search` and `POST /docs/search`. It is read from the one in-memory inbox, so it adds no budgeted read, and it needs no input field: the `session_id` the call already names is the session.
+
+| Field | Content |
+|---|---|
+| `count` | Every directive queued for the session, listed or not. |
+| `entries` | At most 3 of them, highest priority first and then oldest, each `{id, action, priority, age_ms, body}`. `age_ms` is the time since the directive was queued, never negative. `body` is redacted, then cut to 200 characters. |
+| `untrusted` | A notice that the directives are described, not executed: the session answers each with `steering_acknowledge`. |
+
+The key is absent when steering is off, no session is named, or nothing is queued for it; an acknowledged or expired directive is no longer listed. It is attached after the chunk answer like `context`, so the cache entry never carries it and a reply with `steering` is never stored. It never fails or delays a search: a fault reading the inbox is reported on stderr and the reply goes out without it. See `docs/data-planes.md`, Steering inbox.
+
 ### REST
 
 `POST /docs/search` takes `context` with the same meaning. A `context` that is not a JSON boolean, `null` included, answers `400` with `{"error": "datasets must be a string array, session_id a string and context a boolean"}` before the search runs.
+
+### Tandem recall (v1.6 phase 57, `SUBSTRATE_DOCS_TANDEM=off|on`, default `off`)
+
+With the LightRAG plane serving, `on` asks the caller's Hindsight memory as well (`SUBSTRATE_DOCS_TANDEM_LIMIT` hits, 1..10, default 5, under `SUBSTRATE_DOCS_TANDEM_BUDGET_MS`, 50..10000, default 1500) and merges the two lists by reciprocal-rank fusion (`tandem-recall.ts`). Each citation names its origin and provenance; a memory is marked `derived: true` and is untrusted text like the rest. The Hindsight leg is an enrichment, not a dependency: a timeout, a breaker refusal or an error leaves the LightRAG answer exactly as it was, and the reply's `tandem` note says how the leg ended (`ok`, `empty`, `timeout`, `failed`). A tandem reply is never stored in the docs-search cache (a memory can be forgotten at any moment), and while the flag is on the cache key carries a `tandem` part, so a reply stored before the flip is never served in place of a tandem one. `off` is the LightRAG reply unchanged, with no Hindsight call. A value other than `off` or `on` is `off` and named at boot; an out-of-range limit or budget is capped and named.
 
 ## The six ingest refusals
 
@@ -474,6 +521,20 @@ only) when the failing set differs from the one recorded in
 a failed post keeps the old record, so the next run posts again. The record is
 written through a temp file and a rename. It is
 read-only against RAGFlow and uses no key of its own.
+
+Since v1.7 phase 70 the same run also asks the self-supervised golden set (the titles, headings and opening
+sentences of this checkout's `docs/`, see [`corpus-eval.md`](corpus-eval.md)) of the same `POST /docs/search`, up to 200
+questions, but only when `SUBSTRATE_CORPUS` is `on` in the canary's environment (`substrate.env` reaches it through the unit's
+`EnvironmentFile`): with it off nothing was ingested, so the canary sends no extra search and runs the fixtures alone, as before.
+After the fixtures it prints `golden recall@5 <value> over <n> questions`, posts one `note` as `substrate`
+(`payload.action: "docs.canary"`, `golden_recall5`, `golden_asked`) on every run that measured it, and carries
+`golden_recall5` in the regression `warning` when it posts one. The server turns a stored report into the
+`corpus.golden_recall5` gauge when `SUBSTRATE_CORPUS` is on. A recall under `SUBSTRATE_DOCS_SLO_RECALL5` (default 0.6) makes the
+run exit 1 and names the flag on stderr; it does not post a warning of its own. The recall is not measured, with a line on
+stderr and no change to the exit code, when the checkout has no `docs/` to ask about or any question failed or came back
+degraded: a recall over only the answered questions would read better than it is. It is only meaningful once this
+repository's documents are in the corpus under the name `SUBSTRATE_DOCS_EVAL_REPO` (default
+`swcstudiospace/agent-substrate`); before that every question misses.
 
 Seeding the corpus and its pins (do this BEFORE enabling the canary). Search
 adds `dataset_commit` to a citation only from a dataset's recorded version

@@ -40,22 +40,43 @@ function mayReachLedger(path: string): boolean {
 	return path.startsWith(LEDGER_PACKAGE) || path === SMOKE_HARNESS;
 }
 
+const walks = new Map<string, Promise<string[]>>();
+
 /**
  * `dot: true` matters more than it looks: an MCP server is registered in
  * `.mcp.json` or `.cursor/mcp.json`, and a scan that skipped dotfiles would let
  * exactly the wiring this file forbids through.
+ *
+ * Memoised per pattern: the directory walk is the cost, and files do not change
+ * during a test run. No caller mutates the shared array (they filter or spread first).
  */
-async function filesMatching(pattern: string): Promise<string[]> {
-	const found: string[] = [];
-	for await (const path of new Bun.Glob(pattern).scan({ cwd: ROOT, dot: true })) {
-		if (!IGNORED.some((prefix) => path.includes(prefix))) found.push(path);
-	}
-	return found;
+function filesMatching(pattern: string): Promise<string[]> {
+	const cached = walks.get(pattern);
+	if (cached !== undefined) return cached;
+	const walk = (async () => {
+		const found: string[] = [];
+		for await (const path of new Bun.Glob(pattern).scan({ cwd: ROOT, dot: true })) {
+			if (!IGNORED.some((prefix) => path.includes(prefix))) found.push(path);
+		}
+		return found;
+	})();
+	walks.set(pattern, walk);
+	return walk;
 }
 
+const contents = new Map<string, string>();
+
+// Memoised for the same reason as the walk: many tests re-read every file.
 function read(path: string): string {
-	return readFileSync(join(ROOT, path), "utf8");
+	const cached = contents.get(path);
+	if (cached !== undefined) return cached;
+	const text = readFileSync(join(ROOT, path), "utf8");
+	contents.set(path, text);
+	return text;
 }
+
+/** Tests that walk the tree or read every tracked file are slow under host load; Bun's 5 s default is too tight. */
+const SCAN_TIMEOUT_MS = 60_000;
 
 /**
  * Whether a file's text holds a Greptime endpoint or credential.
@@ -111,7 +132,7 @@ describe("Greptime is reachable only through substrate-mcp", () => {
 			.filter((path) => /from\s+["'][^"']*greptime(\.ts)?["']|new\s+GreptimeClient/.test(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("nothing else names the events table in SQL", async () => {
 		const offenders = (await filesMatching("**/*.ts"))
@@ -119,7 +140,7 @@ describe("Greptime is reachable only through substrate-mcp", () => {
 			.filter((path) => /(FROM|INTO|UPDATE|TABLE)\s+"?agent_events"?/i.test(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("nothing else reads GREPTIME_ from the environment", async () => {
 		const offenders = (await filesMatching("**/*.ts"))
@@ -127,7 +148,7 @@ describe("Greptime is reachable only through substrate-mcp", () => {
 			.filter((path) => /GREPTIME_/.test(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 });
 
 /**
@@ -153,7 +174,7 @@ describe("no caller reaches the ledger with SQL", () => {
 			});
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("the query tool's filters are columns this package names, not a caller's string", () => {
 		// `events_query` and `POST /events/query` take a fixed set of typed filters. If a
@@ -192,7 +213,7 @@ describe("memory is written only through the governance gate", () => {
 			);
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("one file inserts an entry, and one file decides that it may", async () => {
 		// Asserted as a set rather than a ceiling: the failure mode is a *new* caller
@@ -203,7 +224,7 @@ describe("memory is written only through the governance gate", () => {
 			.sort();
 
 		expect(callers).toEqual([...MEMORY_WRITE_PATH].sort());
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("the service reaches memory only through the gate", async () => {
 		// `Substrate` holds the index, so it *could* call the store's write primitives
@@ -243,7 +264,7 @@ describe("no native Greptime MCP wiring", () => {
 		});
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 });
 
 describe("no secrets in the repo", () => {
@@ -275,7 +296,7 @@ describe("no secrets in the repo", () => {
 			.filter((path) => carriesCredential(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("the scan covers every tracked env file, whatever its suffix", () => {
 		// `git ls-files` is what makes this true without enumerating suffixes, so the
@@ -293,7 +314,7 @@ describe("no secrets in the repo", () => {
 		]) {
 			expect(carriesCredential(body)).toBe(true);
 		}
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("the scan catches a credential whose key is quoted", () => {
 		// A credential is as likely to sit in a tracked JSON or YAML config as in an
@@ -330,7 +351,7 @@ describe("no secrets in the repo", () => {
 			.filter((path) => TOKEN_LITERAL.test(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("the token scan catches a value under either name, in an env file or a config", () => {
 		for (const body of [
@@ -387,7 +408,7 @@ describe("RAGFlow is reachable only through substrate-mcp", () => {
 		});
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("no package outside the MCP server imports the RAGFlow client", async () => {
 		// Mirrors the ledger-client test above. The CLI proves its cap against
@@ -402,7 +423,7 @@ describe("RAGFlow is reachable only through substrate-mcp", () => {
 			);
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 });
 
 /**
@@ -431,7 +452,7 @@ describe("no RAGFlow credentials in the repo", () => {
 			.filter((path) => carriesRagflowCredential(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("the scan catches an endpoint or key with a value", () => {
 		for (const body of [
@@ -483,7 +504,7 @@ describe("Hindsight is reachable only through substrate-mcp", () => {
 		});
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("no package outside the MCP server imports the Hindsight client", async () => {
 		// Mirrors the ledger-client test above. The CLI proves its cap against
@@ -498,7 +519,7 @@ describe("Hindsight is reachable only through substrate-mcp", () => {
 			);
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 });
 
 /**
@@ -514,7 +535,7 @@ describe("no Hindsight reads or credentials outside the MCP server", () => {
 			.filter((path) => /HINDSIGHT_/.test(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 });
 
 const HINDSIGHT_CREDENTIAL = /HINDSIGHT_(?:URL|API_KEY)["']?\s*[:=]\s*["']?[^\s"']/;
@@ -534,7 +555,7 @@ describe("no Hindsight credentials in the repo", () => {
 			.filter((path) => carriesHindsightCredential(read(path)));
 
 		expect(offenders).toEqual([]);
-	});
+	}, SCAN_TIMEOUT_MS);
 
 	test("the scan catches an endpoint or key with a value", () => {
 		for (const body of [
@@ -558,6 +579,127 @@ describe("no Hindsight credentials in the repo", () => {
 			"# HINDSIGHT_API_KEY lives in the server env file",
 		]) {
 			expect({ body, caught: carriesHindsightCredential(body) }).toEqual({ body, caught: false });
+		}
+	});
+});
+
+/**
+ * The substrate-only door (phase 64): TEI is reached ONLY through `substrate-mcp` (`planes/tei.ts`, behind `embed.ts`).
+ * The CLI, the collectors and the scripts that want a vector ask the server over HTTP; the text they send is document
+ * content, and the server is where the endpoint policy, the breaker and the cache apply.
+ */
+describe("TEI is reachable only through substrate-mcp", () => {
+	test("no package outside the MCP server imports the TEI client or the embedding service", async () => {
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) =>
+				/(from\s+["'][^"']*|import\s*\(\s*["']|require\s*\(\s*["'])[^"']*(planes\/tei|mcp-server\/src\/embed)/.test(read(path)),
+			);
+
+		expect(offenders).toEqual([]);
+	}, SCAN_TIMEOUT_MS);
+});
+
+const TEI_CREDENTIAL = /\bTEI_(?:URL|API_KEY)["']?\s*[:=]\s*["']?[^\s"']/;
+
+function carriesTeiCredential(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\*|<!--)/.test(line))
+		.some((line) => TEI_CREDENTIAL.test(line));
+}
+
+describe("no TEI credentials in the repo", () => {
+	test("no committed non-test file carries a TEI endpoint or key", () => {
+		const offenders = trackedFiles()
+			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => path !== relative(ROOT, import.meta.path))
+			.filter((path) => carriesTeiCredential(read(path)));
+
+		expect(offenders).toEqual([]);
+	}, SCAN_TIMEOUT_MS);
+
+	test("the scan catches an endpoint or key with a value, and not a blank, a bare name or a code read", () => {
+		for (const body of ["TEI_URL=http://x:8080", "TEI_API_KEY=tei-0123456789abcdef", '  "TEI_URL": "http://x:8080"', "TEI_API_KEY: tei-0123456789abcdef"]) {
+			expect({ body, caught: carriesTeiCredential(body) }).toEqual({ body, caught: true });
+		}
+		for (const body of [
+			"TEI_URL=",
+			"TEI_API_KEY=",
+			"SUBSTRATE_TEI_MODEL=bge-small",
+			"Set `TEI_URL` and `TEI_API_KEY`.",
+			"const url = env.TEI_URL?.trim();",
+			"# TEI_API_KEY lives in the server env file",
+		]) {
+			expect({ body, caught: carriesTeiCredential(body) }).toEqual({ body, caught: false });
+		}
+	});
+});
+
+/**
+ * No second door to TEI (phase 64): importing the client is not the only way past the server's checks. A CLI or collector
+ * that read `TEI_URL` and posted to `/embed` itself would skip the endpoint policy, the circuit breaker, the input limits
+ * and the cache. Only the config reader, the flag registry and the client name the settings or build a request; tests
+ * inside the package may, because they feed those files fakes.
+ */
+const TEI_DIRECT_ALLOWED = [join(LEDGER_PACKAGE, "config.ts"), join(LEDGER_PACKAGE, "flag-registry.ts"), join(LEDGER_PACKAGE, "planes", "tei.ts")];
+
+function mayReachTeiDirectly(path: string): boolean {
+	return TEI_DIRECT_ALLOWED.includes(path) || (path.startsWith(LEDGER_PACKAGE) && path.endsWith(".test.ts"));
+}
+
+/** A read of the TEI settings by name. */
+const TEI_SETTING = /\bTEI_(?:URL|API_KEY)\b/;
+/** A request path built in a string: `"/embed"`, `` `${base}/embed` ``, `"http://host/embed"`; not `"./embed.ts"` or `/embeddings`. */
+const TEI_EMBED_PATH = /["'`][^"'`]*\/embed(?![\w.-])/;
+
+function reachesTeiDirectly(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\/\*|\*|<!--)/.test(line))
+		.some((line) => TEI_SETTING.test(line) || TEI_EMBED_PATH.test(line));
+}
+
+describe("nothing outside the TEI client reads its settings or builds a request to it", () => {
+	test("no source file outside the allow-list names TEI_URL or TEI_API_KEY, or builds an /embed request", async () => {
+		const offenders = (await filesMatching("**/*.{ts,mts,js,mjs}"))
+			.filter((path) => !mayReachTeiDirectly(path))
+			.filter((path) => reachesTeiDirectly(read(path)));
+
+		expect(offenders).toEqual([]);
+	}, SCAN_TIMEOUT_MS);
+
+	test("the scan catches a direct request and a read of the settings, over in-memory samples", () => {
+		for (const body of [
+			'const reply = await fetch(process.env.TEI_URL + "/embed", { method: "POST", body });',
+			"const reply = await fetch(`${base}/embed`, { method: 'POST' });",
+			"const key = Bun.env.TEI_API_KEY;",
+			'const url = new URL("/embed", base);',
+			"  headers: { authorization: `Bearer ${env.TEI_API_KEY}` },",
+		]) {
+			expect({ body, caught: reachesTeiDirectly(body) }).toEqual({ body, caught: true });
+		}
+	});
+
+	test("the scan does not fire on a comment, an import of a file named embed, another route or another setting", () => {
+		for (const body of [
+			"// TEI_URL lives in the server env file",
+			"/** TEI_URL names the instance. */",
+			" * POST /embed answers one vector per input",
+			'import { createEmbeddingService } from "./embed.ts";',
+			'const reply = await fetch(`${server}/embeddings`);',
+			'await fetch(`${server}/docs/search`);',
+			"const model = env.SUBSTRATE_TEI_MODEL;",
+		]) {
+			expect({ body, caught: reachesTeiDirectly(body) }).toEqual({ body, caught: false });
+		}
+	});
+
+	test("the allow-list is the config reader, the flag registry, the client and the package's own tests", () => {
+		expect(TEI_DIRECT_ALLOWED.every((path) => mayReachTeiDirectly(path))).toBe(true);
+		expect(mayReachTeiDirectly(join(LEDGER_PACKAGE, "embed.test.ts"))).toBe(true);
+		for (const path of [join(LEDGER_PACKAGE, "service.ts"), join(LEDGER_PACKAGE, "embed.ts"), join("packages", "cli", "src", "embed.ts"), join("scripts", "x.ts")]) {
+			expect({ path, allowed: mayReachTeiDirectly(path) }).toEqual({ path, allowed: false });
 		}
 	});
 });

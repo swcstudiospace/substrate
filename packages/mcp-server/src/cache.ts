@@ -34,7 +34,7 @@
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
-import { callPlane, type PlaneGate } from "@substrate/observability";
+import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { MAX_RECALL_TTL_S } from "./recall-snapshot.ts";
@@ -52,6 +52,8 @@ export const CACHE_TTL = {
 	"brief-snapshot": 3600,
 	"recall-snapshot": MAX_RECALL_TTL_S,
 	"docs-search": 300,
+	// One week, the default of `SUBSTRATE_EMBED_CACHE_TTL_S`; the embedding service sets its own TTL on every write.
+	emb: 604_800,
 } as const;
 
 export type CacheClass = keyof typeof CACHE_TTL;
@@ -66,7 +68,7 @@ export type CacheSwrMode = "off" | "shadow" | "enforce";
  * request classes plus the two that are not a cached answer (`budget` buckets,
  * `gen` counters).
  */
-export const CACHE_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "budget", "gen"] as const;
+export const CACHE_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
 export type CacheKeyClass = (typeof CACHE_CLASSES)[number];
 
 /** The class a `substrate:v1:` key belongs to, or null for anything else. Reads the key name only. */
@@ -103,6 +105,17 @@ export function graphGenerationKey(graphId: string): string {
  * at once; the pins are also part of the key.
  */
 export const DOCS_GENERATION_KEY = `${CACHE_PREFIX}:gen:docs`;
+
+/**
+ * When memory was last forgotten, in epoch ms, deployment-wide (not per repo). A plain value set with a TTL, not a
+ * counter, so it is read as a time and never as a generation. It lives in the `gen` class beside the counters and
+ * is read by no cached answer: only the saved-brief readers ask it (`snapshotSurvivesForget`), because a
+ * `brief-snapshot` has no generation and so cannot see a forget through the memory and recall counters.
+ */
+export const FORGET_MARK_KEY = `${CACHE_PREFIX}:gen:forgotten`;
+
+/** Seconds the mark outlives the longest saved brief it has to guard, so a snapshot saved just before a forget is covered to its last second. */
+export const FORGET_MARK_MARGIN_S = 300;
 
 /**
  * Soonest future timestamp, in epoch ms. A cached answer must not outlive the
@@ -148,8 +161,8 @@ export interface CacheSample {
 	cacheClass?: CacheKeyClass;
 }
 
-/** What `ReadThroughCache.script` answers; `ok: false` is a bounded, redacted reason the caller treats as cache-off. */
-export type ScriptOutcome = { ok: true; value: unknown } | { ok: false; reason: string };
+/** What `ReadThroughCache.script` answers. `ok: false` is a bounded, redacted reason the caller treats as cache-off; `breakerRetryAfterMs` is set only when the plane's breaker refused the command, so nothing was sent: the wait until its next probe. */
+export type ScriptOutcome = { ok: true; value: unknown } | { ok: false; reason: string; breakerRetryAfterMs?: number };
 
 /** The commands the cache uses. Tests pass a fake; production uses Bun. */
 export interface CacheRedis {
@@ -170,10 +183,10 @@ export interface CacheRedis {
 export interface ReadThroughOptions {
 	redis: CacheRedis | null;
 	enabled: boolean;
-	now?: () => number;
+	now?: (() => number) | undefined;
 	log?: (line: string) => void;
 	commandTimeoutMs?: number;
-	record?: (sample: CacheSample) => void;
+	record?: ((sample: CacheSample) => void) | undefined;
 	/** The DOCS-06 refusal to report in health, if the cache was refused. */
 	refusedReason?: string;
 	/** Stale-while-revalidate mode and window (`SUBSTRATE_CACHE_SWR`, `SUBSTRATE_CACHE_SWR_WINDOW_S`). Absent is `off`. */
@@ -282,9 +295,20 @@ export function snapshotKey(klass: CacheClass, surface: string, args: unknown): 
 	return `${CACHE_PREFIX}:${klass}:${hash}`;
 }
 
+/**
+ * `substrate:v1:<class>:<digest>` for a caller that already holds the content hash. The embedding cache keys
+ * `emb` entries by `sha256(model + "\n" + text)`, so the key says which model a vector came from.
+ */
+export function digestKey(klass: CacheClass, digest: string): string {
+	return `${CACHE_PREFIX}:${klass}:${digest}`;
+}
+
+/** The widest embedding the `emb` class accepts, a bound on what one entry can hold. */
+export const EMB_MAX_DIM = 8192;
+
 export interface BunRedisOptions {
-	gate?: PlaneGate | null;
-	now?: () => number;
+	gate?: PlaneGate | null | undefined;
+	now?: (() => number) | undefined;
 	cooldownMs?: number;
 	connectTimeoutMs?: number;
 	/** The deadline every command races inside the plane gate; `COMMAND_TIMEOUT_MS` by default. */
@@ -818,14 +842,57 @@ export class ReadThroughCache {
 	 * pre-write answer for the whole TTL.
 	 */
 	async bump(key: string): Promise<void> {
-		if (!this.enabled || !this.redis) return;
+		const redis = this.redis;
+		if (!this.enabled || !redis) return;
 		try {
-			await this.attempt(() => this.redis!.incr(key));
+			await this.attempt(() => redis.incr(key));
 			this.staleGenerations.delete(key);
 			this.noteConnected();
 		} catch (cause) {
 			this.staleGenerations.add(key);
 			this.fail(cause, false, "gen");
+		}
+	}
+
+	/**
+	 * Record a forget: set {@link FORGET_MARK_KEY} to now, held for `ttlSeconds`. A failed write marks the key stale, the
+	 * way a failed bump marks a generation: until a later write lands, no saved brief is served (`snapshotSurvivesForget`
+	 * answers false), because a mark that may be set but cannot be read back is not "no forget".
+	 */
+	async markForget(ttlSeconds: number): Promise<void> {
+		if (!this.enabled || !this.redis) return;
+		const redis = this.redis;
+		try {
+			await this.attempt(() => redis.set(FORGET_MARK_KEY, String(this.now()), Math.max(1, Math.ceil(ttlSeconds))));
+			this.staleGenerations.delete(FORGET_MARK_KEY);
+			this.noteConnected();
+		} catch (cause) {
+			this.staleGenerations.add(FORGET_MARK_KEY);
+			this.fail(cause, false, "gen");
+		}
+	}
+
+	/**
+	 * Whether a saved brief composed at `at` (the snapshot's own ISO timestamp) may be served: it must be strictly later
+	 * than the last forget. False for a mark that cannot be checked (the read failed, the value is not a time, the last
+	 * mark write failed) and for an unreadable `at`. `quiet` counts and degrades nothing, for the stale-while-revalidate
+	 * probe, which is an optimisation; the degraded fallback is not quiet, like `peek`.
+	 */
+	async snapshotSurvivesForget(at: string, quiet: boolean): Promise<boolean> {
+		if (!this.enabled || !this.redis) return false;
+		const atMs = Date.parse(at);
+		if (!Number.isFinite(atMs)) return false;
+		if (this.staleGenerations.has(FORGET_MARK_KEY)) return false;
+		const redis = this.redis;
+		try {
+			const raw = await this.attempt(() => redis.get(FORGET_MARK_KEY));
+			if (!quiet) this.noteConnected();
+			if (raw === null) return true;
+			const markedMs = Number(raw);
+			return Number.isFinite(markedMs) && atMs > markedMs;
+		} catch (cause) {
+			if (!quiet) this.fail(cause, true, "gen");
+			return false;
 		}
 	}
 
@@ -879,11 +946,61 @@ export class ReadThroughCache {
 	}
 
 	/**
+	 * Read generation-free entries by digest in one round trip (`MGET`): one answer per digest, null for a miss, a
+	 * value that fails the class shape, a failed command or a cache that is off. Counts one hit, miss or error per
+	 * digest. Never throws.
+	 */
+	async peekMany<T>(klass: CacheClass, digests: readonly string[]): Promise<Array<T | null>> {
+		const none = digests.map((): T | null => null);
+		if (!this.enabled || !this.redis || digests.length === 0) return none;
+		const redis = this.redis;
+		try {
+			const raws = await this.attempt(() =>
+				readAll(
+					redis,
+					digests.map((digest) => digestKey(klass, digest)),
+				),
+			);
+			this.noteConnected();
+			return digests.map((_, index): T | null => {
+				const raw = raws[index] ?? null;
+				if (raw === null) {
+					this.count("miss", klass);
+					return null;
+				}
+				const parsed = parseEnvelope<T>(raw, klass);
+				if (!parsed.ok) {
+					this.count("error", klass);
+					this.note("malformed cache value");
+					return null;
+				}
+				this.count("hit", klass);
+				return parsed.value;
+			});
+		} catch (cause) {
+			this.fail(cause, true, klass);
+			return none;
+		}
+	}
+
+	/**
+	 * Write one generation-free entry by digest, always with a TTL: `ttlSeconds` below 1 writes nothing. Never throws;
+	 * false means nothing was stored (cache off, bad shape, failed command).
+	 */
+	async putEntry(klass: CacheClass, digest: string, value: unknown, ttlSeconds: number): Promise<boolean> {
+		return this.writeKey(klass, digestKey(klass, digest), value, ttlSeconds < 1 ? 0 : ttlSeconds);
+	}
+
+	/**
 	 * Write a generation-free entry with its own TTL. `ttlSeconds` ≤ 0 writes
 	 * nothing — that is how `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S=0` switches the
 	 * feature off. Never throws; the caller already has its answer.
 	 */
 	async put(klass: CacheClass, surface: string, args: unknown, value: unknown, ttlSeconds: number): Promise<boolean> {
+		return this.writeKey(klass, snapshotKey(klass, surface, args), value, ttlSeconds);
+	}
+
+	private async writeKey(klass: CacheClass, key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
 		if (!this.enabled || !this.redis || ttlSeconds <= 0 || !shapeOk(klass, value)) return false;
 		const redis = this.redis;
 		let encoded: string;
@@ -894,7 +1011,7 @@ export class ReadThroughCache {
 			return false;
 		}
 		try {
-			await this.attempt(() => redis.set(snapshotKey(klass, surface, args), encoded, Math.floor(ttlSeconds)));
+			await this.attempt(() => redis.set(key, encoded, Math.floor(ttlSeconds)));
 			this.noteConnected();
 			return true;
 		} catch (cause) {
@@ -910,18 +1027,21 @@ export class ReadThroughCache {
 	 * a bypass, so the reason is bounded and redacted and never the answer.
 	 * A failure degrades the cache like any other failed command; not a counted
 	 * bypass, because no read was served from the source in its place.
+	 * A breaker refusal also carries `breakerRetryAfterMs`: no command was sent.
 	 */
 	async script(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
 		if (!this.enabled || !this.redis) return { ok: false, reason: "cache off" };
 		const redis = this.redis;
-		if (!redis.eval) return { ok: false, reason: "cache client has no EVAL" };
+		const evaluate = redis.eval;
+		if (!evaluate) return { ok: false, reason: "cache client has no EVAL" };
 		try {
-			const value = await this.attempt(() => redis.eval!(script, keys, args));
+			const value = await this.attempt(() => evaluate.call(redis, script, keys, args));
 			this.noteConnected();
 			return { ok: true, value };
 		} catch (cause) {
 			this.fail(cause, false, "budget");
-			return { ok: false, reason: redact(stripRedisUrl(cause instanceof Error ? cause.message : String(cause))) };
+			const reason = redact(stripRedisUrl(cause instanceof Error ? cause.message : String(cause)));
+			return cause instanceof BreakerOpenError ? { ok: false, reason, breakerRetryAfterMs: cause.retryAfterMs } : { ok: false, reason };
 		}
 	}
 
@@ -1076,6 +1196,11 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 		const reply = value as { chunks?: unknown; untrusted?: unknown };
 		return Array.isArray(reply.chunks) && typeof reply.untrusted === "string";
 	}
+	if (klass === "emb") {
+		if (!value || typeof value !== "object") return false;
+		const entry = value as { dim?: unknown; b64?: unknown };
+		return embeddingEntryOk(entry.dim, entry.b64);
+	}
 	if (klass === "memory-search") {
 		if (Array.isArray(value)) return true;
 		if (!value || typeof value !== "object") return false;
@@ -1087,6 +1212,33 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 	if (!value || typeof value !== "object") return false;
 	const graph = value as { graph_id?: unknown; nodes?: unknown };
 	return typeof graph.graph_id === "string" && Array.isArray(graph.nodes);
+}
+
+/**
+ * `dim` Float32 values from their base64 bytes, or null when the bytes are not that many or any value is NaN or
+ * infinite: such a vector is never a usable embedding, so it must not be served from the cache.
+ */
+export function decodeEmbeddingBytes(dim: number, b64: string): Float32Array | null {
+	const bytes = Buffer.from(b64, "base64");
+	if (bytes.length !== dim * 4) return null;
+	// A copy: a pooled Buffer's offset is not a multiple of four, which a Float32Array view needs.
+	const vector = new Float32Array(new Uint8Array(bytes).buffer);
+	for (const value of vector) {
+		if (!Number.isFinite(value)) return null;
+	}
+	return vector;
+}
+
+/**
+ * An `emb` entry is `{ dim, b64 }`: `dim` Float32 values as base64. The length of the text must be the length base64
+ * gives `dim * 4` bytes, so a truncated or padded value is refused before it is decoded, and the decoded values must
+ * all be finite.
+ */
+function embeddingEntryOk(dim: unknown, b64: unknown): boolean {
+	if (typeof dim !== "number" || !Number.isInteger(dim) || dim < 1 || dim > EMB_MAX_DIM) return false;
+	if (typeof b64 !== "string") return false;
+	if (b64.length !== 4 * Math.ceil((dim * 4) / 3) || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return false;
+	return decodeEmbeddingBytes(dim, b64) !== null;
 }
 
 function parseEnvelope<T>(raw: string, klass: CacheClass): { ok: true; value: T } | { ok: false } {

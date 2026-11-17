@@ -121,7 +121,7 @@ function idKey(id: JsonRpcId): string {
 	return typeof id === "number" ? `n:${id}` : `s:${id}`;
 }
 
-export type StdioBridgeOptions = { spawn: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number };
+export type StdioBridgeOptions = { spawn: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number | undefined };
 
 /**
  * Lazy single child per tracker, pending replies matched by JSON-RPC id, respawn after exit. A
@@ -243,7 +243,7 @@ export function spawnUltrathinkMcp(tracker: Tracker): TrackerChild {
 	};
 }
 
-export type TrackerProxyOptions = { spawn?: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number };
+export type TrackerProxyOptions = { spawn?: SpawnTrackerChild; log: (line: string) => void; timeoutMs?: number | undefined };
 
 type Body = { ok: true; text: string } | { ok: false; status: 413 };
 

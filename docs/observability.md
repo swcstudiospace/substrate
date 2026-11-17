@@ -53,12 +53,12 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.trace.spans_dropped` | counter | — |
 | `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
 | `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
-| `substrate.admission.decisions` | counter | `surface` (a known surface or `anonymous`), `class` = `read` \| `write` \| `coordination`, `decision` = `allowed` \| `limited` \| `shadow_limited` \| `bypass` |
+| `substrate.admission.decisions` | counter | `surface` (a known surface or `anonymous`), `class` = `read` \| `write` \| `coordination`, `decision` = `allowed` \| `limited` \| `shadow_limited` \| `bypass` \| `refused` |
 | `substrate.metrics.history.dropped` | counter | `reason` = `breaker_open` \| `unavailable` \| `rejected` \| `ddl` \| `schema` \| `invalid` \| `capped` \| `internal` (rows not stored; registered only with `SUBSTRATE_METRICS_HISTORY=on` and a ledger) |
 | `substrate.docs.search` | counter | `surface`, `outcome` = `hit` \| `empty` \| `degraded`, `cached` = `true` \| `false` |
 | `substrate.docs.citations` | counter | `provenance` = `recorded` \| `unrecorded` \| `unpinned` |
 | `substrate.docs.duration` | histogram, ms (own edges, incl. 2000 and 4000) | `surface`, `cached` |
-| `substrate.cache.operations` | counter | `class` = `brief` \| `memory-search` \| `graph-view` \| `brief-snapshot` \| `recall-snapshot` \| `docs-search` \| `budget` \| `gen` \| `unknown`, `result` = `hit` \| `miss` \| `coalesced` \| `stale` \| `refresh` \| `would_serve_stale` \| `bypass` \| `error`, `mode` = `off` \| `on` \| `degraded` (uplift-4 S4: `coalesced` joined another caller's load; `stale` served a last-good brief; `refresh` a background refresh started; `would_serve_stale` only under `SUBSTRATE_CACHE_SWR=shadow`) |
+| `substrate.cache.operations` | counter | `class` = `brief` \| `memory-search` \| `graph-view` \| `brief-snapshot` \| `recall-snapshot` \| `docs-search` \| `emb` \| `budget` \| `gen` \| `unknown`, `result` = `hit` \| `miss` \| `coalesced` \| `stale` \| `refresh` \| `would_serve_stale` \| `bypass` \| `error`, `mode` = `off` \| `on` \| `degraded` (uplift-4 S4: `coalesced` joined another caller's load; `stale` served a last-good brief; `refresh` a background refresh started; `would_serve_stale` only under `SUBSTRATE_CACHE_SWR=shadow`) |
 | `substrate.memory.expired` | counter | `surface`, `kind` (memory kind), `mode` = `served` \| `hidden` — entries past their `ttl` met by an index read (uplift-3 N4; `docs/memory-governance.md` § Lifetime) |
 | `substrate.events.replay` | counter | `result` = `deduplicated` \| `appended` \| `refused` \| `lookup_failed` — one per `POST /events` that took the idempotency lookup (a replay-marked request under `accept`, any keyed one under `enforce`) or was refused on the idempotency rules; silent while `SUBSTRATE_EVENT_IDEMPOTENCY=off`. A `deduplicated` replay is not counted as an emit (U5-4a; `docs/greptime-ledger.md` § Idempotent replay) |
 | `substrate.brief.result` | counter | `surface` (a known surface or `unknown`), `state` = `complete` \| `degraded` \| `snapshot`, `result` = `fresh` \| `not_modified` — one per brief answered at either door; `not_modified` is a REST 304 or an MCP `not_modified: true` (uplift-3 N7) |
@@ -169,6 +169,8 @@ containing `circuit open`, `docs_search` answers `{chunks: [], degraded: true,
 reason: "ragflow circuit open"}`, and the fail-closed paths (emit, claim) stay
 closed. The cache additionally refuses to reconnect for `CACHE_CONNECT_COOLDOWN_MS`
 (5 s) after a failed connect, reported as `cache.cooldownUntil` in `/healthz`.
+
+The cache's admission buckets follow a declared policy while that breaker refuses them: `SUBSTRATE_BUDGET_<CLASS>_BREAKER=fail-open` (the default) admits the request and counts a `bypass`; `fail-closed` answers `503` with `{"error":"cache_unavailable"}` and the breaker's `Retry-After` in `enforce`, and in `shadow` admits the request and counts a `bypass`, since shadow never refuses. The brief and recall never depend on the cache: a refused cache read falls through to the source, so the answer is the source's.
 
 `bun scripts/cache-stats.ts` (uplift-4 S4) is the operator-run, read-only census of the cache's key classes and value bytes and the `maxmemory` they justify: bounded `SCAN`, `TYPE` and `STRLEN`, no value read, loopback URLs only unless `--allow-remote`. The hit, stale and coalesced ratios come from the running service's `/healthz`, which needs the bearer: set `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE` (first entry of a list; it is sent only as an `Authorization` header and never printed); a 401/403 is reported by name in the output.
 
@@ -313,11 +315,15 @@ same reason the plane and burn objectives are:
 | `admission.limited_rate` | `limited / (allowed + limited + shadow_limited)` of `substrate.admission.decisions` ≤ **1 %**; `insufficient-data` under 100 decisions |
 
 A `bypass` — the cache plane not answering the bucket, which admits the caller —
-is not a decision and sits in neither the numerator nor the denominator, so a
-cache outage can neither breach this objective nor dilute it into `ok`. Only an
-enforced refusal (`limited`) is a refusal; in the default `shadow` mode the
-rate is 0 whatever `shadow_limited` counts, and that series is what the budgets
-are tuned from before `SUBSTRATE_BUDGETS=enforce`. The identity label is the
+and a `refused` — a class set `fail-closed` by `SUBSTRATE_BUDGET_<CLASS>_BREAKER`,
+answered 503 while the cache plane is open, in `enforce` mode — are not decisions. In `shadow` the same fail-closed answer is recorded as a `bypass`, so the tuning series holds only the bucket's own decisions.
+Both sit in neither the numerator nor the denominator, so a cache outage can
+neither breach this objective nor dilute it into `ok`. The numerator is `limited`
+alone. In the default `shadow` mode the rate is 0 whatever `shadow_limited`
+counts, and that series is what the budgets are tuned from before
+`SUBSTRATE_BUDGETS=enforce`. Fewer than 100 decided requests is `insufficient-data`,
+so an outage that refuses most traffic can read as insufficient data, not a
+breach; the `refused` series is what shows it. The identity label is the
 bearer's surface, never one a body named, so the series are bounded by the
 surface list plus `anonymous`. The bucket and the 429 a refused caller sees are
 described in [`data-planes.md`](data-planes.md) and [`grok-bot.md`](grok-bot.md);
@@ -639,7 +645,8 @@ the client never sends one for this table, and never `DROP`s it.
 That is the **`core`** allow-list, the only one unless `SUBSTRATE_METRICS_HISTORY_SERIES=extended`
 (uplift-5 S6, default `core`, an unknown value is `core` and named at boot). `extended` adds
 `cache.operations`, `brief.profile_bytes_saved`, `brief.recall`, `recall.prefetch`, `memory.expired`
-and three gauges (`hindsight.outbox_size`, `hindsight.outbox_oldest_age_s`, `index.archive_age_s`)
+and the gauges (`hindsight.outbox_size`, `hindsight.outbox_oldest_age_s`, `index.archive_age_s`, and the
+three `corpus.*` objectives of [`corpus-eval.md`](corpus-eval.md))
 for the promotion evidence and the data-plane dashboards; the series, the row-growth estimate against
 the 14-day TTL and why it is opt-in are in [`dashboards.md`](dashboards.md). With `core` the sampler,
 the rows and the route are exactly those described here.
@@ -977,10 +984,11 @@ substrate-specific spelling.
 | `SUBSTRATE_BUDGET_COORDINATION_RPS` / `_BURST` | `30` / `60` | `graph_claim`, `graph_heartbeat`, `graph_release`, `graph_complete`, `coord_reap_leases`: its own bucket, so reads never starve a heartbeat. |
 | `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST` | `2` / `4` | Every class of the bucket all accepted untokened bridge callers share. |
 | `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` | — | Per-surface override (`GROK_BOT`, `SWARM_A01_ORCH`, …, the `SUBSTRATE_TOKEN_*` spelling); a half left unset is the class value. |
+| `SUBSTRATE_BUDGET_<CLASS>_BREAKER` | `fail-open` | What an open cache breaker does to that class: `fail-open` admits the request (a `bypass`); `fail-closed` answers `503` in `enforce`, and in `shadow` admits the request and counts a `bypass`. Blank is `fail-open`; any other value refuses to boot (`SUBSTRATE_BUDGETS` keeps its older fallback to `shadow`). |
 | `SUBSTRATE_METRICS_HISTORY` | off | `on` samples the registry into `metric_samples` and serves `/slo/history`; anything else is off. It also needs the ledger: with no ledger configured it stays off, the route answers `404 {"enabled":false}` and boot says why. |
 | `SUBSTRATE_METRICS_HISTORY_INTERVAL_S` | `60` | Seconds between samples; floor 15, ceiling 3600. |
 | `SUBSTRATE_METRICS_HISTORY_TTL` | `14d` | Whole days `1d`–`90d`, applied when the table is **created**; anything else falls back to `14d`. An existing table keeps the retention it was created with, so a raised value needs an operator `ALTER TABLE "metric_samples" SET 'ttl'='<n>d'` on it; until then `/slo/history` accepts windows up to the configured value (`retentionDays`) but the table holds no more than its own TTL. |
-| `SUBSTRATE_METRICS_HISTORY_SERIES` | `core` | `core` \| `extended` (any case; uplift-5 S6). `core` is the 11 series above; `extended` also samples and serves the evidence series in [`dashboards.md`](dashboards.md), at an estimated 10 to 17 more rows per 60 s interval in normal use. Opt-in because the volume size is unresolved. Anything else is `core`, named at boot. |
+| `SUBSTRATE_METRICS_HISTORY_SERIES` | `core` | `core` \| `extended` (any case; uplift-5 S6). `core` is the 11 series above plus `planning.transition` (phase 54); `extended` also samples and serves the evidence series in [`dashboards.md`](dashboards.md), at an estimated 10 to 17 more rows per 60 s interval in normal use. Opt-in because the volume size is unresolved. Anything else is `core`, named at boot. |
 | `SUBSTRATE_BRIEF_RECALL` | `off` | `off` \| `shadow` \| `enforce` (uplift-4 S5, Build Plan BP-5.0): `off` adds no Hindsight traffic and leaves every brief, ETag and cache key as it was; `shadow` runs the prefetcher and counts `would_include` while serving today's text; `enforce` appends the `Recalled context` section. An unknown value is `off`, named at boot. |
 | `SUBSTRATE_BRIEF_RECALL_INTERVAL_S` | `120` | Seconds between prefetch ticks (floor 30, ceiling 3600); each tick refreshes `ceil(wanted / ticks per half TTL)` due pairs, at most 8 and at most what fits in 80% of the interval at `SUBSTRATE_BRIEF_RECALL_BUDGET_MS` (docs/data-planes.md § Recall in the brief). |
 | `SUBSTRATE_BRIEF_RECALL_TTL_S` | `900` | How long a recall snapshot lives in the `recall-snapshot` cache class (60–86400). The entry lives twice this: fresh up to it, `stale` (omitted from the brief, counted) up to twice it. A pair is refreshed once its snapshot is older than half of it. |
@@ -996,7 +1004,7 @@ and silently, since export fails open.
 
 ## The unified resource fabric (phase 51)
 
-`fabric_status`, `fabric_optimize` and `fabric_compliance` cover six resources. Each has a panel on the **Substrate data planes** dashboard (`infra/vps/dashboards/substrate-data-planes.json`), in the row "Fabric resources (phase 51)". The panels are generated by `scripts/dashboards.ts` from `FABRIC_SERIES`, and each reads a series the server records. The fabric itself never writes. When write probes are enabled, its Greptime row reads the last write probe `/healthz` recorded and reads `unavailable` until one exists. With `SUBSTRATE_LEDGER_WRITE_PROBE_S=0`, it uses the metadata-only verdict instead; `ok` does not mean a write was tested.
+`fabric_status`, `fabric_optimize` and `fabric_compliance` cover nine resources. Each has a panel on the **Substrate data planes** dashboard (`infra/vps/dashboards/substrate-data-planes.json`), in the row "Fabric resources (phase 51)". The panels are generated by `scripts/dashboards.ts` from `FABRIC_SERIES`, and each reads a series the server records. The fabric itself never writes. When write probes are enabled, its Greptime row reads the last write probe `/healthz` recorded and reads `unavailable` until one exists. With `SUBSTRATE_LEDGER_WRITE_PROBE_S=0`, it uses the metadata-only verdict instead; `ok` does not mean a write was tested.
 
 | Resource | Panel title | Series | Source metric |
 | --- | --- | --- | --- |
@@ -1004,7 +1012,12 @@ and silently, since export fails open.
 | `timescaledb-index` | Fabric: timescaledb-index | `capacity.runway_days` | `capacity.index.runway_days` (sampled into the history) |
 | `greptime` | Fabric: greptime | `plane.availability` | `substrate.plane.duration`, `plane=greptime` |
 | `ragflow` | Fabric: ragflow | `plane.p95` | `substrate.plane.duration`, `plane=ragflow` |
+| `lightrag` | Fabric: lightrag | `plane.p95` | `substrate.plane.duration`, `plane=lightrag` |
 | `hindsight` | Fabric: hindsight | `hindsight.outbox_size` | `substrate.hindsight.retain_outbox.size` (extended series) |
+| `tei` | Fabric: tei | `plane.p95` | `substrate.plane.duration`, `plane=tei` (an auxiliary plane: a gate and a metric label, no `/healthz` row or SLO; phase 64) |
 | `tailscale-proxy` | Fabric: tailscale-proxy | `endpoint.proxy_planes` | `substrate.endpoint.proxy_planes`, a count of the data planes whose endpoint class is `proxy`, set at boot |
+| `corpus` | Fabric: corpus | `corpus.freshness_seconds` | `substrate.corpus.freshness_seconds`, the age of the newest corpus manifest change (extended series) |
 
-The `greptime` and `ragflow` panels are per-plane series: each draws one line per plane, and the named line is that resource. The `hindsight` panel shows one total outbox count, not a line per plane. The `tailscale-proxy` panel is one count, not a line per plane, and reads the same endpoint classes as its status row. The `hindsight` and `tailscale-proxy` panels need `SUBSTRATE_METRICS_HISTORY_SERIES=extended`. Regenerate the dashboards with `bun run dashboards:build`.
+The `greptime`, `ragflow`, `lightrag` and `tei` panels are per-plane series: each draws one line per plane, and the named line is that resource. The `hindsight` panel shows one total outbox count, not a line per plane. The `tailscale-proxy` panel is one count, not a line per plane, and reads the same endpoint classes as its status row. The `hindsight`, `tailscale-proxy` and `corpus` panels need `SUBSTRATE_METRICS_HISTORY_SERIES=extended`. Regenerate the dashboards with `bun run dashboards:build`.
+
+The `corpus` row (v1.7 phase 70) is the docs plane's three objectives and reads no probe of its own. It is `unconfigured` while `SUBSTRATE_CORPUS` is off. Otherwise its `detail` carries the three readings next to the thresholds they are judged by (`SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`), and the row is `degraded` when a reading breaches its threshold (its `source` names which: `corpus.slo: breached freshness,recall5,ingest`) or could not be read within the fabric's per-source deadline (`corpus.slo: timeout` or `corpus.slo: failed`). A reading nobody has taken is `null` and is never a breach: the golden recall is `null` until the docs canary has reported it, the ingest rate is `null` until a request sent documents (a request that found everything unchanged is idle, not slow), and a corpus that has not ingested anything has no freshness. The readings, the series and how to act on a breach are in [`corpus-eval.md`](corpus-eval.md) and [`runbooks/docs-rag-operations.md`](runbooks/docs-rag-operations.md).

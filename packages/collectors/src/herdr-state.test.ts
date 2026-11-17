@@ -17,8 +17,9 @@ import type { HerdrPane } from "./herdr-map.ts";
 const NOW = "2026-10-09T00:00:00.000Z";
 const LATER = "2026-10-09T00:00:05.000Z";
 
-function pane(over: Partial<HerdrPane> = {}): HerdrPane {
-	return {
+/** The defaults with `over` laid on top; `noCwd` leaves the default directory out entirely (the type has no `undefined` values). */
+function pane(over: Partial<HerdrPane> = {}, noCwd = false): HerdrPane {
+	const { cwd, ...rest } = {
 		pane_id: "w1:p1",
 		terminal_id: "term_a",
 		agent: "omp",
@@ -27,7 +28,8 @@ function pane(over: Partial<HerdrPane> = {}): HerdrPane {
 		workspace_id: "w1",
 		tab_id: "t1",
 		...over,
-	};
+	} satisfies HerdrPane;
+	return noCwd ? rest : { ...rest, cwd };
 }
 
 const attribute = () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" });
@@ -280,7 +282,7 @@ describe("one session, one graph", () => {
 	test("a snapshot that reports no directory keeps the session and its graph", () => {
 		const started = reconcile(emptyHerdrState(), [pane()], { now: NOW, ...inGraph(A) });
 		const state = commitReconcile(emptyHerdrState(), started, ["stored"]);
-		const quiet = reconcile(state, [pane({ cwd: undefined, foreground_cwd: undefined, agent_status: "idle" })], {
+		const quiet = reconcile(state, [pane({ agent_status: "idle" }, true)], {
 			now: LATER,
 			...inGraph(A),
 		});
@@ -307,7 +309,7 @@ describe("the graph a pane's directory names", () => {
 	test("comes from the directory, falling back to the foreground process, and is empty elsewhere", () => {
 		const GID = "ut-mugzzzzz-0123abcd";
 		expect(graphOfPane(pane({ cwd: `/var/lib/substrate/worktrees/${GID}/packages/collectors` }))).toBe(GID);
-		expect(graphOfPane(pane({ cwd: undefined, foreground_cwd: `/var/lib/substrate/worktrees/${GID}` }))).toBe(GID);
+		expect(graphOfPane(pane({ foreground_cwd: `/var/lib/substrate/worktrees/${GID}` }, true))).toBe(GID);
 		expect(graphOfPane(pane({ cwd: "/home/ops/src/agent-substrate" }))).toBeUndefined();
 		expect(graphOfPane(pane({ cwd: "/var/lib/substrate/worktrees" }))).toBeUndefined();
 	});

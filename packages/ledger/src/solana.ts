@@ -37,7 +37,7 @@ export function transferMemoArgv({ cli, pubkey, memo, rpcUrl, keypairPath, amoun
 	if (amountSol !== AMOUNT_ZERO && amountSol !== AMOUNT_ONE_LAMPORT) {
 		throw new Error(`transferMemoArgv: amount must be ${AMOUNT_ZERO} or ${AMOUNT_ONE_LAMPORT}`);
 	}
-	if (parseMemo(memo) === null) throw new Error("transferMemoArgv: memo is not a v1 anchor memo");
+	if (parseMemo(memo) === null) throw new Error("transferMemoArgv: memo is not a v1 or v2 anchor memo");
 	if (!PUBKEY_RE.test(pubkey)) throw new Error("transferMemoArgv: pubkey is not 32-44 base58 characters");
 	if (!isAbsolute(keypairPath)) throw new Error("transferMemoArgv: keypair path must be absolute");
 	if (!/^https?:\/\//.test(rpcUrl)) throw new Error("transferMemoArgv: rpc url must be http(s)");

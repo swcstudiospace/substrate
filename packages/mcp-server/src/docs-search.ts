@@ -38,6 +38,7 @@ import { repoScopePrefix } from "./event.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import type { DerivedMemoryHit } from "./memory-recall.ts";
 import { ragRetryDelay } from "./rag-retry.ts";
+import { DEFAULT_TANDEM_OPTIONS, mergeTandem, type TandemCounts, type TandemOptions, type TandemOrigin, type TandemProvenance } from "./tandem-recall.ts";
 import {
 	listDatasets,
 	retrieveChunks,
@@ -58,9 +59,11 @@ import {
  */
 import { retrieveForSearch as retrieveForSearchLightrag, type LightragGraphDetail, type LightragQueryOutcome } from "./planes/lightrag.ts";
 export { retrieveForSearchLightrag };
+import type { SteeringNotice } from "./planning/steering-delivery.ts";
 import { redact, redactValue } from "./redact.ts";
 import { DEFAULT_RAG_MACHINE_SETTINGS, type DocsBackend, type LightragConfig, type RagMachineSettings } from "./config.ts";
 import type { DocumentProvenance } from "./docs-ingest.ts";
+import { CORPUS_DATASET, parseCorpusDocumentName, sourceUrl as corpusSourceUrl } from "@substrate/corpus";
 import type { CitationGraphProvenance, EventInput, PlanningGraphHint, SearchGraphStats, Surface } from "./types.ts";
 /** Framing every docs_search reply carries: chunks are untrusted text. */
 export const UNTRUSTED_DOCS_NOTICE =
@@ -71,7 +74,7 @@ export const UNTRUSTED_DOCS_NOTICE =
 export const SNIPPET_CAP = 1200;
 
 /** The default scope: all configured readable datasets, never a tenant default (D25-03). */
-export const DEFAULT_SEARCH_DATASET_NAMES: readonly string[] = ["agent-substrate", "programming-desk", "agent-skills"];
+export const DEFAULT_SEARCH_DATASET_NAMES: readonly string[] = ["agent-substrate", "programming-desk", "agent-skills", "corpus"];
 
 export interface SearchCitation {
 	title: string;
@@ -92,6 +95,21 @@ export interface SearchCitation {
 	 * on RAGFlow citations, so existing readers are unaffected.
 	 */
 	graph?: CitationGraphProvenance;
+	/** Tandem replies only: which plane the citation came from. Absent otherwise. */
+	origin?: TandemOrigin;
+	/** LightRAG corpus documents only: the docs dataset the document came from (`corpus`). Absent on every other citation. */
+	dataset?: string;
+	/**
+	 * Corpus documents only, and only while `SUBSTRATE_DOCS_RERANK=on`: true when a newer document supersedes this one or
+	 * enough readers called it stale (`corpus/rank.ts`). Absent on every other citation and in every other mode.
+	 */
+	stale?: boolean;
+	/** Corpus documents only, with `stale`: the key (`repo:path`) of the document that replaces this one, or null. */
+	superseded_by?: string | null;
+	/** Tandem replies only, on a Hindsight citation: derived memory, untrusted, never an instruction. */
+	derived?: true;
+	/** Tandem replies only: where the citation came from (bank, document, graph/session/node join keys, file, chunk). */
+	provenance?: TandemProvenance;
 }
 
 /**
@@ -173,6 +191,29 @@ export interface SearchReply {
 	 * Per call, so the answer cache never holds it.
 	 */
 	context?: DocsContext;
+	/**
+	 * Present only on a LightRAG reply that asked Hindsight too (tandem): the counts merged and how the Hindsight leg
+	 * ended. Present even when Hindsight gave nothing, so such a reply is never stored or replayed (`searchReplyStorable`).
+	 */
+	tandem?: TandemNote;
+	/**
+	 * Present only while the calling session (the `session_id` of the call) has queued steering directives: a count and
+	 * at most three entries read from the steering inbox. Per call, so the answer cache never holds it.
+	 */
+	steering?: SteeringNotice;
+	/**
+	 * Present only while `SUBSTRATE_DOCS_RERANK=on` and the answer cites a corpus document the manifest holds: the corpus
+	 * citations were re-ordered by authority, and `moved` is how many of their positions changed. Per call, so the answer
+	 * cache never holds it.
+	 */
+	rerank?: { applied: true; moved: number };
+	/**
+	 * Present only with `SUBSTRATE_CORPUS=on` and a corpus root already cached: the first 12 hex characters of the corpus Merkle
+	 * root (`corpus_root`) and the number of documents it covers (`corpus_count`), so the session's ledger trail says which corpus
+	 * it read. Per call, read from the cache and never computed here, so the answer cache never holds them.
+	 */
+	corpus_root?: string;
+	corpus_count?: number;
 }
 
 /**
@@ -195,10 +236,14 @@ export function citationProvenanceCounts(citations: readonly SearchCitation[]): 
  * Whether a reply may be stored by the answer cache: only a reply every
  * resolved dataset answered. R6's rule ("a degraded reply is never stored")
  * extended to the partial case, for the reason `degraded_datasets` states.
- * A reply carrying `context` is per call: its events belong to one session, so it is never stored.
+ * A reply carrying `context` is per call: its events belong to one session, so it is never stored. The same holds for a
+ * reply carrying `steering`: the queued directives belong to one session and change as they are acknowledged.
  */
 export function searchReplyStorable(reply: SearchReply): boolean {
-	if (Object.hasOwn(reply, "context")) return false;
+	if (Object.hasOwn(reply, "context") || Object.hasOwn(reply, "steering")) return false;
+	// A tandem reply merges Hindsight memory, which can be forgotten at any moment: a stored copy would resurrect
+	// forgotten text for every later caller, and a replay would do the same. It is per call, like `context`.
+	if (Object.hasOwn(reply, "tandem")) return false;
 	return reply.degraded !== true && (reply.degraded_datasets === undefined || reply.degraded_datasets.length === 0);
 }
 
@@ -285,6 +330,8 @@ export interface SearchDeps {
 	emit: (event: EventInput) => Promise<unknown>;
 	surface?: Surface | null;
 	sessionId?: string;
+	/** Safe original question for public notes, supplied separately from any privately augmented retrieval question. */
+	eventQuestion?: string;
 	fetchImpl?: FetchLike;
 	/** Datasets serving from a stale pin: their citations carry pin_age_ms (D25-07). */
 	degradedDatasets?: readonly string[];
@@ -328,8 +375,6 @@ export interface SearchDeps {
 	 * untrusted as before.
 	 */
 	steering?: string | null;
-	/** The planning hash the steering session holds; echoed on the note event so a refresh can be told apart. */
-	planningHash?: string | null;
 	/**
 	 * Hindsight fallback (SPE-19390): when every dataset fails, this is
 	 * tried before the degraded reply. Null means no fallback answered;
@@ -381,6 +426,12 @@ export interface SearchDeps {
 	 * the search answers from Hindsight, or degraded, as it does for an open breaker. The RAGFlow path ignores it.
 	 */
 	lightragCooling?: boolean;
+	/**
+	 * Tandem recall (phase 57c): with the LightRAG plane serving, Hindsight is asked too and merged into the citations
+	 * (`mergeTandem`). Off when absent or `enabled: false`: the LightRAG reply is then exactly what it was. Only the
+	 * LightRAG path reads it; the degraded Hindsight fallback is unchanged.
+	 */
+	tandem?: TandemOptions;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[]): Promise<SearchReply> {
@@ -459,6 +510,24 @@ function cite(
 		document_id: chunk.document_id ?? "",
 		chunk_id: chunk.chunk_id ?? "",
 		...(age !== undefined ? { pin_age_ms: age } : {}),
+	};
+}
+
+/**
+ * A LightRAG result whose file path is a corpus document name (`corpus:<repo>:<path>@<sha>`) cites the document's own
+ * repository and path: `source_url` from the corpus URL rule, `title` as `repo:path`, `dataset: "corpus"`. LightRAG holds
+ * one workspace, so without this the result would be attributed to the first dataset searched. `heading_path` keeps what
+ * LightRAG returned and every other result is returned as it was.
+ */
+function withCorpusProvenance(chunk: RagflowChunk, citation: SearchCitation): SearchCitation {
+	const parsed = parseCorpusDocumentName(chunk.source_url ?? "") ?? parseCorpusDocumentName(chunk.document_name);
+	if (parsed === null) return citation;
+	return {
+		...citation,
+		title: redact(`${parsed.repo}:${parsed.path}`),
+		source_url: redact(corpusSourceUrl(parsed.repo, parsed.path)),
+		commit: `dataset-pin:${CORPUS_DATASET}:unrecorded`,
+		dataset: CORPUS_DATASET,
 	};
 }
 
@@ -745,7 +814,9 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 		try {
 			const raw = await deps.lightrag(effectiveQuestion);
 			const scopeName = repoId !== null ? scopedDatasetName(repoId, "lightrag") : "lightrag";
-			parseLightRagJson(raw).forEach((hit, index) => citations.push(lightRagCite(hit, scopeName, index)));
+			parseLightRagJson(raw).forEach((hit, index) => {
+				citations.push(lightRagCite(hit, scopeName, index));
+			});
 		} catch {
 			// LightRAG down: RAGFlow citations stand alone.
 		}
@@ -767,7 +838,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 			action: "docs.search",
 			dataset_ids: ids,
 			...(repoId !== null ? { repo_id: repoId, scope: repoScopePrefix(repoId) } : {}),
-			...(deps.planningHash ? { planning_hash: deps.planningHash } : {}),
+			...(deps.eventQuestion === undefined ? {} : { question: deps.eventQuestion }),
 			...(deps.steering ? { steered: true } : {}),
 			urls: chunks.map((citation) => citation.source_url),
 			count: chunks.length,
@@ -878,6 +949,45 @@ function backoffWithinDeadline(deadline: SharedDeadline, baseMs: number, retry: 
 	);
 }
 
+/** How the Hindsight leg of a tandem search ended. */
+export type TandemLegStatus = "ok" | "empty" | "timeout" | "failed";
+
+/** The structured note a tandem reply carries: the counts merged, and how the Hindsight leg ended. */
+export interface TandemNote extends TandemCounts {
+	leg: TandemLegStatus;
+}
+
+interface TandemLeg {
+	hits: readonly DerivedMemoryHit[];
+	status: TandemLegStatus;
+}
+
+/**
+ * Start the Hindsight leg of a tandem search, or null when tandem is off or there is no Hindsight reader. The leg
+ * is bounded by `tandem.budget_ms` and NEVER rejects: Hindsight is an enrichment of a LightRAG answer that already
+ * has its own content, so a throw, a timeout, or a breaker refusal (which the reader reports as no hits or a throw)
+ * is a fail-open that leaves the Hindsight items out. It is the opposite of the fallback leg, which has nothing else to serve.
+ */
+function startTandemLeg(deps: SearchDeps, question: string): Promise<TandemLeg> | null {
+	const options = deps.tandem;
+	const recall = deps.lightragHindsight;
+	if (options === undefined || !options.enabled || recall === undefined) return null;
+	const budgetMs = options.budget_ms > 0 ? options.budget_ms : DEFAULT_TANDEM_OPTIONS.budget_ms;
+	const limit = options.hindsight_limit >= 1 ? Math.trunc(options.hindsight_limit) : DEFAULT_TANDEM_OPTIONS.hindsight_limit;
+	const deadline = sharedDeadline(budgetMs, "tandem budget");
+	// The reader runs inside an async function, so a synchronous throw is a rejection like any other.
+	return deadline
+		.race((async () => recall(question))())
+		.then(
+			(hits): TandemLeg => {
+				const held = hits.slice(0, limit);
+				return { hits: held, status: held.length > 0 ? "ok" : "empty" };
+			},
+			(cause: unknown): TandemLeg => ({ hits: [], status: cause instanceof DeadlineError ? "timeout" : "failed" }),
+		)
+		.finally(deadline.clear);
+}
+
 /** Hindsight recall for a failed LightRAG plane; a missing or throwing reader is no hits. */
 async function hindsightRecall(deps: SearchDeps, question: string): Promise<readonly DerivedMemoryHit[]> {
 	if (deps.lightragHindsight === undefined) return [];
@@ -889,7 +999,7 @@ async function hindsightRecall(deps: SearchDeps, question: string): Promise<read
 }
 
 /**
- * A LightRAG plane failure after its retries, or a breaker refusal: Hindsight recall answers in its place when
+ * A LightRAG plane failure after its retries, a breaker refusal, or an unconfigured plane: Hindsight recall answers in its place when
  * it can. With no hit the plain degraded reply stands, its reason the LightRAG failure as before.
  */
 async function lightragFallback(
@@ -935,12 +1045,12 @@ async function lightragFallback(
  * answered. A failed retrieval is retried on the LightRAG backoff (`lightragRetry`). Once the retries are spent,
  * Hindsight recall answers in its place when it can (`lightragFallback`); otherwise the reply degrades exactly like
  * the RAGFlow path (`degraded: true` with a reason, never a throw). A refused search (breaker open) falls back the
- * same way, and an unconfigured plane degrades as before.
+ * same way. An unconfigured plane is answered likewise: Hindsight recall when it finds something, else the degraded reply.
  */
 async function searchDocsLightrag(deps: SearchDeps, question: string, surface: Surface, sessionId: string): Promise<SearchReply> {
 	const lightrag = deps.lightragConfig;
 	const retrieve = deps.lightragRetrieve ?? retrieveForSearchLightrag;
-	if (lightrag == null) return failed(deps, sessionId, "lightrag-not-configured");
+	if (lightrag == null) return lightragFallback(deps, sessionId, question, "lightrag-not-configured");
 	// The RAG machine refused the plane (see `lightragCooling`): the search answers without asking LightRAG.
 	if (deps.lightragCooling === true) return lightragFallback(deps, sessionId, question, RAG_BREAKER_OPEN);
 	// Only the LightRAG plane's own breaker is consulted: the RAGFlow state never
@@ -983,6 +1093,8 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		}
 		return settled;
 	};
+	// Tandem: Hindsight is asked beside the LightRAG retrieval, under its own budget, so it adds no wait of its own beyond that.
+	const tandemLeg = startTandemLeg(deps, question);
 	// The plane's retries, on docs_lightrag_query's backoff. One shared budget covers every attempt and every wait:
 	// a wait the budget ends stops the retries, and the last failure is the one answered.
 	let outcome = await attempt();
@@ -1002,12 +1114,34 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		return lightragFallback(deps, sessionId, question, reason, [{ dataset: first.name, reason }]);
 	}
 	const { detail } = outcome.value;
-	const citations = outcome.value.chunks.map((chunk) => cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf));
+	const citations = outcome.value.chunks.map((chunk) => withCorpusProvenance(chunk, cite(chunk, first.name, deps.pins?.[first.id], pinAged, nowMs, deps.provenanceOf)));
 	citations.sort((left, right) => right.score - left.score);
-	const chunks = citations.slice(0, 10);
-	attachGraphHints(chunks, deps.graphHints);
-	withBackendProvenance(chunks, detail.provenance);
+	const lightragChunks = citations.slice(0, 10);
+	attachGraphHints(lightragChunks, deps.graphHints);
+	withBackendProvenance(lightragChunks, detail.provenance);
 	const graph = mergedGraphCounts(deps.graphHints, detail);
+	// Tandem: the Hindsight leg started beside the LightRAG retrieval is merged in now. It never rejects (see
+	// `startTandemLeg`), so a failed, timed-out or refused Hindsight only leaves its items out.
+	const leg = tandemLeg === null ? null : await tandemLeg;
+	let chunks = lightragChunks;
+	let tandem: TandemNote | undefined;
+	if (leg !== null) {
+		const merged = mergeTandem({
+			lightrag: lightragChunks.map((chunk) => (/^[a-z][a-z0-9+.-]*:/i.test(chunk.source_url) ? chunk : { ...chunk, file_path: chunk.source_url })),
+			hindsight: leg.hits,
+			cap: 10,
+			now: () => nowMs,
+		});
+		chunks = merged.items.map((item): SearchCitation => {
+			if (item.origin === "lightrag") {
+				const original = lightragChunks[item.input_index] as SearchCitation;
+				return { ...original, origin: "lightrag", provenance: item.provenance };
+			}
+			const hit = leg.hits[item.input_index] as DerivedMemoryHit;
+			return { ...hindsightCite(hit, item.input_index), origin: "hindsight", derived: true, provenance: item.provenance };
+		});
+		tandem = { ...merged.counts, leg: leg.status };
+	}
 	await deps.emit({
 		surface,
 		kind: "note",
@@ -1018,11 +1152,12 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 			backend: "lightrag",
 			dataset_ids: readable.map((dataset) => dataset.id),
 			...(repoId !== null ? { repo_id: repoId, scope: repoScopePrefix(repoId) } : {}),
-			...(deps.planningHash ? { planning_hash: deps.planningHash } : {}),
+			...(deps.eventQuestion === undefined ? {} : { question: deps.eventQuestion }),
 			...(deps.steering ? { steered: true } : {}),
 			urls: chunks.map((citation) => citation.source_url),
 			count: chunks.length,
 			...(graph !== undefined ? { graph } : {}),
+			...(tandem !== undefined ? { tandem } : {}),
 		},
 	});
 	return {
@@ -1030,5 +1165,6 @@ async function searchDocsLightrag(deps: SearchDeps, question: string, surface: S
 		untrusted: UNTRUSTED_DOCS_NOTICE,
 		backend: "lightrag",
 		...(graph !== undefined ? { graph } : {}),
+		...(tandem !== undefined ? { tandem } : {}),
 	};
 }

@@ -30,7 +30,16 @@ These apply to every source:
   `skill.decline`, `skill.retire`, `skill.approve.refused`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
   `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
-  `index.archive`, `alert`.
+  `index.archive`, `alert`, and the v1.6 actions `session.checkpoint`, `session.rollback`,
+  `session.rollback.refused`, `memory.forget`, `memory.capsule.export`,
+  `memory.capsule.redact`, `anchor.signer.rotate`, `anchor.reanchor`, and the v1.7 actions `docs.corpus.ingest`, `docs.corpus.refused`,
+  `docs.corpus.root`, `worktrees.report`, `worktree.prune`, `docs.sync` and `docs.planning` (the server's own
+  planning refresh, `docs.planning`, had no row until phase 65).
+- **Reserved actions are not writable through `events_emit` or `POST /events`.** A reader trusts `anchor.signer.rotate`, `anchor.reanchor`, `session.checkpoint`, `session.rollback`,
+  `session.rollback.refused`, `session.rollback.forget_batch`, `memory.forget` and `docs.corpus.root` by their action alone, and the event carries no proof of its writer, so both
+  doors refuse them with a `reserved-action` error (nothing written) unless the caller is an operator emitting as its own surface; the server's own emits do not
+  pass those doors (`RESERVED_NOTE_ACTIONS` in `packages/mcp-server/src/reserved-actions.ts` is the one list). `docs.canary` is the one host-job action in it: the docs canary's
+  report feeds the recall gauge and the `corpus` fabric row, so only the `substrate` token acting as itself may write it, and an operator's token is refused too.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
@@ -43,8 +52,17 @@ These apply to every source:
   accepted merge-trigger has no recorded ingest after
   `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` and one `note` when it clears, with
   `payload.state`, `dataset`, `commit`, `lag_seconds`, deduped through the
-  docs state file; `docs-canary` — the opt-in live golden canary, one
-  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`;
+  docs state file (v1.7 phase 65 judges the corpus under the same action, with
+  `payload.dataset` `corpus`, when `SUBSTRATE_CORPUS=on` and its last ingest is older than
+  `SUBSTRATE_CORPUS_FRESH_MAX_AGE_S`: `payload.lag_seconds` and `threshold_seconds`, no `commit`);
+  `corpus-sync` — v1.7 phase 65, one `note` per `substrate corpus` sync with
+  `payload.repo`, `trigger` (`manual`, `watch`, `hook`, `sweep`, `reconcile`), `outcome`
+  (`ok`, `partial`, `failed`, `skipped`), `lag_s`, the counts (`added`, `changed`, `updated`,
+  `tombstoned`, `refused`, `failed`) and `duration_ms`, never a path or text; the server reads only `lag_s`;
+  `docs-canary` — the opt-in live golden canary, one
+  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`, and (v1.7 phase 70) one `note` per
+  run that measured the golden set, with `payload.golden_recall5` and `golden_asked`, which the warning also carries
+  as `golden_recall5` when it was measured;
   `index-archive` — uplift-4 S2, one `note` per finished index snapshot with
   `payload.snapshot`, `createdAt`, `serverVersion`, `schemaHash` and per-table
   `rows`, `bytes`, `sha256`, never rows or a path; `alert` — uplift-4 S3, one
@@ -97,6 +115,11 @@ These apply to every source:
 | `docs.search.failed` | 25 | `warning` | `caller` | `docs.search` | — | — | no |
 | `docs.ingest` | 25 | `note` | `caller` | `docs.ingest` | — | — | no |
 | `docs.ingest.refused` | 25 | `warning` | `caller` | `docs.ingest` | — | — | no |
+| `docs.corpus.ingest` | 63 | `note` | `caller` | `docs.corpus.ingest` | — | — | no |
+| `docs.corpus.refused` | 63 | `warning` | `caller` | `docs.corpus.refused` | — | — | no |
+| `docs.corpus.root` | 69 | `note` | `substrate` | `docs.corpus.root` | — | — | no |
+| `docs.sync` | 65 | `note` | `caller` | `docs.sync` | `corpus-sync` | — | no |
+| `docs.planning` | 65 | `note` | `substrate` | `docs.planning` | — | — | yes |
 | `memory.retain.failed` | 26 | `warning` | `memory-writer` | `memory.retain` | — | — | no |
 | `memory.write.accepted` | 26 | `note` | `memory-writer` | — | — | — | no |
 | `memory.write.conflict` | 26 | `note` | `memory-writer` | — | — | — | no |
@@ -111,6 +134,7 @@ These apply to every source:
 | `docs.freshness` | 25 | `warning` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.freshness.recovered` | 25 | `note` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
 | `docs.canary` | 25 | `warning` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
+| `docs.canary.report` | 70 | `note` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
 | `index.archive` | 28 | `note` | `substrate` | `index.archive` | `index-archive` | — | yes |
 | `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
@@ -134,6 +158,21 @@ These apply to every source:
 | `railway.deploy.applied` | 45 | `note` | `substrate` | `railway.deploy` | `railway` | — | no |
 | `railway.deploy.refused` | 45 | `warning` | `substrate` | `railway.deploy` | `railway` | — | no |
 | `db.endpoint` | 48 | `note` | `substrate` | `db.endpoint` | `mcp-server` | — | no |
+| `session.checkpoint` | 55 | `note` | `caller` | `session.checkpoint` | — | — | no |
+| `session.rollback` | 55 | `note` | `caller` | `session.rollback` | — | — | no |
+| `session.rollback.refused` | 55 | `warning` | `caller` | `session.rollback.refused` | — | — | no |
+| `memory.forget` | 57 | `note` | `caller` | `memory.forget` | — | — | no |
+| `memory.capsule.export` | 60 | `note` | `caller` | `memory.capsule.export` | — | — | no |
+| `memory.capsule.redact` | 60 | `note` | `caller` | `memory.capsule.redact` | — | — | no |
+| `anchor.signer.rotate` | 59 | `note` | `caller` | `anchor.signer.rotate` | — | — | no |
+| `anchor.reanchor` | 59 | `note` | `caller` | `anchor.reanchor` | — | — | no |
+| `planning.changed` | 52 | `note` | `substrate` | — | — | origin remote of the planning checkout | no |
+| `steering.queued` | 58 | `note` | `substrate` | `steering.queued` | — | — | no |
+| `worktrees.report` | 68 | `note` | `caller` | `worktrees.report` | — | — | no |
+| `worktree.prune` | 68 | `note` | `caller` | `worktree.prune` | — | the pruned worktree's repository (omitted for a local-only one) | no |
+| `worktree.merge_back` | 68 | `note` | `caller` | `worktree.merge_back` | — | the merged-back worktree's repository (omitted for a local-only one) | no |
+| `steering.session_ended` | 71 | `note` | `caller` | `steering.session_ended` | — | closed live session's repository | no |
+| `steering.refused` | 71 | `warning` | `caller` | `steering.refused` | — | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
@@ -153,6 +192,15 @@ Surface rule names: `herdr-agent` is the agent herdr detected, mapped onto
 `SURFACES` by Phase 19's fixed table; `caller` is the authenticated caller,
 never body-supplied; `memory-writer` is the memory's writer; `lease-holder`
 is the lease holder. A fixed name is always that surface.
+
+The four `memory.write.*` rows share one emitter (`auditMemoryWrite`) and no `payload.action`; the payload keys
+are `outcome`, `reason` (`accepted` on a plain acceptance), `scope`, `kind`, `strategy`, `review_id` and
+`quarantine_id`. An accepted write adds `entry_id`: the id of the entry the gate stored, read from the gate's
+result and never from the request, so a caller cannot choose it. It is a payload key on the existing `note`
+(or, for an accepted write the read-back could not verify, `warning`), not a new kind or surface. Refused,
+quarantined and conflicting writes stored nothing and carry no `entry_id`. Events written before the key
+existed lack it; the consistency verifier pairs those by writer, scope, kind and time
+([consistency-verify.md](runbooks/consistency-verify.md#limits-stated-plainly)).
 
 The three `skills.propose` rows share `payload.action: "skill.propose"` and are told
 apart by kind and `payload.status`: a `note` for an outcome, a `warning` with status
@@ -174,6 +222,128 @@ a write the gate refused, or that failed at Railway, is a `warning`. Their paylo
 `action`, `runtime`, `status`, `environment_id`, `service_id`, the refusal code when there
 is one, and the approval reference when one was valid. They never carry the token or a
 request body. The four Railway reads emit nothing (D45-b).
+
+## Live-session events and shared history (phase 71)
+
+This is the implemented producer contract, not a deployment or passing-test claim. It adds no event kind or surface. Live public handles are metadata, never authorization credentials; generic event queries keep their existing historical authorization and `include_payload` behavior.
+
+- **Refused target:** `warning`, `payload.action: "steering.refused"`, from the authenticated caller (or fixed system fallback). Payload is exactly the fixed action/operation, trusted `caller_surface`, `operator`, and `target_sha256`. The hash is SHA-256 of `substrate.live-session-refusal.v1`, a NUL separator and the bounded requested identifier. Neither summary, payload nor top-level `session_id` contains that raw target, proof, ownership/existence reason or private body. Refusal auditing is best-effort; failure never adds `audit: unrecorded` or changes the common not-found response. Mandatory principal 429 does no refusal audit or target lookup.
+- **New live state transitions:** existing `note` / `warning` (PAUSED), public session/repo/state/time and optional previous state. Acknowledgement extras are restricted to public `directive_id` and fixed `via: "steering_acknowledge"`. No snapshot spread, steering text, planning hash, proof/hash or private command count is published.
+- **Queue wake hint:** existing `note`, fixed `substrate` surface, `action: "steering.queued"`, public `directive_id`, `session_id`, `non_blocking: true`. It carries no directive action/priority/body/count.
+- **Explicit committed close:** existing `note`, `action: "steering.session_ended"`, public `session_id`, `repo_id`, SQL `closed_at`, `non_blocking: true`; top-level session/repo are public metadata. Older events may carry legacy removal-decision fields; they are historical records, not the new close contract. Generic `session.end` remains historical append and never revokes a live handle.
+- **New private docs-search notes:** fixed public summary and allowlisted action/live session/repo/non-blocking metadata only, on both success/failure paths. Privately augmented question, directions, planning hash, nested backend extras, proof/hash and directive bodies/counts never enter the shared row. Ordinary search attribution is still historical.
+- **Legacy persistence warning:** historical `steering.persist_failed` rows remain readable, but the restart-cache writer and its producer catalog row were removed. Authority failure returns typed `session-unavailable`, not a successful cache save warning. No event kind was removed or added.
+
+Illustrative refusal payload (the hash placeholder is not a wire value):
+
+```json
+{
+  "action": "steering.refused",
+  "operation": "steering_list",
+  "caller_surface": "omp",
+  "operator": false,
+  "target_sha256": "<domain-separated SHA-256>"
+}
+```
+
+HTTP MCP prepares live targets/budgets before generic audit; one boundary refusal prevents all batch dispatch. Otherwise required mutation audit precedes effects. Generic audit stores canonical argument digest/structural keys, not plaintext live target context or proof. Historical audit/checkpoint labels and prior query authorization are unchanged.
+
+Lifecycle SQL mutations report truthful public receipts even if the subsequent public note fails: issue/update/close return `event_stored: false` rather than hiding the committed effect. This is not the required generic-audit gate (which remains pre-effect). Later close never rewrites an accepted queue/ack/state receipt into a false no-effect refusal. Private read/hint release still requires the final SQL authorization check; a committed movement can retain applied metadata while its hint is withheld.
+
+**No retroactive confidentiality:** previously published rows are not rewritten, scrubbed or newly access-controlled by this cutover. Old live events may contain previously published directions/hashes. Caller-controlled `events_emit` remains historical storage, not a confidential channel. Cache, ledger and presence cannot reconstruct binding credentials or lost terminal authority records. Full operating/recovery limits: [Live Steering](live-steering.md).
+
+## Session checkpoint and rollback events
+
+Phase 55 defines the ledger events for session checkpoints and rollbacks, using existing
+kinds only. Each is emitted from the caller's own surface (the authenticated caller, never
+body-supplied) with `session_id` set to the session it concerns, so it chains into that
+session. None carries `repo` (a per-turn checkpoint would crowd a repo's brief) or a
+`runtime`. The contract is encoded and validated in
+`packages/mcp-server/src/session-events.ts`. The tools `session_checkpoint`,
+`session_rollback_plan` and `session_rollback_commit` (registered in `mcp.ts`, admitted in
+`admission.ts`, listed in `packages/audit/src/policy.ts`) build and emit them, and the
+`substrate session` CLI reaches them over the MCP endpoint (`/mcp`); see the tools paragraph below.
+`checkpoint_verify` and `memory_verify` are read-only tools that resolve a checkpoint or a
+memory entry to its hourly root and emit nothing.
+
+- `session.checkpoint` (`note`, `payload.action: "session.checkpoint"`): `ckpt_id`
+  (`ckpt_` + 26 characters of `0-9a-z`), `seq` (integer >= 1, per session), `trigger`
+  (`turn`, `plan-step`, `steering`, `manual`, `pre-restore`, `baseline`), `git_tree` (40 or
+  64 lowercase hex), optional `git_base_commit` (same), optional `branch` (<= 200),
+  `manifest_sha256` (64 hex), `file_count`, `skipped_count` (integers >= 0), optional
+  `transcript_ref`, optional `chain_head {event_id, hash}`, optional `plan_ref {phase?,
+  step?}` (each <= 64), optional `prev_ckpt_id` and optional `taken_at_ms` (integer >= 0,
+  epoch milliseconds when the client pinned the snapshot; a checkpoint written without it stays valid).
+- `transcript_ref`: `surface` (a `SURFACES` member), `session_locator` (1..128, an opaque
+  id such as a session uuid or conversation id, never a path: no `/`, `\`, `~` or space),
+  optional `entry_id` (1..64), optional `turn_no` (integer >= 0), optional
+  `parent_entry_id` (1..64), optional `prefix_sha256` (64 hex). At least one of `entry_id`
+  and `turn_no` is required.
+- `session.rollback` (`note`, `payload.action: "session.rollback"`): `rollback_id` (`rb_` +
+  26 characters), `from_ckpt_id`, `to_ckpt_id`, `target_event_id`, `target_hash` (64 hex),
+  `pre_restore_tree` (git hex), `pre_restore_ckpt_id`, `files_added`, `files_modified`,
+  `files_deleted` (integers >= 0), `memory {superseded_entries, forgotten_documents}` and
+  `transcript` (`moved-leaf`, `marker-only`, `unsupported`, `stale`).
+- `session.rollback.refused` (`warning`, `payload.action: "session.rollback.refused"`):
+  `reason` (`not-authorized`, `session-busy`, `target-not-found`, `chain-unverified`,
+  `hash-mismatch`, `drift-detected`, `ledger-down`, `blob-missing`, `transcript-stale`,
+  `invalid-request`), optional `to_ckpt_id`, optional `detail` (<= 300; the ledger redacts it).
+
+**No content.** These payloads carry ids, counts and digests only: never file, diff, patch,
+transcript or memory content. The validators reject any key that looks like content (`body`,
+`content`, `text`, `bytes`, `diff`, `patch`, file contents), any unknown key, and any payload
+over the ledger's 16000-byte cap.
+
+**Rollback is an event, not a mutation.** A rollback is a NEW `session.rollback` event that
+points at an earlier one through `target_event_id` and `target_hash`; the append-only ledger
+is never rewritten or deleted from. A refused rollback is a `session.rollback.refused`
+warning.
+
+**The three tools (v1.6 phase 61).** `session_checkpoint` appends a `session.checkpoint` note as the caller's surface and attaches the ledger chain position (`chain_head`, the session's newest event, observed by the server) itself; a checkpoint id already recorded answers `stored: false` with the existing event. `session_rollback_plan` (read only) answers the target checkpoint, the later ones, the anchor verdict (`null` when it cannot be computed in time; it never blocks), how many of the caller's memory entries written in the session after the checkpoint a rollback would forget, and a `plan_digest` over the rollback id, session, target checkpoint and its event hash, and the sorted ids that would be forgotten, never over the later checkpoints. `session_rollback_commit` appends `session.rollback.refused`, or for `committed` recomputes the plan (a different digest answers `stale-plan` and changes nothing), forgets the memory after the target in batches of 50 (`memory.forget`, reason `rollback`; rows and ledger stay, recall stops serving them, Hindsight documents are deleted) and appends ONE `session.rollback` note with the real totals; it is idempotent by `rollback_id`. A checkpoint belongs to the surface that recorded it: another surface's checkpoint answers `not-found` (the CLI treats that as the `target-not-found` refusal). The server never touches a worktree and never reads a transcript. A commit made without a server plan (`local_only`) is accepted on the same checks and its note's summary says the checkpoint was not anchored.
+
+**Which memory a rollback reaches.** The memory cut of a checkpoint is the EARLIER of its ledger record time and its `taken_at_ms`, so a checkpoint taken offline and recorded hours later still forgets what was written in between. A `taken_at_ms` more than 30 days before the record time or more than 30 seconds after it is ignored (the record time stands) and the `session_checkpoint` answer carries a warning that names why. The upper bound is `until_ms` (an integer, epoch milliseconds, on both `session_rollback_plan` and `session_rollback_commit`): memory created AFTER it belongs to the new timeline the session began once the rollback started and is never forgotten, so a commit delivered late (an offline rollback synced hours later) does not forget it. `until_ms` must not be more than 30 seconds ahead of the server clock or before the cut; absent means now. The CLI sets it to the instant the rollback began and keeps it in the pending journal, so a later sync plans and commits with the same bound. The plan digest covers the forgotten entry ids, so it covers the bound through them: a commit sent with another bound than its plan answers `stale-plan`.
+
+**Anchoring.** The events ride the existing hourly Merkle root to Solana devnet with no
+ledger, memo or anchors change (roots only, never event contents). Anchoring lags the hour
+close by about an hour plus the 5 minute ingest lag, and `substrate verify` reports the hour
+`pending` for up to 3 hours.
+
+**Idempotent replay.** A checkpoint is sent with `idempotency_key` `ckpt:<session token>:<seq>`
+and a rollback with `rb:<session token>:<rollback_id>`, plus the original `ts` on a replay. The
+ledger only honours the key under `SUBSTRATE_EVENT_IDEMPOTENCY=accept` or `enforce`; the default
+`off` ignores it, so a retried event would append a duplicate. A refusal carries no key: a
+repeated refusal is a new fact.
+
+## Memory forget events
+
+Phase 57 defines the ledger note for forgetting memory, using an existing kind only. One
+`note` per forget call (`payload.action: "memory.forget"`), emitted from the caller's own
+surface with the target session's `session_id`; it carries no `repo` and no `runtime`. The
+contract is encoded and validated in `packages/mcp-server/src/memory-forget.ts`. It is wired
+to the service as `memoryForget` in `service.ts`, an internal method with no MCP tool or HTTP
+route of its own: `session_rollback_commit` calls it for the entries a rollback forgets. The
+Phase 60 and Phase 59 notes `memory.capsule.export`, `memory.capsule.redact`,
+`anchor.signer.rotate` and `anchor.reanchor` are caller-surface notes with their own builders
+(`capsule.ts`, `signer-set.ts`, `reanchor-plan.ts`). `substrate capsule` posts the two capsule
+notes through the CLI event path (`packages/cli/src/capsule.ts`); an operator posts the signer
+rotation with `events_emit` (`docs/runbooks/anchor-signer-rotation.md`). `anchor.reanchor` is written by the
+operator-run `reanchor-run.ts --execute` (`reanchor.ts`) as an operator surface, in the hour's anchor session
+(`anchor:<YYYY-MM-DDTHH>`), with idempotency key `reanchor:<period_start>:<new_tx_sig>`. The verifier
+(`anchor-verify-deps.ts`, `followReanchor`) reads it from an operator surface only, as a pointer to the replacement
+transaction, and still judges that transaction from the chain; the `anchors` row is never rewritten
+(`docs/runbooks/devnet-reset-and-reanchor.md`). No other code emits it. The server emits none of them by itself.
+
+- Payload: `forget_id` (`fg_` + 26 lowercase hex, derived from the sorted entry ids, the
+  reason and the rollback or checkpoint id, so a retried call reuses it), `reason`
+  (`rollback`, `expiry`, `operator`), `actor` (`agent`, `human`), `entry_count` (1..200),
+  `entry_ids` (the first 50, sorted), `counts {marked, already_forgotten, already_superseded,
+  missing}` and `plane {deleted, absent, pending, skipped}` (each sums to `entry_count`), and
+  optional `session_id`, `checkpoint_id` and `rollback_id`.
+- **Forgotten, not deleted.** The index row stays; its `superseded_by` is set to the marker
+  `forgotten:<forget_id>`, so the brief and `memory_search` (without `include_superseded`)
+  stop serving it at once. Its plane document is deleted afterwards; a plane failure never
+  undoes the mark and is retried by re-running the same request. The ledger is never rewritten.
+- **No content.** The note carries ids and counts only, never memory text.
 
 ## Silent sources
 

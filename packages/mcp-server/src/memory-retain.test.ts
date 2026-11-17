@@ -5,9 +5,9 @@
  * exactly once per idempotency key; everything else warns without touching
  * the write — which already succeeded, so the forward never blocks it.
  */
-import { beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { HindsightFake } from "./hindsight-fake.ts";
-import { forwardRetain, type RetainDeps } from "./memory-retain.ts";
+import { forwardRetain, replayRetain, retainDocumentId, type RetainDeps } from "./memory-retain.ts";
 import { clearEnsuredBanks, type HindsightConfig } from "./planes/hindsight.ts";
 import type { EventInput, MemoryEntry, MemoryWriteResult } from "./types.ts";
 
@@ -43,6 +43,12 @@ function accepted(overrides: Partial<MemoryWriteResult> = {}): MemoryWriteResult
 		entry: entry(),
 		...overrides,
 	};
+}
+
+/** An unaccepted result: the key is dropped, because an `entry: undefined` override would not survive `exactOptionalPropertyTypes`. */
+function withoutEntry(overrides: Partial<MemoryWriteResult> = {}): MemoryWriteResult {
+	const { entry: _entry, ...rest } = accepted(overrides);
+	return rest;
 }
 
 function sourced() {
@@ -95,13 +101,129 @@ describe("forwardRetain", () => {
 		const unnamed = await forwardRetain(
 			deps,
 			request,
-			accepted({ entry: entry({ id: "mem_2", scope: "agent:cursor", repo: undefined }), idempotency_key: "mwd_key2" }),
+			accepted({ entry: entry({ id: "mem_2", scope: "agent:cursor" }), idempotency_key: "mwd_key2" }),
 		);
 		expect(named.forwarded).toBe(true);
 		expect(unnamed.forwarded).toBe(true);
 		const [withRepo, withoutRepo] = fake.retains.map((retained) => retained.item.metadata);
 		expect(withRepo).toMatchObject({ scope: "agent:cursor", repo: "acme/app" });
 		expect(withoutRepo).not.toHaveProperty("repo");
+	});
+
+	describe("join keys", () => {
+		const request = { ...sourced(), scope: "repo:acme/app", kind: "fact" as const, text: "x", writer: "cursor" };
+
+		/** `MemoryEntry` does not declare `node_id`, so the join-key tests carry it structurally. */
+		function keyed(overrides: Record<string, unknown>): MemoryEntry {
+			return { ...entry(), ...overrides } as MemoryEntry;
+		}
+
+		function retainedMetadata(fake: HindsightFake, at = 0): Record<string, unknown> {
+			const metadata = fake.retains[at]?.item.metadata;
+			if (metadata === null || metadata === undefined || typeof metadata !== "object") throw new Error("no retained metadata");
+			return metadata as Record<string, unknown>;
+		}
+
+		test("an entry that holds graph_id, session_id and node_id retains them as metadata, never as tags", async () => {
+			const { fake, deps } = setup();
+			const outcome = await forwardRetain(
+				deps,
+				request,
+				accepted({ entry: keyed({ graph_id: "ut-1", session_id: "sess-1", node_id: "n2" }) }),
+			);
+			expect(outcome.forwarded).toBe(true);
+			expect(retainedMetadata(fake)).toMatchObject({ graph_id: "ut-1", session_id: "sess-1", node_id: "n2" });
+			expect(fake.retains[0]?.item.tags).toEqual(["cursor", "fact"]);
+		});
+
+		test("an entry without them carries no such keys at all", async () => {
+			const { fake, deps } = setup();
+			await forwardRetain(deps, request, accepted());
+			const metadata = retainedMetadata(fake);
+			for (const key of ["graph_id", "session_id", "node_id"]) expect(metadata).not.toHaveProperty(key);
+		});
+
+		test("only the keys the entry holds are sent", async () => {
+			const { fake, deps } = setup();
+			await forwardRetain(deps, request, accepted({ entry: keyed({ graph_id: "ut-1" }) }));
+			const metadata = retainedMetadata(fake);
+			expect(metadata).toMatchObject({ graph_id: "ut-1" });
+			expect(metadata).not.toHaveProperty("session_id");
+			expect(metadata).not.toHaveProperty("node_id");
+		});
+
+		test("an invalid identifier is dropped and does not fail the write", async () => {
+			const { fake, emitted, deps } = setup();
+			const outcome = await forwardRetain(
+				deps,
+				request,
+				accepted({
+					entry: keyed({
+						graph_id: "g".repeat(600), // past the identifier cap
+						session_id: "", // empty reads as absent
+						node_id: 7, // not a string
+					}),
+				}),
+			);
+			expect(outcome.forwarded).toBe(true);
+			expect(emitted).toEqual([]);
+			const metadata = retainedMetadata(fake);
+			for (const key of ["graph_id", "session_id", "node_id"]) expect(metadata).not.toHaveProperty(key);
+		});
+
+		test("an identifier the redactor would rewrite is dropped rather than refusing the forward", async () => {
+			const { fake, emitted, deps } = setup();
+			const outcome = await forwardRetain(
+				deps,
+				request,
+				accepted({ entry: keyed({ graph_id: "password: hunter2", session_id: "sess-1" }) }),
+			);
+			expect(outcome.forwarded).toBe(true);
+			expect(emitted).toEqual([]);
+			const metadata = retainedMetadata(fake);
+			expect(metadata).not.toHaveProperty("graph_id");
+			expect(metadata).toMatchObject({ session_id: "sess-1" });
+			expect(JSON.stringify(fake.requests)).not.toContain("hunter2");
+		});
+
+		test("the document id is the same whether or not the keys are present, and is pinned", async () => {
+			const withKeys = keyed({ subject: "lease-fence", graph_id: "ut-1", session_id: "sess-1", node_id: "n2" });
+			const withoutKeys = keyed({ subject: "lease-fence" });
+			// sha256 of {"kind":"fact","scope":"repo:acme/app","subject":"lease-fence"}, first 32 hex characters.
+			const pinned = "subj_a7edbfde83720cc6b5a0b6c70a1f533b";
+			expect(retainDocumentId(withKeys, "mwd_key1")).toBe(pinned);
+			expect(retainDocumentId(withoutKeys, "mwd_key1")).toBe(pinned);
+			// Without a subject the idempotency key is the id, keys or not.
+			expect(retainDocumentId(keyed({ graph_id: "ut-1" }), "mwd_key1")).toBe("mwd_key1");
+			const { fake, deps } = setup();
+			const outcome = await forwardRetain(deps, request, accepted({ entry: withKeys }));
+			expect(outcome.document_id).toBe(pinned);
+			expect(fake.retains[0]?.item.document_id).toBe(pinned);
+		});
+
+		test("an outbox replay derives the same keys from the entry it re-read", async () => {
+			const { fake, deps } = setup();
+			const outcome = await replayRetain(deps, {
+				entry: keyed({ source_event: "evt_proof_run", graph_id: "ut-1", session_id: "sess-1", node_id: "n2" }),
+				writer: "cursor",
+				bank: "sub-cursor",
+				documentId: "mwd_key1",
+			});
+			expect(outcome.forwarded).toBe(true);
+			expect(retainedMetadata(fake)).toMatchObject({ graph_id: "ut-1", session_id: "sess-1", node_id: "n2", entry_id: "mem_1" });
+		});
+
+		test("redaction is unchanged: a secret in the body still refuses the forward when keys are present", async () => {
+			const { fake, emitted, deps } = setup();
+			const outcome = await forwardRetain(
+				deps,
+				request,
+				accepted({ entry: keyed({ text: "deploy password: hunter2", graph_id: "ut-1" }) }),
+			);
+			expect(outcome.reason).toBe("retain.unredacted");
+			expect(fake.requests.length).toBe(0);
+			expect(emitted.length).toBe(1);
+		});
 	});
 
 	test("a retry under the same key replaces instead of duplicating", async () => {
@@ -115,9 +237,9 @@ describe("forwardRetain", () => {
 
 	test("unaccepted or unverified writes forward nothing and warn nothing", async () => {
 		for (const result of [
-			accepted({ outcome: "denied", verified_persisted: false, entry: undefined }),
-			accepted({ outcome: "quarantined", verified_persisted: false, entry: undefined }),
-			accepted({ outcome: "conflict", verified_persisted: false, entry: undefined }),
+			withoutEntry({ outcome: "denied", verified_persisted: false }),
+			withoutEntry({ outcome: "quarantined", verified_persisted: false }),
+			withoutEntry({ outcome: "conflict", verified_persisted: false }),
 			accepted({ verified_persisted: false }),
 		]) {
 			const { fake, emitted, deps } = setup();
@@ -286,7 +408,7 @@ describe("supersede", () => {
 		const outcome = await forwardRetain(
 			deps,
 			{ ...sourced(), scope: "repo:acme/app", kind: "fact", text: "x", writer: "cursor" },
-			accepted({ idempotency_key: "mwd_key9", entry: entry({ subject: undefined }) }),
+			accepted({ idempotency_key: "mwd_key9", entry: entry() }),
 		);
 		expect(outcome).toMatchObject({ forwarded: true, document_id: "mwd_key9" });
 	});

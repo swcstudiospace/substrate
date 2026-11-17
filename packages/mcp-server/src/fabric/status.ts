@@ -1,5 +1,5 @@
 /**
- * Aggregate status across the six fabric resources (phase 51, SOTA-07). Pure: it reads a facts object and
+ * Aggregate status across the nine fabric resources (phase 51, SOTA-07; the embedding service joined in phase 64 and the corpus in phase 70). Pure: it reads a facts object and
  * returns rows, so it is testable without a service, a socket or a clock.
  *
  * State rules, applied in this order for a service row:
@@ -11,10 +11,16 @@
  *
  * The tailscale-proxy row reads only the phase-48 endpoint classes: unconfigured when no data-plane
  * endpoint is set, degraded when any endpoint is direct, ok otherwise. No network probe backs it.
+ *
+ * The corpus row (phase 70) judges the docs plane's three objectives and reads nothing but the facts: unconfigured when
+ * `SUBSTRATE_CORPUS` is off, degraded when a reading breaches its threshold or the readings could not be read in time,
+ * ok otherwise. A reading nobody has taken yet is not a breach, so a corpus that has not ingested or been evaluated is ok.
  */
+import { sloBreaches } from "@substrate/corpus";
 import type { EndpointClass } from "../db-endpoints.ts";
 import {
 	DB_PLANES,
+	type CorpusDetail,
 	type FabricFacts,
 	type FabricResourceStatus,
 	type FabricState,
@@ -65,7 +71,24 @@ export function proxyRow(facts: FabricFacts): FabricResourceStatus {
 	};
 }
 
-/** The six rows in report order, with per-state counts. Pure. */
+/** The docs plane's objectives as one row. Pure. */
+export function corpusRow(facts: FabricFacts): FabricResourceStatus {
+	const { enabled, readings, thresholds, unread } = facts.corpus;
+	const base = { resource: "corpus", endpointClass: "not-applicable", checkedAt: facts.checkedAt } as const;
+	if (!enabled) return { ...base, state: "unconfigured", source: "config.corpus" };
+	const breaches = sloBreaches(readings, thresholds);
+	const detail: CorpusDetail = {
+		freshnessS: { reading: readings.freshnessS, threshold: thresholds.freshnessS },
+		recall5: { reading: readings.recall5, threshold: thresholds.recall5 },
+		ingestDocsPerS: { reading: readings.ingestDocsPerS, threshold: thresholds.ingestDocsPerS },
+		breaches,
+	};
+	if (unread !== null) return { ...base, state: "degraded", source: `corpus.slo: ${unread}`, detail };
+	if (breaches.length > 0) return { ...base, state: "degraded", source: `corpus.slo: breached ${breaches.join(",")}`, detail };
+	return { ...base, state: "ok", source: "corpus.slo", detail };
+}
+
+/** The eight rows in report order, with per-state counts. Pure. */
 export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 	const at = facts.checkedAt;
 	const resources: FabricResourceStatus[] = [
@@ -73,12 +96,23 @@ export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 		serviceRow("timescaledb-index", facts.endpoints.postgres ?? "unset", facts.services["timescaledb-index"], at),
 		serviceRow("greptime", facts.endpoints.greptime ?? "unset", facts.services.greptime, at),
 		serviceRow("ragflow", "not-applicable", facts.services.ragflow, at),
+		serviceRow("lightrag", "not-applicable", facts.services.lightrag, at),
 		serviceRow("hindsight", "not-applicable", facts.services.hindsight, at),
+		teiRow(facts, at),
 		proxyRow(facts),
+		corpusRow(facts),
 	];
 	const counts: FabricStatus["counts"] = { ok: 0, degraded: 0, unavailable: 0, unconfigured: 0 };
 	for (const row of resources) counts[row.state] += 1;
 	return { checkedAt: at, resources, counts };
+}
+
+/** The embedding service's row: its class is `TEI_URL`'s, and a configured one carries the model, its source, the dimension and the latency the client saw. */
+function teiRow(facts: FabricFacts, checkedAt: string): FabricResourceStatus {
+	const row = serviceRow("tei", facts.tei.endpointClass ?? "unset", facts.services.tei, checkedAt);
+	if (!facts.services.tei.configured) return row;
+	const { model, modelSource, dimension, latencyMs } = facts.tei;
+	return { ...row, detail: { model, modelSource, dimension, latencyMs } };
 }
 
 function serviceRow(

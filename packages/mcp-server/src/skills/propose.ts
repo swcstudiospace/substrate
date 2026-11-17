@@ -76,6 +76,11 @@ export interface ProposeInput {
 	graph_id?: string;
 }
 
+/** The refusal a beforeWork hook may hand back. It applies only if the library no longer holds the content: the git diff finds a change, before any commit or push. */
+export interface ProposeGate {
+	unlessUnchanged: Error;
+}
+
 export interface ProposeOptions {
 	maxBytes: number;
 	/** Operator-only: pem/jwt documentation examples become redactions instead of refusals. */
@@ -88,11 +93,13 @@ export interface ProposeOptions {
 	reopen?: boolean;
 	ledgerPath?: string;
 	/** Test seam: the state dir holding mirror.git, propose/, mirror.lock, locks/ and the ledger. */
-	stateDir?: string;
+	stateDir?: string | undefined;
 	/** Which library the proposal targets; defaults to September's. */
-	library?: SkillsLibrary;
+	library?: SkillsLibrary | undefined;
 	/** Test seam: how long a live lock is waited for. */
 	lockWaitMs?: number;
+	/** Runs after the ledger replay and before any mirror, clone or push work. It is handed the PR of the merged proposal the ledger holds for this content, or null. A throw refuses the proposal with nothing written; a returned gate refuses it only when the library no longer holds the content. Runs for a dry run too. */
+	beforeWork?: (mergedPrUrl: string | null) => Promise<ProposeGate | null>;
 	run: Runner;
 }
 
@@ -810,7 +817,7 @@ async function openPr(
 /**
  * What the ledger already knows about this content: an OPEN PR is `existing`, an owner-CLOSED
  * one `declined` (unless reopen), a pushed branch without a PR gets its PR (never a second push).
- * null means: run the git path (no record, a MERGED PR, or reopen).
+ * null means: run the git path (no record, a MERGED PR, or reopen). A MERGED match is recorded in replay.mergedPrUrl for beforeWork.
  */
 async function fromLedger(
 	run: Runner,
@@ -818,6 +825,7 @@ async function fromLedger(
 	input: ProposeInput,
 	opts: ProposeOptions,
 	ledger: string,
+	replay: { mergedPrUrl: string | null },
 ): Promise<ProposeResult | null> {
 	const library = opts.library ?? DEFAULT_LIBRARY;
 	let knownLines = ledgerMatches(ledger, v.content_sha256);
@@ -861,6 +869,7 @@ async function fromLedger(
 			}
 			return { status: "declined", ...base, ...pr };
 		}
+		if (state === "MERGED") replay.mergedPrUrl = known.pr_url;
 		if (state !== "CLOSED" && state !== "MERGED") throw new ProposeFailed(`gh pr view reported state ${JSON.stringify(String(state)).slice(0, 40)}`);
 		return null;
 	}
@@ -906,6 +915,8 @@ async function fromLedger(
 		return { status: "declined", ...base, pr_url: closed.url, pr_number: closed.number };
 	}
 	// Merged, or a closed PR the operator asked to reopen: the git path, not a second PR on the old branch.
+	const merged = rows.find((row) => row.state === "MERGED");
+	if (merged) replay.mergedPrUrl = merged.url;
 	if (rows.length > 0) return null;
 	return openPr(run, v, input, known.branch, ledger, library);
 }
@@ -929,7 +940,7 @@ function countNameStatus(stdout: string): { diff_added: number; diff_changed: nu
 }
 
 /**
- * validate → mirror check → per-content lock → ledger → mirror lock, fetch, unlock → shared
+ * validate → mirror check → per-content lock → ledger → beforeWork → mirror lock, fetch, unlock → shared
  * clone, set-url, checkout → writeTree → add → diff → commit → origin check → push → ledger
  * pushed → gh pr create → ledger opened. The clone is removed and the locks released in finally.
  */
@@ -961,10 +972,12 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 	const releaseContent = opts.dryRun ? null : await acquireLock(join(paths.contentLocks, v.content_sha256), "proposal", waitMs);
 	let clone: string | null = null;
 	try {
+		const replay: { mergedPrUrl: string | null } = { mergedPrUrl: null };
 		if (!opts.dryRun) {
-			const known = await fromLedger(run, v, input, opts, paths.ledger);
+			const known = await fromLedger(run, v, input, opts, paths.ledger, replay);
 			if (known) return known;
 		}
+		const gate = opts.beforeWork ? await opts.beforeWork(replay.mergedPrUrl) : null;
 
 		const releaseMirror = await acquireLock(paths.mirrorLock, "mirror", waitMs);
 		try {
@@ -999,6 +1012,8 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		const diff = await run(diffQuietArgv(clone));
 		if (diff.code === 0) return { status: "unchanged", ...base };
 		if (diff.code !== 1) throw new ProposeFailed(`git diff exited ${String(diff.code)}: ${tail(diff)}`);
+		// A merged retry the library no longer confirms is refused here: no commit, branch push or PR.
+		if (gate) throw gate.unlessUnchanged;
 
 		await must(run, "git commit", commitArgv(clone, commitMessage(v)));
 		const origin = await must(run, "git remote get-url", originUrlArgv(clone));

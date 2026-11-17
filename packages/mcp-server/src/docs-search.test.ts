@@ -25,6 +25,8 @@ import { lightragFromEnv, loadConfig, resolveDocsBackend } from "./config.ts";
 import { createMcpServer } from "./mcp.ts";
 import { Substrate } from "./service.ts";
 import { goldenFake, searchGoldenOffline } from "./docs-golden.ts";
+import { auditToolCalls, createObservability, type McpToolCall } from "./observe.ts";
+import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
@@ -753,6 +755,7 @@ describe("LightRAG search and the RAGFlow plane", () => {
 			}
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		};
 		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }), { index: null, greptime: null, lightragFetch: lightragIngest });
@@ -941,6 +944,23 @@ describe("LightRAG search retries and the Hindsight fallback", () => {
 			restore();
 		}
 	});
+
+	test("an unconfigured LightRAG plane is answered from Hindsight when recall finds something, else degraded with its reason", async () => {
+		const deps = {
+			config: null,
+			backend: "lightrag" as const,
+			lightragConfig: null,
+			datasetNames: ["agent-substrate"],
+			emit: async () => ({ stored: false }),
+			surface: "omp" as const,
+		};
+		const served = await searchDocs({ ...deps, lightragHindsight: async () => RECALLED }, "where is the plan?");
+		expect(served).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight", reason: "lightrag-not-configured" });
+		expect(served.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
+		expect(searchReplyStorable(served)).toBe(false);
+		const nothing = await searchDocs({ ...deps, lightragHindsight: async () => [] }, "where is the plan?");
+		expect(nothing).toEqual({ chunks: [], untrusted: UNTRUSTED_DOCS_NOTICE, degraded: true, reason: "lightrag-not-configured" });
+	});
 });
 
 describe("search graph metadata (LightRAG path)", () => {
@@ -993,7 +1013,15 @@ describe("search graph metadata (LightRAG path)", () => {
 		seedHeadings(fake);
 		const events: EventInput[] = [];
 		const reply = await searchDocs(
-			{ config: CONFIG, emit: async (event) => ((events.push(event)), { stored: false }), fetchImpl: fake.fetch, graphHints: HINTS },
+			{
+				config: CONFIG,
+				emit: async (event) => {
+					events.push(event);
+					return { stored: false };
+				},
+				fetchImpl: fake.fetch,
+				graphHints: HINTS,
+			},
 			"who reads RAGFlow?",
 		);
 		expect(reply.degraded).toBeUndefined();
@@ -1347,18 +1375,12 @@ function sessionRows(count: number): Array<Record<string, unknown>> {
 	}));
 }
 
-describe("docs_search context (D46-d, D46-e)", () => {
-	const config = loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" });
+describe("docs_search context uses issued live authority", () => {
 	let restoreEnv: () => void = () => {};
-	beforeEach(() => {
-		restoreEnv = hindsightEnv("sub-cursor");
-	});
-	afterEach(() => {
-		restoreEnv();
-	});
+	beforeEach(() => { restoreEnv = hindsightEnv("sub-cursor"); });
+	afterEach(() => { restoreEnv(); });
 
-	/** Four memories in the caller's bank; by score the best three are m2, m4 and m3. */
-	function recallable(): HindsightFake {
+	function recallable() {
 		const hindsight = new HindsightFake();
 		hindsight.seed("sub-cursor", [
 			{ id: "m1", text: "fence the lease", document_id: "mwd_1", tags: ["cursor"], metadata: {}, score: 0.4 },
@@ -1369,238 +1391,404 @@ describe("docs_search context (D46-d, D46-e)", () => {
 		return hindsight;
 	}
 
-	function substrateWith(options: { fake: RagflowFake; hindsight: HindsightFake; greptime: GreptimeClient; cache?: ReadThroughCache }): Substrate {
-		const cache = options.cache ?? new ReadThroughCache({ redis: null, enabled: false, log: () => {} });
-		return new Substrate(config, {
-			index: null,
-			greptime: options.greptime,
-			ragflowFetch: options.fake.fetch,
-			hindsightFetch: options.hindsight.fetch,
-			cache,
+	async function contextRig(backend: "ragflow" | "lightrag", options: { failure?: string; hang?: boolean; cache?: ReadThroughCache; hindsight?: HindsightFake; budgetMs?: number } = {}) {
+		const fake = new RagflowFake();
+		const hindsight = options.hindsight ?? recallable();
+		const authority = createTestLiveSessionAuthority();
+		const caller = { surface: "cursor", isOperator: false } as const;
+		const session = await issueLiveSession(authority, { caller, steering: "PRIVATE-CONTEXT-DIRECTION", planningHash: "PRIVATE-CONTEXT-HASH" });
+		const rows = sessionRows(7).map((row) => ({ ...row, session_id: session.sessionId }));
+		const { greptime, reads } = ledgerStub([
+			...rows,
+			{ ...rows[0], id: "foreign-surface-row", surface: "hermes" },
+			{ ...rows[0], id: "historical-row", session_id: "historical-label" },
+		], options.failure);
+		if (options.hang) Object.assign(greptime, { readEvents: () => new Promise<never>(() => {}) });
+		const queries: string[] = [];
+		const config = loadConfig({
+			RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k",
+			...(backend === "lightrag" ? { LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" } : {}),
+			...(options.budgetMs === undefined ? {} : { HINDSIGHT_SEARCH_RECALL_BUDGET_MS: String(options.budgetMs) }),
 		});
+		const observability = createObservability(config, {});
+		const batches: McpToolCall[][] = [];
+		const substrate = new Substrate(config, {
+			index: null, greptime, ragflowFetch: fake.fetch, hindsightFetch: hindsight.fetch,
+			lightragFetch: async (_input, init) => {
+				queries.push(String(init?.body));
+				return Response.json({ status: "success", data: { chunks: [{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-lightrag", heading_path: "Plan", score: 0.9 }] } });
+			},
+			cache: options.cache ?? new ReadThroughCache({ redis: null, enabled: false, log: () => {} }),
+			steering: { history: null, liveSessions: authority },
+		}, observability.observer, { auditCalls: (principal, calls, transport) => {
+			batches.push(calls);
+			return auditToolCalls(observability, principal.surface, calls, transport);
+		} });
+		const input = { question: "who reads RAGFlow?", session_id: "historical-label", steering_session_id: session.sessionId, context: true };
+		const live = { caller, sessionBinding: session.sessionBinding };
+		return { substrate, session, authority, caller, input, live, reads, hindsight, queries, batches };
 	}
 
-	test("without the flag the reply has no context key, and neither recall nor the ledger is read", async () => {
-		const fake = new RagflowFake();
-		const hindsight = recallable();
-		const { greptime, reads } = ledgerStub(sessionRows(7));
-		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs({ question: "who reads RAGFlow?", session_id: "s-1" }, "cursor");
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(Object.hasOwn(reply, "context")).toBe(false);
-		expect(hindsight.recalls()).toEqual([]);
-		expect(reads).toEqual([]);
-	});
-
-	test("with the flag, memories come from recall and events from the session's last five ledger rows", async () => {
-		const fake = new RagflowFake();
-		const { greptime, reads } = ledgerStub(sessionRows(7));
-		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			"cursor",
-		);
-		expect(reply.degraded).toBeUndefined();
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.context?.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
-		expect(reply.context?.degraded).toBeUndefined();
-		expect(reply.context?.memories.map((memory) => memory.id)).toEqual(["m2", "m4", "m3"]);
-		expect(reply.context?.memories[0]).toEqual({ id: "m2", text: "quote every version", scope: null, repo: null });
-		expect(reply.context?.events.map((event) => event.id)).toEqual(["evt-2", "evt-3", "evt-4", "evt-5", "evt-6"]);
-		expect(reply.context?.events[0]).toEqual({
-			id: "evt-2",
-			ts: new Date(1_700_000_002_000).toISOString(),
-			kind: "note",
-			surface: "cursor",
-			summary: "event 2",
+	for (const backend of ["ragflow", "lightrag"] as const) describe(backend, () => {
+		test("proved context keeps the best three memories and last five exact-owner/live ledger rows", async () => {
+			const h = await contextRig(backend);
+			const reply = await h.substrate.searchDocs(h.input, h.caller.surface, h.live);
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.chunks.length).toBeGreaterThan(0);
+			expect(reply.context?.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
+			expect(reply.context?.degraded).toBeUndefined();
+			expect(reply.context?.memories.map((memory) => memory.id)).toEqual(["m2", "m4", "m3"]);
+			expect(reply.context?.memories[0]).toEqual({ id: "m2", text: "quote every version", scope: null, repo: null });
+			expect(reply.context?.events.map((event) => event.id)).toEqual(["evt-2", "evt-3", "evt-4", "evt-5", "evt-6"]);
+			expect(reply.context?.events[0]).toEqual({ id: "evt-2", ts: new Date(1_700_000_002_000).toISOString(), kind: "note", surface: "cursor", summary: "event 2" });
+			expect(h.reads).toEqual([["session_id", h.session.sessionId]]);
+			expect(h.batches).toHaveLength(1);
+			expect(JSON.stringify(reply)).not.toContain(h.session.sessionBinding);
+			if (backend === "lightrag") {
+				expect(reply.backend).toBe("lightrag");
+				expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["The planner reads the plan."]);
+				expect(h.queries).toHaveLength(1);
+				expect(JSON.parse(h.queries[0] ?? "{}").mode).toBe("hybrid");
+			}
 		});
-		expect(reads).toEqual([["session_id", "s-1"]]);
-	});
 
-	test("no session: events are empty, degraded is no-session, and the memories still come", async () => {
-		const fake = new RagflowFake();
-		const { greptime, reads } = ledgerStub(sessionRows(7));
-		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs({ question: "who reads RAGFlow?", context: true }, "cursor");
-		expect(reply.degraded).toBeUndefined();
-		expect(reply.context?.events).toEqual([]);
-		expect(reply.context?.degraded).toBe("no-session");
-		expect(reply.context?.memories).toHaveLength(3);
-		expect(reads).toEqual([]);
-	});
+		for (const context of [undefined, false]) test(`context=${context} starts neither recall nor ledger`, async () => {
+			const h = await contextRig(backend);
+			const reply = await h.substrate.searchDocs({ question: h.input.question, session_id: h.input.session_id, ...(context === undefined ? {} : { context }) }, h.caller.surface);
+			expect(reply.chunks.length).toBeGreaterThan(0);
+			expect(reply).not.toHaveProperty("context");
+			expect(h.hindsight.recalls()).toEqual([]);
+			expect(h.reads).toEqual([]);
+			expect(h.batches).toEqual([]);
+		});
 
-	test("a recall failure keeps the chunks and names the recall as degraded", async () => {
-		const fake = new RagflowFake();
-		const hindsight = recallable();
-		hindsight.failRecallWith = 503;
-		const { greptime } = ledgerStub(sessionRows(2));
-		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			"cursor",
-		);
-		expect(reply.degraded).toBeUndefined();
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.context?.memories).toEqual([]);
-		expect(reply.context?.degraded).toStartWith("recall: hindsight recall failed");
-		expect(reply.context?.events).toHaveLength(2);
-	});
+		test("historical attribution alone recalls public context but never reads a private ledger", async () => {
+			const h = await contextRig(backend);
+			for (const session_id of [undefined, h.session.sessionId, "s".repeat(600)]) {
+				const reply = await h.substrate.searchDocs({ question: h.input.question, session_id, context: true }, h.caller.surface);
+				expect(reply.context?.events).toEqual([]);
+				expect(reply.context?.degraded).toBe("no-session");
+				expect(reply.context?.memories).toHaveLength(3);
+			}
+			expect(h.reads).toEqual([]);
+		});
 
-	test("a ledger failure keeps the chunks and the memories, and names the ledger", async () => {
-		const fake = new RagflowFake();
-		const { greptime, reads } = ledgerStub([], "greptime unreachable");
-		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			"cursor",
-		);
-		expect(reply.degraded).toBeUndefined();
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.context?.memories).toHaveLength(3);
-		expect(reply.context?.events).toEqual([]);
-		expect(reply.context?.degraded).toStartWith("ledger: ");
-		expect(reads).toEqual([["session_id", "s-1"]]);
-	});
-
-	test("a ledger read that never answers does not hold the reply: chunks come back, events are empty, and the reply returns within the ledger budget", async () => {
-		const fake = new RagflowFake();
-		const { greptime } = ledgerStub([]);
-		Object.assign(greptime, { readEvents: () => new Promise<never>(() => {}) });
-		const started = performance.now();
-		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			"cursor",
-		);
-		const elapsed = performance.now() - started;
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.context?.events).toEqual([]);
-		expect(reply.context?.degraded).toContain("ledger");
-		// The ledger budget is 1000 ms (DOCS_CONTEXT_LEDGER_BUDGET_MS); the 3000 ms bound leaves room for scheduling.
-		expect(elapsed).toBeLessThan(3000);
-	});
-
-	test("a context reply is never stored: the cache keeps the chunk answer, and no stored value carries context", async () => {
-		const fake = new RagflowFake();
-		const redis = new FakeRedis();
-		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
-		const { greptime } = ledgerStub(sessionRows(7));
-		const substrate = substrateWith({ fake, hindsight: recallable(), greptime, cache });
-		const request = { question: "who reads RAGFlow?", session_id: "s-1", context: true };
-		const first = await substrate.searchDocs(request, "cursor");
-		expect(first.context?.memories).toHaveLength(3);
-		expect(searchReplyStorable(first)).toBe(false);
-		const stored = [...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"));
-		expect(stored).toHaveLength(1);
-		const envelope: { v?: Record<string, unknown> } = JSON.parse(stored[0]?.[1] ?? "{}");
-		expect(envelope.v).toBeDefined();
-		expect(Object.hasOwn(envelope.v ?? {}, "context")).toBe(false);
-		const second = await substrate.searchDocs(request, "cursor");
-		expect(second.chunks).toEqual(first.chunks);
-		expect(second.context?.events).toHaveLength(5);
-	});
-
-	test("docs_search over MCP passes context through to the service", async () => {
-		const fake = new RagflowFake();
-		const { greptime } = ledgerStub(sessionRows(7));
-		const substrate = substrateWith({ fake, hindsight: recallable(), greptime });
-		const server = createMcpServer(substrate, "cursor");
-		const client = new Client({ name: "substrate-test", version: "0.0.0" });
-		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-		try {
-			const result = await client.callTool({
-				name: "docs_search",
-				arguments: { question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			});
-			const content = result.content as Array<{ type: string; text?: string }>;
-			const reply: { context?: { memories: unknown[]; events: unknown[] } } = JSON.parse(content[0]?.text ?? "{}");
-			expect(reply.context?.memories).toHaveLength(3);
+		test("recall failure retains chunks and live events while naming degradation", async () => {
+			const hindsight = recallable(); hindsight.failRecallWith = 503;
+			const h = await contextRig(backend, { hindsight });
+			const reply = await h.substrate.searchDocs(h.input, h.caller.surface, h.live);
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.chunks.length).toBeGreaterThan(0);
+			expect(reply.context?.memories).toEqual([]);
+			expect(reply.context?.degraded).toStartWith("recall: hindsight recall failed");
 			expect(reply.context?.events).toHaveLength(5);
-		} finally {
-			await client.close();
-			await server.close();
+		});
+
+		test("ledger failure retains chunks and memories and names unavailable ledger", async () => {
+			const h = await contextRig(backend, { failure: "greptime unreachable" });
+			const reply = await h.substrate.searchDocs(h.input, h.caller.surface, h.live);
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.chunks.length).toBeGreaterThan(0);
+			expect(reply.context?.memories).toHaveLength(3);
+			expect(reply.context?.events).toEqual([]);
+			expect(reply.context?.degraded).toBe("ledger: unavailable");
+			expect(h.reads).toEqual([["session_id", h.session.sessionId]]);
+		});
+
+		test("a stalled ledger is cut at its budget, not a stalled answer", async () => {
+			const h = await contextRig(backend, { hang: true });
+			const started = performance.now();
+			const reply = await h.substrate.searchDocs(h.input, h.caller.surface, h.live);
+			expect(reply.chunks.length).toBeGreaterThan(0);
+			expect(reply.context?.events).toEqual([]);
+			expect(reply.context?.degraded).toContain("ledger");
+			expect(performance.now() - started).toBeLessThan(3000);
+		});
+
+		test("private context and proof never enter shared cache; ordinary public search still caches chunks", async () => {
+			const redis = new FakeRedis();
+			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+			const h = await contextRig(backend, { cache });
+			const first = await h.substrate.searchDocs(h.input, h.caller.surface, h.live);
+			const second = await h.substrate.searchDocs(h.input, h.caller.surface, h.live);
+			expect(first.context?.memories).toHaveLength(3);
+			expect(second.context?.events).toHaveLength(5);
+			expect(searchReplyStorable(first)).toBe(false);
+			expect([...redis.values.keys()].filter((key) => key.startsWith("substrate:v1:docs-search:"))).toEqual([]);
+			expect(JSON.stringify([...redis.values])).not.toContain(h.session.sessionBinding);
+			expect(JSON.stringify([...redis.values])).not.toContain("PRIVATE-CONTEXT");
+			await h.substrate.searchDocs({ question: h.input.question }, h.caller.surface);
+			const stored = [...redis.values].filter(([key]) => key.startsWith("substrate:v1:docs-search:"));
+			expect(stored).toHaveLength(1);
+			expect(JSON.parse(stored[0]?.[1] ?? "{}").v).not.toHaveProperty("context");
+		});
+
+		test("MCP forwards the separate historical label, live selector and proof", async () => {
+			const h = await contextRig(backend);
+			const server = createMcpServer(h.substrate, h.caller);
+			const client = new Client({ name: "substrate-context-test", version: "0.0.0" });
+			const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+			await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+			try {
+				const result = await client.callTool({ name: "docs_search", arguments: { ...h.input, session_binding: h.session.sessionBinding } });
+				expect(result.isError).not.toBe(true);
+				const content = result.content as Array<{ type: string; text?: string }>;
+				const reply: { context?: { memories: unknown[]; events: unknown[] } } = JSON.parse(content[0]?.text ?? "{}");
+				expect(reply.context?.memories).toHaveLength(3);
+				expect(reply.context?.events).toHaveLength(5);
+			} finally { await client.close(); await server.close(); }
+		});
+
+		test("anonymous historical context reads neither recall bank nor private ledger", async () => {
+			const h = await contextRig(backend);
+			const reply = await h.substrate.searchDocs({ question: h.input.question, session_id: h.session.sessionId, context: true }, null);
+			expect(reply.chunks.length).toBeGreaterThan(0);
+			expect(reply.context?.memories).toEqual([]);
+			expect(reply.context?.events).toEqual([]);
+			expect(reply.context?.degraded).toBe("recall: no recall bank for surface unattributed: configure HINDSIGHT_BANKS; no-session");
+			expect(h.hindsight.recalls()).toEqual([]);
+			expect(h.reads).toEqual([]);
+		});
+
+		test("unconfigured recall and empty recall preserve private event context distinctly", async () => {
+			delete process.env.HINDSIGHT_URL;
+			const unavailable = await contextRig(backend);
+			const degraded = await unavailable.substrate.searchDocs(unavailable.input, unavailable.caller.surface, unavailable.live);
+			expect(degraded.context?.memories).toEqual([]);
+			expect(degraded.context?.degraded).toBe("recall: hindsight is not configured");
+			expect(degraded.context?.events).toHaveLength(5);
+			process.env.HINDSIGHT_URL = "http://fake";
+			const hindsight = new HindsightFake(); hindsight.seed("sub-cursor", []);
+			const empty = await contextRig(backend, { hindsight });
+			const reply = await empty.substrate.searchDocs(empty.input, empty.caller.surface, empty.live);
+			expect(reply.context?.memories).toEqual([]);
+			expect(reply.context).not.toHaveProperty("degraded");
+			expect(reply.context?.events).toHaveLength(5);
+		});
+
+		test("one deadline bounds recall without discarding live event context", async () => {
+			const hindsight = recallable(); hindsight.recallDeafMs["sub-cursor"] = 2000;
+			const h = await contextRig(backend, { hindsight, budgetMs: 200 });
+			const started = performance.now();
+			const reply = await h.substrate.searchDocs(h.input, h.caller.surface, h.live);
+			expect(reply.chunks.length).toBeGreaterThan(0);
+			expect(reply.context?.memories).toEqual([]);
+			expect(reply.context?.degraded).toContain("recall deadline");
+			expect(reply.context?.events).toHaveLength(5);
+			expect(performance.now() - started).toBeLessThan(1200);
+		});
+	});
+});
+
+describe("docs_search tandem recall (phase 57c)", () => {
+	const NO_GRAPH = { mode: "hybrid" as const, counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } };
+	const LIGHTRAG_CHUNKS = [
+		{ content: "The planner reads the plan.", document_name: "plan.md", document_id: "doc-1", source_url: "https://example.com/plan", score: 0.9 },
+		{ content: "Briefs are cached per graph.", document_name: "brief.md", document_id: "doc-2", source_url: "https://example.com/brief", score: 0.5 },
+	];
+	const memoryHit = (n: number, extra: Partial<DerivedMemoryHit> = {}): DerivedMemoryHit => ({
+		bank: "sub-cursor",
+		id: `mem-${n}`,
+		text: `Remembered fact ${n}.`,
+		derived: true,
+		document_id: `mwd_${n}`,
+		tags: [],
+		score: 0.9 - n / 10,
+		...extra,
+	});
+	const ON = { enabled: true, hindsight_limit: 5, budget_ms: 1500 };
+
+	function harness(over: {
+		recall?: (question: string) => Promise<readonly DerivedMemoryHit[]>;
+		tandem?: { enabled: boolean; hindsight_limit: number; budget_ms: number };
+		chunks?: typeof LIGHTRAG_CHUNKS;
+		failLightrag?: boolean;
+	}) {
+		const events: EventInput[] = [];
+		const asked: string[] = [];
+		const recall = over.recall;
+		const run = (): Promise<SearchReply> =>
+			searchDocs(
+				{
+					config: null,
+					backend: "lightrag",
+					lightragConfig: { url: "http://lightrag.test" },
+					datasetNames: ["agent-substrate"],
+					lightragRetry: { maxRetries: 0, retryBaseMs: 1 },
+					lightragRetrieve: async () =>
+						over.failLightrag === true ? { ok: false, reason: "lightrag 503" } : { ok: true, chunks: over.chunks ?? LIGHTRAG_CHUNKS, detail: NO_GRAPH },
+					...(recall !== undefined
+						? {
+								lightragHindsight: (question: string) => {
+									asked.push(question);
+									return recall(question);
+								},
+							}
+						: {}),
+					...(over.tandem !== undefined ? { tandem: over.tandem } : {}),
+					emit: async (event: EventInput) => {
+						events.push(event);
+						return { stored: false };
+					},
+					surface: "omp",
+				},
+				"where is the plan?",
+			);
+		return { run, events, asked };
+	}
+
+	test("LightRAG up and tandem on: Hindsight is asked too and merged with provenance, not degraded, never storable", async () => {
+		const { run, events, asked } = harness({
+			tandem: ON,
+			recall: async () => [memoryHit(1, { graph_id: "g-1", session_id: "s-1", node_id: "n-1" }), memoryHit(2)],
+		});
+		const reply = await run();
+		expect(asked).toEqual(["where is the plan?"]);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.fallback).toBeUndefined();
+		expect(reply.backend).toBe("lightrag");
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 2, deduplicated: 0, leg: "ok" });
+		// Fused order: the two rank-1 items tie (hindsight first), then the two rank-2 items.
+		expect(reply.chunks.map((citation) => citation.source_url)).toEqual([
+			"hindsight:sub-cursor/mwd_1",
+			"https://example.com/plan",
+			"hindsight:sub-cursor/mwd_2",
+			"https://example.com/brief",
+		]);
+		const [first, second] = reply.chunks;
+		expect(first).toMatchObject({
+			origin: "hindsight",
+			derived: true,
+			snippet: "Remembered fact 1.",
+			provenance: { bank: "sub-cursor", document_id: "mwd_1", graph_id: "g-1", session_id: "s-1", node_id: "n-1" },
+		});
+		expect(second).toMatchObject({ origin: "lightrag", snippet: "The planner reads the plan.", document_id: "doc-1", provenance: { bank: "lightrag", document_id: "doc-1" } });
+		expect(Object.hasOwn(second as object, "derived")).toBe(false);
+		// A memory can be forgotten at any moment: a tandem reply is never stored or replayed.
+		expect(searchReplyStorable(reply)).toBe(false);
+		const note = events.find((event) => event.kind === "note");
+		expect(note?.payload).toMatchObject({ action: "docs.search", backend: "lightrag", count: 4, tandem: { lightrag: 2, hindsight: 2, deduplicated: 0, leg: "ok" } });
+		expect(events.filter((event) => event.kind === "warning")).toEqual([]);
+	});
+
+	test("a memory that repeats a chunk is deduplicated and counted in the note", async () => {
+		const { run } = harness({ tandem: ON, recall: async () => [memoryHit(1, { text: "the planner   reads the PLAN." }), memoryHit(2)] });
+		const reply = await run();
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 1, deduplicated: 1, leg: "ok" });
+		expect(reply.chunks).toHaveLength(3);
+	});
+
+	test("the Hindsight limit bounds the memories merged", async () => {
+		const { run } = harness({ tandem: { ...ON, hindsight_limit: 2 }, recall: async () => [1, 2, 3, 4].map((n) => memoryHit(n)) });
+		const reply = await run();
+		expect(reply.tandem?.hindsight).toBe(2);
+	});
+
+	test("the merged list is capped at ten and keeps at least two memories", async () => {
+		const many = Array.from({ length: 12 }, (_, i) => ({ content: `lightrag chunk ${i}`, document_name: `d${i}`, document_id: `doc-${i}`, source_url: `https://example.com/${i}`, score: 1 - i / 100 }));
+		const { run } = harness({ tandem: ON, chunks: many as typeof LIGHTRAG_CHUNKS, recall: async () => [memoryHit(1), memoryHit(2), memoryHit(3)] });
+		const reply = await run();
+		expect(reply.chunks).toHaveLength(10);
+		expect(reply.chunks.filter((citation) => citation.origin === "hindsight").length).toBeGreaterThanOrEqual(2);
+		expect(reply.chunks.filter((citation) => citation.origin === "lightrag").length).toBeGreaterThanOrEqual(2);
+	});
+
+	test("tandem off, or absent: Hindsight is not asked, and the reply is the LightRAG reply, storable, with no tandem key", async () => {
+		const baseline = await harness({ recall: async () => [memoryHit(1)] }).run();
+		for (const tandem of [undefined, { ...ON, enabled: false }]) {
+			const { run, asked } = harness({ ...(tandem !== undefined ? { tandem } : {}), recall: async () => [memoryHit(1)] });
+			const reply = await run();
+			expect(asked).toEqual([]);
+			expect(Object.hasOwn(reply, "tandem")).toBe(false);
+			expect(reply).toEqual(baseline);
+			expect(reply.chunks.every((citation) => !Object.hasOwn(citation, "origin"))).toBe(true);
+			expect(searchReplyStorable(reply)).toBe(true);
+		}
+		expect(baseline.chunks.map((citation) => citation.snippet)).toEqual(["The planner reads the plan.", "Briefs are cached per graph."]);
+	});
+
+	test("tandem on but no Hindsight reader wired: the plain LightRAG reply, no tandem key", async () => {
+		const reply = await harness({ tandem: ON }).run();
+		expect(Object.hasOwn(reply, "tandem")).toBe(false);
+		expect(reply.chunks).toHaveLength(2);
+		expect(searchReplyStorable(reply)).toBe(true);
+	});
+
+	test("a Hindsight failure is fail-open: the LightRAG chunks are served, not degraded, and the reply is still never storable", async () => {
+		for (const recall of [
+			async (): Promise<readonly DerivedMemoryHit[]> => {
+				throw new Error("hindsight down");
+			},
+			(): Promise<readonly DerivedMemoryHit[]> => {
+				throw new Error("sync throw");
+			},
+		]) {
+			const { run, events } = harness({ tandem: ON, recall });
+			const reply = await run();
+			expect(reply.degraded).toBeUndefined();
+			expect(reply.fallback).toBeUndefined();
+			expect(reply.backend).toBe("lightrag");
+			expect(reply.chunks.map((citation) => citation.snippet)).toEqual(["The planner reads the plan.", "Briefs are cached per graph."]);
+			expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 0, deduplicated: 0, leg: "failed" });
+			expect(searchReplyStorable(reply)).toBe(false);
+			expect(events.filter((event) => event.kind === "warning")).toEqual([]);
 		}
 	});
 
-	test("an anonymous caller reads no recall bank: memories are empty and the reason is the refusal memory_recall gives", async () => {
-		const fake = new RagflowFake();
-		const hindsight = recallable();
-		const { greptime } = ledgerStub(sessionRows(7));
-		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			null,
-		);
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.context?.memories).toEqual([]);
-		expect(reply.context?.degraded).toBe("recall: no recall bank for surface unattributed: configure HINDSIGHT_BANKS");
-		expect(hindsight.recalls()).toEqual([]);
-		expect(reply.context?.events).toHaveLength(5);
-	});
-
-	test("a recall the plane does not serve names its reason, so a missing source is visible in the context", async () => {
-		delete process.env.HINDSIGHT_URL;
-		const fake = new RagflowFake();
-		const { greptime } = ledgerStub(sessionRows(7));
-		const reply = await substrateWith({ fake, hindsight: new HindsightFake(), greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			"cursor",
-		);
-		expect(reply.degraded).toBeUndefined();
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.context?.memories).toEqual([]);
-		expect(reply.context?.degraded).toBe("recall: hindsight is not configured");
-		expect(reply.context?.events).toHaveLength(5);
-	});
-
-	test("a search with no matches and no degradation carries no degraded key in the context", async () => {
-		const fake = new RagflowFake();
-		const hindsight = new HindsightFake();
-		hindsight.seed("sub-cursor", []);
-		const { greptime } = ledgerStub(sessionRows(7));
-		const reply = await substrateWith({ fake, hindsight, greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s-1", context: true },
-			"cursor",
-		);
-		expect(reply.context?.memories).toEqual([]);
-		expect(Object.hasOwn(reply.context ?? {}, "degraded")).toBe(false);
-		expect(reply.context?.events).toHaveLength(5);
-	});
-
-	test("one deadline bounds the whole recall: a recall that outlives the search budget answers empty and names the recall deadline", async () => {
-		const fake = new RagflowFake();
-		const hindsight = recallable();
-		hindsight.recallDeafMs["sub-cursor"] = 2000;
-		const { greptime } = ledgerStub(sessionRows(2));
-		const budgeted = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", HINDSIGHT_SEARCH_RECALL_BUDGET_MS: "200" }), {
-			index: null,
-			greptime,
-			ragflowFetch: fake.fetch,
-			hindsightFetch: hindsight.fetch,
-			cache: new ReadThroughCache({ redis: null, enabled: false, log: () => {} }),
-		});
+	test("a Hindsight leg that outlives its own budget is left out; the search does not wait for it", async () => {
+		const { run } = harness({ tandem: { ...ON, budget_ms: 10 }, recall: () => new Promise<never>(() => {}) });
 		const started = performance.now();
-		const reply = await budgeted.searchDocs({ question: "who reads RAGFlow?", session_id: "s-1", context: true }, "cursor");
-		const elapsed = performance.now() - started;
-		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.context?.memories).toEqual([]);
-		expect(reply.context?.degraded).toContain("recall deadline");
-		// The outer deadline is the 200 ms budget plus its 500 ms margin; the further 500 ms leaves room for scheduling.
-		expect(elapsed).toBeLessThan(200 + 500 + 500);
+		const reply = await run();
+		expect(performance.now() - started).toBeLessThan(2_000);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 0, deduplicated: 0, leg: "timeout" });
+		expect(reply.chunks).toHaveLength(2);
+		expect(searchReplyStorable(reply)).toBe(false);
 	});
 
-	test("the ledger is read under the session id the events were written with, so a capped id still finds its rows", async () => {
-		const fake = new RagflowFake();
-		const stored = "s".repeat(512);
-		const rows = sessionRows(7).map((row) => ({ ...row, session_id: stored }));
-		const reads: string[] = [];
-		const { greptime } = ledgerStub([]);
-		Object.assign(greptime, {
-			readEvents: async (_column: string, value: string) => {
-				reads.push(value);
-				return value === stored ? rows : [];
+	test("a breaker refusal or an empty recall (no hits) is an empty leg, not a failure of the reply", async () => {
+		const reply = await harness({ tandem: ON, recall: async () => [] }).run();
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 0, deduplicated: 0, leg: "empty" });
+		expect(reply.degraded).toBeUndefined();
+		expect(searchReplyStorable(reply)).toBe(false);
+	});
+
+	test("Hindsight is asked while LightRAG is still retrieving: LightRAG cannot answer until Hindsight has been called", async () => {
+		const hindsightAsked = Promise.withResolvers<void>();
+		const reply = await searchDocs(
+			{
+				config: null,
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				datasetNames: ["agent-substrate"],
+				lightragRetry: { maxRetries: 0, retryBaseMs: 1 },
+				lightragRetrieve: async () => {
+					// A sequential search would never call Hindsight until this returns: the test would time out.
+					await hindsightAsked.promise;
+					return { ok: true, chunks: LIGHTRAG_CHUNKS, detail: NO_GRAPH };
+				},
+				lightragHindsight: async () => {
+					hindsightAsked.resolve();
+					return [memoryHit(1)];
+				},
+				tandem: ON,
+				emit: async () => ({ stored: false }),
+				surface: "omp",
 			},
-		});
-		const reply = await substrateWith({ fake, hindsight: recallable(), greptime }).searchDocs(
-			{ question: "who reads RAGFlow?", session_id: "s".repeat(600), context: true },
-			"cursor",
+			"where is the plan?",
 		);
-		expect(reads).toEqual([stored]);
-		expect(reply.context?.events).toHaveLength(5);
+		expect(reply.tandem).toEqual({ lightrag: 2, hindsight: 1, deduplicated: 0, leg: "ok" });
+	});
+
+	test("LightRAG down with tandem on: the existing Hindsight fallback answers exactly as before, with no tandem note", async () => {
+		const recall = async (): Promise<readonly DerivedMemoryHit[]> => [memoryHit(1)];
+		const off = await harness({ failLightrag: true, recall }).run();
+		const on = await harness({ failLightrag: true, recall, tandem: ON }).run();
+		expect(on).toEqual(off);
+		expect(on).toMatchObject({ degraded: true, backend: "hindsight", fallback: "hindsight", reason: "lightrag 503" });
+		expect(Object.hasOwn(on, "tandem")).toBe(false);
+		expect(on.chunks.map((citation) => citation.source_url)).toEqual(["hindsight:sub-cursor/mwd_1"]);
+		expect(searchReplyStorable(on)).toBe(false);
 	});
 
 	describe("on the LightRAG backend (SC1)", () => {

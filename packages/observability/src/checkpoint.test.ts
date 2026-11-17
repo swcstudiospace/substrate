@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { BurnLedger, BURN_MAX_SAMPLES, TOKENS_BURN_ENV, evaluateBurnSlos } from "./burn.ts";
 import { CheckpointError, MAX_CHECKPOINT_BYTES, restoreCheckpoint, serializeCheckpoint, snapshotCheckpoint, type SloCheckpoint } from "./checkpoint.ts";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
+import { defined } from "./test-support.ts";
 import { MetricRegistry, findHistogram, mergeHistogram } from "./metrics.ts";
 import { CAPACITY_RING_MAX, CapacityRing, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, evaluatePlaneSlos, evaluateSlos } from "./slo.ts";
 
@@ -23,7 +24,7 @@ function process(prior?: SloCheckpoint) {
 }
 
 function briefP95(instruments: SubstrateInstruments) {
-	return evaluateSlos(instruments.snapshot()).find((result) => result.id === "brief.p95")!;
+	return defined(evaluateSlos(instruments.snapshot()).find((result) => result.id === "brief.p95"));
 }
 
 describe("snapshotCheckpoint / restoreCheckpoint", () => {
@@ -75,9 +76,9 @@ describe("snapshotCheckpoint / restoreCheckpoint", () => {
 		for (let i = 0; i < 50; i++) {
 			before.instruments.recordPlane({ plane: "index", op: "ping", outcome: i < 45 ? "ok" : "timeout", durationMs: 1 });
 		}
-		const planeBefore = evaluatePlaneSlos(before.instruments.snapshot(), { configured: { index: true }, window: before.planes, now: T0 }).find(
+		const planeBefore = defined(evaluatePlaneSlos(before.instruments.snapshot(), { configured: { index: true }, window: before.planes, now: T0 }).find(
 			(result) => result.plane === "index",
-		)!;
+		));
 		const briefBefore = briefP95(before.instruments);
 		expect(briefBefore.status).toBe("breached");
 		expect(planeBefore.status).toBe("breached");
@@ -89,9 +90,9 @@ describe("snapshotCheckpoint / restoreCheckpoint", () => {
 		expect(after.epoch).toBe(2);
 		expect(after.skipped).toEqual([]);
 		expect(briefP95(after.instruments)).toEqual(briefBefore);
-		const planeAfter = evaluatePlaneSlos(after.instruments.snapshot(), { configured: { index: true }, window: after.planes, now: T0 }).find(
+		const planeAfter = defined(evaluatePlaneSlos(after.instruments.snapshot(), { configured: { index: true }, window: after.planes, now: T0 }).find(
 			(result) => result.plane === "index",
-		)!;
+		));
 		expect(planeAfter).toEqual(planeBefore);
 	});
 
@@ -104,7 +105,7 @@ describe("snapshotCheckpoint / restoreCheckpoint", () => {
 		after.instruments.recordBrief({ surface: "omp", graph_id: "ut-1", ok: true, durationMs: 100 });
 		after.instruments.recordBrief({ surface: "omp", graph_id: "ut-2", ok: true, durationMs: 100 });
 
-		const merged = mergeHistogram(findHistogram(after.instruments.snapshot(), METRIC.briefDuration)!);
+		const merged = mergeHistogram(defined(findHistogram(after.instruments.snapshot(), METRIC.briefDuration)));
 		expect(merged.count).toBe(22);
 		expect(briefP95(after.instruments).samples).toBe(22);
 	});
@@ -119,8 +120,8 @@ describe("snapshotCheckpoint / restoreCheckpoint", () => {
 		after.instruments.registry.seed(restored.metrics);
 		after.instruments.registry.seed(restored.metrics);
 
-		expect(mergeHistogram(findHistogram(after.instruments.snapshot(), METRIC.briefDuration)!).count).toBe(20);
-		const emit = evaluateSlos(after.instruments.snapshot()).find((result) => result.id === "emit.success")!;
+		expect(mergeHistogram(defined(findHistogram(after.instruments.snapshot(), METRIC.briefDuration))).count).toBe(20);
+		const emit = defined(evaluateSlos(after.instruments.snapshot()).find((result) => result.id === "emit.success"));
 		expect(emit.samples).toBe(1);
 	});
 
@@ -130,17 +131,17 @@ describe("snapshotCheckpoint / restoreCheckpoint", () => {
 		before.instruments.recordUsage({ surface: "omp", graph_id: "ut-1", payload: { usage: { input_tokens: 1000, output_tokens: 0 } } });
 		evaluateBurnSlos(before.instruments.snapshot(), { env, ledger: before.burn, now: T0 - 600_000 });
 		before.instruments.recordUsage({ surface: "omp", graph_id: "ut-1", payload: { usage: { input_tokens: 9000, output_tokens: 0 } } });
-		const resultBefore = evaluateBurnSlos(before.instruments.snapshot(), { env, ledger: before.burn, now: T0 }).find((r) => r.id === "burn.tokens")!;
+		const resultBefore = defined(evaluateBurnSlos(before.instruments.snapshot(), { env, ledger: before.burn, now: T0 }).find((r) => r.id === "burn.tokens"));
 		expect(resultBefore.status).toBe("ok");
 		expect(resultBefore.observed).toBeCloseTo(54_000, 0);
 
 		const after = process(restoreCheckpoint(serializeCheckpoint(snapshotCheckpoint(before.instruments, before.planes, before.burn, 1, { since: SINCE, now: T0 }))));
-		const resultAfter = evaluateBurnSlos(after.instruments.snapshot(), { env, ledger: after.burn, now: T0 }).find((r) => r.id === "burn.tokens")!;
+		const resultAfter = defined(evaluateBurnSlos(after.instruments.snapshot(), { env, ledger: after.burn, now: T0 }).find((r) => r.id === "burn.tokens"));
 		expect(resultAfter).toEqual(resultBefore);
 
 		// The next hour's spend is a delta over the restored base, never a reset.
 		after.instruments.recordUsage({ surface: "omp", graph_id: "ut-1", payload: { usage: { input_tokens: 1000, output_tokens: 0 } } });
-		const later = evaluateBurnSlos(after.instruments.snapshot(), { env, ledger: after.burn, now: T0 + 60_000 }).find((r) => r.id === "burn.tokens")!;
+		const later = defined(evaluateBurnSlos(after.instruments.snapshot(), { env, ledger: after.burn, now: T0 + 60_000 }).find((r) => r.id === "burn.tokens"));
 		expect(later.status).toBe("ok");
 		expect(later.samples).toBe(3);
 	});
@@ -162,7 +163,7 @@ describe("snapshotCheckpoint / restoreCheckpoint", () => {
 		});
 		const after = process(restoreCheckpoint(text));
 		expect(after.skipped.sort()).toEqual(["substrate.gone", METRIC.briefDuration].sort());
-		expect(mergeHistogram(findHistogram(after.instruments.snapshot(), METRIC.briefDuration)!).count).toBe(0);
+		expect(mergeHistogram(defined(findHistogram(after.instruments.snapshot(), METRIC.briefDuration))).count).toBe(0);
 		expect(after.epoch).toBe(4);
 	});
 });

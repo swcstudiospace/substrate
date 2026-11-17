@@ -11,7 +11,7 @@
 import { hostname } from "node:os";
 import type { Attributes } from "./metrics.ts";
 import type { OtlpConfig } from "./otlp.ts";
-import type { SloThresholds } from "./slo.ts";
+import type { SloOverrides } from "./slo.ts";
 
 export interface ObservabilityConfig {
 	/** True when an OTLP endpoint is configured, so the periodic exporter runs. */
@@ -20,7 +20,7 @@ export interface ObservabilityConfig {
 	intervalMs: number;
 	sampleRatio: number;
 	maxSpans: number;
-	slo: SloThresholds;
+	slo: SloOverrides;
 	/**
 	 * The index volume's size in bytes (`SUBSTRATE_INDEX_VOLUME_BYTES`, uplift-3
 	 * N2), the ceiling the capacity runway counts down to; `null` when unset or

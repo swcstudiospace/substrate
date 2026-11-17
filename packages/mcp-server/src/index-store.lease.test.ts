@@ -18,6 +18,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
 import { leaseState } from "./lease.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const GRAPH = `ut-leasetest-${Date.now().toString(36)}`;
@@ -32,8 +33,8 @@ const describeLive = PG_URL ? describe : describe.skip;
 
 describeLive("exclusive hold against a live index", () => {
 	beforeAll(async () => {
-		a = new IndexStore(PG_URL!);
-		b = new IndexStore(PG_URL!);
+		a = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		b = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await a.migrate();
 	});
 
@@ -85,7 +86,7 @@ describeLive("exclusive hold against a live index", () => {
 
 		expect(results.filter((result) => result.claimed)).toHaveLength(1);
 		// One change of hold, so the epoch moved exactly once.
-		const held = results.find((result) => result.claimed)!;
+		const held = defined(results.find((result) => result.claimed), "claimed result");
 		expect(held.lease.epoch).toBe(before + 1);
 	});
 

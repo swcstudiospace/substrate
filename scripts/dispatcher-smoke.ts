@@ -155,6 +155,8 @@ async function main(argv: string[]): Promise<number> {
 		process.stderr.write("[dispatcher-smoke] refusing: python3 not on PATH.\n");
 		return 2;
 	}
+	// A fresh binding: `py` is narrowed here, but not inside the `cli` function declaration below.
+	const python = py;
 	const runDir = mkdtempSync(join(tmpdir(), `${RUN}-`));
 	if (!runDir.startsWith(tmpdir())) {
 		process.stderr.write(`[dispatcher-smoke] refusing: run dir ${runDir} outside the tmp dir.\n`);
@@ -211,7 +213,7 @@ async function main(argv: string[]): Promise<number> {
 	};
 
 	async function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ code: number; out: string; err: string }> {
-		const proc = Bun.spawn([py!, "-m", "substrate_dispatcher", ...args], {
+		const proc = Bun.spawn([python, "-m", "substrate_dispatcher", ...args], {
 			cwd: repoRoot,
 			env: { ...baseEnv, ...extraEnv },
 			stdout: "pipe",
@@ -313,7 +315,7 @@ async function main(argv: string[]): Promise<number> {
 	check("c5 claude-code launch logged", c5log.includes("RHS-105 dispatch:claude-code → launch: graph"), c5.out.slice(0, 300));
 
 	// Process layer: the Python driver (real spawn/git/watch, tmp roots only).
-	const driver = Bun.spawn([py!, join(repoRoot, "scripts/dispatcher-driver.py"), "--run-dir", join(runDir, "driver")], {
+	const driver = Bun.spawn([python, join(repoRoot, "scripts/dispatcher-driver.py"), "--run-dir", join(runDir, "driver")], {
 		cwd: repoRoot,
 		env: { ...baseEnv, PYTHONPATH: join(repoRoot, "packages/dispatcher/src") },
 		stdout: "pipe",

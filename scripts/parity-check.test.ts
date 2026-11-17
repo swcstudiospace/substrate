@@ -1,19 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	diffStability,
+	gitSpawnEnv,
 	parityVerdict,
 	parseCgroup,
 	releaseAncestryOnRemoteMain,
 	releaseDirFromLink,
+	routeParityOutput,
 	parseReflogTime,
 	parseSsListeners,
 	parseSystemctlShow,
 	parseUnitVitals,
-	procStartSeconds,
 	type ParityFacts,
 } from "./parity-check.ts";
 
@@ -37,6 +38,7 @@ function facts(over: Partial<ParityFacts> = {}): ParityFacts {
 		dirtyPaths: [],
 		originDiffPaths: [],
 		originShaKnown: true,
+		originReadFailed: false,
 		healthzStatus: 200,
 		warnings: [],
 		...over,
@@ -192,6 +194,15 @@ describe("parityVerdict", () => {
 		expect(text).not.toContain("operator action");
 	});
 
+	test("names a failed ls-remote as a remote read failure", () => {
+		// The local object-store wording would send the operator to the wrong place.
+		const verdict = parityVerdict(facts({ originShaKnown: null, originReadFailed: true }));
+		expect(verdict.pass).toBe(false);
+		const text = verdict.failures.join("\n");
+		expect(text).toContain("could not read origin/main");
+		expect(text).not.toContain("could not ask whether origin/main is local");
+	});
+
 	test("fails when MainPID shares the port with another holder", () => {
 		// The owner set must be exactly the MainPID singleton, not merely include it.
 		expect(parityVerdict(facts({ ssOwnerPids: [1525582, 3149064] })).pass).toBe(false);
@@ -332,6 +343,71 @@ describe("releaseAncestryOnRemoteMain", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	test("reports a failed ls-remote as a failed remote read, not a local object-store question", () => {
+		const root = mkdtempSync(join(tmpdir(), "parity-lsremote-"));
+		try {
+			const repo = join(root, "repo");
+			git(root, ["init", "-b", "main", repo]);
+			// An origin that does not exist: ls-remote exits non-zero at once.
+			git(repo, ["remote", "add", "origin", join(root, "absent.git")]);
+			const result = releaseAncestryOnRemoteMain(repo, "a".repeat(40));
+			expect(result.originSha).toBeNull();
+			expect(result.originShaKnown).toBeNull();
+			expect(result.originReadFailed).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("starts every git child with terminal prompts switched off", () => {
+		const root = mkdtempSync(join(tmpdir(), "parity-gitenv-"));
+		const savedPath = process.env.PATH;
+		try {
+			const bin = join(root, "bin");
+			mkdirSync(bin);
+			const seen = join(root, "seen.txt");
+			// A stand-in git that records what it was started with, then fails like a credential refusal.
+			writeFileSync(
+				join(bin, "git"),
+				`#!/bin/sh\nprintf '%s|%s' "$GIT_TERMINAL_PROMPT" "$GCM_INTERACTIVE" > "$PARITY_FAKE_GIT_SEEN"\nexit 128\n`,
+				{ mode: 0o755 },
+			);
+			process.env.PATH = `${bin}:${savedPath ?? ""}`;
+			process.env.PARITY_FAKE_GIT_SEEN = seen;
+			const result = releaseAncestryOnRemoteMain(root, "a".repeat(40));
+			expect(readFileSync(seen, "utf8")).toBe("0|never");
+			expect(result.originReadFailed).toBe(true);
+		} finally {
+			process.env.PATH = savedPath;
+			Reflect.deleteProperty(process.env, "PARITY_FAKE_GIT_SEEN");
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("gitSpawnEnv", () => {
+	test("keeps the base environment and forces prompts off over a caller value", () => {
+		const env = gitSpawnEnv({ PATH: "/bin", GIT_TERMINAL_PROMPT: "1" });
+		expect(env.PATH).toBe("/bin");
+		expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+		expect(env.GCM_INTERACTIVE).toBe("never");
+	});
+});
+
+describe("routeParityOutput", () => {
+	const human = "[parity:check] MainPID=1\n FAIL  nope\n[parity:check] FAIL — 1 criterion(s) failed\n";
+	const jsonText = `${JSON.stringify({ pass: false }, null, 2)}\n`;
+
+	test("under --json stdout is only the JSON object and the human lines go to stderr", () => {
+		const routed = routeParityOutput(true, human, jsonText);
+		expect(JSON.parse(routed.stdout)).toEqual({ pass: false });
+		expect(routed.stderr).toBe(human);
+	});
+
+	test("without --json everything stays on stdout", () => {
+		expect(routeParityOutput(false, human, null)).toEqual({ stdout: human, stderr: "" });
+	});
 });
 
 describe("releaseDirFromLink", () => {
@@ -391,7 +467,7 @@ describe("parseSsListeners", () => {
 	test("matches the bare-star wildcard local and skips blank or short lines", () => {
 		// `ss` prints `*:PORT` for an all-address bind; noise lines never produce owners.
 		const text = ["", "garbage", "LISTEN 0 4096 *:6420 *:* users:((\"node\",pid=55,fd=9))"].join("\n");
-		const owners = parseSsListeners(text);
+		const owners = parseSsListeners(text, [6420]);
 		expect(owners.get(6420)).toEqual([55]);
 		expect(owners.size).toBe(1);
 	});
@@ -401,22 +477,6 @@ describe("parseCgroup", () => {
 	test("trims the v2 single line", () => {
 		// /proc/<pid>/cgroup is one line; surrounding whitespace is incidental.
 		expect(parseCgroup("0::/system.slice/substrate-mcp.service\n")).toBe("0::/system.slice/substrate-mcp.service");
-	});
-});
-
-describe("procStartSeconds", () => {
-	const btime = 1790699914;
-	const stat = "1525582 (bun) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 77973817 19 20 21";
-
-	test("adds btime to field 22 after the last paren", () => {
-		// The discuss-time numbers must reproduce the unit's start instant.
-		expect(procStartSeconds(btime, stat)).toBe(btime + 77973817 / 100);
-	});
-
-	test("survives spaces in comm", () => {
-		// comm can hold spaces and parens; only the last ) starts the fields.
-		const spaced = "1525582 (my bun (worker)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 77973817 19 20 21";
-		expect(procStartSeconds(btime, spaced)).toBe(btime + 77973817 / 100);
 	});
 });
 

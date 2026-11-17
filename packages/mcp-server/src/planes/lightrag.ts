@@ -6,35 +6,54 @@
  * `mcp-server` imports this module. Every function mirrors the RAGFlow
  * plane's contract so callers can swap planes without reshaping data:
  * retrieval resolves to the exact `RagflowChunk` shape and
- * `RetrievalOutcome`, uploads resolve to `{ document_id }`, and every
+ * `RetrievalOutcome`, uploads resolve to `{ track_id }`, and every
  * failure is a `{ ok: false, reason }` — never a throw inside an agent's
  * turn, never a secret in a reason string.
  *
- * Endpoint map (LightRAG server, live-unattested — same caveat as the
- * RAGFlow plane's G1–G4 operator gate):
+ * Endpoint map (LightRAG server v1.5.7; the contract is the upstream source,
+ * recorded in `__fixtures__/lightrag-v1.5.7-routes.json` and enforced by
+ * `lightrag.contract.test.ts`. No live server has been called yet):
  * - retrieve: `POST /query` `{ query, mode, top_k, only_need_context }`.
  *   Graph modes are `hybrid` and `mix` (both fuse local entity detail
  *   with global relation context); planning callers ask for graph
  *   explicitly via `mode` or the `/hybrid` / `/mix` question prefix.
  * - upload: `POST /documents/upload` (multipart field `file`), falling
- *   back to `POST /documents/text` when the upload route is absent.
+ *   back to `POST /documents/text` when the upload route is absent. Both
+ *   answer `{ status, message, track_id }`: the `track_id` is NOT a
+ *   document id. A same-name document is HTTP 409 (replace needs an
+ *   explicit delete first).
+ * - document ids: `GET /documents/track_status/{track_id}` lists the real
+ *   document ids once the background enqueue has written them.
  * - parse/scan: `POST /documents/scan` (the pipeline trigger; LightRAG
  *   has no per-document parse call, so `parseDocuments` keeps the
  *   RAGFlow `(datasetId, documentIds)` signature and fans in).
- * - poll: `GET /documents/pipeline_status` until idle.
+ * - poll: `GET /documents/pipeline_status` until `busy` is false.
+ * - delete: `DELETE /documents/delete_document` `{ doc_ids }` (runs in the
+ *   background). `DELETE /documents` is the clear-ALL route; the one
+ *   choke point `call` refuses it before any network I/O, permanently.
+ * - health: `GET /health`.
  *
- * Wire pattern matches `ragflow.ts`: one bearer-keyed `call` with an
- * injected `fetchImpl` (production hands in a `gatedFetch` over the
- * plane's circuit breaker), `lightragOp` as the bounded metric label,
- * and the business `code`/`status` in the body checked independently
- * of the HTTP status.
+ * Wire pattern matches `ragflow.ts`: one `call` with an injected
+ * `fetchImpl` (production hands in a `gatedFetch` over the plane's
+ * circuit breaker), `lightragOp` as the bounded metric label, and the
+ * business `status` in the body checked independently of the HTTP
+ * status. Auth is `X-API-Key` only: an `Authorization` bearer would be
+ * validated as a JWT first and fail every call in API-key mode.
  */
 import type { LightragConfig } from "../config.ts";
-import type { CitationGraphProvenance, PlanningGraphRelation, SearchGraphStats } from "../types.ts";
+import { redact } from "../redact.ts";
+import type { CitationGraphProvenance, PlanningGraphRelation, RagLightragChunk, SearchGraphStats } from "../types.ts";
 import type { RagflowChunk } from "./ragflow.ts";
 
 /** The LightRAG query modes; `hybrid` and `mix` are the graph modes. */
 export type LightragQueryMode = "naive" | "local" | "global" | "hybrid" | "mix";
+
+const QUERY_MODES: readonly string[] = ["naive", "local", "global", "hybrid", "mix"];
+
+/** Whether a parsed value is one of the query modes this client sends. */
+export function isLightragQueryMode(value: unknown): value is LightragQueryMode {
+	return typeof value === "string" && QUERY_MODES.includes(value);
+}
 
 /** The default retrieval mode: graph (`hybrid`) so planning sees relations. */
 export const DEFAULT_QUERY_MODE: LightragQueryMode = "hybrid";
@@ -59,9 +78,11 @@ export function isGraphMode(mode: LightragQueryMode): boolean {
 export function lightragOp(method: string, url: string): string {
 	const path = url.replace(/^[a-z]+:\/\/[^/]+/i, "").replace(/\?.*$/, "");
 	if (path === "/query") return "query";
-	if (path === "/documents/upload" || path === "/documents/text") return "upload";
+	if (path === "/health") return "health";
+	if (path === "/documents/upload" || path === "/documents/text" || path === "/documents/texts") return "upload";
 	if (path === "/documents/scan") return "scan";
 	if (path === "/documents/pipeline_status") return "pipeline-status";
+	if (path.startsWith("/documents/track_status/")) return "track-status";
 	if (path === "/documents" || path.startsWith("/documents")) {
 		if (method === "DELETE") return "document-delete";
 		return "documents";
@@ -69,9 +90,12 @@ export function lightragOp(method: string, url: string): string {
 	return "other";
 }
 
+/** The reason an open breaker gives a call it refused; callers do not retry it. */
+export const LIGHTRAG_CIRCUIT_OPEN = "lightrag circuit open";
+
 /** The reason a transport failure becomes; an open breaker is named as such. */
 function unreachable(cause: unknown): string {
-	if (cause instanceof Error && cause.name === "BreakerOpenError") return "lightrag circuit open";
+	if (cause instanceof Error && cause.name === "BreakerOpenError") return LIGHTRAG_CIRCUIT_OPEN;
 	return `lightrag unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`;
 }
 
@@ -86,8 +110,9 @@ export type LightragChunk = RagflowChunk;
 export interface LightragRetrievalRequest {
 	question: string;
 	/**
-	 * Query mode. Defaults to `hybrid` (graph). `mix` is the deeper graph
-	 * blend for planning passes that need multi-hop relations.
+	 * Query mode. Defaults to `config.queryMode` (`SUBSTRATE_LIGHTRAG_QUERY_MODE`),
+	 * else `hybrid` (graph). `mix` is the deeper graph blend for planning
+	 * passes that need multi-hop relations.
 	 */
 	mode?: LightragQueryMode;
 	/** Most chunks to ask for. Clamped to <= 10 on the wire (D25-03). */
@@ -111,13 +136,16 @@ const QUERY_MODE_PREFIXES: Readonly<Record<string, LightragQueryMode>> = {
 };
 
 /**
- * Resolve the query mode: an explicit `mode` wins, else a leading
- * `/mix` or `/hybrid` question prefix selects the graph mode and is
- * stripped from the query, else the graph default (`hybrid`).
+ * Resolve the query mode. Precedence, highest first: an explicit `mode`
+ * the caller passed; a leading `/mix` or `/hybrid` question prefix (the
+ * graph modes, stripped from the query, and honoured even when the
+ * default is `naive`); `fallback` (the deployment's configured default,
+ * `SUBSTRATE_LIGHTRAG_QUERY_MODE`); else the graph default (`hybrid`).
  */
 export function resolveQueryMode(
 	question: string,
 	requested?: LightragQueryMode,
+	fallback: LightragQueryMode = DEFAULT_QUERY_MODE,
 ): { mode: LightragQueryMode; query: string } {
 	if (requested !== undefined) return { mode: requested, query: question };
 	const head = question.trimStart().slice(0, 8).toLowerCase();
@@ -126,7 +154,7 @@ export function resolveQueryMode(
 			return { mode, query: question.replace(new RegExp(`^\\s*${prefix}\\s*`, "i"), "") };
 		}
 	}
-	return { mode: DEFAULT_QUERY_MODE, query: question };
+	return { mode: fallback, query: question };
 }
 
 /** The fetch surface the plane client needs: injectable for rehearsal fakes. */
@@ -163,25 +191,57 @@ function dataOf(body: unknown): unknown {
 	return body;
 }
 
-/** One request with the API-key header; a transport failure is the reason. */
+/** The reason the choke point gives a clear-all it refused before any network I/O. */
+export const LIGHTRAG_CLEAR_ALL_REFUSED = "lightrag clear-all refused";
+
+/**
+ * Whether a request is LightRAG's clear-ALL route: a `DELETE` whose path is
+ * `/documents` however it is spelled (trailing slash, query string,
+ * fragment, dot segments, percent-encoding, case). Upstream
+ * `DELETE /documents` deletes every document, entity, relationship and file
+ * and ignores any body, so a per-document delete aimed at it would wipe the
+ * index. A permanent denylist: nothing in this client may emit it.
+ */
+export function isClearAllRequest(method: string, path: string): boolean {
+	if (method.toUpperCase() !== "DELETE") return false;
+	const bare = path.replace(/^[a-z]+:\/\/[^/?#]+/i, "").replace(/[?#].*$/, "").replace(/\\/g, "/");
+	let decoded = bare;
+	try {
+		decoded = decodeURIComponent(bare);
+	} catch {
+		// An undecodable path is judged by its raw text: the guard only ever refuses, so a malformed escape cannot loosen it.
+	}
+	const segments: string[] = [];
+	for (const segment of decoded.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") segments.pop();
+		else segments.push(segment);
+	}
+	return segments.length === 1 && segments[0]?.toLowerCase() === "documents";
+}
+
+/**
+ * The single request choke point: every LightRAG call goes through here,
+ * so the clear-all denylist and the auth header live in exactly one place.
+ * Only `X-API-Key` is sent (never an `Authorization` bearer: upstream
+ * `combined_auth` validates any bearer as a JWT first and answers 401 when
+ * it is not one). The key is optional (`lightragFromEnv` allows keyless
+ * reach) and never enters a reason string. Never throws: a transport
+ * failure is the reason.
+ */
 async function call(
 	config: LightragConfig,
 	fetchImpl: FetchLike,
 	path: string,
 	init: { method: string; body?: RequestInit["body"]; json?: boolean; timeoutMs: number },
 ): Promise<{ ok: true; body: unknown } | { ok: false; reason: string }> {
+	if (isClearAllRequest(init.method, path)) return { ok: false, reason: LIGHTRAG_CLEAR_ALL_REFUSED };
 	let response: Response;
 	try {
 		response = await fetchImpl(`${config.url}${path}`, {
 			method: init.method,
 			headers: {
-				// LightRAG servers check `X-API-Key`; the bearer form is
-				// sent alongside for deployments fronted by a gateway.
-				// Neither header value ever enters a reason string. The key
-				// is optional (`lightragFromEnv` allows keyless reach), so
-				// both headers are omitted when it is absent — never a
-				// `Bearer undefined` on the wire.
-				...(config.apiKey ? { "x-api-key": config.apiKey, authorization: `Bearer ${config.apiKey}` } : {}),
+				...(config.apiKey ? { "X-API-Key": config.apiKey } : {}),
 				...(init.json ? { "content-type": "application/json" } : {}),
 			},
 			...(init.body !== undefined ? { body: init.body } : {}),
@@ -202,6 +262,9 @@ async function call(
 	if (failure !== null) return { ok: false, reason: failure };
 	return { ok: true, body };
 }
+
+/** `call`, exported for the contract test only: callers outside this plane use the typed functions below. */
+export const lightragCall = call;
 
 function readString(entry: object, ...names: string[]): string | undefined {
 	for (const name of names) {
@@ -270,10 +333,11 @@ function contextEntries(data: unknown, body: unknown): unknown[] {
 
 /**
  * Retrieve chunks for a question (`POST /query`, `{ query, mode, top_k,
- * only_need_context: true }`). Graph modes (`hybrid`, the default, and
- * `mix`) fuse local entity detail with global relation context — the
- * planning pass asks for `mix` explicitly or prefixes the question with
- * `/mix`.
+ * only_need_context: true }`). Graph modes (`hybrid`, the default unless
+ * `config.queryMode` names another, and `mix`) fuse local entity detail with
+ * global relation context — the planning pass asks for `mix` explicitly or
+ * prefixes the question with `/mix`. A `naive` default (a LightRAG with no
+ * real LLM, so no knowledge graph) retrieves vector chunks only.
  *
  * Transport, auth (401/403) and shape failures come back as
  * `{ ok: false, reason }` — never a throw inside an agent's turn. An
@@ -373,7 +437,7 @@ export async function queryWithGraph(
 	opts: { mode?: LightragQueryMode; topK?: number; timeoutMs?: number } = {},
 ): Promise<LightragQueryOutcome> {
 	if (question.trim().length === 0) return { ok: false, reason: "lightrag: empty query" };
-	const resolved = resolveQueryMode(question, opts.mode);
+	const resolved = resolveQueryMode(question, opts.mode, config.queryMode);
 	if (resolved.query.trim().length === 0) return { ok: false, reason: "lightrag: empty query" };
 	const topK = Math.max(1, Math.min(opts.topK ?? MAX_LIGHTRAG_TOP_K, MAX_LIGHTRAG_TOP_K));
 	const answered = await call(config, fetchImpl, "/query", {
@@ -441,33 +505,39 @@ export interface LightragUploadRequest {
 	metadata: LightragUploadMetadata;
 }
 
+/**
+ * The upload outcome. `track_id` is LightRAG's tracking id for the
+ * enqueue, NOT a document id: resolve the real ids with
+ * {@link resolveDocumentIds}. `conflict` marks HTTP 409: upstream refuses a
+ * same-name document until the existing one is deleted.
+ */
 export type LightragUploadOutcome =
-	| { ok: true; document_id: string }
-	| { ok: false; reason: string };
+	| { ok: true; track_id: string }
+	| { ok: false; reason: string; conflict?: true };
 
-function uploadDocumentId(data: unknown): string | undefined {
-	if (data === null || typeof data !== "object") return undefined;
-	if (Array.isArray(data)) {
-		const first: unknown = data[0];
-		if (first !== null && typeof first === "object") return readString(first, "track_id", "document_id", "doc_id", "id");
-		return undefined;
-	}
-	const direct = readString(data, "track_id", "document_id", "doc_id", "id");
-	if (direct !== undefined) return direct;
-	if ("track_id" in data && typeof (data as Record<string, unknown>).track_id === "string") {
-		return (data as Record<string, unknown>).track_id as string;
-	}
-	return undefined;
+/** The reason an upload (or text insert) gets when LightRAG answers HTTP 409. */
+export const LIGHTRAG_SAME_NAME_CONFLICT = "lightrag 409 same-name conflict";
+
+function uploadTrackId(data: unknown): string | undefined {
+	if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+	const trackId = readString(data, "track_id");
+	return trackId !== undefined && trackId.trim().length > 0 ? trackId : undefined;
+}
+
+/** An upload failure as the outcome: HTTP 409 is the typed same-name conflict, anything else passes through. */
+function uploadFailure(failure: { ok: false; reason: string }): LightragUploadOutcome {
+	return failure.reason === "lightrag 409" ? { ok: false, reason: LIGHTRAG_SAME_NAME_CONFLICT, conflict: true } : failure;
 }
 
 /**
  * Upload one redacted page as a document (`POST /documents/upload`,
- * multipart form field `file`, → `{ status, data: { track_id } }`),
+ * multipart form field `file`, → `{ status, message, track_id }`),
  * falling back to `POST /documents/text` (`{ text, file_source }`)
  * where the multipart route is absent. The ingest metadata travels as
  * trailing form fields on the upload and as members of the text body,
- * so retrieval can echo the source URL either way. A missing id in a
- * success body is a shape failure, not a silent empty upload.
+ * so retrieval can echo the source URL either way. A missing track id in
+ * a success body is a shape failure, not a silent empty upload. HTTP 409
+ * is the typed `conflict` outcome ({@link LIGHTRAG_SAME_NAME_CONFLICT}).
  */
 export async function uploadDocument(
 	config: LightragConfig,
@@ -492,11 +562,11 @@ export async function uploadDocument(
 	if (graphRelations.length > 0) form.append("graph_relations", JSON.stringify(graphRelations));
 	const uploaded = await call(config, fetchImpl, "/documents/upload", { method: "POST", body: form, timeoutMs });
 	if (uploaded.ok) {
-		const documentId = uploadDocumentId(dataOf(uploaded.body));
-		if (documentId === undefined) return { ok: false, reason: "lightrag: unexpected upload shape" };
-		return { ok: true, document_id: documentId };
+		const trackId = uploadTrackId(dataOf(uploaded.body));
+		if (trackId === undefined) return { ok: false, reason: "lightrag: unexpected upload shape" };
+		return { ok: true, track_id: trackId };
 	}
-	if (!uploaded.reason.startsWith("lightrag 404")) return uploaded;
+	if (!uploaded.reason.startsWith("lightrag 404")) return uploadFailure(uploaded);
 	const texted = await call(config, fetchImpl, "/documents/text", {
 		method: "POST",
 		json: true,
@@ -511,10 +581,10 @@ export async function uploadDocument(
 		}),
 		timeoutMs,
 	});
-	if (!texted.ok) return texted;
-	const documentId = uploadDocumentId(dataOf(texted.body));
-	if (documentId === undefined) return { ok: false, reason: "lightrag: unexpected upload shape" };
-	return { ok: true, document_id: documentId };
+	if (!texted.ok) return uploadFailure(texted);
+	const trackId = uploadTrackId(dataOf(texted.body));
+	if (trackId === undefined) return { ok: false, reason: "lightrag: unexpected upload shape" };
+	return { ok: true, track_id: trackId };
 }
 
 /**
@@ -570,6 +640,14 @@ export interface LightragPollOptions {
 	maxPolls?: number;
 	intervalMs?: number;
 	timeoutMs?: number;
+	/** Waits between polls; injected so tests never really wait. */
+	sleep?: (ms: number) => Promise<void>;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setTimeout(resolve, ms);
+	return promise;
 }
 
 /**
@@ -610,13 +688,69 @@ export async function parseDocuments(
 	return scanDocuments(config, fetchImpl, timeoutMs);
 }
 
+/** What one `GET /documents/pipeline_status` body says. */
+type PipelineReading =
+	| { kind: "idle" }
+	| { kind: "busy" }
+	| { kind: "failed"; detail: string }
+	| { kind: "recovery"; message: string }
+	| { kind: "unknown" };
+
 /**
- * Poll the pipeline until idle (`GET /documents/pipeline_status` →
- * `{ status: "idle" }`). A busy pipeline past `maxPolls` is a
- * `parse-timeout` reason; a failed pipeline names the plane's message —
- * never a hang, never a throw. `document_id` is accepted for the
- * RAGFlow drop-in signature (the status is server-global) and never
- * enters the reason.
+ * Read the pipeline state. Upstream `PipelineStatusResponse` (v1.5.7) has a
+ * boolean `busy` and a `recovery_required` fence flag, and no `status`:
+ * - `recovery_required: true` is the workspace fence: every mutation is
+ *   refused with 503 until an operator clears it, so waiting is pointless;
+ * - `busy: false` is idle, `busy: true` is busy. The response allows extra
+ *   fields, so a truthy `scanning`, `destructive_busy` or a positive
+ *   `pending_enqueues` also counts as busy when present: an upload's
+ *   background enqueue has not landed in doc status yet;
+ * - only when `busy` is absent, the legacy `status` / `pipeline_status`
+ *   string is read (`idle|done|completed|success`, `failed|failure|error`,
+ *   any other string is busy). This fallback exists for older servers and
+ *   fakes; v1.5.7 never sends it;
+ * - a body with neither shape is `unknown`, never a silent busy loop.
+ */
+function readPipeline(body: unknown): PipelineReading {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return { kind: "unknown" };
+	const record = body as Record<string, unknown>;
+	if (record.recovery_required === true) {
+		const message =
+			typeof record.recovery_message === "string" && record.recovery_message.length > 0
+				? record.recovery_message
+				: typeof record.recovery_kind === "string" && record.recovery_kind.length > 0
+					? record.recovery_kind
+					: "unspecified";
+		return { kind: "recovery", message };
+	}
+	if (typeof record.busy === "boolean") {
+		const pending = typeof record.pending_enqueues === "number" && record.pending_enqueues > 0;
+		return record.busy || record.scanning === true || record.destructive_busy === true || pending ? { kind: "busy" } : { kind: "idle" };
+	}
+	const data = dataOf(body);
+	if (data === null || typeof data !== "object") return { kind: "unknown" };
+	const status = readString(data, "status", "pipeline_status");
+	if (status === undefined) return { kind: "unknown" };
+	const lower = status.toLowerCase();
+	if (lower === "idle" || lower === "done" || lower === "completed" || lower === "success") return { kind: "idle" };
+	if (lower === "failed" || lower === "failure" || lower === "error") {
+		const message = readString(data, "message", "progress_msg", "error") ?? "";
+		return { kind: "failed", detail: `${lower}${message ? ` ${message.slice(0, 200)}` : ""}` };
+	}
+	return { kind: "busy" };
+}
+
+/**
+ * Poll the pipeline until idle (`GET /documents/pipeline_status`, idle
+ * when `busy` is false). A busy pipeline past `maxPolls` is a
+ * `parse-timeout` reason; a fenced workspace is `lightrag recovery
+ * required: <message>` and stops at once; a body in no known shape is
+ * `lightrag: unexpected pipeline shape` and stops at once — never a hang,
+ * never a throw. After a delete the pipeline stays busy while the
+ * background job runs, so a caller that needs the delete to be complete
+ * polls with this same function. `document` is accepted for the RAGFlow
+ * drop-in signature (the status is server-global) and never enters the
+ * reason.
  */
 export async function pollParseStatus(
 	config: LightragConfig,
@@ -628,32 +762,120 @@ export async function pollParseStatus(
 	const maxPolls = opts.maxPolls ?? 10;
 	const intervalMs = opts.intervalMs ?? 100;
 	const timeoutMs = opts.timeoutMs ?? 4000;
+	const sleep = opts.sleep ?? defaultSleep;
 	for (let poll = 0; poll < maxPolls; poll += 1) {
 		const answered = await call(config, fetchImpl, "/documents/pipeline_status", { method: "GET", timeoutMs });
 		if (!answered.ok) return answered;
-		const data = dataOf(answered.body);
-		const status = (data !== null && typeof data === "object" ? readString(data, "status", "pipeline_status") : undefined) ?? "";
-		const idle = status.toLowerCase();
-		if (idle === "idle" || idle === "done" || idle === "completed" || idle === "success") return { ok: true };
-		if (idle === "failed" || idle === "failure" || idle === "error") {
-			const message =
-				data !== null && typeof data === "object" ? (readString(data, "message", "progress_msg", "error") ?? "") : "";
-			return { ok: false, reason: `parse-failed: ${idle}${message ? ` ${message.slice(0, 200)}` : ""}` };
+		const reading = readPipeline(answered.body);
+		if (reading.kind === "idle") return { ok: true };
+		if (reading.kind === "failed") return { ok: false, reason: `parse-failed: ${reading.detail}` };
+		if (reading.kind === "recovery") {
+			return { ok: false, reason: `lightrag recovery required: ${redact(reading.message).slice(0, 200)}` };
 		}
-		if (poll < maxPolls - 1 && intervalMs > 0) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			setTimeout(resolve, intervalMs);
-			await promise;
-		}
+		if (reading.kind === "unknown") return { ok: false, reason: "lightrag: unexpected pipeline shape" };
+		if (poll < maxPolls - 1 && intervalMs > 0) await sleep(intervalMs);
 	}
 	return { ok: false, reason: "parse-timeout" };
 }
 
+/** One member of a parsed JSON object, or undefined: narrowed with `in`, no assumed shape. */
+function readMember(value: unknown, name: string): unknown {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return name in value ? (value as Record<string, unknown>)[name] : undefined;
+}
+
+/** One document `GET /documents/track_status/{track_id}` lists. */
+export interface LightragTrackedDocument {
+	id: string;
+	status?: string;
+	file_path?: string;
+	error_msg?: string;
+}
+
+export interface LightragTrackOptions {
+	/** Most reads before giving up on the enqueue landing. Default 10. */
+	maxPolls?: number;
+	/** Wait between reads. Default 500 ms. */
+	intervalMs?: number;
+	/** Per-read timeout. Default 4000 ms. */
+	timeoutMs?: number;
+	/** Total budget across all reads and waits. Default 30000 ms. */
+	deadlineMs?: number;
+	/** Waits between reads; injected so tests never really wait. */
+	sleep?: (ms: number) => Promise<void>;
+	/** The clock for the deadline; injected so tests are deterministic. */
+	now?: () => number;
+}
+
+export type LightragTrackOutcome =
+	| { ok: true; ids: string[]; documents: LightragTrackedDocument[] }
+	| { ok: false; reason: string };
+
 /**
- * Delete documents by id (`DELETE /documents` `{ doc_ids }`). The only
- * destructive call on the plane; mirrors the RAGFlow prune's one caller
- * besides the upload's own clean-up. `datasetId` is accepted for the
- * drop-in signature and ignored on the wire.
+ * Resolve the real document ids behind an upload's `track_id`
+ * (`GET /documents/track_status/{track_id}` → `{ track_id, documents: [{ id,
+ * status, file_path, … }], total_count, status_summary }`). The upload
+ * enqueues in the background, so the documents may not be listed yet: an
+ * empty list is read again, up to `maxPolls` reads and `deadlineMs`, then
+ * it is a reason — never a hang. Document ids, not track ids, are what
+ * {@link deleteDocuments} needs.
+ */
+export async function resolveDocumentIds(
+	config: LightragConfig,
+	trackId: string,
+	fetchImpl: FetchLike = fetch,
+	opts: LightragTrackOptions = {},
+): Promise<LightragTrackOutcome> {
+	const id = trackId.trim();
+	if (id.length === 0) return { ok: false, reason: "lightrag: empty track id" };
+	const maxPolls = opts.maxPolls ?? 10;
+	const intervalMs = opts.intervalMs ?? 500;
+	const timeoutMs = opts.timeoutMs ?? 4000;
+	const deadlineMs = opts.deadlineMs ?? 30_000;
+	const sleep = opts.sleep ?? defaultSleep;
+	const now = opts.now ?? Date.now;
+	const started = now();
+	for (let poll = 0; poll < maxPolls; poll += 1) {
+		const remainingMs = deadlineMs - (now() - started);
+		if (remainingMs <= 0) return { ok: false, reason: "lightrag: track_status deadline exceeded with no documents" };
+		const answered = await call(config, fetchImpl, `/documents/track_status/${encodeURIComponent(id)}`, { method: "GET", timeoutMs: Math.min(timeoutMs, remainingMs) });
+		if (!answered.ok) return answered;
+		const listed = readMember(answered.body, "documents");
+		if (!Array.isArray(listed)) return { ok: false, reason: "lightrag: unexpected track_status shape" };
+		const documents: LightragTrackedDocument[] = [];
+		for (const entry of listed) {
+			if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+			const documentId = readString(entry, "id");
+			if (documentId === undefined || documentId.trim().length === 0) continue;
+			const status = readString(entry, "status");
+			const filePath = readString(entry, "file_path");
+			const errorMsg = readString(entry, "error_msg");
+			documents.push({
+				id: documentId,
+				...(status !== undefined ? { status } : {}),
+				...(filePath !== undefined ? { file_path: filePath } : {}),
+				...(errorMsg !== undefined ? { error_msg: redact(errorMsg).slice(0, 200) } : {}),
+			});
+		}
+		if (documents.length > 0) return { ok: true, ids: documents.map((document) => document.id), documents };
+		const leftMs = deadlineMs - (now() - started);
+		if (leftMs <= 0) return { ok: false, reason: "lightrag: track_status deadline exceeded with no documents" };
+		if (poll < maxPolls - 1 && intervalMs > 0) await sleep(Math.min(intervalMs, leftMs));
+	}
+	return { ok: false, reason: "lightrag: track_status listed no documents" };
+}
+
+/**
+ * Delete documents by id (`DELETE /documents/delete_document`
+ * `{ doc_ids, delete_file, delete_llm_cache: false }`; `delete_file` is false unless `options.deleteFile` is true). The ids
+ * must be real document ids ({@link resolveDocumentIds}), never track ids.
+ * Upstream strips and de-duplicates them and refuses an empty id; the
+ * deletion runs in the background, so `ok` means `deletion_started`:
+ * poll {@link pollParseStatus} for completion. `busy` (another writer
+ * holds the pipeline) is `retryable`; any other status fails with a reason
+ * naming it. NEVER the clear-all `DELETE /documents`: the choke point
+ * refuses that path permanently. `datasetId` is accepted for the drop-in
+ * signature and ignored on the wire.
  */
 export async function deleteDocuments(
 	config: LightragConfig,
@@ -661,16 +883,28 @@ export async function deleteDocuments(
 	documentIds: readonly string[],
 	fetchImpl: FetchLike = fetch,
 	timeoutMs = 8000,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+	options: { deleteFile?: boolean } = {},
+): Promise<{ ok: true } | { ok: false; reason: string; retryable?: true }> {
 	void datasetId;
 	if (documentIds.length === 0) return { ok: true };
-	const answered = await call(config, fetchImpl, "/documents", {
+	const ids = [...new Set(documentIds.map((documentId) => documentId.trim()))];
+	if (ids.some((documentId) => documentId.length === 0)) return { ok: false, reason: "lightrag: empty document id" };
+	const answered = await call(config, fetchImpl, "/documents/delete_document", {
 		method: "DELETE",
 		json: true,
-		body: JSON.stringify({ doc_ids: [...documentIds] }),
+		body: JSON.stringify({ doc_ids: ids, delete_file: options.deleteFile ?? false, delete_llm_cache: false }),
 		timeoutMs,
 	});
-	return answered.ok ? { ok: true } : answered;
+	if (!answered.ok) return answered;
+	const rawStatus = readMember(answered.body, "status");
+	const status = typeof rawStatus === "string" ? rawStatus : undefined;
+	const rawMessage = readMember(answered.body, "message");
+	const message = typeof rawMessage === "string" ? `: ${redact(rawMessage).slice(0, 200)}` : "";
+	if (status === "deletion_started") return { ok: true };
+	if (status === "busy") return { ok: false, reason: `lightrag delete busy${message}`, retryable: true };
+	if (status === "not_allowed") return { ok: false, reason: `lightrag delete not_allowed${message}` };
+	if (status === undefined) return { ok: false, reason: "lightrag: unexpected delete shape" };
+	return { ok: false, reason: `lightrag delete: unexpected status ${status.slice(0, 40)}` };
 }
 
 /**
@@ -682,4 +916,88 @@ export async function deleteDocuments(
  */
 export function documentName(path: string): string {
 	return path.replace(/^\/+/, "").replace(/\//g, "__");
+}
+
+/** The result of a LightRAG health probe. */
+export interface LightragProbe {
+	ok: boolean;
+	/** Whether the indexing pipeline is busy, when the server said. */
+	busy?: boolean;
+	/** The server's core version, when it said. */
+	version?: string;
+	/** Why `ok` is false. Never carries the key. */
+	reason?: string;
+}
+
+/**
+ * Probe `GET /health`. Authenticated unless the deployment whitelists the
+ * path: an unauthenticated caller gets only liveness fields (`status`,
+ * versions, `pipeline_busy`), an authenticated one also the configuration.
+ * `ok` is `status === "healthy"`; a refused key is `ok: false` with the
+ * `lightrag 401`/`403` reason. Never throws.
+ */
+export async function probeLightrag(
+	config: LightragConfig,
+	fetchImpl: FetchLike = fetch,
+	timeoutMs = 4000,
+): Promise<LightragProbe> {
+	try {
+		const answered = await call(config, fetchImpl, "/health", { method: "GET", timeoutMs });
+		if (!answered.ok) return { ok: false, reason: answered.reason };
+		const body = answered.body;
+		if (body === null || typeof body !== "object" || Array.isArray(body)) {
+			return { ok: false, reason: "lightrag: unexpected health shape" };
+		}
+		const status = readString(body, "status");
+		if (status === undefined) return { ok: false, reason: "lightrag: unexpected health shape" };
+		if (status !== "healthy") return { ok: false, reason: `lightrag health: ${status.slice(0, 40)}` };
+		const busy = readMember(body, "pipeline_busy");
+		const version = readString(body, "core_version", "api_version");
+		return { ok: true, ...(typeof busy === "boolean" ? { busy } : {}), ...(version !== undefined ? { version } : {}) };
+	} catch (cause) {
+		// `call` never throws; this is for a fetch double that hands back a non-Response. It becomes the reason, not a swallowed error.
+		return { ok: false, reason: unreachable(cause) };
+	}
+}
+
+/** Snippets are redacted and capped before a tool or route replies (D25-04). */
+export const LIGHTRAG_SNIPPET_CAP = 1200;
+
+export type LightragToolOutcome =
+	| { ok: true; chunks: RagLightragChunk[]; mode: LightragQueryMode }
+	| { ok: false; reason: string };
+
+/**
+ * The query the `docs_lightrag_query` tool and `POST /docs/lightrag/query`
+ * serve, over THIS client: the same mode resolution, top-k clamp and
+ * `POST /query` body as `docs_search`, and the caller's gated `fetchImpl`
+ * (so the plane's circuit breaker sees every call). Hits come back in the
+ * query surface's `RagLightragChunk` shape, redacted and capped; an entry
+ * without text is skipped and no usable entry is `lightrag: unexpected
+ * response shape`.
+ */
+export async function queryForTool(
+	config: LightragConfig,
+	input: { question: string; mode?: LightragQueryMode; topK?: number },
+	fetchImpl: FetchLike = fetch,
+	timeoutMs = 4000,
+): Promise<LightragToolOutcome> {
+	const answered = await queryWithGraph(config, input.question, fetchImpl, {
+		...(input.mode !== undefined ? { mode: input.mode } : {}),
+		...(input.topK !== undefined ? { topK: input.topK } : {}),
+		timeoutMs,
+	});
+	if (!answered.ok) return answered;
+	const chunks: RagLightragChunk[] = [];
+	for (const chunk of answered.chunks) {
+		if (chunk.content.length === 0) continue;
+		chunks.push({
+			content: redact(chunk.content).slice(0, LIGHTRAG_SNIPPET_CAP),
+			title: redact(chunk.document_name),
+			sourceUrl: redact(chunk.source_url ?? "lightrag:unrecorded"),
+			score: chunk.score ?? 0,
+		});
+	}
+	if (chunks.length === 0) return { ok: false, reason: "lightrag: unexpected response shape" };
+	return { ok: true, chunks, mode: answered.detail.mode };
 }

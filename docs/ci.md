@@ -1,19 +1,23 @@
 # Verification gate and CI
 
-The gate is four checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
+The gate is six checks, run in this order. `bun run verify` runs them locally; `.github/workflows/ci.yml` runs the same commands on GitHub.
 
 | Step | Command | What it proves |
 |---|---|---|
 | `install` | `bun install --frozen-lockfile` | `bun.lock` matches every `package.json` |
 | `types` | `bunx tsc --noEmit` | the whole workspace typechecks |
+| `lint` | `bunx biome lint --reporter=summary .` | Biome reports no error and no warning: every rule that used to warn is an error now, and the tree has none left |
 | `tests` | `bun test` | the full suite passes |
+| `python` | `uv run --no-project --with httpx==0.28.1 --with pytest==9.1.1 python -m pytest packages/miner/tests packages/dispatcher/tests` | the miner and dispatcher Python suites pass, in an ephemeral environment pinned to the versions they were verified with |
 | `locks` | `bun run check:phase-close` | the event vocabulary, store lock, audit policy and redaction locks hold |
 | `audit` (opt-in) | `bun scripts/audit-gate.ts` | no high or critical advisory in the lockfile, except the accepted risks below; needs the network |
 
 ## Run it locally
 
+Prerequisites: Bun 1.4.0 and `uv` on `PATH`. The `python` step runs `uv run`. CI installs the pinned `uv` release and checks its SHA-256 before use, so a local run needs `uv` installed too.
+
 ```sh
-bun run verify              # install, types, tests, locks
+bun run verify              # install, types, lint, tests, python, locks
 bun run verify --audit      # plus the dependency audit
 bun run verify --only types,locks
 bun run verify --keep-going # do not stop at the first failure
@@ -22,7 +26,7 @@ bun run verify --list
 
 A passing step prints one line (with the pass/skip/fail counts for the suite). A failing step prints the last 60 lines of its output and the run stops, exit code 1. Exit code 2 means bad usage.
 
-`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, or when the report-only `boot-gate` job stops being last, report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, so the workflow cannot drift apart silently.
+`scripts/biome-config.test.ts` pins the Biome rule levels below, so loosening the gate needs a deliberate test change. `scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, when the report-only `boot-gate` job stops being report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, so the workflow cannot drift apart silently.
 
 ### The database-backed tests
 
@@ -36,21 +40,59 @@ bun run rehearsal down --name local
 
 Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal smokes (`bun run rehearsal smoke`, `bun run smoke:vocabulary`). `bun run parity:check` and the other production checks read the operator's host and are never run by CI.
 
+### Code ratchet
+
+`scripts/code-ratchet.ts` counts risky patterns in every non-test `.ts` file under `packages/` and `scripts/`: explicit `any`, `as unknown as`, TypeScript and lint suppression comments, non-null assertions, empty `catch` blocks, `console.*` calls in `packages/*/src`, `process.exit(` calls outside CLI entrypoints, and `JSON.parse(...) as Type` casts (every type except `unknown` and `const`). Counting is AST-based: each file is parsed once with the TypeScript compiler API and walked by syntax node (`ts.forEachChild`, no token objects), so strings, template text, regex literals and comment text are never mistaken for code. Suppression comments are read by one linear `ts.createScanner` pass over the whole text (so a comment before `else`, `finally` or a closing `)` counts too) that jumps over the string, template and regex literal spans the AST walk recorded, and an empty `catch` that holds an explanatory comment is accepted. A file whose text holds none of the substrings any counter needs is not parsed at all. Only source counters exist in the baseline and only they gate; `*.test.ts` files are skipped unless you pass `--with-tests`, which adds an informational test column to the table. A scanned root that does not exist is skipped; any other unreadable directory fails the scan, so an incomplete scan can never pass.
+
+`bun test` runs `scripts/code-ratchet.test.ts`, which fails when a source counter rises above `scripts/code-ratchet.baseline.json`, and also when one falls below it, so the baseline can only move down. After removing offenders, run `bun scripts/code-ratchet.ts --write` and commit the new baseline. `--write` only ever lowers: when the baseline file exists and any source counter is above its baseline value it prints each offending counter, exits 1 and leaves the file untouched. Raising a baseline means deleting the file deliberately, in a reviewed change, and generating it again. `bun scripts/code-ratchet.ts` prints the table; `--check` exits 1 on a regression; `--with-tests` adds the informational test counts.
+
+A CLI entrypoint may call `process.exit`. A file counts as one when it has a shebang, uses `import.meta.main`, is named `*-run.ts`, `index.ts` or `main.ts`, lives under `scripts/`, or carries a `// ratchet-entrypoint` line comment (put it above the guard that makes the file run).
+
+### Docs lint
+
+`scripts/docs-lint.ts` checks the documents and `bun test` runs it through `scripts/docs-lint.test.ts`, so the CI commands do not change. Two rules apply: every relative markdown link in `docs/`, `.planning/` (archives included), `README.md`, `CONTRIBUTING.md`, `AGENTS.md` and `SECURITY.md` must resolve to a file, and every page under `docs/`, every live `.planning/*.md` file and every file under `.planning/phases/` must have a level-1 title. Archived plans under `.planning/milestones/` are exempt from the title rule only. Link and title checks use Bun's built-in markdown parser, so the lint follows CommonMark: titled, reference, angle-wrapped and percent-encoded link destinations are read as a renderer reads them, and a heading inside code or an HTML comment is not a title. Anchors, absolute paths, URLs, fenced code blocks and inline code are not checked as links; to show an illustrative link without breaking the lint, put it in inline code. Run it alone with `bun test scripts/docs-lint.test.ts`; a failure names the file and the target or title.
+
+### Docs eval
+
+`scripts/docs-eval.ts` scores a self-supervised golden set against a deterministic lexical retriever over `packages/corpus/fixtures/eval/`, and `bun test` runs it through `scripts/docs-eval.test.ts`, so the CI commands do not change. It fails when recall at 5 falls by more than 0.02 or MRR by more than 0.03 against `scripts/docs-eval.baseline.json`, when the set loses questions, or when a group of identical documents is not collapsed to one answer: a change in ranking inputs, de-duplication or the re-rank order. It runs offline in a few seconds. After an intended change, `bun scripts/docs-eval.ts --write-baseline` records the new scores; the guide is [`corpus-eval.md`](corpus-eval.md).
+
 ## CI
 
 | Job | Runner | When | Steps |
 |---|---|---|---|
-| `verify` ("Typecheck, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the four steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
+| `verify` ("Typecheck, lint, tests and repo locks") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule) | the six steps above, with a scratch Postgres 16 (the local `scratch-postgres` action) and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
 | `dependency-audit` ("Known-vulnerability audit") | `[self-hosted, linux, x64, omega-ci]` | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun scripts/audit-gate.ts` |
 | `boot-gate` ("Boot and prove (report-only)") | `[self-hosted, linux, x64, omega-ci]` | same-repo pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
 
 Fork pull requests run none of these jobs: each job's `if:` skips a pull request whose head repository is not this repository, because a fork's code would otherwise run on the shared runner pool.
 
+Lint is blocking: the `lint` step (`bunx biome lint --reporter=summary .`, also `bun run lint` without the reporter) sits between `Typecheck` and `Tests` in the `verify` job and in `bun run verify`. Biome exits non-zero on errors, and the two rules that used to warn are errors now, so a new non-null assertion or a missed optional chain fails the step; the tree reports no warning. Biome is pinned exactly to 2.6.3 in the root `package.json` with the `recommended` preset; the formatter is off, so nothing is reformatted. Every root devDependency (`@biomejs/biome`, `@types/bun`, `typescript`) is pinned to an exact version, so a fresh install cannot move the toolchain without a reviewed change.
+
+Rule decisions in `biome.json`:
+
+| Rule | Level | Why |
+|---|---|---|
+| `suspicious/noExplicitAny`, `noProto`, `noPrototypeBuiltins`, `noUselessEscapeInString` | error | real defects or type holes; the tree is clean |
+| `correctness/noUnusedImports`, `noUnusedVariables`, `noUnusedFunctionParameters` | error | dead code; the tree is clean |
+| `style/useConst`, `useImportType` | error | cheap, mechanical, tree is clean (`useImportType` matches `verbatimModuleSyntax`) |
+| `complexity/noCommaOperator`, `useRegexLiterals` | error | obscure constructs; the tree is clean |
+| `style/noNonNullAssertion` | error | every use was removed; a new `!` fails the step, and the code ratchet's baseline for source is 0 as a second guard (tests narrow with a `defined` helper) |
+| `complexity/useOptionalChain` | error | the existing sites were rewritten where the truthiness test cannot differ; a missed chain fails the step |
+| `suspicious/noTemplateCurlyInString` | off | false positives on intentional `${...}` text such as templates and docs strings |
+| `complexity/useLiteralKeys` | off | conflicts with `noPropertyAccessFromIndexSignature`-style bracket access on index signatures |
+| `style/useTemplate` | off | string concatenation is often clearer; purely stylistic |
+
+The compiler is stricter too: `tsconfig.json` enables `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noImplicitOverride`, `noImplicitReturns`, `noUnusedLocals` and `noUnusedParameters` on top of `strict`. Under `exactOptionalPropertyTypes` an optional property is either absent or a value of its type: where `undefined` is a legal value the declaration says `key?: T | undefined`, and a serialized or compared object leaves the key out instead of setting it to `undefined`.
+
 Every job runs on the Omega CI runner pool (`[self-hosted, linux, x64, omega-ci]`, [swcstudiospace/Omega-Prime `docs/ci-runners.md`](https://github.com/swcstudiospace/Omega-Prime/blob/main/docs/ci-runners.md)), never on GitHub-hosted runners. Jobs run as an unprivileged user with no Docker and no `sudo`, so there are no service containers. The `verify` job's scratch database comes from [`.github/actions/scratch-postgres`](../.github/actions/scratch-postgres/action.yml): it runs `initdb` and `pg_ctl` from the image's PostgreSQL 16 into `$RUNNER_TEMP`, listening on 127.0.0.1 and a port the kernel reports free for that job (parallel jobs on one runner host never clash), with trust authentication on loopback. It creates `substrate_test` and exports `SUBSTRATE_TEST_PG_URL`. An `if: always()` step of the same action stops the cluster. Both are `uses:` steps, so the job's `run:` lines stay exactly the gate's four commands. The dependency audit runs on pushes to `main`, weekly and on demand, not on pull requests, so a new high or critical advisory fails it until the package is upgraded or listed under the accepted risks below. The weekly scheduled run re-checks the lockfile for advisories published between changes; a red scheduled run is the signal to upgrade.
+
+### The Hindsight lag watcher
+
+`.github/workflows/hindsight-lag.yml` is a second workflow, separate from the gate: it runs on the same Omega CI pool and behind the same `CI_ENABLED` switch, on Mondays 04:43 UTC and on demand (never on a pull request), with workflow-level `permissions` limited to `contents: read` (`issues: write` is granted only on the two jobs that open or close issues), and no secret but the run's own `GITHUB_TOKEN`. It runs `bun scripts/hindsight-lag.ts`, which compares `.github/hindsight-pin.json` with the stable releases of the upstream Hindsight and keeps one open issue labelled `hindsight-lag` once the oldest stable release newer than the pin has existed for `lag_alert_days` (the issue names the newest stable release); a second job, `report-failure`, with its own checkout and Bun setup, runs only when the first failed and keeps one issue labelled `hindsight-lag-failed` so a broken watcher is visible even when checkout or Bun setup failed. It opens no pull request and never touches Railway. Run it read-only with `bun scripts/hindsight-lag.ts --dry-run`. The upgrade itself is a manual, operator-only procedure: [runbooks/hindsight-upgrade.md](runbooks/hindsight-upgrade.md).
 
 ### Accepted risk and the audit gate
 
-`bun scripts/audit-gate.ts` reads `bun audit --json`, the machine-readable form of the audit. It filters the advisories to `high` and `critical` itself, because `bun audit --audit-level` does not filter the JSON. It fails the job (exit 1) on any high or critical advisory except the ones below. Each accepted advisory must match on GHSA id, package and version, and the lockfile must install that package at exactly that one version. Anything else fails: a new advisory, an upgrade or downgrade of an accepted package, or a second installed version of one. Each entry lives in `.github/audit-accepted-risk.json`. When an accepted advisory's `review_by` date has passed, the gate still passes and prints a warning.
+`bun scripts/audit-gate.ts` reads `bun audit --json`, the machine-readable form of the audit. It filters the advisories to `high` and `critical` itself, because `bun audit --audit-level` does not filter the JSON. It fails the job (exit 1) on any high or critical advisory except the ones below. Each accepted advisory must match on GHSA id, package and version, and the lockfile must install that package at exactly that one version. Anything else fails: a new advisory, an upgrade or downgrade of an accepted package, or a second installed version of one. Each entry lives in `.github/audit-accepted-risk.json`. When an accepted advisory's `review_by` date is 30 days away or fewer, the gate still passes and prints a warning naming the advisory, the package and the date (on the `review_by` day itself too). The day after `review_by` the gate fails with `accepted risk <id> expired on <date>: re-review or upgrade`, until the entry is re-reviewed (a new `review_by`) or the package is upgraded.
 
 Accepted by the owner (SomeRandmGuyy, decision of 2026-10-21, review by 2027-01-19):
 
@@ -94,7 +136,19 @@ gh variable set CI_ENABLED --body true --repo swcstudiospace/agent-substrate   #
 gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            # off (kill switch)
 ```
 
-**Status on 2026-10-09: off.** The first run on pull request 27 failed before any step started, with the annotation "The job was not started because recent account payments have failed or your spending limit needs to be increased". The organisation's Actions usage for the month is already large (other repositories), so enabling this is the operator's decision about spend, not a code change. After the account can run jobs: fix billing, run the workflow once by hand (`gh workflow run CI --ref main` after setting the variable, or open a pull request), confirm `verify` is green, and optionally require `CI / Typecheck, tests and repo locks` in branch protection when the repository's plan supports it. The first run on a real runner may expose a setup detail this repository could not test (for example the Postgres service health check); fix it in a small pull request, or clear the variable while you do.
+**Status on 2026-10-09: off.** The first run on pull request 27 failed before any step started, with the annotation "The job was not started because recent account payments have failed or your spending limit needs to be increased". The organisation's Actions usage for the month is already large (other repositories), so enabling this is the operator's decision about spend, not a code change. After the account can run jobs: fix billing, run the workflow once by hand (`gh workflow run CI --ref main` after setting the variable, or open a pull request), confirm `verify` is green, and optionally require `CI / Typecheck, lint, tests and repo locks` in branch protection when the repository's plan supports it. The first run on a real runner may expose a setup detail this repository could not test (for example the Postgres service health check); fix it in a small pull request, or clear the variable while you do.
+
+### Pool scope and recovery (2026-11-07)
+
+The verify job runs on the Omega CI pool. The pool serves a private allowlist of repositories, set in two places: the controller setting `OMEGA_CI_REPOS` in `/etc/omega-ci/controller.env` on the pool host, and the org runner group `omega-ci`, which grants repository access only to selected repositories and refuses public ones. It currently covers `swcstudiospace/substrate`, `swcstudiospace/spectrumwebco-marketing` and `swcstudiospace/autonogrammer-ai`.
+
+- This narrowing is temporary, pending the owner's decision. It replaces the organisation-wide setting recorded on 2026-10-24, which served every repository, public ones included. The reason: `swcstudiospace/asterinas` has 299 queued jobs that carry only the `self-hosted` label, including TDX and benchmark jobs the pool cannot serve, and the controller matches jobs by label and cannot exclude a repository.
+- Public repositories are not served: the group refuses them. Public repositories that carry the `omega-ci` label are `swcstudiospace/realm`, `swcstudiospace/ultrathink`, `swcstudiospace/PumpGrok` and `swcstudiospace/Omega-Prime`. They need the owner's decision.
+- Full revert to the 2026-10-24 setting, in this order: set `OMEGA_CI_REPOS=swcstudiospace/*` and `OMEGA_CI_PUBLIC_REPOS=swcstudiospace/*` in `/etc/omega-ci/controller.env` (the controller refuses a public entry that the repos list does not cover); set the `omega-ci` runner group to `visibility=all`; then restart the unit `omega-ci-autoscaler`. Allowing public repositories through the group is a separate setting (`allows_public_repositories`), and it stays `false` until the owner decides.
+- Recovery: after the Desktop agents fail to wake, the controller opens a launch circuit breaker, and only a restart of the unit `omega-ci-autoscaler` clears it. The journal line `agent reconcile failed (DesktopError)` is a periodic check with a 150 s wake budget. It is a symptom, not the cause.
+- Verify after any change: the runner group lists the repository (`gh api orgs/swcstudiospace/actions/runner-groups/4/repositories`), an online runner carries the labels `self-hosted, linux, x64, omega-ci`, and a job from this repository completes. On 2026-11-07 the verify job of run 42293269517 completed with success on the pool.
+
+The status above (2026-10-09) is history. On 2026-11-07 the repository variable `CI_ENABLED` is `true` (set 2026-10-09; there is no organisation-level variable of that name), and `BOOT_GATE` is unset at both levels.
 
 ## Editing the workflow
 
@@ -102,4 +156,4 @@ gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            #
 - Keep `permissions: contents: read` and `persist-credentials: false`. No secrets belong in this file; the database password is a scratch value for a container that lives for one job.
 - Change a gate command in `scripts/verify.ts` and in the workflow together; the drift test names whichever one you forgot.
 - The job and step names are stable on purpose: they are what a branch-protection rule would require.
-- No Python tests exist on `main` yet. When the dispatcher and miner land (milestone v1.3), add a `setup-python` step pinned by commit SHA and a pytest step to `verify`, and mirror it in `scripts/verify.ts`.
+- The Python suites in `packages/miner/tests` and `packages/dispatcher/tests` run in the `python` step of `verify` and in the `verify` job. Their dependencies come from `uv run --no-project` with exact pins; keep those pins in sync with the packages' declared `httpx>=0.27` and `pytest>=8.0`.

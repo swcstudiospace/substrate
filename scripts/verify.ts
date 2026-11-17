@@ -3,7 +3,7 @@
  * The repository's verification gate in one command.
  *
  * `bun run verify` runs the checks the CI workflow runs, in the same order:
- * a frozen-lockfile install, `tsc --noEmit`, the full test suite and the repo
+ * a frozen-lockfile install, `tsc --noEmit`, `biome lint` (every diagnostic blocks), the full test suite and the repo
  * locks (`check:phase-close`). `--audit` adds the known-vulnerability audit,
  * which needs the network. A step's output is shown only when the step fails;
  * otherwise one line per step reports its duration and, for the test suite,
@@ -19,7 +19,7 @@
  */
 import { join } from "node:path";
 
-export type StepId = "install" | "types" | "tests" | "locks" | "audit";
+export type StepId = "install" | "types" | "lint" | "tests" | "python" | "locks" | "audit";
 
 export interface GateStep {
 	readonly id: StepId;
@@ -33,7 +33,13 @@ export interface GateStep {
 export const GATE_STEPS: readonly GateStep[] = [
 	{ id: "install", label: "Frozen-lockfile install", argv: ["bun", "install", "--frozen-lockfile"] },
 	{ id: "types", label: "Typecheck", argv: ["bunx", "tsc", "--noEmit"] },
+	{ id: "lint", label: "Lint (Biome)", argv: ["bunx", "biome", "lint", "--reporter=summary", "."] },
 	{ id: "tests", label: "Test suite", argv: ["bun", "test"] },
+	{
+		id: "python",
+		label: "Python suites (miner, dispatcher)",
+		argv: ["uv", "run", "--no-project", "--with", "httpx==0.28.1", "--with", "pytest==9.1.1", "python", "-m", "pytest", "packages/miner/tests", "packages/dispatcher/tests"],
+	},
 	{ id: "locks", label: "Repo locks", argv: ["bun", "run", "check:phase-close"] },
 	{ id: "audit", label: "Dependency audit", argv: ["bun", "scripts/audit-gate.ts"], optIn: true },
 ];
@@ -133,6 +139,27 @@ export function parseTestCounts(output: string): TestCounts | null {
 	return { pass, skip: read("skip") ?? 0, fail };
 }
 
+export interface LintCounts {
+	warnings: number;
+	infos: number;
+}
+
+/** An ANSI colour sequence; built from the ESC code so the pattern holds no control character. */
+const ANSI_COLOUR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+/**
+ * Read Biome's `Found N warnings.` / `Found N infos.` summary lines (zero when absent, singular or plural, ANSI
+ * colour ignored), so a passing lint step still shows how many non-blocking diagnostics remain.
+ */
+export function parseLintCounts(output: string): LintCounts {
+	const plain = output.replace(ANSI_COLOUR, "");
+	const read = (word: string): number => {
+		const match = plain.match(new RegExp(`Found (\\d+) ${word}s?\\.`));
+		return match?.[1] === undefined ? 0 : Number(match[1]);
+	};
+	return { warnings: read("warning"), infos: read("info") };
+}
+
 /** A reminder when tests were skipped because no scratch database was configured; null otherwise. */
 export function skipNote(counts: TestCounts | null, env: Readonly<Record<string, string | undefined>>): string | null {
 	if (counts === null || counts.skip === 0) return null;
@@ -211,7 +238,12 @@ export async function main(argv: readonly string[] = process.argv.slice(2), deps
 	for (const step of steps) {
 		const result = await (deps.run ?? runStep)(step, ROOT);
 		const counts = step.id === "tests" ? parseTestCounts(result.output) : null;
-		const detail = counts ? `: ${counts.pass} pass, ${counts.skip} skip, ${counts.fail} fail` : "";
+		const lint = step.id === "lint" ? parseLintCounts(result.output) : null;
+		const detail = counts
+			? `: ${counts.pass} pass, ${counts.skip} skip, ${counts.fail} fail`
+			: lint
+				? `: ${lint.warnings} warnings, ${lint.infos} infos`
+				: "";
 		if (result.ok) {
 			process.stdout.write(`[verify] ok   ${step.label} (${seconds(result.ms)})${detail}\n`);
 			const note = skipNote(counts, deps.env ?? process.env);

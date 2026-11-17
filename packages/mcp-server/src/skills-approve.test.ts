@@ -188,7 +188,7 @@ interface World {
 
 function world(
 	env: Record<string, string | undefined> = {},
-	options: { propose?: ProposeResult; ledgerFails?: boolean; noIndex?: boolean; config?: (config: SubstrateConfig) => void } = {},
+	options: { propose?: ProposeResult; ledgerFails?: boolean; noIndex?: boolean; config?: (config: SubstrateConfig) => void; merged?: string } = {},
 ): World {
 	const registry = new FakeRegistry();
 	const events: SubstrateEvent[] = [];
@@ -202,7 +202,9 @@ function world(
 		return { code: reply.code ?? 0, stdout: reply.stdout ?? "", stderr: reply.stderr ?? "" };
 	};
 	const proposer: SkillProposer = {
-		propose: async (input) => {
+		propose: async (input, opts) => {
+			// The real proposer runs the staleness hook before any git work and hands it the merged PR the ledger holds for this content (null when none): a refusal here opens nothing.
+			await opts.beforeWork?.(options.merged ?? null);
 			proposals.push(input);
 			return (
 				options.propose ?? {
@@ -228,6 +230,7 @@ function world(
 	options.config?.(config);
 	const substrate = new Substrate(config, {
 		index: options.noIndex ? null : (registry as never),
+		steering: { history: null, liveSessions: null },
 		greptime: greptime as never,
 		skills: proposer,
 		skillRun: run,
@@ -319,7 +322,14 @@ describe("skills_approve: values and configuration are refused before gh is aske
 	});
 
 	test("a skills library that is not fixed stops before gh", async () => {
-		const w = world({}, { config: (config) => void (config.skills.problem = "SUBSTRATE_SKILLS_GH must be an absolute path") });
+		const w = world(
+			{},
+			{
+				config: (config) => {
+					config.skills.problem = "SUBSTRATE_SKILLS_GH must be an absolute path";
+				},
+			},
+		);
 		const failure = await error(w.substrate.approveSkill(approve, asOperator));
 		expect(failure).toBeInstanceOf(SkillApprovalFailed);
 		expect((failure as SkillApprovalFailed).status).toBe(502);
@@ -742,6 +752,23 @@ describe("skills_propose expected_version (memory's contract)", () => {
 		expect(w.events).toHaveLength(eventsBefore);
 	});
 
+	test("a versioned retry of the merged proposal the registry still records is not refused as stale", async () => {
+		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" }, { merged: PR_URL(12) });
+		await w.substrate.proposeSkill(request, asAgent);
+		// The first write recorded version 1 at PR 12. Its response was lost, the owner merged PR 12, and the client
+		// retries with the version it was told. The registry still records PR 12, so this retry is the write that succeeded.
+		await w.substrate.proposeSkill({ ...request, expected_version: 0 }, asAgent);
+		expect(w.proposals).toHaveLength(2);
+	});
+
+	test("a versioned retry is still refused when the registry names a different PR than the merged one", async () => {
+		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" }, { merged: PR_URL(99) });
+		await w.substrate.proposeSkill(request, asAgent);
+		const failure = await error(w.substrate.proposeSkill({ ...request, expected_version: 0 }, asAgent));
+		expect(failure).toBeInstanceOf(SkillProposalStale);
+		expect(w.proposals).toHaveLength(1);
+	});
+
 	test("a matching expected_version is accepted, and the new proposal takes the next version", async () => {
 		const propose: ProposeResult = { status: "opened", pr_url: PR_URL(12), pr_number: 12, branch: BRANCH, content_sha256: HASH, redactions: [] };
 		const w = world({ SUBSTRATE_SKILLS_GOVERNANCE: "report" }, { propose });
@@ -1020,7 +1047,7 @@ describe("the REST doors", () => {
 		// The service the doors serve is the world's own stores under this config.
 		const substrate = new Substrate(
 			config,
-			{ index: w.registry as never, greptime: { ensureAppendMode: async () => true, lastHash: async () => null, insertEvent: async (event: SubstrateEvent) => void w.events.push(event) } as never, skillRun: async (argv) => {
+			{ index: w.registry as never, steering: { history: null, liveSessions: null }, greptime: { ensureAppendMode: async () => true, lastHash: async () => null, insertEvent: async (event: SubstrateEvent) => void w.events.push(event) } as never, skillRun: async (argv) => {
 				w.gh.push([...argv]);
 				return { code: 0, stdout: ghView(), stderr: "" };
 			} },

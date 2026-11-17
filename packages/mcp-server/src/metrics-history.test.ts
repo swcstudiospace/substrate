@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import type { AddressInfo } from "node:net";
 import {
 	ADMISSION_DECISIONS,
+	AUX_PLANES,
 	BRIEF_RECALL_RESULTS,
 	CACHE_METRIC_RESULTS,
 	DOCS_SEARCH_OUTCOMES,
@@ -22,6 +23,7 @@ import type { MetricHistoryPoint } from "./greptime.ts";
 import {
 	ALL_METRIC_SERIES,
 	DROPPED_METRIC,
+	EVENT_METRIC_SERIES,
 	EXTENDED_METRIC_SERIES,
 	MAX_METRIC_BATCH,
 	MAX_METRIC_POINTS,
@@ -46,6 +48,7 @@ import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SURFACES } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 /** What the route hands the client; the fakes below take it and report the step the real client would run at. */
 type ReadQuery = {
@@ -119,6 +122,17 @@ describe("the series allow-list", () => {
 		expect(names.length).toBeGreaterThanOrEqual(10);
 		expect(names.length).toBeLessThanOrEqual(14);
 		for (const name of names) expect(name).toMatch(/^[a-z0-9_.]+$/);
+	});
+
+	test("planning.transition is a core series with one closed outcome label: its two outcomes are stored, and any other name or label is refused", () => {
+		expect(Object.hasOwn(METRIC_SERIES, "planning.transition")).toBe(true);
+		expect(Object.hasOwn(metricSeriesFor("core"), "planning.transition")).toBe(true);
+		expect(canonicalLabels("planning.transition", { outcome: "applied" })).toBe('{"outcome":"applied"}');
+		expect(canonicalLabels("planning.transition", { outcome: "refused" })).toBe('{"outcome":"refused"}');
+		expect(canonicalLabels("planning.transition", { outcome: "dropped" })).toBeNull();
+		expect(canonicalLabels("planning.transition", { surface: "grok-bot" })).toBeNull();
+		expect(canonicalLabels("planning.transition", {})).toBeNull();
+		expect(canonicalLabels("planning.unlisted", { outcome: "applied" })).toBeNull();
 	});
 
 	test("canonicalLabels takes only the series' own label with a value from its closed set", () => {
@@ -197,7 +211,7 @@ describe("SampleCollector", () => {
 		const rows = collector.collect(instruments.snapshot(), null, 5000);
 
 		const p95 = seriesRows(rows, "brief.p95");
-		const grok = p95.find((row) => row.labels.surface === "grok-bot")!;
+		const grok = defined(p95.find((row) => row.labels.surface === "grok-bot"), "grok-bot row");
 		expect(grok.count).toBe(20);
 		expect(grok.value).toBeGreaterThan(10);
 		expect(grok.value).toBeLessThanOrEqual(25);
@@ -391,19 +405,19 @@ describe("MetricsHistorySampler", () => {
 			timers: timers.timers,
 		});
 		sampler.start();
-		const tick = timers.handlers[0]!;
+		const tick = defined(timers.handlers[0], "tick handler");
 		tick();
 		tick();
 		tick();
 		await Promise.resolve();
 		expect(calls).toBe(1);
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await sampler.sample();
 		tick();
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(calls).toBe(2);
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await sampler.sample();
 		expect(maxConcurrent).toBe(1);
 		sampler.stop();
@@ -442,13 +456,13 @@ describe("MetricsHistorySampler", () => {
 
 		// Recorded after the in-flight sample was taken: only the fresh one can carry it.
 		instruments.recordBrief({ surface: "grok-bot", ok: true, durationMs: 40 });
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await inFlight;
 		for (let i = 0; i < 50 && batches.length < 2; i++) await Promise.resolve();
 		expect(batches).toHaveLength(2);
-		expect(seriesRows(batches[1]!, "brief.p95")[0]?.count).toBe(1);
+		expect(seriesRows(defined(batches[1], "second batch"), "brief.p95")[0]?.count).toBe(1);
 		expect(flushed).toBe(false);
-		release.shift()!();
+		defined(release.shift(), "release")();
 		await Promise.all([flushing, joined]);
 		expect(flushed).toBe(true);
 		expect(batches).toHaveLength(2);
@@ -581,10 +595,10 @@ describe("metricHistoryAnswer", () => {
 	});
 
 	test("the step is one rule: raised until buckets x label values fit the cap, never lowered, so the oldest bucket survives", () => {
-		const labelled = Object.keys(METRIC_SERIES).filter((name) => (METRIC_SERIES[name]!.values?.size ?? 1) > 1);
-		expect(METRIC_SERIES["brief.p95"]!.values!.size).toBe(new Set([...SURFACES, "other"]).size);
+		const labelled = Object.keys(METRIC_SERIES).filter((name) => (defined(METRIC_SERIES[name], name).values?.size ?? 1) > 1);
+		expect(defined(defined(METRIC_SERIES["brief.p95"]).values).size).toBe(new Set([...SURFACES, "other"]).size);
 		for (const series of Object.keys(METRIC_SERIES)) {
-			const labelValues = METRIC_SERIES[series]!.values?.size ?? 1;
+			const labelValues = defined(METRIC_SERIES[series], series).values?.size ?? 1;
 			for (const windowMs of [3_600_000, 86_400_000, 14 * 86_400_000, 90 * 86_400_000]) {
 				const step = effectiveHistoryStep(series, windowMs, 15);
 				// A window spans at most ceil(window / step) + 1 date_bin buckets.
@@ -940,6 +954,14 @@ function extendedActivity(instruments: SubstrateInstruments): void {
 	instruments.recordMemoryExpired({ surface: "claude-code", kind: "decision", mode: "hidden" });
 	instruments.setHindsightOutbox({ size: 7, oldestAgeSeconds: 31.5, durable: true });
 	instruments.observeIndexArchiveAge(() => 1_000, () => 61_000);
+	activateCorpusGauges(instruments);
+}
+
+/** The three corpus gauges (phase 70): freshness read from a manifest change, the last ingest rate and the canary's recall. */
+function activateCorpusGauges(instruments: SubstrateInstruments): void {
+	instruments.observeCorpusFreshness(() => 1_000, () => 91_000);
+	instruments.setCorpusIngestRate(2);
+	instruments.setCorpusGoldenRecall5(0.8);
 }
 
 /** The boot-time call `createObservability` makes (observe.ts), with the count the empty environment configures. */
@@ -957,8 +979,9 @@ describe("the extended series (uplift-5 S6)", () => {
 	const core = Object.keys(METRIC_SERIES);
 	const extra = Object.keys(EXTENDED_METRIC_SERIES);
 
-	test("the allow-list is two tiers: core is exactly today's 11, extended adds distinct closed series, and the mode picks one", () => {
-		expect(core).toHaveLength(11);
+	test("the allow-list is two tiers: core is today's 11 plus the event-written planning.transition, extended adds distinct closed series, and the mode picks one", () => {
+		expect(core).toHaveLength(12);
+		expect(core).toContain("planning.transition");
 		expect(extra.length).toBeGreaterThan(0);
 		expect(extra.filter((name) => core.includes(name))).toEqual([]);
 		expect(Object.keys(ALL_METRIC_SERIES)).toEqual([...core, ...extra]);
@@ -967,9 +990,9 @@ describe("the extended series (uplift-5 S6)", () => {
 		expect(metricSeriesFor("extended")).toBe(ALL_METRIC_SERIES);
 		for (const name of extra) {
 			expect(name).toMatch(/^[a-z0-9_.]+$/);
-			const spec = EXTENDED_METRIC_SERIES[name]!;
-			// Counters add; a gauge is the worst reading in a step. Neither is ever averaged.
-			expect(spec.agg).toBe(spec.kind === "counter" ? "sum" : "max");
+			const spec = defined(EXTENDED_METRIC_SERIES[name], name);
+			// Counters add and a gauge is the worst reading in a step; the corpus rate and recall gauges repeat their last value every interval, so their step is the mean of one value.
+			expect(spec.agg).toBe(spec.kind === "counter" ? "sum" : name === "corpus.ingest_docs_per_s" || name === "corpus.golden_recall5" ? "avg" : "max");
 			expect(spec.kind === "counter" || spec.kind === "gauge").toBe(true);
 			if (spec.label !== null) expect(spec.values?.size).toBeGreaterThan(0);
 		}
@@ -1059,6 +1082,24 @@ describe("the extended series (uplift-5 S6)", () => {
 		expect(new SampleCollector().collect(instruments.snapshot(), null, 5000)).toEqual([]);
 	});
 
+	test("the corpus gauges are one row each at their reading, an idle ingest rate of 0 included, and an unset one has none", () => {
+		const instruments = new SubstrateInstruments();
+		const collector = new SampleCollector("extended");
+		expect(collector.collect(instruments.snapshot(), null, 1000)).toEqual([]);
+		activateCorpusGauges(instruments);
+		expect(collector.collect(instruments.snapshot(), null, 2000)).toEqual([
+			{ tsMs: 2000, series: "corpus.freshness_seconds", labels: {}, value: 90, count: 1 },
+			{ tsMs: 2000, series: "corpus.ingest_docs_per_s", labels: {}, value: 2, count: 1 },
+			{ tsMs: 2000, series: "corpus.golden_recall5", labels: {}, value: 0.8, count: 1 },
+		]);
+		instruments.setCorpusIngestRate(0);
+		expect(seriesRows(collector.collect(instruments.snapshot(), null, 3000), "corpus.ingest_docs_per_s")[0]?.value).toBe(0);
+		// Core never reads them, and a stored row keeps no label.
+		expect(new SampleCollector().collect(instruments.snapshot(), null, 4000)).toEqual([]);
+		expect(canonicalLabels("corpus.golden_recall5", {})).toBe("{}");
+		expect(canonicalLabels("corpus.golden_recall5", { outcome: "x" })).toBeNull();
+	});
+
 	test("a label value outside the closed set mints no series", () => {
 		const instruments = new SubstrateInstruments();
 		const collector = new SampleCollector("extended");
@@ -1146,7 +1187,7 @@ describe("the extended series (uplift-5 S6)", () => {
 
 	test("the step rule counts an extended series' label values: 8 cache results mean at most 2000 / 8 - 1 buckets in 14 days", () => {
 		const windowMs = 14 * 86_400_000;
-		const labels = EXTENDED_METRIC_SERIES["cache.operations"]!.values!.size;
+		const labels = defined(defined(EXTENDED_METRIC_SERIES["cache.operations"]).values).size;
 		expect(labels).toBe(8);
 		const maxBuckets = Math.floor(MAX_METRIC_POINTS / labels) - 1;
 		expect(effectiveHistoryStep("cache.operations", windowMs, 60)).toBe(Math.ceil(windowMs / 1000 / maxBuckets));
@@ -1156,7 +1197,8 @@ describe("the extended series (uplift-5 S6)", () => {
 
 	test("the worst case is under the batch cap: every label of every series active in one tick is the sum of the specs, and the real collector emits exactly that many rows", () => {
 		// What the specs allow: one row per label value (or one row) per series.
-		const bound = Object.values(ALL_METRIC_SERIES).reduce((total, spec) => total + (spec.values?.size ?? 1), 0);
+		const sampled = Object.entries(ALL_METRIC_SERIES).filter(([name]) => !Object.hasOwn(EVENT_METRIC_SERIES, name));
+		const bound = sampled.reduce((total, [, spec]) => total + (spec.values?.size ?? 1), 0);
 		expect(bound).toBeLessThan(MAX_METRIC_BATCH);
 
 		const instruments = new SubstrateInstruments();
@@ -1165,7 +1207,7 @@ describe("the extended series (uplift-5 S6)", () => {
 		collector.prime(instruments.snapshot());
 		// Every surface (and one outside the list, which folds into `other`), plane, decision, outcome and result at once.
 		for (const surface of [...SURFACES, "not-a-surface"]) instruments.recordBrief({ surface, ok: true, durationMs: 30 });
-		for (const plane of PLANES) instruments.recordPlane({ plane, op: "select", outcome: "ok", durationMs: 20 });
+		for (const plane of [...PLANES, ...AUX_PLANES]) instruments.recordPlane({ plane, op: "select", outcome: "ok", durationMs: 20 });
 		for (const decision of ADMISSION_DECISIONS) instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision });
 		for (const outcome of DOCS_SEARCH_OUTCOMES) instruments.recordDocsSearch({ surface: "grok-bot", outcome, cached: false, durationMs: 50, citations: {} });
 		instruments.recordEmit({ surface: "grok-bot", kind: "note", stored: true, durationMs: 10 });
@@ -1176,12 +1218,14 @@ describe("the extended series (uplift-5 S6)", () => {
 		for (const mode of MEMORY_EXPIRED_MODES) instruments.recordMemoryExpired({ surface: "grok-bot", kind: "note", mode });
 		instruments.setHindsightOutbox({ size: 1, oldestAgeSeconds: 1, durable: true });
 		instruments.observeIndexArchiveAge(() => 0, () => 1000);
+		activateCorpusGauges(instruments);
 
 		const rows = collector.collect(instruments.snapshot(), 20, 9000);
 		expect(rows).toHaveLength(bound);
 		expect(rows.length).toBeLessThan(MAX_METRIC_BATCH);
 		// Core alone is the same exercise with the extended rows left out.
-		expect(Object.values(METRIC_SERIES).reduce((total, spec) => total + (spec.values?.size ?? 1), 0)).toBe(rows.filter((row) => Object.hasOwn(METRIC_SERIES, row.series)).length);
+		const sampledCore = Object.entries(METRIC_SERIES).filter(([name]) => !Object.hasOwn(EVENT_METRIC_SERIES, name));
+		expect(sampledCore.reduce((total, [, spec]) => total + (spec.values?.size ?? 1), 0)).toBe(rows.filter((row) => Object.hasOwn(METRIC_SERIES, row.series)).length);
 	});
 
 	test("the ledger-side label check knows the extended series: its closed label is kept and a foreign one is not", () => {

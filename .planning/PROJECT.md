@@ -4,7 +4,40 @@
 **Control plane:** Notion "Agent Task Graph" + Linear team Spectrum Web Co
 **Repo:** `swcstudiospace/agent-substrate` (private)
 
-## Current Milestone: v1.3 Build plan completion
+## Current State
+
+**In progress: v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** (phases 71-78). The eight accepted features and full criteria are recorded in [REQUIREMENTS.md](REQUIREMENTS.md). Phase 71's independent-credential session boundary is locally verified; sign-off remains `human_needed`, awaiting Desk Quality / Programming Lead review. No v1.8 phase or milestone is signed off. Progress and the review blocker are in [STATE.md](STATE.md) and [ROADMAP.md](ROADMAP.md).
+
+**Prior v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** (phases 63-70, defined 2026-10-29, Run 14): phases shipped with recorded gaps and owner decisions still open; the milestone is not complete. Its eight features ingest documentation and keep it current (Corpus Atlas, Doc Watch), use TEI (Embedding fabric), improve retrieval context (Docs Reflect), expose Live Steering and cross-session context, optimise worktrees (Worktree Fleet), prove the corpus from hourly devnet anchors (Doc Proofs), and guard docs quality (Docs SLO and eval). Existing production/operator limitations below remain in force.
+
+Shipped **v1.3.x, v1.5 and v1.6** (2026-10-28, override closeouts): Should-have hardening (phases 37-44), SOTA enhancements (phases 45-54) and Contextual Memory, Live Steering and Eternal Rollback (phases 55-62). Each closed on the owner's decision of 2026-10-28 with its open items recorded as accepted debt (`STATE.md`, "Accepted debt (owner decision, 2026-10-28)"); archives are in `.planning/milestones/`.
+
+- **Docs plane:** LightRAG is the live production docs backend in naive mode since 2026-10-28 (Run 11; release `5cf930a0`, `SUBSTRATE_DOCS_BACKEND=lightrag`); the `ragflow` Railway service was deleted on 2026-10-25, and RAGFlow stays only as the legacy fallback when `LIGHTRAG_URL` is unset. The LightRAG client matches upstream v1.5.7 and can never emit a clear-all (v1.6 phase 56, PR #127). Graph and hybrid modes need a real LLM route.
+- **Planning plane:** a file-first GSD-Core planning index with session presence and read-only planning tools, an audited steering inbox with conflict events and resumable checkpoints, and phase-transition metrics (v1.5 phases 52-54: PRs #104, #134, #136, #135); v1.6 added durable steering directives, multi-day liveness and a GSD position model (phase 58: PRs #137, #147).
+- **Memory:** tandem memory with shared join keys, a forget primitive that marks rather than hard-deletes, a cross-store consistency verifier, versioned memory records with `memory_verify` and deterministic capsules (v1.6 phases 57 and 60: PRs #128, #129). The tandem flags default off.
+- **Eternal logging and session rollback:** checkpoints and rollbacks are ledger events with Merkle inclusion proofs against the anchored hourly root, signer rotation and devnet reset detection (phase 59: PRs #128, #129, #150), and `substrate session checkpoint | checkpoints | rollback | recover | sync | hook` restores exact file state (phase 61: PRs #128, #129, #146, #148). Per the v1.6 audit, no anchor transaction was ever sent and the re-anchor executor has never run against any cluster.
+- **Lane A and Lane B hardening (v1.3.x):** graph attribution from the worktree path, Linear relations mirrored from graph edges with a per-node artifact (`substrate evidence --node`, PR #159), the pre-launch drift gate and signed handoff packets, brief recall fan-out and a weekly mental-model refresh behind flags, `anchors` and `teachables` in the evidence bundle, VM-task re-adoption after a dispatcher restart, and a repeatable UAT that passed 6 of 6 scenarios on a scratch twin (PRs #89-#95, #97).
+- **Resource planes (v1.5, in the repository):** the Railway orchestrator with gated writes, the endpoint classifier and policy, SLO forecast rows, cache preload, graph-structured Hindsight memory, the Dragonfly pub/sub event bus and the unified resource fabric (PR #108; a `lightrag` resource in PR #158). The live proofs of phases 45 and 47-50 are accepted debt.
+- **Quality gates (Run 12):** an AST-based code ratchet whose baseline only falls (PR #145), Biome as a blocking step of the single verify gate with `noImplicitOverride`, `noImplicitReturns`, `noUnusedLocals` and `noUnusedParameters` (PR #155), Biome errors from 102 to 0 (PRs #149, #151, #152), and CODEOWNERS, a PR template, CONTRIBUTING and SECURITY (PR #156).
+- **Production:** runs release `5cf930a0` (the merge of #139), which lacks every PR from #142 to #159, so none of the Run 12 behaviour changes is live until the operator deploys main.
+
+Closed with accepted debt (each item stays open and is not marked passed):
+
+- **v1.3.x:** phases 37-39 waived on 2026-10-25 and phases 40-43 accepted as debt on 2026-10-23 (live proofs open; phases 37-43 stay `human_needed`); D-D3, the restore drill and the retirement of the old memory path, was never delivered in the repository, only its runbook.
+- **v1.5:** SOTA-02 phase 46 criteria 2, 4, 5 and 6 and the LightRAG graph and hybrid modes (criterion 4: the parity comparator is not built; criterion 5: the cutover is done and the RAGFlow code removal is gated); phases 45 and 47-50 (live Railway, forecast and warm-up, proxy cutover, graph-memory ledger rows and pub/sub proofs), accepted on 2026-10-23.
+- **v1.6:** phase 61 criterion 3 (SOTA-17: PR #148 shipped `substrate session hook`, the trigger policy and the printed host configuration, but no host runs the hook until an operator installs the printed configuration, ADR 0007 D55-4) and phase 59's live proofs (SOTA-15: anchor key funding, the anchor timer, any devnet send, the Eternal Memory bucket).
+
+Shipped **v1.2** (2026-10-08): ADR 0001 S2 (SPE-5053), S4 (SPE-5055) and lessons-bank Tier 1 (SPE-5830).
+
+- **Lease authority:** swarm sessions name their own agent, replica and graph; a `lease_id` reaches only its holder; only the holder's surface can beat, release or complete; a swarm token is never an operator. agent-substrate #16.
+- **Swarm lease bridge and signed handoffs:** the runner claims, heartbeats, completes or releases each task's node under a lease for the executing agent; accountable-agent boundaries write signed `coord_handoff` packets that rebuild context from the ledger alone. agent-swarm #9, #10.
+- **Workspace install:** one `substrate-mcp` entry per runtime naming the token variable, a 0600 token file per agent outside every checkout, each child given only its own `SUBSTRATE_TOKEN`. agent-substrate #18; agent-swarm #11.
+- **Lessons bank:** `substrate lessons add | recall | digest | outcome` over governed `fact` entries, scores computed at read time. agent-substrate #17.
+
+Shipped **v1.1** (2026-10-07): swarm identities and `graph_bind`, the swarm orchestrate tee, governed swarm memory and the ultrathink plan record (ADR 0001 S1 and S3).
+
+<details>
+<summary>v1.3.x, v1.5 and v1.6 goals (archived)</summary>
 
 **Goal:** Land on `main` everything the Notion build plan still lacks, each part ending in a proof run for real: Linear-driven dispatch with mirrored claims, the docs and memory planes, the hourly Solana devnet anchor, the skills library with propose-only miners and Agent Cards, `desktop_run`, the Lane A host, and the deferred Phase 0 UAT.
 
@@ -23,23 +56,22 @@
 
 Shipped before: **v1.2 Swarm leases, workspace install and lessons bank** (2026-10-08; phases 11-15; 25/25 requirements).
 
-## Current State
-
-Shipped **v1.2** (2026-10-08): ADR 0001 S2 (SPE-5053), S4 (SPE-5055) and lessons-bank Tier 1 (SPE-5830).
-
-- **Lease authority:** swarm sessions name their own agent, replica and graph; a `lease_id` reaches only its holder; only the holder's surface can beat, release or complete; a swarm token is never an operator. agent-substrate #16.
-- **Swarm lease bridge and signed handoffs:** the runner claims, heartbeats, completes or releases each task's node under a lease for the executing agent; accountable-agent boundaries write signed `coord_handoff` packets that rebuild context from the ledger alone. agent-swarm #9, #10.
-- **Workspace install:** one `substrate-mcp` entry per runtime naming the token variable, a 0600 token file per agent outside every checkout, each child given only its own `SUBSTRATE_TOKEN`. agent-substrate #18; agent-swarm #11.
-- **Lessons bank:** `substrate lessons add | recall | digest | outcome` over governed `fact` entries, scores computed at read time. agent-substrate #17.
-
-Shipped **v1.1** (2026-10-07): swarm identities and `graph_bind`, the swarm orchestrate tee, governed swarm memory and the ultrathink plan record (ADR 0001 S1 and S3).
+</details>
 
 ## Next Milestone Goals
 
-Candidates after v1.3, not commitments:
+Carried into v1.7: the `checkpoint_hint` reader and the `steering` and `baseline` hook triggers (STEER-05; the printed configuration covers all four checkpoint triggers since Run 13, PR #166, and a host install stays operator-gated).
+
+Candidates after v1.7, not commitments (the first two are carried over from the v1.3 list):
 
 - ADR S5 gate verdicts as events (SPE-5056).
 - Lessons bank Tier 2: phase lifecycle events, realtime delivery, an outbox and automatic injection at the GSD discuss step.
+- A caller for `S3BlobStore`, which has no caller outside its own test (the CLI opens only `LocalBlobStore`).
+- Callers for `memoryForget` expiry and operator reasons; only the rollback commit calls it today.
+- The phase 46 parity comparator (criterion 4) and the RAGFlow code removal (criterion 5, gated on its own approvals).
+- The LightRAG LLM route that graph and hybrid modes need (`shunt login xai` or `hermes auth add xai-oauth --type oauth`, plus a network path from Railway).
+- Funding the anchor key and the first live re-anchor rehearsal (also what makes Doc Proofs anchored rather than `unanchored`).
+- Deploying main: production runs release `5cf930a0`, which lacks every PR from #142 on; the v1.7 operator steps (first corpus ingest, staged timers) need that deploy.
 
 ## What this is
 
@@ -84,15 +116,22 @@ brief does not call either API on every prompt.
 
 Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway-tailscale.md`.
 
-- **Railway project "Ultrathink"** — **TimescaleDB (index and coordination)**: `graph_index`,
-  `graph_nodes`, `graph_steps`, memory index, and the Programming Desk tables (`desk_intake`
-  queue, `desk_claims`, `desk_idempotency`, `desk_receipts`, `seat_roster`, `tool_pack_state`,
-  hypertables). **GreptimeDB (events)**: append-only `agent_events` with a `hash`/`prev` chain.
+- **Railway project "Ultrathink"** — **TimescaleDB (index and coordination)**: plain Postgres
+  tables with no hypertables, continuous aggregates or Timescale policies (0 hypertables
+  measured 2026-10-13, `docs/data-planes.md`): `graph_index`, `graph_nodes`, `graph_steps`, the
+  memory index (`memory_entries` and the governance tables). The Programming Desk tables
+  (`desk_intake`, `desk_claims`, `desk_idempotency`, `desk_receipts`, `seat_roster`,
+  `tool_pack_state`) are **not in this repository**; earlier revisions of this line called some
+  of them hypertables, which this repository cannot support. **GreptimeDB (events)**: the
+  append-only authoritative event ledger, `agent_events` with a `hash`/`prev` chain
+  (`docs/adr/0004-store-roles.md`).
   **DragonflyDB (cache only)**: brief, search and recall caches, rate counters; falls through on
   outage (owner decision 2026-09-26 stands).
 - **Railway project "Agent Substrate"** — **Hindsight (memory)**: banks `sub-<surface>` and
   `pd-<seat>`; replaces Agentmemory (Phase 7) and the local Claude Code `hindsight` stdio server.
-  **RAGFlow (docs)**: behind `docs_search`; datasets per repo (Phase 5 docs half re-opened).
+  **RAGFlow (docs)**: was behind `docs_search`; **the RAGFlow service was deleted on 2026-10-25**.
+  **LightRAG** is the docs plane since the 2026-10-28 cutover (Run 11: v1.5.7 on a dedicated pgvector Postgres,
+  naive query mode on the LLM bypass service; graph and hybrid modes wait on the operator's LLM route; `docs/runbooks/lightrag-storage-topology.md`, `docs/docs-plane.md`).
 - All five are reached from the VPS over a Tailscale Forwarder deployed inside each project; no
   public TCP proxy or public database domain after cutover.
 - **Langfuse** keeps LLM traces; Greptime holds the substrate's own log. No duplication.
@@ -183,4 +222,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-09 after Phase 18*
+*Last updated: 2026-10-31 for v1.8 and Phase 71 local verification; external sign-off remains pending*

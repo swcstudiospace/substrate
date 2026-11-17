@@ -33,6 +33,7 @@ import { IndexStore } from "./index-store.ts";
 import { governMemoryWrite, type MemoryStore, type NewMemoryEntry } from "./memory-write.ts";
 import { conflictKey, parseScope } from "./memory-policy.ts";
 import type { MemoryReadOptions, MemoryWriteRequest, MemoryWriteResult } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const RUN = Date.now().toString(36);
@@ -53,9 +54,9 @@ const describeLive = PG_URL ? describe : describe.skip;
 
 describeLive("memory governance against a live index", () => {
 	beforeAll(async () => {
-		a = new IndexStore(PG_URL!);
-		b = new IndexStore(PG_URL!);
-		raw = new SQL(PG_URL!);
+		a = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		b = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await a.migrate();
 		// Idempotent, and on a database carrying the old `(entry_hash, state)` index it
 		// is the second run that replaces it — so running it twice is part of the proof.
@@ -74,9 +75,9 @@ describeLive("memory governance against a live index", () => {
 	});
 
 	/** A write through the real gate, against one of the two connections. */
-	function write(store: MemoryStore, request: Partial<MemoryWriteRequest> = {}): Promise<MemoryWriteResult> {
+	function write(store: MemoryStore, request: Partial<MemoryWriteRequest> = {}, options: { withoutRepo?: boolean } = {}): Promise<MemoryWriteResult> {
 		return governMemoryWrite(
-			{ scope: SCOPE, kind: "decision", writer: "hermes", repo: REPO, text: `${MARKER} placeholder`, ...request },
+			{ scope: SCOPE, kind: "decision", writer: "hermes", ...(options.withoutRepo === true ? {} : { repo: REPO }), text: `${MARKER} placeholder`, ...request },
 			{ store, isReviewToken: (token) => token === REVIEW_TOKEN },
 		);
 	}
@@ -89,7 +90,7 @@ describeLive("memory governance against a live index", () => {
 
 	/** A row as the gate would hand it to the store: a first write, retiring nothing. */
 	function firstWriteRow(over: Partial<NewMemoryEntry> & { id: string; idempotency_key: string }): NewMemoryEntry {
-		const scope = parseScope(SCOPE)!;
+		const scope = defined(parseScope(SCOPE), "scope");
 		return {
 			scope: scope.canonical,
 			kind: "decision",
@@ -152,7 +153,7 @@ describeLive("memory governance against a live index", () => {
 		// the driver or the scheduler, and a test that passes because they happened to
 		// run one after the other proves nothing about the state the loser actually has
 		// to handle: a row in the index that no other transaction can yet see.
-		const identity = firstWriteRow({ id: "probe", idempotency_key: "probe" }).conflict_key!;
+		const identity = defined(firstWriteRow({ id: "probe", idempotency_key: "probe" }).conflict_key, "conflict_key");
 		const keyB = `${MARKER}-race-b`;
 		const claimB = await b.claimWrite({
 			key: keyB,
@@ -164,7 +165,7 @@ describeLive("memory governance against a live index", () => {
 		expect(claimB.claimed).toBe(true);
 		if (!claimB.claimed) return;
 
-		const blocker = new SQL(PG_URL!);
+		const blocker = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		let winnerInserted: () => void = () => undefined;
 		let commitWinner: () => void = () => undefined;
 		const inserted = new Promise<void>((resolve) => {
@@ -257,7 +258,7 @@ describeLive("memory governance against a live index", () => {
 
 		expect(loser.outcome).toBe("conflict");
 		expect(loser.reason).toBe("standing.raced");
-		expect(loser.conflict_with).toBe(winner.entry!.id);
+		expect(loser.conflict_with).toBe(defined(winner.entry, "winner entry").id);
 
 		// The claim record is the assertion that matters: `conflict`, not `in-flight`.
 		// In flight it would refuse the loser's own retry for the takeover timeout.
@@ -273,7 +274,7 @@ describeLive("memory governance against a live index", () => {
 		});
 		expect(retry.outcome).toBe("accepted");
 		expect(retry.entry?.version).toBe(2);
-		expect(retry.entry?.supersedes).toBe(winner.entry!.id);
+		expect(retry.entry?.supersedes).toBe(defined(winner.entry, "winner entry").id);
 	});
 
 	test("approving content that was approved before does not collide", async () => {
@@ -422,7 +423,7 @@ describeLive("memory governance against a live index", () => {
 
 		const rows = (await raw`
 			select count(*)::int as n from memory_reviews where entry_hash = ${hash}`) as Array<{ n: number }>;
-		expect(rows[0]!.n).toBe(1);
+		expect(defined(rows[0]).n).toBe(1);
 	});
 
 	test("approving a re-proposal of installed content is accepted, not reported as lost", async () => {
@@ -445,23 +446,23 @@ describeLive("memory governance against a live index", () => {
 		// approval-by-resubmit work at all.
 		const reproposed = await write(b, request);
 		expect(reproposed.reason).toBe("review.required");
-		expect(reproposed.review_id).not.toBe(first.entry!.id);
+		expect(reproposed.review_id).not.toBe(defined(first.entry, "first entry").id);
 
 		const second = await write(b, { ...request, review_token: REVIEW_TOKEN, idempotency_key: `${MARKER}-ap2` });
 
 		expect(second.outcome).toBe("accepted");
 		expect(second.verified_persisted).toBe(true);
-		expect(second.entry!.id).not.toBe(first.entry!.id);
+		expect(defined(second.entry, "second entry").id).not.toBe(defined(first.entry, "first entry").id);
 
 		// Both entries are in the index, both proposals are resolved, and the caller
 		// was told so — which is the whole of it.
 		const entries = (await raw`
-			select count(*)::int as n from memory_entries where entry_hash = ${first.entry!.entry_hash}`) as Array<{
+			select count(*)::int as n from memory_entries where entry_hash = ${defined(first.entry, "first entry").entry_hash}`) as Array<{
 			n: number;
 		}>;
-		expect(entries[0]!.n).toBe(2);
+		expect(defined(entries[0]).n).toBe(2);
 		const reviews = (await raw`
-			select state, count(*)::int as n from memory_reviews where entry_hash = ${first.entry!.entry_hash}
+			select state, count(*)::int as n from memory_reviews where entry_hash = ${defined(first.entry, "first entry").entry_hash}
 			group by state`) as Array<{ state: string; n: number }>;
 		expect(reviews).toEqual([{ state: "approved", n: 2 }]);
 	});
@@ -507,16 +508,17 @@ describeLive("memory governance against a live index", () => {
 		const refused = await write(b, rewrite);
 		expect(refused.outcome).toBe("conflict");
 		expect(refused.reason).toBe("version.required");
-		expect(refused.conflict_with).toBe(first.entry!.id);
+		expect(refused.conflict_with).toBe(defined(first.entry, "first entry").id);
 		expect(refused.current_version).toBe(1);
 
 		// Straight back, same key, with the version the refusal named.
-		const retry = await write(b, { ...rewrite, expected_version: refused.current_version ?? undefined });
+		const named = refused.current_version;
+		const retry = await write(b, { ...rewrite, ...(typeof named === "number" ? { expected_version: named } : {}) });
 		expect(retry.outcome).toBe("accepted");
 		expect(retry.verified_persisted).toBe(true);
 		expect(retry.idempotency_key).toBe(`${MARKER}-cv-decision-2`);
 		expect(retry.entry?.version).toBe(2);
-		expect(retry.entry?.supersedes).toBe(first.entry!.id);
+		expect(retry.entry?.supersedes).toBe(defined(first.entry, "first entry").id);
 	}, 60_000);
 
 	test("a rewrite whose predecessor is replaced under it is a version race, and its key retries at once", async () => {
@@ -579,18 +581,19 @@ describeLive("memory governance against a live index", () => {
 		const standing = (await raw`
 			select id, version from memory_entries
 			where subject = ${subject} and superseded_by is null`) as Array<{ id: string; version: number }>;
-		expect(standing.map((row) => row.id)).toEqual([competitor!.entry!.id]);
+		expect(standing.map((row) => row.id)).toEqual([defined(defined(competitor, "competitor").entry, "competitor entry").id]);
 		const record = (await raw`
 			select outcome from memory_writes where idempotency_key = ${`${MARKER}-vr-k1`}`) as Array<{ outcome: string }>;
 		expect(record[0]?.outcome).toBe("conflict");
 
 		// Straight back, same key, against the version the conflict named.
-		const retry = await write(b, { ...rewrite, expected_version: loser.current_version ?? undefined });
+		const raced = loser.current_version;
+		const retry = await write(b, { ...rewrite, ...(typeof raced === "number" ? { expected_version: raced } : {}) });
 		expect(retry.outcome).toBe("accepted");
 		expect(retry.verified_persisted).toBe(true);
 		expect(retry.idempotency_key).toBe(`${MARKER}-vr-k1`);
 		expect(retry.entry?.version).toBe(3);
-		expect(retry.entry?.supersedes).toBe(competitor!.entry!.id);
+		expect(retry.entry?.supersedes).toBe(defined(defined(competitor, "competitor").entry, "competitor entry").id);
 	});
 
 	test("an agent's own notes are readable in search by that agent only; shared scopes stay visible to every surface", async () => {
@@ -614,7 +617,8 @@ describeLive("memory governance against a live index", () => {
 		const OTHER_REPO = "swcstudiospace/other-repo";
 		const inRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: REPO, subject: `repo-a-${RUN}`, text: `${MARKER} omp note for repo a` });
 		const inOther = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: OTHER_REPO, subject: `repo-b-${RUN}`, text: `${MARKER} omp note for repo b` });
-		const noRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", repo: undefined, subject: `no-repo-${RUN}`, text: `${MARKER} omp note naming no repo` });
+		// The default repo is dropped (not overridden with a value): this note names none.
+		const noRepo = await write(a, { scope: "agent:omp", kind: "fact", writer: "omp", subject: `no-repo-${RUN}`, text: `${MARKER} omp note naming no repo` }, { withoutRepo: true });
 		expect(inRepo.verified_persisted).toBe(true);
 		expect(inOther.verified_persisted).toBe(true);
 		expect(noRepo.verified_persisted).toBe(true);

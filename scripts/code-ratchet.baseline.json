@@ -1,0 +1,14 @@
+{
+	"_generated_by": "bun scripts/code-ratchet.ts --write",
+	"source": {
+		"explicit_any": 0,
+		"as_unknown_as": 26,
+		"ts_suppressions": 0,
+		"lint_suppressions": 9,
+		"non_null_assertions": 0,
+		"empty_catch": 0,
+		"console_calls": 0,
+		"process_exit_non_entrypoint": 0,
+		"json_parse_casts": 45
+	}
+}

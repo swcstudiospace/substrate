@@ -26,6 +26,7 @@ import { envReadSources, scanFiles, scanSource, type EnvRead } from "./flag-regi
 import { EXTENDED_COVERAGE_SERIES, FLAGS, FLAG_FAMILIES, REGISTRY_EXEMPT, findUnregistered, policyFlags, registeredNames } from "./flag-registry.ts";
 import { sweepModeFromEnv } from "./index-sweep.ts";
 import { METRIC_SERIES } from "./metrics-history.ts";
+import { defined } from "./test-support.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 
@@ -166,11 +167,11 @@ describe("the registry is not stale", () => {
 	});
 
 	test("a family's members are what the code composes: one name per surface, one per class half", () => {
-		const tokens = FLAG_FAMILIES.find((family) => family.prefix === "SUBSTRATE_TOKEN_")!;
+		const tokens = defined(FLAG_FAMILIES.find((family) => family.prefix === "SUBSTRATE_TOKEN_"), "SUBSTRATE_TOKEN_ family");
 		expect(tokens.members).toContain("SUBSTRATE_TOKEN_GROK_BOT");
 		expect(tokens.members).toContain("SUBSTRATE_TOKEN_SWARM_A05_BE");
 		expect(tokens.members).toContain("SUBSTRATE_TOKEN_SUBSTRATE");
-		const budgets = FLAG_FAMILIES.find((family) => family.prefix === "SUBSTRATE_BUDGET_")!;
+		const budgets = defined(FLAG_FAMILIES.find((family) => family.prefix === "SUBSTRATE_BUDGET_"), "SUBSTRATE_BUDGET_ family");
 		expect(budgets.members).toContain("SUBSTRATE_BUDGET_READ_RPS");
 		expect(budgets.members).toContain("SUBSTRATE_BUDGET_GROK_BOT_COORDINATION_BURST");
 		expect(budgets.documentedMembers).toContain("SUBSTRATE_BUDGET_WRITE_BURST");
@@ -188,7 +189,7 @@ describe(".env.example agrees with the registry", () => {
 	const listed = new Set<string>();
 	for (const line of lines) {
 		const match = /^#?\s*([A-Z][A-Z0-9_]+)=/.exec(line);
-		if (match !== null) listed.add(match[1]!);
+		if (match !== null) listed.add(defined(match[1]));
 	}
 
 	test("every row marked documented has a NAME= line, and every other row has none", () => {
@@ -230,7 +231,7 @@ describe("the registry's defaults are the code's defaults", () => {
 
 	test("each policy's safe value is the default (or `unset` where the default is off)", () => {
 		for (const flag of policyFlags()) {
-			const policy = flag.policy!;
+			const policy = defined(flag.policy, `${flag.name} policy`);
 			expect(policy.safe === "unset" || policy.safe === flag.default).toBe(true);
 		}
 	});
@@ -252,6 +253,18 @@ describe("the registry's defaults are the code's defaults", () => {
 			expect({ name, default: FLAGS.find((flag) => flag.name === name)?.default }).toEqual({ name, default: value });
 		}
 	});
+
+	test("the live lease is registered, documented and agrees with the real loader", () => {
+		const name = "SUBSTRATE_LIVE_SESSION_LEASE_S";
+		const row = defined(FLAGS.find((flag) => flag.name === name), "live lease row");
+		expect(row.kind).toBe("number");
+		expect(row.documented).toBe(true);
+		expect(Number(row.default)).toBe(loadConfig({}).liveSessionLeaseS);
+		expect(loadConfig({ [name]: "60" }).liveSessionLeaseS).toBe(60);
+		expect(loadConfig({ [name]: "86400" }).liveSessionLeaseS).toBe(86_400);
+		const example = readFileSync(join(ROOT, ".env.example"), "utf8");
+		expect(example.split("\n").some((line) => /^#?\s*SUBSTRATE_LIVE_SESSION_LEASE_S=/.test(line))).toBe(true);
+	});
 });
 
 describe("promotion policies", () => {
@@ -262,7 +275,7 @@ describe("promotion policies", () => {
 		"memory.expired": MEMORY_EXPIRED_MODES,
 	};
 	const terms = policyFlags().flatMap((flag) =>
-		flag.policy!.evidence.flatMap((evidence) => [
+		defined(flag.policy, `${flag.name} policy`).evidence.flatMap((evidence) => [
 			{ flag: flag.name, evidence, term: evidence.numerator },
 			...(evidence.denominator === undefined ? [] : [{ flag: flag.name, evidence, term: evidence.denominator }]),
 		]),
@@ -271,7 +284,7 @@ describe("promotion policies", () => {
 	test("every flag that cites the history has at least one criterion, and a criterion is always a proposal", () => {
 		expect(terms.length).toBeGreaterThan(0);
 		for (const flag of policyFlags()) {
-			for (const evidence of flag.policy!.evidence) {
+			for (const evidence of defined(flag.policy, `${flag.name} policy`).evidence) {
 				expect(evidence.proposed).toBe(true);
 				expect(evidence.rationale.startsWith("PROPOSED")).toBe(true);
 				expect(evidence.minSamples).toBeGreaterThanOrEqual(0);
@@ -291,14 +304,14 @@ describe("promotion policies", () => {
 			if (term === evidence.numerator && evidence.needs === "extended") expect({ label, core }).toEqual({ label, core: false });
 			else expect({ label, known: core || closed !== undefined }).toEqual({ label, known: true });
 			if (term.labels === undefined) continue;
-			const allowed: ReadonlySet<string> | null = core ? METRIC_SERIES[term.series]!.values : closed === undefined ? null : new Set(closed);
+			const allowed: ReadonlySet<string> | null = core ? defined(METRIC_SERIES[term.series], term.series).values : closed === undefined ? null : new Set(closed);
 			expect({ label, valid: allowed !== null && term.labels.every((value) => allowed.has(value)) }).toEqual({ label, valid: true });
 		}
 	});
 
 	test("a policy's safe and enforcing values are values the flag accepts, and differ", () => {
 		for (const flag of policyFlags()) {
-			const policy = flag.policy!;
+			const policy = defined(flag.policy, `${flag.name} policy`);
 			expect(policy.safe).not.toBe(policy.enforcing);
 			if (flag.kind !== "mode" && flag.kind !== "toggle") continue;
 			const accepted = new Set(flag.allowed.split(/[\s|()]+/).filter((token) => token !== ""));
@@ -309,7 +322,7 @@ describe("promotion policies", () => {
 
 	test("extended criteria are covered by an extended gauge that is not a core series, so core history cannot vouch for them", () => {
 		expect(Object.hasOwn(METRIC_SERIES, EXTENDED_COVERAGE_SERIES)).toBe(false);
-		const extended = policyFlags().flatMap((flag) => flag.policy!.evidence).filter((evidence) => evidence.needs === "extended");
+		const extended = policyFlags().flatMap((flag) => defined(flag.policy, `${flag.name} policy`).evidence).filter((evidence) => evidence.needs === "extended");
 		expect(extended.length).toBeGreaterThan(0);
 		// An evidence row has no way to name a core series as its coverage: the field is gone, the advisor derives it.
 		for (const evidence of extended) expect(Object.hasOwn(evidence, "coverageSeries")).toBe(false);
@@ -317,7 +330,7 @@ describe("promotion policies", () => {
 
 	test("a flag with no history evidence says how the operator judges it instead", () => {
 		for (const flag of policyFlags()) {
-			const policy = flag.policy!;
+			const policy = defined(flag.policy, `${flag.name} policy`);
 			if (policy.evidence.length === 0) expect({ flag: flag.name, manual: (policy.manual ?? "").length > 0 }).toEqual({ flag: flag.name, manual: true });
 		}
 	});

@@ -23,8 +23,8 @@ const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(REPO_ROOT, "packages", "cli", "src", "index.ts");
 const H = Date.UTC(2026, 9, 1, 10);
 const HOUR = 3_600_000;
-const PUBKEY = "TestPubkey1111111111111111111111111111111";
-const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 /** One closed hour of fixture: the store rows, the ingest records, and the digest they imply. */
 interface HourWorld {
 	hour: number;
@@ -79,7 +79,7 @@ function anchorRow(hour: number, world: Pick<HourWorld, "root" | "memo">, txSig:
 }
 
 function memoTx(memo: string) {
-	return { memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null };
+	return { memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: 1_790_000_000 };
 }
 
 function stubGreptime(worlds: HourWorld[], anchors: Record<number, Record<string, unknown>>) {
@@ -87,6 +87,7 @@ function stubGreptime(worlds: HourWorld[], anchors: Record<number, Record<string
 		readEvents: async () => worlds.flatMap((world) => world.rows),
 		graphIngest: async () => worlds.flatMap((world) => world.records),
 		firstIngestMs: async () => H,
+		graphChainLeafHours: async () => [],
 		hourLeaves: async (startMs: number) => {
 			const found = worlds.find((world) => world.hour === startMs);
 			if (!found) throw new Error(`no fixture hour for ${String(startMs)}`);

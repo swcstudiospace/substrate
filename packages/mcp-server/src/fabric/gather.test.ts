@@ -1,22 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import { gatherFabricFacts } from "./gather.ts";
 import { buildFabricStatus } from "./status.ts";
-import { FABRIC_RESOURCES, type FabricCostView, type FabricFacts, type FabricHealthParts, type FabricHealthView, type FabricSources } from "./types.ts";
+import { SLO_DEFAULTS, type SloReadings } from "@substrate/corpus";
+import { FABRIC_RESOURCES, type CorpusSourceReading, type FabricCostView, type FabricFacts, type FabricHealthParts, type FabricHealthView, type FabricSources } from "./types.ts";
 
 const NOW = "2026-10-21T00:00:00.000Z";
 const COST: FabricCostView = { status: "ok", projectedMonthlyUsd: 3, budgetUsd: 50 };
+const CORPUS_READINGS: SloReadings = { freshnessS: 120, recall5: 0.9, ingestDocsPerS: 1 };
 
 /** The synchronous view: every breaker closed, the cache answering. */
 function snapshot(): FabricHealthView {
 	return {
 		cache: { enabled: true, connected: true, mode: "on", hits: 9, misses: 1, errors: 0, bypasses: 0 },
 		eventBus: { enabled: true },
+		tei: { model: "test-model", modelSource: "pinned", dimension: 384, latencyMs: 12 },
 		breakers: {
 			greptime: { state: "closed" },
 			index: { state: "closed" },
 			cache: { state: "closed" },
 			hindsight: { state: "closed" },
 			ragflow: { state: "closed" },
+			lightrag: { state: "closed" },
+			tei: { state: "closed" },
 		},
 	};
 }
@@ -28,6 +33,8 @@ function healthyParts(): FabricHealthParts {
 		index: Promise.resolve(true),
 		hindsight: Promise.resolve(true),
 		ragflow: Promise.resolve(true),
+		lightrag: Promise.resolve(true),
+		tei: Promise.resolve(true),
 	};
 }
 
@@ -42,12 +49,16 @@ function sources(overrides: Partial<FabricSources> = {}): FabricSources {
 		health: () => healthyParts(),
 		snapshot,
 		railwayCost: async () => COST,
+		corpus: async () => ({ readings: CORPUS_READINGS, unread: null }),
 		outbox: () => ({ size: 0, oldestAt: null }),
 		config: {
 			endpointPolicy: "enforce",
 			endpointClasses: { greptime: "proxy" },
-			configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, hindsight: true },
+			configured: { dragonfly: true, "timescaledb-index": true, greptime: true, ragflow: true, lightrag: true, hindsight: true, tei: true },
+			teiEndpoint: "loopback",
 			dragonflyRefused: false,
+			corpusEnabled: true,
+			docsSlo: { ...SLO_DEFAULTS },
 		},
 		...overrides,
 	};
@@ -81,6 +92,7 @@ describe("gatherFabricFacts", () => {
 		expect(rowOf(facts, "greptime").state).toBe("ok");
 		expect(rowOf(facts, "hindsight").state).toBe("ok");
 		expect(rowOf(facts, "ragflow").state).toBe("ok");
+		expect(rowOf(facts, "lightrag").state).toBe("ok");
 		expect(rowOf(facts, "dragonfly").state).toBe("ok");
 		expect(buildFabricStatus(facts).resources).toHaveLength(FABRIC_RESOURCES.length);
 	});
@@ -125,6 +137,82 @@ describe("gatherFabricFacts", () => {
 		expect(facts.services.hindsight.degraded).toBe(true);
 		expect(facts.outbox).toEqual({ parked: 2, oldestAt: "2026-10-20T23:00:00.000Z" });
 	});
+
+	test("TEI is read like its siblings: a probe that answers is ok, one that does not is unavailable, one that never answers times out, and its facts carry the client's reading", async () => {
+		const facts = await gatherFabricFacts(sources());
+		expect(rowOf(facts, "tei")).toMatchObject({ state: "ok", endpointClass: "loopback", detail: { model: "test-model", modelSource: "pinned", dimension: 384, latencyMs: 12 } });
+		const down = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: Promise.resolve(false) }) }));
+		expect(rowOf(down, "tei")).toMatchObject({ state: "unavailable", source: "probe().tei" });
+		const silent = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: never<boolean | null>() }) }), { deadlineMs: 20 });
+		expect(rowOf(silent, "tei")).toMatchObject({ state: "unavailable", source: "probe().tei: timeout" });
+		expect(rowOf(silent, "lightrag").state).toBe("ok");
+		const refused = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), tei: Promise.reject(new Error("boom")) }) }));
+		expect(rowOf(refused, "tei").source).toBe("probe().tei: failed");
+	});
+
+	test("an open TEI breaker makes the row unavailable even though the last probe answered", async () => {
+		const facts = await gatherFabricFacts(sources({ snapshot: () => ({ ...snapshot(), breakers: { ...snapshot().breakers, tei: { state: "open" } } }) }));
+		expect(rowOf(facts, "tei").state).toBe("unavailable");
+	});
+
+	test("an unconfigured TEI is unconfigured and has no detail", async () => {
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			health: () => ({ ...healthyParts(), tei: Promise.resolve(null) }),
+			config: { ...base.config, configured: { ...base.config.configured, tei: false }, teiEndpoint: null },
+		});
+		const row = rowOf(facts, "tei");
+		expect(row.state).toBe("unconfigured");
+		expect(row.detail).toBeUndefined();
+		expect(facts.tei.endpointClass).toBeNull();
+	});
+});
+
+describe("the corpus row", () => {
+	test("reads the corpus readings and judges them against the configured thresholds", async () => {
+		const facts = await gatherFabricFacts(sources());
+		expect(facts.corpus).toEqual({ enabled: true, readings: CORPUS_READINGS, thresholds: SLO_DEFAULTS, unread: null });
+		expect(rowOf(facts, "corpus")).toMatchObject({ state: "ok", source: "corpus.slo" });
+		const base = sources();
+		const strict = await gatherFabricFacts({ ...base, config: { ...base.config, docsSlo: { freshnessS: 60, recall5: 0.6, ingestDocsPerS: 0.2 } } });
+		expect(rowOf(strict, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: breached freshness" });
+	});
+
+	test("a corpus that is off is not asked and is unconfigured", async () => {
+		let asked = 0;
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			corpus: async () => {
+				asked += 1;
+				return { readings: CORPUS_READINGS, unread: null };
+			},
+			config: { ...base.config, corpusEnabled: false },
+		});
+		expect(asked).toBe(0);
+		expect(facts.corpus.enabled).toBe(false);
+		expect(rowOf(facts, "corpus").state).toBe("unconfigured");
+	});
+
+	test("readings that miss the deadline or throw make the corpus row degraded with the reason, and the planes keep their state", async () => {
+		const slow = await gatherFabricFacts({ ...sources(), corpus: () => never<CorpusSourceReading>() }, { deadlineMs: 20 });
+		expect(rowOf(slow, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: timeout" });
+		expect(rowOf(slow, "greptime").state).toBe("ok");
+		const broken = await gatherFabricFacts({ ...sources(), corpus: () => Promise.reject(new Error("index gone")) });
+		expect(rowOf(broken, "corpus")).toMatchObject({ state: "degraded", source: "corpus.slo: failed" });
+		expect(broken.corpus.readings).toEqual({ freshnessS: null, recall5: null, ingestDocsPerS: null });
+	});
+
+	test("a source that answers with a failed manifest read makes the row degraded with that reason, whatever it kept as the last reading, and a healthy read is ok", async () => {
+		for (const unread of ["timeout", "failed"] as const) {
+			const facts = await gatherFabricFacts({ ...sources(), corpus: async () => ({ readings: CORPUS_READINGS, unread }) });
+			expect(facts.corpus).toMatchObject({ readings: CORPUS_READINGS, unread });
+			expect(rowOf(facts, "corpus")).toMatchObject({ state: "degraded", source: `corpus.slo: ${unread}` });
+		}
+		const healthy = await gatherFabricFacts(sources());
+		expect(rowOf(healthy, "corpus")).toMatchObject({ state: "ok", source: "corpus.slo" });
+	});
 });
 
 describe("a stalled write on the Greptime row", () => {
@@ -136,5 +224,81 @@ describe("a stalled write on the Greptime row", () => {
 		expect(row.state).toBe("unavailable");
 		expect(row.source).toBe("health().greptime: timeout");
 		expect(buildFabricStatus(facts).counts.ok).toBeLessThan(FABRIC_RESOURCES.length);
+	});
+});
+
+describe("the LightRAG row", () => {
+	test("a configured LightRAG whose probe answers true is ok, read from planes.lightrag", async () => {
+		const facts = await gatherFabricFacts(sources());
+		expect(facts.services.lightrag).toEqual({
+			configured: true,
+			held: false,
+			answered: true,
+			breaker: "closed",
+			degraded: false,
+			source: "health().planes.lightrag",
+		});
+		expect(rowOf(facts, "lightrag")).toMatchObject({ state: "ok", endpointClass: "not-applicable", source: "health().planes.lightrag" });
+	});
+
+	test("a probe that answers false is unavailable, never a pass", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: Promise.resolve(false) }) }));
+		expect(rowOf(facts, "lightrag").state).toBe("unavailable");
+		expect(rowOf(facts, "ragflow").state).toBe("ok");
+	});
+
+	test("a probe that misses the deadline is unavailable with the timeout reason, and the other rows keep their state", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: never<boolean | null>() }) }), { deadlineMs: 20 });
+		const row = rowOf(facts, "lightrag");
+		expect(row.state).toBe("unavailable");
+		expect(row.source).toBe("health().planes.lightrag: timeout");
+		expect(rowOf(facts, "ragflow").state).toBe("ok");
+		expect(rowOf(facts, "greptime").state).toBe("ok");
+	});
+
+	test("a probe that throws is failed, named as such", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: Promise.reject(new Error("boom")) }) }));
+		expect(rowOf(facts, "lightrag")).toMatchObject({ state: "unavailable", source: "health().planes.lightrag: failed" });
+	});
+
+	test("an unconfigured LightRAG is unconfigured, and a null probe answer never makes it healthy", async () => {
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			health: () => ({ ...healthyParts(), lightrag: Promise.resolve(null) }),
+			config: { ...base.config, configured: { ...base.config.configured, lightrag: false } },
+		});
+		expect(rowOf(facts, "lightrag").state).toBe("unconfigured");
+		expect(buildFabricStatus(facts).counts.ok).toBe(FABRIC_RESOURCES.length - 1);
+	});
+
+	test("a configured LightRAG with no probe answer (null) is unavailable, not ok", async () => {
+		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: Promise.resolve(null) }) }));
+		expect(rowOf(facts, "lightrag").state).toBe("unavailable");
+	});
+
+	test("LightRAG set and RAGFlow unset: the lightrag row is live and the ragflow row is unconfigured", async () => {
+		const base = sources();
+		const facts = await gatherFabricFacts({
+			...base,
+			health: () => ({ ...healthyParts(), ragflow: Promise.resolve(null) }),
+			config: { ...base.config, configured: { ...base.config.configured, ragflow: false } },
+		});
+		expect(rowOf(facts, "lightrag").state).toBe("ok");
+		expect(rowOf(facts, "ragflow").state).toBe("unconfigured");
+	});
+
+	test("the LightRAG breaker state appears on its row: open is unavailable, half-open is degraded, off reads off", async () => {
+		const withBreaker = (breaker: FabricHealthView["breakers"]["lightrag"]) =>
+			gatherFabricFacts(sources({ snapshot: () => ({ ...snapshot(), breakers: { ...snapshot().breakers, lightrag: breaker } }) }));
+		const open = await withBreaker({ state: "open" });
+		expect(open.services.lightrag.breaker).toBe("open");
+		expect(rowOf(open, "lightrag").state).toBe("unavailable");
+		const halfOpen = await withBreaker({ state: "half-open" });
+		expect(halfOpen.services.lightrag.breaker).toBe("half-open");
+		expect(rowOf(halfOpen, "lightrag").state).toBe("degraded");
+		const off = await withBreaker(null);
+		expect(off.services.lightrag.breaker).toBe("off");
+		expect(rowOf(off, "lightrag").state).toBe("ok");
 	});
 });

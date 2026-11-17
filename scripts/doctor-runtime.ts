@@ -50,9 +50,10 @@ import {
 	gatherIoEvidence,
 } from "./doctor-vps.ts";
 import { parseSystemctlShow, systemdTimestampToEpoch } from "./parity-check.ts";
+import { type DiskPressure, diskPressure, minFreeGbFromEnv as worktreeMinFreeGb, spawnGit, worktreeRootsFromEnv } from "../packages/fleet/src/index.ts";
 
 export type Status = "ok" | "warn" | "drift" | "unknown";
-export type CheckClass = "units" | "slice" | "redis" | "timers" | "disk" | "swap" | "env";
+export type CheckClass = "units" | "slice" | "redis" | "timers" | "disk" | "swap" | "env" | "checkout";
 
 export interface Row {
 	class: CheckClass;
@@ -769,6 +770,124 @@ export interface DoctorOptions {
 	hardening?: HardeningOptions;
 	/** The report-only `docker reclaimable` row (uplift-5 U5-2). Absent or false: no docker call. */
 	dockerReclaim?: boolean;
+	/** The report-only worktree disk row (phase 68). Absent: no row and no git call. */
+	worktrees?: WorktreeDiskOptions;
+	/** Report-only primary-checkout rows (branch, and behind origin's default). Absent or empty: no row and no git call. */
+	checkouts?: readonly string[];
+}
+
+/** A worktree disk check: report-only, so it can warn but never drift. */
+export interface WorktreeDiskOptions {
+	roots: string[];
+	minFreeGb: number;
+	/** Test seam; defaults to the fleet library's `diskPressure` over real git. */
+	measure?: (roots: readonly string[], minFreeGb: number) => Promise<DiskPressure>;
+}
+
+const WORKTREE_GIB = 1024 ** 3;
+const WORKTREE_LARGEST_SHOWN = 3;
+
+function worktreeGb(bytes: number): string {
+	return `${(bytes / WORKTREE_GIB).toFixed(1)} GB`;
+}
+
+/** `ok`, or a `warn` naming the free space, the floor and the three largest worktrees. Never `drift`. */
+export function compareWorktreeDisk(pressure: DiskPressure): Row {
+	const base = { class: "disk" as const, check: "worktree disk", expected: `at least ${worktreeGb(pressure.minFreeBytes)} free for worktrees` };
+	if (pressure.ok) return { ...base, status: "ok", actual: `${worktreeGb(pressure.freeBytes)} free`, hint: "" };
+	const largest = pressure.worktrees.slice(0, WORKTREE_LARGEST_SHOWN).map((wt) => `${wt.path} ${wt.bytes === null ? "size unknown" : worktreeGb(wt.bytes)}`);
+	return {
+		...base,
+		status: "warn",
+		actual: `${worktreeGb(pressure.freeBytes)} free, below the ${worktreeGb(pressure.minFreeBytes)} floor; largest worktrees: ${largest.length === 0 ? "none found" : largest.join("; ")}`,
+		hint: "run `substrate worktree prune` (a dry run) to see what is safe to reclaim; nothing is changed by the doctor",
+	};
+}
+
+/** Origin's head from ONE `ls-remote --symref` response: the default branch name and HEAD's commit. Null when unreadable. */
+export interface OriginHead {
+	defaultBranch: string;
+	/** Null when origin's HEAD line is missing; behind is then unknown. */
+	sha: string | null;
+}
+
+function readOriginHead(dir: string, host: Host): OriginHead | null {
+	const result = host.run(["git", "-C", dir, "ls-remote", "--symref", "origin", "HEAD"]);
+	if (result === null || result.code !== 0) return null;
+	const defaultBranch = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(result.out)?.[1];
+	if (defaultBranch === undefined) return null;
+	return { defaultBranch, sha: /^([0-9a-f]{40,64})\tHEAD$/m.exec(result.out)?.[1] ?? null };
+}
+
+/** The upstream of the checkout's current branch as `git rev-parse --abbrev-ref @{u}` names it; null when none. */
+function upstreamOf(dir: string, host: Host): string | null {
+	const result = host.run(["git", "-C", dir, "rev-parse", "--abbrev-ref", "@{u}"]);
+	return result === null || result.code !== 0 ? null : result.out.trim();
+}
+
+/**
+ * The advice for a checkout behind origin. `git pull --ff-only` is named only where the
+ * current branch's upstream is origin's default branch; otherwise the default branch is
+ * named as the one to select first, and a detached checkout says so.
+ */
+function pullAdvice(dir: string, host: Host, branch: string, defaultBranch: string): string {
+	const fastForward = "fast-forward it with git pull --ff-only; the doctor never fetches or pulls";
+	const select = `select ${defaultBranch} first (git switch ${defaultBranch}), then ${fastForward}`;
+	if (branch === "") return `the current branch could not be read, so ${select}`;
+	if (branch === "HEAD") return `the checkout is detached, so ${select}`;
+	if (upstreamOf(dir, host) === `origin/${defaultBranch}`) return fastForward;
+	return `the checkout is on ${branch}, which does not track origin/${defaultBranch}; ${select}`;
+}
+
+/**
+ * A primary checkout against origin's default branch, from the one origin read the caller
+ * made. Report-only: `warn` when it is off that branch (or detached) and when it is behind
+ * origin's head. This never fetches, so origin's head counts only when it is already in
+ * local history; otherwise behind is `unknown`. Never `drift`, never a failed run.
+ */
+export function compareCheckout(dir: string, host: Host, origin: OriginHead): Row[] {
+	const { defaultBranch, sha } = origin;
+	const expected = `on ${defaultBranch}`;
+	const upToDate = `up to date with origin/${defaultBranch}`;
+	const branchCheck = `checkout ${dir} branch`;
+	const behindCheck = `checkout ${dir} behind`;
+	const current = host.run(["git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
+	const branch = current === null || current.code !== 0 ? "" : current.out.trim();
+	let branchRow: Row;
+	if (branch === "") branchRow = row("checkout", branchCheck, "unknown", expected, "n/a", `git could not read the current branch of ${dir}`);
+	else if (branch === defaultBranch) branchRow = row("checkout", branchCheck, "ok", expected, `on ${branch}`);
+	else branchRow = row("checkout", branchCheck, "warn", expected, branch === "HEAD" ? "detached HEAD" : `on ${branch}`, "not on origin's default branch; the doctor changes nothing, so switch the checkout back if that was not intended");
+
+	if (sha === null) return [branchRow, row("checkout", behindCheck, "unknown", upToDate, "n/a", "origin's head is missing from the remote's answer; behind is unknown")];
+	const count = host.run(["git", "-C", dir, "rev-list", "--count", `HEAD..${sha}`]);
+	if (count === null || count.code !== 0 || !/^\d+$/.test(count.out.trim())) {
+		return [branchRow, row("checkout", behindCheck, "unknown", upToDate, "n/a", `origin's head ${sha.slice(0, 12)} is not in local history; this check never fetches, so behind is unknown`)];
+	}
+	const behind = Number(count.out.trim());
+	if (behind === 0) return [branchRow, row("checkout", behindCheck, "ok", upToDate, `0 commits behind origin/${defaultBranch}`)];
+	return [branchRow, row("checkout", behindCheck, "warn", upToDate, `${behind} commits behind origin/${defaultBranch}`, pullAdvice(dir, host, branch, defaultBranch))];
+}
+
+/** One checkout's rows, from one origin read. An unreadable origin makes the checkout one unknown row. */
+function gatherCheckout(host: Host, dir: string): Row[] {
+	const origin = readOriginHead(dir, host);
+	if (origin === null) return [row("checkout", `checkout ${dir}`, "unknown", "on origin's default branch", "n/a", "origin's default branch could not be read; the doctor never fetches")];
+	return compareCheckout(dir, host, origin);
+}
+
+/** Only when `SUBSTRATE_WORKTREE_ROOTS` names a root: no root, no check, no row. */
+export function worktreeOptionsFromEnv(env: Record<string, string | undefined>): { worktrees?: WorktreeDiskOptions } {
+	const roots = worktreeRootsFromEnv(env);
+	return roots.length === 0 ? {} : { worktrees: { roots, minFreeGb: worktreeMinFreeGb(env) } };
+}
+
+async function gatherWorktreeDisk(options: WorktreeDiskOptions): Promise<Row> {
+	try {
+		const measure = options.measure ?? ((roots: readonly string[], minFreeGb: number) => diskPressure(roots, minFreeGb, { git: spawnGit }));
+		return compareWorktreeDisk(await measure(options.roots, options.minFreeGb));
+	} catch (error) {
+		return { class: "disk", check: "worktree disk", status: "unknown", expected: "report only", actual: "n/a", hint: `the worktree scan failed: ${error instanceof Error ? error.message.slice(0, 120) : "unknown error"}` };
+	}
 }
 
 /** The deploy floor as `deploy-release.sh` reads it: 0-9999 whole gigabytes, default 5. */
@@ -792,6 +911,7 @@ export function optionsFromEnv(env: Record<string, string | undefined>): DoctorO
 		disk: diskGuardrailsFromEnv(env, RELEASE_ROOT),
 		hardening: hardeningOptionsFromEnv(env),
 		dockerReclaim: true,
+		...worktreeOptionsFromEnv(env),
 	};
 }
 
@@ -813,6 +933,8 @@ export async function gatherRows(policy: Policy, host: Host, options: DoctorOpti
 	const df = host.run(["df", "-Pk", "--", RELEASE_ROOT]);
 	rows.push(compareDisk(df === null || df.code !== 0 ? null : parseDfAvailableKb(df.out), options.minFreeGb));
 	if (options.disk !== undefined) rows.push(...gatherDiskGuardrails(host, options.disk));
+	if (options.worktrees !== undefined) rows.push(await gatherWorktreeDisk(options.worktrees));
+	for (const dir of options.checkouts ?? []) rows.push(...gatherCheckout(host, dir));
 	if (options.dockerReclaim === true) rows.push(...gatherDockerReclaim(host));
 	const before = parseVmstatSwap(host.readText("/proc/vmstat") ?? "");
 	await host.sleep(SWAP_SAMPLE_MS);
@@ -1002,10 +1124,12 @@ export interface CliOptions {
 	json: boolean;
 	emit: boolean;
 	infraDir: string;
+	/** `--checkout DIR`, repeatable: the primary checkouts the report-only checkout rows cover. */
+	checkouts: string[];
 }
 
 export function parseArgs(argv: readonly string[]): CliOptions | { usage: string } {
-	const options: CliOptions = { json: false, emit: false, infraDir: join(import.meta.dir, "..", "infra", "vps") };
+	const options: CliOptions = { json: false, emit: false, infraDir: join(import.meta.dir, "..", "infra", "vps"), checkouts: [] };
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i] ?? "";
 		if (arg === "--json") options.json = true;
@@ -1015,13 +1139,18 @@ export function parseArgs(argv: readonly string[]): CliOptions | { usage: string
 			if (!value || value.startsWith("--")) return { usage: "--infra needs a directory" };
 			options.infraDir = value;
 			i += 1;
+		} else if (arg === "--checkout") {
+			const value = argv[i + 1];
+			if (!value || value.startsWith("--")) return { usage: "--checkout needs a directory" };
+			options.checkouts.push(value);
+			i += 1;
 		} else if (arg === "--help" || arg === "-h") return { usage: "" };
 		else return { usage: `unknown argument ${arg}` };
 	}
 	return options;
 }
 
-const USAGE = `usage: bun scripts/doctor-runtime.ts [--json] [--emit] [--infra dir]
+const USAGE = `usage: bun scripts/doctor-runtime.ts [--json] [--emit] [--infra dir] [--checkout dir]
 
 Compares the host (systemd, redis, df, /proc, the shared env by key NAME) with
 the policy declared under infra/vps. Read-only. Exit 0 when nothing drifts,
@@ -1033,6 +1162,8 @@ Exposure rows (systemd-analyze security, per loaded unit) are report-only until
 SUBSTRATE_EXPOSURE_MAX is a number from 0 to 10; a unit above it is drift. An
 installed 30-sandbox.conf drop-in is compared with systemctl show. The
 "docker reclaimable" row is report-only and never prunes.
+
+--checkout DIR (repeatable) adds the branch and behind-origin rows for a primary checkout. Report-only: it never fetches, pulls or switches branches.
 `;
 
 export const realHost: Host = {
@@ -1090,7 +1221,7 @@ export async function main(
 		return 1;
 	}
 	const policy = loadPolicy(parsed.infraDir);
-	const rows = await gatherRows(policy, host, optionsFromEnv(env));
+	const rows = await gatherRows(policy, host, { ...optionsFromEnv(env), checkouts: parsed.checkouts });
 	let emitted: CheckClass[] = [];
 	if (parsed.emit) {
 		const stateFile = env.SUBSTRATE_DOCTOR_STATE?.trim() || DEFAULT_STATE_FILE;

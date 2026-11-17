@@ -26,6 +26,7 @@ import { IndexStore, type MemoryExpiredSample } from "./index-store.ts";
 import { DEFAULT_SWEEP_POLICY, planSweep } from "./index-sweep.ts";
 import { replayRetain, type RetainDeps } from "./memory-retain.ts";
 import { clearEnsuredBanks, type HindsightConfig } from "./planes/hindsight.ts";
+import { defined } from "./test-support.ts";
 import type { EventInput, MemoryEntry } from "./types.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
@@ -67,13 +68,13 @@ function byName(entries: MemoryEntry[]): Record<string, MemoryEntry> {
 
 describeLive("memory lifetime against a live index", () => {
 	beforeAll(async () => {
-		raw = new SQL(PG_URL!);
+		raw = new SQL(defined(PG_URL, "PG_URL"));
 		const observe = (sample: MemoryExpiredSample) => {
 			samples.push(sample);
 		};
-		plain = new IndexStore(PG_URL!);
-		report = new IndexStore(PG_URL!, { memoryExpiry: { mode: "report", observe } });
-		enforce = new IndexStore(PG_URL!, { memoryExpiry: { mode: "enforce", observe } });
+		plain = new IndexStore(defined(PG_URL, "PG_URL"));
+		report = new IndexStore(defined(PG_URL, "PG_URL"), { memoryExpiry: { mode: "report", observe } });
+		enforce = new IndexStore(defined(PG_URL, "PG_URL"), { memoryExpiry: { mode: "enforce", observe } });
 		await plain.migrate();
 		await seed();
 	});
@@ -132,7 +133,7 @@ describeLive("memory lifetime against a live index", () => {
 		for (const [name, want] of Object.entries(EXPECTED)) {
 			expect({ name, expired: got[name]?.expired }).toEqual({ name, expired: want.expired });
 			if (want.expires_at) {
-				expect(got[name]?.expires_at).toBe(new Date(Date.parse(got[name]!.created) + 30 * DAY_MS).toISOString());
+				expect(got[name]?.expires_at).toBe(new Date(Date.parse(defined(got[name], name).created) + 30 * DAY_MS).toISOString());
 			} else {
 				expect(got[name]?.expires_at).toBeUndefined();
 			}
@@ -153,8 +154,8 @@ describeLive("memory lifetime against a live index", () => {
 		for (const entry of briefed) {
 			expect({ id: entry.id, expired: entry.expired, expires_at: entry.expires_at }).toEqual({
 				id: entry.id,
-				expired: got[entry.id.slice(RUN.length + 1)]!.expired,
-				expires_at: got[entry.id.slice(RUN.length + 1)]!.expires_at,
+				expired: defined(got[entry.id.slice(RUN.length + 1)], entry.id).expired,
+				expires_at: defined(got[entry.id.slice(RUN.length + 1)], entry.id).expires_at,
 			});
 		}
 		expect(sampled("served", "hermes").length).toBeGreaterThanOrEqual(3);
@@ -189,11 +190,11 @@ describeLive("memory lifetime against a live index", () => {
 		const enforced = await enforce.searchMemoryPage({ scope, query: "", limit: 10 });
 		expect(enforced.entries).toEqual([]);
 
-		expect(await plain.graphLifetime({ scope, graph_id: undefined })).toEqual({ status: "Merged" });
+		expect(await plain.graphLifetime({ scope })).toEqual({ status: "Merged" });
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-open") })).toEqual({ status: "In Progress" });
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-null") })).toEqual({ status: null });
 		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: id("g-gone") })).toBeNull();
-		expect(await plain.graphLifetime({ scope: SCOPE, graph_id: undefined })).toBeNull();
+		expect(await plain.graphLifetime({ scope: SCOPE })).toBeNull();
 	});
 
 	test("a store built without settings is report: tagged, nothing hidden, nothing counted", async () => {
@@ -245,8 +246,8 @@ describeLive("memory lifetime against a live index", () => {
 				// The candidate read the outbox replay performs: by id, untagged.
 				const current = await store.readEntry(id(name));
 				expect(current).not.toBeNull();
-				const outcome = await replayRetain(deps, { entry: current!, writer: "cursor", bank: "sub-cursor", documentId: `doc-${id(name)}` });
-				if (outcome.forwarded) forwarded.push(current!.id);
+				const outcome = await replayRetain(deps, { entry: defined(current, name), writer: "cursor", bank: "sub-cursor", documentId: `doc-${id(name)}` });
+				if (outcome.forwarded) forwarded.push(defined(current, name).id);
 				else expect(outcome.reason).toBe("retain.expired");
 			}
 			expect(forwarded.sort()).toEqual(LIVE);
@@ -270,18 +271,18 @@ describeLive("memory lifetime against a live index", () => {
 		// 90-day cutoff (`graphsDays`), so the rows seeded five days ago are not yet
 		// its candidates — the reads hide them now; the sweep removes them later.
 		const steps = planSweep(DEFAULT_SWEEP_POLICY, NOW, { expiry: "enforce" });
-		const thirty = steps.find((step) => step.cls.id === "entries-ttl-30d")!;
-		const graph = steps.find((step) => step.cls.id === "entries-ttl-graph")!;
+		const thirty = defined(steps.find((step) => step.cls.id === "entries-ttl-30d"), "entries-ttl-30d step");
+		const graph = defined(steps.find((step) => step.cls.id === "entries-ttl-graph"), "entries-ttl-graph step");
 		const sentinel = new Error("rolled back on purpose");
 		await raw
 			.begin(async (tx) => {
-				const batch = thirty.cls.deleteBatch!(thirty.cutoff, 5_000);
+				const batch = defined(thirty.cls.deleteBatch, "entries-ttl-30d deleteBatch")(thirty.cutoff, 5_000);
 				const rows = (await tx.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
 				expect(Number(rows[0]?.deleted)).toBeGreaterThanOrEqual(1);
 				const left = (await tx`select id from memory_entries where id like ${`${RUN}%`} order by id`) as Array<{ id: string }>;
 				expect(left.map((row) => row.id)).not.toContain(id("e-30d-old"));
 				expect(left.map((row) => row.id)).toContain(id("e-30d-fresh"));
-				const graphBatch = graph.cls.deleteBatch!(graph.cutoff, 5_000);
+				const graphBatch = defined(graph.cls.deleteBatch, "entries-ttl-graph deleteBatch")(graph.cutoff, 5_000);
 				await tx.unsafe(graphBatch.pick.text, graphBatch.pick.params as unknown[]);
 				const after = (await tx`select id from memory_entries where id like ${`${RUN}%`}`) as Array<{ id: string }>;
 				for (const name of ["e-graph-done", "e-graph-gone", "e-graph-open", "e-perm"]) expect(after.map((row) => row.id)).toContain(id(name));

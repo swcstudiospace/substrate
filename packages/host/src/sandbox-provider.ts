@@ -113,7 +113,7 @@ export type SubstrateDockerOptions = {
 	/** U1: injected host resolver for tests; defaults to an A-record DNS lookup. */
 	resolveEgressHost?: (host: string) => Promise<readonly string[]>;
 	/** U1: one warning event per egress refusal, the reconcile warn idiom (action + reason). */
-	warn?: (payload: { action: string; reason: string }) => void;
+	warn?: ((payload: { action: string; reason: string }) => void) | undefined;
 };
 
 /** LANEA-05: image builds and pulls are refused below 10 GiB free (D31-07). */
@@ -214,10 +214,12 @@ export function defaultSandboxStatePath(env: NodeJS.ProcessEnv = process.env): s
 let sharedState: SandboxStateStore | undefined;
 let sharedDocker: DockerClient | undefined;
 function sharedSandboxState(): SandboxStateStore {
-	return (sharedState ??= new SandboxStateStore(defaultSandboxStatePath()));
+	sharedState ??= new SandboxStateStore(defaultSandboxStatePath());
+	return sharedState;
 }
 function anyDocker(): DockerClient {
-	return (sharedDocker ??= defaultDocker());
+	sharedDocker ??= defaultDocker();
+	return sharedDocker;
 }
 
 /** U1: the default iptables runner — execFileSync on PATH, the desktop argv-stub idiom. */

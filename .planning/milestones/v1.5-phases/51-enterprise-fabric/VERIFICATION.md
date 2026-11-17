@@ -1,0 +1,38 @@
+---
+phase: 51-enterprise-fabric
+verified: 2026-10-28
+status: passed
+score: 2 of 2 success criteria MET in the repository
+verified_on: main at 31a9bb36 (files read; nothing was run)
+covered_files: ["packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/fabric/types.ts", "packages/mcp-server/src/fabric/gather.ts", "packages/mcp-server/src/fabric/status.ts", "packages/mcp-server/src/fabric/optimize.ts", "packages/mcp-server/src/fabric/compliance.ts", "packages/mcp-server/src/fabric/gather.test.ts", "packages/mcp-server/src/fabric/status.test.ts", "packages/mcp-server/src/fabric/optimize.test.ts", "packages/mcp-server/src/fabric/compliance.test.ts", "packages/mcp-server/src/fabric-mcp.test.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/observe.ts", "packages/audit/src/policy.ts", "scripts/dashboards.ts", "scripts/dashboards.test.ts", "infra/vps/dashboards/substrate-data-planes.json", "docs/observability.md", "docs/data-planes.md"]
+---
+
+# 51-VERIFICATION: Enterprise Unified Resource Fabric
+
+## Gates
+
+Not run by the author of this record. The full gate (frozen install, tsc with the strict flags, blocking Biome lint, the full bun test suite against a scratch Postgres, the Python suites, the repo locks) runs in CI on main and the orchestrator records the run in .planning/STATE.md. This record's evidence is file paths and test titles read on main at 31a9bb36; nothing was executed. No test counts or CI numbers are invented here.
+
+## Success criteria
+
+Criteria are the ROADMAP success criteria for phase 51, verbatim: (1) New MCP tools for fabric status and optimization suggestions. (2) Compliance report.
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | New MCP tools for fabric status and optimization suggestions: registered | MET | `fabric_status` at `packages/mcp-server/src/mcp.ts:2207`, `fabric_optimize` at `mcp.ts:2222`, both with `annotations: { readOnlyHint: true }` and empty `inputSchema`. Handlers call `fabricRead()` (`mcp.ts:2200-2205`), which runs `gatherFabricFacts(substrate.fabricSources())`, then the pure builders `buildFabricStatus` (`fabric/status.ts:69`) and `buildFabricSuggestions` (`fabric/optimize.ts`). |
+| 1 | ...reachable (admitted and audited) | MET | Admission class `"read"` for all three tools (`admission.ts:225-227`); `KNOWN_TOOLS` labels (`observe.ts:659-661`); `FAIL_OPEN_TOOLS` entries with the phase 51 comment (`packages/audit/src/policy.ts:79-82`). |
+| 1 | ...zero writes on every call, including the first call | MET | The fabric path never requests a write probe: `sharedHealthProbes` calls `healthProbes(options.greptimeTimeoutMs, false)` (`service.ts:6917`); `probeWritable(probeWrites ? writeProbeS*1000 : 0)` (`service.ts:6885`) so interval 0 returns the cached verdict without writing. The only `probeWrites = true` caller is `/healthz` (`service.ts:6758`). Before any `/healthz` write verdict with the probe on, the fabric reports the Greptime row unavailable, not ok: `writeUnread` gated on `writeProbeS > 0` (`service.ts:6953`), `gather.ts:69` (`writeUnread`), `gather.ts:91` (`answered: null` when unread), `gather.ts:94` (`health().greptime: no write reading`). Test `fabric-mcp.test.ts` describe "fabric reads never write to Greptime", test "fabric_status, fabric_optimize and fabric_compliance issue no write, on the first call or after", records the Greptime wire and asserts zero write statements on the fabric path while `/healthz` still writes. Companion test "a healthy Greptime reads ok at SUBSTRATE_LEDGER_WRITE_PROBE_S=0, and the fabric still issues no write" covers the interval-0 case. |
+| 1 | ...deterministic, evidence-backed suggestions | MET | `buildFabricSuggestions` is pure over `(status, facts)` (`fabric/optimize.ts`). Tests in `fabric/optimize.test.ts` describe "buildFabricSuggestions" cover firing and silence (e.g. over-budget Railway cost named with figures; nothing configured emits nothing). MCP-level test `fabric-mcp.test.ts` "fabric_optimize names an over-budget Railway cost with its figures, and nothing else" and "fabric_optimize with nothing configured emits no suggestion". |
+| 1 | ...goal-level dashboard check: six resources | MET | `FABRIC_RESOURCES` has six entries; `FABRIC_SERIES` maps each (`scripts/dashboards.ts:133`); `fabricItems()` emits one `Fabric: <resource>` panel per resource (`dashboards.ts:260-270`); the committed `infra/vps/dashboards/substrate-data-planes.json` carries the six panels. Test `scripts/dashboards.test.ts` (data-planes block, `dashboards.test.ts:356-364`) asserts `FABRIC_RESOURCES` has length 6 and one panel per resource. See the extended-series caveat in Residual risks. |
+| 2 | Compliance report exists and is registered | MET | `fabric_compliance` at `packages/mcp-server/src/mcp.ts:2239`, `readOnlyHint: true`, returns `buildFabricCompliance({ facts, status, suggestions })`. `buildFabricCompliance` is pure (`fabric/compliance.ts:25`). |
+| 2 | States a verdict per check, never passes the unconfigured, carries no secrets | MET | Tests in `fabric/compliance.test.ts` describe "buildFabricCompliance": "enforce with a direct endpoint outside the allow list fails the private-endpoint check and names the plane"; "all endpoints behind a loopback or proxy passes the private-endpoint check"; "warn fails the enforce check while the endpoints are private"; "with no data-plane endpoint configured, both endpoint checks are not applicable"; "an unconfigured resource is never a pass: every resource check is not applicable"; "a degraded or unavailable resource fails its check, and an ok one passes"; "every fabric tool is fail-open in the audit, so the audit check passes"; "a clean report passes the redaction check" / "a secret-shaped value in a report field fails the redaction check"; "the counts add up to the checks, and the report is dated by its facts". MCP-level test `fabric-mcp.test.ts` "fabric_compliance marks unconfigured resources not applicable, never pass, and carries no token". |
+
+## Residual risks
+
+- With the write probe on (`SUBSTRATE_LEDGER_WRITE_PROBE_S > 0`), the Greptime row is `unavailable` until a `/healthz` probe has recorded a write verdict since boot (`service.ts:6953`, `fabric/gather.ts:69`). `fabric_optimize` then emits `unavailable.greptime`, and `fabric_compliance` reports FAIL for it. A fabric-only deployment with no `/healthz` poller shows this state.
+- The extended-series panels (`Fabric: hindsight`, `Fabric: tailscale-proxy`) are omitted from a core-only history render (`scripts/dashboards.ts` extended-series handling; the data-planes test asserts the six-panel all-series render). With default history mode, four of six fabric panels appear.
+- The `Fabric: dragonfly` panel shows the cache hit ratio, not the resource's state. It is a signal panel, not a health panel.
+- A configured Dragonfly reads `unavailable` until a cache command connects (the cache client has no ping; `docs/data-planes.md`, fabric section). `fabric_optimize` emits `unavailable.dragonfly` on a fresh boot.
+- The fabric still issues live read probes (ping, dialect and append-mode reads, Hindsight and RAGFlow GETs). They are reads, not writes, but CONTEXT.md D51-b said "no new probe".
+- `report-redaction` (`compliance.ts`) tests the report against the same `redact()` that produced its fields.
+- Operator-gated live steps (unchanged, not required by the in-repo criteria): Tailscale ACL, forwarder health and allow-list values (phase 48) — the fabric reads only endpoint classes; the three tools against a deployed server need `RAILWAY_API_TOKEN` and the production data-plane URLs.

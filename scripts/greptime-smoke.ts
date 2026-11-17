@@ -66,7 +66,7 @@ const DECOY = `ghp_${"A".repeat(36)}`;
 /** A quote and a backslash: the two characters that can close a SQL literal early. */
 const AWKWARD = `wrote C:\\new\\table and it's fine -- really; yes`;
 
-const results: Array<{ ok: boolean; what: string; detail?: string }> = [];
+const results: Array<{ ok: boolean; what: string; detail?: string | undefined }> = [];
 
 function check(ok: boolean, what: string, detail?: string): void {
 	results.push({ ok, what, detail });

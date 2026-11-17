@@ -7,14 +7,7 @@
  * in the fixed `source` phrase. The synchronous counters and breaker states need no wait. The call always returns
  * the facts, and nothing throws to the caller.
  */
-import {
-	type BreakerReading,
-	type FabricCostView,
-	type FabricFacts,
-	type FabricSources,
-	type ServiceName,
-	type ServiceReading,
-} from "./types.ts";
+import type { BreakerReading, CorpusSourceReading, FabricCostView, FabricFacts, FabricSources, ServiceName, ServiceReading } from "./types.ts";
 
 /** The per-plane deadline for each read the fabric makes, in ms. */
 export const FABRIC_SOURCE_DEADLINE_MS = 1500;
@@ -22,10 +15,17 @@ export const FABRIC_SOURCE_DEADLINE_MS = 1500;
 /** How long one health computation is shared by the fabric's calls, in ms (phase 51, D51-b). */
 export const FABRIC_HEALTH_WINDOW_MS = 2_000;
 
-type Read<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: "timeout" | "failed" };
+/**
+ * The bound on the corpus manifest read behind the docs SLO readings, in ms. Shorter than {@link FABRIC_SOURCE_DEADLINE_MS} on
+ * purpose: a read that outlasts it is reported to the fabric as `timeout` while the fabric is still waiting, so the fabric never
+ * takes a late answer for a fresh one.
+ */
+export const CORPUS_MANIFEST_READ_MS = 1000;
+
+export type Read<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: "timeout" | "failed" };
 
 /** `work`'s answer, or why there is none: it outlasted `ms` (timeout), or it threw (failed). Never rejects. */
-async function within<T>(work: () => Promise<T>, ms: number): Promise<Read<T>> {
+export async function within<T>(work: () => Promise<T>, ms: number): Promise<Read<T>> {
 	const { promise: deadline, resolve: expire } = Promise.withResolvers<Read<T>>();
 	const timer = setTimeout(() => expire({ ok: false, reason: "timeout" }), ms);
 	const answer = Promise.resolve()
@@ -58,12 +58,16 @@ export async function gatherFabricFacts(
 	const deadlineMs = options.deadlineMs ?? FABRIC_SOURCE_DEADLINE_MS;
 	const checkedAt = sources.now();
 	const parts = sources.health();
-	const [greptimeRead, indexRead, hindsightRead, ragflowRead, costRead] = await Promise.all([
+	const [greptimeRead, indexRead, hindsightRead, ragflowRead, lightragRead, teiRead, costRead, corpusRead] = await Promise.all([
 		within(() => parts.greptime, deadlineMs),
 		within(() => parts.index, deadlineMs),
 		within(() => parts.hindsight, deadlineMs),
 		within(() => parts.ragflow, deadlineMs),
+		within(() => parts.lightrag, deadlineMs),
+		within(() => parts.tei, deadlineMs),
 		within<FabricCostView>(() => sources.railwayCost(), deadlineMs),
+		// A server with the corpus off has no readings and is not asked.
+		sources.config.corpusEnabled ? within<CorpusSourceReading>(() => sources.corpus(), deadlineMs) : Promise.resolve(null),
 	]);
 	const snapshot = sources.snapshot();
 	const config = sources.config;
@@ -71,9 +75,9 @@ export async function gatherFabricFacts(
 	const { cache, breakers } = snapshot;
 	const greptime = greptimeRead.ok ? greptimeRead.value : null;
 	// A write still waiting at its bound is not a write that succeeded: the Greptime row is unavailable for it, never ok.
-	const writeStalled = greptime !== null && greptime.writeTimedOut;
+	const writeStalled = greptime?.writeTimedOut === true;
 	// No write verdict since boot: the fabric reads the last /healthz probe and never writes, so the write is unknown, and unknown is never ok.
-	const writeUnread = greptime !== null && greptime.up && greptime.writeUnread;
+	const writeUnread = greptime?.up === true && greptime.writeUnread;
 
 	const services: Record<ServiceName, ServiceReading> = {
 		dragonfly: {
@@ -108,6 +112,14 @@ export async function gatherFabricFacts(
 			degraded: false,
 			source: sourceOf("planes.ragflow", ragflowRead),
 		},
+		lightrag: {
+			configured: config.configured.lightrag,
+			held: false,
+			answered: lightragRead.ok ? lightragRead.value : null,
+			breaker: breakerOf(breakers.lightrag),
+			degraded: false,
+			source: sourceOf("planes.lightrag", lightragRead),
+		},
 		hindsight: {
 			configured: config.configured.hindsight,
 			held: false,
@@ -115,6 +127,14 @@ export async function gatherFabricFacts(
 			breaker: breakerOf(breakers.hindsight),
 			degraded: outbox.size > 0,
 			source: sourceOf("planes.hindsight", hindsightRead),
+		},
+		tei: {
+			configured: config.configured.tei,
+			held: false,
+			answered: teiRead.ok ? teiRead.value : null,
+			breaker: breakerOf(breakers.tei),
+			degraded: false,
+			source: teiRead.ok ? "probe().tei" : `probe().tei: ${teiRead.reason}`,
 		},
 	};
 
@@ -127,6 +147,7 @@ export async function gatherFabricFacts(
 		endpointPolicy: config.endpointPolicy,
 		endpoints: { ...config.endpointClasses },
 		services,
+		tei: { endpointClass: config.teiEndpoint, ...snapshot.tei },
 		cache: {
 			mode: cache.mode,
 			hits: cache.hits,
@@ -137,5 +158,12 @@ export async function gatherFabricFacts(
 		eventBusEnabled: snapshot.eventBus.enabled,
 		outbox: { parked: outbox.size, oldestAt: outbox.oldestAt },
 		railway,
+		corpus: {
+			enabled: config.corpusEnabled,
+			readings: corpusRead?.ok ? corpusRead.value.readings : { freshnessS: null, recall5: null, ingestDocsPerS: null },
+			thresholds: { ...config.docsSlo },
+			// A read the source itself reports as failed is as unread as one that missed this deadline.
+			unread: corpusRead === null ? null : corpusRead.ok ? corpusRead.value.unread : corpusRead.reason,
+		},
 	};
 }

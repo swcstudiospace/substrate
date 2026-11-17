@@ -15,16 +15,29 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { IndexStore, MIGRATION_STEPS, indexMigrateLockKey } from "./index-store.ts";
+import { IndexStore, MIGRATION_STEPS, applicableMigrationSteps, indexMigrateLockKey } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const describeLive = PG_URL ? describe : describe.skip;
 
 describe("migration steps and the migrate lock", () => {
-	test("versions are 1..N contiguous and names are unique", () => {
+	test("versions ascend from 1 with no gap, and names are unique", () => {
 		const versions = MIGRATION_STEPS.map((step) => step.version);
-		expect(versions).toEqual(MIGRATION_STEPS.map((_, index) => index + 1));
+		const last = versions.at(-1) ?? 0;
+		expect(versions).toEqual(Array.from({ length: last }, (_, index) => index + 1));
 		expect(new Set(MIGRATION_STEPS.map((step) => step.name)).size).toBe(MIGRATION_STEPS.length);
+	});
+
+	test("live session authority is always migrated, independently of restart-cache opt-in", () => {
+		const steps = applicableMigrationSteps({ "steering-audit": false, "steering-sessions": false });
+		const authority = steps.find((step) => step.version === 42);
+		expect(authority).toMatchObject({ name: "live_session_bindings", phase: "expand" });
+		expect(authority?.optIn).toBeUndefined();
+		expect(authority?.sql).toContain("session_id text primary key");
+		expect(authority?.sql).toContain("binding_proof_hash text not null");
+		expect(authority?.sql).not.toContain("steering_sessions");
+		expect(authority?.down).toBe("drop table if exists live_session_bindings");
 	});
 
 	test("the advisory lock key is a single line", () => {
@@ -77,8 +90,9 @@ describeLive("migrate against a live index", () => {
 	let before: { statement: string; lock: string };
 
 	beforeAll(async () => {
-		raw = new SQL(PG_URL!);
-		store = new IndexStore(PG_URL!);
+		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		raw = new SQL(url);
+		store = new IndexStore(url);
 		// The store pool is what `migrate` reserves. A separate client would not show a poisoned session.
 		pool = (store as unknown as { sql: SQL }).sql;
 		before = await timeoutSettings(pool);
@@ -99,9 +113,10 @@ describeLive("migrate against a live index", () => {
 			return Number(row.n);
 		};
 		const once = await count();
-		expect(once).toBe(MIGRATION_STEPS.length);
+		const applicable = applicableMigrationSteps({ "steering-audit": false });
+		expect(once).toBe(applicable.length);
 		const versions = (await raw`select version from schema_migrations order by version`) as Array<{ version: number }>;
-		expect(versions.map((row) => Number(row.version))).toEqual(MIGRATION_STEPS.map((step) => step.version));
+		expect(versions.map((row) => Number(row.version))).toEqual(applicable.map((step) => step.version));
 		await store.migrate();
 		expect(await count()).toBe(once);
 		const indexes = (await raw`

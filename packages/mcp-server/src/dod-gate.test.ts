@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CONNECTOR_COMPLETE_PATH, runDodGate, type DodEvidence, type DodGateDeps } from "./dod-gate.ts";
 import type { Mirror, MirrorContext } from "./mirror.ts";
+import { defined } from "./test-support.ts";
 
 const LEASE_ID = "lease-planted-9f8e7d6c5b4a";
 
@@ -31,7 +32,7 @@ function fakeMirrorGate(states: Array<{ name: string; type: string } | null>, re
 	const mirror = {
 		linearState: async () => {
 			calls.push("linearState");
-			return queue.length > 0 ? queue.shift()! : null;
+			return queue.shift() ?? null;
 		},
 		review: async () => {
 			calls.push("review");
@@ -102,14 +103,14 @@ describe("versioned connector fixture (hermes-linear-connector@6e532fe)", () => 
 
 		expect(result.gate).toBe("approved");
 		expect(calls).toHaveLength(1);
-		expect(calls[0]!.url).toBe(`http://127.0.0.1:8792${CONNECTOR_COMPLETE_PATH}`);
-		expect(calls[0]!.body).toEqual({
+		expect(defined(calls[0], "call").url).toBe(`http://127.0.0.1:8792${CONNECTOR_COMPLETE_PATH}`);
+		expect(defined(calls[0], "call").body).toEqual({
 			linear_issue_id: "uuid-issue-1",
 			summary: "All checks green",
 			tests_pass: true,
 			review_pass: true,
 		});
-		expect(calls[0]!.headers).not.toHaveProperty("Authorization");
+		expect(defined(calls[0], "call").headers).not.toHaveProperty("Authorization");
 	});
 
 	test("only an explicit completed:true approves; completed:false is dod-refused with the reason", async () => {

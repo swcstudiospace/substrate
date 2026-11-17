@@ -5,7 +5,8 @@
  * Gathers host facts about substrate-mcp.service — unit state, the pid that
  * holds 127.0.0.1:7410, /proc identity, one GET to /healthz, and read-only git
  * reads of the operator tree — then reports the verdict. Exit 0 pass, 1 a
- * criterion failed, 2 usage or an unreadable precondition.
+ * criterion failed, 2 usage or an unreadable precondition. With `--json`
+ * stdout is only the JSON object and the human lines go to stderr.
  *
  * It changes nothing: no state-changing systemctl verb, no /etc write, no
  * lock-taking git call (every git argv starts with --no-optional-locks), and
@@ -13,9 +14,10 @@
  */
 import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { resolveBearer } from "../packages/cli/src/token.ts";
+import { procStartSeconds } from "../packages/worktree-snapshot/src/proc-stat.ts";
 
-/** Production ports the check watches in `ss` output. */
-export const WATCHED_PORTS = [7410, 7411, 6420] as const;
+/** The production port the check reads owners for in `ss` output. */
+export const WATCHED_PORTS = [7410] as const;
 
 /** The symlink production units use as WorkingDirectory. */
 export const RELEASE_CURRENT = "/opt/agent-substrate/current";
@@ -88,22 +90,6 @@ export function parseCgroup(text: string): string {
 }
 
 /**
- * Process start epoch: btime (from /proc/stat) plus stat field 22 — the
- * starttime ticks after the last close paren, because comm may hold spaces
- * and parens — divided by the clock tick rate.
- */
-export function procStartSeconds(btime: number, stat: string, clkTck = 100): number | null {
-	const close = stat.lastIndexOf(")");
-	if (close < 0) return null;
-	const rest = stat.slice(close + 1).trim().split(/\s+/);
-	// After comm: state is field 3, so starttime (field 22) sits at index 19.
-	if (rest.length < 20) return null;
-	const ticks = Number(rest[19]);
-	if (!Number.isFinite(ticks) || ticks < 0) return null;
-	return btime + ticks / clkTck;
-}
-
-/**
  * Last HEAD move epoch from `git log -g` output: the unix time inside
  * `HEAD@{…}`. Commit time (%ct) is not the move time, so it is not used.
  */
@@ -141,6 +127,8 @@ export interface ParityFacts {
 	originDiffPaths: string[];
 	/** origin/main sha present in the local object store. Null when unasked. */
 	originShaKnown: boolean | null;
+	/** `git ls-remote` could not read origin/main (no answer, no credentials, or no main branch). */
+	originReadFailed: boolean;
 	/** GET /healthz status. Null when not answering. */
 	healthzStatus: number | null;
 	/** Unit-file diff and sibling-unit inventory: notes, never failures. */
@@ -148,8 +136,8 @@ export interface ParityFacts {
 }
 
 export interface VerdictOptions {
-	expectRestarts?: number;
-	expectStart?: number;
+	expectRestarts?: number | undefined;
+	expectStart?: number | undefined;
 }
 
 export interface ParityVerdictResult {
@@ -223,9 +211,11 @@ export function parityVerdict(facts: ParityFacts, opts: VerdictOptions = {}): Pa
 	}
 	if (facts.originShaKnown !== true) {
 		failures.push(
-			facts.originShaKnown === false
-				? "origin/main is not in the local object store; updating it is an operator action"
-				: "could not ask whether origin/main is local",
+			facts.originReadFailed
+				? "could not read origin/main (git ls-remote failed or origin has no main branch)"
+				: facts.originShaKnown === false
+					? "origin/main is not in the local object store; updating it is an operator action"
+					: "could not ask whether origin/main is local",
 		);
 	}
 	if (opts.expectRestarts !== undefined && facts.nRestarts !== opts.expectRestarts) {
@@ -289,8 +279,7 @@ export function diffStability(before: StabilityReading, after: StabilityReading)
 /** Server paths that decide "from main". */
 const SERVER_PATHS = ["packages", "package.json", "bun.lock"];
 
-const SYSTEMCTL_PROPS =
-	"MainPID,ActiveState,SubState,NRestarts,ExecMainStartTimestamp,WorkingDirectory,ExecStart,FragmentPath,ConditionResult,Result";
+const SYSTEMCTL_PROPS = "MainPID,ActiveState,SubState,NRestarts,ExecMainStartTimestamp,WorkingDirectory,FragmentPath";
 
 const HEALTHZ_URL = "http://127.0.0.1:7410/healthz";
 const SPAWN_TIMEOUT_MS = 15_000;
@@ -302,10 +291,19 @@ interface SpawnResult {
 	out: string;
 }
 
-/** Fixed argv, no shell, bounded: every systemctl, ss and git call goes here. */
-function spawn(argv: string[]): SpawnResult | null {
+/**
+ * The environment of every git child: a missing credential fails at once instead of waiting on a
+ * terminal prompt nobody answers (the only other bound is the spawn timeout). GCM_INTERACTIVE covers
+ * Git Credential Manager, which has its own prompt switch.
+ */
+export function gitSpawnEnv(base: Record<string, string | undefined>): Record<string, string | undefined> {
+	return { ...base, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
+}
+
+/** Fixed argv, no shell, bounded: every systemctl, ss and git call goes here. `env` replaces the child's environment when given. */
+function spawn(argv: string[], env?: Record<string, string | undefined>): SpawnResult | null {
 	try {
-		const run = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe", timeout: SPAWN_TIMEOUT_MS });
+		const run = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe", timeout: SPAWN_TIMEOUT_MS, ...(env ? { env } : {}) });
 		return { code: run.exitCode ?? -1, out: run.stdout.toString() };
 	} catch {
 		return null;
@@ -315,19 +313,21 @@ function spawn(argv: string[]): SpawnResult | null {
 /** The git repo used to ask whether a release sha is on origin/main. Not the process cwd. */
 function operatorRepo(): string {
 	const requested = process.env.SUBSTRATE_REPO;
-	if (requested && requested.startsWith("/") && !requested.includes("\0") && !requested.includes("\n")) return requested;
+	if (requested?.startsWith("/") && !requested.includes("\0") && !requested.includes("\n")) return requested;
 	return "/root/src/repos/agent-substrate";
 }
 
 /** Every git argv leads with --no-optional-locks: the operator .git is shared with every worktree. */
 function gitWork(dir: string, args: string[]): SpawnResult | null {
-	return spawn(["git", "--no-optional-locks", "-C", dir, ...args]);
+	return spawn(["git", "--no-optional-locks", "-C", dir, ...args], gitSpawnEnv(process.env));
 }
 
 export interface RemoteMainAncestry {
 	originSha: string | null;
 	originShaKnown: boolean | null;
 	releaseOnMain: boolean | null;
+	/** `git ls-remote` gave no usable commit: the remote read failed, not the local object-store question. */
+	originReadFailed: boolean;
 }
 
 /**
@@ -344,18 +344,19 @@ export function releaseAncestryOnRemoteMain(repo: string, releaseSha: string): R
 		if (/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) originSha = sha;
 	}
 	if (originSha === null) {
-		return { originSha: null, originShaKnown: null, releaseOnMain: null };
+		return { originSha: null, originShaKnown: null, releaseOnMain: null, originReadFailed: true };
 	}
 	const known = gitWork(repo, ["cat-file", "-e", `${originSha}^{commit}`]);
 	const originShaKnown = known === null ? null : known.code === 0;
 	if (originShaKnown !== true) {
-		return { originSha, originShaKnown, releaseOnMain: null };
+		return { originSha, originShaKnown, releaseOnMain: null, originReadFailed: false };
 	}
 	const ancestor = gitWork(repo, ["merge-base", "--is-ancestor", releaseSha, originSha]);
 	return {
 		originSha,
 		originShaKnown,
 		releaseOnMain: ancestor === null ? null : ancestor.code === 0,
+		originReadFailed: false,
 	};
 }
 
@@ -407,6 +408,16 @@ function usage(message?: string): never {
 	if (message) process.stderr.write(`[parity:check] ${message}\n`);
 	process.stderr.write("usage: parity-check.ts [--json] [--expect-restarts N] [--expect-start EPOCH]\n");
 	process.exit(2);
+}
+
+/**
+ * Split a finished report between the two streams. Under `--json` stdout carries only the JSON object,
+ * so `parity:check --json | jq` parses; every human line goes to stderr. Without it everything stays
+ * on stdout, as before.
+ */
+export function routeParityOutput(json: boolean, human: string, jsonText: string | null): { stdout: string; stderr: string } {
+	if (json) return { stdout: jsonText ?? "", stderr: human };
+	return { stdout: human, stderr: "" };
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -476,6 +487,7 @@ export async function main(argv: string[]): Promise<number> {
 	let dirtyPaths: string[] = [];
 	let originDiffPaths: string[] = [];
 	let originShaKnown: boolean | null = null;
+	let originReadFailed = false;
 	let headSha: string | null = null;
 	let originSha: string | null = null;
 	let pinned = false;
@@ -518,6 +530,7 @@ export async function main(argv: string[]): Promise<number> {
 			const ancestry = releaseAncestryOnRemoteMain(operatorRepo(), releaseSha);
 			originSha = ancestry.originSha;
 			originShaKnown = ancestry.originShaKnown;
+			originReadFailed = ancestry.originReadFailed;
 			releaseOnMain = ancestry.releaseOnMain;
 		}
 	} else if (workdir !== null) {
@@ -542,6 +555,7 @@ export async function main(argv: string[]): Promise<number> {
 			const sha = remote.out.trim().split(/\s+/)[0];
 			originSha = sha ? sha : null;
 		}
+		originReadFailed = originSha === null;
 		if (originSha) {
 			const known = gitWork(workdir, ["cat-file", "-e", `${originSha}^{commit}`]);
 			originShaKnown = known === null ? null : known.code === 0;
@@ -610,6 +624,7 @@ export async function main(argv: string[]): Promise<number> {
 			dirtyPaths,
 			originDiffPaths,
 			originShaKnown,
+			originReadFailed,
 			healthzStatus,
 			warnings,
 		},
@@ -618,19 +633,19 @@ export async function main(argv: string[]): Promise<number> {
 	const failures = [...verdict.failures, ...stability];
 	const pass = failures.length === 0;
 
-	process.stdout.write(
+	const human =
 		`[parity:check] MainPID=${finalPid ?? "(none)"} ${activeState ?? "?"}/${subState ?? "?"} NRestarts=${finalRestarts ?? "?"} start=${finalStart ?? "?"}\n` +
-			`[parity:check] :7410 owners=[${owners2.join(", ")}] cgroup=${cgroup ?? "(unknown)"} entry=${entryPoint}\n` +
-			`[parity:check] tree=${workdir ?? "(unknown)"} HEAD=${headSha ?? "?"} origin=${originSha ?? "?"} healthz=${healthzStatus ?? "(unreachable)"}\n`,
-	);
-	for (const failure of failures) process.stdout.write(` FAIL  ${failure}\n`);
-	for (const warning of verdict.warnings) process.stdout.write(`  --   ${warning}\n`);
-	if (json) {
-		process.stdout.write(
-			`${JSON.stringify({ pass, failures, warnings: verdict.warnings, mainPid: finalPid, nRestarts: finalRestarts, startEpoch: finalStart, headSha, originSha, releaseSha, healthzStatus }, null, 2)}\n`,
-		);
-	}
-	process.stdout.write(pass ? "[parity:check] PASS\n" : `[parity:check] FAIL — ${failures.length} criterion(s) failed\n`);
+		`[parity:check] :7410 owners=[${owners2.join(", ")}] cgroup=${cgroup ?? "(unknown)"} entry=${entryPoint}\n` +
+		`[parity:check] tree=${workdir ?? "(unknown)"} HEAD=${headSha ?? "?"} origin=${originSha ?? "?"} healthz=${healthzStatus ?? "(unreachable)"}\n` +
+		failures.map((failure) => ` FAIL  ${failure}\n`).join("") +
+		verdict.warnings.map((warning) => `  --   ${warning}\n`).join("") +
+		(pass ? "[parity:check] PASS\n" : `[parity:check] FAIL — ${failures.length} criterion(s) failed\n`);
+	const jsonText = json
+		? `${JSON.stringify({ pass, failures, warnings: verdict.warnings, mainPid: finalPid, nRestarts: finalRestarts, startEpoch: finalStart, headSha, originSha, releaseSha, healthzStatus }, null, 2)}\n`
+		: null;
+	const routed = routeParityOutput(json, human, jsonText);
+	if (routed.stdout) process.stdout.write(routed.stdout);
+	if (routed.stderr) process.stderr.write(routed.stderr);
 	return pass ? 0 : 1;
 }
 

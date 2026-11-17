@@ -17,7 +17,10 @@
  * Every upload carries `{source_url, commit, heading_path}` metadata (U-03).
  * Each record carries a `version` (1 on first ingest, +1 per replacement). A page may name the
  * `expected_version` it replaces; a mismatch refuses the call as `version.stale` (memory's
- * contract, answered 409). A mismatch found before the first upload writes nothing; one a concurrent ingest causes mid-call refuses the remaining pages, and `changed` reports what already landed. Absent, the page ingests as before.
+ * contract, answered 409) with `outcome: "conflict"`. Every page's expected version is checked against the
+ * version plan of the whole call before its first upload, so a mismatch refuses the call and writes nothing.
+ * That check runs under the dataset's in-process ingest lock, so no other ingest of the dataset in this process
+ * changes the records between the check and the writes. Absent, the page ingests as before.
  * A replacement reports the superseded document id; with
  * `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (uplift-2 R6) the superseded document
  * is deleted through the documented delete call once the replacement has
@@ -35,6 +38,7 @@ import type { Dirent, Stats } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stripRemoteImages } from "@substrate/corpus";
 import {
 	createVersionStore,
 	DATASET_VERSION_RETENTION,
@@ -52,6 +56,7 @@ import {
 	deleteDocuments as deleteLightragDocuments,
 	parseDocuments as parseLightragDocuments,
 	pollParseStatus as pollLightragParseStatus,
+	resolveDocumentIds as resolveLightragDocumentIds,
 	storePlanningPage,
 	uploadDocument as uploadLightragDocument,
 } from "./planes/lightrag.ts";
@@ -216,7 +221,7 @@ async function addFilePage(absolute: string, path: string, pages: IngestPage[], 
  */
 export function isPlanningPage(path: string): boolean {
 	const clean = normalizeIngestPath(path);
-	return clean !== null && clean.startsWith(".planning/") && clean.endsWith(".md");
+	return clean?.startsWith(".planning/") === true && clean.endsWith(".md");
 }
 
 /**
@@ -456,6 +461,8 @@ export type IngestOutcome =
 			conflict_with?: string;
 			/** On `version.stale`: `false`, since the refused page was not stored. */
 			verified_persisted?: false;
+			/** On `version.stale`: `"conflict"`, memory's outcome for a stale write. */
+			outcome?: "conflict";
 	  };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
@@ -536,21 +543,13 @@ export interface IngestDeps {
 	/** Where a failed prune is reported; stderr when omitted. */
 	log?: (line: string) => void;
 }
-const REMOTE_IMG_TAG = /<img\b[^>]*\bsrc\s*=\s*["']https?:[^>]*>/gi;
-const REMOTE_MD_IMAGE = /!\[[^\]]*\]\(\s*https?:[^)]+\)/g;
 
-/** Strip remote images pre-upload; local image paths are left for the gates. */
-export function stripRemoteImages(body: string): { body: string; stripped: number } {
-	let stripped = 0;
-	const withoutTags = body.replace(REMOTE_IMG_TAG, () => {
-		stripped += 1;
-		return "";
-	});
-	const withoutMd = withoutTags.replace(REMOTE_MD_IMAGE, () => {
-		stripped += 1;
-		return "";
-	});
-	return { body: withoutMd, stripped };
+/** The parse budget with unset values left out, so each plane's own defaults apply; `undefined` is never written as a key. */
+function pollBudget(poll: IngestDeps["poll"]): { maxPolls?: number; intervalMs?: number } {
+	return {
+		...(poll?.maxPolls === undefined ? {} : { maxPolls: poll.maxPolls }),
+		...(poll?.intervalMs === undefined ? {} : { intervalMs: poll.intervalMs }),
+	};
 }
 
 /**
@@ -610,7 +609,7 @@ function warnRefusal(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false; outcome?: "conflict" },
 ): Promise<void> {
 	if (deps.surface === null) return Promise.resolve();
 	return deps
@@ -637,7 +636,7 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false },
+	extra?: { rules?: string[]; page?: string; changed?: boolean; remedy?: string; current_version?: number | null; conflict_with?: string; verified_persisted?: false; outcome?: "conflict" },
 ): Promise<IngestOutcome> {
 	const { changed = false, ...locator } = extra ?? {};
 	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
@@ -768,6 +767,7 @@ async function withDatasetIngestLock<T>(dataset: string, waitMs: number, work: (
 /** The refusal `staleVersion` reports: the version expected against the one on record. */
 interface VersionConflict {
 	remedy: string;
+	outcome: "conflict";
 	current_version: number | null;
 	conflict_with?: string;
 	verified_persisted: false;
@@ -790,6 +790,7 @@ function staleVersion(
 	if (!against) {
 		if (expected === 0) return null;
 		return {
+			outcome: "conflict",
 			remedy:
 				`No document is recorded for this source URL, so there is no version ${expected} to replace. ` +
 				"Re-submit without expected_version to record the first one.",
@@ -799,6 +800,7 @@ function staleVersion(
 	}
 	if (expected === against.version) return null;
 	const reply = {
+		outcome: "conflict" as const,
 		current_version: saved?.version ?? null,
 		verified_persisted: false as const,
 		...(saved?.document_id !== undefined ? { conflict_with: saved.document_id } : {}),
@@ -832,11 +834,10 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const backend: DocsBackend = deps.backend ?? (deps.lightragConfig != null ? "lightrag" : "ragflow");
 	if (input.pages.length === 0) return refused(deps, sessionId, "no-pages");
 
-	// The per-page gates run on both planes. RAGFlow refuses the whole call at
-	// the first page that fails; LightRAG records that page as `failed` and keeps
-	// the rest (per-file isolation), so one bad page never voids the valid ones.
+	// The per-page gates run on both planes before the first write, and an invalid page refuses the whole call on
+	// both: nothing is uploaded or recorded, and the refusal names the first failing page. A write that fails
+	// upstream is the only per-page `failed` (see `ingestDocsLightrag`).
 	const prepared: PreparedPage[] = [];
-	const rejected: IngestPageResult[] = [];
 	let total = 0;
 	let strippedImages = 0;
 	for (const page of input.pages) {
@@ -848,25 +849,14 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			continue;
 		}
 		const locator = { page: page.path, ...(verdict.rules !== undefined ? { rules: verdict.rules } : {}) };
-		if (backend !== "lightrag") return refused(deps, sessionId, verdict.reason, locator);
-		await warnRefusal(deps, sessionId, verdict.reason, locator);
-		rejected.push({
-			path: page.path,
-			source_url: page.source_url ?? "",
-			status: "failed",
-			document_id: "",
-			content_sha256: "",
-			error: redact(verdict.rules !== undefined ? `${verdict.reason}: ${verdict.rules.join(", ")}` : verdict.reason).slice(0, 200),
-		});
+		return refused(deps, sessionId, verdict.reason, locator);
 	}
 
 	// Both planes write one dataset's records under that dataset's lock; the records are read only once it is held.
 	const seen = deps.seen ?? new Map<string, IngestRecord>();
 	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	if (backend === "lightrag") {
-		return underDatasetLock(deps, input.dataset, sessionId, () =>
-			ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, rejected, strippedImages }),
-		);
+		return underDatasetLock(deps, input.dataset, sessionId, () => ingestDocsLightrag(deps, input, sessionId, { roots, seen, locks, prepared, strippedImages }));
 	}
 	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
 	return underDatasetLock(deps, input.dataset, sessionId, () => writeBatch(deps, config, input, prepared, { sessionId, strippedImages, seen, locks }));
@@ -1018,10 +1008,7 @@ async function writeBatch(
 					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
 					const started = await parseDocuments(config, dataset.id, [uploaded.document_id], deps.fetchImpl);
 					if (!started.ok) return { ok: false, reason: started.reason };
-					const parsed = await pollParseStatus(config, { dataset_id: dataset.id, document_id: uploaded.document_id }, deps.fetchImpl, {
-						maxPolls: deps.poll?.maxPolls,
-						intervalMs: deps.poll?.intervalMs,
-					});
+					const parsed = await pollParseStatus(config, { dataset_id: dataset.id, document_id: uploaded.document_id }, deps.fetchImpl, pollBudget(deps.poll));
 					if (!parsed.ok) return { ok: false, reason: parsed.reason };
 					// The replacement is retrievable; only now may the superseded
 					// document go. A failed delete leaves both documents and is
@@ -1403,8 +1390,7 @@ export async function scrapePlanningPages(
 	let pages: IngestPage[];
 	try {
 		pages = await scanIngestPages(baseDir, roots, io);
-	} catch (cause) {
-		const reason = cause instanceof Error ? cause.message : String(cause);
+	} catch {
 		report("ERROR");
 		return { state: "ERROR", pages: [], sanitized: new Map(), errors: [], hash: previousHash ?? "", changed: false };
 	}
@@ -1419,7 +1405,7 @@ export async function scrapePlanningPages(
 			errors.push({ path: page.path, error: redact(reason).slice(0, 200) });
 		}
 	}
-	const { hash, changed } = planningPollTick(previousHash, pages, { maxPages: opts.maxPages });
+	const { hash, changed } = planningPollTick(previousHash, pages, opts.maxPages === undefined ? {} : { maxPages: opts.maxPages });
 	const state = errors.length === 0 ? "SUCCESS" : pages.length - errors.length > 0 ? "PARTIAL" : "ERROR";
 	report(state);
 	return { state, pages, sanitized, errors, hash, changed };
@@ -1448,11 +1434,10 @@ async function ingestDocsLightrag(
 		seen: Map<string, IngestRecord>;
 		locks: Map<string, { task: Promise<PageSettlement>; sha: string }>;
 		prepared: PreparedPage[];
-		rejected: IngestPageResult[];
 		strippedImages: number;
 	},
 ): Promise<IngestOutcome> {
-	const { seen, locks, prepared, rejected, strippedImages } = shared;
+	const { seen, locks, prepared, strippedImages } = shared;
 	// The caller gates auth, but this branch is also entered from tests and
 	// future call sites: fail closed here too, which narrows `deps.surface`
 	// for the note event below.
@@ -1469,13 +1454,12 @@ async function ingestDocsLightrag(
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
-	const results: IngestPageResult[] = [...rejected];
+	const results: IngestPageResult[] = [];
 	const changed = (): boolean => results.some((result) => result.status === "ingested" || result.status === "replaced");
-	// Per-file isolation: a page the plane rejects is recorded as `failed`
-	// and the sweep continues, so one bad page never voids the pages that
-	// landed. The call reports `partial` when anything landed alongside
-	// failures, and refuses only when nothing did.
-	let failed = rejected.length;
+	// Per-file isolation: a page whose upstream write fails is recorded as `failed` and the sweep continues, so one
+	// failed write never voids the pages that landed. Invalid pages never reach here (see `ingestDocs`). The call
+	// reports `partial` when anything landed alongside failures, and refuses only when nothing did.
+	let failed = 0;
 	// Keys with a write that failed in this call. The version plan assumed every planned write landed, so a later
 	// page of such a key is recorded failed and not written: writing it would store a version the plan never reached.
 	const failedKeys = new Set<string>();
@@ -1547,21 +1531,35 @@ async function ingestDocsLightrag(
 									fetchImpl,
 								);
 					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
-					const started = await parseLightragDocuments(lightrag, dataset.id, [uploaded.document_id], fetchImpl);
+					// LightRAG's upload answers a track id, not a document id. The scan and the pipeline poll are server-global (the ids
+					// they take are ignored on this plane), so no document id is passed; the real id is read from track_status once the
+					// pipeline is idle, and only that id is stored, cited and deleted.
+					const started = await parseLightragDocuments(lightrag, dataset.id, [], fetchImpl);
 					if (!started.ok) return { ok: false, reason: started.reason };
-					const parsed = await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: uploaded.document_id }, fetchImpl, {
-						maxPolls: deps.poll?.maxPolls,
-						intervalMs: deps.poll?.intervalMs,
-					});
+					const pollOptions = pollBudget(deps.poll);
+					const parsed = await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: uploaded.track_id }, fetchImpl, pollOptions);
 					if (!parsed.ok) return { ok: false, reason: parsed.reason };
+					const tracked = await resolveLightragDocumentIds(lightrag, uploaded.track_id, fetchImpl, pollOptions);
+					if (!tracked.ok) return { ok: false, reason: tracked.reason };
+					const failedDocument = tracked.documents.find((document) => document.status?.toLowerCase() === "failed");
+					if (failedDocument !== undefined) {
+						return { ok: false, reason: `lightrag: document failed to process${failedDocument.error_msg ? `: ${failedDocument.error_msg}` : ""}` };
+					}
+					const [documentId] = tracked.ids;
+					if (documentId === undefined || tracked.ids.length !== 1) {
+						return { ok: false, reason: `lightrag: track_status listed ${tracked.ids.length} documents for one page` };
+					}
 					let prune: { pruned_document_id: string } | { prune: string } | null = null;
-					if (replacedPrior && deps.prune === true && replacedPrior.document_id !== uploaded.document_id) {
+					if (replacedPrior && deps.prune === true && replacedPrior.document_id !== documentId) {
 						const deleted = await deleteLightragDocuments(lightrag, dataset.id, [replacedPrior.document_id], fetchImpl);
-						if (deleted.ok) prune = { pruned_document_id: replacedPrior.document_id };
+						// The delete runs in the background and holds the pipeline busy until it finishes: wait for idle before the next page writes.
+						const confirmed = deleted.ok ? await pollLightragParseStatus(lightrag, { dataset_id: dataset.id, document_id: replacedPrior.document_id }, fetchImpl, pollOptions) : deleted;
+						if (confirmed.ok) prune = { pruned_document_id: replacedPrior.document_id };
 						else {
-							prune = { prune: `failed: ${deleted.reason}` };
+							const reason = deleted.ok ? `delete started but completion not confirmed: ${confirmed.reason}` : confirmed.reason;
+							prune = { prune: `failed: ${reason}` };
 							(deps.log ?? ((line: string) => process.stderr.write(line)))(
-								`[substrate] docs ingest: superseded document ${replacedPrior.document_id} in ${dataset.name} not pruned — ${redact(deleted.reason)}\n`,
+								`[substrate] docs ingest: superseded document ${replacedPrior.document_id} in ${dataset.name} not pruned — ${redact(reason)}\n`,
 							);
 						}
 					}
@@ -1569,7 +1567,7 @@ async function ingestDocsLightrag(
 						path: page.path,
 						source_url: sourceUrl,
 						status: replacedPrior ? "replaced" : "ingested",
-						document_id: uploaded.document_id,
+						document_id: documentId,
 						content_sha256: sha,
 						...(replacedPrior ? { superseded_document_id: replacedPrior.document_id } : {}),
 						...(prune ?? {}),
@@ -1586,7 +1584,7 @@ async function ingestDocsLightrag(
 						sha,
 						dataset_id: dataset.id,
 						source_url: sourceUrl,
-						document_id: uploaded.document_id,
+						document_id: documentId,
 						version: replacedPrior ? replacedPrior.version + 1 : 1,
 						...(input.commit !== undefined ? { commit: input.commit } : {}),
 						...(lineage.length > 0 ? { superseded: lineage } : {}),

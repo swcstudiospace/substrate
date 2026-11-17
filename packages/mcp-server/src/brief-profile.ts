@@ -41,6 +41,12 @@ export const BRIEF_SECTION_PRIORITY = {
 	actions: 5,
 	others: 6,
 	recall: 7,
+	// Phase 67: appended live by `SUBSTRATE_BRIEF_SESSIONS`, never cached. A queued directive is as urgent as a warning.
+	steering: 2,
+	sessions: 8,
+	// Phase 68: appended live while the worktree registry is on, never cached. Context on who may collide with this session, as droppable as the sessions list.
+	worktrees: 8,
+	handoffs: 9,
 } as const;
 export type BriefSectionId = keyof typeof BRIEF_SECTION_PRIORITY;
 
@@ -55,6 +61,10 @@ const OMIT_LABEL: Record<BriefSectionId, string> = {
 	actions: "actions",
 	others: "graphs",
 	recall: "recalled",
+	steering: "steering",
+	sessions: "sessions",
+	worktrees: "worktrees",
+	handoffs: "handoffs",
 };
 
 /** One selectable line of the compact profile. */
@@ -76,7 +86,7 @@ export interface BriefSection {
 	id: BriefSectionId;
 	/** Exactly the lines the `full` profile prints for this section, separators included. */
 	lines: string[];
-	/** Compact: a line printed above the items while at least one stays. */
+	/** Compact: a line printed above the items. A title with no items is itself the notice (a failed or late read). */
 	title?: string;
 	/** Compact: the selectable lines, in the section's own order. */
 	items: BriefItem[];
@@ -285,6 +295,8 @@ interface Group {
 	/** Items the node cap left out before any byte budget applied. */
 	capped: number;
 	kept: number;
+	/** A title with no items. It is one droppable unit, not a line that can never be omitted. */
+	notice: boolean;
 }
 
 function clampLimit(value: number, min: number, max: number): number {
@@ -324,7 +336,9 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 			}
 		}
 		const lines = items.map((item) => (section.id === "heading" ? clipPoints(foldLine(item.text), HEADING_CHARS) : clipLine(item, chars)));
-		return { section, index, lines, capped, kept: lines.length };
+		const notice = lines.length === 0 && section.title !== undefined && section.title !== "";
+		// A title-only notice is one unit. kept starts at 1 so the byte budget can drop it like any other line.
+		return { section, index, lines, capped, kept: notice ? 1 : lines.length, notice };
 	});
 	const priorityOf = (group: Group): number => BRIEF_SECTION_PRIORITY[group.section.id];
 	const display = [...groups].sort((a, b) => priorityOf(a) - priorityOf(b) || a.index - b.index);
@@ -333,12 +347,14 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 	const render = (): string => {
 		const out = [stateLine];
 		for (const group of display) {
+			const title = group.section.title === undefined ? undefined : foldLine(group.section.title);
+			// A dropped notice (kept 0) is omitted, not printed. A kept notice is the title alone.
 			if (group.kept === 0) continue;
-			if (group.section.title !== undefined) out.push(foldLine(group.section.title));
-			for (let i = 0; i < group.kept; i++) out.push(group.lines[i]!);
+			if (title !== undefined && title !== "") out.push(title);
+			for (const line of group.lines.slice(0, group.kept)) out.push(line);
 		}
 		const missing = groups
-			.map((group) => ({ label: OMIT_LABEL[group.section.id], count: group.capped + group.lines.length - group.kept + (group.section.unlisted ?? 0) }))
+			.map((group) => ({ label: OMIT_LABEL[group.section.id], count: (group.notice ? (group.kept === 0 ? 1 : 0) : group.capped + group.lines.length - group.kept) + (group.section.unlisted ?? 0) }))
 			.filter((entry) => entry.count > 0);
 		if (missing.length > 0) {
 			out.push(`...omitted: ${missing.map((entry) => `${entry.label} ${entry.count}`).join(", ")} (profile=compact; request profile=full)`);
@@ -348,9 +364,13 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 
 	let cursor = 0;
 	const dropOne = (): boolean => {
-		while (cursor < dropOrder.length && dropOrder[cursor]!.kept === 0) cursor++;
-		if (cursor >= dropOrder.length) return false;
-		dropOrder[cursor]!.kept--;
+		let group = dropOrder[cursor];
+		while (group !== undefined && group.kept === 0) {
+			cursor++;
+			group = dropOrder[cursor];
+		}
+		if (group === undefined) return false;
+		group.kept--;
 		return true;
 	};
 
@@ -358,8 +378,8 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 	while (utf8Bytes(text) > cap && dropOne()) text = render();
 	if (utf8Bytes(text) > cap) {
 		const heading = groups.find((group) => group.section.id === "heading" && group.lines.length > 0);
-		if (heading) {
-			const original = heading.lines[0]!;
+		const original = heading?.lines[0];
+		if (heading !== undefined && original !== undefined) {
 			heading.lines[0] = "";
 			const room = cap - utf8Bytes(render());
 			heading.lines[0] = clipBytes(original, Math.max(0, room));

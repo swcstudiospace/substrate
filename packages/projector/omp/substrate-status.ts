@@ -661,11 +661,15 @@ export default function (pi: OmpPi): void {
 	const publish = (): void => {
 		try {
 			pi.events?.emit(SUBSTRATE_STATUS_CHANNEL, busStatus(state, Date.now()));
-		} catch {}
+		} catch {
+			// A broken bus listener must never break the host session; the status publish is best-effort.
+		}
 	};
 	try {
 		pi.events?.on(SUBSTRATE_STATUS_REQUEST, () => publish());
-	} catch {}
+	} catch {
+		// An event bus that rejects subscriptions only costs the on-request publish; the poll still publishes.
+	}
 
 	const poll = async (force: boolean): Promise<void> => {
 		if (!force && !shouldPoll(Date.now(), state.lastPollAt, POLL_MS)) return;

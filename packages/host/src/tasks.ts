@@ -502,7 +502,7 @@ export type VmHandle = {
 
 export type SubstrateLike = {
 	graphGet(graphId: string): Promise<GraphView | null>;
-	graphClaim(graphId: string, nodeId: string, surface: string, sessionId: string): Promise<{ claimed: boolean; reason?: string }>;
+	graphClaim(graphId: string, nodeId: string, surface: string, sessionId: string): Promise<{ claimed: boolean; reason?: string | undefined }>;
 	claimAndPersist(
 		store: LeaseStoreLike,
 		graphId: string,
@@ -548,11 +548,11 @@ export type TaskServiceDeps = {
 	route: Route;
 	testsRoute: TestsRoute;
 	model: string;
-	directKey?: string;
+	directKey?: string | undefined;
 	skills: Skill[];
 	trackers: TrackerLocators;
 	/** D-10 backstop; absent means no tracker sync on this host. */
-	sync?: HostSyncLike;
+	sync?: HostSyncLike | undefined;
 	log?: (line: string) => void;
 	now?: () => Date;
 	/** Heartbeat tick period in ms; the half-TTL default stands in production, tests inject short values. */
@@ -684,7 +684,7 @@ export class TaskService {
 			}
 			this.log(`[substrate-host] heartbeat refused ${key}: ${beat.reason ?? "refused"} — re-claiming once`);
 		}
-		let reclaim: { claimed: boolean; reason?: string };
+		let reclaim: { claimed: boolean; reason?: string | undefined };
 		try {
 			reclaim = await this.deps.substrate.claimAndPersist(this.deps.leases, graphId, nodeId, HOST_SURFACE, sessionId, nowMs);
 		} catch (cause) {
@@ -706,7 +706,7 @@ export class TaskService {
 	async heartbeatTick(graphId: string, nodeId: string): Promise<HeartbeatTick> {
 		const key = `${graphId}/${nodeId}`;
 		const record = this.deps.store.get(graphId, nodeId);
-		if (!record || !record.turn_in_flight || record.released || record.exit_code !== null) return "idle";
+		if (!record?.turn_in_flight || record.released || record.exit_code !== null) return "idle";
 		// Both are "while the turn runs" duties: an untapped approval auto-denies fail-closed
 		// here even when no heartbeat is due, so a parked waiting turn never waits forever.
 		await this.sweepApprovalTimeouts(graphId, nodeId);
@@ -930,7 +930,7 @@ export class TaskService {
 	async backstopSync(graphId: string, nodeId: string): Promise<void> {
 		const sync = this.deps.sync;
 		const record = this.deps.store.get(graphId, nodeId);
-		if (!sync || !record || !record.pr_url || record.pr_number === null || record.synced_at !== null) return;
+		if (!sync || !record?.pr_url || record.pr_number === null || record.synced_at !== null) return;
 		const key = `${graphId}/${nodeId}`;
 		const prUrl = record.pr_url;
 		const prNumber = record.pr_number;
@@ -1111,7 +1111,7 @@ export class TaskService {
 	async sweepApprovalTimeouts(graphId: string, nodeId: string): Promise<number> {
 		const key = `${graphId}/${nodeId}`;
 		const record = this.deps.store.get(graphId, nodeId);
-		if (!record || !record.turn_in_flight || record.released || record.exit_code !== null) return 0;
+		if (!record?.turn_in_flight || record.released || record.exit_code !== null) return 0;
 		const nowMs = this.now().getTime();
 		const expired = record.pending_approvals
 			.filter((p) => typeof p.deadlineMs === "number" && p.deadlineMs <= nowMs)

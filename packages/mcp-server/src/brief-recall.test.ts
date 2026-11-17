@@ -19,6 +19,7 @@ import { FakeStore } from "./memory-write.test.ts";
 import { clearEnsuredBanks } from "./planes/hindsight.ts";
 import { DEFAULT_RECALL_TTL_S, RECALL_STALE_FACTOR, RECALL_TITLE_PREFIX, buildRecallQuery, fanoutSnapshotArgs, recallSnapshotArgs, type RecallSnapshot } from "./recall-snapshot.ts";
 import { Substrate, briefEtag, type SubstrateObserver } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 const SECRET = `ghp_${"a".repeat(40)}`;
 const REQUEST = { repo: "acme/app", surface: "grok-bot" } as const;
@@ -166,7 +167,7 @@ function world(env: Record<string, string>, options: { redis?: FakeRedis; fake?:
 		},
 		hindsightOutbox: (sample) => instruments.setHindsightOutbox(sample),
 	};
-	const substrate = new Substrate(loadConfig(env), { index: (options.index ?? indexOf()) as never, greptime: null, cache, hindsightFetch: fake.fetch }, observer);
+	const substrate = new Substrate(loadConfig(env), { index: (options.index ?? indexOf()) as never, greptime: null, cache, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } }, observer);
 	return { substrate, redis, cache, fake, instruments, briefRecall, prefetch };
 }
 
@@ -259,7 +260,7 @@ describe("SUBSTRATE_BRIEF_RECALL=shadow", () => {
 			expect(w.prefetch).toEqual([{ surface: "grok-bot", result: "ok" }]);
 			const [key] = w.redis.keysOf("recall-snapshot");
 			expect(key).toBeDefined();
-			expect(w.redis.ttls.get(key!)).toBe(DEFAULT_RECALL_TTL_S * RECALL_STALE_FACTOR);
+			expect(w.redis.ttls.get(defined(key))).toBe(DEFAULT_RECALL_TTL_S * RECALL_STALE_FACTOR);
 
 			await w.cache.bump(MEMORY_GENERATION_KEY);
 			const warm = await w.substrate.briefDetailed(WITH_GRAPH, undefined, (WITH_GRAPH).surface);
@@ -403,7 +404,7 @@ describe("SUBSTRATE_BRIEF_RECALL=enforce", () => {
 			expect(complete.state).toBe("complete");
 			expect(complete.text).toContain("- use pnpm, not npm (world)");
 			const [snapshotEntry] = w.redis.keysOf("brief-snapshot");
-			const stored = JSON.parse(w.redis.values.get(snapshotEntry!)!) as { v: { sections: Array<{ id: string }> } };
+			const stored = JSON.parse(defined(w.redis.values.get(defined(snapshotEntry)))) as { v: { sections: Array<{ id: string }> } };
 			expect(stored.v.sections.map((section) => section.id)).toContain("recall");
 
 			failing = true;
@@ -577,10 +578,10 @@ describe("the largest brief the compose step allows", () => {
 			const first = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
 			expect(first.state).toBe("complete");
 			const [key] = w.redis.keysOf("brief");
-			const entry = JSON.parse(w.redis.values.get(key!)!) as { v: string };
+			const entry = JSON.parse(defined(w.redis.values.get(defined(key)))) as { v: string };
 			expect(entry.v.length).toBeLessThan(MAX_ENCODED_CHARS * 0.75);
 			expect(decodeSections(entry.v)).not.toBeNull();
-			expect(decodeSections(encodeSections(decodeSections(entry.v)!))).not.toBeNull();
+			expect(decodeSections(encodeSections(defined(decodeSections(entry.v))))).not.toBeNull();
 			const hits = w.cache.health().hits;
 			const again = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
 			expect(again.text).toBe(first.text);
@@ -635,7 +636,7 @@ describe("an oversized brief and the recall-free fallback", () => {
 			const complete = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
 			expect(complete.text).toContain("Recalled context");
 			const [key] = w.redis.keysOf("brief-snapshot");
-			const stored = JSON.parse(w.redis.values.get(key!)!) as { v: { text: string; sections?: unknown } };
+			const stored = JSON.parse(defined(w.redis.values.get(defined(key)))) as { v: { text: string; sections?: unknown } };
 			expect(stored.v.sections).toBeUndefined();
 			expect(stored.v.text).not.toContain("Recalled context");
 			failing = true;
@@ -687,7 +688,7 @@ describe("a graph past the cached encoding's caps", () => {
 		expect(w.cache.health().hits).toBeGreaterThan(hitsBefore);
 		// The last-good snapshot decodes again too.
 		const [key] = w.redis.keysOf("brief-snapshot");
-		const stored = JSON.parse(w.redis.values.get(key!)!) as { v: { sections?: unknown } };
+		const stored = JSON.parse(defined(w.redis.values.get(defined(key)))) as { v: { sections?: unknown } };
 		expect(stored.v.sections).toBeDefined();
 	});
 });
@@ -786,7 +787,7 @@ describe("the prefetch through the service", () => {
 			await w.substrate.briefDetailed(WITH_GRAPH, undefined, (WITH_GRAPH).surface);
 			await w.substrate.runRecallTick();
 			const [key] = w.redis.keysOf("recall-snapshot");
-			const raw = w.redis.values.get(key!)!;
+			const raw = defined(w.redis.values.get(defined(key)));
 			expect(raw).not.toContain("ghp_");
 			expect(raw).not.toContain("another repo's rule");
 			expect(raw).not.toContain("private to");
@@ -847,7 +848,7 @@ function retainWorld(env: Record<string, string>) {
 	const prefetch: Array<{ surface: string; result: string }> = [];
 	const substrate = new Substrate(
 		loadConfig({ SUBSTRATE_MEMORY_GRANTS: GRANTS, ...env }),
-		{ index: store as never, greptime: null, cache, hindsightFetch: fake.fetch },
+		{ index: store as never, greptime: null, cache, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } },
 		{
 			recallPrefetch: (sample) => prefetch.push(sample),
 			hindsightOutbox: (sample) => instruments.setHindsightOutbox(sample),

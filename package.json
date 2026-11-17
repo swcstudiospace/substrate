@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.4.0",
   "description": "Four-plane substrate (runtime, memory, skills, ledger) shared by every agent on the VPS, keyed by Graph ID",
   "workspaces": [
     "packages/mcp-server",
@@ -13,7 +14,10 @@
     "packages/ledger",
     "packages/observability",
     "packages/audit",
-    "packages/evidence"
+    "packages/evidence",
+    "packages/worktree-snapshot",
+    "packages/fleet",
+    "packages/corpus"
   ],
   "scripts": {
     "test": "bun test",
@@ -46,11 +50,13 @@
     "identity:check": "bun scripts/identity-check.ts",
     "uat:phase0": "bun scripts/uat-phase0.ts",
     "collectors:status": "bun packages/collectors/src/status.ts",
-    "proof:laneb": "bun scripts/laneb-proof.ts"
+    "proof:laneb": "bun scripts/laneb-proof.ts",
+    "lint": "biome lint ."
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5.7.0"
+    "@biomejs/biome": "2.6.3",
+    "@types/bun": "1.4.2",
+    "typescript": "5.9.3"
   },
   "engines": {
     "bun": ">=1.4.0"

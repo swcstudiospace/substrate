@@ -37,7 +37,7 @@ export const CONNECTOR_COMPLETE_PATH = "/v1/complete-issue";
 export interface DodEvidence {
 	summary: string;
 	tests_pass: boolean;
-	review_pass?: boolean;
+	review_pass?: boolean | undefined;
 }
 
 export interface DodGateDeps {

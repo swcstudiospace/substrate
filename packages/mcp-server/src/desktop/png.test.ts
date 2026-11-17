@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { deflateSync, inflateSync } from "node:zlib";
+import { defined } from "../test-support.ts";
 import { crc32, decodePng, decodeXwd, encodePng, pngChunk, PNG_SIGNATURE } from "./png.ts";
 
 /** 4×3 test image: pixel (x, y) is RGB (10x+1, 20y+2, 7x+5y+3). */
@@ -22,7 +23,9 @@ function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: num
 		100 + name.length, o.version ?? 7, o.format ?? 2, 24, W, H, 0, o.byteOrder, 32, o.byteOrder, 32, bpp,
 		bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, o.ncolors ?? 0, W, H, 0, 0, 0,
 	];
-	fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
+	fields.forEach((value, i) => {
+		header.writeUInt32BE(value, i * 4);
+	});
 	const pixels = Buffer.alloc(bytesPerLine * H);
 	for (let y = 0; y < H; y++) {
 		for (let x = 0; x < W; x++) {
@@ -75,12 +78,12 @@ describe("encodePng", () => {
 		expect([...png.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 		const list = chunks(png);
 		expect(list.map((c) => c.type)).toEqual(["IHDR", "IDAT", "IEND"]);
-		const ihdr = list[0]!.data;
+		const ihdr = defined(list[0]).data;
 		expect([ihdr.readUInt32BE(0), ihdr.readUInt32BE(4), ihdr[8], ihdr[9], ihdr[10], ihdr[11], ihdr[12]]).toEqual([W, H, 8, 2, 0, 0, 0]);
 		for (const c of list) expect(c.crc).toBe(crc32(Buffer.concat([Buffer.from(c.type, "latin1"), c.data])));
-		expect(list[2]!.crc.toString(16)).toBe("ae426082");
+		expect(defined(list[2]).crc.toString(16)).toBe("ae426082");
 
-		const raw = inflateSync(list[1]!.data);
+		const raw = inflateSync(defined(list[1]).data);
 		expect(raw.length).toBe(H * (1 + W * 3));
 		for (let y = 0; y < H; y++) {
 			const row = raw.subarray(y * (1 + W * 3), (y + 1) * (1 + W * 3));
@@ -100,11 +103,11 @@ describe("decodePng", () => {
 	test("refuses a non-zero filter byte", () => {
 		const png = encodePng(W, H, EXPECTED_RGB);
 		const list = chunks(png);
-		const raw = inflateSync(list[1]!.data);
+		const raw = inflateSync(defined(list[1]).data);
 		raw[0] = 1; // first row claims a Sub filter
 		const rebuilt = Buffer.concat([
 			PNG_SIGNATURE,
-			pngChunk("IHDR", list[0]!.data),
+			pngChunk("IHDR", defined(list[0]).data),
 			pngChunk("IDAT", deflateSync(raw)),
 			pngChunk("IEND", Buffer.alloc(0)),
 		]);

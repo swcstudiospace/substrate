@@ -22,12 +22,13 @@ import { loadConfig } from "./config.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import { ACCEPTED_TEACHABLE } from "./teachable.fixtures.ts";
+import { defined } from "./test-support.ts";
 import type { MemorySearch, MemorySearchPage, SubstrateEvent } from "./types.ts";
 
 const H = Date.UTC(2026, 8, 1, 10);
 const HOUR = 3_600_000;
 const NOW = H + 5 * HOUR;
-const PUBKEY = "TestPubkey1111111111111111111111111111111";
+const PUBKEY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
 
 /** A `FakeStore` that also answers prefix searches, newest first. */
 class ScratchIndex extends FakeStore {
@@ -62,6 +63,7 @@ export interface ScratchLedger {
 		readEvents: (column: string, value: string) => Promise<Array<Record<string, unknown>>>;
 		graphIngest: (graphId: string) => Promise<IngestRecord[]>;
 		firstIngestMs: () => Promise<number>;
+		graphChainLeafHours: (graphId: string) => Promise<number[]>;
 		hourLeaves: (hour: number) => Promise<Array<{ event_id: string; hash: string }>>;
 		anchorForPeriod: (hour: number) => Promise<Record<string, unknown> | null>;
 	};
@@ -111,6 +113,7 @@ function scratchLedger(): ScratchLedger {
 			return records.filter((record) => ids.has(record.event_id));
 		},
 		firstIngestMs: async () => H,
+		graphChainLeafHours: async () => [],
 		hourLeaves: async (hour: number) => (hour === H ? leaves() : []),
 		anchorForPeriod: async (hour: number) => (hour === H ? anchored : null),
 	};
@@ -161,7 +164,7 @@ function scratchWorld(): ScratchWorld {
 	const base = loadConfig({});
 	const substrate = new Substrate(
 		{ ...base, solana: { ...base.solana, pubkey: PUBKEY } },
-		{ index: index as never, greptime: ledger.greptime as never },
+		{ index: index as never, greptime: ledger.greptime as never, steering: { history: null, liveSessions: null } },
 	);
 	const rpc = {
 		getGenesisHash: async () => DEVNET_GENESIS_HASH,
@@ -238,14 +241,16 @@ describe("teachable anchor coverage", () => {
 		});
 		ledger.anchorHour();
 
-		const decoy = [...ledger.rows.values()].find((row) => row.session_id === "sess-decoy");
-		expect(decoy).toBeDefined();
+		const decoy = defined(
+			[...ledger.rows.values()].find((row) => row.session_id === "sess-decoy"),
+			"the decoy row",
+		);
 		// The digest covers leaf hashes, so the tamper re-hashes the altered
 		// event the way the ledger would have: even a self-consistent edit of
 		// another event in the hour breaks the anchored coverage.
-		const { ingestedAt, hash: _previous, ...unhashed } = decoy!;
+		const { ingestedAt, hash: _previous, ...unhashed } = decoy;
 		const tampered = { ...unhashed, summary: "tampered after anchoring" };
-		ledger.rows.set(decoy!.id, { ...tampered, hash: eventHash(tampered), ingestedAt });
+		ledger.rows.set(decoy.id, { ...tampered, hash: eventHash(tampered), ingestedAt });
 
 		const verdict = await substrate.verifyGraph("ut-teach-29", { now: NOW, rpc: rpc as never });
 

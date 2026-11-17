@@ -55,9 +55,45 @@ describe("auditMode", () => {
 			"fabric_status",
 			"fabric_optimize",
 			"fabric_compliance",
+			"checkpoint_verify",
+			"memory_verify",
+			"session_rollback_plan",
+			"planning_status",
+			"planning_sessions",
+			"steering_list",
+			"session_context",
+			"corpus_status",
 		]) {
 			expect(auditMode(tool)).toBe("fail-open");
 		}
+	});
+
+	test("every live mutation explicitly requires audit; discovery and private reads do not", () => {
+		for (const tool of ["docs_steering_session", "steering_session_heartbeat", "steering_session_close", "steering_queue", "steering_acknowledge"]) {
+			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(true);
+			expect(FAIL_OPEN_TOOLS.has(tool)).toBe(false);
+			expect(auditMode(tool)).toBe("fail-closed");
+		}
+		for (const tool of ["live_session_discovery", "steering_list", "steering_wait"]) {
+			expect(FAIL_OPEN_TOOLS.has(tool)).toBe(true);
+			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(false);
+			expect(auditMode(tool)).toBe("fail-open");
+		}
+	});
+
+	test("the worktree report is an explicit fail-closed write and the registry read an explicit fail-open read", () => {
+		// The report replaces rows other sessions read; a listing is inspection and must not stop on an unwritable audit file.
+		expect({ report: auditMode("worktree_report"), list: auditMode("worktree_list") }).toEqual({ report: "fail-closed", list: "fail-open" });
+		expect({ reportClosed: FAIL_CLOSED_TOOLS.has("worktree_report"), listOpen: FAIL_OPEN_TOOLS.has("worktree_list") }).toEqual({ reportClosed: true, listOpen: true });
+	});
+
+	test("a corpus ingest is fail-closed and the manifest status read is fail-open", () => {
+		// An ingest writes the shared docs dataset and deletes plane documents, so an unrecorded one is refused.
+		expect({ ingest: auditMode("corpus_ingest"), status: auditMode("corpus_status") }).toEqual({ ingest: "fail-closed", status: "fail-open" });
+	});
+
+	test("a docs verdict is fail-open: it is advisory input, so an unwritable audit file must not fail the agent's turn over it", () => {
+		expect(auditMode("docs_feedback")).toBe("fail-open");
 	});
 
 	test("every REST route server.ts audits has a mode", () => {
@@ -71,6 +107,8 @@ describe("auditMode", () => {
 			["/verify", "verify"],
 			["/drift", "drift"],
 			["/evidence", "evidence"],
+			// The worktree claims read is audited under the `graph_get` tool it mirrors, so its mode is that tool's.
+			["/worktrees/claims", "graph_get"],
 		]) {
 			expect(FAIL_OPEN_TOOLS.has(tool as string)).toBe(true);
 			expect(route).toBeDefined();
@@ -87,6 +125,13 @@ describe("auditMode", () => {
 		for (const tool of ["graph_heartbeat", "graph_bind", "coord_handoff", "coord_reap_leases"]) {
 			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(true);
 		}
+		// A checkpoint is one ledger note, like events_emit, the one write that is fail-open on purpose.
+		expect(auditMode("session_checkpoint")).toBe("fail-open");
+		expect(FAIL_CLOSED_TOOLS.has("session_checkpoint")).toBe(false);
+		// A rollback commit takes memory out of force for every agent that reads it and deletes its plane documents.
+		expect(FAIL_CLOSED_TOOLS.has("session_rollback_commit")).toBe(true);
+		expect(FAIL_OPEN_TOOLS.has("session_rollback_commit")).toBe(false);
+		expect(auditMode("session_rollback_commit")).toBe("fail-closed");
 	});
 
 	test("the v1.3 planned tools are explicitly in their decided set", () => {

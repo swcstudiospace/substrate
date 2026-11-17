@@ -284,8 +284,8 @@ The chain tip advances **only on a successful write**, for the same reason.
 
 | | Tools | Why |
 | --- | --- | --- |
-| **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan` — plus `events_emit`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
-| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases`, `desktop_run` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
+| **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan`, `checkpoint_verify`, `memory_verify`, `session_rollback_plan` — plus `events_emit` and `session_checkpoint`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
+| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases`, `desktop_run`, `session_rollback_commit` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
 
 ### Planned in v1.3
 
@@ -306,6 +306,14 @@ lives in [event-vocabulary.md](event-vocabulary.md).
 | `issue_get` (23) | fail-open | A read of untrusted tracker text. |
 | `graph_find` (23) | fail-open | A read of the index. |
 | `memory_recall` (26) | fail-open | A read like `memory_search`. |
+| `checkpoint_verify` (v1.6 phase 59, **landed**) | fail-open | Reads the ledger and devnet to say whether a `session.checkpoint` sits inside an anchored hourly root; sends no transaction and writes nothing, like `events_verify`. |
+| `memory_verify` (v1.6 phase 60, **landed**) | fail-open | Rehashes one memory entry the caller may read and checks that the ledger event its write rested on is anchored; a read, like `memory_search`. |
+| `session_checkpoint` (v1.6 phase 61, **landed**) | fail-open | Appends one `session.checkpoint` note as the caller's surface, the nearest write to `events_emit`: the client journals a checkpoint the server did not record and offers it again, so an unwritable audit file must not fail the agent's turn over it. Admission class `write`. |
+| `session_rollback_plan` (v1.6 phase 61, **landed**) | fail-open | A read: the target checkpoint, the anchor verdict and the memory a rollback would forget; writes and forgets nothing. Admission class `read`. |
+| `session_rollback_commit` (v1.6 phase 61, **landed**) | fail-closed | Takes memory every agent reads out of force (`memory.forget`, reason `rollback`), deletes its Hindsight documents and appends the `session.rollback` note: shared state other agents act on, the nearest write to `memory_write`, so an unrecorded commit is refused and the client keeps it in its pending journal. Admission class `write`. |
+| `corpus_ingest` (v1.7 phase 63, **landed**) | fail-closed | Writes the shared docs dataset every agent reads and deletes plane documents, the nearest write to `docs_ingest`; an unrecorded bulk ingest is refused. Served as the MCP tool and as `POST /corpus/ingest`, audited under the same name before the body is used (counts of documents and tombstones only, never a body) and answering `503` when the chain cannot take the record. Needs an authenticated surface (`401` before the audit). Admission class `write`; answers `503 corpus.disabled` while `SUBSTRATE_CORPUS` is off. |
+| `docs_feedback` (v1.7 phase 66, **landed**) | fail-open | A reader's verdict (`helpful`, `unhelpful`, `stale`, `wrong`, `duplicate`) on a cited corpus document: advisory input to the authority re-rank, the nearest write to `session_checkpoint`, so an unwritable audit file must not fail the agent's turn over it. Served as the MCP tool and as `POST /docs/feedback`, audited under the same name with the document and the verdict only (the `note` is never recorded). Needs an authenticated surface (`401` before the audit). Admission class `write`. Phase 66 also serves `POST /corpus/reflect` (the digest ingest, audited under `corpus_ingest`, counts only, fail-closed like any corpus ingest) and `GET /corpus/gaps` (a read, audited under `corpus_status`, fail-open); both are admission-classed (`write` and `read`). |
+| `corpus_status` (v1.7 phase 63, **landed**) | fail-open | A read of the corpus manifest. Served as the MCP tool, as `GET /corpus/status` and, under the same name, as `POST /corpus/plan` (a plan reads the manifest and writes nothing) and as `POST /corpus/neardup` (phase 64: advisory near-duplicate pairs from document excerpts embedded through the TEI service; it reads no manifest, and its audit record carries `op: neardup` and the item count only, never a text; needs an authenticated surface, `401` before the audit). Admission class `read`. |
 | `agent_card` (29) | fail-open | The Agent Card REST route is a read, audited under this name. |
 
 **An unknown tool is fail-closed.** Deny by default, like `assertAppendOnly` in the
@@ -410,6 +418,7 @@ under a megabyte a day.
 ```sh
 substrate evidence --graph ut-mfk2p3-9a3b1c7d                       # JSON to stdout
 substrate evidence --graph ut-mfk2p3-9a3b1c7d --out evidence.html   # the document
+substrate evidence --graph ut-mfk2p3-9a3b1c7d --node n1             # JSON with that node's artifact as `node`
 ```
 
 The bundle is composed by `substrate-mcp`, not by the CLI: that is the process

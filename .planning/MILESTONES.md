@@ -1,5 +1,65 @@
 # Milestones
 
+## v1.6 Contextual Memory, Live Steering and Eternal Rollback (Closed: 2026-10-29, override closeout decided 2026-10-28)
+
+**Phases completed:** 8 phases (55-62), all merged to main on 2026-10-28; 6 passed (55, 56, 57, 58, 60, 62), 1 human_needed (59), 1 gaps_found (61). Planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1).
+
+**Key accomplishments:**
+
+- Phases 55 and 56 (PR #127): index migrations are contract-tested (frozen digests for steps 1 to 32) and the checkpoint and rollback ledger vocabulary exists; the LightRAG client matches upstream v1.5.7 and can never emit a clear-all (a P0 hazard fixed: the old client sent `DELETE /documents`).
+- Phases 57 and 60 (PRs #128, #129): tandem memory with shared join keys, a forget primitive that marks rather than hard-deletes, and a cross-store consistency verifier; versioned memory records with provenance, `memory_verify` and deterministic capsules (`substrate capsule`). Tandem flags default off.
+- Phase 58 (PR #137, replacing #131; PR #147): durable and delivered steering directives, multi-day liveness and a GSD position model; PR #147 merged one state model for `docs_steering_session` and the steering inbox (criterion 2).
+- Phase 59 (PRs #128, #129, #150): Merkle inclusion proofs against the anchored hourly root, signer rotation and devnet reset detection, a corrected `DEVNET_GENESIS_HASH`, and the guarded re-anchor executor with its verifier pointer (PR #150; never run against any cluster). Roots only.
+- Phase 61 (PRs #128, #129, #146, #148): exact file-state snapshots with a journaled restore (`packages/worktree-snapshot`), the `session_checkpoint`, `session_rollback_plan` and `session_rollback_commit` tools, `substrate session checkpoint | checkpoints | rollback | recover | sync`, the checkpoint sequence lock (#146), and `substrate session hook` with the trigger policy and printed host configuration (#148).
+- Phase 62 (PR #130): a simulated multi-day soak on injected clocks and fakes, the runbooks, ADRs 0004 to 0007 and the v1.6 audit.
+
+**Close-out:** override closeout. The audit of 2026-10-28 says `gaps_found`: 40 of 41 success criteria are met in the repository, phase 59 is `human_needed` (6 of 6 met) and phase 61 criterion 3 is PARTIAL, so SOTA-17 stays unsatisfied and SOTA-15 stays human-gated. The owner was asked once on 2026-10-28 and decided to close v1.6 with the open items recorded as accepted debt (`STATE.md`, "Accepted debt (owner decision, 2026-10-28)"). Accepted debt: phase 61 criterion 3 (SOTA-17; PR #148 shipped `substrate session hook`, the trigger policy and the printed host configuration, but no host runs the hook until an operator installs the printed configuration, ADR 0007 decision D55-4; the `steering` and `baseline` hook configurations are not covered by the printed output) and phase 59's live proofs (SOTA-15: anchor key funding, the anchor timer, any devnet send, the Eternal Memory bucket). The integration findings of the audit that are not criteria remain follow-up work. Archive: [milestones/v1.6-ROADMAP.md](milestones/v1.6-ROADMAP.md) · audit: [milestones/v1.6-MILESTONE-AUDIT.md](milestones/v1.6-MILESTONE-AUDIT.md) · phase folders: [milestones/v1.6-phases/](milestones/v1.6-phases/)
+
+---
+
+## v1.5 SOTA enhancements (Closed: 2026-10-29, override closeout decided 2026-10-28)
+
+**Phases completed:** 10 phases (45-54; 11 phase directories, because `46-ragflow-hybrid` is superseded by `46-lightrag-hybrid`); 4 passed (51, 52, 53, 54), 5 accepted debt since 2026-10-23 (45, 47, 48, 49, 50), 1 human_needed and unsatisfied (46).
+
+**Key accomplishments:**
+
+- Phase 45: a Railway resource orchestrator with the read tools `railway_list`, `railway_monitor`, `railway_scale_suggest` and `railway_cost`, and the write tools `railway_scale` and `railway_deploy`, refused unless `SUBSTRATE_RAILWAY_WRITES=on`, the caller is the operator and the call carries an approval reference; proven in the repository against a fake Railway endpoint.
+- Phase 46: the docs plane runs on LightRAG with Hindsight context opt-in and a Hindsight recall fallback. On 2026-10-28 (Run 11) LightRAG was deployed to Railway production in naive mode, the `--confirm-live` smoke run passed all six checks, and production was cut over to release `5cf930a0` with `SUBSTRATE_DOCS_BACKEND=lightrag`. The `ragflow` Railway service was deleted on 2026-10-25.
+- Phases 47 to 50: SLO forecast rows on `/slo` (report-only) and pattern-based cache preload; an endpoint classifier with a `warn` or `enforce` policy and a boot audit event; graph-structured Hindsight memory with causal recall (causality is session order, not proven cause); a Dragonfly pub/sub event bus (hint-only payloads, default off). All proven in the repository only.
+- Phase 51 (PR #108): one MCP interface across all six resources (the enterprise unified resource fabric); verification passed.
+- Phases 52 to 54 (PRs #104 and #134, #136, #135; the drafts #109, #110 and #111 were closed and replaced): the file-first GSD-Core planning index with read-only planning tools, the audited steering inbox with conflict events and resumable checkpoints, and phase-transition metrics with session STATES and the Railway migration inventory; verification passed for all three.
+
+**Close-out:** override closeout. The audit of 2026-10-28 says `gaps_found`: SOTA-02 (phase 46) is the one unsatisfied requirement. The owner was asked once on 2026-10-28 and decided to close v1.5 with the open items recorded as accepted debt (`STATE.md`, "Accepted debt (owner decision, 2026-10-28)"); this supersedes, for those items only, the 2026-10-23 statement that phase 46 is not accepted as debt. Accepted debt: SOTA-02 phase 46 criteria 2, 4, 5 and 6 and the LightRAG graph and hybrid modes (criterion 3 was met live in naive mode only). Criterion 4 is NOT met because the parity comparator was never built; criterion 5 is PARTIAL because the cutover is done and the RAGFlow code removal is gated. Also accepted debt since 2026-10-23: phases 45 and 47-50 (live Railway, forecast and warm-up, proxy cutover, graph-memory ledger rows and pub/sub proofs). Archive: [milestones/v1.5-ROADMAP.md](milestones/v1.5-ROADMAP.md) · audit: [milestones/v1.5-MILESTONE-AUDIT.md](milestones/v1.5-MILESTONE-AUDIT.md) · phase folders: [milestones/v1.5-phases/](milestones/v1.5-phases/)
+
+---
+
+## v1.3.x Should-have hardening (Closed: 2026-10-29, override closeout decided 2026-10-28)
+
+**Phases completed:** 8 phases (37-44); 1 passed (44), 3 waived by the operator (37-39, 2026-10-25), 4 accepted debt (40-43, 2026-10-23). Phases 37-43 stay `human_needed`.
+
+**Key accomplishments:**
+
+- Phase 37 LANEB (PR #89): Lane B collectors attribute events to a graph from the worktree path the dispatcher created; a graph change ends the session and starts a new one (`end_reason: "graph_changed"`).
+- Phases 38 and 39 (PRs #90, #91): graph edges mirror into Linear relations and each node leaves one artifact (`claim`, `linear`, `notion` and `dod` steps), now reachable through `substrate evidence --node` (PR #159, merged 2026-10-28); phase 39 added no product code and verified the pre-launch drift gate and the signed, replayable handoff packet (signing needs `SUBSTRATE_HANDOFF_KEY`).
+- Phase 40 DOCS-MEMORY (PR #92): the brief reads the same Hindsight fan-out as `memory_recall` under `SUBSTRATE_BRIEF_RECALL=enforce`, plus a weekly mental-model refresh for the models named in `HINDSIGHT_MENTAL_MODELS`; no live effect until the flags are set.
+- Phases 41 and 42 (PRs #93, #94): the evidence bundle carries `anchors` and `teachables` with transaction signature and explorer URL per anchored hour; the `skills_list` audit trail and a per-dataset agent-skills ingest from `SUBSTRATE_AGENT_SKILLS_ROOT`.
+- Phases 43 and 44 (PRs #97, #95): VM-task re-adoption after a dispatcher restart and the sandbox egress allowlist; a repeatable UAT script against any `SUBSTRATE_URL` that passed 6 of 6 scenarios on a scratch twin of main 3e9a106 (phase 44 is the one phase that passed).
+
+**Close-out:** override closeout. The audit of 2026-10-28 says `tech_debt`: 15 requirements, 1 satisfied (I-D1), 5 waived, 9 accepted debt, 0 unsatisfied. The owner was asked once on 2026-10-28 and decided to close v1.3.x with the open items recorded as accepted debt (`STATE.md`, "Accepted debt (owner decision, 2026-10-28)"); nothing is marked passed by that decision. Open items: waived 37-39 on 2026-10-25 (live proofs open), accepted debt 40-43 on 2026-10-23 (live proofs open), and D-D3, which was never delivered in the repository: the restore drill and the retirement of the old path exist only as a runbook, so D-D3 is both accepted debt and unmet. Archive: [milestones/v1.3.x-ROADMAP.md](milestones/v1.3.x-ROADMAP.md) · audit: [milestones/v1.3.x-MILESTONE-AUDIT.md](milestones/v1.3.x-MILESTONE-AUDIT.md) · phase folders: [milestones/v1.3.x-phases/](milestones/v1.3.x-phases/)
+
+---
+
+## v1.4 Substrate contract hardening (Completed locally: 2026-10-24, not published)
+
+**Phases completed:** 3 phases, 3 plans, 0 tasks
+
+**Key accomplishments:**
+- Invalid writes refused with nothing persisted, including LightRAG docs batches (76f2707); live Postgres suites pass (75 tests) on a throwaway postgres:16
+- expected_version enforced for skills and docs with the memory contract's 409 body (c74fa07, 7cf8d44)
+- Degraded-mode exactly-once replay: identical versioned skill proposals answer from the ledger (c74fa07); keyed replay after a newer version tested (7cf8d44); lost tests restored (5b5f68f)
+
+---
+
 ## v1.3 v1.3 (Shipped: 2026-10-11)
 
 **Phases completed:** 18 phases, 76 plans, 101 tasks

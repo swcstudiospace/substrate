@@ -431,3 +431,16 @@ describe("offline exposure (systemd-analyze security --offline=true)", () => {
 		});
 	}
 });
+
+describe("corpus units", () => {
+	test("state directories are the two corpus subdirectories, matching ReadWritePaths", () => {
+		for (const name of ["substrate-corpus-watch.service", "substrate-corpus-sync.service"]) {
+			const text = readFileSync(join(infraDir, name), "utf8");
+			expect(text).not.toMatch(/^StateDirectory=substrate$/m);
+			expect(text).toContain("StateDirectory=substrate/corpus-mirrors\n");
+			expect(text).toContain("StateDirectory=substrate/corpus-hints\n");
+			expect(text).not.toContain("StateDirectory=substrate/corpus-mirrors substrate/corpus-hints");
+			expect(text).toContain("ReadWritePaths=/var/lib/substrate/corpus-mirrors /var/lib/substrate/corpus-hints");
+		}
+	});
+});

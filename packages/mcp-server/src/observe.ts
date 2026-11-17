@@ -92,9 +92,24 @@ const KNOWN_ROUTES = [
 	"/docs/search",
 	"/docs/ingest",
 	"/docs/merge-trigger",
+	"/docs/feedback",
+	"/corpus/reflect",
+	"/corpus/gaps",
 	"/memory/recall",
 	"/slo/history",
 	"/livez",
+	"/steering/sessions",
+	"/steering/sessions/heartbeat",
+	"/steering/sessions/close",
+	"/steering/directives",
+	"/steering/wait",
+	"/steering/queue",
+	"/steering/acknowledge",
+	"/session/context",
+	"/worktrees/report",
+	"/worktrees/claims",
+	"/worktrees",
+	"/corpus/neardup",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -415,6 +430,15 @@ export function createObservability(
 		indexArchive(source) {
 			instruments.observeIndexArchiveAge(() => source.newestAtMs());
 		},
+		corpusFreshness(source) {
+			instruments.observeCorpusFreshness(() => source.newestAtMs());
+		},
+		corpusIngest(sample) {
+			instruments.setCorpusIngestRate(sample.docsPerSecond);
+		},
+		corpusGolden(sample) {
+			instruments.setCorpusGoldenRecall5(sample.recall5);
+		},
 	};
 
 	/**
@@ -622,6 +646,11 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"memory_search",
 	"memory_recall",
 	"memory_pending",
+	"memory_verify",
+	"checkpoint_verify",
+	"session_checkpoint",
+	"session_rollback_plan",
+	"session_rollback_commit",
 	"events_emit",
 	"events_query",
 	"events_verify",
@@ -644,6 +673,10 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"skills_list",
 	"docs_search",
 	"docs_ingest",
+	"docs_steering_session",
+	"steering_session_heartbeat",
+	"steering_session_close",
+	"docs_feedback",
 	"desktop_run",
 	"railway_list",
 	"railway_monitor",
@@ -654,6 +687,18 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"fabric_status",
 	"fabric_optimize",
 	"fabric_compliance",
+	"planning_status",
+	"planning_sessions",
+	"steering_queue",
+	"steering_acknowledge",
+	"steering_list",
+	"steering_wait",
+	"live_session_discovery",
+	"session_context",
+	"worktree_list",
+	"worktree_report",
+	"corpus_status",
+	"corpus_ingest",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",
@@ -667,6 +712,21 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 export function toolLabel(tool: string): string {
 	return KNOWN_TOOLS.has(tool) ? tool : "unrecognized";
 }
+
+/**
+ * Here session_id is a private live target, not historical attribution.
+ * Omit it from plaintext context even on denied batches; args stay canonical
+ * and are still digested by the audit chain without storing their values.
+ */
+const PRIVATE_LIVE_TARGET_TOOLS: Readonly<Record<string, true>> = {
+	docs_steering_session: true,
+	steering_session_heartbeat: true,
+	steering_session_close: true,
+	steering_list: true,
+	steering_queue: true,
+	steering_acknowledge: true,
+	steering_wait: true,
+};
 
 /**
  * Record each tool call, and report the ones that must not run.
@@ -708,7 +768,7 @@ export async function auditToolCalls(
 			transport,
 			graph_id: stringAt(call.args, "graph_id"),
 			node_id: stringAt(call.args, "node_id"),
-			session_id: stringAt(call.args, "session_id"),
+			session_id: Object.hasOwn(PRIVATE_LIVE_TARGET_TOOLS, call.tool) ? null : stringAt(call.args, "session_id"),
 		};
 		// Once the batch is refused, nothing else will be dispatched, so nothing else is
 		// recorded as allowed either.
@@ -1010,6 +1070,7 @@ function anchorEvidenceOf(hour: HourReport): AnchorEvidence {
 		...(hour.tx_sig ? { tx_sig: hour.tx_sig, explorer_url: devnetExplorerTxUrl(hour.tx_sig) } : {}),
 		...(hour.slot === undefined ? {} : { slot: hour.slot }),
 		...(hour.reason ? { reason: hour.reason } : {}),
+		...(hour.head_failed ? { head_failed: true } : {}),
 	};
 }
 

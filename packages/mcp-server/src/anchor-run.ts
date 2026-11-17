@@ -7,10 +7,12 @@
  * Builds the job's ports from `loadConfig()` and the `SOLANA_*` env and exits
  * with the job's code: 0 when every candidate anchored or was adopted (or
  * there was nothing to do), 1 otherwise. Missing config exits 2 with usage
- * and sends nothing — the keypair is only ever a path on a CLI argv.
+ * and sends nothing — the keypair is only ever a path on a CLI argv. A
+ * `SOLANA_RPC_URL` the devnet guard refuses exits 2 the same way.
  */
 import { createRpc, execFileRunner, isClosed } from "@substrate/ledger";
 import { ANCHOR_USAGE, UsageError, parseAnchorArgs, runAnchorJob } from "./anchor.ts";
+import type { AnchorCliOptions } from "./anchor.ts";
 import { loadConfig } from "./config.ts";
 import { GreptimeClient, INGEST_LAG_MS } from "./greptime.ts";
 import { Substrate } from "./service.ts";
@@ -25,7 +27,7 @@ function exitUsage(message: string): never {
 	process.exit(2);
 }
 
-let flags;
+let flags: AnchorCliOptions;
 try {
 	flags = parseAnchorArgs(process.argv.slice(2));
 } catch (cause) {
@@ -34,6 +36,8 @@ try {
 
 const config = loadConfig();
 if (!config.greptime) exitUsage("GREPTIME_URL is not set");
+// Before any CLI or request: a refused URL (mainnet/testnet host, userinfo, non-http scheme) never anchors.
+if (config.solana.problem) exitUsage(config.solana.problem);
 const { rpcUrl, keypairPath, pubkey, cli } = config.solana;
 if (!keypairPath || !pubkey) exitUsage("SOLANA_ANCHOR_KEYPAIR and SOLANA_ANCHOR_PUBKEY must be set");
 if (flags.onlyPeriodMs !== undefined && !isClosed(flags.onlyPeriodMs, Date.now(), INGEST_LAG_MS)) {

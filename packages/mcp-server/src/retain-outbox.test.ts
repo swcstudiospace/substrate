@@ -195,7 +195,8 @@ describe("forwardRetain with an outbox sink", () => {
 		expect(refused.emitted.map((event) => event.payload?.reason)).toEqual(["retain-bad-request"]);
 
 		const unsourced = retainDeps(new HindsightFake());
-		await forwardRetain(unsourced.deps, { ...REQUEST, source_event: undefined }, accepted());
+		const { source_event: _sourceEvent, ...unsourcedRequest } = REQUEST;
+		await forwardRetain(unsourced.deps, unsourcedRequest, accepted());
 		expect(unsourced.queued).toEqual([]);
 		expect(unsourced.emitted.map((event) => event.payload?.reason)).toEqual(["retain.unsourced"]);
 
@@ -539,7 +540,7 @@ function substrateWith(fake: HindsightFake, store: FakeStore, env: Record<string
 	const config = loadConfig({ SUBSTRATE_MEMORY_GRANTS: GRANTS, ...env });
 	const substrate = new Substrate(
 		config,
-		{ index: store as never, greptime: null, hindsightFetch: fake.fetch },
+		{ index: store as never, greptime: null, hindsightFetch: fake.fetch, steering: { history: null, liveSessions: null } },
 		{
 			emitted: (sample) => {
 				if (sample.kind === "warning" && sample.payload.action === "memory.retain") warnings.push(sample.payload);
@@ -692,7 +693,7 @@ describe("Substrate retain outbox", () => {
 			const warnings: Array<Record<string, unknown>> = [];
 			const substrate = new Substrate(
 				loadConfig({ SUBSTRATE_MEMORY_GRANTS: GRANTS }),
-				{ index: store as never, greptime: null, hindsightFetch: gated },
+				{ index: store as never, greptime: null, hindsightFetch: gated, steering: { history: null, liveSessions: null } },
 				{
 					emitted: (sample) => {
 						if (sample.kind === "warning" && sample.payload.action === "memory.retain") warnings.push(sample.payload);

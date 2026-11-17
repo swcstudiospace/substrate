@@ -1,10 +1,10 @@
 /**
- * The Postgres index.
+ * The Postgres coordination index and durable live-session authority.
  *
- * A cache over Notion and Linear so the brief does not call either API on every
- * prompt. It is written by ultrathink's kickoff/sync skills (via graph.register),
- * by hermes-linear-poller events and by substrate-dispatcher. It is never the
- * source of truth — a disagreement is resolved by refreshing from Notion/Linear.
+ * Graph and tracker projections cache Notion/Linear state and are refreshed
+ * when they disagree with those sources. Live-session bindings are different:
+ * their immutable ownership, credential hashes, leases and terminal identities
+ * are authoritative and cannot be reconstructed from tracker or cache rows.
  */
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
@@ -51,6 +51,11 @@ import type {
 	Surface,
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
+import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
+import { bunLiveSessionAuthority, type LiveSessionAuthority } from "./planning/steering-sessions-store.ts";
+import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
+import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
+import { bunReflectStore, type ReflectStore } from "./corpus/reflect-store.ts";
 import {
 	DEFAULT_LEASE_TTL_SECONDS,
 	decideClaim,
@@ -67,7 +72,12 @@ import {
 	type ReleaseDecision,
 } from "./lease.ts";
 import { redact } from "./redact.ts";
+import { FORGET_MARKER_PREFIX, isForgetMarker, MAX_FORGET_ENTRIES, MAX_ROLLBACK_SELECT_LIMIT } from "./memory-forget.ts";
 import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
+import { PgWorktreeRegistry, type WorktreeRegistryStore } from "./worktree-registry.ts";
+
+/** The most entry ids one `forgottenEntryIds` call reads (a recall fan-out holds a few hits per bank). */
+const MAX_FORGET_LOOKUP_IDS = 500;
 
 /**
  * Statuses that mean a graph is finished, so it is no longer "open" in a brief.
@@ -229,6 +239,10 @@ export interface IndexStoreOptions {
 	memoryExpiry?: MemoryExpirySettings;
 	/** `SUBSTRATE_INDEX_TUNE=apply` (uplift-4 S2): apply the lease-table storage tune once at the end of `migrate()`. Absent is `off`. */
 	tune?: "off" | "apply";
+	/** Test seam: a client to use instead of `new SQL(connectionString, …)`, so `migrate()` can run against a recording fake. Production never sets it. */
+	sql?: SQL;
+	/** Migrations gated behind an opt-in (see {@link MigrationOptIn}). Absent is every opt-in off. */
+	migrationOptIns?: MigrationOptIns;
 }
 
 /** What `/healthz` reports about the database's size, from `capacity()`. */
@@ -302,11 +316,43 @@ export interface GraphBindResult {
 export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string | null; graph_status: string | null };
 
 /**
+ * One boot DDL step. `down` and `phase` are the expand-then-contract convention:
+ * `down` is operator-run documentation only (the statements that undo what `sql`
+ * created) and is NEVER executed at boot; `phase` says whether the step expands
+ * the schema (additive, safe under the previous release) or contracts it (removes
+ * what a release ago stopped using). Every step from {@link FIRST_REVERSIBLE_VERSION}
+ * on declares both; `index-store.migrate-contract.test.ts` enforces it.
+ * `optIn` names the opt-in a step is gated behind (see {@link MigrationOptIn}); absent is always run.
+ */
+export interface MigrationStep {
+	version: number;
+	name: string;
+	sql: string;
+	down?: string;
+	phase?: "expand" | "contract";
+	optIn?: MigrationOptIn;
+}
+
+/** The first version that must declare `down` and `phase`. Steps 1..32 predate the convention and are frozen as they are. */
+export const FIRST_REVERSIBLE_VERSION = 33;
+
+/**
+ * A migration that runs only when its named opt-in is on. While the opt-in is off, `migrate()` neither runs
+ * nor ledgers the step, so turning the opt-in on later applies it on the next boot.
+ */
+export type MigrationOptIn = "steering-audit" | "steering-sessions";
+
+/** Which opt-in migrations run. A missing key is off. */
+export type MigrationOptIns = Readonly<Partial<Record<MigrationOptIn, boolean>>>;
+
+const MIGRATION_OPT_INS_OFF: MigrationOptIns = { "steering-audit": false, "steering-sessions": false };
+
+/**
  * Boot DDL in application order. Versions are contiguous and never renumbered:
  * a database stamps a version only after that statement commits. `tuneGraphNodes`
  * is not a step — it stays opt-in inside `migrate` and is not ledgered.
  */
-export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
+export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 	{
 		version: 1,
 		name: "graph_index",
@@ -576,7 +622,326 @@ export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql
 		name: "skills_registry_version",
 		sql: `alter table skills_registry add column if not exists version integer not null default 0`,
 	},
+	// Steering audit (phase 53, SOTA-09): the append-only record of every queued and acknowledged directive.
+	// Created only under the opt-in SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE: while it is off, migrate() skips this
+	// step and does not ledger it. The unique key makes a same-payload repeat a no-op and a different payload under
+	// a saved key a conflict. Rows are never updated or deleted by the application.
+	// Append-only is enforced by the application only; a DB-level REVOKE or trigger is an operator decision, and this
+	// step adds neither.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production. It is additive and
+	// idempotent; it creates one new table and touches no existing row.
+	{
+		version: 33,
+		name: "planning_steering_audit",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `drop table if exists planning_steering_audit`,
+		sql: `
+			create table if not exists planning_steering_audit (
+				id                         bigint generated by default as identity primary key,
+				directive_id               text not null,
+				transition                 text not null check (transition in ('queued', 'acknowledged')),
+				outcome                    text check (outcome in ('applied', 'declined')),
+				confirmed                  boolean,
+				author_principal           text,
+				author_kind                text check (author_kind in ('human', 'agent')),
+				target_session_id          text not null,
+				body_redacted              text,
+				action                     text check (action in ('pause', 'redirect', 'annotate')),
+				priority                   text check (priority in ('low', 'normal', 'high')),
+				plan_phase                 text,
+				plan_plan                  text,
+				conflicts_with_active_plan boolean,
+				directive_created_at_ms    bigint,
+				payload_sha256             text not null,
+				recorded_at                timestamptz not null,
+				constraint planning_steering_audit_directive_transition_key unique (directive_id, transition),
+				constraint planning_steering_audit_shape check (
+					(transition = 'queued' and outcome is null and confirmed is null
+						and author_principal is not null and author_kind is not null and body_redacted is not null
+						and action is not null and priority is not null and conflicts_with_active_plan is not null
+						and directive_created_at_ms is not null and ((plan_phase is null) = (plan_plan is null)))
+					or (transition = 'acknowledged' and outcome is not null and confirmed is not null
+						and author_principal is null and author_kind is null and body_redacted is null
+						and action is null and priority is null and plan_phase is null and plan_plan is null
+						and conflicts_with_active_plan is null and directive_created_at_ms is null)
+				)
+			)`,
+	},
+	// Steering audit reason (phase 58, live steering): why a system closed a directive. A queued directive nobody
+	// acknowledged in time is closed by an acknowledged row with outcome 'declined' and reason 'timeout'; a human
+	// acknowledgement leaves it NULL. Same opt-in as step 33: with SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE off this
+	// step is skipped and not ledgered, and the table it alters does not exist.
+	// Additive and idempotent: one nullable column added `if not exists`, with its check inline so it is added only with
+	// the column. No existing row is touched, and existing rows keep their payload hash because a NULL reason is left
+	// out of the hash. The shape check of step 33 is left as it is: it does not mention the column.
+	// OPERATORS: rehearse on a restored dump before production, like step 33.
+	{
+		version: 34,
+		name: "planning_steering_audit_reason",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `alter table planning_steering_audit drop column if exists reason`,
+		sql: `
+			alter table planning_steering_audit
+				add column if not exists reason text
+				constraint planning_steering_audit_reason_check check (
+					reason is null or (transition = 'acknowledged' and outcome = 'declined' and reason = 'timeout')
+				)`,
+	},
+	// Corpus manifest (v1.7 phase 63): one row per documentation file the bulk ingest has seen, keyed by (repo, path).
+	// `manifest_seq` is an identity column, so the table owns its sequence and `down` drops both; a write that changes a
+	// row takes the next value (`nextval(pg_get_serial_sequence(...))`), which makes the maximum a version that only grows.
+	// `signals` is reserved for phase 66 (ranking); nothing writes it yet. Always run (no opt-in): the ingest routes stay
+	// closed while SUBSTRATE_CORPUS is off, so an empty table costs nothing.
+	// Additive and idempotent: one new table and three indexes, no existing row touched. An older release never names
+	// the table. OPERATORS: rehearse on a restored dump before production, like steps 33 and 34.
+	{
+		version: 35,
+		name: "corpus_documents",
+		phase: "expand",
+		down: `drop table if exists corpus_documents`,
+		sql: `
+			create table if not exists corpus_documents (
+				repo              text not null,
+				path              text not null,
+				kind              text not null,
+				tier              smallint not null check (tier between 1 and 3),
+				sha256            text not null,
+				bytes             integer not null,
+				source            text not null,
+				commit_sha        text,
+				state             text not null default 'active' check (state in ('active', 'tombstoned')),
+				docs_document_id  text,
+				signals           jsonb not null default '{}',
+				manifest_seq      bigint generated by default as identity,
+				ingested_at       timestamptz,
+				tombstoned_at     timestamptz,
+				created_at        timestamptz not null default now(),
+				updated_at        timestamptz not null default now(),
+				primary key (repo, path)
+			);
+			create index if not exists corpus_documents_repo_state_idx on corpus_documents (repo, state);
+			create index if not exists corpus_documents_sha256_idx on corpus_documents (sha256);
+			create index if not exists corpus_documents_docs_document_id_idx on corpus_documents (docs_document_id)`,
+	},
+	// Phase 68 (FLEET-02): the worktree registry, one row per (host, path) as the latest report left it. Additive: a new table and
+	// its index, nothing existing is touched, and an older release never names either. The table holds what reporters sent
+	// (paths, branches, heads, counts), not content. `is_primary` is the report's `primary`, which is a reserved word in SQL.
+	// It is not in the index archive's closed table list: the registry is rebuilt by the next report from each host, so an
+	// archive of it would only restore stale paths.
+	{
+		version: 36,
+		name: "worktrees",
+		phase: "expand",
+		down: `drop table if exists worktrees`,
+		sql: `
+			create table if not exists worktrees (
+				host text not null,
+				path text not null,
+				repo text not null,
+				branch text,
+				head text not null,
+				base text,
+				dirty boolean not null default false,
+				ahead integer,
+				behind integer,
+				last_commit_at timestamptz,
+				size_bytes bigint,
+				locked boolean not null default false,
+				is_primary boolean not null default false,
+				pr_state text not null default 'unknown',
+				session_id text,
+				graph_id text,
+				first_seen_at timestamptz not null,
+				last_seen_at timestamptz not null,
+				reported_at timestamptz not null,
+				primary key (host, path)
+			);
+			create index if not exists worktrees_repo_seen_idx on worktrees (repo, last_seen_at)`,
+	},
+	// Steering sessions (phase 67, live steering GA): the durable copy of the live steering session registry, so a
+	// session's state, steering text and planning hash survive a restart. Created only under the opt-in
+	// SUBSTRATE_STEERING_SESSIONS_TABLE: while it is off, migrate() skips this step and does not ledger it.
+	// The application upserts one row per (surface, session_id) and drops rows past the TTL when it loads them at boot.
+	// Additive and idempotent: one new table and its index, nothing existing is touched.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 37,
+		name: "steering_sessions",
+		optIn: "steering-sessions",
+		phase: "expand",
+		down: `drop table if exists steering_sessions`,
+		sql: `
+			create table if not exists steering_sessions (
+				surface        text not null,
+				session_id     text not null,
+				repo_id        text not null,
+				state          text not null check (state in ('ACTIVE', 'CONTEXT_REFRESH', 'PAUSED', 'RESUMED')),
+				steering       text,
+				planning_hash  text,
+				updated_at     timestamptz not null,
+				primary key (surface, session_id)
+			);
+			create index if not exists steering_sessions_repo_updated_idx on steering_sessions (repo_id, updated_at)`,
+	},
+	// Corpus reflect (v1.7 phase 66): what the docs RAG learns from use. `superseded_by` is the explicit marker of a document
+	// that a newer one replaces (a repo-relative path of the same repository, null when there is none). `corpus_retrievals`
+	// is one bounded, redacted row per `docs_search` while SUBSTRATE_DOCS_TELEMETRY is on (a query hash, a capped redacted
+	// text, at most ten returned document keys with scores, no snippet); a bounded sweep deletes rows past the retention.
+	// `corpus_feedback` is one verdict per (document, session), an upsert. Always run (no opt-in): both tables stay empty
+	// while the flags and the corpus are off, and an older release never names them.
+	// `degraded` marks a search the plane could not answer: it is not a gap in the corpus, so the gap report leaves it out.
+	// `rerank` is set only while SUBSTRATE_DOCS_RERANK=shadow: the order the re-rank would have answered and how many positions moved.
+	// Additive and idempotent: one nullable column, two tables and three indexes, no existing row touched.
+	// Numbered 38: step 37 is steering_sessions (live steering), so this branch's step follows it.
+	// OPERATORS: rehearse on a restored dump before production, like steps 33 to 36.
+	{
+		version: 38,
+		name: "corpus_reflect",
+		phase: "expand",
+		down: `drop table if exists corpus_feedback; drop table if exists corpus_retrievals; alter table corpus_documents drop column if exists superseded_by`,
+		sql: `
+			alter table corpus_documents add column if not exists superseded_by text;
+			create table if not exists corpus_retrievals (
+				id              bigint generated by default as identity primary key,
+				at              timestamptz not null default now(),
+				surface         text not null,
+				query_hash      text not null,
+				query_text      text,
+				backend         text not null,
+				returned        jsonb not null,
+				top_score       real,
+				returned_count  integer not null,
+				degraded        boolean not null default false,
+				rerank          jsonb
+			);
+			create index if not exists corpus_retrievals_at_idx on corpus_retrievals (at);
+			create index if not exists corpus_retrievals_query_hash_idx on corpus_retrievals (query_hash);
+			create table if not exists corpus_feedback (
+				document_key  text not null,
+				session_id    text not null,
+				verdict       text not null check (verdict in ('helpful', 'unhelpful', 'stale', 'wrong', 'duplicate')),
+				surface       text not null,
+				at            timestamptz not null default now(),
+				primary key (document_key, session_id)
+			);
+			create index if not exists corpus_feedback_document_idx on corpus_feedback (document_key)`,
+	},
+	// v1.7 phase 65 (doc watch): the planning refresh's per-page content hashes, so a restart ingests only the pages that
+	// changed. One row per docs-plane destination and `.planning/` path. `destination` is a hash of the configured docs URL,
+	// never the URL. A cutover to another plane misses the old rows and ingests. Written only while
+	// `SUBSTRATE_PLANNING_HASH_STORE=on` (the default is off, and an empty table costs nothing, so the step always runs, like
+	// step 35). It takes version 39, after step 38 `corpus_reflect`.
+	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
+	// restored dump before production, like steps 33 to 35.
+	{
+		version: 39,
+		name: "planning_page_hashes",
+		phase: "expand",
+		down: `drop table if exists planning_page_hashes`,
+		sql: `
+			create table if not exists planning_page_hashes (
+				destination text not null,
+				path        text not null,
+				sha256      text not null,
+				updated_at  timestamptz not null default now(),
+				primary key (destination, path)
+			)`,
+	},
+	// Worktree overlap in the brief (phase 68, FLEET-06): the paths each worktree last reported touching, so `memory_brief`
+	// can name another session's worktree that edits the same files. Additive: two nullable-or-defaulted columns on the
+	// registry table (step 36), runs with the registry and is not opt-in. NULL means the last report carried no list (an
+	// older reporter, or a listing that failed), never "touches nothing".
+	// OPERATORS: rehearse this step on a restored dump before applying it to production. It rewrites no row.
+	{
+		version: 40,
+		name: "worktrees_changed_files",
+		phase: "expand",
+		down: `alter table worktrees drop column if exists changed_files; alter table worktrees drop column if exists files_truncated`,
+		sql: `
+			alter table worktrees add column if not exists changed_files jsonb;
+			alter table worktrees add column if not exists files_truncated boolean not null default false`,
+	},
+	// candidates() filters lower(repo) and orders by last_seen_at. worktrees_repo_seen_idx is (repo, last_seen_at) and cannot
+	// serve lower(repo). This index is its own step: step 40's contract is the two columns only.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 41,
+		name: "worktrees_repo_lower_seen_idx",
+		phase: "expand",
+		down: `drop index if exists worktrees_repo_lower_seen_idx`,
+		sql: `
+			create index if not exists worktrees_repo_lower_seen_idx on worktrees (lower(repo), last_seen_at desc)`,
+	},
+	// Security authority, not restart cache: retain terminal identities permanently. Native PostgreSQL backups must
+	// include this table. Documentary down destroys non-reuse evidence and is never an automatic rollback action.
+	{
+		version: 42,
+		name: "live_session_bindings",
+		phase: "expand",
+		down: `drop table if exists live_session_bindings`,
+		sql: `
+			create table if not exists live_session_bindings (
+				session_id text primary key,
+				owner_surface text not null,
+				repo_id text not null,
+				binding_proof_hash text not null,
+				issued_at timestamptz not null,
+				last_seen_at timestamptz not null,
+				expires_at timestamptz not null,
+				updated_at timestamptz not null,
+				closed_at timestamptz,
+				close_reason text,
+				state text not null,
+				steering text,
+				planning_hash text
+			);
+			create index if not exists live_session_bindings_owner_repo_id_idx
+				on live_session_bindings (owner_surface, repo_id, session_id) where closed_at is null;
+			create index if not exists live_session_bindings_repo_id_idx
+				on live_session_bindings (repo_id, session_id) where closed_at is null`,
+	},
 ];
+
+/** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
+export function applicableMigrationSteps(optIns: MigrationOptIns): ReadonlyArray<(typeof MIGRATION_STEPS)[number]> {
+	return MIGRATION_STEPS.filter((step) => step.optIn === undefined || optIns[step.optIn]);
+}
+
+/**
+ * Not ledgered. Step 39 creates `planning_page_hashes` with primary key `(destination, path)`. A database that applied
+ * an earlier path-only key still has that key, and `ON CONFLICT (destination, path)` does not catch it. Drop that old
+ * table and recreate it. A fresh database already has `destination` in the primary key, so the drop does not run.
+ */
+export const PLANNING_HASH_TABLE_REPAIR = `
+	do $$
+	begin
+		if to_regclass('planning_page_hashes') is not null
+			and not exists (
+				select 1
+				from pg_constraint
+				join pg_attribute
+					on pg_attribute.attrelid = pg_constraint.conrelid
+					and pg_attribute.attnum = any (pg_constraint.conkey)
+				where pg_constraint.conrelid = to_regclass('planning_page_hashes')
+					and pg_constraint.contype = 'p'
+					and pg_attribute.attname = 'destination'
+			) then
+			drop table planning_page_hashes;
+		end if;
+	end
+	$$;
+	create table if not exists planning_page_hashes (
+		destination text not null,
+		path        text not null,
+		sha256      text not null,
+		updated_at  timestamptz not null default now(),
+		primary key (destination, path)
+	);
+	create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path);
+`;
+
 
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
@@ -585,18 +950,68 @@ export class IndexStore implements MemoryStore {
 	readonly poolSettings: IndexPoolSettings;
 	/** `SUBSTRATE_INDEX_TUNE`: `apply` runs {@link IndexStore.tuneGraphNodes} at the end of `migrate()`; `off` (the default) never alters a table. */
 	readonly tune: "off" | "apply";
+	/** The opt-in migrations `migrate()` runs. Every opt-in off by default, so a gated step is neither run nor ledgered. */
+	readonly migrationOptIns: MigrationOptIns;
 
 	constructor(connectionString: string, options: IndexStoreOptions = {}) {
 		this.poolSettings = { ...indexPoolSettingsFromEnv(), ...options.pool, applicationName: INDEX_APPLICATION_NAME };
-		this.sql = new SQL(connectionString, indexSqlOptions(this.poolSettings));
+		this.sql = options.sql ?? new SQL(connectionString, indexSqlOptions(this.poolSettings));
 		this.gate = options.gate ?? null;
 		this.expiry = options.memoryExpiry ?? { mode: "report" };
 		this.tune = options.tune ?? "off";
+		this.migrationOptIns = options.migrationOptIns ?? MIGRATION_OPT_INS_OFF;
 	}
 
 	/** One index call under the plane gate. Without a gate it is just `fn()`. */
 	private plane<T>(op: string, fn: () => Promise<T>): Promise<T> {
 		return callPlane(this.gate, op, fn, { isFailure: isStoreFailure });
+	}
+
+	/**
+	 * The steering audit sink over this store's pool (phase 58, live steering): the append-only `planning_steering_audit`
+	 * writes and the bounded reads that restore the inbox after a restart. It only builds the sink; no statement runs until
+	 * the inbox uses it, and the table exists only when the `steering-audit` opt-in ran its migration steps.
+	 */
+	steeringAudit(): SteeringAuditSink {
+		return new SteeringAuditSink(bunSteeringAuditSql(this.sql), bunSteeringAuditReadSql(this.sql));
+	}
+
+	/**
+	 * The corpus manifest over this store's pool (v1.7 phase 63). It only builds the store; no statement runs until the
+	 * corpus service uses it, and the table exists after migration step 35.
+	 */
+	corpusStore(): CorpusStore {
+		return bunCorpusStore(this.sql);
+	}
+
+	/** Mandatory durable security authority over this pool; historical restart-cache rows cannot grant access. */
+	liveSessions(options: { leaseSeconds: number }): LiveSessionAuthority {
+		return bunLiveSessionAuthority(this.sql, options);
+	}
+
+	/**
+	 * The worktree registry over this store's pool (phase 68): the upsert-and-sweep report and the filtered listing. It only
+	 * builds the adapter; no statement runs until a report or a listing is served, and the table is created by step 36.
+	 */
+	worktreeRegistry(): WorktreeRegistryStore {
+		return new PgWorktreeRegistry(this.sql, (op, fn) => this.plane(op, fn));
+	}
+
+	/**
+	 * The planning refresh's page hashes over this store's pool (v1.7 phase 65). `destination` is a hash of the configured
+	 * docs URL. It only builds the store; no statement runs until the refresh loads it, and the table exists after migration step 39.
+	 */
+	planningHashStore(destination: string): PlanningHashStore {
+		const sql = this.sql;
+		return bunPlanningHashStore((strings, ...values) => sql(strings, ...values), destination);
+	}
+
+	/**
+	 * Retrieval telemetry, feedback and the gap aggregate over this store's pool (v1.7 phase 66). It only builds the store; no
+	 * statement runs until the docs reflect code uses it, and the tables exist after migration step 38.
+	 */
+	reflectStore(): ReflectStore {
+		return bunReflectStore(this.sql);
 	}
 
 	/**
@@ -608,6 +1023,7 @@ export class IndexStore implements MemoryStore {
 	async migrate(): Promise<void> {
 		const reserved = await this.sql.reserve();
 		let migrateFailed = false;
+		let unlockFailure: { cause: unknown } | undefined;
 		try {
 			// SET does not accept bind parameters. The timeouts are numeric constants.
 			await reserved.unsafe(`SET lock_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
@@ -620,7 +1036,7 @@ export class IndexStore implements MemoryStore {
 					name text not null,
 					applied_at timestamptz not null default now()
 				)`;
-			for (const step of MIGRATION_STEPS) {
+			for (const step of applicableMigrationSteps(this.migrationOptIns)) {
 				const present = await reserved`select version from schema_migrations where version = ${step.version}`;
 				if (present.length > 0) continue;
 				await reserved`begin`;
@@ -641,6 +1057,8 @@ export class IndexStore implements MemoryStore {
 			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
 			// makes every later boot a no-op once it is gone.
 			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
+			// Not ledgered. See {@link PLANNING_HASH_TABLE_REPAIR}.
+			await reserved.unsafe(PLANNING_HASH_TABLE_REPAIR);
 		} catch (cause) {
 			migrateFailed = true;
 			throw cause;
@@ -658,9 +1076,11 @@ export class IndexStore implements MemoryStore {
 				} catch {
 					// Already dead. The session lock dies with the connection.
 				}
-				if (!migrateFailed) throw cause;
+				unlockFailure = { cause };
 			}
 		}
+		// Reached only when the migration itself succeeded: a failed migration's error is already propagating.
+		if (unlockFailure !== undefined) throw unlockFailure.cause;
 		// After the reserved connection is back in the pool. `tuneGraphNodes` uses
 		// `this.sql`, so running it while `reserve()` holds the only connection
 		// (`SUBSTRATE_PG_POOL_MAX=1`) waits on itself and boot never finishes.
@@ -681,15 +1101,16 @@ export class IndexStore implements MemoryStore {
 	/** Upsert a whole graph. Idempotent by Graph ID, so a re-run never duplicates. */
 	async registerGraph(plan: {
 		graph_id: string;
-		notion_task_page?: string | null;
-		repo?: string | null;
-		branch?: string | null;
-		surface?: Surface | null;
-		status?: string | null;
-		pr_url?: string | null;
-		nodes?: Array<Partial<GraphNode> & { node_id: string }>;
-		steps?: Array<Partial<GraphStep> & { node_id: string; step: number }>;
-		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }>;
+		notion_task_page?: string | null | undefined;
+		repo?: string | null | undefined;
+		branch?: string | null | undefined;
+		surface?: Surface | null | undefined;
+		status?: string | null | undefined;
+		pr_url?: string | null | undefined;
+		// The plan arrives parsed from a tool call, whose absent fields may be `undefined`.
+		nodes?: Array<{ [K in keyof GraphNode]?: GraphNode[K] | undefined } & { node_id: string }> | undefined;
+		steps?: Array<{ [K in keyof GraphStep]?: GraphStep[K] | undefined } & { node_id: string; step: number }> | undefined;
+		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }> | undefined;
 	}): Promise<GraphView> {
 		await this.sql`
 			insert into graph_index (graph_id, notion_task_page, repo, branch, surface, status, pr_url, updated)
@@ -1677,6 +2098,126 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * Take entries out of force WITHOUT deleting them (v1.6 phase 57, the forget primitive). One statement sets
+	 * `superseded_by` to a forget marker (`forgotten:<forget_id>`, see `memory-forget.ts`) on every named row that
+	 * has none, so the brief, `memory_search` (without `include_superseded`), the standing-entry lookup, the sweeper's
+	 * lifetime classes and the retain replay all stop seeing the row at once, while the row stays for audit and for a
+	 * `include_superseded` read. Returns the ids this call changed: a row that is already superseded or forgotten is
+	 * never overwritten (its real superseder is kept) and a missing id is simply absent, so a second call changes
+	 * nothing. The marker is validated here too: nothing but a well-formed one is ever written into the column.
+	 */
+	async markMemoryForgotten(ids: readonly string[], marker: string): Promise<string[]> {
+		if (!isForgetMarker(marker)) throw new Error(`markMemoryForgotten: "${marker.slice(0, 80)}" is not a forget marker (forgotten:fg_ + 26 hex)`);
+		const distinct = [...new Set(ids)];
+		if (distinct.length === 0) return [];
+		if (distinct.length > MAX_FORGET_ENTRIES) {
+			throw new Error(`markMemoryForgotten: ${distinct.length} ids exceeds the ${MAX_FORGET_ENTRIES}-id bound; forget in batches`);
+		}
+		return this.plane("memory.forget", async () => {
+			const rows = (await this.sql`
+				update memory_entries set superseded_by = ${marker}
+				where id in ${this.sql(distinct)} and superseded_by is null
+				returning id`) as Array<Record<string, unknown>>;
+			return rows.map((row) => String(row.id));
+		});
+	}
+
+	/**
+	 * The entries of a session (and, when given, one graph) created STRICTLY AFTER an instant that no write has
+	 * superseded or forgotten: what a rollback to that instant should forget. Ordered by `created` then `id`, at
+	 * most `limit` of them, with `truncated` true when more matched.
+	 *
+	 * The instant and `created` are compared in whole milliseconds (`created` is truncated to the millisecond, the
+	 * precision of an event `ts`), so a tie keeps the entry: one written in the same millisecond as the rollback point
+	 * is not selected. `session` and `graphId` go through `normalizeIdentifier`, the form the gate stores them in.
+	 * There is no index on `session_id`; the scan is bounded by the session's own rows being few, and the limit.
+	 *
+	 * `untilIso`, when not null, is an INCLUSIVE upper bound (whole milliseconds): an entry created after it belongs to
+	 * the timeline the session began once the rollback started, so a rollback delivered late never reaches it. Null
+	 * means no upper bound. It must not be before `afterIso`.
+	 *
+	 * `writer`, when not null, keeps only that surface's entries, in the query and so ahead of the limit.
+	 */
+	async memoryEntriesCreatedAfter(
+		session: string,
+		afterIso: string,
+		graphId: string | null = null,
+		limit = 1000,
+		untilIso: string | null = null,
+		writer: string | null = null,
+	): Promise<{ entries: MemoryEntry[]; truncated: boolean }> {
+		const sessionId = normalizeIdentifier(session);
+		if (sessionId === null) throw new Error("memoryEntriesCreatedAfter: session is required");
+		const graph = graphId === null ? null : normalizeIdentifier(graphId);
+		if (graphId !== null && graph === null) throw new Error("memoryEntriesCreatedAfter: graphId is empty after normalisation");
+		const afterMs = Date.parse(afterIso);
+		if (Number.isNaN(afterMs)) throw new Error(`memoryEntriesCreatedAfter: "${afterIso.slice(0, 40)}" is not an instant`);
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_ROLLBACK_SELECT_LIMIT) {
+			throw new Error(`memoryEntriesCreatedAfter: limit must be an integer from 1 to ${MAX_ROLLBACK_SELECT_LIMIT}`);
+		}
+		const after = new Date(afterMs).toISOString();
+		let until: string | null = null;
+		if (untilIso !== null) {
+			const untilMs = Date.parse(untilIso);
+			if (Number.isNaN(untilMs)) throw new Error(`memoryEntriesCreatedAfter: "${untilIso.slice(0, 40)}" is not an instant`);
+			if (untilMs < afterMs) throw new Error("memoryEntriesCreatedAfter: the upper bound is before the lower bound");
+			until = new Date(untilMs).toISOString();
+		}
+		return this.plane("memory.forget.select", async () => {
+			const rows = (await this.sql`
+				select * from memory_entries
+				where session_id = ${sessionId}
+				  ${graph === null ? this.sql`` : this.sql`and graph_id = ${graph}`}
+				  ${writer === null ? this.sql`` : this.sql`and writer = ${writer}`}
+				  and superseded_by is null
+				  and date_trunc('milliseconds', created) > ${after}::timestamptz
+				  ${until === null ? this.sql`` : this.sql`and date_trunc('milliseconds', created) <= ${until}::timestamptz`}
+				order by created asc, id asc
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { entries: rows.slice(0, limit).map((row) => toMemoryEntry(row)), truncated: rows.length > limit };
+		});
+	}
+
+	/**
+	 * True when ANOTHER entry in force shares this entry's plane document. A subject-addressed entry's document id is
+	 * derived from (scope, kind, subject) (`retainDocumentId`) and lives in its WRITER's bank (`bankForSurface`), so
+	 * every live entry of the same writer with that triple writes to one document; deleting it for a forgotten entry
+	 * would remove memory that is still in force. A live entry of another writer has its own document in its own
+	 * bank and does not share this one. A subject-less entry has a document of its own and is never shared. The
+	 * `documentShared` dependency of `forgetEntries`; the service asks it inside the document's retain queue.
+	 */
+	async memoryDocumentShared(entry: Pick<MemoryEntry, "id" | "scope" | "kind" | "subject" | "writer">): Promise<boolean> {
+		const subject = entry.subject;
+		if (subject === undefined || subject.length === 0) return false;
+		return this.plane("memory.forget.shared", async () => {
+			const rows = (await this.sql`
+				select 1 as shared from memory_entries
+				where scope = ${entry.scope} and kind = ${entry.kind} and subject = ${subject} and writer = ${entry.writer}
+				  and id <> ${entry.id} and superseded_by is null
+				limit 1`) as Array<Record<string, unknown>>;
+			return rows.length > 0;
+		});
+	}
+
+	/**
+	 * Which of these entry ids are forgotten (their `superseded_by` is a forget marker). The recall leg uses it to drop
+	 * a Hindsight hit whose document outlived the forget (a pending plane deletion): the text of a forgotten entry
+	 * must not be served from the plane while its deletion is retried. An id with no row, or one that is current or
+	 * really superseded, is not in the answer. At most {@link MAX_FORGET_LOOKUP_IDS} ids are read.
+	 */
+	async forgottenEntryIds(ids: readonly string[]): Promise<Set<string>> {
+		const distinct = [...new Set(ids)];
+		if (distinct.length === 0) return new Set();
+		if (distinct.length > MAX_FORGET_LOOKUP_IDS) throw new Error(`forgottenEntryIds: ${distinct.length} ids exceeds the ${MAX_FORGET_LOOKUP_IDS}-id bound`);
+		return this.plane("memory.forget.lookup", async () => {
+			const rows = (await this.sql`
+				select id from memory_entries
+				where id in ${this.sql(distinct)} and superseded_by like ${`${FORGET_MARKER_PREFIX}%`}`) as Array<Record<string, unknown>>;
+			return new Set(rows.map((row) => String(row.id)));
+		});
+	}
+
+	/**
 	 * Record a source on an entry that has none. The retain replay reads this
 	 * column, so a retry that only reports the source leaves the queued lesson
 	 * unsourced. A row that already has this source is unchanged; a different
@@ -2003,7 +2544,7 @@ export class IndexStore implements MemoryStore {
 		includeSuperseded = false,
 		read?: MemoryReadOptions,
 	): Promise<MemoryEntry[]> {
-		return (await this.searchMemoryPage({ query, scope, limit, includeSuperseded }, read)).entries;
+		return (await this.searchMemoryPage({ query, ...(scope === undefined ? {} : { scope }), limit, includeSuperseded }, read)).entries;
 	}
 
 	/**
@@ -2527,6 +3068,9 @@ function timestamp(value: unknown): string {
 }
 
 function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
+	const subject = optional(row.subject);
+	const ttl = optional(row.ttl);
+	const detail = optional(row.detail);
 	return {
 		id: String(row.id),
 		scope: String(row.scope),
@@ -2535,11 +3079,11 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
 		reason: String(row.reason),
 		created: timestamp(row.created),
 		text: String(row.body),
-		...(optional(row.subject) ? { subject: optional(row.subject) } : {}),
+		...(subject ? { subject } : {}),
 		// Review rows only: the quarantine table holds no retention, because a
 		// quarantined write never got as far as being kept for anything.
-		...(optional(row.ttl) ? { ttl: optional(row.ttl) } : {}),
-		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
+		...(ttl ? { ttl } : {}),
+		...(detail ? { detail } : {}),
 	};
 }
 
@@ -2585,16 +3129,24 @@ function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {
 
 export function toMemoryEntry(row: Record<string, unknown>, now = Date.now()): MemoryEntry {
 	const reverifyAfter = optional(row.reverify_after);
+	const subject = optional(row.subject);
+	const sourceEvent = optional(row.source_event);
+	const sessionId = optional(row.session_id);
+	const graphId = optional(row.graph_id);
+	const repo = optional(row.repo);
+	const supersedes = optional(row.supersedes);
+	const supersededBy = optional(row.superseded_by);
+	const idempotencyKey = optional(row.idempotency_key);
 	return {
 		id: String(row.id),
 		scope: String(row.scope),
 		kind: row.kind as MemoryEntry["kind"],
 		text: String(row.body),
-		subject: optional(row.subject),
-		source_event: optional(row.source_event),
-		session_id: optional(row.session_id),
-		graph_id: optional(row.graph_id),
-		repo: optional(row.repo),
+		...(subject === undefined ? {} : { subject }),
+		...(sourceEvent === undefined ? {} : { source_event: sourceEvent }),
+		...(sessionId === undefined ? {} : { session_id: sessionId }),
+		...(graphId === undefined ? {} : { graph_id: graphId }),
+		...(repo === undefined ? {} : { repo }),
 		writer: String(row.writer),
 		actor: (row.actor === "human" ? "human" : "agent") as Actor,
 		trust: row.trust as MemoryEntry["trust"],
@@ -2603,12 +3155,12 @@ export function toMemoryEntry(row: Record<string, unknown>, now = Date.now()): M
 		// `version` predates the gate on rows written in Phase 0, where the column
 		// default backfilled it to 1 — which is what those entries honestly were.
 		version: Number(row.version ?? 1),
-		supersedes: optional(row.supersedes),
-		superseded_by: optional(row.superseded_by),
+		...(supersedes === undefined ? {} : { supersedes }),
+		...(supersededBy === undefined ? {} : { superseded_by: supersededBy }),
 		entry_hash: String(row.entry_hash ?? ""),
 		...(reverifyAfter ? { reverify_after: reverifyAfter } : {}),
 		// Derived, not stored: an entry decays where it sits, without a sweeper job.
 		needs_reverification: needsReverification(reverifyAfter, now),
-		idempotency_key: optional(row.idempotency_key),
+		...(idempotencyKey === undefined ? {} : { idempotency_key: idempotencyKey }),
 	};
 }

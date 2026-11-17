@@ -42,10 +42,20 @@ describe("buildFabricCompliance", () => {
 		expect(check(facts, "db-endpoint-policy-enforce").status).toBe("NOT_APPLICABLE");
 	});
 
+	test("a TEI URL that is neither loopback nor an allowed proxy fails the TEI endpoint check; loopback and proxy pass; unset is not applicable", () => {
+		const direct = check(healthyFacts({ tei: { endpointClass: "direct", model: "m", modelSource: "pinned", dimension: 3, latencyMs: 1 } }), "tei-endpoint-private");
+		expect(direct.status).toBe("FAIL");
+		expect(direct.evidence).not.toContain("http");
+		expect(check(healthyFacts(), "tei-endpoint-private")).toMatchObject({ status: "PASS", evidence: "tei endpoint is loopback" });
+		const proxied = healthyFacts({ tei: { endpointClass: "proxy", model: "m", modelSource: "pinned", dimension: 3, latencyMs: 1 } });
+		expect(check(proxied, "tei-endpoint-private").status).toBe("PASS");
+		expect(check(unconfiguredFacts(), "tei-endpoint-private").status).toBe("NOT_APPLICABLE");
+	});
+
 	test("an unconfigured resource is never a pass: every resource check is not applicable", () => {
 		const { checks } = report(unconfiguredFacts());
 		const resourceChecks = checks.filter((candidate) => candidate.id.startsWith("resource-state."));
-		expect(resourceChecks).toHaveLength(6);
+		expect(resourceChecks).toHaveLength(9);
 		for (const candidate of resourceChecks) expect(candidate.status).toBe("NOT_APPLICABLE");
 	});
 
@@ -55,6 +65,17 @@ describe("buildFabricCompliance", () => {
 		});
 		expect(check(facts, "resource-state.ragflow")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.ragflow" });
 		expect(check(facts, "resource-state.greptime").status).toBe("PASS");
+	});
+
+	test("a LightRAG that does not answer fails its check, and an unconfigured one is not applicable", () => {
+		const facts = healthyFacts({
+			services: { ...healthyFacts().services, lightrag: { configured: true, held: false, answered: false, breaker: "closed", degraded: false, source: "health().planes.lightrag" } },
+		});
+		expect(check(facts, "resource-state.lightrag")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.lightrag" });
+		const absent = healthyFacts({
+			services: { ...healthyFacts().services, lightrag: { configured: false, held: false, answered: null, breaker: "off", degraded: false, source: "health().planes.lightrag" } },
+		});
+		expect(check(absent, "resource-state.lightrag").status).toBe("NOT_APPLICABLE");
 	});
 
 	test("every fabric tool is fail-open in the audit, so the audit check passes", () => {
@@ -67,6 +88,13 @@ describe("buildFabricCompliance", () => {
 
 	test("a clean report passes the redaction check", () => {
 		expect(check(healthyFacts(), "report-redaction").status).toBe("PASS");
+	});
+
+	test("a model only observed from /info is reported and passes the redaction check, and a secret-shaped one fails it", () => {
+		const observed = healthyFacts({ tei: { endpointClass: "loopback", model: "seen-model", modelSource: "observed", dimension: null, latencyMs: 9 } });
+		expect(check(observed, "report-redaction").status).toBe("PASS");
+		const leaky = healthyFacts({ tei: { endpointClass: "loopback", model: `sk-${"a".repeat(24)}`, modelSource: "observed", dimension: null, latencyMs: 9 } });
+		expect(check(leaky, "report-redaction").status).toBe("FAIL");
 	});
 
 	test("a secret-shaped value in a report field fails the redaction check", () => {

@@ -6,7 +6,7 @@
  * actual subprocess — the CLI is a script with top-level side effects, so spawning it
  * is the only honest way to prove the command works rather than the function it calls.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -26,6 +26,7 @@ import {
 } from "./skills/propose.ts";
 import { REDACTED } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
+import { defined } from "./test-support.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
@@ -53,7 +54,7 @@ async function start(
 		config,
 		// Duck-typed stores. A test that needs `verifyGraph` to fail wants a ledger whose
 		// read throws, and standing up a real client to get that would prove nothing extra.
-		{ index: null, greptime: null, ...stores } as ConstructorParameters<typeof Substrate>[1],
+		{ index: null, greptime: null, ...stores, steering: { history: null, liveSessions: null } } as ConstructorParameters<typeof Substrate>[1],
 		observability.observer,
 	);
 	const server = createHttpServer(substrate, config, observability, options);
@@ -742,14 +743,16 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 		// Denying unconditionally made a fault in the audit path able to refuse `/brief`,
 		// which is fail-open precisely so the substrate cannot fail an agent's turn.
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		const response = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
-
-		expect(response.status).toBe(200);
-		expect(await response.text()).not.toContain("audit chain");
-		// And the fault really happened rather than the audit quietly succeeding: nothing
-		// was appended, because the encoder threw before a record existed. Without this the
-		// test would keep passing if the body stopped overflowing the encoder.
-		expect(harness.observability.audit.recent()).toEqual([]);
+		const append = spyOn(harness.observability.audit, "append").mockRejectedValue(new Error("controlled unexpected audit failure"));
+		try {
+			const response = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ surface: "omp" }) });
+			expect(response.status).toBe(200);
+			expect((await response.text()).length).toBeGreaterThan(0);
+			expect(append).toHaveBeenCalledTimes(1);
+			expect(harness.observability.audit.recent()).toEqual([]);
+		} finally {
+			append.mockRestore();
+		}
 	});
 
 	test("a fail-closed route is refused, because there the unrecorded write is worse", async () => {
@@ -767,18 +770,25 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
 		await fetch(`${harness.base}/memory`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
 
-		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
+		const appends = defined(findCounter(harness.observability.snapshot(), METRIC.auditAppends), "audit appends counter");
 		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(1);
 		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(0);
 	});
 
 	test("a fail-open route's fault is counted as an allowed record that was lost", async () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
-		await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: deeplyNested() });
-
-		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
-		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(1);
-		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(0);
+		const append = spyOn(harness.observability.audit, "append").mockRejectedValue(new Error("controlled unexpected audit failure"));
+		try {
+			const response = await fetch(`${harness.base}/brief`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ surface: "omp" }) });
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(append).toHaveBeenCalledTimes(1);
+			const appends = defined(findCounter(harness.observability.snapshot(), METRIC.auditAppends), "audit appends counter");
+			expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(1);
+			expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(0);
+		} finally {
+			append.mockRestore();
+		}
 	});
 });
 
@@ -1364,11 +1374,15 @@ describe("POST /skills/propose", () => {
 		redactions: [],
 	};
 
-	/** A proposer that records its calls and answers (or throws) what the test says. */
+	/**
+	 * A proposer that records its calls and answers (or throws) what the test says. It runs `beforeWork` first,
+	 * as the real proposer does after its ledger replay, so a version refusal stops it before any call is recorded.
+	 */
 	function proposer(answer: ProposeResult | Error = opened) {
 		const calls: Array<{ input: Parameters<SkillProposer["propose"]>[0]; opts: Omit<ProposeOptions, "run"> }> = [];
 		const seam: SkillProposer = {
 			propose: async (input, opts) => {
+				await opts.beforeWork?.(null);
 				calls.push({ input, opts });
 				if (answer instanceof Error) throw answer;
 				return answer;
@@ -1417,8 +1431,29 @@ describe("POST /skills/propose", () => {
 		expect(calls[0]?.opts).toMatchObject({ maxBytes: 1_000_000, mode: "overlay", dryRun: false, reopen: false });
 	});
 
+	test("a stale expected_version is a 409 conflict, and nothing is proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		// No index is wired, so no version of the skill is on record: expecting version 1 is stale.
+		const stale = await propose(harness, "tok-agent", { ...body, expected_version: 1 });
+		expect(stale.status).toBe(409);
+		expect(stale.json).toMatchObject({
+			outcome: "conflict",
+			reason: "version.stale",
+			verified_persisted: false,
+			current_version: null,
+		});
+		expect(calls).toEqual([]);
+
+		// Expecting none on record is the one version that passes, so the 409 above is the check, not the route.
+		const first = await propose(harness, "tok-agent", { ...body, expected_version: 0 });
+		expect(first.status).toBe(200);
+		expect(calls).toHaveLength(1);
+	});
+
 	test.each(["existing", "unchanged", "declined", "dry_run"] as const)("a %s result is a 200 with the same body", async (status) => {
-		const result: ProposeResult = { ...opened, status, pr_url: undefined };
+		const { pr_url: _prUrl, ...unlinked } = opened;
+		const result: ProposeResult = { ...unlinked, status };
 		const harness = await start(TOKENS, { skills: proposer(result).seam });
 		const reply = await propose(harness, "tok-agent");
 		expect(reply.status).toBe(200);
@@ -1565,7 +1600,9 @@ describe("desktop_run at the HTTP gate", () => {
 		const bytesPerLine = W * unit + 4;
 		const header = Buffer.alloc(100);
 		const fields = [100 + name.length, 7, 2, 24, W, H, 0, 0, 32, 0, 32, 32, bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, 0, W, H, 0, 0, 0];
-		fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
+		fields.forEach((value, i) => {
+			header.writeUInt32BE(value, i * 4);
+		});
 		const pixels = Buffer.alloc(bytesPerLine * H);
 		for (let y = 0; y < H; y++) {
 			for (let x = 0; x < W; x++) {
@@ -1618,6 +1655,7 @@ describe("desktop_run at the HTTP gate", () => {
 						return { code: 0, stdout: Buffer.from(""), stderr: "" };
 					},
 					dir,
+					lockPort: 0,
 					sleep: async () => {},
 				}),
 			},

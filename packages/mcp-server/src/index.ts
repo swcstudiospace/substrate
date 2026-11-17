@@ -18,6 +18,7 @@ import { gatedFetch } from "@substrate/observability";
 import {
 	ConfigError,
 	configWarnings,
+	contextualRecallConfigWarnings,
 	desktopConfigWarnings,
 	eventIdempotencyConfigWarnings,
 	hashVersionConfigWarnings,
@@ -30,11 +31,13 @@ import {
 	sloConfigWarnings,
 	swarmTokenWarnings,
 } from "./config.ts";
+import type { SubstrateConfig } from "./config.ts";
 import { briefProfileConfigWarnings } from "./brief-profile.ts";
+import { planningConfigWarnings } from "./planning/config.ts";
 import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
 import { briefRecallConfigWarnings } from "./recall-snapshot.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
-import { createObservability } from "./observe.ts";
+import { auditToolCalls, createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SloNotifier } from "./slo-notify.ts";
@@ -44,7 +47,7 @@ import { createWatchdog, livezUrlFor } from "./watchdog.ts";
 import { MentalModelRefresh } from "./mental-model-refresh.ts";
 import { hindsightFromEnv, hindsightOp } from "./planes/hindsight.ts";
 
-let config;
+let config: SubstrateConfig;
 try {
 	// The one host probe `loadConfig` takes: whether the state directory exists,
 	// so an unset SUBSTRATE_SLO_CHECKPOINT lands in it on a deployed host and
@@ -65,6 +68,7 @@ const substrate = new Substrate(
 	config,
 	{ desktop: createDesktopDriver({ run: bufferRunner, dir: config.desktopDir }) },
 	observability.observer,
+	{ auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport) },
 );
 substrate.startPlanningPoll();
 
@@ -87,8 +91,10 @@ for (const warning of [
 	...briefRecallConfigWarnings(config),
 	...hindsightInventoryConfigWarnings(config),
 	...requestPathConfigWarnings(config),
+	...contextualRecallConfigWarnings(config),
 	...eventIdempotencyConfigWarnings(config),
 	...config.mentalModels.warnings,
+	...planningConfigWarnings(config.planning),
 ]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
@@ -116,6 +122,13 @@ const migration = await substrate.migrate();
 for (const problem of migration.errors) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
+// v1.7 phase 66: with SUBSTRATE_DOCS_TELEMETRY=on, one bounded retention pass now and one an hour (the migration above made the table). Off: nothing runs.
+substrate.startRetrievalSweep();
+
+// Phase 58 (live steering): restore the durable inbox before the server answers, then start its expiry timer (unref'd).
+// Off, with nothing read, unless SUBSTRATE_PLANNING_STEERING and the audit table opt-in are both on; a failed read is
+// reported and the inbox starts empty, so it never refuses boot.
+await substrate.startSteering();
 
 // uplift-4 S6: the durable metrics history, only under SUBSTRATE_METRICS_HISTORY=on.
 // Samples the registry into `metric_samples` through the ledger client; fail-open,
@@ -124,6 +137,7 @@ const metricsHistory = new MetricsHistorySampler({
 	settings: { enabled: config.metricsHistory.enabled, intervalS: config.metricsHistory.intervalS, series: config.metricsHistory.series },
 	snapshot: () => observability.snapshot(),
 	runwayDays: () => observability.evaluateCapacity()[0]?.observed ?? null,
+	beforeSample: () => substrate.refreshCorpusReadings(),
 	record: async (rows) =>
 		substrate.greptime === null
 			? { stored: 0, drops: { unavailable: rows.length } }
@@ -180,6 +194,8 @@ server.listen(config.port, config.host, () => {
 	void substrate.emitDbEndpoints();
 	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
 	const background = substrate.startRecall();
+	// Phase 52: the planning observer's scan timer. Off while SUBSTRATE_PLANNING_ROOT is unset; unref'd.
+	substrate.startPlanning();
 	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
 	if (background.inventory) process.stdout.write(`[substrate] hindsight inventory: on, every ${config.hindsightInventory.intervalS} s, read-only\n`);
 	// Memory governance: the weekly mental-model refresh, named by HINDSIGHT_MENTAL_MODELS. Unref'd; the first pass
@@ -197,6 +213,8 @@ server.listen(config.port, config.host, () => {
 const SHUTDOWN_FLUSH_MS = 2000;
 /** How long in-flight background retains may take before shutdown stops waiting for them. */
 const SHUTDOWN_RETAIN_MS = 10_000;
+/** How long in-flight planning transition records may take before shutdown stops waiting for them. */
+const SHUTDOWN_TRANSITION_MS = 5000;
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, () => {
@@ -205,6 +223,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		// Before the flush below: no new lag pass starts once shutdown began.
 		docsLagTimer.stop();
 		substrate.stopPlanningPoll();
+		substrate.stopRetrievalSweep();
 		// The weekly refresh timer is cleared with the others; a pass in flight is awaited in the bound below.
 		mentalModelRefresh?.stop();
 		// Cancelled first and awaited with the flush below: no ping after shutdown began,
@@ -215,6 +234,10 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		const recallStopped = substrate.stopRecall();
 		// Phase 47: the cache preloader's timer is cleared with them; a tick in flight finishes on its own.
 		substrate.stopPreload();
+		// Phase 52: the planning observer's timer is cleared now; a scan in flight is awaited inside the bound below.
+		const planningStopped = substrate.stopPlanning();
+		// Phase 58: the steering expiry timer is cleared with them; a pass in flight is awaited inside the same bound.
+		const steeringStopped = substrate.stopSteering();
 		// Phase 50: the wake-up hint connections close with the timers; no subscriber outlives the shutdown.
 		substrate.stopEventBus();
 		observability.stop();
@@ -224,6 +247,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// answered before its forward landed must not lose that forward
 			// silently on restart (the durable outbox keeps the rest).
 			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
+			// Planning transition records in flight are awaited within their own bound, after the retains and before the flush below.
+			await substrate.planningObserver.settleTransitions(Bun.sleep(SHUTDOWN_TRANSITION_MS));
 			// The last export before shutdown, so the counters a restart resets are not
 			// simply lost — and *awaited*, within a bound. Firing it and exiting
 			// immediately lost it on an idle server, where the close callback runs at once
@@ -241,6 +266,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					mentalModelRefresh?.flush(),
 					watchdogStopped,
 					recallStopped,
+					planningStopped,
+					steeringStopped,
 				]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);

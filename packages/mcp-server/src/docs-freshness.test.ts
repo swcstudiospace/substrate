@@ -9,6 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
+import { FakeStore } from "./corpus/testkit.ts";
 import {
 	DATASET_TRIGGER_RETENTION,
 	TRIGGER_SCAN_MAX,
@@ -20,9 +21,11 @@ import {
 	type VersionStore,
 } from "./docs-datasets.ts";
 import {
+	CORPUS_FRESHNESS_DATASET,
 	GAUGE_FRESHNESS_SECONDS,
 	GAUGE_TRIGGER_LAG_SECONDS,
 	applyLagActions,
+	corpusFreshnessRow,
 	LagSettler,
 	createFreshnessState,
 	evaluateFreshness,
@@ -288,7 +291,7 @@ describe("the lag warning's dedupe", () => {
 			const stored = normalizeEvent(event, null);
 			expect(stored.surface).toBe("substrate");
 			expect((event.summary ?? "").length).toBeLessThan(120);
-			expect(String((event.payload ?? {}).commit).length).toBe(64);
+			expect(String(event.payload?.commit).length).toBe(64);
 			expect(stored.kind).toBe(event.kind);
 		}
 		expect(warning.kind).toBe("warning");
@@ -658,9 +661,15 @@ describe("the lag timer", () => {
 				setInterval: (handler, ms) => {
 					calls.setInterval.push(ms);
 					tick = handler;
-					return { unref: () => void (calls.unref += 1) };
+					return {
+						unref: () => {
+							calls.unref += 1;
+						},
+					};
 				},
-				clearInterval: () => void (calls.cleared += 1),
+				clearInterval: () => {
+					calls.cleared += 1;
+				},
 			},
 		});
 		return { timer, calls, tick: () => tick(), gate };
@@ -928,5 +937,109 @@ describe("accepting a merge-trigger never waits on the state save", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("the corpus's freshness (v1.7 phase 65)", () => {
+	const DAY_S = 86_400;
+	const LIMIT_S = 2 * DAY_S;
+	const ago = (seconds: number): string => new Date(NOW - seconds * 1000).toISOString();
+	const judged = (lastIngestAt: string | null, maxAgeS = LIMIT_S) => corpusFreshnessRow({ lastIngestAt, now: NOW, maxAgeS });
+
+	test("a corpus is stale only past the age limit; with the limit at 0, nothing ingested, or an unreadable instant it is not judged", () => {
+		expect(judged(ago(LIMIT_S))).toMatchObject({ dataset: CORPUS_FRESHNESS_DATASET, stale: false, lagging: false, trigger_lag_seconds: LIMIT_S });
+		expect(judged(ago(LIMIT_S + 1))).toMatchObject({ stale: true, lagging: true, trigger_lag_seconds: LIMIT_S + 1 });
+		expect(judged(ago(99 * DAY_S), 0)).toBeNull();
+		expect(judged(null)).toBeNull();
+		expect(judged("not a date")).toBeNull();
+		// A manifest stamped ahead of this clock is fresh, never negative.
+		expect(judged(new Date(NOW + HOUR).toISOString())).toMatchObject({ trigger_lag_seconds: 0, stale: false });
+	});
+
+	test("its events name the corpus, the age and the limit in seconds, and carry no commit", () => {
+		const settings: FreshnessSettings = { ...SETTINGS, corpusMaxAgeS: LIMIT_S };
+		const warning = lagWarningEvent({ type: "breach", dataset: CORPUS_FRESHNESS_DATASET, commit: ago(3 * DAY_S), lagSeconds: 3 * DAY_S }, settings);
+		expect(warning).toMatchObject({ kind: "warning", surface: "substrate", payload: { action: "docs.freshness", state: "lagging", dataset: "corpus", lag_seconds: 3 * DAY_S, threshold_seconds: LIMIT_S } });
+		expect(warning.payload).not.toHaveProperty("commit");
+		const recovered = lagRecoveryEvent({ type: "recover", dataset: CORPUS_FRESHNESS_DATASET, commit: ago(3 * DAY_S), warned: true }, settings);
+		expect(recovered).toMatchObject({ kind: "note", payload: { action: "docs.freshness", state: "recovered", dataset: "corpus", threshold_seconds: LIMIT_S } });
+		expect(recovered.payload).not.toHaveProperty("commit");
+	});
+
+	test("its marker survives the state file like a dataset's, and a marker for an unknown name is still dropped", () => {
+		const marker = { since: ago(60), commit: ago(3 * DAY_S), warned: true };
+		const state = freshnessStateFromJson({ lag: { corpus: marker, "not-a-dataset": marker } });
+		expect([...state.lag.keys()]).toEqual(["corpus"]);
+		expect(freshnessStateToJson(state).lag).toEqual({ corpus: marker });
+	});
+
+	function corpusServer(env: Record<string, string>, fake: FakeStore) {
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_CORPUS: "on", ...env }), { index: null, greptime: null, corpus: { store: fake } });
+		const events: EventInput[] = [];
+		spyOn(substrate, "emit").mockImplementation(async (event) => {
+			events.push(event);
+			return { event: normalizeEvent(event, null), stored: true };
+		});
+		const pass = async (now: number): Promise<void> => {
+			await substrate.settleDocsLag(now);
+			await substrate.docsLagIdle();
+		};
+		return { events, pass };
+	}
+
+	test("a corpus past the limit warns once however many passes the breach lasts, and says so once when a fresh ingest clears it", async () => {
+		const fake = new FakeStore();
+		fake.lastIngestAt = ago(3 * DAY_S);
+		const { events, pass } = corpusServer({}, fake);
+		await pass(NOW);
+		await pass(NOW + MIN);
+		await pass(NOW + 2 * MIN);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ kind: "warning", payload: { action: "docs.freshness", dataset: "corpus", state: "lagging", lag_seconds: 3 * DAY_S, threshold_seconds: LIMIT_S } });
+
+		fake.lastIngestAt = new Date(NOW + 3 * MIN).toISOString();
+		await pass(NOW + 4 * MIN);
+		await pass(NOW + 5 * MIN);
+		expect(events.map((event) => [event.kind, event.payload?.state])).toEqual([
+			["warning", "lagging"],
+			["note", "recovered"],
+		]);
+	});
+
+	test("a manifest that cannot be read in a pass is not a recovery: the warning stays and is not repeated when it answers again", async () => {
+		const fake = new FakeStore();
+		fake.lastIngestAt = ago(3 * DAY_S);
+		const { events, pass } = corpusServer({}, fake);
+		await pass(NOW);
+		const status = spyOn(fake, "status").mockRejectedValue(new Error("connection lost"));
+		await pass(NOW + MIN);
+		await pass(NOW + 2 * MIN);
+		status.mockRestore();
+		await pass(NOW + 3 * MIN);
+		expect(events.map((event) => event.payload?.state)).toEqual(["lagging"]);
+	});
+
+	test("with the corpus off, the limit at 0, or nothing ever ingested, no pass judges it", async () => {
+		const stale = new FakeStore();
+		stale.lastIngestAt = ago(30 * DAY_S);
+		const off = corpusServer({ SUBSTRATE_CORPUS: "off" }, stale);
+		await off.pass(NOW);
+		const unlimited = corpusServer({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "0" }, stale);
+		await unlimited.pass(NOW);
+		const empty = corpusServer({}, new FakeStore());
+		await empty.pass(NOW);
+		expect([off.events, unlimited.events, empty.events]).toEqual([[], [], []]);
+	});
+
+	test("the limit is the one the operator set", async () => {
+		const fake = new FakeStore();
+		fake.lastIngestAt = ago(2 * 3600);
+		const tight = corpusServer({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "3600" }, fake);
+		await tight.pass(NOW);
+		expect(tight.events).toHaveLength(1);
+		expect(tight.events[0]?.payload).toMatchObject({ threshold_seconds: 3600 });
+		const loose = corpusServer({}, fake);
+		await loose.pass(NOW);
+		expect(loose.events).toEqual([]);
 	});
 });

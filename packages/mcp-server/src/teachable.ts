@@ -44,7 +44,7 @@ export function isTeachable(kind: MemoryKind | string, subject: unknown): boolea
  */
 export function teachableSlug(subject: unknown): string | null {
 	const normalized = normalizeSubject(subject);
-	if (!normalized || !normalized.startsWith(TEACHABLE_SUBJECT_PREFIX)) return null;
+	if (!normalized?.startsWith(TEACHABLE_SUBJECT_PREFIX)) return null;
 	const slug = normalized.slice(TEACHABLE_SUBJECT_PREFIX.length);
 	return slug ? slug : null;
 }

@@ -88,6 +88,12 @@ export interface SloThresholds {
 	runwayDays?: number;
 }
 
+/**
+ * What a caller may hand over. `loadObservabilityConfig` yields `undefined` for every
+ * threshold the operator left unset, and `stripUndefined` keeps the default for those.
+ */
+export type SloOverrides = { [K in keyof SloThresholds]?: number | undefined };
+
 export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
 	briefP95Ms: 800,
 	emitSuccessRatio: 0.995,
@@ -106,7 +112,7 @@ export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
 	runwayDays: 14,
 };
 
-export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
+export function sloCatalogue(overrides: SloOverrides = {}): SloTarget[] {
 	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
 	return [
 		{
@@ -157,8 +163,8 @@ export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
 	];
 }
 
-function stripUndefined<T extends object>(value: T): Partial<T> {
-	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
+function stripUndefined(value: SloOverrides): SloThresholds {
+	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as SloThresholds;
 }
 
 export type SloStatus = "ok" | "breached" | "insufficient-data" | "unmeasurable";
@@ -339,8 +345,8 @@ export function evaluateSlos(snapshot: MetricSnapshot[], catalogue: SloTarget[] 
  * `admission.limited_rate`: refusals ÷ decisions of `substrate.admission.decisions`,
  * at most 1 %. Beside the catalogue like the plane and burn objectives, because
  * the catalogue is pinned to SPE-4793's four. `decided` is every decision the
- * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass`
- * (the cache not answering) neither helps nor hurts the rate; `limited` alone is
+ * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass` or a
+ * `refused` (the cache not answering) neither helps nor hurts the rate; `limited` alone is
  * the numerator, so in `shadow` mode the rate is 0 whatever the shadow refusals
  * say, and the shadow count is read from the metric while the budgets are tuned.
  * 100 decisions before it is judged: a 1 % ceiling cannot be told from noise on
@@ -358,13 +364,15 @@ export const ADMISSION_SLO: Exclude<SloTarget, { kind: "latency-quantile" }> = {
 };
 
 /**
- * The bypasses are not decisions, so they are taken out of the denominator
- * rather than summed by `evaluateRatio`: a cache outage must not dilute the
- * refusal rate into `ok`.
+ * Only the bucket's own decisions (`allowed`, `limited`, `shadow_limited`) form the
+ * denominator. `bypass` and `refused` are not decisions: a cache outage must not dilute
+ * the refusal rate into `ok`, so 97 allowed, 3 limited and 900 refused is 3 %, a breach.
  */
 export function evaluateAdmissionSlo(snapshot: MetricSnapshot[], target = ADMISSION_SLO): SloResult {
 	const counter = findCounter(snapshot, target.denominator.metric);
-	const decided = counter ? sumCounter(counter) - sumCounter(counter, { decision: "bypass" }) : 0;
+	const decided = counter
+		? ["allowed", "limited", "shadow_limited"].reduce((total, decision) => total + sumCounter(counter, { decision }), 0)
+		: 0;
 	const limited = counter ? sumCounter(counter, target.numerator.where) : 0;
 	const base = { id: target.id, title: target.title, statement: target.statement, unit: "ratio" as const, target: target.target };
 	if (decided < target.minSamples) {
@@ -403,7 +411,7 @@ export function breaches(results: SloResult[]): SloResult[] {
  * its consumers assert that list; it surfaces as the sibling `docs` array on
  * `GET /slo` and is never folded into `breached`.
  */
-export function docsSearchObjective(overrides: SloThresholds = {}): SloTarget {
+export function docsSearchObjective(overrides: SloOverrides = {}): SloTarget {
 	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
 	return {
 		kind: "latency-quantile",
@@ -418,7 +426,7 @@ export function docsSearchObjective(overrides: SloThresholds = {}): SloTarget {
 }
 
 /** The `docs` array `GET /slo` serves: one row, `docs.search.p95`, in the catalogue's entry shape. */
-export function evaluateDocsSlos(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SloResult[] {
+export function evaluateDocsSlos(snapshot: MetricSnapshot[], overrides: SloOverrides = {}): SloResult[] {
 	return evaluateSlos(snapshot, [docsSearchObjective(overrides)]);
 }
 
@@ -441,7 +449,7 @@ export interface SurfaceSloResult extends SloResult {
  * call. Served as the sibling `surfaces` array on `GET /slo`, in the
  * catalogue's entry shape plus `surface`, and never folded into `breached`.
  */
-export function briefBySurfaceObjectives(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SurfaceSloResult[] {
+export function briefBySurfaceObjectives(snapshot: MetricSnapshot[], overrides: SloOverrides = {}): SurfaceSloResult[] {
 	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
 	const histogram = findHistogram(snapshot, METRIC.briefDuration);
 	if (!histogram) return [];
@@ -569,7 +577,7 @@ export class PlaneWindow {
 
 	observe(plane: PlaneName, ok: number, total: number, atMs: number): PlaneWindowReading {
 		const samples = this.byPlane[plane] ?? [];
-		while (samples.length > 0 && samples[0]!.atMs < atMs - this.windowMs) samples.shift();
+		for (let first = samples[0]; first !== undefined && first.atMs < atMs - this.windowMs; first = samples[0]) samples.shift();
 		const last = samples[samples.length - 1];
 		if (last !== undefined && (total < last.total || ok < last.ok)) samples.length = 0;
 		if (last !== undefined && samples.length > 0 && Math.floor(last.atMs / this.bucketMs) === Math.floor(atMs / this.bucketMs)) {
@@ -584,7 +592,8 @@ export class PlaneWindow {
 		const cap = Math.ceil(this.windowMs / this.bucketMs) + 1;
 		if (samples.length > cap) samples.splice(0, samples.length - cap);
 		this.byPlane[plane] = samples;
-		const base = samples[0]!;
+		// The push above guarantees an entry; the fallback only keeps the types honest.
+		const base = samples[0] ?? { atMs, ok, total, baseAtMs: atMs, baseOk: ok, baseTotal: total };
 		return { ok: ok - base.baseOk, total: total - base.baseTotal, spanMs: atMs - base.baseAtMs, samples: samples.length };
 	}
 }
@@ -819,7 +828,7 @@ export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOp
 		];
 	}
 	const spanMs = newest !== undefined && oldest !== undefined ? newest.at - oldest.at : 0;
-	if (samples.length < 2 || spanMs < minSpanMs) {
+	if (newest === undefined || oldest === undefined || samples.length < 2 || spanMs < minSpanMs) {
 		return [
 			{
 				...base,
@@ -845,7 +854,7 @@ export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOp
 		sxx += dt * dt;
 	}
 	const bytesPerDay = sxx > 0 ? (sxy / sxx) * DAY_MS : 0;
-	const current = newest!.databaseBytes;
+	const current = newest.databaseBytes;
 	const remaining = options.volumeBytes - current;
 	const mb = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MiB`;
 	if (remaining <= 0) {

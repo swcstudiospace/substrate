@@ -9,10 +9,11 @@
 import { describe, expect, test } from "bun:test";
 import { auditMode } from "../../audit/src/policy.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
+import { forwardRetain } from "./memory-retain.ts";
 import { recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type RecallDeps } from "./memory-recall.ts";
 import { mergeDerivedHits } from "./memory-search.ts";
 import { normalizeRoute, toolLabel } from "./observe.ts";
-import type { HindsightConfig } from "./planes/hindsight.ts";
+import { clearEnsuredBanks, type HindsightConfig } from "./planes/hindsight.ts";
 import type { MemoryEntry } from "./types.ts";
 
 const CONFIG: HindsightConfig = { url: "http://fake", apiKey: "test-bearer", bankPrefix: "sub-" };
@@ -20,6 +21,22 @@ const CONFIG: HindsightConfig = { url: "http://fake", apiKey: "test-bearer", ban
 function deps(fake: HindsightFake, banks: string[] | null = ["sub-hermes"]): RecallDeps {
 	return { config: CONFIG, banks, fetchImpl: fake.fetch, budgetMs: 2000 };
 }
+
+/** A retainable entry; the join-key tests spread their own ids over it. */
+const ENTRY: MemoryEntry = {
+	id: "mem_join",
+	scope: "repo:acme/app",
+	kind: "fact",
+	text: "fence the lease before handoff",
+	writer: "cursor",
+	actor: "agent",
+	trust: "agent-claimed",
+	ttl: "permanent",
+	created: "2026-10-10T00:00:00.000Z",
+	version: 1,
+	entry_hash: "hash_join",
+	needs_reverification: false,
+};
 
 function seedTwo(fake: HindsightFake): void {
 	fake.seed("sub-cursor", [
@@ -123,6 +140,66 @@ describe("recallMemories", () => {
 		]);
 		const reply = await recallMemories(deps(fake), "lease", "hermes");
 		expect(reply.results.map((hit) => hit.document_id)).toEqual(["mwd_r1"]);
+	});
+
+	test("join keys in a hit's metadata reach the derived hit; a hit without them, or with non-string ones, carries none", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-hermes", [
+			{
+				id: "k1",
+				text: "lease keyed by graph",
+				document_id: "mwd_k1",
+				tags: ["hermes"],
+				metadata: { scope: "repo:acme/app", graph_id: "ut-1", session_id: "sess-1", node_id: "n2" },
+				score: 0.9,
+			},
+			{ id: "k2", text: "lease with no keys", document_id: "mwd_k2", tags: ["hermes"], metadata: { scope: "repo:acme/app" }, score: 0.5 },
+			{
+				id: "k3",
+				text: "lease with junk keys",
+				document_id: "mwd_k3",
+				tags: ["hermes"],
+				metadata: { scope: "repo:acme/app", graph_id: 7, session_id: null, node_id: { n: 1 } },
+				score: 0.4,
+			},
+		]);
+		const reply = await recallMemories(deps(fake), "lease", "hermes");
+		const byDoc = new Map(reply.results.map((hit) => [hit.document_id, hit]));
+		expect(byDoc.get("mwd_k1")).toMatchObject({ graph_id: "ut-1", session_id: "sess-1", node_id: "n2" });
+		for (const id of ["mwd_k2", "mwd_k3"]) {
+			const hit = byDoc.get(id);
+			expect(hit).toBeDefined();
+			expect(hit).not.toHaveProperty("graph_id");
+			expect(hit).not.toHaveProperty("session_id");
+			expect(hit).not.toHaveProperty("node_id");
+		}
+	});
+
+	test("an entry retained with graph_id, session_id and node_id comes back from recall with the same values", async () => {
+		clearEnsuredBanks();
+		const fake = new HindsightFake();
+		const retained = await forwardRetain(
+			{ config: CONFIG, fetchImpl: fake.fetch, emit: async () => ({ stored: true }) },
+			{ source_event: "evt_proof_run", scope: "repo:acme/app", kind: "fact", text: "x", writer: "cursor" },
+			{
+				outcome: "accepted",
+				reason: "stored",
+				remedy: "durable",
+				verified_persisted: true,
+				idempotency_key: "mwd_join",
+				writer: "cursor",
+				entry: {
+					...ENTRY,
+					graph_id: "ut-1",
+					session_id: "sess-1",
+					node_id: "n2",
+				} as MemoryEntry,
+			},
+		);
+		expect(retained.forwarded).toBe(true);
+		const reply = await recallMemories(deps(fake, null), "lease", "cursor");
+		expect(reply.results).toHaveLength(1);
+		expect(reply.results[0]).toMatchObject({ document_id: "mwd_join", graph_id: "ut-1", session_id: "sess-1", node_id: "n2" });
 	});
 
 	test("a legacy agent row with no repo stays hidden from a repo-scoped read", async () => {

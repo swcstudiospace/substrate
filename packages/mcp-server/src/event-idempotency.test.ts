@@ -17,6 +17,7 @@ import { GreptimeClient, IDEMPOTENCY_LOOKUP_LIMIT, IDEMPOTENCY_LOOKUP_MAX_PAGES 
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate, type SubstrateObserver } from "./service.ts";
+import { defined } from "./test-support.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
@@ -135,7 +136,7 @@ function fakeLedger(): FakeLedger {
 		}
 		if (statement.includes("NOT EXISTS")) {
 			// `eventIdsAfter`, as written: an event is NEW unless an earlier record sits inside the one-hour lookback.
-			const bounds = [...statement.matchAll(/"ingested_at" >= '([^']*)'/g)].map((match) => Date.parse(match[1]!));
+			const bounds = [...statement.matchAll(/"ingested_at" >= '([^']*)'/g)].map((match) => Date.parse(defined(match[1])));
 			const [at, lookback] = bounds as [number, number];
 			const fresh = ledger.ingestStamps
 				.filter((row) => row.ingested_at >= at)
@@ -153,7 +154,7 @@ function fakeLedger(): FakeLedger {
 			// statement's own LIMIT. No payload predicate: the client matches the key, so lookalikes come back.
 			const text = (column: string): string | null | undefined => {
 				const match = new RegExp(`"${column}" (?:= '((?:[^']|'')*)'|(IS NULL))`).exec(statement);
-				return match === null ? undefined : match[2] !== undefined ? null : match[1]!.replace(/''/g, "'");
+				return match === null ? undefined : match[2] !== undefined ? null : defined(match[1]).replace(/''/g, "'");
 			};
 			const ts = /"ts" = '([^']*)'/.exec(statement)?.[1];
 			const limit = Number(/LIMIT (\d+)$/.exec(statement)?.[1] ?? 0);
@@ -203,16 +204,31 @@ function substrateWith(env: Record<string, string>, seen: Seen = { replays: [], 
 	return new Substrate(loadConfig(env), { index: null, greptime }, observer);
 }
 
-const base = (extra: Partial<EventInput> = {}): EventInput => ({
-	surface: "omp",
-	kind: "shell",
-	summary: "ran cargo test",
-	session_id: "sess-1",
-	repo: "acme/widgets",
-	graph_id: "ut-1",
-	ts: FIRST_TS,
-	...extra,
-});
+/** Overrides for `base`; `undefined` on these three removes the default, so a test can ask for "no ts", "sessionless" or "no key". */
+type BaseOverrides = Omit<Partial<EventInput>, "ts" | "session_id" | "idempotency_key"> & {
+	ts?: string | undefined;
+	session_id?: string | undefined;
+	idempotency_key?: string | undefined;
+};
+
+const base = (extra: BaseOverrides = {}): EventInput => {
+	const { ts, session_id, idempotency_key, ...rest } = {
+		surface: "omp" as const,
+		kind: "shell" as const,
+		summary: "ran cargo test",
+		session_id: "sess-1",
+		repo: "acme/widgets",
+		graph_id: "ut-1",
+		ts: FIRST_TS,
+		...extra,
+	};
+	return {
+		...rest,
+		...(session_id === undefined ? {} : { session_id }),
+		...(ts === undefined ? {} : { ts }),
+		...(idempotency_key === undefined ? {} : { idempotency_key }),
+	};
+};
 
 const ACCEPT = { SUBSTRATE_EVENT_IDEMPOTENCY: "accept" };
 const ENFORCE = { SUBSTRATE_EVENT_IDEMPOTENCY: "enforce" };
@@ -236,14 +252,14 @@ describe("mode off: today's behaviour, byte for byte", () => {
 		// The one-event statement sequence is exactly the keyless one; the lookup never ran.
 		expect(shape(keyed.sql.slice(0, plainShape.length))).toEqual(plainShape);
 		expect(keyed.lookups()).toEqual([]);
-		expect(keyed.rows[0]!.payload).toBe("{}");
+		expect(defined(keyed.rows[0]).payload).toBe("{}");
 		expect(keyedSeen.replays).toEqual([]);
 	});
 
 	test("a payload `_ik` the caller wrote is left alone: stripping is part of the flag, not of today", async () => {
 		const ledger = fakeLedger();
 		await substrateWith({}).emit(base({ payload: { _ik: "caller-wrote-this", a: 1 } }));
-		expect(JSON.parse(ledger.rows[0]!.payload)).toEqual({ _ik: "caller-wrote-this", a: 1 });
+		expect(JSON.parse(defined(ledger.rows[0]).payload)).toEqual({ _ik: "caller-wrote-this", a: 1 });
 	});
 
 	test("the same replayed event is appended twice — the duplicate the flag exists to prevent", async () => {
@@ -264,7 +280,7 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 
 		expect(result.stored).toBe(true);
 		expect(ledger.lookups()).toEqual([]);
-		expect(ledger.rows[0]!.payload).toBe(`{"a":1,"b":{"c":2},"_ik":"${KEY}"}`);
+		expect(defined(ledger.rows[0]).payload).toBe(`{"a":1,"b":{"c":2},"_ik":"${KEY}"}`);
 		expect(result.event.payload._ik).toBe(KEY);
 		expect(seen.replays).toEqual([]);
 		// The key is inside the hashed event: the stored hash recomputes from the stored payload.
@@ -319,7 +335,7 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 		expect(replay.warning).toBeUndefined();
 		expect(ledger.rows).toHaveLength(1);
 		expect(ledger.inserts()).toHaveLength(1);
-		expect(ledger.ingestRecords).toEqual([{ event_id: ledger.rows[0]!.id, event_ts: FIRST_TS, graph_id: "ut-1" }]);
+		expect(ledger.ingestRecords).toEqual([{ event_id: defined(ledger.rows[0]).id, event_ts: FIRST_TS, graph_id: "ut-1" }]);
 
 		// It is now the event's first record: a further replay finds it and writes nothing.
 		await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
@@ -424,7 +440,7 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 		expect(result.stored).toBe(true);
 		expect(result.deduplicated).toBeUndefined();
 		expect(ledger.lookups()).toHaveLength(1);
-		expect(JSON.parse(ledger.rows[0]!.payload)._ik).toBe(KEY);
+		expect(JSON.parse(defined(ledger.rows[0]).payload)._ik).toBe(KEY);
 		expect(seen.replays).toEqual(["appended"]);
 	});
 
@@ -451,12 +467,12 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 
 		const replay = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
 		expect(replay.deduplicated).toBe(true);
-		expect(replay.event.id).toBe(ledger.rows[0]!.id);
+		expect(replay.event.id).toBe(defined(ledger.rows[0]).id);
 		expect(ledger.rows).toHaveLength(1);
 
 		// The session's next event chains onto the row that is really there.
 		const next = await substrate.emit(base({ summary: "after", ts: undefined }));
-		expect(next.event.prev).toBe(ledger.rows[0]!.hash);
+		expect(next.event.prev).toBe(defined(ledger.rows[0]).hash);
 		expect(verifyChain(ledger.events())).toEqual({ ok: true });
 	});
 });
@@ -555,7 +571,7 @@ describe("what the key does not do", () => {
 		const ledger = fakeLedger();
 		const substrate = substrateWith(ACCEPT);
 		await substrate.emit(base({ payload: { _ik: KEY, a: 1 } }));
-		expect(JSON.parse(ledger.rows[0]!.payload)).toEqual({ a: 1 });
+		expect(JSON.parse(defined(ledger.rows[0]).payload)).toEqual({ a: 1 });
 
 		// Not stored as a key, so a marked replay of KEY is a miss and appends.
 		const replay = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
@@ -563,7 +579,7 @@ describe("what the key does not do", () => {
 		expect(ledger.rows).toHaveLength(2);
 		// With a real key the forged one is replaced, not kept beside it.
 		await substrate.emit(base({ idempotency_key: "another-key-0002", payload: { _ik: KEY } }));
-		expect(JSON.parse(ledger.rows[2]!.payload)).toEqual({ _ik: "another-key-0002" });
+		expect(JSON.parse(defined(ledger.rows[2]).payload)).toEqual({ _ik: "another-key-0002" });
 	});
 
 	test("a `_ik` nested in someone's payload does not masquerade as the stored key", async () => {
@@ -676,7 +692,7 @@ describe("what the key does not do", () => {
 		expect(ledger.rows).toHaveLength(2);
 		expect(replay.deduplicated).toBe(true);
 		expect(replay.event.id).toBe(real.event.id);
-		expect(replay.event.id).not.toBe(ledger.rows[0]!.id);
+		expect(replay.event.id).not.toBe(defined(ledger.rows[0]).id);
 		expect(ledger.inserts()).toHaveLength(2);
 	});
 
@@ -685,7 +701,7 @@ describe("what the key does not do", () => {
 		const substrate = substrateWith(ACCEPT);
 		const huge = Object.fromEntries(Array.from({ length: 40 }, (_, index) => [`k${index}`, "x".repeat(3900)]));
 		await substrate.emit(base({ idempotency_key: KEY, payload: huge }));
-		expect(JSON.parse(ledger.rows[0]!.payload)).toMatchObject({ _dropped: expect.any(String), _ik: KEY });
+		expect(JSON.parse(defined(ledger.rows[0]).payload)).toMatchObject({ _dropped: expect.any(String), _ik: KEY });
 		const replay = await substrate.emit(base({ idempotency_key: KEY, payload: huge }), { replay: true });
 		expect(replay.deduplicated).toBe(true);
 		expect(ledger.rows).toHaveLength(1);
@@ -705,7 +721,7 @@ describe("the chain", () => {
 		expect(replay.deduplicated).toBe(true);
 		expect(replay.event.id).toBe(keyed.event.id);
 		expect(ledger.rows).toHaveLength(4);
-		expect(four.event.prev).toBe(ledger.rows[2]!.hash);
+		expect(four.event.prev).toBe(defined(ledger.rows[2]).hash);
 		expect(verifyChain(ledger.events())).toEqual({ ok: true });
 	});
 
@@ -718,7 +734,7 @@ describe("the chain", () => {
 
 		expect(late.stored).toBe(true);
 		expect(late.event.ts).toBe(long);
-		expect(late.event.prev).toBe(ledger.rows[0]!.hash);
+		expect(late.event.prev).toBe(defined(ledger.rows[0]).hash);
 		expect(verifyChain(ledger.events())).toEqual({ ok: true });
 	});
 });

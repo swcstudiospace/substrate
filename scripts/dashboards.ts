@@ -50,6 +50,9 @@ import { ALL_METRIC_SERIES, parseHistoryStep, parseHistoryWindow, type SeriesSpe
 import {
 	ADMISSION_SLO,
 	CAPACITY_RUNWAY_ID,
+	CORPUS_FRESHNESS_METRIC,
+	CORPUS_GOLDEN_RECALL5_METRIC,
+	CORPUS_INGEST_RATE_METRIC,
 	DEFAULT_THRESHOLDS,
 	ENDPOINT_PROXY_PLANES_METRIC,
 	INDEX_ARCHIVE_AGE_METRIC,
@@ -120,8 +123,12 @@ export const SERIES_SOURCES: Readonly<Record<string, string>> = {
 	"memory.expired": METRIC.memoryExpired,
 	"hindsight.outbox_size": OUTBOX_SIZE_METRIC,
 	"hindsight.outbox_oldest_age_s": OUTBOX_OLDEST_METRIC,
+	"planning.transition": "PlanningObserver scan path (planning/observer.ts)",
 	"index.archive_age_s": INDEX_ARCHIVE_AGE_METRIC,
 	"endpoint.proxy_planes": ENDPOINT_PROXY_PLANES_METRIC,
+	"corpus.freshness_seconds": CORPUS_FRESHNESS_METRIC,
+	"corpus.ingest_docs_per_s": CORPUS_INGEST_RATE_METRIC,
+	"corpus.golden_recall5": CORPUS_GOLDEN_RECALL5_METRIC,
 };
 
 /**
@@ -134,8 +141,11 @@ export const FABRIC_SERIES: Readonly<Record<FabricResourceName, { series: string
 	"timescaledb-index": { series: "capacity.runway_days", note: "The index volume's runway in days, fitted over its size history." },
 	greptime: { series: "plane.availability", note: "The greptime line is the ledger's call availability." },
 	ragflow: { series: "plane.p95", note: "The ragflow line is RAGFlow's call latency at p95." },
+	lightrag: { series: "plane.p95", note: "The lightrag line is LightRAG's call latency at p95." },
+	tei: { series: "plane.p95", note: "The tei line is the embedding service's call latency at p95." },
 	hindsight: { series: "hindsight.outbox_size", note: "Retain forwards parked for replay. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },
 	"tailscale-proxy": { series: "endpoint.proxy_planes", note: "A count of the data planes on a configured proxy (SUBSTRATE_DB_PROXY_ALLOW), set at boot from the endpoint classes. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },
+	corpus: { series: "corpus.freshness_seconds", note: "Age of the newest corpus manifest change; its objective is SUBSTRATE_DOCS_SLO_FRESHNESS_S. No point until the manifest has a change. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended." },
 };
 
 /** A history series unit as Grafana names it; a counting unit (`{decision}`, `{brief}`) is a plain number. */
@@ -276,6 +286,7 @@ function planeItems(): Item[] {
 		{ kind: "chart", series: "emit.p95", title: "Emit latency p95", note: "p95 of the time to append one event. No objective." },
 		{ kind: "chart", series: "plane.p95", title: "Plane call latency p95", note: `Per data plane (${PLANES.join(", ")}); a refused call (breaker open) carries no duration and is not in it.` },
 		{ kind: "chart", series: "docs.search", title: "Docs searches by outcome", note: "hit, empty or degraded searches per step.", stack: true, bars: true },
+		{ kind: "chart", series: "planning.transition", title: "Planning transitions by outcome", note: "One record per detected planning change: applied when the change reached the ledger, refused when it did not.", stack: true, bars: true },
 		{ kind: "row", title: "Extended series (needs SUBSTRATE_METRICS_HISTORY_SERIES=extended)" },
 		{
 			kind: "chart",
@@ -292,6 +303,8 @@ function planeItems(): Item[] {
 		{ kind: "chart", series: "hindsight.outbox_size", title: "Hindsight retain outbox size", note: "Parked retain forwards at the sample; the worst reading in a step." },
 		{ kind: "chart", series: "hindsight.outbox_oldest_age_s", title: "Hindsight retain outbox oldest age", note: "0 for an empty outbox; the worst reading in a step." },
 		{ kind: "chart", series: "index.archive_age_s", title: "Index archive age", note: "Age of the newest complete archive. No point until a first archive exists." },
+		{ kind: "chart", series: "corpus.ingest_docs_per_s", title: "Corpus ingest throughput", note: "Documents per second of the last ingest request's wall time; 0 when it sent nothing. The objective is SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S." },
+		{ kind: "chart", series: "corpus.golden_recall5", title: "Golden-set recall at 5", note: "As the docs canary last reported it. No point until a first report. The objective is SUBSTRATE_DOCS_SLO_RECALL5." },
 	];
 }
 
@@ -340,7 +353,7 @@ function steps(threshold: Threshold | undefined): Json[] {
 }
 
 function chartPanel(item: Extract<Item, { kind: "chart" }>, spec: SeriesSpec, id: number, gridPos: JsonObject): JsonObject {
-	const source = Object.hasOwn(SERIES_SOURCES, item.series) ? SERIES_SOURCES[item.series]! : null;
+	const source = Object.hasOwn(SERIES_SOURCES, item.series) ? (SERIES_SOURCES[item.series] ?? null) : null;
 	if (source === null) throw new Error(`series ${item.series} has no entry in SERIES_SOURCES; add its instrument to scripts/dashboards.ts`);
 	const labelNote = spec.label === null ? "" : ` One line per \`${spec.label}\`.`;
 	const description = `${item.note} Series \`${item.series}\` (${spec.kind}, ${spec.agg} per step, ${spec.unit}), source \`${source}\`.${labelNote}`;
@@ -366,7 +379,7 @@ function chartPanel(item: Extract<Item, { kind: "chart" }>, spec: SeriesSpec, id
 				},
 				mappings: [],
 				thresholds: { mode: "absolute", steps: steps(item.threshold) },
-				unit: Object.hasOwn(GRAFANA_UNITS, spec.unit) ? GRAFANA_UNITS[spec.unit]! : "short",
+				unit: Object.hasOwn(GRAFANA_UNITS, spec.unit) ? (GRAFANA_UNITS[spec.unit] ?? "short") : "short",
 			},
 			overrides: [],
 		},
@@ -414,15 +427,16 @@ function panels(items: Item[], series: Readonly<Record<string, SeriesSpec>>): Js
 			pendingRow = item.title;
 			continue;
 		}
-		if (item.kind === "chart" && !Object.hasOwn(series, item.series)) continue;
+		const spec = item.kind === "chart" && Object.hasOwn(series, item.series) ? series[item.series] : undefined;
+		if (item.kind === "chart" && spec === undefined) continue;
 		if (pendingRow !== null) {
 			out.push({ collapsed: false, gridPos: layout.row(), id: layout.nextId(), panels: [], title: pendingRow, type: "row" });
 			pendingRow = null;
 		}
 		if (item.kind === "text") {
 			out.push({ gridPos: layout.panel(), id: layout.nextId(), options: { content: item.content, mode: "markdown" }, title: item.title, type: "text" });
-		} else {
-			out.push(chartPanel(item, series[item.series]!, layout.nextId(), layout.panel()));
+		} else if (spec !== undefined) {
+			out.push(chartPanel(item, spec, layout.nextId(), layout.panel()));
 		}
 	}
 	return out;
@@ -445,7 +459,9 @@ function variable(name: string, label: string, options: readonly string[], selec
 }
 
 function checkVariables(): void {
-	const ttlDays = parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL)!.days;
+	const ttl = parseMetricsHistoryTtl(DEFAULT_METRICS_HISTORY_TTL);
+	if (ttl === null) throw new Error(`the default metrics history retention ${DEFAULT_METRICS_HISTORY_TTL} does not parse`);
+	const ttlDays = ttl.days;
 	for (const window of WINDOW_OPTIONS) {
 		const seconds = parseHistoryWindow(window);
 		if (seconds === null || seconds > ttlDays * 86_400) throw new Error(`window option ${window} is refused by /slo/history or longer than the default ${ttlDays}d retention`);
@@ -489,7 +505,10 @@ function sortKeys(value: Json): Json {
 	if (Array.isArray(value)) return value.map(sortKeys);
 	if (value !== null && typeof value === "object") {
 		const sorted: JsonObject = {};
-		for (const key of Object.keys(value).sort()) sorted[key] = sortKeys(value[key]!);
+		for (const key of Object.keys(value).sort()) {
+			const child = value[key];
+			if (child !== undefined) sorted[key] = sortKeys(child);
+		}
 		return sorted;
 	}
 	return value;
@@ -623,7 +642,8 @@ export function main(argv: readonly string[]): number {
 	let check = false;
 	let out = DEFAULT_OUT_DIR;
 	for (let i = 0; i < argv.length; i += 1) {
-		const arg = argv[i]!;
+		const arg = argv[i];
+		if (arg === undefined) continue;
 		if (arg === "--check") {
 			check = true;
 		} else if (arg === "--out") {

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeEvent } from "./event.ts";
 import { EVENT_SOURCES, SILENT_SOURCES } from "./event-sources.ts";
+import { steeringQueuedEvent } from "./planning/steering-delivery.ts";
 import { SURFACES } from "./types.ts";
 /**
  * Proof for the v1.3 event-source table.
@@ -294,6 +295,8 @@ describe("the memory.write verdict rows", () => {
 				...(want.reason === undefined ? [] : ["reason"]),
 				// A quarantined write names the parked row a reviewer would look for.
 				...(id === "memory.write.quarantined" ? ["quarantine_id"] : []),
+				// An accepted write names the entry it stored, so the consistency verifier pairs by id.
+				...(id === "memory.write.accepted" ? ["entry_id"] : []),
 				"scope",
 			].sort();
 			expect(keys).toEqual(wantKeys);
@@ -303,5 +306,54 @@ describe("the memory.write verdict rows", () => {
 		// A quarantined write names the parked row a reviewer would look for.
 		const quarantined = row("memory.write.quarantined").sample().payload ?? {};
 		expect(Object.keys(quarantined).sort()).toEqual(["kind", "outcome", "quarantine_id", "reason", "scope"]);
+	});
+});
+
+describe("public live-event samples", () => {
+	function sample(id: string) {
+		const source = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!source) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return source.sample();
+	}
+
+	test("the queued sample uses the actual producer's metadata-only projection", () => {
+		const event = sample("steering.queued");
+		const produced = steeringQueuedEvent({
+			id: String(event.payload?.["directive_id"]),
+			targetSessionId: String(event.session_id),
+			action: "pause",
+			priority: "high",
+		});
+		expect(event.payload).toEqual(produced.payload);
+		expect(Object.keys(event.payload ?? {}).sort()).toEqual(["action", "directive_id", "non_blocking", "session_id"]);
+	});
+
+	test("the ended sample describes committed closure, not cache removal or an ownership verdict", () => {
+		const event = sample("steering.session_ended");
+		expect(event.repo).toBeDefined();
+		expect(event.payload).toEqual({
+			action: "steering.session_ended",
+			session_id: event.session_id,
+			repo_id: event.repo,
+			closed_at: expect.any(String),
+			non_blocking: true,
+		});
+		expect(Number.isFinite(Date.parse(String(event.payload?.["closed_at"])))).toBe(true);
+	});
+
+	test("the refusal sample has a target hash and trusted metadata, never a plaintext target", () => {
+		const event = sample("steering.refused");
+		expect(event.payload).toEqual({
+			action: "steering.refused",
+			operation: "steering_list",
+			target_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+			caller_surface: event.surface,
+			operator: false,
+		});
+		expect(event.session_id).toBeUndefined();
+		expect(event.repo).toBeUndefined();
+		for (const key of ["session_id", "session_binding", "planning_hash", "steering", "proof_hash", "body", "directive_count", "nested"]) {
+			expect(event.payload).not.toHaveProperty(key);
+		}
 	});
 });

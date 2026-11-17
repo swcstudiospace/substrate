@@ -113,7 +113,7 @@ const ACCESS_INDEX = /(?<![A-Za-z0-9_$])[A-Za-z_]*[eE]nv\??\[\s*(["'`])([A-Za-z0
 /** A helper that reads the environment by name: `env("NAME")`, `getEnv("NAME")`; any upper-case name, whatever its prefix. */
 const ACCESS_CALL = /(?<![A-Za-z0-9_$.])[A-Za-z_]*[eE]nv\s*\(\s*(["'`])([A-Z][A-Z0-9_]*)\1\s*[,)]/g;
 /** `const { NAME, OTHER: alias = "x" } = process.env` (also `Bun.env`, `import.meta.env`, any `…env`/`…Env` object); the braces may span lines. */
-const DESTRUCTURE = /\{([^{}]*)\}\s*=\s*(?:process\.env|Bun\.env|import\.meta\.env|[A-Za-z_]*[eE]nv)\b(?!\s*[.(\[])/g;
+const DESTRUCTURE = /\{([^{}]*)\}\s*=\s*(?:process\.env|Bun\.env|import\.meta\.env|[A-Za-z_]*[eE]nv)\b(?!\s*[.([])/g;
 const PREFIX_ALTERNATION = ENV_NAME_PREFIXES.map((prefix) => prefix.replace(/_$/, "")).join("|");
 const LITERAL_NAME = new RegExp(`(["'\`])((?:${PREFIX_ALTERNATION})(?:_[A-Z0-9]+)+)\\1`, "g");
 const LITERAL_PREFIX = new RegExp(`(["'\`])((?:${PREFIX_ALTERNATION})_(?:[A-Z0-9]+_)*)\\1`, "g");
@@ -132,18 +132,30 @@ export function scanSource(file: string, source: string): EnvRead[] {
 	const push = (name: string, form: EnvReadForm, index: number): void => {
 		reads.push({ name, form, file, line: lineOf(text, index) });
 	};
-	for (const match of text.matchAll(ACCESS_DOT)) push(match[1]!, "access", match.index!);
-	for (const match of text.matchAll(ACCESS_INDEX)) push(match[2]!, "access", match.index!);
-	for (const match of text.matchAll(ACCESS_CALL)) push(match[2]!, "access", match.index!);
+	// A match whose capture group or index is missing carries no name to report, so it is skipped.
+	const pushGroup = (pattern: RegExp, group: number, form: EnvReadForm): void => {
+		for (const match of text.matchAll(pattern)) {
+			const name = match[group];
+			const index = match.index;
+			if (name === undefined || index === undefined) continue;
+			push(name, form, index);
+		}
+	};
+	pushGroup(ACCESS_DOT, 1, "access");
+	pushGroup(ACCESS_INDEX, 2, "access");
+	pushGroup(ACCESS_CALL, 2, "access");
 	for (const match of text.matchAll(DESTRUCTURE)) {
-		for (const part of match[1]!.split(",")) {
+		const list = match[1];
+		const index = match.index;
+		if (list === undefined || index === undefined) continue;
+		for (const part of list.split(",")) {
 			const name = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(part)?.[1];
-			if (name !== undefined && /^[A-Z][A-Z0-9_]*$/.test(name)) push(name, "access", match.index!);
+			if (name !== undefined && /^[A-Z][A-Z0-9_]*$/.test(name)) push(name, "access", index);
 		}
 	}
-	for (const match of text.matchAll(LITERAL_NAME)) push(match[2]!, "literal", match.index!);
-	for (const match of text.matchAll(LITERAL_PREFIX)) push(match[2]!, "template", match.index!);
-	for (const match of text.matchAll(TEMPLATE_PREFIX)) push(match[1]!, "template", match.index!);
+	pushGroup(LITERAL_NAME, 2, "literal");
+	pushGroup(LITERAL_PREFIX, 2, "template");
+	pushGroup(TEMPLATE_PREFIX, 1, "template");
 	return reads;
 }
 

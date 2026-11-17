@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.3 — Build plan completion",
+  "milestone": "v1.5 — SOTA enhancements",
   "phases": [
     {
       "number": "16",
@@ -92,12 +92,157 @@
       "number": "33",
       "name": "Lane A dispatch route and approvals",
       "status": "complete"
+    },
+    {
+      "number": "34",
+      "name": "Invalid-write round trip",
+      "status": "complete"
+    },
+    {
+      "number": "35",
+      "name": "expected_version for skills and docs",
+      "status": "complete"
+    },
+    {
+      "number": "36",
+      "name": "Degraded-mode exactly-once replay",
+      "status": "complete"
+    },
+    {
+      "number": "37",
+      "name": "LANEB",
+      "status": "complete"
+    },
+    {
+      "number": "38",
+      "name": "MIRROR",
+      "status": "complete"
+    },
+    {
+      "number": "39",
+      "name": "DISPATCH",
+      "status": "complete"
+    },
+    {
+      "number": "40",
+      "name": "DOCS-MEMORY",
+      "status": "complete"
+    },
+    {
+      "number": "41",
+      "name": "ANCHOR",
+      "status": "complete"
+    },
+    {
+      "number": "42",
+      "name": "SKILL-CARD",
+      "status": "complete"
+    },
+    {
+      "number": "43",
+      "name": "LANE-A",
+      "status": "complete"
+    },
+    {
+      "number": "44",
+      "name": "UAT",
+      "status": "complete"
+    },
+    {
+      "number": "45",
+      "name": "Railway Resource Orchestrator",
+      "status": "complete"
+    },
+    {
+      "number": "46",
+      "name": "LightRAG hybrid RAG and the RAGFlow migration",
+      "status": "pending"
+    },
+    {
+      "number": "47",
+      "name": "GreptimeDB + Dragonfly Predictive Analytics & Cache",
+      "status": "complete"
+    },
+    {
+      "number": "48",
+      "name": "TailscaleDB Secure Unified Proxy Layer",
+      "status": "complete"
+    },
+    {
+      "number": "49",
+      "name": "Hindsight Graph Memory with Greptime Events",
+      "status": "complete"
+    },
+    {
+      "number": "50",
+      "name": "Dragonfly Pub/Sub for Real-time Events",
+      "status": "complete"
+    },
+    {
+      "number": "51",
+      "name": "Enterprise Unified Resource Fabric",
+      "status": "complete"
+    },
+    {
+      "number": "52",
+      "name": "GSD-Core planning index and cross-session awareness core",
+      "status": "complete"
+    },
+    {
+      "number": "53",
+      "name": "Steering, conflict control and checkpoint/resume",
+      "status": "complete"
+    },
+    {
+      "number": "54",
+      "name": "Planning observability and migration inventory",
+      "status": "complete"
+    },
+    {
+      "number": "55",
+      "name": "Migration safety, session event vocabulary and the v1.6 baseline",
+      "status": "complete"
+    },
+    {
+      "number": "56",
+      "name": "LightRAG client contract alignment and storage topology",
+      "status": "complete"
+    },
+    {
+      "number": "57",
+      "name": "Tandem memory, LightRAG with Hindsight, with provenance and forget",
+      "status": "complete"
+    },
+    {
+      "number": "58",
+      "name": "Live session steering for multi-day GSD-Core sessions",
+      "status": "complete"
+    },
+    {
+      "number": "59",
+      "name": "Eternal logging, verifiable checkpoint and rollback events on Solana devnet",
+      "status": "complete"
+    },
+    {
+      "number": "60",
+      "name": "Eternal Memory Knowledge Nexus",
+      "status": "complete"
+    },
+    {
+      "number": "61",
+      "name": "Session rollback to an exact chat moment with file revert",
+      "status": "pending"
+    },
+    {
+      "number": "62",
+      "name": "Soak, runbooks and v1.6 close",
+      "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd:progress",
+    "command": "/gsd-progress",
     "label": "Show progress",
     "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-10-11T02:42:06.519Z"
+  "updated_at": "2026-10-29T00:04:48.115Z"
 }

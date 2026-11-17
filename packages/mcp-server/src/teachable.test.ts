@@ -13,7 +13,6 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import {
-	TEACHABLE_SUBJECT_PREFIX,
 	isTeachable,
 	teachableEvent,
 	teachableSlug,
@@ -219,7 +218,7 @@ describe("writeMemory teachable emit", () => {
 				emitted.push(event);
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		return { emitted, substrate };
 	}
 
@@ -301,7 +300,7 @@ describe("writeMemory teachable emit", () => {
 				throw new Error("greptime unreachable");
 			},
 		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 
 		const result = await substrate.writeMemory({ ...ACCEPTED_TEACHABLE.request });
 

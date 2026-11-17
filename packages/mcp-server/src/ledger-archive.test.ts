@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { merkleRootHex } from "@substrate/ledger";
 import { normalizeEvent } from "./event.ts";
-import type { AnchorRow, ExportCursor, ExportPage, ExportWindowQuery } from "./greptime.ts";
+import type { AnchorRow, ExportPage, ExportWindowQuery } from "./greptime.ts";
 import {
 	archivedDays,
 	archiveFiles,

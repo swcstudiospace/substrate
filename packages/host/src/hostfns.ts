@@ -142,7 +142,7 @@ export type ScratchCheck = { ok: true } | { ok: false; reason: string; paths: st
  * Before any network call: the branch's diff against origin/<base> must list no scratch path.
  * A diff that cannot be computed refuses too — the push never runs on an unknown branch state.
  */
-export async function checkScratch(input: { graphId: string; base: string; run: Runner; worktreeRoot?: string }): Promise<ScratchCheck> {
+export async function checkScratch(input: { graphId: string; base: string; run: Runner; worktreeRoot?: string | undefined }): Promise<ScratchCheck> {
 	if (!validBase(input.base)) return { ok: false, reason: `invalid base branch ${JSON.stringify(input.base)}`, paths: [] };
 	const resolved = siteFor(input.graphId, input.worktreeRoot);
 	if ("error" in resolved) return { ok: false, reason: resolved.error, paths: [] };

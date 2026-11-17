@@ -1,0 +1,45 @@
+[Unit]
+Description=Agent Substrate doc watch sweep: one pass over the registered roots and the mirrors (substrate-corpus-sync.timer; staged, opt-in; read-only against every repository)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+ConditionPathExists=/opt/agent-substrate/current/packages/cli/src/index.ts
+
+[Service]
+Type=oneshot
+# `substrate corpus watch --once` runs a single sweep and exits: it finds what no trigger saw (a push made from another
+# machine, a hint that was lost) by fetching into the Substrate-managed blobless mirrors, never into a checkout, and syncs
+# only the repositories that changed. A failed sweep is a failed oneshot, and the next timer tick tries again. Staged, not
+# installed; run it beside substrate-corpus-watch.service or instead of it (docs/runbooks/corpus-sync.md).
+EnvironmentFile=-/etc/substrate/substrate-corpus.env
+WorkingDirectory=/opt/agent-substrate/current
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts corpus watch --once
+
+StateDirectory=substrate/corpus-mirrors
+StateDirectory=substrate/corpus-hints
+StateDirectoryMode=0700
+Environment=SUBSTRATE_CORPUS_MIRROR_DIR=/var/lib/substrate/corpus-mirrors
+Environment=SUBSTRATE_CORPUS_SPOOL=/var/lib/substrate/corpus-hints
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-corpus-sync
+
+Slice=substrate.slice
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=25%
+MemoryMax=512M
+TasksMax=256
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/substrate/corpus-mirrors /var/lib/substrate/corpus-hints
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

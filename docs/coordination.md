@@ -5,6 +5,25 @@ duplicating, overwriting or silently abandoning each other's work. Three
 primitives do that, and this is what each of them promises — and what it
 deliberately does not.
 
+Telling a running session what to do next, and showing public context about its
+repository's other sessions, is a fourth mechanism: [Live Steering](live-steering.md).
+Its live identity is an independently server-issued public handle plus a private
+binding proof, backed by mandatory PostgreSQL authority and retained tombstones.
+Sharing a surface token or discovering a public ID does not grant private access.
+Operator-only queue/ack and the public-redacted repository digest are separate.
+
+Historical `session_id` labels used by graph leases, handoffs, checkpoints and
+event attribution are **not** live-session credentials. Keep those labels stable;
+private docs/brief use explicit `steering_session_id` and transport proof, while
+hooks use separate `--steering-session` and selected `--binding-file`. Historical
+`session.end` does not close a live handle; heartbeat/close are explicit. None of
+this changes node-lease `lease_id` fencing, renewal or reclaim rules below.
+
+The Phase 71 cutover is authored but unverified/not deployed. Legacy registry
+rows are not backfilled; clients must open new live identities. Complete native
+PostgreSQL recovery must retain binding/tombstone history, not infer it from
+presence/cache/ledger. See the [index recovery limits](runbooks/index-archive.md).
+
 ## Node leases
 
 `graph_claim` takes a **lease**, not a claim.

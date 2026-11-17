@@ -1,4 +1,5 @@
 /** Facts builders for the fabric's tests. Every value is a name, an enum or a count, as in production. */
+import { SLO_DEFAULTS } from "@substrate/corpus";
 import type { FabricFacts, ServiceName, ServiceReading } from "./types.ts";
 
 export const CHECKED_AT = "2026-10-21T00:00:00.000Z";
@@ -19,21 +20,25 @@ export function healthyServices(): Record<ServiceName, ServiceReading> {
 		"timescaledb-index": readyService("health().index"),
 		greptime: readyService("health().greptime"),
 		ragflow: readyService("health().planes.ragflow"),
+		lightrag: readyService("health().planes.lightrag"),
 		hindsight: readyService("health().planes.hindsight"),
+		tei: readyService("probe().tei"),
 	};
 }
 
-/** Every resource configured and answering, every data plane behind a proxy, the cache answering, the bus on. */
+/** Every resource configured and answering, every data plane and the embedding service behind a proxy or loopback, the cache answering, the bus on, the corpus within its objectives. */
 export function healthyFacts(overrides: Partial<FabricFacts> = {}): FabricFacts {
 	return {
 		checkedAt: CHECKED_AT,
 		endpointPolicy: "enforce",
 		endpoints: { greptime: "proxy", postgres: "loopback", dragonfly: "loopback" },
 		services: healthyServices(),
+		tei: { endpointClass: "loopback", model: "test-model", modelSource: "pinned", dimension: 384, latencyMs: 12 },
 		cache: { mode: "on", hits: 90, misses: 10, errors: 0, bypasses: 0 },
 		eventBusEnabled: true,
 		outbox: { parked: 0, oldestAt: null },
 		railway: { status: "ok", projectedMonthlyUsd: 3, budgetUsd: 50 },
+		corpus: { enabled: true, readings: { freshnessS: 3600, recall5: 0.9, ingestDocsPerS: 1 }, thresholds: { ...SLO_DEFAULTS }, unread: null },
 		...overrides,
 	};
 }
@@ -45,16 +50,20 @@ export function unconfiguredFacts(): FabricFacts {
 		"timescaledb-index": absentService(),
 		greptime: absentService(),
 		ragflow: absentService(),
+		lightrag: absentService(),
 		hindsight: absentService(),
+		tei: absentService(),
 	};
 	return {
 		checkedAt: CHECKED_AT,
 		endpointPolicy: "warn",
 		endpoints: {},
 		services,
+		tei: { endpointClass: null, model: null, modelSource: "none", dimension: null, latencyMs: null },
 		cache: null,
 		eventBusEnabled: null,
 		outbox: { parked: 0, oldestAt: null },
 		railway: { status: "unconfigured", projectedMonthlyUsd: null, budgetUsd: null },
+		corpus: { enabled: false, readings: { freshnessS: null, recall5: null, ingestDocsPerS: null }, thresholds: { ...SLO_DEFAULTS }, unread: null },
 	};
 }

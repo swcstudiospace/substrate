@@ -27,9 +27,11 @@ function absentFacts(): FabricFacts {
 			"timescaledb-index": absent,
 			greptime: absent,
 			ragflow: absent,
+			lightrag: absent,
 			hindsight: absent,
+			tei: absent,
 		},
-		cache: null,
+		tei: { endpointClass: null, model: null, modelSource: "none", dimension: null, latencyMs: null },
 		eventBusEnabled: null,
 		railway: { status: "unconfigured", projectedMonthlyUsd: null, budgetUsd: null },
 	});
@@ -38,6 +40,21 @@ function absentFacts(): FabricFacts {
 describe("buildFabricSuggestions", () => {
 	test("a healthy fabric emits no suggestion", () => {
 		expect(suggest(healthyFacts())).toEqual([]);
+	});
+
+	test("a breached corpus objective is one attention suggestion that names the breach, and a corpus within its objectives or switched off says nothing", () => {
+		const breached = healthyFacts({ corpus: { ...healthyFacts().corpus, readings: { freshnessS: 999_999, recall5: 0.9, ingestDocsPerS: 1 } } });
+		expect(suggest(breached)).toEqual([
+			{
+				id: "corpus-slo",
+				resource: "corpus",
+				action: expect.stringContaining("docs-rag-operations"),
+				evidence: "state degraded; source: corpus.slo: breached freshness",
+				severity: "attention",
+			},
+		]);
+		expect(ids(healthyFacts())).toEqual([]);
+		expect(ids(healthyFacts({ corpus: { ...breached.corpus, enabled: false } }))).toEqual([]);
 	});
 
 	test("nothing configured emits nothing, because no rule has evidence", () => {
@@ -87,6 +104,17 @@ describe("buildFabricSuggestions", () => {
 		);
 		expect(found).toMatchObject({ resource: "ragflow", severity: "attention" });
 		expect(found?.evidence).toBe("state unavailable; source: health().planes.ragflow");
+	});
+
+	test("an unavailable LightRAG is named like any resource, and an unconfigured one yields nothing", () => {
+		const found = suggest(withService("lightrag", { answered: false, source: "health().planes.lightrag" })).find(
+			(suggestion) => suggestion.id === "unavailable.lightrag",
+		);
+		expect(found).toMatchObject({ resource: "lightrag", severity: "attention" });
+		expect(found?.evidence).toBe("state unavailable; source: health().planes.lightrag");
+		expect(suggest(withService("lightrag", { configured: false, answered: null, breaker: "off" })).map((suggestion) => suggestion.id)).not.toContain(
+			"unavailable.lightrag",
+		);
 	});
 
 	test("an open Hindsight breaker with queued retains still yields the backlog, with its count and oldest age", () => {

@@ -10,7 +10,7 @@ const LEAF_PREFIX = Uint8Array.of(0x00);
 const NODE_PREFIX = Uint8Array.of(0x01);
 const HASH_HEX_RE = /^[0-9a-f]{64}$/;
 
-function sha256(...parts: Uint8Array[]): Uint8Array {
+export function sha256(...parts: Uint8Array[]): Uint8Array {
 	const hasher = new Bun.CryptoHasher("sha256");
 	for (const part of parts) hasher.update(part);
 	return new Uint8Array(hasher.digest());

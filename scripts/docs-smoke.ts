@@ -72,6 +72,7 @@ import {
 	parseFixtureCounts,
 	RAGFLOW_FIXTURE_SCRIPT,
 } from "../packages/mcp-server/src/rehearsal-ragflow.ts";
+import { procStartSeconds } from "../packages/worktree-snapshot/src/proc-stat.ts";
 
 /** The smoke refused to drive this target; the message names hosts and ports, never values. */
 export class SmokeRefused extends Error {}
@@ -278,7 +279,9 @@ export function parseKeyValues(text: string): Record<string, string[]> {
 		const key = line.slice(0, eq).trim();
 		const value = line.slice(eq + 1).trim();
 		if (!key) continue;
-		(out[key] ??= []).push(value);
+		const bucket = out[key] ?? [];
+		out[key] = bucket;
+		bucket.push(value);
 	}
 	return out;
 }
@@ -508,13 +511,7 @@ function readStartSeconds(pid: number): number | null {
 	if (stat === null || statLine === null) return null;
 	const btime = /^btime (\d+)$/m.exec(statLine);
 	if (!btime) return null;
-	const close = stat.lastIndexOf(")");
-	if (close < 0) return null;
-	const rest = stat.slice(close + 1).trim().split(/\s+/);
-	if (rest.length < 20) return null;
-	const ticks = Number(rest[19]);
-	if (!Number.isFinite(ticks) || ticks < 0) return null;
-	return Number(btime[1]) + ticks / 100;
+	return procStartSeconds(Number(btime[1]), stat);
 }
 
 /** Local ports a pid listens on, from `ss`; null when ss cannot be read. */
@@ -912,7 +909,7 @@ async function runSmokeInner(name: string, runDir: string, scriptCheckout: strin
 		check(shapeOk, "search-shape", `status=${String(searched.status)} count=${String(chunks?.length ?? -1)} pool=20`);
 		const reply = shaped<SearchReplyBody>(searched.body);
 		check(typeof reply?.untrusted === "string" && reply.untrusted.includes("untrusted"), "search-untrusted", "framed");
-		const citesOk = chunks !== null && chunks.every(citationShapeOk);
+		const citesOk = chunks?.every(citationShapeOk);
 		check(citesOk === true, "search-citations", `capped=${String(chunks?.every((chunk) => typeof chunk.snippet === "string" && chunk.snippet.length <= 1200) ?? false)}`);
 		check(
 			chunks !== null && chunks.length > 0 && chunks.every((chunk) => isPinGap(chunk.commit)),

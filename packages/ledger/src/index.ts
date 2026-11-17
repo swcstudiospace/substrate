@@ -13,14 +13,34 @@ export {
 } from "./merkle.ts";
 
 export {
+	domainDigestHex,
+	type MerkleProofHex,
+	merkleAuditPath,
+	merkleProofHex,
+	verifyAuditPath,
+	verifyMerkleProofAgainstCommitment,
+	verifyMerkleProofHex,
+} from "./merkle-proof.ts";
+
+export {
 	formatMemo,
+	formatMemoV2,
 	type Memo,
+	type MemoV2,
 	MEMO_PREFIX,
+	MEMO_PREFIX_V2,
 	MEMO_PROGRAM_IDS,
 	MEMO_RE,
+	MEMO_V2_RE,
 	parseMemo,
 	stripListingPrefix,
 } from "./memo.ts";
+
+export {
+	type GraphHeadRecord,
+	headRecordHash,
+	headsRoot,
+} from "./heads.ts";
 
 export {
 	closedHours,
@@ -33,12 +53,14 @@ export {
 
 export {
 	type AddressMemo,
+	assertDevnetRpcUrl,
 	bs58decode,
 	type Commitment,
 	createRpc,
 	type Rpc,
 	RpcError,
 	type RpcOptions,
+	RpcUrlError,
 	type TransactionMemo,
 } from "./rpc.ts";
 
@@ -55,3 +77,39 @@ export {
 	type TransferMemoInput,
 	transferMemoArgv,
 } from "./solana.ts";
+
+export {
+	CHAIN_VERDICTS,
+	type ChainEvidence,
+	type ChainEvidenceInput,
+	type ChainVerdict,
+	classifyChainEvidence,
+	SIGNATURE_STATUSES,
+	type SignatureStatus,
+	YOUNG_ANCHOR_GRACE_MS,
+} from "./devnet-reset.ts";
+
+export {
+	ANCHOR_SIGNER_ROTATE_ACTION,
+	acceptsSigner,
+	buildSignerRotateEvent,
+	type DerivedSignerSet,
+	isBase58Pubkey,
+	parseRotationPayload,
+	parseSignerSet,
+	ROTATION_MAX_BACKDATE_MS,
+	ROTATION_MAX_FUTURE_MS,
+	type RotationEventInput,
+	type RotationIssue,
+	type RotationIssueReason,
+	type RotationOptions,
+	type RotationPayload,
+	SIGNER_SET_MAX_ENTRIES,
+	type SignerAcceptance,
+	type SignerEntry,
+	type SignerRotateEventDraft,
+	type SignerSet,
+	SignerSetError,
+	type SignerSetRule,
+	signerSetFromRotationEvents,
+} from "./signer-set.ts";

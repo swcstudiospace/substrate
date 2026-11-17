@@ -12,6 +12,7 @@ import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { defined } from "./test-support.ts";
 
 class MapRedis implements CacheRedis {
 	readonly values = new Map<string, string>();
@@ -97,7 +98,7 @@ function rigOf(mode: CacheSwrMode, offsetMs = 0): Rig {
 		openGraphs: async () => [],
 		memoryForBrief: async () => state.memory,
 	};
-	return { substrate: new Substrate(config, { index: index as never, greptime: null, cache }), cache, redis, config, state };
+	return { substrate: new Substrate(config, { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } }), cache, redis, config, state };
 }
 
 describe("single-flight across generations (uplift-4 S4)", () => {
@@ -115,7 +116,7 @@ describe("single-flight across generations (uplift-4 S4)", () => {
 			openGraphs: async () => [],
 			memoryForBrief: async () => [],
 		};
-		const substrate = new Substrate(config, { index: index as never, greptime: null, cache });
+		const substrate = new Substrate(config, { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } });
 
 		const older = substrate.briefDetailed(request);
 		const sameGeneration = substrate.briefDetailed(request);
@@ -281,14 +282,14 @@ describe("the snapshot records its own deadline (uplift-4 S4)", () => {
 	test("the background refresh rewrites the snapshot with text, sections, until and a new timestamp", async () => {
 		const { substrate, cache, redis, state } = rigOf("enforce", 7_000);
 		await substrate.briefDetailed(request);
-		const before = stored(redis)!.v;
+		const before = defined(stored(redis)).v;
 		state.status = "blocked";
 		await cache.bump(MEMORY_GENERATION_KEY);
 		const stale = await substrate.briefDetailed(request);
 		expect(stale.ageS).toBe(7);
 		expect(stale.text).toContain("active");
 		for (let turn = 0; turn < 16; turn += 1) await settle();
-		const after = stored(redis)!.v;
+		const after = defined(stored(redis)).v;
 		expect(after.text).toContain("blocked");
 		expect(after.text.startsWith("## Substrate brief")).toBe(true);
 		expect(Array.isArray(after.sections)).toBe(true);
@@ -334,7 +335,7 @@ describe("a stale brief says so in the compact state line (uplift-4 S4 x S1)", (
 			openGraphs: async () => [],
 			memoryForBrief: async () => [],
 		};
-		const substrate = new Substrate(config, { index: index as never, greptime: null, cache }, {});
+		const substrate = new Substrate(config, { index: index as never, greptime: null, cache, steering: { history: null, liveSessions: null } }, {});
 		const fresh = await substrate.briefDetailed(request, "compact", "cursor");
 		expect(fresh.text.split("\n")[0]).toBe("[brief: complete]");
 

@@ -316,7 +316,11 @@ export function assertArchiveDir(outDir: string, options: IndexArchiveOptions, c
 	const refusal = refusedOutDir(outDir, { cwd });
 	if (refusal !== null) throw new ArchiveRefused(refusal);
 	// The mount gate is the ledger archive's, with its own override name in the message.
-	const mount = refusedMount(outDir, { cwd, dev: options.dev, allowRootfs: options.allowRootfs });
+	const mount = refusedMount(outDir, {
+		cwd,
+		...(options.dev === undefined ? {} : { dev: options.dev }),
+		...(options.allowRootfs === undefined ? {} : { allowRootfs: options.allowRootfs }),
+	});
 	if (mount !== null) throw new ArchiveRefused(mount.replace(LEDGER_ROOTFS_ENV, INDEX_ROOTFS_ENV));
 	const minFreeGb = options.minFreeGb ?? DEFAULT_MIN_FREE_GB;
 	if (minFreeGb > 0) {
@@ -1266,9 +1270,9 @@ export async function retryPendingIndexNotes(
 export class IndexUsageError extends Error {}
 
 export type IndexCommand =
-	| { command: "archive"; out?: string; pageSize?: number; json: boolean }
+	| { command: "archive"; out?: string | undefined; pageSize?: number | undefined; json: boolean }
 	| { command: "verify-archive"; dir: string; json: boolean }
-	| { command: "restore"; scratch?: string; dir: string; json: boolean };
+	| { command: "restore"; scratch?: string | undefined; dir: string; json: boolean };
 
 export const INDEX_ARCHIVE_USAGE =
 	"usage: index-run.ts archive [--out DIR] [--page-size N] [--json]\n" +

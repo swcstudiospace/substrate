@@ -5,6 +5,8 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
-    "@substrate/evidence": "workspace:*"
+    "@substrate/corpus": "workspace:*",
+    "@substrate/evidence": "workspace:*",
+    "@substrate/fleet": "workspace:*"
   }
 }

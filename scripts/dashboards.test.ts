@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FABRIC_RESOURCES } from "../packages/mcp-server/src/fabric/types.ts";
 import { ALL_METRIC_SERIES, METRIC_SERIES, parseHistoryStep, parseHistoryWindow } from "../packages/mcp-server/src/metrics-history.ts";
+import { TRANSITION_SERIES } from "../packages/mcp-server/src/planning/telemetry.ts";
 import { DEFAULT_THRESHOLDS, docsSearchObjective, sloCatalogue, type SloTarget } from "../packages/observability/src/index.ts";
 import {
 	DATASOURCE_TYPE,
@@ -26,6 +27,7 @@ import {
 	writeDashboards,
 	type GeneratedFile,
 } from "./dashboards.ts";
+import { defined } from "./test-support.ts";
 
 interface Panel {
 	id: number;
@@ -69,7 +71,7 @@ function chartFor(dashboard: Dashboard, series: string): Panel {
 
 /** The value of the threshold line: the step that turns red (a ceiling) or green (a floor). */
 function line(panel: Panel): number {
-	const steps = panel.fieldConfig!.defaults.thresholds.steps;
+	const steps = defined(panel.fieldConfig).defaults.thresholds.steps;
 	const step = steps.find((candidate) => candidate.value !== null);
 	if (step === undefined || step.value === null) throw new Error(`panel ${panel.title} has no threshold line`);
 	return step.value;
@@ -164,7 +166,7 @@ describe("the committed dashboards are what the generator renders", () => {
 	});
 
 	test("an objective with no dashboard decision is refused by name rather than left off the dashboard", () => {
-		const unknown: SloTarget = { ...sloCatalogue()[1]!, id: "invented.objective", title: "Invented" };
+		const unknown: SloTarget = { ...defined(sloCatalogue()[1]), id: "invented.objective", title: "Invented" };
 		expect(Object.hasOwn(SLO_SERIES, unknown.id)).toBe(false);
 		expect(() => buildDashboards({ catalogue: [...sloCatalogue(), unknown] })).toThrow("invented.objective");
 	});
@@ -217,13 +219,13 @@ describe("the committed JSON is a valid Grafana dashboard", () => {
 	});
 
 	test("every datasource reference resolves to the provisioning example, which carries its uid and type and no value of ours", () => {
-		const example = committed().find((file) => file.path === "provisioning/datasources.yaml.example")!.content;
+		const example = defined(committed().find((file) => file.path === "provisioning/datasources.yaml.example")).content;
 		expect(example).toContain(`uid: ${DATASOURCE_UID}`);
 		expect(example).toContain(`type: ${DATASOURCE_TYPE}`);
 		for (const [, dashboard] of dashboards) {
 			for (const panel of dashboard.panels.filter((candidate) => candidate.type === "timeseries")) {
 				expect(panel.datasource).toEqual({ type: DATASOURCE_TYPE, uid: DATASOURCE_UID });
-				for (const target of panel.targets!) expect(target.datasource).toEqual({ type: DATASOURCE_TYPE, uid: DATASOURCE_UID });
+				for (const target of defined(panel.targets)) expect(target.datasource).toEqual({ type: DATASOURCE_TYPE, uid: DATASOURCE_UID });
 			}
 		}
 	});
@@ -237,7 +239,7 @@ describe("the committed JSON is a valid Grafana dashboard", () => {
 			// The token scan in store-lock.test.ts: a name followed by 16+ value characters.
 			expect(body).not.toMatch(/SUBSTRATE_TOKEN[A-Z0-9_]*["']?[ \t]*[:=][ \t]*["']?[\w.~+/=-]{16,}/);
 		}
-		const datasource = committed().find((file) => file.path === "provisioning/datasources.yaml.example")!.content;
+		const datasource = defined(committed().find((file) => file.path === "provisioning/datasources.yaml.example")).content;
 		expect(datasource).toMatch(/^ {4}url: \$\{[A-Z_]+\}$/m);
 		expect(datasource).toMatch(/^ {6}bearerToken: \$\{[A-Z_]+\}$/m);
 	});
@@ -246,14 +248,14 @@ describe("the committed JSON is a valid Grafana dashboard", () => {
 		const units: Record<string, string> = { ms: "ms", ratio: "percentunit", days: "d", s: "s", By: "bytes" };
 		for (const [, dashboard] of dashboards) {
 			for (const panel of dashboard.panels.filter((candidate) => candidate.type === "timeseries")) {
-				const series = seriesOf(panel)!;
+				const series = defined(seriesOf(panel));
 				expect(Object.hasOwn(ALL_METRIC_SERIES, series)).toBe(true);
-				const spec = ALL_METRIC_SERIES[series]!;
-				expect(panel.fieldConfig!.defaults.unit).toBe(units[spec.unit] ?? "short");
-				const selectors = panel.targets![0]!.columns.map((column) => column.selector);
+				const spec = defined(ALL_METRIC_SERIES[series], series);
+				expect(defined(panel.fieldConfig).defaults.unit).toBe(units[spec.unit] ?? "short");
+				const selectors = defined(defined(panel.targets)[0]).columns.map((column) => column.selector);
 				expect(selectors).toEqual(spec.label === null ? ["ts", "value"] : ["ts", "value", `labels.${spec.label}`]);
 				// The route's own parameters: a series, and the two dashboard variables.
-				expect(panel.targets![0]!.url_options.params.map((param) => param.key)).toEqual(["series", "window", "step"]);
+				expect(defined(defined(panel.targets)[0]).url_options.params.map((param) => param.key)).toEqual(["series", "window", "step"]);
 				expect(panel.description).toContain(`\`${series}\``);
 			}
 		}
@@ -264,10 +266,16 @@ describe("the committed JSON is a valid Grafana dashboard", () => {
 		expect([...drawn].sort()).toEqual(Object.keys(ALL_METRIC_SERIES).sort());
 	});
 
+	test("the planning transition panel draws the planning.transition series the observer records", () => {
+		const panel = chartFor(parse(committed(), PLANES), TRANSITION_SERIES);
+		expect(panel.type).toBe("timeseries");
+		expect(seriesOf(panel)).toBe(TRANSITION_SERIES);
+	});
+
 	test("the window and step variables are values the route accepts, the default is among them, and no window outruns the default retention", () => {
 		for (const [, dashboard] of dashboards) {
-			const window = dashboard.templating.list.find((variable) => variable.name === "window")!;
-			const step = dashboard.templating.list.find((variable) => variable.name === "step")!;
+			const window = defined(dashboard.templating.list.find((variable) => variable.name === "window"));
+			const step = defined(dashboard.templating.list.find((variable) => variable.name === "step"));
 			expect(window.query.split(",")).toEqual([...WINDOW_OPTIONS]);
 			expect(step.query.split(",")).toEqual([...STEP_OPTIONS]);
 			expect(window.query.split(",")).toContain(window.current.value);
@@ -282,7 +290,7 @@ describe("the committed JSON is a valid Grafana dashboard", () => {
 describe("the threshold lines are the catalogue's targets", () => {
 	const slo = parse(committed(), SLO);
 	const catalogue = sloCatalogue();
-	const byId = (id: string): SloTarget => catalogue.find((target) => target.id === id)!;
+	const byId = (id: string): SloTarget => defined(catalogue.find((target) => target.id === id), id);
 
 	test("brief p95 is the catalogue's millisecond ceiling and the docs search p95 is the docs objective's", () => {
 		const brief = byId("brief.p95");
@@ -291,8 +299,8 @@ describe("the threshold lines are the catalogue's targets", () => {
 		expect(line(panel)).toBe(brief.thresholdMs);
 		expect(line(panel)).toBe(DEFAULT_THRESHOLDS.briefP95Ms);
 		// A ceiling is green under the line and red from it.
-		expect(panel.fieldConfig!.defaults.thresholds.steps.map((step) => step.color)).toEqual(["green", "red"]);
-		expect(panel.fieldConfig!.defaults.custom.thresholdsStyle.mode).toBe("line");
+		expect(defined(panel.fieldConfig).defaults.thresholds.steps.map((step) => step.color)).toEqual(["green", "red"]);
+		expect(defined(panel.fieldConfig).defaults.custom.thresholdsStyle.mode).toBe("line");
 		expect(panel.description).toContain(brief.statement);
 
 		const docs = docsSearchObjective();
@@ -306,25 +314,25 @@ describe("the threshold lines are the catalogue's targets", () => {
 		const panel = chartFor(slo, "emit.success");
 		expect(line(panel)).toBe(emit.target);
 		expect(line(panel)).toBe(DEFAULT_THRESHOLDS.emitSuccessRatio);
-		expect(panel.fieldConfig!.defaults.thresholds.steps.map((step) => step.color)).toEqual(["red", "green"]);
+		expect(defined(panel.fieldConfig).defaults.thresholds.steps.map((step) => step.color)).toEqual(["red", "green"]);
 	});
 
 	test("plane availability and capacity runway use the thresholds the evaluators use; cache hit ratio, which has no objective, draws no line", () => {
 		expect(line(chartFor(slo, "plane.availability"))).toBe(DEFAULT_THRESHOLDS.planeAvailability);
 		expect(line(chartFor(slo, "capacity.runway_days"))).toBe(DEFAULT_THRESHOLDS.runwayDays);
 		const cache = chartFor(slo, "cache.hit_ratio");
-		expect(cache.fieldConfig!.defaults.custom.thresholdsStyle.mode).toBe("off");
-		expect(cache.fieldConfig!.defaults.thresholds.steps).toEqual([{ color: "green", value: null }]);
+		expect(defined(cache.fieldConfig).defaults.custom.thresholdsStyle.mode).toBe("off");
+		expect(defined(cache.fieldConfig).defaults.thresholds.steps).toEqual([{ color: "green", value: null }]);
 	});
 
 	test("the objectives with no durable series say so, with their catalogue target, instead of drawing an empty chart", () => {
 		for (const id of ["lease.steal_rate", "quarantine.rate"]) {
 			const target = byId(id);
 			if (target.kind !== "ratio-ceiling") throw new Error(`${id} is a ceiling`);
-			const panel = slo.panels.find((candidate) => candidate.title.includes(`(${id})`))!;
+			const panel = defined(slo.panels.find((candidate) => candidate.title.includes(`(${id})`)));
 			expect(panel.type).toBe("text");
-			expect(panel.options!.content).toContain(`at most ${(target.target * 100).toFixed(2)} %`);
-			expect(panel.options!.content).toContain("/slo");
+			expect(defined(panel.options).content).toContain(`at most ${(target.target * 100).toFixed(2)} %`);
+			expect(defined(panel.options).content).toContain("/slo");
 			expect(SLO_SERIES[id]).toBeNull();
 		}
 	});
@@ -338,22 +346,22 @@ describe("the threshold lines are the catalogue's targets", () => {
 	test("an objective whose series the build does not carry degrades to its text panel rather than a chart against a 400", () => {
 		const { "emit.success": _gone, ...rest } = ALL_METRIC_SERIES;
 		const degraded = parse(buildDashboards({ series: rest }), SLO);
-		const panel = degraded.panels.find((candidate) => candidate.title.includes("(emit.success)"))!;
+		const panel = defined(degraded.panels.find((candidate) => candidate.title.includes("(emit.success)")));
 		expect(panel.type).toBe("text");
-		expect(panel.options!.content).toContain("99.50 %");
+		expect(defined(panel.options).content).toContain("99.50 %");
 	});
 });
 
 describe("the fabric panels (phase 51)", () => {
-	test("each of the six fabric resources draws exactly one panel, reading an allow-listed series", () => {
+	test("each of the nine fabric resources draws exactly one panel, reading an allow-listed series", () => {
 		const planes = parse(buildDashboards(), "substrate-data-planes.json");
 		const fabric = planes.panels.filter((panel) => panel.title.startsWith("Fabric: "));
-		expect(FABRIC_RESOURCES).toHaveLength(6);
+		expect(FABRIC_RESOURCES).toHaveLength(9);
 		expect(fabric).toHaveLength(FABRIC_RESOURCES.length);
 		for (const resource of FABRIC_RESOURCES) {
 			const panels = fabric.filter((panel) => panel.title === `Fabric: ${resource}`);
 			expect(panels).toHaveLength(1);
-			const series = seriesOf(panels[0]!);
+			const series = seriesOf(defined(panels[0]));
 			expect(series).not.toBeNull();
 			expect(Object.hasOwn(ALL_METRIC_SERIES, series ?? "")).toBe(true);
 		}

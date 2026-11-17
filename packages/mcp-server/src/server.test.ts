@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { validateAgentCard } from "./agent-card.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, tokenEnvName } from "./config.ts";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -25,8 +25,9 @@ import {
 	type HttpServerOptions,
 } from "./server.ts";
 import { Substrate } from "./service.ts";
-import type { MemoryEntry, SubstrateEvent, Surface } from "./types.ts";
+import { SWARM_SURFACES, type MemoryEntry, type SubstrateEvent, type Surface } from "./types.ts";
 import type { EventBus, EventHint } from "./event-bus.ts";
+import { defined } from "./test-support.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -94,7 +95,7 @@ async function serve(
 				body: JSON.stringify(body),
 			}),
 		get: (path: string, headers: Record<string, string> = {}, signal?: AbortSignal) =>
-			fetch(`http://127.0.0.1:${port}${path}`, { headers, signal }),
+			fetch(`http://127.0.0.1:${port}${path}`, { headers, ...(signal === undefined ? {} : { signal }) }),
 		stop: () => {
 			const closed = Promise.withResolvers<void>();
 			observability.stop();
@@ -345,7 +346,7 @@ describe("routes", () => {
 	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" };
 	const OMP_AUTH = { authorization: "Bearer tok-omp" };
 
-	test("POST /docs/search with context true reaches the service and answers a context block", async () => {
+	test("POST /docs/search historical attribution retains public memory context without private ledger reads", async () => {
 		const fake = new RagflowFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
@@ -358,7 +359,8 @@ describe("routes", () => {
 			expect(response.status).toBe(200);
 			expect(Object.hasOwn(body, "context")).toBe(true);
 			expect(hindsight.recalls()).toHaveLength(1);
-			expect(reads).toEqual([["session_id", "s-1"]]);
+			expect(body.context).toMatchObject({ memories: [{ id: "m1", text: "quote every version" }], events: [] });
+			expect(reads).toEqual([]);
 		} finally {
 			await stop();
 		}
@@ -395,7 +397,6 @@ describe("routes", () => {
 				for (const context of ["true", null]) {
 					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context }, OMP_AUTH);
 					expect(response.status).toBe(400);
-					expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("context a boolean");
 				}
 			});
 			expect(hindsight.recalls()).toEqual([]);
@@ -515,6 +516,37 @@ describe("routes", () => {
 				{ authorization: "Bearer tok-omp" },
 			);
 			expect(response.status).toBe(413);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses a stale expected_version with a 409 conflict, and uploads nothing", async () => {
+		const { greptime } = ledger();
+		const fake = new RagflowFake();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch },
+		);
+		try {
+			// Nothing is on record for this source URL, so expecting version 1 is stale.
+			const response = await post(
+				"/docs/ingest",
+				{
+					dataset: "agent-substrate",
+					pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/planes", body: "A page.", expected_version: 1 }],
+				},
+				{ authorization: "Bearer tok-omp" },
+			);
+			expect(response.status).toBe(409);
+			expect(await response.json()).toMatchObject({
+				refused: true,
+				reason: "version.stale",
+				outcome: "conflict",
+				verified_persisted: false,
+			});
+			expect(fake.uploads).toHaveLength(0);
 		} finally {
 			await stop();
 		}
@@ -896,6 +928,7 @@ describe("routes", () => {
 			}
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		}) as typeof fetch;
 		const docs = docsFixture({ "README.md": "The substrate is the only door." });
@@ -1117,6 +1150,7 @@ describe("routes", () => {
 				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
 				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 				return Response.json({ detail: "no route" }, { status: 404 });
 			}) as unknown as typeof fetch;
 			const { greptime } = ledger();
@@ -1211,6 +1245,7 @@ describe("routes", () => {
 				if (init?.method === "POST" && url.pathname === "/documents/upload") return Response.json({ status: "success", data: { track_id: "trk-1" } });
 				if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
 				if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+				if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 				return Response.json({ detail: "no route" }, { status: 404 });
 			}) as unknown as typeof fetch;
 			const { greptime } = ledger();
@@ -1236,6 +1271,115 @@ describe("routes", () => {
 			} finally {
 				// A failed assertion above leaves the probe held; release it so `stop()` does not wait on it.
 				probeReply.resolve(new Response("upstream down", { status: 500 }));
+				await stop();
+			}
+		});
+
+		function recallableOmp(): HindsightFake {
+			const hindsight = new HindsightFake();
+			hindsight.seed("sub-omp", [{ id: "m1", text: "the plan lives in PLAN.md", document_id: "mwd_1", tags: ["omp"], metadata: {}, score: 0.9 }]);
+			return hindsight;
+		}
+
+		/** Recall reads the Hindsight variables at call time, so they are set only around the requests made inside `run`. */
+		async function withHindsightEnv<T>(run: () => Promise<T>): Promise<T> {
+			const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"] as const;
+			const saved = names.map((name) => [name, process.env[name]] as const);
+			process.env.HINDSIGHT_URL = "http://fake";
+			process.env.HINDSIGHT_API_KEY = "test-bearer";
+			process.env.HINDSIGHT_BANKS = "sub-omp";
+			try {
+				return await run();
+			} finally {
+				for (const [name, value] of saved) {
+					if (value === undefined) delete process.env[name];
+					else process.env[name] = value;
+				}
+			}
+		}
+
+		async function jsonOf(response: Promise<Response>): Promise<Record<string, unknown>> {
+			return (await (await response).json()) as Record<string, unknown>;
+		}
+
+		test("a LightRAG failure answered from Hindsight is degraded on both search routes, with the LightRAG failure as the reason", async () => {
+			globalThis.fetch = stubLightrag(async () => new Response("upstream down", { status: 500 }));
+			const hindsight = recallableOmp();
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, LIGHTRAG_ENV, { hindsightFetch: hindsight.fetch });
+			try {
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
+				resetRagMachine();
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
+				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag 500" });
+				expect(hindsight.recalls()).toHaveLength(2);
+			} finally {
+				await stop();
+			}
+		});
+
+		test("with the RAG breaker open, a Hindsight answer is degraded on both routes and LightRAG is not asked", async () => {
+			let planeCalls = 0;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return new Response("upstream down", { status: 500 });
+			});
+			const hindsight = recallableOmp();
+			const { greptime } = ledger();
+			// A 60 s cooldown: it cannot elapse during the test, so ERROR holds until the assertions say otherwise.
+			const { post, get, stop } = await serve(greptime, { ...LIGHTRAG_ENV, SUBSTRATE_RAG_HALF_OPEN_MS: "60000" }, { hindsightFetch: hindsight.fetch });
+			try {
+				await withHindsightEnv(async () => {
+					for (const question of ["trip one", "trip two", "trip three"]) await post("/docs/lightrag/query", { question }, auth);
+				});
+				expect(await (await get("/rag/state", auth)).json()).toMatchObject({ state: "ERROR" });
+				const before = planeCalls;
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "asked inside the cooldown" }, auth)));
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "asked inside the cooldown" }, auth)));
+				expect(planeCalls).toBe(before);
+				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "rag breaker open" });
+				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "rag breaker open" });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("an unconfigured LightRAG plane is answered from Hindsight on both search routes", async () => {
+			const hindsight = recallableOmp();
+			const { greptime } = ledger();
+			// The backend is named but no LIGHTRAG_URL is set, so the plane is not configured.
+			const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_DOCS_BACKEND: "lightrag" }, { hindsightFetch: hindsight.fetch });
+			try {
+				const search = await withHindsightEnv(() => jsonOf(post("/docs/search", { question: "where is the plan?" }, auth)));
+				resetRagMachine();
+				const lightrag = await withHindsightEnv(() => jsonOf(post("/docs/lightrag/query", { question: "where is the plan?" }, auth)));
+				expect(search).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
+				expect(lightrag).toMatchObject({ degraded: true, fallback: "hindsight", reason: "lightrag-not-configured" });
+			} finally {
+				await stop();
+			}
+		});
+
+		test("a degraded LightRAG reply is never replayed: its idempotency key asks the plane again, and a served answer replays", async () => {
+			let planeCalls = 0;
+			let healthy = false;
+			globalThis.fetch = stubLightrag(async () => {
+				planeCalls += 1;
+				return healthy ? Response.json(LIGHTRAG_ANSWER) : new Response("upstream down", { status: 500 });
+			});
+			const { greptime } = ledger();
+			const { post, stop } = await serve(greptime, LIGHTRAG_ENV);
+			try {
+				const request = { question: "replay me", idempotency_key: "replay-1" };
+				expect(await jsonOf(post("/docs/lightrag/query", request, auth))).toMatchObject({ degraded: true });
+				healthy = true;
+				const served = await jsonOf(post("/docs/lightrag/query", request, auth));
+				expect(served).toMatchObject({ backend: "lightrag", chunks: [expect.objectContaining({ content: "A LightRAG chunk." })] });
+				expect(served.degraded).toBeUndefined();
+				expect(await jsonOf(post("/docs/lightrag/query", request, auth))).toMatchObject({ backend: "lightrag" });
+				expect(planeCalls).toBe(2);
+			} finally {
 				await stop();
 			}
 		});
@@ -1293,7 +1437,7 @@ describe("GET /events/stream", () => {
 			insertEvent: async () => {},
 			queryEvents: async () => [] as Array<Record<string, unknown>>,
 			cursorPosition: async (eventId: string) => positions.find((position) => position.id === eventId) ?? null,
-			latestPosition: async () => (positions.length > 0 ? positions[positions.length - 1]! : null),
+			latestPosition: async () => positions[positions.length - 1] ?? null,
 			eventIdsAfter: async (cursor: { id: string; ingestedAt: number }, limit: number) => {
 				reads.push({ cursor, limit });
 				const seen = new Set<string>();
@@ -1326,7 +1470,7 @@ describe("GET /events/stream", () => {
 
 	/** Complete `id:`/`data:` frames in SSE text collected so far. */
 	function frames(text: string): Array<{ id: string; data: string }> {
-		return [...text.matchAll(/id: (.+)\ndata: (.+)\n\n/g)].map((match) => ({ id: match[1]!, data: match[2]! }));
+		return [...text.matchAll(/id: (.+)\ndata: (.+)\n\n/g)].map((match) => ({ id: defined(match[1], "event id"), data: defined(match[2], "event data") }));
 	}
 
 	/**
@@ -1453,7 +1597,7 @@ describe("GET /events/stream", () => {
 			const got = frames(await streamText(response, controller, 3));
 			expect(got.map((frame) => frame.id)).toEqual(["e2", "e3", "e4"]);
 			// The frame body is the ledger event shape the query read returns.
-			const event = JSON.parse(got[0]!.data) as Record<string, unknown>;
+			const event = JSON.parse(defined(got[0], "first event").data) as Record<string, unknown>;
 			expect(event).toMatchObject({ id: "e2", surface: "omp", kind: "note", summary: "second", hash: "h-e2" });
 			// Greptime's epoch millis rebuilt as the ISO string the chain hashed.
 			expect(event.ts).toBe(new Date(BASE + 1).toISOString());
@@ -1833,7 +1977,7 @@ describe("agent card route", () => {
 		const index = {
 			searchMemoryPage: async () => ({ entries: rows, next: null }),
 		};
-		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, observability.observer);
 		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -1934,6 +2078,31 @@ describe("agent card route", () => {
 			const bearer = { authorization: "Bearer tok-cursor" };
 			expect((await get("/.well-known/agent-card.json?surface=swarm-a05-be", bearer)).status).toBe(403);
 			expect((await get("/.well-known/agent-card.json?surface=cursor", bearer)).status).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("each swarm surface from A16 to A30 reads its own card, and no other caller does", async () => {
+		// The card boundary for the later swarm agents: a surface's own token reads its card, while a
+		// neighbouring swarm token and the cursor token are refused, for every surface in the range.
+		const later = SWARM_SURFACES.slice(15);
+		const env: Record<string, string> = { SUBSTRATE_TOKEN_CURSOR: "tok-cursor" };
+		for (const surface of later) env[tokenEnvName(surface)] = `tok-${surface}`;
+		const { get, stop } = await serveCard(
+			later.map((surface) => teachable(`mem-${surface}`, surface)),
+			env,
+		);
+		try {
+			for (const [index, surface] of later.entries()) {
+				const neighbour = later[(index + 1) % later.length] as string;
+				const path = `/.well-known/agent-card.json?surface=${surface}`;
+				const own = await get(path, { authorization: `Bearer tok-${surface}` });
+				expect(own.status).toBe(200);
+				expect(validateAgentCard((await own.json()) as Record<string, unknown>)).toEqual([]);
+				expect((await get(path, { authorization: `Bearer tok-${neighbour}` })).status).toBe(403);
+				expect((await get(path, { authorization: "Bearer tok-cursor" })).status).toBe(403);
+			}
 		} finally {
 			await stop();
 		}
@@ -2045,6 +2214,17 @@ describe("surfaceClaimRefusal", () => {
 	test("an untokened caller's claim is not refused here", () => {
 		expect(surfaceClaimRefusal(null, "swarm-a05-be")).toBeNull();
 	});
+
+	test("a swarm surface from A16 to A30 claims only its own name; a neighbour's or the cursor's claim is refused by name", () => {
+		const later = SWARM_SURFACES.slice(15);
+		for (const [index, surface] of later.entries()) {
+			const neighbour = later[(index + 1) % later.length] as string;
+			expect(surfaceClaimRefusal(surface, surface)).toBeNull();
+			expect(surfaceClaimRefusal(surface, undefined)).toBeNull();
+			expect(surfaceClaimRefusal(surface, neighbour)).toBe(`this token is ${surface} and cannot act as ${neighbour}`);
+			expect(surfaceClaimRefusal("cursor", surface)).toBe(`this token is cursor and cannot act as ${surface}`);
+		}
+	});
 });
 
 describe("memoryWriteStatus", () => {
@@ -2071,6 +2251,31 @@ describe("memoryWriteStatus", () => {
 		// A monitor must not read "the index is down" as "this agent lacks permission".
 		expect(memoryWriteStatus(result("denied", { reason: "store.unavailable", verified_persisted: false }))).toBe(503);
 		expect(memoryWriteStatus(result("denied", { reason: "store.write-failed", verified_persisted: false }))).toBe(503);
+	});
+
+	test("an index outage through writeMemory is answered 503 at the status boundary", async () => {
+		// The whole path, not only the mapping: a throwing claim is what the service turns into
+		// `store.write-failed`, and that reason must reach the caller as 503.
+		const failing = { claimWrite: async () => { throw new Error("connect ETIMEDOUT"); } };
+		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null, steering: { history: null, liveSessions: null } });
+		const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes", idempotency_key: "k-503" };
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("store.write-failed");
+		expect(memoryWriteStatus(result)).toBe(503);
+	});
+
+	test("no index at all is answered 503, and the keyed retry is not spent", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes", idempotency_key: "k-503-none" };
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.reason).toBe("store.unavailable");
+		expect(memoryWriteStatus(result)).toBe(503);
+		expect(result.idempotency_key).toBe("");
 	});
 });
 

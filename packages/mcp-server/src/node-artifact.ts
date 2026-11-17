@@ -55,8 +55,9 @@ function inLedgerOrder(events: readonly ArtifactEvent[]): ArtifactEvent[] {
 	const ordered: ArtifactEvent[] = [];
 	let start = 0;
 	while (start < byTime.length) {
+		const first = byTime[start];
 		let end = start + 1;
-		while (end < byTime.length && byTime[end]!.ts === byTime[start]!.ts) end++;
+		while (end < byTime.length && byTime[end]?.ts === first?.ts) end++;
 		ordered.push(...chainOrder(byTime.slice(start, end)));
 		start = end;
 	}

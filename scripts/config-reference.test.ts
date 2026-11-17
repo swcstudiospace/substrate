@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FLAG_FAMILIES, FLAGS, REGISTRY_EXEMPT, policyFlags } from "../packages/mcp-server/src/flag-registry.ts";
 import { EVIDENCE_BEGIN, EVIDENCE_END, REFERENCE_PATH, RUNBOOK_PATH, main, renderEvidenceTable, renderReference, spliceEvidence } from "./config-reference.ts";
+import { defined } from "./test-support.ts";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -56,11 +57,11 @@ describe("the committed documents match the registry", () => {
 		const runbook = readFileSync(join(ROOT, RUNBOOK_PATH), "utf8");
 		const table = runbook.slice(runbook.indexOf(EVIDENCE_BEGIN), runbook.indexOf(EVIDENCE_END));
 		for (const flag of policyFlags()) {
-			for (const evidence of flag.policy!.evidence) {
+			for (const evidence of defined(flag.policy, "policy").evidence) {
 				expect({ flag: flag.name, id: evidence.id, listed: table.includes(evidence.id) }).toEqual({ flag: flag.name, id: evidence.id, listed: true });
 			}
 		}
-		expect(table.match(/PROPOSED/g)?.length).toBe(policyFlags().flatMap((flag) => flag.policy!.evidence).length);
+		expect(table.match(/PROPOSED/g)?.length).toBe(policyFlags().flatMap((flag) => defined(flag.policy, "policy").evidence).length);
 		expect(runbook).toContain("proposals");
 	});
 });
@@ -125,7 +126,7 @@ describe("--check detects drift", () => {
 	test("splicing replaces only what is between the markers and refuses a runbook without them", () => {
 		const table = renderEvidenceTable();
 		const doc = `before\n${EVIDENCE_BEGIN}\n\nstale-placeholder-row\n\n${EVIDENCE_END}\nafter\n`;
-		const spliced = spliceEvidence(doc, table)!;
+		const spliced = defined(spliceEvidence(doc, table), "spliced runbook");
 		expect(spliced.startsWith(`before\n${EVIDENCE_BEGIN}`)).toBe(true);
 		expect(spliced.endsWith(`${EVIDENCE_END}\nafter\n`)).toBe(true);
 		expect(spliced).not.toContain("stale-placeholder-row");
@@ -177,9 +178,10 @@ describe("the rendered reference is complete and well-formed", () => {
 
 	test("the promotion table has one row per policy flag with its safe and enforcing values", () => {
 		for (const flag of policyFlags()) {
-			const row = text.split("\n").find((line) => line.startsWith(`| \`${flag.name}\` | \`${flag.policy!.safe}\``));
+			const policy = defined(flag.policy, "policy");
+			const row = text.split("\n").find((line) => line.startsWith(`| \`${flag.name}\` | \`${policy.safe}\``));
 			expect({ flag: flag.name, row: row !== undefined }).toEqual({ flag: flag.name, row: true });
-			expect(row).toContain(`\`${flag.policy!.enforcing}\``);
+			expect(row).toContain(`\`${policy.enforcing}\``);
 		}
 	});
 });
