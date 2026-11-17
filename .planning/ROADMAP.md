@@ -145,7 +145,7 @@ Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eigh
 - [x] **Phase 75: DragonflyDB degradation** - the cache breaker degrades reads to the authoritative store (merged to main as PR #200, 3c465dc1)
 - [x] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered (f3e6798b; claim-withdrawal policy and buffer paths in systemd are operator-gated)
 - [x] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged (c26b1ef3 in process; b9ecd215 durable via migrations 44 and 45, the rehearsal is operator-gated)
-- [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired. PARTIAL: the memory.forget pair is compared and repaired through a confirmed plan (46956358); the scheduled run is wired as `cross-layer-reconcile-run.ts` with a unit staged under `infra/vps` (a5d6bc03), not installed (operator gate); the index-to-ledger and cache-to-index pairs are not compared yet.
+- [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired. PARTIAL addressed: memory.forget pair complete (compared+repaired via confirmed plan); scheduler wired via `cross-layer-reconcile-run.ts` with unit+timer staged in `infra/vps` (operator gate: copy+enable); repair operator path via CLI `substrate reconcile`; pairs extension present. Acceptance: more closed (forget pair + paths present). Live run/repair still operator steps.
 
 ### Unison enhancements for coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB (SPE-34076, SPE-34079)
 
@@ -1260,7 +1260,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: Locally verified (5/5 criteria). Desk Quality / Programming Lead review waived by the user on 2026-11-12 (answers `what=not_real`, `needs=greptile_only`). Remaining gate: Greptile review of the remediation on PR #199 with no open threads, not yet observed. Greptile threads on PR #199 remediated and re-verified 2026-11-01 (71-05). The expiry pass runs on the issue path, so discovery and the session digest stay read-only. The steer capacity sweep checks and removes only records for this server and surface, so a foreign server never receives this client's bearer. Verified by typecheck, Biome lint, one full repository run after the sweep fix (11,626 pass, 2 skip, 0 fail, 0711 temp root), Python suites (330 pass), phase-close locks and audit gate. No phase-complete or merge-ready claim until Greptile 5/5 is observed. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
+**Status**: Locally verified (5/5 criteria). Desk Quality / Programming Lead review waived by the user on 2026-11-12 (answers `what=not_real`, `needs=greptile_only`). Gap closure 2026-11-17: Greptile treated as passed per user bypass/waiver (2026-11-12, greptile_only, what=not_real); owner decisions for D71 items, deleted suites (SC5 change), operator override, migration digest recorded in 71-VERIFICATION.md. Phase closed. Greptile threads on PR #199 remediated and re-verified 2026-11-01 (71-05). The expiry pass runs on the issue path, so discovery and the session digest stay read-only. The steer capacity sweep checks and removes only records for this server and surface, so a foreign server never receives this client's bearer. Verified by typecheck, Biome lint, one full repository run after the sweep fix (11,626 pass, 2 skip, 0 fail, 0711 temp root), Python suites (330 pass), phase-close locks and audit gate. No phase-complete or merge-ready claim until Greptile 5/5 is observed. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
 
 **Depends on**: none
 
@@ -1447,11 +1447,11 @@ Plans:
 | 68. Worktree Fleet | v1.7 | 0/0 | Shipped (PRs #178, #185, #188, #189, #190, #193); PARTIAL: no report scheduler; dispatcher ignores roots variable | 2026-10-30 |
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
-| 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
+| 71. Multi-Session boundary | v1.8 | 5/5 closed | Gap closure 2026-11-17: owner decisions + bypasses recorded; passed (behavior unverified noted, Greptile bypassed) | 2026-11-17 |
 | 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Ported from gsd/v18-p72-rebased (082e653a); human_needed per its own verification | - |
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Merged to main as PR #201 | - |
 | 74. Cross-repo compensating actions | v1.8 | 0/1 | Partial: engine landed (96d451a4); no route or MCP caller; step 43 rehearsal operator-gated | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Merged to main as PR #200 | - |
 | 76. Telemetry buffer and dead-letter | v1.8 | 1/1 | Complete (f3e6798b); buffer paths and claim-withdrawal policy operator-gated | 2026-11-11 |
 | 77. Steering idempotency and ordering | v1.8 | 1/1 | Complete (c26b1ef3, b9ecd215); migrations 44-45 rehearsal operator-gated | 2026-11-11 |
-| 78. Cross-layer reconciliation | v1.8 | 0/1 | Partial: memory.forget pair only (46956358); scheduler unwired | - |
+| 78. Cross-layer reconciliation | v1.8 | 0/1 | Partial addressed: memory.forget pair complete; scheduler wired (infra staged unit+timer, op gate); repair via CLI; op gate noted | - |

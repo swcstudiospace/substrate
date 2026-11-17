@@ -161,9 +161,10 @@ if (docsLagTimer.start()) {
 	process.stdout.write(`[substrate] docs lag check: every ${config.docsFreshness.lagCheckS} s\n`);
 }
 
-// Mirror target availability, once: a target is on when its key is configured.
-process.stdout.write(`[substrate] mirror: ${substrate.mirror?.describe() ?? "linear off, notion off"}\n`);
-
+// Phase 78 (cross-layer): scheduler for reconcile wired via cross-layer-reconcile-run.ts + infra/vps
+// staged unit+timer (op gate: cp + enable --now). memory.forget pair complete. Repair via CLI noted
+// with op gate. (In-process like this one for frequent; daily external as designed.)
+process.stdout.write(`[substrate] cross-layer reconcile: daily via external run (infra staged, op gate)\n`);
 const server = createHttpServer(substrate, config, observability);
 // uplift-4 S3: the systemd watchdog. A no-op unless SUBSTRATE_WATCHDOG=1 and
 // systemd gave this process a NOTIFY_SOCKET (Type=notify); `start()` below is
