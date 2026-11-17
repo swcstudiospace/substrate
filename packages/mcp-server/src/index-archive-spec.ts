@@ -209,6 +209,14 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 		placeholders: { body: WITHHELD_PLACEHOLDER, subject: null },
 		hasEntryHash: true,
 	},
+	{
+		name: "context_matrix_entries",
+		columns: [text("entry_id"), text("realm"), text("milestone"), text("phase"), text("source_path"), text("source_sha256"), text("entry_kind"), text("body_redacted"), text("status"), text("superseded_by"), ts("created_at")],
+		key: ["entry_id"],
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: false,
+	},
 ];
 
 const BY_NAME: ReadonlyMap<string, ArchiveTableSpec> = new Map(ARCHIVE_TABLES.map((spec) => [spec.name, spec]));
