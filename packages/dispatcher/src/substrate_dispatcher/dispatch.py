@@ -48,7 +48,7 @@ MARKERS: dict[str, str] = {
     "invalid-graph-id": "the graph id is not a safe worktree name; not dispatching",
     "invalid-ids": "the issue identifier, node id, graph id or repo is not a safe prompt value; not dispatching, not retrying",
     "no-checkout": "no verified checkout of the graph's repo on this host; not dispatching",
-    "low-disk": "under 5 GB free on /; no worktree created, not dispatching",
+    "low-disk": "under {gb} GB free on {path}; no worktree created, not dispatching",
     "path-conflict": "the worktree path is taken by something git does not track as this graph's worktree; not dispatching",
     "git-failed": "git could not prepare the worktree; not dispatching",
     "host-refused": "substrate-host refused the task; not dispatching",
@@ -412,7 +412,7 @@ def tick(
                     continue
                 except WorktreeRefused as refused:
                     log(f"{candidate.identifier}: worktree refused {tag(refused.marker)}: {refused.reason}")
-                    if _comment_once(linear, candidate, refused.marker):
+                    if _comment_once(linear, candidate, refused.marker, **refused.fields):
                         _maybe_emit_failed(mcp, candidate, found, refused.marker, log)
                     continue
                 except HostRefused as refused:
