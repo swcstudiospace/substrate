@@ -28,6 +28,8 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"skills_approve", // uplift-5 S5a: records which merged skill an operator approved, declined or retired.
 	"docs_ingest", // Phase 25: writes a shared dataset every agent reads.
 	"docs_steering_session", // SPE-19388: moves a live session's steering state and writes a ledger note.
+	"steering_session_heartbeat", // Phase 71: renews authoritative liveness.
+	"steering_session_close", // Phase 71: permanently revokes a live identity.
 	"desktop_run", // Phase 30: acts on a desktop (DESK-03).
 	// Phase 45 (D45-h): a Railway write changes a live project, so it is recorded before it runs.
 	"railway_scale",
@@ -91,6 +93,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"planning_sessions",
 	// Phase 53 (SOTA-09): the steering read. The directives for one session, queued or acknowledged, are inspection only.
 	"steering_list",
+	"live_session_discovery", // Phase 71: REST metadata discovery; never renews a lease.
+	"steering_wait", // Phase 71: one private read held until delivery or timeout.
 	// Phase 67 (live steering GA): the cross-session digest. A bounded, redacted read of presence, claims and the ledger; it writes nothing.
 	"session_context",
 	// Phase 68 (FLEET-02): the worktree registry read, as an MCP tool and the `GET /worktrees` route under one name. Inspection only.

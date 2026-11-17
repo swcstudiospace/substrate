@@ -127,7 +127,7 @@ def test_launch_through_the_loop_uses_make_launch_fn_and_registers_the_session(e
 
 def test_worktree_refused_through_the_loop_comments_once(env_file):
     def ensure(*_a):
-        raise WorktreeRefused("only 1.0 GB free on /", "low-disk")
+        raise WorktreeRefused("only 1.0 GB free on /", "low-disk", fields={"path": "/", "gb": "5"})
 
     launch_fn = make_launch_fn(log=lambda _l: None, checkout=lambda _s: Path("/r"), ensure=ensure)
     linear, registry = FakeLinear([cand()]), SessionRegistry()

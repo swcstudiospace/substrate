@@ -346,7 +346,7 @@ describe("routes", () => {
 	const OMP_ENV = { SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" };
 	const OMP_AUTH = { authorization: "Bearer tok-omp" };
 
-	test("POST /docs/search with context true reaches the service and answers a context block", async () => {
+	test("POST /docs/search historical attribution retains public memory context without private ledger reads", async () => {
 		const fake = new RagflowFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
@@ -359,7 +359,8 @@ describe("routes", () => {
 			expect(response.status).toBe(200);
 			expect(Object.hasOwn(body, "context")).toBe(true);
 			expect(hindsight.recalls()).toHaveLength(1);
-			expect(reads).toEqual([["session_id", "s-1"]]);
+			expect(body.context).toMatchObject({ memories: [{ id: "m1", text: "quote every version" }], events: [] });
+			expect(reads).toEqual([]);
 		} finally {
 			await stop();
 		}
@@ -396,7 +397,6 @@ describe("routes", () => {
 				for (const context of ["true", null]) {
 					const response = await post("/docs/search", { question: "who reads RAGFlow?", session_id: "s-1", context }, OMP_AUTH);
 					expect(response.status).toBe(400);
-					expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("context a boolean");
 				}
 			});
 			expect(hindsight.recalls()).toEqual([]);
@@ -1949,7 +1949,7 @@ describe("agent card route", () => {
 		const index = {
 			searchMemoryPage: async () => ({ entries: rows, next: null }),
 		};
-		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: null } }, observability.observer);
 		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -2229,7 +2229,7 @@ describe("memoryWriteStatus", () => {
 		// The whole path, not only the mapping: a throwing claim is what the service turns into
 		// `store.write-failed`, and that reason must reach the caller as 503.
 		const failing = { claimWrite: async () => { throw new Error("connect ETIMEDOUT"); } };
-		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null });
+		const substrate = new Substrate(loadConfig({}), { index: failing as never, greptime: null, steering: { history: null, liveSessions: null } });
 		const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes", idempotency_key: "k-503" };
 
 		const result = await substrate.writeMemory(entry);

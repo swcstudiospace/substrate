@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections import namedtuple
 from pathlib import Path
 
 import pytest
 
+from substrate_dispatcher.dispatch import COMMENT_PREFIX, comment_body
 from substrate_dispatcher.worktree import (
     DEFAULT_MIN_FREE_GB,
     MIN_FREE_ENV,
+    WORKTREE_ROOTS_ENV,
+    WORKTREES_ROOT,
     WorktreeRefused,
+    creation_root,
     ensure_worktree,
     min_free_bytes,
     repo_checkout,
     validate_graph_id,
+    worktree_roots,
 )
 
 MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
@@ -24,6 +30,7 @@ MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
 @pytest.fixture(autouse=True)
 def _clean_floor_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(MIN_FREE_ENV, raising=False)
+    monkeypatch.delenv(WORKTREE_ROOTS_ENV, raising=False)
 
 GID = "ut-mufsocbe-c7ced745"
 SLUG = "swcstudiospace/agent-substrate"
@@ -213,3 +220,191 @@ def test_ensure_worktree_floor_follows_env(repo: Path, tmp_path: Path, monkeypat
     assert err.value.marker == "low-disk"
     assert "20 GB" in str(err.value)
     assert calls == []
+
+
+def test_worktree_roots_keep_absolute_entries_in_order_once(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    value = f"relative/one::{first}:  :./x:{second}:{first}/"
+    assert worktree_roots({WORKTREE_ROOTS_ENV: value}) == [first, second]
+
+
+def test_worktree_roots_are_empty_when_unset():
+    assert worktree_roots({}) == []
+
+
+@pytest.mark.parametrize("value", [None, "", "relative/only", "rel:also-rel:"])
+def test_creation_root_falls_back_to_the_default(value):
+    env = {} if value is None else {WORKTREE_ROOTS_ENV: value}
+    assert creation_root(env) == WORKTREES_ROOT
+
+
+def test_creation_root_is_the_first_configured_root(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    assert creation_root({WORKTREE_ROOTS_ENV: f"{first}:{second}"}) == first
+
+
+def test_ensure_worktree_creates_under_the_first_configured_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+
+    path = ensure_worktree(repo, GID, "main", run=Recorder(), disk_usage=plenty)
+
+    assert path == first / GID
+    assert path.is_dir()
+    assert not second.exists()
+
+
+def test_disk_floor_checks_the_filesystem_of_the_chosen_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, str(tmp_path / "volume" / "worktrees"))
+    checked: list[str] = []
+
+    def usage(path: str) -> Usage:
+        checked.append(path)
+        return PLENTY
+
+    ensure_worktree(repo, GID, "main", run=Recorder(), disk_usage=usage)
+
+    assert checked == [str(tmp_path)]
+
+
+def test_low_disk_on_the_chosen_root_refuses_before_any_git_command(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / "wt"
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, str(root))
+    run = Recorder()
+
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", run=run, disk_usage=usage)
+
+    assert err.value.marker == "low-disk"
+    assert run.calls == []
+    assert not root.exists()
+
+
+def test_low_disk_comment_names_the_checked_path_when_roots_are_set(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, str(tmp_path / "volume" / "worktrees"))
+
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", run=Recorder(), disk_usage=usage)
+
+    assert comment_body(err.value.marker, **err.value.fields) == (
+        f"{COMMENT_PREFIX} [low-disk] under 5 GB free on {tmp_path}; no worktree created, not dispatching"
+    )
+
+
+def test_low_disk_comment_names_slash_when_no_roots_are_set(repo: Path, tmp_path: Path):
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=tmp_path / "wt", run=Recorder(), disk_usage=usage)
+
+    assert comment_body(err.value.marker, **err.value.fields) == (
+        f"{COMMENT_PREFIX} [low-disk] under 5 GB free on /; no worktree created, not dispatching"
+    )
+
+
+def test_low_disk_comment_states_the_configured_floor(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(MIN_FREE_ENV, "10")
+
+    def usage(_path: str) -> Usage:
+        return Usage(100 * 1024**3, 0, 1024**3)
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=tmp_path / "wt", run=Recorder(), disk_usage=usage)
+
+    assert comment_body(err.value.marker, **err.value.fields) == (
+        f"{COMMENT_PREFIX} [low-disk] under 10 GB free on /; no worktree created, not dispatching"
+    )
+
+
+def test_ensure_worktree_reuses_a_checkout_under_a_later_root_without_adding(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    second.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(second / GID), "main")
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == second / GID
+    assert run.adds() == []
+    assert not first.exists()
+
+
+def test_ensure_worktree_refuses_a_missing_checkout_under_a_later_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    second.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(second / GID), "main")
+    shutil.rmtree(second / GID)
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert err.value.marker == "path-conflict"
+    assert run.adds() == []
+    assert not first.exists()
+
+
+def test_ensure_worktree_reuses_a_single_root_checkout_with_one_listing(repo: Path, tmp_path: Path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{GID}", str(root / GID), "main")
+    run = Recorder()
+
+    assert ensure_worktree(repo, GID, "main", root=root, run=run, disk_usage=plenty) == root / GID
+    assert run.adds() == []
+    assert [call[3:5] for call in run.calls] == [["worktree", "list"]]
+
+
+def test_ensure_worktree_ignores_a_later_root_symlink_to_the_primary_checkout(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    second.mkdir()
+    (second / GID).symlink_to(repo)
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == first / GID
+    assert len(run.adds()) == 1
+    assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+
+
+def test_ensure_worktree_ignores_a_later_root_sibling_symlink(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    other = "ut-sibling-graph-b"
+    second.mkdir()
+    git(repo, "worktree", "add", "-b", f"substrate/{other}", str(second / other), "main")
+    (second / GID).symlink_to(second / other)
+    monkeypatch.setenv(WORKTREE_ROOTS_ENV, f"{first}:{second}")
+    run = Recorder()
+
+    path = ensure_worktree(repo, GID, "main", run=run, disk_usage=plenty)
+
+    assert path == first / GID
+    assert len(run.adds()) == 1
+    assert git(path, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"substrate/{GID}"
+
+
+def test_ensure_worktree_refuses_a_creation_root_symlink_to_another_graph(repo: Path, tmp_path: Path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    other = "ut-sibling-graph-b"
+    git(repo, "worktree", "add", "-b", f"substrate/{other}", str(root / other), "main")
+    (root / GID).symlink_to(root / other)
+    run = Recorder()
+
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", root=root, run=run, disk_usage=plenty)
+
+    assert err.value.marker == "invalid-graph-id"
+    assert run.adds() == []

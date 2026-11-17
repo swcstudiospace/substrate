@@ -101,7 +101,7 @@ beforeAll(async () => {
 	// in front of the dispatcher is part of the boundary this file drives.
 	observability = createObservability(config, ENV);
 	await observability.start();
-	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never }, observability.observer);
+	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } }, observability.observer);
 	server = createHttpServer(substrate, config, observability);
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -339,7 +339,7 @@ describe("the handoff sender is the token's surface", () => {
 		// is consulted only when *nothing* is authenticated, never merely because
 		// this particular token named no surface.
 		const config = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes", SUBSTRATE_HANDOFF_KEY: "k" });
-		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
+		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
 		const surfaceless = createHttpServer(
 			substrate,
 			{

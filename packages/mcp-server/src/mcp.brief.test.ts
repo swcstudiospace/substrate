@@ -9,7 +9,7 @@
  * fake; nothing here opens a socket to anything but its own server.
  */
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
@@ -17,10 +17,11 @@ import { MEMORY_GENERATION_KEY, ReadThroughCache, type CacheRedis } from "./cach
 import type { AddressInfo } from "node:net";
 import { loadConfig } from "./config.ts";
 import { createMcpServer } from "./mcp.ts";
-import { createObservability, type Observability } from "./observe.ts";
+import { auditToolCalls, createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { defined } from "./test-support.ts";
+import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
 
 function graphView(graphId: string) {
 	return {
@@ -50,6 +51,8 @@ interface Rig {
 	client: Client;
 	base: string;
 	observability: Observability;
+	substrate: Substrate;
+	authority: TestLiveSessionAuthority;
 	close(): void;
 }
 const rigs: Rig[] = [];
@@ -62,7 +65,10 @@ async function rig(index: Record<string, unknown>, options: { cache?: ReadThroug
 	const config = loadConfig(options.env ?? {});
 	const observability = createObservability(config, {});
 	await observability.start();
-	const substrate = new Substrate(config, { index: index as never, greptime: null, ...(options.cache ? { cache: options.cache } : {}) }, observability.observer);
+	const authority = createTestLiveSessionAuthority();
+	const substrate = new Substrate(config, { index: index as never, greptime: null, steering: { history: null, liveSessions: authority }, ...(options.cache ? { cache: options.cache } : {}) }, observability.observer, {
+		auditCalls: (caller, calls, transport) => auditToolCalls(observability, caller.surface, calls, transport),
+	});
 	const mcp = createMcpServer(substrate, "grok-bot");
 	const client = new Client({ name: "brief-contract", version: "0.0.0" });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -76,6 +82,8 @@ async function rig(index: Record<string, unknown>, options: { cache?: ReadThroug
 		client,
 		base: `http://127.0.0.1:${port}`,
 		observability,
+		substrate,
+		authority,
 		close() {
 			observability.stop();
 			http.close();
@@ -340,7 +348,7 @@ describe("memory_brief profiles (uplift-4 S1)", () => {
 	});
 
 	test("REST: the profile header rides a 304 too, and an unknown profile is a 400 that serves nothing", async () => {
-		const { base } = await rig(COMPLETE_INDEX, ENFORCE);
+		const { base, substrate } = await rig(COMPLETE_INDEX, ENFORCE);
 		const first = await restBriefBody(base, {});
 		expect(first.headers.get("x-substrate-brief-profile")).toBe("compact");
 		const etag = defined(first.headers.get("etag"), "etag header");
@@ -351,20 +359,23 @@ describe("memory_brief profiles (uplift-4 S1)", () => {
 		expect(full.status).toBe(200);
 		expect(full.headers.get("x-substrate-brief-profile")).toBe("full");
 
+		const compose = spyOn(substrate, "briefConditional");
 		for (const bad of ["compat", "", "FULL", 3, ["compact"]]) {
 			const refused = await restBriefBody(base, { profile: bad });
 			expect(refused.status).toBe(400);
-			const payload: unknown = await refused.json();
-			expect(payload).toEqual({ error: expect.stringContaining("profile") });
+			expect(refused.headers.get("etag")).toBeNull();
+			await refused.text();
+			expect(compose).not.toHaveBeenCalled();
 		}
 	});
 
 	test("MCP: an unknown profile is a tool error, never coerced", async () => {
-		const { client } = await rig(COMPLETE_INDEX, ENFORCE);
+		const { client, substrate } = await rig(COMPLETE_INDEX, ENFORCE);
+		const compose = spyOn(substrate, "briefConditional");
 		const refused = await brief(client, { ...ARGS, profile: "compat" });
 		expect(refused.isError).toBe(true);
-		expect(refused.text).toContain("profile");
 		expect(refused.structured).toBeUndefined();
+		expect(compose).not.toHaveBeenCalled();
 	});
 
 	test("served.tokens_est counts fresh answers by bytes/4 and never a 304; substrate.tokens is untouched", async () => {
@@ -425,5 +436,31 @@ describe("the profile follows the bearer's surface, not the surface claimed in t
 		expect(own.structured.surface).toBe("grok-bot");
 		expect(own.structured.profile).toBe("compact");
 		expect(own.text.split("\n")[0]).toBe("[brief: complete]");
+	});
+});
+
+describe("memory_brief live selectors are not historical labels", () => {
+	test("a matching validator cannot bypass proof or terminal authority", async () => {
+		const h = await rig(COMPLETE_INDEX, { env: { SUBSTRATE_BRIEF_SESSIONS: "on" } });
+		const caller = { surface: "grok-bot", isOperator: false } as const;
+		const session = await issueLiveSession(h.authority, { caller, repoId: "acme/app", steering: "PRIVATE-MCP-BRIEF" });
+		const args = { ...ARGS, session_id: "historical-brief-label", steering_session_id: session.sessionId, session_binding: session.sessionBinding };
+		const owner = await brief(h.client, args);
+		expect(owner.isError).toBe(false);
+		expect(owner.text).toContain("PRIVATE-MCP-BRIEF");
+		expect(owner.text).not.toContain(session.sessionBinding);
+		const historical = await brief(h.client, { ...ARGS, session_id: session.sessionId });
+		expect(historical.isError).toBe(false);
+		expect(historical.text).not.toContain("PRIVATE-MCP-BRIEF");
+		for (const session_binding of [undefined, "f".repeat(64)]) {
+			const denied = await brief(h.client, { ...args, session_binding, if_none_match: owner.structured.etag });
+			expect(denied.isError).toBe(true);
+			expect(JSON.parse(denied.text)).toEqual({ status: "refused", error: { code: "not-found" } });
+			expect(denied.text).not.toContain("PRIVATE-MCP-BRIEF");
+		}
+		await h.authority.close(session.access);
+		const closed = await brief(h.client, { ...args, if_none_match: "*" });
+		expect(closed.isError).toBe(true);
+		expect(JSON.parse(closed.text)).toEqual({ status: "refused", error: { code: "not-found" } });
 	});
 });

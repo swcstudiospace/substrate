@@ -34,7 +34,7 @@
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
-import { callPlane, type PlaneGate } from "@substrate/observability";
+import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { MAX_RECALL_TTL_S } from "./recall-snapshot.ts";
@@ -161,8 +161,8 @@ export interface CacheSample {
 	cacheClass?: CacheKeyClass;
 }
 
-/** What `ReadThroughCache.script` answers; `ok: false` is a bounded, redacted reason the caller treats as cache-off. */
-export type ScriptOutcome = { ok: true; value: unknown } | { ok: false; reason: string };
+/** What `ReadThroughCache.script` answers. `ok: false` is a bounded, redacted reason the caller treats as cache-off; `breakerRetryAfterMs` is set only when the plane's breaker refused the command, so nothing was sent: the wait until its next probe. */
+export type ScriptOutcome = { ok: true; value: unknown } | { ok: false; reason: string; breakerRetryAfterMs?: number };
 
 /** The commands the cache uses. Tests pass a fake; production uses Bun. */
 export interface CacheRedis {
@@ -1027,6 +1027,7 @@ export class ReadThroughCache {
 	 * a bypass, so the reason is bounded and redacted and never the answer.
 	 * A failure degrades the cache like any other failed command; not a counted
 	 * bypass, because no read was served from the source in its place.
+	 * A breaker refusal also carries `breakerRetryAfterMs`: no command was sent.
 	 */
 	async script(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
 		if (!this.enabled || !this.redis) return { ok: false, reason: "cache off" };
@@ -1039,7 +1040,8 @@ export class ReadThroughCache {
 			return { ok: true, value };
 		} catch (cause) {
 			this.fail(cause, false, "budget");
-			return { ok: false, reason: redact(stripRedisUrl(cause instanceof Error ? cause.message : String(cause))) };
+			const reason = redact(stripRedisUrl(cause instanceof Error ? cause.message : String(cause)));
+			return cause instanceof BreakerOpenError ? { ok: false, reason, breakerRetryAfterMs: cause.retryAfterMs } : { ok: false, reason };
 		}
 	}
 

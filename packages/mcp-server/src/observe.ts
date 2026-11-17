@@ -99,6 +99,8 @@ const KNOWN_ROUTES = [
 	"/slo/history",
 	"/livez",
 	"/steering/sessions",
+	"/steering/sessions/heartbeat",
+	"/steering/sessions/close",
 	"/steering/directives",
 	"/steering/wait",
 	"/steering/queue",
@@ -671,6 +673,9 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"skills_list",
 	"docs_search",
 	"docs_ingest",
+	"docs_steering_session",
+	"steering_session_heartbeat",
+	"steering_session_close",
 	"docs_feedback",
 	"desktop_run",
 	"railway_list",
@@ -687,6 +692,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_queue",
 	"steering_acknowledge",
 	"steering_list",
+	"steering_wait",
+	"live_session_discovery",
 	"session_context",
 	"worktree_list",
 	"worktree_report",
@@ -705,6 +712,21 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 export function toolLabel(tool: string): string {
 	return KNOWN_TOOLS.has(tool) ? tool : "unrecognized";
 }
+
+/**
+ * Here session_id is a private live target, not historical attribution.
+ * Omit it from plaintext context even on denied batches; args stay canonical
+ * and are still digested by the audit chain without storing their values.
+ */
+const PRIVATE_LIVE_TARGET_TOOLS: Readonly<Record<string, true>> = {
+	docs_steering_session: true,
+	steering_session_heartbeat: true,
+	steering_session_close: true,
+	steering_list: true,
+	steering_queue: true,
+	steering_acknowledge: true,
+	steering_wait: true,
+};
 
 /**
  * Record each tool call, and report the ones that must not run.
@@ -746,7 +768,7 @@ export async function auditToolCalls(
 			transport,
 			graph_id: stringAt(call.args, "graph_id"),
 			node_id: stringAt(call.args, "node_id"),
-			session_id: stringAt(call.args, "session_id"),
+			session_id: Object.hasOwn(PRIVATE_LIVE_TARGET_TOOLS, call.tool) ? null : stringAt(call.args, "session_id"),
 		};
 		// Once the batch is refused, nothing else will be dispatched, so nothing else is
 		// recorded as allowed either.

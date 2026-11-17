@@ -9,7 +9,7 @@ import { assertDevnetRpcUrl, parseSignerSet, SignerSetError, SOLANA_CLI_DEFAULT,
 import { loadSloThresholds, type SloThresholds } from "@substrate/corpus";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
 import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
-import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
+import { ADMISSION_BREAKER_POLICIES, ADMISSION_MODES, type AdmissionBreakerPolicy, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
 import { classifyEndpoint, parseProxyAllow, type DbPlane, type EndpointClass, type ProxyAllow } from "./db-endpoints.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { loadInventoryConfig, type InventoryConfig } from "./hindsight-inventory.ts";
@@ -690,7 +690,7 @@ export interface SubstrateConfig {
 	 * `SUBSTRATE_BUDGETS` (`off` | `shadow` | `enforce`, default `shadow`) and
 	 * the per-class buckets from `SUBSTRATE_BUDGET_<CLASS>_RPS` / `_BURST`, with
 	 * per-surface `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` overrides
-	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`. See `admission.ts`.
+	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`, and each class's `SUBSTRATE_BUDGET_<CLASS>_BREAKER` (what an open cache breaker does to it). See `admission.ts`.
 	 */
 	admission: AdmissionSettings;
 	/**
@@ -760,10 +760,10 @@ export interface SubstrateConfig {
 	steering: SteeringConfigResult;
 	/** `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` (phase 53, SOTA-09): on lets `migrate()` create `planning_steering_audit`. Off by default. */
 	steeringAuditTable: boolean;
-	/** `SUBSTRATE_STEERING_SESSIONS_TABLE` (phase 67): on persists the steering session registry to `steering_sessions` and loads it at boot. Off by default; nothing changes while it is off. */
+	/** Historical migration-37 selection only; no runtime session cache or live authorization role. */
 	steeringSessionsTable: boolean;
-	/** `SUBSTRATE_STEERING_SESSION_TTL_S` (phase 67): sessions older than this are dropped when the durable registry loads. Default 604800. */
-	steeringSessionTtlS: number;
+	/** `SUBSTRATE_LIVE_SESSION_LEASE_S` (phase 71): authoritative live-session lease, whole seconds 60..86400; default 3600. */
+	liveSessionLeaseS: number;
 	/** `SUBSTRATE_STEERING_WAIT_MAX_MS` (phase 67): the longest `GET /steering/wait` holds a request. Default 30000, bound 1000..120000. */
 	steeringWaitMaxMs: number;
 	/** `SUBSTRATE_BRIEF_SESSIONS` (phase 67): on adds the `sessions`, `steering` and `handoffs` sections to the brief. Off by default: the brief is exactly what it was. */
@@ -1278,9 +1278,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// Phase 53 (SOTA-09): the audit table opt-in. Off creates nothing at boot; on creates it through the gated migration step.
 		steeringAuditTable: steeringAuditTableEnabled(env),
 		steeringRegistered: steeringToolsRegistered(env),
-		// Phase 67 (live steering GA): the durable session registry, its TTL, the long-poll bound and the brief sections. Environment only.
+		// Historical schema selection, authoritative live lease, long-poll bound and public brief sections.
 		steeringSessionsTable: toggleOn(env.SUBSTRATE_STEERING_SESSIONS_TABLE),
-		steeringSessionTtlS: boundedInt(env.SUBSTRATE_STEERING_SESSION_TTL_S, 604_800, 60, 31_536_000),
+		liveSessionLeaseS: clampedIntOr(env.SUBSTRATE_LIVE_SESSION_LEASE_S, { min: 60, max: 86_400, fallback: 3_600 }),
 		steeringWaitMaxMs: boundedInt(env.SUBSTRATE_STEERING_WAIT_MAX_MS, 30_000, 1_000, 120_000),
 		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
 		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
@@ -1830,6 +1830,12 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			};
 		}
 	}
+	const breakerPolicy = Object.fromEntries(
+		ADMISSION_CLASSES.map((klass) => {
+			const name = `SUBSTRATE_BUDGET_${klass.toUpperCase()}_BREAKER`;
+			return [klass, breakerPolicyOf(name, env[name])];
+		}),
+	) as Record<AdmissionClass, AdmissionBreakerPolicy>;
 	return {
 		mode,
 		classes,
@@ -1838,7 +1844,20 @@ export function loadAdmissionSettings(env: Record<string, string | undefined>): 
 			burst: positiveOr(env.SUBSTRATE_BUDGET_ANONYMOUS_BURST, DEFAULT_BUDGETS.anonymous.burst),
 		},
 		overrides,
+		breakerPolicy,
 	};
+}
+
+/**
+ * `SUBSTRATE_BUDGET_<CLASS>_BREAKER`, trimmed and lowercased. Unset or blank is `fail-open`, the default. `fail-open` and
+ * `fail-closed` are the only other values; anything else refuses boot, so a typo for `fail-closed` cannot silently admit.
+ * (`SUBSTRATE_BUDGETS` keeps its older fallback to `shadow`.)
+ */
+function breakerPolicyOf(name: string, raw: string | undefined): AdmissionBreakerPolicy {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "") return "fail-open";
+	if ((ADMISSION_BREAKER_POLICIES as readonly string[]).includes(value)) return value as AdmissionBreakerPolicy;
+	throw new ConfigError(`${name}=${JSON.stringify(raw)} is not fail-open or fail-closed; set one of those, or unset it for fail-open`);
 }
 
 /**

@@ -164,7 +164,7 @@ function scratchWorld(): ScratchWorld {
 	const base = loadConfig({});
 	const substrate = new Substrate(
 		{ ...base, solana: { ...base.solana, pubkey: PUBKEY } },
-		{ index: index as never, greptime: ledger.greptime as never },
+		{ index: index as never, greptime: ledger.greptime as never, steering: { history: null, liveSessions: null } },
 	);
 	const rpc = {
 		getGenesisHash: async () => DEVNET_GENESIS_HASH,

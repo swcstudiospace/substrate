@@ -2,23 +2,34 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: "v1.8 defined (phases 71-78, none complete); v1.7 phases 63-70 shipped; v1.7 owner decisions open"
-stopped_at: "v1.8 defined in ROADMAP by PR #198 (phases 71-78, not started); implementation units on gsd/hardening-* branches"
-last_updated: "2026-10-31T00:30:00.000Z"
-last_activity: 2026-10-31
-last_activity_desc: "Milestone v1.8 defined: phases 71-78 in ROADMAP; no phase complete"
+status: "v1.8 Phase 71 locally verified; Greptile remediation (71-05) gates green; human_needed: awaiting Desk Quality review; no phase signed off"
+stopped_at: "Phase 71 remediation ready for draft review on PR #199; Desk SendToAgent connector not mounted in the autonomous session, so the Desk Quality gate is unobserved. Phases 72-78 not started. v1.7 owner decisions open."
+last_updated: "2026-11-01"
+last_activity: 2026-11-01
+last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); expiry pass moved to issue so discovery and the digest stay read-only; one full run 11623 pass, 0 fail; phase remains human_needed"
 state_head: 9d3f20851a85
 progress:
   total_phases: 8
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 4
+  completed_plans: 4
   percent: 0
 current_phase: 71
 current_phase_name: multi-session-boundary
 ---
 
 # State
+
+## Autonomous run record (2026-11-01)
+
+- Live milestone is v1.8 (phases 71-78). Origin/main `b1b42f92` is the source of truth. The primary checkout `/root/src/repos/agent-substrate` is on `planning/consistency-check-2026-10-24`, 262 commits behind main, with uncommitted swarm lines in `.planning/STATE.md` and untracked `.claude/`. Those are not ours and were not touched.
+- Phase 71 work runs in `/root/src/worktrees/as-gsd-v18-p71` (branch `gsd/v18-p71-greptile-fixes`, based on PR #199 head `d535f8c6`).
+- Blockers, by class:
+  - Repo, resolved: stale primary checkout (isolated worktree used instead); six Greptile P2 threads (fixed in 71-05); one `substrate-desktop` test failure caused by a 0700 owned temp root (environment prerequisite; test unchanged).
+  - External, open: Linear free issue quota exceeded, so kickoff tracking is partial (Notion rows exist). Desk Quality Greptile review of the phase 71 remediation not observed (SendToAgent connector not mounted). Uncommitted edits lost from `memory-write.test.ts` and `server.test.ts` need the other session's owner to confirm. `stash@{0}` kept until the operator approves dropping it.
+  - Operator-gated, not run: deploy, live ingest, hook and timer install, anchor funding, LightRAG LLM route, Railway writes, production migrations.
+- Decisions taken autonomously are recorded in `phases/71-multi-session-boundary/71-05-SUMMARY.md`. v1.7 owner decisions 1-11 remain open and are not accepted on the owner's behalf.
+- Next: obtain the Desk Quality review for PR #199, then start phase 72 (needs 71). Phases 73, 74 and 75 have no declared dependency; 76 shares the ledger write path with 73; 77 needs 71; 78 needs 73, 75 and 76.
 
 ## Recovery record (2026-10-23)
 
@@ -671,3 +682,11 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 - **Evidence that shaped the plan** (main at 9d3f2085; file and line references are in each phase's CONTEXT.md): the docs plane ingests one page at a time (upload, scan, pipeline poll, track status per page), has no delete or rename, stores only source URL, commit and heading, has one LightRAG workspace for all datasets and records no retrieval feedback; the only doc-change path is the server's planning refresh, which keeps its hashes in memory and re-ingests everything after a restart; `POST /docs/merge-trigger` is not called for any repository dataset; LightRAG v1.5.7 has `POST /documents/texts`, which the client does not use; Hindsight's client uses retain with `document_id` replace, recall and document delete, and none of reflect, mental-model creation, observations or directives; steering is pull-only with no command, no REST route and no view, session state is process-local, the brief has no steering or handoff section and `checkpoint_hint` has no reader; claims are per graph node, no component knows the worktrees under `/root/src/worktrees`, and the only disk guard is a 5 GiB floor in the dispatcher; TEI has no client; the hourly anchor covers ledger event hashes only; this host shows 106 directories under `/root/src/worktrees` and 98 percent disk use.
 - **Plan:** one pull request per phase through `ultrathink-ship`; shared contracts are fixed in ROADMAP phase 63; migration step numbers are assigned in merge order (the migrate-contract test needs every version from 1 to N), so each unit takes the next free number when it rebases onto main. Wave A: phases 63 (two units), 64, 67, 68 core, 69 core, 70 core. Wave B after phase 63 merges: 65, 66 and the integrations of 68, 69 and 70. Operator-gated and not done by this run: deploy, timers and hooks, the live ingest, anchor funding.
 - **Ultrathink plan (graph ut-mvtjveh1-26111d38, Notion Task 408bc1a0c7ae813a947efa582daedf83; Linear is blocked by the free-issue limit):** it arrived after the first units were dispatched, as in Runs 12 and 13, and was folded in rather than restarted. Its phases map onto this milestone: audit and feature lock (the Run 14 scouts and the audit record under `.planning/phases/63-corpus-atlas/audit/`), foundations and ingestion (63 and 64), change-triggered sync (65), the self-improving loop (66), worktrees and Live Steering (68 and 67), provenance anchoring (69) and hardening (70 and the closeout). Its eight features differ from this milestone's in one place: observability and the evaluation gate share phase 70, and the TEI embedding fabric (64) is added because TEI has no client. Its non-blocking questions took their defaults: the five capabilities the owner described are inside the eight; Solana devnet is used for anchoring only, through the hourly anchor that already exists; extraction-LLM egress is moot while LightRAG runs in naive mode with the LLM bypass (text goes to embeddings only, no token cost), and a graph mode would need the owner's approval first. Its binding constraints changed the phase text: the default sync triggers write nothing into any repository and git hooks are an operator-run opt-in; new tables are covered by the archive and restore spec; the manifest and the docs plane get a reconcile because they are a dual write; staged units are resource-bounded; and the documents this milestone writes must be retrievable through the finished pipeline.
+
+## Needs Human
+
+| Phase | State | Blocker | Resume |
+|-------|-------|---------|--------|
+| 71 | awaiting-review / pending QUALITY | Local acceptance passed; native Programming Lead held-message dispatch or an authorized Desk connector is not exposed. No external Greptile clearance observed. | Complete LEAD → QUALITY review, address findings, then `/gsd:verify-work 71` |
+
+No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.

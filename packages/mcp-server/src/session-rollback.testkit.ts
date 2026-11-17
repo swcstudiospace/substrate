@@ -243,6 +243,7 @@ export function world(env: Record<string, string> = {}, options: { wrapPlane?: (
 	const plane = new HindsightFake();
 	const substrate = new Substrate(loadConfig(env), {
 		index: index as unknown as IndexStore,
+		steering: { history: null, liveSessions: null },
 		greptime: ledger as unknown as GreptimeClient,
 		hindsightFetch: options.wrapPlane === undefined ? plane.fetch : options.wrapPlane(plane.fetch),
 	});

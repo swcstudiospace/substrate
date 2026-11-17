@@ -50,6 +50,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `NOTION_TASK_GRAPH_DS` | string | the repo's task-graph data source id | data source id | the built-in id | mcp-server/config.ts, host/sync.ts | yes |
 | `HERMES_LINEAR_URL` | string | http://127.0.0.1:8792 | URL | the connector's loopback address | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOD_GATE_TIMEOUT_MS` | number | 35000 | positive integer ms | 35000 ms | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIVE_SESSION_LEASE_S` | number | 3600 | whole seconds 60..86400 (out of range clamps; non-integer or unparseable falls back) | 3600 s authoritative live-session lease; heartbeat every 300 s by default, and before expiry when configured below 600 s; independent of restart-cache TTL. See `docs/live-steering.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING` | toggle | off | on \| off (1/0, true/false, yes/no; case- and space-insensitive; anything else refuses the steering settings with a typed error naming the variable) | off: steering is not enabled and no steering tool is registered; on: steering_queue and steering_acknowledge act only for an operator caller, steering_list is a read, and each write answers not-configured until an audit sink is injected | mcp-server/planning/steering.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_PRINCIPALS` | list | none | comma separated principal ids (letters, digits and . _ @ : -; 1 to 128 characters each; an empty entry is refused) | empty: every principal is refused, so no steering directive can be queued | mcp-server/planning/steering.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_RATE_PER_MIN` | number | 10 | whole number 1..1000 (not an integer or out of range: refused with a typed error naming the variable) | 10 directives per minute per target session | mcp-server/planning/steering.ts | yes |
@@ -119,8 +120,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_INDEX_SCRATCH_URL` | secret-ref | none | scratch postgres URL | substrate index restore needs --scratch. See `docs/runbooks/index-archive.md` | mcp-server/index-run.ts | yes |
 | `SUBSTRATE_INDEX_TUNE` | mode | off | off \| apply (anything but apply is off) | off: no storage tune; anything but apply is off. See `docs/runbooks/index-archive.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: migrate() creates no planning_steering_audit table, so steering audit writes fail closed until an operator turns it on | mcp-server/planning/steering-store.ts | yes |
-| `SUBSTRATE_STEERING_SESSIONS_TABLE` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: the steering session registry stays in process memory and migrate() creates no steering_sessions table; on: sessions are written through to steering_sessions and loaded at boot. See `docs/data-planes.md` | mcp-server/config.ts | yes |
-| `SUBSTRATE_STEERING_SESSION_TTL_S` | number | 604800 | 60..31536000 (out of range clamps; unparseable falls back) | 604800 s (seven days): a steering session not updated for longer is dropped when the durable registry loads; read only while SUBSTRATE_STEERING_SESSIONS_TABLE is on. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_STEERING_SESSIONS_TABLE` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: migration 37 remains unselected; on: preserve its historical optional steering_sessions schema selection only. Runtime cache removed; never grants live authority. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_INDEX_VOLUME_BYTES` | number | none | bytes | no capacity runway row (the ceiling is unknown). See `docs/observability.md` | observability/config.ts | yes |
 | `SUBSTRATE_PLANNING_ROOT` | path | none | absolute checkout path | planning plane disabled: nothing under .planning/ is read and no default path exists | mcp-server/planning/config.ts | yes |
 | `SUBSTRATE_PLANNING_PRESENCE_TTL_S` | number | 90 | 1..86400 | 90 s: a session with no heartbeat for longer is stale | mcp-server/planning/config.ts | yes |
@@ -273,6 +273,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_BREAKER_FAILURES` | number | 5 | 1..100 | 5. See `docs/observability.md` | observability/breaker.ts | yes |
 | `SUBSTRATE_BREAKER_OPEN_MS` | number | 30000 | 1000..600000 | 30000 ms. See `docs/observability.md` | observability/breaker.ts | yes |
 | `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | number | read 20/40, write 10/20, coordination 30/60 (rps/burst) | positive number (rps) or positive integer (burst) | the class default; per-surface SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS \| _BURST override a half and the half left out is the class value. See `docs/observability.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_BUDGET_<CLASS>_BREAKER` | mode | fail-open | fail-open \| fail-closed | fail-open: unset or blank, an open cache breaker admits the request and counts a bypass, as before; fail-closed refuses it with 503 in enforce and, in shadow, admits it and counts a bypass; any other value refuses to boot (SUBSTRATE_BUDGETS keeps its older fallback to shadow). See `docs/observability.md` | mcp-server/config.ts | yes |
 
 ## Observability, SLOs and metrics history
 
@@ -483,6 +484,7 @@ The scan sees only the prefix of a name the code builds, so each family is regis
 | --- | --- | --- |
 | `SUBSTRATE_TOKEN_<SURFACE>` | `SUBSTRATE_TOKEN_` | 42 |
 | `SUBSTRATE_BUDGET_<CLASS>_RPS \| _BURST` | `SUBSTRATE_BUDGET_` | 258 |
+| `SUBSTRATE_BUDGET_<CLASS>_BREAKER` | `SUBSTRATE_BUDGET_` | 3 |
 | `SUBSTRATE_REHEARSAL_<NAME>` | `SUBSTRATE_REHEARSAL_` | 1 |
 
 ## Names that are not configuration

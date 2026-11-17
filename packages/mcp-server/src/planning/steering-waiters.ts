@@ -9,9 +9,10 @@
  * Bounds and cleanup, because a held request is a held socket:
  * - at most {@link STEERING_WAIT_PER_SESSION_MAX} waiters per session and {@link STEERING_WAIT_TOTAL_MAX} overall; a request past
  *   either is answered `busy` at once, never queued;
- * - every waiter leaves the registry exactly once, whichever way it ends: a directive, the timeout, the client's abort signal, or
- *   `closeAll` at shutdown. Its timer is cleared and its abort listener removed on every one of those paths;
- * - a directive that was queued before the call is returned at once, without registering anything.
+ * - every waiter leaves the registry exactly once, whichever way it ends: a directive, the timeout, the client's abort signal,
+ *   per-session cancellation or `closeAll` at shutdown. Its timer and abort listener are removed on every path;
+ * - a directive queued before the call is returned at once. These are wake hints, not authorization: the service checks
+ *   durable live-session authority before holding a request and again before releasing any result.
  */
 import type { SteeringInbox, SteeringRecord } from "./steering.ts";
 
@@ -104,7 +105,14 @@ export class SteeringWaiters {
 	wait(request: SteeringWaitRequest): Promise<SteeringWaitResult> {
 		if (this.closed) return Promise.resolve({ status: "closed" });
 		if (request.signal?.aborted === true) return Promise.resolve({ status: "aborted" });
-		const ready = request.check();
+		let ready: QueuedSteeringRecord | null;
+		try {
+			ready = request.check();
+		} catch {
+			return Promise.resolve({ status: "closed" });
+		}
+		if (this.closed) return Promise.resolve({ status: "closed" });
+		if (request.signal?.aborted) return Promise.resolve({ status: "aborted" });
 		if (ready !== null) return Promise.resolve({ status: "directive", record: ready });
 		const held = this.bySession.get(request.sessionId) ?? new Set<Waiter>();
 		if (held.size >= this.perSessionMax) return Promise.resolve({ status: "busy", scope: "session" });
@@ -112,10 +120,11 @@ export class SteeringWaiters {
 		const { promise, resolve } = Promise.withResolvers<SteeringWaitResult>();
 		let done = false;
 		let timer: unknown;
+		let timerSet = false;
 		const finish = (result: SteeringWaitResult): void => {
 			if (done) return;
 			done = true;
-			this.timers.clear(timer);
+			if (timerSet) this.timers.clear(timer);
 			request.signal?.removeEventListener("abort", onAbort);
 			held.delete(waiter);
 			if (held.size === 0 && this.bySession.get(request.sessionId) === held) this.bySession.delete(request.sessionId);
@@ -127,8 +136,22 @@ export class SteeringWaiters {
 		held.add(waiter);
 		this.bySession.set(request.sessionId, held);
 		this.total += 1;
-		timer = this.timers.set(() => finish({ status: "timeout" }), request.timeoutMs);
 		request.signal?.addEventListener("abort", onAbort, { once: true });
+		// Abort may have happened during the initial check, before the listener was installed.
+		if (request.signal?.aborted) onAbort();
+		if (!done) {
+			try {
+				const handle = this.timers.set(() => finish({ status: "timeout" }), request.timeoutMs);
+				// A synchronous test timer may have settled the waiter before returning its handle.
+				if (done) this.timers.clear(handle);
+				else {
+					timer = handle;
+					timerSet = true;
+				}
+			} catch {
+				finish({ status: "closed" });
+			}
+		}
 		return promise;
 	}
 
@@ -149,11 +172,18 @@ export class SteeringWaiters {
 		}
 	}
 
+	/** Cancels this session's local waits without closing the registry or changing durable authority. */
+	closeSession(sessionId: string): number {
+		const held = this.bySession.get(sessionId);
+		if (held === undefined) return 0;
+		const count = held.size;
+		for (const waiter of [...held]) waiter.finish({ status: "closed" });
+		return count;
+	}
+
 	/** Ends every waiter as `closed` and refuses new ones. For shutdown: no request outlives the server. */
 	closeAll(): void {
 		this.closed = true;
-		for (const held of [...this.bySession.values()]) {
-			for (const waiter of [...held]) waiter.finish({ status: "closed" });
-		}
+		for (const sessionId of [...this.bySession.keys()]) this.closeSession(sessionId);
 	}
 }
