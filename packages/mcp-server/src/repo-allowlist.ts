@@ -1,16 +1,22 @@
-/**
- * Phase 72: which repositories one session may address, and the credential each of those repositories is scoped to.
- *
- * `SUBSTRATE_REPO_ALLOWLIST` is JSON, read on each operation (not cached at boot): `{"<session id>": {"owner/name": "<ENV_VAR>"}}`. Each value names
- * the environment variable that holds that repository's credential, and only that repository's grant can resolve it.
- * Unset or blank is an empty allowlist: every session is denied every repository.
- *
- * A repository id is canonical `owner/name` (lowercase, see {@link scopeRepoId}). A session names only repositories in its
- * own entry. An unknown repository and a disallowed one throw the same {@link RepoNotAllowedError}, and neither error
- * carries the requested id, so a refusal never reveals whether a repository exists.
- *
- * This module decides and nothing else: it spawns no process. `repo-executor.ts` calls it before any git argv is spawned.
- */
+ /**
+  * Phase 72: which repositories one session may address, and the credential each of those repositories is scoped to.
+  *
+ * HARD-S2 credential (owner decision 2026-11-12 grant model): least-privilege credentials are the surface bearer
+ * plus its repository grant. A credential is scoped to one repository through the grant; repo A credentials cannot
+ * authorize repo B. The per-repo SUBSTRATE_REPO_CREDENTIAL is injected only for an admitted git invocation under
+ * the grant (see repo-executor and scopedGit). Session allowlist here supports cross-repo (phase 74) credential
+ * resolution only; surface-scoped grants satisfy the roadmap allowlist wording (STATE 2026-11-16).
+  *
+  * `SUBSTRATE_REPO_ALLOWLIST` is JSON, read on each operation (not cached at boot): `{"<session id>": {"owner/name": "<ENV_VAR>"}}`. Each value names
+  * the environment variable that holds that repository's credential, and only that repository's grant can resolve it.
+  * Unset or blank is an empty allowlist: every session is denied every repository.
+  *
+  * A repository id is canonical `owner/name` (lowercase, see {@link scopeRepoId}). A session names only repositories in its
+  * own entry. An unknown repository and a disallowed one throw the same {@link RepoNotAllowedError}, and neither error
+  * carries the requested id, so a refusal never reveals whether a repository exists.
+  *
+  * This module decides and nothing else: it spawns no process. `repo-executor.ts` calls it before any git argv is spawned.
+  */
 import { scopeRepoId } from "./event.ts";
 
 export const REPO_ALLOWLIST_ENV = "SUBSTRATE_REPO_ALLOWLIST";
