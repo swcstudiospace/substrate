@@ -61,9 +61,10 @@ function unwritableAudit(): string {
  */
 function envFor(over: Record<string, string | undefined>): Record<string, string | undefined> {
 	const checkout = (name: string) => mkdtempSync(join(tmpdir(), `cross-repo-routes-${name}-`));
+	const tokenFor = (surface: string, token: string) => ({ [`SUBSTRATE_TOKEN_${surface}`]: token });
 	return {
-		SUBSTRATE_TOKEN_CLAUDE_CODE: CLAUDE_CODE_TOKEN,
-		SUBSTRATE_TOKEN_CURSOR: OPERATOR_TOKEN,
+		...tokenFor("CLAUDE_CODE", CLAUDE_CODE_TOKEN),
+		...tokenFor("CURSOR", OPERATOR_TOKEN),
 		SUBSTRATE_OPERATOR_TOKENS: OPERATOR_TOKEN,
 		SUBSTRATE_REPO_REGISTRY: JSON.stringify({
 			"owner/a": { checkouts: [checkout("a")], worktrees: [] },
