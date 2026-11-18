@@ -117,17 +117,15 @@ systemctl enable --now substrate-docs-canary.timer
 
 ## 6. Turn the re-rank on
 
-**This step waits for the re-rank implementation.** Nothing in this checkout reads `SUBSTRATE_DOCS_RERANK` or `SUBSTRATE_DOCS_TELEMETRY` (`grep -rn SUBSTRATE_DOCS_RERANK packages scripts` finds no reader), so setting them changes no behaviour, and a `corpus eval` run afterwards would pass for reasons that have nothing to do with the re-rank. Do not follow the steps below, and do not record a value for it as a promotion, until that grep finds a reader in `packages/mcp-server/src`; the same way step 5 waits for the sync units.
-
-The re-rank (phase 66) is meant to prefer the current document to the one it replaced, using the authority scores, with three modes: `SUBSTRATE_DOCS_RERANK=off` (the default), `shadow` (records what it would have changed and changes nothing) and `on`. Once it exists, promote it the way [`flag-promotion.md`](flag-promotion.md) says to promote any flag, with the corpus numbers as the evidence:
+The re-rank (phase 66) prefers the current document to the one it replaced, using the authority scores, with three modes: `SUBSTRATE_DOCS_RERANK=off` (the default), `shadow` (records in the telemetry row what it would have changed and leaves the answer alone) and `on` (annotates corpus citations with `stale` and `superseded_by` and re-orders them by authority). The flag is read by `loadDocsReflectSettings` in `packages/mcp-server/src/config.ts` and applied by `reflectAnswer` in `packages/mcp-server/src/service.ts`. Promote it the way [`flag-promotion.md`](flag-promotion.md) says to promote any flag, with the corpus numbers as the evidence:
 
 1. Record the number to beat: `substrate corpus eval --root /root/src/repos --server "$SUBSTRATE_URL" --json > before.json`.
 2. Set `SUBSTRATE_DOCS_RERANK=shadow`, restart, and let it run for the days you choose. Read what it would have changed in the retrieval telemetry (`SUBSTRATE_DOCS_TELEMETRY=on`).
 3. Change `shadow` to `on`, restart.
 
-**Check.** Not available until the re-rank is implemented (see the notice above): with no reader of the flag, a `corpus eval` that passes proves nothing about the re-rank. Offline, `bun scripts/docs-eval.ts` guards the order of its hook, on the lexical run and through the server's search code.
+**Check.** With `SUBSTRATE_DOCS_TELEMETRY=on`, a `shadow` search writes a `corpus_retrievals` row whose `rerank` column holds the order `on` would have answered and how many positions moved; `off` and `on` leave that column null. Under `on`, a corpus citation carries `stale` (and `superseded_by`) when a newer document supersedes it or readers flagged it stale. Compare `before.json` with a run after step 3: the eval exits 1 on a recall breach. Offline, `bun scripts/docs-eval.ts` guards the order of its hook, on the lexical run and through the server's search code.
 
-**Rollback.** Set the value back to `shadow` or `off` and restart (once the re-rank exists). The re-rank acts at query time and writes nothing to the manifest or the plane, so nothing is left to undo.
+**Rollback.** Set the value back to `shadow` or `off` and restart. The re-rank acts at query time and writes nothing to the manifest or the plane; its telemetry rows expire on the retention sweep.
 
 ## 7. Read the objectives
 

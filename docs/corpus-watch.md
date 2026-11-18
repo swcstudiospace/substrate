@@ -110,7 +110,7 @@ A hook tells the watcher that a repository moved. It is an opt-in:
 substrate corpus hook install   --repo DIR     # post-merge, post-checkout, post-rewrite
 substrate corpus hook status    --repo DIR
 substrate corpus hook uninstall --repo DIR
-bun packages/collectors/src/install-git-hook.ts --corpus DIR   # the same, beside the post-commit collector
+bun packages/collectors/src/install-git-hook.ts --corpus DIR   # the three hooks above, plus the post-commit collector (never over a foreign hook)
 ```
 
 Each hook file is `#!/bin/sh` followed by one block between `# >>> substrate corpus hint >>>` and
