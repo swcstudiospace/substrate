@@ -158,6 +158,14 @@ export class EventBuffer {
 		return null;
 	}
 
+	/** The first buffered event, in age order, that `predicate` accepts; null for none. */
+	find(predicate: (event: SubstrateEvent) => boolean): EventBufferEntry | null {
+		for (const entry of this.entries.values()) {
+			if (predicate(entry.event)) return entry;
+		}
+		return null;
+	}
+
 	stats(): EventBufferStats {
 		let oldest: number | null = null;
 		for (const entry of this.entries.values()) {
@@ -214,10 +222,32 @@ export class EventBuffer {
 	 */
 	drain(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, options: { all?: boolean } = {}): Promise<void> {
 		if (this.draining) return this.draining;
-		this.draining = this.runDrain(deliver, options.all === true).finally(() => {
+		this.draining = this.runDrain(deliver, options.all === true, null).finally(() => {
 			this.draining = null;
 		});
 		return this.draining;
+	}
+
+	/**
+	 * The write path's settle (phase 76 chain rule): one delivery attempt for each parked event of one session, in chain order,
+	 * ignoring the backoff schedule, before a write chains onto them. The first event that does not land ends the session's pass,
+	 * so one call spends at most one failing attempt per session.
+	 *
+	 * It never waits for a pass already running. That pass can be blocked on the caller's own session turn, so the call returns
+	 * with no attempt, and the write parks behind the session's tip, which keeps the events in order. A caller outside a write
+	 * calls `idle` first and then runs this under the session turn.
+	 */
+	drainSession(session: string, deliver: (entry: EventBufferEntry) => Promise<EventDelivery>): Promise<void> {
+		if (this.draining) return Promise.resolve();
+		this.draining = this.runDrain(deliver, true, session).finally(() => {
+			this.draining = null;
+		});
+		return this.draining;
+	}
+
+	/** Resolves once no pass is running. Never starts one. */
+	async idle(): Promise<void> {
+		while (this.draining !== null) await this.draining.catch(() => undefined);
 	}
 
 	/** Give every remaining entry up as `abandoned`. A memory-only buffer calls this at shutdown, so none vanishes unrecorded. */
@@ -228,11 +258,12 @@ export class EventBuffer {
 		return dropped.length;
 	}
 
-	private async runDrain(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, all: boolean): Promise<void> {
+	/** One pass: `only` restricts it to one session (the write path's settle); null is every session. */
+	private async runDrain(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, all: boolean, only: string | null): Promise<void> {
 		if (!this.allow()) return;
 		let changed = false;
 		for (;;) {
-			const entry = this.nextDue(all, this.now());
+			const entry = this.nextDue(all, this.now(), only);
 			if (entry === null || !this.allow()) break;
 			this.flying = entry.event.id;
 			let outcome: EventDelivery;
@@ -264,10 +295,11 @@ export class EventBuffer {
 	 * The first entry a pass may attempt: in age order, the first entry of each session (the rest chain onto it) that is due.
 	 * A session whose first entry is not due waits as a whole.
 	 */
-	private nextDue(all: boolean, at: number): EventBufferEntry | null {
+	private nextDue(all: boolean, at: number, only: string | null): EventBufferEntry | null {
 		const seen = new Set<string>();
 		for (const entry of this.entries.values()) {
 			const session = entry.event.session_id;
+			if (only !== null && session !== only) continue;
 			if (session !== null) {
 				if (seen.has(session)) continue;
 				seen.add(session);

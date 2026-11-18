@@ -119,6 +119,12 @@ interface PlanJson {
 /** The flags under which a production boot starts timers of its own: the brief's recall prefetch and the read-only Hindsight inventory. */
 const BACKGROUND_ENV = { SUBSTRATE_BRIEF_RECALL: "shadow", SUBSTRATE_HINDSIGHT_INVENTORY: "on" } as const;
 
+/** The telemetry buffer on, in a fresh directory: an event an outage refuses is parked for the ledger instead of being dropped. */
+function bufferEnv(): Record<string, string> {
+	const dir = tempDir("soak-event-buffer-");
+	return { SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "buffer.jsonl"), SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "dead-letter.jsonl") };
+}
+
 class Sim {
 	readonly fakes = makeFakes();
 	readonly clock = new SoakClock();
@@ -914,6 +920,52 @@ describe("a checkpoint recorded late", () => {
 		const world = await lateRecordScenario(true);
 		expect(new Set(world.forgotten)).toEqual(new Set([...world.during, ...world.after]));
 		for (const kept of world.before) expect(world.forgotten).not.toContain(kept);
+	});
+});
+
+describe("a parked event lands before a later checkpoint reads the chain", () => {
+	test("the later checkpoint names the parked event it settled as its chain head", async () => {
+		await withPlaneEnv(async () => {
+			const sim = new Sim();
+			await sim.start(bufferEnv());
+			try {
+				const track: SessionTrack = { id: "soak-settle", lastN: null, seq: 0 };
+				const first = sim.takeCheckpoint(track);
+				expect((await sim.call("session_checkpoint", first.request)).json).toMatchObject({ ok: true, stored: true });
+				// Down for one event write: the outage refuses the write, so the event is parked in the buffer, not stored.
+				sim.fakes.ledger.setDown(true);
+				const parked = await sim.running.substrate.emit({ surface: "omp", kind: "note", summary: "parked during the outage", session_id: track.id });
+				expect(parked).toMatchObject({ stored: false, buffered: true });
+				sim.fakes.ledger.setDown(false);
+				// The checkpoint settles the parked event before it reads the chain, so its chain head is that event.
+				const later = sim.takeCheckpoint(track);
+				expect((await sim.call("session_checkpoint", later.request)).json).toMatchObject({ ok: true, stored: true });
+				const landed = sim.fakes.ledger.events.find((event) => event.id === parked.event.id);
+				const written = sim.fakes.ledger.events.find((event) => event.session_id === track.id && event.payload["ckpt_id"] === ckptId(later.n));
+				expect(landed).toBeDefined();
+				expect(written?.payload["chain_head"]).toEqual({ event_id: landed?.id, hash: landed?.hash });
+			} finally {
+				await sim.stop();
+			}
+		});
+	});
+});
+
+describe("a service stopped while an event is parked", () => {
+	test("leaves no drain tick behind: the shutdown abandons the event tick", async () => {
+		await withPlaneEnv(async () => {
+			const sim = new Sim();
+			await sim.start(bufferEnv());
+			try {
+				sim.fakes.ledger.setDown(true);
+				const parked = await sim.running.substrate.emit({ surface: "omp", kind: "note", summary: "parked at shutdown", session_id: "soak-stop" });
+				expect(parked).toMatchObject({ stored: false, buffered: true });
+				// The parked event armed the drain tick; stop() fails the test if the shutdown leaves any timer behind.
+				expect(sim.tracker.outstanding().map((timer) => timer.kind)).toContain("interval");
+			} finally {
+				await sim.stop();
+			}
+		});
 	});
 });
 

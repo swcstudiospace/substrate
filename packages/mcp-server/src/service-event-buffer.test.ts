@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, loadConfig } from "./config.ts";
-import { Substrate } from "./service.ts";
+import { Substrate, type ForgetCaller } from "./service.ts";
+import type { ForgetRequest } from "./memory-forget.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 /**
@@ -14,6 +15,14 @@ function fakeLedger() {
 	const state = { rows: [] as SubstrateEvent[], attempts: 0, down: false, lostReplies: 0 };
 	const tips = new Map<string, string>();
 	const greptime = {
+		timeoutMs: 5_000,
+		// The rollback's note read (`GreptimeClient.queryEvents`), answered from the rows this fake keeps.
+		queryEvents: async (query: { match: Record<string, unknown>; limit: number }) =>
+			state.rows
+				.filter((row) => Object.entries(query.match).every(([column, value]) => Reflect.get(row, column) === value))
+				.reverse()
+				.slice(0, query.limit)
+				.map((row) => ({ ...row, ts: Date.parse(row.ts), payload: JSON.stringify(row.payload) })),
 		ensureAppendMode: async () => true,
 		lastHash: async (session: string): Promise<string | null> => tips.get(session) ?? null,
 		insertEvent: async (event: SubstrateEvent, options: { mayExist?: boolean } = {}): Promise<void> => {
@@ -234,5 +243,205 @@ describe("/healthz and the flags", () => {
 			backoffMs: 1000,
 			backoffCapMs: 60_000,
 		});
+	});
+});
+
+describe("a write settles the session's parked events first", () => {
+	test("a later write settles the parked event first once the ledger is back, and chains onto it", async () => {
+		const t = telemetry();
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(t.env, greptime);
+		state.down = true;
+
+		const first = await substrate.emit(input("first"));
+		expect(first.buffered).toBe(true);
+
+		state.down = false;
+		const second = await substrate.emit(input("second"));
+		expect(second).toMatchObject({ stored: true });
+		expect(second.event.prev).toBe(first.event.hash);
+		expect(state.rows.map((row) => row.summary)).toEqual(["first", "second"]);
+		expect((await substrate.health()).eventBuffer).toMatchObject({ depth: 0 });
+	});
+
+	test("a settle the ledger never answers holds a write for one call's budget at most, and the write parks behind the session's tip", async () => {
+		const t = telemetry();
+		const ledger = fakeLedger();
+		let hung = false;
+		const release = Promise.withResolvers<void>();
+		let blockedInserts = 0;
+		const greptime = {
+			...ledger.greptime,
+			timeoutMs: 150,
+			insertEvent: async (event: SubstrateEvent, options: { mayExist?: boolean } = {}): Promise<void> => {
+				if (!hung) return ledger.greptime.insertEvent(event, options);
+				blockedInserts += 1;
+				await release.promise;
+				return ledger.greptime.insertEvent(event, options);
+			},
+		};
+		const substrate = substrateFor(t.env, greptime);
+		ledger.state.down = true;
+		const parked = await substrate.emit(input("first"));
+		expect(parked.buffered).toBe(true);
+
+		hung = true;
+		const started = performance.now();
+		const next = await substrate.emit(input("second"));
+		const elapsed = performance.now() - started;
+
+		expect(next).toMatchObject({ stored: false, buffered: true });
+		expect(next.event.prev).toBe(parked.event.hash);
+		expect(elapsed).toBeLessThan(150 + 500);
+		// The settle's one blocked attempt. The write itself asked the ledger for no insert.
+		expect(blockedInserts).toBe(1);
+
+		// The ledger answers again: the blocked attempt lands, and the parked events land in chain order.
+		ledger.state.down = false;
+		release.resolve();
+		await substrate.drainEventBuffer({ all: true });
+		expect(ledger.state.rows.map((row) => row.summary)).toEqual(["first", "second"]);
+		expect(ledger.state.rows[1]?.prev).toBe(ledger.state.rows[0]?.hash);
+	});
+});
+
+describe("shutdown stops the drain tick, and a zero budget touches no ledger", () => {
+	test("a write after the close parks without re-arming the tick; an open instance holding the same event delivers it", async () => {
+		const closedEnv = telemetry({ SUBSTRATE_EVENT_BUFFER_BACKOFF_MS: "200" });
+		const openEnv = telemetry({ SUBSTRATE_EVENT_BUFFER_BACKOFF_MS: "200" });
+		const closedLedger = fakeLedger();
+		const openLedger = fakeLedger();
+		closedLedger.state.down = true;
+		openLedger.state.down = true;
+		const closed = substrateFor(closedEnv.env, closedLedger.greptime);
+		const open = substrateFor(openEnv.env, openLedger.greptime);
+		expect((await closed.emit(input("kept"))).buffered).toBe(true);
+		expect((await open.emit(input("kept"))).buffered).toBe(true);
+		await closed.drainPendingEvents(0, { abandon: true });
+
+		// A write after the close still parks, but must not re-arm the tick the close stopped.
+		expect((await closed.emit(input("after close"))).buffered).toBe(true);
+		closedLedger.state.down = false;
+		openLedger.state.down = false;
+		// The tick is a real interval with no clock to inject: four seconds clears the 200 ms backoff and several 1 s ticks.
+		await Bun.sleep(4_000);
+
+		expect(closedLedger.state.rows).toEqual([]);
+		expect(openLedger.state.rows.map((row) => row.summary)).toEqual(["kept"]);
+	});
+
+	test("a shutdown with a zero budget makes no ledger call, and the parked event stays for the next pass", async () => {
+		const t = telemetry();
+		const { state, greptime } = fakeLedger();
+		const substrate = substrateFor(t.env, greptime);
+		state.down = true;
+		await substrate.emit(input("waiting"));
+
+		state.down = false;
+		const attempts = state.attempts;
+		await substrate.drainPendingEvents(0, { abandon: true });
+		expect(state.attempts).toBe(attempts);
+		expect(state.rows).toEqual([]);
+		expect((await substrate.health()).eventBuffer).toMatchObject({ depth: 1, durable: true });
+	});
+});
+
+describe("a parked claim is recorded", () => {
+	test("a claim whose event is parked is recorded, so its node is not released", async () => {
+		const t = telemetry();
+		const { state, greptime } = fakeLedger();
+		const released: unknown[] = [];
+		const index = {
+			claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string) => ({
+				claimed: true,
+				node: { graph_id, node_id, linear_identifier: "SPE-1" },
+				lease: { lease_id: "lse_1", epoch: 1, expires_at: "2026-09-30T12:15:00.000Z", state: "held" },
+				decision: {
+					action: "granted",
+					granted: true,
+					lease_id: "lse_1",
+					epoch: 1,
+					observed_epoch: 0,
+					ttl_seconds: 900,
+					evicted: null,
+					holder: { surface, session_id },
+					observed_expiry: null,
+					reason: null,
+				},
+			}),
+			getGraph: async () => ({ repo: "r", branch: "main" }),
+			releaseNode: async (...args: unknown[]) => {
+				released.push(args);
+				return { released: true };
+			},
+		};
+		const substrate = new Substrate(loadConfig(t.env), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
+		opened.push(substrate);
+		state.down = true;
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+		expect(result.claimed).toBe(true);
+		expect(state.rows).toEqual([]);
+		expect(released).toEqual([]);
+	});
+});
+
+describe("a rollback's repeated forget note", () => {
+	test("a repeat writes a note only when it finishes more plane deletions than the notes already recorded", async () => {
+		const saved = { url: process.env.HINDSIGHT_URL, key: process.env.HINDSIGHT_API_KEY, banks: process.env.HINDSIGHT_BANKS };
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = "sub-cursor";
+		try {
+			const { state, greptime } = fakeLedger();
+			let planeDown = true;
+			const hindsightFetch = async (_input: unknown, init?: RequestInit): Promise<Response> => {
+				if ((init?.method ?? "GET").toUpperCase() !== "DELETE") return new Response(null, { status: 404 });
+				return planeDown ? Response.json({ detail: "injected" }, { status: 503 }) : Response.json({ detail: "document not found" }, { status: 404 });
+			};
+			const index = {
+				readEntry: async (id: string) => ({
+					id,
+					writer: "cursor",
+					scope: "graph",
+					kind: "fact",
+					text: "remember this",
+					created: "2026-11-01T00:00:00.000Z",
+					idempotency_key: `idem-${id}`,
+					session_id: "s-1",
+				}),
+				markMemoryForgotten: async (ids: string[]) => ids,
+				memoryDocumentShared: async () => false,
+			};
+			const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, hindsightFetch: hindsightFetch as never, steering: { history: null, liveSessions: null } });
+			opened.push(substrate);
+			const request: ForgetRequest = { reason: "operator", entry_ids: ["mem-forget-1"], actor: "human" };
+			const caller: ForgetCaller = { surface: "omp", session_id: "s-1" };
+			const notePending = () =>
+				state.rows
+					.filter((row) => row.payload["action"] === "memory.forget")
+					.map((row) => {
+						const plane = row.payload["plane"];
+						return plane !== null && typeof plane === "object" && "pending" in plane ? plane.pending : null;
+					});
+
+			await substrate.memoryForget(request, caller);
+			expect(notePending()).toEqual([1]);
+
+			planeDown = false;
+			await substrate.memoryForget(request, caller);
+			expect(notePending()).toEqual([1, 0]);
+
+			// Nothing is left to finish: this repeat reports no more pending than the notes already show, so it writes no note.
+			await substrate.memoryForget(request, caller);
+			expect(notePending()).toEqual([1, 0]);
+		} finally {
+			if (saved.url === undefined) delete process.env.HINDSIGHT_URL;
+			else process.env.HINDSIGHT_URL = saved.url;
+			if (saved.key === undefined) delete process.env.HINDSIGHT_API_KEY;
+			else process.env.HINDSIGHT_API_KEY = saved.key;
+			if (saved.banks === undefined) delete process.env.HINDSIGHT_BANKS;
+			else process.env.HINDSIGHT_BANKS = saved.banks;
+		}
 	});
 });

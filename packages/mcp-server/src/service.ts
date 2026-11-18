@@ -147,7 +147,7 @@ import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, U
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type ForwardOutcome, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
-import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
+import { FORGET_ACTION, forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
 import { anchorEvidenceFor, followReanchor, ReanchorReadIncomplete, resolveSignerSet, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
@@ -1250,6 +1250,16 @@ function storedLedgerId(value: string | undefined): string | null {
 type LedgerRead = { rows: Array<Record<string, unknown>> } | { reason: string };
 
 /**
+ * Resolves true when `work` settles within `ms`, false when the bound passes first. Either way the timer is cleared, so a settled call
+ * holds nothing open. A bound that passes does not cancel the work; it finishes on its own.
+ */
+function settledWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+	const bound = Promise.withResolvers<boolean>();
+	const timer = setTimeout(() => bound.resolve(false), ms);
+	return Promise.race([work.then(() => true, () => true), bound.promise]).finally(() => clearTimeout(timer));
+}
+
+/**
  * One ledger read under `LEDGER_LINK_BUDGET_MS`. A timeout or an error is an outcome, not a throw, so the
  * search drops that part of its reply and says why.
  */
@@ -1565,6 +1575,8 @@ export class Substrate {
 	private readonly eventBufferStores: { buffer: EventBuffer; deadLetters: DeadLetterStore } | null;
 	/** The interval drain, started while the buffer holds entries and left unref'd so it never holds the process. */
 	private eventDrainTimer: ReturnType<typeof setInterval> | null = null;
+	/** Set by the shutdown close: the tick is never re-armed after it, so a closed instance starts no pass. */
+	private eventDrainClosed = false;
 	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
 	private retainRecoverPending = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
@@ -2948,6 +2960,10 @@ export class Substrate {
 		}
 		const waiting = idem?.key != null && stores !== null ? stores.buffer.findKeyed(input.surface, idem.key) : null;
 		if (waiting !== null) return { event: waiting.event, stored: false, buffered: true, error: waiting.last_reason };
+		// Phase 76's chain rule, write side: the session's parked events get their one attempt before this event reads the tip and chains
+		// onto them. A ledger that has recovered lands them, so this event chains onto the ledger's tip; one that has not leaves them parked,
+		// and the park below holds.
+		if (sessionId !== null) await this.settleParked(sessionId);
 		let prev: string | null = null;
 		let tipError: string | null = null;
 		if (this.greptime && sessionId) {
@@ -3056,6 +3072,58 @@ export class Substrate {
 		return session === null ? this.deliverBuffered(entry) : this.withSessionTurn(session, () => this.deliverBuffered(entry));
 	}
 
+	/**
+	 * Phase 76 chain rule, settle side, for the write path: one delivery attempt now for each parked event of one session, in chain order,
+	 * before a write chains onto them. The caller holds the session turn, so the attempts use `deliverBuffered`, not the turn-taking
+	 * `deliverBufferedInTurn`. Never waits for a pass already running (`EventBuffer.drainSession`). Bounded by one ledger call's budget.
+	 * Never throws.
+	 */
+	private async settleParked(sessionId: string): Promise<void> {
+		const stores = this.eventBufferStores;
+		const greptime = this.greptime;
+		if (stores === null || greptime === null || !stores.buffer.hasSession(sessionId)) return;
+		await settledWithin(stores.buffer.drainSession(sessionId, (entry) => this.deliverBuffered(entry)), greptime.timeoutMs);
+	}
+
+	/**
+	 * Settles one session's parked events for a caller outside a write: a rollback or a checkpoint reading the chain, or the forget emit's
+	 * dedupe. It waits for a pass already running, bounded, so that pass's attempt for this session is not skipped, then settles under the
+	 * session turn, the turn every delivery of the session runs in. Takes no turn when a write calls `settleParked` instead. Never throws.
+	 */
+	async settleBufferedEvents(sessionId: string): Promise<void> {
+		const stores = this.eventBufferStores;
+		const greptime = this.greptime;
+		const session = normalizeIdentifier(sessionId);
+		if (stores === null || greptime === null || session === null || !stores.buffer.hasSession(session)) return;
+		await settledWithin(stores.buffer.idle(), greptime.timeoutMs);
+		await this.withSessionTurn(session, () => this.settleParked(session));
+	}
+
+	/**
+	 * Where the forget note of `forgetId` stands in the session, read before the emit adapter writes one. `queued`: one is parked for the
+	 * ledger. Otherwise `recorded` holds the fewest plane deletions still pending among the recorded notes of that forget id, and `absent`
+	 * means none is recorded. The settle runs first, so a parked note the ledger now takes reads as recorded.
+	 */
+	private async forgetNoteInChain(sessionId: string, forgetId: string): Promise<"queued" | "absent" | { recorded: number }> {
+		await this.settleBufferedEvents(sessionId);
+		const session = normalizeIdentifier(sessionId);
+		const buffer = this.eventBufferStores?.buffer ?? null;
+		const isNote = (event: SubstrateEvent): boolean => event.payload["action"] === FORGET_ACTION && event.payload["forget_id"] === forgetId;
+		const parked = session === null || buffer === null ? null : buffer.find((event) => event.session_id === session && isNote(event));
+		if (parked !== null) return "queued";
+		const pending = await this.readSessionNotes(sessionId).then(
+			(notes) =>
+				notes.events.flatMap((event): number[] => {
+					if (!isNote(event)) return [];
+					// A note whose pending count cannot be read counts as pending: the repeat is then written, never dropped.
+					const plane = event.payload["plane"] as { pending?: unknown } | undefined;
+					return [typeof plane?.pending === "number" ? plane.pending : Number.POSITIVE_INFINITY];
+				}),
+			() => [],
+		);
+		return pending.length === 0 ? "absent" : { recorded: Math.min(...pending) };
+	}
+
 	/** Replays the buffer's due entries once. `all` ignores the backoff schedule, as shutdown and tests need. */
 	drainEventBuffer(options: { all?: boolean } = {}): Promise<void> {
 		const stores = this.eventBufferStores;
@@ -3071,14 +3139,15 @@ export class Substrate {
 	 */
 	async drainPendingEvents(timeoutMs: number, options: { abandon?: boolean } = {}): Promise<void> {
 		const stores = this.eventBufferStores;
+		if (options.abandon === true) this.closeEventDrain();
 		if (stores === null) return;
-		if (stores.buffer.size() > 0) await Promise.race([this.drainEventBuffer({ all: true }), Bun.sleep(timeoutMs)]);
-		if (options.abandon === true) this.stopEventDrain();
+		// A zero budget spends no attempt: closing with 0 touches no ledger.
+		if (timeoutMs > 0 && stores.buffer.size() > 0) await Promise.race([this.drainEventBuffer({ all: true }), Bun.sleep(timeoutMs)]);
 		if (options.abandon === true && !stores.buffer.durable) stores.buffer.abandonAll();
 	}
 
 	private ensureEventDrainTimer(): void {
-		if (this.eventDrainTimer !== null) return;
+		if (this.eventDrainTimer !== null || this.eventDrainClosed) return;
 		this.eventDrainTimer = setInterval(() => {
 			void this.drainEventBuffer();
 		}, EVENT_BUFFER_TICK_MS);
@@ -3090,6 +3159,12 @@ export class Substrate {
 		if (this.eventDrainTimer === null) return;
 		clearInterval(this.eventDrainTimer);
 		this.eventDrainTimer = null;
+	}
+
+	/** Shutdown's close: stops the tick and refuses to re-arm it, so a write after the close parks without starting a pass. */
+	private closeEventDrain(): void {
+		this.eventDrainClosed = true;
+		this.stopEventDrain();
 	}
 
 	/**
@@ -4295,6 +4370,14 @@ export class Substrate {
 					},
 					emit: async (payload, summary, meta) => {
 						const sessionId = caller.session_id ?? payload.session_id;
+						// A repeat of this forget call (the rollback retries it) writes no second note while the recorded notes already show its plane
+						// deletions this far: a repeat that finished more of them writes its progress. A note queued for the ledger is not stored, so
+						// the forget is not reported as emitted until it lands.
+						if (sessionId !== undefined) {
+							const where = await this.forgetNoteInChain(sessionId, payload.forget_id);
+							if (where === "queued") throw new Error("the forget note is already queued for the ledger; nothing was written");
+							if (typeof where === "object" && payload.plane.pending >= where.recorded) return;
+						}
 						const emitted = await this.emit({
 							surface: caller.surface,
 							kind: "note",
@@ -4478,6 +4561,7 @@ export class Substrate {
 	private sessionRollbackDeps(): SessionRollbackDeps {
 		return {
 			readSessionNotes: (sessionId) => this.readSessionNotes(sessionId),
+			settleBufferedEvents: (sessionId) => this.settleBufferedEvents(sessionId),
 			chainHead: async (sessionId) => {
 				const ledger = this.greptime;
 				const session = normalizeIdentifier(sessionId);
@@ -5397,7 +5481,9 @@ export class Substrate {
 				},
 				...(await this.placeOf(graphId)),
 			}).catch(() => null);
-			recorded = emitted?.stored === true;
+			// A parked claim is recorded: its event lands in order once the ledger answers, so the node stays held. Only an event that can
+			// never land (dead-lettered, or refused outright) withdraws it. A thrown emit (null) is unrecorded, as before.
+			recorded = emitted !== null && (emitted.stored || emitted.buffered === true);
 		}
 
 		const verdict = decideClaim({

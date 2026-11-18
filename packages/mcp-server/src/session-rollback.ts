@@ -137,6 +137,8 @@ export interface EmitOutcome {
 export interface SessionRollbackDeps {
 	/** The session's `note` events, newest first, payloads included. Throws when the ledger cannot be read. */
 	readSessionNotes(sessionId: string): Promise<SessionNotes>;
+	/** Settle the session's parked ledger events before a write reads the chain: one attempt each, in chain order. Never throws. */
+	settleBufferedEvents(sessionId: string): Promise<void>;
 	/** The newest event of the session (the ledger chain position), or null for an empty session. May throw: the caller treats that as unobservable. */
 	chainHead(sessionId: string): Promise<{ event_id: string; hash: string } | null>;
 	/** Append one event as the caller's surface. */
@@ -467,6 +469,8 @@ async function serialisedByCheckpoint<T>(key: string, work: () => Promise<T>): P
 
 async function recordCheckpoint(deps: SessionRollbackDeps, sessionId: string, payload: CheckpointPayload, caller: RollbackCaller): Promise<CheckpointResult> {
 	try {
+		// A checkpoint reads the chain for its id and its chain head: a parked event of this session lands first, so both see it.
+		await deps.settleBufferedEvents(sessionId);
 		const notes = await readNotes(deps, sessionId);
 		const known = checkpointsIn(notes.events);
 		const same = known.find((record) => record.payload.ckpt_id === payload.ckpt_id);
@@ -1055,6 +1059,9 @@ const inflight = new Map<string, { same: string; flight: Promise<CommitResult> }
 
 async function commitCommitted(deps: SessionRollbackDeps, request: CommittedRequest, caller: RollbackCaller): Promise<CommitResult> {
 	const sessionId = request.session_id;
+	// A parked event of this session lands before the chain is read: a retry of a rollback whose note is parked is then answered as
+	// its replay, and the plan and the forget totals are computed from the same chain.
+	await deps.settleBufferedEvents(sessionId);
 	const notes = await readNotes(deps, sessionId);
 
 	// An earlier commit of this rollback id answers again without forgetting again (only a pending plane deletion is retried).

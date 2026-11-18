@@ -82,6 +82,8 @@ export interface GreptimeClientOptions {
 	gate?: PlaneGate | null;
 	/** Chain cache, lookback, write probe and TTL knobs (uplift-2 R5); the defaults when omitted. */
 	ledger?: LedgerSettings;
+	/** The transport every statement is sent through. Absent, each call reads `globalThis.fetch` when it is made, as before. */
+	fetch?: typeof fetch;
 }
 
 /** A statement the ledger client refuses to send. See `assertAppendOnly`. */
@@ -763,9 +765,11 @@ export class GreptimeClient {
 	ingestAppendMode: boolean | null = null;
 	private ingestAppendModeCheckedAt = 0;
 
-	private readonly timeoutMs: number;
+	readonly timeoutMs: number;
 	private readonly clock: () => number;
 	private readonly gate: PlaneGate | null;
+	/** The transport every statement goes through; see {@link GreptimeClientOptions.fetch}. */
+	private readonly fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
 	private readonly ledger: LedgerSettings;
 
 	/**
@@ -794,6 +798,7 @@ export class GreptimeClient {
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.clock = options.clock ?? Date.now;
 		this.gate = options.gate ?? null;
+		this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
 		this.ledger = options.ledger ?? DEFAULT_LEDGER_SETTINGS;
 		this.chainTips = this.ledger.chainCache ? new ChainTipCache(this.ledger.chainCacheMax) : null;
 		this.knownSecrets = credentialNeedles(this.config);
@@ -886,7 +891,7 @@ export class GreptimeClient {
 				let response: Response;
 				let text: string;
 				try {
-					response = await fetch(url, {
+					response = await this.fetchImpl(url, {
 						method: "POST",
 						headers: this.headers(),
 						body: new URLSearchParams({ sql: statement }),
