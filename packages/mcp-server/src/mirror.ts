@@ -114,10 +114,60 @@ export interface EdgeRelation {
 	blockerRef: string | null;
 }
 
+/** The Linear relation a `created` edge wrote, and the issues it joins: what a later removal of the edge needs. */
+export interface WrittenRelation {
+	id: string;
+	blockerIssueId: string;
+	waitingIssueId: string;
+}
+
 /** What one edge did. `skipped` means a side has no tracker issue, so nothing was asked of Linear. */
 export interface EdgeOutcome extends EdgeRelation {
 	status: "created" | "existing" | "skipped" | "failed";
 	reason?: string;
+	relation?: WrittenRelation;
+}
+
+/**
+ * A Linear relation this mirror created, as the ledger records it: the `created` outcome of an edge between two
+ * graph nodes. Only such a relation may ever be deleted; one a person made is never recorded, so never owned.
+ */
+export interface OwnedRelation extends WrittenRelation {
+	kind: EdgeKind;
+	blockerNode: string;
+	waitingNode: string;
+	blockerRef: string | null;
+	waitingRef: string | null;
+}
+
+/** What a removal did. `kept` means another edge still holds the relation, so nothing was deleted. */
+export interface UnrelateOutcome {
+	status: "deleted" | "kept" | "skipped" | "failed";
+	reason?: string;
+}
+
+/** The owned relations a graph's ledger still holds: a relation is owned from its `ok` create until its `ok` delete. */
+export function ownedRelations(events: ReadonlyArray<{ payload?: Record<string, unknown> }>): OwnedRelation[] {
+	const owned = new Map<string, OwnedRelation>();
+	for (const { payload } of events) {
+		if (payload?.action !== "mirror" || payload.target !== "linear") continue;
+		const pair = `${String(payload.blocker_node)}>${String(payload.waiting_node)}`;
+		if (payload.op === "relate" && payload.status === "ok" && typeof payload.relation_id === "string") {
+			owned.set(pair, {
+				id: payload.relation_id,
+				blockerIssueId: String(payload.blocker_issue_id),
+				waitingIssueId: String(payload.waiting_issue_id),
+				kind: payload.edge_kind as EdgeKind,
+				blockerNode: String(payload.blocker_node),
+				waitingNode: String(payload.waiting_node),
+				blockerRef: typeof payload.blocker_ref === "string" ? payload.blocker_ref : null,
+				waitingRef: typeof payload.waiting_ref === "string" ? payload.waiting_ref : null,
+			});
+		} else if (payload.op === "unrelate" && payload.status === "ok") {
+			owned.delete(pair);
+		}
+	}
+	return [...owned.values()];
 }
 
 export class Mirror {
@@ -463,8 +513,8 @@ export class Mirror {
 					if (blocker.relations.some((relation) => relation.type === "blocks" && relation.relatedIssueId === waitingId)) {
 						return { ...edge, status: "existing" };
 					}
-					await linear.createIssueRelation(blocker.id, waitingId, "blocks");
-					return { ...edge, status: "created" };
+					const id = await linear.createIssueRelation(blocker.id, waitingId, "blocks");
+					return { ...edge, status: "created", relation: { id, blockerIssueId: blocker.id, waitingIssueId: waitingId } };
 				});
 				outcomes.push(outcome);
 			} catch (cause) {
@@ -473,6 +523,26 @@ export class Mirror {
 			}
 		}
 		return outcomes;
+	}
+
+	/**
+	 * Delete a relation this mirror created, when the edge it stood for has left the graph. Runs under the same lock
+	 * as the create, and asks `stillWanted` inside that lock, so a racing registration that re-adds the edge either
+	 * lands first (and the relation is kept) or waits and creates it again. Never throws.
+	 */
+	async unrelate(owned: OwnedRelation, stillWanted: () => Promise<boolean>): Promise<UnrelateOutcome> {
+		const linear = this.linear;
+		if (!linear) return { status: "skipped" };
+		try {
+			return await this.exclusive(`relation:${owned.blockerIssueId}>${owned.waitingIssueId}`, async (): Promise<UnrelateOutcome> => {
+				if (await stillWanted()) return { status: "kept" };
+				await linear.deleteIssueRelation(owned.id);
+				return { status: "deleted" };
+			});
+		} catch (cause) {
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+			return { status: "failed", reason };
+		}
 	}
 }
 	/**

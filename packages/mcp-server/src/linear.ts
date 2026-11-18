@@ -288,16 +288,32 @@ export class LinearClient {
 		};
 	}
 
-	/** Create a relation from `issueId` to `relatedIssueId`. For `blocks`, `issueId` is the blocking issue. */
-	async createIssueRelation(issueId: string, relatedIssueId: string, type: "blocks"): Promise<void> {
-		const data = await this.graphql<{ issueRelationCreate: { success: boolean } }>(
+	/**
+	 * Create a relation from `issueId` to `relatedIssueId` and return its id. For `blocks`, `issueId` is the blocking
+	 * issue. The id is what a later removal needs to delete exactly this relation.
+	 */
+	async createIssueRelation(issueId: string, relatedIssueId: string, type: "blocks"): Promise<string> {
+		const data = await this.graphql<{ issueRelationCreate: { success: boolean; issueRelation: { id: string } | null } }>(
 			`mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
-				issueRelationCreate(input: $input) { success }
+				issueRelationCreate(input: $input) { success issueRelation { id } }
 			}`,
 			{ input: { issueId, relatedIssueId, type } },
 		);
-		if (!data.issueRelationCreate.success) {
+		const created = data.issueRelationCreate;
+		if (!created.success || !created.issueRelation) {
 			throw new LinearError(`issueRelationCreate ${type} from ${issueId} to ${relatedIssueId} did not succeed`);
 		}
+		return created.issueRelation.id;
+	}
+
+	/** Delete one relation by its id. Only a relation this client was told it created is ever passed here. */
+	async deleteIssueRelation(id: string): Promise<void> {
+		const data = await this.graphql<{ issueRelationDelete: { success: boolean } }>(
+			`mutation IssueRelationDelete($id: String!) {
+				issueRelationDelete(id: $id) { success }
+			}`,
+			{ id },
+		);
+		if (!data.issueRelationDelete.success) throw new LinearError(`issueRelationDelete ${id} did not succeed`);
 	}
 }
