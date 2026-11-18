@@ -5851,3 +5851,41 @@ describe("the scheduled reconcile timer (phase 78)", () => {
 		}
 	});
 });
+
+describe("cross-repo service (phase 74)", () => {
+	const FANOUT = { key: "op-1", branch: "feature/x", repos: [{ repo: "owner/a", base: "main" }, { repo: "owner/b", base: "main" }] };
+
+	test("with no index store every cross-repo route answers 503 and nothing runs", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		const replies = [
+			await substrate.crossRepoFanout(FANOUT, "grok-bot"),
+			await substrate.crossRepoStatus("op-1", "grok-bot"),
+			await substrate.crossRepoCompensate({ key: "op-1" }, "grok-bot", true),
+		];
+		for (const reply of replies) {
+			expect(reply.status).toBe(503);
+			expect(reply.body).toMatchObject({ ok: false, reason: "cross-repo.disabled" });
+		}
+	});
+
+	test("an anonymous caller is refused before the operation log is read or written", async () => {
+		const touched: string[] = [];
+		const store = {
+			load: async () => {
+				touched.push("load");
+				return null;
+			},
+			create: async () => {
+				touched.push("create");
+				throw new Error("the operation log must not be written for an anonymous caller");
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: { crossRepoStore: () => store } as never, greptime: null, steering: { history: null, liveSessions: null } });
+
+		const reply = await substrate.crossRepoFanout(FANOUT, null);
+
+		expect(reply.status).toBe(403);
+		expect(reply.body).toMatchObject({ ok: false, reason: "repo-not-granted" });
+		expect(touched).toEqual([]);
+	});
+});

@@ -175,6 +175,7 @@ import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
 import { corpusNeardupReply } from "./corpus/neardup.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusPlanReply, corpusProofReply, corpusReconcileReply, corpusRootReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { type CrossRepoDeps, type CrossRepoReply, crossRepoCompensateReply, crossRepoFanoutReply, crossRepoStatusReply } from "./cross-repo-ops.ts";
 import { authorizeRepo, authorizeRepoPath, grantedRepos, isSurfaceName, REPO_REFUSAL_MESSAGES, repoRefusalPayload, type RepoRefusalReason, type RepoScopeRefusal, rowsInGrant } from "./repo-scope.ts";
 import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
@@ -6735,6 +6736,32 @@ export class Substrate {
 		const reply = await corpusStatusReply(this.corpusDeps(), callerSurface);
 		if (reply.ok) this.corpusSlo.setLastChangeFrom(reply.body.lastIngestAt);
 		return reply;
+	}
+
+	/** `POST /cross-repo/fanout` and the `cross_repo_fanout` tool: a branch fan-out across registered repositories (phase 74). */
+	crossRepoFanout(raw: unknown, callerSurface: Surface | null): Promise<CrossRepoReply> {
+		return this.withCrossRepo(callerSurface, (deps) => crossRepoFanoutReply(raw, deps));
+	}
+
+	/** `GET /cross-repo/status` and the `cross_repo_status` tool: the stored operation under a key. */
+	crossRepoStatus(key: unknown, callerSurface: Surface | null): Promise<CrossRepoReply> {
+		return this.withCrossRepo(callerSurface, (deps) => crossRepoStatusReply(key, deps));
+	}
+
+	/** `POST /cross-repo/compensate` (operator only): undoes a stored operation under a key. The engine refuses a non-operator before it reads the store. */
+	crossRepoCompensate(raw: unknown, callerSurface: Surface | null, isOperator: boolean): Promise<CrossRepoReply> {
+		return this.withCrossRepo(callerSurface, (deps) => crossRepoCompensateReply(raw, deps, isOperator));
+	}
+
+	/**
+	 * The engine's deps for one call. The operation log lives in the index store, so with no index configured the call is
+	 * answered 503 and nothing is written.
+	 */
+	private withCrossRepo(callerSurface: Surface | null, call: (deps: CrossRepoDeps) => Promise<CrossRepoReply>): Promise<CrossRepoReply> {
+		if (this.index === null) {
+			return Promise.resolve({ status: 503, body: { ok: false, reason: "cross-repo.disabled", problem: "cross-repository operations need the index store (SUBSTRATE_PG_URL)" } });
+		}
+		return call({ scope: this.config.repoScope, surface: callerSurface, store: this.index.crossRepoStore() });
 	}
 
 	/** The clock an ingest request is timed with: the test seam's when one is injected, else `performance.now`. */

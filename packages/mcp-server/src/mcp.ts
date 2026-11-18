@@ -1680,6 +1680,71 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	server.registerTool(
+		"cross_repo_fanout",
+		{
+			title: "Branch fan-out across registered repositories",
+			description:
+				"Create one branch at a named base in each of two to 16 registered repositories, as one durable operation (phase 74). Each repository " +
+				"is a step recorded before its git effect. A failure at one step undoes the steps before it, or reports `needs-attention` and names the " +
+				"steps it could not undo; it never reports success for a partial operation. A retry with the same key resumes the same operation, and a " +
+				"different request under that key is refused. Every repository must be granted to the caller's surface. " +
+				"Answers `operation` with status `done`, `rolled-back` or `needs-attention`, and `request-invalid` for a malformed request.",
+			inputSchema: {
+				key: z.string().describe("The dedupe key: 1 to 128 letters, digits, '.', '_', ':' or '-'."),
+				branch: z.string().describe("The branch to create in each repository."),
+				repos: z
+					.array(
+						z.object({
+							repo: z.string().describe("owner/name."),
+							base: z.string().describe("The branch, tag or commit the new branch is cut from in that repository."),
+						}),
+					)
+					.describe("Two to 16 repositories, each named once."),
+			},
+			annotations: { destructiveHint: false, openWorldHint: false },
+		},
+		async (args) => {
+			const reply = await substrate.crossRepoFanout(args, callerSurface);
+			return reply.status === 200 ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
+		"cross_repo_status",
+		{
+			title: "Status of a cross-repository operation",
+			description:
+				"The stored state of one branch fan-out by its key: its status, and each repository's step with its state and reason. A read: it changes " +
+				"nothing. A key the caller cannot see answers `not-found`, as an unknown key does.",
+			inputSchema: {
+				key: z.string().describe("The operation's dedupe key."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ key }) => {
+			const reply = await substrate.crossRepoStatus(key, callerSurface);
+			return reply.status === 200 ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
+		"cross_repo_compensate",
+		{
+			title: "Compensate (undo) a cross-repository operation",
+			description:
+				"Operator-only: undo a stored branch fan-out under its key without applying any forward steps. Only undoes applied/parked steps; returns the final status (`rolled-back` or `needs-attention`). Refused to non-operators. Body is `{\"key\": \"...\"}`. Every repository named by the operation must be granted. (phase 74 compensating action).",
+			inputSchema: {
+				key: z.string().describe("The operation's dedupe key."),
+			},
+			annotations: { destructiveHint: true, openWorldHint: false },
+		},
+		async (args) => {
+			const reply = await substrate.crossRepoCompensate(args, callerSurface, isOperator);
+			return reply.status === 200 ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
 		"corpus_status",
 		{
 			title: "Status of the corpus manifest",

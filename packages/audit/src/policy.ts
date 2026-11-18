@@ -46,6 +46,10 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"worktree_report",
 	// v1.7 (phase 63): a corpus ingest writes the shared docs dataset every agent reads and deletes plane documents (nearest: `docs_ingest`). Phase 65: `POST /corpus/reconcile` with `execute` does the same and is audited here.
 	"corpus_ingest",
+	// Phase 74: a cross-repo fan-out writes branches in two or more repositories, so it is recorded before it runs.
+	"cross_repo_fanout",
+	// Phase 74: the operator's compensation of a stored fan-out deletes branches in two or more repositories, so it is recorded before it runs.
+	"cross_repo_compensate",
 ]);
 
 /**
@@ -78,6 +82,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_handoff_list",
 	"coord_drift_scan",
 	"skills_list", // uplift-5 S5a: a read of the skills registry, like `memory_search`.
+	// Phase 74: a read of one cross-repo operation's parked status, like `graph_get`.
+	"cross_repo_status",
 	// Phase 45 (D45-h): Railway reads. Inspection only; a read must not stop on an unwritable audit file.
 	"railway_list",
 	"railway_monitor",
