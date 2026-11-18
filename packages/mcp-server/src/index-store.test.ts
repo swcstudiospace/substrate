@@ -8,7 +8,8 @@
  * pool settings the constructor composes, and a bounded `ping` against a socket
  * that never answers.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { SQL } from "bun";
 import type { PlaneSample } from "@substrate/observability";
 import {
 	DEFAULT_INDEX_POOL_SETTINGS,
@@ -21,6 +22,7 @@ import {
 	toMemoryEntry,
 	type LinearNodeMatch,
 } from "./index-store.ts";
+import { defined } from "./test-support.ts";
 
 const CREATED = new Date("2026-09-30T00:00:00.000Z");
 
@@ -269,5 +271,48 @@ describe("IndexStore.ping", () => {
 		const store = new IndexStore("postgres://probe:probe@127.0.0.1:1/probe", { pool: { max: 3 } });
 		expect(store.poolSettings.max).toBe(3);
 		expect(store.poolSettings.applicationName).toBe("substrate-mcp");
+	});
+});
+
+const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
+const describeLive = PG_URL ? describe : describe.skip;
+
+describeLive("graphIdsForLinearIssue against a live index", () => {
+	// Namespaced so a shared database is left as found: every row here carries the run prefix.
+	const RUN = `gli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	const GRAPH = `${RUN}-graph`;
+	const ISSUE_ID = `${RUN}-uuid`;
+	const IDENTIFIER = `${RUN}-SWC`;
+	let store: IndexStore;
+	let cleanup: SQL;
+
+	beforeAll(async () => {
+		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		store = new IndexStore(url);
+		cleanup = new SQL(url);
+		await store.migrate();
+		await store.registerGraph({
+			graph_id: GRAPH,
+			nodes: [{ node_id: "n1", linear_issue_id: ISSUE_ID, linear_identifier: IDENTIFIER }],
+		});
+	});
+
+	afterAll(async () => {
+		if (!PG_URL) return;
+		await cleanup`delete from graph_steps where graph_id like ${`${RUN}%`}`.catch(() => undefined);
+		await cleanup`delete from graph_edges where graph_id like ${`${RUN}%`}`.catch(() => undefined);
+		await cleanup`delete from graph_nodes where graph_id like ${`${RUN}%`}`.catch(() => undefined);
+		await cleanup`delete from graph_index where graph_id like ${`${RUN}%`}`.catch(() => undefined);
+		await cleanup.end().catch(() => undefined);
+		await store.close().catch(() => undefined);
+	});
+
+	test("a node's Linear issue id or identifier names its graph, with no row limit", async () => {
+		expect(await store.graphIdsForLinearIssue({ linearIssueId: ISSUE_ID })).toEqual([GRAPH]);
+		expect(await store.graphIdsForLinearIssue({ linearIdentifier: IDENTIFIER })).toEqual([GRAPH]);
+	});
+
+	test("an unknown issue names no graph", async () => {
+		expect(await store.graphIdsForLinearIssue({ linearIssueId: `${RUN}-unknown`, linearIdentifier: `${RUN}-NOPE` })).toEqual([]);
 	});
 });
