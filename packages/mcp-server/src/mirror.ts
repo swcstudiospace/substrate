@@ -123,7 +123,7 @@ export interface EdgeOutcome extends EdgeRelation {
 export class Mirror {
 	private readonly linear: LinearClient | null;
 	private readonly notion: NotionClient | null;
-	/** `graphId/nodeId` → tail of that node's execution chain. */
+	/** Serialisation key (`graphId/nodeId`, or a relation pair) → tail of its chain. */
 	private readonly chains = new Map<string, Promise<void>>();
 
 	constructor(targets: { linear: LinearClient | null; notion?: NotionClient | null }) {
@@ -296,7 +296,14 @@ export class Mirror {
 
 	/** One transition serialized behind earlier transitions for the same node. */
 	private async serialized<T>(ctx: MirrorContext, fn: () => Promise<T>): Promise<T> {
-		const key = `${ctx.graphId}/${ctx.nodeId}`;
+		return this.exclusive(`${ctx.graphId}/${ctx.nodeId}`, fn);
+	}
+
+	/**
+	 * Run `fn` once every earlier call holding `key` has settled. Serialisation is in-process only: two substrate
+	 * processes sharing one Linear workspace are not serialised by this.
+	 */
+	private async exclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
 		const prev = this.chains.get(key) ?? Promise.resolve();
 		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
 		const tail = prev.then(() => gate);
@@ -433,24 +440,33 @@ export class Mirror {
 	 * blocked by it. A relation that already exists in that direction is read, not written again. An edge with no
 	 * tracker issue on either side is skipped. Each edge stands alone: a failure on one never stops the rest.
 	 * Never throws.
+	 *
+	 * The check and the create run under a lock keyed by the issue pair's UUIDs. Two registrations racing on one new
+	 * edge would otherwise both read the blocker before either writes, and both create, leaving Linear a duplicate.
+	 * The blocker is read again inside the lock, after any write that raced it has landed.
 	 */
 	async relateEdges(edges: EdgeRelation[]): Promise<EdgeOutcome[]> {
 		const outcomes: EdgeOutcome[] = [];
 		for (const edge of edges) {
 			const linear = this.linear;
-			if (!linear || !edge.waitingRef || !edge.blockerRef) {
+			const blockerRef = edge.blockerRef;
+			const waitingRef = edge.waitingRef;
+			if (!linear || !blockerRef || !waitingRef) {
 				outcomes.push({ ...edge, status: "skipped" });
 				continue;
 			}
 			try {
-				const blocker = await linear.issueRelations(edge.blockerRef);
-				const waiting = await linear.issueRelations(edge.waitingRef);
-				if (blocker.relations.some((relation) => relation.type === "blocks" && relation.relatedIssueId === waiting.id)) {
-					outcomes.push({ ...edge, status: "existing" });
-					continue;
-				}
-				await linear.createIssueRelation(blocker.id, waiting.id, "blocks");
-				outcomes.push({ ...edge, status: "created" });
+				const blockerId = (await linear.issueRelations(blockerRef)).id;
+				const waitingId = (await linear.issueRelations(waitingRef)).id;
+				const outcome = await this.exclusive(`relation:${blockerId}>${waitingId}`, async (): Promise<EdgeOutcome> => {
+					const blocker = await linear.issueRelations(blockerRef);
+					if (blocker.relations.some((relation) => relation.type === "blocks" && relation.relatedIssueId === waitingId)) {
+						return { ...edge, status: "existing" };
+					}
+					await linear.createIssueRelation(blocker.id, waitingId, "blocks");
+					return { ...edge, status: "created" };
+				});
+				outcomes.push(outcome);
 			} catch (cause) {
 				const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
 				outcomes.push({ ...edge, status: "failed", reason });
