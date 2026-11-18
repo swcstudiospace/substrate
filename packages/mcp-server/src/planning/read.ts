@@ -17,7 +17,9 @@
  * `unknown` and the reason is given. They are not guessed as active. Each session carries its planning view, and the view
  * lists the conflicts across the active sessions. Detection is pure here; announcing a conflict is the observer's. Every
  * sessions answer also carries `view`: the session view's state (`states.ts`, one of six) and its line. A read has no
- * heartbeat, so the view names the server clock and the listing bound, and nothing about the checkout's own writes.
+ * heartbeat, so the view names the server clock and the listing bound, and nothing about the checkout's own writes. A presence
+ * write this server failed makes an ok view DEGRADED until a write lands (`presence-dragonfly.ts`), so a failed heartbeat is never
+ * shown as healthy.
  */
 import type { CompletionStoreView } from "./checkpoint-store.ts";
 import type { PlanningConfigError, PlanningConfigResult, PlanningLimits } from "./config.ts";
@@ -162,7 +164,7 @@ export class PlanningReader {
 	/** The sessions body, with the session view's state beside it: every answer carries one state from the closed set. */
 	async sessions(): Promise<PlanningSessionsView> {
 		const body = await this.sessionsBody();
-		return { ...body, view: sessionStateOf(body) };
+		return { ...body, view: sessionStateOf(body, this.deps.presence?.lastWriteFailure() ?? null) };
 	}
 
 	/** Whether `sessionsForRepo` has anything to read: the plane has a root and a presence store. */
@@ -255,8 +257,11 @@ export class PlanningReader {
 	}
 }
 
-/** The session view's state and line, from what the body knows. Each non-ok body names what is off, or the failure it had. */
-function sessionStateOf(body: PlanningSessionsBody): SessionViewState {
+/**
+ * The session view's state and line, from what the body knows. Each non-ok body names what is off, or the failure it had. The
+ * presence write failure of this server is passed for an ok body only: any other body already names its own state.
+ */
+function sessionStateOf(body: PlanningSessionsBody, writeFailure: string | null): SessionViewState {
 	switch (body.state) {
 		case "disabled":
 			return deriveSessionState({ loaded: true, sessions: [], disabledCapabilities: ["planning"] });
@@ -267,7 +272,7 @@ function sessionStateOf(body: PlanningSessionsBody): SessionViewState {
 			return deriveSessionState({ loaded: true, sessions: [], disabledCapabilities: [], error: body.code });
 		case "ok": {
 			const disabledCapabilities = [...(body.clock.state === "unavailable" ? ["server clock"] : []), ...(body.truncated ? ["sessions beyond the listing bound"] : [])];
-			return deriveSessionState({ loaded: true, sessions: body.sessions.map((row) => row.status), disabledCapabilities });
+			return deriveSessionState({ loaded: true, sessions: body.sessions.map((row) => row.status), disabledCapabilities, writeFailure });
 		}
 	}
 }

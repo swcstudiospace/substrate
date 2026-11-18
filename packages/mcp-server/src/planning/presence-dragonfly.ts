@@ -18,6 +18,9 @@
  * `touchLiveness` renews the record without moving the change time, so a session quiet for days stays active while its
  * observer scans, and its `idleForMs` grows.
  *
+ * Write outcome: `lastWriteFailure` reports the code of the latest write that failed, until a write lands. The session view
+ * reads DEGRADED while it is set (`read.ts`), so a failed heartbeat is never shown as a healthy view.
+ *
  * Bounds: enumeration is a bounded SCAN (see `presence-client.ts`). A listing reads at most `limit`
  * sessions. When more exist, `listWithin` says so with `truncated: true`, and `list` refuses instead
  * of returning a partial answer.
@@ -33,6 +36,7 @@
  */
 import { sharedDeadline } from "../deadline.ts";
 import { PLANNING_BOUNDS } from "./config.ts";
+import { errnoCode } from "./index.ts";
 import { SessionRecordSchema, type PresenceStore, type SessionRecord } from "./presence.ts";
 
 export const PRESENCE_KEY_PREFIX = "substrate:v1:planning:presence:";
@@ -85,7 +89,18 @@ export interface PresenceListing {
 }
 
 export class DragonflyPresenceStore implements PresenceStore {
+	/** The code of the latest presence write that failed, or null once a write has landed. Process-local. */
+	private failedWrite: string | null = null;
+
 	constructor(private readonly backend: PresenceBackend) {}
+
+	/**
+	 * The code of the latest presence write that failed, or null when the latest write landed or none was made. It is a code, never
+	 * a message: a refused write's message can carry the endpoint.
+	 */
+	lastWriteFailure(): string | null {
+		return this.failedWrite;
+	}
 
 	/**
 	 * Records a change heartbeat stamped with the server's time. `ttlMs` is the freshness window. The key outlives it by a margin
@@ -95,9 +110,11 @@ export class DragonflyPresenceStore implements PresenceStore {
 	async touch(record: SessionRecord, ttlMs: number): Promise<void> {
 		const valid = SessionRecordSchema.parse(record);
 		const retentionS = presenceRetentionS(ttlMs);
-		const stamped: SessionRecord = { ...valid, lastHeartbeatMs: await this.backend.serverTimeMs() };
-		delete stamped.livenessMs;
-		await this.backend.setWithTtl(keyFor(valid.sessionId), JSON.stringify(stamped), retentionS);
+		await this.tracked(async () => {
+			const stamped: SessionRecord = { ...valid, lastHeartbeatMs: await this.backend.serverTimeMs() };
+			delete stamped.livenessMs;
+			await this.backend.setWithTtl(keyFor(valid.sessionId), JSON.stringify(stamped), retentionS);
+		});
 	}
 
 	/**
@@ -114,10 +131,23 @@ export class DragonflyPresenceStore implements PresenceStore {
 		const valid = SessionRecordSchema.parse(record);
 		const retentionS = presenceRetentionS(ttlMs);
 		const key = keyFor(valid.sessionId);
-		const nowMs = await this.backend.serverTimeMs();
-		const held = await this.backend.get(key);
-		const stamped: SessionRecord = { ...valid, lastHeartbeatMs: heldChangeTime(held) ?? nowMs, livenessMs: nowMs };
-		await this.backend.setWithTtl(key, JSON.stringify(stamped), retentionS);
+		await this.tracked(async () => {
+			const nowMs = await this.backend.serverTimeMs();
+			const held = await this.backend.get(key);
+			const stamped: SessionRecord = { ...valid, lastHeartbeatMs: heldChangeTime(held) ?? nowMs, livenessMs: nowMs };
+			await this.backend.setWithTtl(key, JSON.stringify(stamped), retentionS);
+		});
+	}
+
+	/** Runs one presence write and records whether it landed: a failure keeps its code and is rethrown, and a landed write clears it. */
+	private async tracked(write: () => Promise<void>): Promise<void> {
+		try {
+			await write();
+		} catch (cause: unknown) {
+			this.failedWrite = errnoCode(cause);
+			throw cause;
+		}
+		this.failedWrite = null;
 	}
 
 	/** Every held record, sorted by session id. Refuses, rather than answer partially, when more than the bound exist. */
