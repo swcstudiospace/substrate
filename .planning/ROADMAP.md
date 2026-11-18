@@ -1419,10 +1419,10 @@ Plans:
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
-| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | On PR #216 with surface-scoped grants (owner decision 2026-11-16); human_needed | - |
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Implemented locally; draft PR #201, not merge-ready | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/0 | On PR #216; human_needed (74-VERIFICATION.md) | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Implemented locally; draft PR #200, not merge-ready | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
-| 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
-| 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | On PR #216 (defect fixes ported); human_needed | - |
+| 77. Steering idempotency and ordering | v1.8 | 0/0 | On PR #216 (migration 43); human_needed | - |
+| 78. Cross-layer reconciliation | v1.8 | 0/0 | On PR #216 (design limit D78-1); human_needed | - |
