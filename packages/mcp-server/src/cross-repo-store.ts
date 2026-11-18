@@ -1,6 +1,6 @@
 /**
  * The Postgres adapter of the cross-repository operation log (phase 74). Built by `IndexStore.crossRepoStore()` over the
- * index's own pool; the tables are created by migration step 43. Each transition is one statement whose `where` clause is
+ * index's own pool; the tables are created by migration step 44. Each transition is one statement whose `where` clause is
  * the compare-and-set: a step is moved only from a state the caller names, and the statement reports whether it moved.
  *
  * A row is read back through closed-set checks: a stored status, step state or detail outside its set is a thrown error,

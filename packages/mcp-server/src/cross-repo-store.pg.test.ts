@@ -4,7 +4,7 @@
  *
  *     SUBSTRATE_TEST_PG_URL=postgres://… bun test cross-repo-store.pg
  *
- * The tables are the real migration (step 43). Every key is namespaced to one run by a marker, so a shared database keeps
+ * The tables are the real migration (step 44). Every key is namespaced to one run by a marker, so a shared database keeps
  * the rows the cases wrote; point the variable at a disposable database.
  */
 import { afterAll, beforeAll, describe } from "bun:test";
