@@ -2403,15 +2403,15 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The server assigns the directive id, returned as " +
 					"directive_id; the caller cannot choose it. The directive is audited before it is queued. A refusal carries a typed error: " +
 					"not-found for any denied or inactive target, forbidden operator-required after a valid binding, principal-not-allowed, " +
-					"rate-limited, invalid-directive or audit-unavailable. Invalid settings answer misconfigured; absent inbox audit answers not-configured.",
+					"rate-limited, invalid-directive or audit-unavailable. An optional idempotency_key (8 to 128 characters of letters, digits, '.', '_', ':', '-') " +
+					"makes a retry safe: a repeat of a keyed queue from the same caller to the same session returns the original reply, with the same " +
+					"sequence, and writes nothing. The same key with different content is refused idempotency-conflict. A keyed reply carries sequence, " +
+					"the directive's place in its session's delivery order. Invalid settings answer misconfigured; absent inbox audit answers not-configured.",
 				inputSchema: STEERING_QUEUE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
 			async (args) => {
 				const queued = await queueSteering(steering, steeringCaller, args, context?.preparedLiveDispatch);
-				// A queued directive wakes its session two ways, neither of which can fail the queue (it is already audited): any
-				// long-poll waiter of the session is released, and one hint (a stored `note`, no body) is announced.
-				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
 				return steeringReply(queued);
 			},
 		);

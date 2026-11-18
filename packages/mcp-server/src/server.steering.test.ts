@@ -250,6 +250,15 @@ describe("bounded long-poll release and cleanup", () => {
 		expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ directive: { session_id: h.row.sessionId }, wait_ms: 5000 });
 		expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
 	});
+	test("the wait body carries the delivery sequence of the directive it returns", async () => {
+		const h = await held(); const directiveId = await queue(h, h.row.sessionId);
+		const response = await h.get(h.path, h.headers);
+		expect(response.status).toBe(200);
+		const body = await response.json() as { directive: { id: string; sequence: unknown } };
+		expect(body.directive.id).toBe(directiveId);
+		expect(typeof body.directive.sequence).toBe("number");
+		expect(body.directive.sequence).toBe(h.substrate.steering.inbox?.sequenceOf(directiveId));
+	});
 	test("queue wakes only the owner's held wait and releases all resources", async () => {
 		const h = await held(); const pending = h.get(h.path, h.headers); await settle(h.timers, () => h.waiters.size === 1);
 		expect(h.timers.delays.every(ms => ms <= 1000)).toBe(true);
