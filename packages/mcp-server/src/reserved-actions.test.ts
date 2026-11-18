@@ -13,7 +13,7 @@ const ACTIONS = [...RESERVED_NOTE_ACTIONS];
 describe("reserved note actions", () => {
 	test("the one list names every action a reader treats as authoritative", () => {
 		expect(ACTIONS.sort()).toEqual(
-			["anchor.reanchor", "anchor.signer.rotate", "docs.canary", "docs.corpus.root", "memory.forget", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
+			["anchor.reanchor", "anchor.signer.rotate", "docs.canary", "docs.corpus.root", "docs.sync", "memory.forget", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
 		);
 		expect(reservedActionOf({ action: "session.checkpoint" })).toBe("session.checkpoint");
 		expect(reservedActionOf({ action: "docs.ingest" })).toBeNull();
@@ -33,6 +33,18 @@ describe("reserved note actions", () => {
 				expect(String(reply.json["error"])).toContain(action);
 			}
 		}
+		expect(w.ledger.events).toHaveLength(0);
+	});
+
+	test("a client's docs.sync note is refused by name and writes nothing, so it cannot forge the sync-lag gauge", async () => {
+		const w = world();
+		const mcp = await connectAs(w.substrate, { surface: "claude-code", isOperator: false });
+
+		const reply = await mcp.call("events_emit", { kind: "note", summary: "forged sync", payload: { action: "docs.sync", runtime: "corpus-sync", repo: "swcstudiospace/agent-substrate", outcome: "ok", lag_s: 0 } });
+
+		expect(reply.isError).toBe(true);
+		expect(String(reply.json["error"])).toContain("reserved-action");
+		expect(String(reply.json["error"])).toContain("docs.sync");
 		expect(w.ledger.events).toHaveLength(0);
 	});
 
