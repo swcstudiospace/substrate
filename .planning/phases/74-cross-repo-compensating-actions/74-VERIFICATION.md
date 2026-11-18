@@ -161,6 +161,15 @@ Status is `human_needed` rather than `passed` because the open items need an own
 **Expected:** Gate green, and sign-off recorded.
 **Why human:** ROADMAP.md: "Verification record not yet re-run on this line; human sign-off pending." The cited gate numbers (101 files, 2896 pass) come from the assignment and were not re-read.
 
+## Owner decisions 2026
+
+These record the owner's answers to the human-verification items above. The status and verdicts in this file are unchanged.
+
+- **Surface policy:** with `SUBSTRATE_REPO_SCOPES` unset, every authenticated surface stays granted every registered repository. This is the owner's choice and the current behaviour; cross-repo writes are not gated further by default.
+- **One driver per index database:** stays the in-process per-key lock (`KeyedLock` in `cross-repo-ops.ts`). It is documented there and is not changed. The recovery rule for a step found `applying` assumes one driver process per index database.
+- **Key existence:** a reused key keeps answering 409 `key-reused`. This is the owner's choice.
+- **Refusal order:** pinned by `packages/mcp-server/src/cross-repo.routes.test.ts`. The order the code has is 401 (no surface) and 403 (non-operator compensation), both before the body is read or audited; then 400 for a body that is not JSON; then the fail-closed audit (503 with its reason); then the missing index store (503 `cross-repo.disabled`); then the engine's grant gate (403). A fan-out on a run with no index answers 503 before its grant gate, so it does not reach 403 there. The compensation's audit refusal happens after the body is read, so it is not "before any body read" as item 4 above says.
+
 ## Info
 
 - Criterion 2 is tested at N = 1 and N = 2 only. The loop in `drive` is generic, so N of 3 or more follows from the code without a test.
