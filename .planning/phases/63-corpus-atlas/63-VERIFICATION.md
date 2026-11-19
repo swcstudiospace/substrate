@@ -1,9 +1,37 @@
 ---
 phase: 63-corpus-atlas
-verified: 2026-10-29
-status: gaps_found
-score: 4 of 7 success criteria MET in the repository (criteria 2, 5, 6, 7, the adapters against fake `gh` and fixture directories), 3 PARTIAL (criteria 1, 3, 4); no live ingest
-verified_on: main at ba7cc010 (files read; nothing was run by the author of this record)
+verified: 2026-11-19T00:56:41Z
+status: human_needed
+score: 6/7 success criteria verified in code and by the corpus test run; criterion 3 restore test and the live Postgres store tests are human_needed
+covered_files: [".planning/phases/63-corpus-atlas/63-CONTEXT.md", ".planning/phases/63-corpus-atlas/63-SUMMARY.md", "package.json", "packages/audit/src/policy.ts", "packages/cli/package.json", "packages/cli/src/corpus/bodies.ts", "packages/cli/src/corpus/client.ts", "packages/cli/src/corpus/index.ts", "packages/cli/src/corpus/ingest.ts", "packages/cli/src/corpus/inventory.ts", "packages/cli/src/corpus/render.ts", "packages/cli/src/corpus/testkit.ts", "packages/cli/src/index.ts", "packages/corpus/package.json", "packages/corpus/src/adapters/github.ts", "packages/corpus/src/adapters/greptile-export.ts", "packages/corpus/src/classify.ts", "packages/corpus/src/discover.ts", "packages/corpus/src/guards.ts", "packages/corpus/src/index.ts", "packages/corpus/src/names.ts", "packages/corpus/src/protocol.ts", "packages/corpus/src/scan.ts", "packages/corpus/src/similarity.ts", "packages/corpus/src/test-support.ts", "packages/mcp-server/package.json", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/ingest.ts", "packages/mcp-server/src/corpus/mutex.ts", "packages/mcp-server/src/corpus/names.ts", "packages/mcp-server/src/corpus/plan.ts", "packages/mcp-server/src/corpus/reconcile.ts", "packages/mcp-server/src/corpus/root.ts", "packages/mcp-server/src/corpus/service.ts", "packages/mcp-server/src/corpus/store.ts", "packages/mcp-server/src/corpus/testkit.ts", "packages/mcp-server/src/corpus/validate.ts", "packages/mcp-server/src/docs-datasets.ts", "packages/mcp-server/src/docs-ingest.ts", "packages/mcp-server/src/docs-search.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index-archive-spec.ts", "packages/mcp-server/src/index-store.migrations.digests.json", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/planes/__fixtures__/lightrag-v1.5.7-routes.json", "packages/mcp-server/src/planes/lightrag-bulk.ts", "packages/mcp-server/src/planes/lightrag.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts"]
+covered_digest: "v4:sha256:ab0fc6f6b664d169636f79e107759a04e2c41b9cf623a2afffbfdc6d4fcc9c45"
+behavior_unverified: 0
+overrides_applied: 0
+re_verification:
+  previous_status: gaps_found
+  previous_score: 4/7
+  gaps_closed:
+    - "Criterion 1 (rename on canonical move): plan.ts pairs a removed row with a new entry across local/* copy collections when the sha256 matches; PlanItem carries renamedFromRepo (protocol.ts); the CLI removes the old row from that repository (cli/src/corpus/ingest.ts renamedFromRow). Within-repository pairing runs first."
+    - "Criterion 3 (archive and operator surface): corpus_documents is no longer in the migrate-contract exclusion list (only corpus_retrievals and corpus_feedback are); index-archive-spec.ts carries it with signals as jsonb and manifest_seq as the identity restore moves past; corpus_ingest runs through corpusIngestReply with operatorOnly, refusing a non-operator with 403 operator-required (routes.test.ts), and the MCP tool and route pass isOperator."
+    - "Criterion 4 (document source fields): the plane document name is corpusDocumentName(repo, path, sha256, facts), carrying kind, tier and commit, and it is the file_sources entry sent to /documents/texts (names.ts; lightrag-bulk.ts)."
+  gaps_remaining: []
+  regressions: []
+human_verification:
+  - test: "Run SUBSTRATE_TEST_PG_URL=<scratch-capable server> bun test packages/mcp-server/src/index-store.archive.test.ts (archive, verify, restore of corpus_documents)"
+    expected: "Equal counts and hashes after restore into a scratch database; next manifest_seq above the restored values"
+    why_human: "Needs Postgres; the restore test skips without it"
+  - test: "Run bun test packages/mcp-server/src/corpus/store.test.ts and reflect-store.test.ts with SUBSTRATE_TEST_PG_URL set"
+    expected: "The 23 skipped live-Postgres tests pass"
+    why_human: "They skip without Postgres"
+  - test: "Send one document to a live LightRAG with the corpus name as file_sources"
+    expected: "The stored file path equals corpus:<repo>:<path>@<sha12>.<kind>.<tier>.<commit>"
+    why_human: "Upstream acceptance of the longer name is inferred from v1.5.7 source, not observed"
+  - test: "Owner decision: plane name after a metadata-only refresh (same bytes, new kind, tier, source or commit)"
+    expected: "Accept that the plane name records facts as of first send (fix names.ts header, docs/docs-plane.md:168, docs/runbooks/docs-rag-operations.md:170) or re-send on a fact change"
+    why_human: "Cost versus currency decision for the owner"
+  - test: "Carried forward: live deploy with SUBSTRATE_CORPUS=on, live ingest with dry run and --execute, LightRAG route diff, Greptile export layout, gh adapter, migration step 35 rehearsal"
+    expected: "As listed in body item 5"
+    why_human: "Needs live services and credentials"
 ---
 
 # Phase 63: Corpus Atlas Verification Report
