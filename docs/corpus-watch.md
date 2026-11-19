@@ -1,7 +1,8 @@
 # Doc Watch — the docs plane follows the repositories
 
 Tracked as WATCH-01 to WATCH-05 (v1.7 phase 65). When documentation changes in a registered repository, the docs plane
-follows without anyone running `substrate corpus ingest`, and a restart re-ingests nothing that has not changed. The
+follows without anyone running `substrate corpus ingest`, and a restart of the server re-ingests nothing that has not
+changed while `SUBSTRATE_PLANNING_HASH_STORE` is on, which it is by default (set it to a value other than `on` to turn it off; see the planning refresh below). The
 commands are `substrate corpus sync`, `watch`, `reconcile`, `hook` and `hint`; the manifest, the plan and the ingest they
 drive are described in [corpus.md](corpus.md), and the docs plane itself in [docs-plane.md](docs-plane.md).
 
@@ -20,8 +21,10 @@ never sent again, so a trigger that fires twice, or a restart, costs a plan and 
 | the sweep timer of `corpus watch` (every `SUBSTRATE_CORPUS_SWEEP_S`), or `corpus watch --once` under a systemd timer | `sweep` | everything, including a push made from another machine | nothing |
 | `corpus reconcile` | `reconcile` | the manifest and the docs plane disagreeing | the server's reconcile route |
 
-The server's own planning refresh, the design's fourth trigger, runs inside the server and keeps its state in the manifest
-and not in memory, so a restart of the server re-ingests nothing unchanged; it is not a CLI command.
+The server's own planning refresh, the design's fourth trigger, runs inside the server and is not a CLI command. Its per-page
+hashes live in the index table `planning_page_hashes` when `SUBSTRATE_PLANNING_HASH_STORE=on`, so a restart of the server
+re-ingests nothing unchanged. With the flag off (`SUBSTRATE_PLANNING_HASH_STORE` set to a value other than `on`), they are kept in memory only and every restart re-ingests every
+planning page. They are not in the corpus manifest (`corpus_documents`).
 
 Only the sweep and the reconcile go to the network (they fetch the mirrors, below). A sync that a watch event or a hint
 starts reads the mirror as it is.
@@ -104,7 +107,8 @@ Fallbacks, each reported in the output and in `--json`:
 
 ## Hooks and the hint spool
 
-A hook tells the watcher that a repository moved. It is an opt-in:
+A hook tells the watcher that a repository moved. It is an opt-in, installed for chosen repositories only. The three hint
+hooks sit beside `post-commit`, the collector, which they never change:
 
 ```
 substrate corpus hook install   --repo DIR     # post-merge, post-checkout, post-rewrite
@@ -130,6 +134,8 @@ then a rename, so a reader never sees half of one. The spool holds at most 1,000
 still 0. `corpus watch` reads the spool about once a second, removes what it read (a malformed or oversized file of ours is
 removed and counted; any other file in the directory is left alone) and signals the repository. A hint for a directory
 below none of the roots is ignored with a line on stderr. Lost hints are recovered by the sweep.
+
+A hint has no kind of its own: nothing called `docs.changed` is written or read. The sync that a hint starts is the `hook` trigger in the table above.
 
 ## Flags
 

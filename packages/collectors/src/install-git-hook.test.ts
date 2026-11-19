@@ -89,6 +89,16 @@ describe("corpus hint hooks", () => {
 		}
 	});
 
+	test("each hint hook is one background corpus hint under timeout 10, and post-commit is not one of them", () => {
+		expect(CORPUS_HOOKS).not.toContain("post-commit");
+		for (const hook of CORPUS_HOOKS) {
+			const block = corpusHookBlock(hook, "/tmp/cli.ts");
+			expect(block).toContain('timeout 10 "$@" corpus hint --repo "$top"');
+			expect(block).toContain("</dev/null >/dev/null 2>&1 &");
+			expect(block.trimEnd().endsWith(CORPUS_BLOCK_END)).toBe(true);
+		}
+	});
+
 	test("without --corpus no hint hook is written", () => {
 		const repo = emptyRepo();
 		run(repo);

@@ -1232,7 +1232,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-2 R6
 		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
 		corpus: loadCorpusSettings(env),
-		planningHashStore: (env.SUBSTRATE_PLANNING_HASH_STORE?.trim().toLowerCase() ?? "") === "on",
+		// v1.7 phase 65: on unless the flag names another value. Unset or empty is on; `off` and any other word are off.
+		planningHashStore: ["", "on"].includes((env.SUBSTRATE_PLANNING_HASH_STORE?.trim() ?? "").toLowerCase()),
 		docsReflect: loadDocsReflectSettings(env),
 		reconcile: loadReconcileSettings(env),
 		docsSlo: loadSloThresholds(env),
