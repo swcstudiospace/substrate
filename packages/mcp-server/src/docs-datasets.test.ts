@@ -150,8 +150,26 @@ describe("refreshDataset", () => {
 			{ dataset: "agent-substrate", commit: "pinned-commit", content_sha256: "sha" },
 		);
 		if (!refreshed.ok) throw new Error(`expected refresh: ${refreshed.reason}`);
+		const documentId = "doc-unrecorded";
 		const reply = await searchDocs(
-			{ config: CONFIG, emit, fetchImpl: fake.fetch, pins: pinsFromVersions(versions, "lightrag"), datasetNames: ["agent-substrate"] },
+			{
+				config: CONFIG,
+				lightragConfig: { url: CONFIG.url },
+				emit,
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "An unrecorded passage.", document_name: "notes.md", document_id: documentId, chunk_id: "chunk-1", heading_path: "Notes", source_url: "https://example.com/notes", score: 0.9 }],
+					detail: { mode: "naive", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
+				lightragRecords: new Map([
+					[
+						"lightrag::swcstudiospace/agent-substrate::https://example.com/notes",
+						{ sha: "recorded-sha", dataset_id: "swcstudiospace/agent-substrate", source_url: "https://example.com/notes", document_id: documentId, version: 1 },
+					],
+				]),
+				pins: pinsByName(versions, ["agent-substrate"], "lightrag"),
+				datasetNames: ["agent-substrate"],
+			},
 			"who reads lightrag?",
 		);
 		expect(reply.chunks.length).toBeGreaterThan(0);
@@ -162,7 +180,6 @@ describe("refreshDataset", () => {
 
 describe("skills-sync liveness and the pin age", () => {
 	test("pin age travels in the search reply for degraded datasets", async () => {
-		const fake = new DocsPlaneFake();
 		const { emit } = eventsHarness();
 		const versions = createVersionStore();
 		recordVersion(versions, {
@@ -174,12 +191,24 @@ describe("skills-sync liveness and the pin age", () => {
 			content_sha256: "sha",
 			ingested_at: new Date(1_000_000).toISOString(),
 		});
+		const documentId = "doc-skill";
 		const reply = await searchDocs(
 			{
 				config: CONFIG,
+				lightragConfig: { url: CONFIG.url },
 				emit,
-				fetchImpl: fake.fetch,
-				pins: pinsFromVersions(versions, "lightrag"),
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "A skill passage.", document_name: "SKILL.md", document_id: documentId, chunk_id: "chunk-1", heading_path: "Skill", score: 0.9 }],
+					detail: { mode: "naive", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
+				lightragRecords: new Map([
+					[
+						"lightrag::swcstudiospace/agent-skills::https://example.com/skill",
+						{ sha: "recorded-sha", dataset_id: "swcstudiospace/agent-skills", source_url: "https://example.com/skill", document_id: documentId, version: 1 },
+					],
+				]),
+				pins: pinsByName(versions, ["agent-skills"], "lightrag"),
 				degradedDatasets: ["agent-skills"],
 				datasetNames: ["agent-skills"],
 				nowMs: 1_000_000 + 30_000,
@@ -260,7 +289,6 @@ describe("a completed version belongs to the backend that indexed it", () => {
 		recordVersion(store, { ...row, dataset_id: "uuid", version: "v1", commit: "c-lightrag", backend: "lightrag" });
 		recordVersion(store, { ...row, dataset_id: "agent-substrate", version: "v2", commit: "c-lightrag", backend: "lightrag" });
 		recordVersion(store, { ...row, dataset_id: "uuid", version: "v3", commit: "c-lightrag-2", backend: "lightrag" });
-		expect(latestVersionFor(store, "agent-substrate", "lightrag")?.commit).toBe("c-lightrag");
 		expect(latestVersionFor(store, "agent-substrate", "lightrag")?.commit).toBe("c-lightrag-2");
 		expect(latestVersionFor(store, "agent-skills", "lightrag")).toBeUndefined();
 	});

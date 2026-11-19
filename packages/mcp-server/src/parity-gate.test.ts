@@ -217,7 +217,7 @@ describe("Part B sample", () => {
 	});
 
 	test("the frozen sample matches the Frozen sample table in 46-PLAN.md, so the two cannot drift", () => {
-		const plan = readFileSync(new URL("../../../.planning/phases/46-lightrag-hybrid/46-PLAN.md", import.meta.url), "utf8");
+		const plan = readFileSync(new URL("../../../.planning/phases/46-ragflow-hybrid/46-PLAN.md", import.meta.url), "utf8");
 		const section = plan.slice(plan.indexOf("## Frozen sample"));
 		const rows = section
 			.split("\n")

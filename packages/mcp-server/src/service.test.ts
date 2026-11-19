@@ -1318,14 +1318,23 @@ describe("append-mode enforcement", () => {
 		try {
 			const hindsight = new HindsightFake();
 			const lightrag = new DocsPlaneFake();
+			// LightRAG probes GET /health (planes/lightrag.ts probeLightrag); the dataset
+			// double only serves the retired dataset API, so answer health here.
+			const lightragFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				if (url.endsWith("/health")) {
+					lightrag.requests.push({ method: (init?.method ?? "GET").toUpperCase(), path: "/health", body: null, query: {} });
+					return Response.json({ status: "healthy" });
+				}
+				return lightrag.fetch(input, init);
+			};
 			const config = loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_BREAKER_FAILURES: "1" });
-			const substrate = new Substrate(config, { index: null, greptime: greptime as never, hindsightFetch: hindsight.fetch, lightragFetch: lightrag.fetch });
+			const substrate = new Substrate(config, { index: null, greptime: greptime as never, hindsightFetch: hindsight.fetch, lightragFetch });
 			const up = await substrate.health();
 			expect(up.planes.hindsight).toMatchObject({ ok: true, lastErrorAt: null });
 			expect(up.planes.lightrag).toMatchObject({ ok: true, breaker: { state: "closed" } });
 			expect(hindsight.requests.filter((request) => request.path === "/health")).toHaveLength(1);
-			expect(lightrag.requests.filter((request) => request.path === "/api/v1/datasets")).toHaveLength(1);
-
+			expect(lightrag.requests.filter((request) => request.path === "/health")).toHaveLength(1);
 			// lightrag goes away: the probe fails, the breaker opens on the first failure, and both are reported.
 			const down = new Substrate(config, {
 				index: null,
@@ -1353,7 +1362,7 @@ describe("append-mode enforcement", () => {
 
 	test("SUBSTRATE_BREAKER=0 leaves every breaker null and every call reaching the plane", async () => {
 		let calls = 0;
-		const substrate = new Substrate(loadConfig({ SUBSTRATE_BREAKER: "0", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BREAKER: "0", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_RAG_MAX_RETRIES: "0" }), {
 			index: null,
 			greptime: null,
 			lightragFetch: async () => {
@@ -1462,6 +1471,11 @@ describe("append-mode enforcement", () => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
 						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/text") {
+						const parsed = JSON.parse(String(init.body)) as { text?: unknown };
+						uploads.push(typeof parsed.text === "string" ? parsed.text : "");
 						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
 					}
 					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
@@ -6057,7 +6071,8 @@ describe("private reads under the request budget and the docs steering precedenc
 			});
 			return { substrate, lightrag, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
 		}
-		const askedWith = (lightrag: DocsPlaneFake): string => JSON.stringify(lightrag.retrievals());
+		// LightRAG retrieves via POST /query ({query, …}); the dataset double records it under /query.
+		const askedWith = (lightrag: DocsPlaneFake): string => JSON.stringify(lightrag.requests.filter((request) => request.path === "/query").map((request) => request.body));
 
 		test("a supplied direction wins over the stored one for that search", async () => {
 			const h = await rig("STORED-DIRECTION");

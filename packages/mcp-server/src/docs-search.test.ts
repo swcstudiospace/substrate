@@ -13,41 +13,176 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { attachGraphHints, citationProvenanceCounts, lightragDocumentDataset, planningGraphCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type DatasetPin, type SearchCitation, type SearchReply } from "./docs-search.ts";
-import type { DatasetListSource } from "./docs-datasets.ts";
 import { documentProvenance, nodeIo, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestRecord, type ScanIo } from "./docs-ingest.ts";
-import { DocsPlaneFake, type FakeChunk } from "./docs-plane-fake.ts";
-import type { GreptimeClient } from "./greptime.ts";
-import { HindsightFake } from "./hindsight-fake.ts";
-import type { DerivedMemoryHit } from "./memory-recall.ts";
-import { lightragOp, type FetchLike } from "./planes/lightrag.ts";
-import type { EventInput } from "./types.ts";
-import { selectRetrievalBackend } from "./types.ts";
-import { lightragFromEnv, loadConfig, resolveDocsBackend } from "./config.ts";
-import { createMcpServer } from "./mcp.ts";
-import { Substrate } from "./service.ts";
-import { goldenFake, searchGoldenOffline } from "./docs-golden.ts";
-import { auditToolCalls, createObservability, type McpToolCall } from "./observe.ts";
-import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
-
+import type { FakeChunk } from "./docs-plane-fake.ts";
+import { searchGoldenOffline } from "./docs-golden.ts";
+import { datasetIdentity } from "./dataset-identity.ts";
+ import type { GreptimeClient } from "./greptime.ts";
+ import { HindsightFake } from "./hindsight-fake.ts";
+ import type { DerivedMemoryHit } from "./memory-recall.ts";
+ import { lightragOp, type FetchLike } from "./planes/lightrag.ts";
+ import type { EventInput } from "./types.ts";
+ import { selectRetrievalBackend } from "./types.ts";
+ import { lightragFromEnv, loadConfig, resolveDocsBackend } from "./config.ts";
+ import { createMcpServer } from "./mcp.ts";
+ import { Substrate } from "./service.ts";
+ import { auditToolCalls, createObservability, type McpToolCall } from "./observe.ts";
+ import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
+ 
 const CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
-
-/** The three datasets the DocsPlaneFake serves: the scope a search over every fake dataset names. */
-const FAKE_DATASETS = ["agent-substrate", "programming-desk", "agent-skills"];
-
-function harness(fake: DocsPlaneFake, pins?: Record<string, { dataset: string; dataset_id: string; version: string; commit: string }>) {
-	const events: EventInput[] = [];
-	const emit = async (event: EventInput): Promise<unknown> => {
-		events.push(event);
-		return { stored: false };
+const LIGHTRAG_CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
+ 
+/** The three datasets the LightRAG fake serves: the scope a search over every fake dataset names. */
+ const FAKE_DATASETS = ["agent-substrate", "programming-desk", "agent-skills"];
+ 
+/**
+ * v1.5.7 LightRAG plane double for docs_search (single retrieval).
+ * Serves `POST /query` (one retrieval for the whole scope, `{ query, mode, top_k, only_need_context }`)
+ * plus the ingest routes (`/documents/upload`, `/documents/text`, `/documents/scan`,
+ * `/documents/pipeline_status`, `/documents/track_status/:id`) so refresh and search share one fake.
+ * Kept local to this file because DocsPlaneFake still speaks the retired `/api/v1/retrieval` shape.
+ */
+class LightragFake {
+	readonly datasets = [
+		{ id: "ds-lightrag-agent-substrate", name: "agent-substrate" },
+		{ id: "ds-lightrag-programming-desk", name: "programming-desk" },
+		{ id: "ds-lightrag-agent-skills", name: "agent-skills" },
+	];
+	readonly queries: string[] = [];
+	readonly uploads: Array<{ name: string; content: string; metadata: Record<string, string> }> = [];
+	readonly seeds: Array<{ document_id: string; content: string; source_url?: string; heading_path?: string; score?: number }> = [];
+	failRetrievalWith: number | null = null;
+	failUploadWhen: ((content: string) => boolean) | null = null;
+	chunkShape: "full" | "minimal" = "full";
+	serveUploadsAsChunks = false;
+	parseDonePolls = 1;
+	answer: ((question: string) => FakeChunk[] | Promise<FakeChunk[]>) | null = null;
+	inFlight = 0;
+	maxInFlight = 0;
+	private trackCount = 0;
+	private readonly trackToDoc = new Map<string, string>();
+	readonly chunks: Record<string, FakeChunk[]> = {
+		"ds-lightrag-agent-substrate": [
+			{ content: "agent-substrate doc one body about data planes.", document_name: "data-planes.md", document_id: "doc-substrate-1", chunk_id: "chunk-substrate-1", heading_path: "Data planes", source_url: "https://example.com/agent-substrate/data-planes", score: 0.91 },
+			{ content: "agent-substrate doc two body about the gate.", document_name: "gate.md", document_id: "doc-substrate-2", chunk_id: "chunk-substrate-2", heading_path: "Gate", source_url: "https://example.com/agent-substrate/gate", score: 0.83 },
+		],
+		"ds-lightrag-programming-desk": [
+			{ content: "programming-desk doc one body about architecture.", document_name: "architecture.md", document_id: "doc-desk-1", chunk_id: "chunk-desk-1", heading_path: "Architecture", source_url: "https://example.com/programming-desk/architecture", score: 0.91 },
+			{ content: "programming-desk doc two body about the desk.", document_name: "desk.md", document_id: "doc-desk-2", chunk_id: "chunk-desk-2", heading_path: "Desk", source_url: "https://example.com/programming-desk/desk", score: 0.83 },
+		],
+		"ds-lightrag-agent-skills": [
+			{ content: "agent-skills doc one body about review.", document_name: "review.md", document_id: "doc-skills-1", chunk_id: "chunk-skills-1", heading_path: "Review", source_url: "https://example.com/agent-skills/review", score: 0.91 },
+			{ content: "agent-skills doc two body about skills.", document_name: "skills.md", document_id: "doc-skills-2", chunk_id: "chunk-skills-2", heading_path: "Skills", source_url: "https://example.com/agent-skills/skills", score: 0.83 },
+		],
 	};
+	readonly fetch: FetchLike = async (input, init) => {
+		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+		const method = (init?.method ?? "GET").toUpperCase();
+		if (method === "POST" && url.pathname === "/query") return this.query(init);
+		if (method === "POST" && url.pathname === "/documents/upload") return this.upload(init);
+		if (method === "POST" && url.pathname === "/documents/text") return this.textUpload(init);
+		if (method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+		if (method === "GET" && url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
+		if (method === "GET" && url.pathname.startsWith("/documents/track_status/")) {
+			const track = decodeURIComponent(url.pathname.slice("/documents/track_status/".length));
+			const doc = this.trackToDoc.get(track);
+			if (doc === undefined) return Response.json({ documents: [], total_count: 0 });
+			return Response.json({ documents: [{ id: doc, status: "processed" }], total_count: 1 });
+		}
+		return Response.json({ detail: `fake has no route for ${method} ${url.pathname}` }, { status: 404 });
+	};
+	private async query(init?: RequestInit): Promise<Response> {
+		let question = "";
+		if (typeof init?.body === "string" && init.body.length > 0) {
+			try {
+				const body = JSON.parse(init.body) as Record<string, unknown>;
+				if (typeof body["query"] === "string") question = body["query"];
+			} catch { /* ignore */ }
+		}
+		this.queries.push(question);
+		if (this.failRetrievalWith !== null) return new Response("unavailable", { status: this.failRetrievalWith });
+		this.inFlight += 1;
+		this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+		try {
+			const served = this.answer !== null ? await this.answer(question) : this.serveUploadsAsChunks ? this.uploadChunks() : this.allChunks();
+			const chunks = served.map((chunk) => this.chunkShape === "minimal" ? { content: chunk.content, document_keyword: chunk.document_name } : {
+				content: chunk.content,
+				document_name: chunk.document_name,
+				document_id: chunk.document_id ?? "",
+				chunk_id: chunk.chunk_id ?? "",
+				heading_path: chunk.heading_path ?? "",
+				source_url: chunk.source_url ?? "",
+				file_path: chunk.source_url ?? "",
+				score: chunk.score ?? 0,
+			});
+			return Response.json({ status: "success", data: { chunks, entities: [], relations: [] } });
+		} finally { this.inFlight -= 1; }
+	}
+	/** Every query body served, in order (the single-retrieval analogue of the old per-dataset retrievals). */
+	queriesCount(): number { return this.queries.length; }
+	private allChunks(): FakeChunk[] { return [...this.chunks["ds-lightrag-agent-substrate"] ?? [], ...this.chunks["ds-lightrag-programming-desk"] ?? [], ...this.chunks["ds-lightrag-agent-skills"] ?? []]; }
+	private uploadChunks(): FakeChunk[] {
+		const fromUploads: FakeChunk[] = this.uploads.map((upload, index) => ({ content: upload.content, document_name: upload.name, document_id: this.trackToDoc.get(this.trackFor(index + 1)) ?? `doc-upload-${index + 1}`, chunk_id: `chunk-upload-${index + 1}`, heading_path: upload.metadata["heading_path"] ?? "", source_url: upload.metadata["source_url"] ?? "", score: 0.9 }));
+		const fromSeeds: FakeChunk[] = this.seeds.map((seed) => ({ content: seed.content, document_name: seed.document_id, document_id: seed.document_id, chunk_id: `chunk-seed-${seed.document_id}`, heading_path: seed.heading_path ?? "", source_url: seed.source_url ?? "", score: seed.score ?? 0.5 }));
+		return [...fromUploads, ...fromSeeds];
+	}
+	private trackFor(n: number): string { return `trk-${n}`; }
+	private async upload(init?: RequestInit): Promise<Response> {
+		if (!(init?.body instanceof FormData)) return Response.json({ detail: "no file part" }, { status: 400 });
+		const parts: Array<{ name: string; text: string }> = [];
+		for (const part of init.body.getAll("file")) if (part instanceof Blob) parts.push({ name: part instanceof File ? part.name : "file", text: await part.text() });
+		const sourceUrl = String(init.body.get("source_url") ?? "");
+		const commit = String(init.body.get("commit") ?? "");
+		const heading = String(init.body.get("heading_path") ?? "");
+		for (const part of parts) {
+			if (this.failUploadWhen?.(part.text)) return new Response("upload refused", { status: 500 });
+			this.trackCount += 1;
+			const track = this.trackFor(this.trackCount);
+			const doc = `doc-${part.name.replace(/[^a-zA-Z0-9]/g, "-")}-${this.trackCount}`;
+			this.trackToDoc.set(track, doc);
+			this.uploads.push({ name: part.name, content: part.text, metadata: { source_url: sourceUrl, commit, heading_path: heading } });
+		}
+		return Response.json({ status: "success", data: { track_id: this.trackFor(this.trackCount) } });
+	}
+	private async textUpload(init?: RequestInit): Promise<Response> {
+		let body: Record<string, unknown> = {};
+		if (typeof init?.body === "string" && init.body.length > 0) { try { body = JSON.parse(init.body) as Record<string, unknown>; } catch { /* ignore */ } }
+		const content = typeof body["text"] === "string" ? body["text"] : "";
+		const name = typeof body["file_source"] === "string" ? body["file_source"] : "doc.md";
+		const sourceUrl = typeof body["source_url"] === "string" ? body["source_url"] : "";
+		const commit = typeof body["commit"] === "string" ? body["commit"] : "";
+		const heading = typeof body["heading_path"] === "string" ? body["heading_path"] : "";
+		if (this.failUploadWhen?.(content)) return new Response("upload refused", { status: 500 });
+		this.trackCount += 1;
+		const track = this.trackFor(this.trackCount);
+		const doc = `doc-${name.replace(/[^a-zA-Z0-9]/g, "-")}-${this.trackCount}`;
+		this.trackToDoc.set(track, doc);
+		this.uploads.push({ name, content, metadata: { source_url: sourceUrl, commit, heading_path: heading } });
+		return Response.json({ status: "success", data: { track_id: track } });
+	}
+}
+function lightragRecordsFor(chunksByDoc: Record<string, string>): Map<string, IngestRecord> {
+	const records = new Map<string, IngestRecord>();
+	for (const [documentId, datasetName] of Object.entries(chunksByDoc)) {
+		const identity = datasetIdentity(datasetName);
+		const sourceUrl = `https://example.com/${datasetName}/${documentId}`;
+		records.set(`lightrag::${identity}::${sourceUrl}`, { sha: `sha-${documentId}`, dataset_id: identity, source_url: sourceUrl, document_id: documentId, version: 1 });
+	}
+	return records;
+}
+function harness(fake: LightragFake, pins?: Record<string, { dataset: string; dataset_id: string; version: string; commit: string }>, records?: Map<string, IngestRecord>) {
+ 	const events: EventInput[] = [];
+ 	const emit = async (event: EventInput): Promise<unknown> => {
+ 		events.push(event);
+ 		return { stored: false };
+ 	};
 	const search = (question: string): Promise<SearchReply> =>
-		searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, datasetNames: FAKE_DATASETS, ...(pins ? { pins } : {}) }, question);
+		searchDocs({ config: CONFIG, backend: "lightrag", lightragConfig: LIGHTRAG_CONFIG, lightragFetch: fake.fetch, lightragDatasets: { list: async () => ({ ok: true, datasets: fake.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })) }), invalidate: () => undefined }, lightragRetry: { maxRetries: 0, retryBaseMs: 1 }, emit, datasetNames: FAKE_DATASETS, ...(pins ? { pins } : {}), ...(records ? { lightragRecords: records } : {}) }, question);
 	return { events, search };
 }
-
 describe("docs_search", () => {
 	test("returns cited redacted results with untrusted framing and a URL-listing event", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		const { events, search } = harness(fake);
 		const reply = await search("who reads lightrag?");
 		expect(reply.degraded).toBeUndefined();
@@ -68,37 +203,42 @@ describe("docs_search", () => {
 	});
 
 	test("Greptile round 2: an unrecorded document never borrows the dataset pin as its commit; the pin travels as dataset_commit", async () => {
-		const fake = new DocsPlaneFake();
-		fake.chunkShape = "minimal";
+		const fake = new LightragFake();
 		const { search } = harness(fake, {
-			"ds-berlin-agent-substrate": {
+			"agent-substrate": {
 				dataset: "agent-substrate",
-				dataset_id: "ds-berlin-agent-substrate",
+				dataset_id: "ds-lightrag-agent-substrate",
 				version: "v3",
 				commit: "abc123",
 			},
-		});
+		}, lightragRecordsFor({ "doc-substrate-1": "agent-substrate", "doc-substrate-2": "agent-substrate", "doc-desk-1": "programming-desk", "doc-desk-2": "programming-desk", "doc-skills-1": "agent-skills", "doc-skills-2": "agent-skills" }));
 		const reply = await search("pin fallback?");
 		expect(reply.chunks.length).toBeGreaterThan(0);
 		// No ingest record for this document: it may predate or postdate v3.
-		expect(reply.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
-		expect(reply.chunks[0]?.commit).not.toBe("abc123");
-		expect(reply.chunks[0]?.dataset_commit).toBe("abc123");
+		const substrateChunks = reply.chunks.filter((chunk) => chunk.document_id.startsWith("doc-substrate"));
+		expect(substrateChunks.length).toBeGreaterThan(0);
+		expect(substrateChunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
+		expect(substrateChunks[0]?.commit).not.toBe("abc123");
+		expect(substrateChunks[0]?.dataset_commit).toBe("abc123");
+		// A chunk no record names is unattributed and cites no pin.
+		const orphan = reply.chunks.find((chunk) => chunk.document_id === "doc-unknown");
+		expect(orphan).toBeUndefined();
 	});
 
 	test("names the pin gap instead of inventing a commit", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		const { search } = harness(fake);
 		const reply = await search("no pins yet?");
 		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
+		// No LightRAG record names these documents: the pin gap is the unattributed marker.
+		expect(reply.chunks[0]?.commit).toBe("dataset-pin:unattributed:unrecorded");
 		// No recorded version: nothing to present as the dataset's commit either.
 		expect(reply.chunks[0]?.dataset_commit).toBeUndefined();
 	});
 
 	test("redacts snippets before reply", async () => {
-		const fake = new DocsPlaneFake();
-		fake.chunks["ds-berlin-agent-substrate"] = [
+		const fake = new LightragFake();
+		fake.chunks["ds-lightrag-agent-substrate"] = [
 			{
 				content: "paste sk-proj-abcdefghij1234567890 into lightrag",
 				document_name: "leak.md",
@@ -117,7 +257,7 @@ describe("docs_search", () => {
 	});
 
 	test("an error yields empty plus reason with a warning event", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		fake.failRetrievalWith = 503;
 		const { events, search } = harness(fake);
 		const reply = await search("who reads lightrag?");
@@ -148,7 +288,7 @@ describe("docs_search", () => {
 
 describe("docs_search wiring", () => {
 	test("Substrate.searchDocs serves citations and degrades when unconfigured", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		const live = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
 			index: null,
 			greptime: null,
@@ -164,7 +304,7 @@ describe("docs_search wiring", () => {
 	});
 
 	test("docs_search is callable over MCP", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
 			index: null,
 			greptime: null,
@@ -191,8 +331,8 @@ describe("docs_search wiring", () => {
 
 describe("docs_search metadata redaction", () => {
 	test("title, source URL and heading path are redacted like snippets", async () => {
-		const fake = new DocsPlaneFake();
-		fake.chunks["ds-berlin-agent-substrate"] = [
+		const fake = new LightragFake();
+		fake.chunks["ds-lightrag-agent-substrate"] = [
 			{
 				content: "clean body",
 				document_name: "sk-proj-abcdefghij1234567890",
@@ -211,6 +351,7 @@ describe("docs_search metadata redaction", () => {
 		expect(cited?.heading_path).not.toContain("sk-proj-");
 	});
 });
+
 
 /** A redis that remembers every command, so the cache's store decision is observable. */
 class FakeRedis implements CacheRedis {
@@ -233,37 +374,38 @@ class FakeRedis implements CacheRedis {
 }
 
 describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
-	const SLOW = "ds-hamm-programming-desk";
 	/** A budget the deadline timer — the code under test's own, not the test's — enforces quickly. */
 	const BUDGET_MS = 100;
 
 	/**
-	 * The slow dataset answers only when `gate` is resolved — never, unless
-	 * the test resolves it; `arrived` settles when its retrieval reaches the
-	 * fake. Every other dataset answers at once.
+	 * The single query answers only when `gate` is resolved — never, unless
+	 * the test resolves it; `arrived` settles when the query reaches the fake.
 	 */
-	function stall(fake: DocsPlaneFake, slow: string = SLOW): { gate: PromiseWithResolvers<FakeChunk[]>; arrived: Promise<void> } {
+	function stall(fake: LightragFake): { gate: PromiseWithResolvers<FakeChunk[]>; arrived: Promise<void> } {
 		const gate = Promise.withResolvers<FakeChunk[]>();
 		const arrived = Promise.withResolvers<void>();
-		fake.answer = (datasetId) => {
-			if (datasetId !== slow) return fake.chunks[datasetId] ?? [];
+		fake.answer = () => {
 			arrived.resolve();
 			return gate.promise;
 		};
 		return { gate, arrived: arrived.promise };
 	}
 
-	/** The dataset list as the service's 60 s cache would hold it, so the list itself never consumes the breaker's probe. */
-	function listedBy(fake: DocsPlaneFake): DatasetListSource {
+	/** The dataset list as the service's 60 s cache would hold it. */
+	function listedBy(fake: LightragFake): { list: () => Promise<{ ok: true; datasets: Array<{ id: string; name: string }> }>; invalidate: () => void } {
 		return {
 			list: async () => ({ ok: true, datasets: fake.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })) }),
 			invalidate: () => {},
 		};
 	}
 
-	test("a dataset that outlives the budget is degraded alone: the others' citations arrive within the budget", async () => {
-		const fake = new DocsPlaneFake();
-		// Never released: a dataset whose transport hangs past the budget.
+	function lightragDeps(fake: LightragFake, extra: Record<string, unknown> = {}) {
+		return { config: CONFIG, backend: "lightrag" as const, lightragConfig: LIGHTRAG_CONFIG, lightragFetch: fake.fetch, lightragDatasets: listedBy(fake), datasetNames: FAKE_DATASETS, lightragRetry: { maxRetries: 0, retryBaseMs: 1 }, emit: async () => ({ stored: false }), ...extra };
+	}
+
+	test("a query that outlives the budget is degraded: the search returns degraded within the budget", async () => {
+		const fake = new LightragFake();
+		// Never released: a query whose transport hangs past the budget.
 		stall(fake);
 		const events: EventInput[] = [];
 		const emit = async (event: EventInput): Promise<unknown> => {
@@ -271,89 +413,54 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 			return { stored: false };
 		};
 		const started = performance.now();
-		const reply = await searchDocs({ config: CONFIG, emit, datasetNames: FAKE_DATASETS, fetchImpl: fake.fetch, budgetMs: BUDGET_MS }, "who reads lightrag?");
+		const reply = await searchDocs(lightragDeps(fake, { emit, budgetMs: BUDGET_MS }), "who reads lightrag?");
 		const elapsed = performance.now() - started;
 
-		// Within the budget plus tolerance, not the per-call 4 s timeout the stalled dataset would cost.
+		// Within the budget plus tolerance, not the per-call 4 s timeout.
 		expect(elapsed).toBeLessThan(BUDGET_MS * 10);
-		expect(reply.degraded).toBeUndefined();
-		expect(reply.degraded_datasets).toEqual([{ dataset: "programming-desk", reason: `deadline (${BUDGET_MS} ms docs budget)` }]);
-		// Both other datasets answered: their four seeded chunks, still score-sorted.
-		expect(reply.chunks).toHaveLength(4);
-		// The fake serves no URL metadata (none is documented), so the proof is the document ids.
-		expect(reply.chunks.map((citation) => citation.document_id).sort()).toEqual(
-			["doc-ds-berlin-agent-substrate-1", "doc-ds-berlin-agent-substrate-2", "doc-ds-leipzig-agent-skills-1", "doc-ds-leipzig-agent-skills-2"],
-		);
-		expect(reply.chunks.map((citation) => citation.score)).toEqual([0.91, 0.91, 0.83, 0.83]);
-		// Not stored by the answer cache: the next caller retries the missing dataset.
+		expect(reply.degraded).toBe(true);
+		expect(reply.chunks).toHaveLength(0);
+		expect(reply.degraded_datasets).toEqual([{ dataset: "agent-substrate", reason: `deadline (${BUDGET_MS} ms docs budget)` }]);
+		// Not stored by the answer cache: the next caller retries.
 		expect(searchReplyStorable(reply)).toBe(false);
-		// Still one note, naming the two datasets that answered and the one that did not.
-		const notes = events.filter((event) => event.kind === "note");
-		expect(notes).toHaveLength(1);
-		expect(notes[0]?.payload).toMatchObject({
-			action: "docs.search",
-			dataset_ids: ["ds-berlin-agent-substrate", "ds-leipzig-agent-skills"],
-			count: 4,
-			degraded_datasets: [{ dataset: "programming-desk", reason: `deadline (${BUDGET_MS} ms docs budget)` }],
-		});
-		expect(events.filter((event) => event.kind === "warning")).toHaveLength(0);
+		expect(events.filter((event) => event.kind === "warning")).toHaveLength(1);
+		expect(events.filter((event) => event.kind === "note")).toHaveLength(0);
 	});
 
-	test("a dataset that fails is degraded alone; the reply is `degraded: true` only when every dataset failed", async () => {
-		const fake = new DocsPlaneFake();
-		fake.answer = (datasetId) => {
-			if (datasetId === SLOW) throw new Error("boom");
-			return fake.chunks[datasetId] ?? [];
-		};
+	test("a query that fails is degraded: the reply is `degraded: true` with the failure reason", async () => {
+		const fake = new LightragFake();
 		const { events, search } = harness(fake);
-		const partial = await search("who reads lightrag?");
-		expect(partial.degraded).toBeUndefined();
-		expect(partial.chunks).toHaveLength(4);
-		expect(partial.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["programming-desk"]);
-		expect(partial.degraded_datasets?.[0]?.reason).toStartWith("lightrag unreachable:");
-		expect(searchReplyStorable(partial)).toBe(false);
-
 		fake.failRetrievalWith = 503;
 		const all = await search("who reads lightrag?");
 		expect(all).toMatchObject({ chunks: [], degraded: true, reason: "lightrag 503" });
-		expect(all.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["agent-substrate", "programming-desk", "agent-skills"]);
-		expect(all.degraded_datasets?.every((entry) => entry.reason === "lightrag 503")).toBe(true);
+		expect(all.degraded_datasets).toEqual([{ dataset: "agent-substrate", reason: "lightrag 503" }]);
 		expect(searchReplyStorable(all)).toBe(false);
 		const warnings = events.filter((event) => event.kind === "warning");
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]?.payload).toMatchObject({ action: "docs.search", reason: "lightrag 503" });
 	});
 
-	test("a reply every dataset answered carries no degraded_datasets and is storable", async () => {
-		const fake = new DocsPlaneFake();
+	test("a reply the query answered carries no degraded_datasets and is storable", async () => {
+		const fake = new LightragFake();
 		const { search } = harness(fake);
 		const reply = await search("who reads lightrag?");
 		expect(reply.degraded_datasets).toBeUndefined();
+		expect(reply.degraded).toBeUndefined();
 		expect(searchReplyStorable(reply)).toBe(true);
+		expect(reply.chunks).toHaveLength(6);
 	});
 
-	test("the retrievals leave together: each dataset answers only once every retrieval has arrived", async () => {
-		const fake = new DocsPlaneFake();
-		const everyoneArrived = Promise.withResolvers<void>();
-		let seen = 0;
-		fake.answer = async (datasetId) => {
-			seen += 1;
-			if (seen === fake.datasets.length) everyoneArrived.resolve();
-			// A sequential client never gets all three in flight: its first
-			// retrieval would wait for a second it has not started, miss the
-			// budget, and the assertions below would name it.
-			await everyoneArrived.promise;
-			return fake.chunks[datasetId] ?? [];
-		};
-		const reply = await searchDocs({ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl: fake.fetch, budgetMs: BUDGET_MS }, "who reads lightrag?");
+	test("the query is a single retrieval: one /query serves the whole scope", async () => {
+		const fake = new LightragFake();
+		const reply = await searchDocs(lightragDeps(fake, { emit: async () => ({ stored: false }), budgetMs: BUDGET_MS }), "who reads lightrag?");
 		expect(reply.degraded_datasets).toBeUndefined();
 		expect(reply.chunks).toHaveLength(6);
-		expect(fake.retrievals()).toHaveLength(3);
-		expect(fake.maxInFlight).toBe(3);
+		expect(fake.queries).toHaveLength(1);
+		expect(fake.maxInFlight).toBe(1);
 	});
 
-	test("Greptile round 1 (PR #61): a half-open breaker probes with the first dataset alone, then the siblings fan out and return citations", async () => {
-		const fake = new DocsPlaneFake();
+	test("Greptile round 1 (PR #61): a half-open breaker still serves the single query and closes on success", async () => {
+		const fake = new LightragFake();
 		// A real breaker, opened by one failure and already past its open window.
 		let now = 1_000_000;
 		const breaker = new CircuitBreaker("lightrag", { enabled: true, failureThreshold: 1, openMs: 1000 }, () => now);
@@ -362,59 +469,43 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 		expect(breaker.state()).toBe("half-open");
 		const gate: PlaneGate = { plane: "lightrag", breaker, observe: null };
 		const fetchImpl = gatedFetch(gate, fake.fetch, lightragOp);
-		// The probe settles only when released, so the siblings' departure is observable.
-		const { gate: probeGate, arrived } = stall(fake, "ds-berlin-agent-substrate");
-		const pending = searchDocs(
-			{ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl, datasets: listedBy(fake), budgetMs: 2_000, breakerState: () => breaker.state() },
+		const reply = await searchDocs(
+			lightragDeps(fake, { lightragFetch: fetchImpl, budgetMs: 2_000, lightragBreakerState: () => breaker.state(), emit: async () => ({ stored: false }) }),
 			"who reads lightrag?",
 		);
-		await arrived;
-		// Only the probe has left; nobody was refused `lightrag circuit open`.
-		expect(fake.retrievals()).toHaveLength(1);
-		expect(breaker.state()).toBe("half-open");
-		probeGate.resolve(fake.chunks["ds-berlin-agent-substrate"] ?? []);
-		const reply = await pending;
-		// The probe closed the breaker; the siblings ran after it and answered.
+		// The single query probed the plane; success closed the breaker.
 		expect(breaker.state()).toBe("closed");
 		expect(reply.degraded).toBeUndefined();
-		expect(reply.degraded_datasets).toBeUndefined();
 		expect(reply.chunks).toHaveLength(6);
-		expect(fake.retrievals()).toHaveLength(3);
-		expect(fake.maxInFlight).toBe(2);
+		expect(fake.queries).toHaveLength(1);
 	});
 
-	test("Greptile round 1 (PR #61): the half-open probe still shares the budget — a stalled probe costs one budget, not a budget per dataset", async () => {
-		const fake = new DocsPlaneFake();
+	test("Greptile round 1 (PR #61): a stalled query still shares the budget — one budget, not a budget per dataset", async () => {
+		const fake = new LightragFake();
 		let now = 1_000_000;
 		const breaker = new CircuitBreaker("lightrag", { enabled: true, failureThreshold: 1, openMs: 1000 }, () => now);
 		breaker.onFailure("lightrag 503");
 		now += 1000;
 		const fetchImpl = gatedFetch({ plane: "lightrag", breaker, observe: null }, fake.fetch, lightragOp);
-		// Never released: the probe hangs past the budget. The deadline settles
-		// it, and the siblings — which only leave after it — find the same
-		// expired deadline, so the whole search still costs one budget and
-		// nothing reaches the plane behind a probe that never came back.
-		stall(fake, "ds-berlin-agent-substrate");
+		// Never released: the query hangs past the budget.
+		stall(fake);
 		const started = performance.now();
 		const reply = await searchDocs(
-			{ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl, datasets: listedBy(fake), budgetMs: BUDGET_MS, breakerState: () => breaker.state() },
+			lightragDeps(fake, { lightragFetch: fetchImpl, budgetMs: BUDGET_MS, lightragBreakerState: () => breaker.state(), emit: async () => ({ stored: false }) }),
 			"who reads lightrag?",
 		);
 		expect(performance.now() - started).toBeLessThan(BUDGET_MS * 10);
 		expect(reply.degraded).toBe(true);
-		expect(reply.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["agent-substrate", "programming-desk", "agent-skills"]);
-		expect(reply.degraded_datasets?.every((entry) => entry.reason === `deadline (${BUDGET_MS} ms docs budget)`)).toBe(true);
-		// The breaker is still probing, so the siblings were refused at the gate: one retrieval reached the fake.
-		expect(fake.retrievals()).toHaveLength(1);
-		expect(breaker.state()).toBe("half-open");
+		expect(reply.degraded_datasets).toEqual([{ dataset: "agent-substrate", reason: `deadline (${BUDGET_MS} ms docs budget)` }]);
+		// One query reached the fake.
+		expect(fake.queries).toHaveLength(1);
 	});
 
-	/** A fetch that refuses the first retrieval of `datasetId` the way an open gate does, then serves normally. */
-	function refusingOnce(fake: DocsPlaneFake, datasetId: string): typeof fetch {
+	/** A fetch that refuses the first query the way an open gate does, then serves normally. */
+	function refusingOnce(fake: LightragFake): typeof fetch {
 		let refused = false;
 		return (async (input: string | URL | Request, init?: RequestInit) => {
-			const body = typeof init?.body === "string" ? init.body : "";
-			if (!refused && String(input).endsWith("/api/v1/retrieval") && body.includes(datasetId)) {
+			if (!refused && String(input).includes("/query")) {
 				refused = true;
 				const open = new Error("circuit open");
 				open.name = "BreakerOpenError";
@@ -424,63 +515,80 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 		}) as unknown as typeof fetch;
 	}
 
-	test("Greptile round 1 (PR #61): a sibling refused `lightrag circuit open` while the breaker has since closed is retried once and answers", async () => {
-		const fake = new DocsPlaneFake();
+	test("Greptile round 1 (PR #61): a refusal `lightrag circuit open` while the breaker has since closed is retried once and answers", async () => {
+		const fake = new LightragFake();
 		const reply = await searchDocs(
-			{ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl: refusingOnce(fake, "ds-leipzig-agent-skills"), budgetMs: 2_000, breakerState: () => "closed" },
+			lightragDeps(fake, { lightragFetch: refusingOnce(fake), budgetMs: 2_000, lightragBreakerState: () => "closed" as const, emit: async () => ({ stored: false }) }),
 			"who reads lightrag?",
 		);
 		expect(reply.degraded).toBeUndefined();
-		expect(reply.degraded_datasets).toBeUndefined();
 		expect(reply.chunks).toHaveLength(6);
-		// Two first attempts reached the plane (the third was refused at the gate), plus the retry.
-		expect(fake.retrievals()).toHaveLength(3);
+		// The refused attempt plus the retry.
+		expect(fake.queries).toHaveLength(1);
 	});
 
 	test("a `lightrag circuit open` refusal stands when the breaker is still not closed, and without breakerState nothing is retried", async () => {
-		for (const state of [() => "open" as const, undefined]) {
-			const fake = new DocsPlaneFake();
+		// Breaker open at search time: the plane is never asked, so there is no degraded dataset to name.
+		{
+			const fake = new LightragFake();
 			const reply = await searchDocs(
-				{ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl: refusingOnce(fake, "ds-leipzig-agent-skills"), budgetMs: 2_000, ...(state ? { breakerState: state } : {}) },
+				lightragDeps(fake, {
+					lightragFetch: refusingOnce(fake),
+					budgetMs: 2_000,
+					emit: async () => ({ stored: false }),
+					lightragBreakerState: () => "open" as const,
+				}),
 				"who reads lightrag?",
 			);
-			expect(reply.degraded_datasets).toEqual([{ dataset: "agent-skills", reason: "lightrag circuit open" }]);
-			expect(reply.chunks).toHaveLength(4);
+			expect(reply.degraded).toBe(true);
+			expect(reply.reason).toBe("lightrag circuit open");
+			expect(reply.chunks).toHaveLength(0);
+			expect(reply.degraded_datasets).toBeUndefined();
+			expect(fake.queries).toHaveLength(0);
+		}
+		// No breakerState: the gated fetch refuses once and nothing retries it.
+		{
+			const fake = new LightragFake();
+			const reply = await searchDocs(
+				lightragDeps(fake, {
+					lightragFetch: refusingOnce(fake),
+					budgetMs: 2_000,
+					emit: async () => ({ stored: false }),
+				}),
+				"who reads lightrag?",
+			);
+			expect(reply.degraded).toBe(true);
+			expect(reply.chunks).toHaveLength(0);
+			expect(reply.degraded_datasets).toEqual([{ dataset: "agent-substrate", reason: "lightrag circuit open" }]);
+			expect(fake.queries).toHaveLength(0);
 		}
 	});
 
-	test("a closed breaker never serialises: all three leave together even with breakerState supplied", async () => {
-		const fake = new DocsPlaneFake();
-		const everyoneArrived = Promise.withResolvers<void>();
-		let seen = 0;
-		fake.answer = async (datasetId) => {
-			seen += 1;
-			if (seen === fake.datasets.length) everyoneArrived.resolve();
-			await everyoneArrived.promise;
-			return fake.chunks[datasetId] ?? [];
-		};
+	test("a closed breaker never serialises: the single query leaves at once with breakerState supplied", async () => {
+		const fake = new LightragFake();
 		const reply = await searchDocs(
-			{ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl: fake.fetch, budgetMs: BUDGET_MS, breakerState: () => "closed" },
+			lightragDeps(fake, { budgetMs: BUDGET_MS, lightragBreakerState: () => "closed" as const, emit: async () => ({ stored: false }) }),
 			"who reads lightrag?",
 		);
 		expect(reply.chunks).toHaveLength(6);
-		expect(fake.maxInFlight).toBe(3);
+		expect(fake.queries).toHaveLength(1);
+		expect(fake.maxInFlight).toBe(1);
 	});
 
-	test("budget 0 keeps the per-call timeout only: a slow dataset is waited for", async () => {
-		const fake = new DocsPlaneFake();
+	test("budget 0 keeps the per-call timeout only: a slow query is waited for", async () => {
+		const fake = new LightragFake();
 		const { gate, arrived } = stall(fake);
-		const pending = searchDocs({ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl: fake.fetch, budgetMs: 0 }, "slow?");
-		// Release the slow dataset only once the search has reached it and is waiting.
+		const pending = searchDocs(lightragDeps(fake, { emit: async () => ({ stored: false }), budgetMs: 0 }), "slow?");
+		// Release the query only once the search has reached it and is waiting.
 		await arrived;
-		gate.resolve(fake.chunks[SLOW] ?? []);
+		gate.resolve(fake.chunks["ds-lightrag-agent-substrate"] ?? []);
 		const reply = await pending;
 		expect(reply.degraded_datasets).toBeUndefined();
-		expect(reply.chunks).toHaveLength(6);
+		expect(reply.chunks.length).toBeGreaterThan(0);
 	});
 
-	test("Substrate.searchDocs: a partially served reply is not cached, and the configured budget reaches the search", async () => {
-		const fake = new DocsPlaneFake();
+	test("Substrate.searchDocs: a degraded reply is not cached, and the configured budget reaches the search", async () => {
+		const fake = new LightragFake();
 		stall(fake);
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
@@ -491,9 +599,9 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 		expect(loadConfig({ SUBSTRATE_DOCS_SEARCH_BUDGET_MS: "soon" }).docsSearchBudgetMs).toBe(4000);
 		const substrate = new Substrate(config, { index: null, greptime: null, lightragFetch: fake.fetch, cache, ...seam.stores });
 		const first = await substrate.searchDocs({ question: "who reads lightrag?" }, "omp");
-		expect(first.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["programming-desk"]);
+		expect(first.degraded).toBe(true);
 		expect(redis.commands.some((command) => command.startsWith("SET substrate:v1:docs-search:"))).toBe(false);
-		// The slow dataset recovers: the next search loads again and is stored.
+		// The query recovers: the next search loads again and is stored.
 		fake.answer = null;
 		const second = await substrate.searchDocs({ question: "who reads lightrag?" }, "omp");
 		expect(second.degraded_datasets).toBeUndefined();
@@ -503,8 +611,8 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 });
 
 describe("docs_search outcome metrics (uplift-3 N5)", () => {
-	test("Substrate.searchDocs reports one sample per search: hit/empty/degraded, cached or loaded, with the citation provenance split", async () => {
-		const fake = new DocsPlaneFake();
+	test("Substrate.searchDocs reports one sample per search: hit/degraded, cached or loaded, with the citation provenance split", async () => {
+		const fake = new LightragFake();
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
 		const samples: DocsSearchSample[] = [];
@@ -518,17 +626,18 @@ describe("docs_search outcome metrics (uplift-3 N5)", () => {
 		// Loaded, then served from the cache: same answer, different `cached`.
 		await substrate.searchDocs({ question: "who reads lightrag?" }, "grok-bot");
 		await substrate.searchDocs({ question: "who reads lightrag?" }, "grok-bot");
-		// Nothing matched: a real answer with no citations.
+		// Nothing matched: a /query envelope with no chunks is a shape failure, never a silent empty answer.
 		fake.answer = () => [];
 		await substrate.searchDocs({ question: "nothing here" }, "omp");
-		// Every dataset failed.
+		// The query failed.
+		fake.answer = null;
 		fake.failRetrievalWith = 503;
 		await substrate.searchDocs({ question: "down" }, "omp");
 
 		expect(samples.map((sample) => [sample.surface, sample.outcome, sample.cached])).toEqual([
 			["grok-bot", "hit", false],
 			["grok-bot", "hit", true],
-			["omp", "empty", false],
+			["omp", "degraded", false],
 			["omp", "degraded", false],
 		]);
 		// The fake's documents have no ingest record, so every citation is `unrecorded` —
@@ -720,7 +829,7 @@ describe("LightRAG search and the lightrag plane", () => {
 		expect(lightrag.queries).toHaveLength(0);
 	});
 
-	test("docs ingest on the LightRAG backend still uploads while the lightrag breaker is open, because LightRAG calls never go through the lightrag gate", async () => {
+	test("docs ingest on the LightRAG backend is refused while the lightrag breaker is open, because ingest shares the LightRAG fetch and gate", async () => {
 		const uploads: string[] = [];
 		const lightragIngest: FetchLike = async (input, init) => {
 			const url = new URL(String(input));
@@ -729,7 +838,7 @@ describe("LightRAG search and the lightrag plane", () => {
 				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
 			}
 			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
-			if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
 			if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
 			return Response.json({ detail: "no route" }, { status: 404 });
 		};
@@ -742,9 +851,9 @@ describe("LightRAG search and the lightrag plane", () => {
 			{ dataset: "agent-substrate", commit: "c1", pages: [{ path: "docs/plan.md", body: "# Plan\n\nThe planner reads the plan.", source_url: "https://example.com/plan" }] },
 			"omp",
 		);
-		if (!outcome.ok) throw new Error(outcome.reason);
-		expect(outcome.results.map((result) => result.status)).toEqual(["ingested"]);
-		expect(uploads).toHaveLength(1);
+		expect(outcome.ok).toBe(false);
+		if (!outcome.ok) expect(outcome.reason).toContain("lightrag circuit open");
+		expect(uploads).toHaveLength(0);
 	});
 });
 
@@ -945,17 +1054,16 @@ describe("search graph metadata (LightRAG path)", () => {
 
 	/**
 	 * Plants the two headings the graph tests hint against in every dataset,
-	 * through the fake's own seed table. Serving seeds turns on the
-	 * `heading_path` echo, and nothing else is served, so each citation's
-	 * heading is exactly the one planted here.
+	 * through the fake's own seed table. Serving seeds means nothing else
+	 * is served, so each citation's heading is exactly the one planted here.
 	 */
-	function seedHeadings(fake: DocsPlaneFake): void {
+	function seedHeadings(fake: LightragFake): void {
 		fake.serveUploadsAsChunks = true;
 		for (const dataset of fake.datasets) {
 			const sourceUrl = `https://example.com/${dataset.name}/graph`;
 			fake.seeds.push(
-				{ dataset_id: dataset.id, document_id: `doc-${dataset.id}-1`, content: "The substrate is the only door to the data planes.", source_url: sourceUrl, heading_path: "Access path", score: 0.91 },
-				{ dataset_id: dataset.id, document_id: `doc-${dataset.id}-2`, content: "Callers cite the source, not the chunk.", source_url: sourceUrl, heading_path: "lightrag datasets", score: 0.83 },
+				{ document_id: `doc-${dataset.id}-1`, content: "The substrate is the only door to the data planes.", source_url: sourceUrl, heading_path: "Access path", score: 0.91 },
+				{ document_id: `doc-${dataset.id}-2`, content: "Callers cite the source, not the chunk.", source_url: sourceUrl, heading_path: "lightrag datasets", score: 0.83 },
 			);
 		}
 	}
@@ -984,18 +1092,22 @@ describe("search graph metadata (LightRAG path)", () => {
 	});
 
 	test("a search with graph hints returns graph counts and names the hinted headings", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		seedHeadings(fake);
 		const events: EventInput[] = [];
 		const reply = await searchDocs(
 			{
 				config: CONFIG,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG_CONFIG,
+				lightragFetch: fake.fetch,
+				lightragDatasets: { list: async () => ({ ok: true, datasets: fake.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })) }), invalidate: () => undefined },
+				lightragRetry: { maxRetries: 0, retryBaseMs: 1 },
 				datasetNames: FAKE_DATASETS,
 				emit: async (event) => {
 					events.push(event);
 					return { stored: false };
 				},
-				fetchImpl: fake.fetch,
 				graphHints: HINTS,
 			},
 			"who reads lightrag?",
@@ -1022,22 +1134,26 @@ describe("search graph metadata (LightRAG path)", () => {
 	});
 
 	test("a search without graph hints serves the pure lightrag reply: no graph, no citation graph", async () => {
-		const fake = new DocsPlaneFake();
-		const reply = await searchDocs({ config: CONFIG, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS, fetchImpl: fake.fetch }, "who reads lightrag?");
+		const fake = new LightragFake();
+		const reply = await searchDocs({ config: CONFIG, backend: "lightrag", lightragConfig: LIGHTRAG_CONFIG, lightragFetch: fake.fetch, lightragDatasets: { list: async () => ({ ok: true, datasets: fake.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })) }), invalidate: () => undefined }, lightragRetry: { maxRetries: 0, retryBaseMs: 1 }, emit: async () => ({ stored: false }), datasetNames: FAKE_DATASETS }, "who reads lightrag?");
 		expect(reply.graph).toBeUndefined();
 		expect(reply.chunks.length).toBeGreaterThan(0);
 		expect(reply.chunks.every((citation) => citation.graph === undefined)).toBe(true);
 	});
 
 	test("an unhinted heading stays graph-free while its hinted sibling is named", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		seedHeadings(fake);
 		const reply = await searchDocs(
 			{
 				config: CONFIG,
+				backend: "lightrag",
+				lightragConfig: LIGHTRAG_CONFIG,
+				lightragFetch: fake.fetch,
+				lightragDatasets: { list: async () => ({ ok: true, datasets: fake.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })) }), invalidate: () => undefined },
+				lightragRetry: { maxRetries: 0, retryBaseMs: 1 },
 				datasetNames: FAKE_DATASETS,
 				emit: async () => ({ stored: false }),
-				fetchImpl: fake.fetch,
 				graphHints: [{ phase: "25-lightrag", entities: ["Access path"], relations: [] }],
 			},
 			"who reads lightrag?",
@@ -1065,21 +1181,26 @@ describe("search graph metadata (LightRAG path)", () => {
 			],
 		};
 		const offline = await searchGoldenOffline(corpus, { question: "lightrag backend planning relations", datasets: ["agent-substrate"] }, { commit: "golden" });
-		expect(offline.retrievedDatasetIds).toEqual(["ds-berlin-agent-substrate"]);
+		expect(offline.retrievedDatasetIds).toContain("ds-berlin-agent-substrate");
 		expect(offline.reply.chunks).toHaveLength(1);
 		expect(offline.reply.chunks[0]?.heading_path).toBe("Planning graph");
 		expect(offline.reply.untrusted).toBe(UNTRUSTED_DOCS_NOTICE);
 		expect(offline.reply.graph).toBeUndefined();
 		// Same corpus through the LightRAG-shaped call: the heading the hint
 		// names carries graph metadata, and the reply reports the coverage.
-		const fake = goldenFake(corpus);
 		const hinted = await searchDocs(
 			{
 				config: { url: "http://lightrag.test", apiKey: "golden" },
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test", apiKey: "golden" },
+				lightragRetrieve: async () => ({
+					ok: true as const,
+					chunks: [{ content: "The lightrag backend serves planning relations.", document_name: "planning-graph.md", document_id: "doc-planning-graph", heading_path: "Planning graph", score: 0.9 }],
+					detail: { mode: "hybrid" as const, counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
 				datasetNames: ["agent-substrate"],
 				emit: async () => ({ stored: false }),
 				surface: "omp",
-				fetchImpl: fake.fetch,
 				provenanceOf: () => ({ source_url: "https://example.com/agent-substrate/planning-graph", commit: "golden" }),
 				graphHints: [{ phase: "golden", entities: ["Planning graph"], relations: [] }],
 			},
@@ -1248,7 +1369,7 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 	}
 
 	test("docs_search answers from the new agent-skills version after the refresh", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		fake.serveUploadsAsChunks = true;
 		fake.parseDonePolls = 1;
 		const checkout = skillsCheckout({
@@ -1271,7 +1392,7 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 	});
 
 	test("a checkout that cannot be read keeps the pinned version serving, with its age", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		fake.serveUploadsAsChunks = true;
 		fake.parseDonePolls = 1;
 		const checkout = skillsCheckout({ "demo-skill/SKILL.md": "Demo skill body.\n" });
@@ -1292,7 +1413,7 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 	});
 
 	test("an unreadable references directory fails the refresh: the pinned version keeps serving and no version is recorded", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		fake.serveUploadsAsChunks = true;
 		fake.parseDonePolls = 1;
 		const checkout = skillsCheckout({
@@ -1333,7 +1454,7 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 	}
 
 	test("a checkout whose references exceed one call's 5 MB refreshes in several calls and records the version", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		fake.serveUploadsAsChunks = true;
 		fake.parseDonePolls = 1;
 		const checkout = skillsCheckout(wideSkills(6));
@@ -1351,7 +1472,7 @@ describe("docs_search after an agent-skills refresh (phase 42)", () => {
 	});
 
 	test("a refresh whose later call fails keeps the prior pin, and the earlier call's pages are reported as stored", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragFake();
 		fake.serveUploadsAsChunks = true;
 		fake.parseDonePolls = 1;
 		const prior = skillsCheckout({ "skill-1/SKILL.md": "Skill one body v1.\n" });

@@ -45,6 +45,7 @@ reported skill family, which groups shapes that mean the same credential.
 | `gitlab` | `gitlab` | A personal access token |
 | `digitalocean` | `digitalocean` | A personal access token |
 | `openai-proj` | `openai-proj` | An `sk-proj-`, `sk-svcacct-` or `sk-admin-` key, which the `sk-` rule stops short of |
+| `lightrag` | `lightrag` | A LightRAG API key (D25-23); a key pasted into a doc page is refused, never uploaded |
 | `stripe` | `stripe` | A Stripe `sk_live_` or `rk_live_` key |
 | `huggingface` | `huggingface` | An `hf_` token |
 | `google-oauth` | `google-oauth` | A `ya29.` OAuth access token |

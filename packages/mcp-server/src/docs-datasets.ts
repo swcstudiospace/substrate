@@ -191,8 +191,8 @@ export function versionsFromJson(value: unknown): VersionStore {
 		for (const row of rows) {
 			if (row === null || typeof row !== "object") continue;
 			const candidate = row as Record<string, unknown>;
-			// A row a state file wrote before the backend was recorded is a lightrag version: only the lightrag path recorded versions then.
-			const backend: DocsBackend | null = candidate.backend === "lightrag" ? "lightrag" : null;
+			const rawBackend: unknown = candidate.backend;
+			const backend: DocsBackend | null = rawBackend === undefined || rawBackend === "lightrag" ? "lightrag" : null;
 			if (
 				typeof candidate.dataset !== "string" ||
 				typeof candidate.dataset_id !== "string" ||
@@ -313,25 +313,93 @@ export function triggersFromJson(value: unknown, datasets: readonly string[]): T
 	return store;
 }
 
-/**
- * Where a dataset list comes from. Production hands every reader the
- * `DatasetListCache`; the module tests and the default use the plane
- * directly, with nothing to invalidate.
- */
-function listLocalDatasets(): Promise<DatasetListOutcome> {
-	return Promise.resolve({ ok: true, datasets: [] });
+const DATASET_EMBEDDING_MODEL = "tei-bge-small";
+const DATASET_CHUNK_METHOD = "naive";
+const DATASET_LIST_PAGE_SIZE = 100;
+
+async function callPlane(
+	config: PlaneConfig,
+	fetchImpl: FetchLike | undefined,
+	path: string,
+	init: { method: string; body?: string; timeoutMs: number },
+): Promise<{ ok: true; body: unknown } | { ok: false; reason: string }> {
+	const fetcher = fetchImpl ?? fetch;
+	let response: Response;
+	try {
+		response = await fetcher(`${config.url.replace(/\/+$/, "")}${path}`, {
+			method: init.method,
+			headers: { authorization: `Bearer ${config.apiKey}`, ...(init.body !== undefined ? { "content-type": "application/json" } : {}) },
+			...(init.body !== undefined ? { body: init.body } : {}),
+			signal: AbortSignal.timeout(init.timeoutMs),
+		});
+	} catch (cause) {
+		return { ok: false, reason: `lightrag: ${cause instanceof Error ? cause.message : String(cause)}` };
+	}
+	if (!response.ok) return { ok: false, reason: `lightrag ${response.status}` };
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return { ok: false, reason: "lightrag: response was not JSON" };
+	}
+	if (body !== null && typeof body === "object" && "code" in body) {
+		const code = (body as Record<string, unknown>).code;
+		if (code !== 0) {
+			const message = typeof (body as Record<string, unknown>).message === "string" ? (body as Record<string, unknown>).message : "request failed";
+			return { ok: false, reason: `lightrag: ${message}` };
+		}
+	}
+	return { ok: true, body };
 }
 
-export interface DatasetListSource {
-	list(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome>;
-	/** Forget the held list: after a create, or after a failed list. */
-	invalidate(): void;
+function readString(entry: object, ...names: string[]): string | undefined {
+	for (const name of names) {
+		if (name in entry) {
+			const value = (entry as Record<string, unknown>)[name];
+			if (typeof value === "string") return value;
+		}
+	}
+	return undefined;
 }
 
-export const DIRECT_DATASET_LIST: DatasetListSource = {
-	list: (_config, _fetchImpl) => listLocalDatasets(),
-	invalidate: () => {},
-};
+function dataOf(body: unknown): unknown {
+	return body !== null && typeof body === "object" && "data" in body ? (body as Record<string, unknown>).data : body;
+}
+
+export async function listDatasets(config: PlaneConfig, fetchImpl: FetchLike | undefined = fetch, timeoutMs = 4000): Promise<DatasetListOutcome> {
+	const answered = await callPlane(config, fetchImpl, `/api/v1/datasets?page=1&page_size=${DATASET_LIST_PAGE_SIZE}`, { method: "GET", timeoutMs });
+	if (!answered.ok) return answered;
+	const listed = dataOf(answered.body);
+	if (!Array.isArray(listed)) return { ok: false, reason: "lightrag: unexpected dataset list shape" };
+	const datasets: Array<{ id: string; name: string }> = [];
+	for (const entry of listed) {
+		if (entry === null || typeof entry !== "object") continue;
+		const id = readString(entry, "id");
+		const name = readString(entry, "name");
+		if (id !== undefined && name !== undefined) datasets.push({ id, name });
+	}
+	return { ok: true, datasets };
+}
+
+async function listLocalDatasets(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+	return listDatasets(config, fetchImpl);
+}
+ 
+ /**
+  * Where a dataset list comes from. Production hands every reader the
+  * `DatasetListCache`; the module tests and the default use the plane
+  * directly, with nothing to invalidate.
+  */
+ export interface DatasetListSource {
+ 	list(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome>;
+ 	/** Forget the held list: after a create, or after a failed list. */
+ 	invalidate(): void;
+ }
+ 
+ export const DIRECT_DATASET_LIST: DatasetListSource = {
+	list: (config, fetchImpl) => listLocalDatasets(config, fetchImpl),
+ 	invalidate: () => {},
+ };
 
 /** How long one dataset list serves search, ingest and refresh before it is fetched again. */
 export const DATASET_LIST_TTL_MS = 60_000;
@@ -369,9 +437,9 @@ export class DatasetListCache implements DatasetListSource {
 		this.inflight = null;
 	}
 
-	private startFetch(_config: PlaneConfig, _fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+	private startFetch(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
 		const generation = this.generation;
-		const pending: Promise<DatasetListOutcome> = listLocalDatasets()
+		const pending: Promise<DatasetListOutcome> = listLocalDatasets(config, fetchImpl)
 			.then((outcome) => {
 				if (generation === this.generation) {
 					this.held = outcome.ok ? { datasets: outcome.datasets.map((dataset) => ({ ...dataset })), expiresAt: this.now() + this.ttlMs } : null;
@@ -401,6 +469,24 @@ export interface ResolveDeps {
 	datasets?: DatasetListSource;
 }
 
+export async function createDataset(
+	config: PlaneConfig,
+	name: string,
+	fetchImpl: FetchLike | undefined = fetch,
+	timeoutMs = 8000,
+): Promise<{ ok: true; id: string } | { ok: false; reason: string }> {
+	const answered = await callPlane(config, fetchImpl, "/api/v1/datasets", {
+		method: "POST",
+		body: JSON.stringify({ name, embedding_model: DATASET_EMBEDDING_MODEL, chunk_method: DATASET_CHUNK_METHOD }),
+		timeoutMs,
+	});
+	if (!answered.ok) return answered;
+	const data = dataOf(answered.body);
+	const id = data !== null && typeof data === "object" ? readString(data, "id") : undefined;
+	if (id === undefined) return { ok: false, reason: "lightrag: unexpected dataset shape" };
+	return { ok: true, id };
+}
+
 /**
  * Discover-first resolve: match names against `GET /api/v1/datasets` and
  * create only on a name-miss (D25-06). A transport failure is a reason, not
@@ -425,8 +511,9 @@ export async function resolveDatasets(
 			datasets.push({ name, id: null, created: false });
 			continue;
 		}
-		const created = await Promise.resolve({ ok: true as const, id: name });
+		const created = await createDataset(deps.config, name, deps.fetchImpl);
 		source.invalidate();
+		if (!created.ok) return { ok: false, reason: created.reason };
 		datasets.push({ name, id: created.id, created: true });
 	}
 	return { ok: true, datasets };

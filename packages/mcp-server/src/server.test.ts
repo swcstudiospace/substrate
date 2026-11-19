@@ -71,6 +71,127 @@ function repoSeam(names: readonly string[] = ["agent-substrate", "programming-de
 	return { env: { SUBSTRATE_PLANNING_ROOTS: roots.join(",") }, stores: { planning: { fs: new FakeTree(files), presence: null } } };
 }
 
+const lightragInstalled = new WeakSet<DocsPlaneFake>();
+
+/**
+ * Serve the LightRAG v1.5.7 routes (`planes/lightrag.ts`: `/health`, `/query`,
+ * `/documents/upload|text`, `/documents/scan`, `/documents/pipeline_status`,
+ * `/documents/track_status/*`, `/documents/delete_document`) over a
+ * DocsPlaneFake's state, so these route tests exercise the current plane.
+ * Other (retired dataset-API) paths delegate to the fake untouched — dataset
+ * listing and creation still ride `GET|POST /api/v1/datasets`. The one
+ * knowledge base per server carries no dataset on the new upload wire, so a
+ * test names the dataset its uploads are attributed to by name; the id is
+ * resolved on the fake's dataset table at upload time, so a dataset created
+ * mid-test owns the uploads that follow.
+ */
+function asLightrag(fake: DocsPlaneFake, datasetName = "agent-substrate"): void {
+	if (lightragInstalled.has(fake)) return;
+	lightragInstalled.add(fake);
+	const original = fake.fetch;
+	const datasetId = () => fake.datasets.find((dataset) => dataset.name === datasetName)?.id ?? datasetName;
+	let next = 0;
+	const byTrack = new Map<string, string>();
+	const adapter: FetchLike = async (input, init) => {
+		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+		const path = url.pathname;
+		const method = (init?.method ?? "GET").toUpperCase();
+		const isPlane = path === "/health" || path === "/query" || path.startsWith("/documents/");
+		if (!isPlane) return original(input, init);
+		let body: unknown = null;
+		const fileParts: Array<{ name: string; text: string }> = [];
+		let form: FormData | null = null;
+		if (init?.body instanceof FormData) {
+			form = init.body;
+			for (const part of form.getAll("file")) {
+				if (part instanceof Blob) fileParts.push({ name: part instanceof File ? part.name : "file", text: await part.text() });
+			}
+			body = { multipart: { file: fileParts.map((part) => ({ name: part.name, bytes: Buffer.byteLength(part.text, "utf8") })) } };
+		} else if (typeof init?.body === "string" && init.body.length > 0) {
+			try {
+				body = JSON.parse(init.body);
+			} catch {
+				body = init.body;
+			}
+		}
+		fake.requests.push({ method, path, body, query: Object.fromEntries(url.searchParams.entries()) });
+		const failure = (code: number, message: string, status = 200): Response => Response.json({ code, message }, { status });
+		if (method === "GET" && path === "/health") return Response.json({ status: "healthy" });
+		if (method === "POST" && path === "/query") {
+			if (fake.failRetrievalWith !== null) return failure(100, "injected failure", fake.failRetrievalWith);
+			const pageSize = body !== null && typeof body === "object" && "top_k" in body && typeof body.top_k === "number" ? body.top_k : 30;
+			const chunks = Object.values(fake.chunks).flat();
+			const entries = chunks.map((chunk) => ({
+				content: chunk.content,
+				document_id: chunk.document_id ?? "",
+				document_keyword: chunk.document_name,
+				id: chunk.chunk_id ?? "",
+				similarity: chunk.score ?? 0,
+			}));
+			return Response.json({ status: "success", data: { chunks: entries.slice(0, Math.max(0, pageSize)), doc_aggs: [], total: entries.length } });
+		}
+		if (method === "POST" && (path === "/documents/upload" || path === "/documents/text")) {
+			const rec = body !== null && typeof body === "object" && !Array.isArray(body) ? body : {};
+			const formMeta = (key: string): string => {
+				const value = form?.get(key);
+				return typeof value === "string" ? value : "";
+			};
+			const textPart = "text" in rec && typeof rec.text === "string" ? rec.text : undefined;
+			const textName = "file_source" in rec && typeof rec.file_source === "string" ? rec.file_source : "doc";
+			const parts = fileParts.length > 0 ? fileParts : textPart !== undefined ? [{ name: textName, text: textPart }] : [];
+			const created: Array<{ id: string; track_id: string; name: string; run: string }> = [];
+			const id = datasetId();
+			for (const part of parts) {
+				next += 1;
+				const documentId = `doc-lightrag-${next}`;
+				const trackId = `track-${next}`;
+				const sourceValue = form?.get("file_source");
+				const name = typeof sourceValue === "string" && sourceValue !== "" ? sourceValue : part.name;
+				const sourceUrl = "source_url" in rec && typeof rec.source_url === "string" ? rec.source_url : formMeta("source_url");
+				const commit = "commit" in rec && typeof rec.commit === "string" ? rec.commit : formMeta("commit");
+				const document: (typeof fake.documents)[string] = { id: documentId, dataset_id: id, name, run: "DONE", polls: 1, meta_fields: { source_url: sourceUrl, commit } };
+				fake.documents[documentId] = document;
+				fake.uploads.push({ dataset_id: id, document_id: documentId, name, content: part.text, metadata: { source_url: sourceUrl, commit } });
+				byTrack.set(trackId, documentId);
+				created.push({ id: documentId, track_id: trackId, name, run: "DONE" });
+			}
+			const first = created[0];
+			return Response.json({ status: "success", data: { track_id: first?.track_id ?? "", documents: created } });
+		}
+		if (method === "POST" && path === "/documents/scan") return Response.json({ status: "success" });
+		if (method === "GET" && path === "/documents/pipeline_status") {
+			if (fake.parseBehavior === "fail") return Response.json({ status: "failed", message: "injected parse failure" });
+			if (fake.parseBehavior === "never") return Response.json({ status: "running" });
+			return Response.json({ status: "idle" });
+		}
+		if (method === "GET" && path.startsWith("/documents/track_status/")) {
+			const trackId = path.split("/").pop() ?? "";
+			const documentId = byTrack.get(trackId);
+			return Response.json({ track_id: trackId, documents: documentId !== undefined ? [{ id: documentId, status: "processed" }] : [], total_count: documentId !== undefined ? 1 : 0 });
+		}
+		if (method === "DELETE" && path === "/documents/delete_document") {
+			if (fake.failDeleteWith !== null) return failure(100, "injected failure", fake.failDeleteWith);
+			const docIds = body !== null && typeof body === "object" && "doc_ids" in body && Array.isArray(body.doc_ids) ? body.doc_ids : [];
+			for (const id of docIds) {
+				if (typeof id !== "string") continue;
+				if (fake.documents[id] === undefined) return failure(102, `Documents not found: ${id}`);
+				delete fake.documents[id];
+				fake.deleted.push(id);
+			}
+			return Response.json({ status: "deletion_started" });
+		}
+		return Response.json({ error: `fake has no route for ${method} ${path}` }, { status: 404 });
+	};
+	Object.defineProperty(fake, "fetch", { value: adapter });
+}
+
+/** A DocsPlaneFake already serving the v1.5.7 plane routes, for the dataset `datasetName`. */
+function lightragFake(datasetName = "agent-substrate"): DocsPlaneFake {
+	const fake = new DocsPlaneFake();
+	asLightrag(fake, datasetName);
+	return fake;
+}
+
 /**
  * Boot the real server on an ephemeral port; `stop` closes it.
  *
@@ -292,7 +413,7 @@ describe("routes", () => {
 
 	test("POST /docs/search answers cited results against the fake", async () => {
 		const { greptime } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
@@ -367,7 +488,7 @@ describe("routes", () => {
 	const OMP_AUTH = { authorization: "Bearer tok-omp" };
 
 	test("POST /docs/search historical attribution retains public memory context without private ledger reads", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
 		const { post, stop } = await serve(greptime, OMP_ENV, { lightragFetch: fake.fetch, hindsightFetch: hindsight.fetch });
@@ -387,7 +508,7 @@ describe("routes", () => {
 	});
 
 	test("POST /docs/search with context false or absent answers without a context key and reads neither source", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
 		const { post, stop } = await serve(greptime, OMP_ENV, { lightragFetch: fake.fetch, hindsightFetch: hindsight.fetch });
@@ -408,7 +529,7 @@ describe("routes", () => {
 	});
 
 	test("POST /docs/search refuses a string or null context with a 400, before recall or the ledger", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const hindsight = ompBank();
 		const { reads, greptime } = sessionLedger();
 		const { post, stop } = await serve(greptime, OMP_ENV, { lightragFetch: fake.fetch, hindsightFetch: hindsight.fetch });
@@ -428,11 +549,12 @@ describe("routes", () => {
 
 	test("POST /docs/ingest stores a page against the fake", async () => {
 		const { greptime } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
-			{ lightragFetch: fake.fetch },
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
+			{ lightragFetch: fake.fetch, ...repos.stores },
 		);
 		try {
 			const response = await post(
@@ -492,7 +614,7 @@ describe("routes", () => {
 
 	test("POST /docs/ingest refuses an out-of-roots real path", async () => {
 		const { greptime } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const { post, stop } = await serve(
 			greptime,
 			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
@@ -531,11 +653,12 @@ describe("routes", () => {
 
 	test("POST /docs/ingest refuses a stale expected_version with a 409 conflict, and uploads nothing", async () => {
 		const { greptime } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
+		const repos = repoSeam();
 		const { post, stop } = await serve(
 			greptime,
-			{ SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
-			{ lightragFetch: fake.fetch },
+			{ ...repos.env, SUBSTRATE_TOKEN_OMP: "tok-omp", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" },
+			{ lightragFetch: fake.fetch, ...repos.stores },
 		);
 		try {
 			// Nothing is on record for this source URL, so expecting version 1 is stale.
@@ -675,7 +798,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger ingests the local roots, then records the version", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
 		const repos = repoSeam();
@@ -692,17 +815,18 @@ describe("routes", () => {
 			expect(response.status).toBe(200);
 			expect(body.ok).toBe(true);
 			expect(body.version?.dataset).toBe("agent-substrate");
-			expect(body.version?.dataset_id).toBe("ds-berlin-agent-substrate");
+			// v1.5.7: LightRAG names its datasets, so the recorded id is the name.
+			expect(body.version?.dataset_id).toBe("agent-substrate");
 			expect(body.version?.version).toBe("v1");
 			expect(body.version?.commit).toBe("c-merge");
 			// The refresh moved documents, not just a version row: both configured
 			// roots were scanned and uploaded under the dataset's id.
 			expect(uploadsFor(fake, "ds-berlin-agent-substrate")).toHaveLength(2);
 			expect(ingestEvents(written).filter((payload) => "source_urls" in payload)).toHaveLength(1);
-			// And the refresh emitted its ledger event for the right dataset id.
+			// And the refresh emitted its ledger event for the right dataset.
 			const events = refreshEvents(written);
 			expect(events).toHaveLength(1);
-			expect(events[0]?.dataset_id).toBe("ds-berlin-agent-substrate");
+			expect(events[0]?.dataset_id).toBe("agent-substrate");
 		} finally {
 			restore();
 			await stop();
@@ -710,12 +834,13 @@ describe("routes", () => {
 		}
 	});
 
-	test("POST /docs/merge-trigger creates the missing dataset before the first ingest", async () => {
+	test("POST /docs/merge-trigger ingests the first version while the plane lists no dataset, and creates none", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		// A configured plane that does not yet hold the dataset this checkout
-		// ingests into: the ingest reads by name and refuses unknown-dataset, so
-		// the trigger must create it before the first ingest can ever succeed.
+		// ingests into. The v1.5.7 ingest resolves the one named dataset without
+		// a plane list, so the first ingest succeeds anyway — and dataset
+		// creation stays an operator step, never a trigger side effect.
 		const kept = fake.datasets.filter((dataset) => dataset.name !== "agent-substrate");
 		fake.datasets.splice(0, fake.datasets.length, ...kept);
 		const restore = patchFetch(fake.fetch);
@@ -733,15 +858,14 @@ describe("routes", () => {
 			expect(response.status).toBe(200);
 			expect(body.ok).toBe(true);
 			expect(body.version?.version).toBe("v1");
-			// The resolve step created the dataset, so the reply says created even
-			// though the refresh's own resolve found it already sitting there.
-			expect(body.created).toBe(true);
-			const created = fake.datasets.find((dataset) => dataset.name === "agent-substrate");
-			expect(created).toBeDefined();
-			expect(body.version?.dataset_id).toBe(created?.id);
-			// The pages moved into the freshly created dataset, and both the
-			// ingest and the refresh recorded their ledger events under its id.
-			expect(uploadsFor(fake, created?.id ?? "")).toHaveLength(2);
+			// v1.5.7: no trigger-side creation, so the reply never claims one and
+			// the plane's dataset table stays as the test left it.
+			expect(body.created).toBe(false);
+			expect(fake.datasets.find((dataset) => dataset.name === "agent-substrate")).toBeUndefined();
+			expect(body.version?.dataset_id).toBe("agent-substrate");
+			// The pages moved anyway, and both the ingest and the refresh
+			// recorded their ledger events under the dataset name.
+			expect(uploadsFor(fake, "agent-substrate")).toHaveLength(2);
 			expect(ingestEvents(written).filter((payload) => "source_urls" in payload)).toHaveLength(1);
 			expect(refreshEvents(written)).toHaveLength(1);
 		} finally {
@@ -753,7 +877,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger ingests the agent-skills checkout when SUBSTRATE_AGENT_SKILLS_ROOT names one, then records the version", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake("agent-skills");
 		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		// The library layout: each skill is a `<name>/` directory holding SKILL.md and a references/ tree. A
@@ -770,7 +894,7 @@ describe("routes", () => {
 			const body = (await response.json()) as { ok: boolean; version?: { version: string; commit: string; dataset_id: string } };
 			expect(response.status).toBe(200);
 			expect(body.ok).toBe(true);
-			expect(body.version).toMatchObject({ version: "v1", commit: head, dataset_id: "ds-leipzig-agent-skills" });
+			expect(body.version).toMatchObject({ version: "v1", commit: head, dataset_id: "agent-skills" });
 			// Exactly the skill's SKILL.md and its reference reach the plane, each cited by its own file.
 			const sources = uploadsFor(fake, "ds-leipzig-agent-skills").map((upload) => upload.metadata.source_url ?? "");
 			expect(sources).toHaveLength(2);
@@ -786,7 +910,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger for agent-skills refuses a checkout that moved past the requested commit: commit-mismatch, nothing recorded", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const checkout = gitCheckout({ "demo-skill/SKILL.md": "---\nname: demo-skill\n---\nDemo skill body.\n" });
@@ -811,7 +935,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger for agent-skills is a truthful noop when SUBSTRATE_AGENT_SKILLS_ROOT is unset", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door." });
 		const { post, stop } = await serve(
@@ -842,7 +966,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger for agent-skills fails with checkout-unreadable when the named checkout is gone", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const restore = patchFetch(fake.fetch);
 		// The named checkout does not exist, so its roots cannot be listed: the job fails before any plane call.
 		const gone = docsFixture({ "demo-skill/SKILL.md": "Demo skill body.\n" });
@@ -863,7 +987,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger dedupes the default dataset by content hash", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		fake.parseDonePolls = 1;
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
@@ -1027,7 +1151,7 @@ describe("routes", () => {
 
 	test("POST /docs/merge-trigger records no version when the ingest is refused", async () => {
 		const { greptime, written } = ledger();
-		const fake = new DocsPlaneFake();
+		const fake = lightragFake();
 		const restore = patchFetch(fake.fetch);
 		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/leak.md": "password: hunter2 in the shipped config" });
 		const repos = repoSeam();

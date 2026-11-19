@@ -55,7 +55,7 @@ describe("buildFabricCompliance", () => {
 	test("an unconfigured resource is never a pass: every resource check is not applicable", () => {
 		const { checks } = report(unconfiguredFacts());
 		const resourceChecks = checks.filter((candidate) => candidate.id.startsWith("resource-state."));
-		expect(resourceChecks).toHaveLength(9);
+		expect(resourceChecks).toHaveLength(8);
 		for (const candidate of resourceChecks) expect(candidate.status).toBe("NOT_APPLICABLE");
 	});
 

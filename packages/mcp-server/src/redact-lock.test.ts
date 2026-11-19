@@ -733,7 +733,7 @@ describe("detector self-tests", () => {
 		{ rule: "gitlab", file: "scan.sh", body: `grep -E '${"glp" + "at-"}[0-9A-Za-z_-]{20,}' scope.txt` },
 		{ rule: "digitalocean", file: "shape.ts", body: `if (/${"dop" + "_v1_"}[a-f0-9]{64}/.test(id)) {` },
 		{ rule: "openai-proj", file: "shape.ts", body: `if (/${"sk-pr" + "oj-"}[A-Za-z0-9_-]{20,}/.test(id)) {` },
-		{ rule: "lightrag", file: "shape.ts", body: `if (/${"ragfl" + "ow-"}[A-Za-z0-9]{20,}/.test(id)) {` },
+		{ rule: "lightrag", file: "shape.ts", body: `if (/${"light" + "rag-"}[A-Za-z0-9]{20,}/.test(id)) {` },
 		{ rule: "stripe", file: "shape.ts", body: `if (/${"sk_li" + "ve_"}[A-Za-z0-9]{24,}/.test(id)) {` },
 		{ rule: "huggingface", file: "shape.ts", body: `if (/${"h" + "f_"}[A-Za-z0-9]{20,}/.test(id)) {` },
 		{ rule: "google-oauth", file: "shape.ts", body: `if (/${"ya2" + "9"}\\.[A-Za-z0-9_-]{20,}/.test(id)) {` },

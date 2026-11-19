@@ -1,5 +1,5 @@
 /**
- * Aggregate status across the nine fabric resources (phase 51, SOTA-07; the embedding service joined in phase 64 and the corpus in phase 70). Pure: it reads a facts object and
+ * Aggregate status across the eight fabric resources (phase 51, SOTA-07; the embedding service joined in phase 64 and the corpus in phase 70). Pure: it reads a facts object and
  * returns rows, so it is testable without a service, a socket or a clock.
  *
  * State rules, applied in this order for a service row:
@@ -95,7 +95,6 @@ export function buildFabricStatus(facts: FabricFacts): FabricStatus {
 		serviceRow("dragonfly", facts.endpoints.dragonfly ?? "unset", facts.services.dragonfly, at),
 		serviceRow("timescaledb-index", facts.endpoints.postgres ?? "unset", facts.services["timescaledb-index"], at),
 		serviceRow("greptime", facts.endpoints.greptime ?? "unset", facts.services.greptime, at),
-		serviceRow("lightrag", "not-applicable", facts.services.lightrag, at),
 		serviceRow("lightrag", "not-applicable", facts.services.lightrag, at),
 		serviceRow("hindsight", "not-applicable", facts.services.hindsight, at),
 		teiRow(facts, at),

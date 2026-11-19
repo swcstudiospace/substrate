@@ -90,7 +90,6 @@ describe("gatherFabricFacts", () => {
 		expect(rowOf(facts, "greptime").state).toBe("ok");
 		expect(rowOf(facts, "hindsight").state).toBe("ok");
 		expect(rowOf(facts, "lightrag").state).toBe("ok");
-		expect(rowOf(facts, "lightrag").state).toBe("ok");
 		expect(rowOf(facts, "dragonfly").state).toBe("ok");
 		expect(buildFabricStatus(facts).resources).toHaveLength(FABRIC_RESOURCES.length);
 	});
@@ -242,7 +241,7 @@ describe("the LightRAG row", () => {
 	test("a probe that answers false is unavailable, never a pass", async () => {
 		const facts = await gatherFabricFacts(sources({ health: () => ({ ...healthyParts(), lightrag: Promise.resolve(false) }) }));
 		expect(rowOf(facts, "lightrag").state).toBe("unavailable");
-		expect(rowOf(facts, "lightrag").state).toBe("ok");
+		expect(rowOf(facts, "hindsight").state).toBe("ok");
 	});
 
 	test("a probe that misses the deadline is unavailable with the timeout reason, and the other rows keep their state", async () => {
@@ -250,7 +249,7 @@ describe("the LightRAG row", () => {
 		const row = rowOf(facts, "lightrag");
 		expect(row.state).toBe("unavailable");
 		expect(row.source).toBe("health().planes.lightrag: timeout");
-		expect(rowOf(facts, "lightrag").state).toBe("ok");
+		expect(rowOf(facts, "hindsight").state).toBe("ok");
 		expect(rowOf(facts, "greptime").state).toBe("ok");
 	});
 
@@ -275,15 +274,15 @@ describe("the LightRAG row", () => {
 		expect(rowOf(facts, "lightrag").state).toBe("unavailable");
 	});
 
-	test("LightRAG set and lightrag unset: the lightrag row is live and the lightrag row is unconfigured", async () => {
+	test("LightRAG set and hindsight unset: the lightrag row is live and the hindsight row is unconfigured", async () => {
 		const base = sources();
 		const facts = await gatherFabricFacts({
 			...base,
-			health: () => ({ ...healthyParts(), lightrag: Promise.resolve(null) }),
-			config: { ...base.config, configured: { ...base.config.configured, lightrag: false } },
+			health: () => ({ ...healthyParts(), hindsight: Promise.resolve(null) }),
+			config: { ...base.config, configured: { ...base.config.configured, hindsight: false } },
 		});
 		expect(rowOf(facts, "lightrag").state).toBe("ok");
-		expect(rowOf(facts, "lightrag").state).toBe("unconfigured");
+		expect(rowOf(facts, "hindsight").state).toBe("unconfigured");
 	});
 
 	test("the LightRAG breaker state appears on its row: open is unavailable, half-open is degraded, off reads off", async () => {

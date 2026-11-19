@@ -42,7 +42,7 @@
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -52,7 +52,7 @@ import type { AuditRecord } from "@substrate/audit";
 import { loadConfig } from "./config.ts";
 import { IndexStore } from "./index-store.ts";
 import { createObservability, type Observability } from "./observe.ts";
-import { DocsPlaneFake } from "./docs-plane-fake.ts";
+import { FakeTree } from "./planning/tree.fixtures.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { ProposeResult, Runner, SkillProposer } from "./skills/propose.ts";
@@ -107,6 +107,83 @@ function ledgerStub() {
 			hasEvent: async () => false,
 		},
 	};
+}
+
+/** The v1.5.7 LightRAG stand-in the docs suites ingest through: upload (multipart) and text share one store, scan
+ * answers at once, the pipeline is idle at once, `track_status` answers the real document id, and a per-document
+ * delete removes it. `uploads` and `documents` are what `storedDocs` snapshots. */
+class LightragDouble {
+	readonly uploads: Array<{ document_id: string; name: string; content: string; metadata: Record<string, string> }> = [];
+	readonly documents: Record<string, { id: string; name: string; content: string; metadata: Record<string, string> }> = {};
+	private readonly trackToDoc = new Map<string, string>();
+	private nextDoc = 1;
+	readonly fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+		const url = new URL(String(input));
+		const store = (content: string, name: string, metadata: Record<string, string>): Response => {
+			const track = `trk-${this.nextDoc}`;
+			const id = `doc-${this.nextDoc}`;
+			this.nextDoc += 1;
+			this.trackToDoc.set(track, id);
+			this.documents[id] = { id, name, content, metadata };
+			this.uploads.push({ document_id: id, name, content, metadata });
+			return Response.json({ status: "success", data: { track_id: track } });
+		};
+		if (init?.method === "DELETE") {
+			const body = typeof init.body === "string" ? (JSON.parse(init.body) as { doc_ids?: unknown }) : null;
+			const ids = Array.isArray(body?.doc_ids) ? body.doc_ids.filter((id): id is string => typeof id === "string") : [];
+			for (const id of ids) delete this.documents[id];
+			return url.pathname === "/documents/delete_document"
+				? Response.json({ status: "deletion_started", message: "started", doc_id: ids[0] ?? "" })
+				: Response.json({ detail: "clear-all must never be reached" }, { status: 500 });
+		}
+		if (url.pathname === "/health") return Response.json({ status: "healthy", pipeline_busy: false, core_version: "fake" });
+		if (init?.method === "POST" && url.pathname === "/documents/upload") {
+			const form = init.body as FormData;
+			const content = await (form.get("file") as Blob).text();
+			return store(content, String(form.get("file_source")), {
+				source_url: String(form.get("source_url")),
+				commit: String(form.get("commit")),
+				heading_path: String(form.get("heading_path")),
+			});
+		}
+		if (init?.method === "POST" && url.pathname === "/documents/text") {
+			const parsed = JSON.parse(String(init.body)) as { text?: unknown; file_source?: unknown; source_url?: unknown; commit?: unknown; heading_path?: unknown };
+			return store(typeof parsed.text === "string" ? parsed.text : "", typeof parsed.file_source === "string" ? parsed.file_source : "", {
+				source_url: typeof parsed.source_url === "string" ? parsed.source_url : "",
+				commit: typeof parsed.commit === "string" ? parsed.commit : "",
+				heading_path: typeof parsed.heading_path === "string" ? parsed.heading_path : "",
+			});
+		}
+		if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+		if (url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
+		if (url.pathname.startsWith("/documents/track_status/")) {
+			const track = decodeURIComponent(url.pathname.slice("/documents/track_status/".length));
+			const id = this.trackToDoc.get(track);
+			const document = id !== undefined ? this.documents[id] : undefined;
+			return document !== undefined
+				? Response.json({
+						track_id: track,
+						documents: [{ id, status: "processed", file_path: document.name }],
+						total_count: 1,
+						status_summary: { processed: 1 },
+					})
+				: Response.json({ track_id: track, documents: [], total_count: 0, status_summary: {} });
+		}
+		return Response.json({ detail: "no route" }, { status: 404 });
+	};
+}
+
+/** The planning seam a docs harness needs: the `agent-substrate` checkout as a planning root, so the dataset is known. */
+function repoSeam() {
+	const root = join(homedir(), "src", "repos", "agent-substrate");
+	const files = { [join(root, ".git", "HEAD")]: "ref: refs/heads/main\n" };
+	return { env: { SUBSTRATE_PLANNING_ROOTS: root }, planning: { fs: new FakeTree(files), presence: null } };
+}
+
+/** The stores a docs harness starts with: the plane double, the ledger stub, and the planning seam. */
+function docsStores(fake: LightragDouble) {
+	const repos = repoSeam();
+	return { index: null, greptime: ledgerStub().greptime, lightragFetch: fake.fetch, planning: repos.planning };
 }
 
 /**
@@ -782,7 +859,7 @@ function docsStateOf(file: string): string | null {
 }
 
 /** What a docs write can change: every upload with its metadata, every document on the plane, and the state file. */
-function storedDocs(fake: DocsPlaneFake, file: string) {
+function storedDocs(fake: LightragDouble, file: string) {
 	return { uploads: structuredClone(fake.uploads), documents: structuredClone(fake.documents), state: docsStateOf(file) };
 }
 
@@ -832,12 +909,11 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 	 * `storedDocs`, not a count.
 	 */
 	async function seeded(env: Record<string, string> = {}) {
-		const fake = new DocsPlaneFake();
-		fake.parseDonePolls = 1;
+		const fake = new LightragDouble();
 		const file = stateFile();
 		const http = await startHttp(
-			{ index: null, greptime: ledgerStub().greptime, lightragFetch: fake.fetch },
-			{ ...env, SUBSTRATE_DOCS_STATE_FILE: file },
+			docsStores(fake),
+			{ ...env, SUBSTRATE_DOCS_STATE_FILE: file, ...repoSeam().env },
 		);
 		const stored = await http.send("/docs/ingest", seed);
 		expect(stored.status).toBe(200);
@@ -846,11 +922,11 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 	}
 
 	test("a valid control is stored, makes exactly one upload, writes the state file, and is audited once", async () => {
-		const fake = new DocsPlaneFake();
+		const fake = new LightragDouble();
 		const file = stateFile();
 		const http = await startHttp(
-			{ index: null, greptime: ledgerStub().greptime, lightragFetch: fake.fetch },
-			{ SUBSTRATE_DOCS_STATE_FILE: file },
+			docsStores(fake),
+			{ SUBSTRATE_DOCS_STATE_FILE: file, ...repoSeam().env },
 		);
 		const stateBefore = docsStateOf(file);
 		const mark = http.audit.seq;
@@ -915,15 +991,16 @@ describe("docs ingest: POST /docs/ingest and MCP docs_ingest", () => {
 
 	test("POST /docs/ingest on the LightRAG plane refuses a batch with an invalid page as lightrag does, with no LightRAG request and an unchanged state file", async () => {
 		const batch = { dataset: "agent-substrate", pages: [page({ path: "docs/first.md" }), without(page({ path: "docs/second.md" }), "source_url")] };
-		const plane = new DocsPlaneFake();
-		const planeHttp = await startHttp({ index: null, greptime: ledgerStub().greptime, lightragFetch: plane.fetch }, { SUBSTRATE_DOCS_STATE_FILE: stateFile() });
+		const plane = new LightragDouble();
+		const planeHttp = await startHttp(docsStores(plane), { SUBSTRATE_DOCS_STATE_FILE: stateFile(), ...repoSeam().env });
 		const expected = await planeHttp.send("/docs/ingest", batch);
+
 
 		const recorder = lightragRecorder();
 		const file = stateFile();
 		const http = await startHttp(
-			{ index: null, greptime: ledgerStub().greptime, lightragFetch: recorder.fetch },
-			{ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_STATE_FILE: file },
+			{ ...docsStores(plane), lightragFetch: recorder.fetch },
+			{ SUBSTRATE_DOCS_BACKEND: "lightrag", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_STATE_FILE: file, ...repoSeam().env },
 		);
 		const mark = http.audit.seq;
 		const response = await http.send("/docs/ingest", batch);

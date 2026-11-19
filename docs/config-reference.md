@@ -223,9 +223,13 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `RAILWAY_SERVICE_NAME` | string | lightrag | LightRAG service name for private DNS | lightrag | mcp-server/config.ts | no |
 | `RAILWAY_PRIVATE_DOMAIN` | string | none | Railway-injected private domain | <service>.railway.internal applies | mcp-server/config.ts | no |
 | `SUBSTRATE_DOCS_INGEST_ROOTS` | list | docs/, README.md, .planning/ | comma separated path prefixes | the default roots. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_PLANNING_ROOTS` | list | .planning/ | comma separated path prefixes | the .planning/ root; a planning poll never reads docs/ or README.md. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_AGENT_SKILLS_ROOT` | path | none | absolute path to an agent-skills checkout | the merge-trigger for agent-skills is a noop: no checkout, no version recorded. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_VM_GUEST` | toggle | off | 1 | docs_ingest is allowed; 1 refuses it before any network call. See `docs/docs-search-ingest.md` | mcp-server/config.ts, cli/index.ts | yes |
 | `SUBSTRATE_DOCS_STATE_FILE` | path | none | file path | ingest records and version pins stay process-local. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LIGHTRAG_ARCHIVE_DIR` | path | none | archive directory | docs-migrate refuses without --archive | mcp-server/docs-archive.ts | no |
+| `SUBSTRATE_LIGHTRAG_ARCHIVE_ALLOW_ROOTFS` | toggle | false | 1 \| true \| yes (case-insensitive; anything else is off) | an archive on the root filesystem is refused | mcp-server/docs-archive.ts | no |
+| `SUBSTRATE_DOCS_MIGRATE_APPROVED` | toggle | unset | 1 | docs-migrate --apply refuses without explicit operator approval. See `docs/rehearsal.md` | mcp-server/docs-migrate.ts | yes |
 | `SUBSTRATE_DOCS_PRUNE_SUPERSEDED` | toggle | off | 1 | off: every superseded document stays on the plane. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` | number | 0.2 | [0, 1] | 0.2. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_DOCS_VECTOR_WEIGHT` | number | 0.3 | [0, 1] | 0.3. See `docs/docs-search-ingest.md` | mcp-server/config.ts | yes |
@@ -432,6 +436,9 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | path | none | harness-owned | the smokes refuse to run. See `docs/rehearsal.md` | scripts/desktop-smoke.ts, skills-sync-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_NAME` | string | none | run name the rehearsal wrote to consumer.env | empty: the run-name comparison is skipped. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
 | `SUBSTRATE_REHEARSAL_DOCS_STATE_FILE` | path | none | file inside the rehearsal run directory | empty: the docs state is read as absent. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
+| `SUBSTRATE_STANDIN_FIXTURE_URL` | string | none | recording stand-in endpoint recorded in the run state | empty: the docs smoke names no verifiable stand-in. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
+| `SUBSTRATE_STANDIN_FIXTURE_READY` | toggle | none | 1 | empty: the recorded stand-in is not marked ready. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
+| `SUBSTRATE_STANDIN_FIXTURE_PID` | number | none | stand-in process id recorded in the run state | empty: the stand-in pid is unverifiable. See `docs/rehearsal.md` | scripts/docs-smoke.ts | no |
 | `SUBSTRATE_GATE_INDEX_DRILL` | toggle | off | 1 | off: gate:boot does not archive or restore the scratch index. See `docs/runbooks/release-gate.md` | scripts/rehearsal.ts | no |
 | `SUBSTRATE_GATE_CHAOS_PLANES` | toggle | off | 1 | off: the rehearsal does not pause the scratch index or probe the other planes. See `docs/runbooks/release-gate.md` | scripts/chaos-planes.ts | no |
 | `CHAOS_REHEARSAL` | toggle | off | 1 \| true \| yes (case-insensitive) | the chaos smoke asserts a degraded deployment. See `docs/observability.md` | scripts/chaos-smoke.ts | yes |

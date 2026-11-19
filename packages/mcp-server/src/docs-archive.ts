@@ -20,7 +20,8 @@ import { stripRemoteImages } from "@substrate/corpus";
 import { changeSha, loadIngestRecords, type IngestRecord } from "./docs-ingest.ts";
 import { refusedMount, type DevReader } from "./ledger-archive.ts";
 import { redact } from "./redact.ts";
-import type { DatasetListOutcome, DocsChunk, DocsDataset, FetchLike, RetrievalOutcome } from "./planes/docs-wire.ts";
+import { DEFAULT_RETRIEVAL_KNOBS, type DatasetListOutcome, type DocsChunk, type DocsDataset, type FetchLike, type RetrievalOutcome } from "./planes/docs-wire.ts";
+import { listDatasets as listDatasetsFromPlane } from "./docs-datasets.ts";
 
 interface DocsDocument {
 	id: string;
@@ -30,13 +31,146 @@ interface DocsDocument {
 type DocumentListOutcome = { ok: true; documents: DocsDocument[] } | { ok: false; reason: string };
 type PlaneConfig = { url: string; apiKey: string };
 
-/** Production archive source is stubbed (archive only used in migration tooling against captured data). */
-export function docsArchiveSource(_config: PlaneConfig, _fetchImpl: FetchLike): DocsArchiveSource {
-	const retired = async (): Promise<{ ok: false; reason: string }> => ({ ok: false, reason: "docs-archive-retired" });
+const DOCUMENT_LIST_PAGE_SIZE = 100;
+const DOCUMENT_LIST_MAX_PAGES = 100;
+
+async function callPlane(
+	config: PlaneConfig,
+	fetchImpl: FetchLike,
+	path: string,
+	init: { method: string; body?: string; timeoutMs: number },
+): Promise<{ ok: true; body: unknown } | { ok: false; reason: string }> {
+	let response: Response;
+	try {
+		response = await fetchImpl(`${config.url.replace(/\/+$/, "")}${path}`, {
+			method: init.method,
+			headers: { authorization: `Bearer ${config.apiKey}`, ...(init.body !== undefined ? { "content-type": "application/json" } : {}) },
+			...(init.body !== undefined ? { body: init.body } : {}),
+			signal: AbortSignal.timeout(init.timeoutMs),
+		});
+	} catch (cause) {
+		return { ok: false, reason: `lightrag: ${cause instanceof Error ? cause.message : String(cause)}` };
+	}
+	if (!response.ok) return { ok: false, reason: `lightrag ${response.status}` };
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return { ok: false, reason: "lightrag: response was not JSON" };
+	}
+	if (body !== null && typeof body === "object" && "code" in body) {
+		const code = (body as Record<string, unknown>).code;
+		if (code !== 0) {
+			const message = typeof (body as Record<string, unknown>).message === "string" ? (body as Record<string, unknown>).message : "request failed";
+			return { ok: false, reason: `lightrag: ${message}` };
+		}
+	}
+	return { ok: true, body };
+}
+
+function readString(entry: object, ...names: string[]): string | undefined {
+	for (const name of names) {
+		if (name in entry) {
+			const value = (entry as Record<string, unknown>)[name];
+			if (typeof value === "string") return value;
+		}
+	}
+	return undefined;
+}
+
+function readNumber(entry: object, ...names: string[]): number | undefined {
+	for (const name of names) {
+		if (name in entry) {
+			const value = (entry as Record<string, unknown>)[name];
+			if (typeof value === "number" && Number.isFinite(value)) return value;
+		}
+	}
+	return undefined;
+}
+
+function dataOf(body: unknown): unknown {
+	return body !== null && typeof body === "object" && "data" in body ? (body as Record<string, unknown>).data : body;
+}
+
+function documentOf(entry: unknown): DocsDocument | null {
+	if (entry === null || typeof entry !== "object") return null;
+	const id = readString(entry, "id");
+	const name = readString(entry, "name");
+	if (id === undefined || name === undefined) return null;
+	const meta: object = "meta_fields" in entry && entry.meta_fields !== null && typeof entry.meta_fields === "object" ? entry.meta_fields : {};
+	return { id, name, meta_fields: { source_url: readString(meta, "source_url"), commit: readString(meta, "commit"), heading_path: readString(meta, "heading_path") } };
+}
+
+async function listDocuments(config: PlaneConfig, datasetId: string, fetchImpl: FetchLike, timeoutMs = 4000): Promise<DocumentListOutcome> {
+	const documents: DocsDocument[] = [];
+	for (let page = 1; page <= DOCUMENT_LIST_MAX_PAGES; page += 1) {
+		const answered = await callPlane(config, fetchImpl, `/api/v1/datasets/${encodeURIComponent(datasetId)}/documents?page=${page}&page_size=${DOCUMENT_LIST_PAGE_SIZE}`, { method: "GET", timeoutMs });
+		if (!answered.ok) return answered;
+		const data = dataOf(answered.body);
+		if (data === null || typeof data !== "object" || !("docs" in data) || !Array.isArray(data.docs)) {
+			return { ok: false, reason: "lightrag: unexpected document list shape" };
+		}
+		for (const entry of data.docs) {
+			const document = documentOf(entry);
+			if (document !== null) documents.push(document);
+		}
+		const total = readNumber(data, "total", "total_datasets");
+		const reached = total === undefined ? data.docs.length < DOCUMENT_LIST_PAGE_SIZE : documents.length >= total;
+		if (reached || data.docs.length === 0) return { ok: true, documents };
+	}
+	return { ok: false, reason: "lightrag: document list exceeds the page cap" };
+}
+
+async function retrieveChunks(config: PlaneConfig, question: string, datasetIds: readonly string[], fetchImpl: FetchLike, timeoutMs = 4000): Promise<RetrievalOutcome> {
+	if (datasetIds.length === 0) throw new Error("retrieveChunks needs explicit dataset_ids; unscoped retrieval is forbidden");
+	const knobs = DEFAULT_RETRIEVAL_KNOBS;
+	const answered = await callPlane(config, fetchImpl, "/api/v1/retrieval", {
+		method: "POST",
+		body: JSON.stringify({
+			question,
+			dataset_ids: [...datasetIds],
+			page: 1,
+			page_size: 30,
+			similarity_threshold: knobs.similarityThreshold,
+			vector_similarity_weight: knobs.vectorSimilarityWeight,
+			top_k: knobs.topK,
+			...(knobs.rerankId !== undefined ? { rerank_id: knobs.rerankId } : {}),
+		}),
+		timeoutMs,
+	});
+	if (!answered.ok) return answered;
+	const data = dataOf(answered.body);
+	if (data === null || typeof data !== "object" || !("chunks" in data) || !Array.isArray(data.chunks)) {
+		return { ok: false, reason: "lightrag: unexpected response shape" };
+	}
+	const chunks: DocsChunk[] = [];
+	for (const entry of data.chunks) {
+		if (entry === null || typeof entry !== "object") continue;
+		if (!("content" in entry) || typeof entry.content !== "string") continue;
+		const documentId = readString(entry, "document_id");
+		const chunkId = readString(entry, "id", "chunk_id");
+		const headingPath = readString(entry, "heading_path");
+		const sourceUrl = readString(entry, "source_url");
+		const score = readNumber(entry, "similarity", "score");
+		chunks.push({
+			content: entry.content,
+			document_name: readString(entry, "document_keyword", "document_name") ?? "doc",
+			...(documentId !== undefined ? { document_id: documentId } : {}),
+			...(chunkId !== undefined ? { chunk_id: chunkId } : {}),
+			...(headingPath !== undefined ? { heading_path: headingPath } : {}),
+			...(sourceUrl !== undefined ? { source_url: sourceUrl } : {}),
+			...(score !== undefined ? { score } : {}),
+		});
+	}
+	return { ok: true, chunks };
+}
+
+/** The production source: the plane's own client, with the archive's retrieval knobs. */
+export function docsArchiveSource(config: PlaneConfig, fetchImpl: FetchLike): DocsArchiveSource {
 	return {
-		listDatasets: retired,
-		listDocuments: async () => retired(),
-		retrieve: async () => retired(),
+		listDatasets: () => listDatasetsFromPlane(config, fetchImpl),
+		listDocuments: (datasetId) => listDocuments(config, datasetId, fetchImpl),
+		retrieve: (question, datasetIds) => retrieveChunks(config, question, datasetIds, fetchImpl),
 	};
 }
 
@@ -168,7 +302,7 @@ export function gitAtCommit(repoRoot: string): ReadAtCommit {
  * empty, or on the root filesystem (unless `allowRootfs`). The manifest is written last.
  */
 export async function archiveDocs(deps: ArchiveDeps, dir: string | null): Promise<ArchiveResult> {
-	if (dir === null) return refused("SUBSTRATE_DOCS_ARCHIVE_DIR is unset: the archive refuses by name and writes nothing");
+	if (dir === null) return refused("SUBSTRATE_LIGHTRAG_ARCHIVE_DIR is unset: the archive refuses by name and writes nothing");
 	const stateFile = deps.stateFile;
 	if (stateFile === null) return refused("SUBSTRATE_DOCS_STATE_FILE is unset: there is no docs state to archive");
 	const refusal = preflight(deps, dir, stateFile);

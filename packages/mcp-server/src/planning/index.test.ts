@@ -640,8 +640,8 @@ Status: Executing
 			[`${P}/STATE.md`]: PHASE_46_STATE,
 			[`${P}/ROADMAP.md`]: POSITION_ROADMAP,
 			[`${P}/phases/46-docs-cutover/46-01-PLAN.md`]: "# docs cutover plan\n",
+			[`${P}/phases/46-docs-cutover/46-01-SUMMARY.md`]: "# docs cutover summary\n",
 			[`${P}/phases/46-lightrag-hybrid/46-01-PLAN.md`]: "# lightrag plan\n",
-			[`${P}/phases/46-lightrag-hybrid/46-01-SUMMARY.md`]: "# lightrag summary\n",
 		};
 
 		test("both unmarked: the position stays ambiguous and has no slug", async () => {
@@ -673,7 +673,7 @@ Status: Executing
 			const result = positionOf(index);
 			expect(result.ok).toBe(false);
 			expect(result.position.phase?.slug).toBeNull();
-			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-lightrag-hybrid, 46-lightrag-hybrid", where: "phases" });
+			expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-docs-cutover, 46-lightrag-hybrid", where: "phases" });
 		});
 
 		test("a lone directory that holds SUPERSEDED.md is still the phase's directory", async () => {

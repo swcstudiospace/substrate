@@ -77,20 +77,129 @@ function ingestHarness(fake: DocsPlaneFake, over: Partial<IngestDeps> = {}) {
 	const { events, emit } = eventSink();
 	const seen = new Map<string, IngestRecord>();
 	const lines: string[] = [];
+	const plane = asLightrag(fake);
 	const deps: IngestDeps = {
-		config: CONFIG,
+		config: null,
+		lightragConfig: { url: CONFIG.url },
 		knownDatasets: ["agent-substrate"],
 		emit,
 		surface: "omp",
 		seen,
 		poll: { intervalMs: 0 },
-		fetchImpl: fake.fetch,
+		fetchImpl: plane,
+		lightragFetch: plane,
 		log: (line) => lines.push(line),
 		...over,
 	};
+	// Ingest prefers `lightragFetch`; a caller-supplied `fetchImpl` (e.g. a failing-upload wrapper) must be honoured there too.
+	if ("fetchImpl" in over) deps.lightragFetch = over.fetchImpl ?? plane;
 	return { events, seen, lines, ingest: (pages: typeof PAGE[]) => ingestDocs(deps, { dataset: "agent-substrate", commit: "c1", pages }) };
 }
 
+const lightragInstalled = new WeakSet<DocsPlaneFake>();
+
+/**
+ * Serve the LightRAG v1.5.7 routes (`planes/lightrag.ts`) over a DocsPlaneFake's state, so this suite
+ * exercises the current plane. Other (retired dataset-API) paths delegate to the fake untouched.
+ */
+function asLightrag(fake: DocsPlaneFake): FetchLike {
+	if (lightragInstalled.has(fake)) return fake.fetch;
+	lightragInstalled.add(fake);
+	const original = fake.fetch;
+	let next = 0;
+	const byTrack = new Map<string, string>();
+	const adapter: FetchLike = async (input, init) => {
+		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+		const path = url.pathname;
+		const method = (init?.method ?? "GET").toUpperCase();
+		const isPlane = path === "/health" || path === "/query" || path.startsWith("/documents/");
+		if (!isPlane) return original(input, init);
+		let body: unknown = null;
+		const fileParts: Array<{ name: string; text: string }> = [];
+		let form: FormData | null = null;
+		if (init?.body instanceof FormData) {
+			form = init.body;
+			for (const part of form.getAll("file")) {
+				if (part instanceof Blob) fileParts.push({ name: part instanceof File ? part.name : "file", text: await part.text() });
+			}
+			body = { multipart: { file: fileParts.map((part) => ({ name: part.name, bytes: Buffer.byteLength(part.text, "utf8") })) } };
+		} else if (typeof init?.body === "string" && init.body.length > 0) {
+			try {
+				body = JSON.parse(init.body);
+			} catch {
+				body = init.body;
+			}
+		}
+		fake.requests.push({ method, path, body, query: Object.fromEntries(url.searchParams.entries()) });
+		const failure = (code: number, message: string, status = 200): Response => Response.json({ code, message }, { status });
+		if (method === "GET" && path === "/health") return Response.json({ status: "healthy" });
+		if (method === "POST" && path === "/query") {
+			if (fake.failRetrievalWith !== null) return failure(100, "injected failure", fake.failRetrievalWith);
+			const pageSize = body !== null && typeof body === "object" && "top_k" in body && typeof body.top_k === "number" ? body.top_k : 30;
+			const chunks = Object.values(fake.chunks).flat();
+			const entries = chunks.map((chunk) => ({
+				content: chunk.content,
+				document_id: chunk.document_id ?? "",
+				document_keyword: chunk.document_name,
+				id: chunk.chunk_id ?? "",
+				similarity: chunk.score ?? 0,
+			}));
+			return Response.json({ status: "success", data: { chunks: entries.slice(0, Math.max(0, pageSize)), doc_aggs: [], total: entries.length } });
+		}
+		if (method === "POST" && (path === "/documents/upload" || path === "/documents/text")) {
+			const rec = body !== null && typeof body === "object" && !Array.isArray(body) ? body : {};
+			const formMeta = (key: string): string => {
+				const value = form?.get(key);
+				return typeof value === "string" ? value : "";
+			};
+			const textPart = "text" in rec && typeof rec.text === "string" ? rec.text : undefined;
+			const textName = "file_source" in rec && typeof rec.file_source === "string" ? rec.file_source : "doc";
+			const parts = fileParts.length > 0 ? fileParts : textPart !== undefined ? [{ name: textName, text: textPart }] : [];
+			const created: Array<{ id: string; track_id: string; name: string; run: string }> = [];
+			for (const part of parts) {
+				next += 1;
+				const documentId = `doc-lightrag-${next}`;
+				const trackId = `track-${next}`;
+				const sourceValue = form?.get("file_source");
+				const name = typeof sourceValue === "string" && sourceValue !== "" ? sourceValue : part.name;
+				const sourceUrl = "source_url" in rec && typeof rec.source_url === "string" ? rec.source_url : formMeta("source_url");
+				const commit = "commit" in rec && typeof rec.commit === "string" ? rec.commit : formMeta("commit");
+				const document: (typeof fake.documents)[string] = { id: documentId, dataset_id: "agent-substrate", name, run: "DONE", polls: 1, meta_fields: { source_url: sourceUrl, commit } };
+				fake.documents[documentId] = document;
+				fake.uploads.push({ dataset_id: "agent-substrate", document_id: documentId, name, content: part.text, metadata: { source_url: sourceUrl, commit } });
+				byTrack.set(trackId, documentId);
+				created.push({ id: documentId, track_id: trackId, name, run: "DONE" });
+			}
+			const first = created[0];
+			return Response.json({ status: "success", data: { track_id: first?.track_id ?? "", documents: created } });
+		}
+		if (method === "POST" && path === "/documents/scan") return Response.json({ status: "success" });
+		if (method === "GET" && path === "/documents/pipeline_status") {
+			if (fake.parseBehavior === "fail") return Response.json({ status: "failed", message: "injected parse failure" });
+			if (fake.parseBehavior === "never") return Response.json({ status: "running" });
+			return Response.json({ status: "idle" });
+		}
+		if (method === "GET" && path.startsWith("/documents/track_status/")) {
+			const trackId = path.split("/").pop() ?? "";
+			const documentId = byTrack.get(trackId);
+			return Response.json({ track_id: trackId, documents: documentId !== undefined ? [{ id: documentId, status: "processed" }] : [], total_count: documentId !== undefined ? 1 : 0 });
+		}
+		if (method === "DELETE" && path === "/documents/delete_document") {
+			if (fake.failDeleteWith !== null) return failure(100, "injected failure", fake.failDeleteWith);
+			const docIds = body !== null && typeof body === "object" && "doc_ids" in body && Array.isArray(body.doc_ids) ? body.doc_ids : [];
+			for (const id of docIds) {
+				if (typeof id !== "string") continue;
+				if (fake.documents[id] === undefined) return failure(102, `Documents not found: ${id}`);
+				delete fake.documents[id];
+				fake.deleted.push(id);
+			}
+			return Response.json({ status: "deletion_started" });
+		}
+		return Response.json({ error: `fake has no route for ${method} ${path}` }, { status: 404 });
+	};
+	Object.defineProperty(fake, "fetch", { value: adapter });
+	return adapter;
+}
 
 describe("retrieval knobs", () => {
 	test("env overrides the documented retrieval knobs; junk falls back", () => {
@@ -133,11 +242,14 @@ describe("durable versions and real pins", () => {
 			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: join(dir, "docs-ingest.json") };
 			// `Substrate` polls at the production cadence (2 s between polls): one poll keeps the test inside the runner's budget.
 			const fake = new DocsPlaneFake();
+			asLightrag(fake);
 			fake.parseDonePolls = 1;
+			fake.chunks["ds-hamm-programming-desk"] = [];
+			fake.chunks["ds-leipzig-agent-skills"] = [];
 			const repos = repoSeam();
 			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
 			const before = await first.searchDocs({ question: "who reads lightrag?", datasets: ["agent-substrate"] }, "omp");
-			expect(before.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
+			expect(before.chunks[0]?.commit).toBe("dataset-pin:unattributed:unrecorded");
 			expect(before.chunks[0]?.dataset_commit).toBeUndefined();
 			const ingested = await first.ingestDocs({ dataset: "agent-substrate", commit: "c-real", pages: [PAGE] }, "omp");
 			if (!ingested.ok) throw new Error(ingested.reason);
@@ -150,12 +262,14 @@ describe("durable versions and real pins", () => {
 			fake.chunks["ds-berlin-agent-substrate"] = [{ ...seeded, document_id: ownId, chunk_id: "chunk-own" }, seeded];
 			const after = await first.searchDocs({ question: "who reads lightrag?", datasets: ["agent-substrate"] }, "omp");
 			expect(after.chunks.length).toBe(2);
-			// Every citation names the dataset's recorded version separately …
-			expect(after.chunks.every((citation) => citation.dataset_commit === "c-real")).toBe(true);
+			// The recorded document names the dataset's recorded version separately …
+			const afterByDocument = Object.fromEntries(after.chunks.map((citation) => [citation.document_id, citation]));
+			expect(afterByDocument[ownId]?.dataset_commit).toBe("c-real");
+			expect(afterByDocument[seeded.document_id ?? ""]?.dataset_commit).toBeUndefined();
 			// … while `commit` is the document's own, or an honest marker (Greptile round 2).
 			const byDocument = Object.fromEntries(after.chunks.map((citation) => [citation.document_id, citation.commit]));
 			expect(byDocument[ownId]).toBe("c-real");
-			expect(byDocument[seeded.document_id ?? ""]).toBe("dataset-pin:agent-substrate:unrecorded");
+			expect(byDocument[seeded.document_id ?? ""]).toBe("dataset-pin:unattributed:unrecorded");
 
 			// A new process: pins hydrate from the file, idempotency holds.
 			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
@@ -170,11 +284,18 @@ describe("durable versions and real pins", () => {
 
 	test("a chunk without a source URL is cited from the ingest record of its document, redacted", async () => {
 		const fake = new DocsPlaneFake();
+		asLightrag(fake);
 		fake.chunks["ds-berlin-agent-substrate"] = [{ content: "clean", document_name: "a.md", document_id: "doc-rec", chunk_id: "c", source_url: "", score: 0.5 }];
+		fake.chunks["ds-hamm-programming-desk"] = [];
+		fake.chunks["ds-leipzig-agent-skills"] = [];
 		const { emit } = eventSink();
+		const records = new Map([["lightrag::swcstudiospace/agent-substrate::https://example.com/a", { sha: "s", dataset_id: "swcstudiospace/agent-substrate", source_url: "https://example.com/a", document_id: "doc-rec", version: 1 } as IngestRecord]]);
 		const reply = await searchDocs(
 			{
-				config: CONFIG,
+				config: null,
+				lightragConfig: { url: CONFIG.url },
+				lightragFetch: fake.fetch,
+				lightragRecords: records,
 				emit,
 				fetchImpl: fake.fetch,
 				datasetNames: ["agent-substrate"],
@@ -185,7 +306,7 @@ describe("durable versions and real pins", () => {
 		expect(reply.chunks[0]?.source_url).toStartWith("https://example.com/");
 		expect(reply.chunks[0]?.source_url).not.toContain("sk-proj-");
 		expect(reply.chunks[0]?.commit).toBe("c-doc");
-		const unknown = await searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, datasetNames: ["agent-substrate"] }, "q");
+		const unknown = await searchDocs({ config: null, lightragConfig: { url: CONFIG.url }, lightragFetch: fake.fetch, lightragRecords: records, emit, fetchImpl: fake.fetch, datasetNames: ["agent-substrate"] }, "q");
 		expect(unknown.chunks[0]?.source_url).toBe("dataset:agent-substrate");
 	});
 
@@ -194,7 +315,10 @@ describe("durable versions and real pins", () => {
 		// dataset's chunks at the documents the plane actually holds, as a
 		// retrieval over an unpruned corpus would.
 		const fake = new DocsPlaneFake();
+		asLightrag(fake);
 		fake.parseDonePolls = 1;
+		fake.chunks["ds-hamm-programming-desk"] = [];
+		fake.chunks["ds-leipzig-agent-skills"] = [];
 		const chunkFor = (documentId: string) => ({ content: `from ${documentId}`, document_name: "data-planes.md", document_id: documentId, chunk_id: `chunk-${documentId}`, source_url: "", score: 0.5 });
 		const repos = repoSeam();
 		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
@@ -220,9 +344,12 @@ describe("durable versions and real pins", () => {
 		expect(byId[newId]).toBe("c-new");
 		// A document the records never uploaded is not stamped with the pin
 		// either (Greptile round 2): it may predate or postdate it.
-		expect(byId["doc-unknown"]).toBe("dataset-pin:agent-substrate:unrecorded");
-		// The dataset's newest recorded version travels on every citation, as its own field.
-		expect(reply.chunks.every((citation) => citation.dataset_commit === "c-new")).toBe(true);
+		expect(byId["doc-unknown"]).toBe("dataset-pin:unattributed:unrecorded");
+		// The dataset's newest recorded version travels on each recorded citation, as its own field.
+		const replyById = Object.fromEntries(reply.chunks.map((citation) => [citation.document_id, citation]));
+		expect(replyById[oldId]?.dataset_commit).toBe("c-new");
+		expect(replyById[newId]?.dataset_commit).toBe("c-new");
+		expect(replyById["doc-unknown"]?.dataset_commit).toBeUndefined();
 		// Both recorded documents carry the ingest record's source URL.
 		expect(reply.chunks.filter((citation) => citation.document_id !== "doc-unknown").every((citation) => citation.source_url === PAGE.source_url)).toBe(true);
 
@@ -243,7 +370,10 @@ describe("durable versions and real pins", () => {
 			const file = join(dir, "docs-ingest.json");
 			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
 			const fake = new DocsPlaneFake();
+			asLightrag(fake);
 			fake.parseDonePolls = 1;
+			fake.chunks["ds-hamm-programming-desk"] = [];
+			fake.chunks["ds-leipzig-agent-skills"] = [];
 			const repos = repoSeam();
 			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, ...repos.stores });
 			const v1 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
@@ -315,14 +445,15 @@ describe("cached reads", () => {
 
 	test("one docs_search costs N retrievals with the list cached, and 0 plane calls on a cache hit", async () => {
 		const fake = new DocsPlaneFake();
+		asLightrag(fake);
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
 		const repos = repoSeam();
 		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, cache, ...repos.stores });
 		const first = await substrate.searchDocs({ question: "who reads  lightrag?" }, "omp");
 		expect(first.degraded).toBeUndefined();
-		expect(fake.datasetLists()).toHaveLength(1);
-		expect(fake.retrievals()).toHaveLength(3);
+		expect(fake.datasetLists()).toHaveLength(0);
+		expect(fake.requests.filter((request) => request.path === "/query")).toHaveLength(1);
 		expect(redis.commands.filter((command) => command.startsWith("SET substrate:v1:docs-search:"))).toHaveLength(1);
 		expect(redis.commands.find((command) => command.startsWith("SET substrate:v1:docs-search:"))).toEndWith(`ttl=${CACHE_TTL["docs-search"]}`);
 		const before = fake.requests.length;
@@ -335,6 +466,7 @@ describe("cached reads", () => {
 
 	test("a degraded answer is never stored, and an ingest or a recorded version bumps gen:docs", async () => {
 		const fake = new DocsPlaneFake();
+		asLightrag(fake);
 		const redis = new FakeRedis();
 		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
 		const repos = repoSeam();
@@ -354,9 +486,9 @@ describe("cached reads", () => {
 		if (!recorded.ok) throw new Error(recorded.reason);
 		expect(redis.commands.filter((command) => command === `INCR ${DOCS_GENERATION_KEY}`)).toHaveLength(2);
 		// The bumped generation (and the new pin) make the next search a miss that stores again.
-		const retrievalsBefore = fake.retrievals().length;
+		const queriesBefore = fake.requests.filter((request) => request.path === "/query").length;
 		await substrate.searchDocs({ question: "q" }, "omp");
-		expect(fake.retrievals().length).toBe(retrievalsBefore + 3);
+		expect(fake.requests.filter((request) => request.path === "/query").length).toBe(queriesBefore + 1);
 		expect(redis.commands.filter((command) => command.startsWith("SET substrate:v1:docs-search:"))).toHaveLength(2);
 	});
 
@@ -405,7 +537,9 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 		expect(fake.deleted).toEqual([superseded]);
 		// The delete ran after the replacement's parse completed, never before.
 		const order = fake.requests.map((request) => `${request.method} ${request.path.split("/").pop()}`);
-		expect(order.indexOf("DELETE documents")).toBeGreaterThan(order.lastIndexOf("GET documents"));
+		const deleteAt = order.indexOf("DELETE delete_document");
+		const parsedAt = order.map((entry, index) => (entry.startsWith("GET track-") ? index : -1)).filter((index) => index >= 0).pop() ?? -1;
+		expect(deleteAt).toBeGreaterThan(parsedAt);
 		expect(Object.keys(fake.documents)).toHaveLength(1);
 		const note = events.filter((event) => event.kind === "note").pop();
 		expect(note?.payload).toMatchObject({ superseded_document_ids: [superseded], pruned_document_ids: [superseded] });
@@ -447,12 +581,12 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 		expect(first.changed).toBe(true);
 		const oldId = first.results[0]?.document_id ?? "";
 		const partial = await ingest([{ ...PAGE, body: `${PAGE.body} More.` }, PAGE_B]);
-		if (partial.ok) throw new Error("expected page B to fail");
-		expect(partial.page).toBe(PAGE_B.path);
+		if (!partial.ok) throw new Error(partial.reason);
+		expect(partial.partial).toBe(true);
 		expect(partial.changed).toBe(true);
 		// Page A landed, its predecessor is gone from the plane, and the record names the surviving document.
 		expect(fake.deleted).toEqual([oldId]);
-		const record = seen.get(`ds-berlin-agent-substrate::${PAGE.source_url}`);
+		const record = seen.get(`lightrag::agent-substrate::${PAGE.source_url}`);
 		expect(record?.document_id).not.toBe(oldId);
 		expect(fake.documents[record?.document_id ?? ""]).toBeDefined();
 		// Nothing stored: an unchanged hash, and a gate refusal before any upload.
@@ -474,28 +608,30 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 			const file = join(dir, "docs-ingest.json");
 			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" };
 			const fake = new DocsPlaneFake();
+			asLightrag(fake);
 			fake.parseDonePolls = 1;
+			const repos = repoSeam();
 			const redis = new FakeRedis();
 			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
 			const bumps = () => redis.commands.filter((command) => command === `INCR ${DOCS_GENERATION_KEY}`).length;
-			const first = new Substrate(loadConfig(env), { index: null, greptime: null, lightragFetch: failingUploadOf(fake, documentName(PAGE_B.path)), cache });
+			const first = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: failingUploadOf(fake, documentName(PAGE_B.path)), cache, ...repos.stores });
 			const v1 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
 			if (!v1.ok) throw new Error(v1.reason);
 			const oldId = v1.results[0]?.document_id ?? "";
 			expect(bumps()).toBe(1);
 			const partial = await first.ingestDocs({ dataset: "agent-substrate", commit: "c2", pages: [{ ...PAGE, body: "two" }, PAGE_B] }, "omp");
-			if (partial.ok) throw new Error("expected page B to fail");
+			if (!partial.ok) throw new Error(partial.reason);
 			expect(partial.changed).toBe(true);
 			// The failure still invalidated cached searches and saved page A's new record.
 			expect(bumps()).toBe(2);
 			expect(fake.deleted).toEqual([oldId]);
-			const saved = (await loadIngestRecords(file, ["agent-substrate"])).records.get(`ds-berlin-agent-substrate::${PAGE.source_url}`);
+			const saved = (await loadIngestRecords(file, ["agent-substrate"])).records.get(`lightrag::swcstudiospace/agent-substrate::${PAGE.source_url}`);
 			expect(saved?.commit).toBe("c2");
 			expect(saved?.document_id).not.toBe(oldId);
 			expect(fake.documents[saved?.document_id ?? ""]).toBeDefined();
 			// A restart re-submitting page A's old content replaces the recorded
 			// document rather than answering `unchanged` for the deleted one.
-			const second = new Substrate(loadConfig(env), { index: null, greptime: null, lightragFetch: fake.fetch, cache });
+			const second = new Substrate(loadConfig({ ...env, ...repos.env }), { index: null, greptime: null, lightragFetch: fake.fetch, cache, ...repos.stores });
 			const resubmitted = await second.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
 			if (!resubmitted.ok) throw new Error(resubmitted.reason);
 			expect(resubmitted.results[0]).toMatchObject({ status: "replaced", superseded_document_id: saved?.document_id });
@@ -548,12 +684,13 @@ describe("the asynchronous merge-trigger", () => {
 	/** A fake whose parse never finishes until released, so the job is observably in flight. */
 	function gatedFake(): { fake: DocsPlaneFake; release: () => void } {
 		const fake = new DocsPlaneFake();
+		asLightrag(fake);
 		const inner = fake.fetch;
 		const gate = Promise.withResolvers<void>();
 		let released = false;
 		const gated: FetchLike = async (input, init) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-			if (!released && (init?.method ?? "GET") === "GET" && /\/documents\?/.test(url)) await gate.promise;
+			if (!released && (init?.method ?? "GET") === "GET" && /\/documents\/pipeline_status/.test(url)) await gate.promise;
 			return inner(input, init);
 		};
 		// Swap the fetch the server sees for the gated one; the fake records as before.
@@ -646,6 +783,7 @@ describe("the asynchronous merge-trigger", () => {
 
 	test("a background job's failure is logged, recorded on ?wait=1, and records no version", async () => {
 		const fake = new DocsPlaneFake();
+		asLightrag(fake);
 		fake.parseBehavior = "fail";
 		const docs = fixture();
 		const lines: string[] = [];
@@ -662,7 +800,7 @@ describe("the asynchronous merge-trigger", () => {
 			expect(waited.status).toBe(503);
 			const body = (await waited.json()) as { ok: boolean; reason: string };
 			expect(body.ok).toBe(false);
-			expect(body.reason).toStartWith("parse-failed");
+			expect(body.reason).toStartWith("lightrag failed");
 			expect(await substrate.latestDocsVersion("agent-substrate")).toBeUndefined();
 			expect(lines.some((line) => line.includes("docs merge-trigger") && line.includes("failed"))).toBe(true);
 		} finally {
@@ -695,6 +833,7 @@ describe("the asynchronous merge-trigger", () => {
 describe("an agent-skills refresh ingests the checkout at the commit it was asked for", () => {
 	test("a queued refresh whose checkout moved on records no version and reports commit-mismatch", async () => {
 		const fake = new DocsPlaneFake();
+		asLightrag(fake);
 		fake.parseDonePolls = 1;
 		const checkout = mkdtempSync(join(tmpdir(), "substrate-skills-queued-"));
 		try {
@@ -705,7 +844,7 @@ describe("an agent-skills refresh ingests the checkout at the commit it was aske
 			const release = Promise.withResolvers<void>();
 			const parked: FetchLike = async (input, init) => {
 				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-				if ((init?.method ?? "GET") === "GET" && /\/documents\?/.test(url)) {
+				if ((init?.method ?? "GET") === "GET" && /\/documents\/pipeline_status/.test(url)) {
 					reached.resolve();
 					await release.promise;
 				}

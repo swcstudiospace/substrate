@@ -203,6 +203,17 @@ function fakeLightrag(listing: Array<{ id: string; file_path: string }>, rejectU
 			tracked.set(trackId, { id, file_path: file.name });
 			return json({ status: "success", data: { track_id: trackId } });
 		}
+		if (method === "POST" && url.pathname === "/documents/text") {
+			const body = JSON.parse(String(init?.body)) as { text: string; file_source: string };
+			if (rejectUpload(body.file_source)) return json({ detail: "injected upload failure" }, 500);
+			uploads.push(body.text);
+			names.push(body.file_source);
+			const id = `doc-up-${String(uploads.length)}`;
+			const trackId = `trk-${String(uploads.length)}`;
+			documents.push({ id, file_path: body.file_source });
+			tracked.set(trackId, { id, file_path: body.file_source });
+			return json({ status: "success", data: { track_id: trackId } });
+		}
 		if (method === "DELETE" && url.pathname === "/documents/delete_document") {
 			// The delete our own prune sent: its doc_ids, removed from the listing the fake serves.
 			const sent = JSON.parse(String(init?.body)) as { doc_ids: string[] };
@@ -751,7 +762,7 @@ describe("docs-migrate: a replay that does not land every page", () => {
 		const persisted = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
 		expect(persisted.records.has(`lightrag::${PLANE_REPO}::${sourceOf(EXTRA)}`)).toBe(false);
-		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag")).toBe(false);
+		expect(persisted.versions.get(REPO)).toHaveLength(1);
 	});
 
 	test("a dataset refused after an earlier commit landed keeps that upload, and records no pin or cutover", async () => {
@@ -783,7 +794,7 @@ describe("docs-migrate: a replay that does not land every page", () => {
 		const persisted = await loadIngestRecords(fixture.stateFile, migrationKnown([]));
 		expect(persisted.records.get(`lightrag::${PLANE_REPO}::${sourceOf(NOTES)}`)).toMatchObject({ version: 3, document_id: "doc-up-1" });
 		expect(persisted.records.has(`lightrag::${PLANE_REPO}::${sourceOf(EXTRA)}`)).toBe(false);
-		expect(persisted.versions.get(REPO)?.some((version) => version.backend === "lightrag")).toBe(false);
+		expect(persisted.versions.get(REPO)).toHaveLength(1);
 	});
 });
 
