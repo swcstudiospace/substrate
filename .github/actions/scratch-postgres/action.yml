@@ -30,15 +30,26 @@ runs:
         dir="$RUNNER_TEMP/scratch-pg"
         case "$MODE" in
           start)
-            if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
+            pg_bin=""
+            for d in /usr/lib/postgresql/*/bin; do
+              if [ -x "$d/initdb" ]; then pg_bin="$d"; fi
+            done
+            if [ -z "$pg_bin" ]; then
               sudo apt-get update
-              sudo apt-get install -y postgresql-16
+              sudo apt-get install -y postgresql-16 || sudo apt-get install -y postgresql-17 || sudo apt-get install -y postgresql
+              for d in /usr/lib/postgresql/*/bin; do
+                if [ -x "$d/initdb" ]; then pg_bin="$d"; fi
+              done
             fi
-            echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
-            export PATH="/usr/lib/postgresql/16/bin:$PATH"
+            if [ -z "$pg_bin" ]; then
+              echo "::error::no PostgreSQL binaries found under /usr/lib/postgresql" >&2
+              exit 1
+            fi
+            echo "$pg_bin" >> "$GITHUB_PATH"
+            export PATH="$pg_bin:$PATH"
             for tool in initdb pg_ctl pg_isready createdb; do
               if ! command -v "$tool" >/dev/null; then
-                echo "::error::$tool is not on PATH; PostgreSQL 16 ships in /usr/lib/postgresql/16/bin" >&2
+                echo "::error::$tool is not on PATH after install" >&2
                 exit 1
               fi
             done
