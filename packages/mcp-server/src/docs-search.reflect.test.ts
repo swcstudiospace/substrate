@@ -191,6 +191,20 @@ describe("SUBSTRATE_DOCS_RERANK", () => {
 		const on = await ask(world({ SUBSTRATE_DOCS_RERANK: "on", SUBSTRATE_CORPUS: "off" }, MIXED));
 		expect(JSON.stringify(on)).toBe(JSON.stringify(baseline));
 	});
+
+	test("a verdict a reader gives a document is stored in the store the search reads, and the next search orders that document by it", async () => {
+		const built = world({ SUBSTRATE_DOCS_RERANK: "on" }, [corpusChunk("docs/t1.md", 0.8), corpusChunk("docs/t2.md", 0.79)]);
+		expect(titles(await ask(built))).toEqual([`${REPO}:docs/t1.md`, `${REPO}:docs/t2.md`]);
+
+		const stored = await built.substrate.docsFeedback({ document: `${REPO}:docs/t1.md`, verdict: "wrong", session_id: "s-1" }, "omp");
+		expect(stored.ok).toBe(true);
+		expect([...built.reflect.feedback.values()].map((entry) => [entry.documentKey, entry.verdict, entry.sessionId])).toEqual([[key("docs/t1.md"), "wrong", "omp/s-1"]]);
+
+		// Equal authority before the verdict, so the plane's order stands; the `wrong` verdict then drops t1 below t2, though the plane scored it higher.
+		const reply = await ask(built);
+		expect(titles(reply)).toEqual([`${REPO}:docs/t2.md`, `${REPO}:docs/t1.md`]);
+		expect(reply.rerank).toEqual({ applied: true, moved: 2 });
+	});
 });
 
 describe("SUBSTRATE_DOCS_TELEMETRY", () => {

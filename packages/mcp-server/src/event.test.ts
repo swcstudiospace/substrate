@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	canonicalJson,
-	type ChainLink,
-	compareToAnchoredHead,
 	eventHash,
-	headRecordsFromLeaves,
 	inChainOrder,
 	InvalidEventError,
 	normalizeEvent,

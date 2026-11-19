@@ -15,6 +15,7 @@
 import { ANCHOR_SIGNER_ROTATE_ACTION } from "@substrate/ledger";
 import { DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE } from "./corpus/slo.ts";
 import { CORPUS_ROOT_ACTION } from "./corpus/root.ts";
+import { DOCS_SYNC_ACTION } from "./corpus/sync-event.ts";
 import { FORGET_ACTION } from "./memory-forget.ts";
 import { ANCHOR_REANCHOR_ACTION } from "./reanchor-plan.ts";
 import { SESSION_CHECKPOINT_ACTION, SESSION_ROLLBACK_ACTION, SESSION_ROLLBACK_REFUSED_ACTION } from "./session-events.ts";
@@ -29,6 +30,7 @@ export const RESERVED_NOTE_ACTIONS: ReadonlySet<string> = new Set([
 	FORGET_BATCH_ACTION,
 	FORGET_ACTION,
 	DOCS_CANARY_ACTION,
+	DOCS_SYNC_ACTION,
 	CORPUS_ROOT_ACTION,
 ]);
 

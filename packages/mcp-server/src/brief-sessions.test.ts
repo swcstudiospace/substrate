@@ -20,7 +20,7 @@ import {
 	type BriefWorktreesInput,
 } from "./brief-sessions.ts";
 import { DeadlineError } from "./deadline.ts";
-import { renderCompactBrief, type BriefSection, type CompactLimits } from "./brief-profile.ts";
+import { loadBriefProfileConfig, renderCompactBrief, renderFullBrief, type BriefSection, type CompactLimits, utf8Bytes } from "./brief-profile.ts";
 import type { ContextSession, SessionContext } from "./session-context.ts";
 import { defined } from "./test-support.ts";
 
@@ -189,6 +189,26 @@ describe("composeLiveSections", () => {
 			NOW,
 		);
 		expect(sections.map((section) => section.id)).toEqual(["sessions", "steering", "handoffs"]);
+	});
+
+	test("the three live sections, rendered at the configured compact cap, stay inside that cap in UTF-8 bytes", async () => {
+		const { nodes, memoryChars, bytes } = loadBriefProfileConfig({});
+		// Each section is held to 1,200 characters, so ASCII text can leave the uncapped render under the cap. Non-ASCII goals
+		// take two bytes a character, which makes the uncapped render longer than the cap.
+		const sections = await composeLiveSections(
+			{
+				context: async () => contextOf(Array.from({ length: 20 }, (_, n) => contextSession(n))),
+				steering: () => ({ sessionId: "sess-a", state: "ACTIVE", steering: "hold", pending: Array.from({ length: 12 }, (_, n) => ({ id: `d${n}`, action: "annotate", priority: "normal", body: "read the notes ".repeat(20), ageS: n })), pendingTotal: 12 }),
+				handoffs: async () => Array.from({ length: 30 }, (_, n) => ({ goal: `goal ${n} ${"é".repeat(300)}`, createdAtMs: NOW - n * 1_000, verified: true })),
+				worktrees: null,
+			},
+			manualDeadline().race,
+			NOW,
+		);
+		expect(sections.map((section) => section.id)).toEqual(["sessions", "steering", "handoffs"]);
+		const capped = utf8Bytes(renderCompactBrief(sections, COMPACT_STATE, { nodes, memoryChars, bytes }));
+		expect(capped).toBeLessThanOrEqual(bytes);
+		expect(utf8Bytes(renderFullBrief(sections))).toBeGreaterThan(bytes);
 	});
 
 	test("a source that is not ready when the deadline ends is replaced by a one-line note, and the sections that were ready stay", async () => {
