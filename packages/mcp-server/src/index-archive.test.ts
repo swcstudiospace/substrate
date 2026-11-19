@@ -69,6 +69,7 @@ function cell(column: ArchiveColumn, i: number): string | number | boolean | nul
 	if (column.type === "text") return column.name === "entry_hash" ? `hash-${pad}` : `${column.name}-${pad}`;
 	if (column.type === "int") return i;
 	if (column.type === "bigint") return String(i);
+	if (column.type === "jsonb") return `{"i":${i}}`;
 	if (column.type === "bool") return i % 2 === 0;
 	return `2026-10-14T00:00:00.${String(i % 1_000_000).padStart(6, "0")}Z`;
 }
@@ -897,5 +898,17 @@ describe("verify keeps constant state however damaged the file is", () => {
 		const lines = readFileSync(smallPath, "utf8").split("\n");
 		writeFileSync(smallPath, ["{not json", lines[1] ?? "", "{also not", ...lines.slice(3)].join("\n"));
 		expect(verifyIndexArchive(join(out, small.snapshot)).mismatches.find((m) => m.kind === "parse")?.detail).toBe("2 line(s) are not graph_bindings rows in archive form (first at line 1, 3)");
+	});
+});
+
+describe("corpus_documents in the archive", () => {
+	test("is a whitelisted table keyed by (repo, path), with its signals as jsonb and its manifest sequence as the identity restore moves past", () => {
+		const spec = tableSpec("corpus_documents");
+		expect(ARCHIVE_TABLES.map((table) => table.name)).toContain("corpus_documents");
+		expect(spec.key).toEqual(["repo", "path"]);
+		expect(spec.withheld).toEqual([]);
+		expect(spec.identity).toBe("manifest_seq");
+		expect(spec.columns.find((column) => column.name === "signals")?.type).toBe("jsonb");
+		expect(spec.columns.map((column) => column.name)).toContain("superseded_by");
 	});
 });

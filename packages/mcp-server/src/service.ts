@@ -6295,7 +6295,7 @@ export class Substrate {
 		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
 		const steering = this.steeringNoticeOf(prepared);
-		const final = this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
+		const final = await this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
 		if (prepared === undefined) this.recordRetrieval(surface, originalQuestion, chunks, reflected.shadow);
 		return final;
 	}
@@ -6790,18 +6790,15 @@ export class Substrate {
 	}
 
 	/**
-	 * Phase 69: a `docs_search` reply names the corpus root it was answered under, from the cache only. With `SUBSTRATE_CORPUS` off the
-	 * reply is returned untouched. A root that is not cached yet is left out and its computation starts off this call's path.
+	 * Phase 69: a `docs_search` reply names the corpus root it was answered under: the cached root while it matches the manifest's
+	 * version, else one read of the manifest that the reply waits for (bounded by `MAX_CORPUS_LEAVES`). With `SUBSTRATE_CORPUS` off the
+	 * reply is returned untouched. A manifest with no root (too large, no index, or unreadable) leaves the two fields out.
 	 */
-	private withCorpusRoot(reply: SearchReply): SearchReply {
+	private async withCorpusRoot(reply: SearchReply): Promise<SearchReply> {
 		if (!this.config.corpus.enabled) return reply;
-		const roots = this.corpusRoots();
-		const snapshot = roots.peek();
-		if (snapshot === null) {
-			roots.warm();
-			return reply;
-		}
-		return { ...reply, corpus_root: shortRoot(snapshot.root), corpus_count: snapshot.count };
+		const answer = await this.corpusRoots().current().catch(() => null);
+		if (answer === null || !answer.ok) return reply;
+		return { ...reply, corpus_root: shortRoot(answer.snapshot.root), corpus_count: answer.snapshot.count };
 	}
 
 	/** `POST /corpus/plan` and the planning half of the `substrate corpus plan` command. */
@@ -6895,9 +6892,9 @@ export class Substrate {
 	}
 
 	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
-	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
+	async corpusIngest(raw: unknown, callerSurface: Surface | null, isOperator: boolean): Promise<CorpusReply<CorpusIngestResponse>> {
 		const startedAt = this.corpusNowMs();
-		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
+		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface, isOperator);
 		// An `updated` row (a changed marker, tier or kind) changes supersession and authority but not the plane, so it drops the index only.
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.updated + reply.body.counts.tombstoned > 0) this.authorityIndex.invalidate();
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);

@@ -148,6 +148,7 @@ describe("response guards", () => {
 
 	test("accept the shapes the server sends", () => {
 		expect(isPlanResponse(plan)).toBe(true);
+		expect(isPlanResponse(planOf([{ action: "rename", repo: "local/c2", path: "new.md", sha256: "a".repeat(64), renamedFrom: "new.md", renamedFromRepo: "local/c1" }]))).toBe(true);
 		expect(isIngestResponse(ingestOf([{ repo: "r", path: "p", status: "refused", reason: "secret-findings" }]))).toBe(true);
 		expect(isStatusResponse(statusOf())).toBe(true);
 	});
@@ -158,6 +159,7 @@ describe("response guards", () => {
 		expect(isPlanResponse({ ...plan, items: [{ action: "delete", repo: "r", path: "p" }] })).toBe(false);
 		expect(isPlanResponse({ ...plan, items: [{ action: "add", repo: "r" }] })).toBe(false);
 		expect(isPlanResponse({ ...plan, manifestVersion: -1 })).toBe(false);
+		expect(isPlanResponse(planOf([{ action: "rename", repo: "local/c2", path: "new.md", sha256: "a".repeat(64), renamedFrom: "new.md", renamedFromRepo: 7 as unknown as string }]))).toBe(false);
 		expect(isIngestResponse({ ...ingestOf([]), results: [{ repo: "r", path: "p", status: "done" }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), byKind: [{ kind: "memo", count: 1 }] })).toBe(false);
 		expect(isStatusResponse({ ...statusOf(), byTier: [{ tier: 4, count: 1 }] })).toBe(false);

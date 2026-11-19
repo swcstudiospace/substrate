@@ -21,9 +21,6 @@ export const CORPUS_ROOT_ACTION = "docs.corpus.root";
 /** The ledger session every root event is written in, so a reader finds them without scanning a whole surface. */
 export const CORPUS_ROOT_SESSION = "corpus-root";
 
-/** At most one root event per this many milliseconds; a change that lands inside the window is coalesced into the next event. */
-export const ROOT_EMIT_MIN_INTERVAL_MS = 5_000;
-
 /**
  * The most active rows one root is made from. A manifest past this has no root and says so (`too-large`) instead of a root over
  * a prefix that would look complete. The store reads one row more than this to know.
@@ -112,13 +109,11 @@ export type CorpusRootRead = { ok: true; snapshot: CorpusRootSnapshot; tree: Cor
 
 /** The keeper's clock; a test passes a manual one. */
 export interface RootClock {
-	now(): number;
 	setTimer(run: () => void, ms: number): void;
 }
 
 /** The real clock. The timer is unref'd, so a pending root event never holds the process open (one still waiting at shutdown is dropped). */
 export const systemRootClock: RootClock = {
-	now: () => Date.now(),
 	setTimer: (run, ms) => {
 		setTimeout(run, ms).unref();
 	},
@@ -139,13 +134,12 @@ export interface CorpusRootKeeperDeps {
  *   it with the manifest's version, so a write this process did not note is not served as current.
  * - An ingest brackets its writes with `writeStarted()` and `writeSettled()`. While one is in flight the cache is empty and no read
  *   is cached, so a search never names a root the batches already saved have outdated.
- * - A root is recorded only when no ingest is writing (the event follows `writeSettled`, which re-arms an event a timer found
- *   deferred) and only when it differs from the root written last, so a state is recorded once however the batches were ordered
- *   and an unchanged manifest writes nothing.
- * - `manifestChanged()` bumps the generation and schedules one root event. Events are coalesced: at most one per
- *   {@link ROOT_EMIT_MIN_INTERVAL_MS}, and the one that goes out reads the manifest when its timer fires, so the latest state wins.
- *   The timer runs after the request that noted the change has answered, and a failure of any kind is swallowed: a root event
- *   never fails an ingest. A root event lost to a failure is written by the next change.
+ * - A root is recorded only when no ingest is writing: the event a changing sync owes follows that ingest's `writeSettled`, which
+ *   re-arms an event a timer found deferred.
+ * - `manifestChanged()` bumps the generation and owes one root event for the change. The event is written off the request that
+ *   noted the change, on a timer with no delay, and it reads the manifest when its turn comes, so it carries the state at that
+ *   time. Each changing sync owes its own event, and writes run one at a time. A failure of any kind is swallowed: a root event
+ *   never fails an ingest, and a lost event is not retried (the next change writes its own).
  * - `peek()` never reads: it is what `docs_search` uses.
  */
 export class CorpusRootKeeper {
@@ -154,14 +148,10 @@ export class CorpusRootKeeper {
 	private cached: (CorpusRootSnapshot & { generation: number }) | null = null;
 	private reading: { generation: number; promise: Promise<CorpusRootRead> } | null = null;
 	private timerPending = false;
-	/** When the last root write was attempted: the five-second window runs from there, rerun or not. */
-	private lastWriteMs: number | null = null;
-	/** The root the ledger holds last. A root is compared, not its version: concurrent batches may commit out of order, so a final state can share the version of an earlier read. */
-	private lastEmittedRoot: string | null = null;
 	/** The ingests whose writes have started and not settled. */
 	private writers = 0;
-	/** A root event is owed: the manifest changed and no root written or judged unneeded since. It survives a timer that fired during an ingest. */
-	private owed = false;
+	/** Changing syncs whose root event is not written yet: one event each. The count survives a timer that fired during an ingest. */
+	private owed = 0;
 	/** The one root write in flight, and whether another was asked for while it ran. */
 	private emitting: Promise<void> | null = null;
 	private emitAgain = false;
@@ -176,15 +166,6 @@ export class CorpusRootKeeper {
 		if (this.writers > 0 || cached === null || cached.generation !== this.generation) return null;
 		const { generation: _generation, ...snapshot } = cached;
 		return snapshot;
-	}
-
-	/** Starts the computation the cache is missing, off the caller's path. Never throws; a failed read leaves the cache empty. */
-	warm(): void {
-		if (this.writers > 0 || this.peek() !== null || this.deps.store() === null) return;
-		this.read().then(
-			() => undefined,
-			() => undefined,
-		);
 	}
 
 	/** Reads the manifest (sharing a read already in flight for this generation) and caches the root. Rejects when the store does. */
@@ -236,31 +217,29 @@ export class CorpusRootKeeper {
 		else {
 			this.generation += 1;
 			// An event an earlier ingest owed may have been deferred by this one; its timer is gone, so it is armed again here.
-			if (this.writers === 0 && this.owed) this.scheduleEmit();
+			if (this.writers === 0 && this.owed > 0) this.scheduleEmit();
 		}
 	}
 
-	/** The manifest changed: forget the cached root and schedule one root event. Returns at once and never throws. */
+	/** The manifest changed: forget the cached root and owe one root event for it. Returns at once and never throws. */
 	manifestChanged(): void {
 		this.generation += 1;
-		this.owed = true;
+		this.owed += 1;
 		this.scheduleEmit();
 	}
 
-	/** Arms the one timer a root event waits on: at once, or when the window since the last write attempt has passed. */
+	/** Arms the one timer the owed root events wait on: at once, off the request that noted the change. */
 	private scheduleEmit(): void {
-		if (this.deps.store() === null || this.timerPending) return;
-		const wait = this.lastWriteMs === null ? 0 : Math.max(0, this.lastWriteMs + ROOT_EMIT_MIN_INTERVAL_MS - this.clock.now());
+		if (this.deps.store() === null || this.timerPending || this.owed === 0) return;
 		this.timerPending = true;
 		this.clock.setTimer(() => {
 			this.timerPending = false;
 			void this.emitRoot();
-		}, wait);
+		}, 0);
 	}
 
 	/**
-	 * At most one root write runs. A request that arrives meanwhile is remembered, and once the running write ends it waits out the
-	 * window from that write's start like any other, so slow writes cannot make the next ones arrive closer than the interval.
+	 * At most one root write runs. A request that arrives meanwhile is remembered, and once the running write ends it runs in turn.
 	 */
 	private async emitRoot(): Promise<void> {
 		if (this.emitting !== null) {
@@ -277,27 +256,33 @@ export class CorpusRootKeeper {
 		await this.emitting;
 	}
 
+	/** Writes one root event per owed change, each carrying the manifest as it reads when its turn comes. Never throws. */
 	private async emitOnce(): Promise<void> {
-		try {
+		while (this.owed > 0) {
 			// While an ingest writes, the manifest is between versions: nothing is recorded now, and `writeSettled` owes the event after it.
 			if (this.writers > 0) return;
-			const read = await this.read();
+			let read: CorpusRootRead | null = null;
+			try {
+				read = await this.read();
+			} catch {
+				// An unreadable manifest: this change's event is lost, and the next change writes its own.
+			}
 			if (this.writers > 0) return;
-			this.owed = false;
-			if (!read.ok || read.snapshot.count === 0 || read.snapshot.root === this.lastEmittedRoot) return;
+			this.owed -= 1;
+			if (read === null || !read.ok || read.snapshot.count === 0) continue;
 			const { root, count, manifestVersion } = read.snapshot;
-			this.lastWriteMs = this.clock.now();
-			const written = await this.deps.emit({
-				surface: "substrate",
-				kind: "note",
-				summary: `corpus root ${shortRoot(root)} over ${count} documents (manifest ${manifestVersion})`,
-				session_id: CORPUS_ROOT_SESSION,
-				payload: { action: CORPUS_ROOT_ACTION, root, count, manifest_version: manifestVersion },
-			});
-			// A write the ledger refused is not a root it holds: the next event for this state must go out again.
-			if (written.stored) this.lastEmittedRoot = root;
-		} catch {
-			// The ingest this follows already answered; a root that did not reach the ledger is written by the next change.
+			// A write the ledger refused (`stored: false`) or threw is not retried: the next change writes its own event.
+			try {
+				await this.deps.emit({
+					surface: "substrate",
+					kind: "note",
+					summary: `corpus root ${shortRoot(root)} over ${count} documents (manifest ${manifestVersion})`,
+					session_id: CORPUS_ROOT_SESSION,
+					payload: { action: CORPUS_ROOT_ACTION, root, count, manifest_version: manifestVersion },
+				});
+			} catch {
+				// A ledger that threw: this change's event is lost. A failed write never fails an ingest.
+			}
 		}
 	}
 }

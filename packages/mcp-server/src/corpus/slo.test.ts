@@ -119,7 +119,7 @@ describe("an ingest request", () => {
 	test("sets the throughput gauge and the SLO reading when it sent documents, and an idle request leaves the gauge at 0 and the reading empty", async () => {
 		const w = await world();
 		expect(w.gauge(CORPUS_INGEST_RATE_METRIC)).toBeNull();
-		const first = await w.substrate.corpusIngest(ingestBody("# A\nthe first document"), "omp");
+		const first = await w.substrate.corpusIngest(ingestBody("# A\nthe first document"), "omp", true);
 		expect(first.ok).toBe(true);
 		const rate = defined(w.gauge(CORPUS_INGEST_RATE_METRIC), "ingest gauge");
 		expect(rate).toBeGreaterThan(0);
@@ -127,7 +127,7 @@ describe("an ingest request", () => {
 		expect(readings.ingestDocsPerS).toBe(rate);
 
 		// The same document again is unchanged: nothing is sent, so the gauge reads 0 and the objective is not judged.
-		const second = await w.substrate.corpusIngest(ingestBody("# A\nthe first document"), "omp");
+		const second = await w.substrate.corpusIngest(ingestBody("# A\nthe first document"), "omp", true);
 		expect(second.ok).toBe(true);
 		expect(w.gauge(CORPUS_INGEST_RATE_METRIC)).toBe(0);
 		expect((await w.substrate.fabricSources().corpus()).readings.ingestDocsPerS).toBeNull();
@@ -135,7 +135,7 @@ describe("an ingest request", () => {
 
 	test("a refused request records nothing", async () => {
 		const w = await world();
-		const refused = await w.substrate.corpusIngest({ protocol: 999 }, "omp");
+		const refused = await w.substrate.corpusIngest({ protocol: 999 }, "omp", true);
 		expect(refused.ok).toBe(false);
 		expect(w.gauge(CORPUS_INGEST_RATE_METRIC)).toBeNull();
 		expect((await w.substrate.fabricSources().corpus()).readings.ingestDocsPerS).toBeNull();
@@ -143,7 +143,7 @@ describe("an ingest request", () => {
 
 	test("with the corpus off nothing is recorded and the freshness gauge is never installed", async () => {
 		const w = await world({});
-		const reply = await w.substrate.corpusIngest(ingestBody("# A\nbody"), "omp");
+		const reply = await w.substrate.corpusIngest(ingestBody("# A\nbody"), "omp", true);
 		expect(reply.ok).toBe(false);
 		await w.substrate.refreshCorpusReadings();
 		expect(w.gauge(CORPUS_INGEST_RATE_METRIC)).toBeNull();
@@ -238,7 +238,7 @@ describe("the freshness read", () => {
 		const w = await world();
 		w.store.lastIngestAt = new Date(Date.now() - 1_000_000).toISOString();
 		expect(await w.substrate.refreshCorpusReadings()).toBe("ok");
-		await w.substrate.corpusIngest(ingestBody("# A\nthe first document"), "omp");
+		await w.substrate.corpusIngest(ingestBody("# A\nthe first document"), "omp", true);
 		await w.substrate.fabricSources().corpus();
 		expect(w.store.newestReads).toBe(3);
 		expect(w.store.statusReads).toBe(0);
@@ -383,13 +383,13 @@ describe("ingest throughput", () => {
 		const clock = { now: 0 };
 		const w = await world({ SUBSTRATE_CORPUS: "on" }, { plane: new SlowPlane(clock, 10_000), nowMs: () => clock.now });
 		const paths = Array.from({ length: 9 }, (_, index) => `docs/refreshed-${index}.md`);
-		const first = await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: paths.map((path) => makeDocument("acme/atlas", path, `# ${path}\nbody of ${path}`)), tombstones: [] }, "omp");
+		const first = await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: paths.map((path) => makeDocument("acme/atlas", path, `# ${path}\nbody of ${path}`)), tombstones: [] }, "omp", true);
 		expect(first.ok).toBe(true);
 
-		// The same bytes at another tier are refreshed in the manifest without a plane write; the one new document is the upload.
-		const refreshed = paths.map((path) => makeDocument("acme/atlas", path, `# ${path}\nbody of ${path}`, { tier: 2 }));
+		// The same bytes under another source are refreshed in the manifest without a plane write; the one new document is the upload.
+		const refreshed = paths.map((path) => makeDocument("acme/atlas", path, `# ${path}\nbody of ${path}`, { source: "github" }));
 		const fresh = makeDocument("acme/atlas", "docs/new.md", "# New\nthe one new document");
-		const second = await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [...refreshed, fresh], tombstones: [] }, "omp");
+		const second = await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [...refreshed, fresh], tombstones: [] }, "omp", true);
 		expect(second.ok).toBe(true);
 		expect(second.ok && second.body.counts).toMatchObject({ ingested: 1, updated: 9 });
 
@@ -404,9 +404,9 @@ describe("ingest throughput", () => {
 		const clock = { now: 0 };
 		const w = await world({ SUBSTRATE_CORPUS: "on" }, { plane: new SlowPlane(clock, 10_000), nowMs: () => clock.now });
 		const original = makeDocument("acme/atlas", "docs/a.md", "# A\nthe first document");
-		await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [original], tombstones: [] }, "omp");
+		await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [original], tombstones: [] }, "omp", true);
 		clock.now += 60_000;
-		const again = await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [{ ...original, tier: 2 }], tombstones: [] }, "omp");
+		const again = await w.substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [{ ...original, source: "github" }], tombstones: [] }, "omp", true);
 		expect(again.ok && again.body.counts).toMatchObject({ ingested: 0, updated: 1 });
 		expect((await w.substrate.fabricSources().corpus()).readings.ingestDocsPerS).toBeNull();
 	});

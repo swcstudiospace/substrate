@@ -3,7 +3,7 @@ import { CORPUS_EMPTY_ROOT, compareEntries, corpusLeafHex } from "@substrate/cor
 import { merkleRootHex, verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
 import { defined } from "../test-support.ts";
 import type { EventInput } from "../types.ts";
-import { buildCorpusTree, CORPUS_ROOT_ACTION, CORPUS_ROOT_SESSION, CorpusRootKeeper, corpusProof, corpusRoot, ROOT_EMIT_MIN_INTERVAL_MS, type RootClock, type RootRow } from "./root.ts";
+import { buildCorpusTree, CORPUS_ROOT_ACTION, CORPUS_ROOT_SESSION, CorpusRootKeeper, corpusProof, corpusRoot, type RootClock, type RootRow } from "./root.ts";
 import { FakeStore, makeRow, sha256Hex } from "./testkit.ts";
 import type { ActiveLeaves } from "./store.ts";
 
@@ -117,9 +117,6 @@ describe("corpusProof", () => {
 class ManualClock implements RootClock {
 	at = 1_000_000;
 	readonly timers: Array<{ run: () => void; ms: number }> = [];
-	now(): number {
-		return this.at;
-	}
 	setTimer(run: () => void, ms: number): void {
 		this.timers.push({ run, ms });
 	}
@@ -130,7 +127,7 @@ class ManualClock implements RootClock {
 
 /** Lets every pending promise step settle: the keeper's work is in-memory, so no real time is needed. */
 async function flush(): Promise<void> {
-	for (let turn = 0; turn < 25; turn++) await Promise.resolve();
+	for (let turn = 0; turn < 200; turn++) await Promise.resolve();
 }
 
 function harness(store: FakeStore | null = new FakeStore(), emitFails = false) {
@@ -169,42 +166,37 @@ describe("CorpusRootKeeper", () => {
 		expect(event.summary).toContain(corpusRoot(rowsOf(4)).root.slice(0, 12));
 	});
 
-	test("changes inside the window are coalesced into one event that carries the latest state", async () => {
+	test("two changing syncs that land before the timer runs each owe and write their own event, on one timer", async () => {
 		const { clock, emitted, keeper, store } = harness();
 		const manifest = defined(store);
 		seed(manifest, 2);
 		keeper.manifestChanged();
 		manifest.seed(makeRow({ repo: REPO, path: "docs/late.md", sha256: sha256Hex("late") }));
 		keeper.manifestChanged();
-		keeper.manifestChanged();
 		expect(clock.timers).toHaveLength(1);
 		clock.fire();
 		await flush();
-		expect(emitted).toHaveLength(1);
-		expect(defined(emitted[0]).payload).toMatchObject({ count: 3, manifest_version: 3 });
+		expect(emitted).toHaveLength(2);
+		expect(emitted.map((event) => event.payload?.manifest_version)).toEqual([3, 3]);
 	});
 
-	test("the next event waits out the rest of the five-second window, and one change never writes two", async () => {
+	test("a changing sync writes its event at once, not after a window, and a change with no manifest write still owes one", async () => {
 		const { clock, emitted, keeper, store } = harness();
 		const manifest = defined(store);
 		seed(manifest, 1);
 		keeper.manifestChanged();
 		clock.fire();
 		await flush();
-		clock.at += 1_000;
 		manifest.seed(makeRow({ repo: REPO, path: "docs/next.md", sha256: sha256Hex("next") }));
 		keeper.manifestChanged();
-		expect(clock.timers.map((timer) => timer.ms)).toEqual([ROOT_EMIT_MIN_INTERVAL_MS - 1_000]);
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS - 1_000;
+		expect(clock.timers.map((timer) => timer.ms)).toEqual([0]);
 		clock.fire();
 		await flush();
 		expect(emitted.map((event) => event.payload?.manifest_version)).toEqual([1, 2]);
-		// A change noted with no manifest write is the same version: nothing more is written.
 		keeper.manifestChanged();
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
 		clock.fire();
 		await flush();
-		expect(emitted).toHaveLength(2);
+		expect(emitted).toHaveLength(3);
 	});
 
 	test("the empty manifest is never emitted", async () => {
@@ -215,7 +207,7 @@ describe("CorpusRootKeeper", () => {
 		expect(emitted).toEqual([]);
 	});
 
-	test("a write the ledger refused is not remembered as written: the same state goes out again on the next event", async () => {
+	test("a write the ledger refused is not retried: the next changing sync writes its own event", async () => {
 		const { clock, emitted, keeper, ledger, store } = harness();
 		seed(defined(store), 2);
 		ledger.stored = false;
@@ -223,19 +215,12 @@ describe("CorpusRootKeeper", () => {
 		clock.fire();
 		await flush();
 		expect(emitted).toHaveLength(1);
-		// A later ingest changes only metadata: the root is the same, and the ledger has no copy of it.
 		ledger.stored = true;
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
 		keeper.manifestChanged();
 		clock.fire();
 		await flush();
 		expect(emitted.map((event) => event.payload?.count)).toEqual([2, 2]);
-		// Once the ledger holds it, the state is not written again.
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
-		keeper.manifestChanged();
-		clock.fire();
-		await flush();
-		expect(emitted).toHaveLength(2);
+		expect(clock.timers).toEqual([]);
 	});
 
 	test("from the first write of an ingest to its end the cached root is unavailable and nothing read meanwhile is kept", async () => {
@@ -250,8 +235,7 @@ describe("CorpusRootKeeper", () => {
 		manifest.seed(makeRow({ repo: REPO, path: "docs/batch.md", sha256: sha256Hex("batch") }));
 		const during = await keeper.read();
 		expect(during.ok && during.snapshot.count).toBe(4);
-		keeper.warm();
-		await flush();
+		await keeper.current();
 		expect(keeper.peek()).toBeNull();
 		keeper.writeSettled(true);
 		expect(keeper.peek()).toBeNull();
@@ -293,18 +277,19 @@ describe("CorpusRootKeeper", () => {
 		expect(emitted).toEqual([]);
 	});
 
-	test("a root write that outlives the window is never repeated for its version, and a newer version is written after it", async () => {
+	test("a root write is never overlapped: a change noted while one runs writes its own event after it", async () => {
 		const clock = new ManualClock();
 		const store = new FakeStore();
 		const emitted: EventInput[] = [];
 		const releases: Array<() => void> = [];
 		const keeper = new CorpusRootKeeper({
 			store: () => store,
-			emit: (event) =>
-				new Promise<{ stored: boolean }>((resolve) => {
-					emitted.push(event);
-					releases.push(() => resolve({ stored: true }));
-				}),
+			emit: (event) => {
+				const { promise, resolve } = Promise.withResolvers<{ stored: boolean }>();
+				emitted.push(event);
+				releases.push(() => resolve({ stored: true }));
+				return promise;
+			},
 			clock,
 		});
 		seed(store, 2);
@@ -312,122 +297,50 @@ describe("CorpusRootKeeper", () => {
 		clock.fire();
 		await flush();
 		expect(emitted).toHaveLength(1);
-		// The same version noted again (a failed-only ingest) while the first write is still running: nothing more is written.
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
-		keeper.manifestChanged();
-		clock.fire();
-		await flush();
-		expect(emitted).toHaveLength(1);
-		// A newer version noted while it runs waits for it: one root write at a time.
+		// A newer change noted while the first write runs waits for it: one root write at a time.
 		store.seed(makeRow({ repo: REPO, path: "docs/newer.md", sha256: sha256Hex("newer") }));
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
 		keeper.manifestChanged();
 		clock.fire();
 		await flush();
 		expect(emitted).toHaveLength(1);
 		defined(releases.shift(), "the first write").call(undefined);
-		await flush();
-		// The rerun waits out the window from the first write's start, which is long past here, so its timer is armed at once.
-		clock.fire();
 		await flush();
 		expect(emitted.map((event) => event.payload?.manifest_version)).toEqual([2, 3]);
 		defined(releases.shift(), "the second write").call(undefined);
 		await flush();
-		// Nothing is owed for a version already written.
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
-		keeper.manifestChanged();
-		clock.fire();
-		await flush();
 		expect(emitted).toHaveLength(2);
 	});
 
-	test("a request that arrives during a slow write waits out the window from that write's start, so writes never come closer than the interval", async () => {
-		const clock = new ManualClock();
-		const store = new FakeStore();
-		const starts: number[] = [];
-		const releases: Array<() => void> = [];
-		const keeper = new CorpusRootKeeper({
-			store: () => store,
-			emit: () =>
-				new Promise<{ stored: boolean }>((resolve) => {
-					starts.push(clock.now());
-					releases.push(() => resolve({ stored: true }));
-				}),
-			clock,
-		});
-		seed(store, 2);
-		keeper.manifestChanged();
-		clock.fire();
-		await flush();
-		// The first write is slow. A second change is noted after the window, while it still runs.
-		clock.at += 6_000;
-		store.seed(makeRow({ repo: REPO, path: "docs/second.md", sha256: sha256Hex("second") }));
-		keeper.manifestChanged();
-		clock.fire();
-		await flush();
-		defined(releases.shift(), "the first write").call(undefined);
-		await flush();
-		clock.fire();
-		await flush();
-		expect(starts).toEqual([1_000_000, 1_006_000]);
-		// A third change four seconds after the second write began waits the rest of the window from that start, not from the first.
-		clock.at += 4_000;
-		store.seed(makeRow({ repo: REPO, path: "docs/third.md", sha256: sha256Hex("third") }));
-		keeper.manifestChanged();
-		expect(clock.timers.map((timer) => timer.ms)).toEqual([ROOT_EMIT_MIN_INTERVAL_MS - 4_000]);
-	});
-
-	test("nothing is recorded while an ingest is writing, and the settled state is recorded after it", async () => {
+	test("nothing is recorded while an ingest is writing; the events it and an earlier sync owe are written after it settles", async () => {
 		const { clock, emitted, keeper, store } = harness();
 		const manifest = defined(store);
 		seed(manifest, 2);
 		keeper.manifestChanged();
-		clock.fire();
-		await flush();
-		expect(emitted).toHaveLength(1);
 		keeper.writeStarted();
 		manifest.seed(makeRow({ repo: REPO, path: "docs/batch-1.md", sha256: sha256Hex("batch 1") }));
-		// A timer left over from the previous ingest fires while this one is writing.
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
-		keeper.manifestChanged();
+		// The timer fires while this ingest is writing: nothing is recorded, and both changes stay owed.
 		clock.fire();
 		await flush();
-		expect(emitted).toHaveLength(1);
+		expect(emitted).toEqual([]);
 		manifest.seed(makeRow({ repo: REPO, path: "docs/batch-2.md", sha256: sha256Hex("batch 2") }));
 		keeper.writeSettled(true);
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
 		clock.fire();
 		await flush();
-		expect(emitted.map((event) => event.payload?.count)).toEqual([2, 4]);
+		// Two changing syncs, two events, each read once the writes had settled.
+		expect(emitted.map((event) => event.payload?.count)).toEqual([4, 4]);
 	});
 
-	test("a root is compared, not its version: a final state that shares the version of an earlier read is still recorded", async () => {
-		// Concurrent batches may commit out of order, so two different states can read at the same manifest version.
-		class SharedVersion extends FakeStore {
-			reads = 0;
-			override async activeLeaves(limit: number): Promise<ActiveLeaves> {
-				const real = await super.activeLeaves(limit);
-				this.reads += 1;
-				return { ...real, manifestVersion: 9, leaves: this.reads === 1 ? real.leaves.slice(0, 2) : real.leaves };
-			}
-		}
-		const shared = new SharedVersion();
-		const { clock, emitted, keeper } = harness(shared);
-		seed(shared, 3);
+	test("every changing sync writes its own event, even when its root is the same as the last one written", async () => {
+		const { clock, emitted, keeper, store } = harness();
+		seed(defined(store), 2);
 		keeper.manifestChanged();
 		clock.fire();
 		await flush();
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
 		keeper.manifestChanged();
 		clock.fire();
 		await flush();
-		expect(emitted.map((event) => event.payload?.count)).toEqual([2, 3]);
-		// The same state again writes nothing.
-		clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
-		keeper.manifestChanged();
-		clock.fire();
-		await flush();
-		expect(emitted).toHaveLength(2);
+		expect(emitted.map((event) => event.payload?.count)).toEqual([2, 2]);
+		expect(emitted.map((event) => event.payload?.root)).toEqual([corpusRoot(rowsOf(2)).root, corpusRoot(rowsOf(2)).root]);
 	});
 
 	test("a manifest too large for a root is not emitted and says so on read", async () => {
@@ -468,29 +381,26 @@ describe("CorpusRootKeeper", () => {
 		await flush();
 		expect(recovering.emitted).toEqual([]);
 		unreadable.failing = false;
-		recovering.clock.at += ROOT_EMIT_MIN_INTERVAL_MS;
 		recovering.keeper.manifestChanged();
 		recovering.clock.fire();
 		await flush();
 		expect(recovering.emitted).toHaveLength(1);
 	});
 
-	test("with no manifest (the corpus is off) a change schedules nothing and a search warms nothing", () => {
+	test("with no manifest (the corpus is off) a change schedules nothing and nothing is cached", () => {
 		const { clock, keeper } = harness(null);
 		keeper.manifestChanged();
-		keeper.warm();
 		expect(clock.timers).toEqual([]);
 		expect(keeper.peek()).toBeNull();
 	});
 
-	test("peek never reads the manifest; warm fills the cache for the current version, and a change empties it", async () => {
+	test("peek never reads the manifest; a read fills it, and a change empties it", async () => {
 		const { keeper, store } = harness();
 		const manifest = defined(store);
 		seed(manifest, 3);
 		expect(keeper.peek()).toBeNull();
 		expect(manifest.leafReads).toBe(0);
-		keeper.warm();
-		await flush();
+		await keeper.read();
 		expect(keeper.peek()).toEqual({ root: corpusRoot(rowsOf(3)).root, count: 3, manifestVersion: 3, skipped: 0 });
 		expect(manifest.leafReads).toBe(1);
 		keeper.manifestChanged();

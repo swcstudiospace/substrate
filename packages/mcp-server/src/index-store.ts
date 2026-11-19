@@ -833,8 +833,8 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 	},
 	// v1.7 phase 65 (doc watch): the planning refresh's per-page content hashes, so a restart ingests only the pages that
 	// changed. One row per docs-plane destination and `.planning/` path. `destination` is a hash of the configured docs URL,
-	// never the URL. A cutover to another plane misses the old rows and ingests. Written only while
-	// `SUBSTRATE_PLANNING_HASH_STORE=on` (the default is off, and an empty table costs nothing, so the step always runs, like
+	// never the URL. A cutover to another plane misses the old rows and ingests. Written while
+	// `SUBSTRATE_PLANNING_HASH_STORE` is on (the default; `off` skips the writes). An empty table costs nothing, so the step always runs, like
 	// step 35). It takes version 39, after step 38 `corpus_reflect`.
 	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
 	// restored dump before production, like steps 33 to 35.
@@ -3080,7 +3080,7 @@ export const MAX_ARCHIVE_PAGE_ROWS = 5000;
 const RESTORE_BATCH_ROWS = 200;
 
 /** The Postgres type a column type is cast to when a restore binds it. */
-const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz" };
+const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz", jsonb: "jsonb" };
 
 /** One REPEATABLE READ READ ONLY view of the archived tables: every read through it sees the same instant. */
 export interface IndexSnapshotReader {
@@ -3109,7 +3109,7 @@ function exportSelectList(spec: ArchiveTableSpec): string {
 		.map((column) => {
 			const quoted = `"${column.name}"`;
 			if (column.type === "timestamptz") return `to_char(${quoted} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as ${quoted}`;
-			if (column.type === "bigint") return `${quoted}::text as ${quoted}`;
+			if (column.type === "bigint" || column.type === "jsonb") return `${quoted}::text as ${quoted}`;
 			return quoted;
 		})
 		.join(", ");
@@ -3163,6 +3163,10 @@ function archiveAccess(sql: SQL): IndexRestoreTx {
 				const params: Array<string | number | boolean | null> = [];
 				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${PG_TYPE[column.type]}`).join(", ")})`);
 				await sql.unsafe(`insert into "${spec.name}" (${columns.map((column) => `"${column.name}"`).join(", ")}) values ${tuples.join(", ")}`, params);
+			}
+			// A restore loads an identity column with the archived values: its sequence moves past them, so the next insert takes a value above them.
+			if (spec.identity !== undefined) {
+				await sql.unsafe(`select setval(pg_get_serial_sequence($1, $2), coalesce((select max("${spec.identity}") from "${spec.name}"), 0) + 1, false)`, [spec.name, spec.identity]);
 			}
 		},
 	};

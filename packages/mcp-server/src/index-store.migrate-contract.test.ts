@@ -59,7 +59,6 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		schema_migrations: "the migration ledger that IndexStore.migrate() creates itself; it is not archive data",
 		skills_registry: "step 17 predates the archive's closed table list and is not part of it; archiving it is a separate change",
 		planning_steering_audit: "step 33 is an opt-in (steering-audit), append-only steering audit table; it is not part of the archive's closed table list and archiving it is a separate change",
-		corpus_documents: "step 35 is the corpus manifest, rebuilt by re-running the corpus scan and ingest; it is not part of the archive's closed table list and archiving it is a separate change",
 		worktrees: "step 36 is the worktree registry, rebuilt by the next report from each host; archiving stale paths would only restore them, and the closed table list stays as it is",
 		planning_page_hashes: "step 39 holds the planning refresh's page hashes, rebuilt by the next planning scan (a missing row only re-ingests that page); it is not part of the archive's closed table list and archiving it is a separate change",
 		steering_sessions: "step 37 is a historical opt-in (steering-sessions) restart-cache table whose runtime consumers were removed; its immutable migration and rows remain for compatibility, never grant authority, and remain outside the archive's closed table list",

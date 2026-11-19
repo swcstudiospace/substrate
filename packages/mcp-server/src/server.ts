@@ -1780,7 +1780,7 @@ export function createHttpServer(
 				// Counts only: the audit record never carries a document body.
 				const fields = { documents: listLength(parsed, "documents"), tombstones: listLength(parsed, "tombstones") };
 				if (!(await auditedRest(res, observability, surface, "corpus_ingest", fields))) return;
-				const reply = await substrate.corpusIngest(parsed, surface);
+				const reply = await substrate.corpusIngest(parsed, surface, caller.isOperator);
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
