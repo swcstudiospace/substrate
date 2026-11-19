@@ -53,6 +53,8 @@ function harness(opts: {
 	modelRouteThrows?: string;
 	/** ensureModelRoute throws only for this graph id (the others succeed). */
 	modelRouteThrowsFor?: string;
+	/** ensureModelRoute throws from its second call on; openTask's second call runs after store.save. */
+	modelRouteThrowsAfterSave?: string;
 	/** sessions.prompt rejects at once when the idempotency key contains this text. */
 	promptRejectsFor?: string;
 	sessionState?: string;
@@ -179,6 +181,9 @@ function harness(opts: {
 			sequence.push(`ensureModelRoute:${graphId}`);
 			if (opts.modelRouteThrows) throw new Error(opts.modelRouteThrows);
 			if (opts.modelRouteThrowsFor === graphId) throw new Error(`relay failed for ${graphId}`);
+			if (opts.modelRouteThrowsAfterSave === graphId && calls.filter((c) => c.name === "ensureModelRoute").length > 1) {
+				throw new Error(`route failed after save for ${graphId}`);
+			}
 		},
 		route: ROUTE,
 		testsRoute: "sandbox",
@@ -297,7 +302,7 @@ describe("TaskService.openTask", () => {
 		expect(body.seeded.every((f) => /^[0-9a-f]{64}$/.test(f.sha256))).toBe(true);
 		expect(JSON.parse(h.files.get("/home/agentos/.claude.json") ?? "")).toEqual({
 			mcpServers: {
-				substrate: { type: "http", url: "http://127.0.0.1:7410/mcp" },
+				substrate: { type: "http", url: "http://127.0.0.1:7413/mcp" },
 				notion: { type: "http", url: "http://127.0.0.1:7412/mcp/notion" },
 				linear: { type: "http", url: "http://127.0.0.1:7412/mcp/linear" },
 			},
@@ -358,6 +363,21 @@ describe("TaskService.openTask", () => {
 		expect(result.status).toBe(502);
 		expect(h.named("graphRelease")).toHaveLength(1);
 		expect(h.named("sessions.open")).toHaveLength(0);
+	});
+
+	test("a failure after store.save releases once through releaseOnce and leaves the record unresumable", async () => {
+		const h = harness({ modelRouteThrowsAfterSave: GID });
+		const result = await h.service.openTask(openBody());
+		expect(result.status).toBe(502);
+		expect(h.named("sessions.prompt")).toHaveLength(0);
+		// The record was saved before the failure; the failure path releases it once, via releaseOnce.
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
+		expect(h.store.get(GID, NID)?.released).toBe(true);
+		expect(interruptedTasks(h.store.list())).toEqual([]);
+		// releaseOnce is the single release path: a second call on the released record is a no-op.
+		await h.service.releaseOnce(GID, NID);
+		expect(h.named("graphRelease")).toHaveLength(1);
 	});
 
 	test("a failed prompt sets last_error and exit_code 1", async () => {

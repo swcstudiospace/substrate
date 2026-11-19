@@ -4,8 +4,8 @@
  * persistent VM storage under /var/lib/substrate/agentos, and the task API on 127.0.0.1:7411.
  *
  * Config comes from the unit's environment (infra/vps/substrate-host.service). Nothing from
- * /etc/substrate/substrate.env reaches a VM except, on route a:anthropic_key only,
- * SUBSTRATE_VM_ANTHROPIC_API_KEY as the session's model auth (D-08).
+ * /etc/substrate/substrate.env reaches a VM. The Anthropic key never does: on route a:anthropic_key a VM's
+ * model calls go to the host relay on 127.0.0.1:3001, which attaches SUBSTRATE_VM_ANTHROPIC_API_KEY (D-08).
  */
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import type { Server } from "node:http";
@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
+import { startSubstrateProxy } from "./substrate-proxy.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
 import { defaultSandboxStatePath, destroySandbox, listSandboxes, runEgressCleanup, setEgressWarnSink } from "./sandbox-provider.ts";
@@ -84,7 +85,6 @@ try {
 	fail(String(cause));
 }
 const ultrathinkConfig = env("SUBSTRATE_ULTRATHINK_CONFIG") ?? "/root/.config/ultrathink/config.json";
-const directKey = route.a === "anthropic_key" ? env("SUBSTRATE_VM_ANTHROPIC_API_KEY") : undefined;
 
 // Storage: root only (rivet keeps session env and history in plaintext, D-08).
 for (const dir of [storageDir, join(storageDir, "tasks")]) {
@@ -154,7 +154,6 @@ const service = new TaskService({
 	route,
 	testsRoute,
 	model,
-	directKey,
 	skills,
 	trackers,
 	sync: sync ?? undefined,
@@ -251,7 +250,12 @@ log(`[substrate-host] interrupted turns resumed: ${resumed}`);
 // D-10: the tracker MCP proxy exists only on the evidence-selected vm_mcp route; elsewhere the seeded
 // notion/linear entries are inert (port neither exempted nor served) and the host does those writes.
 const trackerProxy: Server | null = trackerRoute(route) === "vm_mcp" ? startTrackerProxy({ log }) : null;
-if (!trackerProxy) log("[substrate-host] tracker mcp proxy off (tracker route host)");
+// Phase 32: the VM's substrate entry points at this loopback proxy, which attaches the host's job
+// bearer (SUBSTRATE_TOKEN_SUBSTRATE, else the SubstrateClient order). The VM never holds the bearer.
+const substrateProxy: Server | null = substrate.bearer
+	? startSubstrateProxy({ upstream: `${mcpBase}/mcp`, bearer: substrate.bearer, log })
+	: null;
+if (!substrateProxy) log("[substrate-host] substrate mcp proxy off (no host bearer; substrate calls refused)");
 
 function sleepApprovals(ms: number): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
@@ -312,6 +316,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		log(`[substrate-host] ${signal}: stopping`);
 		service.beginShutdown();
 		server.close();
+		substrateProxy?.close();
 		trackerProxy?.close();
 		registry
 			.shutdown()

@@ -30,8 +30,8 @@ ConditionPathExists=/opt/agent-substrate/current/packages/host/src/main.ts
 Type=simple
 # Credentials for the host only (D-08): names SUBSTRATE_TOKEN_SUBSTRATE — the value lives
 # with the operator in /etc/substrate/substrate-host.env, never in the repo. Nothing from
-# this file is copied into a VM except, on route a:anthropic_key,
-# SUBSTRATE_VM_ANTHROPIC_API_KEY as the session's model auth.
+# is copied into a VM. The Anthropic key never is: on route a:anthropic_key a VM's model calls go to the host
+# relay on 127.0.0.1:3001, which attaches SUBSTRATE_VM_ANTHROPIC_API_KEY on the host.
 EnvironmentFile=/etc/substrate/substrate-host.env
 Environment=HOME=/root
 # Engine: shared loopback engine (31-SPIKE.md G2 UNVERIFIED). No RIVET_RUN_ENGINE=1.

@@ -158,6 +158,8 @@ Approvals-channel checklist (names only — values never enter the repo):
 | Host git/gh | `git -C <worktree> push origin substrate/<gid>`, `gh pr create --repo/--head/--base` fixed by the graph, commit identity fixed; guest supplies title/body/message text within limits only; `.substrate-*` excluded from every add; scratch guard before any network call |
 | Host sync | `NOTION_API_KEY`/`LINEAR_API_KEY` read in the host process only; sync writes PR URL / PR # / PR State / Repo / Branch and the Linear PR link — no workflow state, no Notion Status, never Done (Done comes only from `graph_complete` through the DoD gate) |
 
+The VM reaches substrate MCP only on the `a:loopback` route, through the host proxy at `127.0.0.1:7413`, which adds the host bearer. On `a:anthropic_key` and `a:hostfn_proxy` the VM's substrate entry is not usable, because the VM holds no bearer. That loss is accepted (Phase 32 owner decision).
+
 ## Operator-gated live tail L1-L4 (32-03 — the executor stops at L1, never runs it)
 
 Each gate below is OPERATOR-GATED: preconditions checked, window approved, evidence recorded, rollback run. Out of scope even for the tail: real pushes/PRs on non-throwaway repos, Linear/Notion writes outside the isolated graph, `RIVET_RUN_ENGINE=1` (refused by `main.ts` until the G2 verdict), base-image pulls beyond the L1 window.
@@ -200,6 +202,6 @@ The v1.3 lane-A cutover itself is the LANEA-08 G1–G5 sequence in `docs/runbook
 
 No token value, passphrase, or bus secret is typed into a shell history, a
 record, or a transcript for any step above. Files that must name a credential
-name its variable (`SUBSTRATE_TOKEN_SUBSTRATE`, `SUBSTRATE_VM_ANTHROPIC_API_KEY`
-on route `a:anthropic_key` only). Non-loopback hostnames stay out of the repo,
+name its variable (`SUBSTRATE_TOKEN_SUBSTRATE`). The model key is not in the host
+environment; the relay on 127.0.0.1:3001 holds it. Non-loopback hostnames stay out of the repo,
 the PR, and the record.
