@@ -269,7 +269,12 @@ Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49
 | 47 | verification_deferred_human | /gsd:verify-work 47 |
 | 48 | verification_deferred_human | /gsd:verify-work 48 |
 | 49 | verification_deferred_human | /gsd:verify-work 49 |
-| 50 | verification_deferred_human | /gsd:verify-work 50 |
+| 24 | verification_deferred_human | /gsd:verify-work 24 |
+| 32 | verification_deferred_human | /gsd:verify-work 32 |
+| 63 | verification_deferred_human | /gsd:verify-work 63 |
+| 65 | verification_deferred_human | /gsd:verify-work 65 |
+| 69 | verification_deferred_human | /gsd:verify-work 69 |
+| 70 | verification_deferred_human | /gsd:verify-work 70 |
 
 Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Phases 37-39 are closed by the operator's live-criteria waiver recorded in 585ef28 (2026-10-25); their rows stay here only as the record of what was waived. Phase 46 is open work (re-scoped), not deferred.
 
@@ -701,5 +706,7 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | Phase | State | Blocker | Resume |
 |-------|-------|---------|--------|
 | 71 | awaiting-review / pending QUALITY | Local acceptance passed; native Programming Lead held-message dispatch or an authorized Desk connector is not exposed. No external Greptile clearance observed. | Complete LEAD → QUALITY review, address findings, then `/gsd:verify-work 71` |
+| 24, 32, 63, 65, 69, 70 | verification_deferred_human | Re-verified in the autonomous rerun: code criteria hold; remaining items are live/behaviour proofs (live dispatcher decisions, real VM runs, live Postgres/LightRAG/deploy, operator hook/timer installs, funded devnet anchor, live eval runs). | `/gsd:verify-work <phase>` per phase after the live proof |
+| 71–78 | human_needed / owner-gated | v1.8 hardening: multi-session boundary, allowlist credentials, tamper evidence, cross-repo compensation, degradation, telemetry DLQ, steering idempotency, reconciliation. Repo work is integrated in PR #216 / PR #222 candidates; hosted CI, live proofs, deploy and production migrations remain operator-gated. | Fix billing on swcstudiospace, then re-run hosted CI and merge only on all-green |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.
