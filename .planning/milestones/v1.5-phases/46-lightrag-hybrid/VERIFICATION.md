@@ -108,6 +108,7 @@ human_verification:
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
 | `packages/mcp-server/src/planes/ragflow.ts` | whole file | Legacy RAGFlow backend still in tree | ℹ️ Info | Expected until criterion 5 removal is approved. |
+| `docs/` | - | "phase 46 cutover" phrase from the 2026-10-28 record | ✓ Resolved | `grep -rni "phase 46 cutover" docs/` returns nothing at HEAD. |
 
 ## Human verification required
 
