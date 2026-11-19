@@ -50,7 +50,7 @@ async function stored(entryId: string): Promise<Array<Record<string, unknown>>> 
 
 describeLive("context matrix store against a live index", () => {
 	beforeAll(async () => {
-		store = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
+		store = new IndexStore(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"), { contextMatrixWrite: true });
 		raw = new SQL(defined(PG_URL, "SUBSTRATE_TEST_PG_URL"));
 		await store.migrate();
 	});
@@ -118,5 +118,17 @@ describeLive("context matrix store against a live index", () => {
 
 		const accepted = await store.listAcceptedContext(realm, "decision", sourcePath);
 		expect(decidePromotion(incoming, accepted)).toEqual({ outcome: "held", reason: "conflict" });
+	});
+});
+
+describe("context matrix candidate writes with the flag off", () => {
+	test("insertContextCandidate resolves to disabled and acceptContextCandidate to false, and neither issues a query", async () => {
+		const noQuery = (() => {
+			throw new Error("the store issued a query with contextMatrixWrite off");
+		}) as unknown as SQL;
+		const off = new IndexStore("postgres://unused", { sql: noQuery, contextMatrixWrite: false });
+		const candidate = entry("flag-off");
+		expect(await off.insertContextCandidate(candidate)).toBe("disabled");
+		expect(await off.acceptContextCandidate(candidate.entryId)).toBe(false);
 	});
 });

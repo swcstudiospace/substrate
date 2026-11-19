@@ -253,6 +253,8 @@ export interface IndexStoreOptions {
 	sql?: SQL;
 	/** Migrations gated behind an opt-in (see {@link MigrationOptIn}). Absent is every opt-in off. */
 	migrationOptIns?: MigrationOptIns;
+	/** Context Matrix candidate writes (`insertContextCandidate`, `acceptContextCandidate`). Absent is off: both return without a query. */
+	contextMatrixWrite?: boolean;
 }
 
 /** What `/healthz` reports about the database's size, from `capacity()`. */
@@ -1161,6 +1163,8 @@ export class IndexStore implements MemoryStore {
 	readonly tune: "off" | "apply";
 	/** The opt-in migrations `migrate()` runs. Every opt-in off by default, so a gated step is neither run nor ledgered. */
 	readonly migrationOptIns: MigrationOptIns;
+	/** The Context Matrix candidate writes (`insertContextCandidate`, `acceptContextCandidate`). Off by default: both return without a query. */
+	readonly contextMatrixWrite: boolean;
 
 	constructor(connectionString: string, options: IndexStoreOptions = {}) {
 		this.poolSettings = { ...indexPoolSettingsFromEnv(), ...options.pool, applicationName: INDEX_APPLICATION_NAME };
@@ -1169,6 +1173,7 @@ export class IndexStore implements MemoryStore {
 		this.expiry = options.memoryExpiry ?? { mode: "report" };
 		this.tune = options.tune ?? "off";
 		this.migrationOptIns = options.migrationOptIns ?? MIGRATION_OPT_INS_OFF;
+		this.contextMatrixWrite = options.contextMatrixWrite ?? false;
 	}
 
 	/** One index call under the plane gate. Without a gate it is just `fn()`. */
@@ -2593,9 +2598,11 @@ export class IndexStore implements MemoryStore {
 
 	/**
 	 * Store one candidate. An `entry_id` already stored is left exactly as it is, so a re-extraction of the same
-	 * source never rewrites a row a reviewer may already have accepted.
+	 * source never rewrites a row a reviewer may already have accepted. With `contextMatrixWrite` off it returns
+	 * `disabled` before any query.
 	 */
-	async insertContextCandidate(entry: CandidateEntry): Promise<"inserted" | "existing"> {
+	async insertContextCandidate(entry: CandidateEntry): Promise<"inserted" | "existing" | "disabled"> {
+		if (!this.contextMatrixWrite) return "disabled";
 		const rows = (await this.sql`
 			insert into context_matrix_entries (entry_id, realm, milestone, phase, source_path, source_sha256, entry_kind, body_redacted)
 			values (${entry.entryId}, ${entry.realm}, ${entry.milestone}, ${entry.phase}, ${entry.sourcePath}, ${entry.sourceSha256}, ${entry.entryKind}, ${entry.bodyRedacted})
@@ -2614,8 +2621,9 @@ export class IndexStore implements MemoryStore {
 		return rows.map(toContextCandidate);
 	}
 
-	/** Move a candidate to accepted. Only a row still in `candidate` moves; true when this call moved it. */
+	/** Move a candidate to accepted. Only a row still in `candidate` moves; true when this call moved it. With `contextMatrixWrite` off it returns false before any query. */
 	async acceptContextCandidate(entryId: string): Promise<boolean> {
+		if (!this.contextMatrixWrite) return false;
 		const rows = (await this.sql`
 			update context_matrix_entries set status = 'accepted'
 			where entry_id = ${entryId} and status = 'candidate'
