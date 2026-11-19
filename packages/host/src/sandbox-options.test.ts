@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import {
 	buildContainerSpec,
 	egressConflict,
@@ -8,6 +9,7 @@ import {
 	parseSandboxEgress,
 	SANDBOX_NETWORK,
 	seedBurstRules,
+	worktreeFor,
 	WORKTREES_ROOT,
 	type ContainerSpecOptions,
 } from "./sandbox-options.ts";
@@ -276,5 +278,24 @@ describe("seedBurstRules (U1)", () => {
 		expect(() => seedBurstRules("172.17.0.2", [{ host: "gone.invalid", port: 443 }], new Map())).toThrow(
 			/gone\.invalid:443/,
 		);
+	});
+
+	test("the host and the dispatcher resolve the same non-default worktree root from SUBSTRATE_WORKTREE_ROOTS", () => {
+		const env = { SUBSTRATE_WORKTREE_ROOTS: "/srv/wt-a:/srv/wt-b" };
+		const dispatcher = Bun.spawnSync({
+			cmd: [
+				"python3",
+				"-c",
+				"import json, sys; from substrate_dispatcher.worktree import creation_root; print(creation_root(json.loads(sys.argv[1])) / sys.argv[2])",
+				JSON.stringify(env),
+				graphId,
+			],
+			env: { ...process.env, PYTHONPATH: join(import.meta.dir, "../../dispatcher/src") },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		expect(dispatcher.stderr.toString()).toBe("");
+		expect(worktreeFor(graphId, env)).toBe(`/srv/wt-a/${graphId}`);
+		expect(dispatcher.stdout.toString().trim()).toBe(worktreeFor(graphId, env));
 	});
 });
