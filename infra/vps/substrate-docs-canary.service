@@ -6,7 +6,7 @@ Wants=network-online.target
 # A missing entry point skips the start silently instead of failing into the
 # timer's persistent backlog. The path is the pinned release, not the checkout:
 # ConditionPathExists follows the current symlink.
-ConditionPathExists=/opt/agent-substrate/current/scripts/docs-golden.ts
+ConditionPathExists=/opt/agent-substrate/current/scripts/docs-eval.ts
 
 [Service]
 Type=oneshot
@@ -25,12 +25,15 @@ WorkingDirectory=/opt/agent-substrate/current
 # Machine-specific: `command -v bun`. The binary on this host is under
 # /root/.local, which is why the unit still runs as root (no User=) and why
 # ProtectHome=false stays. The code itself is the release at WorkingDirectory.
-# v1.7 phase 70: the same run also asks the self-supervised golden set of this
-# checkout's docs/ (scripts/docs-eval.ts shares the code), posts a `note` with
-# `golden_recall5` on every run that measured it, and exits 1 when that recall is
-# under SUBSTRATE_DOCS_SLO_RECALL5. No new variable is needed here; the repository
-# name is SUBSTRATE_DOCS_EVAL_REPO. See docs/corpus-eval.md.
-ExecStart=/root/.local/share/reflex/bun/bin/bun scripts/docs-golden.ts --live --emit
+# v1.7 phase 70: the entry point is scripts/docs-eval.ts (--live --emit, criterion 3 of phase 70), which
+# runs the canary's checks with the same refusals and exit codes: the fixture set and one `warning` when
+# its failing set changes, the golden set of this checkout's docs/ (a `note` with `golden_recall5` on every
+# run that measured it), and the corpus freshness and last ingest rate the server reports. It exits 1 when
+# any of the three is past its objective (SUBSTRATE_DOCS_SLO_RECALL5, SUBSTRATE_DOCS_SLO_FRESHNESS_S,
+# SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S). Those readings, like the golden set, are taken only with
+# SUBSTRATE_CORPUS=on in this environment. No new variable is needed here; the repository name is
+# SUBSTRATE_DOCS_EVAL_REPO. --fixtures names the fixture set explicitly. See docs/corpus-eval.md.
+ExecStart=/root/.local/share/reflex/bun/bin/bun scripts/docs-eval.ts --live --emit --fixtures fixtures/docs-golden
 
 # /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
 # The dedupe record (the failing fixtures last announced) lives there.

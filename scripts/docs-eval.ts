@@ -6,6 +6,7 @@
  *   bun scripts/docs-eval.ts --json                # the same, as one JSON object
  *   bun scripts/docs-eval.ts --write-baseline      # offline: record today's scores as scripts/docs-eval.baseline.json
  *   bun scripts/docs-eval.ts --live URL [--json]   # read-only: this checkout's docs asked of a running server's POST /docs/search
+ *   bun scripts/docs-eval.ts --live --emit [--fixtures DIR]   # the canary the timer runs; see below
  *
  * ## Offline (what CI runs)
  *
@@ -26,6 +27,10 @@
  * degraded is counted and left out of the scores, and any such question makes the exit 3: an outage is not a retrieval miss and
  * a partial score must not read as a pass. A question the shared redactor would change (it looks like a credential) is never
  * sent: it is counted as not sent, and a run where every question was held back is exit 3 too. It never runs in tests.
+ *
+ * ## Canary (`--live --emit`)
+ *
+ * `--emit` runs the canary of `docs-golden.ts` from this script, with the same refusals (`SUBSTRATE_DOCS_CANARY=1`, an attested `SUBSTRATE_DOCS_CANARY_MANIFEST`, a loopback `SUBSTRATE_URL`), the same fixture set (`--fixtures DIR`, default `fixtures/docs-golden`), the same warning when the failing set changes, the golden recall note, and the freshness, ingest and recall at 5 breaches. Its exit codes are the canary's: 0 pass, 1 a regression or a breach, 2 not configured, 3 unusable, 4 the dedupe record could not be cleared. The timer runs `bun scripts/docs-eval.ts --live --emit --fixtures fixtures/docs-golden`.
  */
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -52,6 +57,9 @@ import {
 } from "../packages/corpus/src/index.ts";
 import { createServerEvalSearch } from "../packages/mcp-server/src/docs-eval-server.ts";
 import { redact } from "../packages/mcp-server/src/redact.ts";
+import { firstLine } from "../packages/cli/src/token.ts";
+import { loadGoldenCorpus, searchGoldenOffline } from "../packages/mcp-server/src/docs-golden.ts";
+import { CORPUS_DIR as GOLDEN_CORPUS_DIR, DEFAULT_CANARY_STATE, readSloReadings, runCanary as runDocsCanary, writeStateAtomically, type GoldenIo } from "./docs-golden.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 export const FIXTURE_DIR = join(REPO_ROOT, "packages", "corpus", "fixtures", "eval");
@@ -70,7 +78,7 @@ export const LOCAL_DOCS_MAX_FILES = 5000;
 export const LOCAL_DOCS_MAX_DEPTH = 8;
 /** The canary asks fewer: it runs beside the fixture set, once a day. */
 export const CANARY_GOLDEN_MAX_QUERIES = 200;
-export const USAGE = "usage: bun scripts/docs-eval.ts [--json] [--write-baseline | --live URL]; --live needs SUBSTRATE_TOKEN";
+export const USAGE = "usage: bun scripts/docs-eval.ts [--json] [--write-baseline | --live URL | --live --emit [--fixtures DIR]]; --live needs SUBSTRATE_TOKEN; --emit needs SUBSTRATE_DOCS_CANARY=1 and SUBSTRATE_DOCS_CANARY_MANIFEST";
 
 /** What a baseline records: scores of the deterministic offline run, so no latency. */
 export interface Baseline {
@@ -279,7 +287,7 @@ export function formatScore(score: RunScore): string {
 	return `queries=${score.queries} recall@1=${score.recall1.toFixed(3)} recall@5=${score.recall5.toFixed(3)} recall@10=${score.recall10.toFixed(3)} mrr=${score.mrr.toFixed(3)} p50=${score.p50Ms.toFixed(1)}ms p95=${score.p95Ms.toFixed(1)}ms`;
 }
 
-export interface EvalIo {
+export interface EvalIo extends Partial<Pick<GoldenIo, "readFile" | "readToken" | "readState" | "writeState">> {
 	env: Record<string, string | undefined>;
 	fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
 	stdout: (line: string) => void;
@@ -290,11 +298,21 @@ export interface EvalIo {
 	repoRoot?: string | undefined;
 }
 
-type Mode = { mode: "offline"; json: boolean; writeBaseline: boolean } | { mode: "live"; json: boolean; url: string } | { error: string };
+type Mode =
+	| { mode: "offline"; json: boolean; writeBaseline: boolean }
+	| { mode: "live"; json: boolean; url: string }
+	| { mode: "canary"; fixtures: string | undefined }
+	| { error: string };
 
+/** `--fixtures DIR` names the canary's fixture set (its `corpus/` sits beside it); only `--emit` takes it. */
 export function parseArgs(argv: readonly string[]): Mode {
 	const json = argv.includes("--json");
-	const rest = argv.filter((arg) => arg !== "--json");
+	const emit = argv.includes("--emit");
+	const fixtureAt = argv.indexOf("--fixtures");
+	const fixtures = fixtureAt === -1 ? undefined : argv[fixtureAt + 1];
+	if (fixtureAt !== -1 && (!emit || fixtures === undefined || fixtures === "" || fixtures.startsWith("--"))) return { error: USAGE };
+	const rest = argv.filter((arg, index) => arg !== "--json" && arg !== "--emit" && (fixtureAt === -1 || (index !== fixtureAt && index !== fixtureAt + 1)));
+	if (emit) return rest.length === 1 && rest[0] === "--live" && !json ? { mode: "canary", fixtures } : { error: USAGE };
 	if (rest.length === 0) return { mode: "offline", json, writeBaseline: false };
 	if (rest.length === 1 && rest[0] === "--write-baseline" && !json) return { mode: "offline", json, writeBaseline: true };
 	if (rest.length === 2 && rest[0] === "--live" && rest[1] !== undefined && /^https?:\/\/\S+$/.test(rest[1])) return { mode: "live", json, url: rest[1] };
@@ -317,6 +335,7 @@ export async function main(argv: readonly string[], io: EvalIo): Promise<number>
 		return 2;
 	}
 	if (parsed.mode === "live") return runLive(parsed.url, parsed.json, io);
+	if (parsed.mode === "canary") return runDocsCanary(canaryIo(io, parsed.fixtures));
 
 	const docs = loadFixtureDocuments(io.fixtureDir ?? FIXTURE_DIR);
 	const lexical = await runOffline(docs, io.now);
@@ -397,6 +416,36 @@ async function runLive(url: string, json: boolean, io: EvalIo): Promise<number> 
 	}
 	const { asked, live, incomplete } = await askLive(url, token, io);
 	return reportLive(asked, live, json, io, incomplete);
+}
+
+/**
+ * The canary's outside world, from this script's own: the same fetch and host readers `docs-golden.ts` wires in production, and this
+ * checkout's golden recall and SLO readings, so `--emit` runs the canary's checks unchanged. `--fixtures DIR` moves the fixture set and
+ * its `corpus/` together; without it the canary reads the repository's own.
+ */
+function canaryIo(io: EvalIo, fixtures: string | undefined): GoldenIo {
+	const fetchImpl = (input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+		io.fetchImpl(input instanceof Request ? input.url : String(input), init);
+	const corpusDir = fixtures === undefined ? GOLDEN_CORPUS_DIR : join(fixtures, "corpus");
+	const statePath = io.env.SUBSTRATE_DOCS_CANARY_STATE?.trim() || DEFAULT_CANARY_STATE;
+	const canary: GoldenIo = {
+		env: io.env,
+		fetchImpl,
+		stdout: io.stdout,
+		stderr: io.stderr,
+		offline: async (fixture) =>
+			(await searchGoldenOffline(loadGoldenCorpus(corpusDir), fixture, { commit: fixture.corpus_manifest.dataset_commit ?? "golden-offline" })).reply,
+		corpusDir,
+		readToken: io.readToken ?? firstLine,
+		readState: io.readState ?? (() => readTextOrNull(statePath)),
+		writeState: io.writeState ?? ((text) => writeStateAtomically(statePath, text)),
+		now: () => new Date(),
+		goldenRecall: (base, bearer) => measureGoldenRecall(base, bearer, io),
+		sloReadings: (base, bearer) => readSloReadings(base, bearer, { fetchImpl, now: () => new Date(), stderr: io.stderr }),
+	};
+	if (io.readFile !== undefined) canary.readFile = io.readFile;
+	if (fixtures !== undefined) canary.fixtureDir = fixtures;
+	return canary;
 }
 
 /**

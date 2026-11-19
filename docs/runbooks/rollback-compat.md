@@ -75,7 +75,7 @@ A rollback swaps the code under every unit's `WorkingDirectory`. A unit whose `E
 | `substrate-dispatcher.service`, `substrate-skills-bridge.service` | `python3 -m substrate_dispatcher`, `-m substrate_miner bridge --once` | both modules exist (`__main__.py`) | run; the bridge's `--once` flag is not checked |
 | `substrate-index-archive.service` (+ timer) | `packages/cli/src/index.ts index archive` | the file, **no**: `cmdIndex` accepts only `sweep` (`git show 9231f43:packages/cli/src/index.ts`, `function cmdIndex`) | **fails every night** (exit 2, usage) |
 | `substrate-ledger-archive.service` (+ timer) | `packages/cli/src/index.ts ledger archive` | the file, **no**: the old CLI has no `ledger` command | **fails every night** |
-| `substrate-docs-canary.service` (+ timer) | `scripts/docs-golden.ts` | **no** | fails every run |
+| `substrate-docs-canary.service` (+ timer) | `scripts/docs-eval.ts --live --emit --fixtures fixtures/docs-golden` | **no** | fails every run |
 | `substrate-doctor.service` (+ timer) | `scripts/doctor-runtime.ts` | **no** | fails every run |
 | `substrate-alert@.service` (installed with the watchdog drop-in) | `scripts/substrate-alert.ts` | **no** | fails when triggered; it is triggered only through the watchdog drop-in, which is removed |
 

@@ -456,3 +456,34 @@ describe("the live tier", () => {
 		expect(JSON.parse(defined(full.out[0]))).toMatchObject({ partial: false, incomplete: [] });
 	});
 });
+
+describe("the canary entry (--live --emit)", () => {
+	test("the command lines: --live --emit with an optional --fixtures DIR; any other use of --emit is the usage line", () => {
+		expect(parseArgs(["--live", "--emit"])).toEqual({ mode: "canary", fixtures: undefined });
+		expect(parseArgs(["--emit", "--live", "--fixtures", "fixtures/docs-golden"])).toEqual({ mode: "canary", fixtures: "fixtures/docs-golden" });
+		for (const bad of [["--emit"], ["--live", "--emit", "--json"], ["--live", "http://127.0.0.1:7410", "--emit"], ["--live", "--emit", "--fixtures"], ["--live", "--emit", "--fixtures", "--json"], ["--live", "--fixtures", "fixtures/docs-golden"]]) {
+			expect(parseArgs(bad)).toEqual({ error: USAGE });
+		}
+	});
+
+	test("unconfigured, it refuses by name with exit 2 and sends nothing", async () => {
+		const run = capture({ env: { SUBSTRATE_TOKEN: "test-bearer" } });
+		expect(await main(["--live", "--emit"], run.io)).toBe(2);
+		expect(run.err.join("\n")).toContain("SUBSTRATE_DOCS_CANARY=1");
+		expect(run.requests).toEqual([]);
+	});
+
+	test("a SUBSTRATE_URL that is not loopback is refused with exit 2 before any read or request", async () => {
+		const run = capture({ env: { SUBSTRATE_DOCS_CANARY: "1", SUBSTRATE_DOCS_CANARY_MANIFEST: "/unused/manifest", SUBSTRATE_URL: "https://substrate.example", SUBSTRATE_TOKEN: "test-bearer" } });
+		expect(await main(["--live", "--emit"], run.io)).toBe(2);
+		expect(run.err.join("\n")).toContain("SUBSTRATE_URL is not a loopback address");
+		expect(run.requests).toEqual([]);
+	});
+
+	test("an unreadable attested manifest is exit 3 and nothing is sent, so the canary's refusals reach this entry", async () => {
+		const run = capture({ env: { SUBSTRATE_DOCS_CANARY: "1", SUBSTRATE_DOCS_CANARY_MANIFEST: "/unused/manifest", SUBSTRATE_TOKEN: "test-bearer" }, readFile: () => null, readToken: () => null });
+		expect(await main(["--live", "--emit"], run.io)).toBe(3);
+		expect(run.err.join("\n")).toContain("SUBSTRATE_DOCS_CANARY_MANIFEST cannot be read");
+		expect(run.requests).toEqual([]);
+	});
+});
