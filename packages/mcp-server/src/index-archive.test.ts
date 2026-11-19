@@ -67,7 +67,7 @@ const DF_ROOMY = (): string => "Filesystem 1024-blocks Used Available Capacity M
 function cell(column: ArchiveColumn, i: number): string | number | boolean | null {
 	const pad = String(i).padStart(7, "0");
 	if (column.type === "text") return column.name === "entry_hash" ? `hash-${pad}` : `${column.name}-${pad}`;
-	if (column.type === "int") return i;
+	if (column.type === "int" || column.type === "smallint") return i;
 	if (column.type === "bigint") return String(i);
 	if (column.type === "jsonb") return `{"i":${i}}`;
 	if (column.type === "bool") return i % 2 === 0;

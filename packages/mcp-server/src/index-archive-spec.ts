@@ -35,7 +35,7 @@
  */
 import { createHash } from "node:crypto";
 
-export type ColumnType = "text" | "int" | "bigint" | "bool" | "timestamptz" | "jsonb";
+export type ColumnType = "text" | "int" | "smallint" | "bigint" | "bool" | "timestamptz" | "jsonb";
 
 export interface ArchiveColumn {
 	name: string;
@@ -216,7 +216,7 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 			text("repo"),
 			text("path"),
 			text("kind"),
-			{ name: "tier", type: "int" },
+			{ name: "tier", type: "smallint" },
 			text("sha256"),
 			{ name: "bytes", type: "int" },
 			text("source"),
@@ -316,15 +316,15 @@ export function coerceRow(spec: ArchiveTableSpec, record: unknown): CoercedRow {
 		const fine =
 			column.type === "text"
 				? typeof value === "string"
-				: column.type === "int"
+				: column.type === "int" || column.type === "smallint"
 					? typeof value === "number" && Number.isSafeInteger(value)
 					: column.type === "bool"
-						? typeof value === "boolean"
-						: column.type === "bigint"
-							? typeof value === "string" && /^-?\d{1,19}$/.test(value)
-							: column.type === "jsonb"
-								? typeof value === "string"
-								: typeof value === "string" && ISO_MICROS.test(value);
+					? typeof value === "boolean"
+					: column.type === "bigint"
+						? typeof value === "string" && /^-?\d{1,19}$/.test(value)
+						: column.type === "jsonb"
+							? typeof value === "string"
+							: typeof value === "string" && ISO_MICROS.test(value);
 		if (!fine) return { ok: false, reason: `column ${column.name} is not a ${column.type}` };
 		row[column.name] = value as string | number | boolean;
 	}

@@ -3,16 +3,20 @@ phase: 65-doc-watch
 verified: 2026-11-19
 status: human_needed
 score: 2/2 assigned criteria verified in code (2, 3); criteria 1, 4, 5 carried from the 2026-11-18 record, not re-checked in this pass
-covered_files: [".planning/phases/65-doc-watch/65-CONTEXT.md", ".planning/phases/65-doc-watch/65-SUMMARY.md", "docs/corpus-watch.md", "infra/vps/substrate-corpus-sync.service", "infra/vps/substrate-corpus-sync.timer", "infra/vps/substrate-corpus-watch.service", "packages/cli/src/corpus/watch-commands.ts", "packages/collectors/src/install-git-hook.test.ts", "packages/collectors/src/install-git-hook.ts", "packages/corpus/src/coalesce.ts", "packages/corpus/src/hints.ts", "packages/corpus/src/watch.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/reconcile.ts", "packages/mcp-server/src/docs-freshness.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/planning-hash-store.test.ts", "packages/mcp-server/src/planning-hash-store.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v4:sha256:73fc693cd7f8992bd1e1e33351e9c9ff7f60403ac35de0997fe6d954d8f5873e"
+covered_files: [".planning/phases/65-doc-watch/65-CONTEXT.md", ".planning/phases/65-doc-watch/65-SUMMARY.md", "docs/corpus-watch.md", "docs/runbooks/corpus-sync.md", "packages/collectors/src/install-git-hook.test.ts", "packages/collectors/src/install-git-hook.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/planning-hash-store.ts", "packages/mcp-server/src/service.ts"]
+covered_digest: "v3:sha256:f807229704bf36ff698de80a07dc1e815833fd16e92aedb929cbd9b2d7a3bafe"
+verified_commit: ffacc938a1ebc795d23872531640ab613913ecfa
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
-  previous_status: gaps_found
-  previous_score: 3/5
+  previous_status: human_needed
+  previous_score: 2/2
   gaps_closed:
     - "Criterion 3: SUBSTRATE_PLANNING_HASH_STORE now defaults to on (config.ts: unset or empty is on; flag-registry.ts default \"on\"; settings.test.ts asserts it). The 2026-11-18 record's 'default off' gap no longer holds in code."
     - "Criterion 2: the hint is `corpus hint` with payload {v, dir, at}; the amended criterion (opt-in installer, bounded corpus hint, exit 0, foreign hooks left alone) is what the code implements, and docs/corpus-watch.md states that nothing called docs.changed is written or read."
+    - "docs/corpus-watch.md default-off wording corrected by f0c9b6a6: states the flag is on by default, set to a value other than `on` to turn it off."
+    - "docs/runbooks/corpus-sync.md corpus-sync runbook wording corrected by 1bde15fd: the `hook` trigger row now describes `substrate corpus hint --repo` in the background with a 10-second timeout where `timeout` exists, always exits 0, the hint is one small file in the spool outside the repository, and post-commit stays the collector."
+    - "ROADMAP `docs.changed` warning retired: `grep docs.changed .planning/ROADMAP.md` at ffacc938 returns nothing; criterion 2 wording says 'bounded corpus hint'."
   gaps_remaining: []
   regressions: []
 human_verification:
@@ -28,8 +32,9 @@ human_verification:
 
 **Phase Goal:** When documentation changes in a registered repository, the docs plane follows without a manual ingest, and a server restart re-ingests nothing unchanged.
 **Verified:** 2026-11-19
+**Verified commit:** `ffacc938a1ebc795d23872531640ab613913ecfa` (includes `f0c9b6a6` planning-hash default-on + corpus-watch wording, and `1bde15fd` corpus-sync runbook wording)
 **Status:** human_needed
-**Re-verification:** Yes — after gap closure (criteria 2 and 3 re-checked against the code as it is in the worktree; criteria 1, 4 and 5 not re-checked here)
+**Re-verification:** Yes — criteria 2 and 3 re-checked against the code at `ffacc938`, including the `f0c9b6a6`/`1bde15fd` wording fixes; criteria 1, 4 and 5 not re-checked here
 
 ## Goal Achievement
 
@@ -42,43 +47,38 @@ human_verification:
 | Always exits 0 | `corpusHookBlock` ends `return 0`, background `&`; test "exits 0 whatever the command does" and "does nothing and exits 0" | ✓ VERIFIED |
 | Foreign hook never overwritten | `readExisting` returns `foreign`; test "a hook that is not ours is reported and left alone" and "uninstall never touches a foreign hook" | ✓ VERIFIED |
 | Damaged marker pair left alone | `intactBlock` requires one begin before one end; tests "reversed or repeated marker pair is left untouched" | ✓ VERIFIED |
-| Hint is not `docs.changed` | `docs/corpus-watch.md` line 138: "nothing called `docs.changed` is written or read" | ✓ VERIFIED against the amended wording |
-
-**Warning (not blocking):** `.planning/ROADMAP.md` line 1112 still says the hook "sends a bounded `docs.changed` hint". The ROADMAP criterion needs the same amendment the docs already carry, or the code needs to emit that name. Scoped out of this pass; owner decides.
+| Hint is not `docs.changed` | `docs/corpus-watch.md` line 138: "nothing called `docs.changed` is written or read"; no `docs.changed` string in `packages/` or `docs/` other than that sentence | ✓ VERIFIED against the amended wording |
+| corpus-sync runbook wording (1bde15fd) | `docs/runbooks/corpus-sync.md` line 15 `hook` row: runs `substrate corpus hint --repo` in background, 10-second timeout where `timeout` exists, always exits 0, hint is one small spool file outside the repository, `post-commit` stays the collector, installed only by `substrate corpus hook install`, never over a foreign hook | ✓ VERIFIED — matches `install-git-hook.ts:80-100` block |
 
 ### Criterion 3: planning hashes live in `planning_page_hashes`; restart re-ingests nothing unchanged; flag on by default
 
 | Check | Evidence | Status |
 | --- | --- | --- |
-| Separate table | Migration step 39 `planning_page_hashes` in `index-store.ts` (line ~843), primary key `(destination, path)`; not `corpus_documents` (step at line ~704) | ✓ VERIFIED |
+| Separate table | Migration step 39 `planning_page_hashes` in `index-store.ts`, primary key `(destination, path)`; not `corpus_documents` | ✓ VERIFIED |
 | Port and adapters | `planning-hash-store.ts`: `memoryPlanningHashStore`, `bunPlanningHashStore` scoped by SHA-256 of the docs URL | ✓ VERIFIED |
-| Flag default on | `config.ts:1236` `["", "on"].includes(...)`: unset or empty is on, `off` and other words are off; `flag-registry.ts` default `"on"`; `settings.test.ts` asserts `""` and `" On "` → true, `"1"`, `"true"`, `"yes"`, `"off"` → false | ✓ VERIFIED |
+| Flag default on | `config.ts:1236` `["", "on"].includes((env.SUBSTRATE_PLANNING_HASH_STORE?.trim() ?? "").toLowerCase())`: unset or empty is on, `off` and other words are off (f0c9b6a6); `flag-registry.ts` default `"on"`; `settings.test.ts` asserts `""` and `" On "` → true, `"1"`, `"true"`, `"yes"`, `"off"` → false | ✓ VERIFIED |
+| Flag wired in service | `service.ts:7296-7300` `planningHashStore()` returns null when flag off, else cached table store; `config.ts:688` declares the setting | ✓ VERIFIED |
 | Off = nothing read or written | `service.ts` `planningHashStore()` returns null when the flag is off; test "with the flag off nothing is read or written" | ✓ VERIFIED |
 | Restart ingests nothing unchanged | Test "a second server over the same store ingests nothing unchanged, and exactly the changed page after an edit" (spy on ingest) | ✓ VERIFIED |
 | Failed page not stored | Test "a page the plane failed is not stored, so the next process sends it again" | ✓ VERIFIED |
 | Store unreadable / unwritable | Test "costs one full ingest and the pass still completes" | ✓ VERIFIED |
 | Postgres adapter against a live table | Three tests in `describeLive` are skipped without `SUBSTRATE_TEST_PG_URL` | ? UNCERTAIN, see human verification |
 
-**Warning (not blocking):** `docs/corpus-watch.md` still says the flag is "off by default" (line 5) and "With the flag off, the default, they are kept in memory only" (line 26). The code, `flag-registry.ts`, `docs/config-reference.md` line 258 and `docs/runbooks/corpus-sync.md` line 31 all say on. The operator page is wrong and must be corrected by its owner; no code change is needed for criterion 3.
+**Corrected in this pass:** the earlier warnings that `docs/corpus-watch.md` said the flag was off by default and that the corpus-sync runbook described a `docs.changed` hint are both closed by `f0c9b6a6` and `1bde15fd` respectively. `docs/corpus-watch.md` now states the flag is on by default and that nothing called `docs.changed` is written or read; `docs/runbooks/corpus-sync.md` describes the `corpus hint --repo` hook exactly as the installer writes it.
 
-**Warning (not blocking):** the in-memory `planningHashes` map is still the working set during a pass, loaded from and saved to the table. This matches the amended criterion ("planning hashes live in the separate table"), not the original "read from the manifest" wording.
-
-### Required Artifacts (criteria 2 and 3)
+## Required Artifacts (scoped to criteria 2 and 3)
 
 | Artifact | Expected | Status | Details |
 | --- | --- | --- | --- |
 | `packages/collectors/src/install-git-hook.ts` | opt-in hint hook installer | ✓ VERIFIED | `CORPUS_HOOKS`, `corpusHookBlock`, `installCorpusHooks`, `uninstallCorpusHooks` |
 | `packages/mcp-server/src/planning-hash-store.ts` | table-backed hash store port and adapters | ✓ VERIFIED | Memory and Bun SQL adapters |
 | `packages/mcp-server/src/index-store.ts` | migration step 39 | ✓ VERIFIED | `planning_page_hashes` table |
-| `packages/mcp-server/src/config.ts` | flag default on | ✓ VERIFIED | Line 1236 |
-| `docs/corpus-watch.md` | operator description | ✗ WARNING | States the flag is off by default; contradicts code |
+| `packages/mcp-server/src/config.ts` | flag default on | ✓ VERIFIED | Line 1236, f0c9b6a6 |
+| `packages/mcp-server/src/service.ts` | flag gates the store | ✓ VERIFIED | `planningHashStore()` at line ~7296 |
+| `docs/corpus-watch.md` | operator description | ✓ VERIFIED | Default-on wording (f0c9b6a6); `docs.changed` negation at line 138 |
+| `docs/runbooks/corpus-sync.md` | corpus-sync runbook trigger table | ✓ VERIFIED | `hook` row wording (1bde15fd), line 15 |
 
-### Test Run
-
-`bun test packages/collectors/src/install-git-hook.test.ts packages/mcp-server/src/planning-hash-store.test.ts --timeout 60000` (one invocation, both files):
-
-- 23 pass, 0 fail, 3 skip (the live Postgres suite, `describeLive`, skipped without `SUBSTRATE_TEST_PG_URL`)
-- stderr lines `[substrate] planning hashes not loaded — connection refused` and `... not saved — read-only transaction` are the expected output of the failure-path tests, not failures.
+No tests were run in this pass (assignment forbids test execution); the test evidence above is from the prior pass's run and from reading the test files at `ffacc938`.
 
 ### Criteria 1, 4, 5
 
@@ -86,10 +86,7 @@ Not in this pass's assignment. Carried from the 2026-11-18 record: criterion 1 a
 
 ### Anti-Patterns
 
-| File | Line | Pattern | Severity | Impact |
-| --- | --- | --- | --- | --- |
-| `docs/corpus-watch.md` | 5, 26 | Says flag off by default | ⚠️ Warning | Operator docs contradict code |
-| `.planning/ROADMAP.md` | 1112 | Names `docs.changed` hint | ⚠️ Warning | Criterion wording stale against code |
+None in the scoped files at `ffacc938`. The two documentation warnings from the prior pass are closed by `f0c9b6a6` and `1bde15fd`.
 
 ### Human Verification Required
 
@@ -98,7 +95,7 @@ Not in this pass's assignment. Carried from the 2026-11-18 record: criterion 1 a
 
 ### Gaps Summary
 
-No blocking gaps for criteria 2 and 3. Status is `human_needed` rather than `passed` because the live Postgres adapter test did not run and criterion 4 is operator-gated. Two documentation warnings (`docs/corpus-watch.md` default-off wording; ROADMAP `docs.changed` wording) need their owners to correct them.
+No blocking gaps for criteria 2 and 3. Status is `human_needed` rather than `passed` because the live Postgres adapter test did not run and criterion 4 is operator-gated. Both prior documentation warnings are fixed in code by `f0c9b6a6` (corpus-watch default-on) and `1bde15fd` (corpus-sync runbook hook wording), and the ROADMAP `docs.changed` wording is gone at `ffacc938`.
 
 ---
 

@@ -42,7 +42,7 @@ const BASE = Date.now();
 const at = (n: number) => (): number => BASE + n * 5_000;
 
 /** `information_schema.columns.data_type` for each archive column type. */
-const PG_DATA_TYPE: Record<ColumnType, string> = { text: "text", int: "integer", bigint: "bigint", bool: "boolean", timestamptz: "timestamp with time zone", jsonb: "jsonb" };
+const PG_DATA_TYPE: Record<ColumnType, string> = { text: "text", int: "integer", smallint: "smallint", bigint: "bigint", bool: "boolean", timestamptz: "timestamp with time zone", jsonb: "jsonb" };
 
 let store: IndexStore;
 let raw: SQL;
@@ -184,7 +184,7 @@ describeLive("index archive against a live index", () => {
 		}
 		const tables = (await raw`
 			select table_name from information_schema.tables
-			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%')`) as Array<Record<string, unknown>>;
+			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name = 'corpus_documents')`) as Array<Record<string, unknown>>;
 		expect(tables.map((row) => String(row.table_name)).sort()).toEqual(ARCHIVE_TABLES.map((spec) => spec.name).sort());
 	});
 

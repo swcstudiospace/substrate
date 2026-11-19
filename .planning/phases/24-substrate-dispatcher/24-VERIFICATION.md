@@ -1,6 +1,6 @@
 ---
 phase: 24-substrate-dispatcher
-verified: 2026-11-19T00:53:45Z
+verified: 2026-11-19T12:30:13Z
 status: human_needed
 score: 3/5 roadmap success criteria verified
 covered_files: [".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-01-PLAN.md", ".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-01-SUMMARY.md", ".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-02-PLAN.md", ".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-02-SUMMARY.md", ".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-03-PLAN.md", ".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-03-SUMMARY.md", ".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-04-PLAN.md", ".planning/milestones/v1.3-phases/24-substrate-dispatcher/24-04-SUMMARY.md", "docs/dispatcher.md", "docs/runbooks/dispatch-proof.md", "infra/vps/substrate-dispatcher.service", "packages/dispatcher/src/substrate_dispatcher/__init__.py", "packages/dispatcher/src/substrate_dispatcher/__main__.py", "packages/dispatcher/src/substrate_dispatcher/dispatch.py", "packages/dispatcher/src/substrate_dispatcher/handoff.py", "packages/dispatcher/src/substrate_dispatcher/host.py", "packages/dispatcher/src/substrate_dispatcher/launcher.py", "packages/dispatcher/src/substrate_dispatcher/linear.py", "packages/dispatcher/src/substrate_dispatcher/mcp.py", "packages/dispatcher/src/substrate_dispatcher/quota.py", "packages/dispatcher/src/substrate_dispatcher/sessions.py", "packages/dispatcher/src/substrate_dispatcher/worktree.py", "packages/dispatcher/tests/test_claude_code_route.py", "packages/dispatcher/tests/test_dispatch.py", "packages/dispatcher/tests/test_quota.py", "packages/dispatcher/tests/test_readoption.py", "packages/dispatcher/tests/test_sessions.py"]
@@ -12,6 +12,8 @@ re_verification:
   previous_score: 2/5
   gaps_closed:
     - "SC1 marker clause: at-capacity and graph-busy skips now post once-only markers (dispatch.py MARKERS, decide, EVENT_RETRYABLE_MARKERS; tests and docs/dispatcher.md updated)"
+    - "SC1 already-running clause: an issue with a running session now posts one once-only [already-running] marker (commit 248a6572, dispatch.py decide + MARKERS); prior record asked for an owner decision, superseded by this marker"
+    - "Reap path: run_loop does readopt -> reap -> tick each iteration (__main__.py); reap drops exited sessions via _remove_exited/_drop_session (sessions.py) freeing capacity for queued at-capacity/graph-busy re-decision; comment decisions never launch"
   gaps_remaining: []
   regressions: []
 behavior_unverified_items:
@@ -21,9 +23,6 @@ behavior_unverified_items:
     why_human: "The prompt template (launcher.py PROMPT_TEMPLATE) states these steps, but whether the live agent follows them is runtime behaviour; the rehearsal used a shell fake, and no test runs a real Hermes session"
 coincidental_reliance_items: []
 human_verification:
-  - test: "Owner decision on the silent skip 'session already running for this issue' (dispatch.decide, active_issue_ids branch). It posts no comment; docs/dispatcher.md states this. Confirm that a launched issue is a dispatched issue and not a non-dispatch under SC1, or add a once-only marker for it and update the test and marker table."
-    expected: "A recorded owner answer: either the silence stands (documented, no action) or a marker is added"
-    why_human: "Scope interpretation of SC1 ('every non-dispatch'), not observable from code"
   - test: "SC5 bounded live window (DISP-08 runbook, docs/runbooks/dispatch-proof.md steps 1-8): with the kill switch set to 0 for the window only, label a Linear issue dispatch:hermes"
     expected: "A Hermes session starts within 30 s on the issue's Graph ID in /var/lib/substrate/worktrees/<graph_id> on branch substrate/<graph_id>; the claim lands under the Hermes token; Linear shows agent:hermes and Notion Agent hermes; the run ends in a gated Done or a release"
     why_human: "Requires live Linear, Notion, substrate-mcp and Hermes model quota under an operator-approved window; the runbook marks this OPERATOR-GATED and it was not run"
@@ -44,9 +43,9 @@ human_verification:
 # Phase 24: substrate-dispatcher Verification Report
 
 **Phase Goal:** Labelling a Linear issue `dispatch:hermes` starts a lease-correct Hermes session on the issue's Graph ID in its own worktree, and every issue it does not dispatch says why.
-**Verified:** 2026-11-19T00:53:45Z
+**Verified:** 2026-11-19T12:30:13Z
 **Status:** human_needed
-**Re-verification:** Yes. The prior record (2026-11-18, gaps_found, 2/5) had one BLOCKER: SC1 marker clause.
+**Re-verification:** Yes. Refresh of the 2026-11-19T00:53:45Z record (human_needed, 3/5) against commit 248a6572 (once-only markers for at-capacity, graph-busy and already-running). This run inspected code and the commit diff only; it ran no tests, tsc, biome, knip or formatters per the assignment.
 
 ## Goal Achievement
 
@@ -54,48 +53,59 @@ human_verification:
 
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
-| 1 | SC1: `substrate-dispatcher.service` reads unstarted `dispatch:*` issues every 30 s under a flock, re-reads `SUBSTRATE_DISPATCH_DISABLED` each tick, and every non-dispatch leaves one once-only marker comment | ✓ VERIFIED (marker clause); ⚠️ WARNING on one silent skip, see Human Verification 1 | `dispatch.py` `decide()` returns `comment` with `marker="at-capacity"` (capacity_left <= 0) and `marker="graph-busy"` (graph already running); both have `MARKERS` text. `tick()` posts them through `_comment_once`, which skips when the `[<marker>]` tag is among the issue's last 50 comments. Both markers are in `EVENT_RETRYABLE_MARKERS`, so they emit no `dispatch.failed`. `tick()` still reads `dispatch_disabled()` every call (poll and flock clauses unchanged; `__main__.py` and the unit file are not in the diff). Tests: `test_at_capacity_posts_one_queued_marker_then_launches_when_a_slot_frees`, `test_graph_busy_posts_one_queued_marker_and_does_not_launch`, `test_second_issue_on_a_live_graph_is_skipped` (now asserts one `[graph-busy]` comment). Docs: the marker table has both rows and the "at most one once-only comment per marker" text matches the code. |
-| 2 | SC2: worktree at `/var/lib/substrate/worktrees/<graph_id>`, reused, origin-verified, refused below 5 GiB; hermes headless, claude-code to Lane A, others `not-dispatchable` | ✓ VERIFIED (carried forward) | `worktree.py`, `launcher.py`, `dispatch.py` `decide()` `not-dispatchable` branch. None of these files changed in the uncommitted diff, so the prior evidence stands. |
-| 3 | SC3: the launched agent claims with its own surface token, heartbeats, completes or releases, and reads issue text through `issue_get` | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | `launcher.py` PROMPT_TEMPLATE states the steps and excludes issue text. The runtime claim/heartbeat behaviour of a live agent is not exercised by any test. Routed to Human Verification 6. |
-| 4 | SC4: 900 s claim deadline stops the session (SIGTERM, then SIGKILL); exit without claim comments, removes the label, gives up; given-up set survives restart | ✓ VERIFIED (carried forward) | `sessions.py`: `CLAIM_TIMEOUT_SECONDS = 900`; `_reap_one` terminate, then kill after grace; exit branch `_comment_once("exited-unclaimed")`, then `_give_up()`. `sessions.py` is not in the diff. Warning carried from prior record: if substrate-mcp is unreadable at the 900 s mark, the session is not stopped until a read succeeds. |
-| 5 | SC5: bounded live window: launch within 30 s, claim under the Hermes token, Linear and Notion show hermes, Claude Code brief within 60 s, kill switch restored | ? UNCERTAIN (operator-gated) | Not run. Human Verification 2 to 5. |
+| 1 | SC1: `substrate-dispatcher.service` reads unstarted `dispatch:*` issues every 30 s under a flock, re-reads `SUBSTRATE_DISPATCH_DISABLED` each tick, and every non-dispatch leaves one once-only marker comment | ✓ VERIFIED | `dispatch.py` `MARKERS` carries `at-capacity`, `graph-busy`, `already-running`. `decide()` returns `comment` with `marker="already-running"` (active issue branch, line 261), `marker="graph-busy"` (active graph branch), `marker="at-capacity"` (capacity_left <= 0); the only remaining `Decision("skip", ...)` is the gave-up branch (line 259). `tick()` posts comment decisions via `_comment_once` (tag check over last 50 comments) and `_maybe_emit_failed`; all three markers are in `EVENT_RETRYABLE_MARKERS`, so no `dispatch.failed` event is emitted (queued retry). `fetch`→`decide`→`comment` wiring verified. `docs/dispatcher.md` marker table lists all three as queued, emits nothing. |
+| 2 | SC2: worktree at `/var/lib/substrate/worktrees/<graph_id>`, reused, origin-verified, refused below 5 GiB; hermes headless, claude-code to Lane A, others `not-dispatchable` | ✓ VERIFIED (carried forward) | `worktree.py`, `launcher.py`, `dispatch.py` `decide()` `not-dispatchable` branch. None of these files changed in commit 248a6572, so the prior evidence stands. |
+| 3 | SC3: the launched agent claims with its own surface token, heartbeats, completes or releases, and reads issue text through `issue_get` | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | `launcher.py` PROMPT_TEMPLATE states the steps and excludes issue text. The runtime claim/heartbeat behaviour of a live agent is not exercised by any test. Routed to Human Verification 5. |
+| 4 | SC4: 900 s claim deadline stops the session (SIGTERM, then SIGKILL); exit without claim comments, removes the label, gives up; given-up set survives restart | ✓ VERIFIED (carried forward) | `sessions.py`: `CLAIM_TIMEOUT_SECONDS = 900`; `_reap_one` terminate, then kill after grace; exit branch `_comment_once("exited-unclaimed")` then `_give_up()`; claim-timeout branch `_comment_once("claim-timeout")` then `_give_up()`. `sessions.py` unchanged by commit 248a6572. Warning carried from prior record: if substrate-mcp is unreadable at the 900 s mark, the session is not stopped until a read succeeds. |
+| 5 | SC5: bounded live window: launch within 30 s, claim under the Hermes token, Linear and Notion show hermes, Claude Code brief within 60 s, kill switch restored | ? UNCERTAIN (operator-gated) | Not run. Human Verification 1 to 4. |
 
 **Score:** 3/5 roadmap success criteria verified (SC1, SC2, SC4). SC3 is behaviour-unverified. SC5 is operator-gated.
 
-### Silent Skips Reviewed (SC1 interpretation)
+### Dispatch Marker Comments (commit 248a6572)
+
+- `EVENT_RETRYABLE_MARKERS = frozenset({"host-unreachable", "at-capacity", "graph-busy", "already-running"})` — the three new queued markers are silent on the event plane (see `dispatch.py` `_maybe_emit_failed` early return).
+- `MARKERS` texts: `at-capacity` "every dispatch slot is busy; queued, will launch on a later tick"; `graph-busy` "this graph already has a running session; queued, will launch once it ends"; `already-running` "a session for this issue is already running; not launching a second one".
+- `decide()` branches verified in code; `tick()` only launches on `action == "launch"` (elif branch), so comment decisions never call `launch_fn` and never add a session record — queued issues hold no slot.
+- `_comment_once()` checks `tag(marker) in existing` over `linear.comment_bodies(...)` (last 50) before posting once — once-only semantics.
+
+### Reap Path (session reaping before tick)
+
+Verified in current code (not part of commit 248a6572's diff; pre-existing, now exercised by the queued markers):
+
+- `__main__.py` `run_loop()`: each iteration runs `readopt()` → `reap()` → `tick()` → sleep 30 s; `reap`/`tick` failures are caught and logged, never stop the loop (lines 90-108).
+- `sessions.py` `reap()` (line 458): retries `pending_label_removal` label removals, then `_reap_one()` per session (one bad session never stops the reap).
+- `_reap_one()` (line 469): on exited-with-claim calls `_remove_exited()` → `_drop_session()` (frees the slot, so `capacity_left()` rises and a queued `at-capacity` issue launches on the next tick). On exited-without-claim posts `[exited-unclaimed]` then `_give_up()`; on claim timeout posts `[claim-timeout]` then `_give_up()` then SIGTERM (SIGKILL after grace).
+- `capacity_left()` / `active_issue_ids()` / `active_graph_ids()` count live sessions plus pending VM tasks (lines 364-388), so a queued `graph-busy` decision re-decides to launch only after the live session's reap-driven removal.
+
+### Updated Test Pin: test_claude_code_route.py
+
+- `EXPECTED_MARKERS` now includes `"at-capacity", "graph-busy", "already-running"` (line 47) — the full once-only set is pinned.
+- `test_claude_code_accepted_but_unreadable_reply_keeps_its_record_and_is_not_reposted` (line 222): first tick posts `[host-unreachable]`; second tick posts exactly one `[already-running]` (total 2 comments, `mcp.events == []`, `world.requests == 1`, record holds the slot). Verifies the once-only marker replaces a second host POST.
+- Commit 248a6572 also rewrote `test_dispatch.py`: `test_issue_with_running_session_posts_one_already_running_marker_and_does_not_launch`, `test_at_capacity_posts_one_queued_marker_then_launches_when_a_slot_frees`, `test_graph_busy_posts_one_queued_marker_and_does_not_launch`, and `test_second_issue_on_a_live_graph_is_skipped` now expects `comment` `[graph-busy]`.
+
+### Silent Skips Reviewed (SC1 interpretation, updated)
 
 | Decision (`decide`) | Comment | Why it is acceptable |
 | --- | --- | --- |
-| `gave up on this issue (no claim)` | None on this tick | The give-up path always posted `exited-unclaimed` or `claim-timeout` before `_give_up()` (`sessions.py` 531-542), so the issue already carries its marker. |
-| `session already running for this issue` | None | The issue was launched, so it is dispatched, not a non-dispatch. `docs/dispatcher.md` says so explicitly. This reading needs owner confirmation (Human Verification 1). |
-| `at capacity` / `session already running for graph` | `[at-capacity]` / `[graph-busy]`, once only | Closed by this re-verification. |
+| `gave up on this issue (no claim)` (skip, line 259) | None on this tick | The give-up path always posts `exited-unclaimed` or `claim-timeout` before `_give_up()` (`sessions.py` 531-542), so the issue already carries its outcome marker — the skip is a re-decision, not a silent non-dispatch. This is the sole remaining silent branch. |
+| `session already running for this issue` | `[already-running]`, once only | Closed by commit 248a6572 (was an open owner-decision item in the prior record). |
+| `at capacity` / `session already running for graph` | `[at-capacity]` / `[graph-busy]`, once only | Closed by commit 248a6572. |
 
-**Reading of "exactly one":** every marker in the dispatcher uses the once-only tag scheme (`_comment_once`). The new markers follow the same convention, so a deferral repeated on later ticks posts nothing new. This matches the existing `already-claimed` and `no-node` behaviour.
+**Reading of "exactly one":** every marker uses the once-only tag scheme (`_comment_once`); repeated deferrals post nothing new, matching `already-claimed`/`no-node` behaviour. `docs/dispatcher.md` states "at most one" per marker and lists the gave-up skip explicitly.
 
-### Test-Contract Changes in the Diff
+### Spot-Check
 
-- `test_at_capacity_skips_and_decides_again_next_tick` was rewritten. It previously asserted that no comment is posted at capacity, which codified the gap. It now asserts one `[at-capacity]` comment, then no further comment, then launch once a slot frees.
-- Four assertions moved from `skip` to `comment`: `test_quota.py`, `test_readoption.py`, `test_sessions.py`, and `test_dispatch.py::test_second_issue_on_a_live_graph_is_skipped`.
-- `test_claude_code_route.py` `EXPECTED_MARKERS` gained `at-capacity` and `graph-busy`.
-
-### Spot-Check: Dispatcher Test Suite (run once)
-
-```
-uv run --no-project --with pytest --with pytest-timeout --with httpx pytest packages/dispatcher/tests --timeout 60000 -q
-298 passed in 22.49s
-```
-
-0 failed, 0 skipped. The whole `packages/dispatcher/tests` directory was run once, as the assignment asked.
+This re-verification ran NO tests per the assignment (read-only inspection: commit diff, `dispatch.py`, `sessions.py`, `__main__.py`, tests, docs). The prior record's full-suite run (`298 passed`, 22.49 s) stands as history and was not repeated. No advisory re-run was performed, so no new pin-count is claimed here.
 
 ### Anti-Patterns
 
-The uncommitted diff adds no `TODO`, `FIXME`, `XXX`, or `TBD` markers. The new `MARKERS` entries are real comment texts, not placeholders.
+Commit 248a6572's changed files carry no `TODO`, `FIXME`, `XXX`, `TBD`, placeholder or stub markers in the inspected `dispatch.py` / test / docs hunks. The new `MARKERS` entries are real comment texts.
 
 ## Gaps Summary
 
-No BLOCKER remains. The prior SC1 marker gap is closed in code, tests, and docs. Two decisions and two live proofs remain for a human. None of them is a code defect that this run can see.
+No BLOCKER remains. The prior SC1 marker gap (at-capacity, graph-busy) and the already-running owner-decision item are both closed in code, tests and docs by commit 248a6572. The reap path that re-decides queued issues is present and wired (`__main__.py` readopt → reap → tick; `sessions.py` reap drops exited sessions). Two live proofs (SC5) and the live-agent behaviour check (SC3) remain for a human.
 
 ---
 
-_Verified: 2026-11-19T00:53:45Z_
+_Verified: 2026-11-19T12:30:13Z_
 _Verifier: Claude (gsd-verifier)_

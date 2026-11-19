@@ -3079,8 +3079,8 @@ export const MAX_ARCHIVE_PAGE_ROWS = 5000;
 /** The most rows one restore `insert` carries, so the statement stays under the driver's parameter limit. */
 const RESTORE_BATCH_ROWS = 200;
 
-/** The Postgres type a column type is cast to when a restore binds it. */
-const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz", jsonb: "jsonb" };
+/** The Postgres type a column type is cast to when a restore binds it. `jsonb` binds as `text::jsonb`: the archive holds a jsonb value's canonical text form, and a straight `::jsonb` bind makes Bun JSON-encode the string parameter, double-encoding it; `text::jsonb` lets Postgres parse the text instead, so the value round-trips. */
+const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", smallint: "smallint", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz", jsonb: "text::jsonb" };
 
 /** One REPEATABLE READ READ ONLY view of the archived tables: every read through it sees the same instant. */
 export interface IndexSnapshotReader {

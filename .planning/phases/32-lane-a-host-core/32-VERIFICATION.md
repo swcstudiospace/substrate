@@ -1,10 +1,10 @@
 ---
 phase: 32-lane-a-host-core
-verified: 2026-11-19T00:00:00Z
+verified: 2026-11-19T12:29:41Z
 status: human_needed
 score: 3/3 truths verified (truth 1 carries a WARNING; truth 3 verified under the build_proxy decision)
-covered_files: [".planning/milestones/v1.3-phases/32-lane-a-host-core/32-01-PLAN.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-01-SUMMARY.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-02-PLAN.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-02-SUMMARY.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-03-PLAN.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-03-SUMMARY.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-CONTEXT.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-RESEARCH.md", "packages/host/src/hostfns.ts", "packages/host/src/main.ts", "packages/host/src/options.test.ts", "packages/host/src/options.ts", "packages/host/src/seed.test.ts", "packages/host/src/seed.ts", "packages/host/src/substrate-proxy.test.ts", "packages/host/src/substrate-proxy.ts", "packages/host/src/substrate.ts", "packages/host/src/sync.ts", "packages/host/src/tasks.test.ts", "packages/host/src/tasks.ts", "scripts/host-smoke.ts"]
-covered_digest: "v3:sha256:5d4f58c9c04c211b4659b6fad13882683f1926a1a01338bffcfbda94758d9bf0"
+covered_files: [".planning/milestones/v1.3-phases/32-lane-a-host-core/32-01-PLAN.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-01-SUMMARY.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-02-PLAN.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-02-SUMMARY.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-03-PLAN.md", ".planning/milestones/v1.3-phases/32-lane-a-host-core/32-03-SUMMARY.md", "docs/runbooks/lane-a-host.md", "infra/vps/substrate-host.service", "packages/host/src/hostfns.ts", "packages/host/src/main.ts", "packages/host/src/options.ts", "packages/host/src/seed.ts", "packages/host/src/substrate-proxy.ts", "packages/host/src/substrate.ts", "packages/host/src/sync.ts", "packages/host/src/tasks.ts"]
+covered_digest: "v3:sha256:8d8f2bf35bf007721c647f2835c1131cae742b85a5fc4da01128ea753381cfd9"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -33,7 +33,6 @@ human_verification:
 # Phase 32: Lane A host core Verification Report
 
 **Phase Goal:** A host task works its node under the `claude-code` lease from start to finish, survives a host restart, and keeps every credential on the host.
-**Verified:** 2026-11-19
 **Status:** human_needed
 **Re-verification:** Yes. The previous record (gaps_found, criterion 3 blocker) is overwritten. Criterion 3 is re-verified under the owner's build_proxy decision: the VM holds no host bearer and no real API key, and the VM's substrate MCP entry points at the host proxy in `packages/host/src/substrate-proxy.ts` on 127.0.0.1:7413, which adds the host bearer. D32-08 (bearer in the VM) is superseded and no override is recorded.
 

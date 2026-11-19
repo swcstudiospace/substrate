@@ -50,6 +50,7 @@ human_verification:
 ## Goal Achievement
 
 ### Observable Truths
+**Score:** 6/7 criteria verified. Criterion 3 is human_needed because its restore test is live-only. No criterion is FAILED.
 
 | #   | Truth   | Status     | Evidence       |
 | --- | ------- | ---------- | -------------- |
@@ -60,6 +61,7 @@ human_verification:
 | 5   | Removed or renamed documents are tombstoned through `delete_document`, only when no other active row shares the plane document; a narrower scan leaves earlier rows alone | ✓ VERIFIED | Unchanged by the gap closure. The run above includes `ingest.test.ts` tombstone and shared-document tests and `plan.test.ts` scope tests. |
 | 6   | A second identical run reports `unchanged` and sends nothing; a killed run resumes | ✓ VERIFIED | Unchanged. `ingest.test.ts` "a document already recorded at the same sha is unchanged", "a run killed after the first batch resumes" passed in the run. |
 | 7   | Greptile export and GitHub adapters produce the same entries, bounded by `--max-repos` and `--tier` | ✓ VERIFIED | Unchanged. Adapter tests are in `packages/corpus/src/adapters/*.test.ts`, which was not run in this pass; the prior run passed them. |
+### Gap closure, checked against code
 
 **Score:** 6/7 criteria verified. Criterion 3 is human_needed because its restore test is live-only. No criterion is FAILED.
 
@@ -68,9 +70,15 @@ human_verification:
 - **Gap A (criterion 1).** Closed. The planner pairs across copy collections, `PlanItem.renamedFromRepo` is declared in `packages/corpus/src/protocol.ts:135`, `client.ts:99-100` validates it, and `cli/src/corpus/ingest.ts:91-96` removes the old row from `renamedFromRepo`, falling back to the new repository. `render.ts:112` prints the qualified name.
 - **Gap B (criterion 3).** Closed in code. Archive, identity reset and operator gate are all present. The restore test is pending a live database (human item 1).
 - **Gap C (criterion 4).** Closed for the send path. See truth 4 and item 4.
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| `plan.ts` rename item | CLI tombstone | `renamedFrom` + `renamedFromRepo` | ✓ WIRED | `cli/src/corpus/ingest.ts:144-148` |
+| `ingest.ts` | plane | `corpusDocumentName(..., document)` → `file_sources` | ✓ WIRED | `ingest.ts:255`, `lightrag-bulk.ts:234` |
+| `server.ts` `/corpus/ingest` | `corpusIngestReply` | `caller.isOperator` | ✓ WIRED | `server.ts:1783` |
+| `mcp.ts` `corpus_ingest` | `corpusIngestReply` | `isOperator` | ✓ WIRED | `mcp.ts:1798` |
+| restore | `manifest_seq` sequence | `setval` on identity | ✓ WIRED | `index-store.ts:3167-3170` |
 
 ### Artifacts
-
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
 | `packages/mcp-server/src/corpus/plan.ts` | cross-collection rename pairing | ✓ VERIFIED | Two-pass pairing, `renamedFromRepo` |
@@ -80,9 +88,7 @@ human_verification:
 | `packages/mcp-server/src/index-store.migrate-contract.test.ts` | `corpus_documents` not excluded | ✓ VERIFIED | Exclusion list has only retrievals and feedback |
 | `packages/mcp-server/src/corpus/service.ts` | `corpus_ingest` operator-only | ✓ VERIFIED | `gateOf` `operatorOnly`, 403 `operator-required` |
 | `packages/corpus/src/names.ts` | name carries kind, tier, commit | ✓ VERIFIED | `corpusDocumentName` with facts, `parseCorpusDocumentName` reads them back |
-
 ### Key Link Verification
-
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
 | `plan.ts` rename item | CLI tombstone | `renamedFrom` + `renamedFromRepo` | ✓ WIRED | `cli/src/corpus/ingest.ts:144-148` |
@@ -90,7 +96,6 @@ human_verification:
 | `server.ts` `/corpus/ingest` | `corpusIngestReply` | `caller.isOperator` | ✓ WIRED | `server.ts:1783` |
 | `mcp.ts` `corpus_ingest` | `corpusIngestReply` | `isOperator` | ✓ WIRED | `mcp.ts:1798` |
 | restore | `manifest_seq` sequence | `setval` on identity | ✓ WIRED | `index-store.ts:3167-3170` |
-
 ### Requirements Coverage
 
 ATLAS-01 to ATLAS-06 map to criteria 1 to 7 as in the prior record. ATLAS-01 (criterion 1) ✓ SATISFIED. ATLAS-02 ✓ SATISFIED. ATLAS-03 (criterion 3) ⚠️ human_needed (restore). ATLAS-04 (criterion 4) ✓ SATISFIED on the send path, with item 4. ATLAS-05 ✓ SATISFIED. ATLAS-06 ✓ SATISFIED.
