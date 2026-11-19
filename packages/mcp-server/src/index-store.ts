@@ -51,7 +51,8 @@ import type {
 	Surface,
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
-import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
+import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql, bunSteeringIdempotencyStore } from "./planning/steering-store.ts";
+import type { SteeringIdempotencyStore } from "./planning/steering.ts";
 import { bunLiveSessionAuthority, type LiveSessionAuthority } from "./planning/steering-sessions-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
 import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
@@ -74,6 +75,8 @@ import {
 import { redact } from "./redact.ts";
 import { FORGET_MARKER_PREFIX, isForgetMarker, MAX_FORGET_ENTRIES, MAX_ROLLBACK_SELECT_LIMIT } from "./memory-forget.ts";
 import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
+import type { CrossRepoStore } from "./cross-repo-ops.ts";
+import { PgCrossRepoStore } from "./cross-repo-store.ts";
 import { PgWorktreeRegistry, type WorktreeRegistryStore } from "./worktree-registry.ts";
 
 /** The most entry ids one `forgottenEntryIds` call reads (a recall fan-out holds a few hits per bank). */
@@ -830,8 +833,8 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 	},
 	// v1.7 phase 65 (doc watch): the planning refresh's per-page content hashes, so a restart ingests only the pages that
 	// changed. One row per docs-plane destination and `.planning/` path. `destination` is a hash of the configured docs URL,
-	// never the URL. A cutover to another plane misses the old rows and ingests. Written only while
-	// `SUBSTRATE_PLANNING_HASH_STORE=on` (the default is off, and an empty table costs nothing, so the step always runs, like
+	// never the URL. A cutover to another plane misses the old rows and ingests. Written while
+	// `SUBSTRATE_PLANNING_HASH_STORE` is on (the default; `off` skips the writes). An empty table costs nothing, so the step always runs, like
 	// step 35). It takes version 39, after step 38 `corpus_reflect`.
 	// Additive and idempotent: one new table, no existing row touched. An older release never names it. OPERATORS: rehearse on a
 	// restored dump before production, like steps 33 to 35.
@@ -902,6 +905,69 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			create index if not exists live_session_bindings_repo_id_idx
 				on live_session_bindings (repo_id, session_id) where closed_at is null`,
 	},
+	// Durable steering idempotency (v1.8 phase 77): the per-session delivery sequence counter and the keyed-queue replay records.
+	// Opt-in with the audit table (step 33): with SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE off this step is skipped and not ledgered.
+	// Additive: two new tables and one nullable column on planning_steering_audit (the sequence a queued directive was given).
+	// No existing row is touched, and a NULL sequence keeps a row's payload hash. The replay table is pruned by the store (expired
+	// records, then the oldest beyond the configured cap). The audit log itself is never pruned.
+	// OPERATORS: rehearse this step on a restored dump before applying it to production.
+	{
+		version: 43,
+		name: "planning_steering_idempotency",
+		optIn: "steering-audit",
+		phase: "expand",
+		down: `alter table planning_steering_audit drop column if exists delivery_sequence; drop table if exists planning_steering_replay; drop table if exists planning_steering_sequence`,
+		sql: `
+			create table if not exists planning_steering_sequence (
+				target_session_id text primary key,
+				last_sequence     bigint not null check (last_sequence >= 0)
+			);
+			create table if not exists planning_steering_replay (
+				scope_key         text primary key,
+				target_session_id text not null,
+				fingerprint       text not null,
+				directive_json    text not null,
+				sequence          bigint not null check (sequence >= 1),
+				queued_at_ms      bigint not null,
+				expires_at_ms     bigint not null,
+				constraint planning_steering_replay_window_check check (expires_at_ms > queued_at_ms)
+			);
+			create index if not exists planning_steering_replay_recency_idx on planning_steering_replay (queued_at_ms desc, scope_key desc);
+			alter table planning_steering_audit
+				add column if not exists delivery_sequence bigint
+				constraint planning_steering_audit_delivery_sequence_check check (delivery_sequence is null or delivery_sequence >= 1)`,
+	},
+	// Cross-repository operations (phase 74): one row per operation key, and one row per repository step of it. The steps are
+	// written before each git effect (`applying`, `compensating`) and after its outcome, so a crash leaves the state the retry
+	// reads. Additive: two new tables; nothing existing is touched and an older release never names them. Always on, like step
+	// 36: an empty table costs nothing. Not in the archive's closed table list: an operation is re-run, not restored.
+	// OPERATORS: rehearse on a restored dump before production, like step 36.
+	{
+		version: 44,
+		name: "cross_repo_operations",
+		phase: "expand",
+		down: `drop table if exists cross_repo_steps; drop table if exists cross_repo_operations`,
+		sql: `
+			create table if not exists cross_repo_operations (
+				op_key       text primary key,
+				fingerprint  text not null,
+				branch       text not null,
+				status       text not null check (status in ('running', 'done', 'rolled-back', 'needs-attention')),
+				created_at   timestamptz not null,
+				updated_at   timestamptz not null
+			);
+			create table if not exists cross_repo_steps (
+				op_key      text not null references cross_repo_operations (op_key),
+				idx         integer not null check (idx >= 0),
+				repo        text not null,
+				base_ref    text not null,
+				planned_sha text not null,
+				state       text not null check (state in ('pending', 'applying', 'applied', 'compensating', 'compensated', 'failed', 'parked')),
+				detail      text,
+				updated_at  timestamptz not null,
+				primary key (op_key, idx)
+			)`,
+	},
 ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
@@ -942,6 +1008,24 @@ export const PLANNING_HASH_TABLE_REPAIR = `
 	create unique index if not exists planning_page_hashes_destination_path_idx on planning_page_hashes (destination, path);
 `;
 
+/** One `graph_nodes` row's lease columns, as the reconcile reads them. A free node has a null `claimed_by`. */
+export interface ReconcileNodeHold {
+	graph_id: string;
+	node_id: string;
+	claimed_by: string | null;
+	claim_session: string | null;
+	lease_epoch: number;
+}
+
+function toReconcileHold(row: Record<string, unknown>): ReconcileNodeHold {
+	return {
+		graph_id: String(row.graph_id),
+		node_id: String(row.node_id),
+		claimed_by: row.claimed_by == null ? null : String(row.claimed_by),
+		claim_session: row.claim_session == null ? null : String(row.claim_session),
+		lease_epoch: Number(row.lease_epoch),
+	};
+}
 
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
@@ -968,12 +1052,29 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * The cross-repository operation log over this store's pool (phase 74): the operation and per-repository step state a
+	 * branch fan-out writes before each effect. It only builds the adapter; no statement runs until an operation uses it, and
+	 * the tables are created by migration step 44.
+	 */
+	crossRepoStore(): CrossRepoStore {
+		return new PgCrossRepoStore(this.sql, (op, fn) => this.plane(op, fn));
+	}
+
+	/**
 	 * The steering audit sink over this store's pool (phase 58, live steering): the append-only `planning_steering_audit`
 	 * writes and the bounded reads that restore the inbox after a restart. It only builds the sink; no statement runs until
 	 * the inbox uses it, and the table exists only when the `steering-audit` opt-in ran its migration steps.
 	 */
 	steeringAudit(): SteeringAuditSink {
 		return new SteeringAuditSink(bunSteeringAuditSql(this.sql), bunSteeringAuditReadSql(this.sql));
+	}
+
+	/**
+	 * The steering idempotency store over this store's pool (v1.8 phase 77): the durable delivery sequence counter and the keyed-queue
+	 * replay records. It only builds the adapter; the tables exist after migration step 43, under the same opt-in as the audit table.
+	 */
+	steeringIdempotency(): SteeringIdempotencyStore {
+		return bunSteeringIdempotencyStore(this.sql);
 	}
 
 	/**
@@ -2858,6 +2959,69 @@ export class IndexStore implements MemoryStore {
 		return typeof body === "string" ? body : null;
 	}
 
+	/**
+	 * The lease columns of the `(graph_id, node_id)` keys, read-only. A free node comes back with a null `claimed_by`; a key
+	 * with no row is absent. Graphs are read in one statement and the pairs are matched here, so callers pass bounded batches.
+	 */
+	async reconcileHolds(keys: ReadonlyArray<{ graph_id: string; node_id: string }>): Promise<ReconcileNodeHold[]> {
+		if (keys.length === 0) return [];
+		const wanted = new Set(keys.map((key) => `${key.graph_id}\u0000${key.node_id}`));
+		const graphIds = [...new Set(keys.map((key) => key.graph_id))];
+		return this.plane("reconcile.holds", async () => {
+			const rows = (await this.sql`
+				select graph_id, node_id, claimed_by, claim_session, lease_epoch from graph_nodes
+				where graph_id in ${this.sql(graphIds)}`) as Array<Record<string, unknown>>;
+			return rows.map(toReconcileHold).filter((hold) => wanted.has(`${hold.graph_id}\u0000${hold.node_id}`));
+		});
+	}
+
+	/** Every node that currently has a hold, up to `cap`; `truncated` is true when more exist. Read-only. */
+	async reconcileHeldNodes(cap: number): Promise<{ rows: ReconcileNodeHold[]; truncated: boolean }> {
+		const limit = Math.max(1, Math.floor(cap));
+		return this.plane("reconcile.held", async () => {
+			const found = (await this.sql`
+				select graph_id, node_id, claimed_by, claim_session, lease_epoch from graph_nodes
+				where claimed_by is not null
+				order by graph_id, node_id
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { rows: found.slice(0, limit).map(toReconcileHold), truncated: found.length > limit };
+		});
+	}
+
+	/** The ids of `memory_entries` rows created at or after `sinceIso`, newest first, up to `cap`. Read-only. */
+	async reconcileMemoryIds(sinceIso: string, cap: number): Promise<{ rows: string[]; truncated: boolean }> {
+		const limit = Math.max(1, Math.floor(cap));
+		return this.plane("reconcile.memory", async () => {
+			const found = (await this.sql`
+				select id from memory_entries
+				where created >= ${sinceIso}::timestamptz
+				order by created desc, id desc
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { rows: found.slice(0, limit).map((row) => String(row.id)), truncated: found.length > limit };
+		});
+	}
+
+	/** The graph ids in `graph_index`, in id order, up to `cap`; `truncated` is true when more exist. Read-only. */
+	async reconcileGraphIds(cap: number): Promise<{ rows: string[]; truncated: boolean }> {
+		const limit = Math.max(1, Math.floor(cap));
+		return this.plane("reconcile.graphs", async () => {
+			const found = (await this.sql`
+				select graph_id from graph_index
+				order by graph_id
+				limit ${limit + 1}`) as Array<Record<string, unknown>>;
+			return { rows: found.slice(0, limit).map((row) => String(row.graph_id)), truncated: found.length > limit };
+		});
+	}
+
+	/** How many `memory_entries` rows were created before `sinceIso`: the rows a reconcile window does not check. Read-only. */
+	async reconcileMemoryRowsBefore(sinceIso: string): Promise<number> {
+		return this.plane("reconcile.memory_rows", async () => {
+			const rows = (await this.sql`
+				select count(*) as n from memory_entries where created < ${sinceIso}::timestamptz`) as Array<Record<string, unknown>>;
+			return Number(rows[0]?.n ?? 0);
+		});
+	}
+
 	async memoryLifecycleCandidates(options: { now?: number; policy?: SweepPolicy } = {}): Promise<Array<Record<string, unknown>>> {
 		const policy = options.policy ?? sweepPolicyFromEnv();
 		const now = options.now ?? Date.now();
@@ -2915,8 +3079,8 @@ export const MAX_ARCHIVE_PAGE_ROWS = 5000;
 /** The most rows one restore `insert` carries, so the statement stays under the driver's parameter limit. */
 const RESTORE_BATCH_ROWS = 200;
 
-/** The Postgres type a column type is cast to when a restore binds it. */
-const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz" };
+/** The Postgres type a column type is cast to when a restore binds it. `jsonb` binds as `text::jsonb`: the archive holds a jsonb value's canonical text form, and a straight `::jsonb` bind makes Bun JSON-encode the string parameter, double-encoding it; `text::jsonb` lets Postgres parse the text instead, so the value round-trips. */
+const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", smallint: "smallint", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz", jsonb: "text::jsonb" };
 
 /** One REPEATABLE READ READ ONLY view of the archived tables: every read through it sees the same instant. */
 export interface IndexSnapshotReader {
@@ -2945,7 +3109,7 @@ function exportSelectList(spec: ArchiveTableSpec): string {
 		.map((column) => {
 			const quoted = `"${column.name}"`;
 			if (column.type === "timestamptz") return `to_char(${quoted} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as ${quoted}`;
-			if (column.type === "bigint") return `${quoted}::text as ${quoted}`;
+			if (column.type === "bigint" || column.type === "jsonb") return `${quoted}::text as ${quoted}`;
 			return quoted;
 		})
 		.join(", ");
@@ -2999,6 +3163,10 @@ function archiveAccess(sql: SQL): IndexRestoreTx {
 				const params: Array<string | number | boolean | null> = [];
 				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${PG_TYPE[column.type]}`).join(", ")})`);
 				await sql.unsafe(`insert into "${spec.name}" (${columns.map((column) => `"${column.name}"`).join(", ")}) values ${tuples.join(", ")}`, params);
+			}
+			// A restore loads an identity column with the archived values: its sequence moves past them, so the next insert takes a value above them.
+			if (spec.identity !== undefined) {
+				await sql.unsafe(`select setval(pg_get_serial_sequence($1, $2), coalesce((select max("${spec.identity}") from "${spec.name}"), 0) + 1, false)`, [spec.name, spec.identity]);
 			}
 		},
 	};

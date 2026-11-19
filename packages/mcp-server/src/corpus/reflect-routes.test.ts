@@ -229,7 +229,7 @@ describe("POST /corpus/reflect", () => {
 		expect(body.results[0]).toMatchObject({ repo: REPO, status: "stored" });
 		expect(body.manifestVersion).toBeGreaterThan(0);
 		expect(harness.store.row(REPO, DIGEST_PATH)).toMatchObject({ kind: "digest", state: "active", sha256: digest.sha256 });
-		expect(harness.plane.batches).toEqual([[corpusDocumentName(REPO, DIGEST_PATH, digest.sha256)]]);
+		expect(harness.plane.batches).toEqual([[corpusDocumentName(REPO, DIGEST_PATH, digest.sha256, { kind: "digest", tier: 1 })]]);
 
 		const again = (await (await post(harness, "/corpus/reflect", request(digest))).json()) as Reflected;
 		expect(again.results).toEqual([{ repo: REPO, status: "unchanged" }]);

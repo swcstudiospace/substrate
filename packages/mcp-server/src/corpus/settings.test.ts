@@ -37,9 +37,10 @@ describe("the doc watch settings (v1.7 phase 65)", () => {
 		expect(loadCorpusSettings({ SUBSTRATE_CORPUS_FRESH_MAX_AGE_S: "999999999999" }).freshMaxAgeS).toBe(31_536_000);
 	});
 
-	test("the planning hash store is off unless the word on is given", () => {
-		expect(loadConfig({}).planningHashStore).toBe(false);
+	test("the planning hash store is on unless the flag names another value", () => {
+		expect(loadConfig({}).planningHashStore).toBe(true);
+		expect(loadConfig({ SUBSTRATE_PLANNING_HASH_STORE: "" }).planningHashStore).toBe(true);
 		expect(loadConfig({ SUBSTRATE_PLANNING_HASH_STORE: " On " }).planningHashStore).toBe(true);
-		for (const value of ["1", "true", "yes", "off", ""]) expect({ value, on: loadConfig({ SUBSTRATE_PLANNING_HASH_STORE: value }).planningHashStore }).toEqual({ value, on: false });
+		for (const value of ["1", "true", "yes", "off"]) expect({ value, on: loadConfig({ SUBSTRATE_PLANNING_HASH_STORE: value }).planningHashStore }).toEqual({ value, on: false });
 	});
 });

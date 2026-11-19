@@ -72,7 +72,7 @@ function world(options: { enabled?: boolean; verify?: AnchorVerifier } = {}) {
 		roots,
 		anchor: { ports: () => UNUSED_PORTS, verify: options.verify },
 	};
-	const ingest = (documents: CorpusDocument[], tombstones: Array<{ repo: string; path: string }> = []) => corpusIngestReply(deps, { protocol: CORPUS_PROTOCOL, documents, tombstones }, "claude-code");
+	const ingest = (documents: CorpusDocument[], tombstones: Array<{ repo: string; path: string }> = []) => corpusIngestReply(deps, { protocol: CORPUS_PROTOCOL, documents, tombstones }, "claude-code", true);
 	return { store, plane, clock, rootEvents, otherEvents, roots, deps, ingest };
 }
 
@@ -195,8 +195,11 @@ describe("docs_search names the corpus root it was answered under", () => {
 
 		const on = substrateOf("on", store, clock);
 		const cold = await on.searchDocs({ question: "" }, "omp");
-		// Nothing is cached yet: the search did not wait for a root, so the fields are left out.
-		expect(JSON.stringify(cold)).toBe(JSON.stringify(off));
+		// The first reply names the root it read: nothing was cached, and the reply waits for that read.
+		const { corpus_root: coldRoot, corpus_count: coldCount, ...coldRest } = cold;
+		expect(JSON.stringify(coldRest)).toBe(JSON.stringify(off));
+		expect(coldRoot).toBe(shortRoot(corpusRoot([DOC_A, DOC_B]).root));
+		expect(coldCount).toBe(2);
 		await flush();
 		const warm = await on.searchDocs({ question: "" }, "omp");
 		const { corpus_root: root, corpus_count: count, ...rest } = warm;
@@ -217,10 +220,10 @@ describe("docs_search names the corpus root it was answered under", () => {
 		await on.searchDocs({ question: "" }, "omp");
 		await flush();
 		expect(await on.searchDocs({ question: "" }, "omp")).toMatchObject({ corpus_count: 1 });
-		const ingested = await on.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [DOC_B], tombstones: [] }, "omp");
+		const ingested = await on.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: [DOC_B], tombstones: [] }, "omp", true);
 		expect(ingested.ok).toBe(true);
 		const during = await on.searchDocs({ question: "" }, "omp");
-		expect("corpus_root" in during).toBe(false);
+		expect(during).toMatchObject({ corpus_count: 2, corpus_root: shortRoot(corpusRoot([DOC_A, DOC_B]).root) });
 		await flush();
 		expect(await on.searchDocs({ question: "" }, "omp")).toMatchObject({ corpus_count: 2, corpus_root: shortRoot(corpusRoot([DOC_A, DOC_B]).root) });
 	});

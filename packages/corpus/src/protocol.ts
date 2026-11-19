@@ -129,8 +129,10 @@ export interface PlanItem {
 	repo: string;
 	path: string;
 	sha256?: string | undefined;
-	/** Present for `rename`: the manifest row the document moved from (same repo, same sha256). */
+	/** Present for `rename`: the manifest row the document moved from (same sha256, path in `renamedFrom`). */
 	renamedFrom?: string | undefined;
+	/** Present for a `rename` whose old row is in another copy collection: that row's repository. Absent means `repo`. */
+	renamedFromRepo?: string | undefined;
 }
 
 export interface CorpusPlanResponse {

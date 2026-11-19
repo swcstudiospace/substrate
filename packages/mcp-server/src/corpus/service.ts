@@ -24,6 +24,7 @@ import type { AnchorVerifyPorts } from "../anchor-verify-deps.ts";
 import type { CorpusSettings } from "../config.ts";
 import type { LightragBulkPlane } from "../planes/lightrag-bulk.ts";
 import type { EventInput, Surface } from "../types.ts";
+import { authorizeRepo, REPO_REFUSAL_MESSAGES, REPO_SCOPE_OFF, type RepoRefusalReason, type RepoScope } from "../repo-scope.ts";
 import { corpusAnchorStatus, type AnchorVerifier } from "./anchor.ts";
 import { corpusGate, ingestCorpus, type GateReason } from "./ingest.ts";
 import { planCorpus, planRepos } from "./plan.ts";
@@ -35,13 +36,15 @@ import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type Reque
 /** Every reason a corpus door refuses: the gates, the request refusals, an index or plane or embedding service that does not answer, and the proof lookups. Closed. */
 export type CorpusRefusalReason =
 	| GateReason
+	| "operator-required"
 	| RequestRefusal
 	| "corpus.index-unavailable"
 	| "corpus.plane-unreachable"
 	| "corpus.embeddings-unavailable"
 	| "corpus.too-large"
 	| "not-in-corpus"
-	| "bad-root";
+	| "bad-root"
+	| RepoRefusalReason;
 
 export interface CorpusRefusal {
 	error: string;
@@ -72,11 +75,14 @@ export interface CorpusServiceDeps {
 	roots: CorpusRootKeeper;
 	/** The ledger and devnet reads the anchor check goes through. */
 	anchor: { ports: () => AnchorVerifyPorts; verify?: AnchorVerifier | undefined };
+	/** The repository scope the doors that name repositories consult. Absent means scoping is off, as before. */
+	repoScope?: RepoScope | undefined;
 }
 
 const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	unauthenticated: "the corpus needs an authenticated surface; nothing was read or changed",
 	"vm-guest": "the corpus is not served to a VM guest; nothing was read or changed",
+	"operator-required": "the corpus ingest is an operator's write; nothing was sent or changed",
 	"corpus.disabled": "the corpus is switched off (SUBSTRATE_CORPUS is not on); nothing was read or changed",
 	"corpus.backend-unavailable": "the corpus ingest and reconcile need the LightRAG docs backend, which is not configured; nothing was sent",
 	"corpus.index-unavailable": "the corpus manifest is not reachable (no index, or it did not answer); nothing was changed",
@@ -107,14 +113,19 @@ const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	"text-too-long": "an item text is longer than one request may carry",
 	"bad-threshold": "the threshold is not a number from 0.5 to 1",
 	"bad-max-pairs": "maxPairs is not a whole number from 1 to 1000",
+	...REPO_REFUSAL_MESSAGES,
 };
 
 export function refusal(status: 400 | 401 | 403 | 404 | 503, reason: CorpusRefusalReason, detail?: string): CorpusFailure {
 	return { ok: false, status, body: { error: MESSAGES[reason], reason, ...(detail === undefined ? {} : { detail }) } };
 }
 
-/** The gate every corpus door shares. `needsPlane` is true for the ingest, the only door that writes to the docs plane. */
-function gateOf(deps: CorpusServiceDeps, surface: Surface | null, needsPlane: boolean): CorpusFailure | null {
+/**
+ * The gate every corpus door shares. `needsPlane` is true for the ingest, the only door that writes to the docs plane.
+ * `caller.operatorOnly` makes the door an operator's (the ingest): an authenticated surface that is not an operator is refused
+ * after the shared gate. The reads and the digest door leave it unset.
+ */
+function gateOf(deps: CorpusServiceDeps, surface: Surface | null, needsPlane: boolean, caller: { operatorOnly?: boolean; isOperator?: boolean } = {}): CorpusFailure | null {
 	const gate = corpusGate({
 		enabled: deps.settings.enabled,
 		surface,
@@ -122,6 +133,7 @@ function gateOf(deps: CorpusServiceDeps, surface: Surface | null, needsPlane: bo
 		backendReady: !needsPlane || deps.plane !== null,
 	});
 	if (gate !== null) return refusal(gate.status, gate.reason);
+	if (caller.operatorOnly === true && caller.isOperator !== true) return refusal(403, "operator-required");
 	if (deps.store === null) return refusal(503, "corpus.index-unavailable");
 	return null;
 }
@@ -141,6 +153,27 @@ async function emitRefusal(deps: CorpusServiceDeps, surface: Surface, reason: Co
 		);
 }
 
+/**
+ * The repository gate the doors that name repositories share. A repository outside the caller's grant is refused before any
+ * manifest or plane read. An authenticated refusal is audited with its reason alone: the requested repository and path are not
+ * written to the ledger, and an anonymous refusal is recorded by the route audit that runs before every handler.
+ */
+async function repoRefusalOf(deps: CorpusServiceDeps, surface: Surface | null, repos: readonly string[]): Promise<CorpusFailure | null> {
+	const scope = deps.repoScope ?? REPO_SCOPE_OFF;
+	for (const repo of repos) {
+		const gate = authorizeRepo(scope, surface, repo);
+		if (gate.ok) continue;
+		if (surface !== null) await emitRefusal(deps, surface, gate.reason, `corpus-scope:${randomUUID()}`);
+		return refusal(403, gate.reason);
+	}
+	return null;
+}
+
+/** The doors that read every repository at once (status, reconcile): refused while scoping is on, because no single grant covers them. */
+function allReposRefusal(deps: CorpusServiceDeps): CorpusFailure | null {
+	return (deps.repoScope ?? REPO_SCOPE_OFF).enforced ? refusal(403, "all-repos-not-granted") : null;
+}
+
 /** `POST /corpus/plan`: what an ingest would add, change, update, rename or tombstone. Reads the manifest; writes nothing. */
 export async function corpusPlanReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusPlanResponse>> {
 	const gated = gateOf(deps, surface, false);
@@ -148,6 +181,8 @@ export async function corpusPlanReply(deps: CorpusServiceDeps, raw: unknown, sur
 	const parsed = parsePlanRequest(raw);
 	if (!parsed.ok) return refusal(400, parsed.reason, parsed.detail);
 	const { entries, scope } = parsed.value;
+	const scoped = await repoRefusalOf(deps, surface, planRepos(entries, scope));
+	if (scoped !== null) return scoped;
 	const store = deps.store;
 	if (store === null) return refusal(503, "corpus.index-unavailable");
 	try {
@@ -162,8 +197,8 @@ export async function corpusPlanReply(deps: CorpusServiceDeps, raw: unknown, sur
 }
 
 /** `POST /corpus/ingest`: the bulk ingest. The only door that sends anything to the docs plane. */
-export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
-	const gated = gateOf(deps, surface, true);
+export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null, isOperator: boolean): Promise<CorpusReply<CorpusIngestResponse>> {
+	const gated = gateOf(deps, surface, true, { operatorOnly: true, isOperator });
 	if (gated !== null) {
 		if (surface !== null && gated.body.reason !== "corpus.disabled") await emitRefusal(deps, surface, gated.body.reason, `corpus-ingest:${randomUUID()}`);
 		return gated;
@@ -176,9 +211,11 @@ export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, s
 		await emitRefusal(deps, surface, parsed.reason, sessionId);
 		return refusal(400, parsed.reason, parsed.detail);
 	}
+	const scoped = await repoRefusalOf(deps, surface, [...parsed.value.documents, ...parsed.value.tombstones].map((item) => item.repo));
+	if (scoped !== null) return scoped;
 	// The root cache is unavailable from the first write to the last: each batch saves its rows before the later ones and the cleanup.
 	// A request that recorded, changed or removed anything (or failed part-way, or threw) moved the manifest: a root event is owed.
-	// The keeper coalesces and dedupes by manifest version, so a request that changed nothing writes nothing.
+	// Each changing sync owes its own root event, written with no window; a request that changed nothing writes nothing.
 	deps.roots.writeStarted();
 	let changed = true;
 	try {
@@ -205,6 +242,8 @@ function ageSeconds(at: string | null, now: number): number | null {
 export async function corpusStatusReply(deps: CorpusServiceDeps, surface: Surface | null): Promise<CorpusReply<CorpusStatusResponse>> {
 	const gated = gateOf(deps, surface, false);
 	if (gated !== null) return gated;
+	const wide = allReposRefusal(deps);
+	if (wide !== null) return wide;
 	const store = deps.store;
 	if (store === null) return refusal(503, "corpus.index-unavailable");
 	try {
@@ -224,6 +263,8 @@ export async function corpusStatusReply(deps: CorpusServiceDeps, surface: Surfac
 export async function corpusReconcileReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusReconcileResponse>> {
 	const gated = gateOf(deps, surface, true);
 	if (gated !== null) return gated;
+	const wide = allReposRefusal(deps);
+	if (wide !== null) return wide;
 	const parsed = parseReconcileRequest(raw);
 	if (!parsed.ok) return refusal(400, parsed.reason, parsed.detail);
 	const { store, plane } = deps;
@@ -264,6 +305,8 @@ export async function corpusProofReply(deps: CorpusServiceDeps, query: { repo: s
 	const { repo, path } = query;
 	if (repo === null || !isValidRepo(repo)) return refusal(400, "bad-repo");
 	if (path === null || !isValidPath(path)) return refusal(400, "bad-path");
+	const scoped = await repoRefusalOf(deps, surface, [repo]);
+	if (scoped !== null) return scoped;
 	try {
 		const read = await deps.roots.read();
 		if (!read.ok) return refusal(503, "corpus.too-large");

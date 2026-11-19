@@ -89,51 +89,29 @@ describe("trackerRoute (D-10)", () => {
 	});
 });
 
-describe("sessionEnv (D-08)", () => {
+describe("sessionEnv (D-08, LANEA-07)", () => {
 	const base = { model: "grok-4.6", graphId: GID, nodeId: "n1" };
 
-	test("exactly the five keys on every route", () => {
-		for (const route of allRoutes()) {
-			const env = sessionEnv({ ...base, route, directKey: "sk-ant-dummy-000000000000000000000000" });
-			expect(Object.keys(env).sort()).toEqual([
-				"ANTHROPIC_API_KEY",
-				"ANTHROPIC_BASE_URL",
-				"ANTHROPIC_MODEL",
-				"SUBSTRATE_GRAPH_ID",
-				"SUBSTRATE_NODE_ID",
-			]);
-			expect(env.ANTHROPIC_MODEL).toBe("grok-4.6");
-			expect(env.SUBSTRATE_GRAPH_ID).toBe(GID);
-			expect(env.SUBSTRATE_NODE_ID).toBe("n1");
-		}
-	});
-
-	test("loopback and hostfn_proxy use the relay and the dummy key, ignoring a supplied directKey", () => {
-		for (const a of ["loopback", "hostfn_proxy"] as const) {
-			const route: Route = { a, b: "prompt_hostfn", c: "hostfn_commit", s: "hostfn" };
-			const env = sessionEnv({ ...base, route, directKey: "sk-ant-supplied-00000000000000000000" });
-			expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3001");
-			expect(env.ANTHROPIC_API_KEY).toBe("shunt");
-		}
-	});
-
-	test("anthropic_key uses api.anthropic.com and the supplied key, and throws without one", () => {
-		const route: Route = { a: "anthropic_key", b: "prompt_hostfn", c: "hostfn_commit", s: "hostfn" };
-		const env = sessionEnv({ ...base, route, directKey: "sk-ant-supplied-00000000000000000000" });
-		expect(env.ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com");
-		expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-supplied-00000000000000000000");
-		expect(() => sessionEnv({ ...base, route })).toThrow("SUBSTRATE_VM_ANTHROPIC_API_KEY required on route a:anthropic_key");
+	test("exactly the five keys: the model relay and the placeholder key, no real key", () => {
+		const env = sessionEnv(base);
+		expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "SUBSTRATE_GRAPH_ID", "SUBSTRATE_NODE_ID"]);
+		expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3001");
+		expect(env.ANTHROPIC_API_KEY).toBe("shunt");
+		expect(env.ANTHROPIC_MODEL).toBe("grok-4.6");
+		expect(env.SUBSTRATE_GRAPH_ID).toBe(GID);
+		expect(env.SUBSTRATE_NODE_ID).toBe("n1");
 	});
 });
 
 describe("loopbackPorts", () => {
-	test("[7410, 3001, 7412] on a:loopback + vm_mcp, [7410, 3001] on a:loopback otherwise, [] off a:loopback", () => {
+	test("[7413, 3001, 7412] on a:loopback + vm_mcp, [7413, 3001] on a:loopback otherwise, [3001] on a:anthropic_key, [] on a:hostfn_proxy", () => {
 		expect(TRACKER_PROXY_PORT).toBe(7412);
 		for (const route of allRoutes()) {
 			const ports = loopbackPorts(route);
-			if (route.a !== "loopback") expect(ports).toEqual([]);
-			else if (trackerRoute(route) === "vm_mcp") expect(ports).toEqual([7410, 3001, 7412]);
-			else expect(ports).toEqual([7410, 3001]);
+			if (route.a === "hostfn_proxy") expect(ports).toEqual([]);
+			else if (route.a === "anthropic_key") expect(ports).toEqual([3001]);
+			else if (trackerRoute(route) === "vm_mcp") expect(ports).toEqual([7413, 3001, 7412]);
+			else expect(ports).toEqual([7413, 3001]);
 		}
 	});
 });
@@ -145,9 +123,9 @@ describe("networkPermissions (D-12)", () => {
 			const perms = networkPermissions(route);
 			expect(perms.default).toBe("deny");
 			const expected = D12_HOSTS.map((h) => `tcp://${h}:443`);
-			if (route.a === "loopback") expected.push("tcp://127.0.0.1:7410", "tcp://127.0.0.1:3001");
+			if (route.a === "loopback") expected.push("tcp://127.0.0.1:7413");
+			if (route.a === "loopback" || route.a === "anthropic_key") expected.push("tcp://127.0.0.1:3001");
 			if (trackerRoute(route) === "vm_mcp") expected.push("tcp://127.0.0.1:7412");
-			if (route.a === "anthropic_key") expected.push("tcp://api.anthropic.com:443");
 			expect(tcpPatterns(route)).toEqual(expected.sort());
 			for (const rule of perms.rules) {
 				if (rule.patterns.includes("tcp://**")) {
@@ -159,11 +137,11 @@ describe("networkPermissions (D-12)", () => {
 		}
 	});
 
-	test("127.0.0.1:7412 appears only on tracker_route vm_mcp; api.anthropic.com only on a:anthropic_key", () => {
+	test("127.0.0.1:7412 appears only on tracker_route vm_mcp; no route reaches api.anthropic.com", () => {
 		for (const route of allRoutes()) {
 			const all = networkPermissions(route).rules.flatMap((r) => r.patterns).join(" ");
 			expect(all.includes("127.0.0.1:7412")).toBe(trackerRoute(route) === "vm_mcp");
-			expect(all.includes("api.anthropic.com")).toBe(route.a === "anthropic_key");
+			expect(all.includes("api.anthropic.com")).toBe(false);
 		}
 	});
 });

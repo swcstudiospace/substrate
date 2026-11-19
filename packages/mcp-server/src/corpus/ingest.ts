@@ -8,17 +8,19 @@
  *   is marked removed only after that deletion is confirmed. A deletion that fails or is not confirmed leaves the row active
  *   (`delete-failed`), so a retry plans it again.
  * - I, inserts and replacements: batches may run concurrently; each row is written after the plane accepted its document.
- *   Nothing is deleted from the plane in this phase, so no delete can overlap an insert whose text the plane may answer with
- *   a document that is about to disappear (identical text under another name shares one plane document id).
+ *   The only plane delete here is a renamed row's old document, removed in the sequential prepare loop before any batch is sent,
+ *   so no delete overlaps an insert (identical text under another name shares one plane document id).
  * - S, superseded documents: only after every row of the request is recorded, the plane documents the changed documents
  *   replaced are deleted, when no active row holds their id. A crash between I and S leaves an orphan, never a dangling row.
  *
  * Other rules the order of work encodes:
  * - Nothing leaves this module for the plane unless the gates pass (`corpusGate`), the body hashes to its entry's sha256, and
  *   the redactor's secret findings are clean. A refused document is never sent and never recorded.
- * - A document the manifest already holds at that sha, source, kind, tier and `superseded-by` marker is `unchanged` and not
- *   sent, so a re-run is a no-op and a killed run resumes with only what it had not recorded. The same sha under another
- *   source, kind, tier or marker is `updated`: the row is refreshed and the plane is not touched.
+ * - A document the manifest already holds at that sha, kind, tier, commit, source and `superseded-by` marker is `unchanged` and
+ *   not sent, so a re-run is a no-op and a killed run resumes with only what it had not recorded. The same sha under another
+ *   kind, tier or commit is written again under the name those facts produce. Its old plane document is removed first, unless
+ *   another active row still holds it, because the plane answers identical text with the document it already holds.
+ *   The same sha under another source or marker alone is `updated`: the row is refreshed and the plane is not touched.
  * - A plane failure marks the affected documents `failed` and records nothing, so a retry sends only them.
  *
  * Tombstones run before the documents: a rename is a tombstone and an add of the same text, and deleting the old document
@@ -188,9 +190,9 @@ function refuse(tally: Tally, document: CorpusDocument, reason: (typeof REFUSAL_
 }
 
 /**
- * A document whose bytes the manifest already holds but whose source, kind or tier changed: refreshes those columns and the
- * commit, with no plane write. True when the document is settled here (`updated`, `refused` or `failed`); false when the
- * active row at that sha256 vanished meanwhile, so the document takes the full path.
+ * A document whose bytes the manifest already holds under the same name, but whose source or superseded-by marker changed:
+ * refreshes those columns with no plane write. True when the document is settled here (`updated`, `refused` or `failed`);
+ * false when the active row at that sha256 vanished meanwhile, so the document takes the full path.
  */
 async function refreshMetadata(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument, prior: ManifestRow): Promise<boolean> {
 	// The commit lands in the manifest and in citation URLs, so it gets the scan the full path gives a name and a URL.
@@ -219,6 +221,34 @@ async function refreshMetadata(deps: CorpusIngestDeps, tally: Tally, document: C
 	return true;
 }
 
+/**
+ * Removes the old plane document of a row whose kind, tier or commit changed, before the document is written under its new
+ * name. The plane answers identical text with the document it already holds, so a write made first could collapse into the old
+ * document, and a delete made after it would take the new name's text with it. The delete is skipped when another active row
+ * still holds the same document. True when the write may proceed. False when the delete failed or could not be checked: the
+ * document is settled `failed` and its row stays active, so a retry plans it again.
+ */
+async function removeRenamed(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument, replaced: ManifestRow): Promise<boolean> {
+	const id = replaced.documentId;
+	if (id === null) return true;
+	let holders: number;
+	try {
+		holders = await deps.store.activeReferences(id);
+	} catch {
+		settle(tally, document.repo, document.path, "failed", { reason: "manifest-unavailable" });
+		return false;
+	}
+	if (holders > 1) return true;
+	try {
+		const outcome = await deps.plane.deleteDocuments([id]);
+		if (!outcome.failed.some((failure) => failure.id === id)) return true;
+	} catch {
+		// Not confirmed: settled below as a failed delete.
+	}
+	settle(tally, document.repo, document.path, "failed", { reason: "delete-failed", documentId: id });
+	return false;
+}
+
 /** Decides one document: refused, unchanged, or ready to send. A store read that fails fails the document, never the request. */
 async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: CorpusDocument): Promise<PreparedDocument | null> {
 	const broken = documentRefusal(document);
@@ -231,6 +261,8 @@ async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: C
 		return null;
 	}
 	let prior: ManifestRow | null;
+	// The row a renamed document replaces; its plane document is removed once the document has passed the secret scan.
+	let replaced: ManifestRow | null = null;
 	try {
 		prior = await deps.store.rowFor(document.repo, document.path);
 	} catch {
@@ -238,21 +270,36 @@ async function prepareDocument(deps: CorpusIngestDeps, tally: Tally, document: C
 		return null;
 	}
 	if (prior?.state === "active" && prior.sha256 === document.sha256) {
-		if (prior.source === document.source && prior.kind === document.kind && prior.tier === document.tier && prior.supersededBy === (document.supersededBy ?? null)) {
-			settle(tally, document.repo, document.path, "unchanged", { documentId: prior.documentId });
-			return null;
+		// A row recorded before the facts were in the name holds its plane document under the sha-only name: it is written again,
+		// and that document is superseded by the write.
+		const legacy = prior.documentId === planeDocumentIdForName(corpusDocumentName(prior.repo, prior.path, prior.sha256));
+		if (!legacy) {
+			// The kind, tier or commit the name carries changed: the document is written again under its new name. The row's old
+			// plane document is removed before that write (see removeRenamed), so the write cannot collapse into it.
+			const renamed = prior.kind !== document.kind || prior.tier !== document.tier || prior.commit !== (document.commit ?? null) || corpusDocumentName(document.repo, document.path, document.sha256, prior) !== corpusDocumentName(document.repo, document.path, document.sha256, document);
+			if (renamed) {
+				replaced = prior;
+				prior = null;
+			} else {
+				const same = prior.source === document.source && prior.supersededBy === (document.supersededBy ?? null);
+				if (same) {
+					settle(tally, document.repo, document.path, "unchanged", { documentId: prior.documentId });
+					return null;
+				}
+				// The same bytes under another source or marker: only the row's columns change, and the plane document stays as it is.
+				if (await refreshMetadata(deps, tally, document, prior)) return null;
+				prior = null;
+			}
 		}
-		// The same bytes under another source, kind or tier: the manifest is refreshed and the plane is not touched.
-		if (await refreshMetadata(deps, tally, document, prior)) return null;
-		prior = null;
 	}
-	const name = corpusDocumentName(document.repo, document.path, document.sha256);
+	const name = corpusDocumentName(document.repo, document.path, document.sha256, document);
 	const text = stripRemoteImages(document.body).body;
 	const rules = findingRules(`${text}\n${name}\n${sourceUrl(document.repo, document.path, document.commit)}\n${document.commit ?? ""}`);
 	if (rules.length > 0) {
 		refuse(tally, document, "secret-findings", rules);
 		return null;
 	}
+	if (replaced !== null && !(await removeRenamed(deps, tally, document, replaced))) return null;
 	return { document, name, text, size: Buffer.byteLength(text, "utf8") + Buffer.byteLength(name, "utf8"), prior: prior?.state === "active" ? prior : null };
 }
 
@@ -475,7 +522,7 @@ async function runIngest(deps: CorpusIngestDeps, request: CorpusIngestRequest): 
 	// Phase T: every tombstone, deletes included, finishes before the first insert.
 	await tombstone(deps, tally, request.tombstones);
 
-	// Phase I: inserts and replacements. Batches may run concurrently, but nothing here deletes from the plane.
+	// Phase I: inserts and replacements. Batches may run concurrently; the renamed rows' old documents were removed while the documents were prepared, before the first batch.
 	const prepared: PreparedDocument[] = [];
 	for (const document of request.documents) {
 		const item = await prepareDocument(deps, tally, document);

@@ -109,7 +109,8 @@ export function supersededEntries(entries: readonly CorpusEntry[]): Array<{ repo
 
 function describeItem(item: PlanItem, replacedBy: ReadonlyMap<string, string>): string {
 	const key = printable(documentKey(item.repo, item.path));
-	const base = item.action === "rename" && item.renamedFrom !== undefined ? `${key}  (from ${printable(item.renamedFrom)})` : key;
+	const from = item.renamedFrom === undefined ? null : item.renamedFromRepo === undefined || item.renamedFromRepo === item.repo ? item.renamedFrom : documentKey(item.renamedFromRepo, item.renamedFrom);
+	const base = item.action === "rename" && from !== null ? `${key}  (from ${printable(from)})` : key;
 	const newer = replacedBy.get(documentKey(item.repo, item.path));
 	return newer === undefined ? base : `${base}  [superseded by ${printable(newer)}]`;
 }

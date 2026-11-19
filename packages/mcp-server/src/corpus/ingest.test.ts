@@ -25,7 +25,7 @@ function harness(settings: Partial<CorpusIngestSettings> = {}) {
 	return { log, store, plane, events, run };
 }
 
-const nameOf = (document: CorpusDocument): string => corpusDocumentName(document.repo, document.path, document.sha256);
+const nameOf = (document: CorpusDocument): string => corpusDocumentName(document.repo, document.path, document.sha256, document);
 
 describe("corpusGate", () => {
 	const open = { enabled: true, surface: "claude-code" as const, vmGuest: false, backendReady: true };
@@ -472,13 +472,13 @@ describe("ingestCorpus: updates", () => {
 		const id = defined(store.row(REPO, "docs/a.md")?.documentId, "the plane id");
 		const versionBefore = await store.manifestVersion();
 		plane.batches.length = 0;
-		const local = makeDocument(REPO, "docs/a.md", "text", { source: "fs", commit: "bbb2222", tier: 2 });
+		const local = makeDocument(REPO, "docs/a.md", "text", { source: "fs", commit: "aaa1111" });
 		const response = await run([local]);
 		expect(response.results).toEqual([{ repo: REPO, path: "docs/a.md", status: "updated", documentId: id }]);
 		expect(response.counts).toMatchObject({ updated: 1, ingested: 0, unchanged: 0 });
 		expect(plane.batches).toEqual([]);
 		expect(plane.deletes).toEqual([]);
-		expect(store.row(REPO, "docs/a.md")).toMatchObject({ source: "fs", commit: "bbb2222", tier: 2, documentId: id, state: "active" });
+		expect(store.row(REPO, "docs/a.md")).toMatchObject({ source: "fs", commit: "aaa1111", tier: 1, documentId: id, state: "active" });
 		expect(await store.manifestVersion()).toBeGreaterThan(versionBefore);
 
 		// A second identical run has nothing left to refresh, and the row now sits inside a filesystem-only coverage.
@@ -488,6 +488,50 @@ describe("ingestCorpus: updates", () => {
 		expect(plan.items).toEqual([{ action: "tombstone", repo: REPO, path: "docs/a.md", sha256: local.sha256 }]);
 		const removed = await run([], [{ repo: REPO, path: "docs/a.md" }]);
 		expect(removed.results[0]?.status).toBe("tombstoned");
+	});
+
+	test("a changed tier or commit, with the same bytes, writes the document again under its new name and removes the old-named document first", async () => {
+		const { store, plane, run } = harness();
+		const first = makeDocument(REPO, "docs/a.md", "text", { source: "github", commit: "aaa1111" });
+		await run([first]);
+		plane.batches.length = 0;
+		const local = makeDocument(REPO, "docs/a.md", "text", { source: "fs", commit: "bbb2222", tier: 2 });
+		const response = await run([local]);
+		expect(response.counts).toMatchObject({ ingested: 1, updated: 0, unchanged: 0 });
+		expect(plane.batches).toEqual([[nameOf(local)]]);
+		expect(plane.deletes).toEqual([[planeDocumentIdForName(nameOf(first))]]);
+		expect(plane.documents.has(nameOf(first))).toBe(false);
+		expect(store.row(REPO, "docs/a.md")).toMatchObject({ source: "fs", commit: "bbb2222", tier: 2, state: "active" });
+	});
+
+	test("a changed commit deletes the old plane document before the same bytes are written under the new name", async () => {
+		const { store, plane, log, run } = harness();
+		const first = makeDocument(REPO, "docs/a.md", "text", { source: "github", commit: "aaa1111" });
+		await run([first]);
+		const oldId = planeDocumentIdForName(nameOf(first));
+		log.length = 0;
+		const local = makeDocument(REPO, "docs/a.md", "text", { source: "fs", commit: "bbb2222" });
+		const response = await run([local]);
+		const newId = planeDocumentIdForName(nameOf(local));
+		expect(response.results).toEqual([{ repo: REPO, path: "docs/a.md", status: "ingested", documentId: newId }]);
+		const deleted = log.indexOf(`delete:${oldId}`);
+		expect(deleted).toBeGreaterThanOrEqual(0);
+		expect(deleted).toBeLessThan(log.indexOf(`plane:${nameOf(local)}`));
+		expect(plane.documents.get(nameOf(local))).toEqual({ id: newId, text: "text" });
+		expect(store.row(REPO, "docs/a.md")).toMatchObject({ commit: "bbb2222", documentId: newId, state: "active" });
+	});
+
+	test("a changed kind writes the document again under its new name", async () => {
+		const { store, plane, run } = harness();
+		const first = makeDocument(REPO, "docs/a.md", "text");
+		await run([first]);
+		plane.batches.length = 0;
+		const local = makeDocument(REPO, "docs/a.md", "text", { kind: "adr" });
+		const response = await run([local]);
+		expect(response.counts).toMatchObject({ ingested: 1, updated: 0 });
+		expect(plane.batches).toEqual([[nameOf(local)]]);
+		expect(plane.deletes).toEqual([[planeDocumentIdForName(nameOf(first))]]);
+		expect(store.row(REPO, "docs/a.md")).toMatchObject({ kind: "adr", state: "active" });
 	});
 
 	test("a refreshed commit that looks like a secret is refused and the row keeps its old values", async () => {

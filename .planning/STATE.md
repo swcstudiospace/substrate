@@ -20,7 +20,20 @@ current_phase_name: multi-session-boundary
 
 # State
 
+## Autonomous integration record (2026-11-18)
+
+- Candidate `gsd/v18-p78-on-main` is at `dbf25466` (pushed; PR #216 draft). It carries phase 71 hardening and remediation, phase 72, phase 76 defect fixes, phase 77 and phase 74.
+- Phase 77 merged from `gsd/v18-p77-steering-idempotency` (`05cdf2c6`), with 23 conflicts resolved. Migration 43 is steering idempotency. Its digest matches the fixture.
+- Phase 74 ported from the reconcile line (`96d451a4`, `4e9a772a`, the phase 74 parts of `8b8521b9`) onto the surface-grant executor. Migration 44 is `cross_repo_operations`; the digest fixture now has 44 entries.
+- Phase 76 defects ported from the reconcile line (`e20f3634`, `b023d2a0`, `b3591743`, `067f094b`), adapted to the candidate's buffer and session turn.
+- Not on this line, by decision or by scope: the reconcile line's phase 72 session-allowlist module (`repo-allowlist.ts`, `2157ce93`); the reconcile line's phase 78 additions (forget pair, per-graph pairs, systemd units, `ba1166b2` status). The candidate keeps its design limit (D78-1).
+- Verified: `tsc --noEmit` 0 errors, Biome 0 diagnostics, and 113 affected test files with live PostgreSQL 3440 pass, 1 known timeout (`planning/observer.test.ts`, 10,000 simulated scans, over its 180 s budget on this host; also slow on origin/main).
+- Human sign-off is pending for phases 71 to 78 (each verification record is `human_needed`). No phase is marked passed by this record.
+- Owner decisions open: (1) cross-repo writes with `SUBSTRATE_REPO_SCOPES` unset grant every authenticated surface; (2) a database migrated by a reconcile-line build holds steps 43 to 49 under other names, and `migrate()` skips by version, so such a database must be checked before any deploy; (3) whether the reconcile-line phase 78 forget and per-graph reconciliation is in scope.
+- CI: the required check `Typecheck, lint, tests and repo locks` is queued with no runner online for its label.
+
 ## Autonomous run record (2026-11-01)
+
 
 - Live milestone is v1.8 (phases 71-78). Origin/main `b1b42f92` is the source of truth. The primary checkout `/root/src/repos/agent-substrate` is on `planning/consistency-check-2026-10-24`, 262 commits behind main, with uncommitted swarm lines in `.planning/STATE.md` and untracked `.claude/`. Those are not ours and were not touched.
 - Phase 71 work runs in `/root/src/worktrees/as-gsd-v18-p71` (branch `gsd/v18-p71-greptile-fixes`, based on PR #199 head `d535f8c6`).
@@ -256,7 +269,12 @@ Read-only check of the nine accepted-debt phases (40, 41, 42, 43, 45, 47, 48, 49
 | 47 | verification_deferred_human | /gsd:verify-work 47 |
 | 48 | verification_deferred_human | /gsd:verify-work 48 |
 | 49 | verification_deferred_human | /gsd:verify-work 49 |
-| 50 | verification_deferred_human | /gsd:verify-work 50 |
+| 24 | verification_deferred_human | /gsd:verify-work 24 |
+| 32 | verification_deferred_human | /gsd:verify-work 32 |
+| 63 | verification_deferred_human | /gsd:verify-work 63 |
+| 65 | verification_deferred_human | /gsd:verify-work 65 |
+| 69 | verification_deferred_human | /gsd:verify-work 69 |
+| 70 | verification_deferred_human | /gsd:verify-work 70 |
 
 Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Phases 37-39 are closed by the operator's live-criteria waiver recorded in 585ef28 (2026-10-25); their rows stay here only as the record of what was waived. Phase 46 is open work (re-scoped), not deferred.
 
@@ -688,5 +706,7 @@ Base: main = 28ea65f4 (PR #141 merge). The planning records for phases 52-62 sai
 | Phase | State | Blocker | Resume |
 |-------|-------|---------|--------|
 | 71 | awaiting-review / pending QUALITY | Local acceptance passed; native Programming Lead held-message dispatch or an authorized Desk connector is not exposed. No external Greptile clearance observed. | Complete LEAD → QUALITY review, address findings, then `/gsd:verify-work 71` |
+| 24, 32, 63, 65, 69, 70 | verification_deferred_human | Re-verified in the autonomous rerun: code criteria hold; remaining items are live/behaviour proofs (live dispatcher decisions, real VM runs, live Postgres/LightRAG/deploy, operator hook/timer installs, funded devnet anchor, live eval runs). | `/gsd:verify-work <phase>` per phase after the live proof |
+| 71–78 | human_needed / owner-gated | v1.8 hardening: multi-session boundary, allowlist credentials, tamper evidence, cross-repo compensation, degradation, telemetry DLQ, steering idempotency, reconciliation. Repo work is integrated in PR #216 / PR #222 candidates; hosted CI, live proofs, deploy and production migrations remain operator-gated. | Fix billing on swcstudiospace, then re-run hosted CI and merge only on all-green |
 
 No phase or milestone completion is inferred from local tests, draft delivery, or the earlier planning PR. Deployment, production migration/recovery, real credentials and host hooks/timers remain operator-gated.

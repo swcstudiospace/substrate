@@ -6,6 +6,7 @@
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { SUBSTRATE_PROXY_PORT } from "./substrate-proxy.ts";
 import { SANDBOX_IMAGE, WORKTREES_ROOT, worktreeFor } from "./sandbox-options.ts";
 
 export { WORKTREES_ROOT, worktreeFor };
@@ -71,25 +72,25 @@ export function trackerRoute(route: Route): TrackerRoute {
 	return route.b === "hooks" && route.s === "mcp" ? "vm_mcp" : "host";
 }
 
-/** D-12 egress allowlist (dns + tcp:443 each). Anthropic itself only on a:anthropic_key. */
+/** D-12 egress allowlist (dns + tcp:443 each). No route reaches Anthropic directly: the VM holds no Anthropic credential. */
 export const D12_HOSTS = ["mcp.notion.com", "mcp.linear.app", "api.greptile.com", "github.com", "api.github.com"] as const;
 
-export const SUBSTRATE_MCP_PORT = 7410;
 export const MODEL_RELAY_PORT = 3001;
 /** The host's tracker MCP proxy (notion, linear) — served and reachable only on tracker_route vm_mcp. */
 export const TRACKER_PROXY_PORT = 7412;
-export const SUBSTRATE_MCP_URL = `http://127.0.0.1:${SUBSTRATE_MCP_PORT}/mcp`;
-/** Where the session's Anthropic client connects on a:loopback (host shunt) and a:hostfn_proxy (in-VM relay). */
+/** Where the session's Anthropic client connects on every route: the host model relay (a:loopback, a:anthropic_key) or the in-VM relay (a:hostfn_proxy). */
 export const MODEL_RELAY_URL = `http://127.0.0.1:${MODEL_RELAY_PORT}`;
-export const ANTHROPIC_DIRECT_URL = "https://api.anthropic.com";
 
 /**
- * Host loopback ports the VM may reach (the sidecar's SSRF exemption list): only on a:loopback,
- * plus the tracker proxy when tracker_route is vm_mcp (s:mcp implies a:loopback).
+ * Host loopback ports the VM may reach (the sidecar's SSRF exemption list). The model relay on
+ * a:loopback and a:anthropic_key (the host attaches the key); on a:loopback also the substrate
+ * proxy (which attaches the host bearer), plus the tracker proxy when tracker_route is vm_mcp
+ * (s:mcp implies a:loopback).
  */
 export function loopbackPorts(route: Route): number[] {
-	if (route.a !== "loopback") return [];
-	const ports = [SUBSTRATE_MCP_PORT, MODEL_RELAY_PORT];
+	if (route.a === "hostfn_proxy") return [];
+	if (route.a === "anthropic_key") return [MODEL_RELAY_PORT];
+	const ports = [SUBSTRATE_PROXY_PORT, MODEL_RELAY_PORT];
 	if (trackerRoute(route) === "vm_mcp") ports.push(TRACKER_PROXY_PORT);
 	return ports;
 }
@@ -100,13 +101,9 @@ export type RulePermissions = { default: "deny"; rules: PatternRule[] };
 export function networkPermissions(route: Route): RulePermissions {
 	const patterns: string[] = [];
 	for (const host of D12_HOSTS) patterns.push(`dns://${host}`, `tcp://${host}:443`);
-	if (route.a === "loopback") {
-		patterns.push(`tcp://127.0.0.1:${SUBSTRATE_MCP_PORT}`, `tcp://127.0.0.1:${MODEL_RELAY_PORT}`);
-	}
+	if (route.a === "loopback") patterns.push(`tcp://127.0.0.1:${SUBSTRATE_PROXY_PORT}`);
+	if (route.a === "loopback" || route.a === "anthropic_key") patterns.push(`tcp://127.0.0.1:${MODEL_RELAY_PORT}`);
 	if (trackerRoute(route) === "vm_mcp") patterns.push(`tcp://127.0.0.1:${TRACKER_PROXY_PORT}`);
-	if (route.a === "anthropic_key") {
-		patterns.push("dns://api.anthropic.com", "tcp://api.anthropic.com:443");
-	}
 	return {
 		default: "deny",
 		rules: [
@@ -129,30 +126,23 @@ export function hostFunctionPermissions(sandboxCollection: string): RulePermissi
 }
 
 export type SessionEnvInput = {
-	route: Route;
 	model: string;
 	graphId: string;
 	nodeId: string;
-	/** SUBSTRATE_VM_ANTHROPIC_API_KEY from the host env; read only on a:anthropic_key (D-08). */
-	directKey?: string | undefined;
 };
 
-/** Exactly the five D-08 keys; nothing else from the host environment reaches sessions.open. */
+/**
+ * Exactly the five D-08 keys; nothing else from the host environment reaches sessions.open. The VM
+ * holds no model credential on any route: its Anthropic client connects to the model relay, and the
+ * host attaches the real key (SUBSTRATE_VM_ANTHROPIC_API_KEY stays host-side).
+ */
 export function sessionEnv(input: SessionEnvInput): Record<string, string> {
-	const { route, model, graphId, nodeId } = input;
-	let baseUrl = MODEL_RELAY_URL;
-	let apiKey = "shunt";
-	if (route.a === "anthropic_key") {
-		if (!input.directKey) throw new Error("SUBSTRATE_VM_ANTHROPIC_API_KEY required on route a:anthropic_key");
-		baseUrl = ANTHROPIC_DIRECT_URL;
-		apiKey = input.directKey;
-	}
 	return {
-		ANTHROPIC_BASE_URL: baseUrl,
-		ANTHROPIC_API_KEY: apiKey,
-		ANTHROPIC_MODEL: model,
-		SUBSTRATE_GRAPH_ID: graphId,
-		SUBSTRATE_NODE_ID: nodeId,
+		ANTHROPIC_BASE_URL: MODEL_RELAY_URL,
+		ANTHROPIC_API_KEY: "shunt",
+		ANTHROPIC_MODEL: input.model,
+		SUBSTRATE_GRAPH_ID: input.graphId,
+		SUBSTRATE_NODE_ID: input.nodeId,
 	};
 }
 

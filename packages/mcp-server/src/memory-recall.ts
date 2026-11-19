@@ -67,6 +67,8 @@ export interface RecallDeps {
 	fetchImpl?: FetchLike;
 	/** The one abort budget the whole fan-out shares. */
 	budgetMs?: number;
+	/** Under repository scope, whether the caller is granted a repository; a hit from an ungranted repository is not returned. */
+	granted?: ((repo: string) => boolean) | undefined;
 	/** A guest instance never sends queries to the plane. */
 	vmGuest?: boolean;
 	/**
@@ -305,7 +307,7 @@ export async function recallMemories(
 	}
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
-	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo };
+	const caller: MemoryCaller = { surface: callerSurface ?? "unattributed", repo: callerRepo, granted: deps.granted };
 	const budgetMs = deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS;
 	// One deadline for the whole recall: the forgotten-entry lookup spends what the fan-out left, never more.
 	const deadline = Date.now() + budgetMs;

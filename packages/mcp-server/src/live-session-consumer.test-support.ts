@@ -1,4 +1,4 @@
-import { expect, mock, spyOn } from "bun:test";
+import { mock, spyOn } from "bun:test";
 import { AuditUnavailableError, type AuditRecord } from "@substrate/audit";
 import { z } from "zod";
 import { createReadThroughCache } from "./cache.ts";
@@ -55,11 +55,13 @@ export class History implements SteeringHistorySink {
 	readonly entries: SteeringAuditEntry[] = [];
 	async append(entry: SteeringAuditEntry): Promise<void> { this.entries.push(entry); }
 }
+/** Polls `condition` between event-loop turns; fails by name once a 10 s wall-clock deadline passes. */
 export async function settle(condition: () => boolean): Promise<void> {
-	for (let turn = 0; turn < 2000 && !condition(); turn++) {
+	const deadline = Date.now() + 10_000;
+	while (!condition()) {
+		if (Date.now() >= deadline) throw new Error(`settle: condition not met within 10000 ms: ${condition.toString()}`);
 		const next = Promise.withResolvers<void>(); setImmediate(next.resolve); await next.promise;
 	}
-	expect(condition()).toBe(true);
 }
 const stops: Array<() => Promise<void>> = [];
 export async function cleanupLiveHarness(): Promise<void> { for (const stop of stops.splice(0)) await stop(); mock.restore(); }

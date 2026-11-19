@@ -373,7 +373,7 @@ def test_burn_probe_samples_while_every_slot_is_busy(env_file):
         linear, mcp, env_file=env_file, slo=slo, registry=SessionRegistry(max_sessions=0),
     )
 
-    assert [d.action for d in decisions] == ["skip"]  # at capacity
+    assert [d.action for d in decisions] == ["comment"]  # at capacity
     assert launch_fn.calls == []
     assert slo.calls == 1
 

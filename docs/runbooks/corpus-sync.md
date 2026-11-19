@@ -12,7 +12,7 @@ reconcile are read-only, and git hooks are an opt-in you install for repositorie
 
 | Trigger | What it is | Writes into a repository? |
 | --- | --- | --- |
-| `hook` | A git hook (post-merge, post-checkout, post-rewrite) leaves a bounded `docs.changed` hint in the spool and always exits 0. | Yes: the hook file in that repository's `.git/hooks`, installed only by `substrate corpus hook install`, never over a foreign hook |
+| `hook` | A git hook (post-merge, post-checkout, post-rewrite) runs `substrate corpus hint --repo` in the background, with a 10-second timeout where `timeout` exists, and always exits 0. The hint is one small file in the spool, outside the repository; the watcher turns it into a sync. `post-commit` stays the collector. | Yes: the hook file in that repository's `.git/hooks`, installed only by `substrate corpus hook install`, never over a foreign hook |
 | `watch` | `substrate corpus watch` watches the registered roots, waits for quiet (`SUBSTRATE_CORPUS_DEBOUNCE_MS`, at most `SUBSTRATE_CORPUS_MAX_WAIT_MS`) and runs one sync per repository however many edits there were. | No |
 | `sweep` | The same command on a timer (`--once`, or the watcher's own interval `SUBSTRATE_CORPUS_SWEEP_S`): reads each repository's Substrate-managed blobless mirror, so a push made from another machine is found although the local checkout has not pulled. | No (it fetches into the mirror directory, never into your clone) |
 | `manual` | `substrate corpus sync --repo R`. | No |

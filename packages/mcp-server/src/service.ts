@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { RedisClient } from "bun";
 import { canonicalJson, decideClaim, type AuditTransport, type ClaimDecision } from "@substrate/audit";
-import { acceptsSigner, createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
+import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
 import {
 	PLANES,
 	PlaneRegistry,
@@ -110,7 +110,7 @@ import {
 	type DriftReport,
 } from "./drift.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
-import { checkIdempotencyKey, checkReplayTs, eventHash, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, type StoredLeaf, type SteeringSession, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -142,12 +142,12 @@ import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type Mi
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { nodeArtifact, type NodeArtifact } from "./node-artifact.ts";
 import { CAUSAL_WINDOW, LINKED_EVENTS, causalChain, graphLinks, type ReducedEvent } from "./memory-graph.ts";
-import { memoryExpiry, normalizeSubject, visibleToCaller } from "./memory-policy.ts";
+import { grantedToCaller, memoryExpiry, normalizeSubject, visibleToCaller } from "./memory-policy.ts";
 import { briefFanoutOf, fanOutBriefRecall, recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type BankAnswer, type RecallReply } from "./memory-recall.ts";
 import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type ForwardOutcome, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
-import { forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
+import { FORGET_ACTION, forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
 import { anchorEvidenceFor, followReanchor, ReanchorReadIncomplete, resolveSignerSet, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
@@ -175,6 +175,8 @@ import { createEmbeddingService, type EmbeddingService } from "./embed.ts";
 import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightrag-bulk.ts";
 import { corpusNeardupReply } from "./corpus/neardup.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusPlanReply, corpusProofReply, corpusReconcileReply, corpusRootReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
+import { type CrossRepoDeps, type CrossRepoReply, crossRepoCompensateReply, crossRepoFanoutReply, crossRepoStatusReply } from "./cross-repo-ops.ts";
+import { authorizeRepo, authorizeRepoPath, grantedRepos, isSurfaceName, REPO_REFUSAL_MESSAGES, repoRefusalPayload, type RepoRefusalReason, type RepoScopeRefusal, rowsInGrant } from "./repo-scope.ts";
 import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
@@ -209,7 +211,7 @@ import { PlanningReader } from "./planning/read.ts";
 import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import { DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundary, LiveSessionBoundaryError, liveSessionNotFound, SESSION_BINDING_INPUT, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, type LiveCallFailure, type LiveSessionAuditPort, type LiveSessionInvocation, type PreparedLiveCall, type PreparedLiveDispatch, type SteeringWiring } from "./planning/steering-tools.ts";
-import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
+import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink, type SteeringIdempotencyStore } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
 import { LiveSessionStatePort, STEERING_SESSION_ENDED_ACTION, steeringSessionEvent } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringNotice } from "./planning/steering-delivery.ts";
@@ -225,6 +227,8 @@ import type { FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
+import { DeadLetterStore } from "./event-dead-letter.ts";
+import { EVENT_BUFFER_TICK_MS, EventBuffer, type EventBufferEntry, type EventBufferStats, type EventDelivery, type EventEnqueue } from "./event-buffer.ts";
 import {
 	RecallPrefetcher,
 	BRIEF_RECALL_CAP_MS,
@@ -248,6 +252,7 @@ import {
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
 import { RepoAccess, requireComplete, startPreloader, type Preloader } from "./preload.ts";
+import { DEFAULT_RECONCILE_CAPS, runReport } from "./reconcile-run.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -639,6 +644,13 @@ export interface EmitResult {
 	deduplicated?: true;
 	/** Set (with `stored: false`) when the idempotency lookup itself failed: nothing was written and the event is not in the ledger. */
 	lookupFailed?: true;
+	/**
+	 * Set (with `stored: false`) when the write failed and the event is held for retry. It will be written, or given up with a
+	 * dead-letter record, and never silently. Nothing is in the ledger yet.
+	 */
+	buffered?: true;
+	/** Set (with `stored: false`) when the write failed and the event could not be held either: it was given up at once, with a dead-letter record. */
+	deadLettered?: true;
 }
 
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
@@ -1238,6 +1250,16 @@ function storedLedgerId(value: string | undefined): string | null {
 type LedgerRead = { rows: Array<Record<string, unknown>> } | { reason: string };
 
 /**
+ * Resolves true when `work` settles within `ms`, false when the bound passes first. Either way the timer is cleared, so a settled call
+ * holds nothing open. A bound that passes does not cancel the work; it finishes on its own.
+ */
+function settledWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+	const bound = Promise.withResolvers<boolean>();
+	const timer = setTimeout(() => bound.resolve(false), ms);
+	return Promise.race([work.then(() => true, () => true), bound.promise]).finally(() => clearTimeout(timer));
+}
+
+/**
  * One ledger read under `LEDGER_LINK_BUDGET_MS`. A timeout or an error is an outcome, not a throw, so the
  * search drops that part of its reply and says why.
  */
@@ -1525,6 +1547,10 @@ export class Substrate {
 	private readonly retrievalRecorder: RetrievalRecorder;
 	/** Stops the hourly retrieval-retention sweep; null while it is not running. */
 	private retrievalSweepStop: (() => void) | null = null;
+	/** Stops the scheduled reconcile (`SUBSTRATE_RECONCILE_INTERVAL_S`); null while it is off or stopped. */
+	private reconcileStop: (() => void) | null = null;
+	/** The scheduled reconcile pass in flight, so a tick while one runs starts nothing. */
+	private reconcilePass: Promise<void> | null = null;
 	/** Re-rank shadow runs since this process started, and the corpus positions they would have moved. */
 	private readonly shadowCounts = { searches: 0, moved: 0 };
 	private corpusRootKeeper: CorpusRootKeeper | null = null;
@@ -1544,6 +1570,13 @@ export class Substrate {
 	private readonly retainOutbox: RetainOutbox;
 	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
 	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
+	// phase 76 — the telemetry buffer and its dead-letter store, both absent unless SUBSTRATE_EVENT_BUFFER_PATH is set
+	/** Events the ledger did not take, held for retry with backoff, and the store that records the ones given up for good. */
+	private readonly eventBufferStores: { buffer: EventBuffer; deadLetters: DeadLetterStore } | null;
+	/** The interval drain, started while the buffer holds entries and left unref'd so it never holds the process. */
+	private eventDrainTimer: ReturnType<typeof setInterval> | null = null;
+	/** Set by the shutdown close: the tick is never re-armed after it, so a closed instance starts no pass. */
+	private eventDrainClosed = false;
 	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
 	private retainRecoverPending = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
@@ -1624,6 +1657,8 @@ export class Substrate {
 	readonly planningObserver: PlanningObserver;
 	/** Phase 58: the Postgres audit sink behind the inbox while `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on (or a test injects one). Null keeps the inbox in memory. */
 	private readonly steeringDurable: SteeringAuditSink | null;
+	/** Phase 77: the durable sequence counter and keyed-queue replay records behind the inbox, under the same opt-in as the audit sink. Null keeps them in the inbox's memory. */
+	private readonly steeringDurableIdempotency: SteeringIdempotencyStore | null;
 	/** Phase 58: closes directives nobody acknowledged in time. Null unless the inbox is durable. Started by `startSteering`. */
 	private readonly steeringSweeper: SteeringExpirySweeper | null;
 	/** Phase 58: one wake-up hint per queued directive. */
@@ -1677,6 +1712,7 @@ export class Substrate {
 			steering?: {
 				history: SteeringHistorySink | null;
 				durable?: SteeringAuditSink | null;
+				idempotency?: SteeringIdempotencyStore | null;
 				sessionState?: SessionStatePort | null;
 				timers?: PlanningTimers;
 				nowMs?: () => number;
@@ -1821,7 +1857,7 @@ export class Substrate {
 		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
 		// Phase 58: the acknowledgement deadline and sweep interval are part of those settings.
 		const steeringSettings = config.steering.ok ? config.steering.settings : null;
-		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors)];
+		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors), ...(config.steeringIdempotency.ok ? [] : config.steeringIdempotency.errors)];
 		if (steeringErrors.length > 0) {
 			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
 		}
@@ -1834,12 +1870,24 @@ export class Substrate {
 				: config.steeringAuditTable && steeringSettings?.enabled === true && this.index !== null
 					? this.index.steeringAudit()
 					: null;
+		this.steeringDurableIdempotency =
+			steeringSeam !== undefined
+				? (steeringSeam.idempotency ?? null)
+				: this.steeringDurable !== null && this.index !== null
+					? this.index.steeringIdempotency()
+					: null;
 		const steeringHistory = this.steeringDurable ?? steeringSeam?.history ?? null;
 		const steeringClock = { nowMs: steeringSeam?.nowMs ?? (() => Date.now()) };
 		const ackTtlMs = this.steeringDurable !== null && config.steeringExpiry.ok ? config.steeringExpiry.settings.ackTtlMs : undefined;
 		const steeringInbox =
 			steeringSettings?.enabled === true && steeringHistory !== null && steeringErrors.length === 0
-				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
+				? new SteeringInbox({
+						history: steeringHistory,
+						clock: steeringClock,
+						policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs },
+						...(this.steeringDurableIdempotency === null ? {} : { store: this.steeringDurableIdempotency }),
+						...(config.steeringIdempotency.ok ? { idempotency: config.steeringIdempotency.settings } : {}),
+					})
 				: null;
 		this.liveSessions = steeringSeam?.liveSessions !== undefined ? steeringSeam.liveSessions : this.index?.liveSessions({ leaseSeconds: config.liveSessionLeaseS }) ?? null;
 		this.liveBoundary = new LiveSessionBoundary({
@@ -1855,6 +1903,7 @@ export class Substrate {
 			settingsErrors: steeringErrors,
 			inbox: steeringInbox,
 			boundary: this.liveBoundary,
+			onQueued: (directiveId) => this.onSteeringQueued(directiveId),
 			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();
@@ -1905,6 +1954,25 @@ export class Substrate {
 			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
 		});
 		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
+		// Phase 76: the telemetry buffer, on only when SUBSTRATE_EVENT_BUFFER_PATH is set. The dead-letter store is built first, because
+		// the buffer gives entries up to it while it loads its file.
+		const eventBuffer = config.eventBuffer;
+		if (eventBuffer === null) {
+			this.eventBufferStores = null;
+		} else {
+			const deadLetters = new DeadLetterStore({ path: eventBuffer.deadLetterPath });
+			const buffer = new EventBuffer({
+				path: eventBuffer.path,
+				max: eventBuffer.max,
+				maxAttempts: eventBuffer.maxAttempts,
+				backoffMs: eventBuffer.backoffMs,
+				backoffCapMs: eventBuffer.backoffCapMs,
+				allow: () => this.planes.gate("greptime").breaker?.state() !== "open",
+				onDeadLetter: (entry, reason) => deadLetters.record(entry, reason),
+			});
+			this.eventBufferStores = { buffer, deadLetters };
+			if (buffer.size() > 0) this.ensureEventDrainTimer();
+		}
 		// uplift-4 S5: the recall prefetcher (inert unless SUBSTRATE_BRIEF_RECALL is shadow or enforce) and the
 		// read-only Hindsight inventory (inert unless SUBSTRATE_HINDSIGHT_INVENTORY=on). Neither starts a timer here.
 		this.recall = new RecallPrefetcher({
@@ -1920,7 +1988,7 @@ export class Substrate {
 				if (hindsight === null || bankForSurface(hindsight, surface) !== bank) return { ok: false };
 				// `banks: null`: the surface's OWN bank only, never the HINDSIGHT_BANKS fan-out. The
 				// deadline `budgetMs` is the recall's abort signal, so it fires inside the gated fetch.
-				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs }, query, surface, repo);
+				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs, granted: this.memoryGrant(surface) }, query, surface, repo);
 				if (reply.degraded) return { ok: false };
 				return {
 					ok: true,
@@ -2016,6 +2084,13 @@ export class Substrate {
 			const authority = this.liveSessions;
 			if (authority === null) throw new LiveSessionBoundaryError({ status: "refused", error: { code: "session-unavailable" } });
 			const request: LiveSessionInput = { repoId: scopeRepoId(input.repo_id), state: input.state, ...(input.steering === undefined ? {} : { steering: input.steering }), ...(input.planning_hash === undefined ? {} : { planningHash: input.planning_hash }) };
+			// Phase 72: a session addresses only the repositories its surface is granted. An ungranted repository answers the same
+			// not-found an unknown session does, so the refusal discloses nothing about the sessions that repository holds.
+			const repoGate = authorizeRepo(this.config.repoScope, caller.surface, request.repoId);
+			if (!repoGate.ok) {
+				await this.repoRefusal("docs_steering_session", caller.surface, repoGate.reason, request.repoId);
+				throw new LiveSessionBoundaryError(liveSessionNotFound());
+			}
 			const checked = this.liveBoundary.checked(prepared);
 			const result = checked === null ? await authority.issue({ ...request, caller }) : await authority.transition(checked.access, { ...request, ...(input.previous_state === undefined ? {} : { previousState: input.previous_state }) }, "owner-transition");
 			if (!result.ok) {
@@ -2057,6 +2132,9 @@ export class Substrate {
 
 	async listLiveSessions(caller: LiveSessionCaller, query: SessionsQuery): Promise<LiveSessionDiscoveryReply> {
 		return this.executeLiveCall({ caller, tool: "live_session_discovery", args: query, operation: "private-read", kind: "discovery", transport: "rest" }, async () => {
+			// Phase 72: discovery names a repository or reads every one, so a scoped caller must name a granted one. A refusal reads
+			// no session and answers the same not-found an unknown session does.
+			if ((await this.scopedRepoRefusal("live_session_discovery", caller.surface, query.repoId, true)) !== null) throw new LiveSessionBoundaryError(liveSessionNotFound());
 			const result = await this.liveSessions?.listVisible(caller, { ...(query.repoId === null ? {} : { repoId: query.repoId }), limit: query.limit, ...(query.cursor === undefined ? {} : { cursor: query.cursor }) });
 			if (result === undefined || !result.ok) throw new LiveSessionBoundaryError({ status: "refused", error: { code: result?.error.code ?? "session-unavailable" } });
 			return { sessions: result.sessions, truncated: result.nextCursor !== undefined, ...(result.nextCursor === undefined ? {} : { next_cursor: result.nextCursor }) };
@@ -2801,13 +2879,21 @@ export class Substrate {
 		// is still in flight (U5-4a). Keyless sessionless events, and everything under `off`, never wait.
 		const turnKey = sessionId ?? (idem?.key != null ? `${KEY_TURN_PREFIX}${idem.key}` : null);
 		if (!this.greptime || turnKey === null) return this.appendChained(input, sessionId, idem);
+		return this.withSessionTurn(turnKey, () => this.appendChained(input, sessionId, idem));
+	}
+
+	/**
+	 * Runs `fn` as the next turn of `turnKey`: after every earlier turn of that key has settled, and before any later one starts.
+	 * Appends and buffer deliveries of one session share a key, so a delivery never interleaves with an append that reads the tip.
+	 */
+	private async withSessionTurn<T>(turnKey: string, fn: () => Promise<T>): Promise<T> {
 		const previous = this.emitChains.get(turnKey) ?? Promise.resolve();
 		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
 		const tail = previous.then(() => gate);
 		this.emitChains.set(turnKey, tail);
 		await previous;
 		try {
-			return await this.appendChained(input, sessionId, idem);
+			return await fn();
 		} finally {
 			done();
 			if (this.emitChains.get(turnKey) === tail) this.emitChains.delete(turnKey);
@@ -2865,10 +2951,19 @@ export class Substrate {
 	}
 
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
+		const stores = this.eventBufferStores;
+		// A keyed replay is answered from the ledger first: a row that landed is the answer, whatever the buffer holds. Only a replay
+		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write.
 		if (idem?.lookup && idem.key !== null && this.greptime) {
 			const settled = await this.replayOutcome(input, idem.key);
 			if (settled !== null) return settled;
 		}
+		const waiting = idem?.key != null && stores !== null ? stores.buffer.findKeyed(input.surface, idem.key) : null;
+		if (waiting !== null) return { event: waiting.event, stored: false, buffered: true, error: waiting.last_reason };
+		// Phase 76's chain rule, write side: the session's parked events get their one attempt before this event reads the tip and chains
+		// onto them. A ledger that has recovered lands them, so this event chains onto the ledger's tip; one that has not leaves them parked,
+		// and the park below holds.
+		if (sessionId !== null) await this.settleParked(sessionId);
 		let prev: string | null = null;
 		let tipError: string | null = null;
 		if (this.greptime && sessionId) {
@@ -2880,7 +2975,9 @@ export class Substrate {
 				tipError = redact(String(cause));
 			}
 		}
-		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
+		const build = (chainPrev: string | null): SubstrateEvent =>
+			idem === null ? normalizeEvent(input, chainPrev) : normalizeEvent(input, chainPrev, { key: idem.key });
+		const event = build(prev);
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 		if (tipError !== null) {
 			process.stderr.write(`[substrate] event ${event.id} not stored — chain tip unreadable: ${tipError}\n`);
@@ -2894,6 +2991,20 @@ export class Substrate {
 			const error = appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN;
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
+		}
+
+		const key = idem?.key ?? null;
+		// An earlier event of this session is still waiting for the ledger, so this one waits behind it. Written now, it would land
+		// first, and the buffered event's link would name a row that is not there yet.
+		if (stores !== null && sessionId !== null && stores.buffer.hasSession(sessionId)) {
+			return this.bufferEvent(stores.buffer, {
+				session: sessionId,
+				key,
+				ledgerPrev: prev,
+				build,
+				last_reason: "waiting behind an earlier buffered event of this session",
+				attempts: 0,
+			});
 		}
 
 		try {
@@ -2911,9 +3022,149 @@ export class Substrate {
 					warning: appendOnly !== true ? `${INGEST_NOT_RECORDED} ${DEDUP_WARNING}` : INGEST_NOT_RECORDED,
 				};
 			}
-			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
-			return { event, stored: false, error };
+			// The write failed. With the buffer on, nothing of this session waits ahead of it, so the event is held for retry rather than
+			// given up. `event` was built on the ledger's tip, which nothing of the session can have moved since the check above.
+			if (stores === null) {
+				process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
+				return { event, stored: false, error };
+			}
+			return this.bufferEvent(stores.buffer, { session: sessionId, key, ledgerPrev: prev, build: () => event, last_reason: error, attempts: 1 });
 		}
+	}
+
+	/**
+	 * Hands an event the substrate could not write to the buffer. The answer is `buffered` (it will be written, or given up with a
+	 * dead-letter record) or `deadLettered` (it was given up at once). Neither is `stored`: nothing is in the ledger yet.
+	 */
+	private bufferEvent(buffer: EventBuffer, request: EventEnqueue): EmitResult {
+		const outcome = buffer.enqueue(request);
+		if (!outcome.buffered) return { event: outcome.entry.event, stored: false, deadLettered: true, error: request.last_reason };
+		this.ensureEventDrainTimer();
+		process.stderr.write(`[substrate] event ${outcome.entry.event.id} buffered for retry — ${request.last_reason}\n`);
+		return { event: outcome.entry.event, stored: false, buffered: true, error: request.last_reason };
+	}
+
+	/**
+	 * One delivery attempt for a buffered event, run inside its session's turn. `mayExist` keeps a retry after an ambiguous write
+	 * from storing the row twice. An ingest record that could not be confirmed is reported as stored on the direct path too, so the
+	 * row being stored is the outcome that counts here.
+	 */
+	private async deliverBuffered(entry: EventBufferEntry): Promise<EventDelivery> {
+		const greptime = this.greptime;
+		if (!greptime) return { transient: "GREPTIME_URL is not set" };
+		const appendOnly = await greptime.ensureAppendMode().catch(() => null);
+		if (appendOnly !== true && !this.config.allowDeduplicatingLedger) {
+			return { transient: appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN };
+		}
+		try {
+			await greptime.insertEvent(entry.event, { mayExist: true });
+		} catch (cause) {
+			if (!(cause instanceof IngestNotRecorded)) return { transient: redact(String(cause)).slice(0, 200) };
+			process.stderr.write(`[substrate] event ${entry.event.id} landed; ingest record unconfirmed — ${redact(String(cause))}\n`);
+		}
+		this.publishHint(entry.event);
+		return "landed";
+	}
+
+	/** One attempt, run in the event's session turn so it cannot interleave with an append that reads the same tip. */
+	private deliverBufferedInTurn(entry: EventBufferEntry): Promise<EventDelivery> {
+		const session = entry.event.session_id;
+		return session === null ? this.deliverBuffered(entry) : this.withSessionTurn(session, () => this.deliverBuffered(entry));
+	}
+
+	/**
+	 * Phase 76 chain rule, settle side, for the write path: one delivery attempt now for each parked event of one session, in chain order,
+	 * before a write chains onto them. The caller holds the session turn, so the attempts use `deliverBuffered`, not the turn-taking
+	 * `deliverBufferedInTurn`. Never waits for a pass already running (`EventBuffer.drainSession`). Bounded by one ledger call's budget.
+	 * Never throws.
+	 */
+	private async settleParked(sessionId: string): Promise<void> {
+		const stores = this.eventBufferStores;
+		const greptime = this.greptime;
+		if (stores === null || greptime === null || !stores.buffer.hasSession(sessionId)) return;
+		await settledWithin(stores.buffer.drainSession(sessionId, (entry) => this.deliverBuffered(entry)), greptime.timeoutMs);
+	}
+
+	/**
+	 * Settles one session's parked events for a caller outside a write: a rollback or a checkpoint reading the chain, or the forget emit's
+	 * dedupe. It waits for a pass already running, bounded, so that pass's attempt for this session is not skipped, then settles under the
+	 * session turn, the turn every delivery of the session runs in. Takes no turn when a write calls `settleParked` instead. Never throws.
+	 */
+	async settleBufferedEvents(sessionId: string): Promise<void> {
+		const stores = this.eventBufferStores;
+		const greptime = this.greptime;
+		const session = normalizeIdentifier(sessionId);
+		if (stores === null || greptime === null || session === null || !stores.buffer.hasSession(session)) return;
+		await settledWithin(stores.buffer.idle(), greptime.timeoutMs);
+		await this.withSessionTurn(session, () => this.settleParked(session));
+	}
+
+	/**
+	 * Where the forget note of `forgetId` stands in the session, read before the emit adapter writes one. `queued`: one is parked for the
+	 * ledger. Otherwise `recorded` holds the fewest plane deletions still pending among the recorded notes of that forget id, and `absent`
+	 * means none is recorded. The settle runs first, so a parked note the ledger now takes reads as recorded.
+	 */
+	private async forgetNoteInChain(sessionId: string, forgetId: string): Promise<"queued" | "absent" | { recorded: number }> {
+		await this.settleBufferedEvents(sessionId);
+		const session = normalizeIdentifier(sessionId);
+		const buffer = this.eventBufferStores?.buffer ?? null;
+		const isNote = (event: SubstrateEvent): boolean => event.payload["action"] === FORGET_ACTION && event.payload["forget_id"] === forgetId;
+		const parked = session === null || buffer === null ? null : buffer.find((event) => event.session_id === session && isNote(event));
+		if (parked !== null) return "queued";
+		const pending = await this.readSessionNotes(sessionId).then(
+			(notes) =>
+				notes.events.flatMap((event): number[] => {
+					if (!isNote(event)) return [];
+					// A note whose pending count cannot be read counts as pending: the repeat is then written, never dropped.
+					const plane = event.payload["plane"] as { pending?: unknown } | undefined;
+					return [typeof plane?.pending === "number" ? plane.pending : Number.POSITIVE_INFINITY];
+				}),
+			() => [],
+		);
+		return pending.length === 0 ? "absent" : { recorded: Math.min(...pending) };
+	}
+
+	/** Replays the buffer's due entries once. `all` ignores the backoff schedule, as shutdown and tests need. */
+	drainEventBuffer(options: { all?: boolean } = {}): Promise<void> {
+		const stores = this.eventBufferStores;
+		if (stores === null) return Promise.resolve();
+		return stores.buffer.drain((entry) => this.deliverBufferedInTurn(entry), options).finally(() => {
+			if (stores.buffer.size() === 0) this.stopEventDrain();
+		});
+	}
+
+	/**
+	 * Shutdown (phase 76): one bounded pass over the buffer. With `abandon` the periodic drain stops, and a buffer whose file is not
+	 * current gives up what is left, each entry with its dead-letter record. A durable buffer keeps its entries for the next boot.
+	 */
+	async drainPendingEvents(timeoutMs: number, options: { abandon?: boolean } = {}): Promise<void> {
+		const stores = this.eventBufferStores;
+		if (options.abandon === true) this.closeEventDrain();
+		if (stores === null) return;
+		// A zero budget spends no attempt: closing with 0 touches no ledger.
+		if (timeoutMs > 0 && stores.buffer.size() > 0) await Promise.race([this.drainEventBuffer({ all: true }), Bun.sleep(timeoutMs)]);
+		if (options.abandon === true && !stores.buffer.durable) stores.buffer.abandonAll();
+	}
+
+	private ensureEventDrainTimer(): void {
+		if (this.eventDrainTimer !== null || this.eventDrainClosed) return;
+		this.eventDrainTimer = setInterval(() => {
+			void this.drainEventBuffer();
+		}, EVENT_BUFFER_TICK_MS);
+		this.eventDrainTimer.unref();
+	}
+
+	/** Stops the periodic drain. The timer is unref'd, but a Substrate rebuilt in the same process would otherwise leak one interval per boot. */
+	private stopEventDrain(): void {
+		if (this.eventDrainTimer === null) return;
+		clearInterval(this.eventDrainTimer);
+		this.eventDrainTimer = null;
+	}
+
+	/** Shutdown's close: stops the tick and refuses to re-arm it, so a write after the close parks without starting a pass. */
+	private closeEventDrain(): void {
+		this.eventDrainClosed = true;
+		this.stopEventDrain();
 	}
 
 	/**
@@ -3241,7 +3492,7 @@ export class Substrate {
 					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
 					this.recallUncounted({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs, callerRepo),
 				]);
-				return mergeDerivedHits(entries, recall, scope, { surface, repo: callerRepo });
+				return mergeDerivedHits(entries, recall, scope, { surface, repo: callerRepo, granted: this.memoryGrant(surface) });
 			},
 		});
 		if (ledger.graphLinked !== true && ledger.causal !== true) return merged;
@@ -3422,7 +3673,7 @@ export class Substrate {
 		const index = this.index;
 		const load = () => recallMemories(
 			{
-				config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch,
+				config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch, granted: this.memoryGrant(callerSurface),
 				budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
 				...(index === null ? {} : { forgotten: (ids: readonly string[]) => index.forgottenEntryIds(ids) }),
 			}, query, callerSurface, callerRepo,
@@ -3808,15 +4059,67 @@ export class Substrate {
 		}
 	}
 
-	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
+	/** Start the recall prefetch, the Hindsight inventory, the scheduled reconcile (phase 78) and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
 	startRecall(): { recall: boolean; inventory: boolean } {
 		this.startPreload();
+		this.startReconcile();
 		return { recall: this.recall.start(), inventory: this.hindsightInventory.start() };
 	}
 
-	/** Clear both timers and wait, bounded, for the work in flight. No final refresh: the snapshot is cache-only. */
+	/** Clear the recall, Hindsight inventory and reconcile timers, and wait, bounded, for the recall work in flight. No final refresh: the snapshot is cache-only. */
 	async stopRecall(): Promise<void> {
+		this.stopReconcile();
 		await Promise.all([this.recall.stop(), this.hindsightInventory.stop()]);
+	}
+
+	/**
+	 * Start the scheduled reconcile (Phase 78, D78-7): one unref'd interval at `SUBSTRATE_RECONCILE_INTERVAL_S`, and nothing while it is 0.
+	 * Each tick is one read-only run. Idempotent.
+	 */
+	startReconcile(): boolean {
+		const { intervalS, windowHours } = this.config.reconcile;
+		if (this.reconcileStop !== null || intervalS <= 0) return false;
+		const handle = setInterval(() => void this.reconcileTick(), intervalS * 1000);
+		handle.unref();
+		this.reconcileStop = () => clearInterval(handle);
+		process.stdout.write(`[substrate] reconcile: every ${intervalS} s, window ${windowHours} h, read-only\n`);
+		return true;
+	}
+
+	/** Clear the scheduled reconcile's timer. A run in flight finishes on its own; it writes nothing on the way out. */
+	stopReconcile(): void {
+		this.reconcileStop?.();
+		this.reconcileStop = null;
+	}
+
+	/** One scheduled run, single-flight: a tick while a run is in flight starts nothing. Never rejects. */
+	private reconcileTick(): Promise<void> {
+		this.reconcilePass ??= this.runScheduledReconcile().finally(() => {
+			this.reconcilePass = null;
+		});
+		return this.reconcilePass;
+	}
+
+	/** One read-only reconcile over the ledger, the index and the cache: one JSON log line on success, a stderr line on failure. */
+	private async runScheduledReconcile(): Promise<void> {
+		if (this.greptime === null || this.index === null) {
+			process.stderr.write("[substrate] reconcile: skipped, the ledger and the index are both needed\n");
+			return;
+		}
+		try {
+			const report = await runReport({
+				ledger: this.greptime,
+				index: this.index,
+				cache: this.cache,
+				now: new Date(),
+				windowHours: this.config.reconcile.windowHours,
+				caps: DEFAULT_RECONCILE_CAPS,
+			});
+			const line = { schema: report.schema, generated_at: report.generated_at, clean: report.clean, counts: report.counts, truncated: report.truncated, unchecked_layers: report.unchecked_layers, first: report.first };
+			process.stdout.write(`[substrate] reconcile ${JSON.stringify(line)}\n`);
+		} catch (cause) {
+			process.stderr.write(`[substrate] reconcile: run failed — ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+		}
 	}
 
 	/** Start the cache preloader (phase 47): one unref'd interval, and nothing while `SUBSTRATE_CACHE_PRELOAD` is off or it is already running. */
@@ -4067,6 +4370,14 @@ export class Substrate {
 					},
 					emit: async (payload, summary, meta) => {
 						const sessionId = caller.session_id ?? payload.session_id;
+						// A repeat of this forget call (the rollback retries it) writes no second note while the recorded notes already show its plane
+						// deletions this far: a repeat that finished more of them writes its progress. A note queued for the ledger is not stored, so
+						// the forget is not reported as emitted until it lands.
+						if (sessionId !== undefined) {
+							const where = await this.forgetNoteInChain(sessionId, payload.forget_id);
+							if (where === "queued") throw new Error("the forget note is already queued for the ledger; nothing was written");
+							if (typeof where === "object" && payload.plane.pending >= where.recorded) return;
+						}
 						const emitted = await this.emit({
 							surface: caller.surface,
 							kind: "note",
@@ -4168,15 +4479,27 @@ export class Substrate {
 	 * would not. Throws `MemoryVerifyError` for a bad or unreadable id. `verified` does not prove the source event concerns this entry.
 	 */
 	async memoryVerify(id: string, caller: { surface: string | null; repo?: string | undefined; isOperator: boolean }): Promise<MemoryVerifyResult & { signer_set?: SignerSetSummary }> {
+		// Phase 72: the reader's repository decides which agent-scope entries it may read, so under scope it must be granted. An
+		// ungranted one is answered as an unknown id, before the index is read.
+		const scope = this.config.repoScope;
+		if (scope.enforced) {
+			const gate = authorizeRepo(scope, caller.surface as Surface | null, caller.repo ?? "");
+			if (!gate.ok) {
+				await this.repoRefusal("memory_verify", caller.surface as Surface | null, gate.reason, caller.repo ?? "");
+				throw new MemoryVerifyError("not_found", "no entry can be read for this repository");
+			}
+		}
 		const index = this.index;
 		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
-		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo) };
+		// Phase 72: the reader's grant is passed so an entry in an ungranted repository reads as absent, as an unknown id does.
+		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo), granted: this.memoryGrant(caller.surface) };
 		const ports = this.anchorVerifyPorts();
 		let signers: SignerSetSummary | undefined;
 		const result = await verifyMemoryRecord(
 			{
 				getEntry: async (entryId) => {
 					const entry = await index.readEntry(entryId);
+					// An ungranted entry is answered as absent before anything past this line reads it: its hash, its anchor, its content.
 					if (entry === null || !visibleToCaller(entry.scope, entry.repo, reader)) return null;
 					if (this.config.memoryExpiry === "enforce" && !caller.isOperator) {
 						const graph = entry.ttl === "graph" ? await index.graphLifetime(entry) : null;
@@ -4238,6 +4561,7 @@ export class Substrate {
 	private sessionRollbackDeps(): SessionRollbackDeps {
 		return {
 			readSessionNotes: (sessionId) => this.readSessionNotes(sessionId),
+			settleBufferedEvents: (sessionId) => this.settleBufferedEvents(sessionId),
 			chainHead: async (sessionId) => {
 				const ledger = this.greptime;
 				const session = normalizeIdentifier(sessionId);
@@ -4838,9 +5162,16 @@ export class Substrate {
 	}
 
 	/** The registry as a reader sees it: filtered, newest first, at most `query.limit` rows with `truncated` saying more exist. */
-	async listWorktrees(query: WorktreeListQuery): Promise<WorktreeListOutcome> {
+	async listWorktrees(query: WorktreeListQuery, callerSurface: Surface | null = null): Promise<WorktreeListOutcome> {
 		const access = this.worktreeAccess(false);
 		if (!access.ok) return access;
+		if (query.repo !== null) {
+			const gate = authorizeRepo(this.config.repoScope, callerSurface, query.repo);
+			if (!gate.ok) return this.repoRefusal("worktree_list", callerSurface, gate.reason, query.repo);
+		}
+		// A scoped caller reads only its own repositories: the store filters on them, and a caller granted none reads nothing.
+		const repos = grantedRepos(this.config.repoScope, callerSurface);
+		if (repos !== null && repos.length === 0) return { ok: true, worktrees: [], truncated: false };
 		try {
 			// One row past the page tells whether it was cut, without counting the table.
 			const rows = await access.store.list({
@@ -4849,6 +5180,7 @@ export class Substrate {
 				state: query.state,
 				limit: query.limit + 1,
 				staleBefore: staleCutoff(Date.now(), this.config.worktreeRegistry.idleDays),
+				repos,
 			});
 			return { ok: true, worktrees: rows.slice(0, query.limit), truncated: rows.length > query.limit };
 		} catch (cause) {
@@ -5149,7 +5481,9 @@ export class Substrate {
 				},
 				...(await this.placeOf(graphId)),
 			}).catch(() => null);
-			recorded = emitted?.stored === true;
+			// A parked claim is recorded: its event lands in order once the ledger answers, so the node stays held. Only an event that can
+			// never land (dead-lettered, or refused outright) withdraws it. A thrown emit (null) is unrecorded, as before.
+			recorded = emitted !== null && (emitted.stored || emitted.buffered === true);
 		}
 
 		const verdict = decideClaim({
@@ -5961,7 +6295,7 @@ export class Substrate {
 		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
 		const steering = this.steeringNoticeOf(prepared);
-		const final = this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
+		const final = await this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
 		if (prepared === undefined) this.recordRetrieval(surface, originalQuestion, chunks, reflected.shadow);
 		return final;
 	}
@@ -6263,6 +6597,167 @@ export class Substrate {
 	}
 
 	/**
+	 * Phase 72: the gate a repository-keyed read or write applies before it touches anything. Scoping off: nothing. A named
+	 * repository must be granted. With `required`, a reply that would span repositories when unnamed is refused too.
+	 */
+	async scopedRepoRefusal(route: string, surface: Surface | null, named: string | null | undefined, required: boolean): Promise<RepoScopeRefusal | null> {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return null;
+		if (named === undefined || named === null || named === "") return required ? this.repoRefusal(route, surface, "all-repos-not-granted", "") : null;
+		const gate = authorizeRepo(scope, surface, named);
+		return gate.ok ? null : this.repoRefusal(route, surface, gate.reason, named);
+	}
+
+	/**
+	 * Phase 72: the repository a graph belongs to, from the index's graph row, or null when there is no index, the graph is unknown,
+	 * the index does not answer, or the row names no repository. Only the graph's row is read here; its content is read by the caller.
+	 */
+	private async graphRepoOf(graphId: string): Promise<string | null> {
+		if (this.index === null) return null;
+		try {
+			const repo = scopeRepoId((await this.index.getGraph(graphId))?.repo ?? null);
+			return repo === "" ? null : repo;
+		} catch {
+			return null;
+		}
+	}
+
+	/** A graph read or write: its repository must be granted before the graph's content is read. An unresolvable graph is refused under scope. */
+	async scopedGraphRefusal(route: string, surface: Surface | null, graphId: string): Promise<RepoScopeRefusal | null> {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return null;
+		const repo = await this.graphRepoOf(graphId);
+		if (repo === null) return this.repoRefusal(route, surface, "graph-repo-unresolved", graphId);
+		const gate = authorizeRepo(scope, surface, repo);
+		return gate.ok ? null : this.repoRefusal(route, surface, gate.reason, repo);
+	}
+
+	/** The brief: an unnamed repository is refused under scope; a named graph must resolve to a granted repository that is the named one. */
+	async scopedBriefRefusal(surface: Surface | null, request: { repo?: string | null | undefined; graph_id?: string | null | undefined }): Promise<RepoScopeRefusal | null> {
+		const named = await this.scopedRepoRefusal("brief", surface, request.repo ?? null, true);
+		if (named !== null || request.repo === undefined || request.repo === null || request.graph_id === undefined || request.graph_id === null || request.graph_id === "") return named;
+		return this.scopedNamedGraphRefusal("brief", surface, request.repo, request.graph_id);
+	}
+
+	/**
+	 * The docs corpus (RAGFlow datasets, LightRAG and their Hindsight fallback) spans every repository, and a reply carries no
+	 * repository to filter on. Under scope it is refused to every scoped caller, unnamed or named, before any retrieval.
+	 */
+	async scopedDocsRefusal(route: string, surface: Surface | null): Promise<RepoScopeRefusal | null> {
+		return this.config.repoScope.enforced ? this.repoRefusal(route, surface, "all-repos-not-granted", "") : null;
+	}
+
+	/**
+	 * A write names the repository it lands in, and may name a graph too. Under scope a named repository must be granted; a named graph
+	 * must be granted and, when it is already recorded, must belong to that repository. With no repository, the graph's repository is
+	 * the target; with neither, the write is refused.
+	 */
+	async scopedWriteRefusal(route: string, surface: Surface | null, target: { repo?: string | null | undefined; graph_id?: string | null | undefined }): Promise<RepoScopeRefusal | null> {
+		if (!this.config.repoScope.enforced) return null;
+		const hasRepo = target.repo !== undefined && target.repo !== null && target.repo !== "";
+		const hasGraph = target.graph_id !== undefined && target.graph_id !== null && target.graph_id !== "";
+		if (hasRepo) {
+			const named = await this.scopedRepoRefusal(route, surface, target.repo, true);
+			if (named !== null || !hasGraph) return named;
+			return this.scopedNamedGraphRefusal(route, surface, target.repo ?? "", target.graph_id ?? "");
+		}
+		if (hasGraph) return this.scopedGraphRefusal(route, surface, target.graph_id ?? "");
+		return this.repoRefusal(route, surface, "all-repos-not-granted", "");
+	}
+
+	/**
+	 * A named graph inside a named repository: the graph's repository must be granted, and a graph already recorded under another
+	 * repository is refused. An unrecorded graph is allowed, since its first write creates it under the named repository. An index
+	 * that cannot answer is refused: an unreadable row is not known to belong to the repository.
+	 */
+	private async scopedNamedGraphRefusal(route: string, surface: Surface | null, repo: string, graphId: string): Promise<RepoScopeRefusal | null> {
+		if (!this.config.repoScope.enforced) return null;
+		const granted = await this.scopedRepoRefusal(route, surface, repo, true);
+		if (granted !== null) return granted;
+		if (this.index === null) return null;
+		try {
+			const row = await this.index.getGraph(graphId);
+			if (row === null || scopeRepoId(row.repo ?? null) === scopeRepoId(repo)) return null;
+		} catch {
+			return this.repoRefusal(route, surface, "graph-repo-unresolved", graphId);
+		}
+		return this.repoRefusal(route, surface, "graph-repo-mismatch", graphId);
+	}
+
+	/** Default deny: a route or tool no declaration names is refused to a scoped caller, before its handler runs, and audited under its name. */
+	async refuseUndeclared(name: string, surface: Surface | null): Promise<RepoScopeRefusal> {
+		return this.repoRefusal(name, surface, "not-declared-for-scope", name);
+	}
+
+	/**
+	 * The ledger read (`events_query`, `POST /events/query`). Under scope a named repository must be granted, and an unnamed read is
+	 * refused: the store reads one repository at a time, so a scoped caller never reads another repository's rows. The rows that remain
+	 * are filtered again before the reply.
+	 */
+	async queryEventsFor(input: EventQueryInput = {}, surface: Surface | null): Promise<{ ok: true; result: EventQueryResult } | RepoScopeRefusal> {
+		const scope = this.config.repoScope;
+		const named = await this.scopedRepoRefusal("events_query", surface, input.repo ?? null, true);
+		if (named !== null) return named;
+		const result = await this.queryEvents(input);
+		if (!scope.enforced) return { ok: true, result };
+		const events = rowsInGrant(result.events, scope, surface);
+		return { ok: true, result: { ...result, events, count: events.length } };
+	}
+
+	/** Phase 72: whether a graph's repository is granted to `surface`. An unresolvable graph is not. */
+	private async graphGranted(graphId: string, surface: Surface | null): Promise<boolean> {
+		const repo = await this.graphRepoOf(graphId);
+		return repo !== null && authorizeRepo(this.config.repoScope, surface, repo).ok;
+	}
+
+	/**
+	 * Phase 72: a memory search reply a scoped caller may see. An entry whose scope names a repository outside the grant is dropped; a
+	 * `graph:` scope is kept only when its graph resolves to a granted repository; `global`, `person:` and `agent:` scopes name no repository
+	 * and are kept. Ledger links are kept only for granted graphs, and each kept entry's causal chain is removed, since its events are not
+	 * repository-keyed. Scoping off returns the reply unchanged.
+	 */
+	async memoryReplyInGrant<R extends { entries: LinkedMemoryEntry[]; graph_links?: Array<{ graph_id: string; events: ReducedEvent[] }>; derived?: Array<{ scope?: string | undefined; repo?: string | undefined }> }>(reply: R, surface: Surface | null): Promise<R> {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return reply;
+		const granted = this.memoryGrant(surface);
+		const entries: LinkedMemoryEntry[] = [];
+		for (const entry of reply.entries) {
+			// The row's own repository must be granted too: a `global` row names no repository in its scope, so the scope check alone let it through.
+			let allowed = grantedToCaller(undefined, entry.repo, granted);
+			if (allowed && entry.scope.startsWith("repo:")) allowed = authorizeRepo(scope, surface, entry.scope.slice("repo:".length)).ok;
+			else if (allowed && entry.scope.startsWith("graph:")) allowed = await this.graphGranted(entry.scope.slice("graph:".length), surface);
+			if (allowed) {
+				// The causal chain is not keyed by repository, so a scoped reply omits it: the property is absent, not set to undefined.
+				const { causal_chain: _causalChain, ...unlinked } = entry;
+				entries.push(unlinked);
+			}
+		}
+		const links: Array<{ graph_id: string; events: ReducedEvent[] }> = [];
+		for (const link of reply.graph_links ?? []) if (await this.graphGranted(link.graph_id, surface)) links.push(link);
+		// A derived hit is filtered by the rule the recall applies, so one from an ungranted repository is removed here as well.
+		const derived = reply.derived?.filter((hit) => grantedToCaller(hit.scope, hit.repo, granted));
+		return { ...reply, entries, ...(reply.graph_links === undefined ? {} : { graph_links: links }), ...(derived === undefined ? {} : { derived }) } as R;
+	}
+
+	/** Phase 72: whether `repo` is granted to `surface` for memory reads. Undefined while scoping is off; a name that is no surface is granted nothing. */
+	private memoryGrant(surface: string | null): ((repo: string) => boolean) | undefined {
+		const scope = this.config.repoScope;
+		if (!scope.enforced) return undefined;
+		return (repo) => isSurfaceName(surface) && authorizeRepo(scope, surface, repo).ok;
+	}
+
+	/**
+	 * A refused repository request: the 403 the doors answer with. The ledger records the route, the reason and a digest of what was
+	 * asked for, never the request itself. An anonymous refusal is recorded by the route audit, which runs before every handler.
+	 */
+	private async repoRefusal(route: string, surface: Surface | null, reason: RepoRefusalReason, requested: string): Promise<RepoScopeRefusal> {
+		if (surface !== null) {
+			await this.emit({ surface, kind: "warning", summary: `repo request refused: ${reason}`, payload: repoRefusalPayload(route, reason, requested) }).catch(() => undefined);
+		}
+		return { ok: false, status: 403, body: { error: reason, problem: REPO_REFUSAL_MESSAGES[reason] } };
+	}
+
+	/**
 	 * The corpus doors' dependencies (v1.7 phase 63). Built on each call so a server with `SUBSTRATE_CORPUS` off never touches
 	 * the index or builds a plane: the gates in `corpus/service.ts` answer first.
 	 */
@@ -6279,6 +6774,7 @@ export class Substrate {
 			emit: (event) => this.emit(event),
 			roots: this.corpusRoots(),
 			anchor: { ports: () => this.anchorVerifyPorts(), verify: this.corpusSeam?.anchorVerifier },
+			repoScope: this.config.repoScope,
 		};
 	}
 
@@ -6294,18 +6790,15 @@ export class Substrate {
 	}
 
 	/**
-	 * Phase 69: a `docs_search` reply names the corpus root it was answered under, from the cache only. With `SUBSTRATE_CORPUS` off the
-	 * reply is returned untouched. A root that is not cached yet is left out and its computation starts off this call's path.
+	 * Phase 69: a `docs_search` reply names the corpus root it was answered under: the cached root while it matches the manifest's
+	 * version, else one read of the manifest that the reply waits for (bounded by `MAX_CORPUS_LEAVES`). With `SUBSTRATE_CORPUS` off the
+	 * reply is returned untouched. A manifest with no root (too large, no index, or unreadable) leaves the two fields out.
 	 */
-	private withCorpusRoot(reply: SearchReply): SearchReply {
+	private async withCorpusRoot(reply: SearchReply): Promise<SearchReply> {
 		if (!this.config.corpus.enabled) return reply;
-		const roots = this.corpusRoots();
-		const snapshot = roots.peek();
-		if (snapshot === null) {
-			roots.warm();
-			return reply;
-		}
-		return { ...reply, corpus_root: shortRoot(snapshot.root), corpus_count: snapshot.count };
+		const answer = await this.corpusRoots().current().catch(() => null);
+		if (answer === null || !answer.ok) return reply;
+		return { ...reply, corpus_root: shortRoot(answer.snapshot.root), corpus_count: answer.snapshot.count };
 	}
 
 	/** `POST /corpus/plan` and the planning half of the `substrate corpus plan` command. */
@@ -6326,6 +6819,32 @@ export class Substrate {
 		const reply = await corpusStatusReply(this.corpusDeps(), callerSurface);
 		if (reply.ok) this.corpusSlo.setLastChangeFrom(reply.body.lastIngestAt);
 		return reply;
+	}
+
+	/** `POST /cross-repo/fanout` and the `cross_repo_fanout` tool: a branch fan-out across registered repositories (phase 74). */
+	crossRepoFanout(raw: unknown, callerSurface: Surface | null): Promise<CrossRepoReply> {
+		return this.withCrossRepo(callerSurface, (deps) => crossRepoFanoutReply(raw, deps));
+	}
+
+	/** `GET /cross-repo/status` and the `cross_repo_status` tool: the stored operation under a key. */
+	crossRepoStatus(key: unknown, callerSurface: Surface | null): Promise<CrossRepoReply> {
+		return this.withCrossRepo(callerSurface, (deps) => crossRepoStatusReply(key, deps));
+	}
+
+	/** `POST /cross-repo/compensate` (operator only): undoes a stored operation under a key. The engine refuses a non-operator before it reads the store. */
+	crossRepoCompensate(raw: unknown, callerSurface: Surface | null, isOperator: boolean): Promise<CrossRepoReply> {
+		return this.withCrossRepo(callerSurface, (deps) => crossRepoCompensateReply(raw, deps, isOperator));
+	}
+
+	/**
+	 * The engine's deps for one call. The operation log lives in the index store, so with no index configured the call is
+	 * answered 503 and nothing is written.
+	 */
+	private withCrossRepo(callerSurface: Surface | null, call: (deps: CrossRepoDeps) => Promise<CrossRepoReply>): Promise<CrossRepoReply> {
+		if (this.index === null) {
+			return Promise.resolve({ status: 503, body: { ok: false, reason: "cross-repo.disabled", problem: "cross-repository operations need the index store (SUBSTRATE_PG_URL)" } });
+		}
+		return call({ scope: this.config.repoScope, surface: callerSurface, store: this.index.crossRepoStore() });
 	}
 
 	/** The clock an ingest request is timed with: the test seam's when one is injected, else `performance.now`. */
@@ -6373,9 +6892,9 @@ export class Substrate {
 	}
 
 	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
-	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
+	async corpusIngest(raw: unknown, callerSurface: Surface | null, isOperator: boolean): Promise<CorpusReply<CorpusIngestResponse>> {
 		const startedAt = this.corpusNowMs();
-		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
+		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface, isOperator);
 		// An `updated` row (a changed marker, tier or kind) changes supersession and authority but not the plane, so it drops the index only.
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.updated + reply.body.counts.tombstoned > 0) this.authorityIndex.invalidate();
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);
@@ -6918,9 +7437,21 @@ export class Substrate {
 	 * naming a holder that is gone, and each release becomes a warning another
 	 * agent will see in its brief.
 	 */
-	async reapExpiredLeases(repo?: string | null) {
+	async reapExpiredLeases(repo?: string | null, surface: Surface | null = null) {
 		if (!this.index) return [];
-		const reaped = await this.index.reapExpiredLeases(repo ?? null);
+		const index = this.index;
+		// The index reaps by repository, and an unnamed reap reaches every graph. Under scope a reap names one granted repository, or
+		// each granted repository in turn; a named repository outside the grant reaps nothing and is audited.
+		const scope = this.config.repoScope;
+		let targets: Array<string | null> = [repo ?? null];
+		if (scope.enforced) {
+			if (repo) {
+				const gate = authorizeRepo(scope, surface, repo);
+				targets = gate.ok ? [scopeRepoId(repo)] : [];
+				if (!gate.ok) await this.repoRefusal("reap_expired_leases", surface, gate.reason, repo);
+			} else targets = [...(grantedRepos(scope, surface) ?? [])];
+		}
+		const reaped = (await Promise.all(targets.map((target) => index.reapExpiredLeases(target)))).flat();
 		const graphIds = [...new Set(reaped.map((lease) => lease.graph_id))];
 		for (const graphId of graphIds) await this.cache.bump(graphGenerationKey(graphId));
 		if (graphIds.length > 0) await this.cache.bump(GRAPHS_GENERATION_KEY);
@@ -7165,6 +7696,21 @@ export class Substrate {
 	}
 
 	// ── drift ──────────────────────────────────────────────────────────────────
+
+	/**
+	 * `POST /drift` and `drift_scan`: the repository gate, then the scan. The repository must be granted, and a path must sit inside
+	 * a registered directory of that same repository, resolved through symlinks. A refusal runs no git and reads no trail. The scan
+	 * then reads the resolved target, never the string the caller sent.
+	 */
+	async scopedDriftScan(request: Parameters<Substrate["driftScan"]>[0], callerSurface: Surface | null): Promise<{ ok: true; report: DriftReport } | RepoScopeRefusal> {
+		const scope = this.config.repoScope;
+		const repoGate = authorizeRepo(scope, callerSurface, request.repo);
+		if (!repoGate.ok) return this.repoRefusal("drift", callerSurface, repoGate.reason, request.repo);
+		if (request.path === undefined || request.path === null) return { ok: true, report: await this.driftScan(request) };
+		const pathGate = authorizeRepoPath(scope, callerSurface, request.path, request.repo);
+		if (!pathGate.ok) return this.repoRefusal("drift", callerSurface, pathGate.reason, request.path);
+		return { ok: true, report: await this.driftScan({ ...request, path: pathGate.target ?? request.path }) };
+	}
 
 	/**
 	 * Compare the tree, the trail and the claims for one repo.
@@ -8216,6 +8762,8 @@ export class Substrate {
 			// change its status code when the cache is down.
 			cache,
 			eventBus: this.eventBusHealth(),
+			// Phase 76: depths and durability, read from memory. Reported, never gating.
+			eventBuffer: this.eventBufferStores === null ? { enabled: false } : { enabled: true, ...this.eventBufferStores.buffer.stats(), deadLetter: { depth: this.eventBufferStores.deadLetters.depth(), durable: this.eventBufferStores.deadLetters.durable } },
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
@@ -8665,6 +9213,8 @@ export interface SubstrateHealth {
 	cache: CacheHealth;
 	/** Phase 50: the wake-up bus's counters, `{ enabled: false }` while it is off. */
 	eventBus: EventBusHealth;
+	/** Phase 76: the telemetry buffer's depths, or `{ enabled: false }` while it is off. Reported, never gating. */
+	eventBuffer: EventBufferHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
@@ -8673,6 +9223,9 @@ export interface SubstrateHealth {
 
 /** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */
 export type EventBusHealth = { enabled: false } | { enabled: true; published: number; failed: number; oversize: number; malformed: number };
+
+/** `/healthz.eventBuffer` (phase 76): `{ enabled: false }` while `SUBSTRATE_EVENT_BUFFER_PATH` is unset. Otherwise the events waiting for the ledger and the dead-letter store: depths and durability only, and nothing here changes the status code. */
+export type EventBufferHealth = { enabled: false } | ({ enabled: true; deadLetter: { depth: number; durable: boolean } } & EventBufferStats);
 
 /** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
 export interface IndexArchiveHealth {

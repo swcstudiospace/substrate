@@ -1,15 +1,19 @@
-// Pure container spec for the substrate sandbox (D-01). No imports: bun:test loads this file
-// without rivet, and sandbox-provider.ts builds every container body from buildContainerSpec.
+// Pure container spec for the substrate sandbox (D-01). Imports only worktree-root.ts and node:path:
+// bun:test loads this file without rivet, and sandbox-provider.ts builds every container body from buildContainerSpec.
 //
 // Why not upstream sandbox-agent@0.4.2 providers/docker.js: it publishes the command server on
 // every host interface (PortBindings without HostIp) with token auth switched off, and a caller
 // HostConfig replaces its HostConfig wholesale. This builder owns the whole body instead.
 
+import { join } from "node:path";
+import { DEFAULT_WORKTREES_ROOT, type EnvLike, worktreeRoot } from "./worktree-root.ts";
+
 export const SANDBOX_IMAGE = "substrate-sandbox:0.1";
 export const SANDBOX_NETWORK = "substrate-sandbox";
 export const SANDBOX_PORT = 3000;
 export const GRAPH_LABEL = "substrate.graph_id";
-export const WORKTREES_ROOT = "/var/lib/substrate/worktrees";
+/** The default root, used only when SUBSTRATE_WORKTREE_ROOTS names none. Live callers use worktreeFor(). */
+export const WORKTREES_ROOT = DEFAULT_WORKTREES_ROOT;
 
 /** Same rule as packages/dispatcher/src/substrate_dispatcher/worktree.py GRAPH_ID_RE. */
 export const GRAPH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -35,10 +39,10 @@ export function isValidGraphId(graphId: unknown): graphId is string {
 	);
 }
 
-/** The only worktree a graph may bind: the dispatcher's `<WORKTREES_ROOT>/<graph_id>`. */
-export function worktreeFor(graphId: string): string {
+/** The only worktree a graph may bind: `<worktreeRoot()>/<graph_id>`, the dispatcher's creation path. */
+export function worktreeFor(graphId: string, env: EnvLike = process.env): string {
 	if (!isValidGraphId(graphId)) throw new Error(`invalid graph id ${JSON.stringify(graphId)}`);
-	return `${WORKTREES_ROOT}/${graphId}`;
+	return join(worktreeRoot(env), graphId);
 }
 
 const BIND_PATH_RE = /^\/[A-Za-z0-9._/-]*$/;
@@ -68,7 +72,7 @@ export function buildContainerSpec(opts: ContainerSpecOptions): Record<string, u
 	const { graphId, worktree, token, network } = opts;
 	if (!isValidGraphId(graphId)) throw new Error(`invalid graph id ${JSON.stringify(graphId)}`);
 	if (worktree !== worktreeFor(graphId)) {
-		throw new Error(`worktree must be ${WORKTREES_ROOT}/${graphId}, got ${JSON.stringify(worktree)}`);
+		throw new Error(`worktree must be ${worktreeFor(graphId)}, got ${JSON.stringify(worktree)}`);
 	}
 	if (typeof token !== "string" || !/^[A-Za-z0-9._~-]{1,256}$/.test(token)) {
 		throw new Error("sandbox token must be 1-256 URL-safe characters");

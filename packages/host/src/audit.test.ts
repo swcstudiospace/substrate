@@ -63,6 +63,12 @@ describe("containerViolations", () => {
 		expect(containerViolations(own, "published_loopback")).toEqual([]);
 	});
 
+	test("a bind under a non-default root from SUBSTRATE_WORKTREE_ROOTS is the graph's own worktree; with no root set it is foreign", () => {
+		const alt = inspect({ host: { Binds: [`/srv/alt-worktrees/${GID}:/work`] } });
+		expect(containerViolations(alt, "published_loopback", { SUBSTRATE_WORKTREE_ROOTS: "/srv/alt-worktrees" })).toEqual([]);
+		expect(containerViolations(alt, "published_loopback", {}).map((v) => v.split(":")[0])).toEqual(["writable_bind"]);
+	});
+
 	test("on internal, a NetworkMode other than substrate-sandbox or any PortBindings entry is one network_mode violation; published_loopback ignores NetworkMode", () => {
 		const bridged = inspect({ host: { PortBindings: {}, NetworkMode: "bridge" } });
 		expect(containerViolations(bridged, "internal")).toEqual(["network_mode:bridge"]);

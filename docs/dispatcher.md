@@ -24,9 +24,11 @@ its slot until its process exits or is killed.
 
 ## Markers
 
-Every non-dispatch leaves exactly one once-only comment. Body starts with
-`substrate-dispatcher:`, carries the stable `[<marker>]` tag, skipped when
-the tag is among the issue's last 50 comments.
+Each non-dispatch decision posts at most one once-only comment per marker. Body starts
+with `substrate-dispatcher:` and carries the stable `[<marker>]` tag; the comment is
+skipped when the tag is among the issue's last 50 comments, so a decision repeated on
+later ticks (for example `at-capacity`) posts nothing new. A session already running
+for the issue posts one `already-running` comment; an issue the registry gave up on is skipped without a comment.
 
 | Marker | Meaning | Retried? |
 | --- | --- | --- |
@@ -43,6 +45,9 @@ the tag is among the issue's last 50 comments.
 | `host-unreachable` | substrate-host not reachable, or a 401/403 rejection | next tick after a connect failure or a 401/403; after an ambiguous reply, when `readopt()` resolves the kept record; emits nothing |
 | `exited-unclaimed` | hermes exited without claiming; label removed | no, gives up |
 | `claim-timeout` | no claim in 15 min; label removed | no, gives up |
+| `at-capacity` | every dispatch slot is busy (at most 2 sessions); queued, not dispatched | next tick; emits nothing |
+| `graph-busy` | this graph already has a running session; queued, not dispatched | next tick; emits nothing |
+| `already-running` | a session for this issue is already running; no second launch | next tick; emits nothing |
 
 Give-ups persist in `STATE_DIR/given_up.json` (0600, atomic replace) and survive a restart: a new process never relaunches a given-up issue. A dispatcher restart ends every dispatched Hermes session, by design: the unit keeps the default `KillMode=control-group`, so a stop or restart takes the sessions in its cgroup with it. VM tasks (`dispatch:claude-code`) run on substrate-host outside that cgroup, and the dispatcher re-adopts their persisted records from `vm_tasks.json` under `STATE_DIR` on its next start.
 
@@ -117,7 +122,7 @@ not a default anyone can widen: labelling is the trust boundary.
 
 ## Linear writes
 
-Additive only. One idempotent marker comment per non-dispatch; label
+Additive only. At most one idempotent marker comment per non-dispatch; label
 removal only of the candidate's own `dispatch:<surface>` label on give-up
 paths, via `removedLabelIds`. The `dispatch:*` → `agent:<surface>` move on
 landed claims is the Phase 23 mirror's write, never the dispatcher's. No
@@ -131,8 +136,8 @@ ids only, never issue text:
 
 - launch → `dispatch.outcome{outcome: launched}` (kind `note`)
 - terminal non-dispatch / give-up → `dispatch.failed{reason: <marker>}`
-  (kind `warning`); `host-unreachable` and already-commented skips emit
-  nothing.
+  (kind `warning`); `host-unreachable`, `at-capacity`, `graph-busy` and `already-running` (queued retries)
+  and already-commented skips emit nothing.
 
 The DISP-08 live proof is an explicit OPERATOR-GATED sequence in
 `docs/runbooks/dispatch-proof.md` — the executor stops at every gate.

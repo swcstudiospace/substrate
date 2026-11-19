@@ -49,7 +49,7 @@
 - [ ] **STEER-01**: `substrate steer` lists live sessions and their steering state, and queues, acknowledges and lists directives for an operator.
 - [ ] **STEER-02**: A session can ask what the other live sessions of its repository are doing and receives a bounded, redacted digest that carries its provenance.
 - [ ] **STEER-03**: `memory_brief` carries sessions, steering and handoff sections behind a flag.
-- [ ] **STEER-04**: Steering session state survives a server restart.
+- [ ] **STEER-04**: Steering session state survives a server restart. Owner decision (2026-11-19): the `steering_sessions` cap and TTL design is superseded; session state lives in `live_session_bindings` (migration v42) with SQL-time expiry (`expires_at`).
 - [ ] **STEER-05**: The session hook reads `checkpoint_hint` and writes the checkpoint it names, and a context trigger injects the digest at session start.
 - [ ] **STEER-06**: A session can wait for a directive with a long poll instead of polling `docs_search`.
 

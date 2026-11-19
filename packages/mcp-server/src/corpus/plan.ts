@@ -29,6 +29,9 @@ function byPath(left: { path: string }, right: { path: string }): number {
 	return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
 }
 
+/** Copy collections are the `local/*` repositories: identical copies collapse there, so a rename may pair across them. */
+const COLLECTION_PREFIX = "local/";
+
 /** The repositories whose manifest rows a plan needs: those entries name, and those the coverage lists. */
 export function planRepos(entries: readonly CorpusEntry[], scope: CorpusScope): string[] {
 	return [...new Set([...scope.coverage.map((pair) => pair.repo), ...entries.map((entry) => entry.repo)])];
@@ -65,16 +68,35 @@ export function planCorpus(entries: readonly CorpusEntry[], scope: CorpusScope, 
 		.filter((row) => row.state === "active" && row.kind !== "digest" && covered.has(`${row.repo}\n${row.source}`) && row.tier <= scope.maxTier && !reported.has(keyOf(row.repo, row.path)))
 		.sort(byPath);
 
-	// A removed row and a new entry with the same repo and sha256 are one document that moved: a rename, once.
+	// A removed row and a new entry with the same sha256 are one document that moved: a rename, once. Pairs form in two
+	// passes: first within one repository, then across copy collections only (`local/*`, where identical copies collapse to
+	// one entry, so a canonical copy that moves from one collection to another is a rename). Two checkouts never pair.
 	const addsBySha = new Map<string, CorpusEntry[]>();
-	for (const entry of [...adds].sort(byPath)) {
-		const group = addsBySha.get(keyOf(entry.repo, entry.sha256));
-		if (group === undefined) addsBySha.set(keyOf(entry.repo, entry.sha256), [entry]);
+	for (const entry of [...adds].sort((left, right) => (left.repo < right.repo ? -1 : left.repo > right.repo ? 1 : byPath(left, right)))) {
+		const group = addsBySha.get(entry.sha256);
+		if (group === undefined) addsBySha.set(entry.sha256, [entry]);
 		else group.push(entry);
+	}
+	const takeAdd = (row: ManifestRow, accepts: (entry: CorpusEntry) => boolean): CorpusEntry | undefined => {
+		const group = addsBySha.get(row.sha256);
+		const index = group?.findIndex(accepts) ?? -1;
+		if (group === undefined || index < 0) return undefined;
+		const [match] = group.splice(index, 1);
+		return match;
+	};
+	const pairs = new Map<ManifestRow, CorpusEntry>();
+	for (const row of candidates) {
+		const match = takeAdd(row, (entry) => entry.repo === row.repo);
+		if (match !== undefined) pairs.set(row, match);
+	}
+	for (const row of candidates) {
+		if (pairs.has(row) || !row.repo.startsWith(COLLECTION_PREFIX)) continue;
+		const match = takeAdd(row, (entry) => entry.repo !== row.repo && entry.repo.startsWith(COLLECTION_PREFIX));
+		if (match !== undefined) pairs.set(row, match);
 	}
 	const renamed = new Set<string>();
 	for (const row of candidates) {
-		const match = addsBySha.get(keyOf(row.repo, row.sha256))?.shift();
+		const match = pairs.get(row);
 		if (match === undefined) {
 			counts.tombstone += 1;
 			items.push({ action: "tombstone", repo: row.repo, path: row.path, sha256: row.sha256 });
@@ -82,7 +104,14 @@ export function planCorpus(entries: readonly CorpusEntry[], scope: CorpusScope, 
 		}
 		renamed.add(keyOf(match.repo, match.path));
 		counts.rename += 1;
-		items.push({ action: "rename", repo: match.repo, path: match.path, sha256: match.sha256, renamedFrom: row.path });
+		items.push({
+			action: "rename",
+			repo: match.repo,
+			path: match.path,
+			sha256: match.sha256,
+			renamedFrom: row.path,
+			...(match.repo === row.repo ? {} : { renamedFromRepo: row.repo }),
+		});
 	}
 	for (const entry of adds) {
 		if (renamed.has(keyOf(entry.repo, entry.path))) continue;

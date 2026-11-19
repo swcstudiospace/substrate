@@ -13,7 +13,7 @@ import type { AddressInfo } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { METRIC, findCounter, sumCounter } from "@substrate/observability";
+import { BreakerOpenError, METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { FakeBudgetRedis } from "./admission.test.ts";
 import { ReadThroughCache } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
