@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadGoldenCorpus, searchGoldenOffline } from "../packages/mcp-server/src/docs-golden.ts";
 import { CORPUS_INGEST_RATE_METRIC } from "../packages/observability/src/index.ts";
-import { generateGolden, LIVE_MAX_QUERIES } from "../packages/corpus/src/index.ts";
+import { generateGolden } from "../packages/corpus/src/index.ts";
 import {
 	CORPUS_DIR,
 	USAGE,
@@ -27,7 +27,7 @@ import {
 	type GoldenIo,
 	type ScoredReply,
 } from "./docs-golden.ts";
-import { collectLocalDocuments, DEFAULT_EVAL_REPO } from "./docs-eval.ts";
+import { CANARY_GOLDEN_MAX_QUERIES, collectLocalDocuments, DEFAULT_EVAL_REPO } from "./docs-eval.ts";
 
 const corpus = loadGoldenCorpus(CORPUS_DIR);
 const fixtures = loadFixtures();
@@ -83,8 +83,8 @@ describe("the committed fixtures, offline", () => {
 
 describe("the golden set the eval asks about the milestone's runbooks", () => {
 	const scan = collectLocalDocuments(REPO_ROOT, DEFAULT_EVAL_REPO);
-	// The questions `docs-eval --live` asks and the canary's recall measures: the same generator, the same cap.
-	const asked = generateGolden(scan.docs, { maxQueries: LIVE_MAX_QUERIES });
+	// The questions the live canary asks and measures recall over: the same generator, the same cap as the canary sample.
+	const asked = generateGolden(scan.docs, { maxQueries: CANARY_GOLDEN_MAX_QUERIES });
 
 	test("the scan of docs/ reaches every Markdown file, so no bound cuts a runbook", () => {
 		expect(scan.incomplete).toEqual([]);

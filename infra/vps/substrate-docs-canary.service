@@ -40,6 +40,8 @@ ExecStart=/root/.local/share/reflex/bun/bin/bun scripts/docs-eval.ts --live --em
 StateDirectory=substrate
 StateDirectoryMode=0700
 Environment=SUBSTRATE_DOCS_CANARY_STATE=/var/lib/substrate/docs-canary-last.json
+# The canary requires SUBSTRATE_CORPUS=on to run its SLO checks.
+Environment=SUBSTRATE_CORPUS=on
 
 StandardOutput=journal
 StandardError=journal
