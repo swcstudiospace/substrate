@@ -1487,6 +1487,23 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * Every graph holding a node that names this Linear issue, with no row limit. A relation removal needs the whole set
+	 * to decide that no other graph still holds the edge, so `findNodesByLinear`'s two-row cap is not enough here.
+	 */
+	async graphIdsForLinearIssue(ref: { linearIssueId?: string; linearIdentifier?: string }): Promise<string[]> {
+		const ids = new Set<string>();
+		if (ref.linearIssueId) {
+			const rows = (await this.sql`select distinct graph_id from graph_nodes where linear_issue_id = ${ref.linearIssueId}`) as Array<{ graph_id: string }>;
+			for (const row of rows) ids.add(row.graph_id);
+		}
+		if (ref.linearIdentifier) {
+			const rows = (await this.sql`select distinct graph_id from graph_nodes where linear_identifier = ${ref.linearIdentifier}`) as Array<{ graph_id: string }>;
+			for (const row of rows) ids.add(row.graph_id);
+		}
+		return [...ids];
+	}
+
+	/**
 	 * Mark a node under review for the DoD gate, in one fenced statement.
 	 *
 	 * The only new state write of the claim-mirror phase: it sets

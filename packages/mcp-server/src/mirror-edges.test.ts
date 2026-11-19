@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { LinearClient } from "./linear.ts";
-import { type EdgeRelation, Mirror } from "./mirror.ts";
+import { type EdgeRelation, Mirror, ownedRelations } from "./mirror.ts";
 
 const KEY = "lin-test-key";
 const ENDPOINT = "https://linear.test/graphql";
@@ -36,8 +36,9 @@ function linearStandIn(
 		if (body.query.includes("IssueRelationCreate")) {
 			const input = body.variables.input as { issueId: string; relatedIssueId: string };
 			const refused = options.refuse?.(input) ?? false;
-			return reply({ data: { issueRelationCreate: { success: !refused } } });
+			return reply({ data: { issueRelationCreate: { success: !refused, issueRelation: refused ? null : { id: `rel-${input.issueId}-${input.relatedIssueId}` } } } });
 		}
+		if (body.query.includes("IssueRelationDelete")) return reply({ data: { issueRelationDelete: { success: true } } });
 		const identifier = String(body.variables.id);
 		const issue = issues[identifier];
 		if (!issue) return reply({ data: { issue: null } });
@@ -126,5 +127,105 @@ describe("graph edges into Linear blocks relations", () => {
 		]);
 		expect(outcomes.map((outcome) => outcome.status)).toEqual(["failed", "created"]);
 		expect(outcomes[0]?.reason).toContain("did not succeed");
+	});
+});
+
+describe("a racing registration of one new edge (G3)", () => {
+	test("two registrations racing on one new edge write one relation, and the second reports it existing", async () => {
+		// A stateful stand-in: a created relation is visible to the next read. The first two reads of the blocker
+		// wait until both registrations have made theirs, so each one reads before either writes: the race itself.
+		const issues: Record<string, { id: string; relations: Array<{ type: string; relatedIssueId: string }> }> = {
+			"SWC-1": { id: "uuid-1", relations: [] },
+			"SWC-2": { id: "uuid-2", relations: [] },
+		};
+		const requests: Recorded[] = [];
+		const bothRead = Promise.withResolvers<void>();
+		let blockerReads = 0;
+		const fetchImpl = (async (_url: string, init: RequestInit) => {
+			const body = JSON.parse(String(init.body)) as Recorded["body"];
+			requests.push({ body });
+			if (body.query.includes("IssueRelationCreate")) {
+				const input = body.variables.input as { issueId: string; relatedIssueId: string };
+				const blocker = Object.values(issues).find((issue) => issue.id === input.issueId);
+				blocker?.relations.push({ type: "blocks", relatedIssueId: input.relatedIssueId });
+				return reply({ data: { issueRelationCreate: { success: true, issueRelation: { id: "rel-race" } } } });
+			}
+			const identifier = String(body.variables.id);
+			if (identifier === "SWC-1" && ++blockerReads === 2) bothRead.resolve();
+			if (identifier === "SWC-1") await bothRead.promise;
+			const issue = issues[identifier];
+			if (!issue) return reply({ data: { issue: null } });
+			return reply({
+				data: {
+					issue: {
+						id: issue.id,
+						identifier,
+						relations: { nodes: issue.relations.map((relation) => ({ type: relation.type, relatedIssue: { id: relation.relatedIssueId } })) },
+					},
+				},
+			});
+		}) as unknown as typeof fetch;
+		const mirror = new Mirror({ linear: new LinearClient(KEY, { fetchImpl, endpoint: ENDPOINT }) });
+
+		const [first, second] = await Promise.all([mirror.relateEdges([edge()]), mirror.relateEdges([edge()])]);
+
+		expect([first[0]?.status, second[0]?.status].sort()).toEqual(["created", "existing"]);
+		expect(createsOf(requests)).toHaveLength(1);
+	});
+});
+
+describe("removing an edge deletes only a relation this mirror created (G4)", () => {
+	const deletesOf = (requests: Recorded[]) =>
+		requests.filter((request) => request.body.query.includes("IssueRelationDelete")).map((request) => request.body.variables);
+	const created = { id: "rel-uuid-1-uuid-2", blockerIssueId: "uuid-1", waitingIssueId: "uuid-2" };
+	const owned = { ...created, kind: "requires" as const, blockerNode: "n1", waitingNode: "n2", blockerRef: "SWC-1", waitingRef: "SWC-2" };
+
+	test("a relation the create returned is recorded with the ids that delete it", async () => {
+		const { mirror } = linearStandIn({ "SWC-1": { id: "uuid-1" }, "SWC-2": { id: "uuid-2" } });
+		const [outcome] = await mirror.relateEdges([edge()]);
+		expect(outcome?.relation).toEqual(created);
+	});
+
+	test("a relation no edge still holds is deleted by its id", async () => {
+		const { requests, mirror } = linearStandIn({ "SWC-1": { id: "uuid-1" }, "SWC-2": { id: "uuid-2" } });
+		const outcome = await mirror.unrelate(owned, async () => false);
+		expect(outcome.status).toBe("deleted");
+		expect(deletesOf(requests)).toEqual([{ id: "rel-uuid-1-uuid-2" }]);
+	});
+
+	test("a relation an edge still wants is kept, and Linear is not asked to delete it", async () => {
+		const { requests, mirror } = linearStandIn({ "SWC-1": { id: "uuid-1" }, "SWC-2": { id: "uuid-2" } });
+		const outcome = await mirror.unrelate(owned, async () => true);
+		expect(outcome.status).toBe("kept");
+		expect(deletesOf(requests)).toEqual([]);
+	});
+
+	test("a refused delete is reported with its reason and never thrown", async () => {
+		const fetchImpl = (async () => reply({ data: { issueRelationDelete: { success: false } } })) as unknown as typeof fetch;
+		const mirror = new Mirror({ linear: new LinearClient(KEY, { fetchImpl, endpoint: ENDPOINT }) });
+		const outcome = await mirror.unrelate(owned, async () => false);
+		expect(outcome.status).toBe("failed");
+		expect(outcome.reason).toContain("did not succeed");
+	});
+
+	test("ownership is a created relation with an ok record, until its ok removal", () => {
+		const pair = (blocker: string, waiting: string) => ({ action: "mirror", target: "linear", op: "relate", blocker_node: blocker, waiting_node: waiting, status: "ok" });
+		const withRelation = (payload: Record<string, unknown>) => ({
+			...payload,
+			relation_id: `rel-${String(payload.blocker_node)}-${String(payload.waiting_node)}`,
+			blocker_issue_id: "uuid-1",
+			waiting_issue_id: "uuid-2",
+			edge_kind: "requires",
+		});
+		const events = [
+			{ payload: withRelation(pair("n1", "n2")) },
+			{ payload: withRelation(pair("n3", "n4")) },
+			{ payload: { ...pair("n5", "n6"), status: "failed" } },
+			{ payload: { action: "mirror", target: "linear", op: "unrelate", blocker_node: "n3", waiting_node: "n4", status: "ok" } },
+			{ payload: { action: "mirror", target: "linear", op: "unrelate", blocker_node: "n1", waiting_node: "n2", status: "failed" } },
+		];
+		expect(ownedRelations(events).map((relation) => `${relation.blockerNode}>${relation.waitingNode}:${relation.id}`)).toEqual([
+			"n1>n2:rel-n1-n2",
+		]);
 	});
 });

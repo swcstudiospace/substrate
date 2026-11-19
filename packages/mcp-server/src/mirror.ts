@@ -114,16 +114,66 @@ export interface EdgeRelation {
 	blockerRef: string | null;
 }
 
+/** The Linear relation a `created` edge wrote, and the issues it joins: what a later removal of the edge needs. */
+export interface WrittenRelation {
+	id: string;
+	blockerIssueId: string;
+	waitingIssueId: string;
+}
+
 /** What one edge did. `skipped` means a side has no tracker issue, so nothing was asked of Linear. */
 export interface EdgeOutcome extends EdgeRelation {
 	status: "created" | "existing" | "skipped" | "failed";
 	reason?: string;
+	relation?: WrittenRelation;
+}
+
+/**
+ * A Linear relation this mirror created, as the ledger records it: the `created` outcome of an edge between two
+ * graph nodes. Only such a relation may ever be deleted; one a person made is never recorded, so never owned.
+ */
+export interface OwnedRelation extends WrittenRelation {
+	kind: EdgeKind;
+	blockerNode: string;
+	waitingNode: string;
+	blockerRef: string | null;
+	waitingRef: string | null;
+}
+
+/** What a removal did. `kept` means another edge still holds the relation, so nothing was deleted. */
+export interface UnrelateOutcome {
+	status: "deleted" | "kept" | "skipped" | "failed";
+	reason?: string;
+}
+
+/** The owned relations a graph's ledger still holds: a relation is owned from its `ok` create until its `ok` delete. */
+export function ownedRelations(events: ReadonlyArray<{ payload?: Record<string, unknown> }>): OwnedRelation[] {
+	const owned = new Map<string, OwnedRelation>();
+	for (const { payload } of events) {
+		if (payload?.action !== "mirror" || payload.target !== "linear") continue;
+		const pair = `${String(payload.blocker_node)}>${String(payload.waiting_node)}`;
+		if (payload.op === "relate" && payload.status === "ok" && typeof payload.relation_id === "string") {
+			owned.set(pair, {
+				id: payload.relation_id,
+				blockerIssueId: String(payload.blocker_issue_id),
+				waitingIssueId: String(payload.waiting_issue_id),
+				kind: payload.edge_kind as EdgeKind,
+				blockerNode: String(payload.blocker_node),
+				waitingNode: String(payload.waiting_node),
+				blockerRef: typeof payload.blocker_ref === "string" ? payload.blocker_ref : null,
+				waitingRef: typeof payload.waiting_ref === "string" ? payload.waiting_ref : null,
+			});
+		} else if (payload.op === "unrelate" && payload.status === "ok") {
+			owned.delete(pair);
+		}
+	}
+	return [...owned.values()];
 }
 
 export class Mirror {
 	private readonly linear: LinearClient | null;
 	private readonly notion: NotionClient | null;
-	/** `graphId/nodeId` → tail of that node's execution chain. */
+	/** Serialisation key (`graphId/nodeId`, or a relation pair) → tail of its chain. */
 	private readonly chains = new Map<string, Promise<void>>();
 
 	constructor(targets: { linear: LinearClient | null; notion?: NotionClient | null }) {
@@ -296,7 +346,14 @@ export class Mirror {
 
 	/** One transition serialized behind earlier transitions for the same node. */
 	private async serialized<T>(ctx: MirrorContext, fn: () => Promise<T>): Promise<T> {
-		const key = `${ctx.graphId}/${ctx.nodeId}`;
+		return this.exclusive(`${ctx.graphId}/${ctx.nodeId}`, fn);
+	}
+
+	/**
+	 * Run `fn` once every earlier call holding `key` has settled. Serialisation is in-process only: two substrate
+	 * processes sharing one Linear workspace are not serialised by this.
+	 */
+	private async exclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
 		const prev = this.chains.get(key) ?? Promise.resolve();
 		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
 		const tail = prev.then(() => gate);
@@ -433,30 +490,59 @@ export class Mirror {
 	 * blocked by it. A relation that already exists in that direction is read, not written again. An edge with no
 	 * tracker issue on either side is skipped. Each edge stands alone: a failure on one never stops the rest.
 	 * Never throws.
+	 *
+	 * The check and the create run under a lock keyed by the issue pair's UUIDs. Two registrations racing on one new
+	 * edge would otherwise both read the blocker before either writes, and both create, leaving Linear a duplicate.
+	 * The blocker is read again inside the lock, after any write that raced it has landed.
 	 */
 	async relateEdges(edges: EdgeRelation[]): Promise<EdgeOutcome[]> {
 		const outcomes: EdgeOutcome[] = [];
 		for (const edge of edges) {
 			const linear = this.linear;
-			if (!linear || !edge.waitingRef || !edge.blockerRef) {
+			const blockerRef = edge.blockerRef;
+			const waitingRef = edge.waitingRef;
+			if (!linear || !blockerRef || !waitingRef) {
 				outcomes.push({ ...edge, status: "skipped" });
 				continue;
 			}
 			try {
-				const blocker = await linear.issueRelations(edge.blockerRef);
-				const waiting = await linear.issueRelations(edge.waitingRef);
-				if (blocker.relations.some((relation) => relation.type === "blocks" && relation.relatedIssueId === waiting.id)) {
-					outcomes.push({ ...edge, status: "existing" });
-					continue;
-				}
-				await linear.createIssueRelation(blocker.id, waiting.id, "blocks");
-				outcomes.push({ ...edge, status: "created" });
+				const blockerId = (await linear.issueRelations(blockerRef)).id;
+				const waitingId = (await linear.issueRelations(waitingRef)).id;
+				const outcome = await this.exclusive(`relation:${blockerId}>${waitingId}`, async (): Promise<EdgeOutcome> => {
+					const blocker = await linear.issueRelations(blockerRef);
+					if (blocker.relations.some((relation) => relation.type === "blocks" && relation.relatedIssueId === waitingId)) {
+						return { ...edge, status: "existing" };
+					}
+					const id = await linear.createIssueRelation(blocker.id, waitingId, "blocks");
+					return { ...edge, status: "created", relation: { id, blockerIssueId: blocker.id, waitingIssueId: waitingId } };
+				});
+				outcomes.push(outcome);
 			} catch (cause) {
 				const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
 				outcomes.push({ ...edge, status: "failed", reason });
 			}
 		}
 		return outcomes;
+	}
+
+	/**
+	 * Delete a relation this mirror created, when the edge it stood for has left the graph. Runs under the same lock
+	 * as the create, and asks `stillWanted` inside that lock, so a racing registration that re-adds the edge either
+	 * lands first (and the relation is kept) or waits and creates it again. Never throws.
+	 */
+	async unrelate(owned: OwnedRelation, stillWanted: () => Promise<boolean>): Promise<UnrelateOutcome> {
+		const linear = this.linear;
+		if (!linear) return { status: "skipped" };
+		try {
+			return await this.exclusive(`relation:${owned.blockerIssueId}>${owned.waitingIssueId}`, async (): Promise<UnrelateOutcome> => {
+				if (await stillWanted()) return { status: "kept" };
+				await linear.deleteIssueRelation(owned.id);
+				return { status: "deleted" };
+			});
+		} catch (cause) {
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+			return { status: "failed", reason };
+		}
 	}
 }
 	/**

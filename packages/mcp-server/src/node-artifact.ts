@@ -19,7 +19,7 @@ export interface NodeArtifact {
 	node_id: string;
 	/** Every lease decision the ledger recorded for the node, in time order. */
 	claim: Array<{ ts: string | null; action: string }>;
-	/** Claim, review and the rest of the Linear steps, and the relation outcomes (`op: "relate"`) with their edge. */
+	/** Claim, review and the rest of the Linear steps, and the relation outcomes (`op: "relate"` or `"unrelate"`) with their edge. */
 	linear: Array<{
 		ts: string | null;
 		op: string;
