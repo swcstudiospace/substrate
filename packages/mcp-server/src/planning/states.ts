@@ -7,6 +7,9 @@
  *
  *   ERROR → LOADING → DEGRADED → EMPTY → STALE → SUCCESS
  *
+ * DEGRADED covers a disabled capability and a presence write this server made that failed: a failed
+ * heartbeat is never shown as a healthy view.
+ *
  * A session classified `unknown` (its record could not be read) does not make the view
  * STALE: it is not known to be stale, and `presence.ts` never guesses. The text is never
  * blank, whatever the input.
@@ -26,6 +29,8 @@ export interface SessionViewInput {
 	disabledCapabilities: readonly string[];
 	/** A failure message from the read, or null/undefined when the read did not fail. Blank means no failure. */
 	error?: string | null;
+	/** The code of a presence write this server made that failed, until a write landed. Null, undefined or blank means no failure. */
+	writeFailure?: string | null;
 }
 
 export interface SessionViewState {
@@ -49,6 +54,11 @@ export function deriveSessionState(input: SessionViewInput): SessionViewState {
 	const disabled = input.disabledCapabilities.map((name) => name.trim()).filter((name) => name !== "");
 	if (disabled.length > 0) {
 		return { state: "DEGRADED", text: `Degraded: ${disabled.join(", ")} ${disabled.length === 1 ? "is" : "are"} disabled, so this view is partial.` };
+	}
+
+	const writeFailure = present(input.writeFailure);
+	if (writeFailure !== null) {
+		return { state: "DEGRADED", text: `Degraded: this server's last heartbeat write failed (${writeFailure}), so its own checkout may be missing or stale here.` };
 	}
 
 	if (input.sessions.length === 0) return { state: "EMPTY", text: "No sessions have sent a heartbeat yet." };

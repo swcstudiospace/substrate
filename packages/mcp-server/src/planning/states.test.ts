@@ -23,6 +23,18 @@ describe("deriveSessionState precedence", () => {
 		expect(deriveSessionState({ loaded: true, sessions: ["stale"], disabledCapabilities: ["history"] }).state).toBe("DEGRADED");
 	});
 
+	test("a failed heartbeat write is DEGRADED, even beside an empty, stale or healthy view", () => {
+		expect(deriveSessionState({ ...READY, writeFailure: "UNKNOWN" }).state).toBe("DEGRADED");
+		expect(deriveSessionState({ ...READY, sessions: [], writeFailure: "UNKNOWN" }).state).toBe("DEGRADED");
+		expect(deriveSessionState({ ...READY, sessions: ["stale"], writeFailure: "UNKNOWN" }).state).toBe("DEGRADED");
+	});
+
+	test("a failed write names its code, and a blank code is no failure", () => {
+		expect(deriveSessionState({ ...READY, writeFailure: "ECONNREFUSED" }).text).toContain("ECONNREFUSED");
+		expect(deriveSessionState({ ...READY, writeFailure: "   " }).state).toBe("SUCCESS");
+		expect(deriveSessionState({ ...READY, writeFailure: null }).state).toBe("SUCCESS");
+	});
+
 	test("no sessions is EMPTY", () => {
 		expect(deriveSessionState({ ...READY, sessions: [] }).state).toBe("EMPTY");
 	});
