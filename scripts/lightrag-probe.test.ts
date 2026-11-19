@@ -3,7 +3,7 @@
  * waits real time: the fake sleep advances the clock, so the 60-second window costs nothing to run.
  */
 import { describe, expect, test } from "bun:test";
-import type { FetchLike } from "../packages/mcp-server/src/planes/lightrag.ts";
+import type { FetchLike } from "./lightrag-probe.ts";
 import { parseProbeArgs, percentile, PROBE_DEFAULTS, printableHost, runProbe, type ProbeDeps } from "./lightrag-probe.ts";
 
 type Step = { status: number; latencyMs: number } | { throws: string; latencyMs: number };

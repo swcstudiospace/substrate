@@ -139,13 +139,13 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 Eight phases from the round-15 discovery. Owner decisions (2026-10-30): all eight features accepted; unkeyed steering commands keep working unchanged. Dependencies: 72 and 77 need 71; 76 shares the ledger write path with 73; 78 needs 73, 75 and 76. Operator-gated and not run by this milestone: deploy, Railway writes, devnet sends, anchor funding, hook and timer installs, the LightRAG LLM route, production bulk ingest.
 
 - [ ] **Phase 71: Multi-Session boundary** - steering and session context bound to the owning surface
-- [x] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories (ported from gsd/v18-p72-rebased in merge 082e653a; the branch's own verification is human_needed)
+- [x] **Phase 72: Repo allowlist and scoped credentials** - a session addresses only allowlisted repositories (ported from gsd/v18-p72-rebased in merge 082e653a; verification passed 7/7, re-verified 2026-11-19)
 - [x] **Phase 73: Ledger tamper evidence** - rewrites, reorders and tail truncation detected and anchored (merged to main as PR #201, 83779a1d)
-- [ ] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps. Engine landed (96d451a4): branch fan-out with durable steps and compensation. PARTIAL: no route or MCP tool calls it (needs an admission classification and route decision), and migration step 43 rehearsal is operator-gated.
+- [ ] **Phase 74: Cross-repo compensating actions** - failed multi-repo writes undo completed steps. Engine landed (96d451a4): branch fan-out with durable steps and compensation. Route exists (`cross_repo_fanout` mcp.ts:1681, `POST /cross-repo/fanout` server.ts:1843, admission/route-policy/observe wired); verification human_needed only for migration step 43 rehearsal (operator-gated).
 - [x] **Phase 75: DragonflyDB degradation** - the cache breaker degrades reads to the authoritative store (merged to main as PR #200, 3c465dc1)
 - [x] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered (f3e6798b; claim-withdrawal policy and buffer paths in systemd are operator-gated)
 - [x] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged (c26b1ef3 in process; b9ecd215 durable via migrations 44 and 45, the rehearsal is operator-gated)
-- [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired. PARTIAL: the memory.forget pair is compared and repaired through a confirmed plan (46956358); the scheduled run is wired as `cross-layer-reconcile-run.ts` with a unit staged under `infra/vps` (a5d6bc03), not installed (operator gate); the index-to-ledger and cache-to-index pairs are not compared yet.
+- [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired. memory.forget pair compared and repaired via confirmed plan; graph pairs implemented in cross-layer-reconcile-pairs.ts (index->ledger detection-only, cache->index confirmed-plan repair), scheduled only when SUBSTRATE_RECONCILE_GRAPHS names graphs. Unit staged under infra/vps, not installed (operator gate).
 
 ### Unison enhancements for coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB (SPE-34076, SPE-34079)
 
@@ -1260,7 +1260,7 @@ Plans:
 
 **Goal**: Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
 
-**Status**: Locally verified (5/5 criteria). Desk Quality / Programming Lead review waived by the user on 2026-11-12 (answers `what=not_real`, `needs=greptile_only`). Remaining gate: Greptile review of the remediation on PR #199 with no open threads, not yet observed. Greptile threads on PR #199 remediated and re-verified 2026-11-01 (71-05). The expiry pass runs on the issue path, so discovery and the session digest stay read-only. The steer capacity sweep checks and removes only records for this server and surface, so a foreign server never receives this client's bearer. Verified by typecheck, Biome lint, one full repository run after the sweep fix (11,626 pass, 2 skip, 0 fail, 0711 temp root), Python suites (330 pass), phase-close locks and audit gate. No phase-complete or merge-ready claim until Greptile 5/5 is observed. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
+**Status**: Re-verified 2026-11-19 (71-VERIFICATION.md): 3/5 must-haves, human_needed. Executed: live-session-isolation 34 pass, mcp.steering 21 pass, admission 58 pass (113 pass/33 PG skip; no SUBSTRATE_TEST_PG_URL, so restart suites skip). Remaining: PG restart durability (disposable SUBSTRATE_TEST_PG_URL), regression/digest/acceptance group, Greptile (unavailable per owner 2026-11-19 — Green CI only). Desk Quality waiver 2026-11-12 stands. Evidence: [71-VERIFICATION.md](phases/71-multi-session-boundary/71-VERIFICATION.md), [71-05-SUMMARY.md](phases/71-multi-session-boundary/71-05-SUMMARY.md).
 
 **Depends on**: none
 
@@ -1282,7 +1282,7 @@ Plans:
 
 **Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
 
-**Status**: Not started. Discovery: git calls use argv arrays with no shell string; no per-session repository allowlist was found. The unit confirms that before building it.
+**Status**: Passed 7/7 (72-VERIFICATION.md, re-verified 2026-11-19). Allowlist refused at API/CLI before git; credential scoped to repo; grant model preserves HARD-S2 owner grant.
 
 **Depends on**: Phase 71
 
@@ -1312,7 +1312,7 @@ Plans:
 
 **Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: Not started. Discovery found no existing multi-repo transaction path; that absence is not delivery of the accepted feature and does not waive it. Planning must select and implement a concrete multi-repo operation using Phase 72's registry and scoped executor. The unrelated git-hook install loop robustness observation remains separate.
+**Status**: Engine plus route landed; 3/3 criteria verified (74-VERIFICATION.md, re-verified 2026-11-19). Route: cross_repo_fanout/status/compensate MCP tools (mcp.ts:1681) and POST/GET /cross-repo/* (server.ts:1843); admission/route-policy/observe wired. Human_needed only for migration step 43 rehearsal on restored dump (operator-gated).
 
 **Depends on**: Phase 72 (registered repositories, containment and credential-scoped execution)
 
@@ -1345,7 +1345,7 @@ Plans:
 
 **Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
 
-**Status**: Not started. Discovery: `insertEvent` (`packages/mcp-server/src/greptime.ts:1217`) has no retry, and a failure returns `stored: false` (`packages/mcp-server/src/service.ts:2699`) with nothing queued.
+**Status**: Implemented (EventBuffer + backoff + dead-letter with hash; /healthz depth; flag-bounded). Verified 2/2 in repo (76-VERIFICATION.md, re-verified 2026-11-19); human_needed for systemd buffer/dead-letter paths, claim-withdrawal policy, D76-01 scope decision.
 
 **Depends on**: Phase 73 (shared ledger write path)
 
@@ -1360,7 +1360,7 @@ Plans:
 
 **Goal**: A steering command carrying an idempotency key applies once across retries and carries a sequence number, so the reader sees delivery order.
 
-**Status**: Not started. Discovery: no steering command carries a client idempotency key or a sequence number today.
+**Status**: Implemented (idempotency keys with sequences; unkeyed unchanged). Verified 5/6 in process (77-VERIFICATION.md, re-verified 2026-11-19); restart durability + migration 44/45 rehearsal remain operator-gated.
 
 **Depends on**: Phase 71
 
@@ -1376,7 +1376,7 @@ Plans:
 
 **Goal**: The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
 
-**Status**: Not started. Discovery: `substrate_coord_drift_scan` compares git HEAD, the ledger and leases. It does not compare GreptimeDB against TimescaleDB.
+**Status**: Implemented (forget pair + graph pairs in cross-layer-reconcile-pairs.ts; scheduled read-only run with confirmed-plan repair). Verified 2/4 (78-VERIFICATION.md, re-verified 2026-11-19); unit install + SUBSTRATE_RECONCILE_GRAPHS scheduling scope + live-mismatch approval remain operator decisions.
 
 **Depends on**: Phases 73, 75, 76
 

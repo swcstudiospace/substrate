@@ -3,9 +3,9 @@ gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
 current_phase_name: multi-session-boundary
-status: "v1.8 Phase 71 locally verified; Greptile review of PR #199 pending; Desk Quality / Programming Lead review waived by the user 2026-11-12 (what=not_real, needs=greptile_only); phase 72 still human_needed for HARD-S2 credential clause and corpus proof disclosure (owner decisions)"
+status: "v1.8: 72 passed (7/7, re-verified 2026-11-19); 73 passed and 75 passed (re-verified 2026-11-19); 71 human_needed (113 pass/33 PG skip, no SUBSTRATE_TEST_PG_URL); 74 human_needed (route exists, migration step 43 rehearsal only); 76 human_needed (2/2 repo, systemd/claim/scope operator items); 77 human_needed (5/6, restart + rehearsal); 78 human_needed (2/4, unit + pair-scheduling decision). Greptile unavailable per owner 2026-11-19 — Green CI only."
 stopped_at: "2026-11-12: Desk Quality gate waived by user (answers what=not_real, needs=greptile_only). Remaining open: Greptile review on PR #199 and PR #215; phase 72 owner decisions (HARD-S2, corpus proof disclosure); v1.7 owner decisions open."
-last_updated: "2026-11-16T23:59:49.095Z"
+last_updated: "2026-11-19T14:30:00.000Z"
 last_activity: 2026-11-01
 last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); expiry pass moved to issue so discovery and the digest stay read-only; one full run 11623 pass, 0 fail; phase remains human_needed"
 state_head: a2f438f9768cadf9ffc601ba942fd92325dc4da1
@@ -19,6 +19,15 @@ current_phase: 71
 ---
 
 # State
+## Deferred Verification
+
+| Phase | State | Resume |
+|-------|-------|--------|
+| 71 | verification_deferred_human | /gsd:verify-work 71 |
+| 74 | verification_deferred_human | /gsd:verify-work 74 |
+| 76 | verification_deferred_human | /gsd:verify-work 76 |
+| 77 | verification_deferred_human | /gsd:verify-work 77 |
+| 78 | verification_deferred_human | /gsd:verify-work 78 |
 
 ## Autonomous run record (2026-11-01)
 

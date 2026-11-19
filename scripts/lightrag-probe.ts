@@ -13,7 +13,8 @@
  * p95 of at most 500 ms.
  */
 import { lightragFromEnv } from "../packages/mcp-server/src/config.ts";
-import type { FetchLike } from "../packages/mcp-server/src/planes/lightrag.ts";
+// Mirrors planes/lightrag.ts FetchLike so the probe does not depend on the plane client.
+export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 import { LIGHTRAG_HEALTH_PATH } from "../packages/mcp-server/src/railway.ts";
 
 export interface ProbeOptions {

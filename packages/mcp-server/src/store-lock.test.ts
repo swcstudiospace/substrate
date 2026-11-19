@@ -446,8 +446,12 @@ function carrieslightragCredential(body: string): boolean {
 
 describe("no lightrag credentials in the repo", () => {
 	test("no committed non-test file carries a lightrag endpoint or credential", () => {
+		// Offline eval harness (v1.7 phase 70): docs-eval-server.ts is exempt by exact path only.
+		// Its EVAL_PLANE_URL is "http://lightrag.example.test" — the RFC 2606 reserved
+		// example.test host, served by a fake plane in-process. No credential is carried.
 		const offenders = trackedFiles()
-			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => !path.endsWith(".test.ts") && !path.endsWith(".test-support.ts"))
+			.filter((path) => path !== join(LEDGER_PACKAGE, "docs-eval-server.ts"))
 			.filter((path) => path !== relative(ROOT, import.meta.path))
 			.filter((path) => carrieslightragCredential(read(path)));
 

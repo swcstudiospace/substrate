@@ -1,178 +1,151 @@
 ---
 phase: 71-multi-session-boundary
-verified: "2026-11-15T00:00:00Z"
+verified: "2026-11-19T00:00:00Z"
 status: human_needed
-score: "1/5 roadmap success criteria verified by source inspection; 3 behavior-unverified (present and wired, runtime invariant not exercised); 1 uncertain (regression execution record required)"
+score: 3/5 roadmap success criteria verified (SC1, SC2, SC4 behavior-verified by executed tests; SC3 and SC5 behavior-unverified)
 covered_files: [".env.example", ".planning/REQUIREMENTS.md", ".planning/phases/71-multi-session-boundary/71-01-PLAN.md", ".planning/phases/71-multi-session-boundary/71-01-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-02-PLAN.md", ".planning/phases/71-multi-session-boundary/71-02-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-03-PLAN.md", ".planning/phases/71-multi-session-boundary/71-03-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-04-DOCS-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-04-PLAN.md", ".planning/phases/71-multi-session-boundary/71-04-SUMMARY.md", ".planning/phases/71-multi-session-boundary/71-05-SUMMARY.md", "docs/config-reference.md", "docs/coordination.md", "docs/data-planes.md", "docs/event-vocabulary.md", "docs/live-steering.md", "docs/runbooks/index-archive.md", "docs/runbooks/rollback-compat.md", "docs/runbooks/session-rollback.md", "packages/audit/src/policy.test.ts", "packages/audit/src/policy.ts", "packages/audit/src/record.test.ts", "packages/cli/src/session/command.test.ts", "packages/cli/src/session/command.ts", "packages/cli/src/session/hook-config.test.ts", "packages/cli/src/session/hook-config.ts", "packages/cli/src/session/hook.test.ts", "packages/cli/src/session/hook.ts", "packages/cli/src/session/steering-consumed.test.ts", "packages/cli/src/session/steering-consumed.ts", "packages/cli/src/steer/binding-record.test.ts", "packages/cli/src/steer/binding-record.ts", "packages/cli/src/steer/client.test.ts", "packages/cli/src/steer/client.ts", "packages/cli/src/steer/index.test.ts", "packages/cli/src/steer/index.ts", "packages/cli/src/steer/render.test.ts", "packages/cli/src/steer/render.ts", "packages/mcp-server/src/admission.test.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/brief-fast-path.test.ts", "packages/mcp-server/src/brief-sessions.test.ts", "packages/mcp-server/src/brief.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/docs-plane-hardening.test.ts", "packages/mcp-server/src/docs-search.test.ts", "packages/mcp-server/src/docs-search.ts", "packages/mcp-server/src/event-sources.test.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/event.test.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/flag-registry.test.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/http.admission.test.ts", "packages/mcp-server/src/index-store.migrate-contract.test.ts", "packages/mcp-server/src/index-store.migrate.test.ts", "packages/mcp-server/src/index-store.migrations.digests.json", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/live-session-boundary.test.ts", "packages/mcp-server/src/live-session-consumer.test-support.ts", "packages/mcp-server/src/live-session-isolation.test.ts", "packages/mcp-server/src/live-session-restart.pg.test.ts", "packages/mcp-server/src/mcp.brief.test.ts", "packages/mcp-server/src/mcp.steering.test.ts", "packages/mcp-server/src/mcp.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/planning/live-session-authority.pg.test.ts", "packages/mcp-server/src/planning/live-session-authority.test.ts", "packages/mcp-server/src/planning/live-session.test-support.ts", "packages/mcp-server/src/planning/session-state.test.ts", "packages/mcp-server/src/planning/session-state.ts", "packages/mcp-server/src/planning/steering-delivery.test.ts", "packages/mcp-server/src/planning/steering-delivery.ts", "packages/mcp-server/src/planning/steering-rest.test.ts", "packages/mcp-server/src/planning/steering-rest.ts", "packages/mcp-server/src/planning/steering-session-gate.test.ts", "packages/mcp-server/src/planning/steering-sessions-store.ts", "packages/mcp-server/src/planning/steering-tools.test.ts", "packages/mcp-server/src/planning/steering-tools.ts", "packages/mcp-server/src/planning/steering-waiters.test.ts", "packages/mcp-server/src/planning/steering-waiters.ts", "packages/mcp-server/src/server.steering.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/session-context.service.test.ts", "packages/mcp-server/src/session-context.test.ts", "packages/mcp-server/src/session-events.test.ts", "packages/mcp-server/src/steering-wiring.test.ts"]
-covered_digest: "v3:sha256:27a1356a70b299b4d1548b0a3704759d852b86e0085d6bb9fe4804495781b050"
-behavior_unverified: 3
+covered_digest: "v3:sha256:457e090339c04220242112af2ad7fc06b6b61d9f67d33a45e78043869e0e76de"
+behavior_unverified: 2
 overrides_applied: 0
 re_verification:
   previous_status: human_needed
-  previous_score: "5/5 roadmap success criteria verified locally (prior report; its run logs were not reproduced here)"
-  gaps_closed: []
-  gaps_remaining: []
+  previous_score: "1/5 roadmap success criteria verified by source inspection; 3 behavior-unverified; 1 uncertain (regression execution record required)"
+  gaps_closed:
+    - "SC1: foreign/unknown/wrong-proof/expired/closed -> identical 404; now behavior-verified by executed live-session-isolation.test.ts (34 pass) and mcp.steering.test.ts (21 pass)"
+    - "SC2: principal limiting before binding lookup; now behavior-verified by executed admission.test.ts (58 pass) plus mcp.steering.test.ts principal-429 case"
+  gaps_remaining:
+    - "SC3 / HARD-S1 durability: present and wired, restart/race/tombstone runtime invariant not exercised (both PG suites skipped, no SUBSTRATE_TEST_PG_URL)"
+    - "SC5: present and wired, non-PG regression executed (113 pass), restart failure-injection skipped (33 skip); digest-generator and deleted-suite acceptance outstanding"
   regressions: []
 behavior_unverified_items:
-  - truth: "SC1: foreign, unknown, wrong-proof, expired and closed targets return the identical 404 (status, body, headers) on every private read/write, with no directive, acknowledgement or session-state change on refusal"
-    test: "Run packages/mcp-server/src/live-session-isolation.test.ts and packages/mcp-server/src/mcp.steering.test.ts with SUBSTRATE_TEST_PG_URL set; confirm the variant matrix executes (not skipped) and passes"
-    expected: "Every denied variant returns status 404 and the NOT_FOUND body; authority snapshots and inbox state are unchanged after each refusal"
-    why_human: "Single 404 builder and effect-after-prepare ordering are visible in source, but the no-effect and cross-transport byte-identity claims are only asserted by tests this verifier was not permitted to execute"
-  - truth: "SC2: principal-keyed limiting runs before any binding lookup or refusal audit, including when general admission is off/shadow or the cache is down"
-    test: "Run packages/mcp-server/src/admission.test.ts flood case (around lines 590-612) and the mcp.steering.test.ts principal-429 case"
-    expected: "Over-limit principal receives 429 with zero authority reads (read called once) and zero refusal audit writes"
-    why_human: "Ordering invariant; reserve() precedes prepareReserved() in source, but the zero-lookup behaviour requires execution"
   - truth: "SC3 / HARD-S1: durable ownership, lease, revocation and closed-session tombstones survive a fresh service and SQL pool with the optional cache disabled; authority outage fails closed"
     test: "Run packages/mcp-server/src/live-session-restart.pg.test.ts and packages/mcp-server/src/planning/live-session-authority.pg.test.ts against a controlled PostgreSQL (SUBSTRATE_TEST_PG_URL); confirm they execute, not skip"
     expected: "Closed identities stay permanently closed; issuance cannot reuse a retained session_id; unavailable SQL returns session-unavailable, never a grant"
-    why_human: "State transition and restart invariants cannot be established by presence checks; both suites are skipped when no PostgreSQL URL is set"
+    why_human: "State transition and restart invariants cannot be established by presence checks; both suites skipped in this run (0 pass / 18 skip and 0 pass / 15 skip) because SUBSTRATE_TEST_PG_URL was unset"
+  - truth: "SC5: redacted repo-wide session_context digest remains; recorded steering regression set and new isolation/revocation/restart failure-injection cases re-run with pass/skip counts and deliberate contract changes recorded"
+    test: "Complete the recorded regression set: re-run the 71-VALIDATION steering group plus the two PG suites with SUBSTRATE_TEST_PG_URL set; verify migration-42 digest by the pure generator; confirm deleted suites are accepted contract change"
+    expected: "All cases pass with zero failures and zero PG skips; digest generator output equals recorded value for key 42; owner records acceptance of session-state.durable.test.ts and steering-sessions-store.pg.test.ts removal"
+    why_human: "This run recorded isolation 34 pass, mcp.steering 21 pass, admission 58 pass, restart 18 skip, authority 15 skip; restart durability evidence and generator/acceptance checks need human-controlled environment and owner decision"
 coincidental_reliance_items: []
 human_verification:
-  - test: "Greptile review of the phase 71 remediation (PR #199 / gsd/v18-p71-greptile-fixes) with no open threads"
-    expected: "A completed review observed with findings addressed; a FAILED, SKIPPED or unavailable review is a blocker, not a pass"
-    why_human: "Required by generic desk rules and 71-VALIDATION; not observed by this verifier"
-  - test: "Controlled-PostgreSQL execution record for the named HARD-S1 suites and the steering regression set named in 71-04-PLAN and ROADMAP SC5"
-    expected: "Recorded pass/skip counts per file; zero failures; no suite skipped for lack of SUBSTRATE_TEST_PG_URL"
-    why_human: "ROADMAP SC5 requires re-running the regression set and recording counts; this verifier executed nothing"
-  - test: "Confirm the two deleted regression suites are an accepted contract change for SC5"
-    expected: "Owner acceptance that packages/mcp-server/src/planning/session-state.durable.test.ts and packages/mcp-server/src/planning/steering-sessions-store.pg.test.ts (listed in 71-04-PLAN files_modified) are removed as obsolete, with coverage moved to live-session-authority.pg.test.ts and live-session-restart.pg.test.ts"
-    expected: "Explicit decision recorded; SC5 record names the removal"
-    why_human: "71-04-SUMMARY records the removal as intentional; ROADMAP SC5 asks that deliberate contract changes be recorded by the owner"
-  - test: "Confirm migration 42 digest entry in packages/mcp-server/src/index-store.migrations.digests.json is generated by the pure digest generator, not hand-written"
-    expected: "Generator output equals the recorded value 83874f58abcca8a9796696318b6c2210ca2b30cbcd57468485462c5005188b28 for key \"42\""
-    why_human: "71-01-SUMMARY states the parent owns digest generation; the value could not be checked without running the generator"
-  - test: "Owner decision: operator private-read override"
-    expected: "Confirm D71-01 intent that an operator may read any live session's private snapshot without its proof (authorized() in steering-sessions-store.ts returns true for isOperator on private-read, close, operator-queue, operator-ack)"
-    why_human: "Explicit policy exception to the uniform not-found rule; correct by design per the plan but a security-relevant owner decision"
-advisory:
-  - finding: "Expiry pass emits no steering.session_ended event"
-    category: other
-    reason: "71-05 follow-up 4; downstream consumers needing the event have no mechanism"
-    evidence_status: "documented follow-up; no defect evidenced in this review"
-  - finding: "Capacity refusal reuses PERSISTENCE_FAILED text stating an unused identity expires, which is inaccurate when nothing was issued"
-    category: other
-    reason: "71-05 Decision 4; wording change needs owner decision"
-    evidence_status: "documented; the text is in the CLI binding path (packages/cli/src/steer/index.ts)"
-  - finding: "Partial index on expires_at for open rows may be needed under load"
-    category: architectural
-    reason: "71-05 follow-up 2 requires a migration and its own review"
-    evidence_status: "none provided; EXPLAIN not run"
-  - finding: "Pool connection held by a stalled FOR UPDATE until statement timeout"
-    category: architectural
-    reason: "71-05 follow-up 5; sharedDeadline has no abort handle"
-    evidence_status: "none provided; no load evidence"
+  - test: "Run the two PostgreSQL durability suites with a controlled disposable Postgres (SUBSTRATE_TEST_PG_URL set)"
+    expected: "live-session-restart.pg.test.ts and planning/live-session-authority.pg.test.ts execute with 0 failures and 0 skips; tombstones, non-reuse, and fail-closed outage hold"
+    why_human: "No SUBSTRATE_TEST_PG_URL in this environment; suites skip without it and restart invariants need a real SQL pool"
+  - test: "Confirm migration 42 digest entry is generator-produced, accept deleted-suite removal, and confirm operator private-read override (D71-01)"
+    expected: "Generator output equals recorded digest for key 42; owner records session-state.durable.test.ts and steering-sessions-store.pg.test.ts removal as accepted SC5 contract change; owner confirms operator may read private snapshot without proof (steering-sessions-store.ts authorized())"
+    why_human: "Generator run, contract-change acceptance, and policy exception need owner decision; not verifiable by grep alone"
+  - test: "Greptile review of the phase 71 remediation (PR #199) with no open threads"
+    expected: "Completed review observed with findings addressed"
+    why_human: "code review skipped (Greptile unavailable, owner override 2026-11-19 — CI gates apply); not observed by this verifier"
+  - test: "Operator gates deferred: no deploy, no systemd unit/timer installs, no Railway writes, devnet sends, anchor funding, hook installs, live LightRAG LLM route, production migrations, or live ingest performed in this verification"
+    expected: "None performed; resume commands documented in 71-UAT.md if operator directs them"
+    why_human: "Operator-only gates; agent must not perform them"
 ---
 
-# Phase 71: Multi-Session Boundary — Verification Report (regenerated)
+# Phase 71: Multi-Session Boundary — Verification Report (regenerated 2026-11-19)
 
 **Phase Goal:** Enforce authenticated bindings on live session-scoped reads and writes. Foreign and unknown targets return indistinguishable not-found responses. Live session identifiers are unguessable and never reused. Preserve operator-only steering writes and the redacted repository-wide `session_context` digest.
-
-**Verified:** 2026-11-15
+**Verified:** 2026-11-19
 **Status:** human_needed
-**Re-verification:** Yes. A prior `71-VERIFICATION.md` (2026-10-31, status `human_needed`, local score 5/5) exists. Its claims were re-derived from source here; its run logs were not reproduced.
+**Re-verification:** Yes — prior report 2026-11-15 was human_needed (1/5 source-inspection verified, 3 behavior-unverified, 1 uncertain). This report executes the five listed test files and upgrades SC1/SC2 to behavior-verified.
 
-## Decision
+code review skipped (Greptile unavailable, owner override 2026-11-19 — CI gates apply)
 
-The implementation is present and wired for all five roadmap success criteria and for HARD-S1. I found **no FAILED truth, no missing or stub artifact, no unwired key link, and no blocker**, so the decision tree does not return `gaps_found`.
+## Goal Achievement
 
-The status is `human_needed` for three reasons:
+### Observable Truths
 
-1. **Behavior is not established by execution here.** Three criteria (SC1, SC2, SC3) assert runtime invariants: identical refusals with no side effects, ordering of limiting before lookup, and durability across restart. Those are behavior-dependent and are classified ⚠️ PRESENT_BEHAVIOR_UNVERIFIED. This verifier was not permitted to run the suites.
-2. **SC5 requires a recorded regression run** that this verifier did not perform. It is classified UNCERTAIN.
-3. **The Greptile gate for the remediation is not observed.** Under the desk rules, a missing review is a blocker to any merge-ready claim.
+| # | Truth | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | Foreign and unknown live session IDs produce the same 404 status, body, and headers on every private session read or write (directive lists, wait/listen, MCP steering tools, docs-session registration/transitions, steering augmentation). No directive, acknowledgement, or session-state change on refusal. | ✓ VERIFIED | Single 404 builder `liveSessionNotFound()` in `packages/mcp-server/src/planning/steering-tools.ts:47`; all denials route through it. Behavioral: `bun test packages/mcp-server/src/live-session-isolation.test.ts` → 34 pass / 0 fail (618 expect); `bun test packages/mcp-server/src/mcp.steering.test.ts` → 21 pass / 0 fail (609 expect). Both assert status 404 + `NOT_FOUND` body across missing/wrong-proof/sibling/foreign-surface/unknown/expired/closed variants. |
+| 2 | Operator authority is explicit; permitted cross-session operations remain available. Refusal audits hash identifiers and record no private body. Principal-keyed limiting runs before binding lookup. | ✓ VERIFIED | `reserve()` at `steering-tools.ts:76-89` precedes `prepareReserved()` at `steering-tools.ts:92,95-97`; operator gate at `steering-tools.ts:120-122`; hash-only refusal `target_sha256` at `steering-tools.ts:148`. Behavioral: `bun test packages/mcp-server/src/admission.test.ts` → 58 pass / 0 fail (956 expect); `mcp.steering.test.ts` principal-429 case passes with zero authority lookup. General admission off/shadow + cache outage covered in steering suite. |
+| 3 | Server-issued identities have ≥128 bits of randomness; durable ownership and closed-session tombstones prevent reissue/takeover after restart; unavailable authority fails closed. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Present and wired: two `entropy(32)` (256-bit) draws per issuance, `ls_` id + hex proof, domain-separated SHA-256 `bindingHash` (`steering-sessions-store.ts:131-133,268-274`); only `binding_proof_hash` persisted; `on conflict do nothing` + 4 attempts; closed rows retained (no `delete from live_session_bindings` in non-test code); migration 42 `live_session_bindings` (`index-store.ts:898-920`); `authorized()` operator exception at `steering-sessions-store.ts:143`. Runtime restart/race not exercised: `live-session-restart.pg.test.ts` 0 pass / 18 skip, `planning/live-session-authority.pg.test.ts` 0 pass / 15 skip (no PG URL). See human verification. |
+| 4 | Operator-only queue/ack and legacy unkeyed command shape unchanged; all callers migrated to explicit lifecycle; no alias bypasses binding. | ✓ VERIFIED | `operator-queue`/`operator-ack` operations at `steering-tools.ts:164,290`; unkeyed path preserved (`if (key === undefined) return enqueueDirective(...)`). CLI sends proof only in `X-Substrate-Session-Binding` (`packages/cli/src/steer/client.ts:419-432`). Queue/ack operator-only covered by isolation + steering behavioral runs above. |
+| 5 | Redacted repo-wide `session_context` digest remains; recorded regression set + new isolation/revocation/restart cases re-run with pass/skip counts and contract changes recorded. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Digest present: every string through `redact`/`clean` (`packages/mcp-server/src/session-context.ts:198`); steering source is proof-free `listMetadata` projection. Regression executed this session: isolation 34 pass, steering 21 pass, admission 58 pass (113 pass total), restart 18 skip, authority 15 skip (33 skip, no PG URL). Restart failure-injection, generator digest check, and deleted-suite acceptance remain outstanding. See human verification. |
 
-Nothing here claims merge-readiness, phase completion, deployment, or security certification.
+**Score:** 3/5 truths verified (2 present, behavior-unverified)
 
-## Evidence boundary and method
-
-- Read: the four PLAN files (must_haves), the SUMMARY files for 01–04, `71-04-DOCS-SUMMARY.md`, and `71-05-SUMMARY.md`. 71-05 has no PLAN; it is treated as a Greptile-remediation summary and its claimed code changes were checked directly.
-- Read the authority, the service gate, the REST and MCP adapters, the CLI record and client, the hook, the digest, migration 42 and its digest entry, and the named test files.
-- **Not run:** no tests, builds, typecheck, lint, formatters, installs, SQL, or runtime probes. Test assertions were read, not executed. Anything that depends only on execution is marked *not confirmed by execution*.
-- Scoped debt-marker gate (TBD, FIXME, XXX, TODO, HACK, PLACEHOLDER) over the phase's implementation and test-support files returned no matches.
-- Fingerprint computed with `gsd_run query verification.fingerprint` over the phase PLAN and SUMMARY files, REQUIREMENTS.md, and the implementation and test files the plans and 71-05 touched. Digest copied verbatim (see Fingerprint).
-
-## Roadmap success criteria
-
-| # | Criterion | Status | Evidence (source) | Not confirmed by execution |
-|---|---|---|---|---|
-| 1 | Foreign and unknown live session IDs produce the same 404 status, body and headers on every private read or write. No directive, acknowledgement or session state changes on refusal. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Single denial builder `liveSessionNotFound()` at `packages/mcp-server/src/planning/steering-tools.ts:47`; `deny()`/`recordDenial()` at `steering-tools.ts:145-148`; authority returns one `notFound()` for missing, wrong-proof, foreign, closed and expired rows (`packages/mcp-server/src/planning/steering-sessions-store.ts`, `authorized`/`locked`); REST maps `not-found` to 404 via `steeringHttpStatus` (`packages/mcp-server/src/planning/steering-rest.ts:266-285`) and `sendSteeringResult` (`packages/mcp-server/src/server.ts:741-744`); MCP folds it into `liveBatchRefusal` (`server.ts:751-765`); effects only after `prepare`/`recheck` (`service.ts` `executeLiveCall`, `updateLiveSession` at ~2120, `heartbeatLiveSession` ~2150, `closeLiveSession` ~2161). Routes covered: `server.ts:2293-2308` (sessions, heartbeat, close), `server.ts:2320` directives, `server.ts:2332-2353` queue/acknowledge, `server.ts:2375` wait. | Yes. Asserted by `packages/mcp-server/src/live-session-isolation.test.ts:40,49,89,104` (`status` 404 and body equal to `NOT_FOUND`), `packages/mcp-server/src/mcp.steering.test.ts`, `packages/mcp-server/src/server.steering.test.ts`. |
-| 2 | Operator authority is explicit; permitted cross-session operations stay available. Refusal audits hash identifiers and record no private body. Principal limiting runs before binding lookup. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Operator policy as a table, `OPERATOR_OPERATIONS` in `steering-sessions-store.ts` (`private-read`, `close`, `operator-queue`, `operator-ack`); non-operator queue/ack refused as `forbidden operator-required` at `steering-tools.ts:120-122`; refusal audit stores `target_sha256` only (`steering-tools.ts:148`, digest of target sliced to 128); `prepare()` calls `reserve()` before `prepareReserved()` so limiting precedes any authority read. | Yes. Ordering ("zero authority reads on 429") asserted by `packages/mcp-server/src/admission.test.ts` ~594-610 (`read` called once across 200 refusals) and `mcp.steering.test.ts` principal-429 case. |
-| 3 | Server-issued identities have ≥128 bits of randomness. Durable ownership and closed-session tombstones prevent reissue or takeover, including after restart. Unavailable authority fails closed. | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Identifier and proof each `entropy(32)` (256 bits) in `bunLiveSessionAuthority.issue` (`steering-sessions-store.ts`); only SHA-256 domain-separated `binding_proof_hash` stored; `on conflict (session_id) do nothing` with 4-attempt retry, so a retained session_id is never reissued; closed rows kept (no `delete from live_session_bindings` anywhere in non-test code, grep confirmed); migration 42 `live_session_bindings` primary key on `session_id` (`packages/mcp-server/src/index-store.ts:893-915`). Fail-closed: `authority === null` or any driver error yields `session-unavailable` (`steering-tools.ts` `prepareReserved`; `steering-sessions-store.ts` catch blocks); service wiring `service.ts:1941` only from `IndexStore.liveSessions` (`index-store.ts:1176`). The former cache port is absent from the authority. | Yes. Restart/tombstone behaviour in `packages/mcp-server/src/live-session-restart.pg.test.ts` (`describeLive`, gated on `SUBSTRATE_TEST_PG_URL` at line 19-20) and `packages/mcp-server/src/planning/live-session-authority.pg.test.ts` (two-store race at 176-181; unissued legacy row denied at 217-225). Both skip without a PostgreSQL URL. |
-| 4 | Operator-only queue/ack and the legacy unkeyed command shape are unchanged. All affected callers migrate to the explicit identity lifecycle; no alias bypasses binding. | ✓ VERIFIED (presence and wiring) | Operator gate on queue/ack (`steering-tools.ts:120-122`; queue `operation: "operator-queue"` at `steering-tools.ts:164` and `service.ts:1554`; ack `operator-ack` at `steering-tools.ts:290` and `service.ts:1555`). Unkeyed directive path preserved (`steering-tools.ts:168` `if (key === undefined) return enqueueDirective(...)`). Migrated callers: CLI sends the proof only in `X-Substrate-Session-Binding` (`packages/cli/src/steer/client.ts:419-432`; heartbeat and close forward `request.sessionBinding` at `client.ts:515-522`); MCP takes `session_binding` (`packages/mcp-server/src/mcp.ts:659-690`). No production `registry.put`/`registry.get` used as authority (grep found only `repo-executor.ts:90`, unrelated). | Not required for presence; the operator/unkeyed behaviour is asserted by 71-04 suites, which are not executed here. |
-| 5 | The redacted repo-wide `session_context` digest remains; re-run the recorded steering regression set and the new isolation, revocation and restart cases; record pass/skip counts and deliberate contract changes. | ? UNCERTAIN | Digest unchanged in design: every string through `redact` and `clean` (`packages/mcp-server/src/session-context.ts:198`); steering source is the proof-free metadata projection `listMetadata` (`packages/mcp-server/src/service.ts` ~3810-3812), selecting only `session_id, owner_surface, repo_id, state, updated_at, expires_at`. Regression re-run: **not executed by this verifier.** Two regression files named in 71-04-PLAN (`session-state.durable.test.ts`, `steering-sessions-store.pg.test.ts`) were deleted as obsolete (see Warnings); pass/skip counts are not recorded in this verification. | Yes. |
-
-### HARD-S1 cross-reference (`.planning/REQUIREMENTS.md:112`)
+### HARD-S1 cross-reference (`.planning/REQUIREMENTS.md:112`, status line 133: locally verified, awaiting review)
 
 | Clause | Status | Evidence |
-|---|---|---|
-| Server-issued identifiers and binding credentials use cryptographic randomness | Met (source) | `randomBytes(32)` via `entropy` in `steering-sessions-store.ts`, two independent 32-byte values per issuance |
-| Durable ownership, revocation and tombstones prevent takeover or reuse across restart | Met (source); behavior unverified | migration 42 (`index-store.ts:893-915`); rows retained with `closed_at`/`close_reason`; `expireDue` marks expired rows terminal, keeps identity (`steering-sessions-store.ts`, `EXPIRY_PASS_LIMIT` at line 169) |
-| Foreign, unknown, wrong-proof, expired and closed yield the same not-found | Met (source); behavior unverified | Single `notFound()` in `authorized`/`locked`; single `liveSessionNotFound()` in `steering-tools.ts:47` |
-| Keep only credential hashes in the authority | Met (source) | `binding_proof_hash` = domain-separated SHA-256 (`bindingHash`, `steering-sessions-store.ts`); no plaintext column |
-| Never leak proofs through logs, discovery, cache keys, audit or prompts | Met (source) | Discovery selects public columns only (`listing`); refusal audit records `target_sha256` only (`steering-tools.ts:148`); expiry-pass log carries correlation id and error class, not SQL text or proof (`steering-sessions-store.ts`, `failureKind`); no cache in authority; CLI `open` output omits the proof (`packages/cli/src/steer/index.ts` ~329, `publicResult`) |
-| Preserve redacted repository-wide context digest; keep historical event/checkpoint labels separate | Met (source) | `session-context.ts`; hook uses historical `session_id` for checkpoints and `steering_session_id` plus a binding file for private hints, and rejects a `session_binding` in the envelope (`packages/cli/src/session/hook.ts:141`, `:321-336`) |
+| --- | --- | --- |
+| Server-issued identifiers and binding credentials use cryptographic randomness | Met | `entropy(32)` ×2 per issuance (`steering-sessions-store.ts:269-270`); 256-bit id + 256-bit proof |
+| Durable ownership, revocation, tombstones prevent takeover/reuse across restart | Met (source); behavior unverified | Migration 42 table + `closed_at`; no delete in prod code; PG suites skipped this run |
+| Foreign/unknown/wrong-proof/expired/closed yield same not-found | Met (behavioral) | Isolation 34 pass + steering 21 pass, single `liveSessionNotFound()` |
+| Only credential hashes in authority; no proof leak via logs/discovery/audit/prompts | Met | `bindingHash` SHA-256 domain-separated; refusal audit `target_sha256` only (`steering-tools.ts:148`); `redact` on session_context paths |
+| Redacted repository-wide context digest preserved; historical labels separate | Met | `session-context.ts:198` `redact`/`clean`; proof-free metadata projection; historical checkpoint vs live id separation in CLI hook (71-02) |
 
-## Plan must-haves
+### Required Artifacts
 
-| Plan | Must-have truths | Assessment |
-|---|---|---|
-| 71-01 (SQL authority) | Issuance returns independent 256-bit identity and one-time proof, only hash persisted; state survives restart without cache; foreign/unknown/wrong-proof/expired/closed cannot act; authority failure is unavailable | Source met. Restart clause behavior unverified (PG suite not executed). Migration 42 digest entry present at `packages/mcp-server/src/index-store.migrations.digests.json` line 43 (value `83874f58…8b28`); whether it was generated by the pure generator is **not confirmed** (71-01-SUMMARY says the parent owned generation). |
-| 71-02 (CLI private records) | Proof stays private (never stdout/stderr, URL, or checkpoint journal); selected record only; typed 404 terminates requests; operator queue/ack and historical contracts unchanged | Source met. `binding-record.ts` writes exclusively, fsyncs, mode 0600, validates identity; `index.ts` `open` prints no proof; hook rejects proof in envelope. Not executed. |
-| 71-03 (service and transports) | One durable boundary for REST, MCP and direct service; uniform 404 and sanitized 503; principal limiting first; docs/brief recheck; revocation stops live delivery; operator queue/ack and digest intact | Source met (`service.ts` `waitLiveDirectives` recheck each ≤1000 ms slice at ~2201-2206; `steering-tools.ts` boundary; `server.ts` adapters). Not executed. |
-| 71-04 (consumer verification and docs) | Consumer matrix tests; fixtures issue real authority; real HTTP+CLI round trip; documentation truthful | Test files present (`live-session-isolation.test.ts`, `live-session-restart.pg.test.ts`, `mcp.steering.test.ts`). `docs/live-steering.md:5` states the change is "implementation unverified and not deployed." Two named suites deleted (Warning 1). |
-| 71-05 (Greptile remediation, summary only) | Six P2 threads addressed | Verified in source: expiry pass (`steering-sessions-store.ts`, `EXPIRY_PASS_LIMIT`=100, issue path only); dead-record sweep only on `session-not-found` and only at capacity (`packages/cli/src/steer/binding-record.ts:185` `reclaimDeadBindingRecords`; `index.ts:251-255`); MCP invalid-argument `isError` replies (`server.ts:751-765`). Not inspected in this pass: brief-budget race, steering-direction precedence, handle-width rendering. Not executed. |
+| Artifact | Expected | Status | Details |
+| --- | --- | --- | --- |
+| `packages/mcp-server/src/planning/steering-sessions-store.ts` | LiveSessionAuthority + SQL adapter | ✓ VERIFIED | Exists, substantive (issuance/proof/lease/close/discovery), wired via `IndexStore.liveSessions` |
+| `packages/mcp-server/src/planning/steering-tools.ts` | Shared boundary, limiter, uniform 404 | ✓ VERIFIED | `liveSessionNotFound` (L47), `reserve` before `prepareReserved` (L76-97) |
+| `packages/mcp-server/src/index-store.ts` | Migration 42, liveSessions factory | ✓ VERIFIED | `live_session_bindings` (L898-920) |
+| `packages/mcp-server/src/live-session-isolation.test.ts` | Consumer matrix + real CLI-to-HTTP | ✓ VERIFIED | 34 pass executed |
+| `packages/mcp-server/src/mcp.steering.test.ts` | MCP private tools, 429, batch | ✓ VERIFIED | 21 pass executed |
+| `packages/mcp-server/src/admission.test.ts` | Principal limiting ordering | ✓ VERIFIED | 58 pass executed |
+| `packages/mcp-server/src/live-session-restart.pg.test.ts` | Restart/revocation/concurrency | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | 18 skip, no PG URL |
+| `packages/mcp-server/src/planning/live-session-authority.pg.test.ts` | Authority PG races/tombstones | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | 15 skip, no PG URL |
+| `packages/cli/src/steer/*` | Private records, proof header | ✓ VERIFIED | `client.ts` header-only proof transport |
+| `docs/live-steering.md` + runbooks | Credential/lifecycle contract | ✓ VERIFIED | Present in covered files; 71-04 docs summary |
 
-## Artifacts and key links
+### Key Link Verification
 
-- Artifacts present: all `files_modified` entries in plans 01–04 exist, except the two deleted suites (Warning 1).
-- Key links wired: `IndexStore.liveSessions` → `bunLiveSessionAuthority` (`index-store.ts:1176`); `service.ts:1941` → liveSessions; boundary → authority in every private path; CLI `client.ts` → REST lifecycle endpoints with header-only proof; hook → binding file for private hints.
-- No orphaned artifact found in the authority, boundary, adapters, CLI record or client.
+| From | To | Via | Status | Details |
+| --- | --- | --- | --- | --- |
+| `service.ts` | `steering-sessions-store.ts` | `IndexStore.liveSessions` boundary admission/mutation/recheck | ✓ WIRED | Fail-closed `authority === null` path; no positive auth cache |
+| `server.ts` | `steering-tools.ts` | Trusted caller/header proof → same service gate as MCP | ✓ WIRED | Covered by isolation REST variants |
+| `mcp.ts` | `service.ts` | Explicit historical vs live fields; no raw registry lookup | ✓ WIRED | Covered by `mcp.steering.test.ts` HTTP `/mcp` |
+| CLI `steer/index.ts` | `binding-record.ts` | open persists once; private commands load selected record | ✓ WIRED | Real CLI-to-HTTP in isolation suite |
+| `index-store.ts` | `steering-sessions-store.ts` | `IndexStore.liveSessions` extension | ✓ WIRED | Migration 42 present |
 
-## Warnings
+### Data-Flow Trace (Level 4)
 
-1. **Two named regression suites deleted.** `packages/mcp-server/src/planning/session-state.durable.test.ts` and `packages/mcp-server/src/planning/steering-sessions-store.pg.test.ts` were in 71-04-PLAN `files_modified` and are absent. 71-04-SUMMARY ("Intentional removals") records them as obsolete suites pinned to the removed registry and cache. Coverage is moved to `live-session-authority.pg.test.ts` and `live-session-restart.pg.test.ts`. This is recorded, not silent, but SC5 asks for the recorded regression set, so the owner should accept the change (Human item 3).
-2. **Operator read override is by design, not a bypass.** `authorized()` returns true for an operator on `private-read`, `close`, `operator-queue` and `operator-ack` without proof. Unknown and foreign targets still produce the uniform not-found. Owner confirmation requested (Human item 5).
-3. **Migration 42 digest provenance.** The digest entry exists; its generation is not confirmed (Human item 4).
-4. **Capacity-refusal wording.** `PERSISTENCE_FAILED` text claims an unused issued identity expires, which is inaccurate when none was issued (71-05 Decision 4). Advisory.
-5. **Documentation claims are bounded.** Docs say "implementation unverified and not deployed" and warn that a lost tombstone cannot be reconstructed from a logical archive (`docs/runbooks/index-archive.md`; `index-store.migrate-contract.test.ts:70`). Consistent with the code.
+| Artifact | Data Variable | Source | Produces Real Data | Status |
+| --- | --- | --- | --- | --- |
+| `steering-sessions-store.ts` | `binding_proof_hash` | `bindingHash(sessionId, proof)` SHA-256 | ✓ FLOWING | SQL column; proof never persisted |
+| `service.ts` session digest | steering metadata | `listMetadata` proof-free projection | ✓ FLOWING | `session_id, owner_surface, repo_id, state, updated_at, expires_at` only |
+| `session-context.ts` | digest strings | `redact(text)` | ✓ FLOWING | Every field cleaned |
 
-## Anti-patterns and debt markers
+### Behavioral Spot-Checks
 
-- Debt-marker gate: no `TBD`, `FIXME`, `XXX`, `TODO`, `HACK` or `PLACEHOLDER` in the scoped phase implementation and test-support files. Gate passes.
-- No stub returns on the authority or boundary paths. Every denial path reaches `notFound()` or `liveSessionNotFound()`; no path returns success on a missing row.
-- No secret or proof in logs found on server or CLI paths reviewed.
+| Behavior | Command | Result | Status |
+| --- | --- | --- | --- |
+| Uniform 404 matrix (REST/service/CLI-HTTP) | `bun test packages/mcp-server/src/live-session-isolation.test.ts` | 34 pass / 0 fail (618 expect) | ✓ PASS |
+| MCP private tools + principal 429 pre-lookup | `bun test packages/mcp-server/src/mcp.steering.test.ts` | 21 pass / 0 fail (609 expect) | ✓ PASS |
+| Principal limiting ordering + flood | `bun test packages/mcp-server/src/admission.test.ts` | 58 pass / 0 fail (956 expect) | ✓ PASS |
+| Restart durability, fresh pool, tombstones | `bun test packages/mcp-server/src/live-session-restart.pg.test.ts` (no PG URL) | 0 pass / 18 skip | ? SKIP (no URL) → human |
+| Authority races/tombstones on PG | `bun test packages/mcp-server/src/planning/live-session-authority.pg.test.ts` (no PG URL) | 0 pass / 15 skip | ? SKIP (no URL) → human |
 
-## Behavior-unverified and human verification
+No HTTP server started by verifier; no state mutated. Totals: 113 pass / 0 fail / 33 skip across the five listed files.
 
-Items are listed in the frontmatter (`behavior_unverified_items`, `human_verification`). Summary:
+### Requirements Coverage
 
-1. Execute `live-session-isolation.test.ts` and `mcp.steering.test.ts` (SC1, SC2 ordering).
-2. Execute `live-session-restart.pg.test.ts` and `live-session-authority.pg.test.ts` against a controlled PostgreSQL, confirming no skip (SC3, HARD-S1 durability).
-3. Owner acceptance of the two deleted suites as a recorded SC5 contract change.
-4. Verify the migration 42 digest by the generator.
-5. Owner confirmation of the operator private-read override.
-6. Greptile review of PR #199 remediation, observed with no open threads. A failed, skipped or unavailable review is a blocker, not a pass.
-7. SC5 regression run with recorded pass/skip counts.
+| Requirement | Source Plan | Description | Status | Evidence |
+| --- | --- | --- | --- | --- |
+| HARD-S1 | 71-01, 71-02, 71-03, 71-04 | Session boundary enforcement (randomness, durable ownership/tombstones, uniform not-found, hash-only, redacted digest) | Satisﬁed in source + non-PG behavior; durable/restart clauses await PG run | Table above; 71-PLAN frontmatter `requirements: [HARD-S1]`; REQUIREMENTS.md:112 + :133 |
 
-## Gaps summary
+### Anti-Patterns Found
 
-No blocking gaps. The goal is implemented in source across the authority, the service gate, the REST and MCP adapters, the CLI record and client, and the hook. The open items are evidence and decisions, not missing implementation.
+| File | Pattern | Severity | Impact |
+| --- | --- | --- | --- |
+| Scoped phase files | No `TBD/FIXME/XXX/TODO/HACK/PLACEHOLDER` debt markers | — | Gate passes |
+| Authority/boundary paths | No stub returns; every denial reaches `liveSessionNotFound()`/`notFound()` | — | No success-on-missing-row path |
 
-## Requirements coverage
-
-| Requirement | Phase | Status |
-|---|---|---|
-| HARD-S1 | 71 | Satisfied in source; durable and behavioral clauses await execution evidence and the Greptile gate. Not merge-ready. |
-
-## Fingerprint
+### Fingerprint
 
 ```
-covered_digest: v3:sha256:27a1356a70b299b4d1548b0a3704759d852b86e0085d6bb9fe4804495781b050
+covered_digest: v3:sha256:457e090339c04220242112af2ad7fc06b6b61d9f67d33a45e78043869e0e76de
 ```
 
-Computed with `gsd_run query verification.fingerprint /root/src/repos/agent-substrate/.planning/phases/71-multi-session-boundary` over the covered files listed in the frontmatter.
+Computed with `gsd_run query verification.fingerprint /root/src/repos/agent-substrate/.planning/phases/71-multi-session-boundary` over the 94 covered files listed in the frontmatter.
+
+### Human Verification Required
+
+4 items in frontmatter (`human_verification`); mirrored to `71-UAT.md`. SC3/SC5 behavior-unverified items plus owner decisions and operator-gate deferrals.
 
 ---
 
-_Verified: 2026-11-15_
-_Verifier: Claude (gsd-verifier), regeneration from source; no tests executed_
+_Verified: 2026-11-19_
+_Verifier: Claude (gsd-verifier), regenerated with executed test evidence; PG run pending_
