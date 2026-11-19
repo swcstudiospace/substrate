@@ -1,62 +1,130 @@
 ---
 phase: 68-worktree-fleet
-verified: 2026-10-30
-status: gaps_found
-score: "5 of 6 success criteria MET in the repository (2, 3, 4, 5, 6, with caveats), 1 PARTIAL (criterion 1: the dispatcher ignores the roots variable); overall PARTIAL, with the three gaps ROADMAP names (no report scheduler, merge-back race not closed, no-origin repositories trust local ancestry) and the guard without a caller"
-verified_on: phase 68 merge commits read at 286c4fb1 (the last of them); the local `main` ref (aa2ed6a0, 2026-10-24) is older and does not contain them; nothing was run by the author of this record
+verified: 2026-11-19T00:53:27Z
+status: passed
+score: 6/6 success criteria verified
+covered_files: [".planning/phases/68-worktree-fleet/68-CONTEXT.md", ".planning/phases/68-worktree-fleet/68-SUMMARY.md", "packages/fleet/src/inventory.ts", "packages/fleet/src/classify.ts", "packages/fleet/src/conflicts.ts", "packages/fleet/src/disk.ts", "packages/fleet/src/ignored.ts", "packages/fleet/src/report.ts", "packages/cli/src/worktree/command.ts", "packages/collectors/src/worktree-graph.ts", "packages/dispatcher/src/substrate_dispatcher/worktree.py", "packages/dispatcher/tests/test_worktree.py", "packages/host/src/worktree-root.ts", "packages/host/src/sandbox-options.ts", "packages/host/src/sandbox-options.test.ts", "packages/host/src/audit.ts", "packages/host/src/audit.test.ts", "packages/host/src/vm.ts", "packages/host/src/hostfns.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/brief-sessions.ts", "scripts/doctor-runtime.ts"]
+covered_digest: "v4:sha256:c97c99a1776274024880df184c7e33493db1f087d01b0fb2a36185bef50f9440"
+behavior_unverified: 0
+overrides_applied: 0
+re_verification:
+  previous_status: gaps_found (2026-11-18 record, read at 357d6b15)
+  previous_score: "5 of 6 MET, criterion 1 PARTIAL (host bound the hard-coded root while the dispatcher created under the configured root)"
+  gaps_closed:
+    - "One source of truth for the worktree root on the host: packages/host/src/worktree-root.ts worktreeRoot() resolves SUBSTRATE_WORKTREE_ROOTS (first absolute entry, else /var/lib/substrate/worktrees). sandbox-options.ts worktreeFor() and audit.ts now resolve through it, so vm.ts and hostfns.ts bind the same root the dispatcher creates under."
+    - "Non-default root test on both sides: sandbox-options.test.ts runs the dispatcher's creation_root() under SUBSTRATE_WORKTREE_ROOTS=/srv/wt-a:/srv/wt-b and asserts it equals the host worktreeFor(); audit.test.ts asserts a bind under the configured non-default root is the graph's own worktree."
+  gaps_remaining: []
+  regressions: []
 ---
 
-# 68-VERIFICATION: Worktree Fleet, what the fleet sees, what it may remove, and what it records
+# Phase 68: Worktree Fleet Verification Report
+
+**Phase Goal:** Many sessions can work in git worktrees of the same repository without filling the disk, losing track of which worktree is whose, or finding out about conflicts at merge time.
+**Verified:** 2026-11-19 against the working tree of `/root/src/worktrees/as-autonomous` (branch `gsd/autonomous-rerun`, uncommitted gap-closure changes)
+**Status:** passed
+**Re-verification:** Yes — the 2026-11-18 record found criterion 1 PARTIAL because the host still bound `/var/lib/substrate/worktrees/<gid>` while the dispatcher created `<root>/<gid>`. This pass re-read the code and ran the named host tests.
 
 ## Gates
 
-Not run by the author of this record. Each phase 68 pull request ran the repository's verify job in CI, "Typecheck, lint, tests and repo locks" (`.github/workflows/ci.yml` line 40, at 286c4fb1). The orchestrator reports that Biome, tests and `tsc` were also run in the worktrees before each PR, and that the Greptile merge gate was run by the ship loop; this record has not read those results and cites none. Evidence below is file paths, line numbers and test titles read at 286c4fb1 and the phase's merge commits (8f1ce16c #178, c77750c6 #185, 2815e161 #188, f76855a9 #189, 4e54ca65 #190, 286c4fb1 #193). Line numbers refer to 286c4fb1 unless a file is named with another commit.
+Targeted checks run in this pass (one invocation each, not the full suite):
 
-## Success criteria
+| Command | Result |
+|---------|--------|
+| `bun test packages/host/src/sandbox-options.test.ts packages/host/src/audit.test.ts --timeout 60000` | 48 pass, 0 fail, 152 expect() calls, 2 files |
 
-Criteria are the six in ROADMAP.md, Phase 68 (`.planning/ROADMAP.md` lines 1160-1182).
+Not run in this pass: the dispatcher's `test_worktree.py` (its non-default-root cases were read, not executed), the fleet and CLI worktree suites, and any live-host check. The criterion 2–6 verdicts below rest on the 2026-11-18 run plus anchors re-confirmed by grep in this pass.
 
-| # | Criterion | Status | Evidence |
-|---|---|---|---|
-| 1 | `SUBSTRATE_WORKTREE_ROOTS` replaces the hard-coded root in `worktree-graph.ts`, and `@substrate/fleet` finds worktrees with `git worktree list --porcelain` from every repository under the configured roots, including linked worktrees outside them | PARTIAL | MET: `packages/fleet/src/inventory.ts` `discoverRepos` (lines 116-177), `listWorktrees` (line 67, `worktree list --porcelain -z`), and `collectInventory` (lines 438-463), which keeps every listed entry of each repository (no root filter); `packages/collectors/src/worktree-graph.ts` `worktreeRoots` reads the variable. PARTIAL: with no absolute entry the collector falls back to the hard-coded `WORKTREE_ROOT`; the dispatcher never reads the variable and uses its own fixed `WORKTREES_ROOT` (`packages/dispatcher/src/substrate_dispatcher/worktree.py` lines 25 and 136; flag-registry.ts line 311 says so). |
-| 2 | `POST /worktrees/report` stores the inventory in `worktrees` (its own migration step): path, repo, branch, head, base, dirty, ahead, behind, last commit time, size, session and graph attribution, PR state when known | MET | Migration step 36 `worktrees` (`packages/mcp-server/src/index-store.ts`, expand, no `optIn` key, so it runs on every boot) with the listed columns; `packages/fleet/src/report.ts` lines 32-45 and 71-79 map `base`, `last_commit_at`, `size_bytes`, `pr_state`, `session_id`, `graph_id`; `server.ts` line 2240 `POST /worktrees/report` (401 without a surface, 503 via `worktreeGate` while the flag is off); `worktree-registry.ts` line 353 one transaction per report. Caveat: the report is sent only when `substrate worktree scan --report` runs, and nothing runs it on a schedule (see Residual risks). |
-| 3 | `substrate worktree prune` is a dry run until `--execute`, removes only clean, pushed, idle worktrees whose HEAD is proven merged, never the primary checkout or the current directory, and writes one ledger note per removal; tests include a branch that advanced after its merge | MET | `packages/cli/src/worktree/command.ts` `commandPrune` (lines 320-394): dry run unless `args.execute`; re-reload and re-inspect each `safe` worktree (lines 359-372); `git worktree remove` without `--force` (line 373); `emit` one `worktree.prune` note (line 378). `packages/fleet/src/classify.ts` `classifyForPrune` (lines 56-97) is the class rule. Tests: `classify.test.ts` "a branch that gained commits after its pull request merged is review, never safe" (line 82), "a squash-merged branch is safe because HEAD equals the merged pull request head" (line 89), "the current directory, or one inside the worktree, is never" (line 68); `command.test.ts` "a branch that gained a commit after the inventory is not removed on the strength of its old merged pull request" (line 690). Ignored work counts as `review`, not `never` (classify.ts lines 79-84), so it is not removed (see Residual risks on the class name). |
-| 4 | `substrate worktree conflicts` lists, for one repository, the changed files per worktree against the merge base, the overlapping pairs, a `git merge-tree` prediction for each pair and a suggested merge order | MET | `packages/fleet/src/conflicts.ts`: `changedFiles` (line 112), `supportsMergeTree` (line 89, needs git 2.38), the `git merge-tree --write-tree --name-only` call (line 142), `suggestMergeOrder` (line 152), `forecastConflicts` (line 179). `command.ts` `commandConflicts` (line 452). Tests: `conflicts.test.ts` "two branches editing the same lines conflict, different regions and files do not, and nothing is touched" (line 40), "an older git reports unavailable and never runs merge-tree" (line 79); `command.test.ts` "names conflicting pairs, the overlap files and a merge order for one repository named by directory" (line 472). Caveat: on git older than 2.38 the forecast lists overlaps with no prediction, and says so. |
-| 5 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` is enforced by `substrate worktree provision` and the dispatcher's `ensure_worktree`, and the doctor reports worktree disk use against it | MET | `command.ts` line 494 `assertDiskFloor(target, minFreeGbFromEnv(deps.env), ...)`; `packages/fleet/src/config.ts` lines 40-42 read the variable (default 5); `packages/fleet/src/disk.ts` `assertDiskFloor` (line 46); `worktree.py` `min_free_bytes` and the refusal before any git command (module header, line 6, and the check near line 148). `scripts/doctor-runtime.ts` `gatherWorktreeDisk` (around line 884) is report-only and adds a row only when `SUBSTRATE_WORKTREE_ROOTS` names a root (`worktreeOptionsFromEnv`). Caveat: the dispatcher checks free space on `/` only. |
-| 6 | With the registry on, `memory_brief` names other sessions' worktrees that touch files the caller's worktree touches | MET | `packages/mcp-server/src/brief-sessions.ts` `worktreesSection` (line 256) and its bounds (lines 172-177); the gate in `packages/mcp-server/src/service.ts` `liveBriefSections` (line 3541: no section unless the sessions flag or `worktreeRegistry.mode` is on); f76855a9 excludes a clean merged or closed row (`brief-sessions.ts` lines 260-261). Tests, `brief-worktrees.service.test.ts` (c77750c6): "names another session's worktree that shares a file, and only that" (line 87), "registry off: no section and the registry is never read" (line 116), "a registry read that fails drops only this section" (line 135); `brief-sessions.test.ts`: "lists another session's worktree that shares a file" (line 264), "another session's worktree whose pull request is merged or closed is left out" (line 322). Caveat: no live brief was produced; the section depends on `repo` and `session_id` in the request and on reports that carry a file list. |
+## Goal Achievement
 
-## Safety rules as the code states them
+### Observable Truths
 
-These are the rules as read, not as the context or the messages describe them.
+| #   | Truth   | Status     | Evidence       |
+| --- | ------- | ---------- | -------------- |
+| 1   | `SUBSTRATE_WORKTREE_ROOTS` is the one source of the worktree root, and the host and the dispatcher name the same path for a graph | ✓ VERIFIED | `packages/host/src/worktree-root.ts` L11-19: `worktreeRoot(env)` returns `resolve()` of the first absolute, trimmed, non-empty entry, else `DEFAULT_WORKTREES_ROOT`. Dispatcher `packages/dispatcher/src/substrate_dispatcher/worktree.py` L61-84: `worktree_roots` (same split, trim, absolute-only filter) and `creation_root` returns `roots[0]` else `WORKTREES_ROOT`. `ensure_worktree` L199 defaults `root` to `creation_root()`, and `dispatch.py` L540 calls `ensure(repo_path, gid, branch)` with no root override. Host side: `sandbox-options.ts` L43-46 `worktreeFor` = `join(worktreeRoot(env), graphId)`; `vm.ts` L209 and L425 bind `worktreeFor(...)`; `audit.ts` L95 and L134 use `worktreeFor(graphId, env)` and `worktreeRoot(env)`. The two rules agree on empty, relative-only, and whitespace-padded values (both fall back to the default). |
+| 2   | `POST /worktrees/report` stores the inventory in `worktrees` (its own migration step): path, repo, branch, head, base, dirty, ahead, behind, last commit time, size, session and graph attribution, PR state when known | ✓ VERIFIED | Migration `worktrees` at `packages/mcp-server/src/index-store.ts` L738-765 (create table and `worktrees_repo_seen_idx` index L764); later migration `worktrees_changed_files` at L862. Route `packages/mcp-server/src/server.ts` L2400 (`/worktrees/report`), L330 listed in the route table. Carried from the 2026-11-18 record; anchors re-confirmed. |
+| 3   | `substrate worktree prune` is a dry run until `--execute`, removes only clean, pushed, idle worktrees whose HEAD is proven merged, never the primary checkout or the current directory, and writes one ledger note per removal; tests include a branch that advanced after its merge | ✓ VERIFIED | `packages/cli/src/worktree/command.ts` `commandPrune` dry-runs unless `args.execute`; each `safe` item is re-inspected from git before removal; one `deps.emit` per removal. `packages/fleet/src/classify.ts` L56-97 yields `never` for the primary checkout and the cwd, `review` for ignored work and for a merged PR whose HEAD moved past the merged head. Carried from the 2026-11-18 record. |
+| 4   | `substrate worktree conflicts` lists per-worktree changed files against the merge base, overlapping pairs, a `git merge-tree` prediction per pair, and a suggested merge order | ✓ VERIFIED | `packages/fleet/src/conflicts.ts`: `git merge-tree --write-tree --name-only` (L142), git 2.38 gate (L140), `suggestMergeOrder` (L152), `forecastConflicts` (L179). Carried from the 2026-11-18 record. |
+| 5   | `SUBSTRATE_WORKTREE_MIN_FREE_GB` is enforced by `substrate worktree provision` and the dispatcher's `ensure_worktree`, and the doctor reports worktree disk use against it | ✓ VERIFIED | `packages/cli/src/worktree/command.ts` L514 `assertDiskFloor(target, minFreeGbFromEnv(...))`. Dispatcher `worktree.py` `ensure_worktree` checks the floor on the first root's filesystem when roots are set, else on `/`. Doctor `scripts/doctor-runtime.ts` L773-796 and `gatherWorktreeDisk` L884. Carried from the 2026-11-18 record. |
+| 6   | With the registry on, `memory_brief` names other sessions' worktrees that touch files the caller's worktree touches | ✓ VERIFIED | `packages/mcp-server/src/brief-sessions.ts` `worktreesSection` (L256) and its call in brief composition (L378). Carried from the 2026-11-18 record. |
 
-- **Prune never deletes** a primary checkout, the worktree holding the current directory, a locked worktree, a worktree with a live graph claim (`never`), a dirty worktree (uncommitted or untracked change, or a failed `git status`), or a head that is neither pushed nor a merged pull request's head (`never`, `classify.ts` lines 58-75). A worktree with an unverified claim, ignored work, an idle or unknown activity time, an unproven merge, a branch that advanced after its pull request merged, or a missing directory is `review` and is not removed by `--execute` (`classify.ts` lines 77-95).
-- **Prune removes only `safe`**, after the identity is reloaded from git and the claim is asked again just before removal (`command.ts` lines 356-373).
-- **Merge-back never deletes.** It emits one `worktree.merge_back` note with `retained: true` per eligible worktree (`merge-back.ts` lines 128-137, 177). It has no `remove`, `branch`, `push`, `merge` or `checkout` call (grep of the file at 286c4fb1 is empty). Its refusals are listed in the module comment (lines 6-14), and a primary checkout is refused (line 83).
-- **Guard is read-only** (`workspace-guard.ts` lines 8-10; test "the guard writes nothing: no remove, no branch delete and no other write verb is called", `command.test.ts` line 1011). It refuses on any probe failure. Symbolic links are refused as they stand and their targets are not read (lines 126-129). A primary checkout inside the workspace is refused (line 183); a `.planning/` directory is refused (line 188).
-- **Live claims fail closed.** `claims.ts` maps a missing token, an unreachable server, a bad status or an unreadable reply to `unverified`, and `classify.ts` turns `unverified` into `review`.
+**Score:** 6/6 truths verified (0 present-behavior-unverified)
 
-## Evidence read
+### Criterion 1 detail: why it now holds
 
-- Commits: `git show --stat` for 8f1ce16c (70 files), c77750c6 (38 files), 2815e161 (6 files), f76855a9 (3 files), 286c4fb1 (11 files), and 4e54ca65 (2 files, doctor).
-- Files at 286c4fb1: `packages/fleet/src/{classify,inventory,conflicts,claims,ignored,pr,report,disk,config}.ts`, `packages/cli/src/worktree/{command,merge-back}.ts`, `packages/fleet/src/workspace-guard.ts` (blob identical at 2815e161 and 286c4fb1), `packages/collectors/src/worktree-graph.ts`, `packages/mcp-server/src/{index-store,flag-registry,event-sources,brief-sessions,worktree-registry,server,admission}.ts`, `packages/audit/src/policy.ts`, `packages/dispatcher/src/substrate_dispatcher/worktree.py` (the header and the constants), `scripts/doctor-runtime.ts` (the disk and checkout sections), `.github/workflows/ci.yml`, `docs/worktree-fleet-api.md` (headings and flag table only).
-- Migration steps read at 286c4fb1: 36 (`worktrees`), 40 (`worktrees_changed_files`), 41 (`worktrees_repo_lower_seen_idx`). None carries an `optIn` key, so none is gated by an opt-in migration flag; the registry routes are gated by `SUBSTRATE_WORKTREE_REGISTRY`.
+- **Single rule, two implementations, one shared test seam.** The TypeScript `worktreeRoot()` and the Python `creation_root()` implement the same rule. `sandbox-options.test.ts` (test "the host and the dispatcher resolve the same non-default worktree root from SUBSTRATE_WORKTREE_ROOTS") spawns `python3` against `substrate_dispatcher.worktree.creation_root` with `SUBSTRATE_WORKTREE_ROOTS=/srv/wt-a:/srv/wt-b` and asserts it returns `/srv/wt-a` and equals `worktreeFor(graphId, env)`. That test passed in this run.
+- **The dispatcher's default-root path is covered too.** `packages/dispatcher/tests/test_worktree.py` L225-250 and L330-333 set `SUBSTRATE_WORKTREE_ROOTS` to two roots and assert `ensure_worktree` (no `root=` argument) creates under the first. Those tests were not re-run in this pass; they were read.
+- **The host's container spec and audit both follow the root.** `buildContainerSpec` compares `opts.worktree` against `worktreeFor(graphId)` (sandbox-options.ts L74) using `process.env`, which is the same environment `vm.ts` passes into `worktreeFor`. `audit.test.ts` "a bind under a non-default root from SUBSTRATE_WORKTREE_ROOTS is the graph's own worktree; with no root set it is foreign" passed in this run.
+- **Audit change reviewed.** `containerViolations` now uses `isValidGraphId` instead of `graphId !== ""` to choose `ownWorktree`. An invalid or missing label already adds a `label` violation (audit.ts L93), so the verdict is unchanged for those containers.
 
-## Residual risks
+### Required Artifacts
 
-- **Ignored work is `review`, not `never`.** Both block removal by `--execute`, but the class name matters to an operator reading the dry run. The context (D68-3) says ignored work makes a worktree "not clean"; the code says `review`.
-- **No scheduler.** Nothing in the tracked non-markdown files runs `substrate worktree scan --report` (grep at 286c4fb1, excluding tests and markdown). The registry, the brief section and the claims lookup are only as fresh as the last manual run.
-- **Merge-back's check-then-note race is narrowed, not closed.** `decide` reads state, `unchangedSince` (merge-back.ts lines 122-125) reloads HEAD, branch and detached state, and the note then emits. A move of HEAD before the reload is refused; a move after it leaves the note true, because it names the verified commit (lines 117-121). `unchangedSince` does not compare cleanliness, so an edit made after the dirty check and before the note is not seen. The note's payload does not assert cleanliness, but it does assert a merge.
-- **Prune's last check and `git worktree remove` are separate steps.** Ignored files written in between are removed with the worktree, because `git worktree remove` deletes ignored files without asking (the header of `ignored.ts` says so). This is the same window as any check-then-act.
-- **A repository with no origin trusts local ancestry.** Merge-back's `origin/HEAD` check applies only when an origin remote exists (merge-back.ts lines 94-96); without one, `resolveDefaultRef` falls back to a local `main` or `master` (`inventory.ts` lines 281-288) and a commit that is an ancestor of it is recorded as merged. Commit 476b7dc5 added a test for the origin-but-no-`origin/HEAD` case; no test in the phase 68 test files covers a repository with no origin at all (grep). Prune's `pushed` fact is satisfied by the same local ancestry (`inventory.ts` line 394, `merged`).
-- **The guard has no caller in the repository.** `workspaceGuard` is reached only through `substrate worktree guard DIR` (command.ts lines 532-542; grep at 286c4fb1). Nothing in the repository runs the guard before a workspace removal.
-- **Dispatcher scope.** The dispatcher checks free space only on `/`, does not read `SUBSTRATE_WORKTREE_ROOTS`, and creates under one fixed root.
-- **Live claims only for graph-shaped paths.** A checkout whose first segment under a root is not a graph id is never asked about, so a live claim on it cannot be seen. A checkout outside every root is the same (merge-back.ts lines 12-13).
-- **Commit messages that do not match the code.** 8f1ce16c says "migration 35" (it is 36, with 40 and 41 from c77750c6), names a `worktrees_report` tool that does not exist, and says the dispatcher accounts "across roots" (it checks `/` only). The squash subjects of #187 to #192 all read "Discover the remaining gsd-autonomous phases…" and do not describe the change.
-- **Git-version dependence.** The conflict prediction needs git 2.38 or newer. This record did not check the git version on any host.
-- **The merged-PR proof depends on `gh`.** Without `gh`, `pr_state` is `unknown`, so a squash-merged branch whose HEAD is not in the default branch is `review`. That fails safe, but the prune reports it as unprovable, not as merged.
-- **Bounds.** The ignored walk stops at 5,000 files, 50,000 entries or 10 seconds and then counts the rest as work (`ignored.ts` constants). The repository scan stops at 20,000 directories (`inventory.ts` `DEFAULT_DISCOVER_ENTRIES`). Both are fail-safe; a large checkout may show `review` for reasons unrelated to its contents.
-- **REQUIREMENTS.md** in this worktree still shows FLEET-01 to FLEET-06 unchecked and the table row "Planned"; this record does not edit it.
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `packages/host/src/worktree-root.ts` | Single resolver of the worktree root | ✓ VERIFIED | 19 lines, Node built-ins only; exports `DEFAULT_WORKTREES_ROOT`, `worktreeRoot`. Imported by `sandbox-options.ts` L9 and `audit.ts` L15. |
+| `packages/host/src/sandbox-options.ts` | `worktreeFor` resolves through the shared root | ✓ VERIFIED | L9, L15-19 (`WORKTREES_ROOT` now alias of the default), L43-46. |
+| `packages/host/src/audit.ts` | Ownership check resolves through the shared root | ✓ VERIFIED | L14-15, L95, L134. |
+| `packages/dispatcher/src/substrate_dispatcher/worktree.py` | `creation_root` honours the roots variable | ✓ VERIFIED | L61-84; `ensure_worktree` L181-210. Unchanged from HEAD. |
 
-## Operator-gated
+### Key Link Verification
 
-Installing a timer or hook that runs `substrate worktree scan --report` or `prune` on any host (no timer or hook is in the repository); setting `SUBSTRATE_WORKTREE_REGISTRY=on` in any environment (default off, per flag-registry.ts line 309); setting `SUBSTRATE_WORKTREE_ROOTS` on any host so the doctor row and the collector's attribution use it; running `substrate worktree prune --execute` on a real host (this record ran none); running `merge-back --execute` on a real checkout; calling `substrate worktree guard` from any workspace-removal path; changing `SUBSTRATE_WORKTREE_MIN_FREE_GB` from 5 GB; the doctor's checkout rows (#190) are report only and were not run.
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| `sandbox-options.ts` `worktreeFor` | `worktree-root.ts` `worktreeRoot` | import L9, call L45 | ✓ WIRED | |
+| `audit.ts` | `worktree-root.ts` `worktreeRoot` | import L15, call L134 | ✓ WIRED | |
+| `vm.ts` L209, L425 | `sandbox-options.ts` `worktreeFor` | import L38, call | ✓ WIRED | Bind path now follows `SUBSTRATE_WORKTREE_ROOTS`. |
+| `dispatch.py` `make_launch_fn` | `worktree.py` `ensure_worktree` → `creation_root` | L540, default root | ✓ WIRED | |
+| Host test | Dispatcher `creation_root` | `Bun.spawnSync` python3 (sandbox-options.test.ts) | ✓ WIRED | Executed and green in this run. |
+
+### Data-Flow Trace (Level 4)
+
+Not applicable: the criterion is a path resolution, not rendered data.
+
+### Behavioral Spot-Checks
+
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Host and dispatcher agree on a non-default root; audit treats a bind under it as own | `bun test packages/host/src/sandbox-options.test.ts packages/host/src/audit.test.ts --timeout 60000` | 48 pass, 0 fail | ✓ PASS |
+
+### Probe Execution
+
+No probe scripts are declared for this phase.
+
+### Requirements Coverage
+
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ----------- | ----------- | ------ | -------- |
+| FLEET-01 | none (phase built without plans) | Roots variable replaces the hard-coded root | ✓ SATISFIED | Truth 1 and the criterion 1 detail above. |
+| FLEET-02 to FLEET-06 | none | Criteria 2–6 | ✓ SATISFIED | Truths 2–6, carried from the 2026-11-18 record. |
+
+### Anti-Patterns Found
+
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| `packages/mcp-server/src/flag-registry.ts` | 325 | Registry `unset` text says "the dispatcher does not read this variable and always uses that directory". The code reads it (`worktree.py` `worktree_roots`, `creation_root`). | ⚠️ Warning | Documentation contradicts the shipped behaviour and the single-source-of-truth claim. Outside this assignment's files; not edited here. |
+| `.env.example` | 1127 | Same false statement: "the dispatcher does not read it and always uses that directory". | ⚠️ Warning | Operator-facing doc is wrong about the dispatcher. Not edited here. |
+| `.planning/ROADMAP.md` | 133, 1168 | Phase 68 status line still says "PARTIAL: the dispatcher ignores `SUBSTRATE_WORKTREE_ROOTS`". | ℹ️ Info | Stale status text; the criterion itself does not mention the dispatcher. |
+| `packages/collectors/src/worktree-graph.ts` | 11-31 | Its own `WORKTREE_ROOT` constant and root reader (keeps all absolute roots, for attribution; comment says "keep in step with worktree.py"). | ℹ️ Info | Third copy of the rule. It agrees on the default and on attribution; it is not used for creation or binding. |
+| `packages/host/src/worktree-root.ts` | — | No dedicated unit test file. | ℹ️ Info | Covered through `sandbox-options.test.ts` and `audit.test.ts`, which passed in this run. |
+| `packages/dispatcher/src/substrate_dispatcher/worktree.py` | 26 | Fixed `WORKTREES_ROOT` kept as fallback. | ℹ️ Info | Intended fallback. |
+
+Debt-marker scan (TBD/FIXME/XXX) over the changed files was not run in this pass.
+
+### Human Verification Required
+
+None required for the criteria. The live-host check (sandbox and VM bound to a non-default root on a real Docker host) was not run; it is recorded as an advisory item below.
+
+### Advisory (New Scope, Unevidenced)
+
+| # | Finding | Category | Why Advisory |
+|---|---------|----------|--------------|
+| 1 | Live-host confirmation that `ensure_worktree` and the sandbox/VM bind agree under a real non-default `SUBSTRATE_WORKTREE_ROOTS` | other | Needs Docker and a running VM host; code-level agreement is proven by the tests above. Not counted in the score. |
+| 2 | Roadmap open items outside the six criteria: no scheduler runs the fleet report; merge-back check-then-note race; no-origin repositories trust local ancestry; the workspace guard has no caller | other | Listed in ROADMAP.md Phase 68 status; not success criteria; not re-checked in this pass. |
+
+### Gaps Summary
+
+No blocking gaps. Criterion 1, the one open at the 2026-11-18 record, now holds: the host resolves the worktree root through `worktree-root.ts`, the dispatcher's `creation_root` applies the same rule, and the named tests cover a non-default root on both sides. Remaining items are documentation drift (`flag-registry.ts` L325, `.env.example` L1127, ROADMAP status text) and are reported as warnings; they do not change the criterion verdicts.
+
+---
+
+_Verified: 2026-11-19T00:53:27Z_
+_Verifier: Claude (gsd-verifier)_

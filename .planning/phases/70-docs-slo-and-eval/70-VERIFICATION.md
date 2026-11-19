@@ -1,58 +1,95 @@
 ---
 phase: 70-docs-slo-and-eval
-verified: 2026-10-30
+verified: 2026-11-19T00:00:00Z
 status: gaps_found
-score: 3 of 5 success criteria MET in the repository (criteria 1, 2, 4), 2 PARTIAL (criteria 3, 5); no live run, the golden baseline is self-supervised and reads 1.0 on every metric
-verified_on: main at 8af55c5e (PR #182) and d4cd350c (PR #176) (files read with git show; nothing was run by the author of this record)
+score: 4/5 success criteria hold in the working tree (1, 2, 4 carried from the 2026-11-18 record and not re-run in this pass; 3 now verified; 5 partial)
+behavior_unverified: 0
+overrides_applied: 0
+covered_files: [".planning/phases/70-docs-slo-and-eval/70-CONTEXT.md", ".planning/phases/70-docs-slo-and-eval/70-SUMMARY.md", "docs/corpus-eval.md", "docs/runbooks/docs-rag-operations.md", "infra/vps/substrate-docs-canary.service", "infra/vps/substrate-docs-canary.timer", "packages/corpus/src/eval-lexical.test.ts", "packages/corpus/src/eval-lexical.ts", "packages/corpus/src/eval.test.ts", "packages/corpus/src/eval.ts", "packages/corpus/src/slo.test.ts", "packages/corpus/src/slo.ts", "packages/mcp-server/src/docs-eval-server.ts", "packages/mcp-server/src/fabric/status.ts", "packages/mcp-server/src/flag-registry.ts", "packages/observability/src/instruments.ts", "scripts/docs-eval.baseline.json", "scripts/docs-eval.test.ts", "scripts/docs-eval.ts", "scripts/docs-golden.ts", "scripts/docs-lint.ts", "scripts/docs-lint.test.ts", "scripts/planning-integrity.test.ts", "scripts/docs-golden.test.ts"]
+covered_digest: "v4:sha256:69a709849e87828c01e2a34d0109cd8e22809024e70816b1bf59b627f742e329"
+re_verification:
+  previous_status: gaps_found
+  previous_score: 3 of 5 (2026-11-18, committed HEAD 17b93f58)
+  gaps_closed:
+    - "Criterion 3: the canary unit runs scripts/docs-eval.ts --live --emit --fixtures fixtures/docs-golden (working tree, uncommitted); runCanary evaluates freshness, ingest and recall at 5 through sloBreaches and exits 1 on a breach"
+  gaps_remaining:
+    - "Criterion 5: no test asserts a golden case for docs/runbooks/docs-rag-operations.md or the other new runbooks; the live eval has not run"
+  regressions: []
+gaps:
+  - truth: "SC5: docs/runbooks/docs-rag-operations.md covers deploy, first ingest, timers, rollback and proof commands, and the milestone's documents are in the corpus with a golden case each that the eval finds"
+    status: partial
+    reason: "The runbook exists. No test asserts a golden case per new runbook; the only test reference to docs-rag-operations.md is packages/mcp-server/src/fabric/optimize.test.ts. Golden coverage is by construction only, and the live eval has not run. Carried from the 2026-11-18 record and not re-run in this pass."
+    artifacts:
+      - path: "docs/runbooks/docs-rag-operations.md"
+        issue: "Golden coverage of this runbook is not asserted by any test"
+    missing:
+      - "A test that builds the golden set from docs/ and asserts a question for each new runbook, or a recorded live eval that finds them at rank 5 or better"
+deferred: []
+human_verification:
+  - test: "After a first live ingest of this checkout's docs, run `SUBSTRATE_TOKEN=<bearer> bun scripts/docs-eval.ts --live <URL>` and read the golden recall@5 and per-question misses"
+    expected: "The runbooks written in this milestone produce questions, and the eval finds them at rank 5 or better"
+    why_human: "Needs a live server, a corpus ingested under SUBSTRATE_DOCS_EVAL_REPO, and an operator window"
+  - test: "On the host, after the drop-in is installed: run `systemctl start substrate-docs-canary.service` and read the journal"
+    expected: "A line `golden recall@5 <value> over <n> questions`, a `corpus freshness` line and an `ingest` line; the unit fails when any of the three is past its objective"
+    why_human: "Live production server and host timer; the drop-in must set SUBSTRATE_CORPUS=on, and the omp bearer must be able to read GET /corpus/status (route-policy marks it repo-gated for scoped callers)"
+  - test: "Decide whether a canary run with SUBSTRATE_CORPUS unset is acceptable"
+    expected: "A recorded decision. Today the freshness, ingest and golden checks are skipped without a stderr line, and the run exits 0 on the fixtures alone"
+    why_human: "Operator policy; the code documents the gate but does not warn when it is closed"
 ---
 
-# 70-VERIFICATION: Docs SLO and eval, measured without labels and guarded in CI
+# Phase 70: Docs SLO and eval Verification Report
 
-## Gates
+**Phase Goal:** Measurement and guards: a self-supervised golden set, an offline CI harness, SLO series and thresholds, a docs lint and the operator runbook.
+**Verified:** 2026-11-19
+**Status:** gaps_found
+**Re-verification:** Yes, after gap closure of criterion 3 (working tree). Criteria 1, 2 and 4 are carried from the 2026-11-18 record and were not re-run in this pass.
 
-Not run by the author of this record. The repository's single verify gate is the `verify` step list in `docs/ci.md` (d4cd350c, lines 59 and 65: install, types, Biome lint, tests against a scratch Postgres, the repo locks). The docs lint and the offline harness run inside `bun test`, so they are part of that gate and add no CI step (`docs/ci.md`, "Docs lint"; `docs/corpus-eval.md`, "The offline harness"). The orchestrator reports that Biome, tests and tsc were run in worktrees before each PR and that the Greptile merge gate (5/5, no open threads, CI green, squash) was run by the ship loop for each PR; that is not read from PR threads here. This record's evidence is file paths, test titles and constants read on main at 8af55c5e and d4cd350c. No test pass counts or timings are cited. The `test(` counts below are static occurrences in the source files, not executed results.
+## Criterion 3 (re-verified)
 
-## Success criteria
+Criterion (ROADMAP.md phase 70, criterion 3): the timer runs `docs-eval`; the canary checks freshness, ingest and recall at 5 through `sloBreaches`; `fabric_status` and the canary report a breach.
 
-The criteria are the five of the phase 70 entry in `.planning/ROADMAP.md` at 8af55c5e (lines 1180 to 1190).
+| Check | Evidence | Result |
+| --- | --- | --- |
+| Timer runs docs-eval with --emit and --fixtures | `infra/vps/substrate-docs-canary.service:33` `ExecStart=… bun scripts/docs-eval.ts --live --emit --fixtures fixtures/docs-golden`; `fixtures/docs-golden/` is tracked | VERIFIED (working tree only) |
+| Argument parsing selects canary mode | `scripts/docs-eval.ts` `parseArgs`: `--emit` with `--fixtures DIR` and `--live` returns mode `canary` | VERIFIED |
+| Canary runs docs-golden's checks with docs-eval's io | `canaryIo` in `scripts/docs-eval.ts` passes fetch, state, the fixture dir and `measureGoldenRecall` / `readSloReadings` into `runCanary` | VERIFIED |
+| Freshness, ingest and recall at 5 through sloBreaches | `scripts/docs-golden.ts` `runCanary` builds `sloBreaches({freshnessS, recall5, ingestDocsPerS}, loadSloThresholds(env))` (`packages/corpus/src/slo.ts`) and names each breach on stderr | VERIFIED |
+| Exit 1 on any breach | Every return path of `runCanary` returns 1 when a breach or a failing fixture exists; 0 only with neither | VERIFIED (read) |
+| Freshness reading matches fabric_status | Canary: `now - lastIngestAt` from `GET /corpus/status`. Server: `corpus/slo.ts` `freshnessS` from `setLastChangeFrom(lastIngestAt)` (`service.ts:6820`), the same field (`store.ts:281`) | VERIFIED (same source) |
+| Ingest reading matches fabric_status | Canary reads gauge `substrate.corpus.ingest_docs_per_second` from `GET /metrics`; the gauge is set in `setCorpusIngestRate` (`instruments.ts:700`) from `recordIngest`. The `/metrics` gauge shape (`{kind,name,points:[{value}]}`) matches `GaugeSnapshot` | VERIFIED |
+| Unit tests | `bun test --timeout 60000 scripts/docs-eval.test.ts scripts/docs-golden.test.ts`: 79 pass, 0 fail, 2 files | VERIFIED |
+| Entry points load and refuse with no network | `bun scripts/docs-eval.ts --live --emit --fixtures fixtures/docs-golden` and `bun scripts/docs-golden.ts --live --emit`, unconfigured: each exits 2 with the refusal; a non-loopback `SUBSTRATE_URL` also exits 2 | VERIFIED |
 
-| # | Criterion | Status | Evidence |
-|---|---|---|---|
-| 1 | `generateGolden` derives queries from titles and headings with the expected document key; `scoreRun` computes recall at k, MRR and latency percentiles; `scripts/docs-eval.ts` runs them against a live server with `--execute` and against a fake retriever otherwise | MET (wording differs: the live flag is `--live URL`, not `--execute`) | `packages/corpus/src/eval.ts` at 8af55c5e: `generateGolden` (title, heading, lead per document; `expected` is the `repo:path` key), `scoreRun`, `recallAtK`, `mrr`, `percentile`. `scripts/docs-eval.ts` header (line 8): `bun scripts/docs-eval.ts --live URL [--json]`; offline mode runs `runOffline` (lexical) and `runServer` (fake plane). `packages/corpus/src/eval.test.ts` (29 `test(` blocks) and `eval-lexical.test.ts` (8) exist; not executed here. |
-| 2 | A deterministic offline harness (a lexical retriever over a fixture corpus) runs in `bun test` and fails when ranking, de-duplication or the re-rank regress | MET (baseline self-supervised, see Residual risks) | `packages/corpus/src/eval-lexical.ts` (BM25, title weight, collapse of exact duplicates, `rerank` hook). `scripts/docs-eval.test.ts`: `describe("the committed offline harness ...")` (line 80), "a re-rank that puts the best hit last fails the comparison, in the retriever alone and through the server's search code" (line 165), "a re-rank that drops the leading hit fails it too, on both paths" (line 174), "the shipped pipeline collapses every group of identical documents to its smallest key, on both paths" (line 195), "a retriever that answers both copies of a page, or the wrong one, is reported" (line 207). Thresholds in `scripts/docs-eval.ts`: `RECALL5_TOLERANCE = 0.02`, `MRR_TOLERANCE = 0.03`. Baseline `scripts/docs-eval.baseline.json`: `lexical` and `server` each `{queries: 93, recall1: 1, recall5: 1, recall10: 1, mrr: 1}`. |
-| 3 | Ingest throughput, sync lag and retrieval quality are metric series with SLO thresholds in flags; `fabric_status` and the docs canary report a breach; the staged canary timer runs `docs-eval` | PARTIAL | Met in part: `packages/corpus/src/slo.ts` (`SLO_DEFAULTS`, `loadSloThresholds`, `sloBreaches`); `packages/mcp-server/src/flag-registry.ts` lines 855 to 857 (the three `SUBSTRATE_DOCS_SLO_*` flags); `packages/observability/src/instruments.ts` lines 721 to 724 (`substrate.corpus.freshness_seconds`, `substrate.corpus.ingest_docs_per_second`, `substrate.corpus.golden_recall5`); `packages/mcp-server/src/metrics-history.ts` lines 161 to 163 and 415 to 417; `packages/mcp-server/src/fabric/status.ts` `corpusRow` (line 75) and `fabric/gather.ts` line 163. Canary: `scripts/docs-golden.ts` `measureGolden` (line 664) and the breach check near line 630; the golden part calls `measureGoldenRecall` from `docs-eval.ts`, so the canary reuses the harness code rather than invoking the CLI. Gaps: no series named sync lag (only freshness, the age of the newest manifest change); the timer `infra/vps/substrate-docs-canary.timer` (`OnCalendar=*-*-* 04:41:00 UTC`) and its service are staged and not installed. |
-| 4 | A test fails on a broken relative link anywhere in `docs/` and `.planning/` (archives included), and on a missing level-1 title in `docs/` and the live `.planning/` files | MET (mechanism); the roadmap's count of repaired links is not reconciled | `scripts/docs-lint.ts` (d4cd350c): `lintDocs`, `brokenRelativeLinks`, `missingTitle`, `titleRequired`; links read via `Bun.markdown.render`. `scripts/docs-lint.test.ts`: `describe("brokenRelativeLinks")` (line 25), `describe("missingTitle")` (line 96), `describe("lintDocs")` (line 123), "the committed documents ... have no broken relative link and every docs page and live planning file has a level-1 title" (line 163). `scripts/planning-integrity.test.ts`: the legacy exemption list is removed (d4cd350c stat: the file is changed by 42 lines). `docs/ci.md` (d4cd350c, lint section). Counts: the commit message says "44 findings"; the roadmap says 42 in three roadmaps and 8 in v1.3 pattern records (50). Not reconciled. Anchors are not checked: `brokenRelativeLinks` strips `#fragment` before the existence check. |
-| 5 | `docs/runbooks/docs-rag-operations.md` covers deploy, first ingest, timers, rollback and the command that proves each step; the golden set has a case for each new runbook and the eval finds it | PARTIAL | Runbook part met: `docs/runbooks/docs-rag-operations.md` (170 lines) has sections 1 to 10, including "1. Deploy the release", "4. The first ingest", "5. The sync and canary timers", "10. Roll back, step by step", and a **Check.** line in each. Gaps: no case per runbook is asserted anywhere; `generateGolden` walks `docs/` recursively (`collectLocalDocuments`, `scripts/docs-eval.ts`, depth 8), so the runbook would produce questions if it has a title or heading, but the live eval that would show whether it is found has not run. Runbook drift: section 5 relies on `infra/vps/substrate-corpus-sync.*`, which is not in the 8af55c5e tree; section 6 says nothing reads `SUBSTRATE_DOCS_RERANK`, which is true at 8af55c5e but not at 80afb6e5 (`packages/mcp-server/src/config.ts` line 1547 reads it), and the runbook text at 80afb6e5 still says it waits (lines 120 and 165); section 10 names `substrate corpus reconcile`, which is not in `packages/cli/src` at 8af55c5e. |
+**Committed state:** the committed unit at HEAD (`17b93f58`) still runs `scripts/docs-golden.ts --live --emit` (line 33). The docs-eval wiring exists only in the uncommitted working tree, so criterion 3 holds once that change is committed.
 
-## Baseline and golden set (what the harness reports)
+### Mutual import (`docs-golden.ts` ↔ `docs-eval.ts`)
 
-- The golden set is not a file. `generateGolden` produces it from the documents on each run. The only recorded count is `scripts/docs-eval.baseline.json` at 8af55c5e: `queries: 93` for `lexical` and for `server`.
-- That count was not regenerated here (no runs were permitted). Raw line counts in the 33 fixture documents give 33 level-1 lines, 66 level-2 lines and one lead per document, an upper bound of 132 candidates before the drop rules (copies, under 3 words, ambiguous phrases), the cap (3 per document; 2000 per set) and the answer-group rules. The 93 sits inside that bound; no finer claim is made.
-- The recorded scores are `recall1 = recall5 = recall10 = mrr = 1` for both entries. `baselineOf` keeps four decimals; latency is not in the baseline.
-- The baseline was written by running `bun scripts/docs-eval.ts --write-baseline` once (`docs/corpus-eval.md`, "Updating the baseline"). It is self-supervised: the queries are titles, headings and lead sentences of the same documents the index holds, and no human wrote or labelled a question.
+Safe at call time, as the code stands. `docs-golden.ts` imports `measureGoldenRecall` and a type from `docs-eval.ts`. `docs-eval.ts` imports `runCanary`, `readSloReadings`, `writeStateAtomically`, `DEFAULT_CANARY_STATE`, `CORPUS_DIR` (as `GOLDEN_CORPUS_DIR`) and the `GoldenIo` type from `docs-golden.ts`.
 
-## Residual risks
+- Top-level code in both files only computes constants from their own `import.meta.dir` or `REPO_ROOT` and declares functions. No imported binding is read during module evaluation.
+- Both entry orders were exercised by the refusal runs above. With `docs-eval.ts` as the entry, `docs-golden.ts` evaluates first. With `docs-golden.ts` as the entry, `docs-eval.ts` evaluates first. The cross-module references are read only inside functions called from the `import.meta.main` blocks, which run after both bodies have evaluated.
+- Fragility: a future top-level use of an imported binding (for example `const x = DEFAULT_CANARY_STATE`) would throw a TDZ `ReferenceError` on one of the two entry orders. Moving the shared canary helpers into a third module would remove the cycle. This is a recommendation, not a blocker.
 
-- **The baseline cannot show retrieval quality.** A perfect 1.0 on questions taken from the indexed text is what the harness reports; the guard is the comparison against that baseline plus the doctored-re-rank tests [INFERENCE from reading `eval.ts` and `eval-lexical.ts`]. A ranking regression that still answers the title query passes.
-- **The `server` baseline measures the search code over a fake plane.** The plane's own ranking is the fake's (`packages/mcp-server/src/docs-eval-server.ts`, `EVAL_PLANE_URL` is `http://lightrag.example.test`); `docs/corpus-eval.md` says so.
-- **The recall SLO default of 0.6 has no derivation in the commit** (`packages/corpus/src/slo.ts`, `SLO_DEFAULTS`) [INFERENCE: no source states how it was chosen].
-- **`substrate corpus eval` without `--server` exits 0 and only counts questions** (`packages/cli/src/corpus/eval.ts` header). A timer that omits `--server` reads as a pass.
-- **Exit codes differ by entry point.** `scripts/docs-eval.ts --live` exits 3 when not every question was scored; `substrate corpus eval` exits 1 for both a breach and an unscored run. The canary exits 1 on a golden breach as it does on a fixture regression (`scripts/docs-golden.ts`, the `goldenBreached` return).
-- **The canary measures the golden set only when `SUBSTRATE_CORPUS=on`** (`measureGolden`, line 666). With the flag off, `fabric_status` has no recall reading and the breach cannot be seen there.
-- **`--live` measures this checkout's `docs/` under `SUBSTRATE_DOCS_EVAL_REPO`** (default `swcstudiospace/agent-substrate`). Until those documents are in the corpus under that name, every question misses (`docs/corpus-eval.md`, "Live").
-- **Docs lint does not check anchors** (`brokenRelativeLinks` strips `#fragment`; `scripts/docs-lint.test.ts`, "does not check anchors alone, absolute paths or URLs with a scheme").
-- **Two golden sets coexist.** `scripts/docs-golden.ts` keeps four hand-written fixtures in `fixtures/docs-golden/` (`credentials-redacted.json`, `review-gate.json`, `substrate-door.json`, `unanswerable.json`), with thresholds its header says are set for the toy retriever. They are not the phase 70 set.
-- **The `EVAL-01..05` checkboxes in `.planning/REQUIREMENTS.md` remain `[ ]`, with the traceability row "Planned"**, at 8af55c5e (lines 74 to 78, 101). This record does not change them.
-- **Runbook drift** listed under criterion 5.
+## Warnings (not blockers)
 
-## Operator-gated
+- **W1: silent SLO skip.** `measureGolden` and `measureSlo` return `null` without a stderr line unless `SUBSTRATE_CORPUS` is `on`. The canary then exits 0 on the fixtures alone, with no freshness, ingest or recall5 check. The unit comment documents the requirement, but the drop-in that sets it is not in the repository.
+- **W2: null readings are not breaches.** Freshness is null before any ingest. Ingest is null after a zero-document request. Recall at 5 is null on a partial `docs/` scan or an unasked or degraded question. Each case prints only a stderr line, and the run can exit 0 with one of the three unmeasured.
+- **W3: freshness depends on a route the omp bearer may not have.** `GET /corpus/status` is `repo-gated` in `route-policy.ts` and refused to scoped callers. If the `omp` token is scoped in production, freshness is never read and the only signal is a stderr line. [INFERENCE: the scope of the production `omp` token was not checked.]
+- **W4: working tree only.** See the committed-state note above.
+- **W5: live run not observed.** The timer is staged, not installed, by design.
 
-Not run and not done by this phase:
+## Other Criteria
 
-- Deploying with `SUBSTRATE_CORPUS=on` and a LightRAG backend (`docs/runbooks/docs-rag-operations.md`, section 2).
-- The first ingest against the live corpus, and `substrate corpus eval --server` against it (section 4, its check).
-- Installing the canary: `infra/vps/substrate-docs-canary.service`, `.timer` and the drop-in; `SUBSTRATE_DOCS_CANARY=1` and `SUBSTRATE_DOCS_CANARY_MANIFEST` (an attested `{sha256, dataset_commit}`). The sync units named in runbook section 5 are not in the 8af55c5e tree and are not part of this phase's gate.
-- Choosing the three `SUBSTRATE_DOCS_SLO_*` values (defaults 86 400 s, 0.6, 0.2 documents/s).
-- Promoting the re-rank (`SUBSTRATE_DOCS_RERANK`, `shadow` then `on`), which needs a recorded number to beat (section 6).
+- **Criteria 1, 2, 4:** carried from the 2026-11-18 record, which verified them at committed HEAD. Not re-run in this pass.
+- **Criterion 5:** partial. The runbook exists. No test asserts a golden case for each new runbook (the only test reference to `docs-rag-operations.md` is `packages/mcp-server/src/fabric/optimize.test.ts`), and the live eval has not run.
 
-Milestone-level operator gates (hook and timer installs in any host, Railway writes and deploys, devnet sends and anchor funding, the LightRAG LLM route, live bulk ingest, the Greptile knowledge-base export ingest) are outside this phase's scope and are not verified here.
+## Gaps Summary
+
+Criterion 3 is resolved in the working tree and open at committed HEAD until that change is committed. Criterion 5 remains partial, so the phase cannot be marked `passed`. The warnings above need an operator decision before the timer is installed.
+
+Verification was read-only except for this record. One `bun test` invocation covered the two named files. Two refusal-path entry runs and read-only greps covered the rest. No server or canary was started, and no repository file was edited other than this record.
+
+---
+
+_Verified: 2026-11-19_
+_Verifier: Claude (gsd-verifier)_

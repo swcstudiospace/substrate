@@ -1,171 +1,183 @@
 ---
 phase: 76-telemetry-buffer-and-dead-letter
-verified: 2026-11-02T02:42:57Z
+verified: 2026-11-18T12:25:00Z
 status: human_needed
-score: 2/2 must-haves verified
-covered_files: [".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-PLAN.md", ".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-SUMMARY.md", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/event-buffer.test.ts", "packages/mcp-server/src/event-buffer.ts", "packages/mcp-server/src/event-dead-letter.test.ts", "packages/mcp-server/src/event-dead-letter.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/reanchor-run.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service-event-buffer.test.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts"]
-covered_digest: "v3:sha256:373e1485d5da17efa70d422f94220b9039d3f4eb505b9c3d8c80e1b3a943ab03"
+score: 2/2 truths verified (criterion 2 carried as PASSED (override), owner-accepted 2026-11-02)
 behavior_unverified: 0
 overrides_applied: 1
+covered_files: [".env.example", ".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-PLAN.md", ".planning/phases/76-telemetry-buffer-and-dead-letter/76-01-SUMMARY.md", "docs/config-reference.md", "docs/greptime-ledger.md", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/event-buffer.test.ts", "packages/mcp-server/src/event-buffer.ts", "packages/mcp-server/src/event-dead-letter.test.ts", "packages/mcp-server/src/event-dead-letter.ts", "packages/mcp-server/src/event.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/reanchor-run.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service-event-buffer.test.ts", "packages/mcp-server/src/service.ts"]
+covered_digest: "v3:sha256:6ac52ed5ed458ab87096bab2191e2769a78d427a1f91df7db9093fd2953f4a79"
 overrides:
   - must_have: "Buffer and dead-letter depth are reported in /healthz and bounded by a flag."
     reason: "Owner accepted the override on 2026-11-02. The dead-letter store is deliberately unbounded (plan decision D76-13): a bound would have to drop records, the silent loss this phase removes. The buffer is bounded by SUBSTRATE_EVENT_BUFFER_MAX, and the depth of both stores is reported in /healthz. A dead-letter cap is a tracked follow-up."
     accepted_by: "owner"
     accepted_at: "2026-11-02"
+gaps: []
+advisory: []
+behavior_unverified_items: []
+coincidental_reliance_items: []
 human_verification:
   - test: "Live GreptimeDB rehearsal: block the ledger and emit a sequence for one session; restore."
-    expected: "503 with buffered: true, stored: false; /healthz eventBuffer.depth rises; after restore each event lands once, in chain order, each with an event_ingest row. Also checks the mayExist exact-ts predicate (greptime.ts:1291-1302) against real timestamp precision."
+    expected: "503 with buffered: true, stored: false; /healthz eventBuffer.depth rises; after restore each event lands once, in chain order, each with an event_ingest row. Also checks the mayExist exact-ts predicate (greptime.ts insertEvent / eventRowPresent) against real timestamp precision."
     why_human: "Needs a live GreptimeDB and a real outage."
-  - test: "Dead-letter exhaustion on a live outage (nominal budget about 243 s; 195 to 292 s with jitter)."
-    expected: "Dead-letter line written, file mode 0600, and boot refused without SUBSTRATE_EVENT_DEAD_LETTER_PATH."
+  - test: "Dead-letter exhaustion on a live outage (nominal budget 243 s, 195 to 292 s with jitter)."
+    expected: "Dead-letter line written with the event hash, file mode 0600; boot refused without SUBSTRATE_EVENT_DEAD_LETTER_PATH when SUBSTRATE_EVENT_BUFFER_PATH is set."
     why_human: "Needs a live outage longer than the retry budget."
   - test: "Restart during an outage: stop with entries waiting and a durable file."
-    expected: "The next boot reports the depth and drains the entries once."
+    expected: "The next boot reports the depth in /healthz and drains the entries once."
     why_human: "Needs a process restart against a durable file on a real host."
-  - test: "Shutdown under the service manager: drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true }) (index.ts:251)."
-    expected: "Finishes within the shutdown bound with a durable buffer. An unsaved buffer leaves an abandoned record for each entry. Check R-2 here."
+  - test: "Shutdown under the service manager: drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true }) (index.ts:252)."
+    expected: "Finishes within the shutdown bound with a durable buffer. An unsaved buffer leaves an abandoned record for each entry. See warning R-2."
     why_human: "Needs the real service manager and its shutdown timing."
   - test: "Buffered session.end (D76-14, D76-19) on a live session."
-    expected: "The steering session stays open until session.end lands; the wake-up hint (publishHint, service.ts:2836) appears only then."
+    expected: "The steering session stays open until session.end lands; the wake-up hint (publishHint, called from deliverBuffered) appears only then."
     why_human: "Needs a live steering session."
   - test: "Keyed replay after a dead-letter record (R-1) on a live collector spool."
-    expected: "Confirm which trigger occurs: Trigger A (one new row, orphaned record) or Trigger B (two rows)."
+    expected: "Confirm which trigger occurs: Trigger A (one new row, orphaned dead-letter record) or Trigger B (two rows)."
     why_human: "Needs a live collector spool and ledger."
   - test: "Operator decision to enable the buffer (D76-15)."
-    expected: "Criterion 1 holds only with SUBSTRATE_EVENT_BUFFER_PATH and SUBSTRATE_EVENT_DEAD_LETTER_PATH set. Operator must make and record this decision."
-    why_human: "Configuration and policy decision, not code-verifiable."
+    expected: "Criterion 1 holds only in a deployment that sets SUBSTRATE_EVENT_BUFFER_PATH and SUBSTRATE_EVENT_DEAD_LETTER_PATH. The buffer is off by default."
+    why_human: "Deployment configuration is an operator decision."
   - test: "/healthz staleness."
-    expected: "Body is memoised for SUBSTRATE_HEALTHZ_CACHE_MS (default 5000, config.ts:1184, server.ts:920). Pollers see a depth change within that window."
-    why_human: "Needs a running server and a poller."
+    expected: "The body is memoised for SUBSTRATE_HEALTHZ_CACHE_MS (default 5000, server.ts healthz cache). Pollers see a depth change within that window."
+    why_human: "Needs a live poller against the running service."
 ---
 
-# Phase 76: Telemetry buffer and dead-letter Verification Report
+# Phase 76: Telemetry buffer and dead-letter — Verification Report
 
-**Phase Goal:** An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently. (ROADMAP Phase 76)
-**Verified:** 2026-11-02T02:42:57Z
+**Phase Goal:** An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
+**Verified:** 2026-11-18T12:25:00Z
 **Status:** human_needed
-**Re-verification:** No, initial verification (brief directs initial mode; the prior 76-VERIFICATION.md on disk was superseded)
-
-**Branch:** gsd/v18-p76-telemetry-dlq. Phase implementation commit: 327e7c8d.
-**Gates:** not re-run here. The orchestrator reports tsc 0, bun test 11413 pass / 2 skip / 0 fail, phase-close 236 pass. Only the two named tests below were run in this verification.
+**Re-verification:** Yes — the prior record (2026-11-02, human_needed, owner override for criterion 2) was re-checked against the code at this checkout (HEAD 357d6b15, which contains the defect-fix commits dbf25466 and b023d2a0). Earlier findings were re-read from the code, not from that record.
 
 ## Goal Achievement
 
 ### Observable Truths
 
-Must-haves are the ROADMAP Phase 76 success criteria. The PLAN has no `must_haves` frontmatter, so Steps 4 and 5 are not applicable (`verify.artifacts` and `verify.key-links` exit 66).
-
 | #   | Truth | Status | Evidence |
 | --- | ----- | ------ | -------- |
-| 1 | A failed event write enters a bounded buffer, is retried with backoff, and after the retry budget is written to a dead-letter store with its hash | ✓ VERIFIED | Entry: `service.ts:2796-2802` (failed direct write goes to `bufferEvent`); `bufferEvent` at `service.ts:2810-2816`. Bound: `event-buffer.ts:179-188` (`enqueue`, bound check), size from `SUBSTRATE_EVENT_BUFFER_MAX`, default 256 (`config.ts:2525`, `flag-registry.ts:339`). Backoff and retry in `event-buffer.ts` (`runDrain`, delivery via `service.ts:2823-2838` with `insertEvent(..., { mayExist: true })` at `:2831`). Dead-letter with hash: `event-dead-letter.ts` (`DeadLetterStore.record`, wired by `onDeadLetter`, `service.ts:1886`). Behavioral test: `service-event-buffer.test.ts` "a write that exhausts its budget is dead-lettered with its hash and its reason" **run this session: 1 pass, 0 fail**. Bound test: `event-buffer.test.ts:71` "over the bound the oldest entry is given up with a record, never dropped silently". |
-| 2 | Buffer and dead-letter depth are reported in `/healthz` and bounded by a flag | ✓ PASSED (override) | **Reported (met):** `service.ts:8169` sets `health().eventBuffer` to `{ enabled, ...stats(), deadLetter: { depth, durable } }`; `stats()` at `event-buffer.ts:161-167`; `server.ts:914-931` spreads the health body into `/healthz`. Behavioral test: `service-event-buffer.test.ts` "the health body reports the buffer's depth and the dead-letter depth, each with its durability" **run this session: 1 pass, 0 fail**. **Buffer bounded by a flag (met):** `SUBSTRATE_EVENT_BUFFER_MAX` (`config.ts:2525`, `flag-registry.ts:339`), enforced at `event-buffer.ts:183`. **Dead-letter bounded by a flag (not met as written):** `event-dead-letter.ts:11-12` states the store is deliberately unbounded; `DeadLetterStore` has no depth limit and `depth()` only reports. No flag bounds it (`flag-registry.ts` buffer rows at 339-344). **Override:** Override: Owner accepted the override on 2026-11-02 (D76-13; dead-letter store unbounded by design, a bound would drop records). Carried as PASSED (override) under Step 3b; counts toward `verified_truths`. The must-have text is not narrowed. |
+| 1 | A failed event write enters a bounded buffer, is retried with backoff, and after the retry budget is written to a dead-letter store with its hash | ✓ VERIFIED | Buffer: `event-buffer.ts` `EventBuffer` (bounded by `max`; `enqueue` evicts the oldest non-flying entry with `overflow`, or refuses with `buffer-full`). Backoff: `eventBufferBackoffMs` (`base × 2^attempt`, cap, ±20 % jitter) used in `enqueue` and `runDrain`. Budget: `runDrain` gives up with `exhausted` when `attempts >= maxAttempts`. Dead letter: `event-dead-letter.ts` `DeadLetterStore.record` writes `event_hash`, `reason`, `attempts`, `last_reason` and the whole event as 0600 JSONL. Service wiring: `service.ts` `appendChained` buffers a failed direct write (`bufferEvent`), parks later events of the session behind it (`hasSession`), and `deliverBuffered` retries through `greptime.insertEvent(entry.event, { mayExist: true })`. Targeted tests pass (see Behavioral Spot-Checks). |
+| 2 | Buffer and dead-letter depth are reported in `/healthz` and bounded by a flag | ✓ VERIFIED (PASSED override for the dead-letter half) | `/healthz` body: `service.ts` `health()` returns `eventBuffer` = `{ enabled: false }` or `{ enabled: true, depth, max, oldestAt, durable, deadLetter: { depth, durable } }`; `server.ts` `/healthz` spreads `substrate.health()`. Buffer bound: `SUBSTRATE_EVENT_BUFFER_MAX` (default 256) via `config.ts` `loadEventBufferSettings`. Dead-letter store is unbounded by design (D76-13, `event-dead-letter.ts` header), accepted by the owner on 2026-11-02 as override. The health-body test is in `service-event-buffer.test.ts`. |
 
-**Score:** 2/2 truths verified (1 verified, 1 passed by override; 0 present-behavior-unverified)
+**Score:** 2/2 truths verified (1 directly; 1 with the owner-accepted dead-letter override).
+
+### Deferred Items
+
+None.
+
+### Advisory (New Scope, Unevidenced)
+
+None.
 
 ### Required Artifacts
 
-Step 4 not applicable: `verify.artifacts` exit 66 (no `must_haves.artifacts`). Checked manually.
-
 | Artifact | Expected | Status | Details |
 | -------- | -------- | ------ | ------- |
-| `packages/mcp-server/src/event-buffer.ts` | bounded FIFO, backoff, drop causes, persistence | ✓ VERIFIED | Imported by `service.ts`. Drain covered by the named test above and by `event-buffer.test.ts`. |
-| `packages/mcp-server/src/event-dead-letter.ts` | dead-letter store with hash, reason | ✓ VERIFIED | Records carry hash and reason. Deliberately unbounded; the bound is accepted as an override (truth 2). |
-| `packages/mcp-server/src/service.ts` | write path, buffering, drain, shutdown, `health()` | ✓ VERIFIED | Wiring at `:1874-1892`, `:2728-2804`, `:2810-2865`, `:8169`. |
-| `packages/mcp-server/src/greptime.ts` | `insertEvent` with `mayExist` | ✓ VERIFIED | `:1248-1266`, `:1291-1294`. `findByIdempotencyKey` `:1407-1446`. |
-| `packages/mcp-server/src/config.ts` | buffer settings, parsing, refuse boot without dead-letter path | ✓ VERIFIED | `:2508-2530`. |
-| `packages/mcp-server/src/flag-registry.ts` | buffer flag rows | ✓ VERIFIED | `:339-344`. |
-| `packages/mcp-server/src/server.ts` | `/healthz` carries the health body | ✓ VERIFIED | `:914-931`. |
-| `docs/config-reference.md`, `docs/greptime-ledger.md`, `.env.example` | flags documented | ✓ VERIFIED | `docs/greptime-ledger.md:947-989`. Outage claim overstated; see Anti-Patterns. |
+| `packages/mcp-server/src/event-buffer.ts` | Bounded per-session FIFO, backoff, overflow cascade, JSONL persistence | ✓ VERIFIED | 0600 JSONL, compaction, in-flight protection, `drainSession` for the write-path settle |
+| `packages/mcp-server/src/event-dead-letter.ts` | Append-only dead-letter store with hash and reason | ✓ VERIFIED | Reasons: exhausted, overflow, buffer-full, predecessor-dead-lettered, abandoned; memory mode reports `durable: false` |
+| `packages/mcp-server/src/service.ts` | Buffering, delivery, drain, shutdown, health | ✓ VERIFIED | `appendChained`, `bufferEvent`, `deliverBuffered`, `settleParked`, `drainEventBuffer`, `drainPendingEvents`, `health().eventBuffer` |
+| `packages/mcp-server/src/greptime.ts` | `insertEvent(event, { mayExist })` without a second row | ✓ VERIFIED | `eventRowPresent` check, `recordIngest` repair when missing; default path unchanged (no extra read) |
+| `packages/mcp-server/src/config.ts` | Six flags; boot refuses a buffer with no dead-letter path | ✓ VERIFIED | `loadEventBufferSettings` throws `ConfigError` naming `SUBSTRATE_EVENT_DEAD_LETTER_PATH` |
+| `packages/mcp-server/src/index.ts` | Shutdown drains the buffer | ✓ VERIFIED | `index.ts:252` `drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true })` |
+| `packages/mcp-server/src/flag-registry.ts`, `.env.example`, `docs/config-reference.md`, `docs/greptime-ledger.md` | Flags documented | ✓ VERIFIED | Registry rows present (`flag-registry.ts:359-363`); `.env.example:38-46`; config-reference rows at lines 80-81 |
 
 ### Key Link Verification
 
-Step 5 not applicable: `verify.key-links` exit 66 (no `must_haves.key_links`). Checked manually.
-
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
-| `appendChained` write failure | `bufferEvent` → `EventBuffer.enqueue` | `service.ts:2802`, `:2811` | ✓ WIRED | |
-| `EventBuffer` give-up | `DeadLetterStore.record` | `onDeadLetter`, `service.ts:1886` | ✓ WIRED | |
-| drain pass | `deliverBuffered` → `insertEvent(mayExist)` | `service.ts:2841-2843`, `:2831` | ✓ WIRED | |
-| shutdown | `drainPendingEvents` | `index.ts:251` → `service.ts:2859` | ✓ WIRED | |
-| `health()` | `/healthz` body | `service.ts:8169` → `server.ts:931` | ✓ WIRED | |
-| `SUBSTRATE_EVENT_BUFFER_MAX` | buffer bound | `config.ts:2525` → `service.ts:1881` → `event-buffer.ts:183` | ✓ WIRED | |
-| dead-letter depth | bound flag | none | ✓ ACCEPTED (override) | No bound flag exists by design (D76-13). Accepted as an override of truth 2; not counted as NOT_WIRED. |
+| `appendChained` failed write | `EventBuffer.enqueue` | `bufferEvent` | ✓ WIRED | `service.ts` ~3000-3040 |
+| `EventBuffer.runDrain` exhaustion | `DeadLetterStore.record` | `onDeadLetter` option | ✓ WIRED | `service.ts` ~1971; `dropFrom` |
+| `EventBuffer.drain` | `deliverBufferedInTurn` | `drainEventBuffer` / `EVENT_BUFFER_TICK_MS` timer | ✓ WIRED | `service.ts` ~3128-3135, `ensureEventDrainTimer` |
+| `Substrate.health()` | `/healthz` body | spread in `server.ts` | ✓ WIRED | `service.ts` ~8769 |
+| `SUBSTRATE_EVENT_BUFFER_PATH` | `EventBuffer` construction | `loadConfig` → `config.eventBuffer` → `Substrate` constructor | ✓ WIRED | `service.ts` ~1959-1973; `null` when unset |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 | -------- | ------------- | ------ | ------------------ | ------ |
-| `/healthz` `eventBuffer` | depth, max, oldestAt, durable | `EventBuffer.stats()` over the live map | Yes | ✓ FLOWING |
-| `/healthz` `eventBuffer.deadLetter` | depth, durable | `DeadLetterStore.depth()` (onDisk + held) | Yes | ✓ FLOWING |
-| dead-letter record | `event_hash` | `event.hash` from the buffered entry | Yes | ✓ FLOWING |
+| `/healthz.eventBuffer` | depth, max, oldestAt, durable, deadLetter.depth | `EventBuffer.stats()` and `DeadLetterStore.depth()` | Yes (in-memory state of the live stores) | ✓ FLOWING |
+| Dead-letter record | `event_hash`, `attempts`, `last_reason`, `event` | `candidate` from `runDrain` / `enqueue` | Yes | ✓ FLOWING |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
-| Truth 1: budget exhaustion dead-letters with hash (retry → give-up) | `bun test packages/mcp-server/src/service-event-buffer.test.ts -t "a write that exhausts its budget is dead-lettered with its hash and its reason"` | 1 pass, 0 fail | ✓ PASS |
-| Truth 2 (reporting): health body reports both depths and durability | `bun test packages/mcp-server/src/service-event-buffer.test.ts -t "the health body reports the buffer's depth and the dead-letter depth, each with its durability"` | 1 pass, 0 fail | ✓ PASS |
+| Buffer, dead-letter, service buffering, health body, boot refusal, and the `mayExist` insert | `bun test packages/mcp-server/src/event-buffer.test.ts packages/mcp-server/src/event-dead-letter.test.ts packages/mcp-server/src/service-event-buffer.test.ts packages/mcp-server/src/greptime.test.ts` | 221 pass, 0 fail (912 expect calls) | ✓ PASS |
+| Flag registry and its rows stay in step with the code | `bun test packages/mcp-server/src/flag-registry.test.ts` | 26 pass, 0 fail | ✓ PASS |
+| Retry budget nominal total | Sum of waits for attempts 1 to 9 at defaults: 1+2+4+8+16+32+60+60+60 s | 243 s nominal, matching the plan | ✓ PASS (arithmetic) |
 
-Each command is one named test, run once. The full suite was not run here.
+Named service tests that exercise the invariants (`service-event-buffer.test.ts`): "buffered, not dropped" (failed write buffered and lands once); "a later event … waits behind the buffered one" (chain order); "a write that exhausts its budget is dead-lettered with its hash and its reason"; "overflow dead-letters the oldest buffered event and its session's later events"; "a restart re-reads the buffer"; "with the buffer unset … stored false"; "the health body reports the buffer's depth and the dead-letter depth"; "a buffer with no dead-letter path refuses boot".
 
 ### Probe Execution
 
-Step 7c skipped. No probe is declared in the PLAN or SUMMARY, and the phase is neither migration nor tooling.
+No `scripts/*/tests/probe-*.sh` in this repository. Step 7c: SKIPPED.
 
 ### Requirements Coverage
 
-No requirement IDs in the PLAN (`requirements:` absent). `.planning/REQUIREMENTS.md` has no Phase 76 row. Nothing to map and no orphans.
+No requirement IDs are declared for phase 76 in ROADMAP.md (the phase lists success criteria only). Skipped.
 
 ### Anti-Patterns Found
 
-Scan of the 16 changed `.ts` files from 327e7c8d. Debt markers (`TBD`, `FIXME`, `XXX`): none, so the debt-marker gate does not fire. `TODO`, `HACK`, `PLACEHOLDER` added by 327e7c8d: none. `return null` / `=> {}` hits are sentinel returns, not stubs.
-
 | File | Line | Pattern | Severity | Impact |
 | ---- | ---- | ------- | -------- | ------ |
-| `packages/mcp-server/src/event-dead-letter.ts` | 11-12 | Dead-letter store deliberately unbounded | ℹ️ Info (accepted by override) | Root cause of truth 2; the override carries it as PASSED. Dead-letter cap is a tracked follow-up per the override reason. |
-| `packages/mcp-server/src/event-buffer.ts` | 215-221 | R-2: `drain` returns an in-flight pass and ignores `options.all` | ⚠️ Warning | Shutdown can join a periodic pass and skip due-later entries. See R-2. |
-| `packages/mcp-server/src/service.ts` | 2796-2802, 2693-2706 (path) | R-1: keyed replay after give-up writes a fresh row | ⚠️ Warning | Possible second row. See R-1. Not reproduced. |
-| `packages/mcp-server/src/service.ts` | 2625-2630 | Keyed replay lookup in `enforce` without `ts` or replay header | ⚠️ Warning | `ts` falls back to now (`event.ts:278`) and the exact-`ts` lookup misses. See R-1 edge. Read only. |
-| `docs/greptime-ledger.md` | 951 | "The defaults ride out an outage of about five minutes" | ⚠️ Warning | Nine waits, 243 s nominal (1, 2, 4, 8, 16, 32, 60, 60, 60 s), 195 to 292 s with jitter. Four minutes is accurate. |
+| `docs/greptime-ledger.md` | 951 | States the outage tolerance as "about five minutes" | ⚠️ Warning | Nominal budget is 243 s (about four minutes), or 195 to 292 s with jitter. Still overstated, as the prior record noted. Doc fix only. |
+| `packages/mcp-server/src/service.ts` | `drainEventBuffer` / `EventBuffer.drain` | `drain()` returns an in-flight pass and ignores its `all` option, so a shutdown pass can join a periodic pass and skip entries not yet due | ⚠️ Warning (R-2) | With a durable buffer those entries are kept for the next boot. With a memory or unsaved buffer `abandonAll()` writes a dead-letter record for each, so nothing vanishes unrecorded. Carried from the prior record. |
+| `packages/mcp-server/src/greptime.ts` | `insertEvent` with `mayExist` | Keyed replay after a dead-letter record may write a second row when the ledger lookup misses a commit that lands later (Trigger B) | ⚠️ Warning (R-1) | Not reproduced. Trigger A, the common case, lands once. Carried from the prior record; live check in human verification item 6. |
+| `packages/mcp-server/src/event-dead-letter.ts` | — | Dead-letter store unbounded | ℹ️ Info | Owner override (2026-11-02). A cap is a tracked follow-up. |
 
-**R-1 (keyed replay after a give-up).** Event ids are random per call (`event.ts:282`, `evt_${randomUUID()}`), and `ts` defaults to now (`event.ts:278`).
+### Human Verification Required
 
-- *Trigger A (lands once, new id; record orphaned).* Event E (key K, id X, hash H) is dead-lettered and never lands. The collector spool replays it on a 503 with `x-substrate-replay: 1` and the same key and `ts` (`collectors/src/emit.ts:575-578`). `replayOutcome` (`service.ts:2693-2706`) finds no ledger row. `findKeyed` (`event-buffer.ts:154-159`; `service.ts:2736-2737`) finds nothing, because the entry left the buffer. So `appendChained` builds a fresh event: new random id, new hash, `prev` = ledger tip (`service.ts:2740-2751`), written with no `mayExist` (`:2781-2782`). Result: `stored: true`, one row, new id and hash. The dead-letter record (X/H) never matches a ledger row, and a hand replay from the record would be a second row.
-- *Trigger B (duplicate).* The original write committed after the substrate gave it up, or during the shutdown abandon. The replay's ledger lookup runs before the commit, and the buffer no longer holds the entry. Then both rows exist with the same `_ik` and different ids. The shutdown race is at `service.ts:2862-2864`: `abandonAll` runs after `Promise.race` times out, without checking whether a delivery is in flight.
-- *Landed row visible (no duplicate).* When the original write landed and the replay carries its `ts` (a spool replay does), `findByIdempotencyKey` (`greptime.ts:1407-1446`, exact cell, `ts` and key suffix) finds it and the reply is `deduplicated`, `service.ts:2732-2734`.
-- *Edge, not dead-letter specific.* `checkReplayTs` refuses a keyed replay without `ts` (`event.ts:145`), but only when the replay header is set (`service.ts:2625-2627`). A keyed request in `enforce` without the header and without `ts` runs the lookup (`:2630`), with `ts` = now, and misses. Not exercised.
+#### 1. Live GreptimeDB rehearsal
+**Test:** Block the ledger and emit a sequence for one session; restore.
+**Expected:** 503 with `buffered: true, stored: false`; `/healthz` `eventBuffer.depth` rises; after restore each event lands once, in chain order, each with an `event_ingest` row. Also checks the `mayExist` predicate against real timestamp precision.
+**Why human:** Needs a live GreptimeDB and a real outage.
 
-**R-2 (shutdown coalesced into a periodic pass).** Confirmed by reading. `EventBuffer.drain` returns `this.draining` when a pass is in flight and drops `options.all` (`event-buffer.ts:215-221`). The periodic timer calls `drainEventBuffer()` with `all: false` (`service.ts:2867-2870`). A shutdown call with `all: true` (`service.ts:2847-2853`, `:2862`) therefore joins that pass, and entries not yet due are not attempted. With `abandon` and an unsaved buffer, `abandonAll` (`service.ts:2864`) gives them up as `abandoned`, each with a record, so nothing vanishes unrecorded. A durable buffer keeps them for the next boot.
+#### 2. Dead-letter exhaustion on a live outage
+**Test:** Hold an outage longer than the retry budget (243 s nominal; 195 to 292 s with jitter).
+**Expected:** A dead-letter line with the event hash; file mode 0600; boot refused without `SUBSTRATE_EVENT_DEAD_LETTER_PATH` when the buffer path is set.
+**Why human:** Needs a live outage.
 
-## Deferred Items
+#### 3. Restart during an outage
+**Test:** Stop the process with entries waiting and a durable file.
+**Expected:** The next boot reports the depth and drains the entries once.
+**Why human:** Needs a restart against a durable file on a real host.
 
-None. Step 9b checked phases 77 and 78. Phase 77 is steering idempotency and phase 78 is cross-layer reconciliation. Neither covers the dead-letter bound.
+#### 4. Shutdown under the service manager
+**Test:** `drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true })` at `index.ts:252`.
+**Expected:** Finishes within the shutdown bound with a durable buffer; an unsaved buffer leaves an abandoned record per entry. Check R-2 here.
+**Why human:** Needs the real service manager and its shutdown timing.
 
-## Human Verification Required
+#### 5. Buffered `session.end`
+**Test:** On a live session, buffer a `session.end`.
+**Expected:** The steering session stays open until `session.end` lands; the wake-up hint appears only then.
+**Why human:** Needs a live steering session.
 
-Step 8 items. They route the status to `human_needed`. No truth is FAILED, so the status is not `gaps_found`.
+#### 6. Keyed replay after a dead-letter record (R-1)
+**Test:** On a live collector spool, replay a keyed event after its dead-letter record.
+**Expected:** Confirm which trigger occurs: Trigger A (one new row, orphaned dead-letter record) or Trigger B (two rows).
+**Why human:** Needs a live spool and ledger.
 
-1. **Live GreptimeDB rehearsal.** Block the ledger and emit a sequence for one session. Confirm 503 with `buffered: true`, `stored: false`, and `/healthz` `eventBuffer.depth` rising. Restore. Confirm each event lands once, in chain order, each with an `event_ingest` row. This also checks the `mayExist` exact-`ts` predicate (`greptime.ts:1291-1302`) against real timestamp precision.
-2. **Dead-letter exhaustion on a live outage.** Nominal budget is about four minutes (243 s; 195 to 292 s with jitter). Confirm the dead-letter line, mode 0600, and the boot refusal without `SUBSTRATE_EVENT_DEAD_LETTER_PATH`.
-3. **Restart during an outage.** Stop with entries waiting and a durable file. The next boot must report the depth and drain the entries once.
-4. **Shutdown under the service manager.** `drainPendingEvents(SHUTDOWN_RETAIN_MS, { abandon: true })` (`index.ts:251`) must finish within the shutdown bound with a durable buffer. An unsaved buffer leaves an `abandoned` record for each entry. Check R-2 here.
-5. **Buffered `session.end` (D76-14, D76-19).** On a live session, the steering session must stay open until the `session.end` lands, and the wake-up hint (`publishHint`, `service.ts:2836`) must appear only then.
-6. **Keyed replay after a dead-letter record (R-1).** On a live collector spool, confirm which trigger occurs: Trigger A (one new row, orphaned record) or Trigger B (two rows).
-7. **Operator decision to enable the buffer (D76-15).** Criterion 1 holds only with `SUBSTRATE_EVENT_BUFFER_PATH` and `SUBSTRATE_EVENT_DEAD_LETTER_PATH` set.
-8. **`/healthz` staleness.** The body is memoised for `SUBSTRATE_HEALTHZ_CACHE_MS` (default 5000, `config.ts:1184`, `server.ts:920`). Confirm pollers see a depth change within that window.
+#### 7. Operator decision to enable the buffer (D76-15)
+**Test:** Decide whether a deployment sets `SUBSTRATE_EVENT_BUFFER_PATH` and `SUBSTRATE_EVENT_DEAD_LETTER_PATH`.
+**Expected:** Criterion 1 holds only in a deployment that sets both. The buffer is off by default.
+**Why human:** An operator configuration decision.
+
+#### 8. `/healthz` staleness
+**Test:** Poll `/healthz` during a depth change.
+**Expected:** The body is memoised for `SUBSTRATE_HEALTHZ_CACHE_MS` (default 5000); pollers see the change within that window.
+**Why human:** Needs a live poller against the running service.
 
 ## Gaps Summary
 
-No FAILED truths remain. Must-have 2 was failing on the dead-letter half (the store is unbounded by design, D76-13, `event-dead-letter.ts:11-12`, `76-01-PLAN.md:28`). The owner accepted that deviation on 2026-11-02, and it is recorded as the single entry under `overrides:`. Under Step 3b the truth is carried as PASSED (override) and counts toward the score. The must-have text is unchanged. The override does not cover any other must-have.
+No FAILED truths. Both success criteria are implemented in code, wired end to end, and covered by passing targeted tests. Criterion 2's dead-letter half is unbounded by design and carried as the owner-accepted override recorded above. The override does not cover any other truth.
 
 Status is `human_needed` because the eight live items above remain. No `gaps:` section is emitted.
 
 **Warnings (not must-have failures):**
-- R-1: keyed replay after a give-up can write a fresh row with a new id (Trigger A, the common case, lands once). A second row for one event happens only in Trigger B, when the ledger lookup misses a commit that lands later. Not reproduced.
-- R-2: a shutdown pass can join a periodic pass and skip entries that are not yet due. An unsaved buffer then abandons them with records. Nothing vanishes unrecorded.
-- The outage tolerance in `docs/greptime-ledger.md:951` is overstated (about four minutes, not five).
+- R-1 (keyed replay, Trigger B) and R-2 (shutdown pass joining a periodic pass) are unchanged from the prior record and remain open live checks.
+- `docs/greptime-ledger.md:951` says "about five minutes"; the nominal budget is 243 s.
 
 ---
 
-_Verified: 2026-11-02T02:42:57Z_
+_Verified: 2026-11-18T12:25:00Z_
 _Verifier: Claude (gsd-verifier)_
