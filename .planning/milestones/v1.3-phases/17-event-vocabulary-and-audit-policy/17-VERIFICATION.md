@@ -156,6 +156,8 @@ Two things block a clean `passed`:
 
 The live harness sample-per-source run is not done here and is a human item.
 
+**Owner decision (2026-11-19): keep_open.** The 15 reviewed swarm surfaces (`swarm-a16-cloud` … `swarm-a30-custody`) stay open in SURFACES. Criterion 3 (SURFACES equals v1.2 plus `substrate` only) remains failed by design until the owner amends that criterion; this decision does not close gap 1.
+
 ---
 
 _Verified: 2026-11-18T12:22:48Z_
