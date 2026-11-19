@@ -5,7 +5,7 @@ import { bucketStep, limitFor, retryAfterSeconds, type AdmissionSettings, type B
 import type { AuditOutcome, McpToolCall } from "../observe.ts";
 import type { EventInput } from "../types.ts";
 import { SESSION_ID_RE } from "./presence.ts";
-import { scopeRepoId } from "../event.ts";
+import { IDEMPOTENCY_KEY_PATTERN, scopeRepoId } from "../event.ts";
 import type { LiveSessionAccess, LiveSessionAuthority, LiveSessionCaller, LiveSessionOperation, LiveSessionSnapshot } from "./steering-sessions-store.ts";
 import { sessionStateForAcknowledgement, type SessionStatePort, type SteeringAcknowledgeReply } from "./steering-delivery.ts";
 import { STEERING_ACTIONS, STEERING_BODY_MAX, STEERING_OUTCOMES, STEERING_PRIORITIES, type SteeringAckReason, type SteeringClock, type SteeringConfigError, type SteeringError, type SteeringInbox, type SteeringOutcome } from "./steering.ts";
@@ -16,7 +16,7 @@ export const SESSION_BINDING_INPUT = z.string().regex(/^[a-f0-9]{64}$/).optional
 export const STEERING_QUEUE_INPUT = z.object({
  target_session_id: z.string().regex(SESSION_ID_RE), action: z.enum(STEERING_ACTIONS), priority: z.enum(STEERING_PRIORITIES), body: z.string().min(1).max(STEERING_BODY_MAX),
  plan_ref: z.object({ phase: z.string().min(1).max(64), plan: z.string().min(1).max(64) }).strict().optional(),
- conflicts_with_active_plan: z.boolean(), session_binding: SESSION_BINDING_INPUT,
+ conflicts_with_active_plan: z.boolean(), idempotency_key: z.string().regex(IDEMPOTENCY_KEY_PATTERN).optional(), session_binding: SESSION_BINDING_INPUT,
 }).strict();
 export const STEERING_ACKNOWLEDGE_INPUT = z.object({ directive_id: z.string().min(1).max(128), session_id: z.string().regex(SESSION_ID_RE), outcome: z.enum(STEERING_OUTCOMES), confirm: z.boolean().optional(), session_binding: SESSION_BINDING_INPUT }).strict();
 export const LIVE_SESSION_UPDATE_INPUT = z.object({
@@ -129,22 +129,35 @@ export class LiveSessionBoundary {
 }
 export interface SteeringWiring {
  readonly enabled: boolean; readonly inbox: SteeringInbox | null; readonly clock: SteeringClock; readonly settingsErrors: readonly SteeringConfigError[]; readonly newDirectiveId?: () => string;
+ readonly onQueued?: (directiveId: string) => Promise<void>;
  readonly boundary: LiveSessionBoundary;
  readonly executeLiveCall: <T>(invocation: LiveSessionInvocation, effect: (prepared: PreparedLiveCall) => Promise<T>, dispatch?: PreparedLiveDispatch) => Promise<T>;
 }
-export type SteeringWriteResult = { status: "queued"; directive_id: string; target_session_id: string; queued_at_ms: number } | { status: "acknowledged"; directive_id: string; outcome: SteeringOutcome; confirmed: boolean } | LiveCallFailure | { status: "refused"; error: SteeringError } | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
+export type SteeringWriteResult = { status: "queued"; directive_id: string; target_session_id: string; queued_at_ms: number; sequence?: number } | { status: "acknowledged"; directive_id: string; outcome: SteeringOutcome; confirmed: boolean } | LiveCallFailure | { status: "refused"; error: SteeringError } | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
 export interface ListedSteeringDirective { id: string; author_principal_id: string; priority: string; action: string; body: string; plan_ref: { phase: string; plan: string } | null; conflicts_with_active_plan: boolean; created_at_ms: number; state: "queued" | "acknowledged"; outcome: SteeringOutcome | null; confirmed: boolean; queued_at_ms: number; acknowledged_at_ms: number | null; reason: SteeringAckReason | null }
 export type SteeringListResult = { status: "listed"; target_session_id: string; directives: ListedSteeringDirective[]; session_state: { status: "held"; state: string } } | LiveCallFailure | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
 export function steeringFailed(result: SteeringWriteResult): boolean { return result.status !== "queued" && result.status !== "acknowledged"; }
 function settingsFailure(wiring: SteeringWiring): { status: "misconfigured"; errors: SteeringConfigError[] } | null { return wiring.settingsErrors.length ? { status: "misconfigured", errors: [...wiring.settingsErrors] } : null; }
 export async function queueSteering(wiring: SteeringWiring, caller: SteeringCaller, input: SteeringQueueInput, dispatch?: PreparedLiveDispatch, transport: AuditTransport = "mcp"): Promise<SteeringWriteResult> {
- try { return await wiring.executeLiveCall<SteeringWriteResult>({ caller, tool: "steering_queue", args: input, operation: "operator-queue", sessionId: input.target_session_id, sessionBinding: input.session_binding, transport }, async () => {
+ // Set by a fresh queue only. A replay wrote nothing, so it wakes no waiter and announces nothing.
+ const outcome = { freshlyQueued: false };
+ let reply: SteeringWriteResult;
+ try { reply = await wiring.executeLiveCall<SteeringWriteResult>({ caller, tool: "steering_queue", args: input, operation: "operator-queue", sessionId: input.target_session_id, sessionBinding: input.session_binding, transport }, async () => {
   const failure = settingsFailure(wiring); if (failure) return failure; if (wiring.inbox === null) return { status: "not-configured" };
   if (caller.surface === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
-  const result = await wiring.inbox.enqueue({ id: wiring.newDirectiveId?.() ?? randomUUID(), author: { principalId: caller.surface, kind: "human" }, createdAtMs: wiring.clock.nowMs(), priority: input.priority, targetSessionId: input.target_session_id, action: input.action, body: input.body, planRef: input.plan_ref, conflictsWithActivePlan: input.conflicts_with_active_plan });
-  if (!result.ok) return { status: "refused", error: result.error };
-  return { status: "queued", directive_id: result.value.directive.id, target_session_id: result.value.directive.targetSessionId, queued_at_ms: result.value.queuedAtMs };
+  const receipt = await wiring.inbox.enqueueReceipt({ id: wiring.newDirectiveId?.() ?? randomUUID(), author: { principalId: caller.surface, kind: "human" }, createdAtMs: wiring.clock.nowMs(), priority: input.priority, targetSessionId: input.target_session_id, action: input.action, body: input.body, planRef: input.plan_ref, conflictsWithActivePlan: input.conflicts_with_active_plan }, input.idempotency_key);
+  if (!receipt.ok) return { status: "refused", error: receipt.error };
+  outcome.freshlyQueued = !receipt.value.replayed;
+  const queued = { status: "queued" as const, directive_id: receipt.value.record.directive.id, target_session_id: receipt.value.record.directive.targetSessionId, queued_at_ms: receipt.value.record.queuedAtMs };
+  if (input.idempotency_key === undefined) return queued;
+  // A keyed reply carries the delivery sequence, so a retry can be matched against what the reader will see. A replay gets the same number.
+  const sequence = wiring.inbox.sequenceOf(queued.directive_id);
+  if (sequence === null) throw new Error("a queued directive has no delivery sequence");
+  return { ...queued, sequence };
  }, dispatch); } catch (cause) { if (cause instanceof LiveSessionBoundaryError) return cause.refusal; throw cause; }
+ // A fresh queue wakes its session: the long-poll waiters are released and one hint is announced. Neither can fail the queue, which is already audited.
+ if (outcome.freshlyQueued && reply.status === "queued") await wiring.onQueued?.(reply.directive_id);
+ return reply;
 }
 /** Internal inbox effect; only the enclosing executeLiveCall wrapper supplies this opaque checked token. */
 async function acknowledgeSteeringEffect(wiring: SteeringWiring, input: SteeringAcknowledgeInput, prepared: PreparedLiveCall): Promise<SteeringWriteResult> {

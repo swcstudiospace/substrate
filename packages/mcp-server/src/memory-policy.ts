@@ -416,6 +416,22 @@ export function memoryExpiry(
 export interface MemoryCaller {
 	surface: string;
 	repo: string | null;
+	/** Under repository scope, whether the caller is granted a repository. Absent while scoping is off, which grants every row. */
+	granted?: ((repo: string) => boolean) | undefined;
+}
+
+/**
+ * Whether a row kept at `scope` and retained for `repo` names only repositories the caller is granted. A row's `repo`, and the
+ * `repo:` in its scope, must both be granted. A `graph:` row with no repository is not granted: its repository cannot be read from
+ * the row. Absent `granted` (scoping off) grants every row.
+ */
+export function grantedToCaller(scope: string | undefined, repo: string | null | undefined, granted: ((repo: string) => boolean) | undefined): boolean {
+	if (granted === undefined) return true;
+	const rowRepo = normalizeIdentifier(repo);
+	if (rowRepo !== null && !granted(rowRepo)) return false;
+	const normalized = scope?.trim().toLowerCase();
+	if (normalized?.startsWith("repo:") && !granted(normalized.slice("repo:".length))) return false;
+	return !(normalized?.startsWith("graph:") && rowRepo === null);
 }
 
 /**
@@ -427,6 +443,7 @@ export interface MemoryCaller {
  * The index query and the derived-hit merge both apply this rule, so they cannot disagree.
  */
 export function visibleToCaller(scope: string | undefined, repo: string | null | undefined, caller: MemoryCaller): boolean {
+	if (!grantedToCaller(scope, repo, caller.granted)) return false;
 	if (scope === undefined) return true;
 	const normalized = scope.trim().toLowerCase();
 	if (!normalized.startsWith("agent:")) return true;

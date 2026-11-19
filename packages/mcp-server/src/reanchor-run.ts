@@ -272,7 +272,12 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 	// The server's retain outbox file (SUBSTRATE_RETAIN_OUTBOX_PATH) belongs to the running server: constructing a Substrate with it would
 	// hydrate and rewrite that file and start a second drain timer. This process needs only the ledger, so the outbox is memory-only (and,
 	// never fed, empty and timer-less), and the Postgres index and the event bus the re-anchor never uses are not built either.
-	const isolated: SubstrateConfig = { ...config, retainOutbox: { ...config.retainOutbox, path: null } };
+	// The telemetry buffer belongs to the running server, for the same reason: this process holds nothing to retry, so it is off here.
+	const isolated: SubstrateConfig = {
+		...config,
+		retainOutbox: { ...config.retainOutbox, path: null },
+		eventBuffer: null,
+	};
 	const substrate = open.substrateFor !== undefined ? open.substrateFor(isolated, greptime) : new Substrate(isolated, { greptime, index: null, eventBus: () => null });
 	const operators = operatorSurfaces(config);
 	// An explicit --surface is judged by the executor against the operator set; with none, a single operator surface is the answer.

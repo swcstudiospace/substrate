@@ -1253,7 +1253,7 @@ Plans:
 
 **Goal**: A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
 
-**Status**: Not started. Discovery: git calls use argv arrays with no shell string; no per-session repository allowlist was found. The unit confirms that before building it.
+**Status**: Implemented on this line; verification record human_needed (`72-VERIFICATION.md`). The owner decision of 2026-11-16 (surface-scoped grants satisfy the roadmap wording; a session-scoped allowlist is not required) is recorded on the reconcile line and applies here. Discovery (before phase 72): git calls use argv arrays with no shell string; no per-session repository allowlist was found.
 
 **Depends on**: Phase 71
 
@@ -1283,7 +1283,7 @@ Plans:
 
 **Goal**: A real operation spanning at least two registered repositories records durable per-repository step state. Partial failure leaves compensated state or explicit needs-attention, never silent partial success; each retry is idempotent.
 
-**Status**: Not started. Discovery found no existing multi-repo transaction path; that absence is not delivery of the accepted feature and does not waive it. Planning must select and implement a concrete multi-repo operation using Phase 72's registry and scoped executor. The unrelated git-hook install loop robustness observation remains separate.
+**Status**: Implemented on this line (2026-11-18): the cross-repo engine, its store, the fan-out and compensate routes and MCP tools, ported onto the surface-grant executor per the owner decision of 2026-11-16. Gates green: `tsc`, Biome, and 101 affected test files with live PostgreSQL. Verification record not yet re-run on this line; human sign-off pending. Open for the owner: with `SUBSTRATE_REPO_SCOPES` unset, every authenticated surface is granted, so confirm that policy for cross-repo writes or require enforcement. Discovery (before phase 74): no existing multi-repo transaction path.
 
 **Depends on**: Phase 72 (registered repositories, containment and credential-scoped execution)
 
@@ -1316,7 +1316,7 @@ Plans:
 
 **Goal**: An event that fails to write to GreptimeDB is buffered, retried and dead-lettered with a record. No event is dropped silently.
 
-**Status**: Not started. Discovery: `insertEvent` (`packages/mcp-server/src/greptime.ts:1217`) has no retry, and a failure returns `stored: false` (`packages/mcp-server/src/service.ts:2699`) with nothing queued.
+**Status**: Implemented on this line; verification record human_needed (`76-VERIFICATION.md`). The reconcile line's defect fixes were ported on 2026-11-18: settle before chain reads, the closed drain tick, parked claims recorded, and the forget-note dedupe. Discovery (before phase 76): `insertEvent` (`packages/mcp-server/src/greptime.ts`) has no retry, and a failure returned `stored: false` with nothing queued.
 
 **Depends on**: Phase 73 (shared ledger write path)
 
@@ -1331,7 +1331,7 @@ Plans:
 
 **Goal**: A steering command carrying an idempotency key applies once across retries and carries a sequence number, so the reader sees delivery order.
 
-**Status**: Not started. Discovery: no steering command carries a client idempotency key or a sequence number today.
+**Status**: Implemented on this line (merged 2026-11-18 from `gsd/v18-p77-steering-idempotency` at `05cdf2c6`, with the phase 71 hardening it stacks on); verification record human_needed (`77-VERIFICATION.md`). Discovery (before phase 77): no steering command carried a client idempotency key or a sequence number.
 
 **Depends on**: Phase 71
 
@@ -1347,7 +1347,7 @@ Plans:
 
 **Goal**: The ledger, the index and the cache agree, and any drift is reported with evidence. No drift is repaired destructively without a confirmed plan.
 
-**Status**: Not started. Discovery: `substrate_coord_drift_scan` compares git HEAD, the ledger and leases. It does not compare GreptimeDB against TimescaleDB.
+**Status**: Implemented on this line; verification record human_needed (`78-VERIFICATION.md`). This line keeps the design limit of three cross-layer comparisons (D78-1); the reconcile line's wider additions are not on this line. Discovery (before phase 78): `substrate_coord_drift_scan` compares git HEAD, the ledger and leases. It does not compare GreptimeDB against TimescaleDB.
 
 **Depends on**: Phases 73, 75, 76
 
@@ -1419,10 +1419,10 @@ Plans:
 | 69. Doc Proofs | v1.7 | 0/0 | Shipped (PR #181); gaps_found: no anchored hour | 2026-10-29 |
 | 70. Docs SLO and eval | v1.7 | 0/0 | Shipped (PR #182); gaps_found: baseline self-supervised, reads 1.0 | 2026-10-30 |
 | 71. Multi-Session boundary | v1.8 | 4/4 local | Locally verified; human_needed: pending QUALITY | - |
-| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | Not started | - |
+| 72. Repo allowlist and scoped credentials | v1.8 | 0/0 | On PR #216 with surface-scoped grants (owner decision 2026-11-16); human_needed | - |
 | 73. Ledger tamper evidence | v1.8 | 0/0 | Implemented locally; draft PR #201, not merge-ready | - |
-| 74. Cross-repo compensating actions | v1.8 | 0/0 | Not started | - |
+| 74. Cross-repo compensating actions | v1.8 | 0/0 | On PR #216; human_needed (74-VERIFICATION.md) | - |
 | 75. DragonflyDB degradation | v1.8 | 0/0 | Implemented locally; draft PR #200, not merge-ready | - |
-| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | Not started | - |
-| 77. Steering idempotency and ordering | v1.8 | 0/0 | Not started | - |
-| 78. Cross-layer reconciliation | v1.8 | 0/0 | Not started | - |
+| 76. Telemetry buffer and dead-letter | v1.8 | 0/0 | On PR #216 (defect fixes ported); human_needed | - |
+| 77. Steering idempotency and ordering | v1.8 | 0/0 | On PR #216 (migration 43); human_needed | - |
+| 78. Cross-layer reconciliation | v1.8 | 0/0 | On PR #216 (design limit D78-1); human_needed | - |

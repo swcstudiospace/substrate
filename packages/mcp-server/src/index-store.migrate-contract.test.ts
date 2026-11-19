@@ -66,6 +66,10 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		corpus_retrievals: "step 38 is the retrieval telemetry, written only under SUBSTRATE_DOCS_TELEMETRY: a bounded, redacted log that the retention sweep ages out; it is not part of the archive's closed table list, and adding it would change the schema hash that every earlier archive was verified against",
 		corpus_feedback: "step 38 holds the readers' verdicts on corpus documents; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and a lost verdict only costs the re-rank some evidence it collects again",
 		live_session_bindings: "step 42 is durable security authority, including permanent terminal non-reuse records, not reconstructible cache; the legacy logical archive has a closed compatibility hash and excludes it, so complete PostgreSQL-native backup including tombstones is required (this exclusion provides no backup coverage)",
+		planning_steering_sequence: "step 43 holds the per-session steering delivery counter, which must survive a restart so a number is never reused; it is not part of the archive's closed table list and archiving it is a separate change",
+		planning_steering_replay: "step 43 holds the keyed-queue replay records, bounded by their retention and capacity and pruned by the steering store; it is not part of the archive's closed table list and archiving it is a separate change",
+		cross_repo_operations: "step 44 is the cross-repository operation log (phase 74): one row per operation key, rebuilt by re-running the operation with its key, not restored from an archive; it is not part of the archive's closed table list and archiving it is a separate change",
+		cross_repo_steps: "step 44 holds the per-repository steps of a cross-repository operation, written before each git effect; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and an operation is re-run, not restored",
 	},
 };
 

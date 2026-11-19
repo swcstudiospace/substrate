@@ -299,9 +299,9 @@ describeLive("HARD-S1 durable service restart and independent-instance release (
 		const a = await instance(); const b = await instance(); const entry = await issue(a);
 		const inbox = defined(a.service.steering.inbox, "real inbox");
 		const committed = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
-		const enqueue = inbox.enqueue.bind(inbox);
-		const barrier = spyOn(inbox, "enqueue").mockImplementation(async (input) => {
-			const result = await enqueue(input);
+		const enqueueReceipt = inbox.enqueueReceipt.bind(inbox);
+		const barrier = spyOn(inbox, "enqueueReceipt").mockImplementation(async (input, key) => {
+			const result = await enqueueReceipt(input, key);
 			committed.resolve();
 			await release.promise;
 			return result;
