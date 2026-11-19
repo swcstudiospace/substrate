@@ -507,29 +507,54 @@ def test_claimed_node_gets_one_already_claimed_comment_naming_holder(env_file):
     assert launch_fn.calls == []
 
 
-def test_issue_with_running_session_is_skipped_without_graph_find(env_file):
+def test_issue_with_running_session_posts_one_already_running_marker_and_does_not_launch(env_file):
     registry = SessionRegistry()
     registry.add(session("i-1"))
     linear, mcp = FakeLinear([cand()]), FakeMcp()
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
-    assert decisions[0].action == "skip"
-    assert mcp.calls == [] and launch_fn.calls == [] and linear.named("comment") == []
+    assert decisions[0].action == "comment" and decisions[0].marker == "already-running"
+    assert mcp.calls == [] and launch_fn.calls == []
+    posted = linear.named("comment")
+    assert len(posted) == 1 and posted[0][2] == f"{COMMENT_PREFIX} [already-running] {MARKERS['already-running']}"
+
+    run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert len(linear.named("comment")) == 1 and launch_fn.calls == []  # once-only
 
 
-def test_at_capacity_skips_and_decides_again_next_tick(env_file):
+def test_at_capacity_posts_one_queued_marker_then_launches_when_a_slot_frees(env_file):
     registry = SessionRegistry(max_sessions=2)
     registry.add(session("a", graph_id="g-a"))
     registry.add(session("b", graph_id="g-b"))
     linear, mcp = FakeLinear([cand("i-3", "SWC-3")]), FakeMcp()
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
-    assert decisions[0].action == "skip" and "capacity" in decisions[0].reason
-    assert launch_fn.calls == [] and linear.named("comment") == []
+    assert decisions[0].action == "comment" and decisions[0].marker == "at-capacity"
+    assert launch_fn.calls == []
+    posted = linear.named("comment")
+    assert len(posted) == 1 and posted[0][2] == f"{COMMENT_PREFIX} [at-capacity] {MARKERS['at-capacity']}"
+
+    run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert len(linear.named("comment")) == 1  # once-only: later deferrals post nothing
 
     registry = SessionRegistry(max_sessions=2)
     registry.add(session("a", graph_id="g-a"))
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
     assert decisions[0].action == "launch" and len(launch_fn.calls) == 1
-    assert mcp.calls == ["i-3", "i-3"]
+    assert mcp.calls == ["i-3", "i-3", "i-3"]
+    assert len(linear.named("comment")) == 1
+
+
+def test_graph_busy_posts_one_queued_marker_and_does_not_launch(env_file):
+    registry = SessionRegistry()
+    registry.add(session("a", graph_id=GID))  # another issue's live session on the same graph
+    linear, mcp = FakeLinear([cand("i-3", "SWC-3")]), FakeMcp()
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert decisions[0].action == "comment" and decisions[0].marker == "graph-busy"
+    assert launch_fn.calls == []
+    posted = linear.named("comment")
+    assert len(posted) == 1 and posted[0][2] == f"{COMMENT_PREFIX} [graph-busy] {MARKERS['graph-busy']}"
+
+    run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert len(linear.named("comment")) == 1
 
 
 def test_worktree_refused_becomes_one_once_only_marker_comment(env_file):
@@ -666,9 +691,11 @@ def test_second_issue_on_a_live_graph_is_skipped(env_file):
     mcp = FakeMcp({"i-9": other})
     linear = FakeLinear([cand("i-9", "SWC-9")])
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
-    assert [d.action for d in decisions] == ["skip"]
+    assert [d.action for d in decisions] == ["comment"]
     assert "already running for graph" in decisions[0].reason
-    assert launch_fn.calls == [] and linear.named("comment") == []
+    assert launch_fn.calls == []
+    comments = linear.named("comment")
+    assert len(comments) == 1 and "[graph-busy]" in comments[0][2]
 
 
 def test_unstored_outcome_is_logged_with_ids(env_file):

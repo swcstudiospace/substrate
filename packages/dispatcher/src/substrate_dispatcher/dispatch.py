@@ -29,7 +29,7 @@ from .linear import Candidate
 from .quota import burn_breaches
 from .worktree import WorktreeRefused
 
-EVENT_RETRYABLE_MARKERS = frozenset({"host-unreachable"})
+EVENT_RETRYABLE_MARKERS = frozenset({"host-unreachable", "at-capacity", "graph-busy", "already-running"})
 # Rows registered for this phase (Phase 17, event-sources.ts): a launch lands on
 # ``dispatch.outcome`` (kind note), each terminal non-dispatch and give-up on
 # ``dispatch.failed`` (kind warning). Transient states emit nothing.
@@ -56,6 +56,9 @@ MARKERS: dict[str, str] = {
     "exited-unclaimed": "hermes session exited (code {code}) without claiming the node — removed the dispatch label; not retrying",
     "claim-timeout": "no claim within 15 minutes — removed the dispatch label; not retrying",
     "quota-burn": "quota burn SLO {slo} breached its rolling hour; dispatch storm-breaker tripped — not dispatching",
+    "at-capacity": "every dispatch slot is busy; queued, will launch on a later tick",
+    "graph-busy": "this graph already has a running session; queued, will launch once it ends",
+    "already-running": "a session for this issue is already running; not launching a second one",
 }
 
 LaunchFn = Callable[[Candidate, dict], Launched]
@@ -255,13 +258,14 @@ def decide(
     if candidate.issue_id in given_up:
         return Decision("skip", candidate, "gave up on this issue (no claim); not relaunching")
     if candidate.issue_id in active_issue_ids:
-        return Decision("skip", candidate, "session already running for this issue")
+        return Decision("comment", candidate, "session already running for this issue", marker="already-running")
     if not found or not found.get("found"):
         reason = (found or {}).get("reason") or "no registered node"
         return Decision("comment", candidate, f"no node: {reason}", marker="no-node", found=found)
     if found.get("graph_id") in active_graph_ids:
         return Decision(
-            "skip", candidate, f"session already running for graph {found.get('graph_id')}", found=found,
+            "comment", candidate, f"session already running for graph {found.get('graph_id')}",
+            marker="graph-busy", found=found,
         )
     holder = (found.get("node") or {}).get("claimed_by")
     if holder and _lease_is_held(found):
@@ -270,7 +274,7 @@ def decide(
             marker="already-claimed", found=found,
         )
     if capacity_left <= 0:
-        return Decision("skip", candidate, "at capacity", found=found)
+        return Decision("comment", candidate, "at capacity", marker="at-capacity", found=found)
     return Decision(
         "launch", candidate, f"graph {found.get('graph_id')} node {found.get('node_id')}", found=found
     )

@@ -115,7 +115,7 @@ def test_sigterm_ignoring_session_is_killed_after_grace_and_holds_its_slot(env_f
         tick_linear, FakeMcp(), env_file=env_file, registry=registry, launch_fn=RecordingLaunch()
     )
     assert registry.capacity_left() == 0
-    assert decisions[0].action == "skip" and launch_fn.calls == []
+    assert decisions[0].action == "comment" and launch_fn.calls == []
 
     reap(CLAIM_TIMEOUT_SECONDS + TERMINATE_GRACE_SECONDS)
     assert s.proc.signals == ["terminate", "kill"]

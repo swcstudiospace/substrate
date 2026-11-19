@@ -339,7 +339,7 @@ def test_pending_vm_tasks_hold_their_slots_so_a_hermes_session_cannot_exceed_the
 
     hermes, launch_fn = FakeLinear([cand("i-3", "SWC-3")]), RecordingLaunch()
     decisions, _, _, _ = run_tick(hermes, FakeMcp(), env_file=env_file, registry=second, launch_fn=launch_fn)
-    assert [d.action for d in decisions] == ["skip"] and decisions[0].reason == "at capacity"
+    assert [d.action for d in decisions] == ["comment"] and decisions[0].reason == "at capacity"
     assert launch_fn.calls == []
 
     world.down = False  # the host recovers: both pending tasks are readopted, none was displaced
