@@ -1,135 +1,110 @@
 ---
 phase: 72-repo-allowlist-and-scoped-credentials
-verified: 2026-11-18T00:00:00Z
+verified: 2026-11-19T00:00:00Z
 status: human_needed
-score: 5/7 truths verified (2 present but behavior-unverified, 1 uncertain, 0 failed)
-covered_files: [".env.example", ".planning/phases/72-repo-allowlist-and-scoped-credentials/72-01-PLAN.md", ".planning/phases/72-repo-allowlist-and-scoped-credentials/72-01-SUMMARY.md", "docs/worktree-fleet-api.md", "packages/cli/src/worktree/command.ts", "packages/cli/src/worktree/scope.test.ts", "packages/cli/src/worktree/scope.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/service.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/memory-policy.ts", "packages/mcp-server/src/memory-recall.ts", "packages/mcp-server/src/repo-executor.test.ts", "packages/mcp-server/src/repo-executor.ts", "packages/mcp-server/src/repo-scope.boundary.test.ts", "packages/mcp-server/src/repo-scope.reads-writes.test.ts", "packages/mcp-server/src/repo-scope.routes.test.ts", "packages/mcp-server/src/repo-scope.test.ts", "packages/mcp-server/src/repo-scope.ts", "packages/mcp-server/src/route-policy.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/worktree-registry-fake.ts", "packages/mcp-server/src/worktree-registry.testkit.ts", "packages/mcp-server/src/worktree-registry.ts"]
-covered_digest: "v3:sha256:04baec3b8035dc4f05ea2102b300d38e900cd540a57bb64a8841914a48b27516"
+score: 4/7 truths verified (2 present but behavior-unverified, 1 uncertain, 0 failed)
+covered_files: [".planning/phases/72-repo-allowlist-and-scoped-credentials/72-01-PLAN.md", ".planning/phases/72-repo-allowlist-and-scoped-credentials/72-01-SUMMARY.md", "packages/cli/src/worktree/command.ts", "packages/cli/src/worktree/scope.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/service.ts", "packages/mcp-server/src/cross-repo-ops.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/repo-executor.ts", "packages/mcp-server/src/repo-scope.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts"]
+covered_digest: "v3:sha256:49fdca8ac2eedeaafc2adf09b7fb479995b7d7797218abf46415a2cb2734626a"
 behavior_unverified: 2
 overrides_applied: 0
+re_verification:
+  previous_status: human_needed
+  previous_score: 5/7
+  gaps_closed:
+    - "scopedGit has a production caller — now packages/mcp-server/src/cross-repo-ops.ts:213 (Phase 74)"
+  gaps_remaining: []
+  regressions: []
 gaps: []
-deferred:
-  - truth: "scopedGit has a production caller"
-    addressed_in: "Phase 74"
-    evidence: "Phase 74 consumes the registry and scoped executor from this phase (ROADMAP Phase 74 status line)"
 behavior_unverified_items:
   - truth: "SC1 MCP door: drift_scan refuses an ungranted repository or path before any git call"
-    test: "Call MCP tools/call drift_scan with a path in owner/b from a surface granted only owner/a, with a spy on the git runner."
-    expected: "isError refusal; zero git calls; one repo.scope-refused warning in the ledger."
-    why_human: "The service gate and the REST POST /drift door are tested. No test in repo-scope*.test.ts or drift.test.ts names drift_scan under a scope."
+    test: "Call MCP coord_drift_scan with a path in owner/b from a surface granted only owner/a, with a spy on the git runner."
+    expected: "Refusal; zero git calls; one repo.scope-refused warning in the ledger."
+    why_human: "Wired at packages/mcp-server/src/mcp.ts:2070 via substrate.scopedDriftScan, but no test in repo-scope*.test.ts or drift.test.ts names drift_scan under a scope (checked at HEAD ee998735). Presence and wiring alone do not prove the refusal."
   - truth: "SC2 live session: updateLiveSession refuses a repo_id outside the grant before issue or transition"
     test: "Call substrate.updateLiveSession as a surface granted owner/a with repo_id owner/b, once for issue and once for transition."
     expected: "Refusal; authority issue and transition not called; one repo.scope-refused warning."
-    why_human: "No test calls updateLiveSession under scoping."
+    why_human: "Gate present at packages/mcp-server/src/service.ts:2089 (authorizeRepo before issue/transition), but no test calls updateLiveSession under scoping (checked at HEAD ee998735)."
 human_verification:
   - test: "Decide whether GET /corpus/proof discloses another repository's corpus"
     expected: "Recorded decision: accept the whole-corpus root, treeSize and sibling leaf commitments as allowed for a granted caller, or rebuild the proof per repository, or withhold foreign siblings."
-    why_human: "The inclusion reply carries the whole-corpus root, treeSize and the audit path. Its sibling hashes commit to other repositories' (repo, path, sha256). Whether that is reading another repository's corpus is a policy call (UNCERTAIN, truth 5)."
-  - test: "Confirm the owner decision of 2026-11-16 closes the credential clause and the HARD-S2 text"
-    expected: "Either HARD-S2 in .planning/REQUIREMENTS.md is amended to surface-scoped grants (it still reads 'repository-specific references' and is still 'Not started'), or per-repository credential references are added."
-    why_human: "The code grants per surface (SUBSTRATE_REPO_SCOPES keys are surfaces). ROADMAP Phase 72 records the owner decision that surface-scoped grants satisfy the roadmap wording. The requirement text was not updated."
-  - test: "Run the two behavior_unverified_items (MCP drift_scan refusal, live-session issue/transition gate)"
-    expected: "Each passes as written above."
-    why_human: "Tests for these paths do not exist yet. Presence and wiring alone do not prove the refusal."
+    why_human: "corpusProofReply (packages/mcp-server/src/corpus/service.ts:301) gates the named repo via repoRefusalOf, but the reply body still carries the whole-corpus root and treeSize (inclusionOf result). Whether that is reading another repository's corpus is a policy call, not decidable from code."
+  - test: "Confirm the owner decision of 2026-11-16 closes the credential clause and amend HARD-S2"
+    expected: "HARD-S2 in .planning/REQUIREMENTS.md amended to surface-scoped grants (it still reads 'repository-specific references' and its row still reads 'Not started'), or per-repository credential references added."
+    why_human: "Code grants per surface via SUBSTRATE_REPO_SCOPES (packages/mcp-server/src/repo-scope.ts). ROADMAP Phase 72 records the owner decision that surface-scoped grants satisfy the roadmap wording, but the requirement text was not updated — operator action."
+  - test: "Run the two behavior_unverified_items (MCP drift_scan refusal, live-session issue/transition gate) and the Postgres worktree filter live"
+    expected: "Each passes as written above; the Postgres list filter returns only granted rows for owner/a vs owner/b."
+    why_human: "Tests for the two named doors do not exist yet, and the Postgres worktree-registry list query was not run against a live database in this phase. Operator/live execution only."
 ---
 
 # Phase 72: Repo allowlist and scoped credentials Verification Report
 
 **Phase Goal:** A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
-**Verified:** 2026-11-18
+**Verified:** 2026-11-19
 **Status:** human_needed
-**Commit under test:** `357d6b15` (branch `gsd/autonomous-rerun`). Re-verification of the 2026-11-02 record at fix commit `e855734b`. 72 commits separate them. The changes since are in `cli/src/worktree/command.ts` (+ scope gate wiring and merge-back nested-worktree skip), `service.ts`, `mcp.ts`, `server.ts`, `config.ts` and `route-policy.ts`.
-
-Scope: code reading plus targeted tests. The live stack and Postgres were not run.
+**Re-verification:** Yes — after Phase 74 ported the scoped executor (previous record 2026-11-18, HEAD 357d6b15; this pass at HEAD ee998735, no tests run per assignment)
 
 ## Goal Achievement
 
-### Observable truths
-
-Truths are the two roadmap success criteria, split by door. Verdicts come from the code at HEAD and targeted tests at HEAD.
+### Observable Truths
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | SC1 CLI: an ungranted repository or path is refused before any git call | ✓ VERIFIED | `packages/cli/src/worktree/command.ts:581` calls `scopeRefusal(args, deps, roots)` before the dispatch `switch`. `scope.ts` `firstRefusal` checks `--repo`, roots, `provision` target and `guard` paths through `authorizeRepo` / `authorizeRepoPath` (`repo-scope.ts`). A refusal exits 2 and runs no git. Tests: `cli/src/worktree/scope.test.ts` and `command.test.ts` (101 pass, 0 fail when run alone). |
-| 2 | SC1 API, `POST /drift`: an ungranted repository is refused before the scan | ✓ VERIFIED | `server.ts:1585–1601` calls `substrate.scopedDriftScan(..., surface)`. `service.ts` `scopedDriftScan` runs `authorizeRepo`, then `authorizeRepoPath` with the realpath target, and calls `driftScan` only after both pass. Tests: `repo-scope.routes.test.ts` and `repo-scope.boundary.test.ts` (in the 146-pass targeted run). |
-| 3 | SC1 MCP, `drift_scan`: the same gate | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | `mcp.ts` calls `scopedDriftScan` (wiring read). No test names `drift_scan` under a scope; `drift.test.ts` has no scope references. See behavior_unverified_items. |
-| 4 | SC2 worktrees: a named ungranted repository is refused, and an unnamed read returns granted rows only | ✓ VERIFIED | `service.ts` `listWorktrees` (about 5160–5185): a named repository goes through `authorizeRepo` and is refused with `repoRefusal`; `grantedRepos` passes the granted list to `store.list({ repos })`; a caller with no grants reads nothing. Tests: `repo-scope.boundary.test.ts` and `repo-scope.routes.test.ts`. Postgres filter (`lower(repo) in (select jsonb_array_elements_text(...))`) has no repos case in `worktree-registry*.test.ts`. That part is PRESENT_BEHAVIOR_UNVERIFIED under the fake store only; it is noted in the Human Verification list. |
-| 5 | SC2 corpus: plan, ingest, proof and anchor refuse an ungranted repository before any manifest read; status and reconcile refuse under scope | ✓ VERIFIED for refusal; ? UNCERTAIN for disclosure | `corpus/service.ts` `repoRefusalOf` (line 154) runs before reads; `allReposRefusal` (line 166) refuses `GET /corpus/status` and `POST /corpus/reconcile` when scoping is on. `corpus` tests in `repo-scope.boundary.test.ts` pass (describe at line 155). Disclosure: `GET /corpus/proof` returns the whole-corpus `root`, `treeSize` and audit-path sibling commitments, which include other repositories' leaves. That is a policy question, not a refusal failure. Human item 1. |
-| 6 | SC2 live session: `updateLiveSession` refuses a repo outside the grant before issue or transition | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | `service.ts` `updateLiveSession` (about line 2089) calls `authorizeRepo`. No test calls it under scoping. Human item 2. |
-| 7 | Credential scope: a credential for one repository cannot read another repository's data | ✓ VERIFIED against the owner decision; ? UNCERTAIN against HARD-S2 text | Grants are per surface (`SUBSTRATE_REPO_SCOPES`, `repo-scope.ts` `parseRepoScopes`). ROADMAP Phase 72 status records the owner decision of 2026-11-16 that surface-scoped grants satisfy the roadmap wording. `REQUIREMENTS.md` HARD-S2 still says "repository-specific references" and reads "Not started". Human item 2. |
+| 1 | SC1 API: `POST /drift` refuses a repository/path outside the surface grant before any git call | ✓ VERIFIED | `service.ts` `scopedDriftScan` gates via `authorizeRepoPath`; `server.ts:1594` calls it. Registry/scope unit + boundary tests cover the service and REST doors (prior run 146 pass, recorded in previous verification; not re-run here). |
+| 2 | SC1 CLI: `substrate worktree` refuses an ungranted repository/path before any git call | ✓ VERIFIED | `packages/cli/src/worktree/scope.ts` `scopeRefusal` (realpath containment, grant check) wired at `command.ts:581` before dispatch; `scope.test.ts` + `command.test.ts` cover it. |
+| 3 | SC1 MCP: `coord_drift_scan` refuses an ungranted repository/path before any git call | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Wired `mcp.ts:2070` → `scopedDriftScan`, but no test exercises this door under a scope. See Human Verification. |
+| 4 | SC2 worktrees: a surface granted one repository cannot list another's worktrees | ✓ VERIFIED | `service.ts:5165` `listWorktrees(query, callerSurface)` refuses via `authorizeRepo` when a repo is named; `worktree-registry.ts` `repos` filter restricts the Postgres list. Routes + boundary tests cover REST and MCP doors; Postgres execution itself is an operator/live item below. |
+| 5 | SC2 corpus: a surface granted one repository cannot read another's corpus | ⚠️ UNCERTAIN | `corpus/service.ts` `repoRefusalOf` gates plan/ingest/proof after parse and before any read; `allReposRefusal` refuses status/reconcile to scoped callers. But `GET /corpus/proof` returns the whole-corpus `root`/`treeSize` for a granted caller — disclosure policy undecided (operator). |
+| 6 | SC2 live session: `updateLiveSession` refuses a `repo_id` outside the grant before issue/transition | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Gate at `service.ts:2089` (`authorizeRepo` → `repoRefusal`), but no test calls it under scoping. See Human Verification. |
+| 7 | Credential model: the surface bearer plus its `SUBSTRATE_REPO_SCOPES` grant is the scoped credential; `scopedGit` decides before spawning and has a production caller | ✓ VERIFIED | `repo-scope.ts` grant resolution; `repo-executor.ts` `scopedGit` decides-then-spawns (zero runner calls on refusal, per its unit tests); production caller now `cross-repo-ops.ts:213` (Phase 74) — the previous deferred item is closed. HARD-S2 text amendment is operator-only (below). |
 
-**Score:** 5/7 truths verified (truths 3 and 6 are present but behavior-unverified; truth 5's disclosure part and truth 7's requirement-text part are uncertain). 0 failed.
+**Score:** 4/7 truths verified (2 present but behavior-unverified, 1 uncertain)
 
-### Deferred items
-
-| # | Item | Addressed in | Evidence |
-|---|------|--------------|----------|
-| 1 | `scopedGit` has no production caller | Phase 74 | ROADMAP Phase 74 status: the cross-repo engine ports onto "the surface-grant executor" from this phase. |
-
-### Required artifacts
+### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `packages/mcp-server/src/repo-scope.ts` | Pure gate, parsers, refusal payload | ✓ VERIFIED | `authorizeRepo`, `authorizeRepoPath`, `isGranted`, `grantedRepos`, `rowsInGrant`, `repoRefusalPayload` |
-| `packages/mcp-server/src/repo-executor.ts` | `scopedGit` | ✓ VERIFIED | Gate before the runner; `GIT_CEILING_DIRECTORIES`; argv only. Tests: `repo-executor.test.ts` |
-| `packages/cli/src/worktree/scope.ts` | CLI gate before git | ✓ VERIFIED | Wired at `command.ts:581` |
-| `packages/mcp-server/src/service.ts` | Gates and filters | ✓ VERIFIED | `scopedDriftScan`, `listWorktrees`, `scopedRepoRefusal`, `scopedGraphRefusal`, memory reply filter |
-| `packages/mcp-server/src/corpus/service.ts` | Corpus gates | ✓ VERIFIED | `repoRefusalOf`, `allReposRefusal` |
-| `packages/mcp-server/src/route-policy.ts` | Default-deny declarations | ✓ VERIFIED | Declares the scoped routes |
-| `packages/mcp-server/src/config.ts` | `repoScope` from env, fail on malformed | ✓ VERIFIED | `repoScopeOrRefuse` at line 960 |
-| `.planning/REQUIREMENTS.md` HARD-S2 | Requirement text | ⚠️ NOT UPDATED | Human item 2 |
+| `packages/mcp-server/src/repo-scope.ts` | Registry, grants, pure gate, containment | ✓ VERIFIED | Present, substantive (parse + authorize + realpath containment + audit digest). |
+| `packages/mcp-server/src/repo-executor.ts` | `scopedGit` decide-then-spawn | ✓ VERIFIED | Present; production caller `cross-repo-ops.ts:213`. |
+| `packages/cli/src/worktree/scope.ts` | CLI gate before dispatch | ✓ VERIFIED | `scopeRefusal` wired at `command.ts:581`. |
+| `packages/mcp-server/src/config.ts` + `flag-registry.ts` + `.env.example` | `SUBSTRATE_REPO_REGISTRY` / `SUBSTRATE_REPO_SCOPES` parsing | ✓ VERIFIED | Present; malformed value refuses boot. |
 
-### Key link verification
+### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|-----|--------|---------|
-| `server.ts` `POST /drift` | `service.ts` `scopedDriftScan` | line 1594 | ✓ WIRED | Routes test |
-| `mcp.ts` `drift_scan` | `service.ts` `scopedDriftScan` | `mcp.ts` | ✓ WIRED | Not exercised by any test (truth 3) |
-| `server.ts` `GET /worktrees` and `mcp.ts` `worktree_list` | `service.ts` `listWorktrees(query, surface)` | `server.ts`, `mcp.ts` | ✓ WIRED | Routes and boundary tests |
-| `cli/worktree/command.ts` | `scopeRefusal` | line 581 | ✓ WIRED | Scope and command tests |
-| `corpus/service.ts` gates | `authorizeRepo` | `repoRefusalOf` | ✓ WIRED | Boundary test |
+| `server.ts` `POST /drift` | `service.scopedDriftScan` | direct call, `server.ts:1594` | ✓ WIRED | Gate before `readGitTip`. |
+| `mcp.ts` `coord_drift_scan` | `service.scopedDriftScan` | direct call, `mcp.ts:2070` | ✓ WIRED | Not exercised by any test (truth 3). |
+| `server.ts` / `mcp.ts` worktree doors | `service.listWorktrees(query, surface)` | surface passed, `server.ts:2468` | ✓ WIRED | Grant filter in query. |
+| `cli/worktree/command.ts` | `scope.scopeRefusal` | `command.ts:581` before dispatch | ✓ WIRED | Exits before git. |
+| `corpus/service.ts` doors | `repo-scope.authorizeRepo` | `repoRefusalOf` / `allReposRefusal` | ✓ WIRED | Before manifest reads. |
+| `cross-repo-ops.ts` | `repo-executor.scopedGit` | `cross-repo-ops.ts:213` | ✓ WIRED | Closes previous deferred gap. |
+| `service.ts` `updateLiveSession` | `repo-scope.authorizeRepo` | `service.ts:2089` | ✓ WIRED | Not exercised by any test (truth 6). |
 
-### Requirements coverage
+### Data-Flow Trace (Level 4)
+
+No rendered dynamic data in scope for this phase; refusals carry reason codes only (never the requested path; audit records a keyed digest via `repoRefusalPayload`). ✓
+
+### Behavioral Spot-Checks
+
+SKIPPED per assignment (no tests run in this pass). Prior verification recorded targeted runs at HEAD 357d6b15: 146 pass across the six scope test files; `command.test.ts` 101 pass alone. Combined seven-file run showed a load-sensitive `merge-back` flake in `command.test.ts` (not reproduced alone), recorded as an owner rerun, not a gap.
+
+### Requirements Coverage
 
 | Requirement | Source | Status | Evidence |
 |-------------|--------|--------|----------|
-| HARD-S2 | Phase 72 | ⚠️ NEEDS HUMAN | Truths 1, 2, 4, 5 cover the enforcement. The credential clause depends on the owner decision of 2026-11-16 (truth 7). The requirement text was not updated |
+| HARD-S2 | Phase 72 | ⚠️ NEEDS HUMAN | Enforcement truths 1, 2, 4, 7 verified in code. Credential clause rests on the 2026-11-16 owner decision recorded in ROADMAP; REQUIREMENTS.md still reads "Not started" / "repository-specific references" — operator amendment. |
 
-## Tests run (targeted, at HEAD 357d6b15)
+### Anti-Patterns Found
 
-| Command | Result |
-|---------|--------|
-| `bun test` on `repo-scope.test.ts`, `repo-scope.boundary.test.ts`, `repo-scope.routes.test.ts`, `repo-scope.reads-writes.test.ts`, `repo-executor.test.ts`, `cli/src/worktree/scope.test.ts` | 146 pass, 0 fail (6 files) |
-| `bun test packages/cli/src/worktree/command.test.ts` (alone) | 101 pass, 0 fail |
-| Same seven files run together in one process | 245 pass, 2 fail, 2 errors. Both failures and both errors are in `command.test.ts`: one test hit the 5000 ms timeout, and a `merge-back --execute` assertion (`merged-a` missing) failed under parallel load. Not reproduced alone. Treated as load sensitivity in the merge-back path, which is outside the phase's scope gates. Flagged for an owner rerun |
+No `TBD`/`FIXME`/`XXX`/`TODO` markers in the owned implementation files at HEAD ee998735.
 
-Not run: the full suite, Postgres (`worktree-registry.pg.test.ts`), the live stack, and the MCP `drift_scan` path (no test exists).
+### Human Verification Required
 
-## Anti-patterns
+Listed in frontmatter `human_verification` (3 items): (1) corpus-proof disclosure policy, (2) HARD-S2 text amendment confirming the owner decision, (3) live execution of the two behavior-unverified doors plus the Postgres worktree filter.
 
-No `TBD`, `FIXME` or `XXX` markers were found in the owned implementation files. The combined-run flake above is recorded, not counted as a gap.
-
-## Human Verification Required
-
-### 1. Corpus proof disclosure
-
-**Test:** Decide whether `GET /corpus/proof` discloses another repository's corpus.
-**Expected:** A recorded decision: accept the whole-corpus root, `treeSize` and sibling leaf commitments as allowed for a granted caller; or rebuild the proof per repository; or withhold foreign siblings.
-**Why human:** Policy question. Sibling hashes commit to other repositories' `(repo, path, sha256)`.
-
-### 2. Credential model and HARD-S2 text
-
-**Test:** Confirm the owner decision of 2026-11-16 closes the credential clause. Amend HARD-S2 in `.planning/REQUIREMENTS.md` to surface-scoped grants, or add per-repository credential references.
-**Expected:** HARD-S2 text matches the chosen model.
-**Why human:** The owner decision is recorded in ROADMAP, but the requirement text was not updated.
-
-### 3. Behavior-unverified paths
-
-**Test:** Add and run (a) an MCP `drift_scan` refusal test with a git-runner spy, and (b) an `updateLiveSession` issue and transition refusal test under scoping. Run the Postgres worktree filter against `owner/a` and `owner/b` rows.
-**Expected:** Refusals with zero git calls and zero authority writes; the Postgres filter returns only granted rows.
-**Why human:** These tests do not exist yet. Presence and wiring alone do not prove the refusal.
+No code gaps: every API/CLI/MCP/corpus/live-session door names a concrete gate and call site above, and `scopedGit` now has its Phase 74 production caller.
 
 ---
 
-_Verified: 2026-11-18_
+_Verified: 2026-11-19_
 _Verifier: Claude (gsd-verifier)_
