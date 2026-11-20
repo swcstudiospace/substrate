@@ -10,6 +10,7 @@ overrides_applied: 0
 re_verification:
   previous_status: passed
   previous_score: 11/11
+  previous_record: "17-VERIFICATION.md dated 2026-10-09 at HEAD 69272f1"
   gaps_closed: []
   gaps_remaining: []
   regressions: []

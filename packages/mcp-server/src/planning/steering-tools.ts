@@ -150,6 +150,7 @@ export class LiveSessionBoundary {
 }
 export interface SteeringWiring {
  readonly enabled: boolean; readonly inbox: SteeringInbox | null; readonly clock: SteeringClock; readonly settingsErrors: readonly SteeringConfigError[]; readonly newDirectiveId?: () => string;
+ readonly onQueued?: (directiveId: string) => Promise<void>;
  readonly boundary: LiveSessionBoundary;
  readonly idempotency: SteeringIdempotency<SteeringAcknowledgeReply>;
  readonly executeLiveCall: <T>(invocation: LiveSessionInvocation, effect: (prepared: PreparedLiveCall) => Promise<T>, dispatch?: PreparedLiveDispatch) => Promise<T>;
@@ -168,6 +169,9 @@ export async function queueSteering(wiring: SteeringWiring, caller: SteeringCall
   if (key === undefined) return enqueueDirective(wiring, inbox, surface, input, wiring.newDirectiveId?.() ?? randomUUID());
   return wiring.idempotency.serialize(surface, key, () => keyedQueue(wiring, inbox, surface, key, input));
  }, dispatch); } catch (cause) { if (cause instanceof LiveSessionBoundaryError) return cause.refusal; throw cause; }
+ // A fresh queue wakes its session: the long-poll waiters are released and one hint is announced. Neither can fail the queue, which is already audited.
+ if (outcome.freshlyQueued && reply.status === "queued") await wiring.onQueued?.(reply.directive_id);
+ return reply;
 }
 /** Queues one directive as the inbox answers it. The reply carries no sequence: that is for keyed requests only. */
 async function enqueueDirective(wiring: SteeringWiring, inbox: SteeringInbox, surface: string, input: SteeringQueueInput, id: string, keyed?: SteeringKeyedRequest): Promise<SteeringWriteResult> {

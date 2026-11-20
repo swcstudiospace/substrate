@@ -18,6 +18,9 @@
  * (fail-open: a note that was not recorded is said so on stderr, and `--json` carries its delivery result).
  * Before each removal the workspace guard (`workspaceGuard`) runs on that worktree: a refusal is a failed removal, so the run
  * stops and nothing is retried. A worktree whose path is listed in `SUBSTRATE_WORKTREE_GUARD_ALLOW` skips the guard.
+ * Before the claim check a worktree is also kept when another linked worktree of the same repository lies inside it: a plain
+ * `git worktree remove` takes everything below the directory, including the regenerable directories the ignored-work check
+ * skips. Ignored work the inventory finds (`ignored-files`) is `review` and is never removed.
  *
  * `merge-back` records, as a retained note, that a linked worktree's work is already on the default branch. It never
  * merges, removes or moves anything; it refuses a worktree that is dirty, unpushed, unproven, holds ignored work or has a
@@ -44,6 +47,7 @@ import {
 	diskPressure,
 	exclusiveBytes,
 	forecastConflicts,
+	listWorktrees,
 	type FreeBytesFn,
 	type GitRunner,
 	gitOut,
@@ -358,6 +362,13 @@ async function linkTables(paths: readonly string[]): Promise<Map<string, TreeLin
 	return tables;
 }
 
+/** The linked worktrees of the repository that lie inside `path`; null when git cannot list them. */
+async function nestedWorktrees(path: string, repoDir: string, git: GitRunner): Promise<string[] | null> {
+	const listing = await listWorktrees(repoDir, git);
+	if (listing === null) return null;
+	return listing.map((item) => item.path).filter((other) => other !== path && other.startsWith(path + sep));
+}
+
 async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {
 	const rootList = roots(args, deps);
 	if (rootList.length === 0) return usageError(deps, NO_ROOT);
@@ -405,6 +416,19 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 		}
 		const again = await inspectWorktree(current, { git: deps.git, pr: createPrShared(deps.gh) });
 		let check = classifyForPrune(again, pruneContext(days, deps));
+		// Before the claim re-check, which stays the last step: git worktree remove takes everything below the directory, so a
+		// linked worktree nested in it (possibly under a regenerable directory the ignored-work check skips) would go too.
+		if (check.class === "safe") {
+			const nested = await nestedWorktrees(info.path, info.repo_dir, deps.git);
+			if (nested === null) {
+				skip(info.path, ["git could not list the repository's worktrees"]);
+				continue;
+			}
+			if (nested.length > 0) {
+				skip(info.path, [`contains linked worktree ${nested.join(", ")}`]);
+				continue;
+			}
+		}
 		const graphId = check.class === "safe" ? graphIdForWorktree(info.path, rootList) : null;
 		// Asked again, last thing before the removal: a session may have claimed the graph since the inventory.
 		if (graphId !== null) check = classifyForPrune(again, pruneContext(days, deps), await claimStatus(graphId, deps.claims));

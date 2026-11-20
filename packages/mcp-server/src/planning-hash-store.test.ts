@@ -86,6 +86,7 @@ function server(env: Record<string, string>, store: PlanningHashStore, failing: 
 }
 
 const ON = { SUBSTRATE_PLANNING_HASH_STORE: "on" };
+const OFF = { SUBSTRATE_PLANNING_HASH_STORE: "off" };
 
 describe("the in-memory adapter", () => {
 	test("save upserts what it is given and keeps the rest; load answers a copy, so a caller cannot edit the store", async () => {
@@ -172,8 +173,8 @@ describe("the planning refresh with the hash store on", () => {
 
 	test("with the flag off nothing is read or written: a restart ingests every page again and the store stays empty", async () => {
 		const store = memoryPlanningHashStore();
-		await server({}, store).refresh();
-		const restarted = server({}, store);
+		await server(OFF, store).refresh();
+		const restarted = server(OFF, store);
 		await restarted.refresh();
 		expect(restarted.batches.flat().sort()).toEqual([ROADMAP, STATE]);
 		expect((await store.load()).size).toBe(0);

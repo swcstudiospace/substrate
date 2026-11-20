@@ -288,6 +288,7 @@ describe("statuses", () => {
 			[refused({ code: "wrong-session" }), 409],
 			[refused({ code: "already-acknowledged" }), 409],
 			[refused({ code: "confirmation-required" }), 409],
+			[refused({ code: "idempotency-conflict" }), 409],
 			[refused({ code: "rate-limited", retryAfterMs: 1_500 }), 429],
 			[refused({ code: "audit-unavailable", attempts: 2, lastErrorCode: "X" }), 503],
 			[refused({ code: "invalid-directive", issues: [] }), 400],

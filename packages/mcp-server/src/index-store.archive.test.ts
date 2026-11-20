@@ -42,7 +42,7 @@ const BASE = Date.now();
 const at = (n: number) => (): number => BASE + n * 5_000;
 
 /** `information_schema.columns.data_type` for each archive column type. */
-const PG_DATA_TYPE: Record<ColumnType, string> = { text: "text", int: "integer", bigint: "bigint", bool: "boolean", timestamptz: "timestamp with time zone" };
+const PG_DATA_TYPE: Record<ColumnType, string> = { text: "text", int: "integer", smallint: "smallint", bigint: "bigint", bool: "boolean", timestamptz: "timestamp with time zone", jsonb: "jsonb" };
 
 let store: IndexStore;
 let raw: SQL;
@@ -64,7 +64,7 @@ async function directRows(spec: ArchiveTableSpec): Promise<Array<Record<string, 
 		.map((column) =>
 			column.type === "timestamptz"
 				? `to_char("${column.name}" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "${column.name}"`
-				: column.type === "bigint"
+				: column.type === "bigint" || column.type === "jsonb"
 					? `"${column.name}"::text as "${column.name}"`
 					: `"${column.name}"`,
 		)
@@ -111,6 +111,7 @@ describeLive("index archive against a live index", () => {
 		await raw`delete from memory_quarantine where id like ${like}`.catch(() => undefined);
 		await raw`delete from memory_writes where idempotency_key like ${like}`.catch(() => undefined);
 		await raw`delete from context_matrix_entries where entry_id like ${like}`.catch(() => undefined);
+		await raw`delete from corpus_documents where repo like ${like}`.catch(() => undefined);
 		if (scratchName !== null) await raw.unsafe(`drop database if exists "${scratchName}" with (force)`).catch(() => undefined);
 		await raw.end().catch(() => undefined);
 		await store.close().catch(() => undefined);
@@ -153,6 +154,9 @@ describeLive("index archive against a live index", () => {
 		for (const [name, kind] of [["cm1", "decision"], ["cm2", "fact"], ["cm3", "todo"]] as const) {
 			await raw`insert into context_matrix_entries (entry_id, milestone, phase, source_path, source_sha256, entry_kind, body_redacted)
 				values (${id(name)}, 'm1', 'p1', 'docs/plan.md', ${"0".repeat(64)}, ${kind}, ${`${RUN} ${name} body`})`;
+		for (const name of ["d1", "d2", "d3"]) {
+			await raw`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, state, ingested_at)
+				values (${`${RUN}/seed`}, ${`doc-${name}.md`}, 'doc', 2, ${"0".repeat(64)}, 10, 'fs', 'active', now())`;
 		}
 	}
 
@@ -184,7 +188,7 @@ describeLive("index archive against a live index", () => {
 		}
 		const tables = (await raw`
 			select table_name from information_schema.tables
-			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name like 'context\_matrix\_%')`) as Array<Record<string, unknown>>;
+			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name like 'context\_matrix\_%' or table_name = 'corpus_documents')`) as Array<Record<string, unknown>>;
 		expect(tables.map((row) => String(row.table_name)).sort()).toEqual(ARCHIVE_TABLES.map((spec) => spec.name).sort());
 	});
 
@@ -240,6 +244,11 @@ describeLive("index archive against a live index", () => {
 				expect(parked[0]?.body).toBe("[withheld by index-archive]");
 				expect(parked[0]?.subject).toBeNull();
 				expect(parked[0]?.entry_hash).toBe(`hash-${RUN}-q1`);
+				// The manifest's identity sequence was moved past the restored rows: the next write takes a number above all of them.
+				const top = (await restored`select max(manifest_seq)::text as top from corpus_documents`) as Array<Record<string, unknown>>;
+				const fresh = (await restored`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, state)
+					values (${`${RUN}/after`}, 'after.md', 'doc', 1, ${"0".repeat(64)}, 1, 'fs', 'active') returning manifest_seq::text as seq`) as Array<Record<string, unknown>>;
+				expect(BigInt(String(fresh[0]?.seq))).toBeGreaterThan(BigInt(String(top[0]?.top)));
 			} finally {
 				await restored.end().catch(() => undefined);
 			}

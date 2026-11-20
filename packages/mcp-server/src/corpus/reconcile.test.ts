@@ -16,7 +16,7 @@ const REPO = "swcstudiospace/agent-substrate";
 const SETTINGS: CorpusIngestSettings = { concurrency: 4, batchDocs: 20, batchBytes: 1_000_000 };
 const SCOPE: CorpusScope = { coverage: [{ repo: REPO, source: "fs" }], maxTier: 3 };
 
-const nameOf = (document: CorpusDocument): string => corpusDocumentName(document.repo, document.path, document.sha256);
+const nameOf = (document: CorpusDocument): string => corpusDocumentName(document.repo, document.path, document.sha256, document);
 
 function ingestDeps(store: FakeStore, plane: FakePlane) {
 	return { store, plane, settings: SETTINGS, surface: "claude-code" as const, sessionId: "sess-reconcile", emit: async () => undefined };
@@ -36,7 +36,7 @@ function rowOf(path: string, documentId: string | null, over: Partial<ManifestRo
 }
 
 function listed(row: ManifestRow, id: string = row.documentId ?? "doc-none") {
-	return { id, name: corpusDocumentName(row.repo, row.path, row.sha256) };
+	return { id, name: corpusDocumentName(row.repo, row.path, row.sha256, row) };
 }
 
 describe("diffPlane", () => {
@@ -66,7 +66,7 @@ describe("diffPlane", () => {
 	test("a corpus document no row owns by id or by name is an orphan; one carrying the name of a row's current content is owned, whatever its id", () => {
 		const row = rowOf("a.md", "doc-a");
 		const stale = { id: "doc-old", name: corpusDocumentName(REPO, "a.md", sha256Hex("an earlier version")) };
-		const duplicateRecord = { id: "dup-1", name: corpusDocumentName(row.repo, row.path, row.sha256) };
+		const duplicateRecord = { id: "dup-1", name: corpusDocumentName(row.repo, row.path, row.sha256, row) };
 		const drift = diffPlane([row], { documents: [listed(row), stale, duplicateRecord], otherDocumentIds: [], truncated: false }, true);
 		expect(drift.orphans).toEqual([stale]);
 	});

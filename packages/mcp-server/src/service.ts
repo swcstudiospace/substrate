@@ -218,7 +218,7 @@ import { PlanningReader } from "./planning/read.ts";
 import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import { DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundary, LiveSessionBoundaryError, liveSessionNotFound, SESSION_BINDING_INPUT, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, type LiveCallFailure, type LiveSessionAuditPort, type LiveSessionInvocation, type PreparedLiveCall, type PreparedLiveDispatch, type SteeringWiring } from "./planning/steering-tools.ts";
-import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
+import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink, type SteeringIdempotencyStore } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, STEERING_RESTORE_DEADLINE_MS, STEERING_RESTORE_TIMEOUT_CODE, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
 import { LiveSessionStatePort, STEERING_SESSION_ENDED_ACTION, steeringSessionEvent } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringAcknowledgeReply, type SteeringNotice } from "./planning/steering-delivery.ts";
@@ -259,6 +259,7 @@ import {
 	type RecallSnapshot,
 } from "./recall-snapshot.ts";
 import { RepoAccess, requireComplete, startPreloader, type Preloader } from "./preload.ts";
+import { DEFAULT_RECONCILE_CAPS, runReport } from "./reconcile-run.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -678,6 +679,13 @@ export interface EmitResult {
 	deduplicated?: true;
 	/** Set (with `stored: false`) when the idempotency lookup itself failed: nothing was written and the event is not in the ledger. */
 	lookupFailed?: true;
+	/**
+	 * Set (with `stored: false`) when the write failed and the event is held for retry. It will be written, or given up with a
+	 * dead-letter record, and never silently. Nothing is in the ledger yet.
+	 */
+	buffered?: true;
+	/** Set (with `stored: false`) when the write failed and the event could not be held either: it was given up at once, with a dead-letter record. */
+	deadLettered?: true;
 }
 
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
@@ -1613,6 +1621,10 @@ export class Substrate {
 	private readonly retrievalRecorder: RetrievalRecorder;
 	/** Stops the hourly retrieval-retention sweep; null while it is not running. */
 	private retrievalSweepStop: (() => void) | null = null;
+	/** Stops the scheduled reconcile (`SUBSTRATE_RECONCILE_INTERVAL_S`); null while it is off or stopped. */
+	private reconcileStop: (() => void) | null = null;
+	/** The scheduled reconcile pass in flight, so a tick while one runs starts nothing. */
+	private reconcilePass: Promise<void> | null = null;
 	/** Re-rank shadow runs since this process started, and the corpus positions they would have moved. */
 	private readonly shadowCounts = { searches: 0, moved: 0 };
 	private corpusRootKeeper: CorpusRootKeeper | null = null;
@@ -1632,6 +1644,13 @@ export class Substrate {
 	private readonly retainOutbox: RetainOutbox;
 	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
 	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
+	// phase 76 — the telemetry buffer and its dead-letter store, both absent unless SUBSTRATE_EVENT_BUFFER_PATH is set
+	/** Events the ledger did not take, held for retry with backoff, and the store that records the ones given up for good. */
+	private readonly eventBufferStores: { buffer: EventBuffer; deadLetters: DeadLetterStore } | null;
+	/** The interval drain, started while the buffer holds entries and left unref'd so it never holds the process. */
+	private eventDrainTimer: ReturnType<typeof setInterval> | null = null;
+	/** Set by the shutdown close: the tick is never re-armed after it, so a closed instance starts no pass. */
+	private eventDrainClosed = false;
 	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
 	private retainRecoverPending = false;
 	/** Phase 76: the ledger event buffer (parked events awaiting retry) and the dead-letter store (events that never reached the ledger). */
@@ -1719,6 +1738,8 @@ export class Substrate {
 	readonly planningObserver: PlanningObserver;
 	/** Phase 58: the Postgres audit sink behind the inbox while `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on (or a test injects one). Null keeps the inbox in memory. */
 	private readonly steeringDurable: SteeringAuditSink | null;
+	/** Phase 77: the durable sequence counter and keyed-queue replay records behind the inbox, under the same opt-in as the audit sink. Null keeps them in the inbox's memory. */
+	private readonly steeringDurableIdempotency: SteeringIdempotencyStore | null;
 	/** Phase 58: closes directives nobody acknowledged in time. Null unless the inbox is durable. Started by `startSteering`. */
 	private readonly steeringSweeper: SteeringExpirySweeper | null;
 	/** Phase 58: one wake-up hint per queued directive. */
@@ -1770,6 +1791,7 @@ export class Substrate {
 			steering?: {
 				history: SteeringHistorySink | null;
 				durable?: SteeringAuditSink | null;
+				idempotency?: SteeringIdempotencyStore | null;
 				sessionState?: SessionStatePort | null;
 				timers?: PlanningTimers;
 				nowMs?: () => number;
@@ -1914,7 +1936,7 @@ export class Substrate {
 		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
 		// Phase 58: the acknowledgement deadline and sweep interval are part of those settings.
 		const steeringSettings = config.steering.ok ? config.steering.settings : null;
-		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors)];
+		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors), ...(config.steeringIdempotency.ok ? [] : config.steeringIdempotency.errors)];
 		if (steeringErrors.length > 0) {
 			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
 		}
@@ -1927,12 +1949,24 @@ export class Substrate {
 				: config.steeringAuditTable && steeringSettings?.enabled === true && this.index !== null
 					? this.index.steeringAudit()
 					: null;
+		this.steeringDurableIdempotency =
+			steeringSeam !== undefined
+				? (steeringSeam.idempotency ?? null)
+				: this.steeringDurable !== null && this.index !== null
+					? this.index.steeringIdempotency()
+					: null;
 		const steeringHistory = this.steeringDurable ?? steeringSeam?.history ?? null;
 		const steeringClock = { nowMs: steeringSeam?.nowMs ?? (() => Date.now()) };
 		const ackTtlMs = this.steeringDurable !== null && config.steeringExpiry.ok ? config.steeringExpiry.settings.ackTtlMs : undefined;
 		const steeringInbox =
 			steeringSettings?.enabled === true && steeringHistory !== null && steeringErrors.length === 0
-				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
+				? new SteeringInbox({
+						history: steeringHistory,
+						clock: steeringClock,
+						policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs },
+						...(this.steeringDurableIdempotency === null ? {} : { store: this.steeringDurableIdempotency }),
+						...(config.steeringIdempotency.ok ? { idempotency: config.steeringIdempotency.settings } : {}),
+					})
 				: null;
 		this.liveSessions = steeringSeam?.liveSessions !== undefined ? steeringSeam.liveSessions : this.index?.liveSessions({ leaseSeconds: config.liveSessionLeaseS }) ?? null;
 		this.liveBoundary = new LiveSessionBoundary({
@@ -1952,6 +1986,7 @@ export class Substrate {
 			boundary: this.liveBoundary,
 			idempotency: new SteeringIdempotency<SteeringAcknowledgeReply>(),
 			durable: this.steeringDurable,
+			onQueued: (directiveId) => this.onSteeringQueued(directiveId),
 			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();
@@ -2913,13 +2948,21 @@ export class Substrate {
 		// is still in flight (U5-4a). Keyless sessionless events, and everything under `off`, never wait.
 		const turnKey = sessionId ?? (idem?.key != null ? `${KEY_TURN_PREFIX}${idem.key}` : null);
 		if (!this.greptime || turnKey === null) return this.appendChained(input, sessionId, idem);
+		return this.withSessionTurn(turnKey, () => this.appendChained(input, sessionId, idem));
+	}
+
+	/**
+	 * Runs `fn` as the next turn of `turnKey`: after every earlier turn of that key has settled, and before any later one starts.
+	 * Appends and buffer deliveries of one session share a key, so a delivery never interleaves with an append that reads the tip.
+	 */
+	private async withSessionTurn<T>(turnKey: string, fn: () => Promise<T>): Promise<T> {
 		const previous = this.emitChains.get(turnKey) ?? Promise.resolve();
 		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
 		const tail = previous.then(() => gate);
 		this.emitChains.set(turnKey, tail);
 		await previous;
 		try {
-			return await this.appendChained(input, sessionId, idem);
+			return await fn();
 		} finally {
 			done();
 			if (this.emitChains.get(turnKey) === tail) this.emitChains.delete(turnKey);
@@ -2977,6 +3020,9 @@ export class Substrate {
 	}
 
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
+		const stores = this.eventBufferStores;
+		// A keyed replay is answered from the ledger first: a row that landed is the answer, whatever the buffer holds. Only a replay
+		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write.
 		if (idem?.lookup && idem.key !== null && this.greptime) {
 			const key = idem.key;
 			// The ledger is asked first: a parked event whose write landed (its reply was lost) is a stored row, and the
@@ -3014,7 +3060,9 @@ export class Substrate {
 				tipError = redact(String(cause));
 			}
 		}
-		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
+		const build = (chainPrev: string | null): SubstrateEvent =>
+			idem === null ? normalizeEvent(input, chainPrev) : normalizeEvent(input, chainPrev, { key: idem.key });
+		const event = build(prev);
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 		if (parkedTip !== null) return this.parkEvent(event, "an earlier event of this session has not reached the ledger", false);
 		if (tipError !== null) {
@@ -3029,6 +3077,20 @@ export class Substrate {
 			const error = appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN;
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
+		}
+
+		const key = idem?.key ?? null;
+		// An earlier event of this session is still waiting for the ledger, so this one waits behind it. Written now, it would land
+		// first, and the buffered event's link would name a row that is not there yet.
+		if (stores !== null && sessionId !== null && stores.buffer.hasSession(sessionId)) {
+			return this.bufferEvent(stores.buffer, {
+				session: sessionId,
+				key,
+				ledgerPrev: prev,
+				build,
+				last_reason: "waiting behind an earlier buffered event of this session",
+				attempts: 0,
+			});
 		}
 
 		try {
@@ -3976,15 +4038,67 @@ export class Substrate {
 		}
 	}
 
-	/** Start the recall prefetch, the Hindsight inventory and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
+	/** Start the recall prefetch, the Hindsight inventory, the scheduled reconcile (phase 78) and the cache preloader (phase 47). The first two are no-ops while their flags are off; each timer is unref'd. */
 	startRecall(): { recall: boolean; inventory: boolean } {
 		this.startPreload();
+		this.startReconcile();
 		return { recall: this.recall.start(), inventory: this.hindsightInventory.start() };
 	}
 
-	/** Clear both timers and wait, bounded, for the work in flight. No final refresh: the snapshot is cache-only. */
+	/** Clear the recall, Hindsight inventory and reconcile timers, and wait, bounded, for the recall work in flight. No final refresh: the snapshot is cache-only. */
 	async stopRecall(): Promise<void> {
+		this.stopReconcile();
 		await Promise.all([this.recall.stop(), this.hindsightInventory.stop()]);
+	}
+
+	/**
+	 * Start the scheduled reconcile (Phase 78, D78-7): one unref'd interval at `SUBSTRATE_RECONCILE_INTERVAL_S`, and nothing while it is 0.
+	 * Each tick is one read-only run. Idempotent.
+	 */
+	startReconcile(): boolean {
+		const { intervalS, windowHours } = this.config.reconcile;
+		if (this.reconcileStop !== null || intervalS <= 0) return false;
+		const handle = setInterval(() => void this.reconcileTick(), intervalS * 1000);
+		handle.unref();
+		this.reconcileStop = () => clearInterval(handle);
+		process.stdout.write(`[substrate] reconcile: every ${intervalS} s, window ${windowHours} h, read-only\n`);
+		return true;
+	}
+
+	/** Clear the scheduled reconcile's timer. A run in flight finishes on its own; it writes nothing on the way out. */
+	stopReconcile(): void {
+		this.reconcileStop?.();
+		this.reconcileStop = null;
+	}
+
+	/** One scheduled run, single-flight: a tick while a run is in flight starts nothing. Never rejects. */
+	private reconcileTick(): Promise<void> {
+		this.reconcilePass ??= this.runScheduledReconcile().finally(() => {
+			this.reconcilePass = null;
+		});
+		return this.reconcilePass;
+	}
+
+	/** One read-only reconcile over the ledger, the index and the cache: one JSON log line on success, a stderr line on failure. */
+	private async runScheduledReconcile(): Promise<void> {
+		if (this.greptime === null || this.index === null) {
+			process.stderr.write("[substrate] reconcile: skipped, the ledger and the index are both needed\n");
+			return;
+		}
+		try {
+			const report = await runReport({
+				ledger: this.greptime,
+				index: this.index,
+				cache: this.cache,
+				now: new Date(),
+				windowHours: this.config.reconcile.windowHours,
+				caps: DEFAULT_RECONCILE_CAPS,
+			});
+			const line = { schema: report.schema, generated_at: report.generated_at, clean: report.clean, counts: report.counts, truncated: report.truncated, unchecked_layers: report.unchecked_layers, first: report.first };
+			process.stdout.write(`[substrate] reconcile ${JSON.stringify(line)}\n`);
+		} catch (cause) {
+			process.stderr.write(`[substrate] reconcile: run failed — ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
+		}
 	}
 
 	/** Start the cache preloader (phase 47): one unref'd interval, and nothing while `SUBSTRATE_CACHE_PRELOAD` is off or it is already running. */
@@ -6419,7 +6533,7 @@ export class Substrate {
 		// The steering notice is per call like the context: it names the calling session's queued directives, so it is attached
 		// after the cache and a reply that carries it is never stored (`searchReplyStorable`).
 		const steering = this.steeringNoticeOf(prepared);
-		const final = this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
+		const final = await this.withCorpusRoot(steering === null ? answered : { ...answered, steering });
 		if (prepared === undefined) this.recordRetrieval(surface, originalQuestion, chunks, reflected.shadow);
 		return final;
 	}
@@ -6937,18 +7051,15 @@ export class Substrate {
 	}
 
 	/**
-	 * Phase 69: a `docs_search` reply names the corpus root it was answered under, from the cache only. With `SUBSTRATE_CORPUS` off the
-	 * reply is returned untouched. A root that is not cached yet is left out and its computation starts off this call's path.
+	 * Phase 69: a `docs_search` reply names the corpus root it was answered under: the cached root while it matches the manifest's
+	 * version, else one read of the manifest that the reply waits for (bounded by `MAX_CORPUS_LEAVES`). With `SUBSTRATE_CORPUS` off the
+	 * reply is returned untouched. A manifest with no root (too large, no index, or unreadable) leaves the two fields out.
 	 */
-	private withCorpusRoot(reply: SearchReply): SearchReply {
+	private async withCorpusRoot(reply: SearchReply): Promise<SearchReply> {
 		if (!this.config.corpus.enabled) return reply;
-		const roots = this.corpusRoots();
-		const snapshot = roots.peek();
-		if (snapshot === null) {
-			roots.warm();
-			return reply;
-		}
-		return { ...reply, corpus_root: shortRoot(snapshot.root), corpus_count: snapshot.count };
+		const answer = await this.corpusRoots().current().catch(() => null);
+		if (answer === null || !answer.ok) return reply;
+		return { ...reply, corpus_root: shortRoot(answer.snapshot.root), corpus_count: answer.snapshot.count };
 	}
 
 	/** `POST /corpus/plan` and the planning half of the `substrate corpus plan` command. */
@@ -7042,9 +7153,9 @@ export class Substrate {
 	}
 
 	/** `POST /corpus/ingest` and the `corpus_ingest` tool. A run that stored or removed anything invalidates every cached `docs_search` answer, as `docs_ingest` does. */
-	async corpusIngest(raw: unknown, callerSurface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
+	async corpusIngest(raw: unknown, callerSurface: Surface | null, isOperator: boolean): Promise<CorpusReply<CorpusIngestResponse>> {
 		const startedAt = this.corpusNowMs();
-		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface);
+		const reply = await corpusIngestReply(this.corpusDeps(), raw, callerSurface, isOperator);
 		// An `updated` row (a changed marker, tier or kind) changes supersession and authority but not the plane, so it drops the index only.
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.updated + reply.body.counts.tombstoned > 0) this.authorityIndex.invalidate();
 		if (reply.ok && reply.body.counts.ingested + reply.body.counts.tombstoned > 0) await this.cache.bump(DOCS_GENERATION_KEY);

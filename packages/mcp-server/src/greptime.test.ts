@@ -275,6 +275,45 @@ describe("insertEvent", () => {
 	});
 });
 
+describe("insertEvent with mayExist", () => {
+	test("a row already stored for this event is not inserted again", async () => {
+		const event = normalizeEvent(input, null);
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SELECT "id" FROM "agent_events"')) return records(["id"], [[event.id]]);
+			if (statement.includes('FROM "event_ingest" WHERE "event_id"')) return records(["event_id", "ingested_at"], [[event.id, 1790186361859]]);
+			return defaultReply(statement);
+		});
+
+		await new GreptimeClient(config).insertEvent(event, { mayExist: true });
+
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "agent_events"'))).toBe(false);
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "event_ingest"'))).toBe(false);
+	});
+
+	test("a row not yet stored is inserted", async () => {
+		const event = normalizeEvent(input, null);
+		const { sql } = stubFetch((statement) => (statement.includes('SELECT "id" FROM "agent_events"') ? records(["id"], []) : defaultReply(statement)));
+
+		await new GreptimeClient(config).insertEvent(event, { mayExist: true });
+
+		expect(insertStatement(sql)).toContain(`'${event.hash}'`);
+	});
+
+	test("a row stored without its ingest record gets that record, and no second row", async () => {
+		const event = normalizeEvent(input, null);
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SELECT "id" FROM "agent_events"')) return records(["id"], [[event.id]]);
+			if (statement.includes('FROM "event_ingest" WHERE "event_id"')) return records(["event_id", "ingested_at"], []);
+			return defaultReply(statement);
+		});
+
+		await new GreptimeClient(config).insertEvent(event, { mayExist: true });
+
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "agent_events"'))).toBe(false);
+		expect(sql.some((statement) => statement.startsWith('INSERT INTO "event_ingest"'))).toBe(true);
+	});
+});
+
 describe("sql", () => {
 	test("maps rows onto their column names", async () => {
 		stubFetch(() => records(["hash", "ts"], [["abc", 1790186361859]]));

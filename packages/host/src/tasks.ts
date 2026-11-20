@@ -9,7 +9,8 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
+import { TEST_RUN_LABEL, type Route, sessionEnv, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
+import { SUBSTRATE_PROXY_URL } from "./substrate-proxy.ts";
 import { GRAPH_LABEL, isValidGraphId } from "./sandbox-options.ts";
 import {
 	ADDITIONAL_INSTRUCTIONS,
@@ -548,7 +549,6 @@ export type TaskServiceDeps = {
 	route: Route;
 	testsRoute: TestsRoute;
 	model: string;
-	directKey?: string | undefined;
 	skills: Skill[];
 	trackers: TrackerLocators;
 	/** D-10 backstop; absent means no tracker sync on this host. */
@@ -813,7 +813,6 @@ export class TaskService {
 				nodeId: nid,
 				route: this.deps.route,
 				prompt,
-				substrateBearer: this.deps.substrate.bearer ?? null,
 			});
 			const seeded: SeededFile[] = [];
 			const dirs = new Set(files.map((f) => f.path.slice(0, f.path.lastIndexOf("/"))));
@@ -830,9 +829,9 @@ export class TaskService {
 				sessionId: nid,
 				agent: "claude",
 				cwd: VM_WORK,
-				env: sessionEnv({ route: this.deps.route, model: this.deps.model, graphId: gid, nodeId: nid, directKey: this.deps.directKey }),
+				env: sessionEnv({ model: this.deps.model, graphId: gid, nodeId: nid }),
 				mcpServers:
-					this.deps.route.s === "mcp" ? [{ type: "http", name: "substrate", url: SUBSTRATE_MCP_URL, headers: [] }] : [],
+					this.deps.route.s === "mcp" ? [{ type: "http", name: "substrate", url: SUBSTRATE_PROXY_URL, headers: [] }] : [],
 				permissionPolicy: "ask",
 				additionalInstructions: ADDITIONAL_INSTRUCTIONS,
 			});
@@ -868,9 +867,7 @@ export class TaskService {
 			this.log(`[substrate-host] task opened ${gid}/${nid} (${req.identifier})`);
 			return { status: 202, body: await this.statusOf(record) };
 		} catch (cause) {
-			await this.deps.substrate.graphRelease(gid, nid, HOST_SURFACE, nid).catch((error: unknown) => {
-				this.log(`[substrate-host] release after failed open ${gid}/${nid} failed: ${String(error)}`);
-			});
+			await this.releaseOnce(gid, nid);
 			this.log(`[substrate-host] open ${gid}/${nid} failed after claim: ${String(cause)}`);
 			return { status: 502, body: { error: String(cause) } };
 		}

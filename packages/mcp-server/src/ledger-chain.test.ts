@@ -11,6 +11,9 @@
  * either.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { InvalidEventError, verifyChain } from "./event.ts";
 import { GreptimeClient } from "./greptime.ts";
@@ -210,6 +213,32 @@ describe("chain-tip cache", () => {
 			waiting.event.hash,
 			next.event.hash,
 		]);
+	});
+
+	test("a write settles the session's parked event before it reads the tip, so it chains onto the landed row, not beside it", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "chain-settle-"));
+		const ledger = fakeLedger();
+		const substrate = substrateWith(client(), { SUBSTRATE_EVENT_BUFFER_PATH: join(dir, "buffer.jsonl"), SUBSTRATE_EVENT_DEAD_LETTER_PATH: join(dir, "dead.jsonl") });
+		try {
+			let fail = true;
+			ledger.before = async (statement) => {
+				// The settle's row check (`GreptimeClient.insertEvent` with `mayExist`): no row yet, so the attempt inserts.
+				if (statement.startsWith('SELECT "id" FROM "agent_events"')) return records(["id"], []);
+				return fail && statement.startsWith('INSERT INTO "agent_events"') ? new Response("nope", { status: 503 }) : undefined;
+			};
+			const lost = await substrate.emit(input("sess-1", "lost"));
+			expect(lost).toMatchObject({ stored: false, buffered: true });
+
+			fail = false;
+			const next = await substrate.emit(input("sess-1", "after"));
+			expect(next.stored).toBe(true);
+			expect(next.event.prev).toBe(lost.event.hash);
+			expect(ledger.rows.map((row) => row.hash)).toEqual([lost.event.hash, next.event.hash]);
+		} finally {
+			// Stops the drain tick and keeps the durable buffer, as shutdown does; only then does the scratch dir go.
+			await substrate.drainPendingEvents(0, { abandon: true });
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("an unconfirmed ingest record keeps the tip: the event row is stored, so the chain moves on", async () => {

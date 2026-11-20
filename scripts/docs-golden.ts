@@ -58,8 +58,9 @@ import { join } from "node:path";
 import { DEFAULT_TOKENS_DIR, firstLine, resolveBearer } from "../packages/cli/src/token.ts";
 import { loadGoldenCorpus, searchGoldenOffline } from "../packages/mcp-server/src/docs-golden.ts";
 import { redact } from "../packages/mcp-server/src/redact.ts";
-import { loadSloThresholds } from "../packages/corpus/src/index.ts";
+import { loadSloThresholds, sloBreaches } from "../packages/corpus/src/index.ts";
 import { measureGoldenRecall, type GoldenRecallReport } from "./docs-eval.ts";
+import { CORPUS_INGEST_RATE_METRIC } from "../packages/observability/src/index.ts";
 
 /** Where the fixtures and their corpus live, relative to the repository root. */
 export const FIXTURE_DIR = join(import.meta.dir, "..", "fixtures", "docs-golden");
@@ -320,6 +321,17 @@ export interface GoldenIo {
 	 * did before the golden set existed.
 	 */
 	goldenRecall?: (base: string, bearer: string) => Promise<GoldenRecallReport | null>;
+	/**
+	 * The freshness and ingest readings the server's SLO row judges (phase 70), taken after the golden recall with the search bearer;
+	 * `readSloReadings` in production. A test leaves it out and the canary checks the recall alone.
+	 */
+	sloReadings?: (base: string, bearer: string) => Promise<CanarySloReadings>;
+}
+
+/** The freshness and ingest readings the canary takes from the server; each is `null` when it could not be read (phase 70). */
+export interface CanarySloReadings {
+	freshnessS: number | null;
+	ingestDocsPerS: number | null;
 }
 
 /**
@@ -521,8 +533,10 @@ export function goldenReportEvent(report: GoldenRecallReport, stampedAt: string)
  * The canary: every fixture through `POST /docs/search` as `omp`, scored by
  * the same scorer as the offline tier and the printed live tier, plus the
  * attested pin. Exit 0 all pass; 1 a regression (one warning posted when the
- * failing set changed) or, when `goldenRecall` measured it (phase 70), a golden
- * recall at 5 under `SUBSTRATE_DOCS_SLO_RECALL5` (a `note` carrying the recall is
+ * failing set changed) or, when the SLO readings were taken (phase 70), a corpus
+ * freshness over `SUBSTRATE_DOCS_SLO_FRESHNESS_S`, an ingest under
+ * `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`, or a golden recall at 5 under
+ * `SUBSTRATE_DOCS_SLO_RECALL5` (a `note` carrying the recall is
  * posted on every run that measured it); 2 not configured (named, nothing sent); 3 unusable
  * (stale fixtures, an unreadable manifest, a dataset with no version pin, service refused or unreachable, or a degraded
  * answer — an open breaker is an outage, which is the SLO's to report, not a
@@ -623,16 +637,27 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 	}
 	io.stdout(`${fixtures.length - failing.length}/${fixtures.length} fixtures passed the live canary`);
 
-	// Phase 70: the self-supervised golden set, asked of the same server. A recall under the objective fails the run like a
-	// failing fixture does, so the oneshot's failed state is the visible signal; the note below feeds `corpus.golden_recall5`.
+	// Phase 70: the self-supervised golden set, asked of the same server, and the freshness and ingest readings the server's SLO row
+	// judges. A breach of any of the three fails the run like a failing fixture does, so the oneshot's failed state is the visible
+	// signal; the note below feeds `corpus.golden_recall5`.
 	const golden = await measureGolden(io, base, bearer);
-	const goldenFloor = loadSloThresholds(io.env).recall5;
-	const goldenBreached = golden !== null && golden.recall5 < goldenFloor;
+	const slo = await measureSlo(io, base, bearer);
+	const thresholds = loadSloThresholds(io.env);
+	const breaches = sloBreaches({ freshnessS: slo?.freshnessS ?? null, recall5: golden?.recall5 ?? null, ingestDocsPerS: slo?.ingestDocsPerS ?? null }, thresholds);
 	if (golden !== null) {
-		io.stdout(`golden recall@5 ${golden.recall5.toFixed(3)} over ${golden.asked} questions (objective ${goldenFloor})`);
-		if (goldenBreached) io.stderr("docs canary: the golden recall at 5 is under SUBSTRATE_DOCS_SLO_RECALL5");
+		io.stdout(`golden recall@5 ${golden.recall5.toFixed(3)} over ${golden.asked} questions (objective ${thresholds.recall5})`);
+		if (breaches.includes("recall5")) io.stderr("docs canary: the golden recall at 5 is under SUBSTRATE_DOCS_SLO_RECALL5");
 		await reportGolden(io, base, golden);
 	}
+	if (slo !== null && slo.freshnessS !== null) {
+		io.stdout(`corpus freshness ${Math.round(slo.freshnessS)} s (objective ${thresholds.freshnessS} s)`);
+		if (breaches.includes("freshness")) io.stderr("docs canary: the newest corpus change is older than SUBSTRATE_DOCS_SLO_FRESHNESS_S");
+	}
+	if (slo !== null && slo.ingestDocsPerS !== null) {
+		io.stdout(`ingest ${slo.ingestDocsPerS.toFixed(3)} documents per second (objective ${thresholds.ingestDocsPerS})`);
+		if (breaches.includes("ingest")) io.stderr("docs canary: the last ingest ran under SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S");
+	}
+	const sloFailed = breaches.length > 0;
 
 	const previous = readCanaryState(io.readState?.() ?? null);
 	const current = failing.map((entry) => entry.fixture).sort();
@@ -642,7 +667,7 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 			io.stderr("docs canary: all fixtures pass but the dedupe record could not be cleared; the next identical warning would be dropped until it is");
 			return 4;
 		}
-		return goldenBreached ? 1 : 0;
+		return sloFailed ? 1 : 0;
 	}
 	if (unchanged) return 1;
 	const emitBearer = resolveEmitBearer(io.env, io.readToken);
@@ -672,6 +697,67 @@ async function measureGolden(io: GoldenIo, base: string, bearer: string): Promis
 		io.stderr("docs canary: golden recall not measured (the documents could not be read)");
 		return null;
 	}
+}
+
+/**
+ * The freshness and ingest readings, or `null` when they cannot be taken. Like the golden set, only with `SUBSTRATE_CORPUS` on: with
+ * it off nothing is ingested and the server holds no reading to judge.
+ */
+async function measureSlo(io: GoldenIo, base: string, bearer: string): Promise<CanarySloReadings | null> {
+	if (io.sloReadings === undefined) return null;
+	if ((io.env.SUBSTRATE_CORPUS?.trim().toLowerCase() ?? "") !== "on") return null;
+	try {
+		return await io.sloReadings(base, bearer);
+	} catch {
+		io.stderr("docs canary: SLO readings not measured (the server could not be read)");
+		return null;
+	}
+}
+
+/**
+ * The two readings `fabric_status` judges that the canary can read over HTTP (phase 70), as the server holds them: the age of the
+ * newest manifest change, from `GET /corpus/status` (`lastIngestAt`, the value the server's freshness reading is set from), and the
+ * last ingest request's documents per second, from the `substrate.corpus.ingest_docs_per_second` gauge in `GET /metrics`. That gauge
+ * is 0 after a request that sent nothing, and the SLO has no reading for such a request (`CorpusSloState.recordIngest`), so a 0 here is
+ * no reading. A reading that cannot be taken is `null` with the reason on stderr; neither is a breach.
+ */
+export async function readSloReadings(base: string, bearer: string, io: Pick<GoldenIo, "fetchImpl" | "now" | "stderr">): Promise<CanarySloReadings> {
+	const readings: CanarySloReadings = { freshnessS: null, ingestDocsPerS: null };
+	try {
+		const status: unknown = await getJson(io, `${base}/corpus/status`, bearer);
+		const last = typeof status === "object" && status !== null && "lastIngestAt" in status && typeof status.lastIngestAt === "string" ? Date.parse(status.lastIngestAt) : Number.NaN;
+		if (Number.isFinite(last)) readings.freshnessS = Math.max(0, ((io.now?.() ?? new Date()).getTime() - last) / 1000);
+	} catch (cause) {
+		io.stderr(`docs canary: the freshness reading was not taken (${cause instanceof Error ? cause.message : "unknown error"})`);
+	}
+	try {
+		const rate = ingestRateOf(await getJson(io, `${base}/metrics`, bearer));
+		readings.ingestDocsPerS = rate !== null && rate > 0 ? rate : null;
+	} catch (cause) {
+		io.stderr(`docs canary: the ingest reading was not taken (${cause instanceof Error ? cause.message : "unknown error"})`);
+	}
+	return readings;
+}
+
+/** A `GET` with the search bearer; a non-2xx answer or a body that is not JSON throws. */
+async function getJson(io: Pick<GoldenIo, "fetchImpl">, url: string, bearer: string): Promise<unknown> {
+	const response = await io.fetchImpl(url, { headers: { authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(10_000) });
+	if (!response.ok) throw new Error(`answered ${response.status}`);
+	return response.json();
+}
+
+/** The first finite point of the ingest gauge in a `/metrics` body, or `null` while the gauge has none. */
+function ingestRateOf(body: unknown): number | null {
+	if (typeof body !== "object" || body === null || !("metrics" in body) || !Array.isArray(body.metrics)) return null;
+	for (const metric of body.metrics) {
+		if (typeof metric !== "object" || metric === null || !("name" in metric) || metric.name !== CORPUS_INGEST_RATE_METRIC) continue;
+		if (!("kind" in metric) || metric.kind !== "gauge" || !("points" in metric) || !Array.isArray(metric.points)) continue;
+		for (const point of metric.points) {
+			if (typeof point === "object" && point !== null && "value" in point && typeof point.value === "number" && Number.isFinite(point.value)) return point.value;
+		}
+		return null;
+	}
+	return null;
 }
 
 /** Posts the golden report as `substrate`. Best effort: a missing bearer or a refused post is said on stderr and changes no exit code. */
@@ -732,6 +818,12 @@ if (import.meta.main) {
 					env: process.env,
 					fetchImpl: (input, init) => fetch(input, init),
 					now: () => performance.now(),
+					stderr: (line) => process.stderr.write(`${line}\n`),
+				}),
+			sloReadings: (base, bearer) =>
+				readSloReadings(base, bearer, {
+					fetchImpl: fetch,
+					now: () => new Date(),
 					stderr: (line) => process.stderr.write(`${line}\n`),
 				}),
 			readState: () => {

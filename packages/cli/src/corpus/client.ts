@@ -96,7 +96,8 @@ function isPlanItem(value: unknown): boolean {
 		typeof value.repo === "string" &&
 		typeof value.path === "string" &&
 		isOptionalString(value.sha256) &&
-		isOptionalString(value.renamedFrom)
+		isOptionalString(value.renamedFrom) &&
+		isOptionalString(value.renamedFromRepo)
 	);
 }
 

@@ -440,7 +440,7 @@ See `fixtures/docs-golden/README.md` for the fixture shape.
 
 ### Live canary (uplift-4 S7, opt-in)
 
-`bun scripts/docs-golden.ts --live --emit` is the canary a daily staged timer
+`bun scripts/docs-eval.ts --live --emit --fixtures fixtures/docs-golden` is the canary a daily staged timer
 runs (`infra/vps/substrate-docs-canary.{service,timer}`; shipped, **not**
 installed by any code). Unlike plain `--live` it asserts: every fixture goes
 through the loopback `POST /docs/search` as `omp` (bearer from

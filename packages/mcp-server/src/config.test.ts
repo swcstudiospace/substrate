@@ -749,3 +749,57 @@ describe("planning roots on the loaded config", () => {
 		expect(config.planningCheckouts).toEqual([]);
 	});
 });
+describe("SUBSTRATE_RECONCILE_* (phase 78, D78-7)", () => {
+	test("the scheduled reconcile is off when the interval is unset, blank or 0", () => {
+		expect(loadConfig({}).reconcile.intervalS).toBe(0);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "" }).reconcile.intervalS).toBe(0);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "   " }).reconcile.intervalS).toBe(0);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "0" }).reconcile.intervalS).toBe(0);
+	});
+
+	test("a valid interval is kept in whole seconds", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "300" }).reconcile.intervalS).toBe(300);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: " 3600 " }).reconcile.intervalS).toBe(3600);
+	});
+
+	test("an interval above 0 but under 60 is clamped to 60", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "1" }).reconcile.intervalS).toBe(60);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "59" }).reconcile.intervalS).toBe(60);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "60" }).reconcile.intervalS).toBe(60);
+	});
+
+	test("an interval too long for a timer is clamped to the longest one a timer holds", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: "99999999999" }).reconcile.intervalS).toBe(2_147_483);
+	});
+
+	test("an interval that is not a whole number, or is negative, refuses boot and names the variable", () => {
+		for (const value of ["1.5", "-5", "5s", "every hour", "1e3"]) {
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: value })).toThrow(ConfigError);
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_INTERVAL_S: value })).toThrow("SUBSTRATE_RECONCILE_INTERVAL_S");
+		}
+	});
+
+	test("the window defaults to 24 hours when unset or blank", () => {
+		expect(loadConfig({}).reconcile.windowHours).toBe(24);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "" }).reconcile.windowHours).toBe(24);
+	});
+
+	test("a valid window is kept in whole hours", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "6" }).reconcile.windowHours).toBe(6);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "1" }).reconcile.windowHours).toBe(1);
+	});
+
+	test("a window outside 1 to 168 hours is clamped into that range", () => {
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "0" }).reconcile.windowHours).toBe(1);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "168" }).reconcile.windowHours).toBe(168);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "169" }).reconcile.windowHours).toBe(168);
+		expect(loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: "100000" }).reconcile.windowHours).toBe(168);
+	});
+
+	test("a window that is not a whole number, or is negative, refuses boot and names the variable", () => {
+		for (const value of ["1.5", "-1", "a day", "24h"]) {
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: value })).toThrow(ConfigError);
+			expect(() => loadConfig({ SUBSTRATE_RECONCILE_WINDOW_HOURS: value })).toThrow("SUBSTRATE_RECONCILE_WINDOW_HOURS");
+		}
+	});
+});

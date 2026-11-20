@@ -3,7 +3,10 @@
  * anything and the server applies the very same ones when the request arrives: the repository label, the path, the
  * plane-side document name, the size and the empty body.
  *
- * The plane-side name is `corpus:<repo>:<path>@<first 12 hex of sha256>`, with `/` and `%` percent-encoded.
+ * The plane-side name is `corpus:<repo>:<path>@<first 12 hex of sha256>.<kind>.<tier>.<commit or ->`, with `/` and `%`
+ * percent-encoded. The kind, the tier and the commit are part of the name, so a change to any of them is a new name: the
+ * plane takes the document again and the old one is deleted once the new row is recorded. Names written before these
+ * facts were carried are the sha-only form `corpus:<repo>:<path>@<first 12 hex of sha256>`.
  * The sha suffix is there because LightRAG answers a same-name document with 409: a changed document gets a new name, so
  * the new version can be written beside the old one and the old one deleted once the new row is recorded. The name is also
  * what a search result carries back as its file path, which is how a citation finds its repository and path again.
@@ -112,7 +115,22 @@ export interface ParsedCorpusName {
 	repo: string;
 	path: string;
 	sha12: string;
+	/** The facts the name carries. Absent for the sha-only form. */
+	kind?: string;
+	tier?: number;
+	commit?: string;
 }
+
+/** The facts a plane document name carries after the sha prefix. `commit` is written `-` when it is absent or not a hex commit. */
+export interface CorpusNameFacts {
+	kind: string;
+	tier: number;
+	commit?: string | null | undefined;
+}
+
+const COMMIT_SHAPE = /^[0-9a-f]{7,64}$/;
+const KIND_SHAPE = /^[a-z][a-z-]*$/;
+const NO_COMMIT = "-";
 
 function encodeSegment(text: string): string {
 	return text.replaceAll("%", "%25").replaceAll("/", "%2F");
@@ -122,11 +140,14 @@ function decodeSegment(text: string): string {
 	return text.replace(/%(25|2F)/g, (_match, code: string) => (code === "25" ? "%" : "/"));
 }
 
-export function corpusDocumentName(repo: string, path: string, sha256: string): string {
-	return `${CORPUS_NAME_PREFIX}${encodeSegment(repo)}:${encodeSegment(path)}@${sha256.slice(0, NAME_SHA_LENGTH)}`;
+export function corpusDocumentName(repo: string, path: string, sha256: string, facts?: CorpusNameFacts): string {
+	const base = `${CORPUS_NAME_PREFIX}${encodeSegment(repo)}:${encodeSegment(path)}@${sha256.slice(0, NAME_SHA_LENGTH)}`;
+	if (facts === undefined) return base;
+	const commit = facts.commit !== undefined && facts.commit !== null && COMMIT_SHAPE.test(facts.commit) ? facts.commit : NO_COMMIT;
+	return `${base}.${facts.kind}.${facts.tier}.${commit}`;
 }
 
-/** The repo, path and sha prefix a corpus document name carries, or null when it is not one. */
+/** The repo, path, sha prefix and facts a corpus document name carries, or null when it is not one. */
 export function parseCorpusDocumentName(name: string): ParsedCorpusName | null {
 	if (!name.startsWith(CORPUS_NAME_PREFIX)) return null;
 	const rest = name.slice(CORPUS_NAME_PREFIX.length);
@@ -138,9 +159,13 @@ export function parseCorpusDocumentName(name: string): ParsedCorpusName | null {
 	if (at <= 0) return null;
 	const repo = decodeSegment(rest.slice(0, colon));
 	const path = decodeSegment(tail.slice(0, at));
-	const sha12 = tail.slice(at + 1);
+	const [sha12 = "", ...facts] = tail.slice(at + 1).split(".");
 	if (!isValidRepo(repo) || path.length === 0 || !/^[0-9a-f]{12}$/.test(sha12)) return null;
-	return { repo, path, sha12 };
+	if (facts.length === 0) return { repo, path, sha12 };
+	const [kind = "", tier = "", commit = ""] = facts;
+	if (facts.length !== 3 || !KIND_SHAPE.test(kind) || !/^[123]$/.test(tier)) return null;
+	if (commit !== NO_COMMIT && !COMMIT_SHAPE.test(commit)) return null;
+	return { repo, path, sha12, kind, tier: Number(tier), ...(commit === NO_COMMIT ? {} : { commit }) };
 }
 
 /** True when the plane accepts this name as a document source unchanged. A name it would alter or refuse is never sent (`unsafe-name`). */

@@ -1187,7 +1187,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			if (reserved !== null) return refusal(reserved);
 			const writeGate = await substrate.scopedWriteRefusal("events_emit", callerSurface, { repo: args.repo, graph_id: args.graph_id });
 			if (writeGate !== null) return { ...json(writeGate.body), isError: true };
-			const { event, stored, error, warning } = await substrate.emit({
+			const { event, stored, error, warning, buffered, deadLettered } = await substrate.emit({
 				...args,
 				surface: attribution.surface,
 			});
@@ -1198,6 +1198,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				stored,
 				...(error ? { error } : {}),
 				...(warning ? { warning } : {}),
+				...(buffered ? { buffered: true } : {}),
+				...(deadLettered ? { deadLettered: true } : {}),
 			});
 		},
 	);
@@ -1766,7 +1768,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			description:
 				"Put documentation files from many repositories into the docs plane in batches, with the manifest kept in step, and remove tombstoned ones. " +
 				"Each document carries its repo, path, kind, tier, sha256, source and body; the body must hash to its sha256. Fail-closed: a redactor finding, " +
-				"an oversize or mismatching body, an unauthenticated caller, a VM guest, a server with SUBSTRATE_CORPUS off or with no LightRAG backend is refused " +
+				"an oversize or mismatching body, an unauthenticated caller or one that is not an operator, a VM guest, a server with SUBSTRATE_CORPUS off or with no LightRAG backend is refused " +
 				"and nothing is sent. A document already recorded at the same sha256 answers `unchanged`. At most 200 documents and 500 tombstones per call.",
 			inputSchema: {
 				documents: z
@@ -1793,7 +1795,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { destructiveHint: true, openWorldHint: true },
 		},
 		async ({ documents, tombstones }) => {
-			const reply = await substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: documents ?? [], tombstones: tombstones ?? [] }, callerSurface);
+			const reply = await substrate.corpusIngest({ protocol: CORPUS_PROTOCOL, documents: documents ?? [], tombstones: tombstones ?? [] }, callerSurface, isOperator);
 			return reply.ok ? json(reply.body) : { ...json(reply.body), isError: true };
 		},
 	);
@@ -2478,9 +2480,6 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 			async (args) => {
 				const queued = await queueSteering(steering, steeringCaller, args, context?.preparedLiveDispatch);
-				// A queued directive wakes its session two ways, neither of which can fail the queue (it is already audited): any
-				// long-poll waiter of the session is released, and one hint (a stored `note`, no body) is announced.
-				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
 				return steeringReply(queued);
 			},
 		);

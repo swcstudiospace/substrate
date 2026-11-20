@@ -8,6 +8,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadGoldenCorpus, searchGoldenOffline } from "../packages/mcp-server/src/docs-golden.ts";
+import { CORPUS_INGEST_RATE_METRIC } from "../packages/observability/src/index.ts";
+import { generateGolden } from "../packages/corpus/src/index.ts";
 import {
 	CORPUS_DIR,
 	USAGE,
@@ -16,6 +18,7 @@ import {
 	loadFixtures,
 	main,
 	parseArgs,
+	readSloReadings,
 	resolveEmitBearer,
 	resolveSearchBearer,
 	scoreReply,
@@ -24,10 +27,15 @@ import {
 	type GoldenIo,
 	type ScoredReply,
 } from "./docs-golden.ts";
+import { CANARY_GOLDEN_MAX_QUERIES, collectLocalDocuments, DEFAULT_EVAL_REPO } from "./docs-eval.ts";
 
 const corpus = loadGoldenCorpus(CORPUS_DIR);
 const fixtures = loadFixtures();
 const COMMIT = "golden-v1";
+
+/** The runbooks this milestone wrote: corpus ingest (phase 63), doc watch (phase 65) and docs RAG operations (phase 70). */
+const NEW_RUNBOOKS = ["docs/runbooks/corpus-ingest.md", "docs/runbooks/corpus-sync.md", "docs/runbooks/docs-rag-operations.md"];
+const REPO_ROOT = join(import.meta.dir, "..");
 
 describe("the committed fixtures, offline", () => {
 	test("there are fixtures, and every one carries the manifest of the corpus on disk", () => {
@@ -71,6 +79,25 @@ describe("the committed fixtures, offline", () => {
 		expect(reply.chunks[0]?.snippet).toContain("[REDACTED]");
 		expect(JSON.stringify(reply)).not.toContain("sk-proj-");
 	});
+});
+
+describe("the golden set the eval asks about the milestone's runbooks", () => {
+	const scan = collectLocalDocuments(REPO_ROOT, DEFAULT_EVAL_REPO);
+	// The questions the live canary asks and measures recall over: the same generator, the same cap as the canary sample.
+	const asked = generateGolden(scan.docs, { maxQueries: CANARY_GOLDEN_MAX_QUERIES });
+
+	test("the scan of docs/ reaches every Markdown file, so no bound cuts a runbook", () => {
+		expect(scan.incomplete).toEqual([]);
+	});
+
+	for (const runbook of NEW_RUNBOOKS) {
+		test(`${runbook} is in docs/ and has a question that expects it`, () => {
+			expect(scan.docs.map((doc) => doc.path)).toContain(runbook);
+			const key = `${DEFAULT_EVAL_REPO}:${runbook}`;
+			const expects = asked.filter((question) => question.expected === key || question.alsoExpected?.includes(key) === true);
+			expect(expects.length).toBeGreaterThan(0);
+		});
+	}
 });
 
 describe("the scorer", () => {
@@ -640,5 +667,71 @@ describe("the live canary (uplift-4 S7)", () => {
 		expect(await main(["--live"], run.goldenIo)).toBe(0);
 		expect(run.out.at(-1)).toContain("printed, not asserted");
 		expect(events(run.requests)).toEqual([]);
+	});
+
+	/** A fake server for the two SLO reads: `/corpus/status` answers `status` at `statusCode`, `/metrics` answers `metrics`. */
+	function sloFetch(status: unknown, metrics: unknown, statusCode = 200) {
+		const requests: Recorded[] = [];
+		const err: string[] = [];
+		const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			requests.push({ url, authorization: new Headers(init?.headers).get("authorization"), body: {} });
+			return url.endsWith("/corpus/status") ? Response.json(status, { status: statusCode }) : Response.json(metrics);
+		};
+		return { requests, err, io: { fetchImpl, now: () => new Date("2026-10-14T03:00:00.000Z"), stderr: (line: string) => err.push(line) } };
+	}
+	const SLO_BASE = "http://127.0.0.1:7410";
+	const gaugeOf = (value: number) => ({ metrics: [{ kind: "gauge", name: CORPUS_INGEST_RATE_METRIC, points: [{ value }] }] });
+
+	test("the SLO readings: freshness is the age of the newest manifest change, ingest the last request's rate; idle, unsent or unreadable is no reading", async () => {
+		const stamped = "2026-10-14T00:00:00.000Z";
+		const busy = sloFetch({ lastIngestAt: stamped }, gaugeOf(2.5));
+		expect(await readSloReadings(SLO_BASE, "tok-omp", busy.io)).toEqual({ freshnessS: 10_800, ingestDocsPerS: 2.5 });
+		expect(busy.requests.map((request) => request.url)).toEqual([`${SLO_BASE}/corpus/status`, `${SLO_BASE}/metrics`]);
+		expect(busy.requests.every((request) => request.authorization === "Bearer tok-omp")).toBe(true);
+
+		const idle = sloFetch({ lastIngestAt: null }, gaugeOf(0));
+		expect(await readSloReadings(SLO_BASE, "tok-omp", idle.io)).toEqual({ freshnessS: null, ingestDocsPerS: null });
+
+		const unsent = sloFetch({ lastIngestAt: stamped }, { metrics: [{ kind: "gauge", name: CORPUS_INGEST_RATE_METRIC, points: [] }] });
+		expect(await readSloReadings(SLO_BASE, "tok-omp", unsent.io)).toEqual({ freshnessS: 10_800, ingestDocsPerS: null });
+
+		const down = sloFetch({ error: "unavailable" }, { metrics: [] }, 503);
+		expect(await readSloReadings(SLO_BASE, "tok-omp", down.io)).toEqual({ freshnessS: null, ingestDocsPerS: null });
+		expect(down.err).toEqual(["docs canary: the freshness reading was not taken (answered 503)"]);
+	});
+
+	test("a freshness or ingest breach fails the run by name, a reading within its objective passes, a failed read does not fail the run, and nothing is read with SUBSTRATE_CORPUS off", async () => {
+		const stale = canary({ env: { SUBSTRATE_CORPUS: "on" } });
+		stale.goldenIo.sloReadings = async () => ({ freshnessS: 90_000, ingestDocsPerS: 1 });
+		expect(await main(["--live", "--emit"], stale.goldenIo)).toBe(1);
+		expect(stale.out).toContain("corpus freshness 90000 s (objective 86400 s)");
+		expect(stale.err.at(-1)).toContain("SUBSTRATE_DOCS_SLO_FRESHNESS_S");
+		expect(events(stale.requests)).toEqual([]);
+
+		const slow = canary({ env: { SUBSTRATE_CORPUS: "on" } });
+		slow.goldenIo.sloReadings = async () => ({ freshnessS: 60, ingestDocsPerS: 0.05 });
+		expect(await main(["--live", "--emit"], slow.goldenIo)).toBe(1);
+		expect(slow.err.at(-1)).toContain("SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S");
+
+		const lenient = canary({ env: { SUBSTRATE_CORPUS: "on", SUBSTRATE_DOCS_SLO_FRESHNESS_S: "100000", SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S: "0.01" } });
+		lenient.goldenIo.sloReadings = async () => ({ freshnessS: 90_000, ingestDocsPerS: 0.05 });
+		expect(await main(["--live", "--emit"], lenient.goldenIo)).toBe(0);
+
+		const broken = canary({ env: { SUBSTRATE_CORPUS: "on" } });
+		broken.goldenIo.sloReadings = async () => {
+			throw new Error("ECONNREFUSED");
+		};
+		expect(await main(["--live", "--emit"], broken.goldenIo)).toBe(0);
+		expect(broken.err.at(-1)).toContain("SLO readings not measured");
+
+		const off = canary({ env: {} });
+		let read = 0;
+		off.goldenIo.sloReadings = async () => {
+			read += 1;
+			return { freshnessS: 1e9, ingestDocsPerS: 0 };
+		};
+		expect(await main(["--live", "--emit"], off.goldenIo)).toBe(0);
+		expect(read).toBe(0);
 	});
 });

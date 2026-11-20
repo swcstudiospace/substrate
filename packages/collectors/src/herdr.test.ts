@@ -150,8 +150,13 @@ describe("transport", () => {
 		});
 		panes = [];
 		await collector.runPass();
-		await wait(50);
-		const global = conns.find((conn) => conn.subs.length === 1 && JSON.stringify(conn.subs[0]).includes("pane.agent_detected"));
+		// The subscribe is written from the socket's connect handler, a tick after runPass returns.
+		let global: Conn | undefined;
+		for (let waited = 0; waited < 2000; waited += 20) {
+			global = conns.find((conn) => conn.subs.length === 1 && JSON.stringify(conn.subs[0]).includes("pane.agent_detected"));
+			if (global) break;
+			await wait(20);
+		}
 		expect(global).toBeDefined();
 		const before = snapshots;
 		panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "working", cwd: "/tmp/repo" }];

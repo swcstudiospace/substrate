@@ -87,12 +87,13 @@ function prepare(entry: CorpusEntry, input: IngestInput): Prepared {
 	return refusal === null ? { ok: true, body: loaded.body } : { ok: false, status: "refused", reason: refusal };
 }
 
-/** The old path of a rename: the plan names the manifest row, in this repository, with or without the `repo:` prefix. */
-function renamedFromPath(item: PlanItem): string | null {
+/** The manifest row a rename moved from: its repository (`renamedFromRepo`, else the new one) and path, with or without the `repo:` prefix. */
+function renamedFromRow(item: PlanItem): { repo: string; path: string } | null {
 	if (item.renamedFrom === undefined) return null;
-	const prefix = `${item.repo}:`;
+	const repo = item.renamedFromRepo ?? item.repo;
+	const prefix = `${repo}:`;
 	const path = item.renamedFrom.startsWith(prefix) ? item.renamedFrom.slice(prefix.length) : item.renamedFrom;
-	return path === "" || path === item.path ? null : path;
+	return path === "" || (repo === item.repo && path === item.path) ? null : { repo, path };
 }
 
 export async function executeIngest(input: IngestInput): Promise<IngestOutcome> {
@@ -140,13 +141,13 @@ export async function executeIngest(input: IngestInput): Promise<IngestOutcome> 
 		if (item.action === "tombstone") {
 			tombstones.set(documentKey(item.repo, item.path), { repo: item.repo, path: item.path });
 		} else if (item.action === "rename") {
-			const from = renamedFromPath(item);
+			const from = renamedFromRow(item);
 			const entry = entryByKey.get(documentKey(item.repo, item.path));
 			// The old text is removed only when the new document passes every check the server applies; a replacement
 			// that cannot be sent leaves the old row active and is reported as refused or failed in phase 2.
 			if (from !== null && entry !== undefined && prepare(entry, input).ok) {
-				tombstones.set(documentKey(item.repo, from), { repo: item.repo, path: from });
-				removedBefore.set(documentKey(item.repo, item.path), documentKey(item.repo, from));
+				tombstones.set(documentKey(from.repo, from.path), from);
+				removedBefore.set(documentKey(item.repo, item.path), documentKey(from.repo, from.path));
 			}
 		}
 	}

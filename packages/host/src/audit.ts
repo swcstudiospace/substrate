@@ -11,7 +11,8 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GRAPH_LABEL, SANDBOX_NETWORK, type SandboxNetwork, WORKTREES_ROOT } from "./sandbox-options.ts";
+import { GRAPH_LABEL, isValidGraphId, SANDBOX_NETWORK, type SandboxNetwork, worktreeFor } from "./sandbox-options.ts";
+import { type EnvLike, worktreeRoot } from "./worktree-root.ts";
 
 const SECRET_SEGMENTS: Record<string, true> = {
 	KEY: true,
@@ -83,15 +84,15 @@ function asArray(value: unknown): unknown[] {
  * network), not privileged, no docker socket, only the graph's own worktree writable, token auth on.
  * Returns one `<name>[:detail]` string per violation.
  */
-export function containerViolations(inspect: Record<string, unknown>, network: SandboxNetwork): string[] {
+export function containerViolations(inspect: Record<string, unknown>, network: SandboxNetwork, env: EnvLike = process.env): string[] {
 	const violations: string[] = [];
 	const config = asRecord(inspect.Config);
 	const host = asRecord(inspect.HostConfig);
 
 	const labels = asRecord(config.Labels);
 	const graphId = labels[GRAPH_LABEL];
-	if (typeof graphId !== "string" || graphId === "") violations.push("label");
-	const ownWorktree = typeof graphId === "string" && graphId !== "" ? `${WORKTREES_ROOT}/${graphId}` : null;
+	if (typeof graphId !== "string" || !isValidGraphId(graphId)) violations.push("label");
+	const ownWorktree = typeof graphId === "string" && isValidGraphId(graphId) ? worktreeFor(graphId, env) : null;
 
 	const bindings = asRecord(host.PortBindings);
 	let published = 0;
@@ -130,7 +131,7 @@ export function containerViolations(inspect: Record<string, unknown>, network: S
 		}
 		if (mode === "ro") continue;
 		// The graph's own worktree is the one writable mount; without a label the root is all that can be checked.
-		const worktreeBind = containerPath === "/work" && (ownWorktree !== null ? hostPath === ownWorktree : hostPath.startsWith(`${WORKTREES_ROOT}/`));
+		const worktreeBind = containerPath === "/work" && (ownWorktree !== null ? hostPath === ownWorktree : hostPath.startsWith(`${worktreeRoot(env)}/`));
 		if (worktreeBind) continue;
 		violations.push(`writable_bind:${bind}`);
 	}

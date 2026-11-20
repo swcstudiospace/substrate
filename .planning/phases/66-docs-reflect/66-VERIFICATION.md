@@ -1,65 +1,145 @@
 ---
 phase: 66-docs-reflect
-verified: 2026-10-30
-status: gaps_found
-score: 4 of 5 success criteria MET in the repository against fakes (criteria 1 to 4); criterion 5 PARTIAL (no LightRAG, Hindsight or reflect run; gap scores unverified against a live plane)
-verified_on: main at 80afb6e5 (files read; nothing was run by the author of this record)
----
+verified: 2026-11-18T12:22:47Z
+status: human_needed
+score: 4/5 success criteria verified in code and targeted tests; criterion 5 live digest and gap run is operator-gated
+covered_files: [".planning/phases/66-docs-reflect/66-CONTEXT.md", ".planning/phases/66-docs-reflect/66-SUMMARY.md", "docs/corpus-reflect.md", "packages/cli/src/corpus/reflect.ts", "packages/corpus/src/authority.ts", "packages/corpus/src/reflect.ts", "packages/corpus/src/supersession.ts", "packages/mcp-server/src/corpus/authority-index.ts", "packages/mcp-server/src/corpus/digest-retain.ts", "packages/mcp-server/src/corpus/rank.ts", "packages/mcp-server/src/corpus/reflect-service.ts", "packages/mcp-server/src/corpus/reflect-store.ts", "packages/mcp-server/src/corpus/telemetry.ts", "packages/mcp-server/src/docs-search.ts"]
+covered_digest: "v3:sha256:e024b76472337d9e7286b19a523f907dcbcbff7900b3b7a55d64040441dc89ba"
+behavior_unverified: 0
+overrides_applied: 0
+gaps: []
+re_verification:
+  previous_status: gaps_found
+  previous_verified: 2026-10-30
+  previous_head: 80afb6e5
+  current_head: 357d6b15
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
+human_verification:
+  - test: "Run the reflect loop against a live stack: set SUBSTRATE_CORPUS, the LightRAG backend and Hindsight, then run `substrate corpus reflect --execute`, and confirm one digest document per repository lands in the docs plane and is retained in Hindsight with document_id replace (a second run replaces, not duplicates)."
+    expected: "One digest per repository in the docs plane, a corpus-digest retained entry per repository, and no duplicate Hindsight document after a second run."
+    why_human: "Needs a live LightRAG and Hindsight (0.9.1 pin) and an operator-approved run (the command is operator-gated; no schedule exists). Not run by the verifier."
+  - test: "With the live corpus and a flag set to on, run `substrate corpus status --gaps` after real searches and confirm the gap rows list the queries that returned nothing useful."
+    expected: "Rows keyed by query hash, with search count, best score, last asked and redacted text. A query with no citation counts as a gap."
+    why_human: "Gap scores depend on a live plane and on SUBSTRATE_DOCS_GAP_SCORE chosen by the operator. The code path is tested with fakes only."
+  - test: "Enable SUBSTRATE_DOCS_TELEMETRY=on against a Postgres with migration step 38 applied and confirm one corpus_retrievals row per docs_search and the retention sweep prunes expired rows."
+    expected: "Bounded, redacted rows with the query hash, returned keys and scores; expired rows removed after the retention window."
+    why_human: "The live-Postgres store test (packages/mcp-server/src/corpus/reflect-store.test.ts) skips unless SUBSTRATE_TEST_PG_URL is set; it was skipped in this verification's environment. The fake-backed tests pass."
 
-# 66-VERIFICATION: Docs Reflect, the docs RAG learns from use
+## Goal Achievement
 
-## Gates
+**Phase Goal:** The docs RAG improves with use: it remembers what was retrieved, learns what helped, prefers the current document to the one it replaced, writes digests of what it knows and reports what it could not answer.
+**Verified:** 2026-11-18T12:22:47Z
+**Status:** human_needed
+**Re-verification:** Yes, against the earlier record `66-VERIFICATION.md` (2026-10-30, `gaps_found`, HEAD 80afb6e5). That record read files only and cited no run. This one re-checks the five ROADMAP success criteria at HEAD `357d6b15` (branch `gsd/autonomous-rerun`), where the same modules exist, and runs the targeted tests. The earlier `gaps_found` came from criterion 5 being PARTIAL because no live LightRAG, Hindsight or reflect run existed. A live run is an operator action, so under this verifier's rules it is `human_needed`, not a code gap.
 
-Not run by the author of this record. The orchestrator's brief states that Biome, the test suite and tsc were run in a worktree before PR #184 was opened, and that the Greptile merge gate (5/5, no open threads, CI green, squash) was run by the ship loop, with several rounds needed. This record cites no test counts or CI results. Its evidence is file paths, function names and test titles read at 80afb6e5. The CI workflow exports `SUBSTRATE_TEST_PG_URL` from a scratch Postgres job (`.github/workflows/ci.yml`, line 53), so the live-index tests (`corpus/reflect-store.test.ts`) run only when that job runs them. [INFERENCE: the repository does not show whether they ran for #184.]
-
-## Success criteria
-
-ROADMAP phase 66, success criteria 1 to 5.
+### Observable Truths (ROADMAP success criteria)
 
 | # | Criterion | Status | Evidence |
-|---|---|---|---|
-| 1 | With `SUBSTRATE_DOCS_TELEMETRY=on` every `docs_search` appends a bounded, redacted row (query hash, capped redacted text, returned keys with scores, backend, scores) to `corpus_retrievals` (own migration step), with retention | MET | `corpus/telemetry.ts` `retrievalRowOf`, `queryTextOf`, `returnedOf`; `corpus/reflect-store.ts` `appendRetrieval`, `sweepRetrievals`; step 38 in `index-store.ts`; `docs-search.reflect.test.ts` "one search appends exactly one row: the query hash, the redacted capped text, at most ten returned keys with scores, the backend and the surface", "a question holding a credential keeps no text at all, only its hash", "retention drains every expired batch in one pass, and only rows older than the retention window"; `reflect-store.test.ts` "the sweep deletes only rows older than the retention, oldest first, and never more than the batch" (live Postgres only) |
-| 2 | `docs_feedback` (MCP tool and REST route) records helpful, unhelpful, stale, wrong or duplicate against a document key, audited, admission-limited, idempotent per session and document | MET | `mcp.ts` `docs_feedback`; `server.ts` `/docs/feedback`; `admission.ts` `docs_feedback: "write"`; `packages/audit/src/policy.ts` (fail-open list); `corpus/reflect-service.ts` `docsFeedbackReply`; `reflect-routes.test.ts` "a verdict is stored once per session and document, the latest wins, and another session adds its own", "a document the manifest does not hold as active answers unknown-document and stores nothing", "the audit record is written under docs_feedback with the document and the verdict, never the note". Residual risk: verdict stacking (below) |
-| 3 | `scoreDocument` is pure and tested; `SUBSTRATE_DOCS_RERANK=shadow` records what the re-rank would change, `on` applies it, `off` is the default | MET | `packages/corpus/src/authority.ts` `scoreDocument`; `authority.test.ts` "more helpful feedback never lowers the score and, next to a negative, strictly raises it", "a superseded document scores strictly lower than the same document not superseded"; `corpus/rank.ts` `reflectCitations`; `rank.test.ts` "on re-orders by score times authority, annotates each corpus citation and reports the positions moved"; `docs-search.reflect.test.ts` "off, and a flag left unset, answer byte for byte what a service with none of the new flags answers", "shadow answers byte for byte what off answers, and records on the telemetry row what on would have changed". Residual risks: shadow report not readable by a shipped command; re-rank inert when the plane gives no scores |
-| 4 | A document that a newer version, an archive or an explicit marker supersedes is flagged in its citations | MET | `packages/corpus/src/supersession.ts` `detectSupersession` (rules 1 to 3), `supersededByMarker`; marker reads in `scan.ts`, `adapters/github.ts`, `adapters/greptile-export.ts` (`entrySupersededBy`); `supersession.test.ts` "flags a document whose marker names an existing row of the same repository", "an archived file under a milestone directory is superseded by the live file with the same remainder", "a loop of markers flags none of its members, and a document leading into it is not flagged either"; `docs-search.reflect.test.ts` "on drops a superseded document below the document that replaced it, and its citation carries stale and superseded_by". Rule 3 has tests in the same file; their titles were not read for this record |
-| 5 | `substrate corpus reflect` writes one digest per repository into the docs plane and retains it in Hindsight with `document_id` replace; `corpus status --gaps` lists the queries that returned nothing useful | PARTIAL | `packages/corpus/src/reflect.ts` `buildDigest`; `packages/cli/src/corpus/reflect.ts` `collectDigests`; `corpus/reflect-service.ts` `corpusReflectReply`, `corpusGapsReply`; `corpus/digest-retain.ts`; `service.ts` `retainDigest`; `memory-write.ts` (`resolve: "lww"` for `corpus-digest:` subjects); `memory-retain.ts` `retainDocumentId` (subject-derived `subj_` id); `planes/hindsight.ts` (`update_mode: "replace"`); `reflect-store.ts` `gaps`; `reflect-service.test.ts` "stores a digest as the corpus document (repo, DIGEST_PATH), kind digest, through the ingest path, and retains it", "stored digests share one retain budget and do not each wait 5s", "lists the queries whose best score was none or below the gap score, most searched first, and leaves out answered ones and degraded searches". PARTIAL because no reflect run has been made, both LightRAG and Hindsight are required and were not exercised live, the gap score depends on a plane score field the fixture does not show, and nothing schedules reflect |
+|---|-----------|--------|----------|
+| 1 | With `SUBSTRATE_DOCS_TELEMETRY=on` every `docs_search` appends a bounded, redacted row (query hash, capped redacted text, returned keys with scores, backend) to `corpus_retrievals` (its own migration step), with retention. | ✓ VERIFIED (code and fake-backed tests) | `packages/mcp-server/src/corpus/telemetry.ts` (`retrievalRowOf`, `queryTextOf`, `returnedOf`, bounded `RetrievalRecorder`); `packages/mcp-server/src/corpus/reflect-store.ts` (`appendRetrieval`, `sweepRetrievals`); `packages/mcp-server/src/index-store.ts` migration step 38 creates `corpus_retrievals` and `corpus_feedback` (lines ~791-810), always run; `packages/mcp-server/src/docs-search.ts` and `flag-registry.ts` line 890 (`SUBSTRATE_DOCS_TELEMETRY`, default off, retention 30 days). Tests: `packages/mcp-server/src/docs-search.reflect.test.ts`, `telemetry.test.ts`. Live Postgres store test skipped here (no `SUBSTRATE_TEST_PG_URL`). |
+| 2 | `docs_feedback` (MCP tool and REST route) records helpful, unhelpful, stale, wrong or duplicate against a document key; audited, admission-limited, idempotent per session and document. | ✓ VERIFIED | `packages/mcp-server/src/mcp.ts` line ~1804 (`docs_feedback` tool); `server.ts` line 321 and 1872 (`POST /docs/feedback`); `corpus/reflect-service.ts` `docsFeedbackReply` (unknown document answers 404, one verdict per `surface/session` and document, upsert); audit and admission registered per the prior record. Tests: `packages/mcp-server/src/corpus/reflect-routes.test.ts` passed. |
+| 3 | `scoreDocument` is a pure, tested function of tier, kind, recency, supersession and feedback; `SUBSTRATE_DOCS_RERANK=shadow` records what the re-rank would change, `on` applies it, `off` is default. | ✓ VERIFIED | `packages/corpus/src/authority.ts` (`scoreDocument`, pure); `packages/mcp-server/src/corpus/rank.ts` (`reflectCitations` off/shadow/on); `flag-registry.ts` line 892 (`SUBSTRATE_DOCS_RERANK`, default off). Tests passed: `packages/corpus/src/authority.test.ts`, `packages/mcp-server/src/corpus/rank.test.ts`, `packages/mcp-server/src/docs-search.reflect.test.ts`, `authority-index.test.ts`. |
+| 4 | Supersession detected for a newer version of the same path, a live document and its milestone archive, and an explicit `superseded-by` marker; citations carry `stale` and `superseded_by`. | ✓ VERIFIED | `packages/corpus/src/supersession.ts` (`detectSupersession`, marker reading); `rank.ts` annotates `stale` and `superseded_by` on corpus citations. Tests passed: `packages/corpus/src/supersession.test.ts`, `docs-search.reflect.test.ts`. |
+| 5 | `substrate corpus reflect` writes one digest per repository (current milestone and phase, decisions, open items, deterministic from STATE and ROADMAP) into the docs plane and retains it in Hindsight with `document_id` replace; `corpus status --gaps` lists unanswered queries. | ? HUMAN_NEEDED (live run) / ✓ code and tests | `packages/corpus/src/reflect.ts` (`buildDigest`); `packages/cli/src/corpus/reflect.ts` (`collectDigests`); `reflect-service.ts` `corpusReflectReply` and `corpusGapsReply`; `digest-retain.ts` (governed `corpus-digest:` retain); `reflect-store.ts` `gaps`. Tests passed: `packages/corpus/src/reflect.test.ts`, `packages/mcp-server/src/corpus/digest-retain.test.ts`, `reflect-service.test.ts`, `packages/cli/src/corpus/reflect.test.ts`, and `packages/cli/src/corpus/index.test.ts -t gaps` (5 pass). A live digest write to LightRAG and Hindsight is operator-gated and was not run. |
 
-## The reflect loop, traced from code
+**Score:** 4/5 criteria verified in code and tests; criterion 5 needs the operator's live run for its docs-plane and Hindsight half.
 
-1. `docs_search` → telemetry row (flag on) → `corpus_retrievals` → `GET /corpus/gaps`. Connected in code (`service.ts` `recordRetrieval`, `RetrievalRecorder`, `bunReflectStore.gaps`).
-2. `docs_feedback` → `corpus_feedback` → feedback counts (cache 60 s) → `feedbackTerm` and `staleByFeedback` → re-rank. Connected (`docsFeedback` calls `authorityIndex.invalidateFeedback`; `AuthorityIndex` reads `reflectStore()`). The invalidation applies to this process only.
-3. Manifest change → authority snapshot (version check every 30 s) → `detectSupersession` → `stale` and `superseded_by` → re-rank. Connected (`snapshotOf`, `reflectAnswer`).
-4. Digest: CLI scan → `POST /corpus/reflect` → `ingestCorpus` to LightRAG → `retainDigest` through the governed write → `lww` retirement in Hindsight. Connected.
-5. The re-rank touches only citations with `dataset: "corpus"`. Those exist only after a phase 63 ingest into LightRAG, and that ingest has not run in production (see `63-VERIFICATION.md`).
+### Targeted test run (this session)
 
-Nothing in the repository calls `docs_feedback`: `git grep` at 80afb6e5 finds only the tool, the route, the audit and admission tables, the tests and the docs. No hook, skill or scheduled job runs `substrate corpus reflect`. The loop therefore closes only when an operator or an agent makes those calls.
+`bun test` on authority, supersession, reflect (corpus), rank, telemetry, authority-index, reflect-service, reflect-routes, digest-retain, docs-search.reflect and the CLI reflect test: **218 pass, 0 fail**, 52,358 expect() calls. The stderr lines (`cache bypass`, `connection lost`, `ENOTDIR`) are the expected negative-path logs of fail-open tests, not failures. `corpus status --gaps` CLI tests: **5 pass, 0 fail**.
 
-Status: PARTIAL. The code path connects end to end; no run of it exists.
+### Not run
 
-## Residual risks
+- `packages/mcp-server/src/corpus/reflect-store.test.ts` (live Postgres; skipped without `SUBSTRATE_TEST_PG_URL`).
+- Live LightRAG, Hindsight and the Postgres index. The verifier did not run the live stack.
 
-- **Verdict stacking.** `corpus_feedback` is keyed by the caller's `session_id`, and `feedbackCounts` sums rows per document. One surface can post `stale` for the same document under three session ids and reach `STALE_FEEDBACK_MIN` (3) with more stale than helpful votes. `authority-index.test.ts` seeds exactly this with sessions `a`, `b` and `c`. Only the active-row check and the admission limit bound it, and the verdict is not tied to a retrieval the session made.
-- **Plane score dependence.** `planes/lightrag.ts` `toChunk` reads a score only when the entry has one (`readNumber` over `score`, `similarity`, and others); `docs-search.ts` uses `hit.score ?? 0` and `chunk.score ?? 0`. The hand-written v1.5.7 fixture (`planes/__fixtures__/lightrag-v1.5.7-routes.json`) shows no score field. If the live query returns none, every answered search has `top_score` 0, so every query with a citation is a gap at the default 0.2. The re-rank's score multiplier is then 0 for every corpus citation, so the order is the plane's own while `stale` and `superseded_by` still apply. [INFERENCE until a live response is captured.]
-- **Shadow report unreadable.** `reflect-store.ts` `appendRetrieval` writes the `rerank` column. No route, CLI command or SQL statement in the repository reads it (`gaps` selects `top_score` only). `reflectCounters()` in `service.ts` is read only by tests. `docs/corpus-reflect.md` "Reading a shadow report" assumes a read path that does not exist.
-- **Failed digest retain is not retried.** `corpusReflectReply` retains only digests whose outcome is `ingested` or `updated`. A digest whose manifest row is unchanged is answered `unchanged` and is not retained again, so a refused or failed Hindsight leg is not retried by a later run. A `pending` leg is parked by the retain outbox (`memory-retain.ts`); this record did not trace the outbox's retry.
-- **Per-process state.** The authority snapshot and the feedback counts are per process (`authority-index.ts` header). A verdict stored through one server reaches another within 60 s, and a manifest change within 30 s.
-- **Feedback bound.** `feedbackCounts(FEEDBACK_MAX_KEYS)` keeps the 5000 most recently voted documents. Older documents lose their feedback in the re-rank.
-- **Live Postgres tests are conditional.** `reflect-store.test.ts` skips unless `SUBSTRATE_TEST_PG_URL` is set. The gaps SQL, the feedback upsert and the sweep are verified only through that file or the fake.
-- **No end-to-end test of the loop.** No test calls `docs_feedback` and then checks `docs_search` order through `Substrate`. The feedback-to-authority link is tested at the index seam (`authority-index.test.ts`); the reorder is tested at `rank.ts` and in `docs-search.reflect.test.ts` with seeded counts. The digest path is tested through `corpusReflectReply` with fakes.
-- **Hindsight scope.** Pin 0.9.1 (`.github/hindsight-pin.json`). Reflect and mental models are not used (decision D66-2), so Hindsight's own learning surface is not part of the loop.
-- **Column name collision.** `corpus_documents.superseded_by` holds a marker path; the citation field `superseded_by` holds a document key (see `66-SUMMARY.md`, Deviations).
+### Required Artifacts
 
-## Operator-gated
+| Artifact | Expected | Status | Details |
+|----------|----------|--------|---------|
+| `packages/corpus/src/authority.ts` | pure `scoreDocument` | ✓ VERIFIED | present, tested |
+| `packages/corpus/src/supersession.ts` | `detectSupersession` | ✓ VERIFIED | present, tested |
+| `packages/corpus/src/reflect.ts` | `buildDigest` | ✓ VERIFIED | present, tested |
+| `packages/mcp-server/src/corpus/telemetry.ts` | retrieval row builder and recorder | ✓ VERIFIED | present, tested |
+| `packages/mcp-server/src/corpus/reflect-service.ts` | feedback, reflect, gaps replies | ✓ VERIFIED | present, tested |
+| `packages/mcp-server/src/corpus/reflect-store.ts` | Postgres store | ✓ VERIFIED (fake-tested) | live test conditional |
+| `packages/mcp-server/src/corpus/rank.ts` | off/shadow/on re-rank | ✓ VERIFIED | present, tested |
+| `packages/mcp-server/src/corpus/authority-index.ts` | per-process snapshot and feedback cache | ✓ VERIFIED | present, tested |
+| `packages/mcp-server/src/corpus/digest-retain.ts` | governed digest retain | ✓ VERIFIED | present, tested |
+| `packages/cli/src/corpus/reflect.ts` | `substrate corpus reflect` | ✓ VERIFIED | present, tested |
 
-- Setting `SUBSTRATE_DOCS_TELEMETRY`, `SUBSTRATE_DOCS_RERANK` (`shadow`, then `on`), `SUBSTRATE_DOCS_GAP_SCORE` or the retention. All default off or conservative, and this PR sets none of them.
-- Enabling `SUBSTRATE_CORPUS` and the LightRAG backend, which the feedback, reflect and gaps doors and the re-rank need.
-- Running `substrate corpus reflect --execute` against a live LightRAG and Hindsight. No schedule exists.
-- Wiring an agent, hook or skill to call `docs_feedback`. None exists in the repository.
-- Rehearsing migration step 38 on a restored dump before production (`docs/runbooks/rollback-compat.md`, the row this PR added). Step 38 runs at every boot, with no flag.
-- The phase 63 live ingest, which the re-rank depends on.
+### Key Link Verification
 
-## Planning records
+| From | To | Via | Status | Details |
+|------|----|-----|--------|---------|
+| `docs-search.ts` / `service.ts` | `telemetry.ts` `RetrievalRecorder` | `recordRetrieval` after the answer is built, flag-gated | ✓ WIRED | per the code, tested via `docs-search.reflect.test.ts` |
+| `mcp.ts` `docs_feedback` and `server.ts` `/docs/feedback` | `reflect-service.ts` `docsFeedbackReply` | handler call | ✓ WIRED | route and tool both present |
+| `authority-index.ts` | `reflect-store.ts` `feedbackCounts` | feedback term, 60 s cache | ✓ WIRED | `docsFeedback` invalidates the cache |
+| `rank.ts` | `authority.ts` `scoreDocument` | `reflectCitations` | ✓ WIRED | tested |
+| `reflect.ts` (CLI) | `reflect-service.ts` `corpusReflectReply` | `POST /corpus/reflect` | ✓ WIRED | route present in `server.ts` |
 
+### Data-Flow Trace (Level 4)
+
+| Artifact | Data Variable | Source | Produces Real Data | Status |
+|----------|---------------|--------|--------------------|--------|
+| Retrieval rows | query hash, returned keys, scores | `docs_search` answer | yes, from the live answer path (fake-tested) | ✓ FLOWING (code) |
+| Feedback term | helpful and negative counts | `corpus_feedback` table | yes, via `reflect-store.ts` | ✓ FLOWING (code) |
+| Digest | repo STATE and ROADMAP | `buildDigest` deterministic read | yes, tested | ✓ FLOWING (code) |
+
+### Behavioral Spot-Checks
+
+| Behavior | Command | Result | Status |
+|----------|---------|--------|--------|
+| Reflect core, authority, supersession, rank, telemetry, routes, digest, docs-search reflect, CLI reflect | `bun test` on 12 targeted files | 218 pass, 0 fail | ✓ PASS |
+| `corpus status --gaps` CLI | `bun test packages/cli/src/corpus/index.test.ts -t gaps` | 5 pass, 0 fail | ✓ PASS |
+| Live reflect run, live gaps, live Postgres store test | not run | — | ? SKIP (live stack; operator-gated) |
+
+### Probe Execution
+
+No `scripts/*/tests/probe-*.sh` declared for this phase. Skipped.
+
+### Requirements Coverage
+
+| Requirement | Description | Status | Evidence |
+|-------------|-------------|--------|----------|
+| REFLECT-01 | Retrieval telemetry | ✓ SATISFIED (code and fake tests) | criterion 1 |
+| REFLECT-02 | `docs_feedback` | ✓ SATISFIED (code and tests) | criterion 2 |
+| REFLECT-03 | authority score and re-rank | ✓ SATISFIED (code and tests) | criterion 3 and 4 |
+| REFLECT-04 | supersession | ✓ SATISFIED (code and tests) | criterion 4 |
+| REFLECT-05 | digest and gaps | ? NEEDS HUMAN for the live run | criterion 5 |
+
+Planning note: `.planning/REQUIREMENTS.md` may still list REFLECT-01..05 unchecked. This record does not edit it.
+
+### Anti-Patterns Found
+
+| File | Line | Pattern | Severity | Impact |
+|------|------|---------|----------|--------|
+| `docs/corpus-reflect.md` | 141 | says a query that returned nothing "counts as best 0"; the code reports `best: null` (`reflect-routes.test.ts`) | ℹ️ Info | documentation wording only; the SQL counts such a query as a gap either way |
+
+### Known residual risks (not gaps)
+
+- Verdict stacking: feedback is per surface and session, so repeated verdicts from many sessions add weight. Recorded in the prior record; no criterion forbids it.
+- Feedback bound: `FEEDBACK_MAX_KEYS` (5000) keeps only the most recently voted documents in the re-rank.
+- Column name collision: `corpus_documents.superseded_by` (a repo-relative path) and the citation field `superseded_by` (a document key) share a name with different shapes.
+- Nothing in the repository calls `docs_feedback` or schedules `substrate corpus reflect`. The loop closes only when an operator or agent calls them. This is an operator-gated item, not a criterion failure.
+
+### Human Verification Required
+
+1. **Live reflect run.** With `SUBSTRATE_CORPUS`, LightRAG and Hindsight configured, run `substrate corpus reflect --execute`. Expect one digest per repository in the docs plane and a Hindsight retain with `document_id` replace, with no duplicate on a second run.
+2. **Live gaps.** After real `docs_search` traffic with telemetry on, run `substrate corpus status --gaps`. Expect rows for unanswered queries with hashes, counts, best score and redacted text.
+3. **Live Postgres telemetry.** Run `reflect-store.test.ts` with `SUBSTRATE_TEST_PG_URL` set, or enable telemetry against a Postgres at migration step 38. Expect one bounded row per search and expired rows swept.
+
+### Gaps Summary
+
+No gaps. Criteria 1 to 4 are met in code and by 218 passing targeted tests. Criterion 5 is met in code and tests; its live docs-plane, Hindsight and gap-score evidence needs an operator-approved run, so the status is `human_needed`.
+
+---
+# Phase 66 Verification
+
+_Verified: 2026-11-18T12:22:47Z_
+_Verifier: Claude (gsd-verifier)_
 At 80afb6e5, `.planning/REQUIREMENTS.md` still lists REFLECT-01 to REFLECT-05 unchecked (lines 41 to 45), and the traceability table lists them as "Planned" (line 97). This record does not change either.
 
 ## Closure, 2026-11-11 (branch `reconcile/main-2026-11-11`)

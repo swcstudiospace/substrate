@@ -5,7 +5,8 @@
 // issue_get, framed as untrusted task text. The id patterns are the dispatcher's own.
 
 import { isValidGraphId } from "./sandbox-options.ts";
-import { type Route, SUBSTRATE_MCP_URL, TRACKER_PROXY_PORT, type TestsRoute, trackerRoute } from "./options.ts";
+import { type Route, TRACKER_PROXY_PORT, type TestsRoute, trackerRoute } from "./options.ts";
+import { SUBSTRATE_PROXY_URL } from "./substrate-proxy.ts";
 import type { GraphNodeView, GraphView } from "./substrate.ts";
 
 /** launcher.py NODE_ID_RE / IDENTIFIER_RE, worktree.py REPO_SLUG_RE. */
@@ -171,16 +172,7 @@ export type SeedFilesInput = {
 	/** The rendered ids-only prompt: the kickoff state's spec. */
 	prompt: string;
 	/**
-	 * Host-job bearer for the seeded substrate MCP entry (Phase 20 tokens-dir
-	 * order, resolved host-side). Null/omitted keeps September's headerless
-	 * entry. The value is carried, never logged; rotation and scoping are
-	 * Phase 32's credentials discipline (LANEA-02/03/07).
-	 */
-	substrateBearer?: string | null;
-	/**
-	 * The substrate MCP URL written into the seeded entry (D32-08 test seam).
-	 * Defaults to the unit's served loopback proxy; a non-loopback URL keeps
-	 * the entry headerless whatever bearer is supplied.
+	 * The substrate MCP URL written into the seeded entry. Defaults to the host substrate proxy (SUBSTRATE_PROXY_URL).
 	 */
 	substrateMcpUrl?: string;
 	/** Clock for tracking.updatedAt; defaults to the wall clock. */
@@ -271,22 +263,6 @@ function hookSettings(): Record<string, unknown> {
 	};
 }
 
-/**
- * D32-08: whether the served substrate proxy URL is loopback-reachable from the VM. A static
- * hostname check — never a network probe at seed time. The unit serves the proxy on 127.0.0.1;
- * only loopback names keep the bearer in the seeded entry, everything else stays headerless.
- */
-export function substrateProxyLoopback(url: string = SUBSTRATE_MCP_URL): boolean {
-	let host = "";
-	try {
-		host = new URL(url).hostname.toLowerCase();
-	} catch {
-		return false;
-	}
-	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
-	return host === "127.0.0.1" || host === "::1" || host === "localhost";
-}
-
 /** Every file openTask writes under /home/agentos, in write order. */
 export function seedFiles(input: SeedFilesInput): SeedFile[] {
 	const files: SeedFile[] = [{ path: `${VM_HOME}/SUBSTRATE_BRIEF.md`, content: input.brief }];
@@ -303,22 +279,14 @@ export function seedFiles(input: SeedFilesInput): SeedFile[] {
 	}
 	// D-11 / SC-2: MCP servers named exactly substrate, notion and linear; loopback URLs only.
 	// notion and linear point at the host's tracker proxy, which is served and reachable only
-	// on tracker_route vm_mcp; elsewhere the entries are inert. The substrate entry carries the
-	// host-job bearer header (main lease model; anonymous access is refused server-side) — the
-	// value is resolved host-side via the Phase 20 tokens-dir order and never logged.
-	const mcpUrl = (input.substrateMcpUrl ?? SUBSTRATE_MCP_URL).trim();
-	const bearer = (input.substrateBearer ?? "").trim();
-	// D32-08: the bearer rides only the loopback proxy the unit serves. A non-loopback URL
-	// keeps September's headerless entry and the model reaches substrate through host functions.
-	const substrateEntry =
-		bearer !== "" && substrateProxyLoopback(mcpUrl)
-			? { type: "http", url: mcpUrl, headers: { Authorization: `Bearer ${bearer}` } }
-			: { type: "http", url: mcpUrl };
+	// on tracker_route vm_mcp; elsewhere the entries are inert. The substrate entry points at the
+	// host's substrate proxy on loopback, which attaches the host job bearer; the VM never holds it.
+	const mcpUrl = (input.substrateMcpUrl ?? SUBSTRATE_PROXY_URL).trim();
 	files.push({
 		path: `${VM_HOME}/.claude.json`,
 		content: json({
 			mcpServers: {
-				substrate: substrateEntry,
+				substrate: { type: "http", url: mcpUrl },
 				notion: { type: "http", url: `http://127.0.0.1:${TRACKER_PROXY_PORT}/mcp/notion` },
 				linear: { type: "http", url: `http://127.0.0.1:${TRACKER_PROXY_PORT}/mcp/linear` },
 			},

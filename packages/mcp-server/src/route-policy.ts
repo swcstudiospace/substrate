@@ -77,6 +77,7 @@ export const MCP_TOOL_POLICY: Readonly<Record<string, Declaration>> = {
 	cross_repo_fanout: GATED("crossRepoFanoutReply: every repository the operation names must be granted to the caller's surface and listed in its session allowlist"),
 	cross_repo_status: GATED("crossRepoStatusReply: the operation is returned only when every repository it names is granted to the caller's surface and session"),
 	cross_repo_compensate: GATED("crossRepoCompensateReply: operator only, refused to a non-operator before the store is read; every repository the operation names must be granted to the caller's surface and listed in its session allowlist"),
+	railway_cost: GLOBAL("read-only cost of the configured Railway projects; no repository content"),
 	railway_list: GLOBAL("read-only list of Railway projects and services; no repository content"),
 	railway_monitor: GLOBAL("read-only status of one Railway service; no repository content"),
 	fabric_status: GLOBAL("read-only status of the data-plane resources; no repository content"),

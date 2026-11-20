@@ -85,6 +85,16 @@ describe("corpus document names", () => {
 		expect(parseCorpusDocumentName(name)).toEqual({ repo: "swcstudiospace/agent-substrate", path: "docs/data-planes.md", sha12: SHA.slice(0, 12) });
 	});
 
+	test("a name with facts carries the kind, the tier and the commit, and a change to any of them is a different name", () => {
+		const facts = { kind: "runbook" as const, tier: 2 as const, commit: "a".repeat(40) };
+		const name = corpusDocumentName("swcstudiospace/agent-substrate", "docs/run.md", SHA, facts);
+		expect(name).toBe(`corpus:swcstudiospace%2Fagent-substrate:docs%2Frun.md@${SHA.slice(0, 12)}.runbook.2.${"a".repeat(40)}`);
+		expect(parseCorpusDocumentName(name)).toEqual({ repo: "swcstudiospace/agent-substrate", path: "docs/run.md", sha12: SHA.slice(0, 12), kind: "runbook", tier: 2, commit: "a".repeat(40) });
+		expect(corpusDocumentName("a/b", "a.md", SHA, { ...facts, commit: undefined })).toBe(`corpus:a%2Fb:a.md@${SHA.slice(0, 12)}.runbook.2.-`);
+		expect(corpusDocumentName("a/b", "a.md", SHA, { ...facts, tier: 3 })).not.toBe(corpusDocumentName("a/b", "a.md", SHA, facts));
+		expect(corpusDocumentName("a/b", "a.md", SHA, { ...facts, commit: "a".repeat(40) })).not.toBe(corpusDocumentName("a/b", "a.md", SHA, { ...facts, commit: "b".repeat(40) }));
+	});
+
 	test("the encoding is reversible for a path holding a percent sign, a colon and an at sign", () => {
 		for (const path of ["docs/100%/a.md", "docs/a%2Fb.md", "notes/12:30@home.md", "%25.md"]) {
 			const name = corpusDocumentName("local/my notes", path, SHA);

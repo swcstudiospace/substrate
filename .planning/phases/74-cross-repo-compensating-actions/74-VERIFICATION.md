@@ -99,3 +99,17 @@ No code blocker. SC1's prior human_needed ground (no production caller) is close
 ---
 _Verified: 2026-11-19T12:00:00Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Addendum — retained origin/main evidence (2026-11-19, HEAD ee998735)
+
+Merge note: HEAD above (2026-11-19T12:00:00Z, covered_digest v4) is retained as the primary record — it closes SC1's prior "no production caller" ground with the landed REST+MCP route (`server.ts:1843-1866`, `service.ts:6974-6986`, `mcp.ts:1681,1713,1731`). The origin/main record below is retained as additive evidence, not as a competing verdict: both records agree status stays `human_needed` and SC1–SC3 are verified in code.
+
+**Drift check (origin/main):** `git diff 357d6b15..HEAD` over the cross-repo implementation (`cross-repo-ops.ts`, `cross-repo-store.ts`, `cross-repo-ops.test.ts`, `cross-repo-ops.testkit.ts`, `repo-scope.ts`) is empty; the only touched file was `cross-repo.routes.test.ts` (5 lines, cosmetic env-token helper). Implementation evidence is therefore unchanged from the prior pass. Named tests cited there: `cross-repo-ops.test.ts` branch-cut/retry/crash-adoption, failure-at-step-N/park/retry, real-temp-repo adoption/ref-move, and PG crash-resume in `cross-repo-ops.pg.test.ts:34,56`.
+
+**Additional operator/live items from origin/main (retained, beyond migration step 43 above):**
+
+1. **Gate re-run and owner sign-off on HEAD `ee998735`** — expected: gate green (`tsc --noEmit`, Biome, affected cross-repo test files with live PostgreSQL) and owner sign-off recorded, as ROADMAP.md Phase 74 requires ("human sign-off pending"). Why human: that pass was barred from running tests/tsc/Biome.
+2. **Single driver per index database** — expected: either one `mcp-server` driver per Postgres index, or a cross-process guard (lease/owner column on `cross_repo_steps`). Why human: today the one-driver-per-key guarantee is the in-process `KeyedLock` (`cross-repo-ops.ts:242,261`); `moveStep` is compare-and-set so cross-process races cannot double-apply, but the resume-from-`applying` rule assumes one driver. Depends on production replica count, which code does not show.
+3. **Default surface policy confirmation** — expected: owner confirms that with `SUBSTRATE_REPO_SCOPES` unset, `repo-scope.ts` granting every authenticated surface every registered repository is acceptable for cross-repo writes, or requires `SUBSTRATE_REPO_SCOPES` set wherever cross-repo writes run. Why human: policy choice, recorded as open for the owner in ROADMAP.md Phase 74.
+
+_Headline verdict above is unchanged by this addendum: no code gaps; remaining items are operator/live._

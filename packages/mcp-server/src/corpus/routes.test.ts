@@ -19,7 +19,7 @@ import { FakePlane, FakeStore, entryOf, makeDocument, makeRow, sha256Hex } from 
 const REPO = "swcstudiospace/agent-substrate";
 const AUTH = { authorization: "Bearer tok-omp", "content-type": "application/json" };
 const ANON = { "content-type": "application/json" };
-const ON = { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_CORPUS: "on" };
+const ON = { SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_OPERATOR_TOKENS: "tok-omp", SUBSTRATE_CORPUS: "on" };
 
 interface Harness {
 	base: string;
@@ -114,6 +114,15 @@ describe("the corpus gates", () => {
 		expect(response.status).toBe(403);
 		expect(await reasonOf(response)).toBe("vm-guest");
 		expect(harness.plane.batches).toEqual([]);
+	});
+
+	test("an authenticated surface that is not an operator is refused 403 operator-required before anything is sent", async () => {
+		const harness = await start({ ...ON, SUBSTRATE_TOKEN_CLAUDE_CODE: "tok-claude" });
+		const response = await post(harness, "/corpus/ingest", ingestBody, { authorization: "Bearer tok-claude", "content-type": "application/json" });
+		expect(response.status).toBe(403);
+		expect(await reasonOf(response)).toBe("operator-required");
+		expect(harness.plane.batches).toEqual([]);
+		expect(harness.store.rows.size).toBe(0);
 	});
 
 	test("with no LightRAG bulk plane the ingest answers 503 corpus.backend-unavailable and the manifest stays empty", async () => {
@@ -267,7 +276,7 @@ describe("POST /corpus/reconcile", () => {
 	async function drifted() {
 		const harness = await start(ON);
 		await post(harness, "/corpus/ingest", ingestBody);
-		harness.plane.vanish(corpusDocumentName(document.repo, document.path, document.sha256));
+		harness.plane.vanish(corpusDocumentName(document.repo, document.path, document.sha256, document));
 		const orphan = corpusDocumentName(REPO, "docs/stray.md", sha256Hex("stray"));
 		const orphanId = harness.plane.plant(orphan);
 		return { harness, orphan, orphanId };

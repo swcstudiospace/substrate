@@ -63,6 +63,38 @@ describe("planCorpus: the six actions", () => {
 		expect(plan.counts).toMatchObject({ add: 1, tombstone: 1, rename: 0 });
 	});
 
+	test("a canonical copy that moves between copy collections is one rename, naming its old collection", () => {
+		const c1 = "local/c1";
+		const c2 = "local/c2";
+		const collections: CorpusScope = { coverage: [{ repo: c1, source: "fs" }, { repo: c2, source: "fs" }], maxTier: 3 };
+		const rows = [makeRow({ repo: c1, path: "docs/a.md", sha256: sha256Hex("t") })];
+		const plan = planCorpus([entry("docs/a.md", "t", { repo: c2 })], collections, rows);
+		expect(plan.counts).toEqual({ add: 0, change: 0, update: 0, rename: 1, tombstone: 0, unchanged: 0 });
+		expect(plan.items).toEqual([{ action: "rename", repo: c2, path: "docs/a.md", sha256: sha256Hex("t"), renamedFrom: "docs/a.md", renamedFromRepo: c1 }]);
+	});
+
+	test("within one repository a rename pairs before any cross-collection pair, whatever the order of the paths", () => {
+		const c1 = "local/c1";
+		const c2 = "local/c2";
+		const collections: CorpusScope = { coverage: [{ repo: c1, source: "fs" }, { repo: c2, source: "fs" }], maxTier: 3 };
+		const rows = [makeRow({ repo: c2, path: "a.md", sha256: sha256Hex("t") }), makeRow({ repo: c1, path: "b.md", sha256: sha256Hex("t") })];
+		const plan = planCorpus([entry("z.md", "t", { repo: c1 })], collections, rows);
+		expect(plan.counts).toMatchObject({ rename: 1, tombstone: 1, add: 0 });
+		expect(plan.items).toEqual([
+			{ action: "rename", repo: c1, path: "z.md", sha256: sha256Hex("t"), renamedFrom: "b.md" },
+			{ action: "tombstone", repo: c2, path: "a.md", sha256: sha256Hex("t") },
+		]);
+	});
+
+	test("a copy collection and a checkout never pair: the same text across them is an add plus a tombstone", () => {
+		const c1 = "local/c1";
+		const scope: CorpusScope = { coverage: [{ repo: c1, source: "fs" }, { repo: REPO, source: "fs" }], maxTier: 3 };
+		const fromCollection = planCorpus([entry("docs/b.md", "t", { repo: REPO })], scope, [makeRow({ repo: c1, path: "docs/a.md", sha256: sha256Hex("t") })]);
+		expect(fromCollection.counts).toMatchObject({ add: 1, tombstone: 1, rename: 0 });
+		const toCollection = planCorpus([entry("docs/b.md", "t", { repo: c1 })], scope, [makeRow({ repo: REPO, path: "docs/a.md", sha256: sha256Hex("t") })]);
+		expect(toCollection.counts).toMatchObject({ add: 1, tombstone: 1, rename: 0 });
+	});
+
 	test("a change is not a rename candidate: the same text appearing as a change leaves the removed row a tombstone", () => {
 		const rows = [makeRow({ repo: REPO, path: "docs/gone.md", sha256: sha256Hex("t") }), makeRow({ repo: REPO, path: "docs/edited.md", sha256: sha256Hex("before") })];
 		const plan = planCorpus([entry("docs/edited.md", "t")], SCOPE, rows);

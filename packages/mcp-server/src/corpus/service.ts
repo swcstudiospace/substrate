@@ -36,6 +36,7 @@ import { parseIngestRequest, parsePlanRequest, parseReconcileRequest, type Reque
 /** Every reason a corpus door refuses: the gates, the request refusals, an index or plane or embedding service that does not answer, and the proof lookups. Closed. */
 export type CorpusRefusalReason =
 	| GateReason
+	| "operator-required"
 	| RequestRefusal
 	| "corpus.index-unavailable"
 	| "corpus.plane-unreachable"
@@ -81,6 +82,7 @@ export interface CorpusServiceDeps {
 const MESSAGES: Readonly<Record<CorpusRefusalReason, string>> = {
 	unauthenticated: "the corpus needs an authenticated surface; nothing was read or changed",
 	"vm-guest": "the corpus is not served to a VM guest; nothing was read or changed",
+	"operator-required": "the corpus ingest is an operator's write; nothing was sent or changed",
 	"corpus.disabled": "the corpus is switched off (SUBSTRATE_CORPUS is not on); nothing was read or changed",
 	"corpus.backend-unavailable": "the corpus ingest and reconcile need the LightRAG docs backend, which is not configured; nothing was sent",
 	"corpus.index-unavailable": "the corpus manifest is not reachable (no index, or it did not answer); nothing was changed",
@@ -118,8 +120,12 @@ export function refusal(status: 400 | 401 | 403 | 404 | 503, reason: CorpusRefus
 	return { ok: false, status, body: { error: MESSAGES[reason], reason, ...(detail === undefined ? {} : { detail }) } };
 }
 
-/** The gate every corpus door shares. `needsPlane` is true for the ingest, the only door that writes to the docs plane. */
-function gateOf(deps: CorpusServiceDeps, surface: Surface | null, needsPlane: boolean): CorpusFailure | null {
+/**
+ * The gate every corpus door shares. `needsPlane` is true for the ingest, the only door that writes to the docs plane.
+ * `caller.operatorOnly` makes the door an operator's (the ingest): an authenticated surface that is not an operator is refused
+ * after the shared gate. The reads and the digest door leave it unset.
+ */
+function gateOf(deps: CorpusServiceDeps, surface: Surface | null, needsPlane: boolean, caller: { operatorOnly?: boolean; isOperator?: boolean } = {}): CorpusFailure | null {
 	const gate = corpusGate({
 		enabled: deps.settings.enabled,
 		surface,
@@ -127,6 +133,7 @@ function gateOf(deps: CorpusServiceDeps, surface: Surface | null, needsPlane: bo
 		backendReady: !needsPlane || deps.plane !== null,
 	});
 	if (gate !== null) return refusal(gate.status, gate.reason);
+	if (caller.operatorOnly === true && caller.isOperator !== true) return refusal(403, "operator-required");
 	if (deps.store === null) return refusal(503, "corpus.index-unavailable");
 	return null;
 }
@@ -190,8 +197,8 @@ export async function corpusPlanReply(deps: CorpusServiceDeps, raw: unknown, sur
 }
 
 /** `POST /corpus/ingest`: the bulk ingest. The only door that sends anything to the docs plane. */
-export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null): Promise<CorpusReply<CorpusIngestResponse>> {
-	const gated = gateOf(deps, surface, true);
+export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, surface: Surface | null, isOperator: boolean): Promise<CorpusReply<CorpusIngestResponse>> {
+	const gated = gateOf(deps, surface, true, { operatorOnly: true, isOperator });
 	if (gated !== null) {
 		if (surface !== null && gated.body.reason !== "corpus.disabled") await emitRefusal(deps, surface, gated.body.reason, `corpus-ingest:${randomUUID()}`);
 		return gated;
@@ -208,7 +215,7 @@ export async function corpusIngestReply(deps: CorpusServiceDeps, raw: unknown, s
 	if (scoped !== null) return scoped;
 	// The root cache is unavailable from the first write to the last: each batch saves its rows before the later ones and the cleanup.
 	// A request that recorded, changed or removed anything (or failed part-way, or threw) moved the manifest: a root event is owed.
-	// The keeper coalesces and dedupes by manifest version, so a request that changed nothing writes nothing.
+	// Each changing sync owes its own root event, written with no window; a request that changed nothing writes nothing.
 	deps.roots.writeStarted();
 	let changed = true;
 	try {

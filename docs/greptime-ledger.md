@@ -1022,6 +1022,20 @@ forgets. Its scheduled entry is `packages/mcp-server/src/cross-layer-reconcile-r
 - **Install.** Both units are staged in `infra/vps/`. Copying them into `/etc/systemd/system`, `systemctl daemon-reload` and `systemctl enable --now substrate-cross-layer-reconcile.timer` are operator steps; nothing in the repo installs them. The sandbox drop-in `infra/vps/substrate-cross-layer-reconcile.service.d/30-sandbox.conf.example` is an example and is not active until copied.
 - **Exit codes.** 0 for a complete read with no mismatch, 3 for a mismatch (the first mismatching key is in the journal under `substrate-cross-layer-reconcile`), 1 for an incomplete read or a layer that could not be read.
 - **Graphs.** `SUBSTRATE_RECONCILE_GRAPHS` (comma separated graph ids, at most 50) names the graphs whose cross-layer pairs the run compares. Unset, no graph pair is compared: the run reports those pairs as not run, and its exit is the forget pair's alone. The unit file does not set it, so it must be added to `/etc/substrate/substrate.env` to take effect. See `docs/config-reference.md`.
+## Telemetry buffer and dead-letter (phase 76)
+
+The buffer is **off by default**. With `SUBSTRATE_EVENT_BUFFER_PATH` unset, a failed write answers `stored: false` exactly as it always has, and nothing is queued. With the path set, an event whose ledger write fails is not dropped: it waits in a bounded buffer and is retried with exponential backoff. When its retry budget is spent it is written to the dead-letter store: one record per event, carrying the event's hash and the reason. Nothing is discarded without a record.
+
+- **Buffer.** `SUBSTRATE_EVENT_BUFFER_MAX` (default 256) bounds it. A session's events stay in chain order: while one of its events waits, a later event of that session waits behind it, and its `prev` is the hash of the event ahead of it. Hashes are never rewritten.
+- **No duplicates.** Each retry first looks for the event's row by id inside its cell. A row already in `agent_events` is not inserted again, and only a missing ingest record is repaired.
+- **Budget and backoff.** `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` (default 10) counts the live write. The first retry waits `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` (default 1000), doubles per attempt up to `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` (default 60000), with ±20 % jitter. The defaults ride out an outage of about five minutes.
+- **Overflow.** When the buffer is full, the oldest waiting event that is not being delivered is dead-lettered. Later events of its session are dead-lettered with it (`predecessor-dead-lettered`): they could never chain once it is missing.
+- **Dead letters.** `SUBSTRATE_EVENT_DEAD_LETTER_PATH` names an append-only 0600 JSONL file, and it is required while the buffer is on: boot refuses without it, and the message names the variable. Each record holds `event_id`, `event_hash`, `reason` (`exhausted`, `overflow`, `buffer-full`, `predecessor-dead-lettered` or `abandoned`), `attempts`, `last_reason` and the whole event, so an operator can replay it by hand.
+- **Durability.** Both files are durable: a restart re-reads the buffer and retries what was waiting. A shutdown keeps the buffered entries for the next boot. Only a buffer whose file could not be saved gives its entries up at shutdown, as `abandoned`, each with a record.
+- **Responses.** A buffered event answers `stored: false` with `buffered: true`, and `/events` answers 503 as for any unstored event. A keyed event that is still queued answers that same queued event when replayed, so a client that resends it with its idempotency key (`SUBSTRATE_EVENT_IDEMPOTENCY` `accept` or `enforce`) does not create a second row. A given-up event answers `deadLettered: true`. Only a landed event is `stored: true`.
+- **Not buffered.** A chain-tip read failure and an append-mode refusal still answer `stored: false` without queueing. Both are configuration or read failures, and queueing them would hide that.
+- **`/healthz`.** `eventBuffer` is `{ enabled: false }` while the buffer is off. When on it reports `depth`, `max`, `oldestAt`, `durable` and `deadLetter: { depth, durable }`. Depth never changes the status code. The dead-letter store is not bounded, because a bound would have to discard records; alert on its depth.
+- **Residuals.** A buffered `session.end` does not close its steering session until it lands, and a landed event publishes its wake-up hint. Sessionless buffered events have no chain, so they are independent entries with no ordering promise.
 
 ## Configuration
 
@@ -1052,6 +1066,12 @@ Plus switches, none of which is a credential:
 | `SUBSTRATE_LEDGER_DEAD_LETTER_PATH` | file for the dead-letter store (0600 JSONL). Unset: memory-only, and its records are lost at exit. |
 | `SUBSTRATE_LEDGER_DEAD_LETTER_MAX` | dead-letter records kept, a positive integer; default 10000. Over it the oldest is evicted and named on stderr. |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
+| `SUBSTRATE_EVENT_BUFFER_MAX` | events the buffer holds, positive integer; default 256; read only while the buffer is on. Over it, the oldest waiting event is dead-lettered. See *Telemetry buffer*. |
+| `SUBSTRATE_EVENT_BUFFER_PATH` | the buffer's file, and the switch: unset (the default) keeps the buffer off, so a failed write answers `stored: false` as before. Set, it requires `SUBSTRATE_EVENT_DEAD_LETTER_PATH`. |
+| `SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS` | write attempts per event, the live one included, positive integer; default 10; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_MS` | delay before the first retry, positive integer ms; default 1000, doubling per attempt; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS` | ceiling on one retry delay, positive integer ms; default 60000; read only while the buffer is on. |
+| `SUBSTRATE_EVENT_DEAD_LETTER_PATH` | the dead-letter records' file, append-only. Required while `SUBSTRATE_EVENT_BUFFER_PATH` is set; boot refuses without it. |
 
 Out-of-range numbers clamp and unparseable ones fall back, as the breaker settings do.
 

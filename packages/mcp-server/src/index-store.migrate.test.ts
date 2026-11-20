@@ -72,6 +72,12 @@ function timeoutMs(value: string): number {
 	}
 }
 
+function withDatabase(url: string, name: string): string {
+	const target = new URL(url);
+	target.pathname = `/${name}`;
+	return target.toString();
+}
+
 async function timeoutSettings(sql: SQL): Promise<{ statement: string; lock: string }> {
 	const rows = (await sql`
 		select current_setting('statement_timeout') as statement_timeout, current_setting('lock_timeout') as lock_timeout`) as Array<{
@@ -88,13 +94,24 @@ describeLive("migrate against a live index", () => {
 	let raw: SQL;
 	let pool: SQL;
 	let before: { statement: string; lock: string };
+	let scratchName = "";
 
 	beforeAll(async () => {
-		const url = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		const serverUrl = defined(PG_URL, "SUBSTRATE_TEST_PG_URL");
+		// A database of its own: other live files in the same run migrate the shared test database, so its ledger may not be empty.
+		scratchName = `substrate_migrate_${Date.now().toString(36)}`;
+		const admin = new SQL(serverUrl);
+		try {
+			await admin.unsafe(`create database "${scratchName}"`);
+		} finally {
+			await admin.end();
+		}
+		const url = withDatabase(serverUrl, scratchName);
 		raw = new SQL(url);
 		store = new IndexStore(url);
-		// The store pool is what `migrate` reserves. A separate client would not show a poisoned session.
-		pool = (store as unknown as { sql: SQL }).sql;
+		// `IndexStore` keeps its pool private; `migrate` reserves that pool, so the test reaches it through one named unchecked cast.
+		const storeInternals = store as unknown as { sql: SQL };
+		pool = storeInternals.sql;
 		before = await timeoutSettings(pool);
 	});
 
@@ -102,6 +119,12 @@ describeLive("migrate against a live index", () => {
 		if (!PG_URL) return;
 		await raw.end().catch(() => undefined);
 		await store.close().catch(() => undefined);
+		const admin = new SQL(PG_URL);
+		try {
+			await admin.unsafe(`drop database if exists "${scratchName}" with (force)`).catch(() => undefined);
+		} finally {
+			await admin.end();
+		}
 	});
 
 	test("the second migrate adds no ledger rows, and the reviews indexes match the drop", async () => {

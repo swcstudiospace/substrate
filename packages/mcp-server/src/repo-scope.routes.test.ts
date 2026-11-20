@@ -318,6 +318,7 @@ const FINDING_REFUSALS: Array<{ id: string; route: string } | { id: string; tool
 	{ id: "RS-09", tool: "docs_ingest" },
 	{ id: "RS-10", route: "/memory" },
 	{ id: "RS-10", tool: "memory_write" },
+	{ id: "RS-11", route: "/corpus/root" },
 	{ id: "RS-12", tool: "memory_pending" },
 	{ id: "RS-13", route: "/steering/queue" },
 ];

@@ -207,7 +207,7 @@ describe("corpusReflectReply", () => {
 		const reply = ok(await corpusReflectReply(deps, request(digest(REPO, text)), "omp"));
 		expect(reply.results).toEqual([{ repo: REPO, status: "stored" }]);
 		expect(store.row(REPO, DIGEST_PATH)).toMatchObject({ kind: "digest", tier: 1, source: "fs", state: "active", sha256: sha256Hex(text) });
-		expect(plane.batches).toEqual([[corpusDocumentName(REPO, DIGEST_PATH, sha256Hex(text))]]);
+		expect(plane.batches).toEqual([[corpusDocumentName(REPO, DIGEST_PATH, sha256Hex(text), { kind: "digest", tier: 1 })]]);
 		expect(retained).toEqual([{ repo: REPO, text, surface: "omp" }]);
 		expect(reply.manifestVersion).toBeGreaterThan(0);
 	});

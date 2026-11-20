@@ -351,9 +351,11 @@ const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; n
 const APPROVAL_NEEDS_SURFACE = "skills_approve needs an authenticated surface; nothing was changed";
 /** Why a non-operator approval is refused: the same words the service uses. */
 const APPROVAL_NEEDS_OPERATOR = "skills_approve needs an operator token; nothing was changed";
+/** Why an anonymous cross-repository call is refused, even on a run that allows anonymous callers. Nothing is read or changed. */
+const CROSS_REPO_NEEDS_SURFACE = "cross-repo operations need an authenticated surface; nothing was changed";
 /** Why an anonymous compensation is refused, even on a run that allows anonymous callers. */
 const COMPENSATE_NEEDS_SURFACE = "cross_repo_compensate needs an authenticated surface; nothing was changed";
-/** Why a non-operator compensation is refused: the route is operator-only and is not an MCP tool. */
+/** Why a non-operator compensation is refused: compensating a stored operation is an operator's decision. */
 const COMPENSATE_NEEDS_OPERATOR = "cross_repo_compensate needs an operator token; nothing was changed";
 /** Why an anonymous registry read is refused, even on a run that allows anonymous callers. */
 const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
@@ -1382,6 +1384,8 @@ export function createHttpServer(
 					...(result.error ? { error: result.error } : {}),
 					...(result.warning ? { warning: result.warning } : {}),
 					...(result.deduplicated ? { deduplicated: true } : {}),
+					...(result.buffered ? { buffered: true } : {}),
+					...(result.deadLettered ? { deadLettered: true } : {}),
 				});
 				return;
 			}
@@ -1808,7 +1812,7 @@ export function createHttpServer(
 				// Counts only: the audit record never carries a document body.
 				const fields = { documents: listLength(parsed, "documents"), tombstones: listLength(parsed, "tombstones") };
 				if (!(await auditedRest(res, observability, surface, "corpus_ingest", fields))) return;
-				const reply = await substrate.corpusIngest(parsed, surface);
+				const reply = await substrate.corpusIngest(parsed, surface, caller.isOperator);
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
@@ -1838,9 +1842,13 @@ export function createHttpServer(
 				return;
 			}
 			// Phase 74: a branch fan-out across registered repositories, and the stored status of one. The engine gates each
-			// repository on the caller's surface grant and its session allowlist, so an anonymous caller is refused there. The start
-			// is a write, audited fail-closed under `cross_repo_fanout`; the status is a read, audited under `cross_repo_status`.
+			// repository on the caller's surface grant, so an anonymous caller is refused here and before the engine. The start is a
+			// write, audited fail-closed under `cross_repo_fanout`; the status is a read, audited under `cross_repo_status`.
 			if (req.method === "POST" && url.pathname === "/cross-repo/fanout") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CROSS_REPO_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
 				const raw = await readBody(req);
 				let parsed: unknown;
 				try {
@@ -1855,6 +1863,10 @@ export function createHttpServer(
 				return;
 			}
 			if (req.method === "GET" && url.pathname === "/cross-repo/status") {
+				if (surface === null) {
+					sendJson(res, 401, { error: CROSS_REPO_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
 				if (!(await auditedRest(res, observability, surface, "cross_repo_status", { op: "status" }))) return;
 				const reply = await substrate.crossRepoStatus(url.searchParams.get("key"), surface);
 				sendJson(res, reply.status, reply.body);
@@ -2337,8 +2349,6 @@ export function createHttpServer(
 					return;
 				}
 				const queued = await queueSteering(substrate.steering, { surface, isOperator: caller.isOperator }, { ...input.value, session_binding: sessionBindingOf(req) }, undefined, "rest");
-				// The same two wake-ups the tool gives, neither able to fail the queue: the long-poll waiters, then the hint note.
-				if (queued.status === "queued") await substrate.onSteeringQueued(queued.directive_id);
 				sendSteeringResult(res, queued);
 				return;
 			}

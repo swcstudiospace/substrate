@@ -35,7 +35,7 @@
  */
 import { createHash } from "node:crypto";
 
-export type ColumnType = "text" | "int" | "bigint" | "bool" | "timestamptz";
+export type ColumnType = "text" | "int" | "smallint" | "bigint" | "bool" | "timestamptz" | "jsonb";
 
 export interface ArchiveColumn {
 	name: string;
@@ -54,6 +54,8 @@ export interface ArchiveTableSpec {
 	placeholders: Readonly<Record<string, string | null>>;
 	/** Whether the table carries an `entry_hash`, which the archive digests separately. */
 	hasEntryHash: boolean;
+	/** The identity column whose sequence restore moves past the loaded rows, so the next insert takes a value above them. */
+	identity?: string;
 }
 
 /** What restore writes where a withheld, NOT NULL column has nothing to restore from. */
@@ -210,6 +212,35 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 		hasEntryHash: true,
 	},
 	{
+		name: "corpus_documents",
+		columns: [
+			text("repo"),
+			text("path"),
+			text("kind"),
+			{ name: "tier", type: "smallint" },
+			text("sha256"),
+			{ name: "bytes", type: "int" },
+			text("source"),
+			text("commit_sha"),
+			text("state"),
+			text("docs_document_id"),
+			{ name: "signals", type: "jsonb" },
+			{ name: "manifest_seq", type: "bigint" },
+			ts("ingested_at"),
+			ts("tombstoned_at"),
+			ts("created_at"),
+			ts("updated_at"),
+			text("superseded_by"),
+		],
+		key: ["repo", "path"],
+		// The manifest holds repository-relative paths and digests, never a document body: those live in the docs plane only.
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: false,
+		// Restore loads `manifest_seq` with the archived values, so its identity sequence is moved past them afterwards.
+		identity: "manifest_seq",
+	},
+	{
 		name: "context_matrix_entries",
 		columns: [text("entry_id"), text("realm"), text("milestone"), text("phase"), text("source_path"), text("source_sha256"), text("entry_kind"), text("body_redacted"), text("status"), text("superseded_by"), ts("created_at")],
 		key: ["entry_id"],
@@ -294,12 +325,14 @@ export function coerceRow(spec: ArchiveTableSpec, record: unknown): CoercedRow {
 		const fine =
 			column.type === "text"
 				? typeof value === "string"
-				: column.type === "int"
+				: column.type === "int" || column.type === "smallint"
 					? typeof value === "number" && Number.isSafeInteger(value)
 					: column.type === "bool"
-						? typeof value === "boolean"
-						: column.type === "bigint"
-							? typeof value === "string" && /^-?\d{1,19}$/.test(value)
+					? typeof value === "boolean"
+					: column.type === "bigint"
+						? typeof value === "string" && /^-?\d{1,19}$/.test(value)
+						: column.type === "jsonb"
+							? typeof value === "string"
 							: typeof value === "string" && ISO_MICROS.test(value);
 		if (!fine) return { ok: false, reason: `column ${column.name} is not a ${column.type}` };
 		row[column.name] = value as string | number | boolean;

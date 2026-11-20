@@ -1293,7 +1293,13 @@ export class GreptimeClient {
 		return /append_mode'?\s*=\s*'?true/i.test(ddl);
 	}
 
-	async insertEvent(event: SubstrateEvent): Promise<void> {
+	/**
+	 * Store one event's row and its ingest record. With `mayExist`, a row this event already stored is not stored again:
+	 * an earlier attempt may have landed the row and lost its reply (a timeout is not a refusal), and a retry that inserted
+	 * again would be a second row for one event. The row stands; only its ingest record may be missing, and that is repaired.
+	 * The buffer's retries pass `mayExist`; the direct write does not, so it adds no read.
+	 */
+	async insertEvent(event: SubstrateEvent, options: { mayExist?: boolean } = {}): Promise<void> {
 		// Retried until it succeeds, because until the dialect is known a backslash
 		// cannot be quoted safely. The probe is one small SELECT and its answer is
 		// cached for the process.
@@ -1306,6 +1312,11 @@ export class GreptimeClient {
 			throw new DialectRefusal(
 				"refusing to append an event containing a backslash before the server's quoting dialect is known",
 			);
+		}
+		if (options.mayExist === true && (await this.eventRowPresent(event))) {
+			if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
+			if ((await this.cursorPosition(event.id)) === null) await this.recordIngest(event);
+			return;
 		}
 		const cell = (column: (typeof EVENT_COLUMNS)[number]): string => {
 			if (column === "payload") return this.q(JSON.stringify(event.payload));
@@ -1328,6 +1339,22 @@ export class GreptimeClient {
 
 		// The ingest record goes second: it must never name an event that does not exist.
 		await this.recordIngest(event);
+	}
+
+	/** Whether this event's row is already in `agent_events`, looked up inside its cell so the read stays bounded (see `findByIdempotencyKey`). */
+	private async eventRowPresent(event: SubstrateEvent): Promise<boolean> {
+		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE ${this.cellWhere(event)} AND "id" = ${this.q(event.id)} LIMIT 1`);
+		return rows.length > 0;
+	}
+
+	/** The predicate that names one event's cell: the columns a replay lookup and a presence check both key on, with `ts` exact. */
+	private cellWhere(cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind" | "ts">): string {
+		const equals = (column: "surface" | "repo" | "graph_id" | "kind", value: string | null): string =>
+			value === null ? `"${column}" IS NULL` : `"${column}" = ${this.q(value)}`;
+		return (
+			`${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} AND ${equals("graph_id", cell.graph_id)} ` +
+			`AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)}`
+		);
 	}
 
 	/**
@@ -1462,12 +1489,8 @@ export class GreptimeClient {
 			// safely, so a lookup could silently miss the row the original attempt stored.
 			throw new GreptimeError("refusing an idempotency lookup on a value containing a backslash before the server's quoting dialect is known");
 		}
-		const equals = (column: "surface" | "repo" | "graph_id" | "kind", value: string | null): string =>
-			value === null ? `"${column}" IS NULL` : `"${column}" = ${this.q(value)}`;
 		const suffix = `"${IDEMPOTENCY_PAYLOAD_KEY}":"${key}"}`;
-		const cellWhere =
-			`${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} AND ${equals("graph_id", cell.graph_id)} ` +
-			`AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)}`;
+		const cellWhere = this.cellWhere(cell);
 		let after: string | null = null;
 		for (let page = 0; page < IDEMPOTENCY_LOOKUP_MAX_PAGES; page++) {
 			const rows = await this.sql(

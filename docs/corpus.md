@@ -100,10 +100,10 @@ A `.planning` directory may sit at any depth of a monorepo; the rules apply from
    lexically smallest `(repo, path)`. The report lists each kept entry with the copies it stands for
    (`collapsed.identicalCopies`, at most 200 groups of 20 copies, plus the exact totals `identical` and `identicalGroups`),
    so a collapsed copy can be told from a deleted file. When the canonical copy disappears, the next copy (lexically)
-   becomes canonical. The planner matches a rename only inside one repository, so moving the kept copy from `local/c1` to
-   `local/c2` is an `add` of `local/c2`'s path and, when `local/c1` is still covered by the scan, a `tombstone` of the old
-   row; the plane then holds the text once under the new name. Identical files inside one repository, and files of
-   repositories with an origin, are never collapsed.
+   becomes canonical. A rename never crosses repositories, except that a copy in a `local/*` collection may be renamed to
+   another `local/*` collection: moving the kept copy from `local/c1` to `local/c2` is a `rename` when `local/c1` is covered
+   by the scan (its plan item carries `renamedFromRepo: local/c1`), so the plane holds the text once under the new name.
+   Identical files inside one repository, and files of repositories with an origin, are never collapsed.
 
 The scan is deterministic: the same tree gives the same entries, sorted by `(repo, path)` by code unit, and the same
 report. It holds one file body at a time.
@@ -259,12 +259,12 @@ Request: `{protocol, entries, scope}` where `entries` are the entries above with
 A manifest row is identified by `(repo, path)`; its `source` column records which source produced it. An entry that
 matches a row with the same sha256, source, kind and tier is `unchanged`; the same sha256 under a different source, kind
 or tier is `update` (a manifest-only refresh, the docs plane is not touched); a different sha256 is `change`; no row is
-`add`; a tombstone plus an add of one sha256 in the same repository is `rename`. A row with no matching entry is a
+`add`; a tombstone plus an add of one sha256 is `rename` when both are in one repository, or when the tombstone is in one `local/*` copy collection and the add is in another (a rename never crosses any other repository). A row with no matching entry is a
 `tombstone` only when its pair is in `coverage` and its tier is at most `maxTier`.
 
 Response: `{protocol, items, counts, manifestVersion}`. Each item is
-`{action: "add"|"change"|"update"|"rename"|"tombstone", repo, path, sha256?, renamedFrom?}`; `renamedFrom` is the manifest
-row the document moved from. `counts` has `add`, `change`, `update`, `rename`, `tombstone` and `unchanged` (unchanged rows
+`{action: "add"|"change"|"update"|"rename"|"tombstone", repo, path, sha256?, renamedFrom?, renamedFromRepo?}`; `renamedFrom` is the manifest
+row the document moved from, and `renamedFromRepo` is that row's repository, present only when it differs from `repo`. `counts` has `add`, `change`, `update`, `rename`, `tombstone` and `unchanged` (unchanged rows
 are counted and never listed). `manifestVersion` increases whenever the manifest changes.
 
 ### `POST /corpus/neardup`

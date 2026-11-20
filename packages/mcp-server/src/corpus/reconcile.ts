@@ -59,7 +59,7 @@ export function diffPlane(rows: readonly ManifestRow[], plane: PlaneSnapshot, ro
 	const missing: ManifestRow[] = [];
 	let checked = 0;
 	for (const row of rows) {
-		ownedNames.add(corpusDocumentName(row.repo, row.path, row.sha256));
+		ownedNames.add(corpusDocumentName(row.repo, row.path, row.sha256, row));
 		if (row.documentId === null) continue;
 		ownedIds.add(row.documentId);
 		checked += 1;

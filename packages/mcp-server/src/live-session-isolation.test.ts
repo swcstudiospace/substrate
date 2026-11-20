@@ -188,11 +188,17 @@ describe("real CLI and REST isolation", () => {
 		const pending = transport === "rest"
 			? h.post("/docs/search", input, { ...AUTH_OWNER, "x-substrate-session-binding": row.sessionBinding })
 			: h.rpc(call(300, "docs_search", { ...input, session_binding: row.sessionBinding }));
-		await settle(() => source === "retrieval" ? h.retrieval.reads > 0 : h.ledger.reads > 0);
-		if (failure === "close") await h.authority.close(row.access);
-		else if (failure === "expiry") h.authority.advance(3_600_001);
-		else h.authority.unavailable = true;
-		release.resolve();
+		// Observe the outcome now: if a settle failure below ends the test early, a later rejection must not go unhandled.
+		const observed = pending.catch(() => undefined);
+		try {
+			await settle(() => source === "retrieval" ? h.retrieval.reads > 0 : h.ledger.reads > 0);
+			if (failure === "close") await h.authority.close(row.access);
+			else if (failure === "expiry") h.authority.advance(3_600_001);
+			else h.authority.unavailable = true;
+		} finally {
+			release.resolve();
+			await observed;
+		}
 		const answer = await pending;
 		if (answer instanceof Response) {
 			expect(answer.status).toBe(failure === "outage" ? 503 : 404);

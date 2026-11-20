@@ -23,6 +23,7 @@ import {
 	worktreeFor,
 } from "../packages/host/src/sandbox-options.ts";
 import { DISK_FLOOR_BYTES, ensureImagePulled } from "../packages/host/src/sandbox-provider.ts";
+import { SUBSTRATE_PROXY_URL } from "../packages/host/src/substrate-proxy.ts";
 import { LeaseStore, type LeaseStoreLike, MemoryLeaseStore } from "../packages/host/src/substrate.ts";
 import { HostSync, LinearLink, NotionSync, syncTask } from "../packages/host/src/sync.ts";
 import {
@@ -34,6 +35,20 @@ import {
 } from "../packages/host/src/tasks.ts";
 
 export type SmokeResult = { name: string; ok: boolean; detail: string };
+
+/** The seeded substrate entry is the host proxy URL with no Authorization header: the VM never holds the bearer. */
+function substrateEntryAtProxy(claudeJson: string): boolean {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(claudeJson);
+	} catch {
+		return false;
+	}
+	const servers = typeof parsed === "object" && parsed !== null && "mcpServers" in parsed ? parsed.mcpServers : undefined;
+	const entry = typeof servers === "object" && servers !== null && "substrate" in servers ? servers.substrate : undefined;
+	const url = typeof entry === "object" && entry !== null && "url" in entry ? entry.url : undefined;
+	return url === SUBSTRATE_PROXY_URL && !/authorization|bearer/i.test(claudeJson);
+}
 
 function fakeSubstrate(): SubstrateLike & { claims: string[] } {
 	const claims: string[] = [];
@@ -335,8 +350,8 @@ export async function runWorkedNode(): Promise<SmokeResult[]> {
 		results.push(
 			check(
 				"worked seed",
-				actor.files.get("/home/agentos/SUBSTRATE_BRIEF.md") === "smoke brief" && claudeJson.includes("Bearer smoke-bearer"),
-				"brief written and read back; substrate MCP entry carries the bearer header",
+				actor.files.get("/home/agentos/SUBSTRATE_BRIEF.md") === "smoke brief" && substrateEntryAtProxy(claudeJson),
+				"brief written and read back; substrate MCP entry points at the host proxy with no Authorization header",
 			),
 		);
 		results.push(
@@ -494,7 +509,7 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 		results.push(check(`seed ${graphId}`, brief === "smoke brief", "brief file written and read back"));
 		const claudeJson = actor?.files.get("/home/agentos/.claude.json") ?? "";
 		results.push(
-			check(`seed bearer ${graphId}`, claudeJson.includes("Bearer smoke-bearer"), "substrate MCP entry carries the bearer header"),
+			check(`seed bearer ${graphId}`, substrateEntryAtProxy(claudeJson), "substrate MCP entry points at the host proxy with no Authorization header"),
 		);
 	}
 

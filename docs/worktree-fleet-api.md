@@ -164,9 +164,9 @@ A refusal is recorded as a `repo.scope-refused` ledger warning with the route, t
 
 ## Cross-repository operations (phase 74)
 
-`packages/mcp-server/src/cross-repo-ops.ts` runs one cross-repository write: a branch fan-out. The same branch is created at a named base in each of two to 16 registered repositories, one step per repository. It is exposed as `POST /cross-repo/fanout` and the `cross_repo_fanout` tool, and its stored state is read with `GET /cross-repo/status?key=` and the `cross_repo_status` tool (see [Routes and tools](#routes-and-tools-phase-74)). The module entry points are `runBranchFanout` and `crossRepoStatus`. The steps run through the same phase 72 executor and allowlist session as the rest of this document.
+`packages/mcp-server/src/cross-repo-ops.ts` runs one cross-repository write: a branch fan-out. The same branch is created at a named base in each of two to 16 registered repositories, one step per repository. It is exposed as `POST /cross-repo/fanout` and the `cross_repo_fanout` tool, and its stored state is read with `GET /cross-repo/status?key=` and the `cross_repo_status` tool (see [Routes and tools](#routes-and-tools-phase-74)). The operator's undo is `POST /cross-repo/compensate` and the `cross_repo_compensate` tool (see [Compensation](#compensation-phase-74-operator-only)). The module entry points are `runBranchFanout` and `crossRepoStatus`. The steps run through the same phase 72 executor and allowlist session as the rest of this document.
 
-Every step is recorded in Postgres (`cross_repo_operations` and `cross_repo_steps`, migration step 43) before its git effect runs, and its outcome is read back from the repository's ref. Each git call goes through the phase 72 executor, so a repository the surface is not granted, or that is not registered, is refused before any spawn.
+Every step is recorded in Postgres (`cross_repo_operations` and `cross_repo_steps`, migration step 44) before its git effect runs, and its outcome is read back from the repository's ref. Each git call goes through the phase 72 executor, so a repository the surface is not granted, or that is not registered, is refused before any spawn.
 
 - Create is create-only (`update-ref` with a null old value): a branch the operation did not write is never overwritten, and a branch already at the planned commit is refused, not adopted.
 - Undo is compare-and-delete at the planned commit: a ref an outside change moved is parked as `ref-moved` and left alone.
@@ -174,7 +174,7 @@ Every step is recorded in Postgres (`cross_repo_operations` and `cross_repo_step
 - The key is caller-supplied. A retry with the same key and request resumes the stored operation and runs no planning; the same key with a different request is refused (`key-reused`). A new attempt needs a new key.
 - Persisted reasons are closed codes (`apply-failed`, `ref-moved`, `undo-failed`, and so on). Git output and paths are never stored.
 
-A status read is refused as not found for a surface that is not granted every repository of the operation, as a live session is.
+A status read is refused as not found for an anonymous caller, and for a surface that is not granted every repository of the operation, as a live session is.
 
 ### Routes and tools (phase 74)
 
@@ -190,8 +190,8 @@ Every refusal of the fan-out and status routes answers `{"ok": false, "reason": 
 | --- | --- | --- | --- |
 | 200 | none | both | the operation was run, resumed or read. |
 | 400 | `request-invalid` | both | fan-out: the body is not JSON or not an object, carries a field other than `key`, `branch` or `repos`, or a field is malformed (the key, the branch, the repository count, a repository, or a base). Status: the key is missing or malformed. |
-| 403 | `repo-not-granted` | fan-out | a named repository is not granted to the caller's surface, or is not in its `SUBSTRATE_REPO_ALLOWLIST` session. An anonymous caller, a surface with no session, and a malformed allowlist all land here. |
-| 404 | `not-found` | status | no operation is stored under the key, or the caller may not see every repository it names. Both answer alike, so a key for an ungranted repository is not revealed. |
+| 403 | `repo-not-granted` | fan-out | a named repository is not granted to the caller's surface, or is not in its `SUBSTRATE_REPO_ALLOWLIST` session. An anonymous caller (no surface) is refused here whether or not `SUBSTRATE_REPO_SCOPES` is set; a surface with no session, and a malformed allowlist, land here too. |
+| 404 | `not-found` | status | no operation is stored under the key, the caller is anonymous, or the caller may not see every repository it names. All answer alike, so a key for an ungranted repository is not revealed. |
 | 409 | `key-reused` | fan-out | the key is stored for a different request. A new attempt needs a new key. Nothing runs. |
 | 422 | the gate's reason, `branch-invalid` or `base-unresolved` | fan-out | any other refusal: `repo-not-registered`, `path-not-registered`, `all-repos-not-granted` and the like from the surface grant; `branch-invalid` (not a git branch name); `base-unresolved` (the base is not a commit in that repository). Refused before the store is written. |
 | 503 | `cross-repo.disabled` | both | no index store: `SUBSTRATE_PG_URL` is not set. Nothing runs. |
@@ -199,7 +199,8 @@ Every refusal of the fan-out and status routes answers `{"ok": false, "reason": 
 
 ### Compensation (phase 74, operator only)
 
-`POST /cross-repo/compensate` and the `cross_repo_compensate` MCP tool undo a stored fan-out under its key. Operator-only (refused before effects for non-operators). It never runs a step forward; it only undoes steps that were applied. The body/arg is `{"key": "..."}`, and any other field is a 400.
+`POST /cross-repo/compensate` and the `cross_repo_compensate` MCP tool undo a stored fan-out under its key. Operator-only: a caller without an operator token is refused before effects. The surface grant still applies, so operator status does not widen what a surface may touch: every repository the stored operation names must be granted to the caller's surface. It never runs a step forward; it only undoes steps that were applied. The body/arg is `{"key": "..."}`, and any other field is a 400.
+
 The checks run in this order, and the first refusal stops the run:
 
 | Status | Reason | When |

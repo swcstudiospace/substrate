@@ -29,6 +29,7 @@ REPOS_ROOT = Path("/root/src/repos")
 ROOTS_ENV = "SUBSTRATE_WORKTREE_ROOTS"
 DEFAULT_MIN_FREE_GB = 5
 MIN_FREE_ENV = "SUBSTRATE_WORKTREE_MIN_FREE_GB"
+WORKTREE_ROOTS_ENV = "SUBSTRATE_WORKTREE_ROOTS"
 BRANCH_PREFIX = "substrate/"
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -85,6 +86,11 @@ def worktree_root(env: Mapping[str, str] | None = None) -> Path:
     roots = worktree_roots(env)
     return roots[0] if roots else WORKTREES_ROOT
 
+def creation_root(env: Mapping[str, str] | None = None) -> Path:
+    """Where new worktrees are created: the first configured root, else ``WORKTREES_ROOT``."""
+    roots = worktree_roots(env)
+    return roots[0] if roots else WORKTREES_ROOT
+
 
 def _space_probe(path: Path) -> Path:
     """The nearest existing ancestor of ``path``: the filesystem a worktree created there would use."""
@@ -93,18 +99,28 @@ def _space_probe(path: Path) -> Path:
         probe = probe.parent
     return probe
 
+def _nearest_existing(path: Path) -> Path:
+    """The nearest existing directory at or above ``path``, so a root not created yet still has a filesystem."""
+    current = Path(os.path.abspath(path))
+    while not current.exists() and current.parent != current:
+        current = current.parent
+    return current
+
 
 class WorktreeRefused(Exception):
     """The dispatcher will not prepare this worktree.
 
     ``marker`` is a stable key for once-only Linear comments: "invalid-graph-id", "no-checkout",
     "low-disk", "path-conflict", or "git-failed" when a git command itself fails.
+
+    ``fields`` fill the placeholders of the marker's Linear comment; "low-disk" names the checked path.
     """
 
-    def __init__(self, reason: str, marker: str) -> None:
+    def __init__(self, reason: str, marker: str, *, fields: Mapping[str, str] | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
         self.marker = marker
+        self.fields = dict(fields or {})
 
 
 def validate_graph_id(graph_id: str) -> str:
@@ -187,6 +203,17 @@ def _registered(run: Runner, repo: Path, path: Path) -> bool:
     )
 
 
+def _registered_path(run: Runner, repo: Path, gid: str, root: Path) -> Path | None:
+    """The first ``<home>/<gid>`` that is that exact path, not a link, and that git lists as a worktree: ``root`` first, then every configured root."""
+    for home in dict.fromkeys([root, *worktree_roots()]):
+        candidate = home / gid
+        if candidate.resolve() != home.resolve() / gid:
+            continue
+        if _registered(run, repo, candidate):
+            return candidate
+    return None
+
+
 def _ref_exists(run: Runner, repo: Path, ref: str) -> bool:
     return _git(run, repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0
 
@@ -200,31 +227,37 @@ def ensure_worktree(
     run: Runner = subprocess.run,
     disk_usage: Callable[[str], Any] = shutil.disk_usage,
 ) -> Path:
-    """Return the graph's worktree, creating it only with the free-disk floor free on the filesystem that holds the root.
+    """Return the graph's worktree, creating it only with at least the free-disk floor free where it goes.
 
-    ``root`` defaults to :func:`worktree_root`, read from the environment at call time.
+    ``root`` defaults to ``creation_root()``. The floor is checked on the filesystem holding the root when
+    roots are configured, and on ``/`` when none is.
+
+    A checkout git already lists under any configured root is reused in place, and nothing is added for it.
     """
     gid = validate_graph_id(graph_id)
-    root = worktree_root() if root is None else Path(root)
+    configured = bool(worktree_roots())
+    root = Path(root) if root is not None else creation_root()
     path = root / gid
-    if path.resolve().parent != root.resolve():
+    if path.resolve() != root.resolve() / gid:
         raise WorktreeRefused(f"worktree path {path} escapes {root}", "invalid-graph-id")
 
-    probe = _space_probe(root)
-    free = disk_usage(str(probe)).free
+    floor_path = str(_nearest_existing(root)) if configured else "/"
+    free = disk_usage(floor_path).free
     floor = min_free_bytes()
     if free < floor:
         raise WorktreeRefused(
-            f"only {free / 1024**3:.1f} GB free on {probe}; a worktree needs at least {floor / 1024**3:g} GB",
+            f"only {free / 1024**3:.1f} GB free on {floor_path}; a worktree needs at least {floor / 1024**3:g} GB",
             "low-disk",
+            fields={"path": floor_path, "gb": f"{floor / 1024**3:g}"},
         )
 
     repo = Path(repo)
-    if _registered(run, repo, path):
-        if path.is_dir():
-            return path
+    registered = _registered_path(run, repo, gid, root)
+    if registered is not None:
+        if registered.is_dir():
+            return registered
         raise WorktreeRefused(
-            f"{path} is registered with git but missing on disk (git worktree prune needed)",
+            f"{registered} is registered with git but missing on disk (git worktree prune needed)",
             "path-conflict",
         )
     if path.exists():

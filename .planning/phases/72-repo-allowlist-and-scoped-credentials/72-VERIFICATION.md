@@ -132,3 +132,13 @@ No gaps. This re-verification on branch `reconcile/main-2026-11-11` confirms all
 
 _Verified: 2026-11-20T01:26:25Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Addendum — retained origin/main evidence (2026-11-19, HEAD `ee998735`)
+
+Merge note: HEAD above (2026-11-20 re-verification, passed 7/7, `covered_digest` v4) is the primary verdict. The origin/main record (`human_needed`, 4/7, v3) is superseded by that re-verification and is retained below only for its additive evidence; its three human items are dispositioned against HEAD, not re-opened.
+
+**Additional key links recorded only in origin/main** (line numbers as at `ee998735`; HEAD equivalents appear in the primary tables above): `server.ts` `POST /drift` → `service.scopedDriftScan` (`server.ts:1594`, gate before `readGitTip`); `mcp.ts` `coord_drift_scan` → `service.scopedDriftScan` (`mcp.ts:2070`); `server.ts`/`mcp.ts` worktree doors → `service.listWorktrees(query, surface)` (`server.ts:2468`); `cli/worktree/command.ts` → `scope.scopeRefusal` (`command.ts:581` before dispatch); `corpus/service.ts` doors → `repo-scope.authorizeRepo` via `repoRefusalOf`/`allReposRefusal`; `cross-repo-ops.ts` → `repo-executor.scopedGit` (`cross-repo-ops.ts:213`, closes the previous deferred `scopedGit` production-caller item); `service.ts` `updateLiveSession` → `repo-scope.authorizeRepo` (`service.ts:2089`).
+
+**Prior run evidence cited only in origin/main:** 146 pass across the six scope test files at `357d6b15`; `command.test.ts` 101 pass alone; a load-sensitive `merge-back` flake in the combined run was not reproduced alone and was recorded as an owner rerun, not a gap.
+
+**Disposition of origin/main's three human items (closed by HEAD):** (1) `/corpus/proof` disclosure policy — HEAD verifies the grant-scoped corpus root (`corpusRootReply`/`grantRootOf`, truth 4) and that `/corpus/proof` remains GATED (truth 7); (2) HARD-S2 text amendment — HEAD records the amended owner-decision wording intact in REQUIREMENTS.md (truth 6 / Requirements Coverage); (3) live execution of the MCP `drift_scan` refusal, live-session issue/transition gate, and Postgres worktree filter — HEAD cites the orchestrator's 2026-11-16 runs (93 pass, 0 fail including `live-session-issue-gate.test.ts`; Postgres filter 11 pass, 0 fail in `repo-scope.pg.test.ts`).

@@ -28,13 +28,23 @@ class FakeTimers implements SteeringWaitTimers {
 	readonly live = new Map<number, () => void>();
 	readonly delays: number[] = [];
 	private sequence = 0;
-	set(run: () => void, ms: number): number { const id = ++this.sequence; this.delays.push(ms); this.live.set(id, run); return id; }
-	clear(id: unknown): void { this.live.delete(id as number); }
+	private readonly listeners = new Set<() => void>();
+	set(run: () => void, ms: number): number { const id = ++this.sequence; this.delays.push(ms); this.live.set(id, run); this.announce(); return id; }
+	clear(id: unknown): void { this.live.delete(id as number); this.announce(); }
 	fire(): void { const [id, run] = defined([...this.live.entries()][0], "pending wait timer"); this.live.delete(id); run(); }
+	/** A wait registers and releases exactly when its timer is armed or disarmed, so tests wait on those transitions. */
+	onChange(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+	private announce(): void { for (const listener of [...this.listeners]) listener(); }
 }
-async function settle(condition: () => boolean): Promise<void> {
-	for (let n = 0; n < 2000 && !condition(); n++) { const turn = Promise.withResolvers<void>(); setImmediate(turn.resolve); await turn.promise; }
-	expect(condition()).toBe(true);
+/**
+ * Resolves once `condition` holds, re-checked on every timer arming or disarming. The wait is event-driven, so it does not
+ * depend on how many event-loop turns the request spends in authority I/O; a condition that never holds ends at the test's timeout.
+ */
+async function settle(timers: FakeTimers, condition: () => boolean): Promise<void> {
+	const reached = Promise.withResolvers<void>();
+	const check = (): void => { if (condition()) reached.resolve(); };
+	const off = timers.onChange(check);
+	try { check(); await reached.promise; } finally { off(); }
 }
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); });
@@ -259,8 +269,17 @@ describe("bounded long-poll release and cleanup", () => {
 		expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ directive: { session_id: h.row.sessionId }, wait_ms: 5000 });
 		expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
 	});
+	test("the wait body carries the delivery sequence of the directive it returns", async () => {
+		const h = await held(); const directiveId = await queue(h, h.row.sessionId);
+		const response = await h.get(h.path, h.headers);
+		expect(response.status).toBe(200);
+		const body = await response.json() as { directive: { id: string; sequence: unknown } };
+		expect(body.directive.id).toBe(directiveId);
+		expect(typeof body.directive.sequence).toBe("number");
+		expect(body.directive.sequence).toBe(h.substrate.steering.inbox?.sequenceOf(directiveId));
+	});
 	test("queue wakes only the owner's held wait and releases all resources", async () => {
-		const h = await held(); const pending = h.get(h.path, h.headers); await settle(() => h.waiters.size === 1);
+		const h = await held(); const pending = h.get(h.path, h.headers); await settle(h.timers, () => h.waiters.size === 1);
 		expect(h.timers.delays.every(ms => ms <= 1000)).toBe(true);
 		await queue(h, h.row.sessionId);
 		expect((await pending).status).toBe(200); expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
@@ -268,7 +287,7 @@ describe("bounded long-poll release and cleanup", () => {
 	test("final timeout204 rechecks authority and does not recharge or retain a waiter", async () => {
 		const h = await held(); let now = 0; const monotonic = spyOn(performance, "now").mockImplementation(() => now);
 		try {
-			const pending = h.get(h.path, h.headers); await settle(() => h.waiters.size === 1);
+			const pending = h.get(h.path, h.headers); await settle(h.timers, () => h.waiters.size === 1);
 			now = 5001; h.timers.fire(); const response = await pending;
 			expect(response.status).toBe(204); expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
 			expect(h.auditRecords.filter(record => record.tool === "steering_wait")).toHaveLength(1);
@@ -281,7 +300,7 @@ describe("bounded long-poll release and cleanup", () => {
 		let now = 0; const monotonic = spyOn(performance, "now").mockImplementation(() => now);
 		try {
 			const pending = h.get(`/steering/wait?session_id=${h.row.sessionId}&timeout_ms=999999999`, h.headers);
-			await settle(() => h.waiters.size === 1);
+			await settle(h.timers, () => h.waiters.size === 1);
 			expect(h.timers.delays.every(ms => ms <= 1000)).toBe(true);
 			now = h.config.steeringWaitMaxMs + 1; h.timers.fire();
 			const response = await pending;
@@ -291,7 +310,7 @@ describe("bounded long-poll release and cleanup", () => {
 		} finally { monotonic.mockRestore(); }
 	});
 	for (const failure of ["close", "expiry", "outage"] as const) test(`${failure} before timeout cannot release204 or private directive bytes`, async () => {
-		const h = await held(); const pending = h.get(h.path, h.headers); await settle(() => h.waiters.size === 1);
+		const h = await held(); const pending = h.get(h.path, h.headers); await settle(h.timers, () => h.waiters.size === 1);
 		if (failure === "close") await h.authority.close(h.row.access);
 		if (failure === "expiry") h.authority.advance(3600_000);
 		if (failure === "outage") h.authority.unavailable = true;
@@ -301,16 +320,16 @@ describe("bounded long-poll release and cleanup", () => {
 		expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
 	});
 	test("explicit service close wakes local waits immediately into terminal404", async () => {
-		const h = await held(); const pending = h.get(h.path, h.headers); await settle(() => h.waiters.size === 1);
+		const h = await held(); const pending = h.get(h.path, h.headers); await settle(h.timers, () => h.waiters.size === 1);
 		expect((await h.post("/steering/sessions/close", { session_id: h.row.sessionId }, h.headers)).status).toBe(200);
 		expect((await pending).status).toBe(404); expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
 	});
 	test("client abort and server shutdown leave no waiter or timer", async () => {
 		const h = await held(); const abort = new AbortController();
 		const pending = h.get(h.path, h.headers, abort.signal).catch((cause: unknown) => cause);
-		await settle(() => h.waiters.size === 1); abort.abort(); await pending; await settle(() => h.waiters.size === 0);
+		await settle(h.timers, () => h.waiters.size === 1); abort.abort(); await pending; await settle(h.timers, () => h.waiters.size === 0);
 		expect(h.timers.live.size).toBe(0);
-		const another = h.get(h.path, h.headers); await settle(() => h.waiters.size === 1); await h.stop();
+		const another = h.get(h.path, h.headers); await settle(h.timers, () => h.waiters.size === 1); await h.stop();
 		expect((await another).status).toBe(204); expect(h.waiters.size).toBe(0); expect(h.timers.live.size).toBe(0);
 	});
 	test("a poll past the long-poll bound is refused at once in the budget's shape; reads still answer; the bound frees on release", async () => {
@@ -347,7 +366,8 @@ describe("historical public digest and explicit private brief remain separate", 
 		const route = await (await h.get("/session/context?repo_id=owner/name&session_id=historical-label")).json() as Record<string, unknown>;
 		const viaTool = await tool(client, "session_context", { repo_id: "owner/name", session_id: "historical-label" });
 		expect(viaTool.isError).toBe(false);
-		const strip = ({ generated_at: _at, ...rest }: Record<string, unknown>) => rest;
+		// `generated_at` and `age_s` are read from the clock at each request; a second boundary between the two calls must not fail the comparison.
+		const strip = (value: unknown): unknown => JSON.parse(JSON.stringify(value, (key, field: unknown) => key === "generated_at" || key === "age_s" ? undefined : field)) as unknown;
 		expect(strip(viaTool.body)).toEqual(strip(route)); expect(route).toMatchObject({ repo_id: "owner/name", for_session: "historical-label" });
 		for (const marker of ["PRIVATE-", row.sessionBinding]) expect(JSON.stringify(route)).not.toContain(marker);
 	});

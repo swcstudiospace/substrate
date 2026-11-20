@@ -28,7 +28,7 @@ describe("runSmoke", () => {
 		const failed = results.filter((result) => !result.ok);
 		expect(failed).toEqual([]);
 		const names = results.map((result) => result.name);
-		for (const needle of ["two actors", "tokens distinct", "disk gate refuses", "api loopback", "worked single release", "worked sync fields"]) {
+		for (const needle of ["two actors", "tokens distinct", "disk gate refuses", "api loopback", "worked single release", "worked sync fields", "worked seed", "seed bearer"]) {
 			expect(names.some((name) => name.includes(needle))).toBe(true);
 		}
 	});

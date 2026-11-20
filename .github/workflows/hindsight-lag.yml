@@ -6,8 +6,8 @@ name: Hindsight lag
 # opens no pull request and touches nothing on Railway: an upgrade is a manual, operator-only act
 # (docs/runbooks/hindsight-upgrade.md, docs/ci.md).
 #
-# Same conventions as ci.yml: the Omega CI runner pool ([self-hosted, linux, x64, omega-ci]), never
-# GitHub-hosted runners, and CI_ENABLED as the switch (unset: the job is skipped, which GitHub reports
+# Same conventions as ci.yml: GitHub-hosted `ubuntu-latest` runners, and CI_ENABLED as the switch
+# (unset: the job is skipped, which GitHub reports
 # as a skipped, not failed, check). The only secret is the run's own GITHUB_TOKEN, limited to reading
 # the repository and writing issues. The workflow has no pull_request trigger, so a fork's code never
 # reaches the runner.
@@ -33,7 +33,7 @@ jobs:
   lag:
     name: Compare the pin with upstream
     if: vars.CI_ENABLED == 'true'
-    runs-on: [self-hosted, linux, x64, omega-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -59,7 +59,7 @@ jobs:
     name: Report a failed watcher run
     needs: lag
     if: always() && needs.lag.result == 'failure' && vars.CI_ENABLED == 'true'
-    runs-on: [self-hosted, linux, x64, omega-ci]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read

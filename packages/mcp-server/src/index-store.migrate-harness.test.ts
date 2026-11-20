@@ -230,6 +230,7 @@ describe("IndexStore.migrate() against a fake connection", () => {
 		expect(events).toEqual(expectedRun(new Set(), ALL_WITH_STEERING_AUDIT));
 		expect(ledger.has(33)).toBe(true);
 		expect(ledger.has(34)).toBe(true);
+		expect(ledger.has(43)).toBe(true);
 		expect(tables.has("planning_steering_audit")).toBe(true);
 		expect(columns.has("planning_steering_audit.reason")).toBe(true);
 

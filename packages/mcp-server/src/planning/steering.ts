@@ -20,7 +20,9 @@
  *
  * Every mutating call runs under one lock, so audit order, rate tokens and state never interleave.
  */
+import { createHash } from "node:crypto";
 import { z } from "zod";
+import { IDEMPOTENCY_KEY_PATTERN } from "../event.ts";
 import { redact } from "../redact.ts";
 import { errnoCode } from "./index.ts";
 import { SESSION_ID_RE } from "./presence.ts";
@@ -49,6 +51,17 @@ export const DEFAULT_STEERING_EXPIRY_SWEEP_S = 60;
 export const STEERING_EXPIRY_SWEEP_BOUNDS_S = { min: 1, max: 3_600 } as const;
 /** One expiry pass closes at most this many directives, so the inbox lock is never held for an unbounded run. */
 export const STEERING_EXPIRY_BATCH = 100;
+
+/** Keyed-queue replay retention, in whole seconds, from `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S`. A retry within it returns the original reply and writes nothing. */
+export const STEERING_IDEMPOTENCY_TTL_ENV = "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S";
+export const DEFAULT_STEERING_IDEMPOTENCY_TTL_S = 86_400;
+/** Inclusive bounds, in seconds: one minute to thirty days. Outside them the value is refused, not clamped. */
+export const STEERING_IDEMPOTENCY_TTL_BOUNDS_S = { min: 60, max: 2_592_000 } as const;
+/** The most keyed queues the replay store keeps, from `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP`. At the cap the oldest is forgotten first. */
+export const STEERING_IDEMPOTENCY_CAP_ENV = "SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP";
+export const DEFAULT_STEERING_IDEMPOTENCY_CAP = 10_000;
+/** Inclusive bounds. Outside them the value is refused, not clamped. */
+export const STEERING_IDEMPOTENCY_CAP_BOUNDS = { min: 1, max: 1_000_000 } as const;
 
 const RATE_WINDOW_MS = 60_000;
 /** The sequence of the first legacy row a restore loads. Stored sequences are at least 1, so legacy rows count up from here and stay below all of them. */
@@ -135,6 +148,7 @@ const SteeringRestoreEntrySchema = z
 		queuedAtMs: z.number().int().nonnegative(),
 		deliverySequence: z.number().int().positive().nullish(),
 		acknowledgement: SteeringStoredAcknowledgementSchema.nullish(),
+		sequence: z.number().int().positive().nullish(),
 	})
 	.strict();
 
@@ -181,9 +195,16 @@ export type SteeringAuditEntry =
 			idempotency?: SteeringKeyedRequest;
 	  };
 
+/** An opaque unit of work the idempotency store opens for a keyed queue (a transaction on Postgres). Only the store that opened it reads it. */
+export type SteeringUnit = unknown;
+
 /** The append-only history port (the `HistorySink` shape of phase 52, typed for steering entries). */
 export interface SteeringHistorySink {
-	append(entry: SteeringAuditEntry): Promise<void>;
+	/**
+	 * Writes one transition. `unit` is the store's open unit of work for a keyed queue: the write uses it, so it commits or rolls back with
+	 * the replay claim. Absent, the write stands alone.
+	 */
+	append(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<void>;
 	/**
 	 * The time a transition was saved with, or null when none was. A retry reuses it, so the audit content is unchanged.
 	 * Optional: a sink with no durable store has none, and every attempt takes a fresh time. A rejection is an audit failure.
@@ -216,6 +237,10 @@ export interface SteeringInboxDeps {
 	history: SteeringHistorySink;
 	clock: SteeringClock;
 	policy: SteeringPolicy;
+	/** The durable sequence counter and replay records. Absent, the inbox keeps both in memory: one process, and nothing survives a restart. */
+	store?: SteeringIdempotencyStore;
+	/** Keyed-queue replay retention and capacity. Absent, the defaults of this module are used. */
+	idempotency?: SteeringIdempotencySettings;
 }
 
 type SimpleSteeringCode =
@@ -281,6 +306,83 @@ interface TokenBucket {
 	updatedAtMs: number;
 }
 
+/** A keyed queue as the replay store keeps it: what it asked for, the directive it queued, its delivery sequence, and when its key stops replaying. */
+export interface SteeringReplayRecord {
+	scopeKey: string;
+	fingerprint: string;
+	directive: SteeringDirective;
+	queuedAtMs: number;
+	sequence: number;
+	expiresAtMs: number;
+}
+
+/**
+ * The durable side of the inbox's delivery order and replay: the per-session sequence counter and the keyed replay records. Production
+ * keeps both in the steering store, so they survive a restart. Without a store the inbox keeps them in {@link MemorySteeringIdempotencyStore}.
+ */
+export interface SteeringIdempotencyStore {
+	/** The next delivery sequence of a target session. A number is never handed out twice, across processes and restarts. */
+	nextSequence(sessionId: string): Promise<number>;
+	/** Makes the session's counter pass a sequence already in use, so the next number handed out is new. */
+	advancePast(sessionId: string, sequence: number): Promise<void>;
+	/** The live replay record for a scope key at `nowMs`, or null. A record at or past its expiry is not live. */
+	findReplay(scopeKey: string, nowMs: number): Promise<SteeringReplayRecord | null>;
+	/**
+	 * Claims a keyed queue and runs its audit write in the same unit of work. The claim is taken first: when another call already holds the
+	 * scope key, `queue` does not run and the holder's record comes back. Otherwise `queue(unit)` must write through `unit`, and the claim is
+	 * kept only if it returns; a throw keeps nothing. Expired records are pruned, and at most `cap` records are kept.
+	 */
+	claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim>;
+}
+
+/** The outcome of a keyed claim: this call holds the scope key, or another call already holds it and its record is returned. */
+export type SteeringReplayClaim = { claimed: true } | { claimed: false; held: SteeringReplayRecord };
+
+/** One process, no restart: the default store when none is injected. */
+export class MemorySteeringIdempotencyStore implements SteeringIdempotencyStore {
+	private readonly tails = new Map<string, number>();
+	private readonly replays = new Map<string, SteeringReplayRecord>();
+
+	async nextSequence(sessionId: string): Promise<number> {
+		const next = (this.tails.get(sessionId) ?? 0) + 1;
+		this.tails.set(sessionId, next);
+		return next;
+	}
+
+	async advancePast(sessionId: string, sequence: number): Promise<void> {
+		if ((this.tails.get(sessionId) ?? 0) < sequence) this.tails.set(sessionId, sequence);
+	}
+
+	async findReplay(scopeKey: string, nowMs: number): Promise<SteeringReplayRecord | null> {
+		const held = this.replays.get(scopeKey);
+		return held === undefined || held.expiresAtMs <= nowMs ? null : structuredClone(held);
+	}
+
+	async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
+		for (const [key, held] of this.replays) if (held.expiresAtMs <= nowMs) this.replays.delete(key);
+		const held = this.replays.get(record.scopeKey);
+		if (held !== undefined) return { claimed: false, held: structuredClone(held) };
+		await queue(undefined);
+		this.replays.set(record.scopeKey, structuredClone(record));
+		while (this.replays.size > cap) {
+			const oldest = this.replays.keys().next();
+			if (oldest.done) break;
+			this.replays.delete(oldest.value);
+		}
+		return { claimed: true };
+	}
+}
+
+/** What a keyed queue asks for. A replay must match it. The id and clock are left out, since a replay never regenerates the id. */
+function fingerprintOf(directive: SteeringDirective): string {
+	return createHash("sha256").update(JSON.stringify([directive.action, directive.priority, directive.targetSessionId, directive.body, directive.planRef ?? null, directive.conflictsWithActivePlan])).digest("hex");
+}
+/** What a queue returns: the record, and whether the call replayed an earlier keyed queue. A replay wrote nothing, so it announces nothing. */
+export interface SteeringReceipt {
+	record: SteeringRecord;
+	replayed: boolean;
+}
+
 export class SteeringInbox {
 	private readonly records = new Map<string, SteeringRecord>();
 	private readonly buckets = new Map<string, TokenBucket>();
@@ -289,7 +391,7 @@ export class SteeringInbox {
 	private readonly allowlist: ReadonlySet<string>;
 	private readonly capacity: number;
 	private tail: Promise<unknown> = Promise.resolve();
-	/** Delivery order: grows by one for every directive that enters the inbox. Unlike a timestamp it never goes backwards and never ties. */
+	/** Delivery order, per target session: each session's directives take 1, 2, 3... in the order they enter this inbox. Never repeats, whatever the clock says. */
 	private readonly sequences = new Map<string, number>();
 	private lastSequence = 0;
 	/** Legacy rows restored so far by this inbox; each takes the next value above {@link LEGACY_SEQUENCE_FLOOR}. */
@@ -306,6 +408,12 @@ export class SteeringInbox {
 		}
 		this.capacity = ratePerMin;
 		this.allowlist = new Set(deps.policy.allowlist);
+		this.store = deps.store ?? new MemorySteeringIdempotencyStore();
+		const idempotency = deps.idempotency ?? { ttlMs: DEFAULT_STEERING_IDEMPOTENCY_TTL_S * 1_000, cap: DEFAULT_STEERING_IDEMPOTENCY_CAP };
+		if (!Number.isSafeInteger(idempotency.ttlMs) || idempotency.ttlMs < 1 || !Number.isSafeInteger(idempotency.cap) || idempotency.cap < 1) {
+			throw new RangeError("idempotency ttlMs and cap must be positive integers");
+		}
+		this.idempotency = idempotency;
 	}
 
 	/** Validate, authorise, rate-limit, audit, then queue. */
@@ -402,12 +510,22 @@ export class SteeringInbox {
 		const parsed = SteeringDirectiveSchema.safeParse(input);
 		if (!parsed.success) return fail({ code: "invalid-directive", issues: issuePaths(parsed.error) });
 		const directive = parsed.data;
+		if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) return fail({ code: "invalid-directive", issues: ["idempotency_key"] });
 
 		if (directive.author.kind === "agent") return fail({ code: "agent-author-refused" });
 		if (!this.allowlist.has(directive.author.principalId)) return fail({ code: "principal-not-allowed" });
+
+		const seenMs = this.limiterNowMs();
+		const replay = idempotencyKey === undefined ? null : { scopeKey: JSON.stringify([directive.author.principalId, directive.targetSessionId, idempotencyKey]), fingerprint: fingerprintOf(directive) };
+		if (replay !== null) {
+			const held = await this.storeCall(() => this.store.findReplay(replay.scopeKey, seenMs));
+			if (!held.ok) return held;
+			if (held.value !== null) return this.replayOf(held.value, replay.fingerprint);
+		}
+
 		if (this.records.has(directive.id)) return fail({ code: "duplicate-directive" });
 
-		const bucket = this.refilled(directive.targetSessionId, this.limiterNowMs());
+		const bucket = this.refilled(directive.targetSessionId, seenMs);
 		if (bucket.tokens < 1) {
 			const retryAfterMs = Math.ceil(((1 - bucket.tokens) * RATE_WINDOW_MS) / this.capacity);
 			return fail({ code: "rate-limited", retryAfterMs });
@@ -420,6 +538,33 @@ export class SteeringInbox {
 		const audited = await this.audit({ event: "queued", atMs: nowMs, directive, deliverySequence: sequence, ...(keyed === undefined ? {} : { idempotency: keyed }) });
 		if (!audited.ok) return audited;
 
+		if (replay === null) {
+			const audited = await this.audit(entry);
+			if (!audited.ok) {
+				this.reservedSequences.set(directive.id, sequence);
+				return audited;
+			}
+			return this.acceptQueued(directive, nowMs, sequence, bucket);
+		}
+		// The audit row and the replay claim commit as one unit. A refused audit keeps no claim; a claim another call holds queues nothing here.
+		const claim = await this.claimKeyed({ scopeKey: replay.scopeKey, fingerprint: replay.fingerprint, directive, queuedAtMs: nowMs, sequence, expiresAtMs: nowMs + this.idempotency.ttlMs }, seenMs, entry);
+		if (!claim.ok) return claim;
+		if (!claim.value.claimed) return this.replayOf(claim.value.held, replay.fingerprint);
+		return this.acceptQueued(directive, nowMs, sequence, bucket);
+	}
+
+	/** A store call as a typed result: a failure is `audit-unavailable` with the driver's code, and is never thrown into the queue. */
+	private async storeCall<T>(run: () => Promise<T>): Promise<SteeringResult<T>> {
+		try {
+			return { ok: true, value: await run() };
+		} catch (cause) {
+			return fail({ code: "audit-unavailable", attempts: 1, lastErrorCode: errnoCode(cause) });
+		}
+	}
+
+	/** Records an accepted queue: the bucket spends its token, and the record and its sequence are held. Its audit row is already committed. */
+	private acceptQueued(directive: SteeringDirective, nowMs: number, sequence: number, bucket: TokenBucket): SteeringResult<SteeringReceipt> {
+		this.reservedSequences.delete(directive.id);
 		this.buckets.set(directive.targetSessionId, { tokens: bucket.tokens - 1, updatedAtMs: bucket.updatedAtMs });
 		const record: SteeringRecord = { state: "queued", directive, queuedAtMs: nowMs };
 		this.records.set(directive.id, record);
@@ -470,24 +615,24 @@ export class SteeringInbox {
 		return { ok: true, value: structuredClone(record) };
 	}
 
-	private doRestore(entries: readonly unknown[]): SteeringRestoreReport {
+	private async doRestore(entries: readonly unknown[]): Promise<SteeringRestoreReport> {
 		const report: SteeringRestoreReport = { restored: [], unchanged: [], skipped: [] };
-		entries.forEach((entry, index) => {
+		for (const [index, entry] of entries.entries()) {
 			const parsed = SteeringRestoreEntrySchema.safeParse(entry);
 			if (!parsed.success) {
 				report.skipped.push({ index, directiveId: wellFormedDirectiveId(entry), code: "invalid-entry", issues: issuePaths(parsed.error) });
-				return;
+				continue;
 			}
 			const { directive, queuedAtMs, acknowledgement, deliverySequence } = parsed.data;
 			// No human flow can audit an agent author, so such a row did not come from this inbox. It is not loaded.
 			if (directive.author.kind === "agent") {
 				report.skipped.push({ index, directiveId: directive.id, code: "agent-author-refused", issues: [] });
-				return;
+				continue;
 			}
 			const current = this.records.get(directive.id);
 			if (current !== undefined && (current.state === "acknowledged" || acknowledgement == null)) {
 				report.unchanged.push(directive.id);
-				return;
+				continue;
 			}
 			this.records.set(directive.id, recordFromStore(directive, queuedAtMs, acknowledgement ?? null));
 			// A directive this process has not seen keeps the sequence the table stored. A row written before the column has none takes
@@ -502,8 +647,14 @@ export class SteeringInbox {
 				}
 			}
 			report.restored.push(directive.id);
-		});
+		}
 		return report;
+	}
+
+	private async restoredSequence(sessionId: string, stored: number | null): Promise<number> {
+		if (stored === null) return this.store.nextSequence(sessionId);
+		await this.store.advancePast(sessionId, stored);
+		return stored;
 	}
 
 	private async doExpireStale(nowMs: number): Promise<SteeringExpiryReport> {
@@ -605,12 +756,12 @@ export class SteeringInbox {
 		return fail({ code: "audit-unavailable", attempts: STEERING_AUDIT_ATTEMPTS, lastErrorCode });
 	}
 
-	/** Append with a bounded retry. Failure is returned with the last error code, never swallowed. */
-	private async audit(entry: SteeringAuditEntry): Promise<SteeringResult<void>> {
+	/** Append with a bounded retry, inside `unit` when the store opened one. Failure is returned with the last error code, never swallowed. */
+	private async audit(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<SteeringResult<void>> {
 		let lastErrorCode = "UNKNOWN";
 		for (let attempt = 0; attempt < STEERING_AUDIT_ATTEMPTS; attempt++) {
 			try {
-				await this.deps.history.append(entry);
+				await this.deps.history.append(entry, unit);
 				return { ok: true, value: undefined };
 			} catch (cause) {
 				lastErrorCode = errnoCode(cause);
@@ -697,6 +848,28 @@ export function loadSteeringExpirySettings(env: Readonly<Record<string, string |
 	const sweepS = integerSetting(env, STEERING_EXPIRY_SWEEP_ENV, DEFAULT_STEERING_EXPIRY_SWEEP_S, STEERING_EXPIRY_SWEEP_BOUNDS_S, errors);
 	if (errors.length > 0) return { ok: false, errors };
 	return { ok: true, settings: { ackTtlMs: ttlS * 1_000, expirySweepMs: sweepS * 1_000 } };
+}
+
+/** The keyed-queue replay retention and capacity the inbox runs with. */
+export interface SteeringIdempotencySettings {
+	/** Milliseconds a keyed queue replays after it was queued. */
+	ttlMs: number;
+	/** The most keyed queues the store keeps. */
+	cap: number;
+}
+
+export type SteeringIdempotencyConfigResult = { ok: true; settings: SteeringIdempotencySettings } | { ok: false; errors: SteeringConfigError[] };
+
+/**
+ * The keyed-queue replay retention and capacity, from the environment. The retention is whole seconds and the cap is whole records. A
+ * malformed or out-of-range value is a typed error naming its key, never a fallback; an unset key takes its default.
+ */
+export function loadSteeringIdempotencySettings(env: Readonly<Record<string, string | undefined>>): SteeringIdempotencyConfigResult {
+	const errors: SteeringConfigError[] = [];
+	const ttlS = integerSetting(env, STEERING_IDEMPOTENCY_TTL_ENV, DEFAULT_STEERING_IDEMPOTENCY_TTL_S, STEERING_IDEMPOTENCY_TTL_BOUNDS_S, errors);
+	const cap = integerSetting(env, STEERING_IDEMPOTENCY_CAP_ENV, DEFAULT_STEERING_IDEMPOTENCY_CAP, STEERING_IDEMPOTENCY_CAP_BOUNDS, errors);
+	if (errors.length > 0) return { ok: false, errors };
+	return { ok: true, settings: { ttlMs: ttlS * 1_000, cap } };
 }
 
 /**
@@ -791,6 +964,14 @@ function wellFormedDirectiveId(entry: unknown): string | null {
 	const directive = entry.directive;
 	if (typeof directive !== "object" || directive === null || !("id" in directive)) return null;
 	return typeof directive.id === "string" && DIRECTIVE_ID_RE.test(directive.id) ? directive.id : null;
+}
+
+/** Thrown inside a keyed claim when its audit write is refused: the store rolls the claim back and rethrows it, and the inbox reports the refusal. */
+class AuditRefused extends Error {
+	constructor(readonly refusal: SteeringError) {
+		super("steering audit refused");
+		this.name = "AuditRefused";
+	}
 }
 
 function fail<T>(error: SteeringError): SteeringResult<T> {

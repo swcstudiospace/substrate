@@ -1,9 +1,9 @@
 name: Scratch Postgres 16
 description: >
-  Start (or stop) a throwaway PostgreSQL 16 cluster as the job user, from the binaries in the
-  Omega CI runner image (initdb and pg_ctl on PATH). It replaces the old `postgres:16` service
-  container: the pool has no Docker. The cluster lives in RUNNER_TEMP, listens on 127.0.0.1 only,
-  on a port the kernel picks free at start, so parallel jobs on one runner host never clash.
+  Start (or stop) a throwaway PostgreSQL 16 cluster as the job user, from the PostgreSQL 16 binaries
+  on PATH (initdb and pg_ctl). It replaces the old `postgres:16` service container. The cluster
+  lives in RUNNER_TEMP, listens on 127.0.0.1 only, on a port the kernel picks free at start, so
+  parallel jobs on one runner host never clash.
   `start` exports SUBSTRATE_TEST_PG_URL; `stop` shuts the cluster down and is safe to run when
   start never got that far.
 
@@ -30,9 +30,26 @@ runs:
         dir="$RUNNER_TEMP/scratch-pg"
         case "$MODE" in
           start)
+            pg_bin=""
+            for d in /usr/lib/postgresql/*/bin; do
+              if [ -x "$d/initdb" ]; then pg_bin="$d"; fi
+            done
+            if [ -z "$pg_bin" ]; then
+              sudo apt-get update
+              sudo apt-get install -y postgresql-16 || sudo apt-get install -y postgresql-17 || sudo apt-get install -y postgresql
+              for d in /usr/lib/postgresql/*/bin; do
+                if [ -x "$d/initdb" ]; then pg_bin="$d"; fi
+              done
+            fi
+            if [ -z "$pg_bin" ]; then
+              echo "::error::no PostgreSQL binaries found under /usr/lib/postgresql" >&2
+              exit 1
+            fi
+            echo "$pg_bin" >> "$GITHUB_PATH"
+            export PATH="$pg_bin:$PATH"
             for tool in initdb pg_ctl pg_isready createdb; do
               if ! command -v "$tool" >/dev/null; then
-                echo "::error::$tool is not on PATH; the Omega CI runner image ships PostgreSQL 16 in /usr/lib/postgresql/16/bin" >&2
+                echo "::error::$tool is not on PATH after install" >&2
                 exit 1
               fi
             done

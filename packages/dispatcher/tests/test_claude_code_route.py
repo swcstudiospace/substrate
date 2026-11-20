@@ -42,6 +42,8 @@ EXPECTED_MARKERS = frozenset({
     # U4 (uplift 02): the storm-breaker's refusal is a new once-only reason the
     # operator reads on Linear; the D33-02 lock still pins every existing text.
     "quota-burn",
+    # queued skips: re-decided every tick, commented once per issue.
+    "at-capacity", "graph-busy", "already-running",
 })
 
 
@@ -226,9 +228,9 @@ def test_claude_code_accepted_but_unreadable_reply_keeps_its_record_and_is_not_r
     launch_via_tick(world, mcp, linear, env_file, registry, tmp_path)
     launch_via_tick(world, mcp, linear, env_file, registry, tmp_path)
     posted = linear.named("comment")
-    assert len(posted) == 1 and "[host-unreachable]" in posted[0][2]
-    assert mcp.events == []  # silent: no dispatch.failed for the retryable marker
-    # The host answered 200, so it may have opened the task: the record holds the slot and the second tick does not post again.
+    assert len(posted) == 2 and "[host-unreachable]" in posted[0][2] and "[already-running]" in posted[1][2]
+    assert mcp.events == []  # silent: no dispatch.failed for the retryable markers
+    # The host answered 200, so it may have opened the task: the record holds the slot, the second tick posts only the once-only already-running marker and does not POST again.
     assert registry.given_up == set() and registry.active_issue_ids() == {"i-1"} and world.requests == 1
 
 

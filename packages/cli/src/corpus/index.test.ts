@@ -495,6 +495,20 @@ describe("substrate corpus ingest", () => {
 		expect(result.out).toContain("Acme/Alpha:docs/missing.md  [not-in-scan]");
 	});
 
+	test("a rename whose old row is in another copy collection removes that row, not the same path in the new one", async () => {
+		const { root, runner } = fixture();
+		writeTree(root, { "c2/docs/moved.md": "moved\n" });
+		const items: PlanItem[] = [{ action: "rename", repo: "local/c2", path: "docs/moved.md", renamedFrom: "docs/moved.md", renamedFromRepo: "local/c1" }];
+		stub.on("POST /corpus/plan", () => ({ status: 200, body: planOf(items) }));
+		stub.on("POST /corpus/ingest", answerIngest());
+		const result = await run(["ingest", "--root", root, "--execute"], { runner });
+		expect(result.code).toBe(0);
+		const sent = stub.requests("/corpus/ingest").map((s) => ingestParts(s));
+		expect(sent).toHaveLength(2);
+		expect(defined(sent[0], "tombstone request").tombstones).toEqual([{ repo: "local/c1", path: "docs/moved.md" }]);
+		expect(defined(sent[1], "document request").documents.map((d) => `${d.repo}:${d.path}`)).toEqual(["local/c2:docs/moved.md"]);
+	});
+
 	test("tombstones are split into requests no larger than the server accepts", async () => {
 		const { root, runner } = fixture();
 		const items: PlanItem[] = Array.from({ length: MAX_INGEST_TOMBSTONES + 1 }, (_, i) => ({ action: "tombstone", repo: "Acme/Alpha", path: `old/t${i}.md` }));

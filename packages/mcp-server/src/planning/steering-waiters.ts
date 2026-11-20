@@ -24,9 +24,15 @@ export const STEERING_WAIT_TOTAL_MAX = 256;
 /** A queued record: the shape a waiter is woken with. */
 export type QueuedSteeringRecord = Extract<SteeringRecord, { state: "queued" }>;
 
+/** A queued directive with its delivery sequence in its target session: what a wait hands back. */
+export interface QueuedDelivery {
+	sequence: number;
+	record: QueuedSteeringRecord;
+}
+
 /** How a wait ended. `busy` and `closed` are the registry's own answers; the rest are the caller's story. */
 export type SteeringWaitResult =
-	| { status: "directive"; record: QueuedSteeringRecord }
+	| { status: "directive"; record: QueuedSteeringRecord; sequence: number }
 	| { status: "timeout" }
 	| { status: "aborted" }
 	| { status: "closed" }
@@ -54,15 +60,15 @@ const GLOBAL_TIMERS: SteeringWaitTimers = {
  * restart forgot it, or it was never one) filters nothing, so the caller sees every queued directive rather than none and
  * dedupes by id. A read: it changes nothing in the inbox.
  */
-export function nextQueuedDirective(inbox: SteeringInbox, sessionId: string, after: string | null): QueuedSteeringRecord | null {
+export function nextQueuedDirective(inbox: SteeringInbox, sessionId: string, after: string | null): QueuedDelivery | null {
 	const queued = inbox.queuedFor(sessionId);
 	const cursor = after === null ? null : inbox.sequenceOf(after);
-	if (cursor === null) return queued[0]?.record ?? null;
-	return queued.find((entry) => entry.sequence > cursor)?.record ?? null;
+	if (cursor === null) return queued[0] ?? null;
+	return queued.find((entry) => entry.sequence > cursor) ?? null;
 }
 
 interface Waiter {
-	check: () => QueuedSteeringRecord | null;
+	check: () => QueuedDelivery | null;
 	finish: (result: SteeringWaitResult) => void;
 }
 
@@ -79,7 +85,7 @@ export interface SteeringWaitRequest {
 	/** The caller's abort: when it fires the waiter ends `aborted` and leaves no timer or listener behind. */
 	signal?: AbortSignal;
 	/** Asks the inbox for the next directive for this wait. Called once up front and again on every notify for the session. */
-	check: () => QueuedSteeringRecord | null;
+	check: () => QueuedDelivery | null;
 }
 
 export class SteeringWaiters {
@@ -105,7 +111,7 @@ export class SteeringWaiters {
 	wait(request: SteeringWaitRequest): Promise<SteeringWaitResult> {
 		if (this.closed) return Promise.resolve({ status: "closed" });
 		if (request.signal?.aborted === true) return Promise.resolve({ status: "aborted" });
-		let ready: QueuedSteeringRecord | null;
+		let ready: QueuedDelivery | null;
 		try {
 			ready = request.check();
 		} catch {
@@ -113,7 +119,7 @@ export class SteeringWaiters {
 		}
 		if (this.closed) return Promise.resolve({ status: "closed" });
 		if (request.signal?.aborted) return Promise.resolve({ status: "aborted" });
-		if (ready !== null) return Promise.resolve({ status: "directive", record: ready });
+		if (ready !== null) return Promise.resolve({ status: "directive", record: ready.record, sequence: ready.sequence });
 		const held = this.bySession.get(request.sessionId) ?? new Set<Waiter>();
 		if (held.size >= this.perSessionMax) return Promise.resolve({ status: "busy", scope: "session" });
 		if (this.total >= this.totalMax) return Promise.resolve({ status: "busy", scope: "total" });
@@ -124,11 +130,12 @@ export class SteeringWaiters {
 		const finish = (result: SteeringWaitResult): void => {
 			if (done) return;
 			done = true;
-			if (timerSet) this.timers.clear(timer);
 			request.signal?.removeEventListener("abort", onAbort);
 			held.delete(waiter);
 			if (held.size === 0 && this.bySession.get(request.sessionId) === held) this.bySession.delete(request.sessionId);
 			this.total -= 1;
+			// Cleared last: a timer observer runs synchronously here, and must already see this waiter gone from `size`.
+			if (timerSet) this.timers.clear(timer);
 			resolve(result);
 		};
 		const onAbort = (): void => finish({ status: "aborted" });
@@ -160,7 +167,7 @@ export class SteeringWaiters {
 		const held = this.bySession.get(sessionId);
 		if (held === undefined) return;
 		for (const waiter of [...held]) {
-			let found: QueuedSteeringRecord | null;
+			let found: QueuedDelivery | null;
 			try {
 				found = waiter.check();
 			} catch {
@@ -168,7 +175,7 @@ export class SteeringWaiters {
 				waiter.finish({ status: "closed" });
 				continue;
 			}
-			if (found !== null) waiter.finish({ status: "directive", record: found });
+			if (found !== null) waiter.finish({ status: "directive", record: found.record, sequence: found.sequence });
 		}
 	}
 
