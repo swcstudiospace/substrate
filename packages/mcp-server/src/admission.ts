@@ -305,7 +305,6 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	cross_repo_fanout: "write",
 	cross_repo_status: "read",
 	cross_repo_compensate: "write",
-	docs_feedback: "write",
 	skills_propose: "write",
 	docs_steering_session: "write",
 	steering_session_heartbeat: "write",

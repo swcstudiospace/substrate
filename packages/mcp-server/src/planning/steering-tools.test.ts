@@ -327,8 +327,8 @@ describe("keyed steering commands (phase 77)", () => {
 		const first = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0005", { body: "First." })));
 		const second = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0006", { body: "Second." })));
 		expect(second.sequence).toBeGreaterThan(first.sequence);
-		expect(nextQueuedDirective(inbox, h.row.sessionId, null)?.directive.id).toBe(first.directive_id);
-		expect(nextQueuedDirective(inbox, h.row.sessionId, first.directive_id)?.directive.id).toBe(second.directive_id);
+		expect(nextQueuedDirective(inbox, h.row.sessionId, null)?.record.directive.id).toBe(first.directive_id);
+		expect(nextQueuedDirective(inbox, h.row.sessionId, first.directive_id)?.record.directive.id).toBe(second.directive_id);
 		expect(nextQueuedDirective(inbox, h.row.sessionId, second.directive_id)).toBeNull();
 		await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0005", { body: "First." }));
 		expect(inbox.queuedFor(h.row.sessionId).map((entry) => entry.record.directive.id)).toEqual([first.directive_id, second.directive_id]);

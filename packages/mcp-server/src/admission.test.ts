@@ -47,7 +47,7 @@ import { ConfigError, DEFAULT_BUDGETS, loadAdmissionSettings, loadConfig } from 
 import { defined } from "./test-support.ts";
 import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
 import { LiveSessionBoundary, type LiveSessionInvocation } from "./planning/steering-tools.ts";
-import { SteeringWaiters, type QueuedSteeringRecord, type SteeringWaitTimers } from "./planning/steering-waiters.ts";
+import { SteeringWaiters, type QueuedDelivery, type QueuedSteeringRecord, type SteeringWaitTimers } from "./planning/steering-waiters.ts";
 import { SURFACES, type EventInput } from "./types.ts";
 
 /**
@@ -701,13 +701,13 @@ describe("an open long poll and the shared read budget", () => {
 
 	test("the held slot is released when a directive is queued for the session, and its timer is cleared", async () => {
 		const { timers, waiters } = registry();
-		let next: QueuedSteeringRecord | null = null;
+		let next: QueuedDelivery | null = null;
 		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, check: () => next });
 		expect(waiters.size).toBe(1);
 		const record = queuedRecord("d-1");
-		next = record;
+		next = { sequence: 1, record };
 		waiters.notify("sess-a");
-		expect(await held).toEqual({ status: "directive", record });
+		expect(await held).toEqual({ status: "directive", record, sequence: 1 });
 		expect(waiters.size).toBe(0);
 		expect(timers.pending.size).toBe(0);
 	});

@@ -342,7 +342,7 @@ describe("bounded long-poll release and cleanup", () => {
 			sessions.push({ sessionId: row.sessionId, sessionBinding: row.sessionBinding });
 			for (let k = 0; k < STEERING_WAIT_PER_SESSION_MAX; k += 1) held.push(h.get(`/steering/wait?session_id=${row.sessionId}&timeout_ms=5000`, proof(row.sessionBinding)));
 		}
-		await settle(() => h.waiters.size === LONG_POLL_SLOTS_MAX);
+		await settle(h.timers, () => h.waiters.size === LONG_POLL_SLOTS_MAX);
 		const extra = await issueLiveSession(h.authority, { caller: OWNER });
 		const refused = await h.get(`/steering/wait?session_id=${extra.sessionId}&timeout_ms=5000`, proof(extra.sessionBinding));
 		expect(refused.status).toBe(429);

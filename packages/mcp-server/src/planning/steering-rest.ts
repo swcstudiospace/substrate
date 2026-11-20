@@ -79,8 +79,6 @@ export interface RestDirective {
 	created_at: string;
 	acknowledged_at: string | null;
 	outcome: string | null;
-	/** The directive's delivery sequence in its target session. Null when the inbox does not hold it (restored only from the audit history). */
-	sequence: number | null;
 	/** Present for an acknowledged directive whose outcome moves the session: the session may take a steering checkpoint. */
 	checkpoint_hint: { trigger: string; directive_id: string } | null;
 	/** The delivery sequence the inbox gave this directive, the order readers see; null when the inbox does not hold it (a durable row after a restart). */

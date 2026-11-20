@@ -218,7 +218,7 @@ import { PlanningReader } from "./planning/read.ts";
 import { greptimeMetricSink, stdoutMetricSink } from "./planning/telemetry.ts";
 import { completionStoreView, type CompletionStoreView } from "./planning/checkpoint-store.ts";
 import { DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundary, LiveSessionBoundaryError, liveSessionNotFound, SESSION_BINDING_INPUT, STEERING_ACKNOWLEDGE_INPUT, STEERING_LIST_INPUT, STEERING_QUEUE_INPUT, type LiveCallFailure, type LiveSessionAuditPort, type LiveSessionInvocation, type PreparedLiveCall, type PreparedLiveDispatch, type SteeringWiring } from "./planning/steering-tools.ts";
-import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink, type SteeringIdempotencyStore } from "./planning/steering.ts";
+import { SteeringInbox, steeringRecordsFromEntries, type SteeringHistorySink } from "./planning/steering.ts";
 import { DEFAULT_STEERING_RESTORE_LIMIT, DEFAULT_STEERING_RESTORE_MAX_PAGES, STEERING_RESTORE_DEADLINE_MS, STEERING_RESTORE_TIMEOUT_CODE, restoreSteeringInboxPaged, type SteeringAuditSink, type SteeringRestoreStop } from "./planning/steering-store.ts";
 import { LiveSessionStatePort, STEERING_SESSION_ENDED_ACTION, steeringSessionEvent } from "./planning/session-state.ts";
 import { SteeringExpirySweeper, SteeringHintAnnouncer, steeringNoticeFor, type SessionStatePort, type SteeringAcknowledgeReply, type SteeringNotice } from "./planning/steering-delivery.ts";
@@ -679,13 +679,6 @@ export interface EmitResult {
 	deduplicated?: true;
 	/** Set (with `stored: false`) when the idempotency lookup itself failed: nothing was written and the event is not in the ledger. */
 	lookupFailed?: true;
-	/**
-	 * Set (with `stored: false`) when the write failed and the event is held for retry. It will be written, or given up with a
-	 * dead-letter record, and never silently. Nothing is in the ledger yet.
-	 */
-	buffered?: true;
-	/** Set (with `stored: false`) when the write failed and the event could not be held either: it was given up at once, with a dead-letter record. */
-	deadLettered?: true;
 }
 
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
@@ -1644,13 +1637,6 @@ export class Substrate {
 	private readonly retainOutbox: RetainOutbox;
 	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
 	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
-	// phase 76 — the telemetry buffer and its dead-letter store, both absent unless SUBSTRATE_EVENT_BUFFER_PATH is set
-	/** Events the ledger did not take, held for retry with backoff, and the store that records the ones given up for good. */
-	private readonly eventBufferStores: { buffer: EventBuffer; deadLetters: DeadLetterStore } | null;
-	/** The interval drain, started while the buffer holds entries and left unref'd so it never holds the process. */
-	private eventDrainTimer: ReturnType<typeof setInterval> | null = null;
-	/** Set by the shutdown close: the tick is never re-armed after it, so a closed instance starts no pass. */
-	private eventDrainClosed = false;
 	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
 	private retainRecoverPending = false;
 	/** Phase 76: the ledger event buffer (parked events awaiting retry) and the dead-letter store (events that never reached the ledger). */
@@ -1738,8 +1724,6 @@ export class Substrate {
 	readonly planningObserver: PlanningObserver;
 	/** Phase 58: the Postgres audit sink behind the inbox while `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is on (or a test injects one). Null keeps the inbox in memory. */
 	private readonly steeringDurable: SteeringAuditSink | null;
-	/** Phase 77: the durable sequence counter and keyed-queue replay records behind the inbox, under the same opt-in as the audit sink. Null keeps them in the inbox's memory. */
-	private readonly steeringDurableIdempotency: SteeringIdempotencyStore | null;
 	/** Phase 58: closes directives nobody acknowledged in time. Null unless the inbox is durable. Started by `startSteering`. */
 	private readonly steeringSweeper: SteeringExpirySweeper | null;
 	/** Phase 58: one wake-up hint per queued directive. */
@@ -1791,7 +1775,6 @@ export class Substrate {
 			steering?: {
 				history: SteeringHistorySink | null;
 				durable?: SteeringAuditSink | null;
-				idempotency?: SteeringIdempotencyStore | null;
 				sessionState?: SessionStatePort | null;
 				timers?: PlanningTimers;
 				nowMs?: () => number;
@@ -1936,7 +1919,7 @@ export class Substrate {
 		// Invalid settings keep the tools registered, so they answer `misconfigured` naming the keys, and the keys are logged once at boot.
 		// Phase 58: the acknowledgement deadline and sweep interval are part of those settings.
 		const steeringSettings = config.steering.ok ? config.steering.settings : null;
-		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors), ...(config.steeringIdempotency.ok ? [] : config.steeringIdempotency.errors)];
+		const steeringErrors = [...(config.steering.ok ? [] : config.steering.errors), ...(config.steeringExpiry.ok ? [] : config.steeringExpiry.errors)];
 		if (steeringErrors.length > 0) {
 			process.stderr.write(`[substrate] steering settings invalid; steering tools answer misconfigured: ${steeringErrors.map((error) => error.key).join(", ")}\n`);
 		}
@@ -1949,24 +1932,12 @@ export class Substrate {
 				: config.steeringAuditTable && steeringSettings?.enabled === true && this.index !== null
 					? this.index.steeringAudit()
 					: null;
-		this.steeringDurableIdempotency =
-			steeringSeam !== undefined
-				? (steeringSeam.idempotency ?? null)
-				: this.steeringDurable !== null && this.index !== null
-					? this.index.steeringIdempotency()
-					: null;
 		const steeringHistory = this.steeringDurable ?? steeringSeam?.history ?? null;
 		const steeringClock = { nowMs: steeringSeam?.nowMs ?? (() => Date.now()) };
 		const ackTtlMs = this.steeringDurable !== null && config.steeringExpiry.ok ? config.steeringExpiry.settings.ackTtlMs : undefined;
 		const steeringInbox =
 			steeringSettings?.enabled === true && steeringHistory !== null && steeringErrors.length === 0
-				? new SteeringInbox({
-						history: steeringHistory,
-						clock: steeringClock,
-						policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs },
-						...(this.steeringDurableIdempotency === null ? {} : { store: this.steeringDurableIdempotency }),
-						...(config.steeringIdempotency.ok ? { idempotency: config.steeringIdempotency.settings } : {}),
-					})
+				? new SteeringInbox({ history: steeringHistory, clock: steeringClock, policy: ackTtlMs === undefined ? steeringSettings : { ...steeringSettings, ackTtlMs } })
 				: null;
 		this.liveSessions = steeringSeam?.liveSessions !== undefined ? steeringSeam.liveSessions : this.index?.liveSessions({ leaseSeconds: config.liveSessionLeaseS }) ?? null;
 		this.liveBoundary = new LiveSessionBoundary({
@@ -1983,10 +1954,10 @@ export class Substrate {
 			clock: steeringClock,
 			settingsErrors: steeringErrors,
 			inbox: steeringInbox,
+			onQueued: (directiveId) => this.onSteeringQueued(directiveId),
 			boundary: this.liveBoundary,
 			idempotency: new SteeringIdempotency<SteeringAcknowledgeReply>(),
 			durable: this.steeringDurable,
-			onQueued: (directiveId) => this.onSteeringQueued(directiveId),
 			executeLiveCall: (invocation, effect, dispatch) => this.executeLiveCall(invocation, effect, dispatch),
 		};
 		this.steeringWaiters = steeringSeam?.waiters ?? new SteeringWaiters();
@@ -3020,7 +2991,6 @@ export class Substrate {
 	}
 
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
-		const stores = this.eventBufferStores;
 		// A keyed replay is answered from the ledger first: a row that landed is the answer, whatever the buffer holds. Only a replay
 		// the ledger cannot answer is looked for in the buffer, where the event waits for its own write.
 		if (idem?.lookup && idem.key !== null && this.greptime) {
@@ -3060,9 +3030,7 @@ export class Substrate {
 				tipError = redact(String(cause));
 			}
 		}
-		const build = (chainPrev: string | null): SubstrateEvent =>
-			idem === null ? normalizeEvent(input, chainPrev) : normalizeEvent(input, chainPrev, { key: idem.key });
-		const event = build(prev);
+		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 		if (parkedTip !== null) return this.parkEvent(event, "an earlier event of this session has not reached the ledger", false);
 		if (tipError !== null) {
@@ -3077,20 +3045,6 @@ export class Substrate {
 			const error = appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN;
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
-		}
-
-		const key = idem?.key ?? null;
-		// An earlier event of this session is still waiting for the ledger, so this one waits behind it. Written now, it would land
-		// first, and the buffered event's link would name a row that is not there yet.
-		if (stores !== null && sessionId !== null && stores.buffer.hasSession(sessionId)) {
-			return this.bufferEvent(stores.buffer, {
-				session: sessionId,
-				key,
-				ledgerPrev: prev,
-				build,
-				last_reason: "waiting behind an earlier buffered event of this session",
-				attempts: 0,
-			});
 		}
 
 		try {

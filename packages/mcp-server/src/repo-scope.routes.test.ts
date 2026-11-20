@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
+import { FakeStore, makeRow } from "./corpus/testkit.ts";
 import type { CorpusStore } from "./corpus/store.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
@@ -318,7 +319,6 @@ const FINDING_REFUSALS: Array<{ id: string; route: string } | { id: string; tool
 	{ id: "RS-09", tool: "docs_ingest" },
 	{ id: "RS-10", route: "/memory" },
 	{ id: "RS-10", tool: "memory_write" },
-	{ id: "RS-11", route: "/corpus/root" },
 	{ id: "RS-12", tool: "memory_pending" },
 	{ id: "RS-13", route: "/steering/queue" },
 ];
@@ -336,6 +336,20 @@ describe("review findings closed by the default deny", () => {
 	}
 });
 
+
+describe("RS-11: GET /corpus/root is refused to a scoped caller granted nothing, and nothing outside the grant is read or written", () => {
+	test("boundary: a scoped caller with no granted repository is refused before the corpus tree is read", async () => {
+		const store = new FakeStore();
+		store.seed(makeRow({ repo: "owner/a", path: "docs/a.md" }));
+		const h = await start({ ...scopedEnv(), SUBSTRATE_CORPUS: "on", SUBSTRATE_REPO_SCOPES: JSON.stringify({ hermes: ["owner/a"] }) }, { corpus: { store } });
+		const reply = await fetch(`${h.base}/corpus/root`, { headers: BEARER });
+		expect(reply.status).toBe(403);
+		expect(await reply.json()).toMatchObject({ reason: "all-repos-not-granted" });
+		expect(store.leafReads).toBe(0);
+		expect(h.ledger.reads).toHaveLength(0);
+		expect(nonAuditWrites(h.ledger.written)).toHaveLength(0);
+	});
+});
 describe("RS-17: anonymous refusals are audited", () => {
 	test("boundary: an anonymous refusal writes exactly one audit row, and the row carries a keyed digest, never the request", async () => {
 		const h = await start({ ...scopedEnv(), SUBSTRATE_ALLOW_ANONYMOUS: "1" });

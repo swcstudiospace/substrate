@@ -1079,9 +1079,9 @@ async function replayedCommit(deps: SessionRollbackDeps, notes: SessionNotes, ex
 
 async function commitCommitted(deps: SessionRollbackDeps, request: CommittedRequest, caller: RollbackCaller): Promise<CommitResult> {
 	const sessionId = request.session_id;
-	// A parked event of this session lands before the chain is read: a retry of a rollback whose note is parked is then answered as
-	// its replay, and the plan and the forget totals are computed from the same chain.
-	await deps.settleBufferedEvents(sessionId);
+	// The chain is read as the plan saw it, without settling first: a parked forget note landing here would take its batch
+	// out of the unfinished set and make a matching plan stale. Parked notes land on the settle after the digest check,
+	// where a parked rollback note is answered as its replay before anything is forgotten again.
 	const notes = await readNotes(deps, sessionId);
 
 	// An earlier commit of this rollback id answers again without forgetting again (only a pending plane deletion is retried).

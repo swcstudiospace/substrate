@@ -230,9 +230,10 @@ def test_ensure_worktree_disk_floor(repo: Path, tmp_path: Path, free, refused):
         return subprocess.run(argv, **kwargs)
 
     def usage(path: str) -> Usage:
-        # The root does not exist yet, so the floor is read where it would be created: tmp_path.
-        assert path == str(tmp_path)
+        # With no roots configured, the production floor is checked on /.
+        assert path == "/"
         return Usage(100 * 1024**3, 0, free)
+
 
     root = tmp_path / "wt"
     if refused:

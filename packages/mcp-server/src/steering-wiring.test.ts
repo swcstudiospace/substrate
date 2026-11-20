@@ -159,6 +159,17 @@ class FakeAuditSql implements SteeringAuditSql, SteeringAuditReadSql {
 		return this.rows.reduce((max, row) => Math.max(max, row.deliverySequence ?? 0), 0);
 	}
 
+	async maxDeliverySequences(): Promise<ReadonlyMap<string, number>> {
+		if (this.floorGate !== null) await this.floorGate;
+		if (this.failReads !== null) throw this.failReads;
+		const floors = new Map<string, number>();
+		for (const row of this.rows) {
+			if (row.deliverySequence === null) continue;
+			floors.set(row.targetSessionId, Math.max(floors.get(row.targetSessionId) ?? 0, row.deliverySequence));
+		}
+		return floors;
+	}
+
 	async targetSessionOf(directiveId: string): Promise<string | null> {
 		if (this.failReads !== null) throw this.failReads;
 		return this.find(directiveId, "queued")?.targetSessionId ?? null;

@@ -27,12 +27,12 @@ import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
 import { loadCheckpointDirectory, loadPlanningSettings, planningPassSetting, type CheckpointDirectoryResult, type PlanningCheckout, type PlanningConfigResult } from "./planning/config.ts";
-import { loadSteeringExpirySettings, loadSteeringIdempotencySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult, type SteeringIdempotencyConfigResult } from "./planning/steering.ts";
+import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
 import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
-import { DEFAULT_DEAD_LETTER_MAX, DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
+import { DEFAULT_DEAD_LETTER_MAX, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
 import { repoScopeFromEnv, type RepoScope } from "./repo-scope.ts";
@@ -777,8 +777,6 @@ export interface SubstrateConfig {
 	steeringRegistered: boolean;
 	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
 	steeringExpiry: SteeringExpiryConfigResult;
-	/** `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S` and `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP` (phase 77): how long a keyed queue replays and how many keyed queues are kept. A bad value is a typed result. See `planning/steering.ts`. */
-	steeringIdempotency: SteeringIdempotencyConfigResult;
 	/** `SUBSTRATE_PLANNING_BASELINE_DIR` (phase 58): where the observer keeps its publish baseline durably. Unset keeps it in memory. See `planning/baseline-store.ts`. */
 	planningBaseline: BaselineDirectoryResult;
 	/** `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` (phase 58): how often a quiet checkout refreshes its presence record. See `planning/observer.ts`. */
@@ -1312,8 +1310,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
 		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
 		steeringExpiry: loadSteeringExpirySettings(env),
-		// Phase 77 (steering idempotency): the keyed-queue replay retention and capacity. Environment only; a bad value is a typed result.
-		steeringIdempotency: loadSteeringIdempotencySettings(env),
 		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
 		planningBaseline: loadBaselineDirectory(env),
 		planningLiveness: loadLivenessSettings(env),
@@ -1643,21 +1639,6 @@ function wholeNumberOrRefuse(name: string, raw: string | undefined): number | nu
 	return Number(trimmed);
 }
 
-/**
- * The RAGFlow retrieval settings (D46-a, D46-b). `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`
- * is a number in [0, 1], default 0.3 (RAGFlow's own). `SUBSTRATE_RAGFLOW_RERANK_ID`
- * names a reranker; unset or blank, no `rerankId` is returned and no `rerank_id`
- * goes on the wire. A non-numeric or out-of-range weight refuses to start.
- */
-function loadRagflowRetrievalSettings(env: Record<string, string | undefined>): Pick<RetrievalKnobs, "vectorSimilarityWeight" | "rerankId"> {
-	const rawWeight = env.SUBSTRATE_RAGFLOW_VECTOR_WEIGHT?.trim() ?? "";
-	const weight = rawWeight === "" ? DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight : Number(rawWeight);
-	if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
-		throw new ConfigError("SUBSTRATE_RAGFLOW_VECTOR_WEIGHT must be a number in [0, 1]; unset it for RAGFlow's default 0.3");
-	}
-	const rerankId = env.SUBSTRATE_RAGFLOW_RERANK_ID?.trim() ?? "";
-	return { vectorSimilarityWeight: weight, ...(rerankId !== "" ? { rerankId } : {}) };
-}
 
 /** uplift-4 S4: `off`, `shadow` or `enforce` (case-insensitive); anything else, unset included, is `shadow`, which only reports. */
 function cacheSwrOr(raw: string | undefined): "off" | "shadow" | "enforce" {
@@ -2584,40 +2565,6 @@ function positiveIntOr(raw: string | undefined, fallback: number): number {
 	return value > 0 ? value : fallback;
 }
 
-/** The telemetry buffer's settings, present only while the buffer is on. */
-export interface EventBufferSettings {
-	path: string;
-	deadLetterPath: string;
-	max: number;
-	maxAttempts: number;
-	backoffMs: number;
-	backoffCapMs: number;
-}
-
-/**
- * The telemetry buffer's settings (phase 76). The buffer is opt-in: with no `SUBSTRATE_EVENT_BUFFER_PATH` there is nothing to read,
- * and a failed write answers `stored: false` as it always has. A buffer with no dead-letter file is refused at boot, because a
- * buffered event that exhausts its retries would have no record to be kept in.
- */
-function loadEventBufferSettings(env: Record<string, string | undefined>): EventBufferSettings | null {
-	const path = env.SUBSTRATE_EVENT_BUFFER_PATH?.trim() ?? "";
-	if (path === "") return null;
-	const deadLetterPath = env.SUBSTRATE_EVENT_DEAD_LETTER_PATH?.trim() ?? "";
-	if (deadLetterPath === "") {
-		throw new ConfigError(
-			"SUBSTRATE_EVENT_BUFFER_PATH is set, so SUBSTRATE_EVENT_DEAD_LETTER_PATH must be set too: a buffered event that exhausts its " +
-				"retries needs a file to be recorded in. Set SUBSTRATE_EVENT_DEAD_LETTER_PATH, or unset SUBSTRATE_EVENT_BUFFER_PATH",
-		);
-	}
-	return {
-		path,
-		deadLetterPath,
-		max: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX),
-		maxAttempts: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS),
-		backoffMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS),
-		backoffCapMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS),
-	};
-}
 
 /**
  * Hindsight routing keys that do not do what their presence suggests,

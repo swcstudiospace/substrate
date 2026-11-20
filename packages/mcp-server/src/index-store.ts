@@ -52,8 +52,7 @@ import type {
 	Surface,
 } from "./types.ts";
 import { EDGE_KINDS } from "./types.ts";
-import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql, bunSteeringIdempotencyStore } from "./planning/steering-store.ts";
-import type { SteeringIdempotencyStore } from "./planning/steering.ts";
+import { SteeringAuditSink, bunSteeringAuditReadSql, bunSteeringAuditSql } from "./planning/steering-store.ts";
 import { bunLiveSessionAuthority, type LiveSessionAuthority } from "./planning/steering-sessions-store.ts";
 import { bunCorpusStore, type CorpusStore } from "./corpus/store.ts";
 import { bunPlanningHashStore, type PlanningHashStore } from "./planning-hash-store.ts";
@@ -1217,15 +1216,6 @@ export class IndexStore implements MemoryStore {
 	steeringAudit(): SteeringAuditSink {
 		return new SteeringAuditSink(bunSteeringAuditSql(this.sql), bunSteeringAuditReadSql(this.sql));
 	}
-
-	/**
-	 * The steering idempotency store over this store's pool (v1.8 phase 77): the durable delivery sequence counter and the keyed-queue
-	 * replay records. It only builds the adapter; the tables exist after migration step 43, under the same opt-in as the audit table.
-	 */
-	steeringIdempotency(): SteeringIdempotencyStore {
-		return bunSteeringIdempotencyStore(this.sql);
-	}
-
 	/**
 	 * The corpus manifest over this store's pool (v1.7 phase 63). It only builds the store; no statement runs until the
 	 * corpus service uses it, and the table exists after migration step 35.

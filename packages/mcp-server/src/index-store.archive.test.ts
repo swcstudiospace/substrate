@@ -154,6 +154,7 @@ describeLive("index archive against a live index", () => {
 		for (const [name, kind] of [["cm1", "decision"], ["cm2", "fact"], ["cm3", "todo"]] as const) {
 			await raw`insert into context_matrix_entries (entry_id, milestone, phase, source_path, source_sha256, entry_kind, body_redacted)
 				values (${id(name)}, 'm1', 'p1', 'docs/plan.md', ${"0".repeat(64)}, ${kind}, ${`${RUN} ${name} body`})`;
+		}
 		for (const name of ["d1", "d2", "d3"]) {
 			await raw`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, state, ingested_at)
 				values (${`${RUN}/seed`}, ${`doc-${name}.md`}, 'doc', 2, ${"0".repeat(64)}, 10, 'fs', 'active', now())`;

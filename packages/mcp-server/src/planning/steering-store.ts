@@ -38,10 +38,6 @@ import type {
 	SteeringOutcome,
 	SteeringPriority,
 	SteeringRestoreReport,
-	SteeringIdempotencyStore,
-	SteeringReplayClaim,
-	SteeringReplayRecord,
-	SteeringUnit,
 } from "./steering.ts";
 import { STEERING_OUTCOMES, type SteeringKeyedRequest } from "./steering.ts";
 import { SESSION_STATE_NAMES, type SessionStateName, type SessionStateOutcome, type SessionTransitionRefusalReason } from "./steering-delivery.ts";
@@ -177,8 +173,6 @@ export interface SteeringStoredDirectiveRow {
 	deliverySequence: number | null;
 	queuedAt: Date;
 	acknowledgement: SteeringStoredAckRow | null;
-	/** The queued row's delivery sequence, or null when it has none (written before the column existed). */
-	deliverySequence?: number | null;
 }
 
 export interface SteeringAuditReadQuery {
@@ -203,6 +197,8 @@ export interface SteeringAuditReadSql {
 	savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null>;
 	/** The largest delivery sequence any row holds; 0 when none does. */
 	maxDeliverySequence(): Promise<number>;
+	/** The largest delivery sequence each session holds, by target session id. Absent on a port with no durable store. */
+	maxDeliverySequences?(): Promise<ReadonlyMap<string, number>>;
 	/** The session a directive was queued for, from the durable log; null when no queued row holds the id. */
 	targetSessionOf(directiveId: string): Promise<string | null>;
 }
@@ -289,9 +285,9 @@ export class SteeringAuditSink implements SteeringHistorySink, SteeringDurableRe
 		private readonly reads: SteeringAuditReadSql | null = null,
 	) {}
 
-	/** The port method `SteeringInbox` calls. A failed write throws a {@link SteeringAuditFailure}. `unit` is the store's open transaction for a keyed queue. */
-	async append(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<void> {
-		const result = await this.record(entry, unit);
+	/** The port method `SteeringInbox` calls. A failed write throws a {@link SteeringAuditFailure}. */
+	async append(entry: SteeringAuditEntry): Promise<void> {
+		const result = await this.record(entry);
 		if (!result.ok) throw result.error;
 	}
 
@@ -347,6 +343,25 @@ export class SteeringAuditSink implements SteeringHistorySink, SteeringDurableRe
 		}
 	}
 
+	/** The largest delivery sequence the table holds for one session, 0 when none does. Rejects with its driver code. */
+	async maxDeliverySequenceFor(sessionId: string): Promise<number> {
+		const read = this.reads?.maxDeliverySequences;
+		if (read === undefined) return 0;
+		return (await read.call(this.reads as SteeringAuditReadSql)).get(sessionId) ?? 0;
+	}
+
+	/** Every session's stored maximum, for a restart to seed each counter before any page is read. */
+	async readSequenceFloors(): Promise<{ ok: true; value: ReadonlyMap<string, number> } | { ok: false; error: SteeringAuditReadError }> {
+		if (this.reads === null) return { ok: false, error: new SteeringAuditReadError("READ_UNAVAILABLE", "this audit sink was built without a read port") };
+		const read = this.reads.maxDeliverySequences;
+		if (read === undefined) return { ok: true, value: new Map<string, number>() };
+		try {
+			return { ok: true, value: await read.call(this.reads) };
+		} catch (cause) {
+			return { ok: false, error: new SteeringAuditReadError(errnoCode(cause), "steering audit read failed", cause) };
+		}
+	}
+
 	private requireReads(): SteeringAuditReadSql {
 		if (this.reads === null) throw new SteeringAuditReadError("READ_UNAVAILABLE", "this audit sink was built without a read port");
 		return this.reads;
@@ -395,22 +410,21 @@ export class SteeringAuditSink implements SteeringHistorySink, SteeringDurableRe
 		}
 	}
 
-	/** Writes one transition and reports the outcome as a value. A same-payload repeat is `inserted: false`. `unit` is a transaction the store opened: the write goes through it. */
-	async record(entry: SteeringAuditEntry, unit?: SteeringUnit): Promise<SteeringAuditResult> {
+	/** Writes one transition and reports the outcome as a value. A same-payload repeat is `inserted: false`. */
+	async record(entry: SteeringAuditEntry): Promise<SteeringAuditResult> {
 		let row: SteeringAuditRow;
 		try {
 			row = toAuditRow(entry);
 		} catch (cause) {
 			return { ok: false, error: new SteeringAuditError(errnoCode(cause), cause) };
 		}
-		const port = unit === undefined ? this.sql : bunSteeringAuditSql(unit as SQL);
 		try {
-			if (await port.insertAbsent(row)) return { ok: true, value: { inserted: true } };
-			const stored = await port.savedRow(row.directiveId, row.transition);
+			if (await this.sql.insertAbsent(row)) return { ok: true, value: { inserted: true } };
+			const stored = await this.sql.savedRow(row.directiveId, row.transition);
 			if (stored?.payloadSha256 === row.payloadSha256) return { ok: true, value: { inserted: false } };
 			return { ok: false, error: new SteeringAuditConflictError(row.directiveId, row.transition) };
 		} catch (cause) {
-			return this.recoverOrFail(port, row, cause);
+			return this.recoverOrFail(row, cause);
 		}
 	}
 
@@ -419,9 +433,9 @@ export class SteeringAuditSink implements SteeringHistorySink, SteeringDurableRe
 	 * the transition happened, so it is reported as recorded. No such row, or a read-back that also fails, is the original
 	 * failure, and the transition stays held for a retry.
 	 */
-	private async recoverOrFail(port: SteeringAuditSql, row: SteeringAuditRow, cause: unknown): Promise<SteeringAuditResult> {
+	private async recoverOrFail(row: SteeringAuditRow, cause: unknown): Promise<SteeringAuditResult> {
 		try {
-			if ((await port.savedRow(row.directiveId, row.transition))?.payloadSha256 === row.payloadSha256) {
+			if ((await this.sql.savedRow(row.directiveId, row.transition))?.payloadSha256 === row.payloadSha256) {
 				return { ok: true, value: { inserted: false } };
 			}
 		} catch {
@@ -573,6 +587,16 @@ export function bunSteeringAuditReadSql(sql: SQL): SteeringAuditReadSql {
 			const rows = await sql`select coalesce(max(delivery_sequence), 0) as max_sequence from planning_steering_audit`;
 			return integerOrNull(rows[0]?.max_sequence) ?? 0;
 		},
+		async maxDeliverySequences(): Promise<ReadonlyMap<string, number>> {
+			const rows = await sql`select target_session_id, max(delivery_sequence) as max_sequence from planning_steering_audit where delivery_sequence is not null group by target_session_id`;
+			const floors = new Map<string, number>();
+			for (const row of rows as Array<Record<string, unknown>>) {
+				const sessionId = textOrNull(row.target_session_id);
+				const maxSequence = integerOrNull(row.max_sequence);
+				if (sessionId !== null && maxSequence !== null) floors.set(sessionId, maxSequence);
+			}
+			return floors;
+		},
 		async targetSessionOf(directiveId: string): Promise<string | null> {
 			const rows = await sql`select target_session_id from planning_steering_audit where directive_id = ${directiveId} and transition = 'queued'`;
 			return rows[0] === undefined ? null : String(rows[0].target_session_id);
@@ -590,9 +614,9 @@ export async function restoreSteeringInbox(
 	sink: SteeringAuditSink,
 	options: SteeringReadOptions,
 ): Promise<{ ok: true; value: { report: SteeringRestoreReport; truncated: boolean } } | { ok: false; error: SteeringAuditReadError }> {
-	const floor = await sink.readSequenceFloor();
-	if (!floor.ok) return floor;
-	inbox.seedSequence(floor.value);
+	const floors = await sink.readSequenceFloors();
+	if (!floors.ok) return floors;
+	seedFloors(inbox, floors.value);
 	const page = await sink.readOpenDirectives(options);
 	if (!page.ok) return page;
 	return { ok: true, value: { report: await inbox.restore(page.value.entries), truncated: page.value.truncated } };
@@ -670,9 +694,9 @@ interface OpenPages {
  * read fails or the restore gives up, and a directive queued afterwards still sorts after every stored one.
  */
 async function readOpenPages(inbox: SteeringInbox, sink: SteeringAuditSink, options: SteeringRestorePagedOptions, maxPages: number): Promise<{ ok: true; value: OpenPages } | { ok: false; error: SteeringAuditReadError }> {
-	const floor = await sink.readSequenceFloor();
-	if (!floor.ok) return floor;
-	inbox.seedSequence(floor.value);
+	const floors = await sink.readSequenceFloors();
+	if (!floors.ok) return floors;
+	seedFloors(inbox, floors.value);
 	const entries: SteeringRestoreCandidate[] = [];
 	let after: SteeringReadCursor | undefined;
 	let pages = 0;
@@ -699,6 +723,14 @@ async function readOpenPages(inbox: SteeringInbox, sink: SteeringAuditSink, opti
 		after = next;
 	}
 	return { ok: true, value: { entries, pages, stoppedBy } };
+}
+
+/** Raises each session's counter to its stored maximum, so a queue after this restore sorts after every stored directive of its own session. */
+function seedFloors(inbox: SteeringInbox, floors: ReadonlyMap<string, number>): void {
+	for (const [sessionId, floor] of floors) {
+		if (sessionId === "" || !Number.isSafeInteger(floor) || floor < 0) continue;
+		inbox.seedSequenceFor(sessionId, floor);
+	}
 }
 
 /** Where the page after `entries` starts: the last entry's creation time and id, or null when the last entry carries neither as the read ordered them. */
@@ -906,86 +938,4 @@ function canonicalJson(fields: Readonly<Record<string, string | number | boolean
 	const sorted: Record<string, string | number | boolean | null> = {};
 	for (const key of Object.keys(fields).sort()) sorted[key] = fields[key] ?? null;
 	return JSON.stringify(sorted);
-}
-
-/** A column that must hold a whole number: the sequence counter and the replay times. A value that is not one is a driver fault, thrown. */
-function requiredInteger(value: unknown): number {
-	const parsed = integerOrNull(value);
-	if (parsed === null) throw new RangeError("stored steering sequence or time is not a whole number");
-	return parsed;
-}
-
-/**
- * The Bun SQL store for the delivery sequence counter and the keyed-queue replay records (migration 43). A sequence is taken with one
- * upsert, so two processes never take the same number. A keyed queue is one transaction: expired records are pruned, the scope key is
- * claimed by insert (a key another transaction holds makes this one wait, then lose), the queued audit row is written through the same
- * transaction, and the oldest records beyond the cap are deleted. A refused audit write rolls the claim back with it.
- */
-export function bunSteeringIdempotencyStore(sql: SQL): SteeringIdempotencyStore {
-	return {
-		async nextSequence(sessionId: string): Promise<number> {
-			const rows = await sql`
-				insert into planning_steering_sequence (target_session_id, last_sequence)
-				values (${sessionId}, 1)
-				on conflict (target_session_id) do update set last_sequence = planning_steering_sequence.last_sequence + 1
-				returning last_sequence`;
-			return requiredInteger(rows[0]?.last_sequence);
-		},
-		async advancePast(sessionId: string, sequence: number): Promise<void> {
-			await sql`
-				insert into planning_steering_sequence (target_session_id, last_sequence)
-				values (${sessionId}, ${sequence})
-				on conflict (target_session_id) do update set last_sequence = greatest(planning_steering_sequence.last_sequence, excluded.last_sequence)`;
-		},
-		async findReplay(scopeKey: string, nowMs: number): Promise<SteeringReplayRecord | null> {
-			const rows = (await sql`
-				select fingerprint, directive_json, sequence, queued_at_ms, expires_at_ms
-				from planning_steering_replay
-				where scope_key = ${scopeKey} and expires_at_ms > ${nowMs}`) as Array<Record<string, unknown>>;
-			const row = rows[0];
-			return row === undefined ? null : replayRecord(row, scopeKey);
-		},
-		async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
-			return sql.begin(async (tx): Promise<SteeringReplayClaim> => {
-				await tx`delete from planning_steering_replay where expires_at_ms <= ${nowMs}`;
-				const claimed = await tx`
-					insert into planning_steering_replay (scope_key, target_session_id, fingerprint, directive_json, sequence, queued_at_ms, expires_at_ms)
-					values (${record.scopeKey}, ${record.directive.targetSessionId}, ${record.fingerprint}, ${JSON.stringify(record.directive)}, ${record.sequence}, ${record.queuedAtMs}, ${record.expiresAtMs})
-					on conflict (scope_key) do nothing
-					returning scope_key`;
-				if (claimed.length === 0) {
-					const rows = (await tx`
-						select fingerprint, directive_json, sequence, queued_at_ms, expires_at_ms
-						from planning_steering_replay
-						where scope_key = ${record.scopeKey}`) as Array<Record<string, unknown>>;
-					const held = rows[0];
-					if (held === undefined) throw new Error("a held replay claim could not be read");
-					return { claimed: false, held: replayRecord(held, record.scopeKey) };
-				}
-				await queue(tx);
-				await tx`
-					delete from planning_steering_replay
-					where scope_key in (
-						select scope_key from planning_steering_replay
-						order by queued_at_ms desc, scope_key desc
-						offset ${cap}
-					)`;
-				return { claimed: true };
-			});
-		},
-	};
-}
-
-/** A replay row as the record it was saved as. A row whose directive does not parse is a driver fault, thrown. */
-function replayRecord(row: Record<string, unknown>, scopeKey: string): SteeringReplayRecord {
-	const directive = SteeringDirectiveSchema.safeParse(JSON.parse(String(row.directive_json)));
-	if (!directive.success) throw new RangeError("stored steering replay record does not hold a directive");
-	return {
-		scopeKey,
-		fingerprint: String(row.fingerprint),
-		directive: directive.data,
-		sequence: requiredInteger(row.sequence),
-		queuedAtMs: requiredInteger(row.queued_at_ms),
-		expiresAtMs: requiredInteger(row.expires_at_ms),
-	};
 }

@@ -41,12 +41,9 @@
     "verify": "bun scripts/verify.ts",
     "audit:verify": "bun scripts/audit-verify.ts",
     "parity:check": "bun scripts/parity-check.ts",
-<<<<<<< HEAD
     "parity:gate": "bun scripts/parity-gate.ts",
     "probe:lightrag": "bun scripts/lightrag-probe.ts",
-=======
     "reconcile": "bun scripts/reconcile.ts",
->>>>>>> origin/main
     "doctor:runtime": "bun scripts/doctor-runtime.ts",
     "advisor:promote": "bun scripts/promote-advisor.ts",
     "config:reference": "bun scripts/config-reference.ts",

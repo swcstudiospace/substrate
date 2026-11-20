@@ -161,48 +161,52 @@ export interface ListedSteeringDirective { id: string; author_principal_id: stri
 export type SteeringListResult = { status: "listed"; target_session_id: string; directives: ListedSteeringDirective[]; session_state: { status: "held"; state: string } } | LiveCallFailure | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
 export function steeringFailed(result: SteeringWriteResult): boolean { return result.status !== "queued" && result.status !== "acknowledged"; }
 function settingsFailure(wiring: SteeringWiring): { status: "misconfigured"; errors: SteeringConfigError[] } | null { return wiring.settingsErrors.length ? { status: "misconfigured", errors: [...wiring.settingsErrors] } : null; }
+type QueuedReply = { reply: SteeringWriteResult; freshlyQueued: boolean };
 export async function queueSteering(wiring: SteeringWiring, caller: SteeringCaller, input: SteeringQueueInput, dispatch?: PreparedLiveDispatch, transport: AuditTransport = "mcp"): Promise<SteeringWriteResult> {
- try { return await wiring.executeLiveCall<SteeringWriteResult>({ caller, tool: "steering_queue", args: input, operation: "operator-queue", sessionId: input.target_session_id, sessionBinding: input.session_binding, transport }, async () => {
-  const failure = settingsFailure(wiring); if (failure) return failure; const inbox = wiring.inbox; if (inbox === null) return { status: "not-configured" };
+ let outcome: QueuedReply;
+ try { outcome = await wiring.executeLiveCall<QueuedReply>({ caller, tool: "steering_queue", args: input, operation: "operator-queue", sessionId: input.target_session_id, sessionBinding: input.session_binding, transport }, async () => {
+  const failure = settingsFailure(wiring); if (failure) return { reply: failure, freshlyQueued: false }; const inbox = wiring.inbox; if (inbox === null) return { reply: { status: "not-configured" } as SteeringWriteResult, freshlyQueued: false };
   if (caller.surface === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
   const surface = caller.surface; const key = input.idempotency_key;
   if (key === undefined) return enqueueDirective(wiring, inbox, surface, input, wiring.newDirectiveId?.() ?? randomUUID());
   return wiring.idempotency.serialize(surface, key, () => keyedQueue(wiring, inbox, surface, key, input));
- }, dispatch); } catch (cause) { if (cause instanceof LiveSessionBoundaryError) return cause.refusal; throw cause; }
+ }, dispatch); } catch (cause) { if (cause instanceof LiveSessionBoundaryError) { outcome = { reply: cause.refusal, freshlyQueued: false }; } else throw cause; }
  // A fresh queue wakes its session: the long-poll waiters are released and one hint is announced. Neither can fail the queue, which is already audited.
- if (outcome.freshlyQueued && reply.status === "queued") await wiring.onQueued?.(reply.directive_id);
- return reply;
+ if (outcome.freshlyQueued && outcome.reply.status === "queued") {
+  try { await wiring.onQueued?.(outcome.reply.directive_id); } catch { /* The queue stands without its wake-up: the session sees the directive on its next poll. */ }
+ }
+ return outcome.reply;
 }
 /** Queues one directive as the inbox answers it. The reply carries no sequence: that is for keyed requests only. */
-async function enqueueDirective(wiring: SteeringWiring, inbox: SteeringInbox, surface: string, input: SteeringQueueInput, id: string, keyed?: SteeringKeyedRequest): Promise<SteeringWriteResult> {
+async function enqueueDirective(wiring: SteeringWiring, inbox: SteeringInbox, surface: string, input: SteeringQueueInput, id: string, keyed?: SteeringKeyedRequest): Promise<QueuedReply> {
  const result = await inbox.enqueue({ id, author: { principalId: surface, kind: "human" }, createdAtMs: wiring.clock.nowMs(), priority: input.priority, targetSessionId: input.target_session_id, action: input.action, body: input.body, planRef: input.plan_ref, conflictsWithActivePlan: input.conflicts_with_active_plan }, keyed);
- if (!result.ok) return { status: "refused", error: result.error };
- return { status: "queued", directive_id: result.value.directive.id, target_session_id: result.value.directive.targetSessionId, queued_at_ms: result.value.queuedAtMs };
+ if (!result.ok) return { reply: { status: "refused", error: result.error }, freshlyQueued: false };
+ return { reply: { status: "queued", directive_id: result.value.directive.id, target_session_id: result.value.directive.targetSessionId, queued_at_ms: result.value.queuedAtMs }, freshlyQueued: true };
 }
 /**
  * A keyed queue (D77-04, L77-03): the directive the key names is replayed when its request fingerprint matches, and the first
  * application carries its sequence. The inbox holds it while it is open; the durable log answers for it after a restart, open or
  * not. Another request under the key is refused and writes nothing.
  */
-async function keyedQueue(wiring: SteeringWiring, inbox: SteeringInbox, surface: string, key: string, input: SteeringQueueInput): Promise<SteeringWriteResult> {
+async function keyedQueue(wiring: SteeringWiring, inbox: SteeringInbox, surface: string, key: string, input: SteeringQueueInput): Promise<QueuedReply> {
  const id = keyedDirectiveId(surface, key);
  const fingerprint = queueFingerprint(queueRequestFields(input));
  const held = inbox.get(id);
  if (held !== null) {
-  if (fingerprint !== queueFingerprint(queueRecordFields(held.directive))) return { status: "refused", error: { code: "idempotency-conflict" } };
-  return { status: "queued", directive_id: id, target_session_id: held.directive.targetSessionId, queued_at_ms: held.queuedAtMs, sequence: deliverySequence(inbox, id) };
+  if (fingerprint !== queueFingerprint(queueRecordFields(held.directive))) return { reply: { status: "refused", error: { code: "idempotency-conflict" } }, freshlyQueued: false };
+  return { reply: { status: "queued", directive_id: id, target_session_id: held.directive.targetSessionId, queued_at_ms: held.queuedAtMs, sequence: deliverySequence(inbox, id) }, freshlyQueued: false };
  }
  let saved: SteeringKeyedQueueSaved | null;
  try { saved = (await wiring.durable?.savedKeyedQueue(surface, key)) ?? null; }
- catch (cause) { return auditUnavailable(cause); }
+ catch (cause) { return { reply: auditUnavailable(cause), freshlyQueued: false }; }
  if (saved !== null) {
-  if (fingerprint !== saved.fingerprint) return { status: "refused", error: { code: "idempotency-conflict" } };
+  if (fingerprint !== saved.fingerprint) return { reply: { status: "refused", error: { code: "idempotency-conflict" } }, freshlyQueued: false };
   if (saved.deliverySequence === null) throw new Error("keyed queue saved without a delivery sequence");
-  return { status: "queued", directive_id: saved.directiveId, target_session_id: saved.targetSessionId, queued_at_ms: saved.queuedAtMs, sequence: saved.deliverySequence };
+  return { reply: { status: "queued", directive_id: saved.directiveId, target_session_id: saved.targetSessionId, queued_at_ms: saved.queuedAtMs, sequence: saved.deliverySequence }, freshlyQueued: false };
  }
  const queued = await enqueueDirective(wiring, inbox, surface, input, id, { surface, key, fingerprint });
- if (queued.status !== "queued") return queued;
- return { ...queued, sequence: deliverySequence(inbox, id) };
+ if (queued.reply.status !== "queued") return queued;
+ return { reply: { ...queued.reply, sequence: deliverySequence(inbox, id) }, freshlyQueued: true };
 }
 function queueRequestFields(input: SteeringQueueInput): QueueRequestFields {
  return { action: input.action, priority: input.priority, targetSessionId: input.target_session_id, body: redact(input.body), planRef: input.plan_ref ?? null, conflictsWithActivePlan: input.conflicts_with_active_plan };
