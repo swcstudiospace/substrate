@@ -231,6 +231,7 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 			ts("created_at"),
 			ts("updated_at"),
 			text("superseded_by"),
+			text("superseded_by_path"),
 		],
 		key: ["repo", "path"],
 		// The manifest holds repository-relative paths and digests, never a document body: those live in the docs plane only.
