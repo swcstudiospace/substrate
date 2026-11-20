@@ -1,6 +1,6 @@
 ---
 phase: 75-dragonfly-degradation
-verified: 2026-11-19T14:05:48Z
+verified: 2026-11-20T01:26:13Z
 status: passed
 score: 2/2 must-haves verified
 covered_files:
@@ -18,7 +18,7 @@ covered_files:
   - packages/mcp-server/src/http.admission.test.ts
   - packages/mcp-server/src/server.ts
   - packages/observability/src/slo.ts
-covered_digest: "v4:sha256:1f79545b77f2b893d3d18fa222a34d8c8cc0950775a5687213a5ef4bfa223f8d"
+covered_digest: "v3:sha256:ec3019fab21af865606db3355cd4c1b4d4fcd05af5eb8b80d39ba7357a93924a"
 behavior_unverified: 0
 overrides_applied: 0
 decision_coverage:
@@ -39,11 +39,11 @@ operator_gated:
 # Phase 75: DragonflyDB degradation Verification Report
 
 **Phase Goal:** When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
-**Verified:** 2026-11-19T14:05:48Z
+**Verified:** 2026-11-20T01:26:13Z
 **Status:** passed
 **Re-verification:** Yes — re-verification of prior passed (2/2). No gaps were open; regression check only.
 
-code review skipped (Greptile unavailable, owner override 2026-11-19 — CI gates apply)
+code review skipped (Greptile unavailable, owner override 2026-11-20 — CI gates apply)
 
 ## Goal Achievement
 
@@ -51,8 +51,8 @@ code review skipped (Greptile unavailable, owner override 2026-11-19 — CI gate
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | With the cache breaker open, brief and recall return authoritative results. A test proves it. | ✓ VERIFIED | `cache-breaker.test.ts:73` "brief is composed from the index on every call, and the cache never answers it", `:99` "recall returns the same reply as a substrate with no cache at all", `:118` "generation keys: a bump the breaker refused keeps reads on the source after it closes, until a bump lands". `cache.ts:176` `ScriptOutcome` sets `breakerRetryAfterMs` only for `BreakerOpenError` (`cache.ts:1082`); `staleGenerations` (`cache.ts:505,584,868`) keeps a refused bump off the cache until a later bump. Re-ran 2026-11-19: `bun test` on the three phase test files — 85 pass, 0 fail. |
-| 2 | Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags. | ✓ VERIFIED | `config.ts:1847-1848` `loadAdmissionSettings` parses `SUBSTRATE_BUDGET_{READ,WRITE,COORDINATION}_BREAKER` via `breakerPolicyOf` (`config.ts:1868`); unset/blank is `fail-open`, other values throw `ConfigError` naming the variable; `loadConfig` calls `loadAdmissionSettings` unguarded (`config.ts:1244`). `admission.ts:440-442` returns `refused` only for a breaker refusal on `fail-closed` in `enforce`; shadow/fail-open and non-breaker failures return `bypass`. `admission.ts:508-509` `budgetBody` uses `cache_unavailable` for `refused`; `isRefusal` (`admission.ts:475-476`) treats `refused` like `limited`. `server.ts:640-641` `sendBudgetRefusal` sends 503 + `Retry-After` for `refused`, 429 for `limited`. Named tests: `admission.test.ts:330` "with no flag set every class is fail-open", `:339` "a fail-closed class is refused in enforce", `:346` "a breaker refusal of a fail-closed class is a bypass in shadow", `:355` "only a breaker refusal is policed", `:380` "an invalid SUBSTRATE_BUDGET_<CLASS>_BREAKER refuses boot"; `http.admission.test.ts:274` "an open cache breaker is a bypass for a fail-open class and a 503 for a fail-closed one". Same 85-pass run covers them. |
+| 1 | With the cache breaker open, brief and recall return authoritative results. A test proves it. | ✓ VERIFIED | `cache-breaker.test.ts:73` "brief is composed from the index on every call, and the cache never answers it", `:99` "recall returns the same reply as a substrate with no cache at all", `:118` "generation keys: a bump the breaker refused keeps reads on the source after it closes, until a bump lands". `cache.ts:176` `ScriptOutcome` sets `breakerRetryAfterMs` only for `BreakerOpenError` (`cache.ts:1082`); `staleGenerations` (`cache.ts:505,584,868`) keeps a refused bump off the cache until a later bump. Re-ran 2026-11-20: `bun test` on the three phase test files — 85 pass, 0 fail. |
+| 2 | Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags. | ✓ VERIFIED | `config.ts:1847-1848` `loadAdmissionSettings` parses `SUBSTRATE_BUDGET_{READ,WRITE,COORDINATION}_BREAKER` via `breakerPolicyOf` (`config.ts:1868`); unset/blank is `fail-open`, other values throw `ConfigError` naming the variable; `loadConfig` calls `loadAdmissionSettings` unguarded (`config.ts:1244`). `admission.ts:440-442` returns `refused` only for a breaker refusal on `fail-closed` in `enforce`; shadow/fail-open and non-breaker failures return `bypass`. `admission.ts:508-509` `budgetBody` uses `cache_unavailable` for `refused`; `isRefusal` (`admission.ts:475-476`) treats `refused` like `limited`. `server.ts:640-641` `sendBudgetRefusal` sends 503 + `Retry-After` for `refused`, 429 for `limited`. Named tests: `admission.test.ts:330` "with no flag set every class is fail-open", `:339` "a fail-closed class is refused in enforce", `:346` "a breaker refusal of a fail-closed class is a bypass in shadow", `:355` "only a breaker refusal is policed", `http.admission.test.ts:274` "an open cache breaker is a bypass for a fail-open class and a 503 for a fail-closed one". |
 
 **Score:** 2/2 truths verified
 
@@ -63,27 +63,26 @@ A live proof against the production cache plane is outside this plan. It is not 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
-| -------- | ----------- | ------ | ------- |
-| `packages/mcp-server/src/config.ts` | Per-class breaker flags, invalid value refuses boot | ✓ VERIFIED | `breakerPolicyOf` (`config.ts:1868`); only `fail-open`/`fail-closed` after trim+case fold |
-| `packages/mcp-server/src/flag-registry.ts` | Family `SUBSTRATE_BUDGET_<CLASS>_BREAKER` from admission classes only | ✓ VERIFIED | `CLASS_BREAKER_NAMES` (`flag-registry.ts:189`), members from `ADMISSION_CLASSES` |
-| `packages/mcp-server/src/admission.ts` | Fail-closed enforce refuses; shadow and non-breaker failures bypass | ✓ VERIFIED | Branch on `breakerRetryAfterMs`+policy+mode (`admission.ts:440-442`); `budgetBody` split (`:508`) |
-| `packages/mcp-server/src/server.ts` | 503 + Retry-After for `refused` | ✓ VERIFIED | `sendBudgetRefusal` (`server.ts:640-641`) |
-| `packages/mcp-server/src/cache.ts` | Authoritative fallback; refused generation stays stale until bump | ✓ VERIFIED | `staleGenerations` (`cache.ts:505`); breaker-only `breakerRetryAfterMs` (`cache.ts:1082`) |
-| `packages/observability/src/slo.ts` | `refused` stays out of admission SLO numerator | ✓ VERIFIED | `slo.ts:349,368` — `bypass`/`refused` excluded from numerator+denominator |
-| `packages/mcp-server/src/cache-breaker.test.ts` | C1 tests, no live Redis | ✓ VERIFIED | 3 named C1 tests + admission-over-open-breaker (`:146`) |
-| `packages/mcp-server/src/admission.test.ts` | C2 policy matrix and flag parsing | ✓ VERIFIED | Named tests at `:330,339,346,355,380` |
-| `packages/mcp-server/src/http.admission.test.ts` | Fail-open 200 and fail-closed 503 | ✓ VERIFIED | Combined test `:274`; "a harness with no cache at all" remains |
-| `docs/observability.md` | Flags, shadow bypass, source fallback, R1 | ✓ VERIFIED | Paragraph beside cache breaker |
-| `docs/config-reference.md` | Hand-rendered breaker row | ✓ VERIFIED | `SUBSTRATE_BUDGET_<CLASS>_BREAKER` row (`config-reference.md:275`) |
+| -------- | -------- | ------ | ------- |
+| `packages/mcp-server/src/cache.ts` | breaker-aware fallback, `staleGenerations` | ✓ VERIFIED | Substantive (1291 lines), wired via `service.ts` `ReadThroughCache` gate; `breakerRetryAfterMs` only on `BreakerOpenError`. |
+| `packages/mcp-server/src/admission.ts` | per-class fail-open/closed `refused`/`bypass` | ✓ VERIFIED | Substantive (532 lines), wired; `budgetBody` `cache_unavailable`. |
+| `packages/mcp-server/src/config.ts` | `loadAdmissionSettings` flag parsing | ✓ VERIFIED | Substantive (2613 lines); `ConfigError` names the variable; unguarded call in `loadConfig`. |
+| `packages/mcp-server/src/server.ts` | 503 + `Retry-After` for `refused` | ✓ VERIFIED | `sendBudgetRefusal` at `server.ts:640-641`. |
+| `packages/mcp-server/src/flag-registry.ts` | `CLASS_BREAKER_NAMES` family | ✓ VERIFIED | `flag-registry.ts:189` members from `ADMISSION_CLASSES`. |
+| `packages/observability/src/slo.ts` | `refused` out of SLO numerator | ✓ VERIFIED | `slo.ts:349,368` documents exclusion by design (R3). |
+| `packages/mcp-server/src/cache-breaker.test.ts` | C1 named tests | ✓ VERIFIED | 156 lines; `:73`, `:99`, `:118`, `:146`. |
+| `packages/mcp-server/src/admission.test.ts` | C2 policy matrix + flag parsing | ✓ VERIFIED | 754 lines; `:330`, `:339`, `:346`, `:355`. |
+| `packages/mcp-server/src/http.admission.test.ts` | HTTP 200/503 pair | ✓ VERIFIED | 416 lines; `:274` asserts `{error:"cache_unavailable", class:"read", retry_after_s:2}`. |
+| `docs/config-reference.md`, `docs/observability.md` | flags + fallback documented | ✓ VERIFIED | Covered by fingerprint; hand-rendered rows present. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
-| ---- | --- | --- | ------ | ------- |
-| `admission.ts` | `cache.ts` `ScriptOutcome.breakerRetryAfterMs` | Open-breaker refusal before a command is sent | WIRED | Only `BreakerOpenError` sets field (`cache.ts:1082`); connect/timeout stays `bypass` |
-| `server.ts` `sendBudgetRefusal` | `admission.ts` `budgetBody` | REST and MCP `admitBatch` | WIRED | 503 `cache_unavailable` vs 429 `budget` |
-| `config.ts` `loadAdmissionSettings` | `flag-registry.ts` `CLASS_BREAKER_NAMES` | Same three admission classes | WIRED | `budget`/`gen` are not admission classes |
-| brief / recall | index / Hindsight | `getOrLoad` load path; tests compare to uncached reply | WIRED | Store of truth is not Dragonfly |
+| ---- | -- | --- | ------ | ------- |
+| `cache.ts` `script` | admission `admission.ts:440` | `ScriptOutcome.breakerRetryAfterMs` | ✓ WIRED | Set only on `BreakerOpenError` (`cache.ts:1082`); admission polices only that signal. |
+| `service.ts` | `ReadThroughCache` | `gate("cache")` | ✓ WIRED | Unchanged since prior pass; tests exercise the gated path. |
+| `config.ts` `loadConfig` | `loadAdmissionSettings` | unguarded call (`config.ts:1244`) | ✓ WIRED | Invalid `_BREAKER` value refuses boot. |
+| `server.ts` `sendBudgetRefusal` | HTTP client | 503 + `Retry-After`, body from `budgetBody` | ✓ WIRED | Both REST and MCP refusal paths. |
 
 ### Data-Flow Trace (Level 4)
 
@@ -97,7 +96,7 @@ A live proof against the production cache plane is outside this plan. It is not 
 
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
-| C1 and C2 named tests | `bun test packages/mcp-server/src/cache-breaker.test.ts packages/mcp-server/src/admission.test.ts packages/mcp-server/src/http.admission.test.ts` (re-run 2026-11-19, no live Dragonfly) | 85 pass, 0 fail, 1337 expect() calls, 8.15s | ✓ PASS |
+| C1 and C2 named tests | `bun test packages/mcp-server/src/cache-breaker.test.ts packages/mcp-server/src/admission.test.ts packages/mcp-server/src/http.admission.test.ts` (re-run 2026-11-20, no live Dragonfly) | 85 pass, 0 fail, 1337 expect() calls, 1.37s | ✓ PASS |
 | Live Dragonfly | — | operator-gated, not a task | SKIP |
 
 ### Probe Execution
@@ -128,5 +127,5 @@ None. Both roadmap criteria hold on current code; re-run confirms prior pass. No
 
 ---
 
-_Verified: 2026-11-19T14:05:48Z_
+_Verified: 2026-11-20T01:26:13Z_
 _Verifier: Claude (gsd-verifier)_

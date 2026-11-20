@@ -1,10 +1,10 @@
 ---
 phase: 72-repo-allowlist-and-scoped-credentials
-verified: 2026-11-19T14:05:53Z
+verified: 2026-11-20T01:26:25Z
 status: passed
 score: 7/7 must-haves verified
 covered_files: [".env.example", ".planning/REQUIREMENTS.md", ".planning/phases/72-repo-allowlist-and-scoped-credentials/72-01-PLAN.md", ".planning/phases/72-repo-allowlist-and-scoped-credentials/72-01-SUMMARY.md", "docs/corpus-proofs.md", "docs/worktree-fleet-api.md", "packages/cli/src/worktree/command.ts", "packages/cli/src/worktree/scope.test.ts", "packages/cli/src/worktree/scope.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/corpus/proofs.routes.test.ts", "packages/mcp-server/src/corpus/proofs.test.ts", "packages/mcp-server/src/corpus/root.ts", "packages/mcp-server/src/corpus/service.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/live-session-issue-gate.test.ts", "packages/mcp-server/src/mcp.drift-scope.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/memory-policy.ts", "packages/mcp-server/src/memory-recall.ts", "packages/mcp-server/src/planning/steering-tools.ts", "packages/mcp-server/src/repo-executor.test.ts", "packages/mcp-server/src/repo-executor.ts", "packages/mcp-server/src/repo-scope.boundary.test.ts", "packages/mcp-server/src/repo-scope.pg.test.ts", "packages/mcp-server/src/repo-scope.reads-writes.test.ts", "packages/mcp-server/src/repo-scope.routes.test.ts", "packages/mcp-server/src/repo-scope.test.ts", "packages/mcp-server/src/repo-scope.ts", "packages/mcp-server/src/route-policy.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/worktree-registry-fake.ts", "packages/mcp-server/src/worktree-registry.testkit.ts", "packages/mcp-server/src/worktree-registry.ts"]
-covered_digest: "v3:sha256:8f6487c0a68e58ac1255c5ed2ef88dfad79efb02a313a6f4af604aa3ca317b7b"
+covered_digest: "v4:sha256:29d6d0ca26f45e5acfbdf6ff128b534c7c075c506b140cfd90e3d138a4947e54"
 behavior_unverified: 0
 overrides_applied: 0
 decision_coverage:
@@ -25,7 +25,7 @@ re_verification:
   gaps_closed: []
   gaps_remaining: []
   regressions: []
-  note: "2026-11-19 re-verification on branch reconcile/main-2026-11-11. All seven prior truths re-checked against fresh code reads; no regression found. Tests not re-executed per assignment (SKIP gates)."
+  note: "2026-11-20 re-verification on branch reconcile/main-2026-11-11. All seven prior truths re-checked against fresh code reads; no regression found. Tests not re-executed per assignment (SKIP gates)."
 behavior_unverified_items: []
 observed_2026_11_16:
   - test: "bun test packages/mcp-server/src/repo-scope.pg.test.ts"
@@ -37,9 +37,9 @@ advisory: []
 # Phase 72: Repo allowlist and scoped credentials Verification Report
 
 **Phase Goal:** A session can address only the repositories on its allowlist, and each repository's credential is scoped to that repository.
-**Verified:** 2026-11-19T14:05:53Z
+**Verified:** 2026-11-20T01:26:25Z
 **Status:** passed
-**Re-verification:** Yes — after prior pass (2026-11-16, 7/7)
+**Re-verification:** Yes — after prior pass (2026-11-19, 7/7)
 
 code review skipped (Greptile unavailable, owner override 2026-11-19 — CI gates apply)
 
@@ -49,13 +49,13 @@ code review skipped (Greptile unavailable, owner override 2026-11-19 — CI gate
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | SC1 (API): a path in a repository outside the grant is refused before any git call (drift REST and MCP) | ✓ VERIFIED | `scopedDriftScan` at `packages/mcp-server/src/service.ts:7853` calls `authorizeRepo` and returns `repoRefusal` before any scan; `authorizeRepoPath` guards the path before `driftScan` runs. `/drift` and `coord_drift_scan` remain GATED in `route-policy.ts:27`. |
+| 1 | SC1 (API): a path in a repository outside the grant is refused before any git call (drift REST and MCP) | ✓ VERIFIED | `scopedDriftScan` at `packages/mcp-server/src/service.ts:7853` calls `authorizeRepo` at 7855 and `authorizeRepoPath` at 7858, returning `repoRefusal` before any `driftScan`/git. `/drift` remains GATED in `route-policy.ts:27`. |
 | 2 | SC1 (CLI): `substrate worktree` refuses an ungranted repository or root before any git call | ✓ VERIFIED | `scopeRefusal` at `packages/cli/src/worktree/scope.ts:95` returns before dispatch; `command.ts:607` calls it before the dispatch switch. Owner decision 2026-11-16: surface-scoped grants satisfy the roadmap session-allowlist wording. |
-| 3 | SC2 (worktrees): a credential for repo A cannot read repo B's worktrees, with the filter applied in SQL, not after the read | ✓ VERIFIED | `worktree-registry.ts:390-397` applies `lower(repo) in (select jsonb_array_elements_text(...))` inside the `worktrees.list` query, before rows leave the database. Postgres runtime re-confirmed by orchestrator 2026-11-16: 11 pass, 0 fail. |
-| 4 | SC2 (corpus): a credential cannot read another repository's corpus, including the root | ✓ VERIFIED | `corpusRootReply` at `packages/mcp-server/src/corpus/service.ts:285` refuses a caller granted none (`all-repos-not-granted`) and otherwise returns `grantRootOf` over granted repos only. `grantRootOf` at `root.ts:118` filters `tree.ordered` by the granted set. `/corpus/root` is GATED at `route-policy.ts:29`. Orchestrator 2026-11-16 after ec2ced00: 93 pass, 0 fail. |
-| 5 | A transition naming an ungranted repository is refused before the session binding is read | ✓ VERIFIED | `prepareReserved` at `steering-tools.ts:102` returns not-found when `admitRepo` is false, before any authority read; `admitLiveRepo` at `service.ts:6738` calls `authorizeRepo`. `live-session-issue-gate.test.ts` present (`packages/mcp-server/src/`, 2026-11-12). |
+| 3 | SC2 (worktrees): a credential for repo A cannot read repo B's worktrees, with the filter applied in SQL, not after the read | ✓ VERIFIED | `worktree-registry.ts:390-397` applies `lower(repo) in (select jsonb_array_elements_text(...))` inside the `worktrees.list` query, before rows leave the database. Postgres runtime re-confirmed by orchestrator 2026-11-16: 11 pass, 0 fail. `listWorktrees` at `service.ts:5180` gates named repo at 5184 and passes `repos` grant set. |
+| 4 | SC2 (corpus): a credential cannot read another repository's corpus, including the root | ✓ VERIFIED | `corpusRootReply` at `packages/mcp-server/src/corpus/service.ts:285` refuses a caller granted none (`all-repos-not-granted`) and otherwise returns `grantRootOf` over granted repos only (`service.ts:298`). `grantRootOf` at `root.ts:118` filters `tree.ordered` by the granted set. `/corpus/root` is GATED at `route-policy.ts:29`. Orchestrator 2026-11-16 after ec2ced00: 93 pass, 0 fail. |
+| 5 | A transition naming an ungranted repository is refused before the session binding is read | ✓ VERIFIED | `prepareReserved` at `steering-tools.ts:102` returns not-found when `admitRepo` is false, before any authority read; `admitLiveRepo` at `service.ts:6738` calls `authorizeRepo` at 6740. `live-session-issue-gate.test.ts` present (`packages/mcp-server/src/`, 2026-11-12). |
 | 6 | HARD-S2 (grant model): a credential is scoped through the surface bearer plus its grant; repo A cannot authorize repo B | ✓ VERIFIED | REQUIREMENTS.md HARD-S2 states the grant model (owner decision 2026-11-12). `SUBSTRATE_REPO_SCOPES` and `SUBSTRATE_REPO_REGISTRY` registered at `flag-registry.ts:327,331`. `SUBSTRATE_REPO_ALLOWLIST` at `flag-registry.ts:328` is a separate per-session credential map consumed by phase 74's `repo-allowlist.ts`, not the surface grant — `repo-allowlist.ts:8` states surface-scoped grants satisfy the roadmap wording. |
-| 7 | Keyed reads and writes refuse ungranted repositories before the read or write | ✓ VERIFIED | `scopedRepoRefusal` remains the pre-touch gate in `service.ts`; `/worktrees` and `/corpus/proof` remain GATED (`route-policy.ts:28,29`). `authorizeRepo` call sites at `service.ts:5184,6740,6754,6778,6857,6874,6893` gate live-session, worktree-list, and graph/write paths. |
+| 7 | Keyed reads and writes refuse ungranted repositories before the read or write | ✓ VERIFIED | `scopedRepoRefusal` remains the pre-touch gate in `service.ts:6750`; `/worktrees` and `/corpus/proof` remain GATED (`route-policy.ts:28,30`). `authorizeRepo` call sites at `service.ts:2122,5184,6740,6754,6778,6857,6874,6893` gate live-session, worktree-list, and graph/write paths. |
 
 **Score:** 7/7 truths verified (0 present-behavior-unverified)
 
@@ -112,7 +112,7 @@ No orphaned phase-72 requirement IDs beyond HARD-S2.
 
 ### Anti-Patterns Found
 
-None. `return null` occurrences in `scope.ts` and `root.ts` are legitimate sentinel values (parse failure, no match, forced generation), not stubs. No TODO/FIXME/XXX/console.log in the scanned phase-72 files.
+None. Scanned `repo-scope.ts`, `repo-executor.ts`, `scope.ts`, `root.ts` for TODO/FIXME/XXX/placeholder with no matches. `return null` occurrences in `scope.ts` and `root.ts` are legitimate sentinel values (parse failure, no match), not stubs.
 
 ### Human Verification Required
 
@@ -126,9 +126,9 @@ None. All seven truths are verified in code; Postgres runtime was confirmed by t
 
 ### Gaps Summary
 
-No gaps. This re-verification on branch `reconcile/main-2026-11-11` confirms all seven truths from the 2026-11-16 pass still hold against fresh code reads: drift and worktree gates precede git, CLI scope refusal precedes dispatch, worktree and corpus filters are applied in-query, corpus root is grant-scoped, and the live-session admission runs before the binding read. The session-scoped `SUBSTRATE_REPO_ALLOWLIST` (phase 74 surface) does not contradict the surface-grant model recorded as an owner decision.
+No gaps. This re-verification on branch `reconcile/main-2026-11-11` confirms all seven truths from the 2026-11-19 pass still hold against fresh code reads: drift and worktree gates precede git, CLI scope refusal precedes dispatch, worktree and corpus filters are applied in-query, corpus root is grant-scoped, and the live-session admission runs before the binding read. The session-scoped `SUBSTRATE_REPO_ALLOWLIST` (phase 74 surface) does not contradict the surface-grant model recorded as an owner decision.
 
 ---
 
-_Verified: 2026-11-19T14:05:53Z_
+_Verified: 2026-11-20T01:26:25Z_
 _Verifier: Claude (gsd-verifier)_
