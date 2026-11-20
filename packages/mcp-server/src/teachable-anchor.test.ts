@@ -14,7 +14,7 @@
  * never a `SOLANA_*` environment value: no keypair, no RPC override (the
  * read-back is injected), no chain interaction of any kind.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex } from "@substrate/ledger";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import { eventHash } from "./event.ts";
@@ -22,7 +22,7 @@ import { loadConfig } from "./config.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import { ACCEPTED_TEACHABLE } from "./teachable.fixtures.ts";
-import { defined } from "./test-support.ts";
+import { defined, withoutHindsightEnv } from "./test-support.ts";
 import type { MemorySearch, MemorySearchPage, SubstrateEvent } from "./types.ts";
 
 const H = Date.UTC(2026, 8, 1, 10);
@@ -189,6 +189,12 @@ function teachableEventId(ledger: ScratchLedger, session: string): string {
 	if (!found) throw new Error(`no teachable event for session ${session}`);
 	return found.id;
 }
+
+let restoreHindsightEnv: () => void = () => {};
+beforeEach(() => {
+	restoreHindsightEnv = withoutHindsightEnv();
+});
+afterEach(() => restoreHindsightEnv());
 
 describe("teachable anchor coverage", () => {
 	test("the teachable event sits inside a verify-reported anchored hour", async () => {

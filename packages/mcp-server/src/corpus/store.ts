@@ -154,7 +154,7 @@ export function toManifestRow(record: Record<string, unknown>): ManifestRow | nu
 		state,
 		documentId: typeof record.docs_document_id === "string" ? record.docs_document_id : null,
 		manifestSeq: numberOf(record.manifest_seq),
-		supersededBy: typeof record.superseded_by === "string" && record.superseded_by.length > 0 ? record.superseded_by : null,
+		supersededBy: typeof record.superseded_by_path === "string" && record.superseded_by_path.length > 0 ? record.superseded_by_path : null,
 		ingestedAt: isoOf(record.ingested_at) ?? isoOf(record.updated_at),
 	};
 }
@@ -187,7 +187,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					tier = ${row.tier},
 					source = ${row.source},
 					commit_sha = ${row.commit ?? null},
-					superseded_by = ${row.supersededBy ?? null},
+					superseded_by_path = ${row.supersededBy ?? null},
 					updated_at = now(),
 					manifest_seq = nextval(pg_get_serial_sequence('corpus_documents', 'manifest_seq'))
 				where repo = ${row.repo} and path = ${row.path} and state = 'active' and sha256 = ${row.sha256}
@@ -196,7 +196,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 		},
 		async recordIngested(row: RecordedDocument): Promise<void> {
 			await sql`
-				insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, commit_sha, superseded_by, state, docs_document_id, ingested_at, tombstoned_at, updated_at)
+				insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, commit_sha, superseded_by_path, state, docs_document_id, ingested_at, tombstoned_at, updated_at)
 				values (${row.repo}, ${row.path}, ${row.kind}, ${row.tier}, ${row.sha256}, ${row.bytes}, ${row.source}, ${row.commit ?? null}, ${row.supersededBy ?? null}, 'active', ${row.documentId}, now(), null, now())
 				on conflict (repo, path) do update set
 					kind = excluded.kind,
@@ -205,7 +205,7 @@ export function bunCorpusStore(sql: SQL): CorpusStore {
 					bytes = excluded.bytes,
 					source = excluded.source,
 					commit_sha = excluded.commit_sha,
-					superseded_by = excluded.superseded_by,
+					superseded_by_path = excluded.superseded_by_path,
 					state = 'active',
 					docs_document_id = excluded.docs_document_id,
 					ingested_at = now(),

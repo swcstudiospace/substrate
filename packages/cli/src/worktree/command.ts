@@ -16,6 +16,8 @@
  * directory under a root is a graph id is `never` while the server reports a live claim on that graph and
  * `review` when that cannot be checked. Every removal leaves one ledger note through the events route
  * (fail-open: a note that was not recorded is said so on stderr, and `--json` carries its delivery result).
+ * Before each removal the workspace guard (`workspaceGuard`) runs on that worktree: a refusal is a failed removal, so the run
+ * stops and nothing is retried. A worktree whose path is listed in `SUBSTRATE_WORKTREE_GUARD_ALLOW` skips the guard.
  * Before the claim check a worktree is also kept when another linked worktree of the same repository lies inside it: a plain
  * `git worktree remove` takes everything below the directory, including the regenerable directories the ignored-work check
  * skips. Ignored work the inventory finds (`ignored-files`) is `review` and is never removed.
@@ -25,9 +27,9 @@
  * live or unverifiable graph claim (see `merge-back.ts`).
  */
 import { realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import { graphIdForWorktree } from "../../../collectors/src/worktree-graph.ts";
-import { isWorktreeLabel, WORKTREE_TEXT_MAX_CHARS } from "../../../mcp-server/src/worktree-registry.ts";
+import { isWorktreeLabel, WORKTREE_LIST_MAX_LIMIT, WORKTREE_TEXT_MAX_CHARS } from "../../../mcp-server/src/worktree-registry.ts";
 import {
 	assertDiskFloor,
 	buildReports,
@@ -76,15 +78,20 @@ import { commandMergeBack } from "./merge-back.ts";
 
 export const WORKTREE_USAGE =
 	"usage: substrate worktree list|status [--root DIR]... [--repo R] [--json]\n" +
-	"       substrate worktree scan [--root DIR]... [--report [--session ID]] [--json]\n" +
+	"       substrate worktree scan [--root DIR]... [--report [--session ID] [--keep-sessions]] [--json]\n" +
 	"       substrate worktree prune [--root DIR]... [--idle-days N] [--execute] [--json]\n" +
 	"       substrate worktree conflicts [--repo R | --root DIR...] [--json]\n" +
 	"       substrate worktree provision --repo DIR --branch B [--base REF] [--path DIR] [--json]\n" +
 	"       substrate worktree disk [--root DIR]... [--json]\n" +
 	"       substrate worktree merge-back PATH... [--execute] [--json]\n" +
-	"       substrate worktree guard DIR [--json]\n";
+	"       substrate worktree guard DIR [--json]\n" +
+	"environment: SUBSTRATE_WORKTREE_ROOTS (colon-separated roots); SUBSTRATE_WORKTREE_GUARD_ALLOW (colon-separated worktree paths that prune --execute may remove although the guard refuses them)\n";
 
 export type PostOutcome = { ok: true; stored: number } | { ok: false; error: string };
+
+/** One row of `GET /worktrees`: the path the host reported and the session the registry holds for it, when it holds one. */
+export type RegistryRow = { path: string; session_id?: string };
+export type RegistryOutcome = { ok: true; rows: RegistryRow[]; truncated: boolean } | { ok: false; error: string };
 
 export interface WorktreeDeps {
 	env: Record<string, string | undefined>;
@@ -102,6 +109,10 @@ export interface WorktreeDeps {
 	postReport: (report: WorktreeReport) => Promise<PostOutcome>;
 	/** `GET /worktrees/claims`: the live claims of one graph. Never throws; an unanswered question is a failure, not "no claims". */
 	claims: ClaimsFn;
+	/** `GET /worktrees?host=`: the rows the registry holds for one host. Never throws; a failed or truncated answer is a failure. */
+	listRegistry: (host: string) => Promise<RegistryOutcome>;
+	/** Whether the ledger already holds the merge-back note for this repository and head. Never throws; an unanswered question is a failure. */
+	mergeBackNoted: MergeBackNotedFn;
 }
 
 const GIB = 1024 ** 3;
@@ -113,6 +124,12 @@ const LINK_WALK_CONCURRENCY = 2;
 function roots(args: WorktreeArgs, deps: WorktreeDeps): string[] {
 	if (args.roots.length > 0) return [...new Set(args.roots.map((root) => resolve(deps.cwd, root)))];
 	return worktreeRootsFromEnv(deps.env);
+}
+
+/** The worktree paths `SUBSTRATE_WORKTREE_GUARD_ALLOW` lists, read the way `roots()` reads its roots: a relative entry is dropped, the rest are made real paths. */
+function guardAllowlist(deps: WorktreeDeps): Set<string> {
+	const entries = (deps.env.SUBSTRATE_WORKTREE_GUARD_ALLOW ?? "").split(":").map((part) => part.trim()).filter((entry) => entry !== "" && isAbsolute(entry));
+	return new Set(entries.map((entry) => realPath(entry)));
 }
 
 function megabytes(bytes: number | null): string {
@@ -214,6 +231,7 @@ type SessionChoice = { ok: true; id: string | null } | { ok: false; message: str
 /** The session this scan attributes its own worktree to: `--session`, else `SUBSTRATE_SESSION_ID`; only a report carries one. */
 function scanSession(args: WorktreeArgs, deps: WorktreeDeps): SessionChoice {
 	if (!args.report) {
+		if (args.keepSessions) return { ok: false, message: "--keep-sessions keeps a report's attribution: use it with --report\n" };
 		return args.session === undefined ? { ok: true, id: null } : { ok: false, message: "--session attributes a report: use it with --report\n" };
 	}
 	if (args.session !== undefined) {
@@ -236,6 +254,19 @@ function containingWorktree(worktrees: readonly WorktreeInfo[], cwd: string): st
 	return best === null ? null : best.path;
 }
 
+/**
+ * The session the registry holds for each of this host's worktrees. A truncated listing is a failure, not a partial answer: a row
+ * past the page would lose its attribution when the report replaces it.
+ */
+async function registrySessions(deps: WorktreeDeps): Promise<{ ok: true; sessions: Map<string, string> } | { ok: false; error: string }> {
+	const listing = await deps.listRegistry(deps.host);
+	if (!listing.ok) return { ok: false, error: `the registry listing failed (${listing.error})` };
+	if (listing.truncated) return { ok: false, error: `the registry lists more than ${WORKTREE_LIST_MAX_LIMIT} worktrees for ${deps.host}` };
+	const sessions = new Map<string, string>();
+	for (const row of listing.rows) if (row.session_id !== undefined) sessions.set(row.path, row.session_id);
+	return { ok: true, sessions };
+}
+
 async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<number> {
 	const session = scanSession(args, deps);
 	if (!session.ok) return usageError(deps, session.message);
@@ -255,6 +286,15 @@ async function commandScan(args: WorktreeArgs, deps: WorktreeDeps): Promise<numb
 			const own = containingWorktree(inventory.worktrees, deps.cwd);
 			if (own === null) deps.err(`warning: the current directory is inside none of the scanned worktrees, so session ${session.id} is attributed to no worktree\n`);
 			else sessions.set(own, session.id);
+		}
+		// Kept after the claims and the explicit id, so a worktree either of them names keeps its own session.
+		if (args.keepSessions) {
+			const kept = await registrySessions(deps);
+			if (!kept.ok) {
+				deps.err(`cannot keep session attribution: ${kept.error}; nothing was reported\n`);
+				return 1;
+			}
+			for (const [path, id] of kept.sessions) if (!sessions.has(path)) sessions.set(path, id);
 		}
 		const plan = buildReports(deps.host, inventory.worktrees, { now: deps.now(), roots: rootList, sessions });
 		skipped = plan.skipped;
@@ -358,6 +398,7 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 		return 0;
 	}
 
+	const allowed = guardAllowlist(deps);
 	const removed: Array<{ path: string; size_bytes: number | null; ledger: LedgerResult }> = [];
 	const skipped: Array<{ path: string; reasons: string[] }> = [];
 	let failure: { path: string; error: string } | null = null;
@@ -394,6 +435,15 @@ async function commandPrune(args: WorktreeArgs, deps: WorktreeDeps): Promise<num
 		if (check.class !== "safe") {
 			skip(info.path, check.reasons);
 			continue;
+		}
+		// The guard is the last check before the removal. An allowlisted path skips it, and the note says so on stderr.
+		if (allowed.has(realPath(info.path))) deps.err(`note: ${info.path} is in SUBSTRATE_WORKTREE_GUARD_ALLOW: the workspace guard was not run\n`);
+		else {
+			const guard = await workspaceGuard(info.path, deps.git);
+			if (!guard.ok) {
+				failure = { path: info.path, error: `refused by the workspace guard: ${guard.refusals.join("; ")}` };
+				break;
+			}
 		}
 		const result = await deps.git(["worktree", "remove", info.path], info.repo_dir);
 		if (result.code !== 0) {
@@ -638,6 +688,47 @@ export function httpReportPoster(config: HttpPosterConfig): (report: WorktreeRep
 	};
 }
 
+/** A lister of one host's registry rows over `GET /worktrees` with the caller's bearer, when it has one. */
+export function httpRegistryLister(config: HttpPosterConfig): (host: string) => Promise<RegistryOutcome> {
+	const doFetch = config.fetchImpl ?? ((url: string, init: RequestInit) => fetch(url, init));
+	return async (host) => {
+		try {
+			const response = await doFetch(`${config.url}/worktrees?host=${encodeURIComponent(host)}&limit=${WORKTREE_LIST_MAX_LIMIT}`, {
+				method: "GET",
+				headers: config.token === undefined ? {} : { authorization: `Bearer ${config.token}` },
+				signal: AbortSignal.timeout(config.timeoutMs),
+			});
+			if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+			const body: unknown = await response.json();
+			const listing = parseRegistryBody(body);
+			return listing === null ? { ok: false, error: "unexpected response body" } : { ok: true, ...listing };
+		} catch (error) {
+			const name = error instanceof Error ? error.name : "";
+			return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "timeout" : "server unreachable" };
+		}
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The rows and the truncation flag of a `GET /worktrees` reply; null when the reply does not have that shape. */
+export function parseRegistryBody(body: unknown): { rows: RegistryRow[]; truncated: boolean } | null {
+	if (!isRecord(body)) return null;
+	const { worktrees, truncated } = body;
+	if (!Array.isArray(worktrees) || typeof truncated !== "boolean") return null;
+	const rows: RegistryRow[] = [];
+	for (const item of worktrees) {
+		if (!isRecord(item)) return null;
+		const path = item.path;
+		if (typeof path !== "string") return null;
+		const sessionId = item.session_id;
+		rows.push(typeof sessionId === "string" ? { path, session_id: sessionId } : { path });
+	}
+	return { rows, truncated };
+}
+
 /** A lookup of live graph claims over `GET /worktrees/claims` with the caller's bearer. Every failure is a refusal to vouch, never "no claims". */
 export function httpClaimsLookup(config: HttpPosterConfig): ClaimsFn {
 	const doFetch = config.fetchImpl ?? ((url: string, init: RequestInit) => fetch(url, init));
@@ -657,5 +748,108 @@ export function httpClaimsLookup(config: HttpPosterConfig): ClaimsFn {
 			const name = error instanceof Error ? error.name : "";
 			return { ok: false, error: name === "TimeoutError" || name === "AbortError" ? "timeout" : "server unreachable" };
 		}
+	};
+}
+
+/** Whether the ledger already holds a `worktree.merge_back` note for one head. An unanswered question is a failure, never "not recorded". */
+export type MergeBackNotedOutcome = { ok: true; noted: boolean } | { ok: false; error: string };
+export type MergeBackNotedFn = (repo: string, head: string, headCommittedAt?: string | null) => Promise<MergeBackNotedOutcome>;
+
+/** Notes read per page of the lookup, newest first. */
+const MERGE_BACK_NOTE_PAGE = 200;
+/** Pages one lookup may read. Past this the answer is a refusal, never "not recorded". */
+const MERGE_BACK_NOTE_MAX_PAGES = 50;
+
+/**
+ * The instant `head_key` went in (commit b8820570). A head committed at or after it is noted only under its key, so a keyed miss
+ * settles it; an older head may hold a note without the key, which only the bounded scan can find.
+ */
+const HEAD_KEY_CUTOVER_MS = Date.parse("2026-11-13T02:19:15Z");
+
+/** Whether a head's commit time, an ISO string, is at or after the cutover. An absent or unreadable time is not, so its scan keeps the refusal. */
+function committedAfterHeadKey(committedAt: string | null | undefined): boolean {
+	if (typeof committedAt !== "string") return false;
+	const time = Date.parse(committedAt);
+	return Number.isFinite(time) && time >= HEAD_KEY_CUTOVER_MS;
+}
+
+/** Whether a ledger event is the merge-back note for `head`. */
+function isMergeBackNoteFor(event: unknown, head: string): boolean {
+	if (typeof event !== "object" || event === null || !("payload" in event)) return false;
+	const { payload } = event;
+	return typeof payload === "object" && payload !== null && "action" in payload && payload.action === "worktree.merge_back" && "head" in payload && payload.head === head;
+}
+
+/** The oldest readable timestamp in a page, in epoch milliseconds, or null when none is readable. */
+function oldestMs(events: unknown[]): number | null {
+	let oldest: number | null = null;
+	for (const event of events) {
+		if (typeof event !== "object" || event === null || !("ts" in event) || typeof event.ts !== "string") continue;
+		const time = Date.parse(event.ts);
+		if (Number.isFinite(time) && (oldest === null || time < oldest)) oldest = time;
+	}
+	return oldest;
+}
+
+type NotePage = { events: unknown[]; truncated: boolean } | { error: string };
+type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
+
+/** One page of the note lookup. The bearer is sent only when one is configured; the server decides whether an untokened read is allowed. */
+async function readNotePage(doFetch: FetchFn, config: HttpPosterConfig, query: Record<string, unknown>): Promise<NotePage> {
+	const headers: Record<string, string> = { "content-type": "application/json" };
+	if (config.token !== undefined) headers.authorization = `Bearer ${config.token}`;
+	try {
+		const response = await doFetch(`${config.url}/events/query`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ surface: "claude-code", kind: "note", order: "desc", limit: MERGE_BACK_NOTE_PAGE, include_payload: true, ...query }),
+			signal: AbortSignal.timeout(config.timeoutMs),
+		});
+		if (!response.ok) return { error: `HTTP ${response.status}` };
+		const body: unknown = await response.json();
+		if (typeof body !== "object" || body === null) return { error: "the ledger answered without a body" };
+		if ("error" in body && typeof body.error === "string") return { error: body.error };
+		if (!("events" in body) || !Array.isArray(body.events)) return { error: "the ledger answered without events" };
+		return { events: body.events, truncated: "truncated" in body && body.truncated === true };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/**
+ * A lookup of whether `repo` at `head` already has its merge-back note, over `POST /events/query`. The first read asks for the
+ * note by its `head_key` payload field, in one request. A note written before `head_key` existed has none, so when that read
+ * holds no note for `head` or cannot answer, the lookup pages backwards with an `until` bound while a page is full, so a busy
+ * repository is read completely up to `MERGE_BACK_NOTE_MAX_PAGES` pages, from the cutover back when the keyed read answered, since that
+ * read already covers every note written with `head_key`. When that cap is reached without an answer, a head committed at or after the
+ * cutover is new only when the keyed read answered (its note would carry `head_key`), so it is not recorded; any other head is refused.
+ */
+export function httpMergeBackNoted(config: HttpPosterConfig): MergeBackNotedFn {
+	const doFetch: FetchFn = config.fetchImpl ?? ((url, init) => fetch(url, init));
+	return async (repo, head, headCommittedAt) => {
+		const scope = repo.startsWith("local/") ? {} : { repo };
+		const keyed = await readNotePage(doFetch, config, { ...scope, payload_key: "head_key", payload_value: head });
+		if ("events" in keyed && keyed.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
+		// An answered keyed read covers every note written with `head_key`, so the scan reads only history from the cutover back.
+		const keyedAnswered = "events" in keyed;
+		let until: string | undefined = keyedAnswered ? new Date(HEAD_KEY_CUTOVER_MS).toISOString() : undefined;
+		let previousOldest: number | null = null;
+		for (let page = 0; page < MERGE_BACK_NOTE_MAX_PAGES; page++) {
+			const read = await readNotePage(doFetch, config, { ...scope, ...(until === undefined ? {} : { until }) });
+			if ("error" in read) return { ok: false, error: read.error };
+			if (read.events.some((event) => isMergeBackNoteFor(event, head))) return { ok: true, noted: true };
+			if (!read.truncated) return { ok: true, noted: false };
+			const oldest = oldestMs(read.events);
+			if (oldest === null) return { ok: false, error: "the newest notes carry no readable time, so older ones cannot be reached" };
+			// The next page includes this millisecond again, so no event sharing it is skipped. A page that does not reach an
+			// earlier millisecond is all one millisecond: more notes share it than a page holds, so the lookup must refuse.
+			if (previousOldest !== null && oldest >= previousOldest) return { ok: false, error: "more notes share one millisecond than one page holds, so the lookup cannot reach past them" };
+			previousOldest = oldest;
+			until = new Date(oldest).toISOString();
+		}
+		// Past the cap, a head committed after the cutover has its note under `head_key`, which the keyed read answered without finding.
+		// A keyed read that failed proves nothing, so that head is refused.
+		if (keyedAnswered && committedAfterHeadKey(headCommittedAt)) return { ok: true, noted: false };
+		return { ok: false, error: `the newest ${MERGE_BACK_NOTE_PAGE * MERGE_BACK_NOTE_MAX_PAGES} notes do not settle it` };
 	};
 }

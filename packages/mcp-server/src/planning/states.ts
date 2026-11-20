@@ -26,6 +26,8 @@ export interface SessionViewInput {
 	disabledCapabilities: readonly string[];
 	/** A failure message from the read, or null/undefined when the read did not fail. Blank means no failure. */
 	error?: string | null;
+	/** A failure code from a failed heartbeat write, or null/undefined when writes succeeded. Blank means no failure. */
+	writeFailure?: string | null;
 }
 
 export interface SessionViewState {
@@ -50,6 +52,9 @@ export function deriveSessionState(input: SessionViewInput): SessionViewState {
 	if (disabled.length > 0) {
 		return { state: "DEGRADED", text: `Degraded: ${disabled.join(", ")} ${disabled.length === 1 ? "is" : "are"} disabled, so this view is partial.` };
 	}
+
+	const writeFailure = present(input.writeFailure);
+	if (writeFailure !== null) return { state: "DEGRADED", text: `Degraded: heartbeat write failed (${writeFailure}), so this view is partial.` };
 
 	if (input.sessions.length === 0) return { state: "EMPTY", text: "No sessions have sent a heartbeat yet." };
 

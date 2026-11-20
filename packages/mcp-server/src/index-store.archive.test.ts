@@ -110,6 +110,7 @@ describeLive("index archive against a live index", () => {
 		await raw`delete from memory_reviews where id like ${like}`.catch(() => undefined);
 		await raw`delete from memory_quarantine where id like ${like}`.catch(() => undefined);
 		await raw`delete from memory_writes where idempotency_key like ${like}`.catch(() => undefined);
+		await raw`delete from context_matrix_entries where entry_id like ${like}`.catch(() => undefined);
 		await raw`delete from corpus_documents where repo like ${like}`.catch(() => undefined);
 		if (scratchName !== null) await raw.unsafe(`drop database if exists "${scratchName}" with (force)`).catch(() => undefined);
 		await raw.end().catch(() => undefined);
@@ -150,6 +151,10 @@ describeLive("index archive against a live index", () => {
 			await raw`insert into memory_reviews (id, scope, kind, body, subject, writer, entry_hash, reason)
 				values (${id(name)}, 'global', 'fact', ${SECRET_BODY}, ${SECRET_BODY}, 'omp', ${`hash-${RUN}-${name}`}, 'review')`;
 		}
+		for (const [name, kind] of [["cm1", "decision"], ["cm2", "fact"], ["cm3", "todo"]] as const) {
+			await raw`insert into context_matrix_entries (entry_id, milestone, phase, source_path, source_sha256, entry_kind, body_redacted)
+				values (${id(name)}, 'm1', 'p1', 'docs/plan.md', ${"0".repeat(64)}, ${kind}, ${`${RUN} ${name} body`})`;
+		}
 		for (const name of ["d1", "d2", "d3"]) {
 			await raw`insert into corpus_documents (repo, path, kind, tier, sha256, bytes, source, state, ingested_at)
 				values (${`${RUN}/seed`}, ${`doc-${name}.md`}, 'doc', 2, ${"0".repeat(64)}, 10, 'fs', 'active', now())`;
@@ -184,7 +189,7 @@ describeLive("index archive against a live index", () => {
 		}
 		const tables = (await raw`
 			select table_name from information_schema.tables
-			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name = 'corpus_documents')`) as Array<Record<string, unknown>>;
+			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name like 'context\_matrix\_%' or table_name = 'corpus_documents')`) as Array<Record<string, unknown>>;
 		expect(tables.map((row) => String(row.table_name)).sort()).toEqual(ARCHIVE_TABLES.map((spec) => spec.name).sort());
 	});
 

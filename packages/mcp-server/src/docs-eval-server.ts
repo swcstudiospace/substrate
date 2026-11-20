@@ -4,7 +4,7 @@
  *
  * `scripts/docs-eval.ts` holds the fixtures, the scorer and the CLI; this module holds the part that must live inside
  * `mcp-server`, because the store lock (`store-lock.test.ts`) lets no file outside this package import the search code or a
- * plane client. `docs-golden.ts` splits the work the same way for the RAGFlow golden harness.
+ * plane client. `docs-golden.ts` splits the work the same way for the lightrag golden harness.
  *
  * What it exercises, and what it does not. The fake plane plays the retrieval backend: it answers `POST /query` with the
  * fixture documents that share words with the question (lexical BM25, `createLexicalIndex`), up to {@link SERVER_EVAL_CANDIDATES}

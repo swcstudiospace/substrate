@@ -303,7 +303,7 @@ describe("recordPlane", () => {
 		instruments.recordPlane({ plane: "greptime", op: "select", outcome: "ok", durationMs: 120 });
 		instruments.recordPlane({ plane: "greptime", op: "insert", outcome: "error", durationMs: 30, reason: "greptime 503: upstream" });
 		instruments.recordPlane({ plane: "hindsight", op: "recall", outcome: "timeout", durationMs: 4000, reason: "TimeoutError" });
-		instruments.recordPlane({ plane: "ragflow", op: "retrieve", outcome: "open", durationMs: 0 });
+		instruments.recordPlane({ plane: "lightrag", op: "retrieve", outcome: "open", durationMs: 0 });
 		instruments.recordPlane({ plane: "index", op: "query", outcome: "error", durationMs: 1000, reason: "connect ECONNREFUSED 10.0.0.1:5432" });
 		instruments.recordPlane({ plane: "cache", op: "get", outcome: "error", durationMs: 1, reason: "WRONGTYPE" });
 
@@ -315,7 +315,7 @@ describe("recordPlane", () => {
 		const errors = defined(findCounter(snapshot, METRIC.planeErrors));
 		expect(sumCounter(errors, { plane: "greptime", reason: "server" })).toBe(1);
 		expect(sumCounter(errors, { plane: "hindsight", reason: "timeout" })).toBe(1);
-		expect(sumCounter(errors, { plane: "ragflow", reason: "open" })).toBe(1);
+		expect(sumCounter(errors, { plane: "lightrag", reason: "open" })).toBe(1);
 		expect(sumCounter(errors, { plane: "index", reason: "network" })).toBe(1);
 		expect(sumCounter(errors, { plane: "cache", reason: "other" })).toBe(1);
 		// An ok sample is not an error.

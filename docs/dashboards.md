@@ -168,7 +168,7 @@ None of these is run by code or by the test suite.
 3. **Give Grafana the two values** in the environment file of its unit, root-readable
    only: `SUBSTRATE_DASHBOARD_URL` (the substrate base URL as Grafana reaches it,
    **without a trailing slash**: the panels append `/slo/history`) and
-   `SUBSTRATE_DASHBOARD_BEARER`. The substrate has no read-only or scoped token: a
+   `SUBSTRATE_DASHBOARD_BEARER`. The substrate has no read-only or scoped token; a
    bearer is an ordinary `SUBSTRATE_TOKEN_<SURFACE>` token with that surface's full
    authority. Give Grafana its own surface token (so it can be revoked on its own),
    keep it only in that env file, and treat the file as holding a full credential.
@@ -178,7 +178,7 @@ None of these is run by code or by the test suite.
    path; restart Grafana.
 5. **Check** one panel: open a dashboard and look at a panel (a `404` or an error
    panel means the history is off, the bearer is wrong or the URL is), or run
-   `curl -s -H "Authorization: Bearer $TOKEN" "$URL/slo/history?series=brief.p95&window=1h"`,
+   `curl -s --oauth2-bearer "$TOKEN" "$URL/slo/history?series=brief.p95&window=1h"`,
    which returns `{"enabled":true,...}` once the history has run one interval. The
    datasource's *Save & test* button was not verified against a bearer-gated base URL
    that has no `/` route; do not rely on it.

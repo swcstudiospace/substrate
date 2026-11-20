@@ -165,11 +165,11 @@ describe("verdict arithmetic", () => {
 				index: { ok: true, breaker: { state: "closed" } },
 				greptime: { ok: false, breaker: { state: "closed" } },
 				hindsight: { ok: null, breaker: null },
-				ragflow: { ok: true, breaker: { state: "half-open" } },
+				lightrag: { ok: true, breaker: { state: "half-open" } },
 				cache: { ok: true, breaker: { state: "open" } },
 			},
 		};
-		expect(planesNotUp(body)).toEqual(["greptime unreachable", "ragflow breaker half-open", "cache breaker open"]);
+		expect(planesNotUp(body)).toEqual(["greptime unreachable", "lightrag breaker half-open", "cache breaker open"]);
 		expect(planesNotUp({ index: true })).toEqual([]);
 		expect(planesNotUp("# text")).toEqual([]);
 	});

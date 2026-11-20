@@ -86,11 +86,27 @@ interface LabelQueryResult {
 	issueLabels: { nodes: Array<{ id: string; name: string; team: { id: string } | null }> };
 }
 
-/** An issue as `issueRelations` reads it: its UUID, identifier, and the relations it is the source of. */
+/** An issue as `issueRelations` reads it: its UUID, identifier, and every relation it is the source of. */
+export interface IssueRelation {
+	id: string;
+	type: string;
+	relatedIssueId: string;
+}
+
 export interface IssueRelations {
 	id: string;
 	identifier: string;
-	relations: Array<{ type: string; relatedIssueId: string }>;
+	relations: IssueRelation[];
+}
+
+/** One page of an issue's relations as the `IssueRelations` query reads it. */
+interface IssueRelationsPage {
+	id: string;
+	identifier: string;
+	relations: {
+		nodes: Array<{ id: string; type: string; relatedIssue: { id: string } | null }>;
+		pageInfo: { hasNextPage: boolean; endCursor: string | null };
+	};
 }
 
 export class LinearClient {
@@ -265,27 +281,43 @@ export class LinearClient {
 	}
 
 	/**
-	 * An issue's UUID, identifier and the relations it is the source of, in one query. `ref` may be a UUID or an
-	 * identifier like SWC-12. A `blocks` relation is stored on the blocking issue.
+	 * An issue's UUID, identifier and every relation it is the source of, read page by page until Linear reports no
+	 * more. `ref` may be a UUID or an identifier like SWC-12. A `blocks` relation is stored on the blocking issue.
 	 */
 	async issueRelations(ref: string): Promise<IssueRelations> {
-		const data = await this.graphql<{
-			issue: { id: string; identifier: string; relations: { nodes: Array<{ type: string; relatedIssue: { id: string } | null }> } } | null;
-		}>(
-			`query IssueRelations($id: String!) {
-				issue(id: $id) { id identifier relations { nodes { type relatedIssue { id } } } }
-			}`,
-			{ id: ref },
-		);
-		const issue = data.issue;
-		if (!issue) throw new LinearError(`no issue ${ref}`);
-		return {
-			id: issue.id,
-			identifier: issue.identifier,
-			relations: issue.relations.nodes.flatMap((relation) =>
-				relation.relatedIssue ? [{ type: relation.type, relatedIssueId: relation.relatedIssue.id }] : [],
-			),
-		};
+		let head: { id: string; identifier: string } | null = null;
+		const relations: IssueRelation[] = [];
+		const cursors = new Set<string>();
+		let after: string | null = null;
+		for (;;) {
+			const data: { issue: IssueRelationsPage | null } = await this.graphql<{ issue: IssueRelationsPage | null }>(
+				`query IssueRelations($id: String!, $after: String) {
+					issue(id: $id) {
+						id identifier
+						relations(first: 100, after: $after) {
+							nodes { id type relatedIssue { id } }
+							pageInfo { hasNextPage endCursor }
+						}
+					}
+				}`,
+				{ id: ref, after },
+			);
+			const page = data.issue;
+			if (!page) throw new LinearError(`no issue ${ref}`);
+			head ??= { id: page.id, identifier: page.identifier };
+			for (const relation of page.relations.nodes) {
+				if (relation.relatedIssue) {
+					relations.push({ id: relation.id, type: relation.type, relatedIssueId: relation.relatedIssue.id });
+				}
+			}
+			const { hasNextPage, endCursor } = page.relations.pageInfo;
+			if (!hasNextPage) break;
+			if (!endCursor || cursors.has(endCursor)) throw new LinearError(`issue ${ref} relations pagination did not advance`);
+			cursors.add(endCursor);
+			after = endCursor;
+		}
+		if (!head) throw new LinearError(`no issue ${ref}`);
+		return { id: head.id, identifier: head.identifier, relations };
 	}
 
 	/** Create a relation from `issueId` to `relatedIssueId`. For `blocks`, `issueId` is the blocking issue. */
@@ -299,5 +331,16 @@ export class LinearClient {
 		if (!data.issueRelationCreate.success) {
 			throw new LinearError(`issueRelationCreate ${type} from ${issueId} to ${relatedIssueId} did not succeed`);
 		}
+	}
+
+	/** Delete one relation by the id `issueRelations` read for it. */
+	async deleteIssueRelation(id: string): Promise<void> {
+		const data = await this.graphql<{ issueRelationDelete: { success: boolean } }>(
+			`mutation IssueRelationDelete($id: String!) {
+				issueRelationDelete(id: $id) { success }
+			}`,
+			{ id },
+		);
+		if (!data.issueRelationDelete.success) throw new LinearError(`issueRelationDelete ${id} did not succeed`);
 	}
 }

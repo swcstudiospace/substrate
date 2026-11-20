@@ -176,7 +176,7 @@ describe("the grammar is refused before any work", () => {
 	});
 
 	test("the usage text names every subcommand and the exit codes", () => {
-		for (const word of ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config", "exit: 0 done, 1 failed, 2 usage, 3 refused", "4 files restored"]) {
+		for (const word of ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config", "hook-install", "exit: 0 done, 1 failed, 2 usage, 3 refused", "4 files restored"]) {
 			expect(SESSION_USAGE).toContain(word);
 		}
 	});

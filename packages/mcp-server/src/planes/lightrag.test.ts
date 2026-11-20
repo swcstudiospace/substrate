@@ -1,6 +1,6 @@
 /**
  * The LightRAG HTTP adapter against recorded-shape fixtures. Every fake is
- * an injected `fetchImpl` (the same seam `ragflow.test.ts` uses); no network.
+ * an injected `fetchImpl` (the same seam `lightrag.test.ts` uses); no network.
  * Each route is answered from a per-test queue keyed by `METHOD /path`, and
  * every request is recorded so the wire contract (method, path, headers,
  * body, multipart fields) is asserted, not just the parsed outcome.
@@ -172,7 +172,7 @@ describe("retrieval (POST /query)", () => {
 		expect(fake.calls[0]?.body).toMatchObject({ mode: "naive" });
 	});
 
-	test("parses the { data: { chunks } } envelope into the RAGFlow chunk shape", async () => {
+	test("parses the { data: { chunks } } envelope into the lightrag chunk shape", async () => {
 		const fake = fakeLightrag({
 			"POST /query": [
 				json({
@@ -260,13 +260,13 @@ describe("retrieval (POST /query)", () => {
 					status: "success",
 					data: {
 						chunks: [{ content: "graph-backed chunk", document_id: "d1", chunk_id: "c1" }],
-						entities: [{ name: "Hindsight" }, "RAGFlow"],
-						relations: [{ source: "Hindsight", target: "RAGFlow", kind: "fallback" }],
+						entities: [{ name: "Hindsight" }, "lightrag"],
+						relations: [{ source: "Hindsight", target: "lightrag", kind: "fallback" }],
 					},
 				}),
 			],
 		});
-		const outcome = await queryWithGraph(KEYED, "/mix Hindsight and RAGFlow?", fake.fetch);
+		const outcome = await queryWithGraph(KEYED, "/mix Hindsight and lightrag?", fake.fetch);
 		if (!outcome.ok) throw new Error(`expected chunks: ${outcome.reason}`);
 		expect(outcome.chunks).toEqual([
 			{ content: "graph-backed chunk", document_name: "doc", document_id: "d1", chunk_id: "c1" },
@@ -274,7 +274,7 @@ describe("retrieval (POST /query)", () => {
 		expect(outcome.detail).toEqual({
 			mode: "mix",
 			counts: { entities: 2, relations: 1 },
-			provenance: { entities: ["Hindsight", "RAGFlow"], relations: 1 },
+			provenance: { entities: ["Hindsight", "lightrag"], relations: 1 },
 		});
 	});
 
@@ -381,11 +381,11 @@ describe("upload (POST /documents/upload, text fallback)", () => {
 		});
 		await uploadDocument(
 			KEYED,
-			{ ...UPLOAD_REQUEST, metadata: { ...UPLOAD_META, graph_entities: ["Hindsight", "", "RAGFlow"] } },
+			{ ...UPLOAD_REQUEST, metadata: { ...UPLOAD_META, graph_entities: ["Hindsight", "", "lightrag"] } },
 			fake.fetch,
 		);
 		const form = formOf(fake.calls[0]);
-		expect(form.get("graph_entities")).toBe(JSON.stringify(["Hindsight", "RAGFlow"]));
+		expect(form.get("graph_entities")).toBe(JSON.stringify(["Hindsight", "lightrag"]));
 	});
 
 	test("on a 404 from the multipart route, falls back to POST /documents/text with the same metadata", async () => {
@@ -425,7 +425,7 @@ describe("upload (POST /documents/upload, text fallback)", () => {
 
 	test("a non-404 upload failure is reported and does not fall back to the text route", async () => {
 		const fake = fakeLightrag({ "POST /documents/upload": [json({ detail: "boom" }, 500)] });
-		expect(await uploadDocument(PLAIN, UPLOAD_REQUEST, fake.fetch)).toEqual({ ok: false, reason: "lightrag 500" });
+		expect(await uploadDocument(PLAIN, UPLOAD_REQUEST, fake.fetch)).toEqual({ ok: false, reason: "lightrag 500", detail: "boom" });
 		expect(fake.calls).toHaveLength(1);
 	});
 
@@ -438,22 +438,37 @@ describe("upload (POST /documents/upload, text fallback)", () => {
 		expect(await uploadDocument(PLAIN, UPLOAD_REQUEST, fake.fetch)).toEqual(shape);
 	});
 
-	test("storePlanningPage flattens the path, defaults commit to unpinned and heading_path to empty", async () => {
+	test("storePlanningPage names a planning page by its checkout and flattened path, and defaults commit and heading_path", async () => {
 		const fake = fakeLightrag({
-			"POST /documents/upload": [json({ data: { track_id: "trk-p" } })],
+			"POST /documents/text": [json({ data: { track_id: "trk-p" } })],
 		});
 		const outcome = await storePlanningPage(
 			PLAIN,
-			{ path: ".planning/phases/03-x/PLAN.md", sourceUrl: "file:///repo/.planning/phases/03-x/PLAN.md", body: "plan" },
+			{ checkout: "wt-a", path: ".planning/phases/03-x/PLAN.md", sourceUrl: "file:///repo/.planning/phases/03-x/PLAN.md", body: "plan" },
 			fake.fetch,
 		);
 		expect(outcome).toEqual({ ok: true, track_id: "trk-p" });
-		const form = formOf(fake.calls[0]);
-		const file = form.get("file");
-		if (!(file instanceof File)) throw new Error("file part missing");
-		expect(file.name).toBe(".planning__phases__03-x__PLAN.md");
-		expect(form.get("commit")).toBe("unpinned");
-		expect(form.get("heading_path")).toBe("");
+		expect(fake.calls[0]?.path).toBe("/documents/text");
+		expect(fake.calls[0]?.body).toMatchObject({
+			file_source: "wt-a:.planning__phases__03-x__PLAN.md",
+			commit: "unpinned",
+			heading_path: "",
+		});
+	});
+
+	test("two checkouts with the same relative planning path upload under two names", async () => {
+		const fake = fakeLightrag({
+			"POST /documents/text": [json({ data: { track_id: "trk-a" } }), json({ data: { track_id: "trk-b" } })],
+		});
+		const page = { path: ".planning/STATE.md", body: "state" } as const;
+		await storePlanningPage(PLAIN, { ...page, checkout: "wt-a", sourceUrl: "file:///a/.planning/STATE.md" }, fake.fetch);
+		await storePlanningPage(PLAIN, { ...page, checkout: "wt-b", sourceUrl: "file:///b/.planning/STATE.md" }, fake.fetch);
+		const names = fake.calls.map((call) => {
+			const body = call.body;
+			if (body === null || typeof body !== "object" || !("file_source" in body)) throw new Error("text body missing");
+			return body.file_source;
+		});
+		expect(names).toEqual(["wt-a:.planning__STATE.md", "wt-b:.planning__STATE.md"]);
 	});
 
 	test("storePlanningPage sends its commit and heading on the text fallback too", async () => {
@@ -496,7 +511,7 @@ describe("scan, parse and pipeline status", () => {
 
 	test("a scan failure is a reason, not a throw", async () => {
 		const fake = fakeLightrag({ "POST /documents/scan": [json({}, 503)] });
-		expect(await scanDocuments(PLAIN, fake.fetch)).toEqual({ ok: false, reason: "lightrag 503" });
+		expect(await scanDocuments(PLAIN, fake.fetch)).toEqual({ ok: false, reason: "lightrag 503", detail: "{}" });
 	});
 
 	test("pollParseStatus polls pipeline_status until idle", async () => {
@@ -608,7 +623,7 @@ describe("delete (DELETE /documents/delete_document)", () => {
 
 	test("a failed delete is reported as the status reason", async () => {
 		const fake = fakeLightrag({ "DELETE /documents/delete_document": [json({ detail: "locked" }, 500)] });
-		expect(await deleteDocuments(PLAIN, "ds", ["doc-1"], fake.fetch)).toEqual({ ok: false, reason: "lightrag 500" });
+		expect(await deleteDocuments(PLAIN, "ds", ["doc-1"], fake.fetch)).toEqual({ ok: false, reason: "lightrag 500", detail: "locked" });
 	});
 });
 
@@ -786,7 +801,7 @@ describe("document ids (GET /documents/track_status/{track_id})", () => {
 
 	test("a failed read, a wrong shape and a blank track id are reasons", async () => {
 		const down = fakeLightrag({ "GET /documents/track_status/t": [json({ detail: "x" }, 503)] });
-		expect(await resolveDocumentIds(KEYED, "t", down.fetch)).toEqual({ ok: false, reason: "lightrag 503" });
+		expect(await resolveDocumentIds(KEYED, "t", down.fetch)).toEqual({ ok: false, reason: "lightrag 503", detail: "x" });
 		const shape = fakeLightrag({ "GET /documents/track_status/t": [json({ documents: "nope" })] });
 		expect(await resolveDocumentIds(KEYED, "t", shape.fetch)).toEqual({ ok: false, reason: "lightrag: unexpected track_status shape" });
 		const none = fakeLightrag({});
@@ -894,7 +909,7 @@ describe("queryForTool (the docs_lightrag_query door)", () => {
 
 	test("a failure, an empty question and an answer with no usable text are reasons", async () => {
 		const fake = fakeLightrag({ "POST /query": [json({ detail: "x" }, 500), json({ data: { chunks: [{ content: "" }] } })] });
-		expect(await queryForTool(PLAIN, { question: "q" }, fake.fetch)).toEqual({ ok: false, reason: "lightrag 500" });
+		expect(await queryForTool(PLAIN, { question: "q" }, fake.fetch)).toEqual({ ok: false, reason: "lightrag 500", detail: "x" });
 		expect(await queryForTool(PLAIN, { question: "q" }, fake.fetch)).toEqual({ ok: false, reason: "lightrag: unexpected response shape" });
 		expect(await queryForTool(PLAIN, { question: "  " }, fake.fetch)).toEqual({ ok: false, reason: "lightrag: empty query" });
 	});
@@ -976,5 +991,68 @@ describe("resolveQueryMode precedence", () => {
 	test("isGraphMode is false for naive, so a naive answer claims no relations", () => {
 		expect(isGraphMode("naive")).toBe(false);
 		expect(isGraphMode("hybrid")).toBe(true);
+	});
+});
+
+describe("non-2xx failure detail (call)", () => {
+	const call = (response: Response) => {
+		const fake = fakeLightrag({ "POST /documents/upload": [response] });
+		return lightragCall(KEYED, fake.fetch, "/documents/upload", { method: "POST", json: true, body: "{}", timeoutMs: 100 });
+	};
+	/** Built at run time so no token-shaped literal sits in the source. */
+	const tokenLike = `sk-ant-${"A1b2".repeat(8)}`;
+
+	test("a FastAPI body's detail rides alongside the unchanged reason", async () => {
+		expect(await call(json({ detail: "File name too long" }, 400))).toEqual({ ok: false, reason: "lightrag 400", detail: "File name too long" });
+	});
+
+	test("a non-string detail (a 422 validation list) is its JSON text", async () => {
+		const outcome = await call(json({ detail: [{ loc: ["body", "file"], msg: "field required" }] }, 422));
+		expect(outcome).toMatchObject({ ok: false, reason: "lightrag 422" });
+		if (outcome.ok) throw new Error("expected a failure");
+		expect(outcome.detail).toContain("field required");
+	});
+
+	test("a body that is not JSON is the raw text, and a JSON body without detail is its text too", async () => {
+		expect(await call(new Response("upstream gateway timed out", { status: 504 }))).toEqual({ ok: false, reason: "lightrag 504", detail: "upstream gateway timed out" });
+		expect(await call(json({ message: "nope" }, 400))).toEqual({ ok: false, reason: "lightrag 400", detail: '{"message":"nope"}' });
+	});
+
+	test("the detail is cut to 200 characters and the reason is not", async () => {
+		const outcome = await call(json({ detail: "x".repeat(500) }, 400));
+		if (outcome.ok) throw new Error("expected a failure");
+		expect(outcome.reason).toBe("lightrag 400");
+		expect(outcome.detail).toBe("x".repeat(200));
+	});
+
+	test("a token-like string in the body is redacted from the detail, and never reaches the reason", async () => {
+		const outcome = await call(json({ detail: `rejected credential ${tokenLike} for this route` }, 400));
+		if (outcome.ok) throw new Error("expected a failure");
+		expect(outcome.reason).toBe("lightrag 400");
+		expect(outcome.detail).toContain("rejected credential");
+		expect(outcome.detail).not.toContain(tokenLike);
+		expect(JSON.stringify(outcome)).not.toContain(tokenLike);
+		// A token past the 200th character is cut with the rest, and a token across the cut is not left half-shown.
+		const late = await call(json({ detail: `${"y".repeat(190)} ${tokenLike}` }, 400));
+		if (late.ok) throw new Error("expected a failure");
+		expect(late.detail).not.toContain("sk-ant");
+	});
+
+	test("an empty body adds no detail, and a 401 or 403 never reads one", async () => {
+		expect(await call(new Response("", { status: 500 }))).toEqual({ ok: false, reason: "lightrag 500" });
+		expect(await call(json({ detail: "bad key lr-test-key" }, 401))).toEqual({ ok: false, reason: "lightrag 401" });
+		expect(await call(json({ detail: "forbidden" }, 403))).toEqual({ ok: false, reason: "lightrag 403" });
+	});
+
+	test("the upload outcome carries the detail, and the 409 conflict stays the typed conflict", async () => {
+		const refused = fakeLightrag({ "POST /documents/upload": [json({ detail: "Unsupported file type" }, 400)] });
+		expect(await uploadDocument(KEYED, UPLOAD_REQUEST, refused.fetch)).toEqual({ ok: false, reason: "lightrag 400", detail: "Unsupported file type" });
+		const conflict = fakeLightrag({ "POST /documents/upload": [json({ detail: "Document storage already contains the file" }, 409)] });
+		expect(await uploadDocument(KEYED, UPLOAD_REQUEST, conflict.fetch)).toEqual({ ok: false, reason: "lightrag 409 same-name conflict", conflict: true });
+	});
+
+	test("a response whose body cannot be read still fails with the reason alone", async () => {
+		const unreadable = { ok: false, status: 500, text: async () => { throw new Error("stream reset"); } } as unknown as Response;
+		expect(await call(unreadable)).toEqual({ ok: false, reason: "lightrag 500" });
 	});
 });

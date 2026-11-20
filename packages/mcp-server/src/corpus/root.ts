@@ -7,6 +7,9 @@
  * holds and never on the order rows were written or read. The manifest with no active row has the defined root
  * `CORPUS_EMPTY_ROOT` (RFC 6962's hash of the empty tree); it is never emitted.
  *
+ * A proof served to a caller is taken over one repository's rows only (`repositoryTreeOf`), so the root it names is that repository's
+ * root, not the whole-corpus root `corpusRoot` makes and the ledger anchors. The whole-corpus tree and its root are unchanged.
+ *
  * The root event rides the existing hourly anchor: it is an ordinary `note` in the ledger, and the hour it lands in is anchored
  * by the anchor job like any other. Nothing here sends a transaction or writes a memo.
  */
@@ -39,22 +42,24 @@ export interface CorpusTree {
 	ordered: TreeLeaf[];
 	/** One bad row never fails the root: a malformed sha256 or an ill-formed name is skipped and counted here. */
 	skipped: number;
+	/** Repository of each skipped active row, so a grant can count its own skips and no other repository's. */
+	skippedRepos: readonly string[];
 }
 
 /** Equal keys fall back to the hash, so even a duplicated key sorts the same way on every read. */
 export function buildCorpusTree(rows: readonly RootRow[]): CorpusTree {
 	const ordered: TreeLeaf[] = [];
-	let skipped = 0;
+	const skippedRepos: string[] = [];
 	for (const row of rows) {
 		if (row.state === "tombstoned") continue;
 		if (leafRefusal(row.repo, row.path, row.sha256) !== null) {
-			skipped += 1;
+			skippedRepos.push(row.repo);
 			continue;
 		}
 		ordered.push({ repo: row.repo, path: row.path, sha256: row.sha256, leaf: corpusLeafHex(row.repo, row.path, row.sha256) });
 	}
 	ordered.sort((a, b) => compareEntries(a, b) || (a.sha256 < b.sha256 ? -1 : a.sha256 > b.sha256 ? 1 : 0));
-	return { ordered, skipped };
+	return { ordered, skipped: skippedRepos.length, skippedRepos };
 }
 
 function rootOf(ordered: readonly TreeLeaf[]): string {
@@ -78,7 +83,7 @@ export interface CorpusInclusion {
 }
 
 /** The proof of `(repo, path)` in `tree`, or null when the tree holds no such document. */
-export function inclusionOf(tree: CorpusTree, repo: string, path: string): CorpusInclusion | null {
+export function inclusionOf(tree: Pick<CorpusTree, "ordered">, repo: string, path: string): CorpusInclusion | null {
 	const index = tree.ordered.findIndex((entry) => entry.repo === repo && entry.path === path);
 	const found = tree.ordered[index];
 	if (found === undefined) return null;
@@ -89,9 +94,34 @@ export function inclusionOf(tree: CorpusTree, repo: string, path: string): Corpu
 	return { sha256: found.sha256, leaf: found.leaf, index, treeSize: proof.size, path: proof.path, root: rootOf(tree.ordered) };
 }
 
-/** The proof of one document among `rows`, or null when it is not an active row. */
-export function corpusProof(rows: readonly RootRow[], repo: string, path: string): CorpusInclusion | null {
-	return inclusionOf(buildCorpusTree(rows), repo, path);
+/**
+ * One repository's leaves in tree order: the whole-corpus tree's entries for `repo`, and no other. The tree is sorted by
+ * `(repo, path, sha256)`, so the filtered entries keep the same order. A repository's root and proofs are the RFC 6962 tree over
+ * these leaves alone, so they depend on that repository's rows and on no other repository's. The whole-corpus tree is not changed.
+ */
+export function repositoryTreeOf(tree: CorpusTree, repo: string): Pick<CorpusTree, "ordered"> {
+	return { ordered: tree.ordered.filter((entry) => entry.repo === repo) };
+}
+
+/** The root over one repository's active rows alone, and how many of them it covers. The whole-corpus root is {@link corpusRoot}. */
+export function repositoryRoot(rows: readonly RootRow[], repo: string): { root: string; count: number } {
+	const { ordered } = repositoryTreeOf(buildCorpusTree(rows), repo);
+	return { root: rootOf(ordered), count: ordered.length };
+}
+/**
+ * The root, leaf count and skipped rows of `repos` alone. Another repository's leaves and skips are not in the result, so
+ * they cannot move this root or this count. The whole-corpus root is {@link corpusRoot}.
+ */
+export function grantRootOf(tree: CorpusTree, repos: ReadonlySet<string>): { root: string; count: number; skipped: number } {
+	const ordered = tree.ordered.filter((entry) => repos.has(entry.repo));
+	let skipped = 0;
+	for (const repo of tree.skippedRepos) if (repos.has(repo)) skipped += 1;
+	return { root: rootOf(ordered), count: ordered.length, skipped };
+}
+
+/** The proof of one document of `repo` against that repository's root, or null when it is not an active row of `repo`. */
+export function repositoryProof(rows: readonly RootRow[], repo: string, path: string): CorpusInclusion | null {
+	return inclusionOf(repositoryTreeOf(buildCorpusTree(rows), repo), repo, path);
 }
 
 /** The root of one manifest version. */

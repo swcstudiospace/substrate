@@ -390,9 +390,9 @@ describe("parsePosition: the states of a project", () => {
 
 	test("two directories for one phase are ambiguous: no slug, and an error that names both", () => {
 		const state = "---\nmilestone: v1.5\ncurrent_phase: 46\n---\n# State\n";
-		const result = position({ state, roadmap: null, phases: ["46-ragflow-hybrid", "46-lightrag-hybrid", "47-forecast-preload"] });
+		const result = position({ state, roadmap: null, phases: ["46-docs-cutover", "46-lightrag-hybrid", "47-forecast-preload"] });
 		expect(result.position.phase).toEqual({ name: null, number: "46", slug: null });
-		expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-lightrag-hybrid, 46-ragflow-hybrid", where: "phases" });
+		expect(result.errors).toContainEqual({ code: "ambiguous-phase-dir", detail: "phase 46 has 2 directories: 46-docs-cutover, 46-lightrag-hybrid", where: "phases" });
 	});
 
 	test("a status the roadmap's phase section gives fills a state that has none", () => {

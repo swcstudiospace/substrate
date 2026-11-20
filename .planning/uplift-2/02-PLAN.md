@@ -3,8 +3,8 @@
 ## Files touched
 - new `packages/observability/src/breaker.ts` + `breaker.test.ts` (shared contract, plus `gatedFetch` HTTP adapter)
 - `packages/observability/src/index.ts`, `instruments.ts` (plane histogram/counter, `recordPlane`), `slo.ts` + `slo.test.ts` (rolling-window plane availability, `PlaneWindow`), `config.ts` (`SUBSTRATE_SLO_PLANE_AVAILABILITY`)
-- `packages/mcp-server/src/config.ts` (`breaker: BreakerSettings`), `observe.ts` (`plane` observer, `evaluatePlanes`), `service.ts` (`PlaneRegistry`, gated clients, `health()` planes + capacity, `planesConfigured()`), `server.ts` (`/healthz` body, `/slo` `planes`), `greptime.ts` (options object, `callPlane` around `sql`/`ping`, `GreptimeUnavailable`), `cache.ts` (gate on connect/commands, connect cooldown, `cooldownUntil`), `planes/hindsight.ts` + `planes/ragflow.ts` (bounded op tables, `circuit open` reasons)
-- tests: `breaker.test.ts`, `slo.test.ts`, `instruments.test.ts`, `service.test.ts`, `http.test.ts`, `cache.test.ts`, `greptime.test.ts`, `planes/hindsight.test.ts`, `planes/ragflow.test.ts`, `scripts/chaos-smoke.test.ts`
+- `packages/mcp-server/src/config.ts` (`breaker: BreakerSettings`), `observe.ts` (`plane` observer, `evaluatePlanes`), `service.ts` (`PlaneRegistry`, gated clients, `health()` planes + capacity, `planesConfigured()`), `server.ts` (`/healthz` body, `/slo` `planes`), `greptime.ts` (options object, `callPlane` around `sql`/`ping`, `GreptimeUnavailable`), `cache.ts` (gate on connect/commands, connect cooldown, `cooldownUntil`), `planes/hindsight.ts` + `planes/retired.ts` (bounded op tables, `circuit open` reasons)
+- tests: `breaker.test.ts`, `slo.test.ts`, `instruments.test.ts`, `service.test.ts`, `http.test.ts`, `cache.test.ts`, `greptime.test.ts`, `planes/hindsight.test.ts`, `planes/retired.test.ts`, `scripts/chaos-smoke.test.ts`
 - `scripts/chaos-smoke.ts` (`--plane`, `main()` behind `import.meta.main`, pure helpers)
 - `docs/observability.md`, new `docs/runbooks/substrate-red.md`, `.planning/uplift-2/env-notes/02.md`, `02-SUMMARY.md`
 

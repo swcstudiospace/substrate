@@ -208,6 +208,22 @@ describe("the caller's own session", () => {
 		expect(digest.events.map((event) => event.session_id)).toEqual(["them", null]);
 	});
 
+	test("a stale presence row is not a live session and is left out, with its active neighbours kept", async () => {
+		const digest = await run(
+			sources({
+				presence: answer([presenceRow(1, { sessionId: "lapsed", state: "stale" }), presenceRow(2, { sessionId: "live", state: "active" })]),
+			}),
+		);
+		expect(digest.sessions.map((session) => session.session_id)).toEqual(["live"]);
+		expect(digest.sessions.every((session) => session.state !== "stale")).toBe(true);
+	});
+
+	test("a presence list of stale rows alone leaves the sessions list empty, not truncated", async () => {
+		const digest = await run(sources({ presence: answer(Array.from({ length: 30 }, (_, n) => presenceRow(n, { state: "stale" }))) }));
+		expect(digest.sessions).toEqual([]);
+		expect(digest.truncated.sessions).toBe(false);
+	});
+
 	test("with no session named every row is kept", async () => {
 		const digest = await run(sources({ presence: answer([presenceRow(1, { sessionId: "me" })]) }));
 		expect(digest.for_session).toBeNull();

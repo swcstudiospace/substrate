@@ -111,7 +111,7 @@ journalctl -u substrate-docs-canary -n 50          # look for: golden recall@5 <
 systemctl enable --now substrate-docs-canary.timer
 ```
 
-**Check.** The journal line names a recall and a count, the unit exits 0, and `fabric_status` then shows `recall5.reading` in the `corpus` row. If the journal says `golden recall not measured`, the reason is on the line above it (no `docs/` in the release, a scan of `docs/` that a bound cut short, or a question that failed). The posted report (`docs.canary`) is accepted only from the canary's own `substrate` token: any other token is refused with `reserved-action`, so a missing reading is never one somebody else could have written.
+**Check.** The journal line names a recall and a count, the unit exits 0, and `fabric_status` then shows `recall5.reading` in the `corpus` row. If the journal says `golden recall not measured`, the reason is on the line above it (no `docs/` in the release, a scan of `docs/` that a bound cut short, or a question that failed). The posted report (`docs.canary`) is accepted only from the canary's own `substrate` token; any other token is refused with `reserved-action`, so a missing reading is never one somebody else could have written.
 
 **Rollback.** `systemctl disable --now substrate-corpus-sync.timer substrate-corpus-watch.service substrate-docs-canary.timer`, then remove the unit files and `systemctl daemon-reload`. Documents stay on the plane; they simply stop following the repositories.
 

@@ -158,3 +158,33 @@ describe("how the brief reports a lease", () => {
 		expect(brief).not.toContain("lease expired");
 	});
 });
+
+describe("recent-actions quoting follows the ledger's dialect", () => {
+	/** A ledger stub that records each statement and answers with no rows, with the dialect the client would report. */
+	function ledger(escapesBackslashes: boolean) {
+		const sent: string[] = [];
+		const greptime = {
+			escapesBackslashes,
+			sql: async (statement: string) => {
+				sent.push(statement);
+				return [];
+			},
+		};
+		return { sent, greptime };
+	}
+
+	test("a server that does not escape backslashes is asked for the repo with its backslash verbatim", async () => {
+		const { sent, greptime } = ledger(false);
+		await composeBrief({ repo: "acme\\app", surface: "cursor" }, { index: null, greptime: greptime as never }, undefined, undefined, { budgetMs: 0 });
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain(`"repo" = 'acme\\app'`);
+		expect(sent[0]).not.toContain("\\\\");
+	});
+
+	test("a server that escapes backslashes is asked for the doubled form, which is what it stored", async () => {
+		const { sent, greptime } = ledger(true);
+		await composeBrief({ repo: "acme\\app", surface: "cursor" }, { index: null, greptime: greptime as never }, undefined, undefined, { budgetMs: 0 });
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain(`"repo" = 'acme\\\\app'`);
+	});
+});

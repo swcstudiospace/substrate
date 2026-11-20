@@ -1,6 +1,6 @@
-# R6 summary — RAGFlow docs plane: durable versions and pins, cached reads, bounded growth, verified API shapes, async merge trigger
+# R6 summary — LightRAG docs plane: durable versions and pins, cached reads, bounded growth, verified API shapes, async merge trigger (retired RAG backend)
 
-## RAGFlow HTTP API shapes relied on
+## LightRAG (retired RAG backend) HTTP API shapes relied on
 
 Source: the RAGFlow docs site, "HTTP API" reference (https://ragflow.io/docs/http_api_reference), read 2026-10-13. Every answer is read twice per that page's §ERROR CODES: the HTTP status, and the business `code` in the body (`0` success; any other code is a failure even under HTTP 200). All of it is **live-unattested** (see the list at the end).
 

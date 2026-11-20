@@ -79,10 +79,10 @@ export interface RestDirective {
 	created_at: string;
 	acknowledged_at: string | null;
 	outcome: string | null;
-	/** The directive's delivery sequence in its target session. Null when the inbox does not hold it (restored only from the audit history). */
-	sequence: number | null;
 	/** Present for an acknowledged directive whose outcome moves the session: the session may take a steering checkpoint. */
 	checkpoint_hint: { trigger: string; directive_id: string } | null;
+	/** The delivery sequence the inbox gave this directive, the order readers see; null when the inbox does not hold it (a durable row after a restart). */
+	sequence: number | null;
 }
 
 const isoOf = (ms: number): string => new Date(ms).toISOString();
@@ -177,7 +177,7 @@ export function steeringUnavailable(wiring: SteeringWiring): SteeringUnavailable
 // ── POST bodies ───────────────────────────────────────────────────────────────
 
 const QUEUE_FIELDS: readonly string[] = ["session_id", "action", "body", "priority", "conflicts_with_active_plan", "idempotency_key"];
-const ACKNOWLEDGE_FIELDS: readonly string[] = ["directive_id", "outcome", "confirm"];
+const ACKNOWLEDGE_FIELDS: readonly string[] = ["directive_id", "outcome", "confirm", "idempotency_key"];
 
 function plainObject(body: unknown): Record<string, unknown> | null {
 	return body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
@@ -227,6 +227,7 @@ export function parseAcknowledgeBody(body: unknown): RestParse<SteeringAcknowled
 		directive_id: directiveId,
 		outcome: fields.outcome,
 		...(fields.confirm === undefined ? {} : { confirm: fields.confirm }),
+		...(fields.idempotency_key === undefined ? {} : { idempotency_key: fields.idempotency_key }),
 	});
 	return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: `invalid ${issuePaths(parsed.error.issues).replace("session_id", "directive_id")}` };
 }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, loadEventBusSettings, type GreptimeConfig, type SubstrateConfig } from "./config.ts";
 import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
@@ -11,14 +11,28 @@ import { EVENT_SOURCES } from "./event-sources.ts";
 import { createEventBus, MAX_HINT_BYTES, type EventBus, type EventBusClient, type EventHint } from "./event-bus.ts";
 import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type EmitResult, type SkillProposalRequest } from "./service.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey, ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { createTestLiveSessionAuthority, issueLiveSession, type TestLiveSessionAuthority } from "./planning/live-session.test-support.ts";
 import type { LiveSessionAccess, LiveSessionOperation } from "./planning/steering-sessions-store.ts";
 import { ZodError } from "zod";
-import { defined } from "./test-support.ts";
+import { defined, withoutHindsightEnv } from "./test-support.ts";
+import { FakeTree } from "./planning/tree.fixtures.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * The per-repo dataset seam (as in docs-plane-hardening.test.ts): each named repo is a main checkout at
+ * `<homedir>/src/repos/<name>`, held in memory by the planning fs, so the registry names its dataset `<name>` and the repo
+ * is known. The default pair is the repos the old default search scope named besides the skills library and the corpus.
+ */
+function repoSeam(names: readonly string[] = ["agent-substrate", "programming-desk"]) {
+	const roots = names.map((name) => join(homedir(), "src", "repos", name));
+	const files = Object.fromEntries(roots.map((root) => [join(root, ".git", "HEAD"), "ref: refs/heads/main\n"]));
+	return { env: { SUBSTRATE_PLANNING_ROOTS: roots.join(",") }, stores: { planning: { fs: new FakeTree(files), presence: null } } };
+}
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -33,6 +47,7 @@ function stubStores(
 	const emitted: SubstrateEvent[] = [];
 	const callers: Array<Surface | null> = [];
 	const action = claim.action ?? "granted";
+	const released: Array<{ graph_id: string; node_id: string }> = [];
 	const index = {
 		claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string, caller: Surface | null) => {
 			callers.push(caller);
@@ -54,7 +69,11 @@ function stubStores(
 				},
 			};
 		},
-		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null } : null),
+		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null, nodes: [], edges: [] } : null),
+		releaseNode: async (graph_id: string, node_id: string) => {
+			released.push({ graph_id, node_id });
+			return { released: true };
+		},
 	};
 	const greptime = {
 		// Append-only, so `emit` is not fail-closed here; enforcement has its own tests.
@@ -64,7 +83,7 @@ function stubStores(
 			emitted.push(event);
 		},
 	};
-	return { emitted, index, greptime, callers };
+	return { emitted, index, greptime, callers, released };
 }
 
 describe("claimNode", () => {
@@ -93,8 +112,8 @@ describe("claimNode", () => {
 		expect(emitted[0]?.summary).not.toContain("n4");
 	});
 
-	test("still claims when the graph lookup fails — the claim matters more than its event", async () => {
-		const { emitted, index, greptime } = stubStores(null);
+	test("refuses the claim when the graph lookup fails: the prerequisites cannot be read, so nothing is granted", async () => {
+		const { emitted, index, greptime, callers } = stubStores(null);
 		index.getGraph = async () => {
 			throw new Error("postgres blipped");
 		};
@@ -102,8 +121,11 @@ describe("claimNode", () => {
 
 		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
-		expect(result.claimed).toBe(true);
-		expect(emitted[0]?.repo).toBeNull();
+		expect(result).toMatchObject({ claimed: false, action: "refused", reason: "prerequisite-unknown", prerequisite: null, ttl_seconds: null });
+		expect(result.lease.lease_id).toBeNull();
+		// The index was never asked to grant, and no event is written for a refused claim.
+		expect(callers).toEqual([]);
+		expect(emitted).toEqual([]);
 	});
 
 	test("hands the caller the lease it is now holding, and the TTL it was granted", async () => {
@@ -199,6 +221,211 @@ describe("claimNode", () => {
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
 		await expect(substrate.claimNode("ut-1", "n2", "hermes", "sess-1", null)).rejects.toThrow("SUBSTRATE_PG_URL");
 		await expect(substrate.heartbeatNode("ut-1", "n2", "lse_1", null)).rejects.toThrow("SUBSTRATE_PG_URL");
+	});
+
+	describe("a claim whose event does not land", () => {
+		/** The ledger refuses every write, so the claim's event is parked, or dead-lettered once the buffer's attempt budget is spent. */
+		const unreachable = (greptime: { insertEvent: (event: SubstrateEvent) => Promise<void> }) => {
+			greptime.insertEvent = async () => {
+				throw new Error("greptime unreachable: ETIMEDOUT");
+			};
+		};
+		const build = (stores: { index: unknown; greptime: unknown }, env: Record<string, string> = {}) =>
+			new Substrate(loadConfig(env), { index: stores.index as never, greptime: stores.greptime as never, steering: { history: null, liveSessions: null } });
+
+		test("a parked claim is not withdrawn: its event waits in the buffer, so the node stays held", async () => {
+			const stores = stubStores({ repo: "r" });
+			unreachable(stores.greptime);
+			const substrate = build(stores);
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+			await substrate.drainPendingEvents(0, { abandon: true });
+
+			expect(result.decision).toBe("granted");
+			expect(result.claimed).toBe(true);
+			expect(stores.released).toEqual([]);
+		});
+
+		test("a dead-lettered claim is withdrawn: its event can never land, so the node is released", async () => {
+			const stores = stubStores({ repo: "r" });
+			unreachable(stores.greptime);
+			// One attempt is the whole budget, so the failed write is dead-lettered at once rather than parked.
+			const substrate = build(stores, { SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS: "1" });
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+			await substrate.drainPendingEvents(0, { abandon: true });
+
+			expect(result.decision).toBe("revoked");
+			expect(result.claimed).toBe(false);
+			expect(stores.released).toEqual([{ graph_id: "ut-1", node_id: "n4" }]);
+		});
+
+		test("a refused claim is withdrawn as before: nothing was parked, so its event can never land", async () => {
+			const stores = stubStores({ repo: "r" });
+			stores.greptime.ensureAppendMode = async () => false;
+			const substrate = build(stores);
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+			expect(result.decision).toBe("revoked");
+			expect(stores.released).toEqual([{ graph_id: "ut-1", node_id: "n4" }]);
+		});
+
+		test("a stored claim is unchanged: granted, its event in the ledger, and nothing released", async () => {
+			const stores = stubStores({ repo: "r" });
+			const substrate = build(stores);
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+			expect(result.decision).toBe("granted");
+			expect(result.claimed).toBe(true);
+			expect(stores.emitted.map((event) => event.kind)).toEqual(["claim"]);
+			expect(stores.released).toEqual([]);
+		});
+
+		test("a thrown emit is unrecorded, so the claim is withdrawn as before", async () => {
+			const stores = stubStores({ repo: "r" });
+			const substrate = build(stores);
+			substrate.emit = async () => {
+				throw new Error("emit blew up");
+			};
+
+			const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+			expect(result.decision).toBe("revoked");
+			expect(stores.released).toEqual([{ graph_id: "ut-1", node_id: "n4" }]);
+		});
+	});
+});
+
+describe("claimNode waits on open prerequisites", () => {
+	type Edge = { from_node: string; to_node: string; kind: "requires" | "gated_by" | "blocks" };
+
+	function graphNode(node_id: string, state: string) {
+		return {
+			graph_id: "ut-1",
+			node_id,
+			linear_identifier: `SPE-${node_id}`,
+			linear_issue_id: null,
+			notion_page: null,
+			state,
+			claimed_by: null,
+			claimed_at: null,
+			claim_session: null,
+			lease_id: null,
+			lease_expires_at: null,
+			lease_heartbeat_at: null,
+			lease_epoch: 0,
+		};
+	}
+
+	/**
+	 * A graph the claim reads afresh on every call, as the index does: a test completes a prerequisite by setting its
+	 * state in `states`. `grants` records every hold the index made; `emitted` every event the ledger took.
+	 */
+	function world(edges: Edge[], states: Record<string, string>) {
+		const grants: string[] = [];
+		const emitted: SubstrateEvent[] = [];
+		const index = {
+			getGraph: async () => ({
+				graph_id: "ut-1",
+				repo: "swcstudiospace/x",
+				branch: "main",
+				steps: [],
+				edges: edges.map((edge) => ({ graph_id: "ut-1", ...edge })),
+				nodes: Object.entries(states).map(([node_id, state]) => graphNode(node_id, state)),
+			}),
+			claimNode: async (_graph_id: string, node_id: string, surface: string, session_id: string) => {
+				grants.push(node_id);
+				return {
+					claimed: true,
+					node: graphNode(node_id, states[node_id] ?? "unstarted"),
+					lease: { lease_id: "lse_1", epoch: 1, expires_at: "2026-09-30T12:15:00.000Z", state: "held" },
+					decision: {
+						action: "granted",
+						granted: true,
+						lease_id: "lse_1",
+						epoch: 1,
+						observed_epoch: 0,
+						ttl_seconds: 900,
+						evicted: null,
+						holder: { surface, session_id },
+						observed_expiry: null,
+						reason: null,
+					},
+				};
+			},
+			releaseNode: async () => ({ released: true }),
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				emitted.push(event);
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
+		return { substrate, grants, emitted };
+	}
+
+	test("a requires prerequisite that is open refuses the claim, and the claim is granted once it completes", async () => {
+		const states = { n3: "started", n4: "unstarted" };
+		const { substrate, grants, emitted } = world([{ from_node: "n4", to_node: "n3", kind: "requires" }], states);
+
+		const refused = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(refused).toMatchObject({ claimed: false, decision: "contended", action: "refused", reason: "prerequisite-open", ttl_seconds: null });
+		expect(refused.prerequisite).toEqual({ kind: "requires", node_id: "n3", linear_identifier: "SPE-n3", state: "started" });
+		expect(refused.lease.lease_id).toBeNull();
+		expect(grants).toEqual([]);
+		expect(emitted).toEqual([]);
+
+		states.n3 = "completed";
+		const granted = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(granted).toMatchObject({ claimed: true, decision: "granted", reason: null, prerequisite: null });
+		expect(grants).toEqual(["n4"]);
+		expect(emitted.map((event) => event.kind)).toEqual(["claim"]);
+	});
+
+	test("a gated_by prerequisite holds the claim the same way", async () => {
+		const states = { n3: "started_review", n4: "unstarted" };
+		const { substrate, grants } = world([{ from_node: "n4", to_node: "n3", kind: "gated_by" }], states);
+
+		const refused = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(refused).toMatchObject({ claimed: false, reason: "prerequisite-open" });
+		expect(refused.prerequisite?.kind).toBe("gated_by");
+		expect(grants).toEqual([]);
+
+		states.n3 = "completed";
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, reason: null });
+		expect(grants).toEqual(["n4"]);
+	});
+
+	test("a blocks edge does not hold the blocked node: only requires and gated_by are claim prerequisites", async () => {
+		const { substrate, grants } = world([{ from_node: "n3", to_node: "n4", kind: "blocks" }], { n3: "started", n4: "unstarted" });
+
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, reason: null, prerequisite: null });
+		expect(grants).toEqual(["n4"]);
+	});
+
+	test("a claim with no prerequisites is unchanged", async () => {
+		const { substrate, grants, emitted } = world([], { n4: "unstarted" });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(result).toMatchObject({ claimed: true, decision: "granted", action: "granted", reason: null, prerequisite: null });
+		expect(grants).toEqual(["n4"]);
+		expect(emitted.map((event) => event.kind)).toEqual(["claim"]);
+	});
+
+	test("what waits on a node does not hold that node's own claim", async () => {
+		// n3 requires n4: n3 is the waiter, so n4 has no prerequisite and its claim stands even though n3 is open.
+		const { substrate, grants } = world([{ from_node: "n3", to_node: "n4", kind: "requires" }], { n3: "unstarted", n4: "started" });
+
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, reason: null });
+		expect(grants).toEqual(["n4"]);
 	});
 });
 
@@ -398,7 +625,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 				lease,
 				decision: granted,
 			}),
-			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main", nodes: [], edges: [] }),
 			releaseNode: async (graph_id: string, node_id: string, request: { lease_id?: string | null }, caller: Surface | null) => {
 				if (options.releaseFails) throw new Error("postgres is down");
 				// Held to the holder's surface like any release, so a withdrawal made as
@@ -437,12 +664,11 @@ describe("claimNode is fail-closed on the ledger", () => {
 				};
 			},
 		};
+		// `stored: false` is a refusal, not an outage: the append-only check fails, so the event is refused outright and never parked.
 		const greptime = {
-			ensureAppendMode: async () => true,
+			ensureAppendMode: async () => options.stored,
 			lastHash: async () => null,
-			insertEvent: async () => {
-				if (!options.stored) throw new Error("greptime unreachable: connect ETIMEDOUT");
-			},
+			insertEvent: async () => undefined,
 		};
 		return { released, lease, index, greptime };
 	}
@@ -835,6 +1061,12 @@ describe("migrate", () => {
 });
 
 describe("append-mode enforcement", () => {
+	let restoreHindsightEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreHindsightEnv = withoutHindsightEnv();
+	});
+	afterEach(() => restoreHindsightEnv());
+
 	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test", session_id: "sess-1" };
 
 	function ledger(appendMode: boolean | null, quotingDialectKnown = true) {
@@ -921,7 +1153,7 @@ describe("append-mode enforcement", () => {
 	test("healthz separates reachability from writability", async () => {
 		// The state a monitor has to see: `ping` succeeds while every append is refused.
 		const { greptime } = ledger(false);
-		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow" | "lightrag") =>
+		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "lightrag" | "lightrag") =>
 			({ plane, state: "closed" as const, failures: 0, openedAt: null, lastErrorAt: null, lastError: null });
 		expect(await substrateWith(greptime).health()).toEqual({
 			index: false,
@@ -945,13 +1177,18 @@ describe("append-mode enforcement", () => {
 				cooldownUntil: null,
 			},
 			eventBus: { enabled: false },
-			eventBuffer: { enabled: false },
+			eventBuffer: {
+				pending: 0,
+				max: 1000,
+				oldestAt: null,
+				durable: false,
+				deadLetters: { depth: 0, max: 10000, durable: false, evicted: 0 },
+			},
 			planes: {
 				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
 				index: { ok: null, breaker: closed("index"), lastErrorAt: null },
 				cache: { ok: null, breaker: closed("cache"), lastErrorAt: null },
 				hindsight: { ok: null, breaker: closed("hindsight"), lastErrorAt: null },
-				ragflow: { ok: null, breaker: closed("ragflow"), lastErrorAt: null },
 				lightrag: { ok: null, breaker: closed("lightrag"), lastErrorAt: null },
 			},
 			capacity: { index: null, ledger: null },
@@ -1073,39 +1310,48 @@ describe("append-mode enforcement", () => {
 		expect(bare.capacity).toEqual({ index: null, ledger: null });
 	});
 
-	test("healthz probes a configured Hindsight and RAGFlow once each, bounded, and reports the breaker", async () => {
+	test("healthz probes a configured Hindsight and lightrag once each, bounded, and reports the breaker", async () => {
 		const { greptime } = ledger(true);
 		const saved = { HINDSIGHT_URL: process.env.HINDSIGHT_URL, HINDSIGHT_API_KEY: process.env.HINDSIGHT_API_KEY };
 		process.env.HINDSIGHT_URL = "http://fake";
 		process.env.HINDSIGHT_API_KEY = "test-bearer";
 		try {
 			const hindsight = new HindsightFake();
-			const ragflow = new RagflowFake();
-			const config = loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_BREAKER_FAILURES: "1" });
-			const substrate = new Substrate(config, { index: null, greptime: greptime as never, hindsightFetch: hindsight.fetch, ragflowFetch: ragflow.fetch });
+			const lightrag = new DocsPlaneFake();
+			// LightRAG probes GET /health (planes/lightrag.ts probeLightrag); the dataset
+			// double only serves the retired dataset API, so answer health here.
+			const lightragFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				if (url.endsWith("/health")) {
+					lightrag.requests.push({ method: (init?.method ?? "GET").toUpperCase(), path: "/health", body: null, query: {} });
+					return Response.json({ status: "healthy" });
+				}
+				return lightrag.fetch(input, init);
+			};
+			const config = loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_BREAKER_FAILURES: "1" });
+			const substrate = new Substrate(config, { index: null, greptime: greptime as never, hindsightFetch: hindsight.fetch, lightragFetch });
 			const up = await substrate.health();
 			expect(up.planes.hindsight).toMatchObject({ ok: true, lastErrorAt: null });
-			expect(up.planes.ragflow).toMatchObject({ ok: true, breaker: { state: "closed" } });
+			expect(up.planes.lightrag).toMatchObject({ ok: true, breaker: { state: "closed" } });
 			expect(hindsight.requests.filter((request) => request.path === "/health")).toHaveLength(1);
-			expect(ragflow.requests.filter((request) => request.path === "/api/v1/datasets")).toHaveLength(1);
-
-			// RAGFlow goes away: the probe fails, the breaker opens on the first failure, and both are reported.
+			expect(lightrag.requests.filter((request) => request.path === "/health")).toHaveLength(1);
+			// lightrag goes away: the probe fails, the breaker opens on the first failure, and both are reported.
 			const down = new Substrate(config, {
 				index: null,
 				greptime: greptime as never,
 				hindsightFetch: hindsight.fetch,
-				ragflowFetch: async () => {
+				lightragFetch: async () => {
 					throw new Error("connect ECONNREFUSED");
 				},
 			});
 			const failed = await down.health();
-			expect(failed.planes.ragflow.ok).toBe(false);
-			expect(failed.planes.ragflow.breaker).toMatchObject({ state: "open", failures: 1 });
-			expect(failed.planes.ragflow.lastErrorAt).toBe(failed.planes.ragflow.breaker?.lastErrorAt ?? -1);
-			expect(typeof failed.planes.ragflow.lastErrorAt).toBe("number");
+			expect(failed.planes.lightrag.ok).toBe(false);
+			expect(failed.planes.lightrag.breaker).toMatchObject({ state: "open", failures: 1 });
+			expect(failed.planes.lightrag.lastErrorAt).toBe(failed.planes.lightrag.breaker?.lastErrorAt ?? -1);
+			expect(typeof failed.planes.lightrag.lastErrorAt).toBe("number");
 			// Still 200-eligible: the status rule reads ledger and index only.
 			expect(failed.eventsWritable).toBe(true);
-			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, ragflow: true, lightrag: false });
+			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, lightrag: true });
 		} finally {
 			for (const [name, value] of Object.entries(saved)) {
 				if (value === undefined) delete process.env[name];
@@ -1116,22 +1362,22 @@ describe("append-mode enforcement", () => {
 
 	test("SUBSTRATE_BREAKER=0 leaves every breaker null and every call reaching the plane", async () => {
 		let calls = 0;
-		const substrate = new Substrate(loadConfig({ SUBSTRATE_BREAKER: "0", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BREAKER: "0", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_RAG_MAX_RETRIES: "0" }), {
 			index: null,
 			greptime: null,
-			ragflowFetch: async () => {
+			lightragFetch: async () => {
 				calls += 1;
 				throw new Error("connect ECONNREFUSED");
 			},
 		});
 		for (let i = 0; i < 7; i++) {
-			const reply = await substrate.searchDocs({ question: "who reads RAGFlow?" }, "omp");
+			const reply = await substrate.searchDocs({ question: "who reads lightrag?" }, "omp");
 			expect(reply).toMatchObject({ chunks: [], degraded: true });
-			expect(reply.reason).toContain("ragflow unreachable");
+			expect(reply.reason).toContain("lightrag unreachable");
 		}
 		expect(calls).toBe(7);
 		const health = await substrate.health();
-		expect(health.planes.ragflow).toEqual({ ok: false, breaker: null, lastErrorAt: null });
+		expect(health.planes.lightrag).toEqual({ ok: false, breaker: null, lastErrorAt: null });
 	});
 
 	test("docs search and memory recall degrade with `circuit open` once a plane's breaker is open", async () => {
@@ -1140,15 +1386,15 @@ describe("append-mode enforcement", () => {
 		process.env.HINDSIGHT_API_KEY = "test-bearer";
 		process.env.HINDSIGHT_BANKS = "sub-cursor";
 		try {
-			let ragflowCalls = 0;
+			let lightragCalls = 0;
 			let hindsightCalls = 0;
 			const substrate = new Substrate(
-				loadConfig({ SUBSTRATE_BREAKER_FAILURES: "2", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }),
+				loadConfig({ SUBSTRATE_BREAKER_FAILURES: "2", LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }),
 				{
 					index: null,
 					greptime: null,
-					ragflowFetch: async () => {
-						ragflowCalls += 1;
+					lightragFetch: async () => {
+						lightragCalls += 1;
 						throw new Error("connect ECONNREFUSED");
 					},
 					hindsightFetch: async () => {
@@ -1159,8 +1405,8 @@ describe("append-mode enforcement", () => {
 			);
 			for (let i = 0; i < 2; i++) await substrate.searchDocs({ question: "q" }, "omp");
 			const search = await substrate.searchDocs({ question: "q" }, "omp");
-			expect(search).toMatchObject({ chunks: [], degraded: true, reason: "ragflow circuit open" });
-			expect(ragflowCalls).toBe(2);
+			expect(search).toMatchObject({ chunks: [], degraded: true, reason: "lightrag circuit open" });
+			expect(lightragCalls).toBe(2);
 
 			for (let i = 0; i < 2; i++) await substrate.recallMemories({ query: "lease" }, "cursor");
 			const recall = await substrate.recallMemories({ query: "lease" }, "cursor");
@@ -1180,19 +1426,16 @@ describe("append-mode enforcement", () => {
 		expect((await substrateWith(greptime).health()).eventsWritable).toBe(true);
 	});
 
-	test("a LightRAG ingest with RAGFlow configured never lists datasets through the RAGFlow gate", async () => {
-		// The RAGFlow outage refuses every RAGFlow call; the LightRAG ingest must neither list through it nor be refused by it.
-		let ragflowCalls = 0;
+	test("a LightRAG ingest with lightrag configured never lists datasets through the lightrag gate", async () => {
+		// The lightrag outage refuses every lightrag call; the LightRAG ingest must neither list through it nor be refused by it.
 		const uploads: string[] = [];
+		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
-				ragflowFetch: async () => {
-					ragflowCalls += 1;
-					throw new Error("connect ECONNREFUSED");
-				},
+				...repos.stores,
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
@@ -1211,22 +1454,65 @@ describe("append-mode enforcement", () => {
 			"omp",
 			["docs/"],
 		);
-		expect(ragflowCalls).toBe(0);
 		expect(outcome.ok).toBe(true);
 		expect(uploads).toHaveLength(1);
 	});
 
-	test("a RAGFlow refresh does not move a LightRAG dataset's records to RAGFlow's id: an unchanged page stays unchanged", async () => {
-		// Under the lightrag backend the refresh records the dataset's name as its id (recordLightragVersion). The LightRAG
-		// ingest keys its records by that same name, so the next ingest of the same page finds the record and uploads nothing.
-		const ragflow = new RagflowFake();
+	test("a planning page's checkout survives Substrate.ingestDocs, and a non-string checkout is dropped and refused", async () => {
 		const uploads: string[] = [];
+		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
-				ragflowFetch: ragflow.fetch,
+				...repos.stores,
+				lightragFetch: async (input, init) => {
+					const url = new URL(String(input));
+					if (init?.method === "POST" && url.pathname === "/documents/upload") {
+						uploads.push(await ((init.body as FormData).get("file") as Blob).text());
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/text") {
+						const parsed = JSON.parse(String(init.body)) as { text?: unknown };
+						uploads.push(typeof parsed.text === "string" ? parsed.text : "");
+						return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+					}
+					if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+					if (url.pathname === "/documents/pipeline_status") return Response.json({ status: "idle" });
+					if (url.pathname.startsWith("/documents/track_status/")) return Response.json({ documents: [{ id: `doc-${url.pathname.split("/").pop()}`, status: "processed" }], total_count: 1 });
+					return Response.json({ detail: "no route" }, { status: 404 });
+				},
+			},
+		);
+		const body = "# Plan\n\nThe loose plan.\n";
+		const kept = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", pages: [{ path: ".planning/PLAN.md", source_url: "file:///wt/loose/.planning/PLAN.md", body, checkout: "wt-0123456789abcdef01234567" }] },
+			"omp",
+			[".planning/"],
+		);
+		expect(kept.ok).toBe(true);
+		expect(uploads).toHaveLength(1);
+		const dropped = await substrate.ingestDocs(
+			{ dataset: "agent-substrate", pages: [{ path: ".planning/OTHER.md", source_url: "file:///wt/loose/.planning/OTHER.md", body, checkout: 42 }] },
+			"omp",
+			[".planning/"],
+		);
+		expect(JSON.stringify(dropped)).toContain("planning page carries no checkout");
+		expect(uploads).toHaveLength(1);
+	});
+
+	test("a lightrag refresh does not move a LightRAG dataset's records to lightrag's id: an unchanged page stays unchanged", async () => {
+		// Under the lightrag backend the refresh records the dataset's name as its id (recordLightragVersion). The LightRAG
+		// ingest keys its records by that same name, so the next ingest of the same page finds the record and uploads nothing.
+		const uploads: string[] = [];
+		const repos = repoSeam();
+		const substrate = new Substrate(
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
+			{
+				index: null,
+				greptime: null,
+				...repos.stores,
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
@@ -1251,18 +1537,15 @@ describe("append-mode enforcement", () => {
 		expect(uploads).toHaveLength(1);
 	});
 
-	test("a LightRAG refresh does not resolve datasets through RAGFlow: an unreachable RAGFlow does not block it, and it records a LightRAG version", async () => {
-		let ragflowCalls = 0;
+	test("a LightRAG refresh does not resolve datasets through lightrag: an unreachable lightrag does not block it, and it records a LightRAG version", async () => {
 		const uploads: string[] = [];
+		const repos = repoSeam();
 		const substrate = new Substrate(
-			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" }),
+			loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...repos.env }),
 			{
 				index: null,
 				greptime: null,
-				ragflowFetch: async () => {
-					ragflowCalls += 1;
-					throw new Error("connect ECONNREFUSED");
-				},
+				...repos.stores,
 				lightragFetch: async (input, init) => {
 					const url = new URL(String(input));
 					if (init?.method === "POST" && url.pathname === "/documents/upload") {
@@ -1282,7 +1565,6 @@ describe("append-mode enforcement", () => {
 			"omp",
 			{ wait: true },
 		);
-		expect(ragflowCalls).toBe(0);
 		expect(outcome).toMatchObject({ status: 200, body: { ok: true, version: { version: "v1", backend: "lightrag", dataset_id: "agent-substrate" } } });
 		expect(uploads).toHaveLength(1);
 	});
@@ -1889,7 +2171,7 @@ describe("handoff", () => {
 						surface: "grok-bot",
 						kind: "handoff",
 						summary: "handoff to hermes: x",
-						payload: JSON.stringify({ handoff: { goal: "x", signature: null } }),
+						payload: JSON.stringify({ handoff: { goal: "x", files: [], dod: [], blockers: [], from: { surface: "grok-bot" }, to: { surface: "hermes" }, signature: null } }),
 						hash: "h",
 						prev: null,
 						actor: "agent",
@@ -1903,6 +2185,36 @@ describe("handoff", () => {
 
 		expect(handoffs).toHaveLength(1);
 		expect(handoffs[0]?.verdict).toEqual({ ok: false, reason: "unsigned" });
+	});
+
+	test("a stored row whose handoff is not a well-formed packet is skipped, and the valid one still comes back", async () => {
+		// The ledger takes any payload from events_emit, so a malformed row is one fewer packet, never a value cast to
+		// HandoffPacket and handed to the caller.
+		const { written, greptime } = ledger();
+		await new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never }).handoff(input);
+		const row = defined(written[0], "written ledger row");
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), {
+			index: null,
+			greptime: {
+				readEvents: async () => [
+					{ ...row, ts: Date.parse(row.ts), payload: JSON.stringify(row.payload), step: null },
+					{
+						...row,
+						id: "evt_malformed",
+						summary: "handoff to hermes: malformed",
+						payload: JSON.stringify({ handoff: { goal: "x", signature: null } }),
+						ts: Date.parse(row.ts),
+						step: null,
+					},
+				],
+			} as never,
+		});
+
+		const handoffs = await substrate.handoffsForGraph("ut-1");
+
+		expect(handoffs.map((entry) => entry.event_id)).toEqual([row.id]);
+		expect(handoffs[0]?.packet?.goal).toBe("finish the lease CAS path");
+		expect(handoffs[0]?.verdict).toEqual({ ok: true, key_id: "k1" });
 	});
 });
 
@@ -2219,6 +2531,25 @@ describe("queryEvents", () => {
 		expect(result.error).toContain(REDACTED);
 		expect(result.error).not.toContain("hunter2");
 	});
+
+	test("a payload pair keeps only the rows whose payload holds that key with that value exactly", async () => {
+		// The store matches the pair with a plain LIKE, where `_` matches any character: a payload keyed `headXkey` matches `head_key`. The rows below are what that LIKE hands back, and the read must drop the lookalike.
+		const sha = "ab".repeat(20);
+		const { queries, greptime } = reader([
+			row({ id: "exact", payload: JSON.stringify({ head_key: sha }) }),
+			row({ id: "lookalike", payload: JSON.stringify({ headXkey: sha }) }),
+			row({ id: "other-value", payload: JSON.stringify({ head_key: "cd".repeat(20) }) }),
+			row({ id: "unparsed", payload: "not json" }),
+			row({ id: "no-payload", payload: null }),
+		]);
+		const result = await substrateWith(greptime).queryEvents({ payload_key: "head_key", payload_value: sha });
+
+		expect(result.events.map((event) => event.id)).toEqual(["exact"]);
+		expect(result.count).toBe(1);
+		// The payload is read back for the check, and is not handed out unless the caller asked for it.
+		expect(queries[0]?.includePayload).toBe(true);
+		expect(result.events[0]).not.toHaveProperty("payload");
+	});
 });
 
 describe("queryEvents input checks", () => {
@@ -2254,6 +2585,24 @@ describe("queryEvents input checks", () => {
 		// Absent is still absent: no clause, and no refusal.
 		await substrate.queryEvents({});
 		expect(queries[0]?.match?.session_id).toBeUndefined();
+	});
+
+	test("a payload pair is refused unless both halves are well formed, and a well-formed one reaches the store as a pair", async () => {
+		const { queries, greptime } = reader();
+		const substrate = substrateWith(greptime);
+		const sha = "ab".repeat(20);
+
+		await expect(substrate.queryEvents({ payload_key: "head-key", payload_value: sha })).rejects.toThrow(/payload_key must be/);
+		await expect(substrate.queryEvents({ payload_key: "head_key", payload_value: "xyz" })).rejects.toThrow(/payload_value must be/);
+		await expect(substrate.queryEvents({ payload_key: "head_key" })).rejects.toThrow(/payload_key needs payload_value/);
+		await expect(substrate.queryEvents({ payload_value: sha })).rejects.toThrow(/payload_value needs payload_key/);
+		await expect(substrate.queryEvents({ payload_key: 7 as never, payload_value: sha })).rejects.toThrow(/payload_key must be a string/);
+		expect(queries).toEqual([]);
+
+		await substrate.queryEvents({ payload_key: "head_key", payload_value: sha });
+		expect(queries[0]?.payloadPair).toEqual({ key: "head_key", value: sha });
+		await substrate.queryEvents({});
+		expect(queries[1]?.payloadPair).toBeUndefined();
 	});
 
 	test("refuses a filter of the wrong type instead of failing inside redaction", async () => {
@@ -2481,7 +2830,10 @@ describe("emit when the ingest record is not recorded", () => {
 
 	test("an insert that fails before the event row lands is still stored: false", async () => {
 		const { written, greptime } = ledger({ insertFails: "greptime unreachable: connect ETIMEDOUT" });
-		const { result, log } = await captureStderr(() => substrateWith(greptime).emit(input));
+		const substrate = substrateWith(greptime);
+		const { result, log } = await captureStderr(() => substrate.emit(input));
+		// The write is parked, so the instance runs a tick: close it the way shutdown does.
+		await substrate.drainPendingEvents(0, { abandon: true });
 
 		expect(result.stored).toBe(false);
 		expect(result.error).toContain("ETIMEDOUT");
@@ -3158,7 +3510,7 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 					observed_expiry: null,
 				},
 			}),
-			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main", nodes: [], edges: [] }),
 			releaseNode: async (graph_id: string, node_id: string) => ({
 				released: true,
 				node: { graph_id, node_id },
@@ -3175,12 +3527,11 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 		const revokedSubstrate = new Substrate(loadConfig({}), {
 			index: revokedIndex as never,
 			steering: { history: null, liveSessions: null },
+			// A refusal, not an outage: the append-only check fails, so the event is refused outright and never parked.
 			greptime: {
-				ensureAppendMode: async () => true,
+				ensureAppendMode: async () => false,
 				lastHash: async () => null,
-				insertEvent: async () => {
-					throw new Error("greptime unreachable: connect ETIMEDOUT");
-				},
+				insertEvent: async () => undefined,
 			} as never,
 			mirror: revoked.mirror as never,
 		});
@@ -5709,58 +6060,59 @@ describe("private reads under the request budget and the docs steering precedenc
 
 	describe("docs_search directions", () => {
 		async function rig(stored?: string) {
-			const ragflow = new RagflowFake();
+			const lightrag = new DocsPlaneFake();
 			const authority = createTestLiveSessionAuthority();
 			const session = await issueLiveSession(authority, { caller, ...(stored === undefined ? {} : { steering: stored }) });
-			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+			const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), {
 				index: null,
 				greptime: null,
-				ragflowFetch: ragflow.fetch,
+				lightragFetch: lightrag.fetch,
 				steering: { history: null, liveSessions: authority },
 			});
-			return { substrate, ragflow, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
+			return { substrate, lightrag, sessionId: session.sessionId, live: { caller, sessionBinding: session.sessionBinding } };
 		}
-		const askedWith = (ragflow: RagflowFake): string => JSON.stringify(ragflow.retrievals());
+		// LightRAG retrieves via POST /query ({query, …}); the dataset double records it under /query.
+		const askedWith = (lightrag: DocsPlaneFake): string => JSON.stringify(lightrag.requests.filter((request) => request.path === "/query").map((request) => request.body));
 
 		test("a supplied direction wins over the stored one for that search", async () => {
 			const h = await rig("STORED-DIRECTION");
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "PER-CALL-DIRECTION" }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).toContain("PER-CALL-DIRECTION");
-			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId, steering: "PER-CALL-DIRECTION" }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).toContain("PER-CALL-DIRECTION");
+			expect(askedWith(h.lightrag)).not.toContain("STORED-DIRECTION");
 		});
 
 		test("stored directions answer a search that supplies none", async () => {
 			const h = await rig("STORED-DIRECTION");
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).toContain("STORED-DIRECTION");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).toContain("STORED-DIRECTION");
 		});
 
 		test("a search with no directions anywhere asks the plain question", async () => {
 			const h = await rig();
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).toContain("who reads RAGFlow?");
-			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).toContain("who reads lightrag?");
+			expect(askedWith(h.lightrag)).not.toContain("Steering context");
 		});
 
 		test("an explicitly empty direction replaces the stored one with none", async () => {
 			const h = await rig("STORED-DIRECTION");
-			await h.substrate.searchDocs({ question: "who reads RAGFlow?", steering_session_id: h.sessionId, steering: "" }, caller.surface, h.live);
-			expect(askedWith(h.ragflow)).not.toContain("STORED-DIRECTION");
-			expect(askedWith(h.ragflow)).not.toContain("Steering context");
+			await h.substrate.searchDocs({ question: "who reads lightrag?", steering_session_id: h.sessionId, steering: "" }, caller.surface, h.live);
+			expect(askedWith(h.lightrag)).not.toContain("STORED-DIRECTION");
+			expect(askedWith(h.lightrag)).not.toContain("Steering context");
 		});
 
 		test("a supplied direction steers a search outside any steering session", async () => {
-			const ragflow = new RagflowFake();
-			const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: ragflow.fetch });
-			await substrate.searchDocs({ question: "who reads RAGFlow?", steering: "PER-CALL-DIRECTION" }, "cursor");
-			expect(askedWith(ragflow)).toContain("PER-CALL-DIRECTION");
+			const lightrag = new DocsPlaneFake();
+			const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k" }), { index: null, greptime: null, lightragFetch: lightrag.fetch });
+			await substrate.searchDocs({ question: "who reads lightrag?", steering: "PER-CALL-DIRECTION" }, "cursor");
+			expect(askedWith(lightrag)).toContain("PER-CALL-DIRECTION");
 		});
 
 		test("a directions value that is not a string of at most 16000 characters is refused at the boundary", async () => {
 			const h = await rig("STORED-DIRECTION");
 			await expect(h.substrate.searchDocs({ question: "q", steering: 42 }, caller.surface)).rejects.toBeInstanceOf(ZodError);
 			await expect(h.substrate.searchDocs({ question: "q", steering_session_id: h.sessionId, steering: "x".repeat(16_001) }, caller.surface, h.live)).rejects.toBeInstanceOf(ZodError);
-			expect(askedWith(h.ragflow)).toBe("[]");
+			expect(askedWith(h.lightrag)).toBe("[]");
 		});
 	});
 });

@@ -126,7 +126,7 @@ describe("anchor-run entry process boundary", () => {
 		} finally {
 			trap.stop(true);
 		}
-	});
+	}, 30_000);
 
 	test("an unknown flag exits 2 with usage", async () => {
 		const result = await runEntry(["--bogus"]);

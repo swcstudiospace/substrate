@@ -2,8 +2,8 @@
  * Whether removing a workspace directory (`<root>/<graph_id>`) would lose work. The removal itself knows nothing
  * of git, so this runs before it. Every member worktree must be clean (untracked files included), fully pushed, free
  * of ignored work only it holds, and free of submodules, whose files are not checked. The workspace must hold no
- * primary checkout, no entry outside every member (a removal would delete it unchecked), and no `.planning/` directory,
- * which lives outside git.
+ * primary checkout, no entry outside every member (a removal would delete it unchecked), and no `.planning/` with any
+ * change git reports (modified, deleted, untracked or ignored).
  *
  * Read-only by construction: it runs `git status`, `git rev-list`, `git ls-files` (directly and through
  * `findIgnoredWork`), `git worktree list` and the discovery reads of `discoverRepos`. It never removes a worktree,
@@ -16,7 +16,7 @@ import { findIgnoredWork, type IgnoredOptions, UNKNOWN_IGNORED } from "./ignored
 import { discoverRepos, listWorktrees } from "./inventory.ts";
 import { mapLimit } from "./pool.ts";
 
-export const PLANNING_REFUSAL = "workspace .planning is outside git: copy it out first";
+export const PLANNING_REFUSAL = "workspace .planning has changes git reports: commit them or copy them out first";
 export const PRIMARY_REFUSAL = "primary checkout inside the workspace: never removed by a workspace removal";
 export const LOOSE_REFUSAL = "outside every git worktree, so removing the workspace would delete it unchecked: copy it out first";
 
@@ -110,7 +110,7 @@ async function discoverMembers(root: string, git: GitRunner): Promise<Discovered
  * The entries below `dir` that no member owns and that hold no member: a removal would delete them with nothing
  * checking them. Only real directories are searched on, so the walk is a tree that cannot revisit a directory; a
  * symbolic link is refused as it stands and its target is never read. A member's own contents are its own probes'
- * business. The root's `.planning/` has its own refusal and is skipped here.
+ * business. A real `.planning/` directory has its own refusal and is skipped here; a link of that name is refused.
  */
 function looseRefusals(dir: string, members: readonly string[], root: string): string[] {
 	let entries: Dirent[];
@@ -122,11 +122,12 @@ function looseRefusals(dir: string, members: readonly string[], root: string): s
 	const out: string[] = [];
 	for (const entry of entries) {
 		const path = join(dir, entry.name);
-		if (path === join(root, ".planning")) continue;
+		// Links are refused before the `.planning/` skip, so a dangling `.planning` link is not let through unchecked.
 		if (entry.isSymbolicLink()) {
 			out.push(`${path}: ${LOOSE_REFUSAL}`);
 			continue;
 		}
+		if (path === join(root, ".planning")) continue;
 		const real = canonical(path);
 		if (members.includes(real)) continue;
 		if (entry.isDirectory() && members.some((member) => isInside(member, real))) out.push(...looseRefusals(path, members, root));
@@ -171,6 +172,20 @@ async function probe(member: Member, git: GitRunner, options: WorkspaceGuardOpti
 }
 
 /**
+ * The workspace's `.planning/`: refused when `git status` in the root reports any entry under it (modified, deleted,
+ * added, renamed, untracked or ignored). A tracked and clean `.planning/` prints nothing and passes. `git status` runs in
+ * the root, so it answers for the repository that holds the root; a root that no repository holds fails the status and is
+ * refused too. The check is needed because the root may sit inside an enclosing repository that tracks `.planning/`:
+ * `discoverMembers` searches only at or below the root, so no member probe reaches that repository's edits.
+ */
+async function planningReasons(rootReal: string, git: GitRunner): Promise<string[]> {
+	if (!existsSync(join(rootReal, ".planning"))) return [];
+	const status = await git(["status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--", ".planning"], rootReal);
+	if (status.code !== 0) return [PLANNING_REFUSAL];
+	return status.stdout.trim() === "" ? [] : [PLANNING_REFUSAL];
+}
+
+/**
  * Whether the workspace at `root` can be removed without losing work. Reads only: see the module comment. The
  * refusals are ordered: discovery problems, each primary checkout, loose entries, then each member's reasons (every
  * member is still probed, so its state is reported), then the workspace's own `.planning/`.
@@ -185,6 +200,6 @@ export async function workspaceGuard(root: string, git: GitRunner, options: Work
 	if (!memberPaths.includes(rootReal)) refusals.push(...looseRefusals(rootReal, memberPaths, rootReal));
 	const probes = await mapLimit(discovered.members, GUARD_CONCURRENCY, (member) => probe(member, git, options));
 	refusals.push(...probes.flat());
-	if (existsSync(join(rootReal, ".planning"))) refusals.push(PLANNING_REFUSAL);
+	refusals.push(...(await planningReasons(rootReal, git)));
 	return { ok: refusals.length === 0, refusals };
 }

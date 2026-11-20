@@ -3,7 +3,7 @@
  * Opt-in per-plane chaos for a rehearsal twin (`SUBSTRATE_GATE_CHAOS_PLANES=1` or
  * `bun scripts/chaos-planes.ts --name <instance>` or `rehearsal smoke --chaos-planes`).
  *
- * Planes, in order: index, cache, hindsight, ragflow. The Greptime ledger is not here;
+ * Planes, in order: index, cache, hindsight, lightrag. The Greptime ledger is not here;
  * the 60s ledger proof stays in `chaos-smoke.ts` and the gate's `outage.chaos`.
  * `CHAOS_REHEARSAL` is never set.
  *
@@ -15,7 +15,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const CHAOS_PLANES = ["index", "cache", "hindsight", "ragflow"] as const;
+export const CHAOS_PLANES = ["index", "cache", "hindsight", "lightrag"] as const;
 export type ChaosPlane = (typeof CHAOS_PLANES)[number];
 
 /** Longer than the 5s `/healthz` memo so a paused index is visible in a body. */
@@ -30,7 +30,7 @@ export interface ChaosHealthBody {
 	planes?: {
 		index?: { ok?: boolean | null };
 		hindsight?: { ok?: boolean | null };
-		ragflow?: { ok?: boolean | null };
+		lightrag?: { ok?: boolean | null };
 	};
 }
 
@@ -73,7 +73,7 @@ function skipsFor(body: ChaosHealthBody): string[] {
 	const skips: string[] = [];
 	if (body.cache?.enabled !== true) skips.push("cache: rehearsal does not boot redis");
 	if (body.planes?.hindsight?.ok === null || body.planes?.hindsight?.ok === undefined) skips.push("hindsight: plane is not configured");
-	if (body.planes?.ragflow?.ok === null || body.planes?.ragflow?.ok === undefined) skips.push("ragflow: plane is not configured");
+	if (body.planes?.lightrag?.ok === null || body.planes?.lightrag?.ok === undefined) skips.push("lightrag: plane is not configured");
 	return skips;
 }
 

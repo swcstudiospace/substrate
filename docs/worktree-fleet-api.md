@@ -122,13 +122,13 @@ The table is created by migration step `worktrees` (additive, `expand`; see `doc
 
 ## Flags
 
-All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MIN_FREE_GB` and `SUBSTRATE_WORKTREE_ROOTS` in Python. `docs/config-reference.md` lists them with the other flags.
+All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_ROOTS` and `SUBSTRATE_WORKTREE_MIN_FREE_GB` in Python. `docs/config-reference.md` lists them with the other flags.
 
 | Variable | Default | Read by | Meaning |
 | --- | --- | --- | --- |
 | `SUBSTRATE_WORKTREE_REGISTRY` | `off` | the server | `on` enables the routes and the tool |
 | `SUBSTRATE_WORKTREE_REGISTRY_TTL_S` | `1209600` | the server | the retention window, 60 to 31,536,000 seconds |
-| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor, the dispatcher | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`. The dispatcher reuses a checkout of the graph under any configured root, creates under the first root (or `/var/lib/substrate/worktrees` when none is set), and checks free space on the first root's filesystem, or on `/` when no root is set |
+| `SUBSTRATE_WORKTREE_ROOTS` | none | the CLI, the collector, the fleet package, the doctor, the dispatcher | colon-separated absolute directories that hold worktrees. Unset: the CLI and the doctor assume no location; the collector's graph attribution falls back to `/var/lib/substrate/worktrees`; the dispatcher creates worktrees under the first absolute entry, else under `/var/lib/substrate/worktrees` |
 | `SUBSTRATE_WORKTREE_MIN_FREE_GB` | `5` | the CLI, the fleet package, the dispatcher | the free-disk floor for creating a worktree |
 | `SUBSTRATE_WORKTREE_IDLE_DAYS` | `14` | the server, the CLI, the fleet package | how long a worktree must be untouched before prune may call it safe, and when a listing calls it `stale` |
 | `SUBSTRATE_SESSION_ID` | none | the CLI, the fleet package | the session `substrate worktree scan --report` attributes the worktree holding the current directory to when `--session ID` is absent (the flag wins; a value that is not a session id is a usage error) |
@@ -138,6 +138,7 @@ All six are read by TypeScript; the dispatcher also reads `SUBSTRATE_WORKTREE_MI
 1. Set `SUBSTRATE_WORKTREE_REGISTRY=on` on the server (it needs `SUBSTRATE_PG_URL`; the table is created at boot by `migrate()`).
 2. Give each reporter a token for its surface. A reporter without one is refused.
 3. Run the reporter; `GET /worktrees?host=<host>` shows what it sent.
+4. Schedule the reporter with a host timer: `bun scripts/worktree-report.ts` ([the scheduled report](worktree-fleet.md#the-scheduled-report)). It reads `GET /worktrees` before it posts, so it keeps the sessions the registry holds.
 
 To turn it off set the variable back to `off`: the routes answer 503 again and the rows stay, unread, until the next time it is on or an operator drops the table.
 
@@ -147,6 +148,7 @@ Two JSON variables decide which repositories a surface may address, and where ea
 
 - `SUBSTRATE_REPO_REGISTRY`: `{"owner/name": {"checkouts": ["/abs"], "worktrees": ["/abs"]}}`. A path is placed in a repository only by this table. Two repositories may not share or nest a directory.
 - `SUBSTRATE_REPO_SCOPES`: `{"<surface>": ["owner/name"]}`. Unset means scoping is off and every caller may address every repository, as before. Set, a surface missing from the object, and every anonymous caller, is granted nothing.
+- `SUBSTRATE_REPO_ALLOWLIST`: `{"<session id>": {"owner/name": "<CREDENTIAL_ENV>"}}`. The session id is the caller's surface name. Each repository is canonical lowercase `owner/name`, and each value is the name of the environment variable that holds that repository's credential (`[A-Za-z_][A-Za-z0-9_]*`). A session addresses only the repositories in its own entry; an unknown and a disallowed repository are refused alike, and the refusal names neither. Unset or blank: no session is granted any repository, so every session-scoped git operation is refused before any spawn. A malformed value (not a JSON object, an empty session id, a non-canonical repository, or an invalid variable name) grants nothing and fails each operation; it does not refuse the boot. The variable is read from the process environment each time an operation runs. When git runs for an admitted repository, the executor passes that repository's credential to the runner as `SUBSTRATE_REPO_CREDENTIAL`; an unset credential variable passes nothing, and one repository's grant cannot resolve another repository's credential.
 
 What is refused, and before what:
 
@@ -158,11 +160,11 @@ What is refused, and before what:
 
 A refusal is recorded as a `repo.scope-refused` ledger warning with the route, the reason code and a 16-hex digest of what was asked for; the requested path or repository is never written. An anonymous refusal is recorded by the route audit. The corpus root and anchor are not gated: they are digests over every repository and reveal no document content.
 
-The scoped credential is the surface bearer plus its grant. No per-repository secret exists; that is a recorded open decision.
+`SUBSTRATE_REPO_SCOPES` carries no secret. The scoped credential is the surface bearer plus its grant. A repository's git credential is named only by `SUBSTRATE_REPO_ALLOWLIST` (above), which names the environment variable that holds it.
 
 ## Cross-repository operations (phase 74)
 
-`packages/mcp-server/src/cross-repo-ops.ts` runs one cross-repository write: a branch fan-out. The same branch is created at a named base in each of two to 16 registered repositories, one step per repository. It is exposed as `POST /cross-repo/fanout` and the `cross_repo_fanout` tool, and its stored state is read with `GET /cross-repo/status?key=` and the `cross_repo_status` tool (see [Routes and tools](#routes-and-tools-phase-74)). The operator's undo is `POST /cross-repo/compensate` and the `cross_repo_compensate` tool (see [Compensation](#compensation-phase-74-operator-only)). The module entry points are `runBranchFanout` and `crossRepoStatus`. The steps run through the same phase 72 executor and surface grant as the rest of this document.
+`packages/mcp-server/src/cross-repo-ops.ts` runs one cross-repository write: a branch fan-out. The same branch is created at a named base in each of two to 16 registered repositories, one step per repository. It is exposed as `POST /cross-repo/fanout` and the `cross_repo_fanout` tool, and its stored state is read with `GET /cross-repo/status?key=` and the `cross_repo_status` tool (see [Routes and tools](#routes-and-tools-phase-74)). The operator's undo is `POST /cross-repo/compensate` and the `cross_repo_compensate` tool (see [Compensation](#compensation-phase-74-operator-only)). The module entry points are `runBranchFanout` and `crossRepoStatus`. The steps run through the same phase 72 executor and allowlist session as the rest of this document.
 
 Every step is recorded in Postgres (`cross_repo_operations` and `cross_repo_steps`, migration step 44) before its git effect runs, and its outcome is read back from the repository's ref. Each git call goes through the phase 72 executor, so a repository the surface is not granted, or that is not registered, is refused before any spawn.
 
@@ -187,8 +189,8 @@ Every refusal of the fan-out and status routes answers `{"ok": false, "reason": 
 | Status | Reason | Route | When |
 | --- | --- | --- | --- |
 | 200 | none | both | the operation was run, resumed or read. |
-| 400 | `request-invalid` | both | fan-out: the body is not JSON or not an object, carries a field other than `key`, `branch` or `repos`, or a field is malformed (the key, the branch, the repository count, a repository, or a base). The key is missing or malformed. |
-| 403 | `repo-not-granted` | fan-out | a named repository is not granted to the caller's surface. An anonymous caller (no surface) is refused here whether or not `SUBSTRATE_REPO_SCOPES` is set. |
+| 400 | `request-invalid` | both | fan-out: the body is not JSON or not an object, carries a field other than `key`, `branch` or `repos`, or a field is malformed (the key, the branch, the repository count, a repository, or a base). Status: the key is missing or malformed. |
+| 403 | `repo-not-granted` | fan-out | a named repository is not granted to the caller's surface, or is not in its `SUBSTRATE_REPO_ALLOWLIST` session. An anonymous caller (no surface) is refused here whether or not `SUBSTRATE_REPO_SCOPES` is set; a surface with no session, and a malformed allowlist, land here too. |
 | 404 | `not-found` | status | no operation is stored under the key, the caller is anonymous, or the caller may not see every repository it names. All answer alike, so a key for an ungranted repository is not revealed. |
 | 409 | `key-reused` | fan-out | the key is stored for a different request. A new attempt needs a new key. Nothing runs. |
 | 422 | the gate's reason, `branch-invalid` or `base-unresolved` | fan-out | any other refusal: `repo-not-registered`, `path-not-registered`, `all-repos-not-granted` and the like from the surface grant; `branch-invalid` (not a git branch name); `base-unresolved` (the base is not a commit in that repository). Refused before the store is written. |
@@ -211,7 +213,7 @@ The checks run in this order, and the first refusal stops the run:
 | 400 | `request-invalid` | the body is not an object, carries a field other than `key`, or `key` is missing or malformed. |
 | 403 | `operator-required` | the engine's own operator check. The route refuses the same caller first, so this is not reached through it. |
 | 404 | `operation-not-found` | no operation is stored under the key. Nothing runs. |
-| 403 | `repo-not-granted` | a repository the stored operation names is not granted to the caller's surface. |
+| 403 | `repo-not-granted` | a repository the stored operation names is not granted to the caller's surface, or is not in its `SUBSTRATE_REPO_ALLOWLIST` session. |
 | 422 | the gate's reason | any other gate refusal, such as `repo-not-registered`, `path-not-registered` or `all-repos-not-granted`. |
 
 Every repository the operation names is gated before any git call runs. A refusal from the gate runs no git and changes no ref.
@@ -219,3 +221,5 @@ Every repository the operation names is gated before any git call runs. A refusa
 A 200 answers `{"ok": true, "operation": ...}`. The operation's `status` is `rolled-back` (every applied step was undone; terminal) or `needs-attention` (a step was parked and left in place). It is never `done`. A repeat call on a `rolled-back` operation returns it unchanged and makes no git call. A repeat call on a `needs-attention` operation undoes the steps still `applied`, `compensating` or `parked`, again under the key's lock.
 
 A step is parked, not deleted, when the undo cannot prove it wrote the ref: `ref-moved` (the ref is no longer at the planned commit), `undo-failed` (the ref is still at the planned commit after the delete), `undo-unknown` (the ref could not be read), and `apply-unknown` (the step was found mid-create, so it cannot be told apart from one that never ran). Persisted reasons are closed codes, as for the fan-out.
+
+

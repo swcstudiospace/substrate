@@ -16,7 +16,9 @@
  * The historical session id is `--session`, else the envelope's `session_id`, else the one session that has local
  * checkpoints in the worktree. Private hints separately require `--steering-session` / `steering_session_id` and an
  * exact private record selected by `--binding-file` / `binding_file` or the deterministic server/surface/live path.
- * No proof is accepted on stdin or argv. `transcript_path` is accepted and ignored.
+ * No proof is accepted on stdin or argv. `transcript_path` is read and validated, but it is never used as a locator. The claude-code
+ * pointer is `session_id` plus `turn_no` or `entry_id`, the ids the envelope holds, never a path. Those field names follow the
+ * claude-code contract in `transcript-ref.ts`; without them no pointer is recorded.
  *
  * A turn costs no extra tree hash over a bare `session checkpoint`: the cheap rules (rate limit, baseline,
  * directive dedupe) run first on an unlocked list; if they pass, `createCheckpoint` takes the one snapshot and
@@ -30,7 +32,8 @@
  * hook has) and which is empty on any error.
  */
 import { isAbsolute } from "node:path";
-import type { RandomBytes } from "../../../mcp-server/src/session-events.ts";
+import { transcriptRefFor } from "../../../collectors/src/transcript-ref.ts";
+import type { RandomBytes, TranscriptRef } from "../../../mcp-server/src/session-events.ts";
 import { type Clock, type Runner, type SnapshotPolicy, spawnRunner } from "../../../worktree-snapshot/src/index.ts";
 import {
 	type CheckpointResult,
@@ -44,7 +47,7 @@ import type { RollbackServerClient } from "./client.ts";
 import { resolvePendingDir } from "./pending.ts";
 import { consumedPath, readConsumed, retainListed, writeConsumed } from "./steering-consumed.ts";
 import { type CheckpointHookTrigger, type HookTrigger, type PolicyCheckpoint, directiveKey, shouldCheckpoint } from "./trigger-policy.ts";
-import { SESSION_ID_PATTERN, type SteerClient, type SteerDirective, type SteerResult } from "../steer/client.ts";
+import { SESSION_ID_PATTERN, type SteerClient, type SteerDirective, type SteerDirectiveListing, type SteerResult } from "../steer/client.ts";
 import { MAX_DIGEST_CHARS, renderDigest } from "../steer/render.ts";
 import { repoSlugOfWorktree } from "../steer/repo.ts";
 import { LIVE_SESSION_ID_PATTERN, bindingRecordPath, loadBindingRecord, serverIdentity } from "../steer/binding-record.ts";
@@ -55,6 +58,8 @@ export const HOOK_TIMEOUT_MS = 10_000;
 export const MAX_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_SESSION_ID = 512;
 const MAX_DIRECTIVE_ID = 256;
+const MAX_ENTRY_ID = 256;
+const MAX_TRANSCRIPT_PATH = 4096;
 
 export type HookOutcome = (
 	| { status: "checkpointed"; ckpt_id: string; seq: number; created: boolean; ledger: CheckpointResult["server"]["status"] }
@@ -62,7 +67,7 @@ export type HookOutcome = (
 	| { status: "context"; text: string }
 	| { status: "skipped"; reason: string }
 	| { status: "failed"; reason: string }
-) & { hintNote?: string };
+) & { hintNote?: string; transcriptNote?: string };
 
 export interface HookParams {
 	trigger: HookTrigger;
@@ -93,7 +98,7 @@ export interface HookParams {
 	 * The server's REST routes for the `steering` hint reader and the `context` trigger. Absent: `steering` takes the
 	 * plain checkpoint, `context` prints nothing.
 	 */
-	steer?: Pick<SteerClient, "directives" | "context"> | undefined;
+	steer?: Pick<SteerClient, "directiveListing" | "context"> | undefined;
 }
 
 /** Read all of the process's stdin, refusing more than `MAX_ENVELOPE_BYTES`. A terminal has no envelope: that is empty, not a wait. */
@@ -116,6 +121,9 @@ interface Envelope {
 	binding_file?: string;
 	cwd?: string;
 	directive_id?: string;
+	transcript_path?: string;
+	turn_no?: number;
+	entry_id?: string;
 }
 
 /** Parse the stdin text. Empty is an empty envelope; anything that is not a JSON object, or has a mistyped field, is a reason. */
@@ -132,12 +140,16 @@ export function parseEnvelope(raw: string): Envelope | string {
 	const rec = value as Record<string, unknown>;
 	if ("session_binding" in rec || "sessionBinding" in rec) return "the hook envelope must reference a private binding file, not a binding proof";
 	const envelope: Envelope = {};
-	const text = (name: "session_id" | "steering_session_id" | "binding_file" | "cwd" | "directive_id", max: number): string | undefined => {
+	const text = (name: "session_id" | "steering_session_id" | "binding_file" | "cwd" | "directive_id" | "transcript_path" | "entry_id", max: number): string | undefined => {
 		const field = rec[name];
 		if (field === undefined || field === null) return undefined;
 		if (typeof field !== "string" || field.length === 0 || field.length > max) throw new Error(`the envelope field ${name} must be a string of 1 to ${max} characters`);
 		return field;
 	};
+	// turn_no is the claude-code contract's turn number: anything that is not a positive integer is a reason, not a dropped field.
+	const turnField = rec["turn_no"] ?? undefined;
+	if (turnField !== undefined && (typeof turnField !== "number" || !Number.isSafeInteger(turnField) || turnField < 1)) return "the envelope field turn_no must be a positive integer";
+	if (typeof turnField === "number") envelope.turn_no = turnField;
 	try {
 		const sessionId = text("session_id", MAX_SESSION_ID);
 		const steeringSessionId = text("steering_session_id", MAX_SESSION_ID);
@@ -149,6 +161,10 @@ export function parseEnvelope(raw: string): Envelope | string {
 		if (bindingFile !== undefined) envelope.binding_file = bindingFile;
 		if (cwd !== undefined) envelope.cwd = cwd;
 		if (directiveId !== undefined) envelope.directive_id = directiveId;
+		const transcriptPath = text("transcript_path", MAX_TRANSCRIPT_PATH);
+		const entryId = text("entry_id", MAX_ENTRY_ID);
+		if (transcriptPath !== undefined) envelope.transcript_path = transcriptPath;
+		if (entryId !== undefined) envelope.entry_id = entryId;
 	} catch (error) {
 		return error instanceof Error ? error.message : "the hook envelope is not valid";
 	}
@@ -202,6 +218,23 @@ async function contextOutcome(params: HookParams, envelope: Envelope, worktree: 
 	return { status: "context", text: renderDigest(result.value, MAX_DIGEST_CHARS - 1) };
 }
 
+/**
+ * The claude-code transcript pointer for this run's checkpoints, or the reason none is recorded. It names the envelope's own
+ * session and turn (or entry) id; the transcript path is never the locator.
+ */
+function transcriptFor(surface: string, envelope: Envelope, session: string): { ref: TranscriptRef } | { note: string } {
+	if (surface !== "claude-code") return { note: `transcript reference not recorded: the surface is ${surface}, not claude-code` };
+	if (envelope.session_id === undefined) return { note: "transcript reference not recorded: no session id in the envelope" };
+	if (envelope.session_id !== session) return { note: "transcript reference not recorded: the envelope session id is not the checkpoint session" };
+	const result = transcriptRefFor("claude-code", {
+		session_id: envelope.session_id,
+		...(envelope.turn_no === undefined ? {} : { turn_no: envelope.turn_no }),
+		...(envelope.entry_id === undefined ? {} : { entry_id: envelope.entry_id }),
+	});
+	if (result.ref === null) return { note: `transcript reference not recorded: ${result.reason}${result.detail === undefined ? "" : ` (${result.detail})`}` };
+	return { ref: result.ref };
+}
+
 async function execute(params: HookParams): Promise<HookOutcome> {
 	const run = params.run ?? spawnRunner;
 	const parsed = parseEnvelope(await params.readStdin());
@@ -217,7 +250,7 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	if (params.trigger === "context") return contextOutcome(params, parsed, worktree, run);
 	const trigger: CheckpointHookTrigger = params.trigger;
 
-	const { checkpoints } = await listLocalCheckpoints({ worktree, run, now: params.now });
+	let { checkpoints } = await listLocalCheckpoints({ worktree, run, now: params.now });
 	let sessionId = params.sessionId ?? parsed.session_id;
 	if (sessionId === undefined) {
 		const known = [...new Set(checkpoints.map((checkpoint) => checkpoint.session_id))];
@@ -226,6 +259,12 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	}
 	if (sessionId.length === 0 || sessionId.length > MAX_SESSION_ID) return { status: "failed", reason: "the session id must be 1 to 512 characters" };
 	const session = sessionId;
+	// The claude-code transcript pointer: the envelope's own session and turn or entry id, or the reason none is recorded.
+	const transcript = transcriptFor(params.surface, parsed, session);
+
+	// The tree id of this run's latest snapshot. A later attempt of this run judges "unchanged" against it, so an unchanged
+	// tree costs no second snapshot. An edit made after that snapshot is not seen by this run's later hints; the next checkpoint takes it.
+	let knownTree: string | undefined;
 
 	// One checkpoint attempt, for the directive `key` names (none: a plain steering checkpoint of a changed tree).
 	const attempt = async (key: string | undefined, planRef: PlanRef | undefined): Promise<HookOutcome> => {
@@ -250,12 +289,13 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 		};
 
 		// The cheap rules first, on the unlocked list: they need no snapshot.
-		const early = shouldCheckpoint(policyInput(checkpointsOfSession(checkpoints, session)));
+		const early = shouldCheckpoint(policyInput(checkpointsOfSession(checkpoints, session), knownTree));
 		if (!early.take) return { status: "skipped", reason: early.reason };
 
 		const result = await createCheckpoint({
 			worktree,
 			sessionId: session,
+			transcriptRef: "ref" in transcript ? transcript.ref : undefined,
 			trigger,
 			...(planRef === undefined ? {} : { planRef }),
 			surface: params.surface,
@@ -267,12 +307,14 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 			policy: params.policy,
 			// The decision that counts: the whole policy again, with the history read under the checkpoint lock and the tree of the snapshot about to be pinned.
 			admit: ({ existing, tree }) => {
+				knownTree = tree;
 				const decision = shouldCheckpoint(policyInput(existing, tree));
 				return decision.take ? { take: true } : { take: false, reason: decision.reason };
 			},
 		});
 		if ("status" in result) return { status: "skipped", reason: result.reason };
-		return { status: "checkpointed", ckpt_id: result.checkpoint.ckpt_id, seq: result.checkpoint.seq, created: result.created, ledger: result.server.status };
+		checkpoints = [...checkpoints, result.checkpoint];
+		return { status: "checkpointed", ckpt_id: result.checkpoint.ckpt_id, seq: result.checkpoint.seq, created: result.created, ledger: result.server.status, ...("note" in transcript ? { transcriptNote: transcript.note } : {}) };
 	};
 
 	const envelopeKey = trigger === "steering" && parsed.directive_id !== undefined ? directiveKey(parsed.directive_id) : undefined;
@@ -297,14 +339,15 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	}
 
 	// Only acknowledged hints for this live incarnation can affect the historical checkpoint stream.
-	let listed: SteerResult<SteerDirective[]>;
+	let listed: SteerResult<SteerDirectiveListing>;
 	try {
-		listed = await params.steer.directives({ sessionId: liveSession, sessionBinding, status: "acknowledged" });
+		listed = await params.steer.directiveListing({ sessionId: liveSession, sessionBinding, status: "acknowledged" });
 	} catch {
 		return skippedHints("private hint lookup unavailable");
 	}
 	if (!listed.ok) return skippedHints("private hint lookup refused or unavailable");
-	const ownDirectives = listed.value.filter((directive) => directive.session_id === liveSession);
+	const listing = listed.value;
+	const ownDirectives = listing.directives.filter((directive) => directive.session_id === liveSession);
 	const statePath = await consumedPathFor(params, worktree, run, session, liveSession);
 	const previous = statePath === undefined ? [] : readConsumed(statePath);
 	const consumed = new Set(previous);
@@ -330,9 +373,12 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 	}
 
 	// Decisions are kept for as long as the server still lists the directive (a skipped hint has no checkpoint key to stop it
-	// later); only a complete listing prunes anything, so a failed read leaves the stored decisions as they are.
+	// later). Only a complete listing may prune: a partial one (history unavailable or cut) omits directives the server still
+	// holds, so a failed or partial read leaves the stored decisions as they are.
 	if (statePath !== undefined) {
-		const kept = retainListed([...previous, ...acted], new Set(ownDirectives.map((directive) => directive.id)));
+		const kept = listing.complete
+			? retainListed([...previous, ...acted], new Set(ownDirectives.map((directive) => directive.id)))
+			: [...previous, ...acted];
 		if (acted.length > 0 || kept.length !== previous.length) {
 			try {
 				writeConsumed(statePath, session, liveSession, kept);
@@ -341,7 +387,8 @@ async function execute(params: HookParams): Promise<HookOutcome> {
 			}
 		}
 	}
-	return outcomes.find((outcome) => outcome.status === "checkpointed") ?? (outcomes[outcomes.length - 1] as HookOutcome);
+	// A checkpoint wins. Otherwise the first failure: a later attempt that is skipped must not hide it.
+	return outcomes.find((outcome) => outcome.status === "checkpointed") ?? outcomes.find((outcome) => outcome.status === "failed") ?? (outcomes[outcomes.length - 1] as HookOutcome);
 }
 
 /** Where this historical session/live incarnation's decisions are kept, or undefined when git cannot be resolved. */
@@ -369,9 +416,10 @@ export async function runHook(params: HookParams): Promise<HookOutcome> {
 /** The single `--verbose` line for an outcome. */
 export function describeOutcome(trigger: HookTrigger, outcome: HookOutcome): string {
 	const hintNote = outcome.hintNote === undefined ? "" : `; ${outcome.hintNote}`;
+	const transcriptNote = outcome.transcriptNote === undefined ? "" : `; ${outcome.transcriptNote}`;
 	switch (outcome.status) {
 		case "checkpointed":
-			return `substrate session hook ${trigger}: ${outcome.created ? "created" : "found"} checkpoint ${outcome.ckpt_id} (seq ${outcome.seq}; ledger ${outcome.ledger})${hintNote}`;
+			return `substrate session hook ${trigger}: ${outcome.created ? "created" : "found"} checkpoint ${outcome.ckpt_id} (seq ${outcome.seq}; ledger ${outcome.ledger})${hintNote}${transcriptNote}`;
 		case "context":
 			return `substrate session hook ${trigger}: printed ${outcome.text.length} characters of context`;
 		case "skipped":

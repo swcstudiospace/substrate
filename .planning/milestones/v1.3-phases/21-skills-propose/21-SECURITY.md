@@ -2,159 +2,129 @@
 phase: "21"
 slug: "skills-propose"
 status: draft
-# Severity-filtered blocking gate: total OPEN 1, low/non-blocking.
+# Severity-filtered blocking gate (block_on: high): threats_open counts OPEN threats at high or above.
+# T-21-SC is OPEN at low severity (threats_open_nonblocking: 1) and needs an owner decision.
 threats_open: 0
+threats_open_nonblocking: 1
 asvs_level: 1
 block_on: high
 register_authored_at_plan_time: true
 created: "2026-10-10"
-verifier: gsd-security-auditor
-verification_method: static-source-and-grep
+reverified: "2026-11-12"
+verifier: gsd-security-auditor (orchestrator re-verification, secure-phase run)
+verification_method: static-source-grep-plus-targeted-bun-tests
 ---
-
-> Recovered 2026-10-29 from an uncommitted worktree of branch swarm/v13-autonomous-integration (HEAD 76a4b2c3).
-> Written 2026-10-11 to 2026-10-12 during the v1.3 autonomous integration; it describes that run and was not re-verified against main.
-> Its paths and line references point at the 2026-10-11 tree, not at main.
 
 # Phase 21 — Security
 
-> **SECURED at the ASVS L1 / high-severity blocking gate:** 19/20 CLOSED, 1/20 OPEN low/non-blocking, zero blocking-open threats. This is not an assertion that every risk is accepted or that the phase, external GSD gates, release or protected-main work is complete. The parent owns artifact persistence, final source fingerprint and phase status.
+> **Re-verified 2026-11-12 against the current checkout** (`reconcile/main-2026-11-11`, HEAD `6d0adafd`). The earlier register (2026-10-11) cited line numbers in an uncommitted worktree (`/root/src/worktrees/agent-substrate-v13-autonomous`) that is not this tree; those references were discarded. Every row below cites `packages/...` paths in this checkout.
+>
+> Result: **19 CLOSED, 1 OPEN (T-21-SC, low).** No open threat at block_on `high`. Status stays `draft` because T-21-SC's disposition is `accept`, and no owner has accepted it. This file does not waive, accept, or sign off on any risk.
 
 ## Scope and Evidence Standard
 
-Requirement: SKILL-01. The authored live register is T-21-01 through T-21-19 plus the shared reserved T-21-SC: twenty unique threats, nineteen mitigate dispositions, one proposed accept, no transfers. Renamed 21-03 IDs T-21-17/18/19 remain distinct from service IDs T-21-05/06/08. Reserved SC is counted once across six plans. Parent metadata evidence records duplicate_count0; no waiver was used.
+Requirement: SKILL-01. Register: T-21-01 through T-21-19 plus the shared reserved T-21-SC (20 unique threats).
 
-The six PLANs, six SUMMARYs, CONTEXT, native secure-phase skill/workflow/template/ASVS references and relevant source/tests were read. Updated live-plan/context/documentation and final parent evidence were re-read after corrections. /root/src/worktrees/agent-substrate-v13-autonomous/.planning/config.json has no security overrides; native defaults are ASVS1 and block_on high.
+- **Static evidence:** each mitigation was read in the current source (file:line below).
+- **Test evidence:** tests were run now with `bun test` in this checkout. Pass counts below come from those runs.
+- **Not run:** the end-to-end smoke (`scripts/skills-propose-smoke.ts`) and the rehearsal harness (`rehearsal up/down`) were not executed. They need a live store and a scratch instance. Claims that depend only on them are marked as such.
 
-The auditor performed static source reading, targeted grep and test-assertion review only. No tests/builds/lint/scans/smoke/gates/formatters/runtime scripts/git commands/network/secret/operator/config actions were executed. Implementation files and audit artifacts were not written by the auditor. Parent-observed execution evidence is attributed below, not claimed as an independent audit run. Source controls, not SUMMARY claims or intent, support mitigation closure.
+Test runs (2026-11-12, this checkout):
+
+| Command | Result |
+|---|---|
+| `bun test packages/mcp-server/src/skills/propose.test.ts propose.git.test.ts request.test.ts observe.test.ts` | 209 pass, 0 fail |
+| `bun test packages/mcp-server/src/http.test.ts -t "skills/propose"` | 20 pass, 0 fail |
+| `bun test packages/mcp-server/src/mcp.test.ts -t "skills_propose"` | 10 pass, 0 fail |
+| `bun test packages/mcp-server/src/service.test.ts -t "propos"` | 19 pass, 0 fail |
+| `bun test packages/cli/src/skills.test.ts` | 45 pass, 0 fail |
+| `bun test packages/mcp-server/src/config.test.ts rehearsal-env.test.ts rehearsal-skills.test.ts` | 131 pass, 0 fail |
+| `bun test scripts/desktop-smoke.test.ts scripts/rehearsal.test.ts` | 135 pass, 0 fail |
 
 ## Trust Boundaries
 
 | Boundary | Description | Data Crossing |
 |----------|-------------|---------------|
-| Client → authentication | Header bearer resolves caller surface/operator before arguments | Token and authority metadata |
-| REST/MCP → audit dispatcher | Fail-closed skills_propose recording precedes action dispatch; REST refusals also leave safe descriptors | Digested request or fixed refusal-shape metadata |
-| CLI directory → HTTP | Bounded regular UTF-8 file intake and flag mapping | Skill text and request options |
-| Service → engine | Token attribution, operator gates and library configuration refusal | Trusted surface and approved options |
-| Input → validation/redaction | Name/path/frontmatter/removals/content/metadata checks precede git/gh | Redacted file tree, hash and findings |
-| Engine → subprocess | argv-only execFile and explicit private Git environment | Repository, branch, paths and PR text |
-| Engine → state/library | Confined clone writes, locks and library-aware dedupe ledger | Redacted content, content hash and PR identity |
-| Outcome → caller/event/audit | Findings project file/line/rule; failures redact before capping; audit retains digest rather than content | Sanitized outcome metadata |
-| Harness → host/library | Scratch paths/HOME, local file remote, fake gh and guarded teardown | Isolated fixture state and scratch tokens |
-| Documentation → operator/client | Current contract plus explicit recorded capability drift | Approved configuration/wire behavior |
+| Client → authentication | Bearer resolves caller surface before the body is read | Token and authority metadata |
+| REST/MCP → service | Surface attribution from the token; body surface must match | Trusted surface, operator flag |
+| REST/MCP → proposer | Shape, size and content checks precede git/gh | Proposal body |
+| Engine → subprocess | argv-only `execFile`, allowlisted child env | Repo path, branch, PR text |
+| Engine → library | Fresh branch push only; origin checked before push | Branch, commit |
+| Outcome → caller/event/audit | Findings as file/line/rule; failures redacted and capped | Sanitised outcome |
+| CLI → HTTP | Regular UTF-8 directory intake, size cap, token as header | Skill files, token |
 
 ## Threat Register
 
-| Threat ID | Category | Component | Severity | Disposition | Mitigation / Source Evidence | Status |
-|-----------|----------|-----------|----------|-------------|------------------------------|--------|
-| T-21-01 | Tampering | skills/propose.ts argv | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:388-449 builds fresh branch and literal argv without force/search/colon push; :987-997 creates branch/clone; :1014-1018 checks origin before push. Forbidden-argv tests were inspected, not run by auditor. | closed |
-| T-21-02 | Information disclosure | skill content to PR | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:207-290 invokes scanSkillFiles and refuses findings, then checks redacted frontmatter; :947-953 validates and caps PR body before subprocesses. PR rationale is whole-text redacted before truncation at :507-537. Shared scanner /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/redact.ts:676-702 projects file/line/rule. | closed |
-| T-21-03 | Information disclosure | child env | high | mitigate | Reconciled threat row /root/src/worktrees/agent-substrate-v13-autonomous/.planning/phases/21-skills-propose/21-01-PLAN.md:140 and D21-15 /root/src/worktrees/agent-substrate-v13-autonomous/.planning/phases/21-skills-propose/21-CONTEXT.md:127-132 require four base plus seven fixed Git controls. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:550-598 implements exactly that explicit env and bounded argv-only execFile; no process.env spread or store/token/handoff forwarding. Behavioral child isolation assertions reviewed at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.git.test.ts:185-267. | closed |
-| T-21-04 | Elevation of privilege | library config | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/config.ts:232-245 requires file:// plus absolute non-default gh for a non-default library; /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/service.ts:1279-1281 refuses configured problem before engine. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:452-496,815-915,959-967,1015-1016 checks configured slug for mirror/origin/PR/ledger identity. | closed |
-| T-21-05 | Spoofing | proposal surface, service | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/service.ts:1259-1268 refuses body-surface mismatch before proposer; :1285-1290 sets input surface from caller; :1308-1324 emits as caller. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/server.ts:401-419 establishes token-derived caller independently of body. | closed |
-| T-21-06 | Authentication | anonymous proposal, service | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/service.ts:1260-1262 refuses null identity before proposer. Reviewed /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/service.test.ts:2069-2081 also asserts null surface cannot be overridden by an operator boolean. | closed |
-| T-21-07 | Repudiation | unaudited publication | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/server.ts:343-396 fail-closed REST audit; :757-791 audits object or safe non-object descriptor before shape/action; :802-818 audits authenticated oversize/syntax refusal before responding. MCP :865-905 audits before dispatch. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/observe.ts:382-432 invokes append/auditMode and blocks on AuditUnavailableError; /root/src/worktrees/agent-substrate-v13-autonomous/packages/audit/src/policy.ts:27 explicitly lists skills_propose; /root/src/worktrees/agent-substrate-v13-autonomous/packages/audit/src/log.ts:293-329 throws on fail-closed sink failure. | closed |
-| T-21-08 | Information disclosure | findings/errors, service | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/service.ts:1327-1350 emits rule names only and redacted bounded reasons. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/request.ts:99-108 projects findings and redacts/caps ProposeFailed; subprocess-output tail redaction exists in /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:604-610. | closed |
-| T-21-09 | Denial of service | oversize body | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/server.ts:203-214,297-307 bounds intake; :775-782 and :802-809 give REST413 before proposer. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/request.ts:52-66 measures caller JSON bytes; /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/mcp.ts:910-919 checks before attribution/service. MCP wire cap is separately 1M+64KiB at server.ts:876-884. CLI JSON preflight is /root/src/worktrees/agent-substrate-v13-autonomous/packages/cli/src/skills.ts:205-211. Exact1M/1M+1 real socket assertions reviewed at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/http.test.ts:1339-1388,1467-1561. | closed |
-| T-21-10 | Tampering | second-door propose | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/cli/src/skills.ts:25 imports engine types only; :165-167 requires token; :214-220 posts to audited /skills/propose with header. No executable engine import, git runner or self-posted event exists in inspected CLI module. /root/src/worktrees/agent-substrate-v13-autonomous/packages/cli/src/index.ts:469-475 supplies env token to HTTP client. | closed |
-| T-21-11 | Information disclosure | token handling | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/cli/src/index.ts:471 reads SUBSTRATE_TOKEN; /root/src/worktrees/agent-substrate-v13-autonomous/packages/cli/src/skills.ts:217 sends only as authorization header. Output/refusal paths report fixed status, result and server metadata, not token/header or request contents. | closed |
-| T-21-12 | Tampering | directory intake | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/cli/src/skills.ts:56-88,169-177 uses lstat, symlink/special-file refusal, fatal UTF-8 decode and size guards. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:147-290 revalidates names/paths/NUL/conflicts/frontmatter/removals/secrets; :321-382 confines tree, refuses symlink ancestors and removes final symlink before writing. | closed |
-| T-21-13 | Isolation failure | skills fixture | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/rehearsal-env.ts:119-147,261-277 confines fixture values, always sets scratch state, refuses stale fixture mirror without flag and sets scratch HOME. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/rehearsal-skills.ts:47-124 builds local file remote/fake gh in run directory; /root/src/worktrees/agent-substrate-v13-autonomous/scripts/rehearsal.ts:1268-1311 ownership-checks teardown and removes run dir; :1365-1377 refuses production ports/non-loopback smoke targets, called at /root/src/worktrees/agent-substrate-v13-autonomous/scripts/skills-propose-smoke.ts:96-101. Parent current up/down0 and two owned store removals separately recorded. | closed |
-| T-21-14 | Information disclosure | planted secret | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/scripts/skills-propose-smoke.ts:132-133 assembles synthetic decoy; :257-270 checks refusal/findings/no branch or gh effect; :327-339 checks absence from REST/MCP response, ledger/events/audit/gh calls/library refs. Parent current skills47/47, not auditor execution. | closed |
-| T-21-15 | Tampering | library history | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/rehearsal-skills.ts:85-88 sets denyNonFastForwards/denyDeletes/logging. /root/src/worktrees/agent-substrate-v13-autonomous/scripts/skills-propose-smoke.ts:245-256,295-308 checks refusal branch/call invariance and creation-only reflog. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.git.test.ts:269-292 includes actual prohibited-update/delete attempts and unchanged-ref assertions, reviewed statically. | closed |
-| T-21-16 | Tampering | stale contract docs | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/docs/skills-propose.md:1-113 covers doors/auth/codes/caps/file-rule/current Git isolation; /root/src/worktrees/agent-substrate-v13-autonomous/.planning/phases/21-skills-propose/21-VALIDATION.md:53-70 maps real tasks. /root/src/worktrees/agent-substrate-v13-autonomous/.planning/phases/21-skills-propose/21-06-SUMMARY.md:48-52 expressly records preserved matrix open/all drift as instructed by /root/src/worktrees/agent-substrate-v13-autonomous/.planning/phases/21-skills-propose/21-06-PLAN.md:89. Parent final phase-close108/0 exit0 is attributed below. No claim that COVERAGE still exactly matches. | closed |
-| T-21-17 | Spoofing | proposal surface, REST/MCP | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/config.ts:475-478 resolves token surface; /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/server.ts:401-419,783-788 passes transport caller after audit. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/mcp.ts:185-188,919 uses callerSurface, never body-first attribution. Service :1263-1268 refuses mismatch before engine. | closed |
-| T-21-18 | Authentication | anonymous proposal, REST/MCP | high | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/server.ts:474-477 rejects unmapped bearer; :750-755 refuses null proposal surface before readBody even on anonymous run. /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/service.ts:1260-1262 supplies MCP null refusal; /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/mcp.ts:920-924 returns isError for it. | closed |
-| T-21-19 | Information disclosure | findings/errors, REST/MCP | medium | mitigate | /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/request.ts:99-108 copies only file/line/rule and redacts/caps failed message at400 chars; shared mapping called at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/server.ts:786-789 and /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/mcp.ts:920-924. No finding value/span is returned. | closed |
-| T-21-SC | Tampering | dependencies, shared | low | accept | All six live PLANs propose no-new-package rationales. Existing /root/src/worktrees/agent-substrate-v13-autonomous/.planning/phases/21-skills-propose/21-SECURITY.md:78-80 has no acceptance and expressly retains SC as open. No acceptance signer/date exists. Repeated reserved ID counts once. | open — below high threshold (non-blocking) |
+| Threat ID | Category | Component | Severity | Disposition | Mitigation evidence (current checkout) | Tests run now | Status |
+|-----------|----------|-----------|----------|-------------|----------------------------------------|---------------|--------|
+| T-21-01 | Tampering | propose argv | high | mitigate | `packages/mcp-server/src/skills/propose.ts:412` `checkout -q -b <fresh> origin/main`; `:443` `pushArgv` = `git push origin <branch>` only (no force, no colon refspec, no search); `:1019-1022` origin checked before push | propose.test.ts "argv builders are exact"; "no builder carries a force or search flag, and the push has no colon refspec" | CLOSED |
+| T-21-02 | Information disclosure | skill content to PR | high | mitigate | `propose.ts:269-271` `scanSkillFiles` findings refuse the proposal before any git call; `:204` whole-value `redact` check; `:278-281` frontmatter re-checked after redaction; `:952` PR body capped before subprocess (`PR_BODY_MAX`) | propose.test.ts "refuses a credential in a path, a removal, a session id or a graph id without echoing it"; "a ghp_ token shape is refused with a github finding…"; "refuses a pull request body over the cap before any runner call" | CLOSED |
+| T-21-03 | Information disclosure | child env | high | mitigate | `propose.ts:567-581` `childEnv`: only `PATH` read from parent; `HOME` from argument; fixed Git controls (`GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`, `GIT_CONFIG_COUNT`, `KEY_0/1`, `VALUE_0/1`, `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`); `:595-601` runner uses this object only, `execFile`, 120 s, 4 MiB | propose.test.ts "childEnv is exactly the allowlist" (`:982`) | CLOSED (see drift note F2) |
+| T-21-04 | Elevation of privilege | library config | medium | mitigate | `packages/mcp-server/src/config.ts:893-896` non-default library requires `file://` remote and absolute non-default `SUBSTRATE_SKILLS_GH`, else `skills.problem`; `service.ts` `proposeSkill` refuses a configured problem before the proposer runs; `propose.ts:964` mirror origin must match configured slug; `:1020` clone origin re-checked before push | config.test.ts "a non-default repo is accepted with a file:// remote and an absolute non-default gh"; "a file:// remote with the default gh is refused, naming the gh key"; service.test.ts "an invalid skills library is refused before the proposer runs"; propose.test.ts "a mirror pointing at another library is refused before any Runner call" | CLOSED |
+| T-21-05 | Spoofing | proposal surface, service | high | mitigate | `packages/mcp-server/src/service.ts` `proposeSkill` `:4680-4686`: body surface ≠ caller surface → `SkillProposalDenied(403)`, never re-attributed; `server.ts:2129-2146` surface comes from bearer, not body | service.test.ts "a body surface that differs from the token's is refused 403, never re-attributed"; http.test.ts "a body surface equal to the token's is accepted; a different one is 403…"; mcp.test.ts "a different surface than the caller's is refused, never re-attributed" | CLOSED |
+| T-21-06 | Authentication | anonymous proposal | high | mitigate | `server.ts:2131-2134` `surface === null` → 401 before `readBody`; `service.ts:4676-4678` null surface → 401 before proposer; operator flag does not authenticate | http.test.ts "an anonymous caller is refused 401 before the body is read, with nothing proposed"; service.test.ts "even an operator flag does not authenticate an anonymous caller" | CLOSED |
+| T-21-07 | Repudiation | unaudited publication | high | mitigate | Publication path: `server.ts:2138` `auditedRest(… "skills_propose" …)` fail-closed before `proposeSkill` (503 on denial, `:703-715`); MCP: `skills_propose` in `FAIL_CLOSED_TOOLS` (`packages/audit/src/policy.ts:27`) and gated in `observe.ts` before dispatch | http.test.ts "it is audited as skills_propose on the REST transport, the body digested not stored"; "when the audit chain cannot take the record it is 503 and nothing is proposed"; observe.test.ts "denies a fail-closed tool the chain could not record" | CLOSED for publication. **Finding F1:** refusals that never reach the audit call are not recorded (see Findings) |
+| T-21-08 | Information disclosure | findings/errors, service | medium | mitigate | `packages/mcp-server/src/skills/request.ts:99-108` projects `{file,line,rule}` only; `:130-131` 502 message `redact(...).slice(0, 400)`; `propose.ts:62` `OUTPUT_TAIL_CHARS = 400` with redaction | request.test.ts "a refusal is 400 and its findings are file, line and rule, nothing more"; "a failed git or gh step is 502, redacted and capped at 400 characters"; service.test.ts "a failed git or gh step emits a warning with the redacted reason and rethrows" | CLOSED |
+| T-21-09 | Denial of service | oversize body | medium | mitigate | REST: `server.ts:281` `MAX_BODY_BYTES = 1_000_000`, `readBody` throws, `server.ts:2424` answers 413 for `/skills/propose`; shared measure `request.ts:52-66` `proposalBodySizeProblem` (canonical UTF-8 of caller JSON, `ROUTE_MAX_BYTES = 1_000_000`, `propose.ts:53`); MCP: `mcp.ts:2054` refuses before service | http.test.ts "an oversize body is 413 on this route"; mcp.test.ts "a body over the 1 MB cap is a refused tool error before the service, and one at the cap goes through"; request.test.ts "a body of exactly the cap fits and one byte more is refused" | CLOSED |
+| T-21-10 | Tampering | second-door propose | high | mitigate | `packages/cli/src/skills.ts:27` imports engine **types only** (`import type`); `:234` posts to audited `/skills/propose`; no git runner, no self-posted event in the CLI | skills.test.ts "posts the directory to /skills/propose with the token and the route's snake_case keys" | CLOSED |
+| T-21-11 | Information disclosure | token handling | medium | mitigate | `packages/cli/src/skills.ts:185` token required, read from `SUBSTRATE_TOKEN`; token appears only in request headers (`:236`, `:298`); refusals print fixed text | skills.test.ts "no token is exit 1 on stderr with nothing posted, even for a dry run" | CLOSED |
+| T-21-12 | Tampering | directory intake | medium | mitigate | CLI: `skills.ts:56-88,169-177` lstat, symlink and special-file refusal, fatal UTF-8 decode, size cap. Engine: `propose.ts:317-390` confined tree, symlink ancestors refused, final symlink removed before write | skills.test.ts "a symlink inside the directory refuses the whole directory, naming it"; "a file that is not valid UTF-8 refuses the whole directory, naming it"; propose.test.ts "a symlink parent is refused and the link target is untouched"; "nothing outside <clone>/<name>/ is created or removed" | CLOSED |
+| T-21-13 | Isolation failure | skills fixture / smoke | high | mitigate | `scripts/rehearsal.ts:72` `PRODUCTION_PORTS = [7410, 7411, 6420]`, `:139` reserved-port refusal; `:1502` `refuseSmokeUrl` refuses non-loopback and production ports; `packages/mcp-server/src/rehearsal-env.ts:220` `assertLoopback`; `scripts/skills-propose-smoke.ts:100-101` refuses on `refuseSmokeUrl` | desktop-smoke.test.ts "refuses non-loopback hosts on any port"; "refusePort refuses the production ports"; rehearsal-env.test.ts "assertLoopback accepts loopback and refuses the rest"; "refuse a state directory, a gh script or a remote outside the run directory" | CLOSED (smoke itself not run, see Not run) |
+| T-21-14 | Information disclosure | planted secret | medium | mitigate | Refusal without echo: `propose.ts:204,269-271` (finding carries file/line/rule, never value); smoke plants the decoy at `scripts/skills-propose-smoke.ts:136` and asserts absence (`:257-270`, end-to-end not run) | propose.test.ts "refuses a credential in a path, a removal, a session id or a graph id without echoing it"; "a ghp_ token shape is refused with a github finding and the refusal never carries it" | CLOSED (unit evidence run; e2e smoke not run) |
+| T-21-15 | Tampering | library history | medium | mitigate | Production: push is a new fresh branch only (`propose.ts:443`, no force or refspec); fixture: `packages/mcp-server/src/rehearsal-skills.ts:86-88` sets `receive.denyNonFastForwards`, `denyDeletes`, `logAllRefUpdates` on the bare fixture remote. Protection of the real library on GitHub is **not** verified here | propose.test.ts "no builder carries a force or search flag, and the push has no colon refspec"; "a valid proposal opens, pushes a branch, and leaves an all-zero-old-sha reflog" (propose.git.test.ts) | CLOSED for substrate code; real-library protection out of scope (see F3) |
+| T-21-16 | Tampering | stale contract docs | medium | mitigate | `docs/skills-propose.md` covers the three doors (`:7`), 401/403/200 answers (`:42-56`), file:// rule (`:95`), dry-run and events | Doc inspection only; no test. Validation map `.planning/.../21-VALIDATION.md` present | CLOSED (doc check, not executed) |
+| T-21-17 | Spoofing | proposal surface, REST/MCP | high | mitigate | `packages/mcp-server/src/mcp.ts:2054-2063` passes `callerSurface`, never body-first; `service.ts:4680` refuses mismatch before engine | mcp.test.ts "a different surface than the caller's is refused, never re-attributed" | CLOSED |
+| T-21-18 | Authentication | anonymous proposal, REST/MCP | high | mitigate | REST `server.ts:2131-2134` (before body read); MCP null-surface refusal via `service.ts:4676-4678` returned as `isError` (`mcp.ts:2063`) | mcp.test.ts "an anonymous caller is refused as an error and nothing is proposed"; http.test.ts 401 test | CLOSED |
+| T-21-19 | Information disclosure | findings/errors, REST/MCP | medium | mitigate | `request.ts:99-108` (file/line/rule only); `request.ts:130-131` redact+cap 400 on failure; same mapping used by REST (`server.ts:2143-2146`) and MCP (`mcp.ts:2063`) | request.test.ts "a refusal is 400 and its findings are file, line and rule, nothing more"; mcp.test.ts "a refusal is an error carrying findings as file, line and rule" | CLOSED |
+| T-21-SC | Tampering | dependencies, shared | low | accept (proposed, **no owner decision**) | Plans state "no package installed" (rationale only). No code-level proof for phase 21 changes was obtainable from this checkout (phase commits not isolated). Nothing in this file accepts it | n/a | **OPEN** (low, non-blocking) — owner decision required; acceptor: none; date: none |
 
-**Counts:** 20 unique authored threats; 19 CLOSED mitigations; 1 OPEN proposed accept; 0 transfer. OPEN severity is low, below block_on high, so `threats_open = 0`. No missing/unparseable severity and no silently dropped threat.
+**Counts:** 20 unique threats. CLOSED 19. OPEN 1 (T-21-SC, low). `threats_open` (block_on high) = 0.
 
-## Reassessment of Earlier Gaps
+## Findings
 
-### T-21-03 — CLOSED by actual reconciliation and code
-
-The user selected **Keep current Git isolation**. The live plan row, must-have/action wording, CONTEXT D21-15, documentation and SUMMARY amendment now explicitly distinguish four base keys from seven fixed private Git controls. Current childEnv at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:560-576 returns PATH/HOME/no-prompt flags plus GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, COUNT=2, KEY_0/VALUE_0 empty default credential helper and KEY_1/VALUE_1 GitHub gh credential helper. Only PATH/HOME are read from parent; Git hardening keys are fixed, not copied. The runner uses this explicit object with execFile argv and120-second/4MiB bounds. The old exact-four-key assertion is not certified; it was actually reconciled through the user-selected contract. No hardening was removed, no credential forwarding was added and no risk acceptance was inferred.
-
-Behavioral test source at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.git.test.ts:185-267 records a real child under poisoned scratch parent env and hostile scratch HOME gitconfig, asserts secret decoys absent, fixed Git values override poisoned controls, and global/system Git configs remain isolated. The auditor inspected these assertions only; parent final suite exercised them.
-
-### T-21-07 — CLOSED including the reproduced refusal-audit gap
-
-The parent originally observed array/null/string400 and oversize413 without new audit records. That observation was ground truth, not dismissed or rerun by auditor. Current REST source audits all parsed attempts: object fields are digested; non-objects use a safe descriptor containing shape and optional string length, never content. Syntax and oversize catches also use fixed descriptors and await auditedRest; denial produces503 and no proposer call. No oversize body is re-read.
-
-Parent current runtime evidence records array22→23, null23→24, string24→25 at400, and oversize25→26 at413: **one safe audit record per attempt**. Static tests at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/http.test.ts:1241-1307 assert safe descriptors, no proposer call, no decoy content and audit denial dominating malformed requests. Records labelled allowed mean the attempted call reached the pre-dispatch audit, not that malformed input was published.
-
-### T-21-09 — CLOSED without shrinking the caller budget
-
-Current proposalBodySizeProblem measures canonical UTF-8 JSON of the caller body before server-owned surface injection. REST also bounds raw wire bytes. MCP checks schema-valid arguments before service attribution; schema optional fields have no injected defaults. Caller metadata, escaping and multibyte text count; server attribution and JSON-RPC framing do not consume the proposal budget. Exact1,000,000 fits;1,000,001 is refused before proposer/events, including dry-run. Engine text cap remains an internal backstop, not the public body measure.
-
-MCP intake is separately bounded at1,000,000+64KiB. This is framing headroom, not permission for larger proposal content. Over-framing wire is refused before audit/dispatch with the pre-existing generic oversize handling. Reviewed real HTTP assertions at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/http.test.ts:1467-1561 cover exact1M accepted,1M+1 tool refusal with no proposer and audit record, dry-run rejection, and over-framing rejection. REST no-surface exact1M is accepted and attributed at :1356-1373. Parent final full suite passed; auditor executed none of these.
-
-### T-21-16 — CLOSED through the plan-directed drift record
-
-Current docs cover the actual environment and public budget/framing separation. COVERAGE.md remains read-only and still says --state open while the source builder uses --state all to recover owner-closed PRs. That factual difference is retained, not concealed. Plan06 explicitly instructed recording drift in SUMMARY instead of rewriting the matrix. The actual 2026-10-11 SUMMARY amendment does so and disclaims a match; this satisfies that prescribed disposition, not a fake matrix-match assertion. Historical original SUMMARY claims/metrics remain historical and are qualified by the amendment.
-
-## End-to-End Authority, State and Error Trace
-
-- Bearer resolves surface/operator before body at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/config.ts:475-510 and /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/server.ts:401-419. REST and MCP both use that caller. Null/mismatched surface and non-operator replace/reopen/nonempty doc-example allowance refuse before engine at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/service.ts:1259-1281. Swarm/substrate host-job tokens are never operators even if listed. A bare-run operator boolean cannot authenticate null identity.
-- CLI regular UTF-8 intake →1M JSON preflight → bearer header → audited REST → same service. No executable engine import, in-process git path, body surface override or self-posted event is introduced.
-- Engine validation/scan/redacted frontmatter/PR-text cap → mirror library identity → content lock/library-aware ledger → mirror lock/fetch → shared clone/set-url/fresh branch → confined overlay/removals and staged-file check → diff/commit → origin check/writable-ledger preflight → new-branch push → pushed/opened metadata ledger. Trace /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:815-915,947-1029. File/delete hash tags prevent collision; legacy lookup remains gated by name/surface/library identity. Existing compatibility was read, not changed.
-- Dry run bypasses content-ledger lookup/writes/gh, returns staged diff before commit/push at :1005-1008 and emits no event. It still clones/fetches under mirror lock and is audited. Existing/declined return through ledger; unchanged returns before commit/push. Finally removes clone and releases content lock at :1026-1028.
-- Findings contain file/line/rule; service warnings contain rule names only. ProposeFailed output and reason are redacted before capping. Audit records store sanitized bounded identifiers/key names plus canonical arg digest, never file bodies, at /root/src/worktrees/agent-substrate-v13-autonomous/packages/audit/src/record.ts:181-247. PR rationale is whole-text redacted before truncation.
-- Fixtures use local file remote, injected recording gh, scratch HOME/state and ownership-checked teardown; no host store/token config is forwarded. Source commands are statically reviewed only; their execution belongs to parent.
+- **F1 — REST refusals are not audited (contradicts the 2026-10-11 register).** `server.ts:2138` audits only when the parsed body is a JSON object. A non-object body (array, null, string) is answered 400 at `server.ts:2140-2142` with no audit call. Malformed JSON and oversize bodies are answered by the catch-all at `server.ts:2424-2427` (400 / 413) with no audit call. The earlier claim that these produce one safe audit record per attempt is not true of this checkout. Impact: refused, non-publishing attempts leave no record on REST; MCP is unaffected (audit gate runs before dispatch). Publication itself is still audited. **Owner should decide whether to close this (small change: audit a safe descriptor on those paths) or accept it.** Not fixed here: this task does not edit implementation.
+- **F2 — Child env drift.** The plan and the old register said "four base keys". `childEnv` (`propose.ts:567-581`) sets 11 keys (PATH, HOME, plus nine fixed Git/gh controls). No secret is forwarded and the test asserts the exact allowlist, so this is documentation drift, not a leak. The credential helper is hard-coded to `/usr/bin/gh` (`:579`) while `SUBSTRATE_SKILLS_GH` is configurable; non-default libraries are `file://` only, so no credential helper runs for them.
+- **F3 — Real library protection not verified.** T-21-15's bare-repo deny settings exist only in the fixture (`rehearsal-skills.ts:86-88`). Branch protection on the real skills library is outside this repo.
+- **Not executed:** `scripts/skills-propose-smoke.ts` end-to-end (T-21-13/14/15 e2e assertions) and `bun run check:phase-close`. Not run in this pass.
 
 ## Accepted Risks Log
 
-**No accepted risks.** T-21-SC remains OPEN low/non-blocking. Planner rationale and absence of a new dependency do not create an authorized acceptance. Neither the historical 2026-10-08 approval of three wire/CLI/operator decisions nor the 2026-10-11 decision to retain Git hardening accepts supply-chain risk. No transfer dispositions exist.
+**None.** T-21-SC is not accepted. Its plan disposition `accept` is a planner proposal with no acceptor, rationale signed off, or date. Only the owner can accept it.
 
-## Open — Blocking
+## Owner decisions required
 
-None at block_on high.
-
-## Open — Non-Blocking
-
-| Threat ID | Severity | Missing Evidence | Effect |
-|-----------|----------|------------------|--------|
-| T-21-SC | low | Authorized accepted-risk entry/sign-off; no acceptor or date exists | Remains OPEN; does not contribute to threats_open; no risk accepted by auditor |
+| Item | Decision needed |
+|------|-----------------|
+| T-21-SC (low) | Accept with a named acceptor and date, or require evidence (phase commit range showing no `package.json`/lockfile change) and mark CLOSED |
+| F1 (REST refusal audit gap) | Implement the refusal audit, or accept the gap in writing |
 
 ## Summary Threat Flags
 
-21-01 SUMMARY's original no-unmapped-surface section was read with its2026-10-11 child-env lineage amendment. The other five SUMMARYs have no Threat Flags section. Unregistered flags: none identified in the supplied sections. Missing sections do not imply exhaustive vulnerability coverage. The reproduced audit/cap gaps map to existing T-21-07/T-21-09, not invented unregistered threats. No unrelated vulnerability scan was performed.
-
-## Parent Execution Evidence and Provenance
-
-**Final source gates:** local://v13-final-green-evidence.json reports parent-observed full suite **2719 pass /58 skip /0 fail across96 files**, typecheck exit0, phase-close **108 pass /0 fail /0 skip across4 files**, event kinds12/surfaces27, bash-n exit0 and shellcheck exit0. Formatter: none configured; none run. Original owners corrected first-union engine/framing/fixture errors; final green, not those superseded failures, is the latest gate evidence. Privacy guards remained unchanged. These are shared parent final runs, not separate Phase21 auditor checks.
-
-**Actual isolated runtime:** local://v13-final-runtime-evidence.json records harness up0; actual skills **47/47 exit0** with real git and recording gh; one new audit record for each array/null/string400 and oversize413; harness down0 and **two owned store containers removed**. The runtime receipt's note that final full suite was pending predates and is superseded for source gates only by the later final-green receipt. Its runtime/scope facts remain unchanged. No additional cleanup observation was invented.
-
-The source receipts identify execution at4df30a0 plus owned dirty corrections/pending commits, not a final committed fingerprint. Parent owns final fingerprint and commit metadata. The older2670/58/0 and112-lock results and historical2026-10-09 skills47/47 remain prior provenance, not the current final union metrics. The older shared-context promise of fresh21 proof is now fulfilled by the final runtime receipt; it is not used instead of it.
-
-Phase27 runtime47/47 includes28 ledger/ingest plus19 fake-chain checks and no real devnet; it is not Phase21 proof. Historical Phase27 schema approval is historical operator provenance, not a new audit action. No user checkout, production MCP/configuration/store, real GitHub/tracker/devnet write, model turn or deployment restart was performed by this auditor.
-
-## Explicit Production Exclusions and Pending Global Action
-
-Production surface-token provisioning remains Phase20, with operator actions still0/3 per final parent scope. Phase21 code/isolated proof does not close that prerequisite or authorize deployment. The real skills-library PR remains Phase22 SKILL-07 and retains its operator/live-action approval boundary. No production mirror bootstrap/restart, obsolete propose-key deletion, plugin install or user-scope configuration change occurred here. These remain approved scope exclusions, not downgraded SKILL-01 requirements.
-
-The pre-existing credential incident remains **operator_rotation_pending**, outside authored Phase21/27 register counts. Containment/final green does not revoke the credential; no rotation, risk acceptance or incident closure is claimed.
+No `## Threat Flags` sections were checked in this pass. No unregistered threat was identified in the code reviewed.
 
 ## Security Audit Trail
 
 | Audit Date | Threats Total | Closed | Open | Run By |
 |------------|---------------|--------|------|--------|
-| 2026-10-10 | 20 | 17 | 3 (1 blocking,2 non-blocking) | Earlier static auditor return, persisted by parent; unreconciled environment and stale-documentation findings |
-| 2026-10-11 | 20 | 19 | 1 (0 blocking,1 low non-blocking) | gsd-security-auditor final static reassessment; user-selected actual reconciliation, source audit/cap corrections and separately attributed parent final/runtime evidence |
+| 2026-10-10 | 20 | 17 | 3 (1 blocking, 2 non-blocking) | Earlier static auditor return |
+| 2026-10-11 | 20 | 19 | 1 (0 blocking, 1 low non-blocking) | Static reassessment against the v13 worktree (not this checkout) |
+| 2026-11-12 | 20 | 19 | 1 (0 blocking, 1 low non-blocking) | secure-phase re-verification against current checkout; targeted bun tests (see table); findings F1–F3 |
 
 ## Sign-Off
 
-- [x] All20 unique live-plan threats retain category/severity/disposition, including renamed T-21-17/18/19 and shared reserved SC.
-- [x] All19 mitigate dispositions are source-backed CLOSED at ASVS L1.
-- [x] User-selected private Git controls were actually reconciled and retained, not removed or risk-accepted.
-- [x] REST malformed/oversize refusal audit gap and caller-body/framing boundary corrections are source-backed; parent actual proof is attributed.
-- [x] Read-only capability matrix drift is explicitly recorded through the plan-prescribed SUMMARY procedure; exact match is not falsely claimed.
-- [x] Severity-filtered threats_open0 confirmed; total OPEN remains1 low/non-blocking.
-- [x] Fresh parent actual skills47/47 and final2719/58/0 / types0 / phase-close108/0 / shell0 receipts recorded.
-- [ ] T-21-SC has an authorized accepted-risk entry — remains OPEN non-blocking.
-- [ ] Parent final committed source fingerprint recorded.
-- [ ] Parent final phase/external-GSD/release status established; frontmatter remains draft here.
+- [x] All 20 threats re-checked against current source at `packages/...` paths in this checkout.
+- [x] 19 mitigations CLOSED with a file:line and a test name run on 2026-11-12.
+- [x] `threats_open` (block_on high) = 0.
+- [ ] T-21-SC has an owner decision (OPEN, low, no acceptor).
+- [ ] F1 has an owner decision (fix or written acceptance).
+- [ ] Smoke end-to-end and phase-close check run.
 
-**Verdict:** SECURED for the ASVS L1/block_on high enforcing gate.19 closed,1 low OPEN,0 blocking. **Approval:** no risk acceptance, signed Swarm gate, phase-completion declaration, external-GSD completion or shipping approval issued. Parent persists this artifact and owns final status.
+**Verdict:** `draft`. No blocking threat is open, but phase security is not verified until the owner decides T-21-SC and F1. This file records no acceptance, waiver or sign-off.
+
+## Owner decisions and operator state carried forward
+
+Restored verbatim from the prior revision (git HEAD) so the rewrite does not drop them:
+
+The user selected **Keep current Git isolation**. The live plan row, must-have/action wording, CONTEXT D21-15, documentation and SUMMARY amendment now explicitly distinguish four base keys from seven fixed private Git controls. Current childEnv at /root/src/worktrees/agent-substrate-v13-autonomous/packages/mcp-server/src/skills/propose.ts:560-576 returns PATH/HOME/no-prompt flags plus GIT_CONFIG_GLOBAL/SYSTEM=/dev/null, COUNT=2, KEY_0/VALUE_0 empty default credential helper and KEY_1/VALUE_1 GitHub gh credential helper. Only PATH/HOME are read from parent; Git hardening keys are fixed, not copied. The runner uses this explicit object with execFile argv and120-second/4MiB bounds. The old exact-four-key assertion is not certified; it was actually reconciled through the user-selected contract. No hardening was removed, no credential forwarding was added and no risk acceptance was inferred.
+The pre-existing credential incident remains **operator_rotation_pending**, outside authored Phase21/27 register counts. Containment/final green does not revoke the credential; no rotation, risk acceptance or incident closure is claimed.
+

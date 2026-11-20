@@ -58,7 +58,7 @@ DOCS-02 publication path: gated redacting idempotent ingest over MCP plus REST p
 
 - docs_ingest (MCP, POST /docs/ingest, substrate docs ingest) redacts before upload, strips remote images and is idempotent by content hash: TRUE (findingRules over REDACTION_RULES + skill scan pre-upload; strip counts; source_url-keyed sha records skip/replace)
 - Refuses a page without a source URL, outside the configured roots or over the size caps, and any unauthenticated caller or VM guest: TRUE (all six proven; refusals carry rule names + hashes only, refused values never logged)
-- No RAGFlow MCP exists in any agent config and no package outside mcp-server imports the client: TRUE (store-lock: config scan, import scan, credential scan — 23/23 green)
+- No RAGFlow (retired, superseded by LightRAG) MCP exists in any agent config and no package outside mcp-server imports the client: TRUE (store-lock: config scan, import scan, credential scan — 23/23 green)
 
 ## Deviations from Plan
 

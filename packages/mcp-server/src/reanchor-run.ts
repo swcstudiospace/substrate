@@ -276,7 +276,7 @@ export function openRealContext(options: ReanchorOptions, open: OpenOptions = {}
 	const isolated: SubstrateConfig = {
 		...config,
 		retainOutbox: { ...config.retainOutbox, path: null },
-		eventBuffer: null,
+		eventBuffer: { ...config.eventBuffer, path: null, deadLetterPath: null },
 	};
 	const substrate = open.substrateFor !== undefined ? open.substrateFor(isolated, greptime) : new Substrate(isolated, { greptime, index: null, eventBus: () => null });
 	const operators = operatorSurfaces(config);

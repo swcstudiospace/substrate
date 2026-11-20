@@ -164,3 +164,55 @@ Criterion 4 fails against its literal wording. The session state that survives a
 
 _Verified: 2026-11-18T12:26:31Z_
 _Verifier: gsd-verify-queue-2 (gsd-verifier)_
+Installing the printed `steering` and `context` hook configuration in a host (ADR 0007 maps no host event to them); enabling `SUBSTRATE_PLANNING_STEERING`, `SUBSTRATE_PLANNING_STEERING_PRINCIPALS`, `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE`, `SUBSTRATE_BRIEF_SESSIONS` and `SUBSTRATE_STEERING_SESSIONS_TABLE` in production, which creates the opt-in tables; issuing operator tokens; a live restart rehearsal of the registry; delivery to a real session end to end. None of it was done.
+
+## Closure, 2026-11-11 (branch `reconcile/main-2026-11-11`)
+
+Scope: the repo-buildable residual risks, gaps and criterion 3 above. Code commit `dfd7a2f0` (phase 67: close the repo-buildable live steering gaps); this closure record is its own commit. The 2026-10-29 record above is unchanged. The phase is still not GA: the operator-gated items and two residuals below stay open.
+
+Evidence was run here: `bun test` on `brief-sessions`, `server.steering`, `session-context`, `session-context.service`, `session/hook-install` (new), `session/hook-config` and `session/command`: 220 of 220 pass. `bunx tsc --noEmit` exit 0; Biome clean on the touched files (one lint fix in `hook-install.ts`, re-tested, 22 of 22 pass). The tsc run preceded that one type-only annotation (`let info: Stats`). Tests use fake servers and scratch directories. No flag was added, no host or production store was touched, and no hook was installed.
+
+### Residual risks and gaps
+
+| # | Residual (above) | Status | Closure and evidence |
+|---|---|---|---|
+| 1 | Criterion 3: the combined brief is not proved inside the compact byte cap with live sections present | CLOSED | `brief-sessions.test.ts` "the compact byte cap holds with all four live sections beside a full cached brief, and the omitted line says what was dropped" (sessions, steering, handoffs and worktrees, each at its full bound, beside a cached heading, nodes, decisions and actions; at `MIN_COMPACT_BYTES` and at the default; the omitted line is present and the render is deterministic). "with the live sections alone the brief stays inside the smallest cap, and the lower-priority sections are the ones dropped". The full profile is not capped: each live section is at most 1,200 characters and the compact profile is the bound. |
+| 2 | The hint after a restart: an acknowledged directive carries `checkpoint_hint: null` | NOT CLOSED | The acknowledged row in `planning_steering_audit` records the outcome, not whether a state movement committed, so the hint cannot be rebuilt from it. Closing it needs an additive migration step (a column for the committed movement) in `packages/mcp-server/src/index-store.ts`, which is outside this closure's paths, plus a rehearsal of that step on a restored dump. The current behaviour fails safe: the hook writes no checkpoint for a restored record. |
+| 3 | Durability scope: the inbox is memory-only without `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` | OPERATOR-GATED | Opt-in by design; no default changed. Enabling the flag in production creates the table (migration steps 33 and 34, rehearsal first). See the operator list. |
+| 4 | No route-level audit-refusal test | CLOSED | `server.steering.test.ts` "operator queue and acknowledge: a refused audit write is 503 audit-unavailable and leaves the inbox as it was". With the audit sink refusing fail-closed writes: `POST /steering/queue` and `POST /steering/acknowledge` answer 503 `audit-unavailable`; the steering history and the inbox are unchanged (the queued directive is still `queued` and its body is not listed); the two refusals are audited as `denied` and no allowed record is written. |
+| 5 | Held connections: a long poll counts as one admission for as long as it waits | NOT CLOSED | Releasing the admission slot during a wait changes the admission contract in `packages/mcp-server/src/admission.ts`, outside this closure's paths, and needs Main's decision. The waiter bounds (4 per session, 256 overall, 429 past them) are unchanged. |
+| 6 | A stale session stays listed in the digest until its age says so | CLOSED | The digest lists live sessions only: a presence row whose TTL has passed (`state: "stale"`) is left out (`session-context.ts`, documented in its module comment). Tests: `session-context.test.ts` "a stale presence row is not a live session and is left out, with its active neighbours kept" and "a presence list of stale rows alone leaves the sessions list empty, not truncated". The steering source already lists only active sessions; claims already drop lapsed leases. |
+| 7 | Tests run against fake servers and stores; delivery to a real session never exercised | OPERATOR-GATED | Not repository-buildable: it needs a live session on a real host. See the operator list. |
+
+### Hook installer (repository code, tested with fakes)
+
+The gap was that the printed Claude Code `Stop` hook had no installer. `substrate session hook-install claude-code --settings PATH [--write]` (`packages/cli/src/session/hook-install.ts`, dispatch in `command.ts`) merges that hook into a settings file. It is dry run by default and prints the hook block, never the file, which can hold an `env` block with credentials. With `--write` it copies the previous file to `PATH.substrate-backup`, writes a temporary file and renames it, keeps the file's permission bits (a new file is `0600`), and refuses a symbolic link (a rename would replace it), a malformed or wrong-shaped file, a non-regular file and a file over 1 MiB. It is idempotent. Tests: `hook-install.test.ts` (22 tests, scratch directories only). Only `claude-code` is accepted: ADR 0007 maps the `Stop` event to it. `steering`, `baseline`, `context` and `git-post-commit` need host values or an event the operator chooses, so they stay printed text.
+
+### Criteria
+
+| # | Before | After this closure |
+|---|---|---|
+| 1 | MET | MET (unchanged) |
+| 2 | MET | MET (unchanged) |
+| 3 | PARTIAL | MET: the combined brief is proved inside the compact cap (residual 1). Restart hints are a separate residual (2). |
+| 4 | MET | MET (unchanged); durability without the audit flag is residual 3 |
+| 5 | MET | MET for the repository. The `steering` and `context` hooks are still printed text with no host event (operator list). A repository installer now exists for `Stop` only. |
+| 6 | MET | MET (unchanged); held connections are residual 5 |
+
+### Operator-gated (unchanged from above, plus these)
+
+- Dry run, then `substrate session hook-install claude-code --settings <host settings file>` and, after review, `--write`. Never run from this repository.
+- Choosing the host event for the `steering` and `context` configuration printed by `hook-config`. ADR 0007 maps none.
+- Enabling `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` in production (residual 3), with migration steps 33 and 34 rehearsed on a restored dump.
+- The restart-hint migration (residual 2): an operator decision on the new step, its rehearsal, and then the code change.
+- Live delivery to a real session end to end (residual 7).
+
+## Closure of residual 2, the restart hint (2026-11-11, branch `reconcile/main-2026-11-11`)
+
+Residual 2 is CLOSED in repository code. Migration step 45 `planning_steering_movements` (additive, opt-in `steering-audit`, expand) records the committed result of each acknowledgement's session-state step. `applied` is a movement the session committed, and `checkpoint_hint` records whether the reply named a hint. The acknowledgement path writes it once after the session port answers (`steering-tools.ts` `recordSession`). The restart listing joins it (`steering-store.ts` `readClosed`), so a directive acknowledged before a restart is listed with the hint its live reply carried, and `GET /steering/directives` and the hook name the same checkpoint.
+
+Evidence: `planning/steering-idempotency.pg.test.ts` "a session move committed before a restart is still listed with its checkpoint hint" passes against a disposable `postgres:16`, alongside the keyed-replay tests (6 of 6). The old residual is no longer pinned as `null`: `steering-wiring.test.ts` "the route still lists a directive that was acknowledged before the restart…" is a fake-port test of the earlier behaviour and still passes, because the fake keeps no movement row.
+
+Residual, by design: a crash between the acknowledgement row and the step-45 row leaves no hint, which fails safe. The record is written after the port answers, since the audit row must precede the effect.
+
+Operator gate, not run: rehearse migration steps 44 and 45 on a restored production dump before `SUBSTRATE_PLANNING_STEERING_AUDIT_TABLE` is enabled in production. The operator decision named above is made by this change; the rehearsal is what remains.

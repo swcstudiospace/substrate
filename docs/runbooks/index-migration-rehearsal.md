@@ -55,18 +55,21 @@ Expect **12** table-data entries across the `public` and `substrate` schemas. An
 ## 2. Restore into a throwaway container
 
 ```sh
+printf -v POSTGRES_PASSWORD '%s' "$(openssl rand -hex 16)"
+export POSTGRES_PASSWORD
 docker run -d --name index-rehearsal \
-  -e POSTGRES_PASSWORD=rehearsal \
+  -e POSTGRES_PASSWORD \
   -v ~/backups:/backups:ro \
   -p 127.0.0.1:5434:5432 \
   postgres:16
 until docker exec index-rehearsal pg_isready -U postgres; do sleep 1; done
 docker exec index-rehearsal createdb -U postgres substrate_copy
 docker exec index-rehearsal pg_restore -U postgres -d substrate_copy --no-owner /backups/index-"$STAMP".dump
-export REHEARSAL_PG_URL=postgres://postgres:rehearsal@127.0.0.1:5434/substrate_copy
+export REHEARSAL_PG_URL=postgres://postgres@127.0.0.1:5434/substrate_copy
+# add the POSTGRES_PASSWORD value to the password field of this URL in your shell; never echo the result
 ```
 
-`rehearsal` is a throwaway password for a container bound to loopback and removed at the end; it is not a production credential. If port 5434 is already in use, stop: pick another free port above 5433 and say so in your record. Never fall back to 5432.
+The `POSTGRES_PASSWORD` value above is a throwaway password for a container bound to loopback and removed at the end; it is not a production credential. If port 5434 is already in use, stop: pick another free port above 5433 and say so in your record. Never fall back to 5432.
 
 Record the row counts of every table in the copy (the same query is used against production in steps 5 and 7):
 

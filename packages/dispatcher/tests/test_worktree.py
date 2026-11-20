@@ -13,6 +13,7 @@ from substrate_dispatcher.dispatch import COMMENT_PREFIX, comment_body
 from substrate_dispatcher.worktree import (
     DEFAULT_MIN_FREE_GB,
     MIN_FREE_ENV,
+    ROOTS_ENV,
     WORKTREE_ROOTS_ENV,
     WORKTREES_ROOT,
     WorktreeRefused,
@@ -21,6 +22,7 @@ from substrate_dispatcher.worktree import (
     min_free_bytes,
     repo_checkout,
     validate_graph_id,
+    worktree_root,
     worktree_roots,
 )
 
@@ -28,9 +30,12 @@ MIN_FREE_BYTES = DEFAULT_MIN_FREE_GB * 1024**3
 
 
 @pytest.fixture(autouse=True)
-def _clean_floor_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_floor_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv(MIN_FREE_ENV, raising=False)
+    monkeypatch.delenv(ROOTS_ENV, raising=False)
     monkeypatch.delenv(WORKTREE_ROOTS_ENV, raising=False)
+    # Keep the host's real checkouts out of discovery; each test places its own under tmp_path.
+    monkeypatch.setattr("substrate_dispatcher.worktree.REPOS_ROOT", tmp_path / "no-repos-root")
 
 GID = "ut-mufsocbe-c7ced745"
 SLUG = "swcstudiospace/agent-substrate"
@@ -87,12 +92,12 @@ def test_validate_graph_id_rejects(bad):
 
 def test_repo_checkout_maps_slug_when_origin_matches(repo: Path):
     root = repo.parent
-    assert repo_checkout(SLUG, root=root) == root / "agent-substrate"
+    assert repo_checkout(SLUG, roots=[root]) == root / "agent-substrate"
 
 
 def test_repo_checkout_origin_match_is_case_insensitive_and_ignores_dot_git(repo: Path):
     git(repo, "remote", "set-url", "origin", "git@github.com:SWCStudioSpace/Agent-Substrate")
-    assert repo_checkout(SLUG, root=repo.parent) == repo
+    assert repo_checkout(SLUG, roots=[repo.parent]) == repo
 
 
 @pytest.mark.parametrize(
@@ -108,8 +113,58 @@ def test_repo_checkout_refuses(repo: Path, slug, origin):
     if origin:
         git(repo, "remote", "set-url", "origin", origin)
     with pytest.raises(WorktreeRefused) as err:
-        repo_checkout(slug, root=repo.parent)
+        repo_checkout(slug, roots=[repo.parent])
     assert err.value.marker == "no-checkout"
+
+
+def test_repo_checkout_falls_back_to_repos_root_when_no_roots_are_configured(repo: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("substrate_dispatcher.worktree.REPOS_ROOT", repo.parent)
+    assert repo_checkout(SLUG) == repo
+
+
+def test_repo_checkout_refuses_a_repository_outside_the_configured_roots(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(ROOTS_ENV, str(tmp_path / "elsewhere"))
+    with pytest.raises(WorktreeRefused) as err:
+        repo_checkout(SLUG)
+    assert err.value.marker == "no-checkout"
+
+
+def test_repo_checkout_accepts_a_repository_inside_a_configured_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(ROOTS_ENV, f"{tmp_path / 'elsewhere'}:{repo.parent}")
+    assert repo_checkout(SLUG) == repo
+
+
+def test_repo_checkout_finds_a_primary_checkout_under_repos_root_when_worktree_roots_are_set(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("substrate_dispatcher.worktree.REPOS_ROOT", repo.parent)
+    monkeypatch.setenv(ROOTS_ENV, str(tmp_path / "graph-worktrees"))
+    assert repo_checkout(SLUG) == repo
+
+
+def _checkout(path: Path, origin: str) -> Path:
+    path.mkdir(parents=True)
+    git(path, "init", "-q", "-b", "main")
+    git(path, "remote", "add", "origin", origin)
+    return path
+
+
+def test_repo_checkout_skips_an_earlier_checkout_of_another_repository(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    alice = _checkout(first / "app", "https://github.com/alice/app.git")
+    bob = _checkout(second / "app", "https://github.com/bob/app.git")
+    assert repo_checkout("bob/app", roots=[first, second]) == bob
+    assert repo_checkout("alice/app", roots=[first, second]) == alice
+
+
+def test_repo_checkout_refuses_when_every_checkout_has_another_origin(tmp_path: Path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    _checkout(first / "app", "https://github.com/alice/app.git")
+    _checkout(second / "app", "https://github.com/carol/app.git")
+    with pytest.raises(WorktreeRefused) as err:
+        repo_checkout("bob/app", roots=[first, second])
+    assert err.value.marker == "no-checkout"
+
 
 
 def test_ensure_worktree_creates_then_reuses(repo: Path, tmp_path: Path):
@@ -175,8 +230,10 @@ def test_ensure_worktree_disk_floor(repo: Path, tmp_path: Path, free, refused):
         return subprocess.run(argv, **kwargs)
 
     def usage(path: str) -> Usage:
+        # With no roots configured, the production floor is checked on /.
         assert path == "/"
         return Usage(100 * 1024**3, 0, free)
+
 
     root = tmp_path / "wt"
     if refused:
@@ -222,6 +279,63 @@ def test_ensure_worktree_floor_follows_env(repo: Path, tmp_path: Path, monkeypat
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (None, WORKTREES_ROOT),
+        ("", WORKTREES_ROOT),
+        ("   ", WORKTREES_ROOT),
+        ("relative/only:also/relative", WORKTREES_ROOT),
+        ("/first/root", Path("/first/root")),
+        ("rel:/first/root/:/second", Path("/first/root")),
+        ("/x//y/../z: /w ", Path("/x/z")),
+    ],
+)
+def test_worktree_root_is_the_first_absolute_entry(raw, expected):
+    env = {} if raw is None else {ROOTS_ENV: raw}
+    assert worktree_root(env) == expected
+
+
+def test_worktree_roots_keeps_order_drops_relative_and_duplicates():
+    env = {ROOTS_ENV: "/a:rel:/a/:/b:/b/../c"}
+    assert worktree_roots(env) == [Path("/a"), Path("/b"), Path("/c")]
+
+
+def test_worktree_root_reads_the_environment_at_call_time(monkeypatch: pytest.MonkeyPatch):
+    assert worktree_root() == WORKTREES_ROOT
+    monkeypatch.setenv(ROOTS_ENV, "/mnt/fleet:/srv/other")
+    assert worktree_root() == Path("/mnt/fleet")
+
+
+def test_ensure_worktree_creates_under_the_configured_root(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first = tmp_path / "first"
+    monkeypatch.setenv(ROOTS_ENV, f"{first}:{tmp_path / 'second'}")
+    path = ensure_worktree(repo, GID, "main", run=Recorder(), disk_usage=plenty)
+    assert path == first / GID
+    assert path.is_dir()
+    assert str(path) in git(repo, "worktree", "list", "--porcelain")
+    assert not (tmp_path / "second").exists()
+
+
+def test_ensure_worktree_floor_is_read_on_the_configured_root_filesystem(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    monkeypatch.setenv(ROOTS_ENV, str(mount / "wt"))
+    probed: list[str] = []
+
+    def usage(path: str) -> Usage:
+        probed.append(path)
+        # The root's filesystem is nearly full; "/" would have plenty. The check must not read "/".
+        return Usage(100 * 1024**3, 0, 1024**3 if path == str(mount) else 50 * 1024**3)
+
+    run = Recorder()
+    with pytest.raises(WorktreeRefused) as err:
+        ensure_worktree(repo, GID, "main", run=run, disk_usage=usage)
+    assert err.value.marker == "low-disk"
+    assert probed == [str(mount)]
+    assert str(mount) in str(err.value)
+    assert run.calls == []
+    assert not (mount / "wt").exists()
 def test_worktree_roots_keep_absolute_entries_in_order_once(tmp_path: Path):
     first, second = tmp_path / "first", tmp_path / "second"
     value = f"relative/one::{first}:  :./x:{second}:{first}/"

@@ -26,7 +26,6 @@ function absentFacts(): FabricFacts {
 			dragonfly: absent,
 			"timescaledb-index": absent,
 			greptime: absent,
-			ragflow: absent,
 			lightrag: absent,
 			hindsight: absent,
 			tei: absent,
@@ -99,11 +98,11 @@ describe("buildFabricSuggestions", () => {
 	});
 
 	test("an unavailable resource is named with the source of its reading", () => {
-		const found = suggest(withService("ragflow", { answered: false, source: "health().planes.ragflow" })).find(
-			(suggestion) => suggestion.id === "unavailable.ragflow",
+		const found = suggest(withService("lightrag", { answered: false, source: "health().planes.lightrag" })).find(
+			(suggestion) => suggestion.id === "unavailable.lightrag",
 		);
-		expect(found).toMatchObject({ resource: "ragflow", severity: "attention" });
-		expect(found?.evidence).toBe("state unavailable; source: health().planes.ragflow");
+		expect(found).toMatchObject({ resource: "lightrag", severity: "attention" });
+		expect(found?.evidence).toBe("state unavailable; source: health().planes.lightrag");
 	});
 
 	test("an unavailable LightRAG is named like any resource, and an unconfigured one yields nothing", () => {

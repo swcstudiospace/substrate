@@ -256,7 +256,7 @@ no other row claims as its `prev`. A *window of the newest rows by `ts`* is what
 must not be used — a backfilled event is the real tip while sorting last, so such
 a window would leave an already-claimed hash looking unclaimed and the next append
 would fork the session. The `LIMIT` in that query is a memory guard set far above
-any real session, not an ordering assumption. `verifyGraph` puts each session's
+any real session, not an ordering assumption. A read that fills it is refused: `lastHash` throws `chain tip unreliable`, and the append answers `stored: false` and writes nothing, rather than trust a window that may not hold the tip. `verifyGraph` puts each session's
 events in chain order before verifying. This does not weaken verification — hashes are still recomputed,
 and a spliced-out event, a tampered one or a fork all leave events that do not link
 into the walk, which are kept so the break is still reported. What it stops
@@ -307,7 +307,9 @@ only by `migrate()` and only when `SUBSTRATE_LEDGER_TTL` is set (see *Retention*
 Batched statements are refused too, since Greptime's HTTP API accepts
 `;`-separated ones and checking only the first verb would leave a way in. The
 guard blanks string literals before reasoning about structure, so an event whose
-summary contains `;` or `--` is neither mistaken for a batch nor wrongly dropped.
+summary contains `;` or `--` is neither mistaken for a batch nor wrongly dropped. The guard does not know the server's dialect, so it reads
+every statement twice, with and without backslash escapes in a literal, and refuses it if either reading finds a second statement or a verb
+outside the list. The two readings disagree on a backslash before a quote: `'a\'; DELETE …` is one literal under one of them, and a closed literal then a `;` under the other.
 
 **Correct quoting.** Greptime's HTTP SQL API has no bind parameters, so every
 value is inlined and quoting is ours to get right. Single quotes are doubled.
@@ -326,7 +328,7 @@ differs from the text its hash covers, and an append-only table cannot be
 corrected: that row would fail verification for as long as it exists and take its
 session's chain with it. One lost event is the cheaper failure. The payload counts
 here too, since it is stored as JSON and a newline inside it reaches the column as
-a two-character `\n`.
+a two-character `\n`. The refusal is not buffered: a retry of the same event refuses the same way, so it is answered `stored: false` and is not parked for another attempt.
 
 **An honest result.** `emit` returns `stored`. The substrate fails open — an
 unreachable event store must never fail an agent's turn — but a caller that gets
@@ -389,11 +391,14 @@ size cap, so it is inside the hashed event (no schema change, no `ALTER`: the
 append-only guard is untouched) and survives a payload that was replaced for its size.
 It adds at most about 140 bytes beyond the 16 000-byte payload cap.
 
-**Lookup.** One bounded `SELECT` in `GreptimeClient.findByIdempotencyKey`: the
+**Lookup.** One bounded read at a time in `GreptimeClient.findByIdempotencyKey`: the
 primary-key prefix (`surface`, `repo`, `graph_id`, `kind`; a NULL `repo` or `graph_id`
-is `IS NULL`) plus the exact normalised `ts`, with the payload matched against
-`…"_ik":"<key>"}` at the end of its text, at most 5 rows (`LIKE` reads `_` as a wildcard,
-so a lookalike key can match too; each returned row is checked for the exact suffix, and a full read with no exact match is treated as a failed lookup — `503`, nothing written, `result=lookup_failed` — never as a miss, so an unusual key whose pattern matches five other rows in its cell can be answered 503 but never duplicated). It runs inside the per-session
+is `IS NULL`) plus the exact normalised `ts`, in `id` order, five rows a page. Each row's payload is checked in code for the exact
+`…"_ik":"<key>"}` suffix. There is no `LIKE`, so `_` in a key is not a wildcard and a lookalike cannot match. A page that is full with no
+match is followed by keyset paging on `"id"` (`"id" > <last id>`), up to 20 full pages, so a cell with more than five rows at that exact
+`ts` costs one read per page it needs. A short page is the whole rest of the cell, and no match there is a genuine miss. A cell still
+unresolved after 20 full pages, or a row id the paging cannot carry safely, is an inconclusive lookup: `503`, nothing written,
+`result=lookup_failed`, never a miss, so a cell too deep to read can be answered 503 but never duplicated. It runs inside the per-session
 emit turn (`emitChains`), so two concurrent same-key requests leave one row, and a
 replay waits for the original attempt still in flight. A keyed event with no session
 takes its turn on the key instead.
@@ -699,11 +704,11 @@ each as `{ name, rows, diskBytes, sstBytes, indexBytes }`, with a table's region
 summed. `/healthz` reports it under `capacity.ledger`, beside R4's
 `capacity.index`, raced against the same 1 s bound and `null` when the store does
 not answer in time. The Railway volume is 500 MB; the measured ledger was 1.28 MB
-for 14,302 rows (BASELINES.md), so there is room, but the number is now visible
+for 14,302 rows (`.planning/uplift-2/BASELINES.md`), so there is room, but the number is now visible
 rather than a one-off query.
 
 **Operator cleanup: the stale pre-append table.** `agent_events_pre_append_20260930`
-(9,851 rows, 1.29 MB; BASELINES.md) is, by its name, the copy kept when
+(9,851 rows, 1.29 MB; `.planning/uplift-2/BASELINES.md`) is, by its name, the copy kept when
 `agent_events` was recreated with `append_mode`. Nothing reads it; it shows up first in
 `capacity.ledger.tables`. Dropping it is an operator action — this client refuses
 `DROP` by design and will not grow a path for it — taken after an export of the
@@ -918,7 +923,7 @@ stays, and an exported hour can still be checked against it. What is lost is the
 ability to *recompute* a root for an expired hour from the ledger itself.
 
 **Export before expiry.** The policy says *then export*, and the VPS disk is at
-94 % (BASELINES.md), so the export goes off-box. **The precondition for setting
+94 % (`.planning/uplift-3/BASELINES.md`, `uplift-4`, `uplift-5`), so the export goes off-box. **The precondition for setting
 `SUBSTRATE_LEDGER_TTL` is a verified archive of every day that would expire:**
 `substrate ledger archive --until <day>` for every closed day older than the TTL
 (the command writes every closed day without a manifest), then `substrate ledger
@@ -942,6 +947,81 @@ run by the operator against the store, with `SUBSTRATE_LEDGER_TTL` unset in
 unsetting stops further deletion but does not restore rows already removed — which
 is what the export step above is for.
 
+## Write buffer and dead letters (phase 76)
+
+An event whose `agent_events` write fails is no longer lost by a single failed call. It is parked in the buffer
+(`packages/mcp-server/src/event-buffer.ts`), retried with backoff (2 s doubling to 5 min, ±20 % jitter), and after
+`SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS` writes (default 10) it is written to the dead-letter store together with its hash.
+The caller's answer is `stored: false` with `buffered: true` (it will be retried) or `deadLettered: true` (it will not).
+The answer is never `stored: true` for a parked event.
+
+- **Chain order.** Each event's `prev` is its session's previous hash, so a session's parked events are retried in
+  order and a new event of that session is parked behind them rather than written. A dead-lettered event takes the
+  session's later parked events with it (`chain-blocked`). The next event then chains from the ledger's own tip.
+- **Retry safety.** Before each retry the buffer asks whether the row is already in the ledger, because a write that
+  timed out may have landed. If it has, only the missing `event_ingest` record is written.
+- **Keyed replays.** A replay of a keyed event whose first attempt is still parked answers with the parked event and
+  writes nothing, so a retry cannot store a second copy.
+- **Bounds.** The buffer holds `SUBSTRATE_LEDGER_BUFFER_MAX` events; a new event over that bound is dead-lettered with
+  cause `overflow`. The dead-letter store holds `SUBSTRATE_LEDGER_DEAD_LETTER_MAX` records; over that, the oldest is
+  evicted and its id and hash are written to stderr.
+- **Causes.** `exhausted` (the budget was spent), `overflow` (a bound was full), `chain-blocked` (an earlier event of
+  its session was dead-lettered), `abandoned` (a memory-only buffer was shut down with it parked).
+- **Health.** `/healthz.eventBuffer` reports `pending`, `max`, `oldestAt`, `durable`, and `deadLetters` with `depth`,
+  `max`, `durable` and `evicted`. Neither store changes the `/healthz` status code.
+- **Not replayed.** The substrate never re-appends a dead letter. Reading the file and re-appending a record is an
+  operator decision, and the record carries the event whole, `prev` and `hash` included.
+- **Not covered.** A failure before the write (the chain tip unreadable or refused, a ledger that is not append-only, or a backslash
+  the quoting dialect is not yet known for) is still a refusal with `stored: false` and no buffering: the event's hash depends on a `prev`
+  that cannot be read or is not yet safe to write.
+
+## Cross-layer reconcile (phase 78)
+
+`packages/mcp-server/src/cross-layer-reconcile.ts` checks that the ledger, the index and the cache agree about memory
+forgets. Its scheduled entry is `packages/mcp-server/src/cross-layer-reconcile-run.ts`, which calls
+`runScheduledReconcile(deps, options)` once per tick. The reconcile unit that runs that tick is staged under `infra/vps/` and installed by an operator (see *Scheduled run* below). `substrate reconcile` is the manual path for the confirmed repair.
+
+- **What is compared.** A `memory.forget` note names its forget id and its entry ids. For each named entry the index must
+  not still have it in force (`superseded_by` null), and the cache forget mark must be at or after the latest forget that
+  marked rows, while the mark is meant to live (`markTtlS`). An entry the index no longer has, or one another superseder
+  holds, is consistent with the forget. The index keeps no ledger event id, so no other pair has a precise key.
+- **What is judged.** Only notes older than `settleMs` (a write the telemetry buffer parked is not drift until it has had
+  its retries) and newer than `windowMs` ago. A full ledger page, a key set past `RECONCILE_MAX_KEYS`, a malformed forget
+  note or one that names fewer entries than it touched makes the read incomplete: it is reported, and nothing is planned.
+- **Read-only.** `runScheduledReconcile` writes nothing, clean or not. It returns per-layer counts and the first
+  mismatching key, or a failure naming the layer that could not be read or an incomplete read. The tick's exit codes:
+  0 for a complete read with no mismatch; 3 for mismatches found, first key reported (they outrank an incomplete read);
+  1 for an incomplete read or a layer that could not be read, with no mismatch proven.
+- **Repair is a separate, confirmed step.** `planRepair` writes one `reconcile.plan` note whose event id is the plan id,
+  and only for a complete read with something to repair. `applyRepair({ planId, confirm })` refuses unless `confirm`
+  equals `planId`, and each item a fresh read yields is one the stored plan holds. It then marks only the planned entries (`markMemoryForgotten`,
+  which never overwrites another superseder), sets the cache mark if the plan has one, and records a `reconcile.applied`
+  note. A repeat apply marks nothing new. Repair follows the corpus delete rules (`corpus/plan.ts`): scope, never
+  overwrite, never remove (a forget keeps the row), planned keys only.
+- **Manual path.** `substrate reconcile` (no flag, or `--plan`) runs the comparison, records the plan as one `reconcile.plan` note, and prints it with its id; it repairs nothing. `substrate reconcile --apply PLAN_ID --confirm` applies that plan. It refuses without `--confirm`, and it refuses if a fresh read of the layers holds an item the stored plan does not, or an altered one; items already applied drop out, so a partial apply can be retried. The CLI runs `packages/mcp-server/src/cross-layer-reconcile-repair-run.ts`, which calls `planRepair`, `previewRepair` and `applyRepair`, and writes its notes without opening the live queues.
+- **Not covered.** An index forget with no ledger note is not judged: the index has no window to read it by. A repair
+  does not re-send a Hindsight document deletion; a plane document a repaired entry still holds is the plane's pending
+  work, as it is for a forget that stopped part way.
+
+### Cache-to-index repair
+
+`--cache-index GRAPH_ID` checks the cache -> index pair for one graph. `reconcileCacheIndex` reads the graph's cached view under each surface in `PAIR_SURFACES`, at the graph's current generation, and the index's nodes. A node cached but not indexed is `cache-only`; a node in both with another `leaseEpoch` is `version-mismatch`; a node indexed but not cached is `index-only`. This pair is the only one with a repair. The forget pair and the index -> ledger pair are report-only.
+
+- **Plan.** `planCacheIndexRepair` writes ONE `reconcile.plan.cache-index` note whose event id is the plan id. The note holds two `bump` items, `graphGenerationKey(graphId)` and `GRAPHS_GENERATION_KEY`, a digest of those items, and a digest of the state the read saw (verdict, counts and mismatches). A plan comes only from a complete read that is `drift`. A clean read exits 0 and writes nothing. An incomplete or unavailable read (`generation-moved`, `cache-disabled`, `cache-malformed`, or a layer that could not be reached) exits 1 and writes nothing. A plan note the ledger does not store is `plan-not-recorded`: no plan id is printed and nothing is repaired.
+- **Apply.** `--cache-index --apply PLAN_ID --confirm` is refused with exit 2, before any store opens, unless `--confirm` follows the plan id. The plan note is then read back. It must be a `reconcile.plan.cache-index` note whose items are the two keys it names and whose items digest matches; otherwise the apply refuses as `plan-invalid`. The cache and the index are read afresh. An incomplete or unavailable read is refused. A fresh state whose digest differs from the plan's is refused as `plan-invalid`: the cache or the index changed after planning, so plan again. Every refusal writes nothing.
+- **What apply writes.** Two `INCR`s, in order: the graph's generation, then the graphs generation. Nothing else. The repair deletes no cache entry, writes no index row, and writes no `reconcile.applied` note, because this pair records none.
+- **Partial apply.** If the second bump fails, the run exits 1 and names how many keys moved. Re-applying the same plan re-reads the state. If it still digests as the plan's, the repeat bumps both keys again, which only retires the same entries once more. Otherwise it is refused as `plan-invalid`, and the operator plans again.
+- **Scheduled tick.** `runPairsTick` is read-only. The timer never plans, applies or bumps.
+- **Exit codes.** Plan: 0 the layers agree; 3 a plan is printed, with its id and its two bumps; 1 failed (a read was unavailable or incomplete, or the plan was not recorded); 2 usage or missing configuration. Apply: 0 applied; 1 refused or failed; 2 usage.
+- **Operator path.** `bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts --cache-index GRAPH_ID` plans, and `bun packages/mcp-server/src/cross-layer-reconcile-repair-run.ts --cache-index --apply PLAN_ID --confirm` applies. The `substrate reconcile` CLI does not yet forward `--cache-index`, so the runner file is the path for this repair.
+
+### Scheduled run
+
+- **Units.** `infra/vps/substrate-cross-layer-reconcile.service` (`Type=oneshot`, `ExecStart=bun packages/mcp-server/src/cross-layer-reconcile-run.ts --json` in `/opt/agent-substrate/current`, `EnvironmentFile=/etc/substrate/substrate.env`) and its timer `infra/vps/substrate-cross-layer-reconcile.timer`. The entry point is `packages/mcp-server/src/cross-layer-reconcile-run.ts`.
+- **Schedule.** `OnCalendar=*-*-* 04:41:00 UTC` with `Persistent=true`: one tick a day, and a missed day runs at the next boot.
+- **Install.** Both units are staged in `infra/vps/`. Copying them into `/etc/systemd/system`, `systemctl daemon-reload` and `systemctl enable --now substrate-cross-layer-reconcile.timer` are operator steps; nothing in the repo installs them. The sandbox drop-in `infra/vps/substrate-cross-layer-reconcile.service.d/30-sandbox.conf.example` is an example and is not active until copied.
+- **Exit codes.** 0 for a complete read with no mismatch, 3 for a mismatch (the first mismatching key is in the journal under `substrate-cross-layer-reconcile`), 1 for an incomplete read or a layer that could not be read.
+- **Graphs.** `SUBSTRATE_RECONCILE_GRAPHS` (comma separated graph ids, at most 50) names the graphs whose cross-layer pairs the run compares. Unset, no graph pair is compared: the run reports those pairs as not run, and its exit is the forget pair's alone. The unit file does not set it, so it must be added to `/etc/substrate/substrate.env` to take effect. See `docs/config-reference.md`.
 ## Telemetry buffer and dead-letter (phase 76)
 
 The buffer is **off by default**. With `SUBSTRATE_EVENT_BUFFER_PATH` unset, a failed write answers `stored: false` exactly as it always has, and nothing is queued. With the path set, an event whose ledger write fails is not dropped: it waits in a bounded buffer and is retried with exponential backoff. When its retry budget is spent it is written to the dead-letter store: one record per event, carrying the event's hash and the reason. Nothing is discarded without a record.
@@ -980,6 +1060,11 @@ Plus switches, none of which is a credential:
 | `SUBSTRATE_LEDGER_TTL` | retention applied to `agent_events` and `event_ingest` at boot, a Greptime duration such as `180d`. Unset by default: nothing is altered. Invalid refuses to boot. See *Retention*. |
 | `SUBSTRATE_EVENT_IDEMPOTENCY` | `off` (default), `accept` or `enforce`. Anything else is `off` with a boot warning. See *Idempotent replay*. |
 | `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2, 0..100000; default 2. Report-only on `/healthz`. See *Coverage and archive*. |
+| `SUBSTRATE_LEDGER_BUFFER_PATH` | file for the parked-event buffer (0600 JSONL). Unset: memory-only, and shutdown dead-letters what is parked. See *Write buffer and dead letters*. |
+| `SUBSTRATE_LEDGER_BUFFER_MAX` | parked events the buffer holds, a positive integer; default 1000. Over it a new event goes straight to the dead-letter store. |
+| `SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS` | write attempts per event, the live one included, before it is dead-lettered; default 10. |
+| `SUBSTRATE_LEDGER_DEAD_LETTER_PATH` | file for the dead-letter store (0600 JSONL). Unset: memory-only, and its records are lost at exit. |
+| `SUBSTRATE_LEDGER_DEAD_LETTER_MAX` | dead-letter records kept, a positive integer; default 10000. Over it the oldest is evicted and named on stderr. |
 | `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
 | `SUBSTRATE_EVENT_BUFFER_MAX` | events the buffer holds, positive integer; default 256; read only while the buffer is on. Over it, the oldest waiting event is dead-lettered. See *Telemetry buffer*. |
 | `SUBSTRATE_EVENT_BUFFER_PATH` | the buffer's file, and the switch: unset (the default) keeps the buffer off, so a failed write answers `stored: false` as before. Set, it requires `SUBSTRATE_EVENT_DEAD_LETTER_PATH`. |
@@ -1002,7 +1087,7 @@ handle.
 ### Transport: HTTPS with Basic auth, today
 
 `GREPTIME_URL` is the HTTP SQL API base over public HTTPS, and the credential is
-sent as an `Authorization: Basic` header — built per request, never placed in the
+sent in an `Authorization` header using the Basic scheme — built per request, never placed in the
 URL, so it cannot leak through a log line, a redirect or an error this code quotes.
 This is the path INFRA probed green against the Railway service, and it is the one
 to keep using.

@@ -320,13 +320,15 @@ describe("a quoted credential value with spaces loses every word", () => {
 		expect(redact(String.raw`export DB_PASS=\"first\"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
 		expect(redactSkillContent(String.raw`export DB_PASS=\"first\"&&printf ready`).text).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
 	});
-	test("a placeholder value followed by a shell operator is kept on the skill path and still redacted on the event path", () => {
-		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+	test("a placeholder value followed by a shell operator is kept on both paths, operator intact", () => {
+		// Placeholders are not secrets. The ingest gate falls back to redact() (findingRules), so the event path keeps
+		// them as the skill path does, and the operator after the closing quote is never swallowed.
+		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS="example"&&printf ready`);
 		expect(redactSkillContent(`export DB_PASS="example"&&printf ready`).text).toBe(`export DB_PASS="example"&&printf ready`);
-		expect(redact(`export DB_PASS="example"; printf ready`)).toBe(`export DB_PASS=${REDACTED}; printf ready`);
+		expect(redact(`export DB_PASS="example"; printf ready`)).toBe(`export DB_PASS="example"; printf ready`);
 		expect(redactSkillContent(`export DB_PASS="example"; printf ready`).text).toBe(`export DB_PASS="example"; printf ready`);
 		// The escaped form is a placeholder too: the skill path unescapes it before the placeholder check.
-		expect(redact(String.raw`export DB_PASS=\"example\"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		expect(redact(String.raw`export DB_PASS=\"example\"&&printf ready`)).toBe(String.raw`export DB_PASS=\"example\"&&printf ready`);
 		expect(redactSkillContent(String.raw`export DB_PASS=\"example\"&&printf ready`).text).toBe(String.raw`export DB_PASS=\"example\"&&printf ready`);
 	});
 	test("an escaped env reference inside JSON is kept on the skill path", () => {
@@ -359,7 +361,8 @@ describe("a quoted credential value with spaces loses every word", () => {
 		}
 	});
 	test("a placeholder followed by a shell operator keeps the operator on both paths", () => {
-		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS=${REDACTED}&&printf ready`);
+		// The placeholder is kept on the event path too: the gate and redact() share one narrowed pattern.
+		expect(redact(`export DB_PASS="example"&&printf ready`)).toBe(`export DB_PASS="example"&&printf ready`);
 		expect(redactSkillContent(`export DB_PASS="example"&&printf ready`).text).toBe(`export DB_PASS="example"&&printf ready`);
 	});
 });
@@ -422,7 +425,7 @@ const FIXTURES: Record<RedactionRuleName, readonly RuleFixture[]> = {
 	"openai-proj": [{ text: "sk-proj-" + rnd(ALNUM, 40), secret: "sk-proj-" + rnd(ALNUM, 40) }],
 	// The key prefix is a literal like the other provider prefixes above; the
 	// tail is deterministic runtime output, never a real credential.
-	ragflow: [{ text: "ragflow-" + rnd(ALNUM, 40), secret: "ragflow-" + rnd(ALNUM, 40) }],
+	lightrag: [{ text: "lightrag-" + rnd(ALNUM, 40), secret: "lightrag-" + rnd(ALNUM, 40) }],
 	// Provider shapes added with the SOTA pass; the skill pass shares each name.
 	stripe: [{ text: "sk_live_" + rnd(ALNUM, 24), secret: "sk_live_" + rnd(ALNUM, 24) }],
 	huggingface: [{ text: "hf_" + rnd(ALNUM, 34), secret: "hf_" + rnd(ALNUM, 34) }],
@@ -502,6 +505,144 @@ describe("one fixture per named rule", () => {
 	});
 });
 
+describe("six narrowed event rules: real values stay refused, prose and placeholders pass", () => {
+	const SECRET = rnd(ALNUM, 40);
+	/** Whether the rule's own pattern fires, which is the test the ingest gate applies. */
+	const fires = (name: RedactionRuleName, text: string): boolean => {
+		const rule = ruleByName(name);
+		const flags = rule.pattern.flags.includes("g") ? rule.pattern.flags : `${rule.pattern.flags}g`;
+		return new RegExp(rule.pattern.source, flags).test(text);
+	};
+
+	test("assignment: a real value after a spaced separator or under a lowercase key is still refused", () => {
+		expect(fires("assignment", `LINEAR_API_KEY = ${SECRET}`)).toBe(true);
+		expect(fires("assignment", `db_token: ${SECRET}`)).toBe(true);
+		expect(fires("assignment", "client_secret: hunter2x")).toBe(true);
+	});
+
+	test("assignment: prose, env references, placeholders and _FILE/_PATH keys are accepted", () => {
+		for (const text of [
+			"the token: is required before deploy",
+			"SUBSTRATE_TOKEN=${SUBSTRATE_TOKEN}",
+			"SUBSTRATE_TOKEN=<token>",
+			"LINEAR_API_KEY=YOUR_TOKEN_HERE",
+			"SUBSTRATE_TOKEN_FILE=/tmp/t",
+		]) {
+			expect({ text, fires: fires("assignment", text) }).toEqual({ text, fires: false });
+		}
+	});
+
+	test("password: a real value after a spaced separator is still refused", () => {
+		expect(fires("password", `password = ${SECRET}`)).toBe(true);
+		expect(fires("password", `"password" :  ${SECRET}`)).toBe(true);
+	});
+
+	test("placeholder words are whole words: a real value that merely starts with one is still refused", () => {
+		expect(fires("password", `password: example${SECRET}`)).toBe(true);
+		expect(fires("assignment", `LINEAR_API_KEY=changeme${SECRET}`)).toBe(true);
+	});
+
+	test("password: placeholders and env references are accepted", () => {
+		for (const text of ["password: $DB_PASSWORD", "password: <your-password>", 'password: "changeme"', "password: YOUR_PASSWORD"]) {
+			expect({ text, fires: fires("password", text) }).toEqual({ text, fires: false });
+		}
+	});
+
+	test("password-env: uppercase and lowercase keys with a real value are still refused", () => {
+		expect(fires("password-env", `DB_PASSWORD=${SECRET}`)).toBe(true);
+		expect(fires("password-env", `db_pass=${SECRET}`)).toBe(true);
+	});
+
+	test("password-env: lowercase pass counters and placeholders are accepted", () => {
+		for (const text of ["pass=2", "pass=1234", "pass=x", "DB_PASS=$DB_PASS_VALUE", "DB_PASSWORD=<your-password>"]) {
+			expect({ text, fires: fires("password-env", text) }).toEqual({ text, fires: false });
+		}
+	});
+
+	test("api-key-lower: a real value under apiKey or api-key is still refused", () => {
+		expect(fires("api-key-lower", `apiKey: ${SECRET}`)).toBe(true);
+		expect(fires("api-key-lower", `api-key = ${SECRET}`)).toBe(true);
+	});
+
+	test("api-key-lower: a real key value on the next line after a line-ending key is still refused", () => {
+		expect(fires("api-key-lower", `api_key:\n${SECRET}`)).toBe(true);
+		expect(redact(`api_key:\n${SECRET}`)).not.toContain(SECRET);
+	});
+
+	test("api-key-lower: env references and placeholders are accepted", () => {
+		for (const text of [
+			"apiKey: process.env.OPENAI_API_KEY",
+			"apiKey: os.environ.get",
+			"api_key: $OPENAI_API_KEY_VALUE_ENV",
+			"api_key: your-api-key-goes-here",
+			"api_key: <your-api-key-value>",
+		]) {
+			expect({ text, fires: fires("api-key-lower", text) }).toEqual({ text, fires: false });
+		}
+	});
+
+	test("authorization: a real credential with or without a scheme is still refused", () => {
+		expect(fires("authorization", `Authorization: Bearer ${SECRET}`)).toBe(true);
+		expect(fires("authorization", `authorization = ${SECRET}`)).toBe(true);
+	});
+
+	test("authorization: env references and templates after the header are accepted", () => {
+		for (const text of ["Authorization: Bearer $PARALLEL_API_KEY", "authorization: ${AUTH_HEADER}", "Authorization: <token>"]) {
+			expect({ text, fires: fires("authorization", text) }).toEqual({ text, fires: false });
+		}
+	});
+
+	test("a backticked real value is still refused on the redaction path", () => {
+		// A backtick is a value wrapper, not a placeholder: a real value inside it is refused (fail-closed).
+		expect(fires("password", `password: \`${SECRET}\``)).toBe(true);
+		expect(fires("assignment", `LINEAR_API_KEY=\`${SECRET}\``)).toBe(true);
+		expect(fires("authorization", `Authorization: \`${SECRET}\``)).toBe(true);
+		expect(fires("assignment", "set `secret:` in the vault")).toBe(true);
+		expect(redact(`password: \`${SECRET}\``)).not.toContain(SECRET);
+	});
+
+	test("bearer: a real token, including one with a digit in a lowercase run, is still refused", () => {
+		expect(fires("bearer", `Bearer ${SECRET}`)).toBe(true);
+		expect(fires("bearer", "Bearer abcdefghijklmnop42")).toBe(true);
+	});
+
+	test("bearer: a bare all-lowercase token is still refused, and so is a real value after a prose word", () => {
+		expect(fires("bearer", `Bearer ${"z".repeat(64)}`)).toBe(true);
+		expect(fires("bearer", `Bearer authenticationK7p2mX9qL4vR8tY1`)).toBe(true);
+		expect(redact(`Bearer ${"z".repeat(64)}`)).not.toContain("zzzz");
+	});
+
+	test("bearer: placeholders and the lowercase word 'authentication' are accepted", () => {
+		for (const text of ["Bearer YOUR_TOKEN_HERE", "Bearer your_token_value", "Bearer xxxxxxxxxxxxxxxx", "Bearer $API_TOKEN_VALUE", "Bearer <token>", "Bearer authentication"]) {
+			expect({ text, fires: fires("bearer", text) }).toEqual({ text, fires: false });
+		}
+	});
+
+	test("assignment: a real value on the next line after a line-ending key is still refused", () => {
+		expect(fires("assignment", `SUBSTRATE_TOKEN_X=\n${SECRET}`)).toBe(true);
+		expect(fires("assignment", `client_secret:\n${SECRET}`)).toBe(true);
+		expect(redact(`SUBSTRATE_TOKEN_X=\n${SECRET}`)).not.toContain(SECRET);
+	});
+
+	test("password: a real value on the next line after a line-ending key is still refused", () => {
+		expect(fires("password", `password:\n${SECRET}`)).toBe(true);
+		expect(redact(`password:\n${SECRET}`)).not.toContain(SECRET);
+	});
+
+	test("redact leaves the prose and placeholder shapes of all six rules unchanged", () => {
+		for (const text of [
+			"the token: is required before deploy",
+			"password: <your-password>",
+			"pass=2 fail=0",
+			"apiKey: process.env.OPENAI_API_KEY",
+			"Authorization: Bearer $PARALLEL_API_KEY",
+			"Bearer authentication",
+		]) {
+			expect(redact(text)).toBe(text);
+		}
+	});
+});
+
 describe("D-04 counter exemption", () => {
 	test("counts survive while a D-04 fixture and a short api_key are redacted whole", () => {
 		const out = redactValue({
@@ -546,6 +687,98 @@ const SKILL_PEM_MIDDLE = rnd(ALNUM, 32);
 const SKILL_PEM = ["-----BEGIN " + "RSA PRIVATE KEY-----", SKILL_PEM_MIDDLE, "-----END " + "RSA PRIVATE KEY-----"].join("\n");
 const SKILL_JWT_LAST = rnd(ALNUM, 27);
 const SKILL_JWT = ["eyJ" + "hbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", SKILL_JWT_LAST].join(".");
+describe("skill rules narrowed for false positives: real values stay refused, listed shapes pass", () => {
+	const SECRET = rnd(ALNUM, 40);
+	/** Any skill finding or redaction on the text: the skill path's own verdict. */
+	const skillHits = (text: string) => {
+		const result = redactSkillContent(text);
+		return [...result.redactions, ...result.findings];
+	};
+	const refused = (text: string) => skillHits(text).length > 0;
+	const accepted = (text: string) => {
+		expect({ text, hits: skillHits(text), out: redactSkillContent(text).text }).toEqual({ text, hits: [], out: text });
+	};
+
+	test("assignment: a real value on a spaced separator, a lowercase key or a backtick-wrapped mixed secret is refused", () => {
+		expect(refused(`LINEAR_API_KEY = ${SECRET}`)).toBe(true);
+		expect(refused(`client_secret: ${SECRET}`)).toBe(true);
+		expect(refused("SUBSTRATE_TOKEN=`" + SECRET + "`")).toBe(true);
+	});
+
+	test("assignment: prose, placeholders, env references, _FILE keys and backtick identifiers are accepted", () => {
+		for (const text of [
+			"the token: is required before deploy",
+			"SUBSTRATE_TOKEN=${SUBSTRATE_TOKEN}",
+			"SUBSTRATE_TOKEN=<token>",
+			"LINEAR_API_KEY=YOUR_TOKEN_HERE",
+			"SUBSTRATE_TOKEN_FILE=/tmp/t",
+			"SUBSTRATE_TOKEN=`API_KEY_NAME`",
+		]) {
+			accepted(text);
+		}
+	});
+
+	test("password: a real value on a spaced separator is refused; placeholder values are accepted", () => {
+		expect(refused(`password = ${SECRET}`)).toBe(true);
+		expect(refused(`"password" :  ${SECRET}`)).toBe(true);
+		for (const text of ["password: $DB_PASSWORD", "password: <your-password>", 'password: "changeme"']) accepted(text);
+	});
+
+	test("password-env: real values are refused; lowercase pass counters and placeholders are accepted", () => {
+		expect(refused(`DB_PASSWORD=${SECRET}`)).toBe(true);
+		expect(refused(`db_pass=${SECRET}`)).toBe(true);
+		for (const text of ["pass=2 fail=0", "pass=1234", "pass=x", "DB_PASS=$DB_PASS_VALUE"]) accepted(text);
+	});
+
+	test("api-key-lower: real keys are refused; env references and placeholder words are accepted", () => {
+		expect(refused(`apiKey: ${SECRET}`)).toBe(true);
+		expect(refused(`api-key = ${SECRET}`)).toBe(true);
+		for (const text of [
+			"apiKey: process.env.OPENAI_API_KEY",
+			"apiKey: os.environ.get",
+			"api_key: $OPENAI_API_KEY_VALUE_ENV",
+			"api_key: <your-api-key-value>",
+			"api_key: your-api-key-goes-here",
+		]) {
+			accepted(text);
+		}
+	});
+
+	test("authorization: real credentials are refused with or without a scheme; templates and placeholders are accepted", () => {
+		expect(refused(`Authorization: Bearer ${SECRET}`)).toBe(true);
+		expect(refused(`authorization = ${SECRET}`)).toBe(true);
+		for (const text of [
+			"Authorization: Bearer <token>.",
+			"Authorization: Bearer $PARALLEL_API_KEY",
+			"authorization: ${AUTH_HEADER}",
+			"Authorization: <token>",
+		]) {
+			accepted(text);
+		}
+	});
+
+	test("bearer: a bare lowercase token is refused; the listed prose words are accepted", () => {
+		expect(refused(`Bearer ${"z".repeat(64)}`)).toBe(true);
+		expect(refused(`Bearer ${SECRET}`)).toBe(true);
+		expect(refused("Bearer authenticationK7p2mX9qL4vR8tY1")).toBe(true);
+		for (const text of ["Bearer authentication", "Bearer authorization", "Bearer authenticated"]) accepted(text);
+	});
+
+	test("a real value on the next line after a line-ending key is refused on the event path; the skill path stays on its line", () => {
+		// The gate refuses a file when the event redactor changes it, so the next-line value is refused through redact().
+		expect(redact(`password:\n${SECRET}`)).not.toContain(SECRET);
+		expect(redact(`api_key:\n${SECRET}`)).not.toContain(SECRET);
+		expect(skillHits(`password:\n${SECRET}`)).toEqual([]);
+		expect(skillHits(`api_key:\n${SECRET}`)).toEqual([]);
+	});
+
+	test("a backticked real value is still refused on the skill path", () => {
+		expect(refused(`password: \`${SECRET}\``)).toBe(true);
+		expect(refused(`LINEAR_API_KEY=\`${SECRET}\``)).toBe(true);
+		expect(refused(`Authorization: \`${SECRET}\``)).toBe(true);
+	});
+});
+
 describe("redactSkillContent keeps env references and placeholders", () => {
 	test("working auth lines and placeholder values come back unchanged with nothing reported", () => {
 		for (const line of [
@@ -638,7 +871,7 @@ describe("redactSkillContent rejects high-confidence secrets", () => {
 			gitlab: "glpat-" + rnd(ALNUM, 20),
 			digitalocean: "dop_v1_" + rnd(HEX, 64),
 			"openai-proj": "sk-proj-" + rnd(ALNUM, 40),
-			ragflow: "ragflow-" + rnd(ALNUM, 40),
+			lightrag: "lightrag-" + rnd(ALNUM, 40),
 			stripe: "sk_live_" + rnd(ALNUM, 24),
 			huggingface: "hf_" + rnd(ALNUM, 34),
 			"google-oauth": "ya29." + rnd(ALNUM, 40),
@@ -703,10 +936,12 @@ describe("scanSkillFiles", () => {
 		expect(scanners).toEqual(["scanSkillFiles"]);
 	});
 });
-describe("event redactor stays liberal", () => {
-	test("redact() still rewrites a working $VAR auth line that the skill redactor keeps", () => {
+describe("placeholder lines are kept on the event path as well", () => {
+	test("a working $VAR auth line is kept by redact() and by the skill redactor", () => {
+		// An env reference is a placeholder, not a credential. The ingest gate falls back to redact() (findingRules), so
+		// the gate and the event path share one narrowed pattern and the event path keeps the line too.
 		const line = "Authorization: Bearer $PARALLEL_API_KEY";
-		expect(redact(line)).toBe(`Authorization: ${REDACTED}`);
+		expect(redact(line)).toBe(line);
 		expect(redactSkillContent(line).text).toBe(line);
 	});
 });

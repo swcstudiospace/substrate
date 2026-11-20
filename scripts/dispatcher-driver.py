@@ -30,7 +30,11 @@ from pathlib import Path
 
 import httpx
 
-from substrate_dispatcher import dispatch, launcher, worktree
+# The package lives under packages/dispatcher/src (the same layout pytest uses via pythonpath = ["src"]).
+# Bootstrap it here so the driver runs with a bare `python3 scripts/dispatcher-driver.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "dispatcher" / "src"))
+
+from substrate_dispatcher import dispatch, launcher, worktree  # noqa: E402
 from substrate_dispatcher.dispatch import tick
 from substrate_dispatcher.host import HostRefused
 from substrate_dispatcher.linear import Candidate

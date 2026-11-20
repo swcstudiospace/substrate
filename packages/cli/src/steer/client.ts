@@ -96,6 +96,13 @@ export interface SteerDirective {
 	checkpoint_hint: SteerCheckpointHint | null;
 }
 
+/** A directives answer and whether it is the whole list: an unavailable or cut history can leave out directives the server still holds. */
+export interface SteerDirectiveListing {
+	directives: SteerDirective[];
+	/** `true` only when the history was read in full, so the list accounts for every acknowledged directive. */
+	complete: boolean;
+}
+
 /** One list of the digest: every item names where it came from and how old it is. */
 export interface DigestItem {
 	source: string;
@@ -166,6 +173,8 @@ export interface SteerClient {
 	close(request: { sessionId: string; sessionBinding?: string | undefined }): Promise<SteerResult<ClosedSession>>;
 	sessions(query: { repoId?: string | undefined; limit?: number | undefined }): Promise<SteerResult<SteerSessions>>;
 	directives(query: { sessionId: string; status?: DirectiveStatusFilter | undefined; sessionBinding?: string | undefined }): Promise<SteerResult<SteerDirective[]>>;
+	/** The same read as `directives`, with `complete` set only when the server read its history in full. The hook prunes decisions only on a complete listing. */
+	directiveListing(query: { sessionId: string; status?: DirectiveStatusFilter | undefined; sessionBinding?: string | undefined }): Promise<SteerResult<SteerDirectiveListing>>;
 	queue(request: { sessionId: string; action: SteerAction; body: string; priority?: SteerPriority | undefined; conflictsWithActivePlan?: boolean | undefined }): Promise<SteerResult<WriteReply>>;
 	acknowledge(request: { directiveId: string; outcome: SteerOutcome; confirm?: boolean | undefined }): Promise<SteerResult<WriteReply>>;
 	/** One long poll: the next directive after `after`, or `directive: null` when the server's wait ended with none (HTTP 204). */
@@ -229,7 +238,10 @@ export function parseDirective(value: unknown): SteerDirective | string {
 	};
 }
 
-function parseDirectives(value: unknown): SteerDirective[] | string {
+/** The server's `history` answers: `memory-only` has no audit table, `durable` was read, `unavailable` could not be read. */
+const DIRECTIVE_HISTORY = ["memory-only", "durable", "unavailable"] as const;
+
+function parseDirectives(value: unknown): SteerDirectiveListing | string {
 	if (!isRec(value) || !Array.isArray(value.directives)) return "directives";
 	const out: SteerDirective[] = [];
 	for (const entry of value.directives) {
@@ -237,7 +249,11 @@ function parseDirectives(value: unknown): SteerDirective[] | string {
 		if (typeof directive === "string") return directive;
 		out.push(directive);
 	}
-	return out;
+	const history = oneOf(value.history, DIRECTIVE_HISTORY);
+	if (value.history !== undefined && history === undefined) return "history";
+	if (value.history_truncated !== undefined && typeof value.history_truncated !== "boolean") return "history_truncated";
+	// Only a history read in full proves the list holds every acknowledged directive. An answer without the fields cannot prove it, so it counts as partial.
+	return { directives: out, complete: history !== undefined && history !== "unavailable" && value.history_truncated === false };
 }
 
 function parseSessions(value: unknown): SteerSessions | string {
@@ -486,6 +502,9 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 		const value = guard(result.value.body);
 		return value === undefined ? failure("bad-response", "the server returned an invalid lifecycle reply", result.value.status) : { ok: true, value };
 	}
+	/** One session's directives, and whether that answer is the whole list (see `parseDirectives`). */
+	const directiveListing = (query: { sessionId: string; status?: DirectiveStatusFilter | undefined; sessionBinding?: string | undefined }): Promise<SteerResult<SteerDirectiveListing>> =>
+		read("/steering/directives", { session_id: query.sessionId, status: query.status }, parseDirectives, timeoutMs, query.sessionBinding);
 	return {
 		open: (request) => lifecycle("/steering/sessions", { repo_id: request.repoId, state: request.state ?? "ACTIVE" }, (body): IssuedSession | undefined => {
 			if (!isRec(body) || body.status !== "issued" || typeof body.session_id !== "string" || !LIVE_SESSION_ID_PATTERN.test(body.session_id) || typeof body.session_binding !== "string" || !SESSION_BINDING_PATTERN.test(body.session_binding) ||
@@ -503,7 +522,11 @@ export function createSteerClient(options: SteerClientOptions): SteerClient {
 		}, request.sessionBinding),
 		sessions: (query) =>
 			read("/steering/sessions", { repo_id: query.repoId, limit: query.limit === undefined ? undefined : String(query.limit) }, parseSessions),
-		directives: (query) => read("/steering/directives", { session_id: query.sessionId, status: query.status }, parseDirectives, timeoutMs, query.sessionBinding),
+		directiveListing: (query) => directiveListing(query),
+		directives: async (query) => {
+			const listed = await directiveListing(query);
+			return listed.ok ? { ok: true, value: listed.value.directives } : listed;
+		},
 		queue: (request) =>
 			write("/steering/queue", {
 				session_id: request.sessionId,

@@ -22,7 +22,7 @@ These apply to every source:
   dispatcher and any other non-agent host job emit under surface `substrate`,
   with `payload.runtime` naming the job (`anchor`, `skills-sync`,
   `dispatcher`, …). A `substrate` token is bound to its surface exactly like a
-  swarm token: `attributedSurface` refuses it naming any other surface.
+  swarm token. `attributedSurface` refuses it naming any other surface.
 - **`payload.action` is the discriminator** for events a component records
   about itself, following the existing use (`action: "expired"` on the reap
   event, `"released"` / `"stolen"` on lease events). New concepts become

@@ -38,9 +38,9 @@ describe("toManifestRow", () => {
 
 	test("reads the superseded-by marker and the ingestion time, falling back to the update time and to null", () => {
 		const stamp = new Date("2026-03-01T10:00:00.000Z");
-		expect(toManifestRow({ ...record, superseded_by: "docs/new.md", ingested_at: stamp })).toMatchObject({ supersededBy: "docs/new.md", ingestedAt: "2026-03-01T10:00:00.000Z" });
+		expect(toManifestRow({ ...record, superseded_by_path: "docs/new.md", ingested_at: stamp })).toMatchObject({ supersededBy: "docs/new.md", ingestedAt: "2026-03-01T10:00:00.000Z" });
 		expect(toManifestRow({ ...record, ingested_at: null, updated_at: "2026-02-01T00:00:00.000Z" })?.ingestedAt).toBe("2026-02-01T00:00:00.000Z");
-		expect(toManifestRow({ ...record, superseded_by: "", ingested_at: "not a date" })).toMatchObject({ supersededBy: null, ingestedAt: null });
+		expect(toManifestRow({ ...record, superseded_by_path: "", ingested_at: "not a date" })).toMatchObject({ supersededBy: null, ingestedAt: null });
 	});
 
 	test("a row holding a value outside the closed lists is dropped, never guessed at", () => {

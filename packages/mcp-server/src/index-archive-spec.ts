@@ -145,6 +145,7 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 			text("entry_hash"),
 			ts("reverify_after"),
 			text("idempotency_key"),
+			ts("forgotten_at"),
 		],
 		key: ["id"],
 		withheld: [],
@@ -230,6 +231,7 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 			ts("created_at"),
 			ts("updated_at"),
 			text("superseded_by"),
+			text("superseded_by_path"),
 		],
 		key: ["repo", "path"],
 		// The manifest holds repository-relative paths and digests, never a document body: those live in the docs plane only.
@@ -238,6 +240,14 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 		hasEntryHash: false,
 		// Restore loads `manifest_seq` with the archived values, so its identity sequence is moved past them afterwards.
 		identity: "manifest_seq",
+	},
+	{
+		name: "context_matrix_entries",
+		columns: [text("entry_id"), text("realm"), text("milestone"), text("phase"), text("source_path"), text("source_sha256"), text("entry_kind"), text("body_redacted"), text("status"), text("superseded_by"), ts("created_at")],
+		key: ["entry_id"],
+		withheld: [],
+		placeholders: {},
+		hasEntryHash: false,
 	},
 ];
 

@@ -3,13 +3,13 @@ import { INDEX_CHAOS_WINDOW_MS, chaosPlanesEnabled, runChaosPlanes, type ChaosHe
 
 const loopback = "http://127.0.0.1:9";
 
-function body(indexOk: boolean | null, opts?: { cache?: boolean; hindsight?: boolean | null; ragflow?: boolean | null }): ChaosHealthBody {
+function body(indexOk: boolean | null, opts?: { cache?: boolean; hindsight?: boolean | null; lightrag?: boolean | null }): ChaosHealthBody {
 	return {
 		cache: { enabled: opts?.cache ?? false },
 		planes: {
 			index: { ok: indexOk },
 			hindsight: { ok: opts?.hindsight ?? null },
-			ragflow: { ok: opts?.ragflow ?? null },
+			lightrag: { ok: opts?.lightrag ?? null },
 		},
 	};
 }
@@ -59,7 +59,7 @@ describe("chaos planes", () => {
 		expect(healthCalls).toBe(0);
 	});
 
-	test("cache disabled and hindsight/ragflow ok null are three skips and exit 0", async () => {
+	test("cache disabled and hindsight/lightrag ok null are three skips and exit 0", async () => {
 		let n = 0;
 		const { deps, actions } = harness({
 			enabled: true,
@@ -73,7 +73,7 @@ describe("chaos planes", () => {
 		expect(result.skips).toHaveLength(3);
 		expect(result.skips[0]).toContain("redis");
 		expect(result.skips[1]).toContain("hindsight");
-		expect(result.skips[2]).toContain("ragflow");
+		expect(result.skips[2]).toContain("lightrag");
 		expect(actions).toEqual(["pause", "unpause"]);
 	});
 
@@ -95,7 +95,7 @@ describe("chaos planes", () => {
 			enabled: true,
 			healthz: async () => {
 				n++;
-				return body(n === 1, { cache: true, hindsight: true, ragflow: true });
+				return body(n === 1, { cache: true, hindsight: true, lightrag: true });
 			},
 		});
 		const result = await runChaosPlanes(deps);
@@ -123,7 +123,7 @@ describe("chaos planes", () => {
 	test("no index outage is exit 1 after unpause", async () => {
 		const { deps, actions } = harness({
 			enabled: true,
-			healthz: async () => body(true, { cache: true, hindsight: true, ragflow: true }),
+			healthz: async () => body(true, { cache: true, hindsight: true, lightrag: true }),
 		});
 		const result = await runChaosPlanes(deps);
 		expect(result.exit).toBe(1);

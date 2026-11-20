@@ -42,7 +42,7 @@ describe("planeOutageIn", () => {
 		expect(planeOutageIn(body({ ok: true, breaker: { state: "closed" } }), "hindsight")).toBe(false);
 		expect(planeOutageIn(body({ ok: true, breaker: { state: "half-open" } }), "hindsight")).toBe(false);
 		expect(planeOutageIn(body({ ok: null, breaker: null }), "hindsight")).toBe(false);
-		expect(planeOutageIn(body({ ok: false, breaker: null }), "ragflow")).toBe(false);
+		expect(planeOutageIn(body({ ok: false, breaker: null }), "lightrag")).toBe(false);
 		expect(planeOutageIn({ index: false, greptime: false }, "index")).toBe(false);
 		expect(planeOutageIn("# not json", "index")).toBe(false);
 		expect(planeOutageIn(null, "cache")).toBe(false);
@@ -51,15 +51,15 @@ describe("planeOutageIn", () => {
 
 describe("degraded reads", () => {
 	test("degradedIn reads the fail-open flag and nothing else", () => {
-		expect(degradedIn({ chunks: [], degraded: true, reason: "ragflow circuit open" })).toBe(true);
+		expect(degradedIn({ chunks: [], degraded: true, reason: "lightrag circuit open" })).toBe(true);
 		expect(degradedIn({ results: [], degraded: false })).toBe(false);
 		expect(degradedIn({ chunks: [] })).toBe(false);
 		expect(degradedIn("text")).toBe(false);
 	});
 
-	test("only Hindsight and RAGFlow have a read of their own to degrade", () => {
+	test("only Hindsight and LightRAG have a read of their own to degrade", () => {
 		expect(degradedReadFor("hindsight")).toEqual({ path: "/memory/recall", body: { query: "chaos smoke" } });
-		expect(degradedReadFor("ragflow")).toEqual({ path: "/docs/search", body: { question: "chaos smoke" } });
+		expect(degradedReadFor("lightrag")).toEqual({ path: "/docs/search", body: { question: "chaos smoke" } });
 		expect(degradedReadFor("index")).toBeNull();
 		expect(degradedReadFor("cache")).toBeNull();
 		expect(degradedReadFor("greptime")).toBeNull();

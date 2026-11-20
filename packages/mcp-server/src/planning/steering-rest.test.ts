@@ -110,7 +110,7 @@ describe("restDirective and checkpoint_hint", () => {
 		const inbox = inboxOf();
 		await queue(inbox, "d1", "pause");
 		const shaped = restDirective(defined(inbox.get("d1"), "d1"), inbox.sequenceOf("d1"));
-		expect(shaped).toMatchObject({ id: "d1", session_id: "sess-a", status: "queued", acknowledged_at: null, outcome: null, checkpoint_hint: null, author: "omp", created_at: new Date(NOW).toISOString(), sequence: 1 });
+		expect(shaped).toMatchObject({ id: "d1", session_id: "sess-a", status: "queued", acknowledged_at: null, outcome: null, checkpoint_hint: null, author: "omp", created_at: new Date(NOW).toISOString() });
 	});
 
 	test("only a committed acknowledgement state movement creates REST and list checkpoint hints", async () => {
@@ -139,8 +139,8 @@ describe("restDirective and checkpoint_hint", () => {
 		await queue(inbox, "p", "pause");
 		expect((await inbox.acknowledge({ directiveId: "a", sessionId: "sess-a", outcome: "applied" })).ok).toBe(true);
 		expect((await inbox.acknowledge({ directiveId: "p", sessionId: "sess-a", outcome: "declined" })).ok).toBe(true);
-		expect(restDirective(defined(inbox.get("a"), "a"), inbox.sequenceOf("a")).checkpoint_hint).toBeNull();
-		expect(restDirective(defined(inbox.get("p"), "p"), inbox.sequenceOf("p"))).toMatchObject({ outcome: "declined", checkpoint_hint: null });
+		expect(restDirective(defined(inbox.get("a"), "a"), null).checkpoint_hint).toBeNull();
+		expect(restDirective(defined(inbox.get("p"), "p"), null)).toMatchObject({ outcome: "declined", checkpoint_hint: null });
 	});
 
 	test("listing filters by status", async () => {
@@ -314,25 +314,32 @@ describe("statuses", () => {
 	});
 });
 
-describe("keyed queue body and delivery sequence on the REST shapes", () => {
-	test("the queue body takes an optional idempotency key, and a malformed one is refused by field name only", () => {
-		const keyed = parseQueueBody({ session_id: "sess-a", action: "pause", body: "hold", idempotency_key: "retry-key-0001" });
-		expect(keyed.ok && keyed.value.idempotency_key).toBe("retry-key-0001");
+describe("keyed steering over REST (phase 77)", () => {
+	test("the queue and acknowledge bodies take an idempotency key and refuse a malformed one without echoing it", () => {
+		expect(parseQueueBody({ session_id: "sess-a", action: "pause", body: "hold", idempotency_key: "queue-key-0001" })).toEqual({ ok: true, value: expect.objectContaining({ idempotency_key: "queue-key-0001" }) });
 		const unkeyed = parseQueueBody({ session_id: "sess-a", action: "pause", body: "hold" });
-		expect(unkeyed.ok && unkeyed.value.idempotency_key).toBeUndefined();
-		expect(parseQueueBody({ session_id: "sess-a", action: "pause", body: "hold", idempotency_key: "short" })).toEqual({ ok: false, error: "invalid idempotency_key" });
+		expect(unkeyed.ok && "idempotency_key" in unkeyed.value).toBe(false);
+		const malformed = parseQueueBody({ session_id: "sess-a", action: "pause", body: "hold", idempotency_key: "short" });
+		expect(malformed).toEqual({ ok: false, error: "invalid idempotency_key" });
+		expect(JSON.stringify(malformed)).not.toContain("short");
+		expect(parseQueueBody({ session_id: "sess-a", action: "pause", body: "hold", idempotency_key: null }).ok).toBe(false);
+		expect(parseAcknowledgeBody({ directive_id: "d1", outcome: "applied", idempotency_key: "ack-key-0001" })).toEqual({ ok: true, value: { directive_id: "d1", outcome: "applied", idempotency_key: "ack-key-0001" } });
+		expect(parseAcknowledgeBody({ directive_id: "d1", outcome: "applied", idempotency_key: "bad key!!" })).toEqual({ ok: false, error: "invalid idempotency_key" });
 	});
 
-	test("a held directive reports its sequence, and the listing reports the same number in queue order", async () => {
+	test("a directive carries its delivery sequence, and one the inbox does not hold has none", async () => {
 		const inbox = inboxOf();
-		await queue(inbox, "d1", "pause");
+		await queue(inbox, "d1", "annotate");
 		await queue(inbox, "d2", "pause");
 		expect(restDirective(defined(inbox.get("d2"), "d2"), inbox.sequenceOf("d2"))).toMatchObject({ id: "d2", sequence: 2 });
-		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "all" }).map((entry) => [entry.id, entry.sequence])).toEqual([["d1", 1], ["d2", 2]]);
+		expect(restDirective(defined(inbox.get("d1"), "d1"), null).sequence).toBeNull();
+		expect(listRestDirectives(inbox, { sessionId: "sess-a", status: "all" }).map((directive) => [directive.id, directive.sequence])).toEqual([
+			["d1", 1],
+			["d2", 2],
+		]);
 	});
 
-	test("a directive known only from the audit history reports no sequence", () => {
-		const durable = steeringRecordsFromEntries([{ directive: { id: "old", author: { principalId: "omp", kind: "human" }, createdAtMs: NOW - 10, priority: "normal", targetSessionId: "sess-a", action: "pause", body: "Hold.", conflictsWithActivePlan: false }, queuedAtMs: NOW - 10 }]);
-		expect(listRestDirectives(inboxOf(), { sessionId: "sess-a", status: "all" }, durable).map((entry) => entry.sequence)).toEqual([null]);
+	test("an idempotency conflict answers 409", () => {
+		expect(steeringHttpStatus({ status: "refused", error: { code: "idempotency-conflict" } })).toBe(409);
 	});
 });

@@ -1,447 +1,382 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigError, loadConfig } from "./config.ts";
-import { Substrate, type ForgetCaller } from "./service.ts";
-import type { ForgetRequest } from "./memory-forget.ts";
+import { loadConfig } from "./config.ts";
+import type { DeadLetter } from "./event-buffer.ts";
+import { Substrate, type EmitResult } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
-
-/**
- * A ledger that stores rows the way the real client does: `insertEvent` with `mayExist` leaves a row that is already there
- * alone. `down` makes every write fail, and `lostReplies` makes writes land and then report a timeout.
- */
-function fakeLedger() {
-	const state = { rows: [] as SubstrateEvent[], attempts: 0, down: false, lostReplies: 0 };
-	const tips = new Map<string, string>();
-	const greptime = {
-		timeoutMs: 5_000,
-		// The rollback's note read (`GreptimeClient.queryEvents`), answered from the rows this fake keeps.
-		queryEvents: async (query: { match: Record<string, unknown>; limit: number }) =>
-			state.rows
-				.filter((row) => Object.entries(query.match).every(([column, value]) => Reflect.get(row, column) === value))
-				.reverse()
-				.slice(0, query.limit)
-				.map((row) => ({ ...row, ts: Date.parse(row.ts), payload: JSON.stringify(row.payload) })),
-		ensureAppendMode: async () => true,
-		lastHash: async (session: string): Promise<string | null> => tips.get(session) ?? null,
-		insertEvent: async (event: SubstrateEvent, options: { mayExist?: boolean } = {}): Promise<void> => {
-			state.attempts += 1;
-			if (state.down) throw new Error("greptime unreachable: connect ETIMEDOUT");
-			if (options.mayExist === true && state.rows.some((row) => row.id === event.id)) return;
-			state.rows.push(event);
-			if (event.session_id !== null) tips.set(event.session_id, event.hash);
-			if (state.lostReplies > 0) {
-				state.lostReplies -= 1;
-				throw new Error("greptime timed out waiting for the reply");
-			}
-		},
-	};
-	return { state, greptime };
-}
+import { GreptimeClient } from "./greptime.ts";
 
 const dirs: string[] = [];
+const opened: Substrate[] = [];
+afterEach(async () => {
+	// Each instance is closed the way shutdown closes it, before its scratch dir goes: a tick left running would write later.
+	for (const substrate of opened.splice(0)) await substrate.drainPendingEvents(0, { abandon: true });
+	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
-/** The buffer's two files in a fresh directory, and the environment that turns the buffer on with them. */
-function telemetry(extra: Record<string, string> = {}) {
-	const dir = mkdtempSync(join(tmpdir(), "telemetry-buffer-"));
+function scratch(): string {
+	const dir = mkdtempSync(join(tmpdir(), "service-event-buffer-"));
 	dirs.push(dir);
-	const bufferPath = join(dir, "buffer.jsonl");
-	const deadPath = join(dir, "dead.jsonl");
-	return { bufferPath, deadPath, env: { SUBSTRATE_EVENT_BUFFER_PATH: bufferPath, SUBSTRATE_EVENT_DEAD_LETTER_PATH: deadPath, ...extra } };
+	return dir;
 }
 
-/** Every substrate a test built: each is abandoned after its test, which stops its timer and keeps a durable buffer for the next boot. */
-const opened: Substrate[] = [];
+const TIP = "tip-0";
+const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test", session_id: "sess-1" };
 
-function substrateFor(env: Record<string, string>, greptime: unknown): Substrate {
+/**
+ * A ledger that records what it stores. `failures` names the insert calls (1-based, across the whole test) that
+ * throw, with their message; every other insert lands. `lastHash` is the tip of what was written, or TIP before anything was.
+ */
+function ledger(failures: (call: number) => string | null) {
+	const written: SubstrateEvent[] = [];
+	let calls = 0;
+	const greptime = {
+		ensureAppendMode: async () => true,
+		lastHash: async () => written.at(-1)?.hash ?? TIP,
+		eventStored: async () => false,
+		// No ledger row carries the key: a replay finds nothing and the parked event answers it.
+		findByIdempotencyKey: async () => null,
+		recordIngest: async () => undefined,
+		insertEvent: async (event: SubstrateEvent) => {
+			calls += 1;
+			const failure = failures(calls);
+			if (failure !== null) throw new Error(failure);
+			written.push(event);
+		},
+	};
+	return { written, greptime, inserts: () => calls };
+}
+
+function substrateWith(env: Record<string, string>, greptime: unknown): Substrate {
 	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
 	opened.push(substrate);
 	return substrate;
 }
 
-const input = (summary: string, session = "s-1"): EventInput => ({ surface: "omp", kind: "note", summary, session_id: session });
-
-function readRecords(path: string): Array<Record<string, unknown>> {
-	if (!existsSync(path)) return [];
-	return readFileSync(path, "utf8")
-		.split("\n")
-		.filter((line) => line.length > 0)
-		.map((line) => JSON.parse(line) as Record<string, unknown>);
+/** Stop the drain tick and hand a memory-only buffer's leftovers to the dead letters, so no timer outlives the test. */
+async function close(substrate: Substrate): Promise<void> {
+	await substrate.drainPendingEvents(0, { abandon: true });
 }
 
-afterEach(async () => {
-	for (const substrate of opened.splice(0)) await substrate.drainPendingEvents(50, { abandon: true });
-	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+function deadLetterRecords(path: string): DeadLetter[] {
+	return readFileSync(path, "utf8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line) as DeadLetter);
+}
 
-describe("the telemetry buffer", () => {
-	test("a failed write is buffered, not dropped, and lands once the ledger is back", async () => {
-		const t = telemetry();
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
+describe("a failed ledger write is parked, not dropped", () => {
+	test("a write that succeeds at once is stored, not parked", async () => {
+		const { written, greptime } = ledger(() => null);
+		const substrate = substrateWith({}, greptime);
+		const result = await substrate.emit(input);
 
-		const queued = await substrate.emit(input("first"));
-		expect(queued).toMatchObject({ stored: false, buffered: true });
-		expect(queued.error).toContain("unreachable");
-		expect((await substrate.health()).eventBuffer).toMatchObject({ enabled: true, depth: 1, deadLetter: { depth: 0 } });
-
-		state.down = false;
-		await substrate.drainEventBuffer({ all: true });
-
-		expect(state.rows.map((row) => row.id)).toEqual([queued.event.id]);
-		expect((await substrate.health()).eventBuffer).toMatchObject({ enabled: true, depth: 0 });
-	});
-
-	test("a later event of the session waits behind the buffered one, and both land once, in order", async () => {
-		const t = telemetry();
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
-
-		const first = await substrate.emit(input("first"));
-		const second = await substrate.emit(input("second"));
-		expect(second).toMatchObject({ stored: false, buffered: true });
-		expect(second.event.prev).toBe(first.event.hash);
-
-		state.down = false;
-		await substrate.drainEventBuffer({ all: true });
-
-		expect(state.rows.map((row) => row.summary)).toEqual(["first", "second"]);
-		expect(state.rows[1]?.prev).toBe(state.rows[0]?.hash);
-	});
-
-	test("a write that landed but lost its reply is not stored a second time on retry", async () => {
-		const t = telemetry();
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.lostReplies = 1;
-
-		const result = await substrate.emit(input("ambiguous"));
-		expect(result).toMatchObject({ stored: false, buffered: true });
-
-		await substrate.drainEventBuffer({ all: true });
-		expect(state.rows.filter((row) => row.id === result.event.id)).toHaveLength(1);
-	});
-
-	test("a write that exhausts its budget is dead-lettered with its hash and its reason", async () => {
-		const t = telemetry({ SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS: "3" });
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
-
-		const result = await substrate.emit(input("doomed"));
-		await substrate.drainEventBuffer({ all: true });
-		await substrate.drainEventBuffer({ all: true });
-
-		expect(state.rows).toEqual([]);
-		expect(readRecords(t.deadPath)).toMatchObject([
-			{ reason: "exhausted", event_id: result.event.id, event_hash: result.event.hash, attempts: 3 },
-		]);
-		expect(await substrate.health()).toMatchObject({ eventBuffer: { enabled: true, depth: 0, deadLetter: { depth: 1, durable: true } } });
-	});
-
-	test("overflow dead-letters the oldest buffered event and its session's later events, and never drops them silently", async () => {
-		const t = telemetry({ SUBSTRATE_EVENT_BUFFER_MAX: "3" });
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
-
-		const a = await substrate.emit(input("a", "s-1"));
-		const b = await substrate.emit(input("b", "s-1"));
-		await substrate.emit(input("c", "s-2"));
-		const d = await substrate.emit(input("d", "s-3"));
-
-		expect(d).toMatchObject({ stored: false, buffered: true });
-		expect(readRecords(t.deadPath).map((record) => [record.event_id, record.reason])).toEqual([
-			[a.event.id, "overflow"],
-			[b.event.id, "predecessor-dead-lettered"],
-		]);
-		expect(await substrate.health()).toMatchObject({ eventBuffer: { enabled: true, depth: 2, max: 3 } });
-	});
-
-	test("a keyed replay of a queued event answers that event and writes nothing", async () => {
-		const t = telemetry({ SUBSTRATE_EVENT_IDEMPOTENCY: "accept" });
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
-		const keyed: EventInput = { ...input("keyed"), idempotency_key: "replay-key-0001" };
-
-		const first = await substrate.emit(keyed);
-		const replay = await substrate.emit(keyed);
-		expect(replay).toMatchObject({ stored: false, buffered: true });
-		expect(replay.event.id).toBe(first.event.id);
-
-		state.down = false;
-		await substrate.drainEventBuffer({ all: true });
-		expect(state.rows.map((row) => row.id)).toEqual([first.event.id]);
-	});
-
-	test("a restart re-reads the buffer, and the event that was waiting lands once", async () => {
-		const t = telemetry();
-		const before = fakeLedger();
-		before.state.down = true;
-		const first = substrateFor(t.env, before.greptime);
-		const waiting = await first.emit(input("kept"));
-		// Stops the first process's timer and keeps the durable buffer, as a shutdown does.
-		await first.drainPendingEvents(50, { abandon: true });
-
-		const after = fakeLedger();
-		const second = substrateFor(t.env, after.greptime);
-		expect((await second.health()).eventBuffer).toMatchObject({ enabled: true, depth: 1, durable: true });
-		await second.drainEventBuffer({ all: true });
-
-		expect(after.state.rows.map((row) => row.id)).toEqual([waiting.event.id]);
-	});
-
-	test("with the buffer unset, a failed write answers stored false, buffers nothing and writes nothing later", async () => {
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor({}, greptime);
-		state.down = true;
-
-		const result = await substrate.emit(input("unbuffered"));
-		expect(result).toMatchObject({ stored: false });
-		expect(result.error).toContain("unreachable");
+		expect(result.stored).toBe(true);
 		expect(result.buffered).toBeUndefined();
-		expect(result.deadLettered).toBeUndefined();
-		expect(await substrate.health()).toMatchObject({ eventBuffer: { enabled: false } });
+		expect(written).toHaveLength(1);
+		expect((await substrate.health()).eventBuffer.pending).toBe(0);
+		await close(substrate);
+	});
 
-		state.down = false;
+	test("retry then success: the first write fails, the retry stores the same event", async () => {
+		const { written, greptime } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
+		const substrate = substrateWith({}, greptime);
+		const result = await substrate.emit(input);
+
+		expect(result.stored).toBe(false);
+		expect(result.buffered).toBe(true);
+		expect(result.error).toContain("ETIMEDOUT");
+		expect(written).toHaveLength(0);
+		expect((await substrate.health()).eventBuffer.pending).toBe(1);
+
 		await substrate.drainEventBuffer({ all: true });
-		expect(state.rows).toEqual([]);
+		expect(written).toHaveLength(1);
+		expect(written[0]?.id).toBe(result.event.id);
+		expect(written[0]?.hash).toBe(result.event.hash);
+		expect(written[0]?.prev).toBe(TIP);
+		const health = await substrate.health();
+		expect(health.eventBuffer.pending).toBe(0);
+		expect(health.eventBuffer.deadLetters.depth).toBe(0);
+		await close(substrate);
 	});
-});
 
-describe("/healthz and the flags", () => {
-	test("the health body reports the buffer's depth and the dead-letter depth, each with its durability", async () => {
-		const t = telemetry({ SUBSTRATE_EVENT_BUFFER_MAX: "5" });
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
-		await substrate.emit(input("waiting"));
+	test("retry exhausted: the event is written to the dead-letter file with its hash, and healthz counts it", async () => {
+		const dir = scratch();
+		const deadPath = join(dir, "dead-letter.jsonl");
+		const { written, greptime } = ledger(() => "greptime unreachable: ECONNRESET");
+		const substrate = substrateWith({ SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS: "2", SUBSTRATE_LEDGER_DEAD_LETTER_PATH: deadPath }, greptime);
+		const result = await substrate.emit(input);
+		expect(result.buffered).toBe(true);
 
-		expect(await substrate.health()).toMatchObject({
-			eventBuffer: { enabled: true, depth: 1, max: 5, durable: true, deadLetter: { depth: 0, durable: true } },
+		await substrate.drainEventBuffer({ all: true });
+		expect(written).toHaveLength(0);
+		const records = deadLetterRecords(deadPath);
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({ id: result.event.id, hash: result.event.hash, cause: "exhausted", attempts: 2 });
+		expect(records[0]?.event.hash).toBe(result.event.hash);
+
+		const health = await substrate.health();
+		expect(health.eventBuffer).toEqual({
+			pending: 0,
+			max: 1000,
+			oldestAt: null,
+			durable: false,
+			deadLetters: { depth: 1, max: 10000, durable: true, evicted: 0 },
 		});
+		await close(substrate);
 	});
 
-	test("a buffer with no dead-letter path refuses boot, and the message names the missing variable", () => {
-		expect(() => loadConfig({ SUBSTRATE_EVENT_BUFFER_PATH: "/var/lib/substrate/buffer.jsonl" })).toThrow(ConfigError);
-		expect(() => loadConfig({ SUBSTRATE_EVENT_BUFFER_PATH: "/var/lib/substrate/buffer.jsonl" })).toThrow(/SUBSTRATE_EVENT_DEAD_LETTER_PATH/);
-	});
+	test("a full buffer dead-letters the new event at once, and healthz reports the depth", async () => {
+		const dir = scratch();
+		const deadPath = join(dir, "dead-letter.jsonl");
+		const { greptime } = ledger(() => "greptime unreachable: ETIMEDOUT");
+		const substrate = substrateWith({ SUBSTRATE_LEDGER_BUFFER_MAX: "1", SUBSTRATE_LEDGER_DEAD_LETTER_PATH: deadPath }, greptime);
 
-	test("the buffer is off unless its path is set, and the bound comes from the flag with an unusable value falling back", () => {
-		expect(loadConfig({}).eventBuffer).toBeNull();
-		const on = { SUBSTRATE_EVENT_BUFFER_PATH: "/var/lib/substrate/buffer.jsonl", SUBSTRATE_EVENT_DEAD_LETTER_PATH: "/var/lib/substrate/dead.jsonl" };
-		expect(loadConfig({ ...on, SUBSTRATE_EVENT_BUFFER_MAX: "2" }).eventBuffer?.max).toBe(2);
-		expect(loadConfig({ ...on, SUBSTRATE_EVENT_BUFFER_MAX: "0" }).eventBuffer?.max).toBe(256);
-		expect(loadConfig(on).eventBuffer).toMatchObject({
-			path: "/var/lib/substrate/buffer.jsonl",
-			deadLetterPath: "/var/lib/substrate/dead.jsonl",
-			maxAttempts: 10,
-			backoffMs: 1000,
-			backoffCapMs: 60_000,
-		});
-	});
-});
-
-describe("a write settles the session's parked events first", () => {
-	test("a later write settles the parked event first once the ledger is back, and chains onto it", async () => {
-		const t = telemetry();
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
-
-		const first = await substrate.emit(input("first"));
+		const first = await substrate.emit(input);
 		expect(first.buffered).toBe(true);
+		const second = await substrate.emit({ ...input, session_id: "sess-2" });
+		expect(second.stored).toBe(false);
+		expect(second.deadLettered).toBe(true);
+		expect(second.buffered).toBeUndefined();
 
-		state.down = false;
-		const second = await substrate.emit(input("second"));
-		expect(second).toMatchObject({ stored: true });
-		expect(second.event.prev).toBe(first.event.hash);
-		expect(state.rows.map((row) => row.summary)).toEqual(["first", "second"]);
-		expect((await substrate.health()).eventBuffer).toMatchObject({ depth: 0 });
+		const health = await substrate.health();
+		expect(health.eventBuffer.pending).toBe(1);
+		expect(health.eventBuffer.max).toBe(1);
+		expect(health.eventBuffer.deadLetters.depth).toBe(1);
+		const records = deadLetterRecords(deadPath);
+		expect(records).toEqual([expect.objectContaining({ id: second.event.id, hash: second.event.hash, cause: "overflow" })]);
+		await close(substrate);
 	});
 
-	test("a settle the ledger never answers holds a write for one call's budget at most, and the write parks behind the session's tip", async () => {
-		const t = telemetry();
-		const ledger = fakeLedger();
-		let hung = false;
-		const release = Promise.withResolvers<void>();
-		let blockedInserts = 0;
-		const greptime = {
-			...ledger.greptime,
-			timeoutMs: 150,
-			insertEvent: async (event: SubstrateEvent, options: { mayExist?: boolean } = {}): Promise<void> => {
-				if (!hung) return ledger.greptime.insertEvent(event, options);
-				blockedInserts += 1;
-				await release.promise;
-				return ledger.greptime.insertEvent(event, options);
+	test("a session's later event waits behind the parked one: it chains onto it, and both land in order", async () => {
+		// The ledger is still down for the second write, so the second event parks behind the first one's attempt.
+		const { written, greptime } = ledger((call) => (call <= 2 ? "greptime unreachable: ETIMEDOUT" : null));
+		const substrate = substrateWith({}, greptime);
+		const first: EmitResult = await substrate.emit(input);
+		const second: EmitResult = await substrate.emit({ ...input, summary: "ran cargo build" });
+
+		// The second event was not written directly: a direct write would fork the chain the first one extends.
+		expect(second.buffered).toBe(true);
+		expect(second.event.prev).toBe(first.event.hash);
+		expect(first.event.prev).toBe(TIP);
+		expect(written).toHaveLength(0);
+
+		await substrate.drainEventBuffer({ all: true });
+		expect(written.map((event) => event.id)).toEqual([first.event.id, second.event.id]);
+		expect(written[1]?.prev).toBe(written[0]?.hash);
+		await close(substrate);
+	});
+
+	test("a session's later write settles the parked event first once the ledger is back: the parked one lands, then the new one chains onto it", async () => {
+		const { written, greptime } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
+		const substrate = substrateWith({}, greptime);
+		const first: EmitResult = await substrate.emit(input);
+		const second: EmitResult = await substrate.emit({ ...input, summary: "ran cargo build" });
+
+		// The first event's attempt answered on the second write, so the second is stored directly, after it.
+		expect(first.buffered).toBe(true);
+		expect(second.stored).toBe(true);
+		expect(second.buffered).toBeUndefined();
+		expect(written.map((event) => event.id)).toEqual([first.event.id, second.event.id]);
+		expect(second.event.prev).toBe(first.event.hash);
+		expect(written[1]?.prev).toBe(written[0]?.hash);
+		await close(substrate);
+	});
+
+	test("a parked event that lands later publishes its wake-up hint once, at delivery, as a fresh stored event does", async () => {
+		const { written, greptime } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
+		const hints: Array<{ id: string }> = [];
+		const bus = {
+			publish: async (hint: { id: string }) => {
+				hints.push(hint);
+				return true;
 			},
 		};
-		const substrate = substrateFor(t.env, greptime);
-		ledger.state.down = true;
-		const parked = await substrate.emit(input("first"));
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, eventBus: () => bus as never });
+		opened.push(substrate);
+		const parked = await substrate.emit(input);
+		expect(parked.stored).toBe(false);
+		expect(hints).toEqual([]);
+		await substrate.drainEventBuffer({ all: true });
+		expect(written.map((event) => event.id)).toEqual([parked.event.id]);
+		expect(hints.map((hint) => hint.id)).toEqual([parked.event.id]);
+		await close(substrate);
+	});
+
+	test("a keyed replay of a parked event answers with it and writes nothing", async () => {
+		const { written, greptime, inserts } = ledger((call) => (call === 1 ? "greptime unreachable: ETIMEDOUT" : null));
+		const substrate = substrateWith({ SUBSTRATE_EVENT_IDEMPOTENCY: "accept" }, greptime);
+		const keyed: EventInput = { ...input, idempotency_key: "replay-key-1", ts: new Date().toISOString() };
+		const original = await substrate.emit(keyed);
+		expect(original.buffered).toBe(true);
+
+		const replay = await substrate.emit(keyed, { replay: true });
+		expect(replay.stored).toBe(false);
+		expect(replay.buffered).toBe(true);
+		expect(replay.event.id).toBe(original.event.id);
+		expect(inserts()).toBe(1);
+
+		await substrate.drainEventBuffer({ all: true });
+		expect(written).toHaveLength(1);
+		await close(substrate);
+	});
+
+	test("parked events survive a restart when a buffer path is set, and healthz reports them after boot", async () => {
+		const dir = scratch();
+		const bufferPath = join(dir, "buffer.jsonl");
+		const env = { SUBSTRATE_LEDGER_BUFFER_PATH: bufferPath };
+		const before = substrateWith(env, ledger(() => "greptime unreachable: ETIMEDOUT").greptime);
+		const parked = await before.emit(input);
+		expect(parked.buffered).toBe(true);
+		await close(before);
+		// `close` is a shutdown with a memory-only buffer only; the durable file must still hold the event.
+		expect(readFileSync(bufferPath, "utf8")).toContain(parked.event.id);
+
+		const after = substrateWith(env, null);
+		const health = await after.health();
+		expect(health.eventBuffer).toMatchObject({ pending: 1, durable: true });
+		expect(health.eventBuffer.oldestAt).not.toBeNull();
+		await close(after);
+	});
+});
+
+describe("shutdown closes the tick, and a ledger that never answers holds a write for one call at most", () => {
+	/**
+	 * A ledger that answers normally until `arm()`, then settles no call: a link that accepts the connection and goes silent.
+	 * `timeoutMs` is the budget the write path bounds itself by, as the real client's is.
+	 */
+	function silentLedger(timeoutMs: number) {
+		let armed = false;
+		const calls: string[] = [];
+		const reached = Promise.withResolvers<void>();
+		const never = () => new Promise<never>(() => undefined);
+		const greptime = {
+			timeoutMs,
+			ensureAppendMode: async () => true,
+			lastHash: async () => {
+				calls.push("lastHash");
+				return armed ? never() : TIP;
+			},
+			eventStored: async () => {
+				calls.push("eventStored");
+				if (armed) reached.resolve();
+				return armed ? never() : false;
+			},
+			findByIdempotencyKey: async () => null,
+			recordIngest: async () => undefined,
+			insertEvent: async () => {
+				calls.push("insertEvent");
+				if (armed) return never();
+				throw new Error("greptime unreachable: ETIMEDOUT");
+			},
+		};
+		const arm = () => {
+			armed = true;
+		};
+		return { greptime, arm, reached: reached.promise, calls };
+	}
+
+	test("a closed instance writes nothing after the tick interval; an open one holding the same parked event delivers it", async () => {
+		const up = { value: false };
+		const down = () => (up.value ? null : "greptime unreachable: ETIMEDOUT");
+		const closedLedger = ledger(down);
+		const openLedger = ledger(down);
+		const closed = substrateWith({ SUBSTRATE_LEDGER_BUFFER_PATH: join(scratch(), "buffer.jsonl") }, closedLedger.greptime);
+		const open = substrateWith({ SUBSTRATE_LEDGER_BUFFER_PATH: join(scratch(), "buffer.jsonl") }, openLedger.greptime);
+		expect((await closed.emit(input)).buffered).toBe(true);
+		expect((await open.emit(input)).buffered).toBe(true);
+		await close(closed);
+		// A write after the close still parks, but must not re-arm the tick the close stopped.
+		expect((await closed.emit({ ...input, summary: "ran after close" })).buffered).toBe(true);
+		const closedWrites = closedLedger.inserts();
+
+		up.value = true;
+		// The tick is a real `setInterval` inside Substrate with no clock to inject, so this test waits in real time. The first
+		// retry is due 1.6–2.4 s after the park (a 2 s base, ±20%): four seconds clears it and several 1 s ticks.
+		await Bun.sleep(4_000);
+		expect(closedLedger.inserts()).toBe(closedWrites);
+		expect(closedLedger.written).toHaveLength(0);
+		expect(openLedger.written).toHaveLength(1);
+	});
+
+	test("a ledger that never answers holds a write for one call's budget at most, and the write parks behind its session's tip", async () => {
+		const TIMEOUT = 150;
+		const silent = silentLedger(TIMEOUT);
+		const substrate = substrateWith({}, silent.greptime);
+		const parked = await substrate.emit(input);
 		expect(parked.buffered).toBe(true);
 
-		hung = true;
+		silent.arm();
+		const before = silent.calls.length;
 		const started = performance.now();
-		const next = await substrate.emit(input("second"));
+		const next = await substrate.emit({ ...input, summary: "ran cargo build" });
 		const elapsed = performance.now() - started;
 
-		expect(next).toMatchObject({ stored: false, buffered: true });
+		expect(next.stored).toBe(false);
+		expect(next.buffered).toBe(true);
 		expect(next.event.prev).toBe(parked.event.hash);
-		expect(elapsed).toBeLessThan(150 + 500);
-		// The settle's one blocked attempt. The write itself asked the ledger for no insert.
-		expect(blockedInserts).toBe(1);
+		expect(elapsed).toBeLessThan(TIMEOUT + 250);
+		// One blocked call, the settle's own. The write then parked: it asked the ledger for neither the tip nor an insert.
+		expect(silent.calls.slice(before)).toEqual(["eventStored"]);
+	});
 
-		// The ledger answers again: the blocked attempt lands, and the parked events land in chain order.
-		ledger.state.down = false;
-		release.resolve();
-		await substrate.drainEventBuffer({ all: true });
-		expect(ledger.state.rows.map((row) => row.summary)).toEqual(["first", "second"]);
-		expect(ledger.state.rows[1]?.prev).toBe(ledger.state.rows[0]?.hash);
+	test("a drain pass already blocked on the ledger does not hold a write past one call's budget", async () => {
+		const TIMEOUT = 150;
+		const silent = silentLedger(TIMEOUT);
+		const substrate = substrateWith({}, silent.greptime);
+		const parked = await substrate.emit(input);
+		silent.arm();
+		// A pass starts, as the tick's does, and blocks on the ledger. Nothing awaits it.
+		void substrate.drainEventBuffer({ all: true });
+		await silent.reached;
+		const before = silent.calls.length;
+		const started = performance.now();
+		const next = await substrate.emit({ ...input, summary: "ran cargo build" });
+		expect(performance.now() - started).toBeLessThan(TIMEOUT + 250);
+		expect(next.buffered).toBe(true);
+		expect(next.event.prev).toBe(parked.event.hash);
+		// The write queued behind the pass without a call of its own: the pass is the one blocked call.
+		expect(silent.calls.slice(before)).toEqual([]);
 	});
 });
 
-describe("shutdown stops the drain tick, and a zero budget touches no ledger", () => {
-	test("a write after the close parks without re-arming the tick; an open instance holding the same event delivers it", async () => {
-		const closedEnv = telemetry({ SUBSTRATE_EVENT_BUFFER_BACKOFF_MS: "200" });
-		const openEnv = telemetry({ SUBSTRATE_EVENT_BUFFER_BACKOFF_MS: "200" });
-		const closedLedger = fakeLedger();
-		const openLedger = fakeLedger();
-		closedLedger.state.down = true;
-		openLedger.state.down = true;
-		const closed = substrateFor(closedEnv.env, closedLedger.greptime);
-		const open = substrateFor(openEnv.env, openLedger.greptime);
-		expect((await closed.emit(input("kept"))).buffered).toBe(true);
-		expect((await open.emit(input("kept"))).buffered).toBe(true);
-		await closed.drainPendingEvents(0, { abandon: true });
-
-		// A write after the close still parks, but must not re-arm the tick the close stopped.
-		expect((await closed.emit(input("after close"))).buffered).toBe(true);
-		closedLedger.state.down = false;
-		openLedger.state.down = false;
-		// The tick is a real interval with no clock to inject: four seconds clears the 200 ms backoff and several 1 s ticks.
-		await Bun.sleep(4_000);
-
-		expect(closedLedger.state.rows).toEqual([]);
-		expect(openLedger.state.rows.map((row) => row.summary)).toEqual(["kept"]);
-	});
-
-	test("a shutdown with a zero budget makes no ledger call, and the parked event stays for the next pass", async () => {
-		const t = telemetry();
-		const { state, greptime } = fakeLedger();
-		const substrate = substrateFor(t.env, greptime);
-		state.down = true;
-		await substrate.emit(input("waiting"));
-
-		state.down = false;
-		const attempts = state.attempts;
-		await substrate.drainPendingEvents(0, { abandon: true });
-		expect(state.attempts).toBe(attempts);
-		expect(state.rows).toEqual([]);
-		expect((await substrate.health()).eventBuffer).toMatchObject({ depth: 1, durable: true });
-	});
-});
-
-describe("a parked claim is recorded", () => {
-	test("a claim whose event is parked is recorded, so its node is not released", async () => {
-		const t = telemetry();
-		const { state, greptime } = fakeLedger();
-		const released: unknown[] = [];
-		const index = {
-			claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string) => ({
-				claimed: true,
-				node: { graph_id, node_id, linear_identifier: "SPE-1" },
-				lease: { lease_id: "lse_1", epoch: 1, expires_at: "2026-09-30T12:15:00.000Z", state: "held" },
-				decision: {
-					action: "granted",
-					granted: true,
-					lease_id: "lse_1",
-					epoch: 1,
-					observed_epoch: 0,
-					ttl_seconds: 900,
-					evicted: null,
-					holder: { surface, session_id },
-					observed_expiry: null,
-					reason: null,
-				},
-			}),
-			getGraph: async () => ({ repo: "r", branch: "main" }),
-			releaseNode: async (...args: unknown[]) => {
-				released.push(args);
-				return { released: true };
-			},
-		};
-		const substrate = new Substrate(loadConfig(t.env), { index: index as never, greptime: greptime as never, steering: { history: null, liveSessions: null } });
-		opened.push(substrate);
-		state.down = true;
-
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
-		expect(result.claimed).toBe(true);
-		expect(state.rows).toEqual([]);
-		expect(released).toEqual([]);
-	});
-});
-
-describe("a rollback's repeated forget note", () => {
-	test("a repeat writes a note only when it finishes more plane deletions than the notes already recorded", async () => {
-		const saved = { url: process.env.HINDSIGHT_URL, key: process.env.HINDSIGHT_API_KEY, banks: process.env.HINDSIGHT_BANKS };
-		process.env.HINDSIGHT_URL = "http://fake";
-		process.env.HINDSIGHT_API_KEY = "test-bearer";
-		process.env.HINDSIGHT_BANKS = "sub-cursor";
+describe("a closed instance's writes go only through its own transport", () => {
+	test("a closed Substrate with a parked event makes no call through the global fetch after the tick interval", async () => {
+		const original = globalThis.fetch;
+		const globalCalls: unknown[] = [];
+		globalThis.fetch = (async (...args: unknown[]) => {
+			globalCalls.push(args);
+			throw new Error("the global fetch was used");
+		}) as unknown as typeof fetch;
 		try {
-			const { state, greptime } = fakeLedger();
-			let planeDown = true;
-			const hindsightFetch = async (_input: unknown, init?: RequestInit): Promise<Response> => {
-				if ((init?.method ?? "GET").toUpperCase() !== "DELETE") return new Response(null, { status: 404 });
-				return planeDown ? Response.json({ detail: "injected" }, { status: 503 }) : Response.json({ detail: "document not found" }, { status: 404 });
-			};
-			const index = {
-				readEntry: async (id: string) => ({
-					id,
-					writer: "cursor",
-					scope: "graph",
-					kind: "fact",
-					text: "remember this",
-					created: "2026-11-01T00:00:00.000Z",
-					idempotency_key: `idem-${id}`,
-					session_id: "s-1",
-				}),
-				markMemoryForgotten: async (ids: string[]) => ids,
-				memoryDocumentShared: async () => false,
-			};
-			const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, hindsightFetch: hindsightFetch as never, steering: { history: null, liveSessions: null } });
-			opened.push(substrate);
-			const request: ForgetRequest = { reason: "operator", entry_ids: ["mem-forget-1"], actor: "human" };
-			const caller: ForgetCaller = { surface: "omp", session_id: "s-1" };
-			const notePending = () =>
-				state.rows
-					.filter((row) => row.payload["action"] === "memory.forget")
-					.map((row) => {
-						const plane = row.payload["plane"];
-						return plane !== null && typeof plane === "object" && "pending" in plane ? plane.pending : null;
-					});
-
-			await substrate.memoryForget(request, caller);
-			expect(notePending()).toEqual([1]);
-
-			planeDown = false;
-			await substrate.memoryForget(request, caller);
-			expect(notePending()).toEqual([1, 0]);
-
-			// Nothing is left to finish: this repeat reports no more pending than the notes already show, so it writes no note.
-			await substrate.memoryForget(request, caller);
-			expect(notePending()).toEqual([1, 0]);
+			const sent: string[] = [];
+			const transport = (async (_url: string, init: RequestInit) => {
+				const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
+				sent.push(statement);
+				// The append-mode probe answers true, so the event reaches the write, and the write is what fails.
+				if (statement === 'SHOW CREATE TABLE "agent_events"') {
+					return Response.json({ output: [{ records: { schema: { column_schemas: [{ name: "Table" }, { name: "Create Table" }] }, rows: [["agent_events", "... WITH( append_mode = 'true' )"]] } }] });
+				}
+				// The chain-tip read finds an empty ledger, so the event proceeds to the write, which is what fails.
+				if (statement.startsWith('SELECT "hash", "prev" FROM "agent_events"')) {
+					return Response.json({ output: [{ records: { schema: { column_schemas: [{ name: "hash" }, { name: "prev" }] }, rows: [] } }] });
+				}
+				return new Response("ledger down", { status: 500 });
+			}) as unknown as typeof fetch;
+			const client = new GreptimeClient({ url: "http://greptime.test", user: "u", password: "p", db: "substrate" }, { fetch: transport });
+			const substrate = substrateWith({ SUBSTRATE_LEDGER_BUFFER_PATH: join(scratch(), "buffer.jsonl") }, client);
+			expect((await substrate.emit(input)).buffered).toBe(true);
+			await close(substrate);
+			const sentAtClose = sent.length;
+			// The tick is a real `setInterval` inside Substrate with no clock to inject, so this test waits in real time, as the closed-instance test above does.
+			// The first retry is due 1.6–2.4 s after the park: four seconds clears it and several 1 s ticks.
+			await Bun.sleep(4_000);
+			expect(sent.length).toBe(sentAtClose);
+			expect(globalCalls).toEqual([]);
 		} finally {
-			if (saved.url === undefined) delete process.env.HINDSIGHT_URL;
-			else process.env.HINDSIGHT_URL = saved.url;
-			if (saved.key === undefined) delete process.env.HINDSIGHT_API_KEY;
-			else process.env.HINDSIGHT_API_KEY = saved.key;
-			if (saved.banks === undefined) delete process.env.HINDSIGHT_BANKS;
-			else process.env.HINDSIGHT_BANKS = saved.banks;
+			globalThis.fetch = original;
 		}
-	});
+	}, 10_000);
 });

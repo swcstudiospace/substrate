@@ -1,11 +1,11 @@
 /**
  * The offline docs-golden harness (uplift-3 N5): the real `searchDocs` over
- * a question-aware `RagflowFake` seeded from a small Markdown corpus.
+ * a question-aware `lightragFake` seeded from a small Markdown corpus.
  *
  * `scripts/docs-golden.ts` holds the fixtures, the scorer and the CLI; this
  * module holds the part that must live inside `mcp-server` — the store lock
  * (`store-lock.test.ts`) lets no file outside this package import the
- * RAGFlow client or its fake, and the rehearsal fixtures (`rehearsal-skills.ts`)
+ * lightrag client or its fake, and the rehearsal fixtures (`rehearsal-skills.ts`)
  * already follow the same split.
  *
  * What the offline run proves, and what it cannot: the fake retrieves by
@@ -25,8 +25,10 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { datasetIdentity } from "./dataset-identity.ts";
 import { searchDocs, type SearchReply } from "./docs-search.ts";
-import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
+import { DocsPlaneFake, type FakeChunk } from "./docs-plane-fake.ts";
+import type { IngestRecord } from "./docs-ingest.ts";
 import type { EventInput } from "./types.ts";
 
 /** The reserved host every corpus document is cited under (RFC 2606), as the fake's own seeds are. */
@@ -37,7 +39,7 @@ export interface GoldenDocument {
 	slug: string;
 	source_url: string;
 	document_id: string;
-	/** The file name, which is what RAGFlow reports as `document_keyword`. */
+	/** The file name, which is what lightrag reports as `document_keyword`. */
 	name: string;
 	body: string;
 }
@@ -151,8 +153,8 @@ export function lexicalChunk(document: GoldenDocument, question: string): FakeCh
  * first. The fake's own three datasets are the scope; a corpus directory
  * named after one of them fills it.
  */
-export function goldenFake(corpus: GoldenCorpus): RagflowFake {
-	const fake = new RagflowFake();
+export function goldenFake(corpus: GoldenCorpus): DocsPlaneFake {
+	const fake = new DocsPlaneFake();
 	fake.echoHeadings = true;
 	fake.answer = (datasetId, question) => {
 		const dataset = fake.datasets.find((entry) => entry.id === datasetId);
@@ -197,12 +199,47 @@ export async function searchGoldenOffline(
 	const events: EventInput[] = [];
 	const provenance: Record<string, { source_url: string; commit: string }> = {};
 	for (const document of corpus.documents) provenance[document.document_id] = { source_url: document.source_url, commit: options.commit };
+	// The fake's own three datasets are the scope (see `goldenFake`); listing
+	// them keeps the wire ids the fake ids scope isolation is proven over.
+	// Pins are filed under the dataset name, the key the search cites.
 	const pins = Object.fromEntries(
-		fake.datasets.map((dataset) => [dataset.id, { dataset: dataset.name, dataset_id: dataset.id, version: "golden", commit: options.commit }]),
+		fake.datasets.map((dataset) => [dataset.name, { dataset: dataset.name, dataset_id: dataset.id, version: "golden", commit: options.commit }]),
 	);
+	// LightRAG attributes a chunk to the dataset its ingest record names:
+	// `lightrag::<dataset identity>::<source URL>` (`lightragDocumentDataset`).
+	const lightragRecords = new Map<string, IngestRecord>();
+	for (const document of corpus.documents) {
+		const identity = datasetIdentity(document.dataset);
+		lightragRecords.set(`lightrag::${identity}::${document.source_url}`, {
+			sha: "golden",
+			dataset_id: identity,
+			source_url: document.source_url,
+			document_id: document.document_id,
+			version: 1,
+		});
+	}
+	const retrievedDatasetIds: string[] = [];
 	const reply = await searchDocs(
 		{
-			config: { url: "http://ragflow.test", apiKey: "golden" },
+			config: { url: "http://lightrag.test", apiKey: "golden" },
+			backend: "lightrag",
+			lightragConfig: { url: "http://lightrag.test", apiKey: "golden" },
+			lightragDatasets: {
+				list: async () => ({ ok: true, datasets: fake.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })) }),
+				invalidate: () => undefined,
+			},
+			lightragRetrieve: async (_config, question, datasetIds) => {
+				retrievedDatasetIds.push(...datasetIds);
+				const chunks: FakeChunk[] = [];
+				for (const id of datasetIds) chunks.push(...(await (fake.answer?.(id, question) ?? [])));
+				chunks.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+				return {
+					ok: true,
+					chunks,
+					detail: { mode: "hybrid", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				};
+			},
+			lightragRecords,
 			datasetNames: fixture.datasets,
 			pins,
 			emit: async (event) => {
@@ -210,17 +247,10 @@ export async function searchGoldenOffline(
 				return { stored: false };
 			},
 			surface: "omp",
-			fetchImpl: fake.fetch,
 			provenanceOf: (documentId) => provenance[documentId],
 			...(options.budgetMs !== undefined ? { budgetMs: options.budgetMs } : {}),
 		},
 		fixture.question,
 	);
-	const retrievedDatasetIds: string[] = [];
-	for (const body of fake.retrievals()) {
-		if (body !== null && typeof body === "object" && "dataset_ids" in body && Array.isArray(body.dataset_ids)) {
-			for (const id of body.dataset_ids) if (typeof id === "string") retrievedDatasetIds.push(id);
-		}
-	}
 	return { reply, retrievedDatasetIds, events };
 }

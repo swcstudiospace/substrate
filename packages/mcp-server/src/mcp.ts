@@ -402,7 +402,7 @@ const INGEST_GATE_REFUSALS: Record<string, true> = {
 	"version.stale": true,
 	"dataset-lock-timeout": true,
 	"lightrag-not-configured": true,
-	"ragflow-not-configured": true,
+
 };
 
 /** Whether an ingest refusal is a gate refusal. A LightRAG secret finding carries its rule names after a colon. */
@@ -1633,7 +1633,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Ingest pages into a docs dataset",
 			description:
 				"Publish pages into a substrate docs dataset (agent-substrate, programming-desk, agent-skills) " +
-				"through the configured docs backend (LightRAG, or RAGFlow as the legacy fallback). Fail-closed: a redactor finding, a missing source URL, an out-of-roots path, " +
+				"through the configured docs backend (LightRAG, or lightrag as the legacy fallback). Fail-closed: a redactor finding, a missing source URL, an out-of-roots path, " +
 				"an over-cap page, an unauthenticated caller or a VM guest is refused and nothing is uploaded. " +
 				"Needs an authenticated surface. Unchanged content hashes answer `unchanged`, changed ones are " +
 				"replaced. `dataset` names a configured dataset; raw ids are never accepted.",
@@ -1687,7 +1687,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"Create one branch at a named base in each of two to 16 registered repositories, as one durable operation (phase 74). Each repository " +
 				"is a step recorded before its git effect. A failure at one step undoes the steps before it, or reports `needs-attention` and names the " +
 				"steps it could not undo; it never reports success for a partial operation. A retry with the same key resumes the same operation, and a " +
-				"different request under that key is refused. Every repository must be granted to the caller's surface. " +
+				"different request under that key is refused. Every repository must be granted to the caller's surface and listed in its session allowlist. " +
 				"Answers `operation` with status `done`, `rolled-back` or `needs-attention`, and `request-invalid` for a malformed request.",
 			inputSchema: {
 				key: z.string().describe("The dedupe key: 1 to 128 letters, digits, '.', '_', ':' or '-'."),
@@ -2368,7 +2368,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "Status of the nine fabric resources",
 			description:
-				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, RAGFlow, LightRAG, Hindsight, TEI (the embedding service), the Tailscale proxy layer and the corpus. " +
+				"One row per resource: Dragonfly, the TimescaleDB index, GreptimeDB, lightrag, LightRAG, Hindsight, TEI (the embedding service), the Tailscale proxy layer and the corpus. " +
 				"Each row has its endpoint class (loopback, proxy, direct, unset or not-applicable), a state (ok, degraded, unavailable " +
 				"or unconfigured) and a fixed phrase naming its source. A resource that is not configured is unconfigured, never ok. The corpus row carries " +
 				"the docs plane's three objectives (freshness, golden-set recall at 5, ingest throughput) as readings against their thresholds. " +
@@ -2415,23 +2415,25 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	/**
-	 * The planning reads (phase 52, SOTA-08). Both are typed: a plane with no root answers `disabled`, never an error.
+	 * The planning reads (phase 52, SOTA-08). Both are typed: a plane with no checkouts answers `disabled`, never an error. Each takes an optional `checkout` key.
 	 * Both are read-only and write nothing. Changes are published, and checkouts heartbeat, by the server's planning observer.
 	 */
 	server.registerTool(
 		"planning_status",
 		{
-			title: "Planning index for the configured checkout",
+			title: "Planning index for the configured checkouts",
 			description:
-				"Counts, sha256 hashes and error records for the planning documents under the configured checkout's .planning/, and the " +
+				"Counts, sha256 hashes and error records for the planning documents under each configured checkout's .planning/, and the " +
 				"GSD-Core `position` (milestone, phase, plan, step, status, progress) parsed from STATE.md and ROADMAP.md, redacted and " +
-				"capped; a missing or malformed file is an entry in its errors. Never a file body and never a frontmatter value. An unset " +
-				"root answers disabled. A read: it writes nothing and changes no file, and it sends no heartbeat. Changes are published by " +
+				"capped; a missing or malformed file is an entry in its errors. Never a file body and never a frontmatter value. The top-level " +
+				"fields are the selected checkout's (the one `checkout` names, else the first configured); `checkouts` holds one entry per " +
+				"checkout, or only the named one. An unset roots list answers disabled; an unknown `checkout` answers unavailable with reason " +
+				"unknown-checkout. A read: it writes nothing and changes no file, and it sends no heartbeat. Changes are published by " +
 				"the server's planning observer, not by this tool.",
-			inputSchema: {},
+			inputSchema: { checkout: z.string().optional().describe("The checkout key to read: `wt-` and 24 hex digits, as the reply names it. Omitted: every configured checkout.") },
 			annotations: { readOnlyHint: true },
 		},
-		async () => json(await substrate.planning.status()),
+		async ({ checkout }) => json(await substrate.planning.status(checkout)),
 	);
 
 	server.registerTool(
@@ -2440,14 +2442,16 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Planning presence for sessions",
 			description:
 				"The sessions heartbeating into the planning plane, each active, stale or unknown against the server's own clock. " +
-				"An unset root answers disabled; an unset cache endpoint answers unavailable. A read: it writes nothing and sends no " +
-				"heartbeat. The server's planning observer heartbeats a checkout when it sees that checkout change a planning document, " +
-				"and refreshes a quiet checkout's liveness on each scan, so a session idle for hours stays active; `idleForMs` is the " +
-				"time since its last planning change.",
-			inputSchema: {},
+				"The top-level fields are the selected checkout's (the one `checkout` names, else the first configured); `checkouts` holds " +
+				"each checkout's own session and the conflicts it takes part in, or only the named one. An unset roots list answers disabled; " +
+				"an unset cache endpoint answers unavailable; an unknown `checkout` answers unavailable with reason unknown-checkout. A read: " +
+				"it writes nothing and sends no heartbeat. The server's planning observer heartbeats a checkout when it sees that checkout " +
+				"change a planning document, and refreshes a quiet checkout's liveness on each scan, so a session idle for hours stays active; " +
+				"`idleForMs` is the time since its last planning change.",
+			inputSchema: { checkout: z.string().optional().describe("The checkout key to read: `wt-` and 24 hex digits, as the reply names it. Omitted: every configured checkout.") },
 			annotations: { readOnlyHint: true },
 		},
-		async () => json(await substrate.planning.sessions()),
+		async ({ checkout }) => json(await substrate.planning.sessions(checkout)),
 	);
 
 	/**
@@ -2468,10 +2472,9 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"SUBSTRATE_PLANNING_STEERING_PRINCIPALS. Each session has a rate limit. The server assigns the directive id, returned as " +
 					"directive_id; the caller cannot choose it. The directive is audited before it is queued. A refusal carries a typed error: " +
 					"not-found for any denied or inactive target, forbidden operator-required after a valid binding, principal-not-allowed, " +
-					"rate-limited, invalid-directive or audit-unavailable. An optional idempotency_key (8 to 128 characters of letters, digits, '.', '_', ':', '-') " +
-					"makes a retry safe: a repeat of a keyed queue from the same caller to the same session returns the original reply, with the same " +
-					"sequence, and writes nothing. The same key with different content is refused idempotency-conflict. A keyed reply carries sequence, " +
-					"the directive's place in its session's delivery order. Invalid settings answer misconfigured; absent inbox audit answers not-configured.",
+					"rate-limited, invalid-directive, idempotency-conflict or audit-unavailable. Invalid settings answer misconfigured; absent inbox audit answers not-configured. " +
+					"With idempotency_key a retry applies once: the same request under the key replays the original reply, with its sequence, and writes nothing; " +
+					"a different request under the key is idempotency-conflict. A keyed reply carries sequence, the directive's delivery order.",
 				inputSchema: STEERING_QUEUE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },
 			},
@@ -2491,7 +2494,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					"(annotate and declined change nothing), the same session docs_steering_session holds, and the reply then carries checkpoint_hint " +
 					"{ trigger: steering, directive_id } for the session to take a steering checkpoint; a transition the session refuses (or a session " +
 					"the server does not hold) is reported as session_state refused, never forced. A refusal " +
-					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required or audit-unavailable. " +
+					"carries a typed error: forbidden, not-found, wrong-session, already-acknowledged, confirmation-required, idempotency-conflict or audit-unavailable. " +
+					"With idempotency_key a retry under the same key and request replays the stored reply, with its sequence, and moves nothing; a different request under the key is refused. " +
 					"Answers misconfigured while the steering settings are invalid.",
 				inputSchema: STEERING_ACKNOWLEDGE_INPUT,
 				annotations: { destructiveHint: false, idempotentHint: false },

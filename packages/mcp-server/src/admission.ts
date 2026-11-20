@@ -188,14 +188,16 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/skills": "read",
 	"/skills/approve": "write",
 	"/handoff": "write",
+"/handoffs": "read",
 	"/slo/history": "read",
 	"/docs/lightrag/query": "read",
-	// Phase 67 (live steering GA): the steering routes mirror the steering tools. A held long poll is one admission, like one read.
+	// Phase 67 (live steering GA): the steering routes are classed as the steering tools are. `GET /steering/wait` is not in
+	// this table: a long poll is admitted by its own concurrency slot (`LongPollSlots`), not by a token of the shared budget.
+	// The other steering routes mirror the steering tools.
 	"/steering/sessions": "read",
 	"/steering/sessions/heartbeat": "write",
 	"/steering/sessions/close": "write",
 	"/steering/directives": "read",
-	"/steering/wait": "read",
 	"/steering/queue": "write",
 	"/steering/acknowledge": "write",
 	"/session/context": "read",
@@ -220,6 +222,51 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 
 /** Monitoring traffic. Exempt on GET only: a POST to one of these is a 404, and a 404 is metered like any other unknown path. */
 export const MONITOR_ROUTES: Readonly<Record<string, true>> = { "/healthz": true, "/metrics": true, "/slo": true, "/livez": true, "/rag/state": true };
+
+// ── long-poll slots ──────────────────────────────────────────────────────────
+
+/**
+ * The class a held `GET /steering/wait` is admitted under. It takes no token of a metered class, so a poll cannot spend the
+ * shared budget and a read cannot starve a poll. It is not an `AdmissionClass`: it has no budget knob and no metric label.
+ */
+export const LONG_POLL_CLASS = "poll";
+/** Long polls the process holds at once, across sessions. A poll past it is refused at once; the waiter registry's bounds still apply inside it. */
+export const LONG_POLL_SLOTS_MAX = 32;
+/** The route a long poll holds. `routeClass` does not meter it. */
+export const LONG_POLL_ROUTE = "/steering/wait";
+/** `Retry-After` of a refused poll: a slot frees on a directive, the timeout or a disconnect, none of which has a computed wait. */
+export const LONG_POLL_RETRY_AFTER_S = 1;
+
+/** The bounded body of a refused long poll: `budgetBody`'s shape, with the class the poll is admitted under. */
+export function longPollBody(): { error: "budget"; class: typeof LONG_POLL_CLASS; retry_after_s: number } {
+	return { error: "budget", class: LONG_POLL_CLASS, retry_after_s: LONG_POLL_RETRY_AFTER_S };
+}
+
+/**
+ * The held-poll slots of one process. `acquire` takes one and returns its release, or null when the class is full. A release
+ * runs at most once, so a path that releases twice cannot free another poll's slot.
+ */
+export class LongPollSlots {
+	private held = 0;
+
+	constructor(private readonly max: number = LONG_POLL_SLOTS_MAX) {}
+
+	/** Slots held right now. */
+	get size(): number {
+		return this.held;
+	}
+
+	acquire(): (() => void) | null {
+		if (this.held >= this.max) return null;
+		this.held += 1;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.held -= 1;
+		};
+	}
+}
 
 /** Metered in `handleMcp`: the cost is the number of `tools/call` members, by each member's class. */
 export const MCP_ROUTE = "/mcp";
@@ -252,12 +299,12 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	session_checkpoint: "write",
 	session_rollback_commit: "write",
 	docs_ingest: "write",
+	docs_feedback: "write",
 	corpus_status: "read",
 	corpus_ingest: "write",
 	cross_repo_fanout: "write",
 	cross_repo_status: "read",
 	cross_repo_compensate: "write",
-	docs_feedback: "write",
 	skills_propose: "write",
 	docs_steering_session: "write",
 	steering_session_heartbeat: "write",
@@ -298,10 +345,11 @@ export const DEFAULT_CLASS: AdmissionClass = "read";
 
 /**
  * The class of one REST request, or null when it is not metered here: a monitor
- * GET, or `/mcp`, whose members are metered one by one.
+ * GET, a long poll (`LONG_POLL_ROUTE`, held by its own slot), or `/mcp`, whose members are metered one by one.
  */
 export function routeClass(method: string, pathname: string): AdmissionClass | null {
 	if (method === "GET" && Object.hasOwn(MONITOR_ROUTES, pathname)) return null;
+	if (method === "GET" && pathname === LONG_POLL_ROUTE) return null;
 	if (pathname === MCP_ROUTE) return null;
 	if (method === "POST" && pathname === "/steering/sessions") return "write";
 	return (Object.hasOwn(ROUTE_CLASSES, pathname) ? ROUTE_CLASSES[pathname] : undefined) ?? DEFAULT_CLASS;

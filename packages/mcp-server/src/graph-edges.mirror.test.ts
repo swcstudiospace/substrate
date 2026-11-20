@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
 import { type CacheRedis, ReadThroughCache } from "./cache.ts";
 import type { EdgeOutcome, EdgeRelation, Mirror } from "./mirror.ts";
-import { Substrate } from "./service.ts";
+import { InvalidGraphEdgesError, Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
 
 const GRAPH = "ut-1";
@@ -60,16 +60,26 @@ function viewOf(
 	};
 }
 
-/** A substrate whose index returns `view`, whose mirror answers `relate`, and whose events are captured. */
-function harness(view: unknown, mirror: unknown) {
-	const index = { registerGraph: async () => view };
+/**
+ * The index stand-in. `stored` is what the index holds for the graph before a write (the view, unless a test says
+ * otherwise); `removed` is the edge set a write drops. Every write is kept in `writes`.
+ */
+function harness(view: unknown, mirror: unknown, options: { stored?: unknown; removed?: unknown[] } = {}) {
+	const writes: unknown[] = [];
+	const index = {
+		getGraph: async () => (options.stored === undefined ? view : options.stored),
+		registerGraph: async (plan: unknown) => {
+			writes.push(plan);
+			return { ...(view as object), removed: options.removed ?? [] };
+		},
+	};
 	const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, mirror: mirror as never, steering: { history: null, liveSessions: null } });
 	const emitted: EventInput[] = [];
 	substrate.emit = (async (input: EventInput) => {
 		emitted.push(input);
 		return { stored: true } as never;
 	}) as never;
-	return { substrate, emitted };
+	return { substrate, emitted, writes };
 }
 
 function mirrorAnswering(answer: (edges: EdgeRelation[]) => EdgeOutcome[]) {
@@ -237,5 +247,201 @@ describe("graph edges at registration", () => {
 		expect(await substrate.getGraph(GRAPH)).toMatchObject({ graph_id: GRAPH, notion_task_page: "after" });
 		release.resolve();
 		await registering;
+	});
+});
+
+/** The refusal a registration raised, or a failure of the test if it went through. */
+async function refusalOf(registration: Promise<unknown>): Promise<Error> {
+	const outcome = await registration.then(
+		() => null,
+		(cause: unknown) => cause,
+	);
+	expect(outcome).toBeInstanceOf(InvalidGraphEdgesError);
+	return outcome as Error;
+}
+
+/** A mirror whose every call is recorded: a refused graph must reach it not at all. */
+function recordingMirror(calls: unknown[]) {
+	return {
+		relateEdges: async (edges: unknown[]) => {
+			calls.push(edges);
+			return [];
+		},
+		removeEdges: async (edges: unknown[]) => {
+			calls.push(edges);
+			return [];
+		},
+	} as unknown as Mirror;
+}
+
+describe("graph edges are checked before the index write", () => {
+	test("a self-loop is refused, naming the edge, and writes nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate, emitted, writes } = harness(viewOf(REFS, []), recordingMirror(calls));
+		const error = await refusalOf(
+			substrate.registerGraph({ graph_id: GRAPH, edges: [{ from_node: "n1", to_node: "n1", kind: "requires" }] } as never),
+		);
+		expect(error.message).toBe("edge n1 requires n1 is a self-loop");
+		expect(writes).toEqual([]);
+		expect(calls).toEqual([]);
+		expect(emitted).toEqual([]);
+	});
+
+	test("an edge to a node the graph does not have is refused, and writes nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate, writes } = harness(viewOf(REFS, []), recordingMirror(calls), { stored: null });
+		const error = await refusalOf(
+			substrate.registerGraph({
+				graph_id: GRAPH,
+				nodes: [{ node_id: "n1" }],
+				edges: [{ from_node: "n1", to_node: "n9", kind: "gated_by" }],
+			} as never),
+		);
+		expect(error.message).toBe("edge n1 gated_by n9 names node n9, which is not in the graph");
+		expect(writes).toEqual([]);
+		expect(calls).toEqual([]);
+	});
+
+	test("a cycle over requires edges is refused, naming the edge that closes it, and writes nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate, writes } = harness(viewOf(REFS, []), recordingMirror(calls));
+		const error = await refusalOf(
+			substrate.registerGraph({
+				graph_id: GRAPH,
+				edges: [
+					{ from_node: "n1", to_node: "n2", kind: "requires" },
+					{ from_node: "n2", to_node: "n3", kind: "requires" },
+					{ from_node: "n3", to_node: "n1", kind: "requires" },
+				],
+			} as never),
+		);
+		expect(error.message).toBe("edge n3 requires n1 closes a cycle: n1 -> n2 -> n3 -> n1");
+		expect(writes).toEqual([]);
+		expect(calls).toEqual([]);
+	});
+
+	test("a gated_by edge closes a cycle with a requires edge too", async () => {
+		const { substrate, writes } = harness(viewOf(REFS, []), recordingMirror([]));
+		const error = await refusalOf(
+			substrate.registerGraph({
+				graph_id: GRAPH,
+				edges: [
+					{ from_node: "n1", to_node: "n2", kind: "gated_by" },
+					{ from_node: "n2", to_node: "n1", kind: "requires" },
+				],
+			} as never),
+		);
+		expect(error.message).toBe("edge n2 requires n1 closes a cycle: n1 -> n2 -> n1");
+		expect(writes).toEqual([]);
+	});
+
+	test("a graph with no cycle is accepted, and an edge to a node an earlier register left is valid", async () => {
+		const { substrate, writes } = harness(
+			viewOf(REFS, []),
+			mirrorAnswering((edges) => edges.map((edge) => ({ ...edge, status: "skipped" }))),
+		);
+		const registered = await substrate.registerGraph({
+			graph_id: GRAPH,
+			edges: [
+				{ from_node: "n2", to_node: "n1", kind: "requires" },
+				{ from_node: "n3", to_node: "n2", kind: "gated_by" },
+				{ from_node: "n3", to_node: "n1", kind: "blocks" },
+			],
+		} as never);
+		expect(registered.graph_id).toBe(GRAPH);
+		expect(writes).toHaveLength(1);
+	});
+
+	test("a cycle over blocks edges is refused, naming the edge that closes it, and writes nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate, writes, emitted } = harness(viewOf(REFS, []), recordingMirror(calls));
+		const error = await refusalOf(
+			substrate.registerGraph({
+				graph_id: GRAPH,
+				edges: [
+					{ from_node: "n1", to_node: "n2", kind: "blocks" },
+					{ from_node: "n2", to_node: "n3", kind: "blocks" },
+					{ from_node: "n3", to_node: "n1", kind: "blocks" },
+				],
+			} as never),
+		);
+		expect(error.message).toBe("edge n3 blocks n1 closes a cycle: n1 -> n2 -> n3 -> n1");
+		expect(writes).toEqual([]);
+		expect(calls).toEqual([]);
+		expect(emitted).toEqual([]);
+	});
+
+	test("a cycle that mixes blocks with requires and gated_by edges is refused, and writes nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate, writes } = harness(viewOf(REFS, []), recordingMirror(calls));
+		const error = await refusalOf(
+			substrate.registerGraph({
+				graph_id: GRAPH,
+				edges: [
+					{ from_node: "n1", to_node: "n2", kind: "blocks" },
+					{ from_node: "n2", to_node: "n3", kind: "requires" },
+					{ from_node: "n3", to_node: "n1", kind: "blocks" },
+				],
+			} as never),
+		);
+		expect(error.message).toBe("edge n3 blocks n1 closes a cycle: n1 -> n2 -> n3 -> n1");
+		expect(writes).toEqual([]);
+		expect(calls).toEqual([]);
+	});
+
+	test("an acyclic chain of blocks edges is accepted and written", async () => {
+		const { substrate, writes } = harness(viewOf(REFS, []), mirrorAnswering((edges) => edges.map((edge) => ({ ...edge, status: "skipped" }))));
+		const registered = await substrate.registerGraph({
+			graph_id: GRAPH,
+			edges: [
+				{ from_node: "n1", to_node: "n2", kind: "blocks" },
+				{ from_node: "n2", to_node: "n3", kind: "blocks" },
+			],
+		} as never);
+		expect(registered.graph_id).toBe(GRAPH);
+		expect(writes).toHaveLength(1);
+	});
+});
+
+describe("a dropped edge leaves Linear after the index write", () => {
+	const dropped = { graph_id: GRAPH, from_node: "n2", to_node: "n1", kind: "requires" as const };
+
+	test("removeEdges receives the dropped edge once the index already holds the new set", async () => {
+		const seen: Array<{ edges: unknown[]; result: unknown; writesSoFar: number }> = [];
+		let writes: unknown[] = [];
+		const mirror = {
+			relateEdges: async () => [],
+			removeEdges: async (edges: unknown[], result: unknown) => {
+				seen.push({ edges, result, writesSoFar: writes.length });
+				return [];
+			},
+		} as unknown as Mirror;
+		const harnessed = harness(viewOf(REFS, []), mirror, { removed: [dropped] });
+		writes = harnessed.writes;
+		await harnessed.substrate.registerGraph({ graph_id: GRAPH, edges: [] } as never);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toMatchObject({ edges: [dropped], writesSoFar: 1, result: { graph_id: GRAPH, removed: [dropped] } });
+	});
+
+	test("a write that drops nothing asks Linear to remove nothing", async () => {
+		const calls: unknown[] = [];
+		const { substrate } = harness(viewOf(REFS, []), recordingMirror(calls));
+		await substrate.registerGraph({ graph_id: GRAPH, edges: [] } as never);
+		expect(calls).toEqual([]);
+	});
+
+	test("a failed removal records a warning on the node that waited, and the registration still returns", async () => {
+		const mirror = {
+			relateEdges: async () => [],
+			removeEdges: async () => {
+				throw new Error("linear down");
+			},
+		} as unknown as Mirror;
+		const { substrate, emitted } = harness(viewOf(REFS, []), mirror, { removed: [dropped] });
+		const registered = await substrate.registerGraph({ graph_id: GRAPH, edges: [] } as never);
+		expect(registered.graph_id).toBe(GRAPH);
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]).toMatchObject({ kind: "warning", node_id: "n2" });
+		expect(emitted[0]?.payload).toMatchObject({ op: "unrelate", status: "failed", reason: "linear down" });
 	});
 });

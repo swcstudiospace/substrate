@@ -9,10 +9,12 @@
  * for the signer rotation and the re-anchor record, by an operator; a tokened caller that is not an operator is refused, and an operator is held to its
  * own authenticated surface (the surface `operatorSurfaces` reads rotations and re-anchors from).
  * The docs canary's report (`docs.canary`) is the one host-job action: only the `substrate` token acting as itself may write it.
+ * The cross-layer reconcile's records (`reconcile.plan`, `reconcile.applied`) are written only by the reconcile run, straight to the ledger; no caller emits them through this door, an operator included.
  *
  * ONE list: add an action here when a reader starts to treat it as authoritative.
  */
 import { ANCHOR_SIGNER_ROTATE_ACTION } from "@substrate/ledger";
+import { RECONCILE_APPLIED_ACTION, RECONCILE_PLAN_ACTION } from "./cross-layer-reconcile.ts";
 import { DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE } from "./corpus/slo.ts";
 import { CORPUS_ROOT_ACTION } from "./corpus/root.ts";
 import { FORGET_ACTION } from "./memory-forget.ts";
@@ -30,6 +32,8 @@ export const RESERVED_NOTE_ACTIONS: ReadonlySet<string> = new Set([
 	FORGET_ACTION,
 	DOCS_CANARY_ACTION,
 	CORPUS_ROOT_ACTION,
+	RECONCILE_PLAN_ACTION,
+	RECONCILE_APPLIED_ACTION,
 ]);
 
 /**
@@ -38,6 +42,9 @@ export const RESERVED_NOTE_ACTIONS: ReadonlySet<string> = new Set([
  * docs canary's readings feed the recall gauge and the `corpus` fabric row, so a breach must not be hideable by any other caller.
  */
 const HOST_JOB_ACTIONS: ReadonlyMap<string, string> = new Map([[DOCS_CANARY_ACTION, DOCS_CANARY_SURFACE]]);
+
+/** The reconcile's own records. The reconcile run appends them straight to the ledger, which is not this door, so no caller may emit them here, an operator included. */
+const RECONCILE_ACTIONS: ReadonlySet<string> = new Set([RECONCILE_PLAN_ACTION, RECONCILE_APPLIED_ACTION]);
 
 /** The reserved action a payload names, or null. `payload` is whatever the caller sent, so anything that is not an object names none. */
 export function reservedActionOf(payload: unknown): string | null {
@@ -55,6 +62,7 @@ export function reservedActionOf(payload: unknown): string | null {
 export function reservedEmitRefusal(input: { payload: unknown; surface: string; callerSurface: string | null; isOperator: boolean }): string | null {
 	const action = reservedActionOf(input.payload);
 	if (action === null) return null;
+	if (RECONCILE_ACTIONS.has(action)) return `reserved-action: "${action}" is written by the substrate's cross-layer reconcile run itself, so this caller cannot emit it; nothing was written`;
 	// A host job's report: its own token, acting as itself, is the one authority. An operator is not (its event would carry no
 	// weight with the reader), except a bare local run, which has no token to check.
 	const hostJob = HOST_JOB_ACTIONS.get(action);

@@ -6,7 +6,7 @@ import type { EmitOutcome } from "../../../collectors/src/emit.ts";
 import { type CommandResult, type CommandRunner, spawnGit } from "../../../fleet/src/git.ts";
 import { addWorktree, cleanupTemp, commit, defined, fakeGh, git, makeRepo, type TestRepo, tempDir, write } from "../../../fleet/src/testkit.ts";
 import type { EventInput } from "../../../mcp-server/src/types.ts";
-import { httpClaimsLookup, httpReportPoster, runWorktree, type PostOutcome, type WorktreeDeps } from "./command.ts";
+import { httpClaimsLookup, httpMergeBackNoted, httpRegistryLister, httpReportPoster, parseRegistryBody, runWorktree, type PostOutcome, type RegistryOutcome, type RegistryRow, type WorktreeDeps } from "./command.ts";
 import type { ClaimsLookup } from "../../../fleet/src/claims.ts";
 import { parseWorktreeArgs } from "./args.ts";
 
@@ -47,6 +47,8 @@ function harness(overrides: Partial<WorktreeDeps> = {}, env: Record<string, stri
 			return { ok: true, stored: report.worktrees.length };
 		},
 		claims: async () => ({ ok: true, claims: [] }),
+		listRegistry: async () => ({ ok: true, rows: [], truncated: false }),
+		mergeBackNoted: async () => ({ ok: true, noted: false }),
 		...overrides,
 	};
 	return { deps, out, err, events, reports };
@@ -80,24 +82,46 @@ function fleet(): Fleet {
 
 const withRoot = (root: string): Record<string, string> => ({ SUBSTRATE_WORKTREE_ROOTS: root });
 
+/** Git verbs that only read a repository, a worktree, a branch, a remote or its configuration. Any other recorded form is a write. */
+const READ_ONLY_VERBS = ["status", "rev-parse", "rev-list", "ls-files", "diff", "merge-tree", "merge-base", "log", "show", "for-each-ref", "check-ref-format", "version"];
+
 /** Git's own exclude file of the repository: every worktree of it ignores the pattern, as a `.gitignore` would. */
 function excludeFor(repo: TestRepo, pattern: string): void {
 	write(repo.dir, ".git/info/exclude", `${pattern}\n`);
 }
 
-/** Git verbs that write to a repository or a worktree, plus the worktree, branch, remote and config forms that do. */
-const WRITE_VERBS = ["add", "commit", "push", "reset", "checkout", "switch", "restore", "clean", "gc", "stash", "fetch", "pull", "merge", "rebase", "cherry-pick", "revert", "tag", "update-ref", "rm", "mv", "init", "clone", "prune"];
-const BRANCH_WRITE_FLAGS = ["-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream"];
-
-/** Whether a recorded git call could change a repository, a worktree, a branch, a remote or its configuration. */
-function isWrite(args: string[]): boolean {
-	if (WRITE_VERBS.includes(args[0] ?? "")) return true;
-	if (args[0] === "worktree") return args[1] !== "list";
-	if (args[0] === "branch") return args.some((arg) => BRANCH_WRITE_FLAGS.includes(arg));
-	if (args[0] === "remote") return ["add", "remove", "rm", "rename", "set-head", "set-url", "prune"].includes(args[1] ?? "");
-	if (args[0] === "config") return !args.some((arg) => arg === "--get" || arg === "--list" || arg === "-l");
-	return false;
+/** The call without the options that come before its verb: `-c key=value`, `-C dir` and `--no-pager`. */
+function withoutGlobalOptions(args: string[]): string[] {
+	let rest = args;
+	while (rest[0] === "-c" || rest[0] === "-C" || rest[0] === "--no-pager") rest = rest.slice(rest[0] === "--no-pager" ? 1 : 2);
+	return rest;
 }
+
+/** Whether a recorded git call could change a repository, a worktree, a branch, a remote or its configuration. An allowlist: a form not named here is a write. */
+function isWrite(recorded: string[]): boolean {
+	const args = withoutGlobalOptions(recorded);
+	const [verb, sub] = args;
+	if (READ_ONLY_VERBS.includes(verb ?? "")) return false;
+	if (verb === "worktree") return sub !== "list";
+	if (verb === "remote") return sub !== "get-url";
+	if (verb === "config") return !args.some((arg) => arg === "--get" || arg === "--list" || arg === "-l");
+	// One operand reads the ref; a second operand names a target, and `-d` deletes it.
+	if (verb === "symbolic-ref") return args.includes("-d") || args.includes("--delete") || args.slice(1).filter((arg) => !arg.startsWith("-")).length !== 1;
+	return true;
+}
+
+describe("the recorded-call oracle", () => {
+	for (const args of [["branch", "feature"], ["branch", "-d", "feature"], ["-c", "core.hooksPath=/dev/null", "commit", "-m", "x"], ["-C", "/tmp", "reset", "--hard"], ["--no-pager", "-c", "x=y", "checkout", "main"], ["symbolic-ref", "HEAD", "refs/heads/x"], ["remote", "add", "other", "url"], ["config", "user.name", "x"], ["worktree", "add", "-b", "x", "path"], ["notes", "add", "-m", "x"], ["replace", "a", "b"], ["frobnicate"]]) {
+		test(`${args.join(" ")} is a write`, () => {
+			expect(isWrite(args)).toBe(true);
+		});
+	}
+	for (const args of [["status", "--porcelain"], ["-c", "core.quotepath=off", "status"], ["-C", "/tmp", "rev-parse", "--git-dir"], ["--no-pager", "log", "-1"], ["worktree", "list", "--porcelain", "-z"], ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], ["remote", "get-url", "origin"], ["config", "--get", "user.name"], ["merge-tree", "--write-tree", "--name-only", "a", "b"]]) {
+		test(`${args.join(" ")} is read-only`, () => {
+			expect(isWrite(args)).toBe(false);
+		});
+	}
+});
 
 describe("usage and roots", () => {
 	test("with no configured root the commands say so and exit 2", async () => {
@@ -186,21 +210,21 @@ describe("prune", () => {
 
 	test("a worktree that became dirty after the inventory is checked again and left alone", async () => {
 		const f = fleet();
-		const statusCalls = new Map<string, number>();
-		const racing: CommandRunner = async (args, cwd) => {
-			if (args[0] === "status" && args[1] === "--porcelain" && cwd === f.merged) {
-				const count = (statusCalls.get(cwd) ?? 0) + 1;
-				statusCalls.set(cwd, count);
-				// The second status is the re-check right before removal.
-				if (count === 2) write(f.merged, "late-work.txt", "unsaved\n");
-			}
-			return spawnGit(args, cwd);
-		};
-		const h = harness({ git: racing }, withRoot(f.root));
+		const h: Harness = harness(
+			{
+				// Dirtied right after the first note is written: it lands between the inventory and the second worktree's re-check.
+				emit: async (event) => {
+					h.events.push(event);
+					write(f.mergedToo, "late-work.txt", "unsaved\n");
+					return { kind: "stored" };
+				},
+			},
+			withRoot(f.root),
+		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(existsSync(join(f.merged, "late-work.txt"))).toBe(true);
-		expect(existsSync(f.mergedToo)).toBe(false);
-		expect(h.events.map((event) => event.payload?.path)).toEqual([f.mergedToo]);
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(join(f.mergedToo, "late-work.txt"))).toBe(true);
+		expect(h.events.map((event) => event.payload?.path)).toEqual([f.merged]);
 		expect(h.err.join("")).toContain("no longer safe");
 	});
 
@@ -480,7 +504,6 @@ describe("scan --report session attribution", () => {
 		expect(JSON.parse(h.out.join(""))).toMatchObject({ attributed: 1 });
 	});
 
-
 	test("SUBSTRATE_SESSION_ID is used when the flag is absent, a blank one is no attribution, and the flag wins over it", async () => {
 		const f = fleet();
 		const fromEnv = harness({ cwd: f.review }, { ...withRoot(f.root), SUBSTRATE_SESSION_ID: "sess-env" });
@@ -731,22 +754,27 @@ describe("prune and live graph claims", () => {
 	test("--execute asks again right before each removal: a claim taken after the inventory keeps that worktree", async () => {
 		const f = fleet();
 		const calls = new Map<string, number>();
-		const h = harness(
+		let firstNoted = false;
+		const h: Harness = harness(
 			{
 				claims: async (graphId) => {
-					const count = (calls.get(graphId) ?? 0) + 1;
-					calls.set(graphId, count);
-					// The first answer is the inventory's; the second is the check before removal.
-					return { ok: true, claims: graphId === "merged-a" && count >= 2 ? [CLAIM] : [] };
+					calls.set(graphId, (calls.get(graphId) ?? 0) + 1);
+					// The claim lands once the first note is written: after the inventory's answer for the second worktree, before its check.
+					return { ok: true, claims: graphId === "merged-b" && firstNoted ? [CLAIM] : [] };
+				},
+				emit: async (event) => {
+					h.events.push(event);
+					firstNoted = true;
+					return { kind: "stored" };
 				},
 			},
 			withRoot(f.root),
 		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(existsSync(f.merged)).toBe(true);
-		expect(existsSync(f.mergedToo)).toBe(false);
-		expect(calls.get("merged-a")).toBe(2);
-		expect(h.err.join("")).toContain("live claim on graph merged-a");
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(f.mergedToo)).toBe(true);
+		expect(calls.get("merged-b")).toBe(2);
+		expect(h.err.join("")).toContain("live claim on graph merged-b");
 	});
 
 	test("a worktree outside every root has no claim to ask about", async () => {
@@ -765,46 +793,59 @@ describe("prune and live graph claims", () => {
 
 describe("prune reloads the worktree's identity before it trusts a merge proof", () => {
 	test("a branch that gained a commit after the inventory is not removed on the strength of its old merged pull request", async () => {
-		const repo = makeRepo();
-		const root = join(tempDir(), "wts");
-		mkdirSync(root);
-		const wt = addWorktree(repo, root, "squashed");
+		const f = fleet();
+		const wt = addWorktree(f.repo, f.root, "squashed");
 		const merged = commit(wt, "s.txt", "1\n");
 		git(wt, ["push", "-q", "origin", "squashed"]);
 		// A squash merge leaves a different commit on main; only the pull request's head equals the branch head.
-		commit(repo.dir, "s.txt", "1\n", "squash of squashed");
-		git(repo.dir, ["push", "-q", "origin", "main"]);
+		commit(f.repo.dir, "s.txt", "1\n", "squash of squashed");
+		git(f.repo.dir, ["push", "-q", "origin", "main"]);
 		const gh = fakeGh({ squashed: [{ state: "MERGED", headRefOid: merged, number: 11 }] });
-		let listings = 0;
-		const racing: CommandRunner = async (args, cwd) => {
-			if (args[0] === "worktree" && args[1] === "list") {
-				listings += 1;
-				// The second listing is the reload right before removal: another session commits just before it.
-				if (listings === 2) commit(wt, "later.txt", "unpushed work\n");
-			}
-			return spawnGit(args, cwd);
-		};
-		const h = harness({ git: racing, gh }, withRoot(root));
+		let raced = false;
+		const h: Harness = harness(
+			{
+				gh,
+				// Another session commits to the squashed branch after the first removal, so its identity is reloaded after that commit.
+				emit: async (event) => {
+					h.events.push(event);
+					if (!raced) {
+						commit(wt, "later.txt", "unpushed work\n");
+						raced = true;
+					}
+					return { kind: "stored" };
+				},
+			},
+			withRoot(f.root),
+		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(listings).toBeGreaterThanOrEqual(2);
+		expect(raced).toBe(true);
 		expect(existsSync(join(wt, "later.txt"))).toBe(true);
 		expect(h.err.join("")).toContain("not pushed");
-		expect(h.events).toEqual([]);
+		expect(h.events.map((event) => event.payload?.path)).not.toContain(wt);
 	});
 
 	test("a worktree git no longer lists is skipped, not removed", async () => {
 		const f = fleet();
-		let listings = 0;
+		let firstNoted = false;
+		// Once the first worktree is removed and noted, git no longer lists the second: it was deleted between the two.
 		const vanishing: CommandRunner = async (args, cwd) => {
-			if (args[0] === "worktree" && args[1] === "list") {
-				listings += 1;
-				if (listings >= 2) return { code: 128, stdout: "", stderr: "fatal: not a git repository" };
-			}
+			if (firstNoted && args[0] === "worktree" && args[1] === "list") return { code: 128, stdout: "", stderr: "fatal: not a git repository" };
 			return spawnGit(args, cwd);
 		};
-		const h = harness({ git: vanishing }, withRoot(f.root));
+		const h: Harness = harness(
+			{
+				git: vanishing,
+				emit: async (event) => {
+					h.events.push(event);
+					firstNoted = true;
+					return { kind: "stored" };
+				},
+			},
+			withRoot(f.root),
+		);
 		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], h.deps)).toBe(0);
-		expect(existsSync(f.merged) && existsSync(f.mergedToo)).toBe(true);
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(f.mergedToo)).toBe(true);
 		expect(h.err.join("")).toContain("no longer lists");
 	});
 });
@@ -1077,12 +1118,46 @@ describe("guard", () => {
 		}
 	});
 
-	test("a .planning directory in the workspace root is refused: it is outside git", async () => {
+	test("a .planning directory in the workspace root is refused when git does not track it", async () => {
 		const w = workspace();
 		write(w.root, ".planning/STATE.md", "state\n");
 		const h = harness({}, withRoot("/nowhere"));
 		expect(await runWorktree(["guard", w.root], h.deps)).toBe(1);
-		expect(h.out.join("")).toContain("workspace .planning is outside git: copy it out first");
+		expect(h.out.join("")).toContain("workspace .planning has changes git reports: commit them or copy them out first");
+	});
+
+	test("a tracked .planning directory in a member is not refused: git holds it", async () => {
+		const w = workspace();
+		commit(w.api, ".planning/STATE.md", "state\n");
+		git(w.api, ["push", "-q", "origin", "api"]);
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.api], h.deps)).toBe(0);
+		expect(h.out.join("")).not.toContain("workspace .planning");
+	});
+
+	test("an untracked .planning directory in a member is refused", async () => {
+		const w = workspace();
+		write(w.api, ".planning/STATE.md", "state\n");
+		const h = harness({}, withRoot("/nowhere"));
+		expect(await runWorktree(["guard", w.api], h.deps)).toBe(1);
+		expect(h.out.join("")).toContain("workspace .planning has changes git reports");
+	});
+
+	test("prune --execute does not remove a worktree the guard refuses; SUBSTRATE_WORKTREE_GUARD_ALLOW removes it as before", async () => {
+		const f = fleet();
+		// An empty `.planning/` is invisible to git, so both worktrees stay `safe`, yet the guard checks it: the fake answers that check with an untracked entry.
+		for (const dir of [f.merged, f.mergedToo]) mkdirSync(join(dir, ".planning"));
+		const untracked = (args: string[]): CommandResult | null => (args.includes("--ignored=matching") ? { code: 0, stdout: "?? .planning/STATE.md\n", stderr: "" } : null);
+		const refused = harness({ git: recording(untracked).git }, withRoot(f.root));
+		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], refused.deps)).toBe(1);
+		expect(refused.err.join("")).toContain("refused by the workspace guard: ");
+		expect(refused.err.join("")).toContain("workspace .planning has changes git reports");
+		expect(existsSync(f.merged) && existsSync(f.mergedToo)).toBe(true);
+		const allowed = harness({ git: recording(untracked).git }, { ...withRoot(f.root), SUBSTRATE_WORKTREE_GUARD_ALLOW: `${f.merged}:${f.mergedToo}` });
+		expect(await runWorktree(["prune", "--execute", "--idle-days", "0"], allowed.deps)).toBe(0);
+		expect(allowed.err.join("")).not.toContain("refused by the workspace guard");
+		expect(existsSync(f.merged)).toBe(false);
+		expect(existsSync(f.mergedToo)).toBe(false);
 	});
 
 	test("the guard writes nothing: no remove, no branch delete and no other write verb is called", async () => {
@@ -1296,6 +1371,22 @@ describe("merge-back", () => {
 		expect([f.merged, f.mergedToo, f.repo.dir].every((path) => existsSync(path))).toBe(true);
 	});
 
+	test("a head the ledger already holds is not noted twice: nothing is emitted and the run exits 0", async () => {
+		const f = fleet();
+		const h = harness({ mergeBackNoted: async () => ({ ok: true, noted: true }) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(0);
+		expect(h.events).toEqual([]);
+		expect(h.out.join("")).toContain("already recorded");
+	});
+
+	test("a ledger lookup that cannot answer refuses the worktree and emits nothing", async () => {
+		const f = fleet();
+		const h = harness({ mergeBackNoted: async () => ({ ok: false, error: "HTTP 503" }) }, withRoot(f.root));
+		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(1);
+		expect(h.events).toEqual([]);
+		expect(h.err.join("") + h.out.join("")).toContain("could not say whether this head is already recorded");
+	});
+
 	test("a squash-merged pull request proves its head: merged_via is pull-request", async () => {
 		const repo = makeRepo();
 		const root = join(tempDir(), "wts");
@@ -1311,6 +1402,22 @@ describe("merge-back", () => {
 		expect(await runWorktree(["merge-back", "--execute", wt], h.deps)).toBe(0);
 		expect(h.events).toHaveLength(1);
 		expect(h.events[0]).toMatchObject({ payload: { head, merged_via: "pull-request", retained: true } });
+	});
+
+	test("the merge-back note names its head as head and as head_key, the field the keyed lookup reads", async () => {
+		const repo = makeRepo();
+		const root = join(tempDir(), "wts");
+		mkdirSync(root);
+		const wt = addWorktree(repo, root, "keyed");
+		const head = commit(wt, "k.txt", "1\n");
+		git(wt, ["push", "-q", "origin", "keyed"]);
+		commit(repo.dir, "k.txt", "1\n", "squash of keyed");
+		git(repo.dir, ["push", "-q", "origin", "main"]);
+		const gh = prGh({ keyed: [{ state: "MERGED", headRefOid: head, number: 12, baseRefName: "main" }] });
+		const h = harness({ gh }, withRoot(root));
+		expect(await runWorktree(["merge-back", "--execute", wt], h.deps)).toBe(0);
+		expect(h.events).toHaveLength(1);
+		expect(h.events[0]).toMatchObject({ kind: "note", payload: { head, head_key: head } });
 	});
 
 	test("a dirty, unpushed, unproven, ignored-work, primary or live-claimed worktree is refused and absent from the notes", async () => {
@@ -1392,6 +1499,22 @@ describe("merge-back", () => {
 		expect(h.events).toEqual([]);
 	});
 
+	test("a repository with no origin is refused: a commit merged into its local main was never pushed, and nothing is recorded", async () => {
+		const repo = makeRepo();
+		git(repo.dir, ["remote", "remove", "origin"]);
+		const root = join(tempDir(), "local-wts");
+		mkdirSync(root);
+		const path = addWorktree(repo, root, "local-only");
+		commit(path, "l.txt", "l\n");
+		git(repo.dir, ["merge", "-q", "--ff-only", "local-only"]);
+		const h = harness({}, withRoot(root));
+		expect(await runWorktree(["merge-back", "--json", path], h.deps)).toBe(1);
+		const result: MergeBackJson = JSON.parse(h.out.join(""));
+		expect(result.recorded).toEqual([]);
+		expect(reasonsOf(result, path)).toContain("head is not pushed");
+		expect(h.events).toEqual([]);
+	});
+
 	test("the parser takes paths for merge-back alone, and it needs a path and a configured root", async () => {
 		expect(parseWorktreeArgs(["merge-back", "/a", "/b", "--execute"])).toMatchObject({ ok: true, args: { command: "merge-back", positional: ["/a", "/b"], execute: true } });
 		expect(parseWorktreeArgs(["merge-back", "--root", "/x"]).ok).toBe(false);
@@ -1454,18 +1577,18 @@ describe("merge-back", () => {
 	test("a HEAD that moves between the check and the note is refused, not recorded under the commit that was checked", async () => {
 		const f = fleet();
 		const mainSha = git(f.repo.dir, ["rev-parse", "HEAD"]);
-		let listings = 0;
+		let moved = false;
 		const moving: CommandRunner = async (args, cwd) => {
-			const result = await spawnGit(args, cwd);
-			if (args[0] === "worktree" && args[1] === "list" && cwd === f.repo.dir) {
-				listings += 1;
-				// The first listing is the reload that captures merged-a's HEAD; another session moves that HEAD right after it.
-				if (listings === 1) git(f.merged, ["checkout", "-q", "--detach", mainSha]);
+			// The first status in merged-a runs inside its check, after its HEAD was read: another session moves that HEAD there.
+			if (!moved && args[0] === "status" && cwd === f.merged) {
+				moved = true;
+				git(f.merged, ["checkout", "-q", "--detach", mainSha]);
 			}
-			return result;
+			return spawnGit(args, cwd);
 		};
 		const h = harness({ git: moving }, withRoot(f.root));
 		expect(await runWorktree(["merge-back", "--execute", f.merged, f.mergedToo], h.deps)).toBe(1);
+		expect(moved).toBe(true);
 		expect(h.events.map((event) => event.payload?.branch)).toEqual(["merged-b"]);
 		expect(h.out.join("")).toContain("HEAD or the branch changed");
 	});
@@ -1533,5 +1656,240 @@ describe("merge-back", () => {
 		expect(await runWorktree(["merge-back", "--execute", f.merged], h.deps)).toBe(0);
 		expect(h.events).toHaveLength(1);
 		expect(h.events[0]).toMatchObject({ payload: { branch: "merged-a", merged_via: "default-branch" } });
+	});
+});
+
+describe("scan --report --keep-sessions", () => {
+	/** The rows that went out with a session, as [path, session], in path order. */
+	function attributed(h: Harness): Array<[string, string]> {
+		const rows = defined(h.reports[0], "the report").worktrees;
+		return rows.flatMap((wt): Array<[string, string]> => (wt.session_id === undefined ? [] : [[wt.path, wt.session_id]])).sort(([a], [b]) => a.localeCompare(b));
+	}
+	const listing = (rows: RegistryRow[], truncated = false): RegistryOutcome => ({ ok: true, rows, truncated });
+	const holding = (session: string): ClaimsLookup => ({ ok: true, claims: [{ node_id: "node-0", holder: { surface: "hermes", session_id: session }, expires_at: "2026-10-29T13:00:00.000Z" }] });
+
+	test("the flag is a scan flag that needs --report", () => {
+		expect(parseWorktreeArgs(["scan", "--report", "--keep-sessions"])).toMatchObject({ ok: true, args: { keepSessions: true, report: true } });
+		expect(parseWorktreeArgs(["prune", "--keep-sessions"]).ok).toBe(false);
+	});
+
+	test("without the flag the registry is never read, and its sessions are cleared as before", async () => {
+		const f = fleet();
+		let reads = 0;
+		const h = harness({ listRegistry: async () => { reads += 1; return listing([{ path: f.review, session_id: "sess-kept" }]); } }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report"], h.deps)).toBe(0);
+		expect(reads).toBe(0);
+		expect(attributed(h)).toEqual([]);
+	});
+
+	test("--keep-sessions without --report is a usage error and reads nothing", async () => {
+		const f = fleet();
+		let reads = 0;
+		const h = harness({ listRegistry: async () => { reads += 1; return listing([]); } }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--keep-sessions"], h.deps)).toBe(2);
+		expect(h.err.join("")).toContain("--keep-sessions keeps a report's attribution: use it with --report");
+		expect(reads).toBe(0);
+		expect(h.reports).toEqual([]);
+	});
+
+	test("a worktree that no claim or --session names keeps the session the registry holds; rows of other paths are ignored", async () => {
+		const f = fleet();
+		const h = harness({ listRegistry: async () => listing([{ path: f.review, session_id: "sess-kept" }, { path: "/elsewhere/host-b", session_id: "sess-other" }]) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "sess-kept"]]);
+		expect(h.reports[0]?.worktrees).toHaveLength(4);
+	});
+
+	test("a live claim beats the kept session for its worktree", async () => {
+		const f = fleet();
+		const claims: WorktreeDeps["claims"] = async (graphId) => (graphId === "review-me" ? holding("sess-claim") : { ok: true, claims: [] });
+		const h = harness({ claims, listRegistry: async () => listing([{ path: f.review, session_id: "sess-kept" }]) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.review, "sess-claim"]]);
+	});
+
+	test("--session beats the kept session for the worktree that holds the current directory", async () => {
+		const f = fleet();
+		const h = harness({ cwd: f.merged, listRegistry: async () => listing([{ path: f.merged, session_id: "sess-kept" }]) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions", "--session", "sess-own"], h.deps)).toBe(0);
+		expect(attributed(h)).toEqual([[f.merged, "sess-own"]]);
+	});
+
+	test("a failed listing and a truncated one post nothing, say why and exit 1", async () => {
+		const f = fleet();
+		const failed = harness({ listRegistry: async () => ({ ok: false, error: "HTTP 503" }) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], failed.deps)).toBe(1);
+		expect(failed.reports).toEqual([]);
+		expect(failed.err.join("")).toContain("cannot keep session attribution: the registry listing failed (HTTP 503); nothing was reported");
+
+		const truncated = harness({ listRegistry: async () => listing([], true) }, withRoot(f.root));
+		expect(await runWorktree(["scan", "--report", "--keep-sessions"], truncated.deps)).toBe(1);
+		expect(truncated.reports).toEqual([]);
+		expect(truncated.err.join("")).toContain("lists more than 500 worktrees for test-host");
+	});
+});
+
+describe("httpRegistryLister", () => {
+	test("asks for one host's rows with the bearer and reads the rows and the truncation flag", async () => {
+		const seen: Array<{ url: string; init: RequestInit }> = [];
+		const lister = httpRegistryLister({
+			url: "http://x",
+			token: "tok",
+			timeoutMs: 1000,
+			fetchImpl: async (url, init) => {
+				seen.push({ url, init });
+				return new Response(JSON.stringify({ worktrees: [{ path: "/w/a", session_id: "s1", host: "h" }, { path: "/w/b" }], truncated: false }), { status: 200 });
+			},
+		});
+		expect(await lister("test host")).toEqual({ ok: true, rows: [{ path: "/w/a", session_id: "s1" }, { path: "/w/b" }], truncated: false });
+		expect(seen[0]?.url).toBe("http://x/worktrees?host=test%20host&limit=500");
+		expect(seen[0]?.init.method).toBe("GET");
+		expect(seen[0]?.init.headers).toEqual({ authorization: "Bearer tok" });
+	});
+
+	test("no token sends no authorization header", async () => {
+		const seen: RequestInit[] = [];
+		const lister = httpRegistryLister({
+			url: "http://x",
+			token: undefined,
+			timeoutMs: 1000,
+			fetchImpl: async (_url, init) => {
+				seen.push(init);
+				return new Response(JSON.stringify({ worktrees: [], truncated: false }), { status: 200 });
+			},
+		});
+		expect(await lister("h")).toEqual({ ok: true, rows: [], truncated: false });
+		expect(seen[0]?.headers).toEqual({});
+	});
+
+	test("a refused reply, a malformed body, an unreachable server and a timeout are failures, never an empty listing", async () => {
+		const reply = (status: number, body: unknown) => httpRegistryLister({ url: "http://x", token: "t", timeoutMs: 1000, fetchImpl: async () => new Response(JSON.stringify(body), { status }) });
+		expect(await reply(503, { worktrees: [], truncated: false })("h")).toEqual({ ok: false, error: "HTTP 503" });
+		expect(await reply(200, { worktrees: "nope", truncated: false })("h")).toEqual({ ok: false, error: "unexpected response body" });
+		expect(await reply(200, { worktrees: [{ host: "h" }], truncated: false })("h")).toEqual({ ok: false, error: "unexpected response body" });
+		expect(await reply(200, { worktrees: [] })("h")).toEqual({ ok: false, error: "unexpected response body" });
+		const down = httpRegistryLister({ url: "http://x", token: "t", timeoutMs: 1000, fetchImpl: async () => Promise.reject(new Error("refused")) });
+		expect(await down("h")).toEqual({ ok: false, error: "server unreachable" });
+		const slow = httpRegistryLister({ url: "http://x", token: "t", timeoutMs: 1000, fetchImpl: async () => Promise.reject(Object.assign(new Error("slow"), { name: "TimeoutError" })) });
+		expect(await slow("h")).toEqual({ ok: false, error: "timeout" });
+	});
+
+	test("parseRegistryBody keeps a session only when the row holds one", () => {
+		expect(parseRegistryBody({ worktrees: [{ path: "/p", session_id: 7 }], truncated: true })).toEqual({ rows: [{ path: "/p" }], truncated: true });
+		expect(parseRegistryBody(null)).toBeNull();
+		expect(parseRegistryBody({ worktrees: [null], truncated: false })).toBeNull();
+	});
+});
+
+describe("httpMergeBackNoted: the head_key path", () => {
+	const HEAD = "c".repeat(40);
+	const OTHER = "d".repeat(40);
+	const KEYED_NOTE = { kind: "note", ts: "2026-11-12T10:00:00.000Z", payload: { action: "worktree.merge_back", repo: "acme/widgets", head: HEAD, head_key: HEAD } };
+	const LEGACY_NOTE = { kind: "note", ts: "2026-11-11T10:00:00.000Z", payload: { action: "worktree.merge_back", repo: "acme/widgets", head: HEAD } };
+	const EMPTY = { events: [], count: 0, truncated: false };
+
+	type Reply = { status: number; body: unknown };
+	const answer = (body: unknown): Reply => ({ status: 200, body });
+
+	/** A ledger answering each request from a script, recording each request body. */
+	function ledger(replies: Reply[]) {
+		const requests: Record<string, unknown>[] = [];
+		const fetchImpl = (async (_url: string, init: RequestInit) => {
+			requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+			const reply = replies[requests.length - 1] ?? answer(EMPTY);
+			return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+		return { requests, lookup: httpMergeBackNoted({ url: "http://127.0.0.1:7410", token: "t", timeoutMs: 1000, fetchImpl }) };
+	}
+
+	test("a keyed note settles the question in one request, with no scan", async () => {
+		const { requests, lookup } = ledger([answer({ events: [KEYED_NOTE], count: 1, truncated: false })]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: true });
+		expect(requests).toHaveLength(1);
+		expect(requests[0]).toMatchObject({ repo: "acme/widgets", kind: "note", payload_key: "head_key", payload_value: HEAD });
+	});
+
+	test("a head with no keyed note still uses the bounded scan, which finds a note written before head_key", async () => {
+		const { requests, lookup } = ledger([answer(EMPTY), answer({ events: [LEGACY_NOTE], count: 1, truncated: false })]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: true });
+		expect(requests).toHaveLength(2);
+		expect(requests[0]).toMatchObject({ payload_key: "head_key", payload_value: HEAD });
+		expect(requests[1]).not.toHaveProperty("payload_key");
+	});
+
+	test("a head with no note under either path is not recorded, after the scan", async () => {
+		const { requests, lookup } = ledger([answer(EMPTY), answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
+	});
+
+	test("a keyed read that cannot answer falls back to the scan rather than to not recorded", async () => {
+		const { requests, lookup } = ledger([{ status: 500, body: "boom" }, answer({ events: [LEGACY_NOTE], count: 1, truncated: false })]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: true });
+		expect(requests).toHaveLength(2);
+	});
+
+	test("a keyed read and the scan that both cannot answer refuse; neither reads as not recorded", async () => {
+		const { lookup } = ledger([{ status: 500, body: "boom" }, { status: 500, body: "boom" }]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: false, error: "HTTP 500" });
+	});
+
+	test("a reply that ignores the key filter and returns another head's note does not count", async () => {
+		const other = { ...KEYED_NOTE, payload: { ...KEYED_NOTE.payload, head: OTHER, head_key: OTHER } };
+		const { requests, lookup } = ledger([answer({ events: [other], count: 1, truncated: false }), answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD)).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
+	});
+
+	/** The keyed read misses, then fifty full pages of other heads' notes, each older than the last: the scan reaches its cap without an answer. */
+	function cappedScan(): Reply[] {
+		const newest = Date.parse("2026-11-12T12:00:00Z");
+		const replies: Reply[] = [answer(EMPTY)];
+		for (let page = 0; page < 50; page++) {
+			const ts = new Date(newest - page * 60_000).toISOString();
+			replies.push(answer({ events: [{ kind: "note", ts, payload: { action: "worktree.merge_back", repo: "acme/widgets", head: OTHER, head_key: OTHER } }], count: 1, truncated: true }));
+		}
+		return replies;
+	}
+
+	test("a new head committed after the cutover is not refused when its scan is capped", async () => {
+		const { requests, lookup } = ledger(cappedScan());
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(51);
+	});
+
+	test("a head committed exactly at the cutover is new when its scan is capped", async () => {
+		const { lookup } = ledger(cappedScan());
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T02:19:15.000Z")).toEqual({ ok: true, noted: false });
+	});
+
+	test("an older head whose scan is capped keeps the refusal", async () => {
+		const { lookup } = ledger(cappedScan());
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T02:19:14.999Z")).toEqual({ ok: false, error: "the newest 10000 notes do not settle it" });
+	});
+
+	test("a capped scan with no readable commit time keeps the refusal", async () => {
+		expect((await ledger(cappedScan()).lookup("acme/widgets", HEAD, null)).ok).toBe(false);
+		expect((await ledger(cappedScan()).lookup("acme/widgets", HEAD)).ok).toBe(false);
+	});
+
+	test("a failed keyed read refuses a capped post-cutover head rather than reporting it not recorded", async () => {
+		const { requests, lookup } = ledger([{ status: 500, body: "boom" }, ...cappedScan().slice(1)]);
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: false, error: "the newest 10000 notes do not settle it" });
+		expect(requests).toHaveLength(51);
+	});
+
+	test("an answered keyed read starts the fallback scan at the cutover instant, not now", async () => {
+		const { requests, lookup } = ledger([answer(EMPTY), answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.until).toBe("2026-11-13T02:19:15.000Z");
+	});
+
+	test("a failed keyed read starts the fallback scan from now, with no until bound", async () => {
+		const { requests, lookup } = ledger([{ status: 500, body: "boom" }, answer(EMPTY)]);
+		expect(await lookup("acme/widgets", HEAD, "2026-11-13T03:00:00.000Z")).toEqual({ ok: true, noted: false });
+		expect(requests).toHaveLength(2);
+		expect(requests[1]).not.toHaveProperty("until");
 	});
 });

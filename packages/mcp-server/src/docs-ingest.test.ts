@@ -6,12 +6,13 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import {
 	INGEST_CALL_MAX_BYTES,
+	changeSha,
 	INGEST_PAGE_MAX_BYTES,
 	extractPlanningGraphHint,
 	batchIngestPages,
@@ -32,22 +33,34 @@ import {
 	type PageSettlement,
 	type ScanIo,
 } from "./docs-ingest.ts";
+import { corpusDocumentName } from "@substrate/corpus";
+import { lightragSearchDatasets } from "./docs-datasets.ts";
 import { createMcpServer } from "./mcp.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import { FakeTree } from "./planning/tree.fixtures.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
+import type { FetchLike } from "./planes/docs-wire.ts";
 
-const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
+const CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
+
+const HARNESS_DATASETS = [
+	{ id: "ds-berlin-agent-substrate", name: "agent-substrate" },
+	{ id: "ds-hamm-programming-desk", name: "programming-desk" },
+];
 
 function harness(
-	fake: RagflowFake,
-	over: Partial<Pick<IngestDeps, "surface" | "vmGuest" | "roots" | "config" | "seen" | "locks" | "poll" | "fetchImpl" | "datasetLockWaitMs">> = {},
+	fake: LightragFake,
+	over: Partial<Pick<IngestDeps, "surface" | "vmGuest" | "roots" | "config" | "backend" | "seen" | "locks" | "poll" | "fetchImpl" | "lightragFetch" | "lightragConfig" | "datasetLockWaitMs">> = {},
 ) {
 	const events: EventInput[] = [];
 	const seen = new Map<string, IngestRecord>();
+	const planeFetch = over.lightragFetch ?? over.fetchImpl ?? fake.fetch;
 	const deps: IngestDeps = {
-		config: CONFIG,
+		config: null,
+		backend: "lightrag",
+		knownDatasets: ["agent-substrate", "programming-desk"],
+		lightragConfig: { url: "http://lightrag.test" },
+		lightragDatasets: { list: async () => ({ ok: true, datasets: HARNESS_DATASETS }), invalidate: () => undefined },
 		emit: async (event: EventInput): Promise<unknown> => {
 			events.push(event);
 			return { stored: false };
@@ -55,7 +68,8 @@ function harness(
 		surface: "omp",
 		seen,
 		poll: { intervalMs: 0 },
-		fetchImpl: fake.fetch,
+		fetchImpl: planeFetch,
+		lightragFetch: planeFetch,
 		...over,
 	};
 	const ingest = (input: IngestInput): Promise<IngestOutcome> => ingestDocs(deps, input);
@@ -70,7 +84,7 @@ const PAGE = {
 
 describe("docs_ingest gates", () => {
 	test("ingests a clean page with metadata and a note event", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { events, ingest } = harness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", commit: "abc123", pages: [PAGE] });
 		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
@@ -88,7 +102,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses on a redactor finding and never uploads", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { events, ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -107,7 +121,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses a page without a source URL", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", pages: [{ path: PAGE.path, body: PAGE.body }] });
 		if (outcome.ok) throw new Error("expected a refusal");
@@ -116,7 +130,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses a path outside the configured roots", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -128,7 +142,7 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses a page over 1 MB and a call over 5 MB", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const big = await ingest({
 			dataset: "agent-substrate",
@@ -145,14 +159,14 @@ describe("docs_ingest gates", () => {
 	});
 
 	test("refuses unauthenticated callers and VM guests before any network call", async () => {
-		const anonymous = new RagflowFake();
+		const anonymous = new LightragFake();
 		const anonymousHarness = harness(anonymous, { surface: null });
 		const denied = await anonymousHarness.ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (denied.ok) throw new Error("expected a refusal");
 		expect(denied.reason).toBe("unauthenticated");
 		expect(anonymous.requests).toHaveLength(0);
 
-		const guest = new RagflowFake();
+		const guest = new LightragFake();
 		const guestHarness = harness(guest, { vmGuest: true });
 		const refused = await guestHarness.ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (refused.ok) throw new Error("expected a refusal");
@@ -163,7 +177,7 @@ describe("docs_ingest gates", () => {
 
 describe("docs_ingest idempotency and images", () => {
 	test("skips unchanged hashes and replaces changed ones", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -180,7 +194,7 @@ describe("docs_ingest idempotency and images", () => {
 	});
 
 	test("strips remote images pre-upload and counts them", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -198,7 +212,7 @@ describe("docs_ingest idempotency and images", () => {
 	});
 
 	test("a parse that never finishes is a timeout refusal", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		fake.parseBehavior = "never";
 		const { ingest } = harness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
@@ -207,13 +221,21 @@ describe("docs_ingest idempotency and images", () => {
 	});
 });
 
+function repoSeam() {
+	const root = join(homedir(), "src", "repos", "agent-substrate");
+	const files = { [join(root, ".git", "HEAD")]: "ref: refs/heads/main\n" };
+	return { env: { SUBSTRATE_PLANNING_ROOTS: root }, stores: { planning: { fs: new FakeTree(files), presence: null } } };
+}
+
 describe("docs_ingest wiring", () => {
 	test("Substrate.ingestDocs ingests and refuses anonymous callers", async () => {
-		const fake = new RagflowFake();
-		const live = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+		const fake = new LightragFake();
+		const repos = repoSeam();
+		const live = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...repos.env }), {
 			index: null,
 			greptime: null,
-			ragflowFetch: fake.fetch,
+			...repos.stores,
+			lightragFetch: fake.fetch,
 		});
 		const reply = await live.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
 		if (!reply.ok) throw new Error(`expected ingest: ${reply.reason}`);
@@ -225,11 +247,13 @@ describe("docs_ingest wiring", () => {
 	});
 
 	test("docs_ingest is callable over MCP and refusals are errors", async () => {
-		const fake = new RagflowFake();
-		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+		const fake = new LightragFake();
+		const repos = repoSeam();
+		const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", ...repos.env }), {
 			index: null,
 			greptime: null,
-			ragflowFetch: fake.fetch,
+			...repos.stores,
+			lightragFetch: fake.fetch,
 		});
 		const server = createMcpServer(substrate, "omp");
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
@@ -262,7 +286,7 @@ describe("docs_ingest wiring", () => {
 
 describe("docs_ingest review hardening", () => {
 	test("refuses a secret smuggled in the heading metadata", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { events, ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -276,7 +300,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("refuses dot-segment escapes and out-of-roots real paths", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const escaped = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, path: "docs/../private.md" }] });
 		if (escaped.ok) throw new Error("expected a refusal");
@@ -291,11 +315,12 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("refuses a secret in graph strings on the LightRAG path before any upload", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const events: EventInput[] = [];
 		const outcome = await ingestDocs(
 			{
 				config: null,
+				knownDatasets: ["agent-substrate"],
 				backend: "lightrag",
 				lightragConfig: { url: "http://lightrag.test" },
 				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
@@ -317,7 +342,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("keys records by dataset so a second dataset ingests and the first still skips", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -331,7 +356,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("concurrent retries for one page share a single upload", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const locks = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 		const left = harness(fake, { locks, poll: { intervalMs: 0 } });
 		const right = harness(fake, { locks, seen: left.seen, poll: { intervalMs: 0 } });
@@ -345,7 +370,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("a concurrent retry with different content uploads its own page", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const locks = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 		const left = harness(fake, { locks, poll: { intervalMs: 0 } });
 		const right = harness(fake, { locks, seen: left.seen, poll: { intervalMs: 0 } });
@@ -361,7 +386,7 @@ describe("docs_ingest review hardening", () => {
 	});
 
 	test("a replacement reports the superseded document id", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { events, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -384,7 +409,7 @@ describe("ingest record persistence", () => {
 				["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1", version: 1 }],
 			]);
 			await saveIngestRecords(file, seen);
-			const loaded = await loadIngestRecords(file);
+			const loaded = await loadIngestRecords(file, ["ds-1"]);
 			expect(loaded.problem).toBeUndefined();
 			expect(loaded.records.get("ds-1::https://example.com/a")?.document_id).toBe("doc-1");
 		} finally {
@@ -395,14 +420,55 @@ describe("ingest record persistence", () => {
 	test("a missing or corrupt file means an empty map, never a throw", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
-			const missing = await loadIngestRecords(join(dir, "absent.json"));
+			const missing = await loadIngestRecords(join(dir, "absent.json"), []);
 			expect(missing.records.size).toBe(0);
 			expect(missing.problem).toBeUndefined();
 			const corrupt = join(dir, "corrupt.json");
 			writeFileSync(corrupt, "not json{{{");
-			const loaded = await loadIngestRecords(corrupt);
+			const loaded = await loadIngestRecords(corrupt, []);
 			expect(loaded.records.size).toBe(0);
 			expect(typeof loaded.problem).toBe("string");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a state file that exists but cannot be read reports a problem and is never overwritten", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			// A link to itself fails to open with ELOOP: a read error, not a missing file, and it holds no state to merge into.
+			// Unlike a permission bit it fails for root too.
+			const file = join(dir, "ingest.json");
+			symlinkSync(file, file);
+			const loaded = await loadIngestRecords(file, []);
+			expect(loaded.records.size).toBe(0);
+			expect(loaded.problem).toMatch(/could not be read \(ELOOP\)/);
+			const seen = new Map<string, IngestRecord>([
+				["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1", version: 1 }],
+			]);
+			await expect(saveIngestRecords(file, seen)).rejects.toThrow("not overwriting it");
+			expect(lstatSync(file).isSymbolicLink()).toBe(true);
+			expect(readlinkSync(file)).toBe(file);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test.skipIf(process.getuid?.() === 0)("a state file that cannot be read keeps its bytes through a save", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			const file = join(dir, "ingest.json");
+			await saveIngestRecords(file, new Map<string, IngestRecord>([["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1", version: 1 }]]));
+			const before = readFileSync(file);
+			chmodSync(file, 0o000);
+			try {
+				const loaded = await loadIngestRecords(file, []);
+				expect(loaded.problem).toContain("could not be read (EACCES)");
+				await expect(saveIngestRecords(file, new Map<string, IngestRecord>())).rejects.toThrow("not overwriting it");
+			} finally {
+				chmodSync(file, 0o600);
+			}
+			expect(readFileSync(file).equals(before)).toBe(true);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -412,12 +478,13 @@ describe("ingest record persistence", () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
 			const file = join(dir, "ingest.json");
-			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
-			const fake = new RagflowFake();
-			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const repos = repoSeam();
+			const env = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file, ...repos.env };
+			const fake = new LightragFake();
+			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ...repos.stores, lightragFetch: fake.fetch });
 			const ingested = await first.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
 			if (!ingested.ok) throw new Error(`expected ingest: ${ingested.reason}`);
-			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ...repos.stores, lightragFetch: fake.fetch });
 			const skipped = await second.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
 			if (!skipped.ok) throw new Error(`expected skip: ${skipped.reason}`);
 			expect(skipped.results[0]?.status).toBe("unchanged");
@@ -573,7 +640,7 @@ describe("agent-skills checkout roots and scan", () => {
 describe("docs_ingest expected_version (memory's contract)", () => {
 	// Each test builds its own harness: its own record map and fake, so no state is shared between them.
 	test("a stale expected_version is refused with nothing written: the stored record is byte-identical", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { events, seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -598,7 +665,7 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 	});
 
 	test("a stale docs write is refused with outcome conflict and uploads nothing", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -611,7 +678,7 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 	});
 
 	test("a matching expected_version is accepted and the record version increments", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -629,7 +696,7 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 	});
 
 	test("an absent expected_version keeps today's behaviour: the write proceeds and the version still counts", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { seen, ingest } = harness(fake);
 		await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		const replaced = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.` }] });
@@ -647,12 +714,13 @@ describe("docs_ingest expected_version (memory's contract)", () => {
 
 describe("docs_ingest expected_version on the LightRAG plane", () => {
 	test("a page expecting a version nothing has on record is refused before any upload", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const events: EventInput[] = [];
 		const seen = new Map<string, IngestRecord>();
 		const outcome = await ingestDocs(
 			{
 				config: null,
+				knownDatasets: ["agent-substrate"],
 				backend: "lightrag",
 				lightragConfig: { url: "http://lightrag.test" },
 				lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
@@ -679,7 +747,7 @@ describe("docs_ingest atomic batch", () => {
 	const SECOND = { ...PAGE, path: "docs/data-planes-2.md" };
 
 	test("a batch with one stale page is refused whole: the matching page is neither uploaded nor recorded", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { events, seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE, OTHER] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -708,7 +776,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a batch whose pages all match is stored, each record advancing one version", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE, OTHER] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -727,7 +795,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a later page of one source URL is checked against the version an earlier page of the batch leaves", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -748,7 +816,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a repeated URL whose later page is stale against the batch reports the saved version and conflict_with, and stores nothing", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { events, seen, ingest } = harness(fake);
 		await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		const replaced = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Second.`, expected_version: 1 }] });
@@ -781,7 +849,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a batch may chain expected versions on one source URL", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const { seen, ingest } = harness(fake);
 		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
@@ -799,7 +867,7 @@ describe("docs_ingest atomic batch", () => {
 	});
 
 	test("a call that cannot take its dataset's lock in time is refused with nothing written, and the lock frees afterwards", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		let openGate!: () => void;
 		const gate = new Promise<void>((resolve) => {
 			openGate = resolve;
@@ -852,10 +920,11 @@ describe("a refresh's ingest calls (split under the call limit)", () => {
 	});
 
 	test("preflightIngestPages refuses a page's secret before any call uploads, so earlier pages are not stored", async () => {
-		const fake = new RagflowFake();
+		const fake = new LightragFake();
 		const events: EventInput[] = [];
 		const deps: IngestDeps = {
 			config: CONFIG,
+			knownDatasets: ["agent-substrate"],
 			emit: async (event: EventInput): Promise<unknown> => {
 				events.push(event);
 				return { stored: false };
@@ -873,8 +942,8 @@ describe("a refresh's ingest calls (split under the call limit)", () => {
 	});
 
 	test("preflightIngestPages passes a clean set and refuses an empty one", async () => {
-		const fake = new RagflowFake();
-		const deps: IngestDeps = { config: CONFIG, emit: async (): Promise<unknown> => ({ stored: false }), surface: "omp", seen: new Map(), poll: { intervalMs: 0 }, fetchImpl: fake.fetch };
+		const fake = new LightragFake();
+		const deps: IngestDeps = { config: CONFIG, knownDatasets: ["agent-substrate"], emit: async (): Promise<unknown> => ({ stored: false }), surface: "omp", seen: new Map(), poll: { intervalMs: 0 }, fetchImpl: fake.fetch };
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: wideSkills() })).toBeUndefined();
 		expect(await preflightIngestPages(deps, { dataset: "agent-substrate", pages: [] })).toBe("no-pages");
 		expect(fake.uploads).toHaveLength(0);
@@ -976,8 +1045,8 @@ describe("planning scan graph hints (LightRAG path)", () => {
 		}
 	});
 
-	test("ingest accepts call-level graphHints on the RAGFlow path unchanged", async () => {
-		const fake = new RagflowFake();
+	test("ingest accepts call-level graphHints on the lightrag path unchanged", async () => {
+		const fake = new LightragFake();
 		const { ingest } = harness(fake);
 		const outcome = await ingest({
 			dataset: "agent-substrate",
@@ -1013,30 +1082,58 @@ function trackStatusBody(pathname: string) {
  * every DELETE is recorded (`deletes`) and a per-document delete answers `deletion_started`.
  */
 class LightragFake {
-	readonly uploads: Array<{ content: string; source_url: string; graph: string }> = [];
+	readonly uploads: Array<{ content: string; source_url: string; graph: string; metadata: { source_url: string; commit: string } }> = [];
 	readonly deletes: Array<{ path: string; body: unknown }> = [];
+	readonly requests: string[] = [];
 	failUploadWhen: ((content: string) => boolean) | null = null;
 	conflictUploadWhen: ((content: string) => boolean) | null = null;
 	trackStatusFails = false;
+	/** `never` keeps the pipeline busy, so a parse never finishes and the ingest is a timeout. */
+	parseBehavior: "done" | "never" = "done";
+	private nextTrack = 1;
 	readonly fetch: FetchLike = async (input, init) => {
 		const url = new URL(String(input));
+		this.requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
 		if (init?.method === "DELETE") {
 			this.deletes.push({ path: url.pathname, body: typeof init.body === "string" ? JSON.parse(init.body) : init.body });
 			return url.pathname === "/documents/delete_document"
 				? Response.json({ status: "deletion_started", message: "started", doc_id: "x" })
 				: Response.json({ detail: "clear-all must never be reached" }, { status: 500 });
 		}
+		if (url.pathname === "/health") return Response.json({ status: "healthy", pipeline_busy: false, core_version: "fake" });
 		if (init?.method === "POST" && url.pathname === "/documents/upload") {
 			const form = init.body as FormData;
 			const content = await (form.get("file") as Blob).text();
 			if (this.failUploadWhen?.(content) === true) return Response.json({ detail: "upload refused" }, { status: 500 });
 			if (this.conflictUploadWhen?.(content) === true) return Response.json({ detail: "Document storage already contains the file" }, { status: 409 });
-			const id = `trk-${this.uploads.length + 1}`;
-			this.uploads.push({ content, source_url: String(form.get("source_url")), graph: String(form.get("graph_entities") ?? "") });
+			const id = `trk-${this.nextTrack}`;
+			this.nextTrack += 1;
+			this.uploads.push({
+				content,
+				source_url: String(form.get("source_url")),
+				graph: String(form.get("graph_entities") ?? ""),
+				metadata: { source_url: String(form.get("source_url")), commit: String(form.get("commit")) },
+			});
+			return Response.json({ status: "success", data: { track_id: id } });
+		}
+		if (init?.method === "POST" && url.pathname === "/documents/text") {
+			const parsed = JSON.parse(String(init.body)) as { text?: unknown; source_url?: unknown; commit?: unknown; graph_entities?: unknown };
+			const content = typeof parsed.text === "string" ? parsed.text : "";
+			if (this.failUploadWhen?.(content) === true) return Response.json({ detail: "upload refused" }, { status: 500 });
+			if (this.conflictUploadWhen?.(content) === true) return Response.json({ detail: "Document storage already contains the file" }, { status: 409 });
+			const id = `trk-${this.nextTrack}`;
+			this.nextTrack += 1;
+			const sourceUrl = typeof parsed.source_url === "string" ? parsed.source_url : "";
+			this.uploads.push({
+				content,
+				source_url: sourceUrl,
+				graph: Array.isArray(parsed.graph_entities) ? JSON.stringify(parsed.graph_entities) : "",
+				metadata: { source_url: sourceUrl, commit: typeof parsed.commit === "string" ? parsed.commit : "" },
+			});
 			return Response.json({ status: "success", data: { track_id: id } });
 		}
 		if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
-		if (url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
+		if (url.pathname === "/documents/pipeline_status") return Response.json(this.parseBehavior === "never" ? { busy: true } : { busy: false });
 		if (url.pathname.startsWith("/documents/track_status/")) {
 			if (this.trackStatusFails) return Response.json({ detail: "track store down" }, { status: 503 });
 			return Response.json(trackStatusBody(url.pathname));
@@ -1049,6 +1146,7 @@ function lightragHarness(fake: LightragFake, options: { prune?: boolean } = {}) 
 	const seen = new Map<string, IngestRecord>();
 	const deps: IngestDeps = {
 		config: null,
+		knownDatasets: ["agent-substrate"],
 		backend: "lightrag",
 		lightragConfig: { url: "http://lightrag.test" },
 		lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
@@ -1061,6 +1159,43 @@ function lightragHarness(fake: LightragFake, options: { prune?: boolean } = {}) 
 	};
 	return { seen, ingest: (input: IngestInput): Promise<IngestOutcome> => ingestDocs(deps, input) };
 }
+
+describe("docs_ingest on the LightRAG plane: the dataset gate", () => {
+	// The service's wiring: its list names only the requested dataset, so a check against that list alone accepts any name.
+	const ingestAs = (fake: LightragFake, seen: Map<string, IngestRecord>, dataset: string): Promise<IngestOutcome> =>
+		ingestDocs(
+			{
+				config: null,
+				knownDatasets: ["agent-substrate"],
+				backend: "lightrag",
+				lightragConfig: { url: "http://lightrag.test" },
+				lightragDatasets: { list: async () => lightragSearchDatasets([dataset]), invalidate: () => undefined },
+				lightragFetch: fake.fetch,
+				seen,
+				poll: { intervalMs: 0 },
+				emit: async (): Promise<unknown> => ({ stored: false }),
+				surface: "omp",
+			},
+			{ dataset, pages: [PAGE] },
+		);
+
+	test("a name the plane does not configure is refused unknown-dataset before any plane call, empty name included", async () => {
+		const fake = new LightragFake();
+		const seen = new Map<string, IngestRecord>();
+		for (const dataset of ["not-a-dataset", ""]) {
+			expect(await ingestAs(fake, seen, dataset)).toMatchObject({ ok: false, reason: "unknown-dataset" });
+		}
+		expect(fake.uploads).toEqual([]);
+		expect(seen.size).toBe(0);
+	});
+
+	test("a configured dataset still ingests through the same wiring", async () => {
+		const fake = new LightragFake();
+		const outcome = await ingestAs(fake, new Map<string, IngestRecord>(), "agent-substrate");
+		expect(outcome).toMatchObject({ ok: true });
+		expect(fake.uploads).toHaveLength(1);
+	});
+});
 
 describe("docs_ingest on the LightRAG plane: failed writes and graph corrections", () => {
 	test("a later page of a source URL is not written once an earlier page of that URL failed in the call", async () => {
@@ -1078,7 +1213,7 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		if (!outcome.ok) throw new Error(`expected a partial ingest: ${outcome.reason}`);
 		const [first, second, other] = outcome.results;
 		expect(first).toMatchObject({ path: PAGE.path, status: "failed" });
-		expect(first?.error).toMatch(/lightrag 500/);
+		expect(first?.error).toBe("lightrag 500: upload refused");
 		expect(second).toMatchObject({ path: PAGE.path, status: "failed" });
 		expect(second?.error).toMatch(/earlier page/);
 		expect(other).toMatchObject({ path: "docs/other.md", status: "ingested" });
@@ -1092,6 +1227,7 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		const page = (entity: string) => ({
 			path: ".planning/phases/01-graph/PLAN.md",
 			source_url: "file:///repo/.planning/phases/01-graph/PLAN.md",
+			checkout: "wt-0123456789abcdef01234567",
 			body: "# Plan\n\nThe plan body.",
 			graph: { phase: "01-graph", entities: [entity], relations: [] },
 		});
@@ -1136,7 +1272,7 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		const { seen, ingest } = lightragHarness(fake);
 		const outcome = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (outcome.ok) throw new Error("expected a refusal: the document id could not be resolved");
-		expect(outcome.reason).toBe("lightrag 503");
+		expect(outcome.reason).toBe("lightrag 503: track store down");
 		expect(seen.size).toBe(0);
 	});
 
@@ -1149,5 +1285,91 @@ describe("docs_ingest on the LightRAG plane: failed writes and graph corrections
 		if (!second.ok) throw new Error(`expected ingest: ${second.reason}`);
 		expect(second.results[0]).toMatchObject({ status: "replaced", document_id: "doc-2", pruned_document_id: "doc-1" });
 		expect(fake.deletes).toEqual([{ path: "/documents/delete_document", body: { doc_ids: ["doc-1"], delete_file: false, delete_llm_cache: false } }]);
+	});
+});
+
+describe("docs_ingest on the LightRAG plane: corpus-named bulk mode", () => {
+	const PLANNING_PATH = ".planning/phases/01-graph/PLAN.md";
+	const PLANNING_BODY = "# Plan\n\nThe plan body.";
+	const HINT = { phase: "01-graph", entities: ["Graph entity"], relations: [{ source: "A", target: "B", kind: "depends_on" }] };
+
+	/** A LightRAG that records the name and graph form each upload carries. */
+	function recordingPlane() {
+		const uploads: Array<{ name: string; entities: string; relations: string }> = [];
+		const fetchImpl: FetchLike = async (input, init) => {
+			const url = new URL(String(input));
+			if (init?.method === "POST" && url.pathname === "/documents/upload") {
+				const form = init.body as FormData;
+				uploads.push({
+					name: String(form.get("file_source")),
+					entities: String(form.get("graph_entities") ?? ""),
+					relations: String(form.get("graph_relations") ?? ""),
+				});
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/text") {
+				const parsed = JSON.parse(String(init.body)) as { file_source?: unknown; graph_entities?: unknown; graph_relations?: unknown };
+				uploads.push({
+					name: typeof parsed.file_source === "string" ? parsed.file_source : "",
+					entities: Array.isArray(parsed.graph_entities) ? JSON.stringify(parsed.graph_entities) : "",
+					relations: Array.isArray(parsed.graph_relations) ? JSON.stringify(parsed.graph_relations) : "",
+				});
+				return Response.json({ status: "success", data: { track_id: `trk-${uploads.length}` } });
+			}
+			if (init?.method === "POST" && url.pathname === "/documents/scan") return Response.json({ status: "success" });
+			if (url.pathname === "/documents/pipeline_status") return Response.json({ busy: false });
+			if (url.pathname.startsWith("/documents/track_status/")) return Response.json(trackStatusBody(url.pathname));
+			return Response.json({ detail: "no route" }, { status: 404 });
+		};
+		return { uploads, fetchImpl };
+	}
+
+	function ingestWith(fetchImpl: FetchLike, corpusNames: boolean) {
+		const deps: IngestDeps = {
+			config: null,
+			knownDatasets: ["agent-substrate"],
+			backend: "lightrag",
+			lightragConfig: { url: "http://lightrag.test" },
+			lightragDatasets: { list: async () => ({ ok: true, datasets: [{ id: "owner/agent-substrate", name: "agent-substrate" }] }), invalidate: () => undefined },
+			lightragFetch: fetchImpl,
+			seen: new Map<string, IngestRecord>(),
+			poll: { intervalMs: 0 },
+			...(corpusNames ? { corpusNames: true } : {}),
+			emit: async (): Promise<unknown> => ({ stored: false }),
+			surface: "omp",
+		};
+		return (input: IngestInput): Promise<IngestOutcome> => ingestDocs(deps, input);
+	}
+
+	const planningPage = {
+		path: PLANNING_PATH,
+		source_url: "file:///repo/.planning/phases/01-graph/PLAN.md",
+		checkout: "wt-0123456789abcdef01234567",
+		body: PLANNING_BODY,
+		graph: HINT,
+	};
+
+	test("a planning page with a graph hint is named by the corpus scheme and keeps its graph entities and relations", async () => {
+		const plane = recordingPlane();
+		const outcome = await ingestWith(plane.fetchImpl, true)({ dataset: "agent-substrate", pages: [planningPage] });
+		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
+		expect(outcome.results[0]).toMatchObject({ path: PLANNING_PATH, status: "ingested" });
+		expect(plane.uploads).toHaveLength(1);
+		const [upload] = plane.uploads;
+		expect(upload?.name).toBe(corpusDocumentName("owner/agent-substrate", PLANNING_PATH, changeSha(PLANNING_BODY, HINT)));
+		expect(upload?.name.startsWith("corpus:")).toBe(true);
+		expect(upload?.name).not.toContain(".planning__");
+		expect(JSON.parse(upload?.entities ?? "null")).toEqual(["Graph entity"]);
+		expect(JSON.parse(upload?.relations ?? "null")).toEqual([{ source: "A", target: "B", kind: "depends_on" }]);
+	});
+
+	test("outside corpus mode the same planning page keeps its flat checkout-keyed name", async () => {
+		const plane = recordingPlane();
+		const outcome = await ingestWith(plane.fetchImpl, false)({ dataset: "agent-substrate", pages: [planningPage] });
+		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
+		expect(plane.uploads).toHaveLength(1);
+		expect(plane.uploads[0]?.name.startsWith("corpus:")).toBe(false);
+		expect(plane.uploads[0]?.name).toContain("wt-0123456789abcdef01234567");
+		expect(plane.uploads[0]?.name).toContain(".planning__phases__01-graph__PLAN.md");
 	});
 });

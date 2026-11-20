@@ -1,83 +1,121 @@
 ---
 phase: 41-anchor
-verified: 2026-10-21
+verified: 2026-11-12T08:36:13Z
 status: human_needed
-score: 2 of 2 criteria proven in-repo with fake-RPC tests
-verified_on: gsd/v13x-41-anchor at f96b448 (review fixes), on origin/main acb6767. Typecheck and full suite run on that tree
-covered_files: ["packages/evidence/src/explorer.ts", "packages/evidence/src/explorer.test.ts", "packages/evidence/src/report.ts", "packages/evidence/src/index.ts", "packages/evidence/src/html.ts", "packages/evidence/src/html.test.ts", "packages/evidence/src/report.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/evidence-anchor.test.ts", "packages/cli/src/index.ts", "packages/cli/src/evidence.test.ts", "docs/greptime-ledger.md", "README.md"]
+score: 2/2 roadmap criteria verified in-repo (fake RPC); live devnet proof not run
+covered_files: [".planning/milestones/v1.3.x-phases/41-anchor/PLAN.md", ".planning/milestones/v1.3.x-phases/41-anchor/SUMMARY.md", "README.md", "docs/greptime-ledger.md", "packages/cli/src/evidence.test.ts", "packages/cli/src/index.ts", "packages/evidence/src/explorer.test.ts", "packages/evidence/src/explorer.ts", "packages/evidence/src/html.test.ts", "packages/evidence/src/html.ts", "packages/evidence/src/index.ts", "packages/evidence/src/report.test.ts", "packages/evidence/src/report.ts", "packages/mcp-server/src/evidence-anchor.test.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts"]
+covered_digest: "v3:sha256:dc39ab0b60408fc29ea6ddaa3be0fbf33d23fee67923399a55b38636eabfcebd"
+behavior_unverified: 0
+overrides_applied: 0
+re_verification: false
+human_verification:
+  - test: "Live devnet anchor proof (docs/agent-cards.md G1 to G3): with a funded anchor key, emit a proof teachable, let the hourly timer anchor its hour, read the memo back by tx_sig, then run substrate evidence for that graph."
+    expected: "The hour is listed as anchored with its explorer link, the teachable reads anchored: true, and the command exits 0."
+    why_human: "Needs a funded devnet key (SOLANA_ANCHOR_KEYPAIR, SOLANA_ANCHOR_PUBKEY), a live devnet send and the host hourly timer. All are operator-gated (29-CONTEXT.md)."
+  - test: "Confirm the fail-closed state before the timer runs."
+    expected: "Closed hours older than the 3 h verify window with no anchor are marked unverified, and substrate evidence exits 1 for that graph. This is by design (D41-5) and clears once the timer runs."
+    why_human: "Depends on host timer state and live devnet reachability, which were not checked."
 ---
 
-> Status detail, kept verbatim from the original frontmatter: passed in-repo. The live devnet proof is not run (operator-gated)
+# Phase 41: ANCHOR Verification Report
 
-# 41-VERIFICATION: ANCHOR
+**Phase Goal:** Hourly anchors appear in the evidence bundle, and teachable moments are anchored.
+**Verified:** 2026-11-12T08:36:13Z
+**Status:** human_needed
+**Re-verification:** No. Fresh verifier run. The prior VERIFICATION.md (2026-10-21) carried no gaps section.
 
-## Proven in-repo
+## Goal Achievement
 
-| Claim | Evidence |
-|---|---|
-| Typecheck is clean | `bunx tsc --noEmit` exit 0 |
-| Full suite passes | `bun test` against the verification Postgres, clean run on f96b448: 5763 pass, 2 skip (`cache-conformance.test.ts:127`, `redact.test.ts:813`, both pre-existing), 0 fail. 5765 tests in 215 files, 159 s, no `ENOSPC` |
-| Anchored hour carries its transaction | `evidence-anchor.test.ts` (a): tx signature, slot and devnet explorer link |
-| Pending hour does not fail | `evidence-anchor.test.ts` (b); `cli/src/evidence.test.ts` control: anchored and pending exit 0 |
-| Unconfirmed hour fails closed | `evidence-anchor.test.ts` (c): devnet cannot confirm; memo disagrees with the recomputed root. `cli/src/evidence.test.ts` (c): exit 1, names the hour |
-| Budget covers a long bundle | `evidence-anchor.test.ts`: five hours, each devnet read costing 350 ms on a virtual clock, all anchored; with the old 1,500 ms budget the fifth hour is unverified with a reason |
-| Explorer link | `explorer.test.ts`: devnet cluster and transaction page; a signature cannot leave the transaction path |
-| Teachable carries digest, hour and transaction | `evidence-anchor.test.ts` (e) |
-| Altered teachable is not anchored | `evidence-anchor.test.ts`: a teachable altered after its hour was anchored is not anchored (reason `tampered`); the untouched one is |
-| HTML renders anchors and teachables, and older bundles | `html.test.ts`: anchored hours, unverified hour, teachables, tampered teachable, and a bundle from a server without the fields |
+### Observable Truths
 
-## Success criteria
+| #   | Truth | Status | Evidence |
+| --- | ----- | ------ | -------- |
+| 1 | Anchors appear in the evidence bundle: a tx signature and an explorer link per hour (ROADMAP SC1) | ✓ VERIFIED | `packages/mcp-server/src/observe.ts:952` calls `verifyGraph(graphId, { ...verify, anchors: true })`. `observe.ts:1062-1075` `anchorEvidenceOf` sets `tx_sig` and `explorer_url` on any hour with a transaction. `packages/evidence/src/explorer.ts:11-13` `devnetExplorerTxUrl` builds the devnet tx URL with no network call. `packages/evidence/src/report.ts:159,185` declares `anchors`. Tests: `evidence-anchor.test.ts` "an anchored hour carries its transaction signature, slot and devnet explorer link" (pass); `explorer.test.ts` (pass). |
+| 2 | Teachable moments are anchored with graph id plus observation digest (ROADMAP SC2) | ✓ VERIFIED | `packages/mcp-server/src/service.ts:7832` `graphTeachables` reads teachables. `service.ts:7852` recomputes the hash (`tampered`). `observe.ts:963` loads them. `observe.ts:1083-1098` `teachableEvidenceOf` sets `graph_id`, `content_sha256`, `hour`, `anchored` (not tampered and hour anchored), and the hour's `tx_sig` and `explorer_url`. Tests: `evidence-anchor.test.ts` "a teachable carries its graph id, its content digest, its hour and that hour's transaction" and "a teachable altered after its hour was anchored is not anchored" (pass). |
+| 3 | Pending hour does not fail; unverified hour fails closed (D41-5) | ✓ VERIFIED | `packages/cli/src/index.ts:521-527` exits 1 on any `unverified` anchor and on nothing else in this check. `anchorEvidenceOf` (`observe.ts:1063`) maps any status other than anchored or pending to `unverified`. Tests: `cli/src/evidence.test.ts` "an hour devnet cannot confirm exits 1…" and "anchored and pending hours exit 0…" (pass). |
+| 4 | HTML renders anchors and teachables; older bundles still render | ✓ VERIFIED | `packages/evidence/src/html.ts:100` renderer, anchor rows at `:118`, teachable rows at `:130`, with an "unavailable" row for bundles without the fields. Tests: `html.test.ts` (pass). |
 
-| # | ROADMAP criterion | Verdict | Evidence |
-|---|---|---|---|
-| 1 | Anchors appear in the evidence bundle: a tx signature and an explorer link per hour | PASS in-repo, with a fake RPC. The live devnet send is not run | the anchor and explorer tests above |
-| 2 | Teachable moments are anchored with graph id plus an observation digest | PASS in-repo. The anchored record is the hour's. The digest is the teachable event's `content_sha256`, checked against its stored hash | `evidence-anchor.test.ts` (e) and the tampered-teachable test |
+**Score:** 2/2 roadmap criteria verified in-repo. Truths 3 and 4 support SC1 and SC2. No truth depends on a state transition, so none is PRESENT_BEHAVIOR_UNVERIFIED.
 
-## Not proven
+### Deferred Items
 
-- A real devnet anchor on the host. The hourly timer is not installed (`29-CONTEXT.md`), and no funded key is configured. The live proof (`docs/agent-cards.md` G1 to G3) is operator-gated and was not run.
-- Behaviour under a live devnet outage. The bundle depends on devnet; see SUMMARY behaviour changes.
-- The CLI request budget is not covered by a CLI-level test. Such a test needs real delays, which the repo forbids in tests. The server-side budget is covered.
+None.
 
-## Load-sensitive test, not caused by this phase
+### Advisory (New Scope, Unevidenced)
 
-- `redact-adversarial.test.ts` "the skill scan is not quadratic in the number of matches" failed once in a full run at host load average 27 (1,231 ms against its threshold). It passes on its own, twice, and in the clean full run above. The phase does not touch that code.
+None.
 
-## Requirement coverage re-verification (2026-10-24)
+### Required Artifacts
 
-Tests were not run in this task; the orchestrator runs them. Code and test names below were confirmed by read and grep only.
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `packages/evidence/src/explorer.ts` | Devnet explorer URL builder | ✓ VERIFIED | `devnetExplorerTxUrl` at :11; tests pass |
+| `packages/evidence/src/report.ts` | `anchors` and `teachables` on the bundle | ✓ VERIFIED | :159, :161, :185-186 |
+| `packages/mcp-server/src/observe.ts` | Anchor and teachable mapping | ✓ VERIFIED | `buildGraphEvidence` :934; `anchorEvidenceOf` :1062; `teachableEvidenceOf` :1083 |
+| `packages/mcp-server/src/service.ts` | `graphTeachables` read | ✓ VERIFIED | :7832; tamper check :7852 |
+| `packages/evidence/src/html.ts` | Anchor and teachable sections | ✓ VERIFIED | :100, :118, :130 |
+| `packages/cli/src/index.ts` | Exit 1 on unverified hour | ✓ VERIFIED | :521-527 |
 
-### E-D1
+### Key Link Verification
 
-- Requirement (ROADMAP Phase 41 criterion 1): "Anchors appear in the evidence bundle: a tx signature and an explorer link per hour, so PR and incident evidence can be checked outside the system (v0.3 6.x)." (REQUIREMENTS.md line 36 words it differently; the ROADMAP text is quoted as the criterion.)
-- Implementing code:
-  - `packages/mcp-server/src/observe.ts:874-899` `buildGraphEvidence` takes the hour report from one `substrate.verifyGraph(graphId, { ...verify, anchors: true })` call (`observe.ts:892`) and maps it with `anchorEvidenceOf` (`observe.ts:899`).
-  - `packages/mcp-server/src/observe.ts:1002-1013` `anchorEvidenceOf` sets `tx_sig` and `explorer_url` for each hour that has a transaction (`observe.ts:1010`).
-  - `packages/evidence/src/explorer.ts:11` `devnetExplorerTxUrl` builds `https://explorer.solana.com/tx/<sig>?cluster=devnet`, encoding the signature.
-  - `packages/mcp-server/src/service.ts:637-645` `VerifyOptions` (`anchors`, `now`, injected `rpc`); `service.ts:5539-5541` documents that the bundle takes its hours from `verifyGraph`; `service.ts:5543` `verifyGraph`.
-  - `packages/mcp-server/src/server.ts:1069-1080` `POST /evidence` calls `buildGraphEvidence`, and returns HTML when `format` is `html`.
-  - `packages/cli/src/index.ts:360` `cmdEvidence` (request budget; the CLI-level budget is not covered by a test, per the phase VERIFICATION).
-- Tests (exact names):
-  - `packages/mcp-server/src/evidence-anchor.test.ts`: "an anchored hour carries its transaction signature, slot and devnet explorer link"; "a pending hour is listed without a transaction, and does not fail"; "an hour devnet cannot confirm is unverified, names the reason, and is not anchored"; "a bundle of more hours than the old 1,500 ms budget allowed anchors every hour".
-  - `packages/evidence/src/explorer.test.ts`: "names the devnet cluster and the transaction page for the signature"; "a signature cannot leave the transaction path".
-  - `packages/evidence/src/html.test.ts`: "renders each anchored hour with its devnet transaction as an explorer link".
-  - `packages/cli/src/evidence.test.ts`: "anchored and pending hours exit 0, and the bundle lists both".
-- Evidence status: `in-repo proven` (code and tests both found, fake RPC).
-- Live proof remaining: `PENDING_VALIDATION`. The hourly anchor timer is not installed and no funded devnet key is configured (phase VERIFICATION "Not proven"; the timer is cited there as `29-CONTEXT.md`, found at `.planning/phases/29-agent-cards-and-teachable-moments/29-CONTEXT.md`). Operator check: follow `docs/agent-cards.md` G3 (line 62) with the funded key: emit a proof teachable, let the hourly timer anchor its hour, read the memo back by `tx_sig`, then `substrate evidence` for that graph must list the hour as `anchored` with its explorer link and exit 0.
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| `observe.ts buildGraphEvidence` | `service.ts verifyGraph` | `verifyGraph(..., { anchors: true })` | ✓ WIRED | `observe.ts:952` |
+| `observe.ts buildGraphEvidence` | `service.ts graphTeachables` | call | ✓ WIRED | `observe.ts:963` |
+| `observe.ts anchorEvidenceOf` | `evidence/explorer.ts` | `devnetExplorerTxUrl` | ✓ WIRED | `observe.ts:1070` |
+| `cli/index.ts cmdEvidence` | bundle `anchors` | `status === "unverified"` filter | ✓ WIRED | `cli/src/index.ts:521` |
+| `evidence/html.ts` | bundle `anchors`/`teachables` | render | ✓ WIRED | `html.ts:118`, `:130` |
 
-### E-D2
+### Data-Flow Trace (Level 4)
 
-- Requirement (ROADMAP Phase 41 criterion 2): "Teachable moments are anchored with graph id plus an observation digest, a user addition carried in the brief's area E."
-- Implementing code:
-  - `packages/mcp-server/src/service.ts:5591-5620` `graphTeachables`: reads the graph's teachable events, sets `graph_id`, `content_sha256` (`service.ts:5615`), `hour` (`service.ts:5616`) and `tampered` (`service.ts:5617`, recomputed event hash).
-  - `packages/mcp-server/src/observe.ts:899-903` loads the teachables (`observe.ts:903`) against the anchors of the same verdict (`observe.ts:899`).
-  - `packages/mcp-server/src/observe.ts:1022-1036` `teachableEvidenceOf`: `anchored` is `!teachable.tampered && anchor?.status === "anchored"` (`observe.ts:1032`); a tampered teachable gets `reason: "tampered"` (`observe.ts:1033`); the hour's `tx_sig` and `explorer_url` are copied (`observe.ts:1034`).
-- Tests (exact names):
-  - `packages/mcp-server/src/evidence-anchor.test.ts`: "a teachable carries its graph id, its content digest, its hour and that hour's transaction"; "a teachable altered after its hour was anchored is not anchored, and an untouched teachable still is".
-  - `packages/evidence/src/html.test.ts`: "renders each teachable with its digest, its hour and that hour's transaction"; "renders a tampered teachable as not anchored, with its reason".
-- Evidence status: `in-repo proven`.
-- Live proof remaining: `PENDING_VALIDATION`, same operator check as E-D1 (G3 in `docs/agent-cards.md`): the proof teachable's hour must be anchored on devnet and its teachable must read `anchored: true` in the bundle.
+| Artifact | Data Variable | Source | Produces Real Data | Status |
+| -------- | ------------- | ------ | ------------------ | ------ |
+| `observe.ts` anchors | `verdict.hours` | `verifyGraph` (ledger and devnet read) | Yes, in tests via fake RPC | ✓ FLOWING |
+| `observe.ts` teachables | `graphTeachables` | ledger read | Yes, in tests via scratch ledger | ✓ FLOWING |
 
-### Scope note
+### Behavioral Spot-Checks
 
-- Nothing in this block changes the frontmatter status, the score line, or the criteria table above.
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Explorer, HTML and report evidence tests | `bun test packages/evidence/src/explorer.test.ts packages/evidence/src/html.test.ts packages/evidence/src/report.test.ts` | 39 pass, 0 fail | ✓ PASS |
+| CLI evidence exit codes | `bun test packages/cli/src/evidence.test.ts` | 9 pass, 0 fail | ✓ PASS |
+| Anchor and teachable bundle | `bun test packages/mcp-server/src/evidence-anchor.test.ts` | 123 pass, 0 fail (no live Postgres or devnet used) | ✓ PASS |
+
+### Probe Execution
+
+No probes declared for this phase.
+
+### Requirements Coverage
+
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ----------- | ----------- | ------ | -------- |
+| E-D1 | 41-PLAN | Anchors in the evidence bundle, with a tx signature and explorer link per hour | ✓ SATISFIED in-repo; live proof PENDING_VALIDATION | Truth 1 |
+| E-D2 | 41-PLAN | Teachable moments anchored with graph id and observation digest | ✓ SATISFIED in-repo; live proof PENDING_VALIDATION | Truth 2 |
+
+### Anti-Patterns Found
+
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| `packages/mcp-server/src/service.ts` | — | Phase 41 files were edited by later phases (76 to 78) after f96b448 | ℹ️ Info | The code verified here is HEAD. The Phase 41 functions above are present at HEAD. |
+
+No stubs, placeholder returns or hardcoded data were found in the phase-41 functions read.
+
+### Not Run
+
+- Live Postgres suite (`127.0.0.1:5432` refuses TCP; live index tests not run).
+- Full `bun test` and `bunx tsc --noEmit` on HEAD. Only the phase-41 test files listed above were run.
+- Live devnet anchor and the hourly timer (operator-gated).
+
+### Human Verification Required
+
+1. **Live devnet anchor proof** (`docs/agent-cards.md` G1 to G3). Needs a funded key and the host timer. Expected: the hour is anchored with its explorer link, the teachable reads `anchored: true`, and `substrate evidence` exits 0.
+2. **Fail-closed state before the timer runs.** Hours older than the 3 h window with no anchor show as unverified, so `substrate evidence` exits 1. This is by design (D41-5). Confirm it is understood as expected.
+
+### Gaps Summary
+
+No gaps. Both ROADMAP success criteria are implemented, wired and covered by passing tests. Status is `human_needed` because the live devnet proof, the funded key and the hourly timer are operator-gated and were not run, as the phase requires.
+
+---
+
+_Verified: 2026-11-12T08:36:13Z_
+_Verifier: Claude (gsd-verifier)_

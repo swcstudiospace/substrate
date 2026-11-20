@@ -43,7 +43,7 @@ export interface ContractAllowlists {
 /**
  * The exceptions for the real steps.
  *
- * - `idempotence`: none. Steps 1..33 are all `create … if not exists` or `add column if not exists`.
+ * - `idempotence`: step 48 only (see `REAL_ALLOWLISTS.idempotence`). Every other step's statements are `create … if not exists` or `add column if not exists`.
  * - `destructive`: none. The one destructive statement in the migrator, `drop index if exists memory_reviews_hash_idx`,
  *   lives in `IndexStore.migrate()` itself and is deliberately not a ledgered step.
  * - `tables`: `schema_migrations` is the ledger `migrate()` creates for itself (it is not a step, listed so a step that
@@ -53,7 +53,9 @@ export interface ContractAllowlists {
  *   host's next report rebuilds, so an archive of it would only restore stale paths.
  */
 export const REAL_ALLOWLISTS: ContractAllowlists = {
-	idempotence: {},
+	idempotence: {
+		48: "a non-transactional step whose do block only checks memory_forgotten_at_idx and raises when it is INVALID; the classifier does not read do blocks, and the build is create … if not exists, so a re-run is safe",
+	},
 	destructive: {},
 	tables: {
 		schema_migrations: "the migration ledger that IndexStore.migrate() creates itself; it is not archive data",
@@ -65,10 +67,9 @@ export const REAL_ALLOWLISTS: ContractAllowlists = {
 		corpus_retrievals: "step 38 is the retrieval telemetry, written only under SUBSTRATE_DOCS_TELEMETRY: a bounded, redacted log that the retention sweep ages out; it is not part of the archive's closed table list, and adding it would change the schema hash that every earlier archive was verified against",
 		corpus_feedback: "step 38 holds the readers' verdicts on corpus documents; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and a lost verdict only costs the re-rank some evidence it collects again",
 		live_session_bindings: "step 42 is durable security authority, including permanent terminal non-reuse records, not reconstructible cache; the legacy logical archive has a closed compatibility hash and excludes it, so complete PostgreSQL-native backup including tombstones is required (this exclusion provides no backup coverage)",
-		planning_steering_sequence: "step 43 holds the per-session steering delivery counter, which must survive a restart so a number is never reused; it is not part of the archive's closed table list and archiving it is a separate change",
-		planning_steering_replay: "step 43 holds the keyed-queue replay records, bounded by their retention and capacity and pruned by the steering store; it is not part of the archive's closed table list and archiving it is a separate change",
-		cross_repo_operations: "step 44 is the cross-repository operation log (phase 74): one row per operation key, rebuilt by re-running the operation with its key, not restored from an archive; it is not part of the archive's closed table list and archiving it is a separate change",
-		cross_repo_steps: "step 44 holds the per-repository steps of a cross-repository operation, written before each git effect; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and an operation is re-run, not restored",
+		cross_repo_operations: "step 43 is the cross-repository operation log (phase 74): one row per operation key, rebuilt by re-running the operation with its key, not restored from an archive; it is not part of the archive's closed table list and archiving it is a separate change",
+		cross_repo_steps: "step 43 holds the per-repository steps of a cross-repository operation, written before each git effect; it is not part of the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against) and an operation is re-run, not restored",
+		planning_steering_movements: "step 45 holds the committed session-state result of each steering acknowledgement, written once after the session port answers; it is an opt-in (steering-audit) append-only table outside the archive's closed table list (adding a table changes the schema hash every earlier archive was verified against), and a lost row only drops a restart hint, which fails safe",
 	},
 };
 
@@ -250,6 +251,18 @@ describe("the real MIGRATION_STEPS satisfy the contract", () => {
 		expect(step41[0]?.sql).not.toContain("add column");
 	});
 
+	test("step 48 (forgotten-at index, concurrent) is non-transactional and expand; its up drops nothing and refuses an INVALID index, and its down drops the index it creates", () => {
+		const step48 = MIGRATION_STEPS.filter((candidate) => candidate.version === 48);
+		expect(step48.map((candidate) => candidate.name)).toEqual(["memory_entries_forgotten_at_index_concurrent"]);
+		expect(normalizedStatements(step48[0]?.sql ?? "").filter((statement) => statement.startsWith("drop "))).toEqual([]);
+		expect(step48[0]?.sql).toContain("raise exception 'memory_forgotten_at_idx is INVALID");
+		expect(step48[0]?.transactional).toBe(false);
+		expect(step48[0]?.phase).toBe("expand");
+		expect(step48[0]?.down).toBe("drop index if exists memory_forgotten_at_idx");
+		expect(step48[0]?.sql).toContain("create index concurrently if not exists memory_forgotten_at_idx on memory_entries (forgotten_at) where forgotten_at is not null");
+		expect(checkMigrationSteps(step48)).toEqual([]);
+	});
+
 	test("the applied text of every step matches the committed digest fixture", () => {
 		expect(digestViolations(MIGRATION_STEPS, loadFixture()).join("\n")).toBe("");
 	});
@@ -310,6 +323,13 @@ describe("rule (a): idempotence", () => {
 			step(3, "alter table a add column if not exists b int not null default 0, add column if not exists c text"),
 		];
 		expect(checkMigrationSteps(good, allowTables("a"))).toEqual([]);
+	});
+
+	test("create index concurrently if not exists is idempotent; without if not exists it is reported", () => {
+		expect(checkMigrationSteps([step(1, "create index concurrently if not exists a_idx on a (id)")], allowTables("a"))).toEqual([]);
+		expect(checkMigrationSteps([step(1, "create index concurrently a_idx on a (id)")], allowTables("a"))).toEqual([
+			"step 1 (s1): statement is not idempotent: create index concurrently a_idx on a (id)",
+		]);
 	});
 
 	test("create table without if not exists is reported with its text", () => {

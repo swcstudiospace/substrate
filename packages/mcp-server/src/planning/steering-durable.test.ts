@@ -6,9 +6,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
-	DEFAULT_STEERING_IDEMPOTENCY_TTL_S,
-	MemorySteeringIdempotencyStore,
-	type SteeringIdempotencyStore,
 	STEERING_ACK_TTL_BOUNDS_S,
 	STEERING_ACK_TTL_ENV,
 	STEERING_AUDIT_ATTEMPTS,
@@ -20,9 +17,7 @@ import {
 	type SteeringAuditEntry,
 	type SteeringClock,
 	type SteeringHistorySink,
-	type SteeringReplayClaim,
-	type SteeringReplayRecord,
-	type SteeringUnit,
+	type SteeringKeyedRequest,
 } from "./steering.ts";
 import {
 	SteeringAuditConflictError,
@@ -40,6 +35,8 @@ import {
 	type SteeringStoredAckRow,
 	type SteeringStoredDirectiveRow,
 } from "./steering-store.ts";
+import type { SteeringKeyedAckSaved, SteeringKeyedQueueSaved, SteeringSessionRow } from "./steering-store.ts";
+import type { SessionStateOutcome } from "./steering-delivery.ts";
 import { loadConfig } from "../config.ts";
 import { auditToolCalls, createObservability } from "../observe.ts";
 import { Substrate } from "../service.ts";
@@ -66,6 +63,7 @@ class DurableSql implements SteeringAuditSql, SteeringAuditReadSql {
 	failInsert: unknown = null;
 	failReads: unknown = null;
 	insertAttempts = 0;
+	readonly sessions: SteeringSessionRow[] = [];
 
 	async insertAbsent(row: SteeringAuditRow): Promise<boolean> {
 		this.insertAttempts += 1;
@@ -101,13 +99,62 @@ class DurableSql implements SteeringAuditSql, SteeringAuditReadSql {
 		return closed
 			.sort((a, b) => b.ack.recordedAt.getTime() - a.ack.recordedAt.getTime() || compare(b.row.directiveId, a.row.directiveId))
 			.slice(0, query.limit)
-			.map(({ row, ack }) => stored(row, storedAck(ack)));
+			.map(({ row, ack }) => stored(row, storedAck(ack, this.sessions)));
 	}
 
 	async savedAcknowledgement(directiveId: string): Promise<SteeringStoredAckRow | null> {
 		if (this.failReads !== null) throw this.failReads;
 		const ack = this.find(directiveId, "acknowledged");
-		return ack === undefined ? null : storedAck(ack);
+		return ack === undefined ? null : storedAck(ack, this.sessions);
+	}
+
+	async insertSessionOutcome(row: SteeringSessionRow): Promise<void> {
+		if (this.sessions.some((saved) => saved.directiveId === row.directiveId)) return;
+		this.sessions.push({ ...row });
+	}
+
+	async savedKeyedQueue(surface: string, key: string): Promise<SteeringKeyedQueueSaved | null> {
+		if (this.failReads !== null) throw this.failReads;
+		const row = this.rows.find((candidate) => candidate.transition === "queued" && candidate.idempotencySurface === surface && candidate.idempotencyKey === key);
+		if (row === undefined) return null;
+		return { directiveId: row.directiveId, targetSessionId: row.targetSessionId, queuedAtMs: row.recordedAt.getTime(), deliverySequence: row.deliverySequence, fingerprint: row.idempotencyFingerprint ?? "" };
+	}
+
+	async savedKeyedAcknowledgement(surface: string, key: string): Promise<SteeringKeyedAckSaved | null> {
+		if (this.failReads !== null) throw this.failReads;
+		const ack = this.rows.find((candidate) => candidate.transition === "acknowledged" && candidate.idempotencySurface === surface && candidate.idempotencyKey === key);
+		if (ack === undefined) return null;
+		if (ack.outcome === null || ack.confirmed === null) throw new Error("keyed acknowledgement row without an outcome");
+		const saved = this.sessions.find((row) => row.directiveId === ack.directiveId);
+		return {
+			directiveId: ack.directiveId,
+			outcome: ack.outcome,
+			confirmed: ack.confirmed,
+			fingerprint: ack.idempotencyFingerprint ?? "",
+			deliverySequence: this.find(ack.directiveId, "queued")?.deliverySequence ?? null,
+			session: saved === undefined ? null : sessionOutcomeOf(saved),
+			checkpointHint: saved?.checkpointHint ?? false,
+		};
+	}
+
+	async maxDeliverySequence(): Promise<number> {
+		if (this.failReads !== null) throw this.failReads;
+		return this.rows.reduce((max, row) => Math.max(max, row.deliverySequence ?? 0), 0);
+	}
+
+	async maxDeliverySequences(): Promise<ReadonlyMap<string, number>> {
+		if (this.failReads !== null) throw this.failReads;
+		const floors = new Map<string, number>();
+		for (const row of this.rows) {
+			if (row.deliverySequence === null) continue;
+			floors.set(row.targetSessionId, Math.max(floors.get(row.targetSessionId) ?? 0, row.deliverySequence));
+		}
+		return floors;
+	}
+
+	async targetSessionOf(directiveId: string): Promise<string | null> {
+		if (this.failReads !== null) throw this.failReads;
+		return this.find(directiveId, "queued")?.targetSessionId ?? null;
 	}
 
 	/** A row written behind the sink's back, as another process or a bad edit would. */
@@ -132,8 +179,18 @@ function compare(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function storedAck(row: SteeringAuditRow): SteeringStoredAckRow {
-	return { outcome: row.outcome, confirmed: row.confirmed, reason: row.reason, recordedAt: row.recordedAt };
+function storedAck(row: SteeringAuditRow, sessions: readonly SteeringSessionRow[]): SteeringStoredAckRow {
+	const moved = sessions.some((saved) => saved.directiveId === row.directiveId && saved.sessionStatus === "applied");
+	return { outcome: row.outcome, confirmed: row.confirmed, reason: row.reason, recordedAt: row.recordedAt, sessionMoved: moved };
+}
+
+/** The session outcome a fake movement row holds, in the shape the reply carries. */
+function sessionOutcomeOf(row: SteeringSessionRow): SessionStateOutcome {
+	if (row.sessionStatus === "unchanged") return { status: "unchanged" };
+	if (row.sessionState === null) throw new Error("session row without a state");
+	if (row.sessionStatus === "applied") return { status: "applied", state: row.sessionState };
+	if (row.refusalReason === null) throw new Error("refused session row without a reason");
+	return { status: "refused", state: row.sessionState, reason: row.refusalReason };
 }
 
 function stored(row: SteeringAuditRow, acknowledgement: SteeringStoredAckRow | null): SteeringStoredDirectiveRow {
@@ -172,6 +229,9 @@ function queuedRow(overrides: Partial<SteeringAuditRow> = {}): SteeringAuditRow 
 		planPlan: null,
 		conflictsWithActivePlan: false,
 		directiveCreatedAtMs: 1_000,
+		idempotencySurface: null,
+		idempotencyKey: null,
+		idempotencyFingerprint: null,
 		deliverySequence: null,
 		payloadSha256: "seeded",
 		recordedAt: new Date(T0),
@@ -420,6 +480,10 @@ describe("restore from the audit log", () => {
 					},
 					readClosed: (query) => sql.readClosed(query),
 					savedAcknowledgement: (directiveId) => sql.savedAcknowledgement(directiveId),
+					savedKeyedQueue: (surface, key) => sql.savedKeyedQueue(surface, key),
+					savedKeyedAcknowledgement: (surface, key) => sql.savedKeyedAcknowledgement(surface, key),
+					maxDeliverySequence: () => sql.maxDeliverySequence(),
+					targetSessionOf: (id) => sql.targetSessionOf(id),
 				});
 
 			const first = processOver(sql, new ManualClock(T0));
@@ -442,6 +506,10 @@ describe("restore from the audit log", () => {
 				readOpen: (query) => sql.readOpen({ ...query, after: null }),
 				readClosed: (query) => sql.readClosed(query),
 				savedAcknowledgement: (directiveId) => sql.savedAcknowledgement(directiveId),
+				savedKeyedQueue: (surface, key) => sql.savedKeyedQueue(surface, key),
+				savedKeyedAcknowledgement: (surface, key) => sql.savedKeyedAcknowledgement(surface, key),
+				maxDeliverySequence: () => sql.maxDeliverySequence(),
+				targetSessionOf: (id) => sql.targetSessionOf(id),
 			});
 			const stuck = processOver(sql, new ManualClock(T0));
 			const result = await restoreSteeringInboxPaged(stuck.inbox, deaf, { limit: 3 });
@@ -872,99 +940,48 @@ describe("private durable history through the service boundary", () => {
 
 describe("keyed replay and delivery sequence across a restart", () => {
 	const KEY = "retry-key-0001";
+	const keyedFor = (key: string): SteeringKeyedRequest => ({ surface: HUMAN, key, fingerprint: "fp-retry" });
 
-	/** A server process over the shared audit log and the shared replay store. A restart is a new process over the same two. */
-	function serverOver(sql: DurableSql, store: SteeringIdempotencyStore, clock: SteeringClock): ServerProcess {
-		const sink = new SteeringAuditSink(sql, sql);
-		const inbox = new SteeringInbox({ history: sink, clock, policy: { allowlist: [HUMAN], ratePerMin: 100 }, store });
-		return { inbox, sink };
-	}
-
-	test("a keyed retry after a restart returns the original record and sequence, even once the directive was acknowledged, and writes no audit row", async () => {
+	/**
+	 * The inbox keeps idempotency on the audit row, not in a side store: a keyed queue's surface/key/fingerprint are written with the
+	 * queued row, and a restart rebuilds the record and its delivery sequence from the log, writing nothing.
+	 */
+	test("a keyed queue stores its idempotency on the audit row, and a restart restores the record and sequence", async () => {
 		const sql = new DurableSql();
-		const store = new MemorySteeringIdempotencyStore();
 		const clock = new ManualClock(T0);
-		const writer = serverOver(sql, store, clock).inbox;
-		const first = await writer.enqueue(directive({ id: "d-1" }), KEY);
-		await writer.acknowledge({ directiveId: "d-1", sessionId: WORKER, outcome: "applied" });
+		const writer = processOver(sql, clock).inbox;
+		await writer.enqueue(directive({ id: "d-1" }), keyedFor(KEY));
 		const attempts = sql.insertAttempts;
-		const restarted = serverOver(sql, store, clock).inbox;
-		const replay = await restarted.enqueue(directive({ id: "d-2" }), KEY);
-		expect(replay).toEqual(first);
+		const restarted = processOver(sql, clock);
+		expect(await restoreSteeringInboxPaged(restarted.inbox, restarted.sink, { limit: 100 })).toMatchObject({ ok: true, value: { report: { restored: ["d-1"] } } });
 		expect(sql.insertAttempts).toBe(attempts);
-		expect(restarted.sequenceOf("d-1")).toBe(1);
-		expect(restarted.get("d-2")).toBeNull();
+		expect(restarted.inbox.sequenceOf("d-1")).toBe(1);
+		expect(restarted.inbox.get("d-1")).toMatchObject({ state: "queued", directive: { id: "d-1" } });
+		const queued = sql.rows.find((row) => row.directiveId === "d-1" && row.transition === "queued");
+		expect(queued).toMatchObject({ idempotencySurface: HUMAN, idempotencyKey: KEY, idempotencyFingerprint: "fp-retry" });
 	});
 
 	test("after a restart the next distinct command takes the next sequence, and a restored directive keeps its own", async () => {
 		const sql = new DurableSql();
-		const store = new MemorySteeringIdempotencyStore();
 		const clock = new ManualClock(T0);
-		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
-		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }));
-		const restarted = serverOver(sql, store, clock);
+		await processOver(sql, clock).inbox.enqueue(directive({ id: "d-1" }), keyedFor(KEY));
+		await processOver(sql, clock).inbox.enqueue(directive({ id: "d-2" }));
+		const restarted = processOver(sql, clock);
 		expect(await restoreSteeringInboxPaged(restarted.inbox, restarted.sink, { limit: 100 })).toMatchObject({ ok: true, value: { report: { restored: ["d-1", "d-2"] } } });
 		expect([restarted.inbox.sequenceOf("d-1"), restarted.inbox.sequenceOf("d-2")]).toEqual([1, 2]);
-		const next = await restarted.inbox.enqueue(directive({ id: "d-3" }), "retry-key-0002");
+		const next = await restarted.inbox.enqueue(directive({ id: "d-3" }), keyedFor("retry-key-0002"));
 		expect(next.ok ? restarted.inbox.sequenceOf("d-3") : null).toBe(3);
 	});
 
-	test("past the retention window a retry across a restart is a new command with the next sequence", async () => {
-		const sql = new DurableSql();
-		const store = new MemorySteeringIdempotencyStore();
-		const clock = new ManualClock(T0);
-		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
-		const later = serverOver(sql, store, new ManualClock(T0 + DEFAULT_STEERING_IDEMPOTENCY_TTL_S * 1_000)).inbox;
-		expect((await later.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
-		expect(later.sequenceOf("d-2")).toBe(2);
-	});
-
-	test("a retry across a restart with different content is refused as a conflict, and writes nothing", async () => {
-		const sql = new DurableSql();
-		const store = new MemorySteeringIdempotencyStore();
-		const clock = new ManualClock(T0);
-		await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY);
-		const attempts = sql.insertAttempts;
-		const other = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2", action: "annotate" }), KEY);
-		expect(other).toEqual({ ok: false, error: { code: "idempotency-conflict" } });
-		expect(sql.insertAttempts).toBe(attempts);
-	});
-
-	/** A store whose claim commits, then loses its reply: the caller sees a failure, while the claim and its audit row stay kept. */
-	class LostReplyStore extends MemorySteeringIdempotencyStore {
-		loseNextReply = false;
-		override async claimReplay(record: SteeringReplayRecord, nowMs: number, cap: number, queue: (unit: SteeringUnit) => Promise<void>): Promise<SteeringReplayClaim> {
-			const claim = await super.claimReplay(record, nowMs, cap, queue);
-			if (this.loseNextReply) {
-				this.loseNextReply = false;
-				throw new Error("reply lost after commit");
-			}
-			return claim;
-		}
-	}
-
 	const queuedIds = (sql: DurableSql): string[] => sql.rows.filter((row) => row.transition === "queued").map((row) => row.directiveId);
 
-	test("a keyed queue whose reply is lost after its audit row committed replays on retry and is never queued twice", async () => {
+	test("an audit refusal holds nothing, so the retry queues once", async () => {
 		const sql = new DurableSql();
-		const store = new LostReplyStore();
-		const clock = new ManualClock(T0);
-		store.loseNextReply = true;
-		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
-		expect(queuedIds(sql)).toEqual(["d-1"]);
-		const retry = await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY);
-		expect(retry).toMatchObject({ ok: true, value: { directive: { id: "d-1" } } });
-		expect(queuedIds(sql)).toEqual(["d-1"]);
-	});
-
-	test("an audit refusal inside the keyed claim holds nothing, so the retry queues once", async () => {
-		const sql = new DurableSql();
-		const store = new MemorySteeringIdempotencyStore();
 		const clock = new ManualClock(T0);
 		sql.failInsert = new Error("connection reset");
-		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-1" }), KEY)).ok).toBe(false);
+		expect((await processOver(sql, clock).inbox.enqueue(directive({ id: "d-1" }), keyedFor(KEY))).ok).toBe(false);
 		sql.failInsert = null;
-		expect((await serverOver(sql, store, clock).inbox.enqueue(directive({ id: "d-2" }), KEY)).ok).toBe(true);
+		expect((await processOver(sql, clock).inbox.enqueue(directive({ id: "d-2" }), keyedFor(KEY))).ok).toBe(true);
 		expect(queuedIds(sql)).toEqual(["d-2"]);
 	});
 });

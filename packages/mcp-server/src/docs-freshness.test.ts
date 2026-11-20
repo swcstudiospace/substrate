@@ -46,6 +46,7 @@ import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate, type EmitResult } from "./service.ts";
 import type { EventInput } from "./types.ts";
+import { reposSeam } from "./planning/tree.fixtures.ts";
 
 const NOW = Date.parse("2026-10-14T12:00:00.000Z");
 const MIN = 60_000;
@@ -60,7 +61,7 @@ function version(dataset: string, commit: string, agoMs: number, n = 1): Dataset
 		commit,
 		content_sha256: `sha-${commit}`,
 		ingested_at: new Date(NOW - agoMs).toISOString(),
-		backend: "ragflow",
+		backend: "lightrag",
 	};
 }
 
@@ -81,6 +82,7 @@ function triggers(entries: Array<[string, string, number]>): TriggerStore {
 describe("freshness math", () => {
 	test("is now minus the newest ingested_at per dataset, over several datasets", () => {
 		const rows = evaluateFreshness({
+			datasets: ["agent-substrate", "programming-desk", "kanbanos"],
 			versions: store(
 				version("agent-substrate", "c1", 5 * HOUR, 1),
 				version("agent-substrate", "c2", 2 * HOUR, 2),
@@ -100,6 +102,7 @@ describe("freshness math", () => {
 
 	test("the newest by timestamp wins even when it is not the last row", () => {
 		const rows = evaluateFreshness({
+			datasets: ["agent-substrate"],
 			versions: store(version("agent-substrate", "c1", HOUR, 1), version("agent-substrate", "c2", 9 * HOUR, 2)),
 			triggers: new Map(),
 			now: NOW,
@@ -108,12 +111,12 @@ describe("freshness math", () => {
 		expect(rows[0]?.freshness_seconds).toBe(3600);
 	});
 
-	test("a dataset with no data is omitted, a name outside the trigger table never appears, a future stamp reads 0, max age 0 never judges", () => {
+	test("a dataset with no data is omitted, a name outside the datasets never appears, a future stamp reads 0, max age 0 never judges", () => {
 		const versions = store(version("not-a-dataset", "x", HOUR), version("agent-substrate", "c1", -10 * MIN));
-		const rows = evaluateFreshness({ versions, triggers: new Map(), now: NOW, settings: { maxAgeHours: 0, triggerLagMinutes: 15 } });
+		const rows = evaluateFreshness({ versions, triggers: new Map(), datasets: ["agent-substrate", "programming-desk"], now: NOW, settings: { maxAgeHours: 0, triggerLagMinutes: 15 } });
 		expect(rows.map((row) => row.dataset)).toEqual(["agent-substrate"]);
 		expect(rows[0]?.freshness_seconds).toBe(0);
-		const old = evaluateFreshness({ versions: store(version("agent-substrate", "c1", 9999 * HOUR)), triggers: new Map(), now: NOW, settings: { maxAgeHours: 0, triggerLagMinutes: 15 } });
+		const old = evaluateFreshness({ versions: store(version("agent-substrate", "c1", 9999 * HOUR)), triggers: new Map(), datasets: ["agent-substrate"], now: NOW, settings: { maxAgeHours: 0, triggerLagMinutes: 15 } });
 		expect(old[0]?.stale).toBe(false);
 	});
 });
@@ -121,6 +124,7 @@ describe("freshness math", () => {
 describe("trigger lag", () => {
 	test("an accepted trigger with no recorded version lags once it has waited the threshold, per dataset", () => {
 		const rows = evaluateFreshness({
+			datasets: ["agent-substrate", "kanbanos"],
 			versions: store(version("agent-substrate", "c0", HOUR), version("kanbanos", "k0", HOUR)),
 			triggers: triggers([
 				["agent-substrate", "c1", 20 * MIN],
@@ -137,6 +141,7 @@ describe("trigger lag", () => {
 
 	test("a recorded version for the commit clears it", () => {
 		const rows = evaluateFreshness({
+			datasets: ["agent-substrate"],
 			versions: store(version("agent-substrate", "c1", 10 * MIN)),
 			triggers: triggers([["agent-substrate", "c1", 20 * MIN]]),
 			now: NOW,
@@ -147,6 +152,7 @@ describe("trigger lag", () => {
 
 	test("the newest trigger is the one judged: a later landed commit supersedes an older unresolved one", () => {
 		const rows = evaluateFreshness({
+			datasets: ["agent-substrate"],
 			versions: store(version("agent-substrate", "c2", 10 * MIN)),
 			triggers: triggers([
 				["agent-substrate", "c1", 60 * MIN],
@@ -160,12 +166,13 @@ describe("trigger lag", () => {
 
 	test("a trigger the version history has rolled past is not reported", () => {
 		const many = Array.from({ length: 5 }, (_, i) => version("agent-substrate", `n${i}`, (30 - i) * MIN, i + 1));
-		const rows = evaluateFreshness({ versions: store(...many), triggers: triggers([["agent-substrate", "gone", 90 * MIN]]), now: NOW, settings: SETTINGS });
+		const rows = evaluateFreshness({ versions: store(...many), triggers: triggers([["agent-substrate", "gone", 90 * MIN]]), datasets: ["agent-substrate"], now: NOW, settings: SETTINGS });
 		expect(rows[0]).toMatchObject({ lagging: false, trigger_lag_seconds: 0 });
 	});
 
 	test("lag minutes 0 detects nothing", () => {
 		const rows = evaluateFreshness({
+			datasets: ["agent-substrate"],
 			versions: store(version("agent-substrate", "c0", HOUR)),
 			triggers: triggers([["agent-substrate", "c1", 600 * MIN]]),
 			now: NOW,
@@ -185,6 +192,7 @@ describe("trigger lag", () => {
 describe("the gauges", () => {
 	test("carry only the dataset label, with freshness for data and lag for triggered datasets", () => {
 		const rows = evaluateFreshness({
+			datasets: ["agent-substrate"],
 			versions: store(version("agent-substrate", "c0", HOUR)),
 			triggers: triggers([["agent-substrate", "c1", 20 * MIN]]),
 			now: NOW,
@@ -216,7 +224,7 @@ describe("the lag warning's dedupe", () => {
 			report: () => undefined,
 		};
 		const tick = async (versions: VersionStore, trig: TriggerStore, now: number) => {
-			const rows = evaluateFreshness({ versions, triggers: trig, now, settings: SETTINGS });
+			const rows = evaluateFreshness({ versions, triggers: trig, datasets: ["agent-substrate"], now, settings: SETTINGS });
 			return applyLagActions(planLagTransitions(rows, markers), markers, SETTINGS, new Date(now).toISOString(), effects);
 		};
 		return { events, markers, tick, fail: (value: boolean) => (failEmit = value), persisted: () => persisted };
@@ -301,7 +309,7 @@ describe("the lag warning's dedupe", () => {
 
 describe("the state file members", () => {
 	test("an old state file without them loads exactly as before", () => {
-		const state = freshnessStateFromJson({ version: 2, records: {}, versions: {} });
+		const state = freshnessStateFromJson({ version: 2, records: {}, versions: {} }, ["agent-substrate"]);
 		expect(state.triggers.size).toBe(0);
 		expect(state.lag.size).toBe(0);
 		expect(freshnessStateToJson(state)).toEqual({});
@@ -319,7 +327,7 @@ describe("the state file members", () => {
 				return Reflect.get(target, key, receiver);
 			},
 		});
-		const state = freshnessStateFromJson({ triggers: { "agent-substrate": watched } });
+		const state = freshnessStateFromJson({ triggers: { "agent-substrate": watched } }, ["agent-substrate"]);
 		const kept = state.triggers.get("agent-substrate") ?? [];
 		expect(kept).toHaveLength(DATASET_TRIGGER_RETENTION);
 		expect(kept[0]?.commit).toBe("good-10");
@@ -346,12 +354,12 @@ describe("the state file members", () => {
 				},
 			}),
 		);
-		const state = freshnessStateFromJson(parsed);
+		const state = freshnessStateFromJson(parsed, ["agent-substrate", "kanbanos"]);
 		expect([...state.triggers.keys()]).toEqual(["agent-substrate"]);
 		expect(state.triggers.get("agent-substrate")?.map((row) => row.commit)).toEqual(["ok"]);
 		expect([...state.lag.keys()]).toEqual(["agent-substrate"]);
-		expect(freshnessStateFromJson("string").triggers.size).toBe(0);
-		expect(freshnessStateFromJson({ triggers: [], lag: [] }).lag.size).toBe(0);
+		expect(freshnessStateFromJson("string", ["agent-substrate"]).triggers.size).toBe(0);
+		expect(freshnessStateFromJson({ triggers: [], lag: [] }, ["agent-substrate"]).lag.size).toBe(0);
 	});
 
 	test("flag-off parity: a state file with nothing triggered carries exactly today's keys, and triggers add only their own", async () => {
@@ -369,7 +377,7 @@ describe("the state file members", () => {
 			state.lag.set("agent-substrate", { since: new Date(NOW).toISOString(), commit: "c2", warned: false });
 			await saveIngestRecords(file, new Map(), versions, state);
 			expect(Object.keys(JSON.parse(readFileSync(file, "utf8")) as object)).toEqual(["version", "records", "versions", "triggers", "lag"]);
-			const loaded = await loadIngestRecords(file);
+			const loaded = await loadIngestRecords(file, ["agent-substrate"]);
 			expect(loaded.freshness.triggers.get("agent-substrate")).toHaveLength(1);
 			expect(loaded.freshness.lag.get("agent-substrate")).toMatchObject({ commit: "c2", warned: false });
 			expect(loaded.versions.get("agent-substrate")?.[0]?.commit).toBe("c1");
@@ -394,8 +402,9 @@ describe("the service bookkeeping", () => {
 		const dir = mkdtempSync(join(tmpdir(), "docs-freshness-"));
 		try {
 			const file = join(dir, "state.json");
-			const env = { SUBSTRATE_DOCS_STATE_FILE: file };
-			const first = new Substrate(loadConfig(env), { index: null, greptime: null });
+			const seam = reposSeam(["agent-substrate"]);
+			const env = { ...seam.env, SUBSTRATE_DOCS_STATE_FILE: file };
+			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ...seam.stores });
 			const events = spy(first);
 			// No docs plane is configured, so the job fails: exactly the trigger that never became an ingest.
 			const outcome = await first.startDocsRefresh(request("c-lost"), "omp", { wait: true });
@@ -419,17 +428,17 @@ describe("the service bookkeeping", () => {
 			expect(events.map((event) => event.kind)).toEqual(["warning"]);
 
 			// A restarted process reads the marker back and stays quiet while the breach lasts.
-			const second = new Substrate(loadConfig(env), { index: null, greptime: null });
+			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ...seam.stores });
 			const restarted = spy(second);
 			await second.settleDocsLag(late + 2 * MIN);
 			await second.docsLagIdle();
 			expect(restarted).toEqual([]);
 
 			// The version lands (written the way an ingest persists it): one recovery note, then silence.
-			const state = await loadIngestRecords(file);
+			const state = await loadIngestRecords(file, ["agent-substrate"]);
 			recordVersion(state.versions, version("agent-substrate", "c-lost", 0, 1));
 			await saveIngestRecords(file, new Map(), state.versions, state.freshness);
-			const third = new Substrate(loadConfig(env), { index: null, greptime: null });
+			const third = new Substrate(loadConfig(env), { index: null, greptime: null, ...seam.stores });
 			const recovered = spy(third);
 			await third.settleDocsLag(late + 3 * MIN);
 			await third.docsLagIdle();
@@ -447,7 +456,8 @@ describe("the service bookkeeping", () => {
 		try {
 			const blocked = join(dir, "blocked");
 			writeFileSync(blocked, "a file where a directory is needed");
-			const substrate = new Substrate(loadConfig({ SUBSTRATE_DOCS_STATE_FILE: join(blocked, "state.json") }), { index: null, greptime: null });
+			const seam = reposSeam(["agent-substrate"]);
+			const substrate = new Substrate(loadConfig({ ...seam.env, SUBSTRATE_DOCS_STATE_FILE: join(blocked, "state.json") }), { index: null, greptime: null, ...seam.stores });
 			spyOn(substrate, "emit").mockImplementation(async () => {
 				throw new Error("ledger down");
 			});
@@ -516,7 +526,8 @@ describe("the service bookkeeping", () => {
 			const state = createFreshnessState();
 			recordTrigger(state.triggers, "agent-substrate", { commit: "c-lost", content_sha256: "s", received_at: new Date(Date.now() - 40 * MIN).toISOString() });
 			await saveIngestRecords(file, new Map(), createVersionStore(), state);
-			const substrate = new Substrate(loadConfig({ SUBSTRATE_DOCS_STATE_FILE: file }), { index: null, greptime: null });
+			const seam = reposSeam(["agent-substrate"]);
+			const substrate = new Substrate(loadConfig({ ...seam.env, SUBSTRATE_DOCS_STATE_FILE: file }), { index: null, greptime: null, ...seam.stores });
 			const events = spy(substrate);
 			let tick: () => void = () => undefined;
 			const timer = new DocsLagTimer({
@@ -541,10 +552,11 @@ describe("the service bookkeeping", () => {
 
 describe("GET /slo and GET /metrics", () => {
 	async function serveWith(env: Record<string, string>) {
-		const config = loadConfig(env);
+		const seam = reposSeam(["agent-substrate"]);
+		const config = loadConfig({ ...seam.env, ...env });
 		const observability = createObservability(config, env);
 		await observability.start();
-		const substrate = new Substrate(config, { index: null, greptime: null }, observability.observer);
+		const substrate = new Substrate(config, { index: null, greptime: null, ...seam.stores }, observability.observer);
 		const events: EventInput[] = [];
 		spyOn(substrate, "emit").mockImplementation(async (event) => {
 			events.push(event);
@@ -723,16 +735,16 @@ describe("a trigger is landed only by a version with its commit AND its content 
 	test("a re-trigger of one commit under a different hash still lags until that identity is recorded", () => {
 		const held: TriggerStore = new Map();
 		recordTrigger(held, "agent-substrate", { commit: "c1", content_sha256: "sha-other", received_at: new Date(NOW - 20 * MIN).toISOString() });
-		const lagging = evaluateFreshness({ versions: store(version("agent-substrate", "c1", HOUR)), triggers: held, now: NOW, settings: SETTINGS });
+		const lagging = evaluateFreshness({ versions: store(version("agent-substrate", "c1", HOUR)), triggers: held, datasets: ["agent-substrate"], now: NOW, settings: SETTINGS });
 		expect(lagging[0]).toMatchObject({ lagging: true, lagging_commit: "c1", trigger_lag_seconds: 1200 });
-		const landed = evaluateFreshness({ versions: store({ ...version("agent-substrate", "c1", 5 * MIN), content_sha256: "sha-other" }), triggers: held, now: NOW, settings: SETTINGS });
+		const landed = evaluateFreshness({ versions: store({ ...version("agent-substrate", "c1", 5 * MIN), content_sha256: "sha-other" }), triggers: held, datasets: ["agent-substrate"], now: NOW, settings: SETTINGS });
 		expect(landed[0]).toMatchObject({ lagging: false, trigger_lag_seconds: 0 });
 	});
 });
 
 describe("the background settler", () => {
 	const breach = () =>
-		evaluateFreshness({ versions: store(version("agent-substrate", "c0", HOUR)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), now: NOW, settings: SETTINGS });
+		evaluateFreshness({ versions: store(version("agent-substrate", "c0", HOUR)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), datasets: ["agent-substrate"], now: NOW, settings: SETTINGS });
 
 	function rig(options: { retryMs?: number; emitDeadlineMs?: number; emit?: (event: EventInput) => Promise<unknown> } = {}) {
 		const markers: LagMarkers = new Map();
@@ -823,7 +835,8 @@ describe("the background settler", () => {
 	test("a slow ledger never delays the timer pass or GET /slo: both answer while the warning is still hung", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "docs-freshness-"));
 		try {
-			const substrate = new Substrate(loadConfig({ SUBSTRATE_DOCS_STATE_FILE: join(dir, "state.json") }), { index: null, greptime: null });
+			const seam = reposSeam(["agent-substrate"]);
+			const substrate = new Substrate(loadConfig({ ...seam.env, SUBSTRATE_DOCS_STATE_FILE: join(dir, "state.json") }), { index: null, greptime: null, ...seam.stores });
 			let emitCalls = 0;
 			const started = Promise.withResolvers<void>();
 			spyOn(substrate, "emit").mockImplementation(() => {
@@ -851,9 +864,9 @@ describe("the background settler", () => {
 
 describe("a resolved stored:false emit is a failed delivery", () => {
 	const lagging = (): DatasetFreshness[] =>
-		evaluateFreshness({ versions: store(version("agent-substrate", "c0", HOUR)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), now: NOW, settings: SETTINGS });
+		evaluateFreshness({ versions: store(version("agent-substrate", "c0", HOUR)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), datasets: ["agent-substrate"], now: NOW, settings: SETTINGS });
 	const landed = (): DatasetFreshness[] =>
-		evaluateFreshness({ versions: store(version("agent-substrate", "c1", 0, 2)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), now: NOW, settings: SETTINGS });
+		evaluateFreshness({ versions: store(version("agent-substrate", "c1", 0, 2)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), datasets: ["agent-substrate"], now: NOW, settings: SETTINGS });
 
 	function effects(storedFlag: { value: boolean }, sent: EventInput[], lines: string[]) {
 		return {
@@ -968,7 +981,7 @@ describe("the corpus's freshness (v1.7 phase 65)", () => {
 
 	test("its marker survives the state file like a dataset's, and a marker for an unknown name is still dropped", () => {
 		const marker = { since: ago(60), commit: ago(3 * DAY_S), warned: true };
-		const state = freshnessStateFromJson({ lag: { corpus: marker, "not-a-dataset": marker } });
+		const state = freshnessStateFromJson({ lag: { corpus: marker, "not-a-dataset": marker } }, ["agent-substrate"]);
 		expect([...state.lag.keys()]).toEqual(["corpus"]);
 		expect(freshnessStateToJson(state).lag).toEqual({ corpus: marker });
 	});

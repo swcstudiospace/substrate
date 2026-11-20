@@ -123,6 +123,7 @@ export const EXPECTED_TIMERS: readonly ExpectedTimer[] = [
 	{ name: "substrate-anchor.timer", periodSeconds: 3600, required: true, why: "BP-7 hourly ledger root" },
 	{ name: "substrate-index-sweep.timer", periodSeconds: 86_400, required: false, why: "opt-in daily retention report" },
 	{ name: "substrate-doctor.timer", periodSeconds: 6 * 3600, required: false, why: "opt-in runtime doctor" },
+	{ name: "substrate-cross-layer-reconcile.timer", periodSeconds: 86_400, required: false, why: "opt-in daily cross-layer reconcile" },
 ];
 
 /**

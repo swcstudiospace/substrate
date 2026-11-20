@@ -19,7 +19,7 @@
 		"redaction_clean": true
 	},
 	"corpus_manifest": {
-		"sha256": "a9a30850816e065c3f26e643da07e19386af75d6f151830cfb3dc03c33eb203f",
+		"sha256": "0f375b547da93127c254922a35bc288c9d28c9bd62e8867df2b16bb1af5b1912",
 		"dataset_commit": "golden-v1"
 	}
 }

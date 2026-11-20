@@ -4,15 +4,15 @@ requirements: [SOTA-02]
 status: planned; units U1 and U2 run in parallel, U3 follows
 ---
 
-# 46-PLAN: RAGFlow hybrid retrieval with Hindsight and Greptime context
+# 46-PLAN: RAGFlow (retired, superseded by LightRAG) hybrid retrieval with Hindsight and Greptime context
 
 ## Units (disjoint files)
 
-### U1 — hybrid knobs (RAGFlow plane and config)
+### U1 — hybrid knobs (RAGFlow (retired, superseded by LightRAG) plane and config)
 
-Files: `packages/mcp-server/src/planes/ragflow.ts`, `packages/mcp-server/src/planes/ragflow.test.ts`, `packages/mcp-server/src/config.ts` (the RAGFlow settings only), `packages/mcp-server/src/flag-registry.ts` (new rows only), `.env.example` (new lines only).
+Files: `packages/mcp-server/src/planes/ragflow.ts`, `packages/mcp-server/src/planes/ragflow.test.ts`, `packages/mcp-server/src/config.ts` (the RAGFlow (retired, superseded by LightRAG) settings only), `packages/mcp-server/src/flag-registry.ts` (new rows only), `.env.example` (new lines only).
 
-- Add `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` (number in [0, 1], default 0.3) and `SUBSTRATE_RAGFLOW_RERANK_ID` (string, default unset). Parse them in the same style as the existing RAGFlow settings; an out-of-range weight is a config error with the variable named.
+- Add `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` (number in [0, 1], default 0.3) and `SUBSTRATE_RAGFLOW_RERANK_ID` (string, default unset). Parse them in the same style as the existing RAGFlow (retired, superseded by LightRAG) settings; an out-of-range weight is a config error with the variable named.
 - `retrieveChunks` sends `vector_similarity_weight` from the setting. It sends `rerank_id` only when the setting is set.
 - Tests in `ragflow.test.ts`, using the existing `RagflowFake`: with weight 0.7 and rerank id set, the captured body carries both; with defaults, the body carries 0.3 and no `rerank_id`; an out-of-range weight throws before any request.
 

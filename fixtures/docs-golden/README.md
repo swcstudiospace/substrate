@@ -45,7 +45,7 @@ never reaches a reply.
 ## Offline tier (CI)
 
 `scripts/docs-golden.test.ts` runs every fixture through the real
-`searchDocs` against a question-aware `RagflowFake` that retrieves by
+`searchDocs` against a question-aware LightRAG stand-in fake that retrieves by
 lexical overlap from the corpus (`packages/mcp-server/src/docs-golden.ts`).
 It proves scope isolation, provenance, ordering, the ten-citation cap,
 redaction and the scorer — not the deployment's relevance. Thresholds are

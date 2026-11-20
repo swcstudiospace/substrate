@@ -52,7 +52,10 @@ interface FakeLedger {
 }
 
 const originalFetch = globalThis.fetch;
-afterEach(() => {
+/** Every instance a test builds, closed in `afterEach` the way shutdown closes one: a tick left running would write through the next test's ledger. */
+const opened: Substrate[] = [];
+afterEach(async () => {
+	for (const substrate of opened.splice(0)) await substrate.drainPendingEvents(0, { abandon: true });
 	globalThis.fetch = originalFetch;
 });
 
@@ -94,7 +97,9 @@ function answer(ledger: FakeLedger, statement: string): unknown {
 }
 
 function substrateWith(greptime: unknown, env: Record<string, string> = {}): Substrate {
-	return new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+	opened.push(substrate);
+	return substrate;
 }
 
 function client(env: Record<string, string> = {}, now: () => number = () => T0): GreptimeClient {
@@ -169,7 +174,7 @@ describe("chain-tip cache", () => {
 		expect(ledger.sessionReads()).toBe(2);
 	});
 
-	test("an event-row error forgets the tip, and the next emit reads the ledger again", async () => {
+	test("an event-row error forgets the tip and parks the event: the next emit chains behind it, and the ledger receives them in order", async () => {
 		const ledger = fakeLedger();
 		const greptime = client();
 		const substrate = substrateWith(greptime);
@@ -181,14 +186,33 @@ describe("chain-tip cache", () => {
 			fail && statement.startsWith('INSERT INTO "agent_events"') ? new Response("nope", { status: 503 }) : undefined;
 		const refused = await substrate.emit(input("sess-1", "lost"));
 		expect(refused.stored).toBe(false);
+		expect(refused.buffered).toBe(true);
 		expect(greptime.chainTipsCached).toBe(0);
 
+		// Ledger still down: the event waits behind the lost one, which is not written beside it. Its settle attempt fails too,
+		// so no ledger row is read for the session: the read count does not move.
+		const readsWhileDown = ledger.sessionReads();
+		const waiting = await substrate.emit(input("sess-1", "waiting"));
+		expect(waiting.stored).toBe(false);
+		expect(waiting.buffered).toBe(true);
+		expect(waiting.event.prev).toBe(refused.event.hash);
+		expect(ledger.sessionReads()).toBe(readsWhileDown);
+
+		// Ledger back: the write settles the parked events first, in chain order, so the next event chains onto the last
+		// of them in the ledger, never beside them. The landed events advance the cached tip, so the next event reads no row.
 		fail = false;
 		const next = await substrate.emit(input("sess-1", "after"));
 		expect(next.stored).toBe(true);
-		expect(ledger.sessionReads()).toBe(3);
-		// It chained onto the row that is actually in the ledger, not the lost one.
-		expect(next.event.prev).toBe(defined(ledger.rows[0], "first row").hash);
+		expect(next.event.prev).toBe(waiting.event.hash);
+		expect(ledger.sessionReads()).toBe(readsWhileDown);
+
+		await substrate.drainEventBuffer({ all: true });
+		expect(ledger.rows.map((row) => row.hash)).toEqual([
+			defined(ledger.rows[0], "first row").hash,
+			refused.event.hash,
+			waiting.event.hash,
+			next.event.hash,
+		]);
 	});
 
 	test("a write settles the session's parked event before it reads the tip, so it chains onto the landed row, not beside it", async () => {

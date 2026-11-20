@@ -25,7 +25,7 @@ import { defaultOptions, type EmitWarning, LIBRARY_DIR, postWarning, project } f
 
 const RUN_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 200;
-/** The dataset a skills-sync fast-forward refreshes (the substrate's DATASET_TRIGGERS row). */
+/** The dataset a skills-sync fast-forward refreshes: the skills library, always a known dataset (`SKILLS_DATASET` in mcp-server's docs-datasets.ts). */
 export const SYNC_REFRESH_DATASET = "agent-skills";
 /** Same budget family as the projector's fail-open POST /events. */
 const REFRESH_TIMEOUT_MS = 3_000;

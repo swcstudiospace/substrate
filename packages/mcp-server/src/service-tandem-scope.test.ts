@@ -111,16 +111,13 @@ function docsWorld(env: Record<string, string>, shared: Partial<Pick<DocsWorld, 
 		return original(request);
 	});
 	const substrate = new Substrate(
-		loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag", ...env }),
+		loadConfig({ LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_BACKEND: "lightrag", ...env }),
 		{
 			index: null,
 			greptime: null,
 			cache,
 			lightragFetch: lightrag.fetch,
 			hindsightFetch: shared.hindsightFetch ?? fake.fetch,
-			ragflowFetch: async () => {
-				throw new Error("RAGFlow is not part of this test");
-			},
 		},
 	);
 	return { substrate, cache, redis, fake, lightrag, reads };

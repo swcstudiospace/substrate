@@ -177,8 +177,8 @@ function docsStateInputs(withFreshness: boolean): { file: string; seen: Map<stri
 		version: 1,
 	});
 	const versions = createVersionStore();
-	recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds_agent_substrate", version: "v1", commit: "b".repeat(40), content_sha256: "e".repeat(64), ingested_at: "2026-10-13T08:00:00.000Z", backend: "ragflow" });
-	recordVersion(versions, { dataset: "agent-skills", dataset_id: "ds_agent_skills", version: "v1", commit: "c".repeat(40), content_sha256: "f".repeat(64), ingested_at: "2026-10-13T09:00:00.000Z", backend: "ragflow" });
+	recordVersion(versions, { dataset: "agent-substrate", dataset_id: "ds_agent_substrate", version: "v1", commit: "b".repeat(40), content_sha256: "e".repeat(64), ingested_at: "2026-10-13T08:00:00.000Z", backend: "lightrag" });
+	recordVersion(versions, { dataset: "agent-skills", dataset_id: "ds_agent_skills", version: "v1", commit: "c".repeat(40), content_sha256: "f".repeat(64), ingested_at: "2026-10-13T09:00:00.000Z", backend: "lightrag" });
 	const freshness = createFreshnessState();
 	if (withFreshness) {
 		recordTrigger(freshness.triggers, "agent-substrate", { commit: "c".repeat(40), content_sha256: "e".repeat(64), received_at: "2026-10-14T08:00:00.000Z" });
@@ -204,7 +204,7 @@ describe("docs state file (docs-ingest.json): the current writer against the 923
 			expect(extraKeys(record, OLD_DOCS_RECORD).sort()).toEqual([...NEW_DOCS_RECORD_KEYS].sort());
 		}
 		for (const rows of Object.values(parsed.versions as Record<string, Array<Record<string, unknown>>>)) {
-			// The backend stamp is the one row addition. A row without it loads as ragflow, so an older state still completes RAGFlow replays.
+			// The backend stamp is the one row addition. A row without it loads as lightrag, so an older state still completes lightrag replays.
 			for (const row of rows) expect(Object.keys(row).sort()).toEqual([...OLD_DOCS_VERSION, "backend"].sort());
 		}
 		expect(parsed.version).toBe(2);
@@ -248,7 +248,7 @@ describe("docs state file (docs-ingest.json): the current writer against the 923
 		// The fixture is itself the old shape: guard against it drifting into something else.
 		expect(oldDocsStateViolations(JSON.parse(fixtureText("docs-ingest.json")))).toEqual([]);
 
-		const loaded = await loadIngestRecords(file);
+		const loaded = await loadIngestRecords(file, ["agent-substrate", "agent-skills"]);
 		expect(loaded.problem).toBeUndefined();
 		expect([...loaded.records.keys()]).toEqual(["agent-substrate docs/data-planes.md", "agent-substrate README.md"]);
 		expect(loaded.records.get("agent-substrate docs/data-planes.md")).toEqual({
@@ -279,7 +279,7 @@ describe("docs state file (docs-ingest.json): the current writer against the 923
 		const { file, parsed } = await writeRealDocsState(true);
 		const stripped = { version: parsed.version, records: parsed.records, versions: parsed.versions };
 		writeFileSync(file, `${JSON.stringify(stripped)}\n`);
-		const loaded = await loadIngestRecords(file);
+		const loaded = await loadIngestRecords(file, ["agent-substrate"]);
 		expect(loaded.problem).toBeUndefined();
 		expect(loaded.records.size).toBe(2);
 		expect(loaded.freshness.triggers.size).toBe(0);
@@ -478,14 +478,14 @@ describe("brief-snapshot envelope: the current writer against the 9231f43 reader
 
 // ── retain outbox ────────────────────────────────────────────────────────────
 
-/** Keys of one parked retain (`retain-outbox.ts:121-138` of 9231f43). `session_id` is optional. */
+/** Keys of one parked retain (`retain-outbox.ts:121-138` of 9231f43; the entry check is `isEntry` in `retain-outbox.ts` now). `session_id` is optional. */
 const OLD_OUTBOX_KEYS = ["id", "bank", "document_id", "entry_id", "surface", "entry_hash", "session_id", "attempts", "next_at", "last_reason", "enqueued_at"];
 
 /**
- * What the 9231f43 `RetainOutbox.hydrate` needs from one JSONL line, frozen:
- * each line is one JSON object (`:393`, `:406` write `JSON.stringify(entry)`;
- * `:359-363` split on newlines and parse) that passes `isEntry` (`:121-138`).
- * A line that fails is counted malformed and skipped: the parked retain is lost.
+ * What the 9231f43 `RetainOutbox.hydrate` needs from one JSONL line, frozen. Each line is one JSON object that passes `isEntry`.
+ * The line handling 9231f43 did at `:393`, `:406` (write `JSON.stringify(entry)`) and `:359-363` (split on newlines and parse)
+ * now lives in `outbox-file.ts` (`OutboxFile.append`, `rewrite` and `read`); `isEntry` (`:121-138` of 9231f43) stays in
+ * `retain-outbox.ts`. A line that fails is counted malformed and skipped: the parked retain is lost.
  */
 function oldOutboxLineViolations(line: string): string[] {
 	let parsed: unknown;
@@ -670,7 +670,9 @@ describe("index (Postgres) migration steps added since the 9231f43 reference rel
 
 	test("every step added since is additive: create table / create index / add column, all if not exists (a NOT NULL column has a default)", () => {
 		for (const step of stepsSinceReference(MIGRATION_STEPS)) {
-			expect({ step: step.version, name: step.name, notAdditive: nonAdditiveStatements(step) }).toEqual({ step: step.version, name: step.name, notAdditive: [] });
+			// Step 48's only non-additive statement is its fail-closed guard: a do block that raises when the index is invalid, and drops nothing. Any other statement still fails the rule.
+			const notAdditive = nonAdditiveStatements(step).filter((statement) => !(step.version === 48 && statement.toLowerCase().startsWith("do $$")));
+			expect({ step: step.version, name: step.name, notAdditive }).toEqual({ step: step.version, name: step.name, notAdditive: [] });
 		}
 	});
 

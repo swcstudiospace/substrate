@@ -24,8 +24,7 @@
  * caller through `onDrop`, so the warning shape stays the forward's own.
  */
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { OutboxFile, outboxBackoffMs } from "./outbox-file.ts";
 
 /** A failure the plane may recover from; everything else is a refusal. */
 export const TRANSIENT_RETAIN_REASONS: readonly string[] = [
@@ -100,8 +99,7 @@ export interface RetainOutboxStats {
 export const DEFAULT_RETAIN_OUTBOX_MAX = 10_000;
 export const DEFAULT_RETAIN_MAX_ATTEMPTS = 10;
 export const DEFAULT_RETAIN_DRAIN_MS = 30_000;
-const BACKOFF_BASE_MS = 30_000;
-const BACKOFF_CAP_MS = 3_600_000;
+const RETAIN_BACKOFF = { base: 30_000, cap: 3_600_000 };
 
 /**
  * 30 s × 2^attempt, base capped at one hour, then ±20 % jitter so a fleet
@@ -109,9 +107,7 @@ const BACKOFF_CAP_MS = 3_600_000;
  * first replay after the live failure waits ~30 s.
  */
 export function retainBackoffMs(attempt: number, random: () => number = Math.random): number {
-	const exponent = Math.max(0, Math.min(attempt, 30));
-	const base = Math.min(BACKOFF_BASE_MS * 2 ** exponent, BACKOFF_CAP_MS);
-	return Math.round(base * (0.8 + 0.4 * random()));
+	return outboxBackoffMs(attempt, RETAIN_BACKOFF, random);
 }
 
 function keyOf(entry: { bank: string; document_id: string }): string {
@@ -137,7 +133,7 @@ function isEntry(value: unknown): value is RetainOutboxEntry {
 }
 
 export class RetainOutbox {
-	private readonly path: string | null;
+	private readonly file: OutboxFile<RetainOutboxEntry> | null;
 	private readonly max: number;
 	private readonly maxAttempts: number;
 	private readonly now: () => number;
@@ -150,13 +146,10 @@ export class RetainOutbox {
 	private draining: Promise<void> | null = null;
 	/** Set when a drain was refused by the gate; cleared by the next drain that ran. */
 	private heldByGate = false;
-	/** True from a failed save until the next one that succeeds; `durable` is false meanwhile. */
-	private unsaved = false;
-	/** File-system error codes already reported, so a broken disk logs once per code. */
-	private readonly reported = new Set<string>();
 
 	constructor(options: RetainOutboxOptions = {}) {
-		this.path = options.path ?? null;
+		const path = options.path ?? null;
+		this.file = path === null ? null : new OutboxFile<RetainOutboxEntry>({ path, label: "retain outbox", isEntry, keyOf, onUnsaved: (entry) => this.onUnsaved(entry) });
 		this.max = Math.max(1, options.max ?? DEFAULT_RETAIN_OUTBOX_MAX);
 		this.maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_RETAIN_MAX_ATTEMPTS);
 		this.now = options.now ?? Date.now;
@@ -164,7 +157,7 @@ export class RetainOutbox {
 		this.allow = options.allow ?? (() => true);
 		this.onDrop = options.onDrop ?? (() => undefined);
 		this.onUnsaved = options.onUnsaved ?? (() => undefined);
-		if (this.path !== null) this.hydrate(this.path);
+		this.hydrate();
 	}
 
 	/**
@@ -174,7 +167,7 @@ export class RetainOutbox {
 	 * restart would silently lose what the failed save never wrote.
 	 */
 	get durable(): boolean {
-		return this.path !== null && !this.unsaved;
+		return this.file?.durable ?? false;
 	}
 
 	/** Whether this exact entry is still parked: a replay that waited its turn re-checks before sending. */
@@ -346,95 +339,20 @@ export class RetainOutbox {
 	}
 
 	/** Rebuild the queue from the file: last line per document wins, oldest first. */
-	private hydrate(path: string): void {
-		let body: string;
-		try {
-			if (!existsSync(path)) return;
-			body = readFileSync(path, "utf8");
-		} catch (cause) {
-			this.report("read", cause);
-			return;
-		}
-		let malformed = 0;
-		for (const line of body.split("\n")) {
-			if (line.trim().length === 0) continue;
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(line);
-			} catch {
-				malformed += 1;
-				continue;
-			}
-			if (!isEntry(parsed)) {
-				malformed += 1;
-				continue;
-			}
-			const key = keyOf(parsed);
-			this.entries.delete(key);
-			this.entries.set(key, { ...parsed });
-		}
-		if (malformed > 0) process.stderr.write(`[substrate] retain outbox: skipped ${malformed} malformed line(s) in ${path}\n`);
+	private hydrate(): void {
+		const read = this.file?.read();
+		if (!read) return;
+		for (const entry of read.entries) this.entries.set(keyOf(entry), { ...entry });
 		this.enforceBound();
 		// One compact rewrite at boot: the file is back to one line per entry.
 		this.compact();
 	}
 
 	private append(entry: RetainOutboxEntry): void {
-		if (this.path === null) return;
-		// An earlier save failed: a plain append would leave the file missing
-		// what that save never wrote. Rewrite the whole queue instead.
-		if (this.unsaved) {
-			this.compact();
-			return;
-		}
-		try {
-			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-			const fresh = !existsSync(this.path);
-			appendFileSync(this.path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-			if (fresh) chmodSync(this.path, 0o600);
-			this.saved();
-		} catch (cause) {
-			this.failedSave("append", cause, entry);
-		}
+		this.file?.append(entry, () => this.entries.values());
 	}
 
 	private compact(): void {
-		if (this.path === null) return;
-		try {
-			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-			const tmp = `${this.path}.${process.pid}.tmp`;
-			const lines = [...this.entries.values()].map((entry) => JSON.stringify(entry));
-			writeFileSync(tmp, lines.length === 0 ? "" : `${lines.join("\n")}\n`, { mode: 0o600 });
-			chmodSync(tmp, 0o600);
-			renameSync(tmp, this.path);
-			this.saved();
-		} catch (cause) {
-			this.failedSave("rewrite", cause, this.entries.values().next().value ?? null);
-		}
-	}
-
-	private saved(): void {
-		this.unsaved = false;
-	}
-
-	/**
-	 * One save failed. The queue stays in memory and keeps retrying, but it is
-	 * no longer durable: the first failure after a good state warns once (the
-	 * retain-failed shape, reason `outbox-unsaved`, on the entry at hand so the
-	 * trail has a locator) and every later save rewrites the whole file.
-	 */
-	private failedSave(action: string, cause: unknown, entry: RetainOutboxEntry | null): void {
-		this.report(action, cause);
-		if (this.unsaved) return;
-		this.unsaved = true;
-		if (entry !== null) this.onUnsaved(entry);
-	}
-
-	/** Fixed text plus the errno code: the path is config, never a secret, but a body never belongs in a log. */
-	private report(action: string, cause: unknown): void {
-		const code = (cause as NodeJS.ErrnoException | null)?.code ?? "EIO";
-		if (this.reported.has(`${action}:${code}`)) return;
-		this.reported.add(`${action}:${code}`);
-		process.stderr.write(`[substrate] retain outbox ${action} failed (${code}) at ${this.path}; the queue continues in memory\n`);
+		this.file?.rewrite(() => this.entries.values());
 	}
 }

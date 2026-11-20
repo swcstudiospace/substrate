@@ -1,19 +1,29 @@
 /**
- * Planning plane settings (phase 52, SOTA-08). Environment only.
+ * Planning plane settings (phase 52, SOTA-08; multi-root, v1.7). Environment only.
  *
- * `SUBSTRATE_PLANNING_ROOT` is the absolute checkout whose `.planning/` the plane reads. Unset
- * or blank means the plane is disabled: nothing is read and no default path exists. The numeric
- * settings have documented defaults. A value that is set but is not a plain integer in range is
- * an error, never a silent fallback. A blank numeric value counts as malformed, because it was
- * set on purpose.
+ * `SUBSTRATE_PLANNING_ROOTS` is a comma-separated list of absolute checkout paths whose `.planning/`
+ * the plane reads. Each entry is trimmed, blank entries are dropped, and a relative or duplicate entry
+ * refuses the whole list. Unset or blank means the plane is disabled: nothing is read and no default path
+ * exists. Each checkout is keyed by `planningSessionId` (`checkout.ts`). The numeric settings have documented
+ * defaults. A value that is set but is not a plain integer in range is an error, never a silent fallback. A
+ * blank numeric value counts as malformed, because it was set on purpose.
+ *
+ * `SUBSTRATE_PLANNING_PASS` (`on` by default, or `off`) decides whether the planning pass runs at all. `off` runs no pass, so
+ * the planning refresh reads and sends no `.planning/` page to LightRAG; the roots still derive the dataset registry.
  */
-import { isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
+import { isAbsolute, resolve as resolvePath } from "node:path";
+import { planningSessionId } from "./checkout.ts";
+import type { PlanningFs } from "./index.ts";
 
-export const PLANNING_ROOT_ENV = "SUBSTRATE_PLANNING_ROOT";
+export const PLANNING_ROOTS_ENV = "SUBSTRATE_PLANNING_ROOTS";
 export const PLANNING_PRESENCE_TTL_ENV = "SUBSTRATE_PLANNING_PRESENCE_TTL_S";
 export const PLANNING_MAX_FILES_ENV = "SUBSTRATE_PLANNING_MAX_FILES";
 export const PLANNING_MAX_BYTES_ENV = "SUBSTRATE_PLANNING_MAX_BYTES";
 export const PLANNING_SCAN_INTERVAL_ENV = "SUBSTRATE_PLANNING_SCAN_INTERVAL_MS";
+/** The pass switch: `on` (the default) or `off`. See `planningPassSetting`. */
+export const PLANNING_PASS_ENV = "SUBSTRATE_PLANNING_PASS";
+export type PlanningPass = "on" | "off";
 
 export const DEFAULT_PRESENCE_TTL_S = 90;
 export const DEFAULT_MAX_FILES = 500;
@@ -38,9 +48,15 @@ export interface PlanningLimits {
 	scanIntervalMs: number;
 }
 
-export type PlanningSettings = (PlanningLimits & { enabled: false }) | (PlanningLimits & { enabled: true; root: string });
+/** One checkout the plane reads: `root` is the absolute path as given (trimmed); `key` is `planningSessionId(root)`, the page and state key. */
+export interface PlanningCheckout {
+	root: string;
+	key: string;
+}
 
-export type PlanningConfigReason = "not-absolute" | "invalid-characters" | "not-integer" | "out-of-range";
+export type PlanningSettings = (PlanningLimits & { enabled: false; checkouts: readonly [] }) | (PlanningLimits & { enabled: true; checkouts: readonly PlanningCheckout[] });
+
+export type PlanningConfigReason = "not-absolute" | "invalid-characters" | "duplicate" | "not-integer" | "out-of-range" | "unrecognised";
 
 export interface PlanningConfigError {
 	key: string;
@@ -59,15 +75,55 @@ export function loadPlanningSettings(env: Readonly<Record<string, string | undef
 	const maxFiles = integerSetting(env, PLANNING_MAX_FILES_ENV, DEFAULT_MAX_FILES, PLANNING_BOUNDS.maxFiles, errors);
 	const maxBytes = integerSetting(env, PLANNING_MAX_BYTES_ENV, DEFAULT_MAX_BYTES, PLANNING_BOUNDS.maxBytes, errors);
 	const scanIntervalMs = integerSetting(env, PLANNING_SCAN_INTERVAL_ENV, DEFAULT_SCAN_INTERVAL_MS, PLANNING_BOUNDS.scanIntervalMs, errors);
+	if (planningPassSetting(env) === null) errors.push({ key: PLANNING_PASS_ENV, reason: "unrecognised" });
 
-	const root = (env[PLANNING_ROOT_ENV] ?? "").trim();
-	if (root.includes("\0")) errors.push({ key: PLANNING_ROOT_ENV, reason: "invalid-characters" });
-	else if (root !== "" && !isAbsolute(root)) errors.push({ key: PLANNING_ROOT_ENV, reason: "not-absolute" });
+	const checkouts = checkoutsSetting(env, errors);
 
 	if (errors.length > 0) return { ok: false, errors };
 	const limits: PlanningLimits = { presenceTtlS, maxFiles, maxBytes, scanIntervalMs };
-	if (root === "") return { ok: true, settings: { enabled: false, ...limits } };
-	return { ok: true, settings: { enabled: true, root, ...limits } };
+	if (checkouts.length === 0) return { ok: true, settings: { enabled: false, checkouts: [], ...limits } };
+	return { ok: true, settings: { enabled: true, checkouts, ...limits } };
+}
+
+/**
+ * The hasher `planningSessionId` needs. It reads only `sha256` from a PlanningFs, and this is the same digest as
+ * `nodePlanningFs()` in fs.ts. fs.ts is not imported here: it reaches position.ts, which imports this file.
+ */
+const CHECKOUT_HASHER = { sha256: (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex") } as PlanningFs;
+
+/**
+ * `SUBSTRATE_PLANNING_ROOTS`: split on commas, each entry trimmed, blank entries dropped. Duplicates are compared as
+ * resolved paths, so `/a` and `/a/` collide. Each refusal reason is reported once, and the value is never echoed.
+ */
+function checkoutsSetting(env: Readonly<Record<string, string | undefined>>, errors: PlanningConfigError[]): PlanningCheckout[] {
+	const reasons = new Set<PlanningConfigReason>();
+	const seen = new Set<string>();
+	const checkouts: PlanningCheckout[] = [];
+	const entries = (env[PLANNING_ROOTS_ENV] ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+	for (const root of entries) {
+		if (root.includes("\0")) reasons.add("invalid-characters");
+		else if (!isAbsolute(root)) reasons.add("not-absolute");
+		else if (seen.has(resolvePath(root))) reasons.add("duplicate");
+		else {
+			seen.add(resolvePath(root));
+			checkouts.push({ root, key: planningSessionId(CHECKOUT_HASHER, root) });
+		}
+	}
+	for (const reason of reasons) errors.push({ key: PLANNING_ROOTS_ENV, reason });
+	return checkouts;
+}
+
+/**
+ * `SUBSTRATE_PLANNING_PASS`: `on` runs the planning pass, which scans the checkouts and sends changed `.planning/` pages to
+ * LightRAG; `off` runs no pass, so nothing under `.planning/` reaches LightRAG. The dataset registry is derived from the roots
+ * either way. Trimmed and case-insensitive; unset is `on`. Any other value, a blank one included, is refused: this returns
+ * null for it, and the value is never echoed.
+ */
+export function planningPassSetting(env: Readonly<Record<string, string | undefined>>): PlanningPass | null {
+	const raw = env[PLANNING_PASS_ENV];
+	if (raw === undefined) return "on";
+	const value = raw.trim().toLowerCase();
+	return value === "on" || value === "off" ? value : null;
 }
 
 /** The boot warnings for refused planning settings: each key and why, never the value. Empty when the settings are valid. */

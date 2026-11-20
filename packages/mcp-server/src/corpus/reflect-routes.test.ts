@@ -220,7 +220,7 @@ describe("POST /corpus/reflect", () => {
 		expect(bare.store.rows.size).toBe(0);
 	});
 
-	test("a valid digest is stored as the corpus document and reported stored; the same digest again is unchanged and sends nothing", async () => {
+	test("a valid digest is stored as the corpus document and reported stored; the same digest again is unchanged and sends nothing, and its retain is owed again", async () => {
 		const harness = await start(ON);
 		const first = await post(harness, "/corpus/reflect", request(digest));
 		expect(first.status).toBe(200);
@@ -231,8 +231,9 @@ describe("POST /corpus/reflect", () => {
 		expect(harness.store.row(REPO, DIGEST_PATH)).toMatchObject({ kind: "digest", state: "active", sha256: digest.sha256 });
 		expect(harness.plane.batches).toEqual([[corpusDocumentName(REPO, DIGEST_PATH, digest.sha256, { kind: "digest", tier: 1 })]]);
 
+		// This server has no memory index, so the retain is still owed: the repeat reports it again instead of a bare unchanged.
 		const again = (await (await post(harness, "/corpus/reflect", request(digest))).json()) as Reflected;
-		expect(again.results).toEqual([{ repo: REPO, status: "unchanged" }]);
+		expect(again.results).toEqual([{ repo: REPO, status: "unchanged", reason: "hindsight:store.unavailable" }]);
 		expect(harness.plane.batches).toHaveLength(1);
 	});
 

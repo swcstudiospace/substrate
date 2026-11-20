@@ -601,10 +601,10 @@ describe("the quota-burn objectives (SPE-10477)", () => {
 });
 
 describe("the per-plane availability objectives (uplift-2 R2)", () => {
-	const ALL = { greptime: true, index: true, cache: true, hindsight: true, ragflow: true };
+	const ALL = { greptime: true, index: true, cache: true, hindsight: true, lightrag: true };
 
 	/** `n` plane calls on `plane`, `bad` of them failed. */
-	function calls(instruments: SubstrateInstruments, plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow", n: number, bad = 0) {
+	function calls(instruments: SubstrateInstruments, plane: "greptime" | "index" | "cache" | "hindsight" | "lightrag", n: number, bad = 0) {
 		for (let i = 0; i < n; i++) {
 			const outcome = i < bad ? (i % 3 === 0 ? "timeout" : i % 3 === 1 ? "error" : "open") : "ok";
 			instruments.recordPlane({ plane, op: "op", outcome, durationMs: 10, ...(outcome === "ok" ? {} : { reason: "x" }) });
@@ -624,7 +624,6 @@ describe("the per-plane availability objectives (uplift-2 R2)", () => {
 			"plane.index.availability",
 			"plane.cache.availability",
 			"plane.hindsight.availability",
-			"plane.ragflow.availability",
 			"plane.lightrag.availability",
 		]);
 		expect(plane(results, "plane.index.availability")).toMatchObject({ status: "unconfigured", observed: null, samples: 0, unit: "ratio", target: 0.99 });
@@ -654,8 +653,8 @@ describe("the per-plane availability objectives (uplift-2 R2)", () => {
 		const result = plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 60_000 }), "plane.hindsight.availability");
 		expect(result).toMatchObject({ status: "breached", observed: 0.97, samples: 100 });
 		expect(result.detail).toContain("97 of 100 calls ok");
-		// The ragflow plane is untouched: enough readings, no calls.
-		expect(plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 61_000 }), "plane.ragflow.availability").status).toBe(
+		// The cache plane is untouched: enough readings, no calls.
+		expect(plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 61_000 }), "plane.cache.availability").status).toBe(
 			"insufficient-data",
 		);
 	});
@@ -758,8 +757,8 @@ describe("the per-plane availability objectives (uplift-2 R2)", () => {
 
 		// A slow poller covers the same hour with fewer readings.
 		const slow = new PlaneWindow();
-		let last = slow.observe("ragflow", 0, 0, 0);
-		for (let minute = 1; minute <= 61; minute++) last = slow.observe("ragflow", minute * 60, minute * 60, minute * 60_000);
+		let last = slow.observe("lightrag", 0, 0, 0);
+		for (let minute = 1; minute <= 61; minute++) last = slow.observe("lightrag", minute * 60, minute * 60, minute * 60_000);
 		expect(last.samples).toBe(61);
 		expect(last.spanMs).toBe(PLANE_WINDOW_MS);
 		expect(last.total).toBe(3600);

@@ -29,7 +29,7 @@ below once per kind. The body is never in the event. From the operator session:
 
 ```sh
 # the last hour of refusals, grouped by writer and reason
-curl -s "http://127.0.0.1:7410/events/query" -H "authorization: Bearer $SUBSTRATE_TOKEN_SUBSTRATE" \
+curl -s "http://127.0.0.1:7410/events/query" --oauth2-bearer "$SUBSTRATE_TOKEN_SUBSTRATE" \
   -H 'content-type: application/json' \
   -d '{"kind":"warning","since":"<ISO one hour ago>","limit":500,"include_payload":true}' \
   | jq -r '.events[] | select(.summary|startswith("memory.write")) | "\(.surface)\t\(.payload.reason)"' | sort | uniq -c | sort -rn
@@ -39,7 +39,7 @@ And the queue itself, with a reviewer token so bodies are visible (they are what
 you need to classify; a `secret` row holds the *redacted* body only):
 
 ```
-memory_pending { limit: 100, review_token: <one of SUBSTRATE_MEMORY_REVIEW_TOKENS> }
+memory_pending { limit: 100, review_token <one of SUBSTRATE_MEMORY_REVIEW_TOKENS> }
 ```
 
 Read the three columns the queue gives you — `writer`, `reason`, `scope` — and

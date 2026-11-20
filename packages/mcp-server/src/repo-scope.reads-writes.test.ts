@@ -166,6 +166,24 @@ describe("memory (criterion 2: memory rows outside the grant are dropped before 
 		const filtered = await substrate.memoryReplyInGrant(reply, SURFACE);
 		expect(filtered.entries.map((entry) => entry.id)).toEqual(["m7"]);
 	});
+
+	test("boundary: a brief's memory read carries the caller's grant, so a row of an ungranted repository is never read into the brief", async () => {
+		const reads: Array<{ granted?: (repo: string) => boolean }> = [];
+		const { index } = countingIndex({});
+		const briefIndex = {
+			...index,
+			openGraphs: async () => [],
+			memoryForBrief: async (_repo: unknown, _graphId: unknown, _limit: unknown, read?: { granted?: (repo: string) => boolean }) => {
+				reads.push(read ?? {});
+				return [];
+			},
+		};
+		const substrate = new Substrate(loadConfig(scopedEnv()), { index: briefIndex as never, greptime: null });
+		await substrate.briefDetailed({ repo: "owner/a", surface: SURFACE });
+		const granted = reads[0]?.granted;
+		expect(granted?.("owner/a")).toBe(true);
+		expect(granted?.("owner/b")).toBe(false);
+	});
 });
 
 describe("memory verify (criterion 2: the reader's repository must be granted before the index is read)", () => {

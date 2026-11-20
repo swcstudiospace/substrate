@@ -14,11 +14,12 @@
  * way `IndexStore.servable` does under `enforce`; what is under test is the
  * service's cache keys and dependencies, not the predicate.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { GRAPHS_GENERATION_KEY, MEMORY_GENERATION_KEY, ReadThroughCache, graphGenerationKey, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { Substrate } from "./service.ts";
 import type { MemoryEntry } from "./types.ts";
+import { withoutHindsightEnv } from "./test-support.ts";
 
 /** A redis that remembers every command, so a generation bump is observable. */
 class FakeRedis implements CacheRedis {
@@ -83,6 +84,12 @@ function graphEntry(over: Partial<MemoryEntry> = {}): MemoryEntry {
 }
 
 describe("a finished graph drops the cached searches that still list its memories", () => {
+	let restoreHindsightEnv: () => void = () => {};
+	beforeEach(() => {
+		restoreHindsightEnv = withoutHindsightEnv();
+	});
+	afterEach(() => restoreHindsightEnv());
+
 	/**
 	 * The index as `enforce` reads it: the graph entry is served while its graph
 	 * is open and left out once `graph_index` says `Merged`. `registerGraph` is

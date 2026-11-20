@@ -1,22 +1,22 @@
 /**
  * Plan 25-03 Task 1: dataset resolve-by-name, refresh with last-five
- * retention, and the skills-sync-not-live degradation — all against the
+ * retention, the skills-sync pin age, and the dataset-list cache — all against the
  * recording fake. Product-dataset creation is proven as a convention here;
  * real creation is a gated live step (G2).
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { Substrate } from "./service.ts";
 import {
 	DATASET_TRIGGER_RETENTION,
+	DatasetListCache,
 	TRIGGER_SCAN_MAX,
 	createSkillsSyncTracker,
 	createTriggerStore,
 	createVersionStore,
-	degradedAgentSkillsServe,
 	isSyncLive,
 	latestVersion,
 	latestVersionFor,
@@ -24,6 +24,8 @@ import {
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
 	pinsByName,
+	knownDatasets,
+	planningDatasetRegistry,
 	recordTrigger,
 	recordVersion,
 	refreshDataset,
@@ -35,10 +37,14 @@ import {
 	type RefreshDeps,
 } from "./docs-datasets.ts";
 import { searchDocs } from "./docs-search.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import type { FetchLike } from "./planes/docs-wire.ts";
+import { DocsPlaneFake } from "./docs-plane-fake.ts";
 import type { EventInput } from "./types.ts";
+import { planningSessionId } from "./planning/checkout.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
+import type { PlanningFs } from "./planning/index.ts";
 
-const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
+const CONFIG = { url: "http://lightrag.test", apiKey: "test-key" };
 
 function eventsHarness() {
 	const events: EventInput[] = [];
@@ -51,7 +57,7 @@ function eventsHarness() {
 
 describe("resolveDatasets", () => {
 	test("reuses existing datasets without creating", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const resolved = await resolveDatasets({ config: CONFIG, fetchImpl: fake.fetch }, ["agent-substrate", "programming-desk"]);
 		if (!resolved.ok) throw new Error(`expected resolve: ${resolved.reason}`);
 		expect(resolved.datasets).toEqual([
@@ -62,7 +68,7 @@ describe("resolveDatasets", () => {
 	});
 
 	test("creates only on a name-miss with the pinned embedding model", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const resolved = await resolveDatasets({ config: CONFIG, fetchImpl: fake.fetch }, ["kanbanos"]);
 		if (!resolved.ok) throw new Error(`expected resolve: ${resolved.reason}`);
 		expect(resolved.datasets[0]?.created).toBe(true);
@@ -74,7 +80,7 @@ describe("resolveDatasets", () => {
 	});
 
 	test("rehearses discovery without creating when asked", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const resolved = await resolveDatasets({ config: CONFIG, fetchImpl: fake.fetch, createOnMiss: false }, ["clippyos"]);
 		if (!resolved.ok) throw new Error(`expected resolve: ${resolved.reason}`);
 		expect(resolved.datasets).toEqual([{ name: "clippyos", id: null, created: false }]);
@@ -83,11 +89,11 @@ describe("resolveDatasets", () => {
 });
 
 describe("lightragSearchDatasets", () => {
-	test("a LightRAG dataset is identified by its name, whatever id a RAGFlow refresh recorded for it", () => {
+	test("a LightRAG dataset is identified by its name, whatever id a lightrag refresh recorded for it", () => {
 		const store = createVersionStore();
-		const base = { dataset: "agent-substrate", content_sha256: "sha", commit: "c1", ingested_at: "2026-10-22T00:00:00Z", backend: "ragflow" as const };
-		recordVersion(store, { ...base, dataset_id: "ragflow-uuid-old", version: "v1" });
-		recordVersion(store, { ...base, dataset_id: "ragflow-uuid", version: "v2" });
+		const base = { dataset: "agent-substrate", content_sha256: "sha", commit: "c1", ingested_at: "2026-10-22T00:00:00Z", backend: "lightrag" as const };
+		recordVersion(store, { ...base, dataset_id: "lightrag-uuid-old", version: "v1" });
+		recordVersion(store, { ...base, dataset_id: "lightrag-uuid", version: "v2" });
 		expect(lightragSearchDatasets(["agent-substrate"])).toEqual({ ok: true, datasets: [{ id: "agent-substrate", name: "agent-substrate" }] });
 	});
 
@@ -97,7 +103,7 @@ describe("lightragSearchDatasets", () => {
 
 	test("the caller's name order does not change the list or its first dataset", () => {
 		const store = createVersionStore();
-		recordVersion(store, { dataset: "agent-skills", dataset_id: "uuid-skills", version: "v1", commit: "c1", content_sha256: "sha", ingested_at: "2026-10-22T00:00:00Z", backend: "ragflow" });
+		recordVersion(store, { dataset: "agent-skills", dataset_id: "uuid-skills", version: "v1", commit: "c1", content_sha256: "sha", ingested_at: "2026-10-22T00:00:00Z", backend: "lightrag" });
 		const listed = lightragSearchDatasets(["agent-substrate", "agent-skills"]);
 		expect(lightragSearchDatasets(["agent-skills", "agent-substrate"])).toEqual(listed);
 		expect(listed).toEqual({
@@ -111,18 +117,18 @@ describe("lightragSearchDatasets", () => {
 
 	test("the pin is filed under the dataset's name, from that name's newest version of the backend asked for", () => {
 		const store = createVersionStore();
-		const base = { dataset: "agent-substrate", content_sha256: "sha", commit: "c1", ingested_at: "2026-10-22T00:00:00Z", backend: "ragflow" as const };
-		recordVersion(store, { ...base, dataset_id: "ragflow-uuid-old", version: "v1" });
-		recordVersion(store, { ...base, dataset_id: "ragflow-uuid", version: "v2" });
-		expect(pinsByName(store, ["agent-substrate", "agent-missing"], "ragflow")).toEqual({
-			"agent-substrate": { dataset: "agent-substrate", dataset_id: "ragflow-uuid", version: "v2", commit: "c1", ingested_at: "2026-10-22T00:00:00Z" },
+		const base = { dataset: "agent-substrate", content_sha256: "sha", commit: "c1", ingested_at: "2026-10-22T00:00:00Z", backend: "lightrag" as const };
+		recordVersion(store, { ...base, dataset_id: "lightrag-uuid-old", version: "v1" });
+		recordVersion(store, { ...base, dataset_id: "lightrag-uuid", version: "v2" });
+		expect(pinsByName(store, ["agent-substrate", "agent-missing"], "lightrag")).toEqual({
+			"agent-substrate": { dataset: "agent-substrate", dataset_id: "lightrag-uuid", version: "v2", commit: "c1", ingested_at: "2026-10-22T00:00:00Z" },
 		});
 	});
 });
 
 describe("refreshDataset", () => {
 	test("records versions and keeps the last five with monotonic numbers", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { emit } = eventsHarness();
 		const deps: RefreshDeps = { config: CONFIG, versions: createVersionStore(), emit, fetchImpl: fake.fetch, nowMs: 1_000_000 };
 		for (let n = 1; n <= 7; n += 1) {
@@ -132,11 +138,11 @@ describe("refreshDataset", () => {
 		const kept = deps.versions.get("agent-substrate") ?? [];
 		expect(kept.map((version) => version.version)).toEqual(["v3", "v4", "v5", "v6", "v7"]);
 		expect(latestVersion(deps.versions, "agent-substrate")?.commit).toBe("c7");
-		expect(latestVersion(deps.versions, "agent-substrate")?.backend).toBe("ragflow");
+		expect(latestVersion(deps.versions, "agent-substrate")?.backend).toBe("lightrag");
 	});
 
 	test("pins travel as dataset_commit; an unrecorded document is never cited with the pin as its commit", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { emit } = eventsHarness();
 		const versions = createVersionStore();
 		const refreshed = await refreshDataset(
@@ -144,9 +150,27 @@ describe("refreshDataset", () => {
 			{ dataset: "agent-substrate", commit: "pinned-commit", content_sha256: "sha" },
 		);
 		if (!refreshed.ok) throw new Error(`expected refresh: ${refreshed.reason}`);
+		const documentId = "doc-unrecorded";
 		const reply = await searchDocs(
-			{ config: CONFIG, emit, fetchImpl: fake.fetch, pins: pinsFromVersions(versions, "ragflow"), datasetNames: ["agent-substrate"] },
-			"who reads RAGFlow?",
+			{
+				config: CONFIG,
+				lightragConfig: { url: CONFIG.url },
+				emit,
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "An unrecorded passage.", document_name: "notes.md", document_id: documentId, chunk_id: "chunk-1", heading_path: "Notes", source_url: "https://example.com/notes", score: 0.9 }],
+					detail: { mode: "naive", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
+				lightragRecords: new Map([
+					[
+						"lightrag::swcstudiospace/agent-substrate::https://example.com/notes",
+						{ sha: "recorded-sha", dataset_id: "swcstudiospace/agent-substrate", source_url: "https://example.com/notes", document_id: documentId, version: 1 },
+					],
+				]),
+				pins: pinsByName(versions, ["agent-substrate"], "lightrag"),
+				datasetNames: ["agent-substrate"],
+			},
+			"who reads lightrag?",
 		);
 		expect(reply.chunks.length).toBeGreaterThan(0);
 		expect(reply.chunks.every((citation) => citation.dataset_commit === "pinned-commit")).toBe(true);
@@ -154,37 +178,8 @@ describe("refreshDataset", () => {
 	});
 });
 
-describe("skills-sync degradation", () => {
-	test("absent fast-forward warns once and serves the pin with its age", async () => {
-		const fake = new RagflowFake();
-		const { events, emit } = eventsHarness();
-		const versions = createVersionStore();
-		recordVersion(versions, {
-			dataset: "agent-skills",
-			dataset_id: "ds-leipzig-agent-skills",
-			version: "v2",
-			commit: "skill-pin",
-			backend: "ragflow",
-			content_sha256: "sha",
-			ingested_at: new Date(1_000_000).toISOString(),
-		});
-		const tracker = createSkillsSyncTracker();
-		expect(isSyncLive(tracker)).toBe(false);
-		const deps: RefreshDeps = { config: CONFIG, versions, emit, fetchImpl: fake.fetch, nowMs: 1_000_000 + 60_000 };
-		const first = await degradedAgentSkillsServe(deps, tracker);
-		if (!first.ok) throw new Error(`expected serve: ${first.reason}`);
-		expect(first.serve.pin_age_ms).toBe(60_000);
-		const warnings = events.filter((event) => event.kind === "warning");
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]?.payload).toMatchObject({ action: "docs.ingest", reason: "skills-sync-not-live" });
-
-		const second = await degradedAgentSkillsServe(deps, tracker);
-		if (!second.ok) throw new Error(`expected serve: ${second.reason}`);
-		expect(events.filter((event) => event.kind === "warning")).toHaveLength(1);
-	});
-
+describe("skills-sync liveness and the pin age", () => {
 	test("pin age travels in the search reply for degraded datasets", async () => {
-		const fake = new RagflowFake();
 		const { emit } = eventsHarness();
 		const versions = createVersionStore();
 		recordVersion(versions, {
@@ -192,17 +187,30 @@ describe("skills-sync degradation", () => {
 			dataset_id: "ds-leipzig-agent-skills",
 			version: "v2",
 			commit: "skill-pin",
-			backend: "ragflow",
+			backend: "lightrag",
 			content_sha256: "sha",
 			ingested_at: new Date(1_000_000).toISOString(),
 		});
+		const documentId = "doc-skill";
 		const reply = await searchDocs(
 			{
 				config: CONFIG,
+				lightragConfig: { url: CONFIG.url },
 				emit,
-				fetchImpl: fake.fetch,
-				pins: pinsFromVersions(versions, "ragflow"),
+				lightragRetrieve: async () => ({
+					ok: true,
+					chunks: [{ content: "A skill passage.", document_name: "SKILL.md", document_id: documentId, chunk_id: "chunk-1", heading_path: "Skill", score: 0.9 }],
+					detail: { mode: "naive", counts: { entities: 0, relations: 0 }, provenance: { entities: [], relations: 0 } },
+				}),
+				lightragRecords: new Map([
+					[
+						"lightrag::swcstudiospace/agent-skills::https://example.com/skill",
+						{ sha: "recorded-sha", dataset_id: "swcstudiospace/agent-skills", source_url: "https://example.com/skill", document_id: documentId, version: 1 },
+					],
+				]),
+				pins: pinsByName(versions, ["agent-skills"], "lightrag"),
 				degradedDatasets: ["agent-skills"],
+				datasetNames: ["agent-skills"],
 				nowMs: 1_000_000 + 30_000,
 			},
 			"what skills exist?",
@@ -213,7 +221,7 @@ describe("skills-sync degradation", () => {
 	});
 
 	test("a fast-forward flips the tracker live and drives refresh", async () => {
-		const fake = new RagflowFake();
+		const fake = new DocsPlaneFake();
 		const { events, emit } = eventsHarness();
 		const tracker = createSkillsSyncTracker();
 		noteSkillsSyncFastForward(tracker);
@@ -225,17 +233,6 @@ describe("skills-sync degradation", () => {
 		if (!refreshed.ok) throw new Error(`expected refresh: ${refreshed.reason}`);
 		expect(refreshed.version.version).toBe("v1");
 		expect(events.some((event) => event.kind === "note")).toBe(true);
-	});
-
-	test("degraded serve without a pin is a reason, not a throw", async () => {
-		const fake = new RagflowFake();
-		const { emit } = eventsHarness();
-		const serve = await degradedAgentSkillsServe(
-			{ config: CONFIG, versions: createVersionStore(), emit, fetchImpl: fake.fetch },
-			createSkillsSyncTracker(),
-		);
-		if (serve.ok) throw new Error("expected a reason");
-		expect(serve.reason).toBe("no-pinned-version");
 	});
 });
 
@@ -252,88 +249,213 @@ describe("the accepted-trigger store (uplift-4 S7)", () => {
 		expect(kept[kept.length - 1]?.commit).toBe(`c${DATASET_TRIGGER_RETENTION + 6}`);
 	});
 
-	test("round-trips through JSON, reading only the trigger table's own datasets and skipping bad rows", () => {
+	test("round-trips through JSON, reading only the named datasets and skipping bad rows", () => {
 		const store = createTriggerStore();
 		recordTrigger(store, "kanbanos", { commit: "k1", content_sha256: "s", received_at: at });
 		const json = triggersToJson(store);
-		expect(triggersFromJson(JSON.parse(JSON.stringify(json))).get("kanbanos")).toEqual([{ commit: "k1", content_sha256: "s", received_at: at }]);
-		const hostile = triggersFromJson({ constructor: [{ commit: "c", content_sha256: "s", received_at: at }], kanbanos: [null, 5, { commit: "k", content_sha256: "s", received_at: "nope" }] });
+		expect(triggersFromJson(JSON.parse(JSON.stringify(json)), ["kanbanos"]).get("kanbanos")).toEqual([{ commit: "k1", content_sha256: "s", received_at: at }]);
+		const hostile = triggersFromJson({ constructor: [{ commit: "c", content_sha256: "s", received_at: at }], kanbanos: [null, 5, { commit: "k", content_sha256: "s", received_at: "nope" }] }, ["kanbanos"]);
 		expect(hostile.size).toBe(0);
-		expect(triggersFromJson(null).size).toBe(0);
-		expect(triggersFromJson([]).size).toBe(0);
+		expect(triggersFromJson(null, ["kanbanos"]).size).toBe(0);
+		expect(triggersFromJson([], ["kanbanos"]).size).toBe(0);
 	});
 
 	test("reads at most TRIGGER_SCAN_MAX rows from the tail of an oversized list", () => {
 		const rows = Array.from({ length: 10_000 }, (_, i) => ({ commit: `c${i}`, content_sha256: "s", received_at: at }));
-		const kept = triggersFromJson({ "agent-substrate": rows }).get("agent-substrate") ?? [];
+		const kept = triggersFromJson({ "agent-substrate": rows }, ["agent-substrate"]).get("agent-substrate") ?? [];
 		expect(kept).toHaveLength(DATASET_TRIGGER_RETENTION);
 		expect(kept[kept.length - 1]?.commit).toBe("c9999");
 		const garbage = Array.from({ length: TRIGGER_SCAN_MAX + 5 }, () => ({ nope: true }));
-		expect(triggersFromJson({ "agent-substrate": [{ commit: "old", content_sha256: "s", received_at: at }, ...garbage] }).size).toBe(0);
+		expect(triggersFromJson({ "agent-substrate": [{ commit: "old", content_sha256: "s", received_at: at }, ...garbage] }, ["agent-substrate"]).size).toBe(0);
 	});
 });
 
 describe("a completed version belongs to the backend that indexed it", () => {
 	const at = "2026-10-22T00:00:00Z";
 
-	test("the backend round-trips through the state file; a legacy version without one loads as ragflow", () => {
+	test("the backend round-trips through the state file; a legacy version without one loads as lightrag", () => {
 		const store = createVersionStore();
 		recordVersion(store, { dataset: "agent-substrate", dataset_id: "agent-substrate", version: "v1", commit: "c1", content_sha256: "s", ingested_at: at, backend: "lightrag" });
 		const reloaded = versionsFromJson(JSON.parse(JSON.stringify(versionsToJson(store))));
 		expect(reloaded.get("agent-substrate")).toEqual(store.get("agent-substrate"));
 		const legacy = versionsFromJson({ "agent-substrate": [{ dataset: "agent-substrate", dataset_id: "uuid", version: "v1", commit: "c0", content_sha256: "s", ingested_at: at }] });
-		expect(legacy.get("agent-substrate")?.[0]?.backend).toBe("ragflow");
+		expect(legacy.get("agent-substrate")?.[0]?.backend).toBe("lightrag");
 		expect(versionsFromJson({ "agent-substrate": [{ dataset: "agent-substrate", dataset_id: "uuid", version: "v1", commit: "c0", content_sha256: "s", ingested_at: at, backend: "pinecone" }] }).size).toBe(0);
 	});
 
 	test("the newest version a backend recorded is the one it completes against", () => {
 		const store = createVersionStore();
 		const row = { dataset: "agent-substrate", content_sha256: "s", ingested_at: at };
-		recordVersion(store, { ...row, dataset_id: "uuid", version: "v1", commit: "c-ragflow", backend: "ragflow" });
+		recordVersion(store, { ...row, dataset_id: "uuid", version: "v1", commit: "c-lightrag", backend: "lightrag" });
 		recordVersion(store, { ...row, dataset_id: "agent-substrate", version: "v2", commit: "c-lightrag", backend: "lightrag" });
-		recordVersion(store, { ...row, dataset_id: "uuid", version: "v3", commit: "c-ragflow-2", backend: "ragflow" });
-		expect(latestVersionFor(store, "agent-substrate", "lightrag")?.commit).toBe("c-lightrag");
-		expect(latestVersionFor(store, "agent-substrate", "ragflow")?.commit).toBe("c-ragflow-2");
-		expect(latestVersionFor(store, "agent-skills", "ragflow")).toBeUndefined();
+		recordVersion(store, { ...row, dataset_id: "uuid", version: "v3", commit: "c-lightrag-2", backend: "lightrag" });
+		expect(latestVersionFor(store, "agent-substrate", "lightrag")?.commit).toBe("c-lightrag-2");
+		expect(latestVersionFor(store, "agent-skills", "lightrag")).toBeUndefined();
 	});
 
-	test("a pin never crosses backends: a RAGFlow-era version supplies no LightRAG pin and a LightRAG version supplies no RAGFlow pin", () => {
+	test("a LightRAG version supplies a LightRAG pin", () => {
 		const store = createVersionStore();
 		const row = { content_sha256: "s", ingested_at: at };
-		recordVersion(store, { ...row, dataset: "agent-substrate", dataset_id: "uuid", version: "v1", commit: "c-ragflow", backend: "ragflow" });
-		recordVersion(store, { ...row, dataset: "agent-skills", dataset_id: "agent-skills", version: "v1", commit: "c-lightrag", backend: "lightrag" });
-		expect(pinsByName(store, ["agent-substrate"], "lightrag")).toEqual({});
-		expect(pinsFromVersions(store, "lightrag")).toEqual({
-			"agent-skills": { dataset: "agent-skills", dataset_id: "agent-skills", version: "v1", commit: "c-lightrag", ingested_at: at },
+		recordVersion(store, { ...row, dataset: "agent-substrate", dataset_id: "agent-substrate", version: "v1", commit: "c-lightrag", backend: "lightrag" });
+		expect(pinsByName(store, ["agent-substrate"], "lightrag")).toEqual({
+			"agent-substrate": { dataset: "agent-substrate", dataset_id: "agent-substrate", version: "v1", commit: "c-lightrag", ingested_at: at },
 		});
-		expect(pinsByName(store, ["agent-skills"], "ragflow")).toEqual({});
-		expect(pinsFromVersions(store, "ragflow")).toEqual({
-			uuid: { dataset: "agent-substrate", dataset_id: "uuid", version: "v1", commit: "c-ragflow", ingested_at: at },
-		});
+		expect(pinsFromVersions(store, "lightrag")["agent-substrate"]?.commit).toBe("c-lightrag");
 	});
 
-	test("after a RAGFlow-era version, a LightRAG replay is not complete; the same version still completes a RAGFlow replay", async () => {
+	test("a LightRAG version is still the latest after a restart on the same backend", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-backend-"));
 		try {
-			const ragflowEnv = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: join(dir, "docs-ingest.json") };
-			const lightragEnv = { ...ragflowEnv, LIGHTRAG_URL: "http://lightrag.test", SUBSTRATE_DOCS_BACKEND: "lightrag" };
-			const fake = new RagflowFake();
-			const ragflowEra = new Substrate(loadConfig(ragflowEnv), { index: null, greptime: null, ragflowFetch: fake.fetch });
-			const recorded = await ragflowEra.recordDocsVersion({ dataset: "agent-substrate", commit: "c-cut", content_sha256: "sha-cut" }, "omp");
+			const lightragEnv = { LIGHTRAG_URL: "http://lightrag.test", LIGHTRAG_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: join(dir, "docs-ingest.json"), SUBSTRATE_DOCS_BACKEND: "lightrag" };
+			const fake = new DocsPlaneFake();
+			const era = new Substrate(loadConfig(lightragEnv), { index: null, greptime: null, lightragFetch: fake.fetch });
+			const recorded = await era.recordDocsVersion({ dataset: "agent-substrate", commit: "c-cut", content_sha256: "sha-cut" }, "omp");
 			if (!recorded.ok) throw new Error(recorded.reason);
-			// The cutover keeps the URLs and the state file and selects LightRAG: the RAGFlow version must not complete its replay.
-			const cutover = new Substrate(loadConfig(lightragEnv), { index: null, greptime: null, ragflowFetch: fake.fetch });
-			expect(await cutover.latestDocsVersion("agent-substrate")).toBeUndefined();
-			// A LightRAG refresh records its own version, which then completes the LightRAG replay.
-			const lightrag = await cutover.recordDocsVersion({ dataset: "agent-substrate", commit: "c-cut", content_sha256: "sha-cut" }, "omp");
-			if (!lightrag.ok) throw new Error(lightrag.reason);
-			expect(lightrag.version).toMatchObject({ backend: "lightrag", dataset_id: "agent-substrate", version: "v2" });
-			expect(await cutover.latestDocsVersion("agent-substrate")).toMatchObject({ backend: "lightrag", commit: "c-cut", content_sha256: "sha-cut" });
-			// The RAGFlow replay of the RAGFlow version still completes after a restart.
-			const restarted = new Substrate(loadConfig(ragflowEnv), { index: null, greptime: null, ragflowFetch: fake.fetch });
-			expect(await restarted.latestDocsVersion("agent-substrate")).toMatchObject({ backend: "ragflow", commit: "c-cut", content_sha256: "sha-cut", version: "v1" });
+			const restarted = new Substrate(loadConfig(lightragEnv), { index: null, greptime: null, lightragFetch: fake.fetch });
+			expect(await restarted.latestDocsVersion("agent-substrate")).toMatchObject({ backend: "lightrag", commit: "c-cut", content_sha256: "sha-cut" });
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("the per-repo dataset registry", () => {
+	const fs = nodePlanningFs();
+	/** A main checkout: its `.git` is a directory. */
+	function mainCheckout(dir: string): string {
+		mkdirSync(join(dir, ".git"), { recursive: true });
+		return dir;
+	}
+	/** A linked worktree at `dir`: its `.git` file names `<repoDotGit>/worktrees/<name>`, whose `commondir` names `<repoDotGit>`. */
+	function linkedWorktree(dir: string, repoDotGit: string, name: string): string {
+		const gitDir = join(repoDotGit, "worktrees", name);
+		mkdirSync(gitDir, { recursive: true });
+		writeFileSync(join(gitDir, "commondir"), "../..\n");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, ".git"), `gitdir: ${gitDir}\n`);
+		return dir;
+	}
+	const keyed = (root: string) => ({ root, key: planningSessionId(fs, root) });
+	async function inTree(run: (base: string) => Promise<void>): Promise<void> {
+		const base = mkdtempSync(join(tmpdir(), "substrate-datasets-"));
+		try {
+			await run(base);
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	}
+
+	test("a main checkout under the repos root is named for its directory", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const repo = keyed(mainCheckout(join(reposRoot, "agent-substrate")));
+			const registry = await planningDatasetRegistry([repo], fs, reposRoot);
+			expect(registry.datasets).toEqual(["agent-substrate"]);
+			expect(registry.datasetOf.get(repo.key)).toBe("agent-substrate");
+		}));
+
+	test("a linked worktree joins its repo's dataset wherever it is checked out, so one repo has one dataset", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const repoGit = join(reposRoot, "agent-substrate", ".git");
+			const main = keyed(mainCheckout(join(reposRoot, "agent-substrate")));
+			const worktree = keyed(linkedWorktree(join(base, "scratch", "as-fix"), repoGit, "as-fix"));
+			const registry = await planningDatasetRegistry([main, worktree], fs, reposRoot);
+			expect(registry.datasets).toEqual(["agent-substrate"]);
+			expect(registry.datasetOf.get(worktree.key)).toBe("agent-substrate");
+		}));
+
+	test("a worktree of a repo outside the repos root is unattributed and keeps a dataset named by its key", () =>
+		inTree(async (base) => {
+			const other = mainCheckout(join(base, "srv", "other"));
+			const worktree = keyed(linkedWorktree(join(base, "scratch", "o-wt"), join(other, ".git"), "o-wt"));
+			const registry = await planningDatasetRegistry([worktree], fs, join(base, "src", "repos"));
+			expect(registry.datasets).toEqual([worktree.key]);
+		}));
+
+	test("checkouts that cannot be attributed each keep a dataset named by their key", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const plain = keyed(mainCheckout(join(base, "srv", "plain")));
+			const noGit = keyed(join(base, "srv", "nogit"));
+			mkdirSync(noGit.root, { recursive: true });
+			const malformed = keyed(join(base, "srv", "malformed"));
+			mkdirSync(malformed.root, { recursive: true });
+			writeFileSync(join(malformed.root, ".git"), "not a pointer\n");
+			const nested = keyed(mainCheckout(join(reposRoot, "group", "nested")));
+			const bareCommon = keyed(linkedWorktree(join(base, "scratch", "bare-wt"), join(reposRoot, "shared.git"), "bare-wt"));
+			const checkouts = [plain, noGit, malformed, nested, bareCommon];
+			const registry = await planningDatasetRegistry(checkouts, fs, reposRoot);
+			for (const checkout of checkouts) expect(registry.datasetOf.get(checkout.key)).toBe(checkout.key);
+			expect(registry.datasets).toEqual(checkouts.map((checkout) => checkout.key).sort());
+		}));
+
+	test("a read that fails keeps that checkout on its key without failing the registry", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const repo = keyed(mainCheckout(join(reposRoot, "agent-substrate")));
+			const broken = keyed(mainCheckout(join(base, "srv", "broken")));
+			const failing: PlanningFs = {
+				...fs,
+				statFile: async (path) => {
+					if (path.startsWith(broken.root)) throw new Error("EIO");
+					return fs.statFile(path);
+				},
+			};
+			const registry = await planningDatasetRegistry([repo, broken], failing, reposRoot);
+			expect(registry.datasetOf.get(broken.key)).toBe(broken.key);
+			expect(registry.datasetOf.get(repo.key)).toBe("agent-substrate");
+		}));
+
+	test("the registry does not depend on the order the checkouts are listed in", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const alpha = keyed(mainCheckout(join(reposRoot, "alpha")));
+			const alphaWorktree = keyed(linkedWorktree(join(base, "scratch", "alpha-wt"), join(reposRoot, "alpha", ".git"), "alpha-wt"));
+			const zeta = keyed(mainCheckout(join(reposRoot, "zeta")));
+			const forward = await planningDatasetRegistry([zeta, alphaWorktree, alpha], fs, reposRoot);
+			const backward = await planningDatasetRegistry([alpha, alphaWorktree, zeta], fs, reposRoot);
+			expect(forward.datasets).toEqual(["alpha", "zeta"]);
+			expect(backward.datasets).toEqual(forward.datasets);
+			expect(Object.fromEntries(backward.datasetOf)).toEqual(Object.fromEntries(forward.datasetOf));
+		}));
+
+	test("no planning roots name no repo datasets; the known set adds the skills library and the corpus", () =>
+		inTree(async (base) => {
+			const reposRoot = join(base, "src", "repos");
+			const empty = await planningDatasetRegistry([], fs, reposRoot);
+			expect(empty.datasets).toEqual([]);
+			expect(knownDatasets(empty)).toEqual(["agent-skills", "corpus"]);
+			const repo = keyed(mainCheckout(join(reposRoot, "kanbanos")));
+			const one = await planningDatasetRegistry([repo], fs, reposRoot);
+			expect(knownDatasets(one)).toEqual(["agent-skills", "corpus", "kanbanos"]);
+		}));
+});
+
+describe("DatasetListCache", () => {
+	test("an invalidate during an open fetch: the stale answer does not refill the hold, and the next reader sees the create", async () => {
+		const fake = new DocsPlaneFake();
+		const cache = new DatasetListCache();
+		const gate = Promise.withResolvers<void>();
+		const reached = Promise.withResolvers<void>();
+		// The first list is answered before the create, then held open until the test releases it.
+		const holdFirst: FetchLike = async (input, init) => {
+			const response = await fake.fetch(input, init);
+			reached.resolve();
+			await gate.promise;
+			return response;
+		};
+		const stale = cache.list(CONFIG, holdFirst);
+		await reached.promise;
+		const created = await fake.fetch("http://lightrag.test/api/v1/datasets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "clippyos", chunk_method: "naive" }) });
+		if (!created.ok) throw new Error(`dataset create failed: ${created.status}`);
+		cache.invalidate();
+		const fresh = await cache.list(CONFIG, fake.fetch);
+		gate.resolve();
+		expect((await stale).ok).toBe(true);
+		expect(fresh.ok && fresh.datasets.some((dataset) => dataset.name === "clippyos")).toBe(true);
+		const held = await cache.list(CONFIG, fake.fetch);
+		expect(held.ok && held.datasets.some((dataset) => dataset.name === "clippyos")).toBe(true);
+		expect(fake.datasetLists()).toHaveLength(2);
 	});
 });

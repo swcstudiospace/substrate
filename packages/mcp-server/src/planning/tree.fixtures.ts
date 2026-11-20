@@ -9,6 +9,8 @@
  */
 import { createHash } from "node:crypto";
 import type { DirEntry, OpenResult, PlanningFs, Probe } from "./index.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export const TREE_ROOT = "/repo";
 
@@ -156,4 +158,15 @@ export class FakeTree implements PlanningFs {
 		if (path in this.links) return "link";
 		return this.files.has(path) ? "file" : "dir";
 	}
+}
+
+/**
+ * Planning roots for a service under test: one checkout per repo, under the repos root the docs dataset registry reads
+ * (`~/src/repos`), held in memory so nothing reaches the disk. A repo is known to the service exactly when a checkout named
+ * after it is listed here.
+ */
+export function reposSeam(names: readonly string[] = ["agent-substrate", "programming-desk"]): { env: Record<string, string>; stores: { planning: { fs: FakeTree; presence: null } } } {
+	const roots = names.map((name) => join(homedir(), "src", "repos", name));
+	const files = Object.fromEntries(roots.map((root) => [join(root, ".git", "HEAD"), "ref: refs/heads/main\n"]));
+	return { env: { SUBSTRATE_PLANNING_ROOTS: roots.join(",") }, stores: { planning: { fs: new FakeTree(files), presence: null } } };
 }

@@ -755,7 +755,7 @@ export async function runGate(opts: GateOptions, deps: GateDeps): Promise<Receip
 				return {
 					ok: true,
 					detail: "exit 1, degraded: the contract held, a plane was not fully up",
-					note: "smoke:grok reported degraded (exit 1) and the gate accepts it: the connector contract held, but a plane or breaker was not fully up. On this twin Hindsight, RAGFlow and the cache are not configured.",
+					note: "smoke:grok reported degraded (exit 1) and the gate accepts it: the connector contract held, but a plane or breaker was not fully up. On this twin Hindsight and the cache are not configured.",
 				};
 			}
 			return { ok: false, detail: result.timedOut ? "timed out" : `exit ${String(result.code)}: ${firstLine(result.out) || firstLine(result.err)}` };

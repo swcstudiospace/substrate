@@ -105,7 +105,7 @@ describe("markMemoryForgotten against a fake connection", () => {
 		expect(await index.markMemoryForgotten(["mem_a", "mem_b", "mem_c"], MARKER)).toEqual(["mem_a", "mem_c"]);
 		expect(statements).toEqual([
 			{
-				text: "update memory_entries set superseded_by = $1 where id in ($2,$3,$4) and superseded_by is null returning id",
+				text: "update memory_entries set superseded_by = $1, forgotten_at = now() where id in ($2,$3,$4) and superseded_by is null returning id",
 				params: [MARKER, "mem_a", "mem_b", "mem_c"],
 			},
 		]);
@@ -278,6 +278,25 @@ describe("every memory reader in the index filters on superseded_by IS NULL, so 
 		const standing = store();
 		expect(await standing.index.standingEntry("key")).toBeNull();
 		expect(standing.statements[0]?.text).toContain("conflict_key = $1 and superseded_by is null");
+	});
+
+	test("a brief read under a repository grant leaves out a global row of an ungranted repository; a read with no grant keeps every row", async () => {
+		const { index } = store(() => [row("mem_b", { scope: "global", repo: "owner/b" }), row("mem_a", { scope: "global", repo: "owner/a" })]);
+		const granted = (repo: string): boolean => repo === "owner/a";
+		expect((await index.memoryForBrief("owner/a", null, 5, { surface: "cursor", granted })).map((entry) => entry.id)).toEqual(["mem_a"]);
+		expect((await index.memoryForBrief("owner/a", null, 5, { surface: "cursor" })).map((entry) => entry.id)).toEqual(["mem_b", "mem_a"]);
+	});
+
+	test("a brief read keeps a graph row that names no repository only while its graph has a graph_index row, whatever its ttl; under a grant the row is judged by its graph, not its missing repo", async () => {
+		const granted = (repo: string): boolean => repo === "owner/a";
+		// The query's graph_index probe: a graph that was never registered has no row, so the database returns none of its rows, permanent or not.
+		const unregistered = store(() => []);
+		expect(await unregistered.index.memoryForBrief(null, "ut-1", 5, { surface: "cursor", granted })).toEqual([]);
+		expect(unregistered.statements[0]?.text).toContain("exists (select 1 from graph_index g where g.graph_id = substring(memory_entries.scope from 7))");
+		expect(unregistered.statements[0]?.text).not.toContain("ttl <> 'graph'");
+		// A registered graph: its permanent row comes back, and the global row of an ungranted repository is still left out.
+		const { index } = store(() => [row("mem_g", { scope: "graph:ut-1", repo: null }), row("mem_b", { scope: "global", repo: "owner/b" })]);
+		expect((await index.memoryForBrief(null, "ut-1", 5, { surface: "cursor", granted })).map((entry) => entry.id)).toEqual(["mem_g"]);
 	});
 
 	test("a forgotten row reads back with its marker, which is what makes the retain replay answer gone", async () => {

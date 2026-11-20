@@ -63,7 +63,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
-import { Admission, admitBatch, budgetBody, budgetRefusal, isRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import { Admission, admitBatch, budgetBody, budgetRefusal, isRefusal, LONG_POLL_RETRY_AFTER_S, longPollBody, LongPollSlots, routeClass, type AdmissionVerdict } from "./admission.ts";
 import type { SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
 import { parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, SteeringReadUnavailableError } from "./planning/steering-rest.ts";
 import { acknowledgeSteeringWithState, DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundaryError, queueSteering, type LiveCallFailure, type PreparedLiveDispatch, type SteeringWriteResult } from "./planning/steering-tools.ts";
@@ -73,7 +73,6 @@ import type { EventBus } from "./event-bus.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { syncLagSeconds } from "./corpus/sync-event.ts";
-import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { freshnessGauges } from "./docs-freshness.ts";
 import { scanIngestPages, readSkillsCheckoutPages, skillsCheckoutRoots, type IngestPage } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
@@ -388,6 +387,8 @@ const SESSION_CONTEXT_NEEDS_SURFACE = "session_context needs an authenticated su
 const WORKTREE_REPORT_NEEDS_SURFACE = "worktree report needs an authenticated surface; nothing was stored";
 /** Why an anonymous claims read is refused: it names the sessions holding a graph's nodes. */
 const WORKTREE_CLAIMS_NEEDS_SURFACE = "worktree claims need an authenticated surface";
+/** Why an anonymous handoff replay is refused: the packets name who handed what to whom. */
+const HANDOFFS_NEEDS_SURFACE = "handoff replay needs an authenticated surface";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
 
@@ -841,6 +842,8 @@ export function createHttpServer(
 		now,
 		record: (verdict) => observability.observer.admission?.(verdict),
 	});
+	// The held long polls: their own slots, not a token of the shared budget (`admission.ts`, `LongPollSlots`).
+	const longPolls = new LongPollSlots();
 	// The configured public origin, parsed once. When it does not parse, only loopback is answered.
 	const publicOrigin = parsePublicOrigin(config.publicOrigin);
 	const server = createServer(async (req, res) => {
@@ -1582,6 +1585,30 @@ export function createHttpServer(
 				return;
 			}
 
+			// The replay of a graph's handoffs (SPE-5714): the REST door on `coord_handoff_list`, for a hook with no MCP client. Same audit
+			// name, same graph gate, same packets; each comes back with the verdict it verifies under.
+			if (req.method === "GET" && url.pathname === "/handoffs") {
+				if (surface === null) {
+					sendJson(res, 401, { error: HANDOFFS_NEEDS_SURFACE });
+					return;
+				}
+				const query = parseClaimsQuery(url.searchParams.get("graph") ?? undefined);
+				if (!query.ok) {
+					sendJson(res, 400, { error: "handoffs.invalid", problem: query.problem });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "coord_handoff_list", { graph_id: query.value }))) return;
+				const graphScope = await substrate.scopedGraphRefusal("handoffs_for_graph", surface, query.value);
+				if (graphScope !== null) {
+					sendJson(res, graphScope.status, graphScope.body);
+					return;
+				}
+				// The same full-history read as the `coord_handoff_list` tool, oldest first, so both doors return one chain. Each packet
+				// comes back with the verdict it verifies under; a packet that does not verify is listed with its reason.
+				sendJson(res, 200, await substrate.handoffsForGraph(query.value));
+				return;
+			}
+
 			if (req.method === "POST" && url.pathname === "/drift") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
@@ -1692,6 +1719,11 @@ export function createHttpServer(
 				}
 				if (!("dataset" in parsed) || typeof parsed.dataset !== "string") {
 					sendJson(res, 400, { error: "dataset is required" });
+					return;
+				}
+				// An empty name names no dataset: refused with the ingest's own unknown-dataset reason, before any audit or ingest.
+				if (parsed.dataset.length === 0) {
+					sendJson(res, 400, { ok: false, refused: true, reason: "unknown-dataset", changed: false });
 					return;
 				}
 				const commit = "commit" in parsed ? parsed.commit : undefined;
@@ -1840,9 +1872,9 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
-			// Phase 74: the operator's compensation of a stored operation: undo only, under the key's lock, never a forward apply. An
-			// anonymous caller is refused 401 and a caller that is not an operator 403, both before the body is read or audited. The
-			// engine repeats the operator check, so a refusal never reaches the store or git.
+			// Phase 74: the operator's compensation of a stored operation: undo only, under the key's lock, never a forward apply. This is an
+			// operator's decision, so a caller with no surface is refused 401 and one that is not an operator 403, both before the body is
+			// read or audited. It is not an MCP tool. The engine repeats the operator check, so a refusal never reaches the store or git.
 			if (req.method === "POST" && url.pathname === "/cross-repo/compensate") {
 				if (surface === null) {
 					sendJson(res, 401, { error: COMPENSATE_NEEDS_SURFACE });
@@ -2134,13 +2166,12 @@ export function createHttpServer(
 				}
 				const body = parsed as Record<string, unknown>;
 				const dataset = typeof body.dataset === "string" ? body.dataset : MERGE_TRIGGER_DATASET;
-				// hasOwn, not `in`: `in` also accepts the names every object inherits —
-				// "constructor", "toString", "__proto__" — and those would pass the
-				// known-dataset check and reach the refresh with a dataset the store
-				// never held. Only the trigger table's own rows are known.
-				if (!Object.hasOwn(DATASET_TRIGGERS, dataset)) {
+				// The known datasets are the planning registry's repos, the skills library and the corpus (`knownDocsDatasets`).
+				// An array lookup takes no inherited name ("constructor", "__proto__"), so an unknown name cannot reach the refresh.
+				const known = await substrate.knownDocsDatasets();
+				if (!known.includes(dataset)) {
 					sendJson(res, 400, {
-						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${Object.keys(DATASET_TRIGGERS).join(", ")}`,
+						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${known.join(", ")}`,
 					});
 					return;
 				}
@@ -2153,8 +2184,8 @@ export function createHttpServer(
 				// is decided under — a merge-trigger nobody recorded is an unrecorded
 				// publication, same as an ingest nobody recorded.
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
-				// The selected plane decides: a LightRAG deployment with RAGFlow unset still refreshes.
-				if (config.docsBackend === "lightrag" ? config.lightrag === null : config.ragflow === null) {
+				// The selected plane decides: a LightRAG deployment with lightrag unset still refreshes.
+				if (config.docsBackend === "lightrag" ? config.lightrag === null : config.lightrag === null) {
 					// The null-block idiom: no docs plane is configured, so the trigger
 					// asks for nothing that exists — answered quietly, no plane call made.
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });
@@ -2340,26 +2371,37 @@ export function createHttpServer(
 					sendJson(res, 400, { error: query.error });
 					return;
 				}
-				// A client that goes away ends its wait: the waiter leaves the registry with its timer and listener.
-				const gone = new AbortController();
-				res.on("close", () => gone.abort());
-				const { timeoutMs } = query.value;
-				const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
-				switch (waited.status) {
-					case "directive":
-						sendJson(res, 200, { directive: restDirective(waited.record, waited.sequence), wait_ms: timeoutMs });
-						return;
-					case "busy":
-						send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });
-						return;
-					case "aborted":
-						return;
-					case "timeout":
-					case "closed":
-						// No body to carry `wait_ms`, so the wait this request got rides a header.
-						res.writeHead(204, { "x-steering-wait-ms": String(timeoutMs) });
-						res.end();
-						return;
+				// The poll's own slot, not a token of the shared budget: a full class refuses in the budget's shape, before any hold.
+				const release = longPolls.acquire();
+				if (release === null) {
+					send(res, 429, JSON.stringify(longPollBody()), "application/json", { "retry-after": String(LONG_POLL_RETRY_AFTER_S) });
+					return;
+				}
+				try {
+					// A client that goes away ends its wait: the waiter leaves the registry with its timer and listener.
+					const gone = new AbortController();
+					res.on("close", () => gone.abort());
+					const { timeoutMs } = query.value;
+					const waited = await substrate.waitLiveDirectives({ surface, isOperator: caller.isOperator }, query.value, sessionBindingOf(req), gone.signal);
+					switch (waited.status) {
+						case "directive":
+							sendJson(res, 200, { directive: restDirective(waited.record, substrate.steering.inbox?.sequenceOf(waited.record.directive.id) ?? null), wait_ms: timeoutMs });
+							return;
+						case "busy":
+							send(res, 429, JSON.stringify({ error: `too many waiters for this ${waited.scope === "session" ? "session" : "server"}` }), "application/json", { "retry-after": "1" });
+							return;
+						case "aborted":
+							return;
+						case "timeout":
+						case "closed":
+							// No body to carry `wait_ms`, so the wait this request got rides a header.
+							res.writeHead(204, { "x-steering-wait-ms": String(timeoutMs) });
+							res.end();
+							return;
+					}
+				} finally {
+					// Every exit ends here: a directive, the timeout, a disconnect, a busy or closed registry, or a throw.
+					release();
 				}
 			}
 

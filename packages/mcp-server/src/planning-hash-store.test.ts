@@ -9,10 +9,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
-import type { IngestOutcome } from "./docs-ingest.ts";
+import { type IngestOutcome, type PlanningPage, planningIngestTrigger, planningPageSha } from "./docs-ingest.ts";
 import { normalizeEvent } from "./event.ts";
 import { IndexStore } from "./index-store.ts";
-import { bunPlanningHashStore, memoryPlanningHashStore, planningDestinationKey, type PlanningHashQuery, type PlanningHashStore } from "./planning-hash-store.ts";
+import { bunPlanningHashStore, memoryPlanningHashStore, planningDestinationKey, planningPageKey, type PlanningHashQuery, type PlanningHashStore } from "./planning-hash-store.ts";
+import { planningSessionId } from "./planning/checkout.ts";
+import { nodePlanningFs } from "./planning/fs.ts";
 import { Substrate } from "./service.ts";
 import { defined } from "./test-support.ts";
 import type { EventInput } from "./types.ts";
@@ -36,37 +38,45 @@ afterEach(() => {
 interface Run {
 	/** The pages each `ingestDocs` call carried, in order. */
 	batches: string[][];
+	/** The dataset each `ingestDocs` call named, in order: a planning page is filed under its checkout's dataset. */
+	datasets: string[];
 	events: EventInput[];
+	/** The server under test, for the calls a refresh does not make: the known datasets, a direct request. */
+	substrate: Substrate;
 	refresh(): Promise<void>;
 }
 
 /** A server whose docs plane is a spy: every page it is asked to ingest succeeds unless `failing` names it. */
 function server(env: Record<string, string>, store: PlanningHashStore, failing: readonly string[] = []): Run {
-	const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.invalid", ...env }), {
+	const substrate = new Substrate(loadConfig({ LIGHTRAG_URL: "http://lightrag.invalid", SUBSTRATE_DOCS_BACKEND: "lightrag", SUBSTRATE_PLANNING_ROOTS: dir, ...env }), {
 		index: null,
 		greptime: null,
-		planningBaseDir: dir,
 		planningHashes: store,
 	});
 	const batches: string[][] = [];
+	const datasets: string[] = [];
 	const events: EventInput[] = [];
 	spyOn(substrate, "emit").mockImplementation(async (event) => {
 		events.push(event);
 		return { event: normalizeEvent(event, null), stored: true };
 	});
 	spyOn(substrate, "ingestDocs").mockImplementation(async (input): Promise<IngestOutcome> => {
-		const paths = (Array.isArray(input.pages) ? input.pages : []).map((page: { path: string }) => page.path);
+		const pages = (Array.isArray(input.pages) ? input.pages : []) as Array<{ path: string; source_url: string }>;
+		const paths = pages.map((page) => page.path);
 		batches.push(paths);
+		datasets.push(input.dataset as string);
 		return {
 			ok: true,
 			stripped_images: 0,
 			changed: true,
-			results: paths.map((path) => ({ path, source_url: `file:///${path}`, status: failing.includes(path) ? ("failed" as const) : ("ingested" as const), document_id: `doc-${path}`, content_sha256: "x" })),
+			results: pages.map((page) => ({ path: page.path, source_url: page.source_url, status: failing.includes(page.path) ? ("failed" as const) : ("ingested" as const), document_id: `doc-${page.path}`, content_sha256: "x" })),
 		};
 	});
 	return {
 		batches,
+		datasets,
 		events,
+		substrate,
 		async refresh() {
 			substrate.startPlanningPoll();
 			await substrate.planningRefreshIdle();
@@ -142,10 +152,19 @@ describe("the planning refresh with the hash store on", () => {
 		expect(third.events.map((event) => event.payload?.paths)).toEqual([[ROADMAP]]);
 	});
 
+	test("a checkout outside the repos root is filed under its checkout key, the dataset every batch names", async () => {
+		const run = server(ON, memoryPlanningHashStore());
+		await run.refresh();
+		const checkout = planningSessionId(nodePlanningFs(), dir);
+		expect(run.datasets.length).toBeGreaterThan(0);
+		expect(run.datasets.every((dataset) => dataset === checkout)).toBe(true);
+	});
+
 	test("a page the plane failed is not stored, so the next process sends it again and only it", async () => {
 		const store = memoryPlanningHashStore();
 		await server(ON, store, [ROADMAP]).refresh();
-		expect([...(await store.load()).keys()]).toEqual([STATE]);
+		const checkout = planningSessionId(nodePlanningFs(), dir);
+		expect([...(await store.load()).keys()]).toEqual([planningPageKey(checkout, STATE)]);
 
 		const next = server(ON, store);
 		await next.refresh();
@@ -183,6 +202,83 @@ describe("the planning refresh with the hash store on", () => {
 		await write.refresh();
 		expect(write.batches.flat().sort()).toEqual([ROADMAP, STATE]);
 		expect(defined(write.events[0], "the planning note").payload?.action).toBe("docs.planning");
+	});
+});
+
+describe("the planning pass switch", () => {
+	test("off: no pass runs at boot, the poll timer never starts, and nothing is read or written", async () => {
+		const intervals = spyOn(globalThis, "setInterval");
+		try {
+			const run = server({ SUBSTRATE_PLANNING_PASS: "off", SUBSTRATE_LIGHTRAG_POLL_MS: "7777" }, memoryPlanningHashStore());
+			await run.refresh();
+			expect(intervals.mock.calls.some((call) => call[1] === 7777)).toBe(false);
+			expect(run.batches).toEqual([]);
+			expect(run.events).toEqual([]);
+		} finally {
+			intervals.mockRestore();
+		}
+	});
+
+	test("off: a direct planning request runs no pass and sends nothing", async () => {
+		const run = server({ SUBSTRATE_PLANNING_PASS: "off" }, memoryPlanningHashStore());
+		// The private entry point every planning trigger goes through, reached directly; the cast is only to name it.
+		const seam = run.substrate as unknown as { requestPlanningRefresh(reason: string): void };
+		seam.requestPlanningRefresh("planning-changed");
+		await run.substrate.planningRefreshIdle();
+		expect(run.batches).toEqual([]);
+		expect(run.events).toEqual([]);
+	});
+
+	test("on, named explicitly, runs the pass as it did before the switch existed", async () => {
+		const run = server({ SUBSTRATE_PLANNING_PASS: "on" }, memoryPlanningHashStore());
+		await run.refresh();
+		expect(run.batches.flat().sort()).toEqual([ROADMAP, STATE]);
+		expect(defined(run.events[0], "the planning note").payload?.action).toBe("docs.planning");
+	});
+
+	test("the registry is derived from the roots either way: the known datasets match with the switch off and on", async () => {
+		const off = server({ SUBSTRATE_PLANNING_PASS: "off" }, memoryPlanningHashStore());
+		const on = server({}, memoryPlanningHashStore());
+		expect(await off.substrate.knownDocsDatasets()).toContain(planningSessionId(nodePlanningFs(), dir));
+		expect(await off.substrate.knownDocsDatasets()).toEqual(await on.substrate.knownDocsDatasets());
+	});
+
+	test("an unrecognised value refuses the planning settings at load: the plane is off and the value is never echoed", () => {
+		const config = loadConfig({ SUBSTRATE_PLANNING_ROOTS: dir, SUBSTRATE_PLANNING_PASS: "pause-now" });
+		expect(config.planning).toEqual({ ok: false, errors: [{ key: "SUBSTRATE_PLANNING_PASS", reason: "unrecognised" }] });
+		expect(config.planningCheckouts).toEqual([]);
+		expect(JSON.stringify(config.planning)).not.toContain("pause-now");
+	});
+});
+
+describe("two checkouts with the same relative path", () => {
+	const A = "wt-a";
+	const B = "wt-b";
+	const page = (checkout: string, body: string): PlanningPage => ({ checkout, path: STATE, body });
+
+	test("the store holds each checkout's hash under its own key", async () => {
+		const store = memoryPlanningHashStore();
+		await store.save(new Map([[planningPageKey(A, STATE), "hash-a"]]));
+		await store.save(new Map([[planningPageKey(B, STATE), "hash-b"]]));
+		const loaded = await store.load();
+		expect(loaded.size).toBe(2);
+		expect(loaded.get(planningPageKey(A, STATE))).toBe("hash-a");
+		expect(loaded.get(planningPageKey(B, STATE))).toBe("hash-b");
+	});
+
+	test("an edit to one checkout's page triggers that page alone, not the same path in the other checkout", () => {
+		const previous = new Map([[planningPageKey(A, STATE), planningPageSha(page(A, "alpha"))], [planningPageKey(B, STATE), planningPageSha(page(B, "beta"))]]);
+		const trigger = planningIngestTrigger([page(A, "alpha"), page(B, "beta, edited")], previous);
+		expect(trigger.triggered).toBe(true);
+		expect(trigger.keys).toEqual([planningPageKey(B, STATE)]);
+		expect(trigger.paths).toEqual([STATE]);
+	});
+
+	test("a first poll triggers both copies, and a repeat of the same pages triggers neither", () => {
+		const pages = [page(A, "alpha"), page(B, "beta")];
+		expect(planningIngestTrigger(pages, null).keys).toEqual([planningPageKey(A, STATE), planningPageKey(B, STATE)]);
+		const previous = new Map(pages.map((p) => [planningPageKey(p.checkout, p.path), planningPageSha(p)] as const));
+		expect(planningIngestTrigger(pages, previous).triggered).toBe(false);
 	});
 });
 

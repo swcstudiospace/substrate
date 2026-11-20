@@ -2,9 +2,9 @@
 
 **Domain:** Multi-agent substrate on one VPS (substrate-mcp + Linear/Notion control plane + Railway data planes + Solana devnet anchor). Milestone v1.3 "Build plan completion", areas A–I, phases numbered from 16.
 **Researched:** 2026-10-08
-**Confidence:** HIGH for repo and host facts (each cites a file, commit or command). MEDIUM for external service limits (Linear, Solana faucet, RAGFlow), which come from public docs that change without notice.
+**Confidence:** HIGH for repo and host facts (each cites a file, commit or command). MEDIUM for external service limits (Linear, Solana faucet, RAG-backend), which come from public docs that change without notice.
 
-Area key: **A** Lane B collectors and Muse projector · **B** claim mirror and DoD gate · **C** substrate-dispatcher · **D** docs plane (RAGFlow, Hindsight, Dragonfly) · **E** ledger anchor and `substrate verify` · **F** skills plane, timers, miner, Agent Cards · **G** `desktop_run` · **H** Lane A rivet-agentos host · **I** Phase 0 UAT.
+Area key: **A** Lane B collectors and Muse projector · **B** claim mirror and DoD gate · **C** substrate-dispatcher · **D** docs plane (RAG-backend, Hindsight, Dragonfly) · **E** ledger anchor and `substrate verify` · **F** skills plane, timers, miner, Agent Cards · **G** `desktop_run` · **H** Lane A rivet-agentos host · **I** Phase 0 UAT.
 
 "Phase 16 (foundation)" below means the first v1.3 phase. These pitfalls argue that it must come before any area work, and that it should restore production parity, close the policy enums and extend the guard tests.
 
@@ -117,7 +117,7 @@ Phase 16 writes a per-tool decision table into `docs/mcp-audit.md` and encodes i
 **Warning signs:**
 - A new tool name is missing from both sets in `policy.ts`.
 - `policy.test.ts` "the two lists do not overlap" still passes, but the new tool is in neither.
-- The brief p95 SLO (`docs/observability.md:152`) breaches during a RAGFlow outage.
+- The brief p95 SLO (`docs/observability.md:152`) breaches during a RAG-backend outage.
 - Collector logs show 4xx and a silent ledger.
 
 **Phase to address:**
@@ -198,13 +198,13 @@ The area C phase. The rate-limit budget is shared with the area B phase.
 
 ---
 
-### Pitfall 6: Unredacted content reaches RAGFlow or an anchor
+### Pitfall 6: Unredacted content reaches RAG-backend or an anchor
 
 **What goes wrong:**
 - **Ingest is publication.** Everything ingested is returned verbatim to every agent through `docs_search`.
 - **Anchors are public.** A Solana memo is public for as long as the cluster keeps it.
 - **21652a2 anchors content.** `anchorTeachableOnSolanaDevnet` writes `substrate:${graph_id}:${teachable.framing}`, which is free text from agent events, into a devnet memo (`21652a2 packages/miner/src/teachable.ts`). That breaks "roots only, never event contents" (`.planning/PROJECT.md:115`; build plan §11).
-- **Coverage gaps.** Main's `redact.ts` covers provider token shapes, `*_KEY=` and keypair byte arrays (`packages/mcp-server/src/redact.ts:18-50`). It does not cover base58 secret keys, RAGFlow or Hindsight key formats [UNVERIFIED formats], or Railway and tailnet hostnames. The desk rules forbid hostnames, and `.planning` docs on `acc30a8` contain them (scout: `05-DISCOVERY.md:61`, `07-RESEARCH-CONTRACTS.md:310`, `08-02-PLAN.md:140`).
+- **Coverage gaps.** Main's `redact.ts` covers provider token shapes, `*_KEY=` and keypair byte arrays (`packages/mcp-server/src/redact.ts:18-50`). It does not cover base58 secret keys, RAG-backend or Hindsight key formats [UNVERIFIED formats], or Railway and tailnet hostnames. The desk rules forbid hostnames, and `.planning` docs on `acc30a8` contain them (scout: `05-DISCOVERY.md:61`, `07-RESEARCH-CONTRACTS.md:310`, `08-02-PLAN.md:140`).
 - **Three redactors.** The connector's `redactor.py`, main's `redact.ts`, and `acc30a8 redact.ts` with `SKILL_HIGH_CONFIDENCE_RULES`/`scanSkillFiles` will drift apart.
 
 **Why it happens:**
@@ -232,7 +232,7 @@ Phase 16 for the shared redaction library. The area D phase for ingest refusal. 
 ### Pitfall 7: Secrets in generated configs, unit files and spawned agents
 
 **What goes wrong:**
-- **Narrow store lock.** It catches only `SUBSTRATE_TOKEN*` literals and Greptime credentials and hosts (`store-lock.test.ts:72-95, 249-362`). A committed `LINEAR_API_KEY`, `NOTION_API_KEY`, `RAGFLOW_API_KEY`, `HINDSIGHT_API_KEY`, the skills `propose.key` or a Solana keypair array would pass it.
+- **Narrow store lock.** It catches only `SUBSTRATE_TOKEN*` literals and Greptime credentials and hosts (`store-lock.test.ts:72-95, 249-362`). A committed `LINEAR_API_KEY`, `NOTION_API_KEY`, `RAG-backend_API_KEY`, `HINDSIGHT_API_KEY`, the skills `propose.key` or a Solana keypair array would pass it.
 - **Configs outside the repo.** The projector writes configs into agent homes and workspaces that the store lock cannot see (`docs/adr/0001-*.md:603`, "a green substrate test read as a swarm guarantee").
 - **`Environment=` values are exposed.** Any `Environment=` value in a unit is printed by `systemctl cat` and `systemctl show`, to any user. The current units correctly use only `EnvironmentFile=/etc/substrate/substrate.env` (0600 root), with path-only `Environment=` lines.
 - **Spawned agents run as root.** The dispatcher has no `User=`, and its children run as root and "can still read substrate.env" (`launcher.py:39-45` comment). Token separation is not process isolation (`docs/adr/0001-*.md:605`).
@@ -252,7 +252,7 @@ The store lock was built around the Greptime and token threats of v1.0–v1.2. T
 - **Keypair access:** only the anchor job reads the keypair path. Pass it to `solana` as `--keypair <path>` in an argv, never through a shell (`acc30a8 solana.ts:4`), and scrub the path from stderr (`21652a2 planes.ts:175` does).
 
 **Warning signs:**
-- `git grep -nE '(LINEAR|NOTION|RAGFLOW|HINDSIGHT)_API_KEY\s*[:=]\s*\S{16,}'` returns anything.
+- `git grep -nE '(LINEAR|NOTION|RAG-backend|HINDSIGHT)_API_KEY\s*[:=]\s*\S{16,}'` returns anything.
 - A generated `.mcp.json` or `hooks.json` contains a token-shaped value.
 - `systemctl show -p Environment substrate-*` shows a non-path value.
 
@@ -274,24 +274,24 @@ Phase 16 (store-lock extension). The area C, F and H phases (units and spawned a
 Each v1.3 area has a natural way to break them:
 - **E:** the build-plan sketch `packages/ledger/anchor.ts` runs `greptime.sql(... agent_events ...)` and `INSERT INTO anchors` directly (build plan §7). That breaks invariants 1 and 2.
 - **D:** a `planes.ts` Hindsight `retain` is a memory write past the gate. Invariant 3 only matches Postgres table names, so the test does not catch it.
-- **D, F:** `substrate.yaml` in the build plan gives `claude-code` and `hermes` a direct `ragflow` MCP server (§6.3). That is a second, unredacted door, and it contradicts v0.3 §4 ("Only substrate `docs.search`; raw RAGFlow / Hindsight off seat defaults").
+- **D, F:** `substrate.yaml` in the build plan gives `claude-code` and `hermes` a direct `RAG-backend` MCP server (§6.3). That is a second, unredacted door, and it contradicts v0.3 §4 ("Only substrate `docs.search`; raw RAG-backend / Hindsight off seat defaults").
 - **Ported docs:** `.planning` docs with Railway hosts fail invariant 5.
 
 **Why it happens:**
-The invariants are scoped to Greptime and Postgres. The new stores (RAGFlow, Hindsight, Dragonfly, Solana) are not named in them yet.
+The invariants are scoped to Greptime and Postgres. The new stores (RAG-backend, Hindsight, Dragonfly, Solana) are not named in them yet.
 
 **How to avoid:**
 - **Area E:** the anchor job calls substrate-mcp. Either add a typed `Substrate.anchorPeriod` and anchors methods in `greptime.ts`, driven by a timer that calls a loopback route, or argue a named exception in the test, the way `SMOKE_HARNESS` was.
 - **Phase 16 adds store-lock rules:**
   - only the memory-write path calls Hindsight `retain`;
-  - no agent config registers RAGFlow or Hindsight as an MCP server (extend `:226-247` to `ragflow|hindsight`);
-  - only `mcp-server/src` reads `RAGFLOW_*`, `HINDSIGHT_*`, `DRAGONFLY_*`;
+  - no agent config registers RAG-backend or Hindsight as an MCP server (extend `:226-247` to `RAG-backend|hindsight`);
+  - only `mcp-server/src` reads `RAG-backend_*`, `HINDSIGHT_*`, `DRAGONFLY_*`;
   - only the anchor module reads `SOLANA_*`.
 
 **Warning signs:**
 - `bun test store-lock` fails after a port.
 - A new package's `package.json` depends on a Greptime client or a Redis client.
-- A projector fixture lists `ragflow` under `mcpServers`.
+- A projector fixture lists `RAG-backend` under `mcpServers`.
 
 **Phase to address:**
 Phase 16 (rule extensions). The area D and E phases implement against them.
@@ -334,20 +334,20 @@ The area E phase. Funding is listed as an operator gate in its plan.
 
 ---
 
-### Pitfall 10: RAGFlow dataset and version churn breaks `docs_search` and its citations
+### Pitfall 10: RAG-backend dataset and version churn breaks `docs_search` and its citations
 
 **What goes wrong:**
-- **Churning IDs.** `docs/data-planes.md:41-50` wants a dataset per repo, re-ingested on merge, keeping "the last five dataset versions", so dataset IDs change. `main` has a single `RAGFLOW_DATASET_ID` (`.env.example:81`).
-- **Locked embedding model.** RAGFlow fixes a dataset's `embedding_model` once it has chunks. `/api/v1/retrieval` refuses datasets with different embedding models in one call, and needs `dataset_ids` or `document_ids` ([RAGFlow HTTP API](https://ragflow.io/docs/http_api_reference)).
-- **21652a2's `ragflowSearch` falls short in three ways:**
+- **Churning IDs.** `docs/data-planes.md:41-50` wants a dataset per repo, re-ingested on merge, keeping "the last five dataset versions", so dataset IDs change. `main` has a single `RAG-backend_DATASET_ID` (`.env.example:81`).
+- **Locked embedding model.** RAG-backend fixes a dataset's `embedding_model` once it has chunks. `/api/v1/retrieval` refuses datasets with different embedding models in one call, and needs `dataset_ids` or `document_ids` ([RAG-backend HTTP API](https://RAG-backend.io/docs/http_api_reference)).
+- **21652a2's `RAG-backendSearch` falls short in three ways:**
   - It sends no `dataset_ids`.
-  - It returns `"ragflow <status>"` as if it were content.
+  - It returns `"RAG-backend <status>"` as if it were content.
   - It returns only `document_name` and 180 characters, with no source URL, commit or heading path. The citation contract in `data-planes.md:50` needs those.
 - **Async parsing.** Parsing runs asynchronously after upload, so "ingested" is not "searchable".
-- **Unreachable ingest trigger.** The GitHub-Action ingest trigger cannot reach a loopback `substrate-mcp` or a tailnet-only RAGFlow (`docs/data-planes.md:28, 52-65`).
+- **Unreachable ingest trigger.** The GitHub-Action ingest trigger cannot reach a loopback `substrate-mcp` or a tailnet-only RAG-backend (`docs/data-planes.md:28, 52-65`).
 
 **Why it happens:**
-RAGFlow's dataset is the unit of versioning, embedding and retrieval all at once. Treating it as a stable ID collapses those three.
+RAG-backend's dataset is the unit of versioning, embedding and retrieval all at once. Treating it as a stable ID collapses those three.
 
 **How to avoid:**
 - **Resolve datasets by name** and an alias (the current version), with a cache in Dragonfly whose fallback is a list call. Never use a fixed ID.
@@ -362,7 +362,7 @@ RAGFlow's dataset is the unit of versioning, embedding and retrieval all at once
 - **Trigger ingest from the VPS** (the skills-sync timer pattern, or a post-merge pull), not from GitHub-hosted runners.
 
 **Warning signs:**
-- `docs_search` returns `ragflow 4xx` text, or chunks with no URL.
+- `docs_search` returns `RAG-backend 4xx` text, or chunks with no URL.
 - Retrieval fails after a re-ingest.
 - More than five datasets per repo.
 
@@ -446,7 +446,7 @@ Phase 16 (Orca/herdr decision; contract fixtures). The area A, B and F phases.
 
 **What goes wrong:**
 A test reaches a real endpoint and writes into production:
-- Linear, Notion, RAGFlow, Hindsight, Greptime, Timescale or devnet;
+- Linear, Notion, RAG-backend, Hindsight, Greptime, Timescale or devnet;
 - the production state directories: `/var/lib/substrate/skills/{mirror.git,propose.key,proposals.jsonl}`, `/var/lib/substrate/worktrees`, `/var/lib/substrate/dispatcher/dispatcher.lock`;
 - the running `substrate-desktop` container.
 
@@ -470,7 +470,7 @@ For v1.3:
 - Proofs are separate scripts, the way `scripts/greptime-smoke.ts` is. They run only with operator approval.
 
 **Warning signs:**
-- A test file references `LINEAR_API_KEY`, `RAGFLOW_URL`, `/var/lib/substrate` or `substrate-desktop` outside a seam default.
+- A test file references `LINEAR_API_KEY`, `RAG-backend_URL`, `/var/lib/substrate` or `substrate-desktop` outside a seam default.
 - New rows appear in production tables after a CI run.
 - `bun test` output has skipped live suites but no stated-skip line.
 
@@ -594,7 +594,7 @@ The area G phase.
 |----------|-------------------|----------------|-----------------|
 | Cherry-pick `acc30a8` core-file hunks | Fast "port" | Re-introduces session-keyed claims and unauthenticated calls, and bypasses leases (Pitfall 2) | Never. Port leaf modules only |
 | Keep production units pointing at a checkout that tracks `main` | No deploy tooling | Every merge is a deploy; files vanish under running processes (Pitfall 1) | Only with `ConditionPathExists` guards and PRs that declare their live effect |
-| One `RAGFLOW_DATASET_ID` | Simple config | Breaks on the first re-ingest or version swap (Pitfall 10) | Area D spike only, never on main |
+| One `RAG-backend_DATASET_ID` | Simple config | Breaks on the first re-ingest or version swap (Pitfall 10) | Area D spike only, never on main |
 | In-memory dispatch registry | No schema change | Re-dispatch after every restart (Pitfall 5) | Never. Use a durable, unique-keyed record |
 | Teachable text in a devnet memo | Human-readable chain | Publishes agent content permanently (Pitfall 6) | Never. Hash only |
 | Widen `EVENT_KINDS`/`SURFACES` inside a feature PR | Collectors work immediately | An unreviewed fail-closed policy change; chain-affecting (ADR 0001:587-601) | Never. Use a dedicated PR |
@@ -609,7 +609,7 @@ The area G phase.
 | Linear labels | Creating `agent:<surface>` concurrently; replacing the label set | Look the label up by name, create it, and re-search on a create error (`acc30a8 linear.ts:155-196`). Use only `addedLabelIds`/`removedLabelIds` |
 | hermes-linear-connector DoD | Treating a timeout as approval | Only `completed: true` counts. Settle a timeout by reading Linear state (`acc30a8 dod-gate.ts`) |
 | Notion | One PATCH per heartbeat | One PATCH per lease transition. Notion's documented average limit is about 3 requests/s [UNVERIFIED current value] |
-| RAGFlow | Retrieval without `dataset_ids`; mixing embedding models; reading "uploaded" as "searchable" | Resolve datasets by alias, use one model, poll parse status, and store URL and commit metadata |
+| RAG-backend | Retrieval without `dataset_ids`; mixing embedding models; reading "uploaded" as "searchable" | Resolve datasets by alias, use one model, poll parse status, and store URL and commit metadata |
 | Hindsight | Calling `retain` from a plane client | Only through the `memory_write` gate. Banks `sub-<surface>`/`pd-<seat>` via `HINDSIGHT_BANK_PREFIX` (`docs/data-planes.md:30-39`) |
 | Dragonfly | Using it for locks, queues or sessions | Cache only. Falls through on outage (`docs/data-planes.md:26`) |
 | Solana CLI | Airdrop loops; keypair contents in env; memo free text | Fund once (operator). `--keypair <path>` in an argv. Memo matches `MEMO_RE` |
@@ -620,7 +620,7 @@ The area G phase.
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| Brief composed with RAGFlow and Hindsight calls inline | brief p95 above 800 ms (`docs/observability.md:152`); hook returns `""` at 1.5 s | Recall and docs behind Dragonfly with short timeouts; empty result on timeout | Any RAGFlow cold start or tailnet hop over ~700 ms |
+| Brief composed with RAG-backend and Hindsight calls inline | brief p95 above 800 ms (`docs/observability.md:152`); hook returns `""` at 1.5 s | Recall and docs behind Dragonfly with short timeouts; empty result on timeout | Any RAG-backend cold start or tailnet hop over ~700 ms |
 | `docker exec` per desktop action under CPU steal | 4–7 s per action (`driver.ts:40`); MCP call timeouts | Batch steps per run, cap steps, run serially (`driver.ts:354` queue) | More than ~10 steps per `desktop_run` |
 | Crash-looping units writing to the journal | Journal growth on a 95% disk | `ConditionPathExists`, a `StartLimitBurst` | Immediately on the next restart of an orphaned unit |
 | Warning event per refused timer tick | Brief "Warnings" buried, ledger noise | Warn on state change, not on every tick | `skills-sync` refusing dirty: 288/day |
@@ -632,7 +632,7 @@ The area G phase.
 |---------|------|------------|
 | `lease_id` in a Linear comment, Notion row or event | Anyone reading Linear can extend, release or complete the node | The mirror carries surface, session and epoch only. Add a leak test |
 | Dispatched agents running as root with substrate.env readable | A child reads every credential, including other surfaces' tokens | Dedicated user where supported; otherwise record the boundary as accepted risk |
-| A RAGFlow or Hindsight MCP server in agent configs | A second, unredacted door to the planes (v0.3 §4) | Store-lock rule, plus projector tests |
+| A RAG-backend or Hindsight MCP server in agent configs | A second, unredacted door to the planes (v0.3 §4) | Store-lock rule, plus projector tests |
 | `docs_ingest` that redacts and continues | Secrets published to every agent through `docs_search` | Refuse on findings; one shared redactor |
 | Tailnet or Railway hostnames in committed docs | A desk-rule violation; it also fails `store-lock.test.ts:268-277` | Do not port `.planning` archives. Note: `docs/data-planes.md:12-16` already names forwarder machine names, which the desk rule forbids; do not add more [observation] |
 | `desktop_run` open to every surface | Host-root reach via Docker exec; pixel leaks | Operator-listed surfaces, fail-closed, hashes not images |
@@ -660,7 +660,7 @@ The area G phase.
 - [ ] **Desktop (G):** no image bytes in events; runs refused for unlisted surfaces.
 - [ ] **Lane A (H):** the disk gate refuses below budget, and a VM survives a host restart (build plan §10 proof). Verify on an isolated graph.
 - [ ] **UAT (I):** all 8 scenarios answered with fresh evidence, test 7 in an approved outage window.
-- [ ] **Store lock:** extended rules for the RAGFlow, Hindsight, Dragonfly and Solana env names, keypair arrays and native plane MCP wiring all pass.
+- [ ] **Store lock:** extended rules for the RAG-backend, Hindsight, Dragonfly and Solana env names, keypair arrays and native plane MCP wiring all pass.
 
 ## Recovery Strategies
 
@@ -669,10 +669,10 @@ The area G phase.
 | Orphaned unit crash-loops after a reboot | LOW | Operator: `systemctl disable --now` the unit, or land its code on main and pull. Vacuum the journal if the disk is critical |
 | Double dispatch on one issue | MEDIUM | Lease CAS leaves one holder. Stop the loser session; operator `force` release if needed. Remove the duplicate worktree; reconcile Linear labels |
 | `lease_id` leaked to Linear or Notion | MEDIUM | The holder releases and re-claims (new epoch and id). Edit or delete the comment. The ledger cannot be scrubbed; the holder check limits the damage (`coordination.md:101-103`) |
-| Secret ingested into RAGFlow | HIGH | Delete the document and dataset version, rotate the secret, re-ingest from a redacted source, and find who searched it via `events_query` on `docs_search` |
+| Secret ingested into RAG-backend | HIGH | Delete the document and dataset version, rotate the secret, re-ingest from a redacted source, and find who searched it via `events_query` on `docs_search` |
 | Content anchored in a devnet memo | HIGH | Cannot be deleted from chain until a reset. Rotate anything sensitive and fix the memo format. Record an incident receipt |
 | Devnet reset | LOW | Re-fund the key. `anchors` keeps roots. Verify reports `cluster-reset` for older periods; re-anchor is optional |
-| RAGFlow dataset broken by a model mismatch | MEDIUM | Create a new dataset with the pinned model, re-ingest, swap the alias |
+| RAG-backend dataset broken by a model mismatch | MEDIUM | Create a new dataset with the pinned model, re-ingest, swap the alias |
 | Disk exhausted | MEDIUM | Operator cleanup (Docker images, journal, worktrees). The gates stop new VMs and worktrees first |
 
 ## Pitfall-to-Phase Mapping
@@ -688,7 +688,7 @@ The area G phase.
 | 7 Secrets in configs, units, spawned agents | Phase 16; areas C, F, H | Extended store-lock scans; projector output tests; `systemctl show -p Environment` audit in the proof |
 | 8 Store-lock bypass by new planes | Phase 16; areas D, E | New store-lock rules green; anchor job has no Greptime import outside `mcp-server/src` |
 | 9 Devnet funding, resets, verify semantics | Area E (operator funding gate) | Deterministic-root test; late-event test; `solana-test-validator` integration; one approved devnet anchor |
-| 10 RAGFlow churn | Area D | Version-swap test against a fake; citation fields present; model-pin assertion |
+| 10 RAG-backend churn | Area D | Version-swap test against a fake; citation fields present; model-pin assertion |
 | 11 Disk and KVM | Phase 16 gate helper; areas G, H | Gate unit tests; area H go/no-go spike result recorded |
 | 12 Cross-repo dependencies | Phase 16 decisions; areas A, B, F | Contract fixtures per dependency; agent-skills dirty-tree resolution; Orca/herdr Key Decision |
 | 13 Test isolation | Phase 16 convention; all phases | No production names or paths in tests; stated-skip lines in output |
@@ -728,7 +728,7 @@ The area G phase.
 - [Linear rate limiting](https://linear.app/developers/rate-limiting)
 - [Solana devnet faucet](https://faucet.solana.com/)
 - [Anza clusters](https://docs.anza.xyz/clusters/available)
-- [RAGFlow HTTP API](https://ragflow.io/docs/http_api_reference), and [ragflow#11429](https://github.com/infiniflow/ragflow/issues/11429) on embedding-model lock-in
+- [RAG-backend HTTP API](https://RAG-backend.io/docs/http_api_reference), and [RAG-backend#11429](https://github.com/infiniflow/RAG-backend/issues/11429) on embedding-model lock-in
 
 ---
 *Pitfalls research for: agent-substrate v1.3 Build plan completion (areas A–I)*

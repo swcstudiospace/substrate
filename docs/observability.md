@@ -76,7 +76,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 `status` is a class (`2xx`, `5xx`), not a code, and `route` is one of the known
 paths or `other` — an unauthenticated caller walking random URLs must not be able
 to mint a metric series per URL it tries. `plane` is one of the five data planes
-(`greptime`, `index`, `cache`, `hindsight`, `ragflow`) and `op` is a fixed label per
+(`greptime`, `index`, `cache`, `hindsight`, `lightrag`) and `op` is a fixed label per
 client — a SQL verb for the ledger, a route-table entry for the HTTP planes
 (`recall`, `retain`, `retrieve`, `datasets`, …), a command name for the cache —
 never a statement or a URL.
@@ -142,7 +142,7 @@ below). An event with no usage contributes nothing rather than a zero, so a
 > invisibly, because a redacted field looks like redaction working. The exemption
 > added in `redact.ts` is an explicit list of counter names *and* requires a finite
 > numeric value: `{"tokens": "sk-ant-…"}` is still redacted whole, and so is
-> `{"password": 123456}`. A number is not inherently safe; a named count is. The full
+> `{"<password-key>": 123456}`. A number is not inherently safe; a named count is. The full
 > exemption is documented in the counter-exemption section of [`redaction.md`](redaction.md).
 
 ## Plane circuit breakers (uplift-2 R2)
@@ -150,7 +150,7 @@ below). An event with no usage contributes nothing rather than a zero, so a
 Every outbound call to a data plane goes through `callPlane` in
 `packages/observability/src/breaker.ts`: ledger SQL (`greptime.ts`), index
 queries (`index-store.ts`), cache connects and commands (`cache.ts`), and every
-Hindsight and RAGFlow request (the gated `fetch` `Substrate` hands to
+Hindsight and LightRAG request (the gated `fetch` `Substrate` hands to
 `planes/*.ts`). One `CircuitBreaker` per plane, closed → open → half-open:
 
 - after `SUBSTRATE_BREAKER_FAILURES` (default **5**) consecutive failures — a
@@ -166,11 +166,11 @@ Hindsight and RAGFlow request (the gated `fetch` `Substrate` hands to
 A refusal reaches each caller **exactly where a network error would**: the brief
 source read fails open, `memory_recall` answers `degraded: true` with a reason
 containing `circuit open`, `docs_search` answers `{chunks: [], degraded: true,
-reason: "ragflow circuit open"}`, and the fail-closed paths (emit, claim) stay
+reason: "lightrag circuit open"}`, and the fail-closed paths (emit, claim) stay
 closed. The cache additionally refuses to reconnect for `CACHE_CONNECT_COOLDOWN_MS`
 (5 s) after a failed connect, reported as `cache.cooldownUntil` in `/healthz`.
 
-The cache's admission buckets follow a declared policy while that breaker refuses them: `SUBSTRATE_BUDGET_<CLASS>_BREAKER=fail-open` (the default) admits the request and counts a `bypass`; `fail-closed` answers `503` with `{"error":"cache_unavailable"}` and the breaker's `Retry-After` in `enforce`, and in `shadow` admits the request and counts a `bypass`, since shadow never refuses. The brief and recall never depend on the cache: a refused cache read falls through to the source, so the answer is the source's.
+The cache's admission buckets follow a declared policy while that breaker refuses them. The flags are `SUBSTRATE_BUDGET_READ_BREAKER`, `SUBSTRATE_BUDGET_WRITE_BREAKER`, and `SUBSTRATE_BUDGET_COORDINATION_BREAKER`. Unset or blank is today's `fail-open`: the request is admitted and counted as a `bypass`. `fail-closed` answers `503` with `{"error":"cache_unavailable"}` and the breaker's `Retry-After` only in `enforce`; in `shadow` the same refusal is recorded as a `bypass` and never refuses. The brief and recall never depend on the cache: a refused cache read falls through to the source, so the answer is the source's. A refused generation bump is in-process only (R1): `staleGenerations` lives in the writing process, so after a restart or on another replica a brief written before the write can still be served until the 5-minute brief TTL.
 
 `bun scripts/cache-stats.ts` (uplift-4 S4) is the operator-run, read-only census of the cache's key classes and value bytes and the `maxmemory` they justify: bounded `SCAN`, `TYPE` and `STRLEN`, no value read, loopback URLs only unless `--allow-remote`. The hit, stale and coalesced ratios come from the running service's `/healthz`, which needs the bearer: set `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE` (first entry of a list; it is sent only as an `Authorization` header and never printed); a 401/403 is reported by name in the output.
 
@@ -183,14 +183,14 @@ comes from the ledger and the index alone:
   "index":     { "ok": true,  "breaker": { "state": "closed", "…": "…" }, "lastErrorAt": null },
   "cache":     { "ok": null,  "breaker": { "…": "…" }, "lastErrorAt": null },
   "hindsight": { "ok": false, "breaker": { "state": "open", "failures": 5, "openedAt": 1791480000000, "lastErrorAt": 1791480000000, "lastError": "hindsight GET /health: timed out" }, "lastErrorAt": 1791480000000 },
-  "ragflow":   { "ok": null,  "breaker": null, "lastErrorAt": null }
+  "lightrag":  { "ok": null,  "breaker": null, "lastErrorAt": null }
 },
 "capacity": { "index": { "databaseBytes": 11534336, "tables": [ { "name": "memory_entries", "totalBytes": 409600, "liveRows": 64, "deadRows": 0 } ] } }
 ```
 
 `ok` is `null` for a plane that is not configured (and for the cache until its
 first command); `breaker` is `null` when `SUBSTRATE_BREAKER=0`. Hindsight and
-RAGFlow are probed once each, bounded to 1 s, only when configured; the index is
+LightRAG are probed once each, bounded to 1 s, only when configured; the index is
 pinged with the same bound and asked for its size (`capacity.index`, `null` when
 it does not answer in time); the cache is never pinged. `/healthz` therefore costs
 at most one round trip per configured plane.
@@ -856,14 +856,14 @@ while its store is gone. Blackhole the ledger for the window:
 sudo iptables -I OUTPUT -d <ledger-ip> -j DROP && sleep 60 \
   && sudo iptables -D OUTPUT -d <ledger-ip> -j DROP
 
-# terminal 2
-SUBSTRATE_URL=http://127.0.0.1:7410 SUBSTRATE_TOKEN=… bun run smoke:chaos
+# terminal 2 — with SUBSTRATE_TOKEN already exported in this shell
+SUBSTRATE_URL=http://127.0.0.1:7410 bun run smoke:chaos
 ```
 
-`--plane index|hindsight|ragflow|cache` (uplift-2 R2) blackholes a different
+`--plane index|hindsight|lightrag|cache` (uplift-2 R2) blackholes a different
 plane instead (for the loopback cache, stop `redis-server` rather than drop
 packets). During the window every tick reads `/healthz`, asks for a brief as
-`grok-bot`, and — for Hindsight and RAGFlow — makes the read that plane serves
+`grok-bot`, and — for Hindsight and LightRAG — makes the read that plane serves
 (`/memory/recall`, `/docs/search`). The run asserts that `/healthz` reported the
 plane `ok: false` or its breaker `open` at least once (it **fails** otherwise:
 the outage has to have been observed), that every brief answered 200 within
@@ -1004,20 +1004,19 @@ and silently, since export fails open.
 
 ## The unified resource fabric (phase 51)
 
-`fabric_status`, `fabric_optimize` and `fabric_compliance` cover nine resources. Each has a panel on the **Substrate data planes** dashboard (`infra/vps/dashboards/substrate-data-planes.json`), in the row "Fabric resources (phase 51)". The panels are generated by `scripts/dashboards.ts` from `FABRIC_SERIES`, and each reads a series the server records. The fabric itself never writes. When write probes are enabled, its Greptime row reads the last write probe `/healthz` recorded and reads `unavailable` until one exists. With `SUBSTRATE_LEDGER_WRITE_PROBE_S=0`, it uses the metadata-only verdict instead; `ok` does not mean a write was tested.
+`fabric_status`, `fabric_optimize` and `fabric_compliance` cover eight resources. Each has a panel on the **Substrate data planes** dashboard (`infra/vps/dashboards/substrate-data-planes.json`), in the row "Fabric resources (phase 51)". The panels are generated by `scripts/dashboards.ts` from `FABRIC_SERIES`, and each reads a series the server records. The fabric itself never writes. When write probes are enabled, its Greptime row reads the last write probe `/healthz` recorded and reads `unavailable` until one exists. With `SUBSTRATE_LEDGER_WRITE_PROBE_S=0`, it uses the metadata-only verdict instead; `ok` does not mean a write was tested.
 
 | Resource | Panel title | Series | Source metric |
 | --- | --- | --- | --- |
 | `dragonfly` | Fabric: dragonfly | `cache.hit_ratio` | `substrate.cache.operations` |
 | `timescaledb-index` | Fabric: timescaledb-index | `capacity.runway_days` | `capacity.index.runway_days` (sampled into the history) |
 | `greptime` | Fabric: greptime | `plane.availability` | `substrate.plane.duration`, `plane=greptime` |
-| `ragflow` | Fabric: ragflow | `plane.p95` | `substrate.plane.duration`, `plane=ragflow` |
 | `lightrag` | Fabric: lightrag | `plane.p95` | `substrate.plane.duration`, `plane=lightrag` |
 | `hindsight` | Fabric: hindsight | `hindsight.outbox_size` | `substrate.hindsight.retain_outbox.size` (extended series) |
 | `tei` | Fabric: tei | `plane.p95` | `substrate.plane.duration`, `plane=tei` (an auxiliary plane: a gate and a metric label, no `/healthz` row or SLO; phase 64) |
 | `tailscale-proxy` | Fabric: tailscale-proxy | `endpoint.proxy_planes` | `substrate.endpoint.proxy_planes`, a count of the data planes whose endpoint class is `proxy`, set at boot |
 | `corpus` | Fabric: corpus | `corpus.freshness_seconds` | `substrate.corpus.freshness_seconds`, the age of the newest corpus manifest change (extended series) |
 
-The `greptime`, `ragflow`, `lightrag` and `tei` panels are per-plane series: each draws one line per plane, and the named line is that resource. The `hindsight` panel shows one total outbox count, not a line per plane. The `tailscale-proxy` panel is one count, not a line per plane, and reads the same endpoint classes as its status row. The `hindsight`, `tailscale-proxy` and `corpus` panels need `SUBSTRATE_METRICS_HISTORY_SERIES=extended`. Regenerate the dashboards with `bun run dashboards:build`.
+The `greptime`, `lightrag` and `tei` panels are per-plane series: each draws one line per plane, and the named line is that resource. The `hindsight` panel shows one total outbox count, not a line per plane. The `tailscale-proxy` panel is one count, not a line per plane, and reads the same endpoint classes as its status row. The `hindsight`, `tailscale-proxy` and `corpus` panels need `SUBSTRATE_METRICS_HISTORY_SERIES=extended`. Regenerate the dashboards with `bun run dashboards:build`.
 
 The `corpus` row (v1.7 phase 70) is the docs plane's three objectives and reads no probe of its own. It is `unconfigured` while `SUBSTRATE_CORPUS` is off. Otherwise its `detail` carries the three readings next to the thresholds they are judged by (`SUBSTRATE_DOCS_SLO_FRESHNESS_S`, `SUBSTRATE_DOCS_SLO_RECALL5`, `SUBSTRATE_DOCS_SLO_INGEST_DOCS_PER_S`), and the row is `degraded` when a reading breaches its threshold (its `source` names which: `corpus.slo: breached freshness,recall5,ingest`) or could not be read within the fabric's per-source deadline (`corpus.slo: timeout` or `corpus.slo: failed`). A reading nobody has taken is `null` and is never a breach: the golden recall is `null` until the docs canary has reported it, the ingest rate is `null` until a request sent documents (a request that found everything unchanged is idle, not slow), and a corpus that has not ingested anything has no freshness. The readings, the series and how to act on a breach are in [`corpus-eval.md`](corpus-eval.md) and [`runbooks/docs-rag-operations.md`](runbooks/docs-rag-operations.md).

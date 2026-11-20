@@ -113,3 +113,22 @@ describe("retainListed", () => {
 		expect(retainListed(["d1"], new Set())).toEqual([]);
 	});
 });
+
+describe("writeConsumed's temporary file", () => {
+	test("never uses the fixed name `<path>.tmp`: a file already there is left alone", () => {
+		const path = consumedPath(join(tempDir(), "substrate-pending"), "s", "live");
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(`${path}.tmp`, "another writer's body");
+		writeConsumed(path, "s", "live", ["d1"]);
+		expect(readConsumed(path)).toEqual(["d1"]);
+		expect(readFileSync(`${path}.tmp`, "utf8")).toBe("another writer's body");
+	});
+
+	test("a write that fails throws and leaves no temporary file behind", () => {
+		const path = consumedPath(join(tempDir(), "substrate-pending"), "s", "live");
+		// A directory where the state file belongs: the rename over it cannot succeed.
+		mkdirSync(path, { recursive: true });
+		expect(() => writeConsumed(path, "s", "live", ["d1"])).toThrow();
+		expect(readdirSync(dirname(path)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+	});
+});

@@ -51,6 +51,7 @@ substrate session recover [--json]
 substrate session sync [--json]
 substrate session hook <turn|plan-step|steering|baseline|context> [--session HISTORICAL_ID] [--steering-session LIVE_ID] [--binding-file PATH] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]
 substrate session hook-config <claude-code|git-post-commit|steering|baseline|context>
+substrate session hook-install claude-code --settings PATH [--write]
 ```
 
 | Exit | Meaning |
@@ -84,7 +85,7 @@ Every line of output is scrubbed: the bearer, anything the redactor recognises, 
 
 The limits count checkpoints of the **same** trigger, so a manual checkpoint does not suppress a turn one. They are defaults from a cost argument (a checkpoint hashes the worktree), not measurements (ADR 0007).
 
-**What the hook does.** It reads a JSON envelope (`session_id`, `cwd`, `transcript_path`; optional `directive_id`, `steering_session_id`, `binding_file` for steering), checkpoints if due and prints nothing except the context digest. Historical ID comes from `--session`, else envelope, else the worktree's one checkpoint session. Explicit live flags override live envelope fields; a historical ID never substitutes for a live handle. Plaintext proof envelope fields are refused. Malformed input, missing state, unreachable server, wrong flag or the 10-second deadline exit 0; `--verbose` gives sanitized stderr. This is fail-open **host/checkpoint** behavior, never fail-open private authorization: unavailable/denied hints are skipped. The pending historical checkpoint record is written before the server request for later `substrate session sync`. Checkpoint sequence locking still serializes concurrent hooks.
+**What the hook does.** It reads a JSON envelope (`session_id`, `cwd`, `transcript_path`; optional `directive_id`, `steering_session_id`, `binding_file` for steering), checkpoints if due and prints nothing except the context digest. Historical ID comes from `--session`, else envelope, else the worktree's one checkpoint session. Explicit live flags override live envelope fields; a historical ID never substitutes for a live handle. Plaintext proof envelope fields are refused. Malformed input, missing state, unreachable server, wrong flag or the 10-second deadline exit 0; `--verbose` gives sanitized stderr. This is fail-open **host/checkpoint** behavior, never fail-open private authorization; unavailable/denied hints are skipped. The pending historical checkpoint record is written before the server request for later `substrate session sync`. Checkpoint sequence locking still serializes concurrent hooks.
 
 **Installing it (an operator step; nothing here installs anything).** Print the configuration and put it where the host reads it:
 
@@ -94,6 +95,8 @@ substrate session hook-config git-post-commit    # plan-step: a post-commit scri
 substrate session hook-config steering           # print-only: separate historical/live IDs and binding-file reference; no proof in script or argv
 substrate session hook-config baseline           # baseline: a script body that runs `substrate session hook baseline --surface "$SURFACE"` once at session start, in the foreground
 substrate session hook-config context            # context: a script body that runs `substrate session hook context --surface "$SURFACE"` in the foreground and keeps its stdout, the digest
+substrate session hook-install claude-code --settings ~/.claude/settings.json          # dry run: prints the Stop hook it would add; writes nothing
+substrate session hook-install claude-code --settings ~/.claude/settings.json --write  # merges the Stop hook; keeps the previous file as settings.json.substrate-backup
 ```
 
 - **Claude Code.** Merge the printed `hooks` object into `.claude/settings.json` (this project) or `~/.claude/settings.json` (every project); if a `Stop` list exists, add the entry to it. `substrate` must be on the PATH of the hook (otherwise replace it with `bun <checkout>/packages/cli/src/index.ts`).

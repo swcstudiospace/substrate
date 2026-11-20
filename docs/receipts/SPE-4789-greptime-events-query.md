@@ -6,7 +6,7 @@
 | Run | `20260930T065417Z-39274714` (Grok Bot → Claude Code) |
 | Branch | `claude/greptime-events-ledger-7kwlr2`, from `main` |
 | Scope | GreptimeDB events ledger behind `substrate-mcp` only |
-| Untouched | Timescale SoR, Dragonfly, Hindsight, RAGflow, and every open PR |
+| Untouched | Timescale SoR, Dragonfly, Hindsight, and every open PR |
 
 ## What this run found, and what it did
 
@@ -155,7 +155,7 @@ implying otherwise.
   `GREPTIME_DB`, declared in `.env.example` and filled in only at
   `/etc/substrate/substrate.env` (root-owned, `0600`, loaded by the systemd unit).
   This run added no variable and changed no name.
-- The transport stays HTTPS with a per-request `Authorization: Basic` header — the
+- The transport stays HTTPS with a per-request `Authorization` header that uses the `Basic` scheme — the
   path INFRA probed green. A Tailscale forwarder is recorded as the preferred later
   shape; it needs no new variable, and the switch is INFRA's to make.
 - `store-lock.test.ts` scans every git-tracked file for a Greptime endpoint or

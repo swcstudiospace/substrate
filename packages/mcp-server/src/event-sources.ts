@@ -322,9 +322,9 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		sample: () => ({
 			surface: "claude-code",
 			kind: "warning",
-			summary: "docs search failed: ragflow-unreachable",
+			summary: "docs search failed: lightrag-unreachable",
 			session_id: "sess-p17-docs-search",
-			payload: { action: "docs.search", reason: "ragflow-unreachable" },
+			payload: { action: "docs.search", reason: "lightrag-unreachable" },
 		}),
 	},
 	{

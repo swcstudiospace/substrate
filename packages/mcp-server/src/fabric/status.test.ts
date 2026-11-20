@@ -72,11 +72,11 @@ describe("the corpus row (phase 70)", () => {
 });
 
 describe("buildFabricStatus", () => {
-	test("reports exactly the nine resources, in report order, tei between hindsight and the proxy layer, the corpus last", () => {
+	test("reports exactly the eight resources, in report order, tei between hindsight and the proxy layer, the corpus last", () => {
 		const status = buildFabricStatus(healthyFacts());
 		expect(status.resources.map((row) => row.resource)).toEqual([...FABRIC_RESOURCES]);
 		expect(status.resources.at(-1)?.resource).toBe("corpus");
-		expect(FABRIC_RESOURCES).toHaveLength(9);
+		expect(FABRIC_RESOURCES).toHaveLength(8);
 	});
 
 	test("an unconfigured TEI is unconfigured with no detail; a configured one carries its model, dimension and latency and never a URL", () => {
@@ -107,7 +107,7 @@ describe("buildFabricStatus", () => {
 
 	test("a configured resource that gives no true answer is unavailable, not ok", () => {
 		expect(rowOf(withService("greptime", { answered: null }), "greptime").state).toBe("unavailable");
-		expect(rowOf(withService("ragflow", { answered: false }), "ragflow").state).toBe("unavailable");
+		expect(rowOf(withService("lightrag", { answered: false }), "lightrag").state).toBe("unavailable");
 	});
 
 	test("a configured LightRAG answers like its siblings: true is ok, false, null and an open breaker are not", () => {
@@ -118,10 +118,10 @@ describe("buildFabricStatus", () => {
 		expect(rowOf(withService("lightrag", { breaker: "half-open" }), "lightrag").state).toBe("degraded");
 	});
 
-	test("an unconfigured LightRAG is unconfigured however it was probed, and the ragflow row is independent", () => {
+	test("an unconfigured LightRAG is unconfigured however it was probed, and the hindsight row is independent", () => {
 		expect(rowOf(withService("lightrag", { configured: false, answered: true }), "lightrag").state).toBe("unconfigured");
-		const legacy = withService("ragflow", { configured: false, answered: null, breaker: "off" });
-		expect(rowOf(legacy, "ragflow").state).toBe("unconfigured");
+		const legacy = withService("hindsight", { configured: false, answered: null, breaker: "off" });
+		expect(rowOf(legacy, "hindsight").state).toBe("unconfigured");
 		expect(rowOf(legacy, "lightrag").state).toBe("ok");
 	});
 
@@ -152,7 +152,6 @@ describe("buildFabricStatus", () => {
 	});
 
 	test("the HTTP planes report not-applicable as their endpoint class", () => {
-		expect(rowOf(healthyFacts(), "ragflow").endpointClass).toBe("not-applicable");
 		expect(rowOf(healthyFacts(), "lightrag").endpointClass).toBe("not-applicable");
 		expect(rowOf(healthyFacts(), "hindsight").endpointClass).toBe("not-applicable");
 	});

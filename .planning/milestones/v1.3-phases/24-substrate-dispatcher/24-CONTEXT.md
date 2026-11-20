@@ -133,7 +133,7 @@ One PR on agent-substrate (DISP-01..DISP-08). Labelling a Linear issue `dispatch
 - Running dispatched Hermes as an unprivileged user that cannot read `/etc/substrate` (branch D-16 deferred idea; unchanged).
 - `dispatch:claude-code` live launch (needs the Lane A host; Phase 33 owns the route proof).
 - A periodic reaper unit for lapsed dispatcher sessions beyond the loop's own reap (Phase 23 deferred the mirror reaper the same way; the loop's per-tick reap covers it).
-- RAGFlow/docs or memory wiring for dispatched sessions (the session uses `issue_get` + its normal tools; no dispatcher role).
+- RAGFlow (retired, superseded by LightRAG)/docs or memory wiring for dispatched sessions (the session uses `issue_get` + its normal tools; no dispatcher role).
 - Library-in-VM mounts for dispatched work (deferred with Phase 22's D-08).
 </deferred>
 

@@ -13,7 +13,7 @@ const ACTIONS = [...RESERVED_NOTE_ACTIONS];
 describe("reserved note actions", () => {
 	test("the one list names every action a reader treats as authoritative", () => {
 		expect(ACTIONS.sort()).toEqual(
-			["anchor.reanchor", "anchor.signer.rotate", "docs.canary", "docs.corpus.root", "memory.forget", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
+			["anchor.reanchor", "anchor.signer.rotate", "docs.canary", "docs.corpus.root", "memory.forget", "reconcile.applied", "reconcile.plan", "session.checkpoint", "session.rollback", "session.rollback.forget_batch", "session.rollback.refused"].sort(),
 		);
 		expect(reservedActionOf({ action: "session.checkpoint" })).toBe("session.checkpoint");
 		expect(reservedActionOf({ action: "docs.ingest" })).toBeNull();
@@ -72,6 +72,27 @@ describe("reserved note actions", () => {
 		const reply = await mcp.call("events_emit", { kind: "note", summary: "rotation", payload: { action: "anchor.signer.rotate" } });
 
 		expect(reply.json["stored"]).toBe(true);
+	});
+
+	test("the reconcile's own records are refused for every caller: an operator as its own surface, and a bare local run included", async () => {
+		const w = world();
+		const operator = await connectAs(w.substrate, { surface: "omp", isOperator: true });
+		const bare = await connectAs(w.substrate, { surface: null, isOperator: true });
+
+		for (const action of ["reconcile.plan", "reconcile.applied"]) {
+			const payload = { action };
+			for (const callerSurface of [null, "omp"] as const) {
+				expect(reservedEmitRefusal({ payload, surface: "omp", callerSurface, isOperator: true })).toContain("reserved-action");
+				expect(reservedEmitRefusal({ payload, surface: "omp", callerSurface, isOperator: true })).toContain(action);
+			}
+			for (const mcp of [operator, bare]) {
+				const reply = await mcp.call("events_emit", { kind: "note", summary: "forged reconcile record", payload });
+				expect(reply.isError).toBe(true);
+				expect(String(reply.json["error"])).toContain("reserved-action");
+				expect(String(reply.json["error"])).toContain(action);
+			}
+		}
+		expect(w.ledger.events).toHaveLength(0);
 	});
 
 	test("the service's own emit is not the tool's door: it records every reserved action as the surface it names", async () => {

@@ -79,14 +79,14 @@ function metricsFixture(startedAt: string, omp: { req: number; emit: number; too
 }
 
 /** Synthetic GET /healthz body with planes, cache and capacity.ledger.tables. */
-function healthFixture(ragflowOk = true) {
+function healthFixture(lightragOk = true) {
 	return {
 		index: true,
 		greptime: true,
 		planes: {
 			greptime: { ok: true, breaker: { plane: "greptime", state: "closed", failures: 0, openedAt: null, lastErrorAt: null, lastError: null }, lastErrorAt: null },
 			index: { ok: true, breaker: { state: "closed" } },
-			ragflow: { ok: ragflowOk, breaker: { state: ragflowOk ? "closed" : "open" } },
+			lightrag: { ok: lightragOk, breaker: { state: lightragOk ? "closed" : "open" } },
 		},
 		cache: { enabled: true, connected: true, mode: "on", hits: 74, misses: 471, bypasses: 0, errors: 0, cooldownUntil: null },
 		capacity: {
@@ -103,9 +103,9 @@ function healthFixture(ragflowOk = true) {
 	};
 }
 
-function snapshot(at: number, startedAt: string, omp: { req: number; emit: number; tool: number }, ragflowOk = true): Snapshot {
+function snapshot(at: number, startedAt: string, omp: { req: number; emit: number; tool: number }, lightragOk = true): Snapshot {
 	const metrics = parseMetrics(metricsFixture(startedAt, omp));
-	const health = parseHealthz(healthFixture(ragflowOk));
+	const health = parseHealthz(healthFixture(lightragOk));
 	if (!metrics || !health) throw new Error("fixture did not parse");
 	return { at, metrics, health };
 }
@@ -173,7 +173,7 @@ describe("parsing", () => {
 		const health = parseHealthz(healthFixture(false));
 		expect(health).not.toBeNull();
 		expect(health?.planes.greptime).toEqual({ ok: true, breaker: "closed" });
-		expect(health?.planes.ragflow).toEqual({ ok: false, breaker: "open" });
+		expect(health?.planes.lightrag).toEqual({ ok: false, breaker: "open" });
 		expect(health?.cacheHits).toBe(74);
 		expect(health?.cacheMisses).toBe(471);
 		expect(health?.ledgerRows).toBe(27914);
@@ -264,7 +264,7 @@ describe("usage, coverage and /substrate", () => {
 		const health = parseHealthz({
 			...raw,
 			token: "CANARY-TOKEN-VALUE",
-			planes: { ...raw.planes, ragflow: { ok: true, breaker: { state: "closed" }, token: "CANARY-TOKEN-VALUE" } },
+			planes: { ...raw.planes, lightrag: { ok: true, breaker: { state: "closed" }, token: "CANARY-TOKEN-VALUE" } },
 		});
 		const metrics = parseMetrics(metricsFixture(STARTED, { req: 10, emit: 4, tool: 3 }));
 		if (!health || !metrics) throw new Error("fixture did not parse");

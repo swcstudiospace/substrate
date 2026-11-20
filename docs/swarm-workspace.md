@@ -81,7 +81,7 @@ The same secret has two names, at opposite ends, and they are owned by different
 | `SUBSTRATE_TOKEN`, exactly one: the agent's own | the agent's MCP client (the expanded `Authorization` header), the `substrate` CLI, the collectors, the swarm's HTTP client | whoever runs the swarm | that agent's env file, `${XDG_CONFIG_HOME:-~/.config}/agent-swarm/agents/<workspace key>/<slug>.env`, 0600, outside the workspace and every git checkout, holding that one line |
 | `SUBSTRATE_URL` | every client | whoever runs the swarm | the swarm runner's environment, inherited by each agent session |
 
-So A05's file says `SUBSTRATE_TOKEN=<value>`, and the server holds the same value as `SUBSTRATE_TOKEN_SWARM_A05_BE`. An
+So A05's file sets `SUBSTRATE_TOKEN` to the token value, and the server holds the same value as `SUBSTRATE_TOKEN_SWARM_A05_BE`. An
 agent given only the server-side name sends no bearer at all, and once any token is configured the server answers that
 with 401. The `/brief` and `events.emit` paths fail open, so such an agent looks almost healthy: it runs unbriefed and
 untraced. That is why the swarm installer refuses to finish without every agent's token, and why PROOF-03 asserts a

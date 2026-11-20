@@ -1,44 +1,99 @@
 ---
 phase: 44-uat
-verified: 2026-10-21
-status: passed
-score: 1 of 1 criterion proven in-repo (I-D1)
-verified_on: gsd/v13x-44-uat on its final tree, against origin/main 3e9a106 for the regression
-covered_files: ["scripts/uat-phase0.ts", "scripts/uat-phase0.test.ts", "scripts/cache-stats.test.ts", "infra/vps/deploy-release.test.ts", "docs/uat.md"]
+verified: 2026-11-12T08:35:56Z
+status: human_needed
+score: 1/1 must-haves verified in code (live regression re-run not run)
+behavior_unverified: 0
+overrides_applied: 0
+covered_files: [".planning/milestones/v1.3.x-phases/44-uat/PLAN.md", ".planning/milestones/v1.3.x-phases/44-uat/SUMMARY.md", "docs/uat.md", "infra/vps/deploy-release.test.ts", "scripts/cache-stats.test.ts", "scripts/uat-phase0.test.ts", "scripts/uat-phase0.ts"]
+covered_digest: "v3:sha256:e727fe6d6b351194ed4b7a6e65ded56779d33181bb4d7595457b9886bf98b0a2"
+re_verification:
+  previous_status: passed
+  previous_score: "1 of 1 criterion proven in-repo (I-D1)"
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
+human_verification:
+  - test: "Re-run the Phase 0 regression on a scratch twin: from a detached worktree at the commit under test, `bun run rehearsal up`; source the run's consumer.env; `bun run uat:phase0 --tag <run-tag> --scenarios 1,3,4,6,7,8 --report <path>`; `bun run rehearsal down`."
+    expected: "All six selected scenarios report passed (matches the recorded run 2 on origin/main 3e9a106: 6 of 6)."
+    why_human: "Requires Docker and the rehearsal twin, which this verifier cannot start. The original run report lives outside the repository. Not run in this verification."
 ---
 
-> Status detail, kept verbatim from the original frontmatter: passed in-repo. Regression loop green on a scratch twin of origin/main 3e9a106. CI wiring is an operator decision, not done
+# Phase 44: UAT Verification Report
 
-# 44-VERIFICATION: UAT
+**Phase Goal:** The Phase 0 UAT runs as a repeatable script against any `SUBSTRATE_URL`.
+**Verified:** 2026-11-12T08:35:56Z
+**Status:** human_needed
+**Re-verification:** Yes — previous VERIFICATION.md (2026-10-21, `passed`) re-checked against current code
 
-## Regression evidence
+## Goal Achievement
 
-| Run | Harness | Twin | Result |
-|---|---|---|---|
-| 1 | original (one operator bearer for every scenario) | scratch twin, commit 3e9a106, clean tree | 4 of 6 passed. Scenario 6 and 8 failed: the server refused the operator bearer for another surface (403), so BRIEF.md was not written and the cross-surface brief was refused |
-| 2 | surface-named requests use that surface's bearer | same twin, same commit | 6 of 6 passed (scenarios 1, 3, 4, 6, 7 and 8) |
+### Observable Truths
 
-The report of run 2 holds ids, counts, statuses, booleans and elapsed times only. It lives outside the repository.
+| #   | Truth | Status | Evidence |
+| --- | ----- | ------ | -------- |
+| 1   | The UAT runs as a repeatable script against any `SUBSTRATE_URL` (ROADMAP criterion 1, I-D1) | ✓ VERIFIED (code + unit tests); live regression re-run not run | `scripts/uat-phase0.ts:1013-1014` reads `SUBSTRATE_URL` and refuses if unset; `scripts/uat-phase0.ts:91-92` classifies scratch vs production; `scripts/uat-phase0.ts:95-104` refuses write scenarios on production without `--live <approval-ref>`; `scripts/uat-phase0.ts:652` store URLs excluded from the child env. `bun test scripts/uat-phase0.test.ts`: 54 pass, 0 fail (run in this verification). `docs/uat.md` documents the command. |
 
-## Proven in-repo
+**Score:** 1/1 truths verified in code (0 present-but-behavior-unverified; live regression not re-run, see Human Verification)
 
-| Claim | Evidence |
-|---|---|
-| The UAT test file passes, including the three new tests | `bun test scripts/uat-phase0.test.ts`: 53 pass, 0 fail (before the load-timeout edits); the three edited files together: 122 pass, 0 fail |
-| Typecheck is clean | `bunx tsc --noEmit` exit 0 on the final tree |
-| Full suite passes | `bun test` on the final tree against this phase's verification database: 5826 pass, 2 skip (pre-existing: `cache-conformance.test.ts:127`, `redact.test.ts:813`), 0 fail. 5828 tests in 217 files |
-| Repo locks pass | `bun run check:phase-close`: 4 lock files green; EVENT_KINDS unchanged at 12 against ab62c91; SURFACES equals baseline plus substrate at 27 |
-| No store URL is contacted | `uat-phase0.test.ts`: the UAT never connects to a store listener, even with store variables set |
-| A production write is refused before any request | `uat-phase0.test.ts`: refused, naming `--live`, zero requests |
-| A surface's bearer is its own file | `uat-phase0.test.ts`: each surface's bearer comes from its file, never from the operator token |
+### Required Artifacts
 
-## Load-sensitive tests (not caused by this phase)
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `scripts/uat-phase0.ts` | Scenario runner reading only SUBSTRATE_URL and bearer inputs | ✓ VERIFIED | 1090 lines; eight scenarios; production guard; `surfaceBearer` (line 1007) never reads `SUBSTRATE_TOKEN` |
+| `scripts/uat-phase0.test.ts` | Unit tests including the three phase-44 tests | ✓ VERIFIED | 548 lines; tests at lines 462 (no store connection), 488 (production write refused before any request, names `--live`), 531 (surface bearer from its own file) all pass |
+| `scripts/cache-stats.test.ts` | Explicit 60 s wall budget for load-sensitive test | ✓ VERIFIED | line 185 `wallBudgetMs: 60_000` |
+| `infra/vps/deploy-release.test.ts` | 30 s default timeout | ✓ VERIFIED | line 8 `setDefaultTimeout(30_000)` |
+| `docs/uat.md` | Command and flag documentation | ✓ VERIFIED | Documents `uat:phase0`, flags, surface-bearer rule |
 
-- `scripts/cache-stats.test.ts`, recommendation floor: the collector's 250 ms wall budget truncated a 1005-key scan on a host at load of about 30 (total came back as 800 bytes instead of 1311720). It passes alone (24 of 24). The test now sets a 60 s budget explicitly.
-- `infra/vps/deploy-release.test.ts`: `spawnSync` against bash exceeded bun's 5 s default under load. Passes alone (45 of 45). The file now sets a 30 s default timeout.
+### Key Link Verification
 
-## Not proven
+| From | To | Via | Status | Details |
+| ---- | -- | --- | ------ | ------- |
+| `package.json` | `scripts/uat-phase0.ts` | `"uat:phase0": "bun scripts/uat-phase0.ts"` (package.json:53) | ✓ WIRED | |
+| `scripts/uat-phase0.ts` | `SUBSTRATE_URL` | env read in `surfaceBearer`/`runUat` (line 1013) | ✓ WIRED | Target is any URL, not hardcoded |
+| `scripts/uat-phase0.ts` | surface bearers | `surfaceBearers` from per-surface token file (line 1028) | ✓ WIRED | |
 
-- CI wiring. The regression needs Docker and the rehearsal twin, which CI does not run (D44-e).
-- Scenarios 2 and 5 against any target. They are outside the harness default by design.
-- A regression run against production. Production was not targeted.
+### Data-Flow Trace (Level 4)
+
+Skipped: the phase produces a test/report script, not a rendered dynamic UI.
+
+### Behavioral Spot-Checks
+
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Consumer contract, production guard, surface bearers | `bun test scripts/uat-phase0.test.ts` | 54 pass, 0 fail | ✓ PASS |
+| Live regression on scratch twin | `bun run rehearsal up` + `uat:phase0` | Not run (Docker/rehearsal twin unavailable) | ? SKIP — routed to Human Verification |
+
+### Probe Execution
+
+No probe scripts declared or conventional for this phase. Skipped.
+
+### Requirements Coverage
+
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ----------- | ----------- | ------ | -------- |
+| I-D1 | PLAN.md | Regression check for every later phase | ? NEEDS HUMAN | Script and guards verified in code; the recorded 6-of-6 regression run is historical and was not reproduced |
+
+### Anti-Patterns Found
+
+| File | Line | Pattern | Severity | Impact |
+| ---- | ---- | ------- | -------- | ------ |
+| — | — | TBD/FIXME/XXX/TODO/HACK/PLACEHOLDER scan of all five implementation files | — | None found |
+
+### Human Verification Required
+
+### 1. Live regression re-run on scratch twin
+
+**Test:** Start the rehearsal twin from a detached worktree at the commit under test (`bun run rehearsal up`), source its `consumer.env`, run `bun run uat:phase0 --tag <run-tag> --scenarios 1,3,4,6,7,8 --report <path>`, then `bun run rehearsal down`.
+**Expected:** All six selected scenarios pass.
+**Why human:** Needs Docker and the rehearsal twin, which this verifier cannot start. Postgres at 127.0.0.1:5432 was not used.
+
+### Gaps Summary
+
+No code gaps. The UAT script targets any `SUBSTRATE_URL`, refuses writes on production without an approval reference, keeps store URLs out of its child environment, and uses each surface's own bearer. The phase-44 tests pass. The status is `human_needed` only because the regression run was not repeated here. CI wiring remains an operator decision (D44-e) and is not a roadmap criterion.
+
+---
+
+_Verified: 2026-11-12T08:35:56Z_
+_Verifier: Claude (gsd-verifier)_

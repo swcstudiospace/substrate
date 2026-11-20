@@ -7,7 +7,7 @@
  * then reads the bundle through the production `verifyGraph` with the fake read-back
  * injected. What is asserted is what a reader of the bundle sees.
  */
-import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { formatMemo, formatMemoV2, headsRoot, hourEnd, merkleRootHex } from "@substrate/ledger";
 import { buildGraphHeads, DEVNET_GENESIS_HASH } from "./anchor.ts";
 import type { StoredLeaf } from "./event.ts";
@@ -17,6 +17,7 @@ import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import { ACCEPTED_TEACHABLE } from "./teachable.fixtures.ts";
 import type { MemorySearch, MemorySearchPage, MemoryWriteRequest, SubstrateEvent } from "./types.ts";
+import { withoutHindsightEnv } from "./test-support.ts";
 
 const H = Date.UTC(2026, 8, 1, 10);
 const HOUR = 3_600_000;
@@ -203,6 +204,10 @@ let elapsedMs = 0;
 const restorers: Array<() => void> = [];
 afterEach(() => {
 	for (const restore of restorers.splice(0)) restore();
+});
+
+beforeEach(() => {
+	restorers.push(withoutHindsightEnv());
 });
 
 /** Start the virtual clock at zero: from here `Date.now()` moves only when a read-back advances it. */

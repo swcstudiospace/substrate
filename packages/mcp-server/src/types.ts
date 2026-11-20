@@ -292,6 +292,11 @@ export interface MemoryReadOptions {
 	 * names none sees no agent row. Normalised with `normalizeIdentifier`, as the write stores it.
 	 */
 	repo?: string;
+	/**
+	 * Under repository scope, whether the caller is granted a repository. A row is returned only when its own repository and the
+	 * repository its scope names are both granted. Absent while scoping is off, which grants every row.
+	 */
+	granted?: ((repo: string) => boolean) | undefined;
 }
 
 /** One parked write, as a reviewer's queue lists it. */
@@ -500,24 +505,17 @@ export interface GraphView extends GraphIndexRow {
 }
 
 /**
- * Which docs plane serves a retrieval. `ragflow` is the incumbent default;
- * `lightrag` is the graph-backed cutover target. Additive: no existing
- * reply or input shape changes meaning.
+ * Which docs plane serves a retrieval. LightRAG backend.
  */
-export const RETRIEVAL_BACKENDS = ["ragflow", "lightrag"] as const;
+export const RETRIEVAL_BACKENDS = ["lightrag"] as const;
 export type RetrievalBackend = (typeof RETRIEVAL_BACKENDS)[number];
 
-/**
- * Pick the serving backend from what is configured. An explicit preference
- * wins when it is available; otherwise ragflow keeps today's default when it
- * is configured; otherwise lightrag; otherwise null (no plane reachable).
- */
+/** LightRAG when configured, otherwise null. */
 export function selectRetrievalBackend(
-	available: { ragflow: boolean; lightrag: boolean },
+	available: { lightrag: boolean },
 	prefer?: RetrievalBackend,
 ): RetrievalBackend | null {
 	if (prefer !== undefined && available[prefer]) return prefer;
-	if (available.ragflow) return "ragflow";
 	if (available.lightrag) return "lightrag";
 	return null;
 }
@@ -555,7 +553,7 @@ export interface SearchGraphStats {
  * Which graph nodes back a citation: the matched entity names and, when the
  * backend reports it, how many relations support the chunk. Lives on
  * `SearchCitation.graph` (optional, LightRAG-served citations only; absent
- * on RAGFlow citations).
+ * on lightrag citations).
  */
 export interface CitationGraphProvenance {
 	entities: string[];

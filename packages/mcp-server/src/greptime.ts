@@ -40,7 +40,8 @@ import {
 	type MetricSampleRow,
 } from "./metrics-history.ts";
 
-const DEFAULT_TIMEOUT_MS = 5000;
+/** The per-call budget every ledger statement is given unless the client is built with its own (`GreptimeClientOptions.timeoutMs`). */
+export const DEFAULT_TIMEOUT_MS = 5000;
 
 export class GreptimeError extends Error {
 	/**
@@ -88,6 +89,11 @@ export interface GreptimeClientOptions {
 
 /** A statement the ledger client refuses to send. See `assertAppendOnly`. */
 export class AppendOnlyViolation extends GreptimeError {}
+/**
+ * An event the ledger will not take yet: it carries a backslash and the server's quoting dialect is not known, so it is refused before
+ * anything is sent. Retrying the same event refuses the same way, so a caller must answer with a refusal and not park it for another attempt.
+ */
+export class DialectRefusal extends GreptimeError {}
 /**
  * The event row is stored but its ingest record is not, so the event will not
  * be anchored. `Substrate.append` maps this to `stored: true` with a warning
@@ -186,6 +192,13 @@ export const DEFAULT_QUERY_LIMIT = 50;
 /** Rows one `readRecentEvents` read may return at most. */
 export const MAX_RECENT_EVENTS = 200;
 
+/**
+ * The JSON pair a read may narrow by in the payload text: a lowercase key and a 40-character lowercase hex
+ * value (a git SHA). Both fixed shapes, so neither can carry a quote or a LIKE wildcard other than `_`.
+ */
+export const PAYLOAD_KEY_PATTERN = /^[a-z_]{1,64}$/;
+export const PAYLOAD_VALUE_PATTERN = /^[0-9a-f]{40}$/;
+
 /** A ledger read. Values are expected already normalised — see `Substrate.queryEvents`. */
 export interface EventQuery {
 	/** Equality filters, keyed by column. `undefined` and `null` values are dropped. */
@@ -197,6 +210,11 @@ export interface EventQuery {
 	/** `desc` (the default) reads the newest events first. */
 	order?: "asc" | "desc";
 	includePayload?: boolean;
+	/**
+	 * Only events whose payload text contains the JSON pair `"key":"value"`. Validated by the service
+	 * and re-checked in {@link GreptimeClient.queryEvents} before it reaches a literal.
+	 */
+	payloadPair?: { key: string; value: string };
 }
 
 /** One member of a closed ingest hour, in position order. */
@@ -288,10 +306,8 @@ export function queryLimit(limit: number | undefined): number {
 /**
  * Upper bound on the rows `lastHash` will pull for one session.
  *
- * This is a memory guard, not an ordering assumption. It deliberately cannot be
- * reached by ordinary use — a window small enough to be crossed would reintroduce
- * the bug it replaced, where a backfill appending older source timestamps pushed
- * the real chain tip out of view and the next append forked the chain.
+ * A read that returns this many rows is not trusted to hold the chain's tip: its newest row may not be the tip once a backfill has
+ * pushed the real one out of the window. `lastHash` refuses in that case rather than fork the chain.
  */
 const MAX_SESSION_ROWS = 10_000;
 
@@ -397,41 +413,63 @@ interface GreptimeResponse {
 }
 
 /**
- * The statement with every string literal blanked out.
+ * The statement's SQL structure under one reading of `\` inside a string literal (`backslashEscapes`): comments removed, and every
+ * string literal and quoted identifier blanked to an empty placeholder of its own kind.
  *
  * `assertAppendOnly` has to reason about SQL structure, and an event summary is
- * arbitrary agent text: it may well contain a `;` or a `--`. Blanking the
- * literals first means the guard can neither be fooled by that text nor trip
- * over it and drop a legitimate event.
+ * arbitrary agent text: it may well contain a `;`, a `--` or an apostrophe. One
+ * left-to-right pass decides what every character is, so a `'` inside a line
+ * comment or a block comment never opens a literal, and a `"` or backtick
+ * identifier that holds a `'` or `;` is never mistaken for a literal. Blanking
+ * them first means the guard can neither be fooled by that text nor trip over
+ * it and drop a legitimate event.
  */
-function withoutLiterals(statement: string): string {
+function sqlStructure(statement: string, backslashEscapes: boolean): string {
 	let out = "";
 	let i = 0;
 	while (i < statement.length) {
-		if (statement[i] !== "'") {
-			out += statement[i];
-			i++;
-			continue;
-		}
-		out += "''"; // placeholder: an empty literal, structurally where the real one was
-		i++;
-		while (i < statement.length) {
-			if (statement[i] === "\\") {
-				i += 2;
-				continue;
-			}
-			if (statement[i] === "'") {
-				if (statement[i + 1] === "'") {
-					i += 2;
-					continue;
-				}
-				i++;
-				break;
-			}
+		const ch = statement[i];
+		if (ch === "-" && statement[i + 1] === "-") {
+			const newline = statement.indexOf("\n", i);
+			i = newline === -1 ? statement.length : newline;
+			out += " ";
+		} else if (ch === "/" && statement[i + 1] === "*") {
+			const close = statement.indexOf("*/", i + 2);
+			i = close === -1 ? statement.length : close + 2;
+			out += " ";
+		} else if (ch === "'") {
+			i = skipQuoted(statement, i, "'", backslashEscapes);
+			out += "''";
+		} else if (ch === '"' || ch === "`") {
+			i = skipQuoted(statement, i, ch, false);
+			out += ch + ch;
+		} else {
+			out += ch;
 			i++;
 		}
 	}
 	return out;
+}
+
+/**
+ * The index just past the quote that closes the one at `start`. A doubled quote
+ * is an escaped quote and does not close; a string literal also honours `\`
+ * escapes, as the ledger's dialect does, while an identifier does not.
+ */
+function skipQuoted(statement: string, start: number, quote: string, backslashEscapes: boolean): number {
+	let i = start + 1;
+	while (i < statement.length) {
+		const ch = statement[i];
+		if (backslashEscapes && ch === "\\") {
+			i += 2;
+		} else if (ch === quote) {
+			if (statement[i + 1] !== quote) return i + 1;
+			i += 2;
+		} else {
+			i++;
+		}
+	}
+	return statement.length;
 }
 
 /**
@@ -446,18 +484,20 @@ const APPEND_ONLY_VERBS = new Set(["select", "insert", "create", "show", "descri
 
 /** Reject anything that could mutate the ledger, or smuggle a second statement past the verb check. */
 export function assertAppendOnly(statement: string): void {
-	const structure = withoutLiterals(statement)
-		.replace(/\/\*[\s\S]*?\*\//g, " ")
-		.replace(/--[^\n]*/g, " ")
-		.trim();
-	// Greptime's HTTP API accepts `;`-separated batches, so a single trailing
-	// semicolon is all that may follow the one statement we are sending.
-	if (structure.replace(/;\s*$/, "").includes(";")) {
-		throw new AppendOnlyViolation("refusing a batched statement: the ledger takes one statement per call");
-	}
-	const verb = structure.match(/^[a-zA-Z]+/)?.[0].toLowerCase() ?? "";
-	if (!APPEND_ONLY_VERBS.has(verb)) {
-		throw new AppendOnlyViolation(`refusing ${verb || "an empty statement"}: the event ledger is append-only`);
+	// Whether `\` escapes inside a literal depends on the server's dialect, which is not known here. The two readings disagree on a
+	// backslash before a quote: `'a\'; DELETE …` is one literal under escapes, and a closed literal then a `;` without. Each reading
+	// must pass, so the guard is not fooled by the one it did not check.
+	for (const backslashEscapes of [true, false]) {
+		const structure = sqlStructure(statement, backslashEscapes).trim();
+		// Greptime's HTTP API accepts `;`-separated batches, so a single trailing
+		// semicolon is all that may follow the one statement we are sending.
+		if (structure.replace(/;\s*$/, "").includes(";")) {
+			throw new AppendOnlyViolation("refusing a batched statement: the ledger takes one statement per call");
+		}
+		const verb = structure.match(/^[a-zA-Z]+/)?.[0].toLowerCase() ?? "";
+		if (!APPEND_ONLY_VERBS.has(verb)) {
+			throw new AppendOnlyViolation(`refusing ${verb || "an empty statement"}: the event ledger is append-only`);
+		}
 	}
 }
 
@@ -765,6 +805,7 @@ export class GreptimeClient {
 	ingestAppendMode: boolean | null = null;
 	private ingestAppendModeCheckedAt = 0;
 
+	/** The budget one ledger statement gets before it is abandoned. The write path reads it to bound its own waits. */
 	readonly timeoutMs: number;
 	private readonly clock: () => number;
 	private readonly gate: PlaneGate | null;
@@ -863,6 +904,14 @@ export class GreptimeClient {
 	/** Quote using whatever dialect the server reported. */
 	private q(value: string | number | null): string {
 		return quote(value, this.backslashEscapes);
+	}
+
+	/**
+	 * Whether the server reads `\` inside a string literal as an escape: the dialect this client quotes in, assumed until probed.
+	 * SQL built outside this class must quote with it, or a value containing a backslash never matches what was stored.
+	 */
+	get escapesBackslashes(): boolean {
+		return this.backslashEscapes;
 	}
 
 	/**
@@ -1260,7 +1309,7 @@ export class GreptimeClient {
 			// text the hash was computed over, and an append-only table cannot be
 			// corrected — that row would fail verification for as long as it exists,
 			// and take its session's chain with it.
-			throw new GreptimeError(
+			throw new DialectRefusal(
 				"refusing to append an event containing a backslash before the server's quoting dialect is known",
 			);
 		}
@@ -1306,6 +1355,26 @@ export class GreptimeClient {
 			`${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} AND ${equals("graph_id", cell.graph_id)} ` +
 			`AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)}`
 		);
+	}
+
+	/**
+	 * Whether a row with this event id is in the ledger: the retry check for a buffered event (phase 76). A write
+	 * that timed out may have landed, and writing the event again would leave two rows for one event. Throws on
+	 * any ledger error, an open breaker included: a failed lookup must never be read as "not stored".
+	 */
+	async eventStored(id: string): Promise<boolean> {
+		if (!IDEMPOTENCY_ID.test(id)) throw new GreptimeError("refusing an event lookup for a malformed id");
+		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE "id" = ${this.q(id)} LIMIT 1`);
+		return rows.length > 0;
+	}
+
+	/**
+	 * One event with its payload, by id; null when no row has it. The cross-layer reconcile reads its plan record this way.
+	 */
+	async readEvent(id: string): Promise<Record<string, unknown> | null> {
+		if (!IDEMPOTENCY_ID.test(id)) throw new GreptimeError("refusing an event lookup for a malformed id");
+		const rows = await this.sql(`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "id" = ${this.q(id)} LIMIT 1`);
+		return rows[0] ?? null;
 	}
 
 	/**
@@ -1492,6 +1561,11 @@ export class GreptimeClient {
 						`SELECT "hash", "prev" FROM "agent_events" WHERE "session_id" = ${this.q(sessionId)}
 			 ORDER BY "ts" DESC, "id" DESC LIMIT ${MAX_SESSION_ROWS}`,
 					);
+		if (rows.length >= MAX_SESSION_ROWS) {
+			throw new GreptimeError(
+				`chain tip unreliable: ${MAX_SESSION_ROWS} rows in the read window, so its newest row may not be the tip; refusing to append rather than fork the chain`,
+			);
+		}
 		const tip = chainTip(rows);
 		this.chainTips?.set(sessionId, tip);
 		return tip;
@@ -1529,6 +1603,14 @@ export class GreptimeClient {
 		}
 		if (query.since !== undefined) where.push(`"ts" >= ${this.q(query.since)}`);
 		if (query.until !== undefined) where.push(`"ts" <= ${this.q(query.until)}`);
+		if (query.payloadPair !== undefined) {
+			const { key, value } = query.payloadPair;
+			if (!PAYLOAD_KEY_PATTERN.test(key) || !PAYLOAD_VALUE_PATTERN.test(value)) {
+				throw new GreptimeError("refusing a payload filter that is not a lowercase key and a 40-character lowercase hex value");
+			}
+			// Plain LIKE: `_` in the key matches any character, which can only widen the match to a field named like the key with the same exact 40-character SHA. The value is hex, so it carries no wildcard.
+			where.push(`"payload" LIKE ${this.q(`%"${key}":"${value}"%`)}`);
+		}
 
 		const direction = query.order === "asc" ? "ASC" : "DESC";
 		return this.sql(

@@ -19,6 +19,8 @@ import {
 	BUDGET_SCRIPT,
 	DEFAULT_ADMISSION_BREAKER_POLICY,
 	DEFAULT_CLASS,
+	LONG_POLL_ROUTE,
+	LONG_POLL_SLOTS_MAX,
 	MCP_ROUTE,
 	MONITOR_ROUTES,
 	ROUTE_CLASSES,
@@ -30,6 +32,8 @@ import {
 	budgetKey,
 	budgetRefusal,
 	limitFor,
+	LongPollSlots,
+	longPollBody,
 	retryAfterSeconds,
 	routeClass,
 	toolClass,
@@ -43,6 +47,7 @@ import { ConfigError, DEFAULT_BUDGETS, loadAdmissionSettings, loadConfig } from 
 import { defined } from "./test-support.ts";
 import { createTestLiveSessionAuthority, issueLiveSession } from "./planning/live-session.test-support.ts";
 import { LiveSessionBoundary, type LiveSessionInvocation } from "./planning/steering-tools.ts";
+import { SteeringWaiters, type QueuedDelivery, type QueuedSteeringRecord, type SteeringWaitTimers } from "./planning/steering-waiters.ts";
 import { SURFACES, type EventInput } from "./types.ts";
 
 /**
@@ -442,7 +447,7 @@ describe("the class tables are exhaustive over what the server serves", () => {
 
 	test("every route server.ts matches on is classified, exempt, or the MCP door — and nothing stale is listed", () => {
 		expect(servedRoutes.size).toBeGreaterThan(10);
-		const classified = new Set([...Object.keys(ROUTE_CLASSES), ...Object.keys(MONITOR_ROUTES), MCP_ROUTE]);
+		const classified = new Set([...Object.keys(ROUTE_CLASSES), ...Object.keys(MONITOR_ROUTES), LONG_POLL_ROUTE, MCP_ROUTE]);
 		expect([...servedRoutes].filter((route) => !classified.has(route))).toEqual([]);
 		expect([...classified].filter((route) => !servedRoutes.has(route))).toEqual([]);
 	});
@@ -460,7 +465,8 @@ describe("the class tables are exhaustive over what the server serves", () => {
 			expect(routeClass("POST", route)).toBe("write");
 			expect(toolClass(tool)).toBe("write");
 		}
-		for (const route of ["/steering/directives", "/steering/wait", "/session/context"]) expect(routeClass("GET", route)).toBe("read");
+		for (const route of ["/steering/directives", "/session/context"]) expect(routeClass("GET", route)).toBe("read");
+		expect(routeClass("GET", LONG_POLL_ROUTE)).toBeNull();
 		for (const tool of ["steering_list", "steering_wait", "live_session_discovery", "session_context"]) expect(toolClass(tool)).toBe("read");
 	});
 
@@ -638,5 +644,111 @@ describe("mandatory live principal budgets", () => {
 		expect(read).toHaveBeenCalledTimes(3);
 		expect(await boundary.prepare(invocation)).toMatchObject({ status: "refused", error: { code: "principal-rate-limited" } });
 		expect(read).toHaveBeenCalledTimes(3);
+	});
+});
+
+describe("an open long poll and the shared read budget", () => {
+	/** The timer seam: the poll's timeout is its only clock, and each test fires it by hand. */
+	class ManualTimers implements SteeringWaitTimers {
+		readonly pending = new Map<number, () => void>();
+		private next = 0;
+		set(run: () => void): unknown {
+			this.next += 1;
+			this.pending.set(this.next, run);
+			return this.next;
+		}
+		clear(handle: unknown): void {
+			this.pending.delete(handle as number);
+		}
+		fireAll(): void {
+			for (const [handle, run] of [...this.pending]) {
+				this.pending.delete(handle);
+				run();
+			}
+		}
+	}
+	const registry = () => {
+		const timers = new ManualTimers();
+		return { timers, waiters: new SteeringWaiters({ timers }) };
+	};
+	/** The registry reads only a record's directive id, so a record carrying that id is all it needs. */
+	const queuedRecord = (id: string): QueuedSteeringRecord => ({ state: "queued", directive: { id } }) as unknown as QueuedSteeringRecord;
+	const readBudget: Partial<AdmissionSettings> = { classes: { read: { rps: 1, burst: 3 }, write: { rps: 1, burst: 1 }, coordination: { rps: 5, burst: 5 } } };
+
+	test("a held poll takes no token of the shared read budget, so reads keep all of it while the poll waits", async () => {
+		const { admission } = admissionOver(new FakeBudgetRedis(), readBudget);
+		const { timers, waiters } = registry();
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, check: () => null });
+		expect(waiters.size).toBe(1);
+		expect(await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).toMatchObject({ decision: "allowed", tokensLeft: 2 });
+		expect(await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).toMatchObject({ decision: "allowed", tokensLeft: 1 });
+		expect(await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).toMatchObject({ decision: "allowed", tokensLeft: 0 });
+		expect((await admission.admit({ surface: "hermes", klass: "read", cost: 1 })).decision).toBe("limited");
+		timers.fireAll();
+		expect(await held).toEqual({ status: "timeout" });
+		expect(waiters.size).toBe(0);
+	});
+
+	test("the held slot is released on the timeout and leaves no timer behind", async () => {
+		const { timers, waiters } = registry();
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, check: () => null });
+		expect(waiters.size).toBe(1);
+		timers.fireAll();
+		expect(await held).toEqual({ status: "timeout" });
+		expect(waiters.size).toBe(0);
+		expect(timers.pending.size).toBe(0);
+	});
+
+	test("the held slot is released when a directive is queued for the session, and its timer is cleared", async () => {
+		const { timers, waiters } = registry();
+		let next: QueuedDelivery | null = null;
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, check: () => next });
+		expect(waiters.size).toBe(1);
+		const record = queuedRecord("d-1");
+		next = { sequence: 1, record };
+		waiters.notify("sess-a");
+		expect(await held).toEqual({ status: "directive", record, sequence: 1 });
+		expect(waiters.size).toBe(0);
+		expect(timers.pending.size).toBe(0);
+	});
+
+	test("the held slot is released when the client goes away, and its timer is cleared", async () => {
+		const { timers, waiters } = registry();
+		const gone = new AbortController();
+		const held = waiters.wait({ sessionId: "sess-a", timeoutMs: 30_000, signal: gone.signal, check: () => null });
+		expect(waiters.size).toBe(1);
+		gone.abort();
+		expect(await held).toEqual({ status: "aborted" });
+		expect(waiters.size).toBe(0);
+		expect(timers.pending.size).toBe(0);
+	});
+});
+
+describe("the long-poll slots: their own bound, refused in the budget's shape", () => {
+	test("acquire takes slots up to the bound, then a full class refuses; the default bound is the named constant", () => {
+		const slots = new LongPollSlots(2);
+		expect(slots.acquire()).not.toBeNull();
+		expect(slots.acquire()).not.toBeNull();
+		expect(slots.size).toBe(2);
+		expect(slots.acquire()).toBeNull();
+		expect(slots.size).toBe(2);
+		const full = new LongPollSlots();
+		for (let index = 0; index < LONG_POLL_SLOTS_MAX; index += 1) expect(full.acquire()).not.toBeNull();
+		expect(full.acquire()).toBeNull();
+	});
+
+	test("a release frees its slot exactly once, so a second release cannot free another poll's", () => {
+		const slots = new LongPollSlots(1);
+		const release = defined(slots.acquire());
+		expect(slots.acquire()).toBeNull();
+		release();
+		release();
+		expect(slots.size).toBe(0);
+		expect(slots.acquire()).not.toBeNull();
+	});
+
+	test("a refused poll answers the budget body, naming the poll class, and the poll class is not a metered class", () => {
+		expect(longPollBody()).toEqual({ error: "budget", class: "poll", retry_after_s: 1 });
+		expect(ADMISSION_CLASSES as readonly string[]).not.toContain("poll");
 	});
 });

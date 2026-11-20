@@ -13,6 +13,8 @@
  *   substrate skills propose|list|approve ...  propose, list or decide a skill (docs/runbooks/skills-governance.md)
  *   substrate docs ingest --dataset NAME --path PATH --source-url URL [...]
  *       ingest one page into a docs dataset (docs/docs-search-ingest.md)
+ *   substrate docs feedback <document> <verdict> [--session ID] [--json]
+ *       rate a cited corpus document: POST /docs/feedback, the docs_feedback tool's route (exit 0 stored, 1 refused or failed, 2 usage)
  *   substrate index sweep [--apply] [--json]  the index retention sweep (dry-run unless --apply
  *       AND SUBSTRATE_INDEX_SWEEP=apply are both given)
  *   substrate ledger coverage|archive|verify-archive   anchor coverage and the verified
@@ -26,6 +28,8 @@
  *       (exit 0 done, 1 failed, 2 usage, 3 refused by the server: not an operator, rate limited, bad token)
  *   substrate corpus scan|plan|ingest|reflect|status|sync|watch|reconcile|hook|hint   the documentation corpus of every repository (docs/corpus.md, docs/corpus-watch.md, docs/corpus-reflect.md)
  *       (exit 0 done, 1 failed, 2 usage; ingest, reflect, sync and reconcile are dry runs until --execute; status --gaps lists unanswered queries)
+ *   substrate reconcile [--plan] | --apply PLAN_ID --confirm   the cross-layer reconcile's manual repair (docs/greptime-ledger.md, "Cross-layer reconcile")
+ *       (exit 0 nothing to repair or applied, 1 failed or refused, 2 usage, 3 a plan printed)
  *   substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]
  *       the memory consistency verifier: the index, the plane and the ledger compared
  *       (exit 0 consistent, 1 drift, 2 usage, 3 a store could not be read; docs/runbooks/consistency-verify.md)
@@ -58,11 +62,13 @@ import { list, parseArgs, str } from "./args.ts";
 import { driftExitCode, parseEmitPayload, parseEvidenceBundle } from "./guards.ts";
 import { resolveBearer } from "./token.ts";
 import { docsTimeout, runDocs } from "./docs.ts";
+import { runDocsFeedback } from "./docs/feedback.ts";
+import { runDocsIngestAll } from "./docs/ingest-all.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { runLedger } from "./ledger.ts";
-import { freeBytes, spawnGh, spawnGit } from "../../fleet/src/index.ts";
-import { httpClaimsLookup, httpReportPoster, runWorktree } from "./worktree/command.ts";
+import { runWorktree } from "./worktree/command.ts";
+import { requestTimeoutMs, substrateUrl, worktreeDeps } from "./worktree/deps.ts";
 import { runSpool } from "./spool.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
@@ -81,17 +87,10 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const DEFAULT_URL = "http://127.0.0.1:7410";
-const DEFAULT_TIMEOUT_MS = 1500;
 /** Added to the verify budget for `/evidence`: the server builds the bundle after its hour loop, outside that budget. */
 const EVIDENCE_RESPONSE_MARGIN_MS = 5_000;
-/** A worktree report holds up to 500 rows per request, so it gets more time than a hook-sized call. */
-const WORKTREE_REPORT_TIMEOUT_MS = 10_000;
-/** A claims lookup answers from one index read, but prune waits on it before every removal, so it gets more than a hook's budget. */
-const WORKTREE_CLAIMS_TIMEOUT_MS = 5_000;
-
 function base(): string {
-	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
+	return substrateUrl(process.env);
 }
 
 /**
@@ -115,8 +114,7 @@ function verifyBudgetMs(): number {
 }
 
 function timeout(): number {
-	const raw = Number(process.env.SUBSTRATE_TIMEOUT_MS);
-	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+	return requestTimeoutMs(process.env);
 }
 
 function git(args: string[], cwd = process.cwd()): string {
@@ -602,6 +600,46 @@ function cmdConsistency(argv: string[]): number {
 }
 
 /**
+ * `substrate reconcile [--plan]` and `substrate reconcile --apply PLAN_ID --confirm` (phase 78): the operator's manual path for
+ * the cross-layer reconcile. The work runs in `packages/mcp-server/src/cross-layer-reconcile-repair-run.ts`, spawned from this
+ * checkout with the operator's environment, for the same reason as `ledger`: the store credentials live in the server package
+ * only. The grammar is checked here, so a refused apply never costs a process: an apply without `--confirm` is refused before
+ * anything is spawned.
+ */
+const RECONCILE_USAGE =
+	"usage: substrate reconcile [--plan]\n" +
+	"       substrate reconcile --apply PLAN_ID --confirm\n" +
+	"  (no flag or --plan) print the comparison and the repairs it calls for; records them as one reconcile.plan note, repairs nothing\n" +
+	"  --apply PLAN_ID   apply the plan that a --plan run printed\n" +
+	"  --confirm         required with --apply: nothing is written without it\n" +
+	"exit: 0 nothing to repair or applied, 1 failed or refused, 2 usage, 3 a plan was printed\n";
+
+function cmdReconcile(argv: string[]): number {
+	const fail = (message: string): number => {
+		process.stderr.write(`${message}\n${RECONCILE_USAGE}`);
+		return 2;
+	};
+	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "cross-layer-reconcile-repair-run.ts");
+	const run = (runnerArgs: string[]): number => {
+		const status = spawnSync(process.execPath, [runner, ...runnerArgs], { stdio: "inherit", env: process.env }).status;
+		if (status === null) {
+			process.stderr.write("the reconcile runner ended abnormally; nothing was verified or applied\n");
+			return 1;
+		}
+		return status;
+	};
+	if (argv.length === 0 || (argv.length === 1 && argv[0] === "--plan")) return run(["--plan"]);
+	const at = argv.indexOf("--apply");
+	if (at === -1) return fail(`unknown reconcile arguments: ${argv.join(" ")}`);
+	const planId = argv[at + 1];
+	const extra = argv.filter((word, i) => i !== at && i !== at + 1 && word !== "--confirm");
+	if (extra.length > 0) return fail(`unknown reconcile argument: ${extra[0]}`);
+	if (!argv.includes("--confirm")) return fail("--apply writes repairs and needs --confirm: pass --apply PLAN_ID --confirm");
+	if (planId === undefined || planId.startsWith("--")) return fail("--apply needs the PLAN_ID that `substrate reconcile --plan` printed");
+	return run(["--apply", planId, "--confirm"]);
+}
+
+/**
  * The transcript adapter for `substrate session rollback`: omp gets a forked session file, every other surface a
  * marker. All file access is the real filesystem here and nowhere else; the port itself is injected with it.
  * Built on the first rewind, so `checkpoint`, `checkpoints`, `recover` and `sync` never look for an omp bucket.
@@ -695,6 +733,28 @@ switch (command) {
 		);
 		break;
 	case "docs":
+		if (rest[0] === "ingest-all") {
+			process.exit(
+				await runDocsIngestAll(rest.slice(1), {
+					out: (text) => process.stdout.write(text),
+					err: (text) => process.stderr.write(text),
+					invokedFromCli: true,
+				}),
+			);
+			break;
+		}
+		if (rest[0] === "feedback") {
+			process.exit(
+				await runDocsFeedback(rest.slice(1), {
+					url: base(),
+					token: resolveBearer("claude-code", process.env) ?? undefined,
+					timeoutMs: docsTimeout(process.env.SUBSTRATE_DOCS_TIMEOUT_MS),
+					out: (text) => process.stdout.write(text),
+					err: (text) => process.stderr.write(text),
+				}),
+			);
+			break;
+		}
 		process.exit(
 			await runDocs(rest, {
 				url: base(),
@@ -712,29 +772,16 @@ switch (command) {
 		break;
 	case "worktree":
 		process.exit(
-			await runWorktree(rest, {
-				env: process.env,
-				cwd: process.cwd(),
-				host: hostname(),
-				out: (text) => process.stdout.write(text),
-				err: (text) => process.stderr.write(text),
-				git: spawnGit,
-				gh: spawnGh,
-				now: () => new Date(),
-				freeBytes,
-				emit: (event) => emitEvent(event, { timeoutMs: timeout(), collector: "cli", source: "cli.worktree", url: base() }),
-				postReport: httpReportPoster({
-					url: base(),
-					token: resolveBearer("claude-code", process.env) ?? undefined,
-					// A report can hold hundreds of rows; the hook-sized default budget is too short for it.
-					timeoutMs: Math.max(timeout(), WORKTREE_REPORT_TIMEOUT_MS),
+			await runWorktree(
+				rest,
+				worktreeDeps({
+					env: process.env,
+					cwd: process.cwd(),
+					host: hostname(),
+					out: (text) => process.stdout.write(text),
+					err: (text) => process.stderr.write(text),
 				}),
-				claims: httpClaimsLookup({
-					url: base(),
-					token: resolveBearer("claude-code", process.env) ?? undefined,
-					timeoutMs: Math.max(timeout(), WORKTREE_CLAIMS_TIMEOUT_MS),
-				}),
-			}),
+			),
 		);
 		break;
 	case "ledger":
@@ -750,6 +797,9 @@ switch (command) {
 		break;
 	case "consistency":
 		process.exit(cmdConsistency(rest));
+		break;
+	case "reconcile":
+		process.exit(cmdReconcile(rest));
 		break;
 	case "memory":
 		process.exit(
@@ -829,12 +879,15 @@ switch (command) {
 				"substrate skills list [--state approved|proposed|declined|retired|all]\n" +
 				"substrate skills approve --name N --pr NUMBER --decision approve|decline|retire [--reason R]\n" +
 				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
+				"substrate docs feedback <document> <verdict> [--session ID] [--json]\n" +
+				"substrate docs ingest-all --state-dir DIR [--roots DIR,DIR] [--group NAME] [--dry-run | --apply]\n" +
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
 				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
 				"substrate steer open --repo R | heartbeat --session ID | close --session ID | sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (private commands use --binding-file PATH; substrate steer for all flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
 				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
+				"substrate reconcile [--plan] | --apply PLAN_ID --confirm   (exit 0 nothing to repair or applied, 1 failed or refused, 2 usage, 3 a plan printed; docs/greptime-ledger.md)\n" +
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +

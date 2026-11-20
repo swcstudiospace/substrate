@@ -1,8 +1,9 @@
+/** In-memory docs plane double for tests. Serves the LightRAG API shapes for rehearsal and client tests. */
 /**
- * The recording RAGFlow fake for rehearsal (D25-10).
+ * The recording lightrag fake for rehearsal (D25-10).
  *
  * Serves the shapes the HTTP API reference documents
- * (https://ragflow.io/docs/http_api_reference, read 2026-10-13; uplift-2
+ * (https://lightrag.io/docs/http_api_reference, read 2026-10-13; uplift-2
  * R6) over an injected `fetch`, and records every request it receives.
  * Tests prove the client against it instead of the deployment; the live
  * proof (Phase 25 G1–G4) stays operator-gated, so the shapes are
@@ -33,7 +34,7 @@
  * record how many retrievals overlapped, which is how a test tells a
  * concurrent client from a sequential one.
  */
-import type { RagflowChunk } from "./planes/ragflow.ts";
+import type { DocsChunk } from "./planes/docs-wire.ts";
 
 export interface FakeDataset {
 	id: string;
@@ -58,7 +59,7 @@ export type FakeChunkShape = "full" | "minimal";
  * accepted so existing fixtures type-check but are never served — the
  * reference documents no metadata on retrieval chunks.
  */
-export interface FakeChunk extends RagflowChunk {
+export interface FakeChunk extends DocsChunk {
 	source_url: string;
 }
 
@@ -108,7 +109,7 @@ function seedChunks(datasetId: string, sourceUrl: string): FakeChunk[] {
 			document_name: "data-planes.md",
 			document_id: `doc-${datasetId}-2`,
 			chunk_id: `chunk-${datasetId}-2`,
-			heading_path: "RAGFlow datasets",
+			heading_path: "lightrag datasets",
 			source_url: sourceUrl,
 			score: 0.83,
 		},
@@ -120,7 +121,7 @@ function failure(code: number, message: string, status = 200): Response {
 	return Response.json({ code, message }, { status });
 }
 
-export class RagflowFake {
+export class DocsPlaneFake {
 	readonly requests: RecordedRequest[] = [];
 	/** Flip to serve the minimal shape (no ids, no score) — the U-01 version-swap arm. */
 	chunkShape: FakeChunkShape = "full";

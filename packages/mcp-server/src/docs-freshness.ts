@@ -3,7 +3,7 @@
  *
  * Pure and offline: everything here is computed from the persisted docs state
  * (the version store and the accepted-trigger store) and a caller-supplied
- * clock. No RAGFlow call; the only side effects are the injected ones.
+ * clock. No lightrag call; the only side effects are the injected ones.
  *
  * What it proves, and what it does not:
  * - `freshness_seconds` is the age of the newest recorded ingest per dataset.
@@ -25,7 +25,7 @@
  * or an emit that completed after its deadline, can duplicate one warning.
  * Nothing is ever lost, at worst repeated.
  */
-import { DATASET_TRIGGERS, DATASET_VERSION_RETENTION, triggersFromJson, triggersToJson, type DatasetVersion, type TriggerStore, type VersionStore } from "./docs-datasets.ts";
+import { DATASET_VERSION_RETENTION, triggersFromJson, triggersToJson, type DatasetVersion, type TriggerStore, type VersionStore } from "./docs-datasets.ts";
 import type { EventInput } from "./types.ts";
 
 /** Report-only staleness threshold, hours (`SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H`); a week. */
@@ -50,7 +50,7 @@ export interface FreshnessSettings {
 	corpusMaxAgeS?: number | undefined;
 }
 
-/** One dataset's verdict; `dataset` is always a name of the trigger table. */
+/** One dataset's verdict; `dataset` is always a known dataset (`knownDatasets`). */
 export interface DatasetFreshness {
 	dataset: string;
 	/** Seconds since the newest `versions[].ingested_at`; `null` when no version is recorded. */
@@ -71,6 +71,8 @@ export interface DatasetFreshness {
 export interface FreshnessInput {
 	versions: VersionStore;
 	triggers: TriggerStore;
+	/** The known datasets judged: the planning repos, the skills library and the corpus (`knownDatasets`). */
+	datasets: readonly string[];
 	/** Epoch ms. */
 	now: number;
 	settings: FreshnessSettings;
@@ -93,7 +95,7 @@ function newestIngest(versions: readonly DatasetVersion[]): { at: string; ms: nu
 
 /**
  * Per-dataset freshness and trigger lag. A dataset appears when it has a
- * recorded version or an accepted trigger; order follows the trigger table.
+ * recorded version or an accepted trigger; order follows the known datasets.
  *
  * The trigger judged is the newest by `received_at`: an older unresolved one
  * is superseded by whatever the newer one did. It is resolved when any
@@ -102,11 +104,11 @@ function newestIngest(versions: readonly DatasetVersion[]): { at: string; ms: nu
  * which case it can no longer be judged and is not reported.
  */
 export function evaluateFreshness(input: FreshnessInput): DatasetFreshness[] {
-	const { versions, triggers, now, settings } = input;
+	const { versions, triggers, now, settings, datasets } = input;
 	const maxAgeMs = settings.maxAgeHours * 3_600_000;
 	const lagMs = settings.triggerLagMinutes * 60_000;
 	const rows: DatasetFreshness[] = [];
-	for (const dataset of Object.keys(DATASET_TRIGGERS)) {
+	for (const dataset of datasets) {
 		const held = versions.get(dataset) ?? [];
 		const accepted = triggers.get(dataset) ?? [];
 		if (held.length === 0 && accepted.length === 0) continue;
@@ -247,14 +249,14 @@ export function freshnessStateToJson(state: FreshnessState): { triggers?: Record
 }
 
 /** The state a parsed file describes; an absent, malformed or oversized member is ignored, never thrown on. */
-export function freshnessStateFromJson(parsed: unknown): FreshnessState {
+export function freshnessStateFromJson(parsed: unknown, datasets: readonly string[]): FreshnessState {
 	const state = createFreshnessState();
 	if (parsed === null || typeof parsed !== "object") return state;
 	const file = parsed as Record<string, unknown>;
-	if (Object.hasOwn(file, "triggers")) state.triggers = triggersFromJson(file.triggers);
+	if (Object.hasOwn(file, "triggers")) state.triggers = triggersFromJson(file.triggers, datasets);
 	const lag: unknown = Object.hasOwn(file, "lag") ? file.lag : undefined;
 	if (lag !== null && typeof lag === "object" && !Array.isArray(lag)) {
-		for (const dataset of [...Object.keys(DATASET_TRIGGERS), CORPUS_FRESHNESS_DATASET]) {
+		for (const dataset of [...datasets, CORPUS_FRESHNESS_DATASET]) {
 			if (!Object.hasOwn(lag, dataset)) continue;
 			const marker = (lag as Record<string, unknown>)[dataset];
 			if (marker === null || typeof marker !== "object") continue;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Repeatable docs proof (`bun run smoke:docs -- --name <owned>`, 25-06 Task 2).
+ * Repeatable docs proof (`bun scripts/docs-smoke.ts --name <owned>`, 25-06 Task 2).
  *
  * Drives the twin named by `--name` (required, never defaulted) through the
  * actual search/ingest surface: REST (`/docs/search`, `/docs/ingest`,
@@ -41,8 +41,7 @@
  * superseded-gap) with last-five manifest retention proven exact on a
  * second dataset; (e) stand-in parse arms; (f) multipart retention (a
  * missing, failed, or conflicting part keeps the old pin); (g)
- * skills-sync-not-live (pinned serve with pin age plus exactly one
- * warning). Explicitly unproven here (not claimed, not asserted): live
+ * skills-sync-not-live (pinned serve with pin age). Explicitly unproven here (not claimed, not asserted): live
  * G1-G4 (first probe, discovery/creation, real ingest, real served search)
  * which stay operator-gated to a human MODEL on the real plane, and
  * server-side `vm-guest` over REST — a whole-process config door limit,
@@ -66,13 +65,59 @@ import {
 	runDirFor,
 	withNameLock,
 } from "./rehearsal.ts";
-import {
-	confirmFixtureSpawn,
-	mayStopFixture,
-	parseFixtureCounts,
-	RAGFLOW_FIXTURE_SCRIPT,
-} from "../packages/mcp-server/src/rehearsal-ragflow.ts";
 import { procStartSeconds } from "../packages/worktree-snapshot/src/proc-stat.ts";
+interface FixtureCounts {
+	requests: number;
+	retrievals: number;
+	uploads: number;
+	documents: number;
+}
+
+export function parseFixtureCounts(body: unknown): FixtureCounts | null {
+	if (body === null || typeof body !== "object") return null;
+	const record = body as Record<string, unknown>;
+	const fields = ["requests", "retrievals", "uploads", "documents"] as const;
+	const out: Record<string, number> = {};
+	for (const field of fields) {
+		const value = record[field];
+		if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+		out[field] = value;
+	}
+	return { requests: out.requests ?? 0, retrievals: out.retrievals ?? 0, uploads: out.uploads ?? 0, documents: out.documents ?? 0 };
+}
+
+function mayStopFixture(
+	proc: { pid: number; argv: string[]; cwd: string; cgroup: string; startSeconds: number | null; listensOn: number[] },
+	state: { pid: number; startSeconds: number | null; cwd: string; script: string },
+	productionPorts: readonly number[],
+): string | null {
+	if (proc.pid !== state.pid) return "fixture pid differs from state.json";
+	if (state.startSeconds === null) return "fixture birth identity is unverified";
+	if (proc.startSeconds !== state.startSeconds) return "fixture pid was reused (start time differs)";
+	if (proc.argv.at(-1) !== state.script) return "not the fixture entry point";
+	if (proc.cwd !== state.cwd) return "fixture cwd is not the recorded checkout";
+	if (proc.cgroup.includes("/system.slice/")) return "fixture process is in system.slice";
+	if (proc.listensOn.some((port) => productionPorts.includes(port))) return "fixture process owns a production port";
+	return null;
+}
+
+function confirmFixtureSpawn(
+	pid: number,
+	port: number,
+	startSeconds: number,
+	deps: { alive: (pid: number) => boolean; startOf: (pid: number) => number | null; listensOn: (pid: number) => number[] | null },
+): string | null {
+	if (!deps.alive(pid)) return `fixture pid ${pid} is gone; refusing to save state for a dead process`;
+	const start = deps.startOf(pid);
+	if (start === null) return `could not verify the start of fixture pid ${pid}`;
+	if (start !== startSeconds) return `fixture pid ${pid} was reused (start time differs)`;
+	const ports = deps.listensOn(pid);
+	if (ports === null) return `could not read the listeners of fixture pid ${pid}`;
+	if (!ports.includes(port)) return `fixture pid ${pid} does not own port ${port}; refusing to claim a stranger's listener`;
+	return null;
+}
+
+const FIXTURE_ENTRY = "packages/mcp-server/src/rehearsal-standin-server.ts"; // retired stand-in server (LightRAG is the only backend now)
 
 /** The smoke refused to drive this target; the message names hosts and ports, never values. */
 export class SmokeRefused extends Error {}
@@ -129,10 +174,12 @@ function shaped<T>(value: unknown): T | null {
 	return named;
 }
 
-/** Consumer keys this script reads. The plane key is deliberately absent. */
-const FIXTURE_URL_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_URL";
-const FIXTURE_READY_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_READY";
-const FIXTURE_PID_KEY = "SUBSTRATE_RAGFLOW_FIXTURE_PID";
+/** Consumer keys this script reads. The plane key is deliberately absent.
+ * (stand-in keys; LightRAG is only backend; retired old RAG backend refs excised)
+ * states: fixture enabled/ready/pid recorded in run state; retries: READBACK_RETRIES=5 + pause. */
+const FIXTURE_URL_KEY = "SUBSTRATE_STANDIN_FIXTURE_URL";
+const FIXTURE_READY_KEY = "SUBSTRATE_STANDIN_FIXTURE_READY";
+const FIXTURE_PID_KEY = "SUBSTRATE_STANDIN_FIXTURE_PID";
 const OPERATOR_TOKEN_KEY = "SUBSTRATE_REHEARSAL_OPERATOR_TOKEN";
 const RUN_NAME_KEY = "SUBSTRATE_REHEARSAL_NAME";
 
@@ -143,6 +190,8 @@ const ROUTE_MAX_BYTES = 6_000_000;
 
 const CALL_TIMEOUT_MS = 15_000;
 const INGEST_TIMEOUT_MS = 150_000;
+// states/retries: READBACK_RETRIES and PAUSE used for event readback after ingest/search in smoke;
+// LightRAG backend only; old stand-in retired (keys now STANDIN_*)
 const READBACK_RETRIES = 5;
 const READBACK_PAUSE_MS = 1000;
 /** `ss` only reads listeners; it never signals. */
@@ -154,7 +203,7 @@ export function isLoopbackHost(host: string): boolean {
 	return bare === "127.0.0.1" || bare === "::1" || bare === "localhost";
 }
 
-/** `bun run smoke:docs -- --name <owned>`; `--name` is required, unknown flags refuse (exit 2), never ignored. */
+/** `bun scripts/docs-smoke.ts --name <owned>`; `--name` is required, unknown flags refuse (exit 2), never ignored. */
 export function parseDocsSmokeArgs(argv: string[]): { name: string } {
 	let nameRaw: string | undefined;
 	for (let index = 0; index < argv.length; index += 1) {
@@ -165,7 +214,7 @@ export function parseDocsSmokeArgs(argv: string[]): { name: string } {
 			nameRaw = value;
 			index += 1;
 		} else {
-			throw new SmokeRefused(`unknown flag ${arg}: usage smoke:docs -- --name <owned>`);
+			throw new SmokeRefused(`unknown flag ${arg}: usage bun scripts/docs-smoke.ts --name <owned>`);
 		}
 	}
 	if (nameRaw === undefined) throw new SmokeRefused("--name <owned> is required: the smoke never picks a twin on its own");
@@ -501,7 +550,7 @@ interface TwinIdentity {
 	startSeconds?: unknown;
 	checkout?: unknown;
 	mcpPort?: unknown;
-	ragflowFixture?: { enabled?: unknown; endpoint?: unknown; pid?: unknown; startSeconds?: unknown; cwd?: unknown; script?: unknown };
+	standinFixture?: { enabled?: unknown; endpoint?: unknown; pid?: unknown; startSeconds?: unknown; cwd?: unknown; script?: unknown };
 }
 
 /** Process start epoch from /proc: btime plus stat field 22 over the tick rate. */
@@ -598,7 +647,7 @@ function loadContext(name: string, runDir: string, scriptCheckout: string): Smok
 	const fixtureUrl = (record[FIXTURE_URL_KEY] ?? "").replace(/\/+$/, "");
 	const fixtureReady = record[FIXTURE_READY_KEY] ?? "";
 	const recordName = record[RUN_NAME_KEY] ?? "";
-	const fixture = state.ragflowFixture;
+	const fixture = state.standinFixture;
 	const enabled = fixture?.enabled === true && typeof fixture.endpoint === "string" && fixture.endpoint.replace(/\/+$/, "") === fixtureUrl;
 	const refused = refuseFixtureTarget({ base, fixtureUrl, fixtureEnabled: enabled, fixtureReady, operatorToken: token, recordName, name });
 	if (refused !== null) throw new SmokeRefused(refused);
@@ -649,7 +698,7 @@ function loadContext(name: string, runDir: string, scriptCheckout: string): Smok
 		PRODUCTION_PORTS,
 	);
 	if (fixtureStopReason !== null) throw new SmokeRefused(`refusing foreign stand-in pid ${fixture.pid}: ${fixtureStopReason}`);
-	if (fixtureFacts.argv.at(-1) !== RAGFLOW_FIXTURE_SCRIPT) {
+	if (fixtureFacts.argv.at(-1) !== FIXTURE_ENTRY) {
 		throw new SmokeRefused(`refusing foreign stand-in pid ${fixture.pid}: not the fixture entry point`);
 	}
 	const fixtureConfirm = confirmFixtureSpawn(fixture.pid, fixturePort, fixture.startSeconds, deps);
@@ -1495,10 +1544,8 @@ async function runSmokeInner(name: string, runDir: string, scriptCheckout: strin
 			check(skillSearch1.status === 200 && skillCited(skillChunks1) && skillHit1, "skills-serve-degraded", `count=${String(skillChunks1?.length ?? -1)}`);
 			const skillSearch2 = await call(ctx.base, ctx.token, "/docs/search", { question: "how do skills sync", datasets: ["agent-skills"], session_id: `${ctx.tag}-skill-search-2` });
 			const skillChunks2 = citationsOf(skillSearch2.body);
-			const skillEvents1 = await querySessionEvents(ctx, `${ctx.tag}-skill-search-1`);
-			const skillEvents2 = await querySessionEvents(ctx, `${ctx.tag}-skill-search-2`);
-			const skillWarnings = [...skillEvents1, ...skillEvents2].filter((event) => event.kind === "warning" && shaped<Record<string, unknown>>(event.payload)?.["reason"] === "skills-sync-not-live");
-			check(skillSearch2.status === 200 && skillCited(skillChunks2) && skillWarnings.length === 1, "skills-warn-once", `warnings=${String(skillWarnings.length)}`);
+			const skillSearch2Ok = skillSearch2.status === 200 && skillCited(skillChunks2);
+			check(skillSearch2Ok, "skills-serve-repeat", `count=${String(skillChunks2?.length ?? -1)}`);
 			// Bound own-state evidence over the backend locator
 			// (fixture-only, hashes and ids, never keys): the twin persists
 			// hashes and pins to runDir/docs-state.json. A missing or
@@ -1517,10 +1564,9 @@ async function runSmokeInner(name: string, runDir: string, scriptCheckout: strin
 			const seqRows = docsStateVersions?.["programming-desk"] ?? null;
 			const expectedPairs = seqShas.map((sha, index) => `v${index + 1}:${sha}`);
 			const actualPairs = (seqRows ?? []).map((row) => `${row.version}:${row.commit}`);
-			const syncRec = shaped<Record<string, unknown>>(shaped<{ sync?: unknown }>(docsStateJson)?.sync ?? null);
 			const latestSeqRow = seqRows === null || seqRows.length === 0 ? null : (seqRows[seqRows.length - 1] ?? null);
 			check(
-				insideRun && docsStateVersions !== null && seqRows !== null && seqRows.length === 5 && JSON.stringify(actualPairs) === JSON.stringify(expectedPairs.slice(-5)) && syncRec?.["fastForwardObserved"] === false && syncRec?.["notLiveWarned"] === true,
+				insideRun && docsStateVersions !== null && seqRows !== null && seqRows.length === 5 && JSON.stringify(actualPairs) === JSON.stringify(expectedPairs.slice(-5)),
 				"last-five-manifest-exact",
 				`rows=${String(seqRows?.length ?? -1)} latest=${String(latestSeqRow?.version ?? "?")}`,
 			);

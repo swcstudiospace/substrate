@@ -49,7 +49,7 @@
 - [ ] **STEER-01**: `substrate steer` lists live sessions and their steering state, and queues, acknowledges and lists directives for an operator.
 - [ ] **STEER-02**: A session can ask what the other live sessions of its repository are doing and receives a bounded, redacted digest that carries its provenance.
 - [ ] **STEER-03**: `memory_brief` carries sessions, steering and handoff sections behind a flag.
-- [ ] **STEER-04**: Steering session state survives a server restart. Owner decision (2026-11-19): the `steering_sessions` cap and TTL design is superseded; session state lives in `live_session_bindings` (migration v42) with SQL-time expiry (`expires_at`).
+- [ ] **STEER-04**: Steering session state survives a server restart.
 - [ ] **STEER-05**: The session hook reads `checkpoint_hint` and writes the checkpoint it names, and a context trigger injects the digest at session start.
 - [ ] **STEER-06**: A session can wait for a directive with a long poll instead of polling `docs_search`.
 
@@ -80,7 +80,7 @@
 ## Out of scope and deferred
 
 - Graph and hybrid LightRAG modes: they need an LLM route that only the operator can provide (production runs naive mode). Nothing in this milestone requires one; REFLECT-05 is deterministic.
-- Removing the RAGFlow code (TODO register D-15), deploys, Railway writes, funding the anchor key, devnet sends outside the existing anchor job, and installing hooks or timers on a host: all operator-gated. This milestone ships the code, the staged units and the runbooks.
+- Removing the RAG-backend code (TODO register D-15), deploys, Railway writes, funding the anchor key, devnet sends outside the existing anchor job, and installing hooks or timers on a host: all operator-gated. This milestone ships the code, the staged units and the runbooks.
 - Agents queueing steering directives for other agents: directive authors stay human (v1.6 decision); STEER-02 shares context, it does not delegate authority.
 - A new on-chain memo format: PROOF-02 rides the existing hourly anchor.
 - Moving `packages/collectors/src/cursor-stop.ts` and the cli to collectors import cycle, `noPropertyAccessFromIndexSignature` and coverage thresholds stay deferred as recorded in Run 13.
@@ -110,7 +110,7 @@ Checkbox convention: a ticked requirement is satisfied or waived by the operator
 ### Security
 
 - [ ] **HARD-S1 — Session boundary enforcement (Phase 71):** Recheck authenticated per-session binding on each private live-session operation. Server-issued identifiers and separate binding credentials use cryptographic randomness; durable ownership, revocation, and tombstones prevent takeover/reuse across restart. Foreign, unknown, wrong-proof, expired, and closed targets yield the same not-found response. Keep only credential hashes in the authority; never leak proofs through logs, discovery, cache keys, audit, or prompts. Preserve the redacted repository-wide context digest and keep historical event/checkpoint labels separate.
-- [ ] **HARD-S2 — Repository allowlist and scoped credentials (Phase 72):** Address registered repositories by identifier, not user-supplied raw paths/URLs. Canonicalize paths and enforce component-wise allowed roots on each operation; reject traversal and symlink escape, including after registration. Resolve least-privilege credentials by repository-specific references; repo A credentials cannot authorize repo B. Use argv-only git execution.
+- [ ] **HARD-S2 — Repository allowlist and scoped credentials (Phase 72):** Address registered repositories by identifier, not user-supplied raw paths/URLs. Canonicalize paths and enforce component-wise allowed roots on each operation; reject traversal and symlink escape, including after registration. Resolve least-privilege credentials by the surface bearer plus its repository grant (owner decision 2026-11-12, grant model): a credential is scoped to one repository through the grant, and repo A credentials cannot authorize repo B. Use argv-only git execution.
 - [ ] **HARD-S3 — Ledger tamper evidence (Phase 73):** Chain canonical content checksums using a standard hash; on-demand and scheduled verification detect modified, deleted, gapped, or reordered entries and report the first bad position. State explicitly which trusted earlier proof supports truncation/rewrite detection; never claim hashes recomputed solely from modified rows prove the missing history.
 
 ### Redundancy
@@ -131,7 +131,7 @@ Every feature requires CONTEXT, executable PLAN files, SUMMARY, and exercised ve
 | Requirement | Category | Phase | Status |
 |-------------|----------|-------|--------|
 | HARD-S1 | Security | 71 | Locally verified (5/5); awaiting-review / pending QUALITY |
-| HARD-S2 | Security | 72 | Not started |
+| HARD-S2 | Security | 72 | Amended 2026-11-12 (grant model, owner decision); code and tests in progress; open: corpus proof decision applied, Postgres filter run passed, live-session transition ordering gap open |
 | HARD-S3 | Security | 73 | Preliminary edits validated; not complete |
 | HARD-R1 | Redundancy | 74 | Not started; earlier no-op was not delivery |
 | HARD-R2 | Redundancy | 75 | Preliminary edits validated; not complete |

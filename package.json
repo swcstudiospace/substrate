@@ -41,6 +41,8 @@
     "verify": "bun scripts/verify.ts",
     "audit:verify": "bun scripts/audit-verify.ts",
     "parity:check": "bun scripts/parity-check.ts",
+    "parity:gate": "bun scripts/parity-gate.ts",
+    "probe:lightrag": "bun scripts/lightrag-probe.ts",
     "reconcile": "bun scripts/reconcile.ts",
     "doctor:runtime": "bun scripts/doctor-runtime.ts",
     "advisor:promote": "bun scripts/promote-advisor.ts",
@@ -52,6 +54,7 @@
     "uat:phase0": "bun scripts/uat-phase0.ts",
     "collectors:status": "bun packages/collectors/src/status.ts",
     "proof:laneb": "bun scripts/laneb-proof.ts",
+    "build:binaries": "bun scripts/build-binaries.ts",
     "lint": "biome lint ."
   },
   "devDependencies": {

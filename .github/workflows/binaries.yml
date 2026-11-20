@@ -1,0 +1,45 @@
+name: Binaries
+
+# Compiles the `substrate` CLI and the `substrate-mcp` server into standalone executables for
+# macOS (arm64, x64), Windows (x64) and Linux (x64) with `bun build --compile` (scripts/build-binaries.ts).
+# Bun cross-compiles every target from the Linux runner, so no GitHub-hosted runner is used: this
+# follows the repository rule that every job runs on the Omega CI runner pool (docs/ci.md).
+# The artifacts carry no secrets: this workflow reads no repository secrets.
+#
+# Like ci.yml, the job is skipped while the repository variable CI_ENABLED is unset.
+# Run it on demand with `gh workflow run binaries.yml`.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile all targets
+    if: ${{ vars.CI_ENABLED == 'true' }}
+    runs-on: [self-hosted, linux, x64, omega-ci]
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install dependencies (lockfile must be current)
+        run: bun install --frozen-lockfile
+
+      - name: Compile the CLI and the MCP server for every target
+        run: bun run build:binaries
+
+      - name: Upload the executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: substrate-binaries
+          path: dist/bin
+          if-no-files-found: error

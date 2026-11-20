@@ -23,7 +23,7 @@ export const BASELINE_HOOK_COMMAND = "substrate session hook baseline";
 export const CONTEXT_HOOK_COMMAND = "substrate session hook context";
 
 /** Claude Code takes a hook timeout in whole seconds; leave room above the hook's own budget so the hook ends itself first. */
-const CLAUDE_CODE_TIMEOUT_SECONDS = Math.ceil(HOOK_TIMEOUT_MS / 1000) + 5;
+export const CLAUDE_CODE_TIMEOUT_SECONDS = Math.ceil(HOOK_TIMEOUT_MS / 1000) + 5;
 
 /** Claude Code settings JSON, and nothing else, so it can be pasted or merged as is. */
 function claudeCode(): string {

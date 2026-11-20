@@ -40,6 +40,9 @@ interface Rig {
 /** What the REST routes the steering and context triggers read answer with. `down` throws like a refused connection; `garbage` answers 200 with HTML. */
 interface SteerStub {
 	mode: "up" | "down" | "garbage" | "denied";
+	/** The durable history's answer on `/steering/directives`: `unavailable` and a cut history leave the listing partial. */
+	history: "memory-only" | "durable" | "unavailable";
+	historyTruncated: boolean;
 	directives: unknown[];
 	context: unknown;
 	calls: Array<{ path: string; search: string; authorization: string | undefined; sessionBinding: string | undefined }>;
@@ -52,7 +55,7 @@ function steerFetchFor(stub: SteerStub): SteerFetch {
 		if (stub.mode === "down") throw new TypeError("fetch failed");
 		if (stub.mode === "garbage") return new Response("<html>not json</html>", { status: 200 });
 		if (stub.mode === "denied") return Response.json({ status: "refused", error: { code: "not-found" } }, { status: 404 });
-		if (url.pathname === "/steering/directives") return Response.json({ directives: stub.directives });
+		if (url.pathname === "/steering/directives") return Response.json({ directives: stub.directives, history: stub.history, history_truncated: stub.historyTruncated });
 		if (url.pathname === "/session/context") return Response.json(stub.context);
 		return new Response("{}", { status: 404 });
 	};
@@ -62,7 +65,7 @@ function rig(overrides: Partial<SessionDeps> = {}, repo = true): Rig {
 	const dir = repo ? makeRepo() : tempDir();
 	if (repo) writeFiles(dir, { "a.txt": "alpha\n" });
 	const server = new FakeServer();
-	const steer: SteerStub = { mode: "up", directives: [], context: {}, calls: [] };
+	const steer: SteerStub = { mode: "up", history: "memory-only", historyTruncated: false, directives: [], context: {}, calls: [] };
 	const out: string[] = [];
 	const err: string[] = [];
 	const clock = { ms: T0 };
@@ -104,6 +107,28 @@ function verboseLine(r: Rig): string {
 	const lines = r.err.join("").split("\n").filter((line) => line.length > 0);
 	expect(lines).toHaveLength(1);
 	return lines[0] as string;
+}
+
+/** A runner that counts the snapshots taken: each one starts from `git read-tree --empty` on a temporary index. */
+function countingRunner(): { run: Runner; snapshots: () => number } {
+	let count = 0;
+	const run: Runner = async (argv, options) => {
+		if (argv.includes("read-tree")) count += 1;
+		return spawnRunner(argv, options);
+	};
+	return { run, snapshots: () => count };
+}
+
+/** A runner whose next snapshot fails once, as a local I/O error would; every other call runs normally. */
+function failNextSnapshot(): Runner {
+	let armed = true;
+	return async (argv, options) => {
+		if (armed && argv.includes("read-tree")) {
+			armed = false;
+			throw new Error("snapshot unavailable");
+		}
+		return spawnRunner(argv, options);
+	};
 }
 
 describe("a turn hook creates one checkpoint", () => {
@@ -418,16 +443,6 @@ describe("overlapping hooks and the number of snapshots", () => {
 		expect(r.server.deliveries.checkpoint).toBe(1);
 	});
 
-	/** A runner that counts the snapshots taken: each one starts from `git read-tree --empty` on a temporary index. */
-	function countingRunner(): { run: Runner; snapshots: () => number } {
-		let count = 0;
-		const run: Runner = async (argv, options) => {
-			if (argv.includes("read-tree")) count += 1;
-			return spawnRunner(argv, options);
-		};
-		return { run, snapshots: () => count };
-	}
-
 	test("the first automatic checkpoint hashes the worktree once, and an unchanged tree afterwards is skipped after one hash too", async () => {
 		const r = rig();
 		const { run, snapshots } = countingRunner();
@@ -471,7 +486,7 @@ describe("parseEnvelope", () => {
 	});
 
 	test("reads the Claude Code fields and ignores the rest", () => {
-		expect(parseEnvelope(JSON.stringify({ session_id: "s", cwd: "/x", transcript_path: "/t", hook_event_name: "Stop", stop_hook_active: false }))).toEqual({ session_id: "s", cwd: "/x" });
+		expect(parseEnvelope(JSON.stringify({ session_id: "s", cwd: "/x", transcript_path: "/t", hook_event_name: "Stop", stop_hook_active: false }))).toEqual({ session_id: "s", cwd: "/x", transcript_path: "/t" });
 	});
 	test("null fields are absent; empty text is an empty envelope", () => {
 		expect(parseEnvelope(JSON.stringify({ session_id: null, directive_id: "d" }))).toEqual({ directive_id: "d" });
@@ -648,12 +663,34 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 		expect(r.err.join("")).not.toContain(PROOF);
 	});
 
-	test("only five matching hints are acted on in one run; foreign live hints are not consumed", async () => {
-		const r = rig();
-		r.steer.directives = [directive("foreign", { session_id: SIBLING }), ...Array.from({ length: 7 }, (_, index) => directive(`bounded-${index}`))];
+	test("only five matching hints are acted on in one run, which hashes the tree once; the next run acts on the rest", async () => {
+		const { run, snapshots } = countingRunner();
+		const r = rig({ run });
+		const ids = Array.from({ length: 7 }, (_, index) => `bounded-${index}`);
+		r.steer.directives = [directive("foreign", { session_id: SIBLING }), ...ids.map((id) => directive(id))];
 		await hook(r, envelope(r), "steering");
-		expect(await consumedOf(r)).toEqual(["bounded-0", "bounded-1", "bounded-2", "bounded-3", "bounded-4"]);
+		expect(await consumedOf(r)).toEqual(ids.slice(0, 5));
 		expect(await stepsOf(r)).toEqual(["directive:bounded-0"]);
+		// The first hint snapshots the tree; the four after it, and the plain attempt, see the tree that checkpoint pinned.
+		expect(snapshots()).toBe(1);
+		// Hints 6 and 7 stayed unconsumed, so the next run acts on them: its one snapshot finds the tree unchanged, so no checkpoint.
+		await hook(r, envelope(r), "steering");
+		expect(await consumedOf(r)).toEqual(ids);
+		expect(await stepsOf(r)).toEqual(["directive:bounded-0"]);
+		expect(snapshots()).toBe(2);
+	});
+
+	test("a failed hint is the outcome reported for the run, even though the plain attempt after it is skipped", async () => {
+		const r = rig();
+		expect(await runSession(["checkpoint", "--session", SESSION, "--json"], r.deps)).toBe(EXIT_DONE);
+		r.steer.directives = [directive("dir-1")];
+		r.deps.run = failNextSnapshot();
+		await hook(r, envelope(r), "steering", "--verbose");
+		// The hint's snapshot failed. The plain attempt then finds the tree unchanged since the manual checkpoint and is skipped.
+		expect(verboseLine(r)).toContain("failed open");
+		expect(verboseLine(r)).not.toContain("skipped");
+		expect(await stepsOf(r)).toEqual([]);
+		expect(await consumedOf(r)).toEqual([]);
 	});
 
 	test("an acknowledged directive with a hint gets exactly the checkpoint it names, with no envelope directive id", async () => {
@@ -712,7 +749,7 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 		expect(await stepsOf(r)).toEqual([undefined]);
 	});
 
-	test("a skipped hint stays consumed after more than 200 later decisions, while the server still lists it", async () => {
+	test("a skipped hint stays consumed among 250 earlier decisions, while the server still lists it", async () => {
 		const r = rig();
 		const earlier = Array.from({ length: 250 }, (_, index) => (index === 0 ? "old-skipped" : `filler-${index}`));
 		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE), SESSION, LIVE, earlier);
@@ -739,6 +776,35 @@ describe("the checkpoint_hint reader of the steering trigger", () => {
 		writeFiles(r.dir, { "a.txt": "gamma\n" });
 		await hook(r, envelope(r), "steering");
 		expect(await consumedOf(r)).toEqual(["kept"]);
+	});
+
+	// A listing the history cannot vouch for omits directives the server still holds: its absence proves nothing, so it must not prune.
+	const partialListingKeepsDecision = async (r: Rig, history: SteerStub["history"], historyTruncated: boolean): Promise<void> => {
+		writeConsumed(consumedPath(await resolvePendingDir(r.dir), SESSION, LIVE), SESSION, LIVE, ["dir-1"]);
+		r.steer.history = history;
+		r.steer.historyTruncated = historyTruncated;
+		r.steer.directives = [];
+		writeFiles(r.dir, { "a.txt": "gamma\n" });
+		await hook(r, envelope(r), "steering");
+		expect(await consumedOf(r)).toEqual(["dir-1"]);
+		// The history is back and lists the hint again: its decision still stands, so no second checkpoint is taken for it.
+		r.steer.history = "durable";
+		r.steer.historyTruncated = false;
+		r.steer.directives = [directive("dir-1")];
+		writeFiles(r.dir, { "a.txt": "delta\n" });
+		await hook(r, envelope(r), "steering");
+		expect((await stepsOf(r)).filter((step) => step === "directive:dir-1")).toEqual([]);
+		expect(await consumedOf(r)).toEqual(["dir-1"]);
+	};
+
+	test("a 200 listing whose history is unavailable keeps the decision of a consumed hint, and takes no new checkpoint for it", async () => {
+		const r = rig();
+		await partialListingKeepsDecision(r, "unavailable", false);
+	});
+
+	test("a 200 listing whose history was truncated keeps the decision of a consumed hint, and takes no new checkpoint for it", async () => {
+		const r = rig();
+		await partialListingKeepsDecision(r, "durable", true);
 	});
 
 	test("directives without a steering hint, for another session, or declined are ignored; a plain steering checkpoint is still taken", async () => {

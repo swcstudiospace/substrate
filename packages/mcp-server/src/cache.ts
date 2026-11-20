@@ -118,6 +118,17 @@ export const FORGET_MARK_KEY = `${CACHE_PREFIX}:gen:forgotten`;
 export const FORGET_MARK_MARGIN_S = 300;
 
 /**
+ * The forget mark's lifetime for a `briefSnapshotTtlS`: the longest saved brief it has to guard, plus the margin. The one
+ * place it is computed, so `Substrate.memoryForget` and the cross-layer reconcile judge the same number.
+ */
+export function forgetMarkTtlS(briefSnapshotTtlS: number): number {
+	return Math.max(briefSnapshotTtlS, CACHE_TTL["brief-snapshot"]) + FORGET_MARK_MARGIN_S;
+}
+
+/** What the forget mark holds, as the cross-layer reconcile reads it. `disabled` when the cache is off. */
+export type ForgetMarkRead = { state: "disabled" } | { state: "absent" } | { state: "present"; atMs: number };
+
+/**
  * Soonest future timestamp, in epoch ms. A cached answer must not outlive the
  * next lease expiry or reverify deadline baked into it.
  */
@@ -520,6 +531,11 @@ export class ReadThroughCache {
 		this.flightMaxAgeMs = Math.max(1, Math.floor(options.flightMaxAgeMs ?? FLIGHT_MAX_AGE_MS));
 	}
 
+	/** The gated redis client this cache reads through, or null when it is off. The reconcile pairs read the cache through it, so an open breaker reports `unavailable`. */
+	redisClient(): CacheRedis | null {
+		return this.redis;
+	}
+
 	health(): CacheHealth {
 		return {
 			enabled: this.enabled,
@@ -860,6 +876,28 @@ export class ReadThroughCache {
 			this.staleGenerations.add(key);
 			this.fail(cause, false, "gen");
 		}
+	}
+
+	/**
+	 * The forget mark as the cross-layer reconcile reads it. A failed read throws, so the caller reports the cache as
+	 * unverifiable; it never answers `absent` for a read that failed, because an absent mark means "no forget". `disabled`
+	 * when the cache is off.
+	 */
+	async readForgetMark(): Promise<ForgetMarkRead> {
+		if (!this.enabled || !this.redis) return { state: "disabled" };
+		const redis = this.redis;
+		let raw: string | null;
+		try {
+			raw = await this.attempt(() => redis.get(FORGET_MARK_KEY));
+			this.noteConnected();
+		} catch (cause) {
+			this.fail(cause, false, "gen");
+			throw cause;
+		}
+		if (raw === null) return { state: "absent" };
+		const atMs = Number(raw);
+		if (!Number.isFinite(atMs)) throw new Error("the forget mark is not a time");
+		return { state: "present", atMs };
 	}
 
 	/**

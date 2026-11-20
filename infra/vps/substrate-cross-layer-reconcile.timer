@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the cross-layer reconcile daily (substrate-cross-layer-reconcile.service)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Once a day, off the hour and clear of the other daily ticks: index sweep at
+# 03:17 UTC, the doctor every six hours at :23. The reconcile judges a 25-hour
+# window, so a tick that runs an hour late still covers every note.
+# Persistent=true runs a missed day at the next boot.
+OnCalendar=*-*-* 04:41:00 UTC
+Persistent=true
+Unit=substrate-cross-layer-reconcile.service
+
+[Install]
+WantedBy=timers.target

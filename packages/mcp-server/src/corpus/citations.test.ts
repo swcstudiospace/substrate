@@ -1,11 +1,11 @@
 /**
  * A LightRAG result that came from a corpus document cites that document's repository and path; every other result is
- * untouched. The corpus dataset is searched by default and has its own row in the dataset table.
+ * untouched. The corpus dataset is always a known dataset, so a search scope can name it.
  */
 import { describe, expect, test } from "bun:test";
 import { corpusDocumentName } from "@substrate/corpus";
-import { DATASET_TRIGGERS } from "../docs-datasets.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs } from "../docs-search.ts";
+import { knownDatasets } from "../docs-datasets.ts";
+import { searchDocs } from "../docs-search.ts";
 import { defined } from "../test-support.ts";
 import { sha256Hex } from "./testkit.ts";
 
@@ -55,8 +55,7 @@ describe("corpus citations", () => {
 });
 
 describe("the corpus dataset", () => {
-	test("is searched by default and has a trigger row", () => {
-		expect(DEFAULT_SEARCH_DATASET_NAMES).toContain("corpus");
-		expect(Object.hasOwn(DATASET_TRIGGERS, "corpus")).toBe(true);
+	test("is a known dataset, so the default search scope names it", () => {
+		expect(knownDatasets({ datasets: [], datasetOf: new Map() })).toContain("corpus");
 	});
 });

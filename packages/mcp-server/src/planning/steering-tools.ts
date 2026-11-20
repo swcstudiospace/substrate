@@ -6,19 +6,26 @@ import type { AuditOutcome, McpToolCall } from "../observe.ts";
 import type { EventInput } from "../types.ts";
 import { SESSION_ID_RE } from "./presence.ts";
 import { IDEMPOTENCY_KEY_PATTERN, scopeRepoId } from "../event.ts";
+import { redact } from "../redact.ts";
+import { acknowledgeFingerprint, keyedDirectiveId, queueFingerprint, type QueueRequestFields, type SteeringIdempotency } from "./steering-idempotency.ts";
 import type { LiveSessionAccess, LiveSessionAuthority, LiveSessionCaller, LiveSessionOperation, LiveSessionSnapshot } from "./steering-sessions-store.ts";
 import { sessionStateForAcknowledgement, type SessionStatePort, type SteeringAcknowledgeReply } from "./steering-delivery.ts";
-import { STEERING_ACTIONS, STEERING_BODY_MAX, STEERING_OUTCOMES, STEERING_PRIORITIES, type SteeringAckReason, type SteeringClock, type SteeringConfigError, type SteeringError, type SteeringInbox, type SteeringOutcome } from "./steering.ts";
+import { errnoCode } from "./index.ts";
+import type { SteeringDurableReplies, SteeringKeyedQueueSaved } from "./steering-store.ts";
+import type { SteeringKeyedRequest } from "./steering.ts";
+import { STEERING_ACTIONS, STEERING_BODY_MAX, STEERING_OUTCOMES, STEERING_PRIORITIES, type SteeringAckReason, type SteeringClock, type SteeringConfigError, type SteeringDirective, type SteeringError, type SteeringInbox, type SteeringOutcome } from "./steering.ts";
 
 export type SteeringCaller = LiveSessionCaller;
 export const STEERING_REFUSED_ACTION = "steering.refused";
 export const SESSION_BINDING_INPUT = z.string().regex(/^[a-f0-9]{64}$/).optional();
+/** A client's idempotency key (phase 77): the event rule, so a key means the same thing on both surfaces. Unset means unkeyed. */
+export const STEERING_IDEMPOTENCY_KEY_INPUT = z.string().regex(IDEMPOTENCY_KEY_PATTERN).optional();
 export const STEERING_QUEUE_INPUT = z.object({
  target_session_id: z.string().regex(SESSION_ID_RE), action: z.enum(STEERING_ACTIONS), priority: z.enum(STEERING_PRIORITIES), body: z.string().min(1).max(STEERING_BODY_MAX),
  plan_ref: z.object({ phase: z.string().min(1).max(64), plan: z.string().min(1).max(64) }).strict().optional(),
- conflicts_with_active_plan: z.boolean(), idempotency_key: z.string().regex(IDEMPOTENCY_KEY_PATTERN).optional(), session_binding: SESSION_BINDING_INPUT,
+ conflicts_with_active_plan: z.boolean(), idempotency_key: STEERING_IDEMPOTENCY_KEY_INPUT, session_binding: SESSION_BINDING_INPUT,
 }).strict();
-export const STEERING_ACKNOWLEDGE_INPUT = z.object({ directive_id: z.string().min(1).max(128), session_id: z.string().regex(SESSION_ID_RE), outcome: z.enum(STEERING_OUTCOMES), confirm: z.boolean().optional(), session_binding: SESSION_BINDING_INPUT }).strict();
+export const STEERING_ACKNOWLEDGE_INPUT = z.object({ directive_id: z.string().min(1).max(128), session_id: z.string().regex(SESSION_ID_RE), outcome: z.enum(STEERING_OUTCOMES), confirm: z.boolean().optional(), idempotency_key: STEERING_IDEMPOTENCY_KEY_INPUT, session_binding: SESSION_BINDING_INPUT }).strict();
 export const LIVE_SESSION_UPDATE_INPUT = z.object({
  session_id: z.string().regex(SESSION_ID_RE).optional(), repo_id: z.string().min(1).max(256).refine((repo) => scopeRepoId(repo) !== "", "invalid repository"), state: z.enum(["ACTIVE", "CONTEXT_REFRESH", "PAUSED", "RESUMED"]),
  steering: z.string().max(16000).optional(), planning_hash: z.string().max(256).optional(), previous_state: z.enum(["ACTIVE", "CONTEXT_REFRESH", "PAUSED", "RESUMED"]).optional(), session_binding: SESSION_BINDING_INPUT,
@@ -44,18 +51,28 @@ export class LiveSessionBoundaryError extends Error {
 export interface LiveSessionAuditPort { auditCalls(caller: LiveSessionCaller, calls: McpToolCall[], transport: AuditTransport): Promise<AuditOutcome> }
 /** Trusted service invocation, never a client-provided grant. Arguments contain no injected authorization state. */
 export interface LiveSessionInvocation {
- caller: LiveSessionCaller; tool: string; args: unknown; operation: LiveSessionOperation; sessionId?: string | undefined; directiveId?: string | undefined; sessionBinding?: string | undefined; kind?: "issue" | "discovery" | undefined; transport?: AuditTransport | undefined;
+  caller: LiveSessionCaller; tool: string; args: unknown; operation: LiveSessionOperation; sessionId?: string | undefined; directiveId?: string | undefined; sessionBinding?: string | undefined; kind?: "issue" | "discovery" | undefined; transport?: AuditTransport | undefined;
+  /** The repository the call names (already scoped). Admitted before any session-binding read; see `LiveSessionBoundaryDeps.admitRepo`. */
+  repoId?: string | undefined;
 }
 declare const preparedBrand: unique symbol;
 export interface PreparedLiveCall { readonly [preparedBrand]: true }
 declare const dispatchBrand: unique symbol;
 export interface PreparedLiveDispatch { readonly [dispatchBrand]: true }
 interface CheckedCall { invocation: LiveSessionInvocation; access: LiveSessionAccess | null; snapshot: LiveSessionSnapshot | null }
+export interface LiveSessionBoundaryDeps {
+  authority: LiveSessionAuthority | null; settings: AdmissionSettings; recordRefusal: (event: EventInput) => Promise<boolean>; resolveDirective: (id: string) => string | null; resolveDurableDirective?: (id: string) => Promise<string | null>; nowMs?: () => number;
+  /**
+   * Phase 72: the repository gate for a call that names a repository. Runs before any read of session state, so an ungranted
+   * repository is refused without reading the binding or the session. Returns false when refused (the refusal is recorded by the owner).
+   */
+  admitRepo?: (invocation: LiveSessionInvocation) => Promise<boolean>;
+}
 /** A SQL-backed boundary. Process-local buckets bound principals, not attacker-selected targets. */
 export class LiveSessionBoundary {
  private readonly buckets = new Map<string, BucketState>();
  private readonly prepared = new WeakMap<PreparedLiveCall, CheckedCall>();
- constructor(private readonly deps: { authority: LiveSessionAuthority | null; settings: AdmissionSettings; recordRefusal: (event: EventInput) => Promise<boolean>; resolveDirective: (id: string) => string | null; nowMs?: () => number }) {}
+ constructor(private readonly deps: LiveSessionBoundaryDeps) {}
  reserve(invocations: readonly LiveSessionInvocation[]): LiveSessionRefusal | null {
   const costs = new Map<string, { caller: LiveSessionCaller; klass: "read" | "write"; count: number }>();
   for (const invocation of invocations) {
@@ -81,6 +98,8 @@ export class LiveSessionBoundary {
   return entries;
  }
  private async prepareReserved(invocation: LiveSessionInvocation): Promise<PreparedLiveCall | LiveCallFailure> {
+  // Repository gate first: an ungranted repository is refused before the authority is consulted (no binding or session read).
+  if (invocation.repoId !== undefined && this.deps.admitRepo !== undefined && !(await this.deps.admitRepo(invocation))) return liveSessionNotFound();
   if (this.deps.authority === null) return { status: "refused", error: { code: "session-unavailable" } };
   if (invocation.kind !== undefined) {
    if (invocation.caller.surface === null) return this.deny(invocation, "");
@@ -88,9 +107,11 @@ export class LiveSessionBoundary {
   }
   let sessionId = invocation.sessionId;
   if (invocation.directiveId !== undefined) {
-   const target = this.deps.resolveDirective(invocation.directiveId);
-   if (target === null || (sessionId !== undefined && sessionId !== target)) return this.deny(invocation, invocation.directiveId);
-   sessionId = target;
+  let target: string | null;
+  try { target = this.deps.resolveDirective(invocation.directiveId) ?? (await this.deps.resolveDurableDirective?.(invocation.directiveId) ?? null); }
+  catch { return { status: "refused", error: { code: "session-unavailable" } }; }
+  if (target === null || (sessionId !== undefined && sessionId !== target)) return this.deny(invocation, invocation.directiveId);
+  sessionId = target;
   }
   const access: LiveSessionAccess = { caller: { surface: invocation.caller.surface, isOperator: invocation.caller.isOperator }, sessionId: sessionId ?? "", ...(invocation.sessionBinding === undefined ? {} : { sessionBinding: invocation.sessionBinding }) };
   const found = await this.read(access, invocation.operation);
@@ -131,44 +152,150 @@ export interface SteeringWiring {
  readonly enabled: boolean; readonly inbox: SteeringInbox | null; readonly clock: SteeringClock; readonly settingsErrors: readonly SteeringConfigError[]; readonly newDirectiveId?: () => string;
  readonly onQueued?: (directiveId: string) => Promise<void>;
  readonly boundary: LiveSessionBoundary;
+ readonly idempotency: SteeringIdempotency<SteeringAcknowledgeReply>;
  readonly executeLiveCall: <T>(invocation: LiveSessionInvocation, effect: (prepared: PreparedLiveCall) => Promise<T>, dispatch?: PreparedLiveDispatch) => Promise<T>;
+ readonly durable?: SteeringDurableReplies | null;
 }
-export type SteeringWriteResult = { status: "queued"; directive_id: string; target_session_id: string; queued_at_ms: number; sequence?: number } | { status: "acknowledged"; directive_id: string; outcome: SteeringOutcome; confirmed: boolean } | LiveCallFailure | { status: "refused"; error: SteeringError } | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
+export type SteeringWriteResult = { status: "queued"; directive_id: string; target_session_id: string; queued_at_ms: number; sequence?: number } | { status: "acknowledged"; directive_id: string; outcome: SteeringOutcome; confirmed: boolean; sequence?: number } | LiveCallFailure | { status: "refused"; error: SteeringError } | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
 export interface ListedSteeringDirective { id: string; author_principal_id: string; priority: string; action: string; body: string; plan_ref: { phase: string; plan: string } | null; conflicts_with_active_plan: boolean; created_at_ms: number; state: "queued" | "acknowledged"; outcome: SteeringOutcome | null; confirmed: boolean; queued_at_ms: number; acknowledged_at_ms: number | null; reason: SteeringAckReason | null }
 export type SteeringListResult = { status: "listed"; target_session_id: string; directives: ListedSteeringDirective[]; session_state: { status: "held"; state: string } } | LiveCallFailure | { status: "misconfigured"; errors: SteeringConfigError[] } | { status: "not-configured" };
 export function steeringFailed(result: SteeringWriteResult): boolean { return result.status !== "queued" && result.status !== "acknowledged"; }
 function settingsFailure(wiring: SteeringWiring): { status: "misconfigured"; errors: SteeringConfigError[] } | null { return wiring.settingsErrors.length ? { status: "misconfigured", errors: [...wiring.settingsErrors] } : null; }
+type QueuedReply = { reply: SteeringWriteResult; freshlyQueued: boolean };
 export async function queueSteering(wiring: SteeringWiring, caller: SteeringCaller, input: SteeringQueueInput, dispatch?: PreparedLiveDispatch, transport: AuditTransport = "mcp"): Promise<SteeringWriteResult> {
- // Set by a fresh queue only. A replay wrote nothing, so it wakes no waiter and announces nothing.
- const outcome = { freshlyQueued: false };
- let reply: SteeringWriteResult;
- try { reply = await wiring.executeLiveCall<SteeringWriteResult>({ caller, tool: "steering_queue", args: input, operation: "operator-queue", sessionId: input.target_session_id, sessionBinding: input.session_binding, transport }, async () => {
-  const failure = settingsFailure(wiring); if (failure) return failure; if (wiring.inbox === null) return { status: "not-configured" };
+ let outcome: QueuedReply;
+ try { outcome = await wiring.executeLiveCall<QueuedReply>({ caller, tool: "steering_queue", args: input, operation: "operator-queue", sessionId: input.target_session_id, sessionBinding: input.session_binding, transport }, async () => {
+  const failure = settingsFailure(wiring); if (failure) return { reply: failure, freshlyQueued: false }; const inbox = wiring.inbox; if (inbox === null) return { reply: { status: "not-configured" } as SteeringWriteResult, freshlyQueued: false };
   if (caller.surface === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
-  const receipt = await wiring.inbox.enqueueReceipt({ id: wiring.newDirectiveId?.() ?? randomUUID(), author: { principalId: caller.surface, kind: "human" }, createdAtMs: wiring.clock.nowMs(), priority: input.priority, targetSessionId: input.target_session_id, action: input.action, body: input.body, planRef: input.plan_ref, conflictsWithActivePlan: input.conflicts_with_active_plan }, input.idempotency_key);
-  if (!receipt.ok) return { status: "refused", error: receipt.error };
-  outcome.freshlyQueued = !receipt.value.replayed;
-  const queued = { status: "queued" as const, directive_id: receipt.value.record.directive.id, target_session_id: receipt.value.record.directive.targetSessionId, queued_at_ms: receipt.value.record.queuedAtMs };
-  if (input.idempotency_key === undefined) return queued;
-  // A keyed reply carries the delivery sequence, so a retry can be matched against what the reader will see. A replay gets the same number.
-  const sequence = wiring.inbox.sequenceOf(queued.directive_id);
-  if (sequence === null) throw new Error("a queued directive has no delivery sequence");
-  return { ...queued, sequence };
- }, dispatch); } catch (cause) { if (cause instanceof LiveSessionBoundaryError) return cause.refusal; throw cause; }
+  const surface = caller.surface; const key = input.idempotency_key;
+  if (key === undefined) return enqueueDirective(wiring, inbox, surface, input, wiring.newDirectiveId?.() ?? randomUUID());
+  return wiring.idempotency.serialize(surface, key, () => keyedQueue(wiring, inbox, surface, key, input));
+ }, dispatch); } catch (cause) { if (cause instanceof LiveSessionBoundaryError) { outcome = { reply: cause.refusal, freshlyQueued: false }; } else throw cause; }
  // A fresh queue wakes its session: the long-poll waiters are released and one hint is announced. Neither can fail the queue, which is already audited.
- if (outcome.freshlyQueued && reply.status === "queued") await wiring.onQueued?.(reply.directive_id);
+ if (outcome.freshlyQueued && outcome.reply.status === "queued") {
+  try { await wiring.onQueued?.(outcome.reply.directive_id); } catch { /* The queue stands without its wake-up: the session sees the directive on its next poll. */ }
+ }
+ return outcome.reply;
+}
+/** Queues one directive as the inbox answers it. The reply carries no sequence: that is for keyed requests only. */
+async function enqueueDirective(wiring: SteeringWiring, inbox: SteeringInbox, surface: string, input: SteeringQueueInput, id: string, keyed?: SteeringKeyedRequest): Promise<QueuedReply> {
+ const result = await inbox.enqueue({ id, author: { principalId: surface, kind: "human" }, createdAtMs: wiring.clock.nowMs(), priority: input.priority, targetSessionId: input.target_session_id, action: input.action, body: input.body, planRef: input.plan_ref, conflictsWithActivePlan: input.conflicts_with_active_plan }, keyed);
+ if (!result.ok) return { reply: { status: "refused", error: result.error }, freshlyQueued: false };
+ return { reply: { status: "queued", directive_id: result.value.directive.id, target_session_id: result.value.directive.targetSessionId, queued_at_ms: result.value.queuedAtMs }, freshlyQueued: true };
+}
+/**
+ * A keyed queue (D77-04, L77-03): the directive the key names is replayed when its request fingerprint matches, and the first
+ * application carries its sequence. The inbox holds it while it is open; the durable log answers for it after a restart, open or
+ * not. Another request under the key is refused and writes nothing.
+ */
+async function keyedQueue(wiring: SteeringWiring, inbox: SteeringInbox, surface: string, key: string, input: SteeringQueueInput): Promise<QueuedReply> {
+ const id = keyedDirectiveId(surface, key);
+ const fingerprint = queueFingerprint(queueRequestFields(input));
+ const held = inbox.get(id);
+ if (held !== null) {
+  if (fingerprint !== queueFingerprint(queueRecordFields(held.directive))) return { reply: { status: "refused", error: { code: "idempotency-conflict" } }, freshlyQueued: false };
+  return { reply: { status: "queued", directive_id: id, target_session_id: held.directive.targetSessionId, queued_at_ms: held.queuedAtMs, sequence: deliverySequence(inbox, id) }, freshlyQueued: false };
+ }
+ let saved: SteeringKeyedQueueSaved | null;
+ try { saved = (await wiring.durable?.savedKeyedQueue(surface, key)) ?? null; }
+ catch (cause) { return { reply: auditUnavailable(cause), freshlyQueued: false }; }
+ if (saved !== null) {
+  if (fingerprint !== saved.fingerprint) return { reply: { status: "refused", error: { code: "idempotency-conflict" } }, freshlyQueued: false };
+  if (saved.deliverySequence === null) throw new Error("keyed queue saved without a delivery sequence");
+  return { reply: { status: "queued", directive_id: saved.directiveId, target_session_id: saved.targetSessionId, queued_at_ms: saved.queuedAtMs, sequence: saved.deliverySequence }, freshlyQueued: false };
+ }
+ const queued = await enqueueDirective(wiring, inbox, surface, input, id, { surface, key, fingerprint });
+ if (queued.reply.status !== "queued") return queued;
+ return { reply: { ...queued.reply, sequence: deliverySequence(inbox, id) }, freshlyQueued: true };
+}
+function queueRequestFields(input: SteeringQueueInput): QueueRequestFields {
+ return { action: input.action, priority: input.priority, targetSessionId: input.target_session_id, body: redact(input.body), planRef: input.plan_ref ?? null, conflictsWithActivePlan: input.conflicts_with_active_plan };
+}
+/** The same fields as {@link queueRequestFields}, read from a stored directive. Its body is already redacted once, as the request's is. */
+function queueRecordFields(directive: SteeringDirective): QueueRequestFields {
+ return { action: directive.action, priority: directive.priority, targetSessionId: directive.targetSessionId, body: directive.body, planRef: directive.planRef ?? null, conflictsWithActivePlan: directive.conflictsWithActivePlan };
+}
+/** The delivery sequence the inbox gave a directive it holds. A missing inbox or sequence is an internal fault, never a guessed number. */
+function deliverySequence(inbox: SteeringInbox | null, directiveId: string): number {
+ const sequence = inbox?.sequenceOf(directiveId) ?? null;
+ if (sequence === null) throw new Error("steering directive held without a delivery sequence");
+ return sequence;
+}
+/**
+ * Runs an acknowledgement effect once per key when the request carries one (D77-05, L77-02, L77-04). The first applied acknowledgement
+ * is kept with its sequence and fingerprint, in the process index and in the durable log, so a replay after a restart, or after the
+ * index forgot it, returns that reply and runs nothing. Another request under the key is refused. A refused effect is not kept, so a
+ * retry runs it again. An unkeyed request runs the effect as before. Either way the session step is recorded once (phase 67).
+ */
+async function applyAcknowledgement(wiring: SteeringWiring, input: SteeringAcknowledgeInput, prepared: PreparedLiveCall, run: () => Promise<SteeringAcknowledgeReply>): Promise<SteeringAcknowledgeReply> {
+ const checked = wiring.boundary.checked(prepared); if (checked === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
+ const keyed = keyedAcknowledgementOf(input, checked.access.caller.surface, checked.access.sessionId);
+ if (keyed === undefined) return recordSession(wiring, await run());
+ return wiring.idempotency.serialize(keyed.surface, keyed.key, async (): Promise<SteeringAcknowledgeReply> => {
+  let stored = wiring.idempotency.recall(keyed.surface, keyed.key);
+  if (stored === null) {
+   try { stored = await durableAcknowledgementOf(wiring, keyed); }
+   catch (cause) { return auditUnavailable(cause); }
+   if (stored !== null) wiring.idempotency.remember(keyed.surface, keyed.key, stored.fingerprint, stored.reply);
+  }
+  if (stored !== null) return stored.fingerprint === keyed.fingerprint ? stored.reply : { status: "refused", error: { code: "idempotency-conflict" } };
+  const reply = await recordSession(wiring, await run());
+  if (reply.status !== "acknowledged") return reply;
+  const kept: SteeringAcknowledgeReply = { ...reply, sequence: deliverySequence(wiring.inbox, reply.directive_id) };
+  wiring.idempotency.remember(keyed.surface, keyed.key, keyed.fingerprint, kept);
+  return kept;
+ });
+}
+
+/** The keyed request an acknowledgement makes (phase 77): its caller surface, its key and the fingerprint of its request. Undefined when unkeyed. */
+function keyedAcknowledgementOf(input: SteeringAcknowledgeInput, surface: string | null, sessionId: string): SteeringKeyedRequest | undefined {
+ const key = input.idempotency_key;
+ if (key === undefined) return undefined;
+ if (surface === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
+ const fingerprint = acknowledgeFingerprint({ directiveId: input.directive_id, sessionId, outcome: input.outcome, confirmed: input.confirm === true });
+ return { surface, key, fingerprint };
+}
+
+/** The keyed acknowledgement the durable log holds under this key, rebuilt as the reply it gave, or null. A read failure rejects with its code. */
+async function durableAcknowledgementOf(wiring: SteeringWiring, keyed: SteeringKeyedRequest): Promise<{ fingerprint: string; reply: SteeringAcknowledgeReply } | null> {
+ const saved = (await wiring.durable?.savedKeyedAcknowledgement(keyed.surface, keyed.key)) ?? null;
+ if (saved === null) return null;
+ const reply: SteeringAcknowledgeReply = {
+  status: "acknowledged", directive_id: saved.directiveId, outcome: saved.outcome, confirmed: saved.confirmed,
+  ...(saved.deliverySequence === null ? {} : { sequence: saved.deliverySequence }),
+  ...(saved.session === null ? {} : { session_state: saved.session }),
+  ...(saved.checkpointHint ? { checkpoint_hint: { trigger: "steering" as const, directive_id: saved.directiveId } } : {}),
+ };
+ return { fingerprint: saved.fingerprint, reply };
+}
+
+/**
+ * Records the session-state result of an acknowledgement once, after the session port answered: the committed movement and the
+ * hint a restart needs (phase 67). The acknowledgement stands whatever this write does. A missing record only loses a restart hint
+ * and a replayed session state, which fails safe.
+ */
+async function recordSession(wiring: SteeringWiring, reply: SteeringAcknowledgeReply): Promise<SteeringAcknowledgeReply> {
+ const durable = wiring.durable ?? null;
+ if (durable === null || reply.status !== "acknowledged" || reply.session_state === undefined) return reply;
+ try { await durable.recordSessionOutcome(reply.directive_id, reply.session_state, reply.checkpoint_hint !== undefined, wiring.clock.nowMs()); }
+ catch { /* The acknowledgement stands without this record; see above. */ }
  return reply;
+}
+
+/** A durable read or write that failed, as the refusal the inbox gives for a failed audit write. */
+function auditUnavailable(cause: unknown): { status: "refused"; error: SteeringError } {
+ return { status: "refused", error: { code: "audit-unavailable", attempts: 1, lastErrorCode: errnoCode(cause) } };
 }
 /** Internal inbox effect; only the enclosing executeLiveCall wrapper supplies this opaque checked token. */
 async function acknowledgeSteeringEffect(wiring: SteeringWiring, input: SteeringAcknowledgeInput, prepared: PreparedLiveCall): Promise<SteeringWriteResult> {
  const checked = wiring.boundary.checked(prepared); if (checked === null) throw new LiveSessionBoundaryError(liveSessionNotFound());
  const failure = settingsFailure(wiring); if (failure) return failure; if (wiring.inbox === null) return { status: "not-configured" };
- const result = await wiring.inbox.acknowledge({ directiveId: input.directive_id, sessionId: checked.access.sessionId, outcome: input.outcome, confirm: input.confirm });
+ const result = await wiring.inbox.acknowledge({ directiveId: input.directive_id, sessionId: checked.access.sessionId, outcome: input.outcome, confirm: input.confirm }, keyedAcknowledgementOf(input, checked.access.caller.surface, checked.access.sessionId));
  if (!result.ok) return { status: "refused", error: result.error };
  return { status: "acknowledged", directive_id: result.value.directive.id, outcome: input.outcome, confirmed: input.confirm === true };
 }
 export async function acknowledgeSteering(wiring: SteeringWiring, caller: SteeringCaller, input: SteeringAcknowledgeInput, dispatch?: PreparedLiveDispatch): Promise<SteeringWriteResult> {
- try { return await wiring.executeLiveCall<SteeringWriteResult>({ caller, tool: "steering_acknowledge", args: input, operation: "operator-ack", sessionId: input.session_id, directiveId: input.directive_id, sessionBinding: input.session_binding }, prepared => acknowledgeSteeringEffect(wiring, input, prepared), dispatch); }
+ try { return await wiring.executeLiveCall<SteeringWriteResult>({ caller, tool: "steering_acknowledge", args: input, operation: "operator-ack", sessionId: input.session_id, directiveId: input.directive_id, sessionBinding: input.session_binding }, prepared => applyAcknowledgement(wiring, input, prepared, () => acknowledgeSteeringEffect(wiring, input, prepared)), dispatch); }
  catch (cause) { if (cause instanceof LiveSessionBoundaryError) return cause.refusal; throw cause; }
 }
 export async function listSteering(wiring: SteeringWiring, caller: SteeringCaller, input: SteeringListInput, dispatch?: PreparedLiveDispatch): Promise<SteeringListResult> {
@@ -205,7 +332,7 @@ export async function acknowledgeSteeringWithState(
 			directiveId: input.directive_id,
 			sessionBinding: input.session_binding,
 			transport,
-		}, async (prepared): Promise<SteeringAcknowledgeReply> => {
+		}, (prepared): Promise<SteeringAcknowledgeReply> => applyAcknowledgement(wiring, input, prepared, async (): Promise<SteeringAcknowledgeReply> => {
 			const checked = wiring.boundary.checked(prepared);
 			if (checked === null) return { status: "refused", error: { code: "not-found" } };
 			const result = await acknowledgeSteeringEffect(wiring, input, prepared);
@@ -236,7 +363,7 @@ export async function acknowledgeSteeringWithState(
 				// An effective acknowledgement stands; private port/driver diagnostics never enter its reply.
 				return { ...result, session_state: { status: "refused", state: target, reason: "session-unavailable" } };
 			}
-		}, dispatch);
+		}), dispatch);
 	} catch (cause) {
 		if (cause instanceof LiveSessionBoundaryError) return cause.refusal;
 		throw cause;

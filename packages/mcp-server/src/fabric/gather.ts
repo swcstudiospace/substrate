@@ -58,11 +58,10 @@ export async function gatherFabricFacts(
 	const deadlineMs = options.deadlineMs ?? FABRIC_SOURCE_DEADLINE_MS;
 	const checkedAt = sources.now();
 	const parts = sources.health();
-	const [greptimeRead, indexRead, hindsightRead, ragflowRead, lightragRead, teiRead, costRead, corpusRead] = await Promise.all([
+	const [greptimeRead, indexRead, hindsightRead, lightragRead, teiRead, costRead, corpusRead] = await Promise.all([
 		within(() => parts.greptime, deadlineMs),
 		within(() => parts.index, deadlineMs),
 		within(() => parts.hindsight, deadlineMs),
-		within(() => parts.ragflow, deadlineMs),
 		within(() => parts.lightrag, deadlineMs),
 		within(() => parts.tei, deadlineMs),
 		within<FabricCostView>(() => sources.railwayCost(), deadlineMs),
@@ -103,14 +102,6 @@ export async function gatherFabricFacts(
 			breaker: breakerOf(breakers.greptime),
 			degraded: greptime !== null && !writeStalled && greptime.up && !greptime.eventsWritable,
 			source: writeStalled ? "health().greptime: timeout" : writeUnread ? "health().greptime: no write reading" : sourceOf("greptime", greptimeRead),
-		},
-		ragflow: {
-			configured: config.configured.ragflow,
-			held: false,
-			answered: ragflowRead.ok ? ragflowRead.value : null,
-			breaker: breakerOf(breakers.ragflow),
-			degraded: false,
-			source: sourceOf("planes.ragflow", ragflowRead),
 		},
 		lightrag: {
 			configured: config.configured.lightrag,

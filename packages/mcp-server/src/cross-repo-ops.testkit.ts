@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BranchFanoutRequest, CrossRepoDeps, CrossRepoOperation, CrossRepoOutcome, CrossRepoStore } from "./cross-repo-ops.ts";
 import { MemoryCrossRepoStore } from "./cross-repo-fake.ts";
+import { REPO_ALLOWLIST_ENV } from "./repo-allowlist.ts";
 import { defaultScopedGitRunner, type ScopedGitResult, type ScopedGitRunner } from "./repo-executor.ts";
 import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV, type RepoScope, repoScopeFromEnv } from "./repo-scope.ts";
 import type { Surface } from "./types.ts";
@@ -31,15 +32,12 @@ export interface Repos {
 	checkoutA: string;
 	checkoutB: string;
 	scope: RepoScope;
-	/** The environment the registry and the grants were read from. The engine is given the parsed scope, never this environment. */
+	/** The environment the registry, the grants and the session allowlist were read from. Passed to the engine so it reads the same allowlist. */
 	env: Readonly<Record<string, string>>;
 }
 
-/**
- * Two registered repositories on disk, each with one commit on `main`. The registry and the grants come from the env, as in production.
- * `null` grants leave `SUBSTRATE_REPO_SCOPES` unset, so scoping is off.
- */
-export function repos(grants: Record<string, string[]> | null = { omp: ["owner/a", "owner/b"] }): Repos {
+/** Two registered repositories on disk, each with one commit on `main`. The registry and the grants come from the env, as in production. */
+export function repos(grants: Record<string, string[]> = { omp: ["owner/a", "owner/b"] }): Repos {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "cross-repo-")));
 	const make = (name: string): string => {
 		const checkout = join(root, name, "checkout");
@@ -57,8 +55,9 @@ export function repos(grants: Record<string, string[]> | null = { omp: ["owner/a
 		"owner/a": { checkouts: [checkoutA], worktrees: [join(root, "a", "worktrees")] },
 		"owner/b": { checkouts: [checkoutB], worktrees: [join(root, "b", "worktrees")] },
 	};
-	const env: Record<string, string> = { [REPO_REGISTRY_ENV]: JSON.stringify(registry) };
-	if (grants !== null) env[REPO_SCOPES_ENV] = JSON.stringify(grants);
+	// Each surface's session allowlist: every granted repository mapped to a credential variable, as production reads it.
+	const allowlist = Object.fromEntries(Object.entries(grants).map(([surface, ids]) => [surface, Object.fromEntries(ids.map((id, index) => [id, `XRO_TEST_CREDENTIAL_${index}`]))]));
+	const env = { [REPO_REGISTRY_ENV]: JSON.stringify(registry), [REPO_SCOPES_ENV]: JSON.stringify(grants), [REPO_ALLOWLIST_ENV]: JSON.stringify(allowlist) };
 	const parsed = repoScopeFromEnv(env);
 	if (!parsed.ok) throw new Error(parsed.problem);
 	return { root, checkoutA, checkoutB, scope: parsed.value, env };
@@ -69,7 +68,7 @@ export interface World extends Repos {
 }
 
 /** {@link repos} with an in-memory store, whose write count the unit tests assert on. */
-export function world(grants?: Record<string, string[]> | null): World {
+export function world(grants?: Record<string, string[]>): World {
 	return { ...repos(grants), store: new MemoryCrossRepoStore() };
 }
 
@@ -97,8 +96,8 @@ export function runnerWith(intercept?: Intercept): { run: ScopedGitRunner; write
 
 export const FAILED: ScopedGitResult = { code: 1, stdout: "", stderr: "injected failure" };
 
-export function depsFor(w: Repos & { store: CrossRepoStore }, run: ScopedGitRunner, surface: Surface | null = "omp"): CrossRepoDeps {
-	return { scope: w.scope, surface, store: w.store, run };
+export function depsFor(w: Repos & { store: CrossRepoStore }, run: ScopedGitRunner, surface: Surface | null = "omp", env: Readonly<Record<string, string | undefined>> = w.env): CrossRepoDeps {
+	return { scope: w.scope, surface, store: w.store, run, env };
 }
 
 export function request(overrides: Partial<BranchFanoutRequest> = {}): BranchFanoutRequest {

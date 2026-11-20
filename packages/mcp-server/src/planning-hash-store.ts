@@ -4,7 +4,7 @@
  * The refresh used to keep them in a map in memory, so every restart re-ingested every planning page. With
  * `SUBSTRATE_PLANNING_HASH_STORE=on` the map is loaded once from a store behind this port and the pages a batch put into the
  * plane are written back, so a restart ingests only what changed. The port is small on purpose: the Postgres adapter is a
- * table keyed by path and destination (`planning_page_hashes`, migration step 39), the in-memory adapter serves a deployment
+ * table keyed by page key and destination (`planning_page_hashes`, migration step 39), the in-memory adapter serves a deployment
  * with no index and the tests. `destination` is a stable hash of the configured docs URL, not the URL. A different plane
  * misses the old rows, so the refresh ingests those pages.
  *
@@ -22,8 +22,17 @@ export function planningDestinationKey(url: string): string {
 	return createHash("sha256").update(url).digest("hex");
 }
 
+/**
+ * The key a planning page's hash is held under, and the name its LightRAG document is built from: its checkout and its repo
+ * path. Two checkouts with the same relative path (`.planning/STATE.md`) get two keys. A checkout key (`planningSessionId`)
+ * holds no `:`, so the first `:` always ends it.
+ */
+export function planningPageKey(checkout: string, path: string): string {
+	return `${checkout}:${path}`;
+}
+
 export interface PlanningHashStore {
-	/** Every stored `path -> sha256`, at most {@link PLANNING_HASH_MAX_ROWS}. Rejects when the store cannot be read. */
+	/** Every stored `key -> sha256`, at most {@link PLANNING_HASH_MAX_ROWS}. Rejects when the store cannot be read. */
 	load(): Promise<Map<string, string>>;
 	/** Upserts these entries (and nothing else). Rejects when the store cannot be written. */
 	save(entries: ReadonlyMap<string, string>): Promise<void>;

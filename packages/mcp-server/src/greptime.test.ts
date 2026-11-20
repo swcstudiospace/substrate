@@ -15,6 +15,7 @@ import {
 	chainTip,
 	COVERAGE_MAX_UNCOVERED,
 	DEFAULT_QUERY_LIMIT,
+	DialectRefusal,
 	epochMsAnyUnit,
 	EVENT_COLUMNS,
 	EXPORT_INGEST_SKEW_MS,
@@ -178,6 +179,36 @@ describe("assertAppendOnly", () => {
 		expect(() => assertAppendOnly(statement)).not.toThrow();
 		expect(() => assertAppendOnly(`SELECT 1 FROM "t" WHERE "x" = 'it''s; fine'`)).not.toThrow();
 	});
+
+	test("an apostrophe inside a comment never opens a literal, so a following ; still counts", () => {
+		// The regression this guards: a `'` inside `--` or a block comment used to open a
+		// literal that blanked the `;` and everything after it, so a second statement passed.
+		expect(() => assertAppendOnly(`SELECT 1 -- it's\n; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT 1 /* it's */; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT 1 /* it's */ ; DELETE FROM "agent_events" -- it's`)).toThrow(
+			AppendOnlyViolation,
+		);
+	});
+
+	test("a comment that holds an apostrophe is still only a comment", () => {
+		expect(() => assertAppendOnly(`SELECT "hash" -- it's\nFROM "agent_events"`)).not.toThrow();
+		expect(() => assertAppendOnly(`SELECT "hash" /* it's */ FROM "agent_events"`)).not.toThrow();
+		expect(() => assertAppendOnly(`SELECT 1 FROM "agent_events"; -- it's`)).not.toThrow();
+	});
+
+	test("an apostrophe or semicolon inside a quoted identifier is inert", () => {
+		expect(() => assertAppendOnly(`SELECT "it's" FROM "t"; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT "a;b" FROM "agent_events"`)).not.toThrow();
+	});
+
+	test("reads a backslash before a quote both ways, so the reading that hides a ; cannot pass", () => {
+		// `'a\'` is one literal where the server escapes backslashes, and a closed literal where it does not. The `;` sits inside the
+		// literal under one reading and outside it under the other, so each reading has to be checked.
+		expect(() => assertAppendOnly(`SELECT 'a\\'; DELETE FROM "agent_events"`)).toThrow(AppendOnlyViolation);
+		expect(() => assertAppendOnly(`SELECT 'x\\'; SELECT 'y'`)).toThrow(AppendOnlyViolation);
+		// The same literal under both readings, with no `;` to hide: still allowed.
+		expect(() => assertAppendOnly(`SELECT 'a\\' FROM "agent_events"`)).not.toThrow();
+	});
 });
 
 describe("insertEvent", () => {
@@ -235,6 +266,12 @@ describe("insertEvent", () => {
 
 		await expect(new GreptimeClient(config).insertEvent(event)).rejects.toThrow(/quoting dialect/);
 		expect(insertStatement(sql)).toBe("");
+	});
+
+	test("the refusal is a DialectRefusal, which a caller must not park for a retry", async () => {
+		stubFetch((statement) => (statement.includes("LENGTH") ? new Response("nope", { status: 500 }) : affected));
+		const event = normalizeEvent({ ...input, summary: "wrote C:\\new" }, null);
+		await expect(new GreptimeClient(config).insertEvent(event)).rejects.toBeInstanceOf(DialectRefusal);
 	});
 });
 
@@ -920,6 +957,23 @@ describe("reads", () => {
 		);
 		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("second");
 	});
+
+	test("lastHash refuses a session whose read window is full, rather than guess its tip", async () => {
+		// At the cap the newest row may not be the tip: a backfill can have pushed the real one out of the window. Answering from the
+		// window would let the next append chain onto a row that already has a successor, so the read refuses instead.
+		const full = Array.from({ length: 10_000 }, (_, i) => [`h${i}`, `p${i}`]);
+		const { sql } = stubFetch(() => records(["hash", "prev"], full));
+		const client = new GreptimeClient(config);
+		await expect(client.lastHash("sess-1")).rejects.toThrow(/chain tip unreliable/);
+		// Nothing is cached on a refusal, so the next call asks the ledger again.
+		await expect(client.lastHash("sess-1")).rejects.toThrow(/chain tip unreliable/);
+		expect(sql).toHaveLength(2);
+	});
+
+	test("lastHash still answers a window one row short of the cap", async () => {
+		stubFetch(() => records(["hash", "prev"], Array.from({ length: 9_999 }, (_, i) => [`h${i}`, `p${i}`])));
+		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("h0");
+	});
 });
 
 describe("findByIdempotencyKey", () => {
@@ -1249,6 +1303,25 @@ describe("queryEvents", () => {
 		expect(selectStatement(sql)).toContain(
 			`WHERE "ts" >= '2026-09-30T00:00:00.000Z' AND "ts" <= '2026-09-30T12:00:00.000Z'`,
 		);
+	});
+
+	test("narrows by a JSON pair in the payload text as a plain LIKE", async () => {
+		const { sql } = stubFetch();
+		const sha = "ab".repeat(20);
+		await new GreptimeClient(config).queryEvents({ match: { kind: "worktree.merge_back" }, payloadPair: { key: "head_key", value: sha } });
+
+		// The key is matched as written: a plain LIKE, with the value hex and carrying no wildcard.
+		expect(selectStatement(sql)).toContain(
+			`WHERE "kind" = 'worktree.merge_back' AND "payload" LIKE '%"head_key":"${sha}"%'`,
+		);
+	});
+
+	test("refuses a payload pair that is not a lowercase key and a lowercase hex value, before any read", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config);
+		await expect(client.queryEvents({ payloadPair: { key: "head_key'--", value: "ab".repeat(20) } })).rejects.toThrow(/not a lowercase key/);
+		await expect(client.queryEvents({ payloadPair: { key: "head_key", value: "AB".repeat(20) } })).rejects.toThrow(/not a lowercase key/);
+		expect(selectStatement(sql)).toBe("");
 	});
 
 	test("a filter value cannot close its literal or add a clause of its own", async () => {
@@ -3017,5 +3090,26 @@ describe("metric_samples (uplift-4 S6)", () => {
 			const old = Math.ceil((14 * 86_400) / MAX_METRIC_POINTS);
 			expect(Math.ceil((14 * 86_400) / old + 1) * surfaces.length).toBeGreaterThan(MAX_METRIC_POINTS);
 		});
+	});
+});
+
+describe("the client's transport is the one it was given", () => {
+	test("a client built with an injected fetch sends its statements only through that fetch", async () => {
+		const globalCalls: unknown[] = [];
+		globalThis.fetch = (async (...args: unknown[]) => {
+			globalCalls.push(args);
+			throw new Error("the global fetch was used");
+		}) as unknown as typeof fetch;
+		const injected: string[] = [];
+		const transport = (async (_url: string, init: RequestInit) => {
+			const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
+			injected.push(statement);
+			return new Response(JSON.stringify(defaultReply(statement)), { status: 200, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+
+		await new GreptimeClient(config, { fetch: transport }).insertEvent(normalizeEvent(input, null));
+
+		expect(injected.some((statement) => statement.startsWith("INSERT INTO"))).toBe(true);
+		expect(globalCalls).toEqual([]);
 	});
 });

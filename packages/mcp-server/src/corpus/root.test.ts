@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { CORPUS_EMPTY_ROOT, compareEntries, corpusLeafHex } from "@substrate/corpus";
-import { merkleRootHex, verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
+import { merkleProofHex, merkleRootHex, verifyMerkleProofAgainstCommitment } from "@substrate/ledger";
 import { defined } from "../test-support.ts";
 import type { EventInput } from "../types.ts";
-import { buildCorpusTree, CORPUS_ROOT_ACTION, CORPUS_ROOT_SESSION, CorpusRootKeeper, corpusProof, corpusRoot, type RootClock, type RootRow } from "./root.ts";
+import { buildCorpusTree, CORPUS_ROOT_ACTION, CORPUS_ROOT_SESSION, CorpusRootKeeper, corpusRoot, repositoryProof, repositoryRoot, type RootClock, type RootRow } from "./root.ts";
 import { FakeStore, makeRow, sha256Hex } from "./testkit.ts";
 import type { ActiveLeaves } from "./store.ts";
 
@@ -76,16 +76,37 @@ describe("corpusRoot", () => {
 		const bad: RootRow = { repo: REPO, path: "docs/bad.md", sha256: "not-a-hash" };
 		expect(corpusRoot([...good, bad])).toEqual({ ...corpusRoot(good), skipped: 1 });
 	});
+
+	test("the whole-corpus root and its leaves are the values pinned before per-repository proofs existed", () => {
+		const rows: RootRow[] = [
+			{ repo: "swcstudiospace/alpha", path: "docs/a.md", sha256: sha256Hex("a") },
+			{ repo: "swcstudiospace/alpha", path: "docs/b.md", sha256: sha256Hex("b") },
+			{ repo: "swcstudiospace/beta", path: "docs/a.md", sha256: sha256Hex("a") },
+			{ repo: "swcstudiospace/beta", path: "docs/c.md", sha256: sha256Hex("c"), state: "active" },
+			{ repo: "local/gamma", path: "notes/x.md", sha256: sha256Hex("x"), state: "tombstoned" },
+			{ repo: "local/gamma", path: "notes/y.md", sha256: "NOT-HEX" },
+			{ repo: "local/gamma", path: "notes/z.md", sha256: sha256Hex("z"), state: "active" },
+		];
+		expect(corpusRoot(rows)).toEqual({ root: "6421f2e47324f00f741670895145cb4e44aca8e275c861adf7ac7de4a5d13c35", count: 5, skipped: 1 });
+		expect(corpusRoot(rows.slice(0, 1)).root).toBe("baecc4c1daadf023927bb2141a625eb8a20fae52b5c48389ecfe95c7f37ec689");
+		expect(buildCorpusTree(rows).ordered.map((entry) => entry.leaf)).toEqual([
+			"99a1d742ea09b3affcd1f7bc64c28ed9c14a55a1e30cd239c000f87ce6d68599",
+			"4f9c422941337680ef7bedec2d36168e40493b25284827962883fb20ce9de078",
+			"80a1653f1f01c32cafd1e6a1bc7f0dcbdbb1068a300bd94f0d1028f81f1f1691",
+			"212d8a4b5e88fcfe0867c816e02d44c72bcf8e2c5395890de2f2ac95ec441c1d",
+			"db1900eeb592910c5f5cb1030f13c671419708707be5ef6e6d48d764d0c0acc7",
+		]);
+	});
 });
 
-describe("corpusProof", () => {
+describe("repositoryProof", () => {
 	test("every leaf of trees of 1, 2, 3, 5, 8 and 9 documents proves against the root, at its first, middle and last index", () => {
 		for (const size of [1, 2, 3, 5, 8, 9]) {
 			const rows = rowsOf(size);
 			const { root } = corpusRoot(rows);
 			for (const index of new Set([0, Math.floor(size / 2), size - 1])) {
 				const row = defined(rows[index], "row");
-				const proof = defined(corpusProof(rows, row.repo, row.path), `proof of ${row.path}`);
+				const proof = defined(repositoryProof(rows, row.repo, row.path), `proof of ${row.path}`);
 				expect(proof).toMatchObject({ index, treeSize: size, root, sha256: row.sha256, leaf: corpusLeafHex(row.repo, row.path, row.sha256) });
 				expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: root, count: size })).toBe(true);
 			}
@@ -95,7 +116,7 @@ describe("corpusProof", () => {
 	test("a tampered sibling, leaf or index fails", () => {
 		const rows = rowsOf(5);
 		const row = defined(rows[2], "row");
-		const proof = defined(corpusProof(rows, row.repo, row.path), "proof");
+		const proof = defined(repositoryProof(rows, row.repo, row.path), "proof");
 		const commitment = { rootHex: proof.root, count: proof.treeSize };
 		const sibling = defined(proof.path[0], "first sibling");
 		const tamperedPath = [flipLastHexCharacter(sibling), ...proof.path.slice(1)];
@@ -107,9 +128,101 @@ describe("corpusProof", () => {
 
 	test("a missing document and a tombstoned one have no proof", () => {
 		const rows: RootRow[] = [...rowsOf(3), { repo: REPO, path: "docs/gone.md", sha256: sha256Hex("gone"), state: "tombstoned" }];
-		expect(corpusProof(rows, REPO, "docs/gone.md")).toBeNull();
-		expect(corpusProof(rows, REPO, "docs/never.md")).toBeNull();
-		expect(corpusProof([], REPO, "docs/doc-000.md")).toBeNull();
+		expect(repositoryProof(rows, REPO, "docs/gone.md")).toBeNull();
+		expect(repositoryProof(rows, REPO, "docs/never.md")).toBeNull();
+		expect(repositoryProof([], REPO, "docs/doc-000.md")).toBeNull();
+	});
+
+	const OTHER = "swcstudiospace/other";
+
+	/** Five documents of REPO and six of OTHER: OTHER's leaves must never appear in REPO's proofs. */
+	function twoRepos(): RootRow[] {
+		const others = Array.from({ length: 6 }, (_, index) => ({ repo: OTHER, path: `docs/o-${index}.md`, sha256: sha256Hex(`other ${index}`) }));
+		return [...rowsOf(5), ...others];
+	}
+
+	/** The leaves of one repository in tree order, built here without the module under test. */
+	function leavesOf(rows: readonly RootRow[], repo: string): string[] {
+		return rows
+			.filter((row) => row.repo === repo)
+			.sort(compareEntries)
+			.map((row) => corpusLeafHex(row.repo, row.path, row.sha256));
+	}
+
+	/** The proof of every active document of `repo`. */
+	function proofsOf(rows: readonly RootRow[], repo: string) {
+		return rows.filter((row) => row.repo === repo).map((row) => defined(repositoryProof(rows, repo, row.path), `proof of ${row.path}`));
+	}
+
+	test("a repository's root is the RFC 6962 root over its own leaves, and each of its proofs verifies against it", () => {
+		const rows = twoRepos();
+		for (const repo of [REPO, OTHER]) {
+			const leaves = leavesOf(rows, repo);
+			const root = merkleRootHex(leaves);
+			expect(repositoryRoot(rows, repo)).toEqual({ root, count: leaves.length });
+			for (const row of rows.filter((candidate) => candidate.repo === repo)) {
+				const proof = defined(repositoryProof(rows, repo, row.path), `proof of ${row.path}`);
+				expect(proof).toMatchObject({ treeSize: leaves.length, root, sha256: row.sha256, leaf: corpusLeafHex(row.repo, row.path, row.sha256) });
+				expect(leaves[proof.index]).toBe(proof.leaf);
+				expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: root, count: leaves.length })).toBe(true);
+			}
+		}
+	});
+
+	test("first, middle and last documents of repositories of 1, 2, 3, 5, 8 and 9 documents prove against their own root", () => {
+		for (const size of [1, 2, 3, 5, 8, 9]) {
+			const others = Array.from({ length: 4 }, (_, index) => ({ repo: OTHER, path: `docs/o-${index}.md`, sha256: sha256Hex(`other ${index}`) }));
+			const rows = [...rowsOf(size), ...others];
+			const root = merkleRootHex(leavesOf(rows, REPO));
+			for (const index of new Set([0, Math.floor(size / 2), size - 1])) {
+				const row = defined(rows[index], "row");
+				const proof = defined(repositoryProof(rows, REPO, row.path), `proof of ${row.path}`);
+				expect({ size, position: proof.index, treeSize: proof.treeSize, root: proof.root }).toEqual({ size, position: index, treeSize: size, root });
+				expect(verifyMerkleProofAgainstCommitment(proof.leaf, { index: proof.index, size: proof.treeSize, path: proof.path }, { rootHex: root, count: size })).toBe(true);
+			}
+		}
+	});
+
+	test("repository A's audit path holds no hash derived from repository B's rows, and is exactly the path over A's leaves alone", () => {
+		const rows = twoRepos();
+		// B's leaf values, and the RFC 6962 hash of each (`merkleRootHex` of one leaf is that hash): neither may appear in A's path.
+		const otherLeaves = leavesOf(rows, OTHER);
+		const forbidden = new Set([...otherLeaves, ...otherLeaves.map((leaf) => merkleRootHex([leaf]))]);
+		const ownLeaves = leavesOf(rows, REPO);
+		for (const proof of proofsOf(rows, REPO)) {
+			expect(proof.path.filter((hash) => forbidden.has(hash))).toEqual([]);
+			expect(proof.path).toEqual(merkleProofHex(ownLeaves, proof.index).path);
+		}
+	});
+
+	test("repository A's root and proofs do not change when repository B's rows change", () => {
+		const rows = twoRepos();
+		const changed: RootRow[] = [
+			...rows.filter((row) => row.repo === REPO),
+			...rows.filter((row) => row.repo === OTHER).map((row, index): RootRow => {
+				if (index === 0) return { ...row, sha256: sha256Hex("edited") };
+				if (index === 5) return { ...row, state: "tombstoned" };
+				return row;
+			}),
+			{ repo: OTHER, path: "docs/new.md", sha256: sha256Hex("new") },
+		];
+		expect(repositoryRoot(changed, REPO)).toEqual(repositoryRoot(rows, REPO));
+		expect(proofsOf(changed, REPO)).toEqual(proofsOf(rows, REPO));
+		// The whole-corpus root does move, so the equality above is not vacuous.
+		expect(corpusRoot(changed).root).not.toBe(corpusRoot(rows).root);
+	});
+
+	test("a document of another repository, a tombstoned one and a malformed one have no proof in this repository", () => {
+		const rows = twoRepos();
+		expect(repositoryProof(rows, REPO, "docs/o-0.md")).toBeNull();
+		const withExtras: RootRow[] = [
+			...rows,
+			{ repo: REPO, path: "docs/gone.md", sha256: sha256Hex("gone"), state: "tombstoned" },
+			{ repo: REPO, path: "docs/bad.md", sha256: "not-a-hash" },
+		];
+		expect(repositoryProof(withExtras, REPO, "docs/gone.md")).toBeNull();
+		expect(repositoryProof(withExtras, REPO, "docs/bad.md")).toBeNull();
+		expect(repositoryRoot(withExtras, REPO)).toEqual(repositoryRoot(rows, REPO));
 	});
 });
 

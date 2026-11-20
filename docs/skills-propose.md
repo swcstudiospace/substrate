@@ -9,7 +9,7 @@ Any authenticated surface can propose a skill and get a reviewable pull request 
 | Door | How |
 |---|---|
 | MCP tool | `skills_propose` over `/mcp`; the tool's input schema is the body below |
-| REST route | `POST /skills/propose` with `Authorization: Bearer <surface token>` and a JSON body |
+| REST route | `POST /skills/propose` with an `Authorization` header carrying the surface token as a bearer credential, and a JSON body |
 | CLI | `substrate skills propose --dir PATH [flags]`, an HTTP client of the route with `SUBSTRATE_TOKEN` |
 
 The CLI keeps no in-process git path: that would be a second door that skips the token, the audit chain and the event. The server records the outcome; the CLI never posts an event of its own.

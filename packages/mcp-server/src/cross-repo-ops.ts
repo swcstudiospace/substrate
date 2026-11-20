@@ -20,14 +20,15 @@
  *   with nothing parked. `needs-attention` means at least one step is parked: its state cannot be proven safe to leave or undo.
  *   A partial operation is never `done`.
  *
- * Every git call goes through `scopedGit` (phase 72) under the caller's surface grant (`SUBSTRATE_REPO_SCOPES`). A repository the
- * surface is not granted, or that is not registered, is refused before any spawn. An anonymous caller is refused every repository
- * before any git call, whether or not grants are enforced. The store is a port;
+ * Every git call goes through `scopedGit` (phase 72) under the caller's allowlist session: the surface, and the repositories its
+ * entry names in `SUBSTRATE_REPO_ALLOWLIST`. A repository the session is not granted, or that is not registered, is refused
+ * before any spawn, and so is every call of a caller with no surface or a malformed allowlist. The store is a port;
  * `cross-repo-store.ts` is the Postgres adapter and `cross-repo-fake.ts` the in-memory one.
  */
 import { createHash } from "node:crypto";
 import { scopeRepoId } from "./event.ts";
-import { defaultScopedGitRunner, type ScopedGitResult, type ScopedGitRunner, scopedGit } from "./repo-executor.ts";
+import { assertRepoAllowed, RepoNotAllowedError, repoAllowlistFromEnv } from "./repo-allowlist.ts";
+import { defaultScopedGitRunner, type ScopedGitResult, type ScopedGitRunner, type ScopedSession, scopedGit } from "./repo-executor.ts";
 import { authorizeRepo, REPO_REFUSAL_MESSAGES, type RepoRefusalReason, type RepoScope } from "./repo-scope.ts";
 import type { Surface } from "./types.ts";
 
@@ -122,6 +123,8 @@ export interface CrossRepoDeps {
 	readonly store: CrossRepoStore;
 	/** Defaults to the real git runner. Tests inject faults and crashes here. */
 	readonly run?: ScopedGitRunner | undefined;
+	/** The environment `SUBSTRATE_REPO_ALLOWLIST` is read from. Defaults to the process environment; tests inject their own. */
+	readonly env?: Readonly<Record<string, string | undefined>> | undefined;
 	/** Defaults to the wall clock. */
 	readonly now?: (() => Date) | undefined;
 }
@@ -200,17 +203,37 @@ export function fingerprintOf(branch: string, repos: readonly BranchFanoutRepo[]
 interface Context {
 	readonly scope: RepoScope;
 	readonly surface: Surface | null;
+	/** The caller's allowlist session. Null when the caller is anonymous or the allowlist is malformed: nothing is granted. */
+	readonly session: ScopedSession | null;
 	readonly store: CrossRepoStore;
 	readonly run: ScopedGitRunner;
 	readonly now: () => Date;
 }
 
+/** The session of `surface` in the allowlist that `env` names. A malformed allowlist grants nothing, as an empty one does. */
+function sessionOf(surface: Surface | null, env: Readonly<Record<string, string | undefined>>): ScopedSession | null {
+	if (surface === null) return null;
+	const parsed = repoAllowlistFromEnv(env);
+	return parsed.ok ? { id: surface, allowlist: parsed.value } : null;
+}
+
+function contextOf(deps: CrossRepoDeps): Context {
+	return {
+		scope: deps.scope,
+		surface: deps.surface,
+		session: sessionOf(deps.surface, deps.env ?? process.env),
+		store: deps.store,
+		run: deps.run ?? defaultScopedGitRunner,
+		now: deps.now ?? (() => new Date()),
+	};
+}
+
 type GitCall = { ok: true; result: ScopedGitResult } | { ok: false; reason: RepoRefusalReason };
 
-/** One git call through the phase 72 executor, under the caller's surface grant. A refusal returns before any spawn. */
+/** One git call through the phase 72 executor, under the caller's allowlist session. A refusal returns before any spawn. */
 function git(ctx: Context, repo: string, args: readonly string[]): GitCall {
-	if (ctx.surface === null) return { ok: false, reason: "repo-not-granted" };
-	const outcome = scopedGit({ scope: ctx.scope, surface: ctx.surface, repo, path: null, args }, ctx.run);
+	if (ctx.session === null) return { ok: false, reason: "repo-not-granted" };
+	const outcome = scopedGit({ scope: ctx.scope, surface: ctx.surface, repo, path: null, args, session: ctx.session }, ctx.run);
 	return outcome.ok ? { ok: true, result: outcome.result } : { ok: false, reason: outcome.reason };
 }
 
@@ -263,9 +286,22 @@ const operationLocks = new KeyedLock();
 /** The result of one step attempt. `busy` means another driver holds the step; the caller re-reads and reports the state it finds. */
 type StepOutcome = "applied" | "failed" | "parked" | "compensated" | "busy";
 
-/** Whether `repo` may be operated on: the caller holds a surface, the repository is registered, and the surface is granted it. */
+/** The session's refusal for `repo`, or null when the allowlist grants it. A missing session grants nothing. */
+function sessionReason(ctx: Context, repo: string): RepoRefusalReason | null {
+	if (ctx.session === null) return "repo-not-granted";
+	try {
+		assertRepoAllowed(ctx.session.allowlist, ctx.session.id, repo);
+		return null;
+	} catch (error) {
+		if (error instanceof RepoNotAllowedError) return "repo-not-granted";
+		throw error;
+	}
+}
+
+/** Whether `repo` may be operated on: the allowlist grants it, it is registered, and the surface is granted it. */
 function gateRepo(ctx: Context, repo: string): { ok: true } | { ok: false; reason: RepoRefusalReason } {
-	if (ctx.surface === null) return { ok: false, reason: "repo-not-granted" };
+	const granted = sessionReason(ctx, repo);
+	if (granted !== null) return { ok: false, reason: granted };
 	if (!ctx.scope.registry.has(repo)) return { ok: false, reason: "repo-not-registered" };
 	const gate = authorizeRepo(ctx.scope, ctx.surface, repo);
 	return gate.ok ? { ok: true } : { ok: false, reason: gate.reason };
@@ -425,13 +461,7 @@ export async function runBranchFanout(request: BranchFanoutRequest, deps: CrossR
 
 /** One run under the key's lock: the gate, the stored-operation check, and the plan for a new key. */
 async function fanout(key: string, branch: string, repos: readonly BranchFanoutRepo[], deps: CrossRepoDeps): Promise<CrossRepoOutcome> {
-	const ctx: Context = {
-		scope: deps.scope,
-		surface: deps.surface,
-		store: deps.store,
-		run: deps.run ?? defaultScopedGitRunner,
-		now: deps.now ?? (() => new Date()),
-	};
+	const ctx = contextOf(deps);
 
 	for (const { repo } of repos) {
 		const gate = gateRepo(ctx, repo);
@@ -464,41 +494,29 @@ async function fanout(key: string, branch: string, repos: readonly BranchFanoutR
 }
 
 /**
- * The stored operation under `key`, or null. A surface that is not granted every repository of the operation, or an anonymous caller,
- * gets null too, so the reply does not reveal that a key exists for a repository it cannot address.
+ * The stored operation under `key`, or null. A surface that is not granted every repository of the operation, or that has no
+ * allowlist session, gets null too, so the reply does not reveal that a key exists for a repository it cannot address.
  */
 export async function crossRepoStatus(key: string, deps: CrossRepoDeps): Promise<CrossRepoOperation | null> {
 	if (typeof key !== "string" || !KEY_PATTERN.test(key)) return null;
-	const ctx: Context = {
-		scope: deps.scope,
-		surface: deps.surface,
-		store: deps.store,
-		run: deps.run ?? defaultScopedGitRunner,
-		now: deps.now ?? (() => new Date()),
-	};
+	const ctx = contextOf(deps);
 	const op = await ctx.store.load(key);
 	if (op === null) return null;
-	const visible = op.steps.every((step) => ctx.surface !== null && authorizeRepo(ctx.scope, ctx.surface, step.repo).ok);
+	const visible = op.steps.every((step) => sessionReason(ctx, step.repo) === null && authorizeRepo(ctx.scope, ctx.surface, step.repo).ok);
 	return visible ? op : null;
 }
 
 /**
  * The operator's compensation of a stored operation (`POST /cross-repo/compensate`). Refused before the store is read or any git
  * call runs unless `isOperator` is true, and refused as `operation-not-found` when no operation is stored under `key`. Every
- * repository the operation names must be granted to the caller's surface, or nothing runs.
+ * repository the operation names must be granted to the caller's surface and listed in its session allowlist, or nothing runs.
  * The run holds the key's lock and only undoes (see {@link compensate}); it never applies a step forward.
  */
 export async function compensateBranchFanout(key: string, deps: CrossRepoDeps, isOperator: boolean): Promise<CrossRepoOutcome> {
 	if (!isOperator) return refused("operator-required");
 	if (typeof key !== "string" || !KEY_PATTERN.test(key)) return refused("request-invalid", KEY_PROBLEM);
 	return operationLocks.run<CrossRepoOutcome>(key, async () => {
-		const ctx: Context = {
-			scope: deps.scope,
-			surface: deps.surface,
-			store: deps.store,
-			run: deps.run ?? defaultScopedGitRunner,
-			now: deps.now ?? (() => new Date()),
-		};
+		const ctx = contextOf(deps);
 		const stored = await ctx.store.load(key);
 		if (stored === null) return refused("operation-not-found");
 		for (const step of stored.steps) {

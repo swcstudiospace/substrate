@@ -8,6 +8,9 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import net, { type AddressInfo } from "node:net";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BreakerOpenError, CACHE_METRIC_CLASSES, CircuitBreaker, findCounter, sumCounter, type MetricSnapshot, type PlaneSample } from "@substrate/observability";
 import {
 	CACHE_CLASSES,
@@ -32,9 +35,10 @@ import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { createObservability } from "./observe.ts";
+import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV } from "./repo-scope.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
-import { defined } from "./test-support.ts";
+import { defined, withoutHindsightEnv } from "./test-support.ts";
 import { clearEnsuredBanks, type FetchLike } from "./planes/hindsight.ts";
 
 /**
@@ -407,21 +411,28 @@ describe("the same answer with the cache off, on and broken", () => {
 	}
 
 	test("searchMemory matches", async () => {
-		const on = new FakeRedis();
-		const broken = new FakeRedis();
-		broken.fail = true;
-		const off = substrate();
-		const live = substrate(cacheOf(on));
-		const down = substrate(cacheOf(broken));
+		// The recall the merged search shares is part of this answer: an ambient Hindsight URL and key would answer it from a host
+		// this test never set up, degrading the reply out of the cache.
+		const restoreHindsightEnv = withoutHindsightEnv();
+		try {
+			const on = new FakeRedis();
+			const broken = new FakeRedis();
+			broken.fail = true;
+			const off = substrate();
+			const live = substrate(cacheOf(on));
+			const down = substrate(cacheOf(broken));
 
-		const a = await off.searchMemory("lease", undefined, undefined, undefined, "cursor");
-		const b = await live.searchMemory("lease", undefined, undefined, undefined, "cursor");
-		const c = await down.searchMemory("lease", undefined, undefined, undefined, "cursor");
-		expect(b).toEqual(a);
-		expect(c).toEqual(a);
-		expect(await live.searchMemory("lease", undefined, undefined, undefined, "cursor")).toEqual(a);
-		// Two entries: the merged search and the recall it shares with memory_recall.
-		expect(on.sets).toBe(2);
+			const a = await off.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			const b = await live.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			const c = await down.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			expect(b).toEqual(a);
+			expect(c).toEqual(a);
+			expect(await live.searchMemory("lease", undefined, undefined, undefined, "cursor")).toEqual(a);
+			// Two entries: the merged search and the recall it shares with memory_recall.
+			expect(on.sets).toBe(2);
+		} finally {
+			restoreHindsightEnv();
+		}
 	});
 
 	test("brief matches", async () => {
@@ -878,6 +889,33 @@ describe("the same answer with the cache off, on and broken", () => {
 			else process.env.HINDSIGHT_API_KEY = saved.key;
 			if (saved.banks === undefined) delete process.env.HINDSIGHT_BANKS;
 			else process.env.HINDSIGHT_BANKS = saved.banks;
+		}
+	});
+
+	test("a cached recall is answered under the grants in force now: a repository narrowed out of the grant is not served from the cache", async () => {
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			fake.seed("sub-cursor", [
+				{ id: "a1", text: "fence the owner-a lease", document_id: "mwd_a1", tags: ["cursor"], metadata: { scope: "repo:owner/a", repo: "owner/a" }, score: 0.9 },
+				{ id: "b1", text: "fence the owner-b lease", document_id: "mwd_b1", tags: ["cursor"], metadata: { scope: "repo:owner/b", repo: "owner/b" }, score: 0.5 },
+			]);
+			const redis = new FakeRedis();
+			const cache = cacheOf(redis);
+			const open = new Substrate(loadConfig({}), { index: null, greptime: null, cache, hindsightFetch: fake.fetch });
+			expect((await open.recallMemories({ query: "lease" }, "cursor")).results).toHaveLength(2);
+			const dirA = mkdtempSync(join(tmpdir(), "cache-rec-a-"));
+			const dirB = mkdtempSync(join(tmpdir(), "cache-rec-b-"));
+			const narrowedEnv = {
+				[REPO_REGISTRY_ENV]: JSON.stringify({ "owner/a": { checkouts: [dirA], worktrees: [] }, "owner/b": { checkouts: [dirB], worktrees: [] } }),
+				[REPO_SCOPES_ENV]: JSON.stringify({ cursor: ["owner/a"] }),
+			};
+			const narrowed = new Substrate(loadConfig(narrowedEnv), { index: null, greptime: null, cache, hindsightFetch: fake.fetch });
+			const reply = await narrowed.recallMemories({ query: "lease" }, "cursor");
+			expect(cache.health().hits).toBe(1);
+			expect(reply.results.map((hit) => hit.repo)).toEqual(["owner/a"]);
+		} finally {
+			restore();
 		}
 	});
 

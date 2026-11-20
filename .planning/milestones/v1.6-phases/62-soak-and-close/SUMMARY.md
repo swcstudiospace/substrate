@@ -14,7 +14,7 @@ status: written on gsd/v16-int (soak tests 8752578; ADRs 0004 to 0007 and docs/u
 - **Runbooks** (earlier phases wrote them; this phase checked the set): `index-migration-rehearsal`, `lightrag-storage-topology`, `anchor-chain-outage`, `devnet-reset-and-reanchor`, `session-rollback`, `anchor-signer-rotation`, plus `consistency-verify` and `memory-capsules`.
 - **Decision records:** ADR 0004 (store roles), 0005 (rollback semantics), 0006 (memo-only anchoring), 0007 (checkpoint triggers and sibling hook proposals), with `docs/adr/README.md` updated; `docs/ussr-integration.md` for the four sibling components.
 - **GSD artifacts:** ROADMAP.md (phases 55 to 62), REQUIREMENTS.md (SOTA-11 to SOTA-18), STATE.md (Run 8), and per-phase CONTEXT, SUMMARY and VERIFICATION for phases 55 to 62, and `v1.6-MILESTONE-AUDIT.md`.
-- **Documents corrected:** `docs/event-vocabulary.md` (the wiring prose and the action list), `docs/runbooks/session-rollback.md` (`--omp-session`), `docs/data-planes.md` (LightRAG not deployed, RAGFlow historical) and `.planning/PROJECT.md` (no hypertables).
+- **Documents corrected:** `docs/event-vocabulary.md` (the wiring prose and the action list), `docs/runbooks/session-rollback.md` (`--omp-session`), `docs/data-planes.md` (LightRAG not deployed, RAGFlow (retired, superseded by LightRAG) historical) and `.planning/PROJECT.md` (no hypertables).
 
 ## Key decisions
 

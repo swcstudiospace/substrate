@@ -48,12 +48,18 @@
  * the presence record without moving its change time (`livenessBeat`), so a session quiet for days stays active while the
  * observer runs and its `idleForMs` grows. Dragonfly holds only this ephemeral record: the baseline never goes there. The beat
  * also runs on its own timer (`livenessPeriodMs`, at most a third of the freshness window), independent of the scan interval.
+ *
+ * Checkouts: the plane reads every configured checkout (`settings.checkouts`, each keyed by `planningSessionId`). Each has its
+ * own state (`CheckoutState`, held by the checkout key): its index, baseline, touched pairs, heartbeat, liveness, conflicts and
+ * baseline saves are its own, so one checkout's change or failure never moves another's. The scan timer is one interval, and
+ * each tick scans every checkout in configuration order. `scan()` returns the first configured checkout's scan, the top-level
+ * view `planning_status` shows; `scanAll()` returns every checkout's.
  */
 import type { EventInput } from "../types.ts";
 import { BaselineStoreError, type BaselineLoad, type BaselineStore, type StoredBaseline } from "./baseline-store.ts";
-import { branchOf, gitLayout, planningSessionId, repoOf, type OriginUrlRunner, type RepoLookup } from "./checkout.ts";
+import { branchOf, gitLayout, repoOf, type OriginUrlRunner, type RepoLookup } from "./checkout.ts";
 import { conflictEvent, conflictOriginMs, conflictSignature, detectConflicts, repoKey } from "./conflicts.ts";
-import type { PlanningConfigError, PlanningConfigResult } from "./config.ts";
+import type { PlanningCheckout, PlanningConfigError, PlanningConfigResult, PlanningLimits } from "./config.ts";
 import { diffPlanningIndex, type PathChange, type PlanningDiff, type PlanningSnapshot } from "./diff.ts";
 import { observePlanningChange } from "./events.ts";
 import { buildPlanningIndex, errnoCode, indexRecords, isErrorRecord, snapshotOf, updatePlanningIndex, type PlanningFs, type PlanningIndex, type PlanningIndexFailure, type PlanningIndexResult } from "./index.ts";
@@ -119,6 +125,13 @@ export type ObserverScan =
 	| { state: "unavailable"; code: PlanningIndexFailure }
 	| { state: "failed"; detail: string }
 	| { state: "observed"; outcome: ObserverOutcome; heartbeat: PlanningHeartbeat; liveness?: PlanningLiveness };
+
+/** One configured checkout's scan: its key and root, and what its scan did. Entries come in configuration order. */
+export interface PlanningCheckoutScan {
+	key: string;
+	root: string;
+	scan: ObserverScan;
+}
 
 export interface PlanningObserverDeps {
 	settings: PlanningConfigResult;
@@ -186,665 +199,106 @@ export function loadLivenessSettings(env: Readonly<Record<string, string | undef
 /** The phase and plan of one described document. `plan` is null when the document names none. */
 type PhasePlan = Pick<TouchedPair, "phase" | "plan">;
 
-export class PlanningObserver {
+/**
+ * One checkout's state between scans, held by its checkout key in the observer. It holds no dependency: the filesystem, presence
+ * store, ledger and clock are shared, so a checkout's state is only what that checkout's scans keep.
+ */
+interface CheckoutState {
+	readonly key: string;
+	readonly root: string;
 	/** The index of the latest scan, which the next scan updates. Holds whatever the last scan found, even when a publish failed. */
-	private index: { root: string; index: PlanningIndex } | null = null;
+	index: PlanningIndex | null;
 	/** The latest scan's snapshot and state. A heartbeat reports the change since it, so it moves with every scan. */
-	private lastScan: { root: string; snapshot: PlanningSnapshot; state: SessionState } | null = null;
+	lastScan: { snapshot: PlanningSnapshot; state: SessionState } | null;
 	/** The publish baseline: what the ledger has been told. It holds when a publish fails, so the change is retried. */
-	private baseline: StoredBaseline | null = null;
+	baseline: StoredBaseline | null;
 	/** The session state the plane was in when `baseline` was taken. Null for a baseline restored from the store, which keeps no state. */
-	private baselineState: SessionState | null = null;
+	baselineState: SessionState | null;
 	/** The identity of the held change whose transition is already recorded, so a later scan of that change records nothing. */
-	private recordedHold: string | null = null;
-	/** Scheduled transition deliveries not yet settled. */
-	private readonly pendingTransitions = new Set<Promise<void>>();
+	recordedHold: string | null;
 	/**
 	 * The last complete snapshot whose change was claimed: a touched pair is taken against it. It moves on a claim and on a
 	 * complete scan with no change. It holds on an incomplete scan and while the clock is unreadable, so a change observed then
 	 * is claimed on a readable scan. A retry of a held publish finds no new change, so it never renews a touched time. Process-local.
 	 */
-	private touchBase: { root: string; snapshot: PlanningSnapshot; phasePlans: ReadonlyMap<string, PhasePlan> } | null = null;
+	touchBase: { snapshot: PlanningSnapshot; phasePlans: ReadonlyMap<string, PhasePlan> } | null;
 	/** This checkout's planning report from its latest scan, stamped by the server clock. It rides in the checkout's heartbeat. Null until one exists. */
-	private report: PlanningReport | null = null;
+	report: PlanningReport | null;
 	/** The watcher gap after the latest scan: a truncated or unlisted scan opens it, and a complete scan clears it. Process-local. */
-	private gap: WatcherGap | null = null;
+	gap: WatcherGap | null;
 	/** This checkout's touched pairs inside the TTL, as its latest complete changes left them. Written on each heartbeat. Process-local. */
-	private touched: TouchedPair[] = [];
+	touched: TouchedPair[];
 	/** True while the claims a complete change could not keep in `touched` are inside the freshness window. The report stays unknown (`report-limit`) until they have left it. */
-	private touchedOverflow = false;
+	touchedOverflow: boolean;
 	/** When the change that overflowed `touched` was observed, by the server clock; null when none has. The overflow holds while that time is inside the TTL. Process-local. */
-	private overflowAtMs: number | null = null;
+	overflowAtMs: number | null;
 	/** The presence record has a change this process has not written yet: a change, a moved watcher gap, a changed view, or a write that failed. Process-local. */
-	private presencePending = false;
+	presencePending: boolean;
 	/** When the observation that armed the pending write was made, by the server clock. Null when that clock was unreadable (`pendingUndated`) or nothing is pending. Process-local. */
-	private pendingSinceMs: number | null = null;
+	pendingSinceMs: number | null;
 	/** True when the pending write was armed in a scan whose clock was unreadable: its observation has no time, so it is dropped unwritten once retained. Process-local. */
-	private pendingUndated = false;
+	pendingUndated: boolean;
 	/** The report the last successful heartbeat wrote: undefined until one is written, null when it wrote none. A change of view (known, unknown, or none) must reach the record. */
-	private written: PlanningReport | null | undefined = undefined;
+	written: PlanningReport | null | undefined;
 	/** The repository the last successful heartbeat wrote; undefined until one is written. A different repository now is a change the record must carry. */
-	private writtenRepo: string | null | undefined = undefined;
+	writtenRepo: string | null | undefined;
 	/** Conflicts announced and still open, by signature. A conflict leaves the set once it is no longer detected. Process-local. */
-	private openConflicts = new Set<string>();
-	private timer: PlanningTimerHandle | undefined;
-	/** The scan in flight, or null. A scan asked for while one runs shares it. */
-	private running: Promise<ObserverScan> | null = null;
-	/** The problem last reported, or null while the scans are healthy. A report fires only when the problem changes. */
-	private problem: string | null = null;
-	/** The root whose stored baseline has been looked for. A root is restored at most once, on its first successful scan. Process-local. */
-	private restoreTried: string | null = null;
+	openConflicts: Set<string>;
+	/** The scan problem last reported, or null while this checkout's scans are healthy. A report fires only when the problem changes. */
+	problem: string | null;
+	/** True once the stored baseline of this checkout has been looked for. It is looked for at most once, on the first successful scan. Process-local. */
+	restoreTried: boolean;
 	/** The baseline last written to, or read from, the store. A baseline that differs from it is dirty. At most one snapshot is held for it. Process-local. */
-	private savedBaseline: StoredBaseline | null = null;
+	savedBaseline: StoredBaseline | null;
 	/** The save in flight, or null. It never rejects, and a scan does not wait for it. */
-	private baselineSave: Promise<void> | null = null;
+	baselineSave: Promise<void> | null;
 	/** When the last save was attempted, by the host clock (`deps.now`); null before the first. Saves are at least `baselineSaveIntervalMs` apart. */
-	private lastSaveAttemptMs: number | null = null;
+	lastSaveAttemptMs: number | null;
 	/** The save failure last reported, or null while saves land. A report fires only when it changes. */
-	private saveProblem: string | null = null;
+	saveProblem: string | null;
 	/** The server time of the last presence write that landed (change or liveness); null before one, or when its clock was unreadable. The liveness interval runs from it. Process-local. */
-	private lastPresenceMs: number | null = null;
-	/** The liveness timer, or undefined while it is not running. It beats independently of the scan interval. */
-	private livenessTimer: PlanningTimerHandle | undefined;
-	/** The liveness beat in flight, or null. It never rejects. */
-	private livenessRun: Promise<void> | null = null;
+	lastPresenceMs: number | null;
 	/** The liveness-timer failure last reported, or null while its beats land. A report fires only when it changes. */
-	private livenessProblem: string | null = null;
-	/** What the liveness timer beats for: the checkout the latest scan read. Null before a scan, and after a scan that could not read it. Process-local. */
-	private liveTarget: { root: string; ttlMs: number; repo: RepoLookup } | null = null;
-	private readonly timers: PlanningTimers;
-	private readonly reporter: (line: string) => void;
-	private readonly clock: () => number;
-	private readonly saveIntervalMs: number;
+	livenessProblem: string | null;
+	/** What the liveness timer beats for: the checkout the latest scan read. Null before a scan, and after a scan that could not read it. */
+	liveTarget: { ttlMs: number; repo: RepoLookup } | null;
+	/** True while this checkout's scan runs. The liveness timer does not beat for a checkout whose scan is in flight. */
+	scanning: boolean;
+}
 
-	constructor(private readonly deps: PlanningObserverDeps) {
-		this.timers = deps.timers ?? GLOBAL_TIMERS;
-		this.reporter = deps.report ?? STDERR_REPORT;
-		this.clock = deps.now ?? Date.now;
-		this.saveIntervalMs = deps.baselineSaveIntervalMs ?? DEFAULT_BASELINE_SAVE_INTERVAL_MS;
-		if (!Number.isFinite(this.saveIntervalMs) || this.saveIntervalMs < 0) throw new RangeError("baselineSaveIntervalMs must be a non-negative number");
-	}
-
-	/**
-	 * Start the scan timer at the configured cadence, unref'd, and, when liveness is configured and a presence store exists, the
-	 * liveness timer beside it (`livenessPeriodMs`). Nothing starts while the plane is disabled or misconfigured. Returns whether it
-	 * is running. The liveness timer is scheduled first so the scan timer is the one a test's single-slot fake keeps.
-	 */
-	start(): boolean {
-		if (this.timer !== undefined) return true;
-		const resolved = resolveSettings(this.deps.settings);
-		if (!resolved.ready) return false;
-		const liveness = this.deps.liveness;
-		if (liveness !== undefined && liveness !== null && this.deps.presence !== null) {
-			this.livenessTimer = this.timers.setInterval(() => this.livenessTick(), livenessPeriodMs(liveness, resolved.limits.scanIntervalMs, resolved.limits.presenceTtlS * 1000));
-		}
-		this.timer = this.timers.setInterval(() => this.tick(), resolved.limits.scanIntervalMs);
-		return true;
-	}
-
-	/** Clear both timers. A scan or liveness beat in flight finishes; `idle` waits for it. Nothing new starts from a timer. */
-	stop(): void {
-		this.timers.clearInterval(this.timer);
-		this.timer = undefined;
-		if (this.livenessTimer !== undefined) this.timers.clearInterval(this.livenessTimer);
-		this.livenessTimer = undefined;
-	}
-
-	/**
-	 * Resolves once no scan, no liveness beat and no baseline save is in flight. A scan can start a save as it ends, so it looks
-	 * again after each wait. The shutdown path waits on it, inside its own bound, after `stop`. Never rejects.
-	 */
-	async idle(): Promise<void> {
-		for (;;) {
-			const pending: Array<Promise<unknown>> = [];
-			if (this.running !== null) pending.push(this.running);
-			if (this.livenessRun !== null) pending.push(this.livenessRun);
-			if (this.baselineSave !== null) pending.push(this.baselineSave);
-			if (pending.length === 0) return;
-			await Promise.all(pending);
-		}
-	}
-
-	/** One scan. A call made while a scan is in flight shares that scan: no second scan starts behind it. Never rejects. */
-	scan(): Promise<ObserverScan> {
-		return this.running ?? this.startScan();
-	}
-
-	private startScan(): Promise<ObserverScan> {
-		const run = this.scanOnce()
-			.catch((cause: unknown) => {
-				this.liveTarget = null;
-				return failedScan(cause);
-			})
-			.finally(() => {
-				this.running = null;
-			});
-		this.running = run;
-		return run;
-	}
-
-	/**
-	 * Waits for the scan in flight, then for the transition deliveries in flight, up to `deadline`: resolves `settled` when neither is
-	 * left, or `deadline` when the bound came first. Never rejects. Shutdown passes its timer as the bound. A scan running when this is
-	 * called cannot schedule a transition after the settle returns, because the settle waits for that scan first. A scan never waits
-	 * on this. Without a bound it waits for everything.
-	 */
-	async settleTransitions(deadline: Promise<void> = Promise.withResolvers<void>().promise): Promise<"settled" | "deadline"> {
-		const flushed = (async (): Promise<"settled"> => {
-			for (;;) {
-				if (this.running !== null) await this.running;
-				if (this.pendingTransitions.size === 0) return "settled";
-				await Promise.all([...this.pendingTransitions]);
-			}
-		})();
-		return Promise.race([flushed, deadline.then((): "deadline" => "deadline")]);
-	}
-
-	/** One timer tick: a scan (shared with one already in flight), then the report for its outcome. */
-	private async tick(): Promise<void> {
-		this.note(await this.scan());
-	}
-
-	/** Reports a problem when it appears or changes, and the recovery when the scans are healthy again. Silent while nothing changes. */
-	private note(scan: ObserverScan): void {
-		const problem = problemOf(scan);
-		if (problem === this.problem) return;
-		const before = this.problem;
-		this.problem = problem;
-		if (problem !== null) this.reporter(`[substrate] planning observer: ${problem}`);
-		else if (before !== null) this.reporter("[substrate] planning observer: scans succeed again");
-	}
-
-	private async scanOnce(): Promise<ObserverScan> {
-		const resolved = resolveSettings(this.deps.settings);
-		if (!resolved.ready) return { state: "disabled" };
-		const { root, limits } = resolved;
-		const ttlMs = limits.presenceTtlS * 1000;
-		const fsDeps = { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } };
-		const cached = this.index !== null && this.index.root === root ? this.index.index : null;
-		const built = cached === null ? await buildPlanningIndex(root, fsDeps) : await updatePlanningIndex(root, fsDeps, cached);
-
-		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
-		const nowMs = clock?.ok ? clock.nowMs : null;
-		const gapMoved = nowMs !== null ? this.stampReport(built, nowMs) : this.withdrawReport();
-		const repo = await repoOf(this.deps.fs, root, this.deps.originUrl);
-		if (!built.ok) {
-			// A checkout the scan could not read is not proven alive: the liveness timer stops beating until a scan reads it.
-			this.liveTarget = null;
-			await this.heartbeat(root, false, ttlMs, repo, nowMs);
-			return { state: "unavailable", code: built.code };
-		}
-		this.index = { root, index: built.index };
-		this.liveTarget = { root, ttlMs, repo };
-
-		const next = snapshotOf(built.index);
-		const state = indexState(built.index);
-		// The change since the scan before: a heartbeat reports it, so a change is heartbeated once, in the scan that sees it.
-		const sinceLastScan = this.lastScan !== null && this.lastScan.root === root ? diffPlanningIndex(this.lastScan.snapshot, next) : null;
-		// The state the scan before saw. A revert and a held change record their move from there: the publish baseline's state lags while a change is held.
-		const observedBefore = this.lastScan !== null && this.lastScan.root === root ? this.lastScan.state : null;
-		this.lastScan = { root, snapshot: next, state };
-		this.claimTouches(root, next, phasePlansOf(built.index), nowMs, ttlMs);
-		// The overflow holds while the claims it could not keep are inside the freshness window of the change that overflowed.
-		if (nowMs !== null) {
-			this.touchedOverflow = this.overflowAtMs !== null && nowMs - this.overflowAtMs <= ttlMs;
-			if (!this.touchedOverflow) this.overflowAtMs = null;
-		}
-		if (this.touchedOverflow && nowMs !== null) this.report = unknownReport(nowMs, "report-limit");
-
-		if (this.restoreTried !== root && (this.baseline === null || this.baseline.root !== root)) await this.restoreBaseline(root);
-		// Read after the restore, so a restored baseline is the one a transition moves from.
-		const current = this.baseline;
-		const previous = current !== null && current.root === root ? current.snapshot : null;
-		const diff = previous === null ? null : diffPlanningIndex(previous, next);
-		const changed = diff?.complete === true && changesIn(diff) > 0;
-		let outcome: ObserverOutcome;
-		if (repo.state === "known") {
-			const observed = await observePlanningChange({
-				previous,
-				next,
-				repo: repo.repo,
-				sessionId: PLANNING_OBSERVER_SESSION,
-				publisher: { publish: this.deps.emit },
-			});
-			// A failed publish holds the baseline; every other outcome advances it. The transition follows the same rule.
-			const held = observed.outcome === "not-published";
-			const transition = observed.outcome === "published" ? "applied" : held ? "refused" : unpublishedOutcome(previous, diff);
-			this.settle(root, current, state, { snapshot: observed.baseline, next, diff, outcome: transition, held, observedBefore });
-			outcome = observed.outcome;
-		} else if (changed) {
-			// Without a repo nothing can be published. A complete change is reported once and ends here, unless the failure that
-			// hid the repo was transient: then the baseline holds, and the next scan sees the same change again.
-			if (!repo.transient) this.settle(root, current, state, { snapshot: next, next, diff, outcome: "refused", held: false, observedBefore });
-			outcome = "repo-unknown";
-		} else {
-			this.settle(root, current, state, { snapshot: next, next, diff, outcome: unpublishedOutcome(previous, diff), held: false, observedBefore });
-			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
-		}
-		// The transition was scheduled, not awaited, and the baseline advanced in `settle` above: the baseline save below saves the
-		// advanced baseline, and nothing after it (heartbeat, liveness beat, announcement) waits on the metric write.
-		const sinceChange = sinceLastScan?.complete === true && changesIn(sinceLastScan) > 0;
-		const heartbeat = await this.heartbeat(root, sinceChange || gapMoved, ttlMs, repo, nowMs);
-		const liveness = await this.livenessBeat(root, heartbeat, ttlMs, repo, nowMs);
-		await this.announce(root, repo, ttlMs);
-		this.persistBaseline(root);
-		return liveness === undefined ? { state: "observed", outcome, heartbeat } : { state: "observed", outcome, heartbeat, liveness };
-	}
-
-	/**
-	 * Records the transition this scan made, if any, then moves the baseline. A held change keeps the baseline's state: its
-	 * transition is recorded once, on first detection, and a later scan of the same change records nothing. A baseline restored
-	 * from the store has no state, so a move from it is recorded as a move from this scan's own state.
-	 */
-	private settle(
-		root: string,
-		current: StoredBaseline | null,
-		state: SessionState,
-		change: { snapshot: PlanningSnapshot; next: PlanningSnapshot; diff: PlanningDiff | null; outcome: TransitionOutcome | null; held: boolean; observedBefore: SessionState | null },
-	): void {
-		const { diff, outcome } = change;
-		// The state the baseline was taken in; a restored baseline has none, so the move reads from this scan's own state.
-		const baselineState = this.baselineState ?? state;
-		const incomplete = diff !== null && !diff.complete;
-		const key = diff !== null && diff.removed !== null && outcome !== null ? changeKey({ added: diff.added, removed: diff.removed, changed: diff.changed }, change.next) : null;
-		if (change.held) {
-			if (outcome !== null && current !== null && key !== this.recordedHold) {
-				this.recordedHold = key;
-				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? baselineState, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
-			}
-			if (current !== null) this.baseline = { root, snapshot: change.snapshot };
-			return;
-		}
-		const recorded = key !== null && key === this.recordedHold;
-		if (outcome !== null && current !== null && !recorded) {
-			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: baselineState, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
-		} else if (current !== null && this.recordedHold !== null && diff?.complete === true && changesIn(diff) === 0) {
-			// A revert: the held change is undone, so the baseline matches the checkout again and nothing is published. It is recorded
-			// once, as refused, because the reverted change never reached the ledger.
-			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? baselineState, to: state, outcome: "refused" }, this.deps.clock ?? hostClock));
-		}
-		this.advance(root, change.snapshot, state);
-	}
-
-	/** Moves the baseline. A new baseline forgets a held change. */
-	private advance(root: string, snapshot: PlanningSnapshot, state: SessionState): void {
-		this.recordedHold = null;
-		this.baseline = { root, snapshot };
-		this.baselineState = state;
-	}
-
-	/**
-	 * Hands one `planning.transition` record to its sinks without waiting for them, so the scan never waits on the metric write.
-	 * The deliveries in flight are bounded by {@link MAX_PENDING_TRANSITIONS}: past the bound a record goes to the fallback alone,
-	 * so a stalled primary can neither grow the set nor lose a record. `emitTransition` never throws; a fallback that fails is
-	 * written to stderr.
-	 */
-	private schedule(record: TransitionRecord): void {
-		const fallback = this.deps.fallback ?? stdoutMetricSink();
-		const tracked = this.pendingTransitions.size < MAX_PENDING_TRANSITIONS;
-		const delivery: Promise<void> = emitTransition(record, tracked ? this.deps.metrics : fallback, fallback).then((delivered) => {
-			if (tracked) this.pendingTransitions.delete(delivery);
-			if (delivered.status === "failed") {
-				process.stderr.write(`[substrate] planning transition not delivered: ${delivered.primary.sink} ${delivered.primary.reason}, ${delivered.fallback.sink} ${delivered.fallback.reason}\n`);
-			}
-		});
-		if (tracked) this.pendingTransitions.add(delivery);
-	}
-
-	/**
-	 * Stamps this checkout's report from its scan and moves the watcher gap. Returns whether the gap moved: a gap that opens or
-	 * closes is a change the presence record must carry. A failed scan proves nothing, so it keeps the gap it had.
-	 */
-	private stampReport(built: PlanningIndexResult, nowMs: number): boolean {
-		const observed = observeScan(built, nowMs, this.gap);
-		const moved = observed.gap !== this.gap;
-		this.report = observed.report;
-		this.gap = observed.gap;
-		return moved;
-	}
-
-	/**
-	 * Withdraws this checkout's report when the server clock cannot stamp a scan. The held report was stamped by an earlier clock
-	 * reading, so keeping it would let a later write present that old view as current. Without a report the session reads as
-	 * `no-scan`, which is unknown. Returns whether a report was held: its withdrawal is a change the record must carry.
-	 */
-	private withdrawReport(): boolean {
-		const held = this.report !== null;
-		this.report = null;
-		return held;
-	}
-
-	/**
-	 * Claims the change since the last complete snapshot (`touchBase`): its pairs are folded into the touched list, dated by the
-	 * server clock. A complete change observed while the clock is unreadable is not claimed, since its time is unknown, and
-	 * `touchBase` still advances past it, so recovery never presents it as active. An incomplete observation claims nothing and
-	 * holds `touchBase`. The first complete scan of a root sets it, and a complete scan with no change moves it.
-	 */
-	private claimTouches(root: string, next: PlanningSnapshot, nextPhasePlans: ReadonlyMap<string, PhasePlan>, nowMs: number | null, ttlMs: number): void {
-		const base = this.touchBase !== null && this.touchBase.root === root ? this.touchBase : null;
-		if (base === null) {
-			// Only a complete snapshot may be a touch baseline: an incomplete one would make every later diff incomplete, and never move.
-			if (!next.truncated && next.unlisted.length === 0) this.touchBase = { root, snapshot: next, phasePlans: nextPhasePlans };
-			return;
-		}
-		const diff = diffPlanningIndex(base.snapshot, next);
-		if (!diff.complete) return;
-		// An undated change is not claimed: its time is unknown, so claiming it at recovery would show a stale edit as active.
-		if (changesIn(diff) > 0 && nowMs !== null) this.touch(pairsOfChange(diff, nextPhasePlans, base.phasePlans), nowMs, ttlMs);
-		this.touchBase = { root, snapshot: next, phasePlans: nextPhasePlans };
-	}
-
-	/**
-	 * Folds one complete change into the touched pairs, dated by the server clock. A pair the change touches replaces its older
-	 * entry, and the others stay while they are inside the TTL. A list past `MAX_REPORT_ENTRIES` is not kept: the pairs stay as
-	 * they were, pruned, and the overflow holds the report unknown until the claims that did not fit have left the freshness
-	 * window, dated by the overflowing change.
-	 */
-	private touch(pairs: readonly PhasePlan[], nowMs: number, ttlMs: number): void {
-		const fresh = new Map<string, TouchedPair>();
-		for (const pair of pairs) fresh.set(touchKey(pair), { phase: pair.phase, plan: pair.plan, observedAtMs: nowMs });
-		const kept = touchedWithin(this.touched, nowMs, ttlMs).filter((pair) => !fresh.has(touchKey(pair)));
-		const merged = [...fresh.values(), ...kept];
-		if (merged.length > MAX_REPORT_ENTRIES) {
-			this.overflowAtMs = nowMs;
-			this.touched = touchedWithin(this.touched, nowMs, ttlMs);
-		} else {
-			this.touched = merged;
-		}
-	}
-
-	/**
-	 * Heartbeats this checkout when `due`, or when a write is still pending. The record's time is replaced by the server's clock,
-	 * and the record carries the repository, the report and the touched pairs. The pending write follows these rules:
-	 * R1: a write armed this scan (a due observation, or a view or repo change that newly arms it) is attempted at once. Its
-	 *     observation time is `nowMs`, which may be null: a null time makes the write undated.
-	 * R2: a retained write (pending from an earlier scan) is held while `nowMs` is null: the result is failed with `clock-unavailable`.
-	 * R3: a retained undated write is dropped unwritten, so it is never written as active.
-	 * R4: a retained write older than the freshness window (`nowMs - pendingSinceMs > ttlMs`) is dropped unwritten. Exactly `ttlMs` is still written.
-	 * R5: a successful write clears the debt. A failed write keeps it, with its observation time.
-	 */
-	private async heartbeat(root: string, due: boolean, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningHeartbeat> {
-		const currentRepo = repo.state === "known" ? repo.repo : null;
-		const viewChanged = this.written !== undefined && reportViewOf(this.report) !== reportViewOf(this.written);
-		const repoChanged = this.writtenRepo !== undefined && this.writtenRepo !== currentRepo;
-		// A view or repo change arms the write only when it first arms, so re-arming on every scan cannot keep a dead write alive.
-		const armed = due || (!this.presencePending && (viewChanged || repoChanged));
-		if (armed) {
-			this.presencePending = true;
-			this.pendingSinceMs = nowMs;
-			this.pendingUndated = nowMs === null;
-		} else if (!this.presencePending) {
-			return { state: "not-due" };
-		}
-		const presence = this.deps.presence;
-		if (presence === null) {
-			this.clearPending();
-			return { state: "presence-unset" };
-		}
-		if (!armed) {
-			// A retained write is aged against this scan's clock. While the clock is unreadable its age cannot be checked, so it is held.
-			if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
-			if (this.pendingUndated || (this.pendingSinceMs !== null && nowMs - this.pendingSinceMs > ttlMs)) {
-				// The observation has no time, or has left the window: writing now would show the checkout active on a quiet
-				// observation. The view and repo are acknowledged, so the next scan does not re-arm them.
-				this.clearPending();
-				this.written = this.report;
-				this.writtenRepo = currentRepo;
-				return { state: "not-due" };
-			}
-		}
-		const result = await this.touchCheckout(root, presence, currentRepo, ttlMs);
-		if (result.state === "written") {
-			this.clearPending();
-			this.written = this.report;
-			this.writtenRepo = currentRepo;
-		}
-		return result;
-	}
-
-	/** Clears the pending write: it was written, or it is dropped unwritten. */
-	private clearPending(): void {
-		this.presencePending = false;
-		this.pendingSinceMs = null;
-		this.pendingUndated = false;
-	}
-
-	/** Writes the checkout's session record. The result is written, or failed with an error code: never a message, which can carry host paths. */
-	private async touchCheckout(root: string, presence: DragonflyPresenceStore, currentRepo: string | null, ttlMs: number, kind: "change" | "liveness" = "change"): Promise<Extract<PlanningHeartbeat, { state: "written" | "failed" }>> {
-		try {
-			const layout = await gitLayout(this.deps.fs, root);
-			if (!layout.ok) return { state: "failed", detail: layout.reason };
-			const record: SessionRecord = {
-				sessionId: planningSessionId(this.deps.fs, root),
-				worktree: root,
-				branch: await branchOf(this.deps.fs, layout.gitDir),
-				activePhase: null,
-				lastHeartbeatMs: 0,
-				repo: currentRepo,
-				touched: this.touched,
-				...(this.report === null ? {} : { planning: this.report }),
-			};
-			await (kind === "liveness" ? presence.touchLiveness(record, ttlMs) : presence.touch(record, ttlMs));
-			return { state: "written" };
-		} catch (cause: unknown) {
-			return { state: "failed", detail: errnoCode(cause) };
-		}
-	}
-
-	/**
-	 * The liveness heartbeat (phase 58): a scan that read the checkout proves it alive, whether or not anything changed, so a
-	 * session that thinks for hours without touching a planning document stays active. It runs only when `deps.liveness` is set,
-	 * and only after a scan that built the index: a checkout that cannot be read is not proven alive. A scan whose change
-	 * heartbeat landed is already covered (that write is also a sign of life). A failed change heartbeat is not retried here:
-	 * the same backend would refuse it. Otherwise a write is due on the first scan and then `intervalMs` after the last presence
-	 * write, capped at a third of the freshness window so a beat always lands well inside it. A write that fails is reported
-	 * (`problemOf`) and tried again on the next scan, since a failure does not move the last-write time. The same write is also
-	 * driven by its own timer (`livenessTick`), so a scan interval longer than the freshness window cannot make a live session
-	 * look dead.
-	 */
-	private async livenessBeat(root: string, heartbeat: PlanningHeartbeat, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningLiveness | undefined> {
-		const settings = this.deps.liveness;
-		if (settings === undefined || settings === null) return undefined;
-		const presence = this.deps.presence;
-		if (presence === null) return { state: "presence-unset" };
-		if (heartbeat.state === "written") {
-			this.lastPresenceMs = nowMs;
-			return { state: "covered" };
-		}
-		if (heartbeat.state === "failed") return { state: "failed", detail: heartbeat.detail };
-		return this.livenessWrite(root, presence, settings, ttlMs, repo, nowMs);
-	}
-
-	/** The due check and the write of one liveness beat, shared by the scan and the liveness timer. */
-	private async livenessWrite(root: string, presence: DragonflyPresenceStore, settings: LivenessSettings, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningLiveness> {
-		if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
-		const everyMs = Math.min(settings.intervalMs, Math.floor(ttlMs / 3));
-		const elapsedMs = this.lastPresenceMs === null ? null : nowMs - this.lastPresenceMs;
-		// A server clock that moved backwards (negative elapsed time) is due: it cannot show how long the record has been held.
-		if (elapsedMs !== null && elapsedMs >= 0 && elapsedMs < everyMs) return { state: "not-due" };
-		const currentRepo = repo.state === "known" ? repo.repo : null;
-		const result = await this.touchCheckout(root, presence, currentRepo, ttlMs, "liveness");
-		if (result.state === "failed") return result;
-		this.lastPresenceMs = nowMs;
-		// The liveness record carries the same report and repository a change heartbeat does, so they are written: a view change must not re-arm a change heartbeat for them.
-		this.written = this.report;
-		this.writtenRepo = currentRepo;
-		return { state: "written" };
-	}
-
-	/**
-	 * One tick of the liveness timer, which runs on its own cadence (`livenessPeriodMs`), not the scan's. It beats for the
-	 * checkout the last scan read (`liveTarget`, dropped by a scan that could not read it); `touchCheckout` reads the git layout
-	 * again, so a checkout that has vanished since then is not written. A scan in flight beats for itself, and a beat in flight
-	 * is not doubled. Never rejects: a failure is reported once when it appears or changes, and once more on recovery.
-	 */
-	private async livenessTick(): Promise<void> {
-		const settings = this.deps.liveness;
-		const presence = this.deps.presence;
-		const target = this.liveTarget;
-		if (settings === undefined || settings === null || presence === null || target === null) return;
-		if (this.running !== null || this.livenessRun !== null) return;
-		const run = (async () => {
-			try {
-				const clock = await readClock(presence);
-				const beat = await this.livenessWrite(target.root, presence, settings, target.ttlMs, target.repo, clock.ok ? clock.nowMs : null);
-				this.noteLiveness(beat.state === "failed" ? beat.detail : null);
-			} catch (cause: unknown) {
-				this.noteLiveness(errnoCode(cause));
-			}
-		})().finally(() => {
-			this.livenessRun = null;
-		});
-		this.livenessRun = run;
-		await run;
-	}
-
-	/** Reports a liveness-timer failure when it appears or changes, and the recovery when the beats land again. Silent while nothing changes. */
-	private noteLiveness(problem: string | null): void {
-		if (problem === this.livenessProblem) return;
-		const before = this.livenessProblem;
-		this.livenessProblem = problem;
-		if (problem !== null) this.reporter(`[substrate] planning observer: liveness timer heartbeat failed: ${problem}`);
-		else if (before !== null) this.reporter("[substrate] planning observer: liveness timer heartbeats succeed again");
-	}
-
-	/**
-	 * Takes the stored baseline of this checkout as the publish baseline, once per root, so the first scan diffs the tree against
-	 * what the ledger was last told and publishes what changed while the observer was down. No store, no file, a file for another
-	 * root, or a file that cannot be used leaves no baseline, and the first scan is a baseline as before: the last three are
-	 * reported, and the next save replaces the bad file. Changes found this way are published but not claimed as touched pairs:
-	 * their time is unknown, and claiming them at restart would show a stale edit as active.
-	 */
-	private async restoreBaseline(root: string): Promise<void> {
-		this.restoreTried = root;
-		const store = this.deps.baselines;
-		if (store === undefined || store === null) return;
-		let loaded: BaselineLoad;
-		try {
-			loaded = await store.load(planningSessionId(this.deps.fs, root));
-		} catch (cause: unknown) {
-			this.reporter(`[substrate] planning observer: stored baseline not read: ${cause instanceof BaselineStoreError ? cause.message : errnoCode(cause)}; scanning as a first run`);
-			return;
-		}
-		if (loaded.state === "unusable") {
-			this.reporter(`[substrate] planning observer: stored baseline unusable (${loaded.reason}${loaded.detail === null ? "" : `: ${loaded.detail}`}); scanning as a first run`);
-			return;
-		}
-		if (loaded.state !== "loaded") return;
-		if (loaded.baseline.root !== root) {
-			this.reporter("[substrate] planning observer: stored baseline names another checkout root; scanning as a first run");
-			return;
-		}
-		// The store keeps no state: a restored baseline has none, and the first move from it reads from the state that scan finds.
-		this.baseline = loaded.baseline;
-		this.baselineState = null;
-		this.savedBaseline = loaded.baseline;
-	}
-
-	/**
-	 * Starts a save of the publish baseline when it differs from the stored one, no save is in flight, and the last attempt is
-	 * older than `baselineSaveIntervalMs` (host clock, injected). It never waits for the save: a slow or failing store cannot
-	 * hold a scan. A failed save leaves the baseline dirty, so a later scan tries again. A crash before a save lands loses at
-	 * most the baseline advance since the last save, so a restart may publish that change a second time: delivery is at least once.
-	 */
-	private persistBaseline(root: string): void {
-		const baseline = this.baseline;
-		if (this.deps.baselines === undefined || this.deps.baselines === null || baseline === null || baseline.root !== root) return;
-		if (this.baselineSave !== null) return;
-		// Equal content needs no save. The newest object is held, not the first one saved, so a quiet tree retains one snapshot.
-		if (this.savedBaseline !== null && sameBaseline(this.savedBaseline, baseline)) {
-			this.savedBaseline = baseline;
-			return;
-		}
-		const nowMs = this.clock();
-		const sinceMs = this.lastSaveAttemptMs === null ? null : nowMs - this.lastSaveAttemptMs;
-		// A host clock that moved backwards (negative elapsed time) is due.
-		if (sinceMs !== null && sinceMs >= 0 && sinceMs < this.saveIntervalMs) return;
-		this.startSave(baseline, nowMs);
-	}
-
-	/** Saves `baseline` in the background. The result is recorded, never thrown: a failure is reported once and the baseline stays dirty. */
-	private startSave(baseline: StoredBaseline, nowMs: number): void {
-		const store = this.deps.baselines;
-		if (store === undefined || store === null) return;
-		this.lastSaveAttemptMs = nowMs;
-		this.baselineSave = (async () => {
-			try {
-				await store.save(planningSessionId(this.deps.fs, baseline.root), baseline);
-				this.savedBaseline = baseline;
-				this.noteSave(null);
-			} catch (cause: unknown) {
-				this.noteSave(cause instanceof BaselineStoreError ? cause.message : errnoCode(cause));
-			}
-		})().finally(() => {
-			this.baselineSave = null;
-		});
-	}
-
-	/** Reports a save failure when it appears or changes, and the recovery when saves land again. Silent while nothing changes. */
-	private noteSave(problem: string | null): void {
-		if (problem === this.saveProblem) return;
-		const before = this.saveProblem;
-		this.saveProblem = problem;
-		if (problem !== null) this.reporter(`[substrate] planning observer: baseline save failed: ${problem}; it is retried`);
-		else if (before !== null) this.reporter("[substrate] planning observer: baseline saves succeed again");
-	}
-
-	/**
-	 * Saves the publish baseline now when it is dirty, ignoring the throttle, and waits for it. The shutdown path calls it (inside
-	 * its own bound) so a clean stop loses no baseline advance. Never rejects: a failure is reported like any other save failure.
-	 */
-	async flushBaseline(): Promise<void> {
-		while (this.baselineSave !== null) await this.baselineSave;
-		const baseline = this.baseline;
-		if (this.deps.baselines === undefined || this.deps.baselines === null || baseline === null) return;
-		if (this.savedBaseline !== null && sameBaseline(this.savedBaseline, baseline)) return;
-		this.startSave(baseline, this.clock());
-		await this.baselineSave;
-	}
-
-	/**
-	 * Announces each conflict of this checkout's repository that is not already open, once. With a deduplicating ledger every
-	 * observer announces it under the conflict's key (see `conflictEvent`); otherwise this checkout announces it only when it is the
-	 * conflict's announcer, the session with the smallest id among its sessions, which needs no coordination. A conflict that is no
-	 * longer detected leaves the open set, so its return is announced again. A conflict the ledger did not store stays out of the
-	 * set, so the next scan tries again.
-	 */
-	private async announce(root: string, repo: RepoLookup, ttlMs: number): Promise<void> {
-		const presence = this.deps.presence;
-		if (presence === null) return;
-		const sessionId = planningSessionId(this.deps.fs, root);
-		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS).catch(() => null);
-		if (listing === null) return;
-		// The clock is read after the listing, which takes time: a peer that passed its freshness window while the scan ran is expired.
-		const clock = await readClock(presence);
-		if (!clock.ok) return;
-		const detected = detectConflicts({ sessions: classifySessions(listing.records, clock.nowMs, ttlMs), nowMs: clock.nowMs, ttlMs });
-		const repoName = repo.state === "known" ? repo.repo : null;
-		const keyed = this.deps.dedup === true;
-		const next = new Set<string>();
-		for (const conflict of detected.conflicts) {
-			if (repoName === null || repoKey(conflict.repo) !== repoKey(repoName)) continue;
-			// Without a deduplicating ledger the announcer is the smallest session of the conflict (`sessionIds` is sorted). Known
-			// limit: when that session has no running observer, no observer announces the conflict.
-			if (!keyed && conflict.sessionIds[0] !== sessionId) continue;
-			const signature = conflictSignature(conflict);
-			if (this.openConflicts.has(signature)) {
-				next.add(signature);
-				continue;
-			}
-			let stored = false;
-			try {
-				stored = await this.deps.emit(keyed ? conflictEvent(conflict, conflictOriginMs(conflict, detected.views)) : conflictEvent(conflict));
-			} catch {
-				stored = false;
-			}
-			if (stored) next.add(signature);
-		}
-		// A truncated listing may omit sessions that hold an open conflict: those stay open rather than leave the set and be announced again.
-		if (listing.truncated) for (const signature of this.openConflicts) next.add(signature);
-		this.openConflicts = next;
-	}
+/** The state of a checkout no scan has read yet. */
+function newCheckoutState(key: string, root: string): CheckoutState {
+	return {
+		key,
+		root,
+		index: null,
+		lastScan: null,
+		baseline: null,
+		baselineState: null,
+		recordedHold: null,
+		touchBase: null,
+		report: null,
+		gap: null,
+		touched: [],
+		touchedOverflow: false,
+		overflowAtMs: null,
+		presencePending: false,
+		pendingSinceMs: null,
+		pendingUndated: false,
+		written: undefined,
+		writtenRepo: undefined,
+		openConflicts: new Set(),
+		problem: null,
+		restoreTried: false,
+		savedBaseline: null,
+		baselineSave: null,
+		lastSaveAttemptMs: null,
+		saveProblem: null,
+		lastPresenceMs: null,
+		livenessProblem: null,
+		liveTarget: null,
+		scanning: false,
+	};
 }
 
 /** What a reader of a report sees: known, the reason it is unknown, or none. A new scan time alone is not a change of view. */
@@ -960,4 +414,663 @@ export function livenessPeriodMs(settings: LivenessSettings, scanIntervalMs: num
 	const cap = Math.floor(ttlMs / 3);
 	const wanted = settings.intervalMs > 0 ? settings.intervalMs : scanIntervalMs;
 	return Math.max(1, Math.min(wanted, cap));
+}
+
+export class PlanningObserver {
+	/** Each checkout's state, held by its checkout key, in the order the checkouts were first scanned (configuration order). */
+	private readonly watches = new Map<string, CheckoutState>();
+	/** Scheduled transition deliveries not yet settled. Shared by every checkout: the bound on deliveries is for the observer. */
+	private readonly pendingTransitions = new Set<Promise<void>>();
+	private timer: PlanningTimerHandle | undefined;
+	/** The scan of every checkout in flight, or null. A scan asked for while one runs shares it. */
+	private running: Promise<readonly PlanningCheckoutScan[]> | null = null;
+	/** The liveness timer, or undefined while it is not running. It beats independently of the scan interval. */
+	private livenessTimer: PlanningTimerHandle | undefined;
+	/** The liveness beats in flight, or null. It never rejects. */
+	private livenessRun: Promise<void> | null = null;
+	private readonly timers: PlanningTimers;
+	private readonly reporter: (line: string) => void;
+	private readonly clock: () => number;
+	private readonly saveIntervalMs: number;
+
+	constructor(private readonly deps: PlanningObserverDeps) {
+		this.timers = deps.timers ?? GLOBAL_TIMERS;
+		this.reporter = deps.report ?? STDERR_REPORT;
+		this.clock = deps.now ?? Date.now;
+		this.saveIntervalMs = deps.baselineSaveIntervalMs ?? DEFAULT_BASELINE_SAVE_INTERVAL_MS;
+		if (!Number.isFinite(this.saveIntervalMs) || this.saveIntervalMs < 0) throw new RangeError("baselineSaveIntervalMs must be a non-negative number");
+	}
+
+	/**
+	 * Start the scan timer at the configured cadence, unref'd, and, when liveness is configured and a presence store exists, the
+	 * liveness timer beside it (`livenessPeriodMs`). Nothing starts while the plane is disabled or misconfigured. Returns whether it
+	 * is running. The liveness timer is scheduled first so the scan timer is the one a test's single-slot fake keeps.
+	 */
+	start(): boolean {
+		if (this.timer !== undefined) return true;
+		const resolved = resolveSettings(this.deps.settings);
+		if (!resolved.ready) return false;
+		const liveness = this.deps.liveness;
+		if (liveness !== undefined && liveness !== null && this.deps.presence !== null) {
+			this.livenessTimer = this.timers.setInterval(() => this.livenessTick(), livenessPeriodMs(liveness, resolved.limits.scanIntervalMs, resolved.limits.presenceTtlS * 1000));
+		}
+		this.timer = this.timers.setInterval(() => this.tick(), resolved.limits.scanIntervalMs);
+		return true;
+	}
+
+	/** Clear both timers. A scan or liveness beat in flight finishes; `idle` waits for it. Nothing new starts from a timer. */
+	stop(): void {
+		this.timers.clearInterval(this.timer);
+		this.timer = undefined;
+		if (this.livenessTimer !== undefined) this.timers.clearInterval(this.livenessTimer);
+		this.livenessTimer = undefined;
+	}
+
+	/**
+	 * Resolves once no scan, no liveness beat and no baseline save is in flight. A scan can start a save as it ends, so it looks
+	 * again after each wait. The shutdown path waits on it, inside its own bound, after `stop`. Never rejects.
+	 */
+	async idle(): Promise<void> {
+		for (;;) {
+			const pending: Array<Promise<unknown>> = [];
+			if (this.running !== null) pending.push(this.running);
+			if (this.livenessRun !== null) pending.push(this.livenessRun);
+			for (const w of this.watches.values()) if (w.baselineSave !== null) pending.push(w.baselineSave);
+			if (pending.length === 0) return;
+			await Promise.all(pending);
+		}
+	}
+
+	/**
+	 * One scan of every configured checkout, in configuration order. A call made while a scan is in flight shares that scan: no
+	 * second scan starts behind it. Never rejects.
+	 */
+	scanAll(): Promise<readonly PlanningCheckoutScan[]> {
+		return this.running ?? this.startScan();
+	}
+
+	/**
+	 * One scan of the plane, as `planning_status` reads it: every configured checkout is scanned (`scanAll`), and the answer is the
+	 * first configured checkout's scan. `disabled` when no checkout is configured. Never rejects.
+	 */
+	async scan(): Promise<ObserverScan> {
+		const scans = await this.scanAll();
+		return scans[0]?.scan ?? { state: "disabled" };
+	}
+
+	private startScan(): Promise<readonly PlanningCheckoutScan[]> {
+		const run = this.scanEach().finally(() => {
+			this.running = null;
+		});
+		this.running = run;
+		return run;
+	}
+
+	/** Scans each configured checkout in configuration order, one at a time, so their reads and writes never interleave. */
+	private async scanEach(): Promise<PlanningCheckoutScan[]> {
+		const resolved = resolveSettings(this.deps.settings);
+		if (!resolved.ready) return [];
+		const scans: PlanningCheckoutScan[] = [];
+		for (const checkout of resolved.checkouts) {
+			scans.push({ key: checkout.key, root: checkout.root, scan: await this.scanCheckout(this.watchOf(checkout), resolved.limits) });
+		}
+		return scans;
+	}
+
+	/** One checkout's scan. A throw is that checkout's failed scan, and its liveness beat stops. Never rejects. */
+	private async scanCheckout(w: CheckoutState, limits: PlanningLimits): Promise<ObserverScan> {
+		w.scanning = true;
+		try {
+			return await this.scanOnce(w, limits);
+		} catch (cause: unknown) {
+			w.liveTarget = null;
+			return failedScan(cause);
+		} finally {
+			w.scanning = false;
+		}
+	}
+
+	/** The state of a checkout, created on its first scan. */
+	private watchOf(checkout: PlanningCheckout): CheckoutState {
+		const known = this.watches.get(checkout.key);
+		if (known !== undefined) return known;
+		const created = newCheckoutState(checkout.key, checkout.root);
+		this.watches.set(checkout.key, created);
+		return created;
+	}
+
+	/**
+	 * Waits for the scan in flight, then for the transition deliveries in flight, up to `deadline`: resolves `settled` when neither is
+	 * left, or `deadline` when the bound came first. Never rejects. Shutdown passes its timer as the bound. A scan running when this is
+	 * called cannot schedule a transition after the settle returns, because the settle waits for that scan first. A scan never waits
+	 * on this. Without a bound it waits for everything.
+	 */
+	async settleTransitions(deadline: Promise<void> = Promise.withResolvers<void>().promise): Promise<"settled" | "deadline"> {
+		const flushed = (async (): Promise<"settled"> => {
+			for (;;) {
+				if (this.running !== null) await this.running;
+				if (this.pendingTransitions.size === 0) return "settled";
+				await Promise.all([...this.pendingTransitions]);
+			}
+		})();
+		return Promise.race([flushed, deadline.then((): "deadline" => "deadline")]);
+	}
+
+	/** One timer tick: a scan of every checkout (shared with one already in flight), then each checkout's report of its outcome. */
+	private async tick(): Promise<void> {
+		for (const entry of await this.scanAll()) this.note(this.watchOf(entry), entry.scan);
+	}
+
+	/** Reports a checkout's problem when it appears or changes, and the recovery when its scans are healthy again. Silent while nothing changes. */
+	private note(w: CheckoutState, scan: ObserverScan): void {
+		const problem = problemOf(scan);
+		if (problem === w.problem) return;
+		const before = w.problem;
+		w.problem = problem;
+		if (problem !== null) this.reporter(`[substrate] planning observer: ${problem}`);
+		else if (before !== null) this.reporter("[substrate] planning observer: scans succeed again");
+	}
+
+	private async scanOnce(w: CheckoutState, limits: PlanningLimits): Promise<ObserverScan> {
+		const root = w.root;
+		const ttlMs = limits.presenceTtlS * 1000;
+		const fsDeps = { fs: this.deps.fs, limits: { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes } };
+		const built = w.index === null ? await buildPlanningIndex(root, fsDeps) : await updatePlanningIndex(root, fsDeps, w.index);
+
+		const clock = this.deps.presence === null ? null : await readClock(this.deps.presence);
+		const nowMs = clock?.ok ? clock.nowMs : null;
+		const gapMoved = nowMs !== null ? this.stampReport(w, built, nowMs) : this.withdrawReport(w);
+		const repo = await repoOf(this.deps.fs, root, this.deps.originUrl);
+		if (!built.ok) {
+			// A checkout the scan could not read is not proven alive: the liveness timer stops beating until a scan reads it.
+			w.liveTarget = null;
+			await this.heartbeat(w, false, ttlMs, repo, nowMs);
+			return { state: "unavailable", code: built.code };
+		}
+		w.index = built.index;
+		w.liveTarget = { ttlMs, repo };
+
+		const next = snapshotOf(built.index);
+		const state = indexState(built.index);
+		// The change since the scan before: a heartbeat reports it, so a change is heartbeated once, in the scan that sees it.
+		const sinceLastScan = w.lastScan !== null ? diffPlanningIndex(w.lastScan.snapshot, next) : null;
+		// The state the scan before saw. A revert and a held change record their move from there: the publish baseline's state lags while a change is held.
+		const observedBefore = w.lastScan !== null ? w.lastScan.state : null;
+		w.lastScan = { snapshot: next, state };
+		this.claimTouches(w, next, phasePlansOf(built.index), nowMs, ttlMs);
+		// The overflow holds while the claims it could not keep are inside the freshness window of the change that overflowed.
+		if (nowMs !== null) {
+			w.touchedOverflow = w.overflowAtMs !== null && nowMs - w.overflowAtMs <= ttlMs;
+			if (!w.touchedOverflow) w.overflowAtMs = null;
+		}
+		if (w.touchedOverflow && nowMs !== null) w.report = unknownReport(nowMs, "report-limit");
+
+		if (!w.restoreTried && (w.baseline === null || w.baseline.root !== root)) await this.restoreBaseline(w);
+		// Read after the restore, so a restored baseline is the one a transition moves from.
+		const current = w.baseline;
+		const previous = current !== null && current.root === root ? current.snapshot : null;
+		const diff = previous === null ? null : diffPlanningIndex(previous, next);
+		const changed = diff?.complete === true && changesIn(diff) > 0;
+		let outcome: ObserverOutcome;
+		if (repo.state === "known") {
+			const observed = await observePlanningChange({
+				previous,
+				next,
+				repo: repo.repo,
+				sessionId: PLANNING_OBSERVER_SESSION,
+				publisher: { publish: this.deps.emit },
+			});
+			// A failed publish holds the baseline; every other outcome advances it. The transition follows the same rule.
+			const held = observed.outcome === "not-published";
+			const transition = observed.outcome === "published" ? "applied" : held ? "refused" : unpublishedOutcome(previous, diff);
+			this.settle(w, current, state, { snapshot: observed.baseline, next, diff, outcome: transition, held, observedBefore });
+			outcome = observed.outcome;
+		} else if (changed) {
+			// Without a repo nothing can be published. A complete change is reported once and ends here, unless the failure that
+			// hid the repo was transient: then the baseline holds, and the next scan sees the same change again.
+			if (!repo.transient) this.settle(w, current, state, { snapshot: next, next, diff, outcome: "refused", held: false, observedBefore });
+			outcome = "repo-unknown";
+		} else {
+			this.settle(w, current, state, { snapshot: next, next, diff, outcome: unpublishedOutcome(previous, diff), held: false, observedBefore });
+			outcome = previous === null ? "baseline" : diff !== null && !diff.complete ? "incomplete" : "unchanged";
+		}
+		// The transition was scheduled, not awaited, and the baseline advanced in `settle` above: the baseline save below saves the
+		// advanced baseline, and nothing after it (heartbeat, liveness beat, announcement) waits on the metric write.
+		const sinceChange = sinceLastScan?.complete === true && changesIn(sinceLastScan) > 0;
+		const heartbeat = await this.heartbeat(w, sinceChange || gapMoved, ttlMs, repo, nowMs);
+		const liveness = await this.livenessBeat(w, heartbeat, ttlMs, repo, nowMs);
+		await this.announce(w, repo, ttlMs);
+		this.persistBaseline(w);
+		return liveness === undefined ? { state: "observed", outcome, heartbeat } : { state: "observed", outcome, heartbeat, liveness };
+	}
+
+	/**
+	 * Records the transition this scan made, if any, then moves the baseline. A held change keeps the baseline's state: its
+	 * transition is recorded once, on first detection, and a later scan of the same change records nothing. A baseline restored
+	 * from the store has no state, so a move from it is recorded as a move from this scan's own state.
+	 */
+	private settle(
+		w: CheckoutState,
+		current: StoredBaseline | null,
+		state: SessionState,
+		change: { snapshot: PlanningSnapshot; next: PlanningSnapshot; diff: PlanningDiff | null; outcome: TransitionOutcome | null; held: boolean; observedBefore: SessionState | null },
+	): void {
+		const { diff, outcome } = change;
+		// The state the baseline was taken in; a restored baseline has none, so the move reads from this scan's own state.
+		const baselineState = w.baselineState ?? state;
+		const incomplete = diff !== null && !diff.complete;
+		const key = diff !== null && diff.removed !== null && outcome !== null ? changeKey({ added: diff.added, removed: diff.removed, changed: diff.changed }, change.next) : null;
+		if (change.held) {
+			if (outcome !== null && current !== null && key !== w.recordedHold) {
+				w.recordedHold = key;
+				this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? baselineState, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
+			}
+			if (current !== null) w.baseline = { root: w.root, snapshot: change.snapshot };
+			return;
+		}
+		const recorded = key !== null && key === w.recordedHold;
+		if (outcome !== null && current !== null && !recorded) {
+			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: baselineState, to: state, outcome, incomplete }, this.deps.clock ?? hostClock));
+		} else if (current !== null && w.recordedHold !== null && diff?.complete === true && changesIn(diff) === 0) {
+			// A revert: the held change is undone, so the baseline matches the checkout again and nothing is published. It is recorded
+			// once, as refused, because the reverted change never reached the ledger.
+			this.schedule(transitionRecord({ phaseId: PLANNING_TRANSITION_PHASE, from: change.observedBefore ?? baselineState, to: state, outcome: "refused" }, this.deps.clock ?? hostClock));
+		}
+		this.advance(w, change.snapshot, state);
+	}
+
+	/** Moves the checkout's baseline. A new baseline forgets a held change. */
+	private advance(w: CheckoutState, snapshot: PlanningSnapshot, state: SessionState): void {
+		w.recordedHold = null;
+		w.baseline = { root: w.root, snapshot };
+		w.baselineState = state;
+	}
+
+	/**
+	 * Hands one `planning.transition` record to its sinks without waiting for them, so the scan never waits on the metric write.
+	 * The deliveries in flight are bounded by {@link MAX_PENDING_TRANSITIONS}: past the bound a record goes to the fallback alone,
+	 * so a stalled primary can neither grow the set nor lose a record. `emitTransition` never throws; a fallback that fails is
+	 * written to stderr.
+	 */
+	private schedule(record: TransitionRecord): void {
+		const fallback = this.deps.fallback ?? stdoutMetricSink();
+		const tracked = this.pendingTransitions.size < MAX_PENDING_TRANSITIONS;
+		const delivery: Promise<void> = emitTransition(record, tracked ? this.deps.metrics : fallback, fallback).then((delivered) => {
+			if (tracked) this.pendingTransitions.delete(delivery);
+			if (delivered.status === "failed") {
+				process.stderr.write(`[substrate] planning transition not delivered: ${delivered.primary.sink} ${delivered.primary.reason}, ${delivered.fallback.sink} ${delivered.fallback.reason}\n`);
+			}
+		});
+		if (tracked) this.pendingTransitions.add(delivery);
+	}
+
+	/**
+	 * Stamps this checkout's report from its scan and moves its watcher gap. Returns whether the gap moved: a gap that opens or
+	 * closes is a change the presence record must carry. A failed scan proves nothing, so it keeps the gap it had.
+	 */
+	private stampReport(w: CheckoutState, built: PlanningIndexResult, nowMs: number): boolean {
+		const observed = observeScan(built, nowMs, w.gap);
+		const moved = observed.gap !== w.gap;
+		w.report = observed.report;
+		w.gap = observed.gap;
+		return moved;
+	}
+
+	/**
+	 * Withdraws this checkout's report when the server clock cannot stamp a scan. The held report was stamped by an earlier clock
+	 * reading, so keeping it would let a later write present that old view as current. Without a report the session reads as
+	 * `no-scan`, which is unknown. Returns whether a report was held: its withdrawal is a change the record must carry.
+	 */
+	private withdrawReport(w: CheckoutState): boolean {
+		const held = w.report !== null;
+		w.report = null;
+		return held;
+	}
+
+	/**
+	 * Claims the change since the checkout's last complete snapshot (`touchBase`): its pairs are folded into the touched list, dated by
+	 * the server clock. A complete change observed while the clock is unreadable is not claimed, since its time is unknown, and
+	 * `touchBase` still advances past it, so recovery never presents it as active. An incomplete observation claims nothing and
+	 * holds `touchBase`. The first complete scan of a checkout sets it, and a complete scan with no change moves it.
+	 */
+	private claimTouches(w: CheckoutState, next: PlanningSnapshot, nextPhasePlans: ReadonlyMap<string, PhasePlan>, nowMs: number | null, ttlMs: number): void {
+		const base = w.touchBase;
+		if (base === null) {
+			// Only a complete snapshot may be a touch baseline: an incomplete one would make every later diff incomplete, and never move.
+			if (!next.truncated && next.unlisted.length === 0) w.touchBase = { snapshot: next, phasePlans: nextPhasePlans };
+			return;
+		}
+		const diff = diffPlanningIndex(base.snapshot, next);
+		if (!diff.complete) return;
+		// An undated change is not claimed: its time is unknown, so claiming it at recovery would show a stale edit as active.
+		if (changesIn(diff) > 0 && nowMs !== null) this.touch(w, pairsOfChange(diff, nextPhasePlans, base.phasePlans), nowMs, ttlMs);
+		w.touchBase = { snapshot: next, phasePlans: nextPhasePlans };
+	}
+
+	/**
+	 * Folds one complete change into the checkout's touched pairs, dated by the server clock. A pair the change touches replaces its
+	 * older entry, and the others stay while they are inside the TTL. A list past `MAX_REPORT_ENTRIES` is not kept: the pairs stay as
+	 * they were, pruned, and the overflow holds the report unknown until the claims that did not fit have left the freshness window,
+	 * dated by the overflowing change.
+	 */
+	private touch(w: CheckoutState, pairs: readonly PhasePlan[], nowMs: number, ttlMs: number): void {
+		const fresh = new Map<string, TouchedPair>();
+		for (const pair of pairs) fresh.set(touchKey(pair), { phase: pair.phase, plan: pair.plan, observedAtMs: nowMs });
+		const kept = touchedWithin(w.touched, nowMs, ttlMs).filter((pair) => !fresh.has(touchKey(pair)));
+		const merged = [...fresh.values(), ...kept];
+		if (merged.length > MAX_REPORT_ENTRIES) {
+			w.overflowAtMs = nowMs;
+			w.touched = touchedWithin(w.touched, nowMs, ttlMs);
+		} else {
+			w.touched = merged;
+		}
+	}
+
+	/**
+	 * Heartbeats this checkout when `due`, or when a write is still pending. The record's time is replaced by the server's clock,
+	 * and the record carries the repository, the report and the touched pairs. The pending write follows these rules:
+	 * R1: a write armed this scan (a due observation, or a view or repo change that newly arms it) is attempted at once. Its
+	 *     observation time is `nowMs`, which may be null: a null time makes the write undated.
+	 * R2: a retained write (pending from an earlier scan) is held while `nowMs` is null: the result is failed with `clock-unavailable`.
+	 * R3: a retained undated write is dropped unwritten, so it is never written as active.
+	 * R4: a retained write older than the freshness window (`nowMs - pendingSinceMs > ttlMs`) is dropped unwritten. Exactly `ttlMs` is still written.
+	 * R5: a successful write clears the debt. A failed write keeps it, with its observation time.
+	 */
+	private async heartbeat(w: CheckoutState, due: boolean, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningHeartbeat> {
+		const currentRepo = repo.state === "known" ? repo.repo : null;
+		const viewChanged = w.written !== undefined && reportViewOf(w.report) !== reportViewOf(w.written);
+		const repoChanged = w.writtenRepo !== undefined && w.writtenRepo !== currentRepo;
+		// A view or repo change arms the write only when it first arms, so re-arming on every scan cannot keep a dead write alive.
+		const armed = due || (!w.presencePending && (viewChanged || repoChanged));
+		if (armed) {
+			w.presencePending = true;
+			w.pendingSinceMs = nowMs;
+			w.pendingUndated = nowMs === null;
+		} else if (!w.presencePending) {
+			return { state: "not-due" };
+		}
+		const presence = this.deps.presence;
+		if (presence === null) {
+			this.clearPending(w);
+			return { state: "presence-unset" };
+		}
+		if (!armed) {
+			// A retained write is aged against this scan's clock. While the clock is unreadable its age cannot be checked, so it is held.
+			if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
+			if (w.pendingUndated || (w.pendingSinceMs !== null && nowMs - w.pendingSinceMs > ttlMs)) {
+				// The observation has no time, or has left the window: writing now would show the checkout active on a quiet
+				// observation. The view and repo are acknowledged, so the next scan does not re-arm them.
+				this.clearPending(w);
+				w.written = w.report;
+				w.writtenRepo = currentRepo;
+				return { state: "not-due" };
+			}
+		}
+		const result = await this.touchCheckout(w, presence, currentRepo, ttlMs);
+		if (result.state === "written") {
+			this.clearPending(w);
+			w.written = w.report;
+			w.writtenRepo = currentRepo;
+		}
+		return result;
+	}
+
+	/** Clears a checkout's pending write: it was written, or it is dropped unwritten. */
+	private clearPending(w: CheckoutState): void {
+		w.presencePending = false;
+		w.pendingSinceMs = null;
+		w.pendingUndated = false;
+	}
+
+	/** Writes the checkout's session record. The result is written, or failed with an error code: never a message, which can carry host paths. */
+	private async touchCheckout(w: CheckoutState, presence: DragonflyPresenceStore, currentRepo: string | null, ttlMs: number, kind: "change" | "liveness" = "change"): Promise<Extract<PlanningHeartbeat, { state: "written" | "failed" }>> {
+		try {
+			const layout = await gitLayout(this.deps.fs, w.root);
+			if (!layout.ok) return { state: "failed", detail: layout.reason };
+			const record: SessionRecord = {
+				sessionId: w.key,
+				worktree: w.root,
+				branch: await branchOf(this.deps.fs, layout.gitDir),
+				activePhase: null,
+				lastHeartbeatMs: 0,
+				repo: currentRepo,
+				touched: w.touched,
+				...(w.report === null ? {} : { planning: w.report }),
+			};
+			await (kind === "liveness" ? presence.touchLiveness(record, ttlMs) : presence.touch(record, ttlMs));
+			return { state: "written" };
+		} catch (cause: unknown) {
+			return { state: "failed", detail: errnoCode(cause) };
+		}
+	}
+
+	/**
+	 * The liveness heartbeat (phase 58): a scan that read the checkout proves it alive, whether or not anything changed, so a
+	 * session that thinks for hours without touching a planning document stays active. It runs only when `deps.liveness` is set,
+	 * and only after a scan that built the index: a checkout that cannot be read is not proven alive. A scan whose change
+	 * heartbeat landed is already covered (that write is also a sign of life). A failed change heartbeat is not retried here:
+	 * the same backend would refuse it. Otherwise a write is due on the first scan and then `intervalMs` after the last presence
+	 * write, capped at a third of the freshness window so a beat always lands well inside it. A write that fails is reported
+	 * (`problemOf`) and tried again on the next scan, since a failure does not move the last-write time. The same write is also
+	 * driven by its own timer (`livenessTick`), so a scan interval longer than the freshness window cannot make a live session
+	 * look dead.
+	 */
+	private async livenessBeat(w: CheckoutState, heartbeat: PlanningHeartbeat, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningLiveness | undefined> {
+		const settings = this.deps.liveness;
+		if (settings === undefined || settings === null) return undefined;
+		const presence = this.deps.presence;
+		if (presence === null) return { state: "presence-unset" };
+		if (heartbeat.state === "written") {
+			w.lastPresenceMs = nowMs;
+			return { state: "covered" };
+		}
+		if (heartbeat.state === "failed") return { state: "failed", detail: heartbeat.detail };
+		return this.livenessWrite(w, presence, settings, ttlMs, repo, nowMs);
+	}
+
+	/** The due check and the write of one liveness beat, shared by the scan and the liveness timer. */
+	private async livenessWrite(w: CheckoutState, presence: DragonflyPresenceStore, settings: LivenessSettings, ttlMs: number, repo: RepoLookup, nowMs: number | null): Promise<PlanningLiveness> {
+		if (nowMs === null) return { state: "failed", detail: "clock-unavailable" };
+		const everyMs = Math.min(settings.intervalMs, Math.floor(ttlMs / 3));
+		const elapsedMs = w.lastPresenceMs === null ? null : nowMs - w.lastPresenceMs;
+		// A server clock that moved backwards (negative elapsed time) is due: it cannot show how long the record has been held.
+		if (elapsedMs !== null && elapsedMs >= 0 && elapsedMs < everyMs) return { state: "not-due" };
+		const currentRepo = repo.state === "known" ? repo.repo : null;
+		const result = await this.touchCheckout(w, presence, currentRepo, ttlMs, "liveness");
+		if (result.state === "failed") return result;
+		w.lastPresenceMs = nowMs;
+		// The liveness record carries the same report and repository a change heartbeat does, so they are written: a view change must not re-arm a change heartbeat for them.
+		w.written = w.report;
+		w.writtenRepo = currentRepo;
+		return { state: "written" };
+	}
+
+	/**
+	 * One tick of the liveness timer, which runs on its own cadence (`livenessPeriodMs`), not the scan's. It beats for each checkout
+	 * a scan has read (`liveTarget`, dropped by a scan that could not read it), and not for one whose scan is in flight, which beats
+	 * for itself. `touchCheckout` reads the git layout again, so a checkout that has vanished since then is not written. A beat in
+	 * flight is not doubled. Never rejects: a failure is reported once when it appears or changes, and once more on recovery.
+	 */
+	private async livenessTick(): Promise<void> {
+		const settings = this.deps.liveness;
+		const presence = this.deps.presence;
+		if (settings === undefined || settings === null || presence === null) return;
+		const watches = [...this.watches.values()];
+		if (this.livenessRun !== null || watches.every((w) => w.liveTarget === null)) return;
+		const run = (async () => {
+			try {
+				const clock = await readClock(presence);
+				for (const w of watches) await this.liveBeat(w, presence, settings, clock.ok ? clock.nowMs : null);
+			} catch (cause: unknown) {
+				for (const w of watches) if (w.liveTarget !== null) this.noteLiveness(w, errnoCode(cause));
+			}
+		})().finally(() => {
+			this.livenessRun = null;
+		});
+		this.livenessRun = run;
+		await run;
+	}
+
+	/** One checkout's liveness beat from the liveness timer. It never rejects; its failure is reported for that checkout. */
+	private async liveBeat(w: CheckoutState, presence: DragonflyPresenceStore, settings: LivenessSettings, nowMs: number | null): Promise<void> {
+		const target = w.liveTarget;
+		if (target === null || w.scanning) return;
+		try {
+			const beat = await this.livenessWrite(w, presence, settings, target.ttlMs, target.repo, nowMs);
+			this.noteLiveness(w, beat.state === "failed" ? beat.detail : null);
+		} catch (cause: unknown) {
+			this.noteLiveness(w, errnoCode(cause));
+		}
+	}
+
+	/** Reports a checkout's liveness-timer failure when it appears or changes, and the recovery when its beats land again. Silent while nothing changes. */
+	private noteLiveness(w: CheckoutState, problem: string | null): void {
+		if (problem === w.livenessProblem) return;
+		const before = w.livenessProblem;
+		w.livenessProblem = problem;
+		if (problem !== null) this.reporter(`[substrate] planning observer: liveness timer heartbeat failed: ${problem}`);
+		else if (before !== null) this.reporter("[substrate] planning observer: liveness timer heartbeats succeed again");
+	}
+
+	/**
+	 * Takes the stored baseline of this checkout as its publish baseline, once, so the first scan diffs the tree against what the
+	 * ledger was last told and publishes what changed while the observer was down. No store, no file, a file for another root, or a
+	 * file that cannot be used leaves no baseline, and the first scan is a baseline as before: the last three are reported, and the
+	 * next save replaces the bad file. Changes found this way are published but not claimed as touched pairs: their time is unknown,
+	 * and claiming them at restart would show a stale edit as active.
+	 */
+	private async restoreBaseline(w: CheckoutState): Promise<void> {
+		w.restoreTried = true;
+		const store = this.deps.baselines;
+		if (store === undefined || store === null) return;
+		let loaded: BaselineLoad;
+		try {
+			loaded = await store.load(w.key);
+		} catch (cause: unknown) {
+			this.reporter(`[substrate] planning observer: stored baseline not read: ${cause instanceof BaselineStoreError ? cause.message : errnoCode(cause)}; scanning as a first run`);
+			return;
+		}
+		if (loaded.state === "unusable") {
+			this.reporter(`[substrate] planning observer: stored baseline unusable (${loaded.reason}${loaded.detail === null ? "" : `: ${loaded.detail}`}); scanning as a first run`);
+			return;
+		}
+		if (loaded.state !== "loaded") return;
+		if (loaded.baseline.root !== w.root) {
+			this.reporter("[substrate] planning observer: stored baseline names another checkout root; scanning as a first run");
+			return;
+		}
+		// The store keeps no state: a restored baseline has none, and the first move from it reads from the state that scan finds.
+		w.baseline = loaded.baseline;
+		w.baselineState = null;
+		w.savedBaseline = loaded.baseline;
+	}
+
+	/**
+	 * Starts a save of a checkout's publish baseline when it differs from the stored one, no save is in flight, and the last attempt is
+	 * older than `baselineSaveIntervalMs` (host clock, injected). It never waits for the save: a slow or failing store cannot hold a
+	 * scan. A failed save leaves the baseline dirty, so a later scan tries again. A crash before a save lands loses at most the
+	 * baseline advance since the last save, so a restart may publish that change a second time: delivery is at least once.
+	 */
+	private persistBaseline(w: CheckoutState): void {
+		const baseline = w.baseline;
+		if (this.deps.baselines === undefined || this.deps.baselines === null || baseline === null || baseline.root !== w.root) return;
+		if (w.baselineSave !== null) return;
+		// Equal content needs no save. The newest object is held, not the first one saved, so a quiet tree retains one snapshot.
+		if (w.savedBaseline !== null && sameBaseline(w.savedBaseline, baseline)) {
+			w.savedBaseline = baseline;
+			return;
+		}
+		const nowMs = this.clock();
+		const sinceMs = w.lastSaveAttemptMs === null ? null : nowMs - w.lastSaveAttemptMs;
+		// A host clock that moved backwards (negative elapsed time) is due.
+		if (sinceMs !== null && sinceMs >= 0 && sinceMs < this.saveIntervalMs) return;
+		this.startSave(w, baseline, nowMs);
+	}
+
+	/** Saves `baseline` for the checkout in the background. The result is recorded, never thrown: a failure is reported once and the baseline stays dirty. */
+	private startSave(w: CheckoutState, baseline: StoredBaseline, nowMs: number): void {
+		const store = this.deps.baselines;
+		if (store === undefined || store === null) return;
+		w.lastSaveAttemptMs = nowMs;
+		w.baselineSave = (async () => {
+			try {
+				await store.save(w.key, baseline);
+				w.savedBaseline = baseline;
+				this.noteSave(w, null);
+			} catch (cause: unknown) {
+				this.noteSave(w, cause instanceof BaselineStoreError ? cause.message : errnoCode(cause));
+			}
+		})().finally(() => {
+			w.baselineSave = null;
+		});
+	}
+
+	/** Reports a save failure when it appears or changes, and the recovery when saves land again. Silent while nothing changes. */
+	private noteSave(w: CheckoutState, problem: string | null): void {
+		if (problem === w.saveProblem) return;
+		const before = w.saveProblem;
+		w.saveProblem = problem;
+		if (problem !== null) this.reporter(`[substrate] planning observer: baseline save failed: ${problem}; it is retried`);
+		else if (before !== null) this.reporter("[substrate] planning observer: baseline saves succeed again");
+	}
+
+	/**
+	 * Saves every checkout's publish baseline now when it is dirty, ignoring the throttle, and waits for them. The shutdown path calls
+	 * it (inside its own bound) so a clean stop loses no baseline advance. Never rejects: a failure is reported like any other save failure.
+	 */
+	async flushBaseline(): Promise<void> {
+		for (const w of this.watches.values()) await this.flushOne(w);
+	}
+
+	private async flushOne(w: CheckoutState): Promise<void> {
+		while (w.baselineSave !== null) await w.baselineSave;
+		const baseline = w.baseline;
+		if (this.deps.baselines === undefined || this.deps.baselines === null || baseline === null) return;
+		if (w.savedBaseline !== null && sameBaseline(w.savedBaseline, baseline)) return;
+		this.startSave(w, baseline, this.clock());
+		await w.baselineSave;
+	}
+
+	/**
+	 * Announces each conflict of this checkout's repository that is not already open, once. With a deduplicating ledger every
+	 * observer announces it under the conflict's key (see `conflictEvent`); otherwise this checkout announces it only when it is the
+	 * conflict's announcer, the session with the smallest id among its sessions, which needs no coordination. A conflict that is no
+	 * longer detected leaves the open set, so its return is announced again. A conflict the ledger did not store stays out of the
+	 * set, so the next scan tries again.
+	 */
+	private async announce(w: CheckoutState, repo: RepoLookup, ttlMs: number): Promise<void> {
+		const presence = this.deps.presence;
+		if (presence === null) return;
+		const sessionId = w.key;
+		const listing = await presence.listWithin(PRESENCE_MAX_SESSIONS).catch(() => null);
+		if (listing === null) return;
+		// The clock is read after the listing, which takes time: a peer that passed its freshness window while the scan ran is expired.
+		const clock = await readClock(presence);
+		if (!clock.ok) return;
+		const detected = detectConflicts({ sessions: classifySessions(listing.records, clock.nowMs, ttlMs), nowMs: clock.nowMs, ttlMs });
+		const repoName = repo.state === "known" ? repo.repo : null;
+		const keyed = this.deps.dedup === true;
+		const next = new Set<string>();
+		for (const conflict of detected.conflicts) {
+			if (repoName === null || repoKey(conflict.repo) !== repoKey(repoName)) continue;
+			// Without a deduplicating ledger the announcer is the smallest session of the conflict (`sessionIds` is sorted). Known
+			// limit: when that session has no running observer, no observer announces the conflict.
+			if (!keyed && conflict.sessionIds[0] !== sessionId) continue;
+			const signature = conflictSignature(conflict);
+			if (w.openConflicts.has(signature)) {
+				next.add(signature);
+				continue;
+			}
+			let stored = false;
+			try {
+				stored = await this.deps.emit(keyed ? conflictEvent(conflict, conflictOriginMs(conflict, detected.views)) : conflictEvent(conflict));
+			} catch {
+				stored = false;
+			}
+			if (stored) next.add(signature);
+		}
+		// A truncated listing may omit sessions that hold an open conflict: those stay open rather than leave the set and be announced again.
+		if (listing.truncated) for (const signature of w.openConflicts) next.add(signature);
+		w.openConflicts = next;
+	}
 }

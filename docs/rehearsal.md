@@ -38,7 +38,7 @@ default; clients reach the ledger only through `SUBSTRATE_URL`.
 All six run through the `rehearsal` package script:
 
 ```sh
-bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture] [--extra-env KEY=VALUE]...
+bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture] [--extra-env <key>=<value>]...
 bun run rehearsal smoke [--name <n>]
 bun run rehearsal status [--name <n>]
 bun run rehearsal pause --store ledger|index [--name <n>]
@@ -83,7 +83,7 @@ waits for `GET /healthz` to report a writable index and ledger, and prints the
 `consumer.env` path, the URL, the checkout commit, a dirty flag and the image
 tags. Never a credential.
 
-`--extra-env KEY=VALUE` (repeatable, `up` only) adds one server setting to the twin's environment. It is a closed list in `packages/mcp-server/src/rehearsal-env.ts` (`EXTRA_ENV_ALLOWLIST`), and every key accepts only the values listed here:
+`--extra-env <key>=<value>` (repeatable, `up` only) adds one server setting to the twin's environment. It is a closed list in `packages/mcp-server/src/rehearsal-env.ts` (`EXTRA_ENV_ALLOWLIST`), and every key accepts only the values listed here:
 
 | Key | Accepts |
 | --- | --- |
@@ -92,7 +92,7 @@ tags. Never a credential.
 | `SUBSTRATE_CACHE_SWR` | `off`, `shadow`, `enforce` |
 | `SUBSTRATE_SLO_MIN_SAMPLES` | a whole number, 1 to 999 |
 
-Anything else exits `2` before any Docker call, naming the rule: `extra-env-format` (not `KEY=VALUE`), `extra-env-key` (not on the list, so no store URL, token, path or host can be injected), `extra-env-value` (a value the key does not take) or `extra-env-duplicate` (the same key twice; the later value never silently wins). A key is added to the list only once the server reads it, with the values the server accepts. `up` prints each accepted pair.
+Anything else exits `2` before any Docker call, naming the rule: `extra-env-format` (not `<key>=<value>`), `extra-env-key` (not on the list, so no store URL, token, path or host can be injected), `extra-env-value` (a value the key does not take) or `extra-env-duplicate` (the same key twice; the later value never silently wins). A key is added to the list only once the server reads it, with the values the server accepts. `up` prints each accepted pair.
 
 `pause` and `unpause` freeze and thaw one scratch store of one instance with `docker pause` / `docker unpause`: the container keeps its connections open and answers nothing, which is how a dropped-packet outage looks to the server (`index` is the Postgres container, `ledger` the other). They take the same per-instance lock as `down` and the same local-daemon check. The container is found by the instance label **and** its exact name (`substrate-rehearsal-<name>-ledger` or `-pg`); anything else, none or two matches refuse with rule `pause-target` and nothing is paused. A store already in the asked state is reported and left alone (exit `0`), so a cleanup `unpause` is always safe, and the state is read back from Docker after the verb. A paused store does not stop `down`: removal is forced.
 
@@ -161,10 +161,6 @@ Every later proof sources `consumer.env` and hardcodes nothing:
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | One 0600 file per surface |
 | `SUBSTRATE_REHEARSAL_NAME` | The instance name |
 | `SUBSTRATE_TEST_PG_URL` | The scratch Postgres URL, so the existing live index tests run against scratch |
-| `SUBSTRATE_REHEARSAL_RAGFLOW_URL` | The fake RAGFlow's loopback URL (only with `--ragflow-fixture`) |
-| `SUBSTRATE_REHEARSAL_RAGFLOW_REGISTRY` | The fixture registry file (only with `--ragflow-fixture`) |
-| `SUBSTRATE_REHEARSAL_RAGFLOW_STATE` | What the fake received, persisted on every mutation (only with `--ragflow-fixture`) |
-| `SUBSTRATE_REHEARSAL_RAGFLOW_MODE_FILE` | The fake's scriptable mode file (only with `--ragflow-fixture`) |
 
 It does not export the ledger keys: clients talk to the ledger only through
 `SUBSTRATE_URL`.
@@ -203,18 +199,20 @@ proof; a twin from this harness is where proofs run.
 
 ## Live-gated docs proof checklist — NOT RUN
 
-The isolated proof (`rehearsal up --ragflow-fixture`, `smoke:docs`, unit
+The isolated proof (`rehearsal up`, `bun scripts/docs-smoke.ts --name <owned>`, unit
 tests) covers every refusal and error path against fakes. The five steps
-below touch the live RAGFlow or the host, so each waits for an explicit
+below touch the live docs plane or the host, so each waits for an explicit
 operator approval window. None has run; none is implied to have run.
+An unset `LIGHTRAG_URL` leaves search degraded and ingest refused; do not
+point these steps at another docs backend.
 Until the product slugs confirm (25-CONTEXT.md open question 3), the live
 DOCS-03 proof covers `agent-substrate`, `agent-skills` and
 `programming-desk` only.
 
 | Step | Approval window | Status |
 |---|---|---|
-| 1. Read-only: query RAGFlow's version, its dataset list and its embedding models, to confirm endpoint shapes, existing datasets and the TEI `bge-small` model id | _blank — operator approval required_ | NOT RUN |
+| 1. Read-only: query LightRAG's health and confirm the registry dataset names and the TEI `bge-small` model id | _blank — operator approval required_ | NOT RUN |
 | 2. Read-only: confirm the product repo slugs on GitHub, and that the host can fetch each repo | _blank — operator approval required_ | NOT RUN |
-| 3. Write: create the missing datasets and run the first `substrate docs refresh` for each dataset, as a RAGFlow write | _blank — operator approval required_ | NOT RUN |
+| 3. Write: run the first `substrate docs refresh` for each dataset | _blank — operator approval required_ | NOT RUN |
 | 4. Write: deploy the release, create `/var/lib/substrate/docs`, and install and enable `substrate-docs-refresh.timer` | _blank — operator approval required_ | NOT RUN |
-| 5. Write and read: the live search and ingest proof against the deployed RAGFlow, which writes an event and an audit record; then confirm a skills-sync fast-forward triggers the agent-skills refresh | _blank — operator approval required_ | NOT RUN |
+| 5. Write and read: the live search and ingest proof against the deployed LightRAG, which writes an event and an audit record; then confirm a skills-sync fast-forward triggers the agent-skills refresh | _blank — operator approval required_ | NOT RUN |

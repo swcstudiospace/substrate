@@ -61,6 +61,11 @@ export interface BriefOptions {
 	 * text is the same either way; a failed read is the same `graph` failure.
 	 */
 	graphRead?: "full" | "lite";
+	/**
+	 * Under repository scope, whether the caller is granted a repository. A memory row outside the grant is left out of the brief,
+	 * whatever its scope. Absent while scoping is off.
+	 */
+	granted?: ((repo: string) => boolean) | undefined;
 }
 
 /** The most nodes one brief lists; past it the line says how many were left out (the cached encoding caps a section at 2000 items). */
@@ -297,14 +302,14 @@ export async function composeBriefSections(
 		greptime && repo
 			? start(
 					"recent actions",
-					() => greptime.sql(recentActionsSql(repo, now() - windowDays * DAY_MS), budgetMs > 0 ? budgetMs : undefined),
+					() => greptime.sql(recentActionsSql(repo, now() - windowDays * DAY_MS, greptime.escapesBackslashes), budgetMs > 0 ? budgetMs : undefined),
 					[] as Array<Record<string, unknown>>,
 				)
 			: null;
 	// Other graphs open in this repo.
 	const othersRead = index && repo ? start("open graphs", () => index.openGraphs(repo, graphId ?? undefined), [] as GraphView[]) : null;
 	// Warnings and decisions worth carrying into this session.
-	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId, undefined, { surface }), [] as MemoryEntry[]) : null;
+	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId, undefined, { surface, granted: options.granted }), [] as MemoryEntry[]) : null;
 	// The recall read rides the same start line as the reads above. It is not one of the four
 	// sources, and it is not under the brief budget: it has its own cap, and a failed or late read is a missing section.
 	const recallRead: Promise<RecallSnapshot | null> | null = options.recall ? boundedRecall(options.recall.read, options.recall.partial, options.recall.capMs ?? BRIEF_RECALL_CAP_MS) : null;
@@ -442,10 +447,12 @@ export async function composeBriefSections(
  * The recent-actions statement. Exported so a test can read the bound without
  * a ledger; the SQL itself stays in this file (store lock). `since` is the
  * ISO form `queryEvents` already compares `ts` against on the live store.
+ * `backslashEscapes` is the client's dialect (`GreptimeClient.escapesBackslashes`): the repo is stored in the form that
+ * dialect writes, so it is matched in that same form.
  */
-export function recentActionsSql(repo: string, sinceMs: number): string {
+export function recentActionsSql(repo: string, sinceMs: number, backslashEscapes = true): string {
 	return `SELECT "ts", "surface", "summary", "node_id", "step" FROM "agent_events"
-				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
-				 AND "ts" >= ${quote(new Date(sinceMs).toISOString())}
+				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo, backslashEscapes)} AND "kind" NOT IN ('session.start','session.end')
+				 AND "ts" >= ${quote(new Date(sinceMs).toISOString(), backslashEscapes)}
 				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`;
 }

@@ -1,226 +1,308 @@
 /**
- * The telemetry buffer (phase 76): events the substrate could not write to the ledger, waiting to be retried.
+ * The ledger event buffer and dead-letter store (phase 76).
  *
- * A failed write is not a dropped event. The entry waits with a backoff schedule, and the drain retries it until the
- * ledger takes it or its attempt budget is spent; a spent entry goes to the dead-letter store with its hash and reason.
- * The buffer itself is bounded (`SUBSTRATE_EVENT_BUFFER_MAX`). When it is full the oldest entry that is not being
- * delivered is given up, never discarded silently.
+ * A failed `agent_events` write used to return `stored: false` and nothing else. Now the event is parked
+ * here, retried with exponential backoff (`outbox-file.ts`, the retain outbox's backoff and persistence),
+ * and once its attempt budget is spent it is written to the dead-letter store together with its hash.
+ * Nothing is dropped without a record: every event leaves this module either into the ledger or into the
+ * dead-letter store, and each dead letter names its cause.
  *
- * Ordering. A session's events form a hash chain, so they are kept as one FIFO per session: an event waits behind the
- * buffered events of its session, and the drain only ever attempts the first of them. Each buffered event's `prev` is
- * fixed when it is queued, to the hash of the event ahead of it, and is never rewritten. Dropping an entry therefore
- * takes the entries after it in the same session with it (`predecessor-dead-lettered`): they could never chain. Sessionless
- * events have no chain and are each an independent entry.
+ * Chain rule. An event's `prev` is the hash of its session's previous event, so a parked event can never
+ * be overtaken by a later event of its session. While a session has a parked event, a new event of that
+ * session is parked behind it with `prev` set to the parked tail's hash, and nothing for that session is
+ * written directly. A parked event that exhausts its budget takes the session's later parked events with
+ * it (`chain-blocked`): their `prev` names a row that will never exist. The session's next event then
+ * chains from the ledger's own tip again. An overflow dead-letters only the event that did not fit: the
+ * events parked before it are still valid, and the events after it chain onto them.
  *
- * Persistence mirrors the retain outbox. With a path the buffer is an append-only 0600 JSONL file, rewritten compactly
- * after any change except a plain enqueue, and read back at boot. Without one it is process memory and `durable` reads
- * false, so the owner knows a shutdown must give its entries up with records instead of letting them vanish.
+ * Bounds. `SUBSTRATE_LEDGER_BUFFER_MAX` caps the parked events; a new event over the cap goes straight to
+ * the dead-letter store with cause `overflow`. `SUBSTRATE_LEDGER_DEAD_LETTER_MAX` caps the dead letters;
+ * over it the oldest record is evicted with a stderr line naming its id and hash, and the eviction count is
+ * reported. Both paths are memory-only unless a file is configured, and `/healthz` says which.
+ *
+ * Events are parked whole, payload included: a parked event has to be written, and a dead letter has to be
+ * recoverable by an operator. Both were normalised and redacted before they got here.
  */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { z } from "zod";
-import { parseStoredLine, StoredEvent } from "./event.ts";
 import type { SubstrateEvent } from "./types.ts";
-import type { DeadLetterReason } from "./event-dead-letter.ts";
+import { OutboxFile, outboxBackoffMs } from "./outbox-file.ts";
 
-export const DEFAULT_EVENT_BUFFER_MAX = 256;
+export const DEFAULT_EVENT_BUFFER_MAX = 1_000;
 export const DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS = 10;
-export const DEFAULT_EVENT_BUFFER_BACKOFF_MS = 1_000;
-export const DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS = 60_000;
-/** How often the drain looks for due entries while the buffer is not empty. */
-export const EVENT_BUFFER_TICK_MS = 1_000;
+export const DEFAULT_DEAD_LETTER_MAX = 10_000;
+/** How often the drain looks for due entries. The backoff, not this, sets each event's pace. */
+export const EVENT_DRAIN_TICK_MS = 1_000;
+const EVENT_BACKOFF = { base: 2_000, cap: 300_000 };
+/** The longest failure reason kept on a parked or dead-lettered event: enough to read, never a whole error dump. */
+const REASON_MAX = 300;
 
-/**
- * `base × 2^attempt`, capped at `capMs`, then ±20 % jitter so entries that failed together do not retry in lockstep.
- * `attempt` is zero-based: the first retry, after the live write, waits about `base`.
- */
-export function eventBufferBackoffMs(attempt: number, baseMs: number, capMs: number, random: () => number = Math.random): number {
-	const exponent = Math.max(0, Math.min(attempt, 30));
-	const base = Math.min(baseMs * 2 ** exponent, capMs);
-	return Math.round(base * (0.8 + 0.4 * random()));
+/** One parked event. The event is whole: `prev` and `hash` are the values it was written with. */
+export interface BufferedEvent {
+	event: SubstrateEvent;
+	/** Write attempts so far, the live one included; 0 for an event parked behind an earlier one that was never tried itself. */
+	attempts: number;
+	/** Epoch ms before which the drain leaves the entry alone. */
+	next_at: number;
+	last_reason: string;
+	enqueued_at: number;
 }
 
-/** One buffered event. `event` is final: its hash covers the `prev` it was queued onto. */
-export const StoredEntry = z.object({
-	event: StoredEvent,
-	/** The `SUBSTRATE_EVENT_IDEMPOTENCY` key the caller sent, or null. */
-	key: z.string().nullable(),
-	/** Write attempts so far, the live one included; 0 for an event that waited behind another and never tried. */
-	attempts: z.number(),
-	/** Epoch ms before which the drain leaves the entry alone. */
-	next_at: z.number(),
-	last_reason: z.string(),
-	enqueued_at: z.number(),
-});
-export type EventBufferEntry = z.infer<typeof StoredEntry>;
+export type DeadLetterCause = "exhausted" | "overflow" | "chain-blocked" | "abandoned";
 
-/** What one delivery attempt found: the event landed, or the attempt failed for a reason worth retrying. */
-export type EventDelivery = "landed" | { transient: string };
+/** One event that never reached the ledger. `hash` is the event's own hash, so the record can be checked against the event it names. */
+export interface DeadLetter {
+	id: string;
+	hash: string;
+	session_id: string | null;
+	cause: DeadLetterCause;
+	attempts: number;
+	last_reason: string;
+	dead_at: number;
+	event: SubstrateEvent;
+}
+
+/**
+ * What one delivery attempt answered. `delivered`: the row and its ingest record are in the ledger.
+ * `held`: the ledger's breaker is open, so the attempt was not made and spends nothing. `transient`: a
+ * failure that spends one attempt, with the redacted reason.
+ */
+export type EventDelivery = "delivered" | "held" | { transient: string };
+
+export type EnqueueOutcome = "buffered" | "dead-lettered";
+
+export interface DeadLetterStoreOptions {
+	path?: string | null;
+	max?: number;
+}
+
+function isEventLike(value: unknown): value is SubstrateEvent {
+	if (value === null || typeof value !== "object") return false;
+	const row = value as Record<string, unknown>;
+	return typeof row.id === "string" && typeof row.hash === "string" && (row.session_id === null || typeof row.session_id === "string");
+}
+
+const DEAD_LETTER_CAUSES: readonly string[] = ["exhausted", "overflow", "chain-blocked", "abandoned"];
+
+function isBufferedEvent(value: unknown): value is BufferedEvent {
+	if (value === null || typeof value !== "object") return false;
+	const row = value as Record<string, unknown>;
+	return (
+		isEventLike(row.event) &&
+		typeof row.attempts === "number" &&
+		typeof row.next_at === "number" &&
+		typeof row.last_reason === "string" &&
+		typeof row.enqueued_at === "number"
+	);
+}
+
+function isDeadLetter(value: unknown): value is DeadLetter {
+	if (value === null || typeof value !== "object") return false;
+	const row = value as Record<string, unknown>;
+	return (
+		typeof row.id === "string" &&
+		typeof row.hash === "string" &&
+		(row.session_id === null || typeof row.session_id === "string") &&
+		typeof row.cause === "string" &&
+		DEAD_LETTER_CAUSES.includes(row.cause) &&
+		typeof row.attempts === "number" &&
+		typeof row.last_reason === "string" &&
+		typeof row.dead_at === "number" &&
+		isEventLike(row.event)
+	);
+}
+
+function deadLetterOf(entry: BufferedEvent, cause: DeadLetterCause, at: number): DeadLetter {
+	return {
+		id: entry.event.id,
+		hash: entry.event.hash,
+		session_id: entry.event.session_id,
+		cause,
+		attempts: entry.attempts,
+		last_reason: entry.last_reason,
+		dead_at: at,
+		event: entry.event,
+	};
+}
+
+/**
+ * The dead-letter store: records of events that never reached the ledger. Keyed by event id, which is
+ * unique because an event is parked, and so dead-lettered, at most once. Not replayed by the substrate:
+ * an operator reads it, and re-appending a record is a deliberate act.
+ */
+export class DeadLetterStore {
+	private readonly file: OutboxFile<DeadLetter> | null;
+	readonly max: number;
+	/** Insertion order: the oldest record first. */
+	private readonly records = new Map<string, DeadLetter>();
+	private evictions = 0;
+
+	constructor(options: DeadLetterStoreOptions = {}) {
+		const path = options.path ?? null;
+		this.max = Math.max(1, options.max ?? DEFAULT_DEAD_LETTER_MAX);
+		this.file = path === null ? null : new OutboxFile<DeadLetter>({ path, label: "dead-letter store", isEntry: isDeadLetter, keyOf: (record) => record.id });
+		const read = this.file?.read();
+		if (read) for (const record of read.entries) this.records.set(record.id, record);
+		while (this.records.size > this.max) this.evictOldest();
+		if (read && this.evictions > 0) this.file?.rewrite(() => this.records.values());
+	}
+
+	/** Store one record. Over the bound the oldest is evicted, and the eviction is written to stderr with its id and hash. */
+	add(record: DeadLetter): void {
+		this.records.delete(record.id);
+		this.records.set(record.id, record);
+		let evicted = false;
+		while (this.records.size > this.max) {
+			this.evictOldest();
+			evicted = true;
+		}
+		if (evicted) this.file?.rewrite(() => this.records.values());
+		else this.file?.append(record, () => this.records.values());
+	}
+
+	depth(): number {
+		return this.records.size;
+	}
+
+	/** Records dropped because the store was full. Each one was named on stderr when it went. */
+	evicted(): number {
+		return this.evictions;
+	}
+
+	/** True while every record is on disk; always false for the memory-only store. */
+	get durable(): boolean {
+		return this.file?.durable ?? false;
+	}
+
+	list(): DeadLetter[] {
+		return [...this.records.values()];
+	}
+
+	private evictOldest(): void {
+		const oldest = this.records.values().next().value;
+		if (oldest === undefined) return;
+		this.records.delete(oldest.id);
+		this.evictions += 1;
+		process.stderr.write(`[substrate] dead-letter store full (${this.max}): evicted ${oldest.id} (hash ${oldest.hash}, cause ${oldest.cause})\n`);
+	}
+}
+
+export interface EventBufferOptions {
+	/** JSONL file; null keeps the parked events in memory. */
+	path?: string | null;
+	max?: number;
+	maxAttempts?: number;
+	deadLetters: DeadLetterStore;
+	now?: () => number;
+	/** Uniform [0, 1); injected so the backoff schedule is testable. */
+	random?: () => number;
+}
 
 export interface EventBufferStats {
-	depth: number;
+	pending: number;
 	max: number;
-	/** ISO instant of the oldest entry; null when empty. */
+	/** ISO instant of the oldest parked event; null when empty. */
 	oldestAt: string | null;
 	durable: boolean;
 }
 
-export interface EventBufferOptions {
-	/** JSONL file; null keeps the buffer in memory. */
-	path?: string | null;
-	max?: number;
-	maxAttempts?: number;
-	backoffMs?: number;
-	backoffCapMs?: number;
-	now?: () => number;
-	/** Uniform [0, 1); injected so the backoff schedule is testable. */
-	random?: () => number;
-	/** False while the ledger's breaker is open: a pass is skipped and no attempt is used. */
-	allow?: () => boolean;
-	/** Every entry given up, and why. The owner keeps the record. */
-	onDeadLetter: (entry: EventBufferEntry, reason: DeadLetterReason) => void;
-}
-
-/** What `enqueue` needs. `build` runs after any eviction, so the link it writes names the entry that is really ahead of it. */
-export interface EventEnqueue {
-	/** The session the event chains into; null for a sessionless event. */
-	session: string | null;
-	key: string | null;
-	/** The ledger's latest hash for the session: the `prev` used when nothing for the session is buffered. */
-	ledgerPrev: string | null;
-	build: (prev: string | null) => SubstrateEvent;
-	last_reason: string;
-	/** 1 for an event whose live write just failed; 0 for one that waits behind another and has not tried. */
-	attempts: number;
-}
-
-/** `buffered` false means the event was given up at once, and `entry` is what would have been buffered. */
-export type EnqueueOutcome = { buffered: true; entry: EventBufferEntry } | { buffered: false; entry: EventBufferEntry; reason: DeadLetterReason };
-
-function reportTo(action: string, path: string, cause: unknown, reported: Set<string>): void {
-	const code = (cause as NodeJS.ErrnoException | null)?.code ?? "EIO";
-	if (reported.has(`${action}:${code}`)) return;
-	reported.add(`${action}:${code}`);
-	process.stderr.write(`[substrate] event buffer ${action} failed (${code}) at ${path}; the buffer continues in memory\n`);
-}
-
 export class EventBuffer {
-	private readonly path: string | null;
+	private readonly file: OutboxFile<BufferedEvent> | null;
 	private readonly max: number;
 	private readonly maxAttempts: number;
-	private readonly backoffMs: number;
-	private readonly backoffCapMs: number;
 	private readonly now: () => number;
 	private readonly random: () => number;
-	private readonly allow: () => boolean;
-	private readonly onDeadLetter: (entry: EventBufferEntry, reason: DeadLetterReason) => void;
-	/** Insertion order is age order, and within one session it is chain order. */
-	private readonly entries = new Map<string, EventBufferEntry>();
-	/** The id of the entry a delivery is working on. No eviction takes it. */
-	private flying: string | null = null;
+	private readonly deadLetters: DeadLetterStore;
+	/** Insertion order is age order: the first key is the oldest parked event. Keyed by event id. */
+	private readonly entries = new Map<string, BufferedEvent>();
+	/**
+	 * Per session: the hash of its newest parked event, and how many of its events are parked. Removal is
+	 * always of a session's oldest event, or of all of them, so the tail is unchanged until the count
+	 * reaches zero.
+	 */
+	private readonly tails = new Map<string, { hash: string; count: number }>();
 	private draining: Promise<void> | null = null;
-	/** True from a failed save until the next one that succeeds; `durable` is false meanwhile. */
-	private unsaved = false;
-	private readonly reported = new Set<string>();
 
 	constructor(options: EventBufferOptions) {
-		this.path = options.path ?? null;
+		const path = options.path ?? null;
+		this.file = path === null ? null : new OutboxFile<BufferedEvent>({ path, label: "event buffer", isEntry: isBufferedEvent, keyOf: (entry) => entry.event.id });
 		this.max = Math.max(1, options.max ?? DEFAULT_EVENT_BUFFER_MAX);
 		this.maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS);
-		this.backoffMs = Math.max(1, options.backoffMs ?? DEFAULT_EVENT_BUFFER_BACKOFF_MS);
-		this.backoffCapMs = Math.max(1, options.backoffCapMs ?? DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS);
 		this.now = options.now ?? Date.now;
 		this.random = options.random ?? Math.random;
-		this.allow = options.allow ?? (() => true);
-		this.onDeadLetter = options.onDeadLetter;
-		if (this.path !== null) this.hydrate(this.path);
+		this.deadLetters = options.deadLetters;
+		// Hydrated without re-bounding: a lower bound applies to new events only, so no parked event is
+		// dropped at boot and every chain stays whole.
+		const read = this.file?.read();
+		if (read) {
+			for (const entry of read.entries) this.park(entry);
+			this.file?.rewrite(() => this.entries.values());
+		}
 	}
 
-	/** True only while every entry is on disk. A configured path whose last save failed is not durable. */
+	/** True only while every parked event is on disk; always false for the memory-only buffer. */
 	get durable(): boolean {
-		return this.path !== null && !this.unsaved;
+		return this.file?.durable ?? false;
 	}
 
 	size(): number {
 		return this.entries.size;
 	}
 
-	/** Whether any event of the session is waiting, so a new one must queue behind it. */
-	hasSession(session: string | null): boolean {
-		return this.tailOf(session) !== null;
+	/** The hash a new event of this session must chain onto while the session has parked events; null when it has none. */
+	tipOf(sessionId: string): string | null {
+		return this.tails.get(sessionId)?.hash ?? null;
 	}
 
-	/** The buffered entry a keyed replay names: same surface, same idempotency key. */
-	findKeyed(surface: string, key: string): EventBufferEntry | null {
-		for (const entry of this.entries.values()) {
-			if (entry.key === key && entry.event.surface === surface) return entry;
-		}
-		return null;
-	}
-
-	/** The first buffered event, in age order, that `predicate` accepts; null for none. */
-	find(predicate: (event: SubstrateEvent) => boolean): EventBufferEntry | null {
-		for (const entry of this.entries.values()) {
-			if (predicate(entry.event)) return entry;
-		}
+	/** A parked event that `match` accepts, for a replay of a keyed event whose first attempt is still parked. */
+	find(match: (event: SubstrateEvent) => boolean): SubstrateEvent | null {
+		for (const entry of this.entries.values()) if (match(entry.event)) return entry.event;
 		return null;
 	}
 
 	stats(): EventBufferStats {
 		let oldest: number | null = null;
-		for (const entry of this.entries.values()) {
-			if (oldest === null || entry.enqueued_at < oldest) oldest = entry.enqueued_at;
-		}
-		return { depth: this.entries.size, max: this.max, oldestAt: oldest === null ? null : new Date(oldest).toISOString(), durable: this.durable };
-	}
-
-	/** A snapshot in age order, for tests. */
-	list(): EventBufferEntry[] {
-		return [...this.entries.values()].map((entry) => ({ ...entry }));
+		for (const entry of this.entries.values()) if (oldest === null || entry.enqueued_at < oldest) oldest = entry.enqueued_at;
+		return {
+			pending: this.entries.size,
+			max: this.max,
+			oldestAt: oldest === null ? null : new Date(oldest).toISOString(),
+			durable: this.durable,
+		};
 	}
 
 	/**
-	 * Take one event that could not be written. Over the bound, the oldest entry that is not being delivered is given up
-	 * first (with the entries after it in its session). When nothing can be given up, the new event is refused instead.
-	 * An event whose live write was its last allowed attempt is given up at once, so the budget is honoured at every size.
+	 * Park one event. `attempted` is true for the write that just failed, which spends the first attempt; a
+	 * false event was parked behind an earlier one of its session and was never tried. Over the bound, or
+	 * when the attempt ceiling is already reached, the event goes to the dead-letter store instead, with no
+	 * effect on the events parked before it.
 	 */
-	enqueue(request: EventEnqueue): EnqueueOutcome {
+	enqueue(event: SubstrateEvent, reason: string, attempted: boolean): EnqueueOutcome {
 		const at = this.now();
-		const exhaustedAtOnce = request.attempts > 0 && request.attempts >= this.maxAttempts;
-		let evicted = false;
-		while (!exhaustedAtOnce && this.entries.size >= this.max) {
-			const victim = this.oldestEvictable();
-			if (victim === null) break;
-			this.dropFrom(victim, "overflow");
-			evicted = true;
-		}
-		// Built only now: an eviction above may have removed this session's tail, and the link must name what is really ahead.
-		const event = request.build(this.tailOf(request.session)?.event.hash ?? request.ledgerPrev);
-		const entry: EventBufferEntry = {
+		const entry: BufferedEvent = {
 			event,
-			key: request.key,
-			attempts: request.attempts,
-			next_at: request.attempts === 0 ? at : at + eventBufferBackoffMs(request.attempts - 1, this.backoffMs, this.backoffCapMs, this.random),
-			last_reason: request.last_reason,
+			attempts: attempted ? 1 : 0,
+			next_at: attempted ? at + outboxBackoffMs(0, EVENT_BACKOFF, this.random) : at,
+			last_reason: reason.slice(0, REASON_MAX),
 			enqueued_at: at,
 		};
-		if (exhaustedAtOnce || this.entries.size >= this.max) {
-			const reason: DeadLetterReason = exhaustedAtOnce ? "exhausted" : "buffer-full";
-			this.onDeadLetter(entry, reason);
-			if (evicted) this.compact();
-			return { buffered: false, entry, reason };
+		if (this.entries.size >= this.max) {
+			this.deadLetters.add(deadLetterOf(entry, "overflow", at));
+			return "dead-lettered";
 		}
-		this.entries.set(event.id, entry);
-		if (evicted) this.compact();
-		else this.append(entry);
-		return { buffered: true, entry };
+		if (entry.attempts >= this.maxAttempts) {
+			this.deadLetters.add(deadLetterOf(entry, "exhausted", at));
+			return "dead-lettered";
+		}
+		this.park(entry);
+		this.file?.append(entry, () => this.entries.values());
+		return "buffered";
 	}
 
 	/**
-	 * Replay the due entries, one delivery at a time, in age order. Overlapping calls share one pass. `all` ignores the
-	 * schedule (shutdown and tests use it). A pass stops at its first transient failure: the ledger is probably down.
+	 * Retry due entries, one delivery at a time, in age order. Overlapping calls share one pass. `all`
+	 * ignores the schedule (shutdown). A session with an entry that is not due, or that failed in this pass,
+	 * is left alone for the rest of the pass, so a session's events are never delivered out of order.
 	 */
-	drain(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, options: { all?: boolean } = {}): Promise<void> {
+	drain(deliver: (event: SubstrateEvent) => Promise<EventDelivery>, options: { all?: boolean } = {}): Promise<void> {
 		if (this.draining) return this.draining;
 		this.draining = this.runDrain(deliver, options.all === true, null).finally(() => {
 			this.draining = null;
@@ -230,186 +312,94 @@ export class EventBuffer {
 
 	/**
 	 * The write path's settle (phase 76 chain rule): one delivery attempt for each parked event of one session, in chain order,
-	 * ignoring the backoff schedule, before a write chains onto them. The first event that does not land ends the session's pass,
-	 * so one call spends at most one failing attempt per session.
-	 *
-	 * It never waits for a pass already running. That pass can be blocked on the caller's own session turn, so the call returns
-	 * with no attempt, and the write parks behind the session's tip, which keeps the events in order. A caller outside a write
-	 * calls `idle` first and then runs this under the session turn.
+	 * before a write chains onto them. The schedule is not consulted: the write cannot chain past those events, so each gets its
+	 * attempt now. The first event that does not land blocks the rest of the session, so one call spends at most one failing
+	 * attempt per session. A pass already running is awaited first, so one event is never delivered by two passes at once.
 	 */
-	drainSession(session: string, deliver: (entry: EventBufferEntry) => Promise<EventDelivery>): Promise<void> {
-		if (this.draining) return Promise.resolve();
-		this.draining = this.runDrain(deliver, true, session).finally(() => {
+	async drainSession(sessionId: string, deliver: (event: SubstrateEvent) => Promise<EventDelivery>): Promise<void> {
+		while (this.draining) await this.draining;
+		this.draining = this.runDrain(deliver, true, sessionId).finally(() => {
 			this.draining = null;
 		});
 		return this.draining;
 	}
 
-	/** Resolves once no pass is running. Never starts one. */
-	async idle(): Promise<void> {
-		while (this.draining !== null) await this.draining.catch(() => undefined);
-	}
-
-	/** Give every remaining entry up as `abandoned`. A memory-only buffer calls this at shutdown, so none vanishes unrecorded. */
+	/** Shutdown of a memory-only buffer: every parked event goes to the dead-letter store as `abandoned`, so none vanishes with the process. */
 	abandonAll(): number {
+		const at = this.now();
 		const dropped = [...this.entries.values()];
 		this.entries.clear();
-		for (const entry of dropped) this.onDeadLetter(entry, "abandoned");
+		this.tails.clear();
+		for (const entry of dropped) this.deadLetters.add(deadLetterOf(entry, "abandoned", at));
+		this.file?.rewrite(() => this.entries.values());
 		return dropped.length;
 	}
 
-	/** One pass: `only` restricts it to one session (the write path's settle); null is every session. */
-	private async runDrain(deliver: (entry: EventBufferEntry) => Promise<EventDelivery>, all: boolean, only: string | null): Promise<void> {
-		if (!this.allow()) return;
+	private async runDrain(deliver: (event: SubstrateEvent) => Promise<EventDelivery>, all: boolean, only: string | null): Promise<void> {
 		let changed = false;
-		for (;;) {
-			const entry = this.nextDue(all, this.now(), only);
-			if (entry === null || !this.allow()) break;
-			this.flying = entry.event.id;
-			let outcome: EventDelivery;
-			try {
-				outcome = await deliver(entry);
-			} catch (cause) {
-				outcome = { transient: `deliver-threw: ${(cause instanceof Error ? cause.message : String(cause)).slice(0, 120)}` };
-			} finally {
-				this.flying = null;
-			}
-			changed = true;
-			if (outcome === "landed") {
-				this.entries.delete(entry.event.id);
-				continue;
-			}
-			entry.attempts += 1;
-			entry.last_reason = outcome.transient;
-			if (entry.attempts >= this.maxAttempts) {
-				this.dropFrom(entry, "exhausted");
-				continue;
-			}
-			entry.next_at = this.now() + eventBufferBackoffMs(entry.attempts - 1, this.backoffMs, this.backoffCapMs, this.random);
-			break;
-		}
-		if (changed) this.compact();
-	}
-
-	/**
-	 * The first entry a pass may attempt: in age order, the first entry of each session (the rest chain onto it) that is due.
-	 * A session whose first entry is not due waits as a whole.
-	 */
-	private nextDue(all: boolean, at: number, only: string | null): EventBufferEntry | null {
-		const seen = new Set<string>();
-		for (const entry of this.entries.values()) {
+		const blocked = new Set<string>();
+		for (const entry of [...this.entries.values()]) {
+			// Dead-lettered with its session, or abandoned, since the pass began: not ours anymore.
+			if (this.entries.get(entry.event.id) !== entry) continue;
 			const session = entry.event.session_id;
 			if (only !== null && session !== only) continue;
-			if (session !== null) {
-				if (seen.has(session)) continue;
-				seen.add(session);
-			}
-			if (all || entry.next_at <= at) return entry;
-		}
-		return null;
-	}
-
-	/** The oldest entry no delivery is working on; null when every entry is in flight. */
-	private oldestEvictable(): EventBufferEntry | null {
-		for (const entry of this.entries.values()) {
-			if (entry.event.id !== this.flying) return entry;
-		}
-		return null;
-	}
-
-	/**
-	 * Give up `victim` and every later entry of its session, which could never chain. The victim is the session's
-	 * earliest buffered entry, and any delivery in flight is a session's earliest entry, so it is never among them.
-	 */
-	private dropFrom(victim: EventBufferEntry, reason: DeadLetterReason): void {
-		const session = victim.event.session_id;
-		const doomed: EventBufferEntry[] = [];
-		let started = false;
-		for (const entry of this.entries.values()) {
-			if (entry === victim) started = true;
-			if (started && (entry === victim || (session !== null && entry.event.session_id === session))) doomed.push(entry);
-		}
-		for (const entry of doomed) this.entries.delete(entry.event.id);
-		for (const [index, entry] of doomed.entries()) {
-			this.onDeadLetter(entry, index === 0 ? reason : "predecessor-dead-lettered");
-		}
-	}
-
-	/** The session's last buffered entry, which the next event must chain onto; null for none, or for a sessionless event. */
-	private tailOf(session: string | null): EventBufferEntry | null {
-		if (session === null) return null;
-		let tail: EventBufferEntry | null = null;
-		for (const entry of this.entries.values()) {
-			if (entry.event.session_id === session) tail = entry;
-		}
-		return tail;
-	}
-
-	/** Rebuild from the file: one line per event, last write wins, oldest first. A bound that shrank since the last boot gives up the oldest. */
-	private hydrate(path: string): void {
-		let body: string;
-		try {
-			if (!existsSync(path)) return;
-			body = readFileSync(path, "utf8");
-		} catch (cause) {
-			reportTo("read", path, cause, this.reported);
-			return;
-		}
-		let malformed = 0;
-		for (const line of body.split("\n")) {
-			if (line.trim().length === 0) continue;
-			const entry = parseStoredLine(line, StoredEntry);
-			if (entry === null) {
-				malformed += 1;
+			if (session !== null && blocked.has(session)) continue;
+			if (!all && entry.next_at > this.now()) {
+				if (session !== null) blocked.add(session);
 				continue;
 			}
-			this.entries.delete(entry.event.id);
-			this.entries.set(entry.event.id, entry);
+			const outcome = await deliver(entry.event);
+			if (this.entries.get(entry.event.id) !== entry) continue;
+			if (outcome === "delivered") {
+				this.remove(entry);
+				changed = true;
+				continue;
+			}
+			if (outcome === "held") {
+				// The ledger's breaker is open: the rest would be refused the same way, and no attempt is spent.
+				break;
+			}
+			changed = true;
+			entry.attempts += 1;
+			entry.last_reason = outcome.transient;
+			if (session !== null) blocked.add(session);
+			if (entry.attempts >= this.maxAttempts) {
+				this.remove(entry);
+				this.deadLetters.add(deadLetterOf(entry, "exhausted", this.now()));
+				// Every parked event after this one in its session chains onto the row that will not exist.
+				if (session !== null) this.deadLetterSession(session);
+				continue;
+			}
+			entry.next_at = this.now() + outboxBackoffMs(entry.attempts - 1, EVENT_BACKOFF, this.random);
 		}
-		if (malformed > 0) process.stderr.write(`[substrate] event buffer: skipped ${malformed} malformed line(s) in ${path}\n`);
-		while (this.entries.size > this.max) {
-			const oldest = this.entries.values().next().value;
-			if (oldest === undefined) break;
-			this.dropFrom(oldest, "overflow");
-		}
-		this.compact();
+		if (changed) this.file?.rewrite(() => this.entries.values());
 	}
 
-	private append(entry: EventBufferEntry): void {
-		if (this.path === null) return;
-		// After a failed save a plain append would leave out what that save never wrote: rewrite the whole buffer instead.
-		if (this.unsaved) {
-			this.compact();
-			return;
-		}
-		try {
-			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-			const fresh = !existsSync(this.path);
-			appendFileSync(this.path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-			if (fresh) chmodSync(this.path, 0o600);
-			this.unsaved = false;
-		} catch (cause) {
-			this.failedSave("append", cause);
-		}
-	}
-
-	private compact(): void {
-		if (this.path === null) return;
-		try {
-			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-			const tmp = `${this.path}.${process.pid}.tmp`;
-			const lines = [...this.entries.values()].map((entry) => JSON.stringify(entry));
-			writeFileSync(tmp, lines.length === 0 ? "" : `${lines.join("\n")}\n`, { mode: 0o600 });
-			chmodSync(tmp, 0o600);
-			renameSync(tmp, this.path);
-			this.unsaved = false;
-		} catch (cause) {
-			this.failedSave("rewrite", cause);
+	/** Every event still parked for one session, all of them successors of the event that just exhausted. */
+	private deadLetterSession(sessionId: string): void {
+		const at = this.now();
+		for (const entry of [...this.entries.values()]) {
+			if (entry.event.session_id !== sessionId) continue;
+			this.remove(entry);
+			this.deadLetters.add(deadLetterOf(entry, "chain-blocked", at));
 		}
 	}
 
-	private failedSave(action: string, cause: unknown): void {
-		this.unsaved = true;
-		reportTo(action, this.path ?? "", cause, this.reported);
+	private park(entry: BufferedEvent): void {
+		this.entries.set(entry.event.id, entry);
+		const sessionId = entry.event.session_id;
+		if (sessionId === null) return;
+		const tail = this.tails.get(sessionId);
+		this.tails.set(sessionId, { hash: entry.event.hash, count: (tail?.count ?? 0) + 1 });
+	}
+
+	private remove(entry: BufferedEvent): void {
+		this.entries.delete(entry.event.id);
+		const sessionId = entry.event.session_id;
+		if (sessionId === null) return;
+		const tail = this.tails.get(sessionId);
+		if (tail === undefined) return;
+		if (tail.count <= 1) this.tails.delete(sessionId);
+		else this.tails.set(sessionId, { hash: tail.hash, count: tail.count - 1 });
 	}
 }

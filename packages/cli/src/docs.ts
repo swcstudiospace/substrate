@@ -1,3 +1,4 @@
+/** `substrate docs ingest` — uses the LightRAG backend for docs dataset ingest (DOCS-02). */
 /**
  * `substrate docs ingest` — ingest one page into a docs dataset (DOCS-02).
  *
@@ -6,10 +7,7 @@
  *
  * An HTTP client over `POST /docs/ingest`, with the Phase 20 bearer order
  * (the caller in `index.ts` resolves it; this command only checks one is
- * present). It keeps no RAGFlow path: that would be a second door that skips
- * the token, the audit chain and the ingest gates. Anonymous use and a VM
- * guest are refused before any file is read or anything is posted.
- *
+ * present). Anonymous use and a VM guest are refused before any file is read or anything is posted.
  * It is not a hook command, so a failure is a non-zero exit, as with `skills
  * propose`: 0 for `ingested`, `unchanged` and `replaced`; 1 for a refusal, a
  * failure, a 401, 403 or 5xx, or a server that did not answer.

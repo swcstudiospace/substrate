@@ -18,7 +18,7 @@
  * worktree becomes `<worktree>` and the home directory `~`).
  */
 import { homedir } from "node:os";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 import { open } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { redact, redactKnown } from "../../../mcp-server/src/redact.ts";
@@ -54,6 +54,7 @@ import { PendingJournalError, listPending, replayPending, resolvePendingDir, set
 import { type RollbackResult, type TranscriptPort, RollbackInputError, rollback } from "./rollback.ts";
 import { HOOK_TIMEOUT_MS, describeOutcome, readProcessStdin, runHook } from "./hook.ts";
 import { HOOK_CONFIG_TARGETS, type HookConfigTarget, renderHookConfig } from "./hook-config.ts";
+import { HookInstallError, installClaudeCodeHook } from "./hook-install.ts";
 import { HOOK_TRIGGERS, type HookTrigger } from "./trigger-policy.ts";
 import { type SteerClient, type SteerFetch, createSteerClient } from "../steer/client.ts";
 import { MAX_DIGEST_CHARS } from "../steer/render.ts";
@@ -72,6 +73,7 @@ export const SESSION_USAGE =
 	"       substrate session sync [--json]\n" +
 	"       substrate session hook <turn|plan-step|steering|baseline|context> [--session HISTORICAL_ID] [--steering-session LIVE_ID] [--binding-file PATH] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]   (reads a JSON envelope on stdin; fail-open: always exits 0; `context` prints the historical-filtered live-context digest; steering hints require an explicit live handle and matching private record)\n" +
 	`       substrate session hook-config <${HOOK_CONFIG_TARGETS.join("|")}>   (prints the hook configuration to install; installs nothing)\n` +
+	"       substrate session hook-install claude-code --settings PATH [--write]   (merges the Stop hook into a Claude Code settings file; without --write it only reports; an operator runs it, never this repository)\n" +
 	`triggers: ${CHECKPOINT_TRIGGERS.join(", ")}\n` +
 	"exit: 0 done, 1 failed, 2 usage, 3 refused (drift, anchor mismatch, unknown or foreign target), 4 files restored but the ledger commit is pending\n" +
 	"--omp-session FILE records where in that omp session file the checkpoint was taken (entry id, turn number, prefix digest; never content or the path). A file that cannot be read or parsed does not fail the checkpoint: it is made without a transcript reference and the output says why.\n";
@@ -121,10 +123,10 @@ export interface SessionDeps {
 // Grammar
 // ---------------------------------------------------------------------------
 
-type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync" | "hook" | "hook-config";
+type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync" | "hook" | "hook-config" | "hook-install";
 
-const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config"];
-const VALUE_FLAGS: readonly string[] = ["session", "steering-session", "binding-file", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"];
+const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config", "hook-install"];
+const VALUE_FLAGS: readonly string[] = ["session", "steering-session", "binding-file", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step", "settings"];
 const ALLOWED: Record<Sub, readonly string[]> = {
 	checkpoint: ["json", "session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"],
 	checkpoints: ["json", "session", "surface", "offline"],
@@ -133,6 +135,7 @@ const ALLOWED: Record<Sub, readonly string[]> = {
 	sync: ["json"],
 	hook: ["session", "steering-session", "binding-file", "surface", "plan-phase", "plan-step", "verbose"],
 	"hook-config": [],
+	"hook-install": ["settings", "write"],
 };
 
 interface Parsed {
@@ -176,6 +179,9 @@ export function parseSessionArgs(argv: readonly string[]): Parsed | string {
 		if (positional.length !== 1 || !(HOOK_TRIGGERS as readonly string[]).includes(positional[0] as string)) return `hook takes exactly one trigger: ${HOOK_TRIGGERS.join(", ")}`;
 	} else if (sub === "hook-config") {
 		if (positional.length !== 1 || !(HOOK_CONFIG_TARGETS as readonly string[]).includes(positional[0] as string)) return `hook-config takes exactly one target: ${HOOK_CONFIG_TARGETS.join(", ")}`;
+	} else if (sub === "hook-install") {
+		if (positional.length !== 1 || positional[0] !== "claude-code") return "hook-install takes exactly one target, claude-code; the other hook configurations are printed by hook-config and wired by the operator";
+		if (!flags.has("settings")) return "hook-install needs --settings PATH, the Claude Code settings file to merge into";
 	} else if (positional.length > 0) {
 		return `\`session ${sub}\` takes no positional argument`;
 	}
@@ -307,6 +313,8 @@ export async function runSession(argv: readonly string[], deps: SessionDeps): Pr
 			case "hook-config":
 				deps.out(renderHookConfig(parsed.positional[0] as HookConfigTarget));
 				return EXIT_DONE;
+			case "hook-install":
+				return await commandHookInstall(parsed, out, failure);
 			default:
 				return await commandSync(deps, out, run, json, clientFor);
 		}
@@ -696,6 +704,28 @@ function renderRollback(out: Output, r: RollbackResult): void {
 // ---------------------------------------------------------------------------
 // recover and sync
 // ---------------------------------------------------------------------------
+
+/**
+ * `session hook-install claude-code --settings PATH [--write]`: merges the Stop hook into a Claude Code settings file (see
+ * `hook-install.ts`). Dry run by default: it prints the hook it would add, never the file, which can hold credentials.
+ */
+async function commandHookInstall(parsed: Parsed, out: Output, failure: Failure): Promise<number> {
+	const path = resolve(flagValue(parsed, "settings") as string);
+	try {
+		const report = await installClaudeCodeHook(path, parsed.flags.has("write"));
+		if (!report.added) out.line(`the Stop hook is already in ${path}; nothing to change`);
+		else if (!report.written) {
+			out.line(`would add this Stop hook to ${path} (dry run: nothing written; rerun with --write to apply):`);
+			out.line(renderHookConfig("claude-code").trimEnd());
+		} else {
+			out.line(`added the Stop hook to ${path}${report.backup === null ? "" : `; the previous file is kept at ${report.backup}`}`);
+		}
+		return EXIT_DONE;
+	} catch (error) {
+		if (error instanceof HookInstallError) return failure(error.code, error.message);
+		throw error;
+	}
+}
 
 async function commandRecover(deps: SessionDeps, out: Output, run: Runner, json: boolean, failure: Failure): Promise<number> {
 	try {

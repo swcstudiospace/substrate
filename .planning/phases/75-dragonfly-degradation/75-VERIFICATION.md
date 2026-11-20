@@ -1,142 +1,139 @@
 ---
 phase: 75-dragonfly-degradation
-verified: 2026-11-19T13:23:40Z
-status: human_needed
-score: 4/5 truths verified (2/2 ROADMAP success criteria verified; 1 sub-truth behavior-unverified)
-covered_files: [".planning/phases/75-dragonfly-degradation/75-CONTEXT.md", "packages/mcp-server/src/admission.test.ts", "packages/mcp-server/src/admission.ts", "packages/mcp-server/src/cache-breaker.test.ts", "packages/mcp-server/src/cache.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/flag-registry.ts", "packages/mcp-server/src/http.admission.test.ts", "packages/mcp-server/src/server.ts", "packages/observability/src/instruments.ts", "packages/observability/src/slo.test.ts", "packages/observability/src/slo.ts"]
-covered_digest: "v3:sha256:c805fcf63e39ade2405bfb96e5479d09f505881422c94b34fc59a186b6c582c1"
-behavior_unverified: 1
+verified: 2026-11-20T01:26:13Z
+status: passed
+score: 2/2 must-haves verified
+covered_files:
+  - .planning/REQUIREMENTS.md
+  - .planning/phases/75-dragonfly-degradation/75-01-PLAN.md
+  - .planning/phases/75-dragonfly-degradation/75-CONTEXT.md
+  - docs/config-reference.md
+  - docs/observability.md
+  - packages/mcp-server/src/admission.test.ts
+  - packages/mcp-server/src/admission.ts
+  - packages/mcp-server/src/cache-breaker.test.ts
+  - packages/mcp-server/src/cache.ts
+  - packages/mcp-server/src/config.ts
+  - packages/mcp-server/src/flag-registry.ts
+  - packages/mcp-server/src/http.admission.test.ts
+  - packages/mcp-server/src/server.ts
+  - packages/observability/src/slo.ts
+covered_digest: "v3:sha256:ec3019fab21af865606db3355cd4c1b4d4fcd05af5eb8b80d39ba7357a93924a"
+behavior_unverified: 0
 overrides_applied: 0
+decision_coverage:
+  honored: 5
+  total: 5
+  not_honored: []
 re_verification:
-  previous_status: human_needed
-  previous_score: 4/5
-  previous_verified: 2026-11-18T12:24:20Z
-  head: ee998735dce82872df0302501e8b0a49c9914648
-  regressions: []
+  previous_status: passed
+  previous_score: 2/2
   gaps_closed: []
   gaps_remaining: []
-behavior_unverified_items:
-  - truth: "Degraded brief with the cache breaker open: the live source fails, the refused snapshot read leaves the brief in state degraded, and no stale answer is served from the cache"
-    test: "Open the cache breaker (PlaneRegistry failureThreshold 1, or a real plane failure), make the brief's live source throw (for example getGraph), call briefDetailed for the same repo and graph"
-    expected: "state is degraded; no brief-snapshot text is served; the cache answers nothing; the brief does not throw"
-    why_human: "No test opens the breaker and fails the live source together. The degraded-brief tests in brief-fast-path.test.ts use a healthy or merely failing FakeRedis with no breaker. The snapshot-refusal branch (service.ts:2477, service.ts:2542, snapshotSurvivesForget) under an open breaker is unexercised — re-checked at HEAD ee998735, still no such test"
-coincidental_reliance_items: []
-gaps: []
-human_verification:
-  - test: "With the full stack running, stop the live Dragonfly, then call POST /brief and POST /memory/recall with default flags (nothing set)"
-    expected: "Both answer 200 with authoritative source content, the answer returns within the command timeout (no hang), and cache health reports degraded"
-    why_human: "The in-process tests inject an open breaker or point at an unreachable port (cache-breaker.test.ts:21, :120-127). A live outage with real sockets, real timeouts and a real breaker transition is not exercised"
-  - test: "Set SUBSTRATE_BUDGETS=enforce and SUBSTRATE_BUDGET_READ_BREAKER=fail-closed. Stop the live Dragonfly, drive enough cache failures to open the breaker, then call POST /brief"
-    expected: "HTTP 503, body {\"error\":\"cache_unavailable\",\"class\":\"read\",\"retry_after_s\":N}, a Retry-After header equal to N as an integer, and one substrate.admission.decisions{decision=\"refused\"} increment"
-    why_human: "http.admission.test.ts injects BreakerOpenError into a fake redis; the real breaker opening and closing under a live Dragonfly is not observed"
-  - test: "Check the refused decision in the real pipeline: /metrics, the OTel/Greptime export, and any dashboard that reads substrate.admission.decisions"
-    expected: "decision=\"refused\" series appears with class and surface labels, and is outside the admission.limited_rate SLO numerator (slo.ts, R3)"
-    why_human: "recordAdmission (observability/src/instruments.ts) is verified in code and in-process; delivery to the live exporter and dashboards is not"
-  - test: "Operator acceptance of the read policy: with SUBSTRATE_BUDGET_READ_BREAKER=fail-closed and the breaker open, /brief and /memory/recall (class read) answer 503 before the authoritative source is consulted"
-    expected: "Operator confirms this is the intended declared policy for read (D75-2)"
-    why_human: "The consequence is a declared policy decision that a human must accept; it is not a code defect"
-  - test: "Decide whether a fail-closed class may admit during the 5 s connect cooldown (cache.ts run(): the cooldown rejects with a plain Error, not BreakerOpenError, cache.ts:408-409) while the breaker is still closed"
-    expected: "Explicit operator decision: accept the cooldown window as outside the 'open breaker' scope of criterion 2, or change the cooldown to refuse fail-closed classes"
-    why_human: "Criterion 2 is scoped to an open breaker; the cooldown is a separate mechanism. Whether the gap matters is a policy call"
+  regressions: []
+operator_gated:
+  - item: "Live cache-plane proof against production Dragonfly"
+    reason: "Plan acceptance marks this outside the tasks. Repo criteria are the named tests, not a live plane."
 ---
 
 # Phase 75: DragonflyDB degradation Verification Report
 
 **Phase Goal:** When the cache plane is open or unreachable, reads fall back to the authoritative store without losing state, and admission behaves as declared.
-**Verified:** 2026-11-19T13:23:40Z
-**Status:** human_needed
-**Re-verification:** Yes — third pass. Prior record (2026-11-18, HEAD `357d6b15`, status human_needed) was regression-checked at HEAD `ee998735`: the phase's breaker/admission/cache files are unchanged since `357d6b15` except unrelated `config.ts`/`flag-registry.ts` hunks (`planningHashStore` default, `SUBSTRATE_WORKTREE_ROOTS` doc, docs-canary `readBy`) and one unrelated `service.ts` corpus hunk (`f6213948`, cross-collection rename). No new test covers the 1c combined path. No code gap found; the five human items are unchanged and remain operator/live only.
+**Verified:** 2026-11-20T01:26:13Z
+**Status:** passed
+**Re-verification:** Yes — re-verification of prior passed (2/2). No gaps were open; regression check only.
+
+code review skipped (Greptile unavailable, owner override 2026-11-20 — CI gates apply)
 
 ## Goal Achievement
 
 ### Observable Truths
 
-| #   | Truth | Status | Evidence |
-| --- | ----- | ------ | -------- |
-| 1a  | ROADMAP criterion 1: with the cache breaker open, brief returns the authoritative (index) result | ✓ VERIFIED | `service.ts:2436` brief reads go through `cache.getOrLoad({ klass: "brief", ... })`; a refused read is served by the live `load` (cache `getOrLoad` catch path and `run()` gate at `cache.ts:411`). Named test `packages/mcp-server/src/cache-breaker.test.ts` "brief is composed from the index on every call, and the cache never answers it" (passed 2026-11-18 run, code unchanged since) |
-| 1b  | ROADMAP criterion 1: with the cache breaker open, recall returns the authoritative (Hindsight) result | ✓ VERIFIED | Recall cache reads are `klass: "memory-search"` (`service.ts:3471`, `:3518`, `:3683`), load is `recallUncounted`; test `cache-breaker.test.ts` "recall returns the same reply as a substrate with no cache at all" asserts deep-equal with the no-cache reply (file unchanged since prior pass) |
-| 1c  | Degraded brief sub-truth: breaker open and live source failing, the refused snapshot read leaves the brief `degraded` with no stale serve | ⚠️ PRESENT_BEHAVIOR_UNVERIFIED | Presence: `service.ts:2477` and `service.ts:2542` call `snapshotSurvivesForget` (`cache.ts:889`); no test opens the breaker and fails the live source together (re-checked at HEAD). Not counted as verified |
-| 2a  | ROADMAP criterion 2: admission under an open breaker follows the declared policy per class (fail-open admits as bypass; fail-closed refuses in enforce; shadow never refuses) | ✓ VERIFIED | `admission.ts:392-394`: `refused` only when `breakerRetryAfterMs` is set AND class policy is `fail-closed` AND mode is `enforce`; `budgetBody` at `admission.ts:461` maps refused to `cache_unavailable`. Named test `cache-breaker.test.ts` "admission over the open breaker: a fail-closed class is refused, a fail-open class admits, and neither reaches the plane" (live at `:147-154`, file unchanged) |
-| 2b  | ROADMAP criterion 2: the policy is declared per class in flags, defaults fail-open, and an invalid value refuses boot naming the variable | ✓ VERIFIED | `config.ts:1893-1894` builds `SUBSTRATE_BUDGET_<CLASS>_BREAKER` per class, `breakerPolicyOf` at `config.ts:1914` (blank/unset → `fail-open`; other values throw `ConfigError` naming the variable). `flag-registry.ts:189` `CLASS_BREAKER_NAMES`. Documented in `docs/config-reference.md:279` (row unchanged in this rerun) |
+| # | Truth | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | With the cache breaker open, brief and recall return authoritative results. A test proves it. | ✓ VERIFIED | `cache-breaker.test.ts:73` "brief is composed from the index on every call, and the cache never answers it", `:99` "recall returns the same reply as a substrate with no cache at all", `:118` "generation keys: a bump the breaker refused keeps reads on the source after it closes, until a bump lands". `cache.ts:176` `ScriptOutcome` sets `breakerRetryAfterMs` only for `BreakerOpenError` (`cache.ts:1082`); `staleGenerations` (`cache.ts:505,584,868`) keeps a refused bump off the cache until a later bump. Re-ran 2026-11-20: `bun test` on the three phase test files — 85 pass, 0 fail. |
+| 2 | Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags. | ✓ VERIFIED | `config.ts:1847-1848` `loadAdmissionSettings` parses `SUBSTRATE_BUDGET_{READ,WRITE,COORDINATION}_BREAKER` via `breakerPolicyOf` (`config.ts:1868`); unset/blank is `fail-open`, other values throw `ConfigError` naming the variable; `loadConfig` calls `loadAdmissionSettings` unguarded (`config.ts:1244`). `admission.ts:440-442` returns `refused` only for a breaker refusal on `fail-closed` in `enforce`; shadow/fail-open and non-breaker failures return `bypass`. `admission.ts:508-509` `budgetBody` uses `cache_unavailable` for `refused`; `isRefusal` (`admission.ts:475-476`) treats `refused` like `limited`. `server.ts:640-641` `sendBudgetRefusal` sends 503 + `Retry-After` for `refused`, 429 for `limited`. Named tests: `admission.test.ts:330` "with no flag set every class is fail-open", `:339` "a fail-closed class is refused in enforce", `:346` "a breaker refusal of a fail-closed class is a bypass in shadow", `:355` "only a breaker refusal is policed", `http.admission.test.ts:274` "an open cache breaker is a bypass for a fail-open class and a 503 for a fail-closed one". |
 
-**Score:** 4/5 truths verified (1a, 1b, 2a, 2b). 1c is present but behaviour-unverified. Both ROADMAP success criteria are verified by their named tests.
+**Score:** 2/2 truths verified
 
-### ROADMAP Success Criteria
+### Operator-gated (not a repo gap)
 
-| # | Criterion | Status | Evidence |
-| - | --------- | ------ | -------- |
-| 1 | With the cache breaker open, brief and recall return authoritative results. A test proves it. | ✓ VERIFIED | 1a and 1b: both named tests present and code paths unchanged since they passed |
-| 2 | Admission under an open breaker follows a declared policy per class (fail open or closed), set in flags. | ✓ VERIFIED | 2a and 2b: policy code, flag registry, config parsing and boot-refusal all present at HEAD |
+A live proof against the production cache plane is outside this plan. It is not claimed and does not fail either roadmap criterion.
+
+### Required Artifacts
+
+| Artifact | Expected | Status | Details |
+| -------- | -------- | ------ | ------- |
+| `packages/mcp-server/src/cache.ts` | breaker-aware fallback, `staleGenerations` | ✓ VERIFIED | Substantive (1291 lines), wired via `service.ts` `ReadThroughCache` gate; `breakerRetryAfterMs` only on `BreakerOpenError`. |
+| `packages/mcp-server/src/admission.ts` | per-class fail-open/closed `refused`/`bypass` | ✓ VERIFIED | Substantive (532 lines), wired; `budgetBody` `cache_unavailable`. |
+| `packages/mcp-server/src/config.ts` | `loadAdmissionSettings` flag parsing | ✓ VERIFIED | Substantive (2613 lines); `ConfigError` names the variable; unguarded call in `loadConfig`. |
+| `packages/mcp-server/src/server.ts` | 503 + `Retry-After` for `refused` | ✓ VERIFIED | `sendBudgetRefusal` at `server.ts:640-641`. |
+| `packages/mcp-server/src/flag-registry.ts` | `CLASS_BREAKER_NAMES` family | ✓ VERIFIED | `flag-registry.ts:189` members from `ADMISSION_CLASSES`. |
+| `packages/observability/src/slo.ts` | `refused` out of SLO numerator | ✓ VERIFIED | `slo.ts:349,368` documents exclusion by design (R3). |
+| `packages/mcp-server/src/cache-breaker.test.ts` | C1 named tests | ✓ VERIFIED | 156 lines; `:73`, `:99`, `:118`, `:146`. |
+| `packages/mcp-server/src/admission.test.ts` | C2 policy matrix + flag parsing | ✓ VERIFIED | 754 lines; `:330`, `:339`, `:346`, `:355`. |
+| `packages/mcp-server/src/http.admission.test.ts` | HTTP 200/503 pair | ✓ VERIFIED | 416 lines; `:274` asserts `{error:"cache_unavailable", class:"read", retry_after_s:2}`. |
+| `docs/config-reference.md`, `docs/observability.md` | flags + fallback documented | ✓ VERIFIED | Covered by fingerprint; hand-rendered rows present. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 | ---- | -- | --- | ------ | ------- |
-| `service.ts` brief | `cache.ts` `getOrLoad` | `klass: "brief"` with live compose as `load` (`service.ts:2436`) | ✓ WIRED | Brief answers from the source when the gate refuses |
-| `cache.ts` `run()` | `breaker.ts` `callPlane` | `planes.gate("cache")` (`service.ts:1807`, `cache.ts:411`) | ✓ WIRED | Open breaker refuses before any socket is opened |
-| `admission.ts` `admit` | `server.ts` 503 path | verdict `refused` (`admission.ts:392-394,461`, `server.ts:638`) | ✓ WIRED | fail-closed enforce only |
-| `config.ts` `loadConfig` | `loadAdmissionSettings` | unguarded call | ✓ WIRED | Invalid value refuses boot |
+| `cache.ts` `script` | admission `admission.ts:440` | `ScriptOutcome.breakerRetryAfterMs` | ✓ WIRED | Set only on `BreakerOpenError` (`cache.ts:1082`); admission polices only that signal. |
+| `service.ts` | `ReadThroughCache` | `gate("cache")` | ✓ WIRED | Unchanged since prior pass; tests exercise the gated path. |
+| `config.ts` `loadConfig` | `loadAdmissionSettings` | unguarded call (`config.ts:1244`) | ✓ WIRED | Invalid `_BREAKER` value refuses boot. |
+| `server.ts` `sendBudgetRefusal` | HTTP client | 503 + `Retry-After`, body from `budgetBody` | ✓ WIRED | Both REST and MCP refusal paths. |
+
+### Data-Flow Trace (Level 4)
+
+| Artifact | Data Variable | Source | Produces Real Data | Status |
+| -------- | ------------- | ------ | ------------------ | ------ |
+| brief under open breaker | composed brief | index `load`, not cache hit | Yes, in named test | ✓ FLOWING |
+| recall under open breaker | recall reply | Hindsight fake equal to uncached substrate | Yes, in named test | ✓ FLOWING |
+| fail-closed refusal body | `error`, `retry_after_s` | breaker wait on `ScriptOutcome` | Yes | ✓ FLOWING |
 
 ### Behavioral Spot-Checks
 
-Not run in this pass per assignment (no test execution). Prior pass (2026-11-18) ran the four named tests: all 1 pass / 0 fail. Files under test are unchanged since that run, so the results carry forward as regression evidence.
-
 | Behavior | Command | Result | Status |
 | -------- | ------- | ------ | ------ |
-| Brief answers from the index with the breaker open (1a) | prior run, unchanged code | 1 pass, 0 fail | ✓ PASS (carried forward) |
-| Recall equals the uncached reply with the breaker open (1b) | prior run, unchanged code | 1 pass, 0 fail | ✓ PASS (carried forward) |
-| Admission policy per class over an open breaker (2a) | prior run, unchanged code | 1 pass, 0 fail | ✓ PASS (carried forward) |
-| Invalid breaker flag refuses boot (2b) | prior run, unchanged code | 1 pass, 0 fail | ✓ PASS (carried forward) |
-| Degraded brief with breaker open (1c) | none (no test combines an open breaker with a failing live source) | not run | ? SKIP → H-1 |
-| Live Dragonfly stop, real 503 | requires a running server and Dragonfly | not run | ? SKIP → H-2, H-3 |
+| C1 and C2 named tests | `bun test packages/mcp-server/src/cache-breaker.test.ts packages/mcp-server/src/admission.test.ts packages/mcp-server/src/http.admission.test.ts` (re-run 2026-11-20, no live Dragonfly) | 85 pass, 0 fail, 1337 expect() calls, 1.37s | ✓ PASS |
+| Live Dragonfly | — | operator-gated, not a task | SKIP |
 
-Probe execution (Step 7c): SKIPPED. Not a migration or tooling phase; no PLAN, SUMMARY or success criterion mentions probes.
+### Probe Execution
+
+No phase probe scripts. Step 7c not applicable.
 
 ### Requirements Coverage
 
-No PLAN exists for this phase, so there are no plan `requirements:` IDs. Not evaluated beyond this note.
+| Requirement | Source Plan | Description | Status | Evidence |
+| ----------- | ---------- | ----------- | ------ | -------- |
+| HARD-R2 | 75-01 (phase 75) | Reuse cache-plane breaker. On outage, reads fall back or report degradation. No authoritative state only in the cache. | ✓ SATISFIED | Breaker reuse via `callPlane`/`BreakerOpenError`. Brief/recall tests fall through to source. Fail-closed answers 503 `cache_unavailable` with `Retry-After`. Default fail-open still admits with source answer. Live plane proof operator-gated. |
+
+### Decision Coverage
+
+All trackable CONTEXT.md decisions honored (5/5: D75-1, D75-2, D75-2a, D75-3, D75-4). Non-blocking. No source edits made by this verification.
 
 ### Anti-Patterns Found
 
-| File | Line | Pattern | Severity | Impact |
-| ---- | ---- | ------- | -------- | ------ |
-| `packages/mcp-server/src/cache.ts` | 502 | `staleGenerations` is an in-process `Set` (residual R1 in CONTEXT, predates this phase) | ℹ️ Info | Cross-process or post-restart staleness is bounded by the 5-minute brief TTL |
-| `packages/mcp-server/src/cache.ts` | 408-409 | Connect-cooldown refusal rejects with a plain `Error`, not `BreakerOpenError`, so a fail-closed class admits during the 5 s cooldown while the breaker may be closed | ⚠️ Warning | Outside the criterion's "open breaker" scope; routed to H-5 for an explicit decision |
-| `.planning/phases/75-dragonfly-degradation/75-CONTEXT.md` | D75-2 / Flags | CONTEXT says `shadow` records `shadow_limited` for a breaker refusal; code (`admission.ts:392-394`) and `flag-registry.ts` / `config-reference.md` say shadow admits and counts `bypass` | ℹ️ Info | Documentation drift only; the tested behaviour is bypass in shadow |
-| `packages/mcp-server/src/` | - | No `TODO`, `FIXME`, `XXX` in the covered phase files | ✓ | No debt-marker blockers |
+None in phase paths that block the goal. `refused` excluded from admission SLO numerator by design (R3). Cross-process staleness after refused bump (R1) documented, bounded by 5-minute brief TTL, out of scope.
 
-## Human Verification Required
+### Human Verification Required
 
-### H-1. Degraded brief with the breaker open and the live source failing (1c)
-**Test:** Open the cache breaker (`PlaneRegistry` with `failureThreshold: 1`, or a real plane failure). Make the brief's live source throw, for example `getGraph`. Call `briefDetailed` for the same repo and graph.
-**Expected:** State `degraded`; no brief-snapshot text served; the cache answers nothing; the brief does not throw.
-**Why human:** The degraded-brief tests use a healthy or failing `FakeRedis` with no breaker. The combined path is unexercised — confirmed still unexercised at HEAD `ee998735`.
+N/A — infrastructure phase. Acceptance is the named tests, all passing without live Dragonfly. Live cache plane is an operator checkpoint outside the plan, not a repo failure. No UAT.md created.
 
-### H-2. Live stop of Dragonfly while brief and recall run
-**Test:** Full stack up, default flags (nothing set). Stop the live Dragonfly. Call `POST /brief` and `POST /memory/recall`.
-**Expected:** 200 with authoritative source content; each returns within the command timeout; cache health reports degraded.
-**Why human:** In-process tests use an unreachable port or an injected open breaker.
+### Gaps Summary
 
-### H-3. Live fail-closed 503 with Retry-After
-**Test:** `SUBSTRATE_BUDGETS=enforce`, `SUBSTRATE_BUDGET_READ_BREAKER=fail-closed`. Stop Dragonfly and drive failures until the breaker opens. Call `POST /brief`.
-**Expected:** HTTP 503, body `{"error":"cache_unavailable","class":"read","retry_after_s":N}`, `Retry-After: N`, and one `substrate.admission.decisions{decision="refused"}` increment.
-**Why human:** `http.admission.test.ts` injects a `BreakerOpenError` into a fake redis.
-
-### H-4. Refused-decision metric in the real pipeline; operator acceptance of the read policy
-**Test:** (a) Check `/metrics`, the OTel/Greptime export and dashboards for `substrate.admission.decisions{decision="refused"}`, and confirm it is outside `admission.limited_rate`. (b) Confirm the operator accepts that with `SUBSTRATE_BUDGET_READ_BREAKER=fail-closed` and the breaker open, `/brief` and `/memory/recall` answer 503 without reaching the authoritative source.
-**Expected:** (a) the series exists with class and surface labels; (b) the operator confirms the policy is intended.
-**Why human:** Live exporter and dashboard delivery are not in code; the read-policy consequence is a declared decision (D75-2).
-
-### H-5. Cooldown window for fail-closed classes
-**Test:** Decide whether a fail-closed class may admit during the 5 s connect cooldown while the breaker is still closed.
-**Expected:** An explicit decision recorded in this file or in CONTEXT.
-**Why human:** Criterion 2 is scoped to an open breaker; the cooldown is a separate mechanism.
-
-### Residual risks (carried from CONTEXT, unchanged)
-- **R1** cross-process staleness after a refused generation bump (bounded by the 5-minute brief TTL). Follow-up, not in this phase.
-- **R3** `refused` is not in the admission SLO numerator (`slo.ts`); a cache outage is the breaker's signal, not a budget breach.
+None. Both roadmap criteria hold on current code; re-run confirms prior pass. No live Dragonfly proof claimed.
 
 ---
 
-_Verified: 2026-11-19T13:23:40Z_
+_Verified: 2026-11-20T01:26:13Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Addendum — retained origin/main evidence (2026-11-19, HEAD `ee998735`)
+
+Merge note: HEAD above (2026-11-20 re-verification, passed 2/2, named tests re-run 85 pass / 0 fail) is the primary verdict and supersedes the origin/main record (`human_needed`, 4/5 sub-truths, v3). The finer origin/main truth split is retained below as evidence; its items are operator/live or residual-risk, not repo gaps, consistent with HEAD's `operator_gated` live-plane item.
+
+**Truth split (origin/main, maps onto HEAD truths 1–2):** 1a brief under open breaker → authoritative index result, and 1b recall → authoritative Hindsight result, both `VERIFIED` by the same named tests cited in truth 1; 2a per-class admission policy and 2b flag declaration/boot-refusal, both `VERIFIED` as in truth 2. **1c (retained residual):** degraded-brief sub-truth — breaker open with the live source failing, the refused snapshot read leaves the brief `degraded` with no stale serve (`service.ts:2477,2542` `snapshotSurvivesForget`, `cache.ts:889`) — was `PRESENT_BEHAVIOR_UNVERIFIED` in origin/main because no test combined an open breaker with a failing live source. It is a sub-truth, not a ROADMAP criterion; retained here as a residual risk, not a gap under HEAD's passed verdict.
+
+**Operator/live items recorded only in origin/main (H-1–H-5, retained):** H-1 the 1c combined path above; H-2 live Dragonfly stop, then `POST /brief`/`/memory/recall` at default flags answer 200 from the authoritative source within timeout with health `degraded`; H-3 live fail-closed 503 `cache_unavailable` with `Retry-After` and one `substrate.admission.decisions{decision="refused"}` increment; H-4 refused-decision series in the real pipeline (`/metrics`, OTel/Greptime export, dashboards) plus operator acceptance of the read policy (D75-2); H-5 explicit decision on whether a fail-closed class may admit during the 5 s connect cooldown, where `cache.ts:408-409` rejects with a plain `Error`, not `BreakerOpenError`, while the breaker may still be closed. Also retained: anti-pattern notes that `staleGenerations` (`cache.ts:502`) is an in-process `Set` (residual R1, bounded by the 5-minute brief TTL) and that CONTEXT.md D75-2's `shadow` wording drifts from the tested `bypass` behavior.

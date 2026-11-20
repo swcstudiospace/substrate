@@ -1,11 +1,12 @@
 """Per-Graph-ID git worktrees (D-12).
 
-A dispatched session works in ``<root>/<graph_id>`` on branch ``substrate/<graph_id>``, where ``<root>`` is the
-first of ``SUBSTRATE_WORKTREE_ROOTS`` or ``/var/lib/substrate/worktrees`` when no absolute root is set. The worktree
-is reused when git already has it registered, created from the existing branch when only the branch exists, and
-created with a new branch otherwise.
-Creation is refused when the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB) is not met on the
-filesystem holding the root, or on ``/`` when no root is configured, and no git command runs in that case.
+A dispatched session works in ``<root>/<graph_id>`` on branch
+``substrate/<graph_id>``. The worktree is reused when git already has it registered, created
+from the existing branch when only the branch exists, and created with a new branch otherwise.
+The root is the first absolute entry of ``SUBSTRATE_WORKTREE_ROOTS`` (the same variable the fleet and the collector
+read), else ``/var/lib/substrate/worktrees``. Creation is refused when the filesystem that holds the root has less than
+the free-disk floor (``SUBSTRATE_WORKTREE_MIN_FREE_GB``, default 5 GiB), and no git command runs in that case.
+Repository checkouts are looked up under ``REPOS_ROOT`` and the configured roots, and a repository outside them is refused.
 Every git call is an argv list (never a shell), and nothing here ever deletes a directory or
 checks out a branch in the main checkout.
 """
@@ -19,12 +20,13 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 WORKTREES_ROOT = Path("/var/lib/substrate/worktrees")
 REPOS_ROOT = Path("/root/src/repos")
+ROOTS_ENV = "SUBSTRATE_WORKTREE_ROOTS"
 DEFAULT_MIN_FREE_GB = 5
 MIN_FREE_ENV = "SUBSTRATE_WORKTREE_MIN_FREE_GB"
 WORKTREE_ROOTS_ENV = "SUBSTRATE_WORKTREE_ROOTS"
@@ -59,30 +61,43 @@ def min_free_bytes(env: Mapping[str, str] | None = None) -> int:
 
 
 def worktree_roots(env: Mapping[str, str] | None = None) -> list[Path]:
-    """The directories in ``SUBSTRATE_WORKTREE_ROOTS``, in the order written.
+    """The absolute entries of ``SUBSTRATE_WORKTREE_ROOTS`` in the order written, normalised and de-duplicated.
 
-    Read as the fleet's ``worktreeRootsFromEnv`` reads it: colon-separated, blank and relative entries
-    dropped, the rest normalised and de-duplicated.
+    A relative or blank entry is dropped, as the fleet and the collector drop it, so the three readers agree.
     """
-    raw = (os.environ if env is None else env).get(WORKTREE_ROOTS_ENV)
-    if raw is None:
-        return []
+    raw = (os.environ if env is None else env).get(ROOTS_ENV, "")
     roots: list[Path] = []
     for part in raw.split(":"):
         entry = part.strip()
-        if entry == "" or not os.path.isabs(entry):
+        if not entry or not os.path.isabs(entry):
             continue
-        root = Path(os.path.normpath(entry))
-        if root not in roots:
-            roots.append(root)
+        normal = Path(os.path.normpath(entry))
+        if normal not in roots:
+            roots.append(normal)
     return roots
 
+
+def worktree_root(env: Mapping[str, str] | None = None) -> Path:
+    """Where a graph's worktree is created: the first configured root, else ``WORKTREES_ROOT``.
+
+    The collector attributes a path to the first root that contains it, so the first root is the one that keeps a
+    dispatched worktree attributed to its graph.
+    """
+    roots = worktree_roots(env)
+    return roots[0] if roots else WORKTREES_ROOT
 
 def creation_root(env: Mapping[str, str] | None = None) -> Path:
     """Where new worktrees are created: the first configured root, else ``WORKTREES_ROOT``."""
     roots = worktree_roots(env)
     return roots[0] if roots else WORKTREES_ROOT
 
+
+def _space_probe(path: Path) -> Path:
+    """The nearest existing ancestor of ``path``: the filesystem a worktree created there would use."""
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return probe
 
 def _nearest_existing(path: Path) -> Path:
     """The nearest existing directory at or above ``path``, so a root not created yet still has a filesystem."""
@@ -134,20 +149,45 @@ def _origin_matches(url: str, slug: str) -> bool:
     return norm == want or norm.endswith("/" + want) or norm.endswith(":" + want)
 
 
-def repo_checkout(slug: str, *, root: Path = REPOS_ROOT, run: Runner = subprocess.run) -> Path:
-    """Map an ``owner/name`` slug to its checkout ``<root>/<name>``, verified by its origin URL."""
+def repo_roots(env: Mapping[str, str] | None = None) -> list[Path]:
+    """Where a repository checkout may sit: ``REPOS_ROOT`` first, then the configured roots, de-duplicated.
+
+    ``REPOS_ROOT`` is always searched, so primary checkouts stay found when ``SUBSTRATE_WORKTREE_ROOTS`` places worktrees
+    elsewhere. Read from the environment at call time. A repository outside every root is not dispatched.
+    """
+    roots = [REPOS_ROOT]
+    for root in worktree_roots(env):
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def repo_checkout(slug: str, *, roots: Sequence[Path] | None = None, run: Runner = subprocess.run) -> Path:
+    """Map an ``owner/name`` slug to its checkout ``<root>/<name>``, taking the first root whose checkout has that origin.
+
+    ``roots`` defaults to :func:`repo_roots`. A slug whose checkout lies under no root is refused, so the configured
+    roots bound which repositories the dispatcher checks out.
+    """
     if not isinstance(slug, str) or not REPO_SLUG_RE.fullmatch(slug):
         raise WorktreeRefused(f"invalid repo slug {slug!r}", "no-checkout")
-    root = Path(root)
-    path = root / slug.split("/")[1]
-    if path.resolve().parent != root.resolve():
-        raise WorktreeRefused(f"repo slug {slug!r} escapes {root}", "no-checkout")
-    if not (path / ".git").exists():
-        raise WorktreeRefused(f"no git checkout for {slug} at {path}", "no-checkout")
-    origin = _git(run, path, "remote", "get-url", "origin")
-    if origin.returncode != 0 or not _origin_matches(origin.stdout, slug):
-        raise WorktreeRefused(f"checkout {path} is not origin {slug}", "no-checkout")
-    return path
+    name = slug.split("/")[1]
+    search = repo_roots() if roots is None else [Path(root) for root in roots]
+    mismatched: list[Path] = []
+    for root in search:
+        candidate = root / name
+        if candidate.resolve().parent != root.resolve():
+            raise WorktreeRefused(f"repo slug {slug!r} escapes {root}", "no-checkout")
+        if not (candidate / ".git").exists():
+            continue
+        origin = _git(run, candidate, "remote", "get-url", "origin")
+        if origin.returncode == 0 and _origin_matches(origin.stdout, slug):
+            return candidate
+        mismatched.append(candidate)
+    if mismatched:
+        found = ", ".join(str(path) for path in mismatched)
+        raise WorktreeRefused(f"no checkout of {slug}: {found} has a different origin", "no-checkout")
+    listed = ", ".join(str(root) for root in search) or "no root"
+    raise WorktreeRefused(f"no git checkout for {slug} under {listed}", "no-checkout")
 
 
 def _registered(run: Runner, repo: Path, path: Path) -> bool:

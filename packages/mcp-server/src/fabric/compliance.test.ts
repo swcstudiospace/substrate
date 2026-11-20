@@ -55,15 +55,15 @@ describe("buildFabricCompliance", () => {
 	test("an unconfigured resource is never a pass: every resource check is not applicable", () => {
 		const { checks } = report(unconfiguredFacts());
 		const resourceChecks = checks.filter((candidate) => candidate.id.startsWith("resource-state."));
-		expect(resourceChecks).toHaveLength(9);
+		expect(resourceChecks).toHaveLength(8);
 		for (const candidate of resourceChecks) expect(candidate.status).toBe("NOT_APPLICABLE");
 	});
 
 	test("a degraded or unavailable resource fails its check, and an ok one passes", () => {
 		const facts = healthyFacts({
-			services: { ...healthyFacts().services, ragflow: { configured: true, held: false, answered: false, breaker: "closed", degraded: false, source: "health().planes.ragflow" } },
+			services: { ...healthyFacts().services, lightrag: { configured: true, held: false, answered: false, breaker: "closed", degraded: false, source: "health().planes.lightrag" } },
 		});
-		expect(check(facts, "resource-state.ragflow")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.ragflow" });
+		expect(check(facts, "resource-state.lightrag")).toMatchObject({ status: "FAIL", evidence: "state unavailable; source: health().planes.lightrag" });
 		expect(check(facts, "resource-state.greptime").status).toBe("PASS");
 	});
 

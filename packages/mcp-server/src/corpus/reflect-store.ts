@@ -4,7 +4,7 @@
  * (`corpus_feedback`) and the gap aggregate over the rows. Both tables come from migration step 38.
  */
 import type { SQL } from "bun";
-import type { FeedbackCounts } from "@substrate/corpus";
+import type { CorpusShadowRow, FeedbackCounts } from "@substrate/corpus";
 
 /** The closed list of verdicts a session may give a document. */
 export const FEEDBACK_VERDICTS = ["helpful", "unhelpful", "stale", "wrong", "duplicate"] as const;
@@ -22,8 +22,14 @@ export const RETRIEVAL_QUERY_TEXT_CHARS = 200;
 export const RETRIEVAL_KEY_CHARS = 300;
 /** The most rows one retention sweep deletes, so a sweep never holds a long lock. */
 export const RETRIEVAL_SWEEP_BATCH = 1000;
-/** The most document keys the feedback counts hold: a bound on memory and on the grouped query. */
-export const FEEDBACK_MAX_KEYS = 5000;
+/**
+ * The most document keys the feedback counts hold. It equals the manifest's own read cap (`AUTHORITY_MAX_ROWS`): the counts are
+ * read only for documents with an active row, so every document the authority index can see keeps its votes, and the bound is the
+ * one the index already has.
+ */
+export const FEEDBACK_MAX_KEYS = 100_000;
+/** The most keys one shadow row keeps in its order. */
+export const SHADOW_ORDER_KEYS = 10;
 /** The window `GET /corpus/gaps` aggregates over, in days. */
 export const GAP_WINDOW_DAYS = 30;
 
@@ -63,6 +69,20 @@ export interface FeedbackEntry {
 	surface: string;
 }
 
+/** What the shadow report reads: the window and the most rows to list. */
+export interface ShadowQuery {
+	days: number;
+	limit: number;
+}
+
+/** The shadow report's aggregate over one window, as the store computes it. */
+export interface ShadowAggregate {
+	searches: number;
+	movedSearches: number;
+	moved: number;
+	largest: CorpusShadowRow[];
+}
+
 /** One aggregate row of the gap report. */
 export interface GapRow {
 	queryHash: string;
@@ -91,8 +111,14 @@ export interface ReflectStore {
 	sweepRetrievals(retentionDays: number, batch: number): Promise<number>;
 	/** One verdict per (document, session): the latest wins. */
 	upsertFeedback(entry: FeedbackEntry): Promise<void>;
-	/** Verdict counts per document key, one grouped query over at most `maxKeys` keys (the most recently voted on first). */
+	/**
+	 * Verdict counts per document key: one grouped query over at most `maxKeys` documents that hold an active manifest row, the most
+	 * recently voted on first. A surface counts once per document: its latest verdict, whichever of its sessions gave it, so one
+	 * surface cannot reach the stale threshold by posting under many session ids.
+	 */
 	feedbackCounts(maxKeys: number): Promise<Map<string, FeedbackCounts>>;
+	/** The shadow report over the window: how many searches the re-rank would have moved, and the largest moves. */
+	shadowReport(query: ShadowQuery): Promise<ShadowAggregate>;
 	/** Query hashes whose best score in the window was below the gap score, most searched first. */
 	gaps(query: GapQuery): Promise<GapRow[]>;
 }
@@ -100,6 +126,21 @@ export interface ReflectStore {
 function numberOf(value: unknown): number {
 	const parsed = Number(value);
 	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** The `rerank` column as the shadow note the search wrote: its moved count and the keys it would have answered in, or null when it does not read as one. */
+export function shadowOf(value: unknown): { moved: number; order: string[] } | null {
+	if (typeof value !== "string") return null;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch {
+		return null;
+	}
+	if (parsed === null || typeof parsed !== "object") return null;
+	const { moved, order } = parsed as { moved?: unknown; order?: unknown };
+	if (typeof moved !== "number" || !Number.isFinite(moved) || !Array.isArray(order)) return null;
+	return { moved, order: order.filter((key): key is string => typeof key === "string").slice(0, SHADOW_ORDER_KEYS) };
 }
 
 function isoOf(value: unknown): string {
@@ -131,15 +172,20 @@ export function bunReflectStore(sql: SQL): ReflectStore {
 		},
 		async feedbackCounts(maxKeys: number): Promise<Map<string, FeedbackCounts>> {
 			const rows: Array<Record<string, unknown>> = await sql`
-				select document_key,
-					count(*) filter (where verdict = 'helpful')::int as helpful,
-					count(*) filter (where verdict = 'unhelpful')::int as unhelpful,
-					count(*) filter (where verdict = 'stale')::int as stale,
-					count(*) filter (where verdict = 'wrong')::int as wrong,
-					count(*) filter (where verdict = 'duplicate')::int as duplicate
-				from corpus_feedback
-				group by document_key
-				order by max(at) desc, document_key
+				select f.document_key,
+					count(*) filter (where f.verdict = 'helpful')::int as helpful,
+					count(*) filter (where f.verdict = 'unhelpful')::int as unhelpful,
+					count(*) filter (where f.verdict = 'stale')::int as stale,
+					count(*) filter (where f.verdict = 'wrong')::int as wrong,
+					count(*) filter (where f.verdict = 'duplicate')::int as duplicate
+				from (
+					select distinct on (document_key, surface) document_key, surface, verdict, at
+					from corpus_feedback
+					order by document_key, surface, at desc
+				) f
+				join corpus_documents d on d.repo || ':' || d.path = f.document_key and d.state = 'active'
+				group by f.document_key
+				order by max(f.at) desc, f.document_key
 				limit ${maxKeys}`;
 			const counts = new Map<string, FeedbackCounts>();
 			for (const row of rows) {
@@ -153,6 +199,32 @@ export function bunReflectStore(sql: SQL): ReflectStore {
 				});
 			}
 			return counts;
+		},
+		async shadowReport(query: ShadowQuery): Promise<ShadowAggregate> {
+			const totalRows: Array<Record<string, unknown>> = await sql`
+				select count(*)::int as searches,
+					count(*) filter (where (rerank->>'moved')::int > 0)::int as moved_searches,
+					coalesce(sum((rerank->>'moved')::int), 0)::int as moved
+				from corpus_retrievals
+				where at >= now() - make_interval(days => ${query.days}) and not degraded and rerank is not null`;
+			const rows: Array<Record<string, unknown>> = await sql`
+				select query_hash, query_text, at, rerank::text as rerank
+				from corpus_retrievals
+				where at >= now() - make_interval(days => ${query.days}) and not degraded and rerank is not null
+					and (rerank->>'moved')::int > 0
+				order by (rerank->>'moved')::int desc, at desc, query_hash
+				limit ${query.limit}`;
+			const totals = totalRows[0] ?? {};
+			return {
+				searches: numberOf(totals.searches),
+				movedSearches: numberOf(totals.moved_searches),
+				moved: numberOf(totals.moved),
+				largest: rows.flatMap((row): CorpusShadowRow[] => {
+					const parsed = shadowOf(row.rerank);
+					if (typeof row.query_hash !== "string" || parsed === null) return [];
+					return [{ queryHash: row.query_hash, text: typeof row.query_text === "string" ? row.query_text : null, at: isoOf(row.at), moved: parsed.moved, order: parsed.order }];
+				}),
+			};
 		},
 		async gaps(query: GapQuery): Promise<GapRow[]> {
 			const rows: Array<Record<string, unknown>> = await sql`

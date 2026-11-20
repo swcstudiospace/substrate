@@ -13,6 +13,7 @@ import {
 	type SteeringAuditSql,
 	type SteeringAuditTransition,
 	type SteeringSavedRow,
+	type SteeringSessionRow,
 } from "./steering-store.ts";
 
 const HUMAN = "ops.lead";
@@ -26,6 +27,7 @@ const SECRET = "ghp_" + "c".repeat(36);
  */
 class FakeAuditSql implements SteeringAuditSql {
 	readonly rows: SteeringAuditRow[] = [];
+	readonly sessions: SteeringSessionRow[] = [];
 	failWith: unknown = null;
 	failInsert: unknown = null;
 	loseReplyAfterCommit = false;
@@ -51,6 +53,11 @@ class FakeAuditSql implements SteeringAuditSql {
 		if (this.failReadBack !== null) throw this.failReadBack;
 		if (this.failWith !== null) throw this.failWith;
 		return this.saved.get(keyOf(directiveId, transition)) ?? null;
+	}
+
+	async insertSessionOutcome(row: SteeringSessionRow): Promise<void> {
+		if (this.failWith !== null) throw this.failWith;
+		if (!this.sessions.some((saved) => saved.directiveId === row.directiveId)) this.sessions.push({ ...row });
 	}
 }
 

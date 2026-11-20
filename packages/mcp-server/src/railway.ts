@@ -2,14 +2,14 @@ import type { DocsBackend, RailwayHostingConfig } from "./config.ts";
 
 /** Single source of truth lives in `config.ts`; re-exported so planes keep one import. */
 export type { DocsBackend } from "./config.ts";
-/** Backward default: existing hosts serve the RAGFlow plane until opted in. */
-export const DEFAULT_DOCS_BACKEND: DocsBackend = "ragflow";
+/** Hosts serve the LightRAG docs plane. */
+export const DEFAULT_DOCS_BACKEND: DocsBackend = "lightrag";
 
 /** Canonical planning-graph shapes live in `types.ts`; re-exported for fabric callers. */
 export type { PlanningGraphHint, PlanningGraphRelation } from "./types.ts";
 import type { PlanningGraphHint } from "./types.ts";
 
-/** The LightRAG image this Railway project hosts, next to RAGFlow. */
+/** The LightRAG image this Railway project hosts. */
 export const LIGHTRAG_DOCKER_IMAGE = "ghcr.io/hkuds/lightrag:latest";
 /** LightRAG's HTTP port inside its container. */
 export const LIGHTRAG_DEFAULT_PORT = 9621;
@@ -110,7 +110,7 @@ export type LightragHealth =
 
 /**
  * Provisions and reports the LightRAG service hosted in the same Railway
- * project as RAGFlow.
+ * project as lightrag.
  *
  * Railway-side mutations (create/get-service) are stubs: they return the
  * success shape with the exact plan, but perform no API call yet — the live

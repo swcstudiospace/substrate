@@ -20,7 +20,7 @@ import {
 	type BriefWorktreesInput,
 } from "./brief-sessions.ts";
 import { DeadlineError } from "./deadline.ts";
-import { renderCompactBrief, type BriefSection, type CompactLimits } from "./brief-profile.ts";
+import { DEFAULT_COMPACT_BYTES, DEFAULT_COMPACT_MEMORY_CHARS, DEFAULT_COMPACT_NODES, MIN_COMPACT_BYTES, renderCompactBrief, utf8Bytes, type BriefSection, type CompactLimits } from "./brief-profile.ts";
 import type { ContextSession, SessionContext } from "./session-context.ts";
 import { defined } from "./test-support.ts";
 
@@ -529,5 +529,51 @@ describe("composeLiveSections with the worktrees source", () => {
 	test("no worktrees source (registry off, no repository or no session) adds no section", async () => {
 		const sections = await composeLiveSections({ context: null, steering: null, handoffs: null, worktrees: null }, manualDeadline().race, NOW);
 		expect(sections).toEqual([]);
+	});
+});
+
+describe("the combined compact brief with every live section (criterion 3)", () => {
+	test("the compact byte cap holds with all four live sections beside a full cached brief, and the omitted line says what was dropped", async () => {
+		const cached: BriefSection[] = [
+			{ id: "heading", lines: ["# graph owner/name", "state: complete"], items: [{ text: `# graph owner/name ${"h".repeat(200)}` }] },
+			{ id: "nodes", lines: [], title: "Nodes", items: Array.from({ length: 12 }, (_, n) => ({ text: `- node ${n} ${"n".repeat(200)}`, rank: n })) },
+			{ id: "decisions", lines: [], title: "Decisions", items: Array.from({ length: 6 }, (_, n) => ({ text: `- decision ${n} ${"d".repeat(200)}` })) },
+			{ id: "actions", lines: [], title: "Actions", items: Array.from({ length: 4 }, (_, n) => ({ text: `- action ${n} ${"a".repeat(200)}` })) },
+		];
+		const live = await composeLiveSections(
+			{
+				context: async () => contextOf(Array.from({ length: 20 }, (_, n) => contextSession(n))),
+				steering: () => ({ ...steeringInput, pending: Array.from({ length: 12 }, (_, n) => ({ id: `d-${n}`, action: "pause", priority: "high", body: "word ".repeat(80), ageS: 5 })), pendingTotal: 12 }),
+				handoffs: async () => Array.from({ length: 30 }, (_, n) => ({ goal: `goal ${n} ${"g".repeat(300)}`, createdAtMs: NOW - n * 1_000, verified: true })),
+				worktrees: async () => wtInput(Array.from({ length: 10 }, (_, n) => wtRow({ path: `/w/${n}`, session_id: `sess-${n}`, files: [`src/${n}.ts`] }))),
+			},
+			manualDeadline().race,
+			NOW,
+		);
+		expect(live.map((section) => section.id)).toEqual(["sessions", "steering", "handoffs", "worktrees"]);
+		for (const bytes of [MIN_COMPACT_BYTES, DEFAULT_COMPACT_BYTES]) {
+			const brief = renderCompactBrief([...cached, ...live], COMPACT_STATE, { nodes: DEFAULT_COMPACT_NODES, memoryChars: DEFAULT_COMPACT_MEMORY_CHARS, bytes });
+			expect(utf8Bytes(brief)).toBeLessThanOrEqual(bytes);
+			expect(brief).toContain("# graph owner/name");
+			expect(brief).toMatch(/\.\.\.omitted: .*\(profile=compact; request profile=full\)$/);
+			expect(renderCompactBrief([...cached, ...live], COMPACT_STATE, { nodes: DEFAULT_COMPACT_NODES, memoryChars: DEFAULT_COMPACT_MEMORY_CHARS, bytes })).toBe(brief);
+		}
+	});
+
+	test("with the live sections alone the brief stays inside the smallest cap, and the lower-priority sections are the ones dropped", async () => {
+		const live = await composeLiveSections(
+			{
+				context: async () => contextOf(Array.from({ length: 20 }, (_, n) => contextSession(n))),
+				steering: () => steeringInput,
+				handoffs: async () => [{ goal: "ship it", createdAtMs: NOW - 5_000, verified: true }],
+				worktrees: null,
+			},
+			manualDeadline().race,
+			NOW,
+		);
+		const brief = renderCompactBrief(live, COMPACT_STATE, { nodes: DEFAULT_COMPACT_NODES, memoryChars: DEFAULT_COMPACT_MEMORY_CHARS, bytes: MIN_COMPACT_BYTES });
+		expect(utf8Bytes(brief)).toBeLessThanOrEqual(MIN_COMPACT_BYTES);
+		expect(brief).toContain("read the notes");
+		expect(brief).toContain("...omitted: sessions");
 	});
 });

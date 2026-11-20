@@ -53,7 +53,7 @@ non-object list (400 REST, protocol MCP). Skills propose: REST and MCP, with the
 and a git spy that must see no calls, plus a fake-seam control that moves the registry by one.
 Skills approve: REST and MCP, with five value refusals and a non-object list. Docs ingest:
 REST and MCP, with a valid control, seven refusals (including a valid page followed by an
-invalid one) and five non-object bodies, counted by RAGFlow uploads. The Postgres suites are
+invalid one) and five non-object bodies, counted by RAGFlow (retired, superseded by LightRAG) uploads. The Postgres suites are
 skipped without `SUBSTRATE_TEST_PG_URL`; the docs suite is not.
 PR #72's oversize tests are not duplicated: no body here is near the size cap.
 

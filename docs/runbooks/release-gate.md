@@ -35,8 +35,10 @@ Options: `--name <id>` (default `gate-<time>`; a name that already has a run dir
 One named check per row, each with its timing, then one line a log search or a deploy hook can key on:
 
 ```text
-gate-receipt name=<id> commit=<sha12> verdict=pass|fail|unavailable exit=<0|1|2> checks=N pass=N fail=N skip=N notes=N failed=<ids|-> unavailable=<reason|-> kept=<bool> ms=N
+gate-receipt name=<id> commit=<sha12> verdict=pass|fail|unavailable exit=<0|1|2> checks=N [pass, fail, skip, notes counts] failed=<ids|-> unavailable=<reason|-> kept=<bool> ms=N
 ```
+
+The four bracketed counts are `pass`, `fail`, `skip` and `notes`, each written as its name, `=`, and a number.
 
 | Check | Proves | Turns red when |
 | --- | --- | --- |
@@ -87,7 +89,7 @@ The gate does not prove, and its green must not be read as proving:
 
 - **Production configuration and host state.** It runs a fresh twin with a generated environment: no production env file, unit hardening, slices, redis/Dragonfly, swap, timers or file permissions. `bun run doctor:runtime` and `bun run parity:check` read the host and are separate.
 - **The cache plane.** The twin configures no redis, so cache behaviour (single-flight, stale-while-revalidate, generations) is not exercised. `SUBSTRATE_CACHE_SWR` can be set on the twin but has no cache to act on.
-- **Hindsight and RAGFlow.** Neither is configured on the twin; recall, the docs search and their breakers are not exercised.
+- **Hindsight and LightRAG.** Neither is configured on the twin; recall, the docs search and their breakers are not exercised. An unset docs URL on the twin degrades search and refuses ingest; it does not call another docs backend.
 - **The index outage.** By default the gate only freezes the ledger. `rehearsal pause --store index` and `SUBSTRATE_GATE_CHAOS_PLANES=1` (opt-in, not the ledger freeze) can pause the twin's own Postgres container; neither is on unless that flag is exactly `1`. Postgres loss and recovery are not proven by a default green gate.
 - **The production index archive.** A default gate does not prove the production index archive or anything under `/mnt/index-archive`. `SUBSTRATE_GATE_INDEX_DRILL=1` runs a scratch archive/restore drill against the twin's loopback Postgres and a temp directory under the run dir; it does not touch `/mnt/index-archive`. See [index-archive.md](index-archive.md).
 - **Production data volume, retention and latency.** Scratch stores run on tmpfs and are empty; the brief and SLO timings say nothing about production load. The GreptimeDB image is the local v0.14.4, not production's version (see [../rehearsal.md](../rehearsal.md)).

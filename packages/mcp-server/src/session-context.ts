@@ -18,6 +18,8 @@
  * - **Degrading.** Each source fails alone: a source that is not configured, throws or misses the deadline gives an empty list
  *   and one line in `notes`, never an exception. The digest is still an answer.
  * - **Never the caller's own.** With `session_id`, that session's own presence, steering and ledger rows are left out.
+ * - **Live only.** A presence record whose sign of life is past its TTL (`state: "stale"`) is left out: it is not a live session,
+ *   and listing it would spend the bounded sessions list on sessions that are gone.
  */
 import { sharedDeadline } from "./deadline.ts";
 import { normalizeIdentifier, scopeRepoId } from "./event.ts";
@@ -59,7 +61,7 @@ export interface PresenceRow {
 	worktree: string;
 	branch: string;
 	lastHeartbeatMs: number;
-	/** `active` or `stale`, as the presence classifier judged it. */
+	/** `active` or `stale`, as the presence classifier judged it. A `stale` row is not listed in the digest. */
 	state: string;
 }
 
@@ -274,7 +276,7 @@ export async function assembleSessionContext(request: SessionContextRequest, sou
 
 		// sessions: presence and steering, the caller's own left out.
 		const sessionRows: ContextSession[] = [
-			...(presence.ok ? presence.items.filter((row) => row.sessionId !== own).map(
+			...(presence.ok ? presence.items.filter((row) => row.sessionId !== own && row.state !== "stale").map(
 				(row): ContextSession => ({
 					session_id: clean(row.sessionId),
 					surface: null,

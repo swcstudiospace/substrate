@@ -69,7 +69,7 @@ through two connections to a real Postgres.
 1. Keep the `lease_id` from `graph_claim`. It is shown to you **once**, in the
    reply that grants it, and `graph_heartbeat`, `graph_release` and
    `graph_complete` all need it. Lost it? Re-claim with the same `session_id`,
-   from the same token: that renews the lease and returns the same id.
+   from the same token; doing so renews the lease and returns the same id.
 2. Heartbeat well inside the TTL for as long as you are working the node.
 3. **Stop on a refusal.** `ok: false` from a heartbeat means you no longer hold
    the node: `lost` if someone else does, `expired` if it lapsed — re-claim
@@ -82,7 +82,7 @@ through two connections to a real Postgres.
 
 ### Only the holder sees, or uses, a lease
 
-The `lease_id` is the fencing token: whoever presents it can extend, release
+The `lease_id` is the fencing token. Whoever presents it can extend, release
 or complete the node. So it reaches its holder and nobody else:
 
 - **Disclosure.** A reply carries `lease_id` only when it grants the lease or

@@ -391,7 +391,10 @@ export async function inspectWorktree(wt: InspectInput, options: InspectOptions)
 	base.last_commit_at = isoFromSeconds(commitTime);
 	base.merged = ancestorOfDefault === null ? null : ancestorOfDefault === 0 ? true : ancestorOfDefault === 1 ? false : null;
 	const remoteHasHead = wt.branch !== null ? ancestorOfRemote === 0 : remoteContains !== null && remoteContains !== "";
-	base.pushed = remoteHasHead || base.merged === true;
+	// A commit merged into the default branch is pushed only when that branch is a remote one. Without an origin, or without
+	// origin/HEAD, the default is a local branch, and a local merge proves nothing about what reached a remote.
+	const defaultIsRemote = defaultRef?.startsWith("origin/") === true;
+	base.pushed = remoteHasHead || (base.merged === true && defaultIsRemote);
 	base.pr_state = pr.state;
 	base.pr_number = pr.number;
 	base.pr_head_sha = pr.headSha;

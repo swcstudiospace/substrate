@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { type BranchFanoutRequest, type CrossRepoStore, compensateBranchFanout, crossRepoFanoutReply, crossRepoStatus, crossRepoStatusReply, fingerprintOf, runBranchFanout } from "./cross-repo-ops.ts";
-import { REPO_SCOPES_ENV, repoScopeFromEnv } from "./repo-scope.ts";
+import { REPO_ALLOWLIST_ENV } from "./repo-allowlist.ts";
 import { defaultScopedGitRunner, type ScopedGitResult } from "./repo-executor.ts";
 import { BRANCH, depsFor, FAILED, git, type Intercept, opOf, orFail, refIn, request, runnerWith, stepStates, world } from "./cross-repo-ops.testkit.ts";
 
@@ -231,18 +231,6 @@ describe("refusals run no git and write nothing", () => {
 		expect(w.store.writes).toBe(0);
 	});
 
-	test("an anonymous caller is refused when scoping is off, before any git call or store write", async () => {
-		const w = world(null);
-		let gitCalls = 0;
-		const { run } = runnerWith(() => {
-			gitCalls += 1;
-			return undefined;
-		});
-		expect(await runBranchFanout(request(), depsFor(w, run, null))).toMatchObject({ ok: false, reason: "repo-not-granted" });
-		expect(gitCalls).toBe(0);
-		expect(w.store.writes).toBe(0);
-	});
-
 	test("a repository with no registration is refused", async () => {
 		const w = world({ omp: ["owner/a", "owner/zzz"] });
 		const outcome = await runBranchFanout(request({ repos: [{ repo: "owner/a", base: "main" }, { repo: "owner/zzz", base: "main" }] }), depsFor(w, runnerWith().run));
@@ -316,46 +304,37 @@ describe("status exposes the stored operation to a granted surface only", () => 
 		expect(await crossRepoStatus("never-written", depsFor(w, runnerWith().run))).toBeNull();
 		expect(await crossRepoStatus("bad key", depsFor(w, runnerWith().run))).toBeNull();
 	});
-
-	test("an anonymous caller sees no operation, with scoping on or off", async () => {
-		const enforced = world();
-		await runBranchFanout(request(), depsFor(enforced, runnerWith().run));
-		expect(await crossRepoStatus("op-1", depsFor(enforced, runnerWith().run, null))).toBeNull();
-		const off = world(null);
-		await runBranchFanout(request(), depsFor(off, runnerWith().run, "omp"));
-		expect(await crossRepoStatus("op-1", depsFor(off, runnerWith().run, null))).toBeNull();
-	});
 });
 
-describe("the surface grant alone decides every git call: no second allowlist is read", () => {
-	test("a surface granted only one repository of the operation is refused before any git call, when the operation names the other", async () => {
-		const w = world({ omp: ["owner/a"] });
+describe("the session allowlist applies to every git call, on top of the surface grant", () => {
+	test("a surface granted a repository by its scope is refused when its allowlist entry does not name it, before any git call", async () => {
+		const w = world();
+		const env = { ...w.env, [REPO_ALLOWLIST_ENV]: JSON.stringify({ omp: { "owner/a": "XRO_TEST_CREDENTIAL_0" } }) };
 		let gitCalls = 0;
 		const { run } = runnerWith(() => {
 			gitCalls += 1;
 			return undefined;
 		});
-		const outcome = await runBranchFanout(request(), depsFor(w, run));
+		const outcome = await runBranchFanout(request(), depsFor(w, run, "omp", env));
 		expect(outcome).toMatchObject({ ok: false, reason: "repo-not-granted" });
 		expect(gitCalls).toBe(0);
 		expect(w.store.writes).toBe(0);
 	});
 
-	test("a malformed grant variable is refused at boot, so no scope reaches the engine, and a surface with no grant entry is refused every repository", async () => {
+	test("a malformed allowlist grants nothing: every repository is refused before any git call", async () => {
 		const w = world();
-		expect(repoScopeFromEnv({ ...w.env, [REPO_SCOPES_ENV]: "{not json" }).ok).toBe(false);
-		const ungranted = world({ cursor: ["owner/a", "owner/b"] });
+		const env = { ...w.env, [REPO_ALLOWLIST_ENV]: "{not json" };
 		const { run, writes } = runnerWith();
-		expect(await runBranchFanout(request(), depsFor(ungranted, run, "omp"))).toMatchObject({ ok: false, reason: "repo-not-granted" });
+		expect(await runBranchFanout(request(), depsFor(w, run, "omp", env))).toMatchObject({ ok: false, reason: "repo-not-granted" });
 		expect(writes).toHaveLength(0);
-		expect(ungranted.store.writes).toBe(0);
+		expect(w.store.writes).toBe(0);
 	});
 
-	test("a surface with no grant entry sees no operation, though another surface's operation is stored", async () => {
-		const w = world({ omp: ["owner/a", "owner/b"], cursor: ["owner/a", "owner/b"] });
+	test("a session absent from the allowlist sees no operation, though its surface is granted every repository", async () => {
+		const w = world();
 		await runBranchFanout(request(), depsFor(w, runnerWith().run));
-		expect(await crossRepoStatus("op-1", depsFor(w, runnerWith().run, "claude-code"))).toBeNull();
-		expect((await crossRepoStatus("op-1", depsFor(w, runnerWith().run, "omp")))?.status).toBe("done");
+		const env = { ...w.env, [REPO_ALLOWLIST_ENV]: "{}" };
+		expect(await crossRepoStatus("op-1", depsFor(w, runnerWith().run, "omp", env))).toBeNull();
 	});
 });
 
@@ -590,17 +569,6 @@ describe("the operator's compensation undoes a stored operation and never applie
 		expect(outcome).toMatchObject({ ok: false, reason: "repo-not-granted" });
 		expect(runner.writes).toHaveLength(0);
 		expect(refIn(w.checkoutA, BRANCH_REF)).not.toBeNull();
-	});
-
-	test("an operator with no surface is refused when scoping is off, before any git call, and the refs are left in place", async () => {
-		const w = world(null);
-		await runBranchFanout(request(), depsFor(w, runnerWith().run, "omp"));
-		const runner = runnerWith();
-		const outcome = await compensateBranchFanout("op-1", depsFor(w, runner.run, null), true);
-		expect(outcome).toMatchObject({ ok: false, reason: "repo-not-granted" });
-		expect(runner.writes).toHaveLength(0);
-		expect(refIn(w.checkoutA, BRANCH_REF)).not.toBeNull();
-		expect(refIn(w.checkoutB, BRANCH_REF)).not.toBeNull();
 	});
 });
 

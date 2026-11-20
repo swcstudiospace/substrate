@@ -5,9 +5,9 @@
  * Existing datasets are reused by name; creation happens only on a
  * name-miss with the pinned embedding model. Refresh records a version per
  * dataset and keeps the last five. The `agent-skills` refresh is driven by
- * skills-sync fast-forward evidence: with the sync unit not yet live there
- * is no evidence, so refresh degrades explicitly — one warning, and serve
- * from the last pinned version with the pin age in the reply.
+ * skills-sync fast-forward evidence. With the sync unit not yet live there
+ * is no evidence, so search marks `agent-skills` citations with the age of
+ * the pin they are served from (`degradedDatasets` in `service.ts`).
  *
  * The hook has no timer and no surface: the sync tick's projection step
  * calls `noteSkillsSyncFastForward`, and search consults `isSyncLive`.
@@ -19,22 +19,70 @@
  * production the 60 s `DatasetListCache`, invalidated by a create or a
  * failed list — instead of fetching the tenant's list per call.
  */
-import { createDataset, listDatasets, type DatasetListOutcome, type FetchLike, type RagflowConfig } from "./planes/ragflow.ts";
+import type { DatasetListOutcome, FetchLike } from "./planes/docs-wire.ts";
+type PlaneConfig = { url: string; apiKey: string };
 import type { DatasetPin } from "./docs-search.ts";
 import type { DocsBackend } from "./config.ts";
 import type { EventInput, Surface } from "./types.ts";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { CORPUS_DATASET } from "@substrate/corpus";
+import { gitLayout } from "./planning/checkout.ts";
+import type { PlanningCheckout } from "./planning/config.ts";
+import type { PlanningFs } from "./planning/index.ts";
 
-/** Every dataset this phase knows, with its refresh trigger. */
-export const DATASET_TRIGGERS: Readonly<Record<string, string>> = {
-	"agent-substrate": "merge to main of agent-substrate",
-	"programming-desk": "merge to main of programming-desk",
-	"agent-skills": "substrate-skills-sync fast-forward",
-	kanbanos: "merge to main of kanbanos",
-	desklanes: "merge to main of desklanes",
-	clippyos: "merge to main of clippyos",
-	auctioning: "merge to main of auctioning",
-	corpus: "SUBSTRATE_CORPUS bulk ingest (substrate corpus ingest --execute); no merge trigger",
-};
+/** The dataset the skills-sync fast-forward refreshes. The skills library is not a planning root, so it is named here. */
+export const SKILLS_DATASET = "agent-skills";
+
+/**
+ * The docs datasets the planning roots name: one LightRAG dataset per repo, named by the repo's directory under the repos
+ * root (`~/src/repos`). A checkout attributes to its repo through its git common directory, so a linked worktree lands on
+ * the repo it was cut from, wherever it is checked out. A checkout that cannot be attributed (no readable git data, a
+ * common directory not named `.git`, or a repo outside the repos root) gets a dataset of its own, named by its key.
+ */
+export interface PlanningDatasetRegistry {
+	/** The dataset each checkout's records are filed under, keyed by `PlanningCheckout.key`. */
+	readonly datasetOf: ReadonlyMap<string, string>;
+	/** Every dataset the planning roots name: sorted, without repeats. */
+	readonly datasets: readonly string[];
+}
+
+/** Derived once at startup from the configured checkouts. Never throws: a checkout that cannot be read keeps its own dataset. */
+export async function planningDatasetRegistry(
+	checkouts: readonly PlanningCheckout[],
+	fs: PlanningFs,
+	reposRoot: string = join(homedir(), "src", "repos"),
+): Promise<PlanningDatasetRegistry> {
+	const repos = resolve(reposRoot);
+	const datasetOf = new Map<string, string>();
+	for (const checkout of checkouts) datasetOf.set(checkout.key, await datasetOfCheckout(checkout, fs, repos));
+	return { datasetOf, datasets: [...new Set(datasetOf.values())].sort() };
+}
+
+async function datasetOfCheckout(checkout: PlanningCheckout, fs: PlanningFs, reposRoot: string): Promise<string> {
+	const owner = await ownerOf(checkout.root, fs);
+	return owner !== null && dirname(owner) === reposRoot ? basename(owner) : checkout.key;
+}
+
+/** The checkout directory that owns this checkout's git common directory, or null when it cannot be named. */
+async function ownerOf(root: string, fs: PlanningFs): Promise<string | null> {
+	try {
+		const layout = await gitLayout(fs, root);
+		if (!layout.ok || basename(layout.commonDir) !== ".git") return null;
+		return dirname(layout.commonDir);
+	} catch {
+		// gitLayout throws on an I/O failure. One unreadable checkout must not fail startup: it keeps its own dataset.
+		return null;
+	}
+}
+
+/**
+ * Every dataset a docs call may name: the planning repos, plus the skills library and the corpus, which no planning root
+ * names and which are therefore always known. Sorted.
+ */
+export function knownDatasets(registry: PlanningDatasetRegistry): readonly string[] {
+	return [...new Set([...registry.datasets, SKILLS_DATASET, CORPUS_DATASET])].sort();
+}
 
 /** How many versions each dataset keeps (D25-06). */
 export const DATASET_VERSION_RETENTION = 5;
@@ -72,7 +120,7 @@ export function latestVersion(store: VersionStore, dataset: string): DatasetVers
 
 /**
  * The newest version `backend` recorded for a dataset. A version completes a replay only under the backend that
- * indexed it: a RAGFlow record says nothing about what LightRAG holds, so a LightRAG replay finds none and uploads.
+ * indexed it: a lightrag record says nothing about what LightRAG holds, so a LightRAG replay finds none and uploads.
  */
 export function latestVersionFor(store: VersionStore, dataset: string, backend: DocsBackend): DatasetVersion | undefined {
 	const versions = store.get(dataset) ?? [];
@@ -84,13 +132,14 @@ export function latestVersionFor(store: VersionStore, dataset: string, backend: 
 }
 
 /**
- * The dataset list LightRAG reads, with no RAGFlow round trip. LightRAG names its datasets, so each wanted name is
- * its own id, whatever version a RAGFlow refresh recorded for it: a LightRAG record keyed by RAGFlow's id could not
- * be found again by the LightRAG plane. Sorted by name: search attributes every citation to the first dataset and
- * keys its cache on the sorted set, so the first must not depend on the caller's order.
+ * The dataset list LightRAG reads, with no lightrag round trip. Each listed dataset's id is `idOf(name)`: the identity its
+ * records are keyed under. A LightRAG record keyed by lightrag's id could not be found again by the LightRAG plane, so the
+ * default id is the name. The normal refresh passes the identity the migration replay keys by, so a record either writes is
+ * the record the other reads. Sorted by name: search attributes every citation to the first dataset and keys its cache on
+ * the sorted set, so the first must not depend on the caller's order.
  */
-export function lightragSearchDatasets(names: readonly string[]): DatasetListOutcome {
-	return { ok: true, datasets: [...names].sort().map((name) => ({ id: name, name })) };
+export function lightragSearchDatasets(names: readonly string[], idOf: (name: string) => string = (name) => name): DatasetListOutcome {
+	return { ok: true, datasets: [...names].sort().map((name) => ({ id: idOf(name), name })) };
 }
 
 /** The search pin a recorded version files under. */
@@ -142,8 +191,8 @@ export function versionsFromJson(value: unknown): VersionStore {
 		for (const row of rows) {
 			if (row === null || typeof row !== "object") continue;
 			const candidate = row as Record<string, unknown>;
-			// A row a state file wrote before the backend was recorded is a RAGFlow version: only the RAGFlow path recorded versions then.
-			const backend: DocsBackend | null = candidate.backend === undefined ? "ragflow" : candidate.backend === "ragflow" || candidate.backend === "lightrag" ? candidate.backend : null;
+			const rawBackend: unknown = candidate.backend;
+			const backend: DocsBackend | null = rawBackend === undefined || rawBackend === "lightrag" ? "lightrag" : null;
 			if (
 				typeof candidate.dataset !== "string" ||
 				typeof candidate.dataset_id !== "string" ||
@@ -226,14 +275,14 @@ export function triggersToJson(store: TriggerStore): Record<string, AcceptedTrig
 
 /**
  * The trigger store a state file's `triggers` member describes. Only the
- * trigger table's own dataset names are read (`Object.hasOwn`, never `in`),
+ * named `datasets` are read (`Object.hasOwn`, never `in`),
  * each list is scanned from its tail for at most `TRIGGER_SCAN_MAX` rows,
  * and a malformed, oversized or unparseable row is skipped. Never throws.
  */
-export function triggersFromJson(value: unknown): TriggerStore {
+export function triggersFromJson(value: unknown, datasets: readonly string[]): TriggerStore {
 	const store = createTriggerStore();
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return store;
-	for (const dataset of Object.keys(DATASET_TRIGGERS)) {
+	for (const dataset of datasets) {
 		if (!Object.hasOwn(value, dataset)) continue;
 		const rows: unknown = (value as Record<string, unknown>)[dataset];
 		if (!Array.isArray(rows)) continue;
@@ -264,21 +313,93 @@ export function triggersFromJson(value: unknown): TriggerStore {
 	return store;
 }
 
-/**
- * Where a dataset list comes from. Production hands every reader the
- * `DatasetListCache`; the module tests and the default use the plane
- * directly, with nothing to invalidate.
- */
-export interface DatasetListSource {
-	list(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome>;
-	/** Forget the held list: after a create, or after a failed list. */
-	invalidate(): void;
+const DATASET_EMBEDDING_MODEL = "tei-bge-small";
+const DATASET_CHUNK_METHOD = "naive";
+const DATASET_LIST_PAGE_SIZE = 100;
+
+async function callPlane(
+	config: PlaneConfig,
+	fetchImpl: FetchLike | undefined,
+	path: string,
+	init: { method: string; body?: string; timeoutMs: number },
+): Promise<{ ok: true; body: unknown } | { ok: false; reason: string }> {
+	const fetcher = fetchImpl ?? fetch;
+	let response: Response;
+	try {
+		response = await fetcher(`${config.url.replace(/\/+$/, "")}${path}`, {
+			method: init.method,
+			headers: { authorization: `Bearer ${config.apiKey}`, ...(init.body !== undefined ? { "content-type": "application/json" } : {}) },
+			...(init.body !== undefined ? { body: init.body } : {}),
+			signal: AbortSignal.timeout(init.timeoutMs),
+		});
+	} catch (cause) {
+		return { ok: false, reason: `lightrag: ${cause instanceof Error ? cause.message : String(cause)}` };
+	}
+	if (!response.ok) return { ok: false, reason: `lightrag ${response.status}` };
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return { ok: false, reason: "lightrag: response was not JSON" };
+	}
+	if (body !== null && typeof body === "object" && "code" in body) {
+		const code = (body as Record<string, unknown>).code;
+		if (code !== 0) {
+			const message = typeof (body as Record<string, unknown>).message === "string" ? (body as Record<string, unknown>).message : "request failed";
+			return { ok: false, reason: `lightrag: ${message}` };
+		}
+	}
+	return { ok: true, body };
 }
 
-export const DIRECT_DATASET_LIST: DatasetListSource = {
-	list: (config, fetchImpl) => listDatasets(config, fetchImpl),
-	invalidate: () => {},
-};
+function readString(entry: object, ...names: string[]): string | undefined {
+	for (const name of names) {
+		if (name in entry) {
+			const value = (entry as Record<string, unknown>)[name];
+			if (typeof value === "string") return value;
+		}
+	}
+	return undefined;
+}
+
+function dataOf(body: unknown): unknown {
+	return body !== null && typeof body === "object" && "data" in body ? (body as Record<string, unknown>).data : body;
+}
+
+export async function listDatasets(config: PlaneConfig, fetchImpl: FetchLike | undefined = fetch, timeoutMs = 4000): Promise<DatasetListOutcome> {
+	const answered = await callPlane(config, fetchImpl, `/api/v1/datasets?page=1&page_size=${DATASET_LIST_PAGE_SIZE}`, { method: "GET", timeoutMs });
+	if (!answered.ok) return answered;
+	const listed = dataOf(answered.body);
+	if (!Array.isArray(listed)) return { ok: false, reason: "lightrag: unexpected dataset list shape" };
+	const datasets: Array<{ id: string; name: string }> = [];
+	for (const entry of listed) {
+		if (entry === null || typeof entry !== "object") continue;
+		const id = readString(entry, "id");
+		const name = readString(entry, "name");
+		if (id !== undefined && name !== undefined) datasets.push({ id, name });
+	}
+	return { ok: true, datasets };
+}
+
+async function listLocalDatasets(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+	return listDatasets(config, fetchImpl);
+}
+ 
+ /**
+  * Where a dataset list comes from. Production hands every reader the
+  * `DatasetListCache`; the module tests and the default use the plane
+  * directly, with nothing to invalidate.
+  */
+ export interface DatasetListSource {
+ 	list(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome>;
+ 	/** Forget the held list: after a create, or after a failed list. */
+ 	invalidate(): void;
+ }
+ 
+ export const DIRECT_DATASET_LIST: DatasetListSource = {
+	list: (config, fetchImpl) => listLocalDatasets(config, fetchImpl),
+ 	invalidate: () => {},
+ };
 
 /** How long one dataset list serves search, ingest and refresh before it is fetched again. */
 export const DATASET_LIST_TTL_MS = 60_000;
@@ -294,32 +415,42 @@ export const DATASET_LIST_TTL_MS = 60_000;
 export class DatasetListCache implements DatasetListSource {
 	private held: { datasets: readonly { id: string; name: string }[]; expiresAt: number } | null = null;
 	private inflight: Promise<DatasetListOutcome> | null = null;
+	/** Bumped by `invalidate`. A fetch that began under an older generation answers its own callers but never refills the hold. */
+	private generation = 0;
 
 	constructor(
 		private readonly ttlMs: number = DATASET_LIST_TTL_MS,
 		private readonly now: () => number = Date.now,
 	) {}
 
-	async list(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+	async list(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
 		const held = this.held;
 		if (held && held.expiresAt > this.now()) return { ok: true, datasets: held.datasets.map((dataset) => ({ ...dataset })) };
-		if (!this.inflight) {
-			this.inflight = listDatasets(config, fetchImpl)
-				.then((outcome) => {
-					if (outcome.ok) this.held = { datasets: outcome.datasets.map((dataset) => ({ ...dataset })), expiresAt: this.now() + this.ttlMs };
-					else this.held = null;
-					return outcome;
-				})
-				.finally(() => {
-					this.inflight = null;
-				});
-		}
-		const outcome = await this.inflight;
+		const outcome = await (this.inflight ?? this.startFetch(config, fetchImpl));
 		return outcome.ok ? { ok: true, datasets: outcome.datasets.map((dataset) => ({ ...dataset })) } : outcome;
 	}
 
 	invalidate(): void {
+		this.generation += 1;
 		this.held = null;
+		// An open fetch was asked before the change: the next reader asks again rather than joining it.
+		this.inflight = null;
+	}
+
+	private startFetch(config: PlaneConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+		const generation = this.generation;
+		const pending: Promise<DatasetListOutcome> = listLocalDatasets(config, fetchImpl)
+			.then((outcome) => {
+				if (generation === this.generation) {
+					this.held = outcome.ok ? { datasets: outcome.datasets.map((dataset) => ({ ...dataset })), expiresAt: this.now() + this.ttlMs } : null;
+				}
+				return outcome;
+			})
+			.finally(() => {
+				if (this.inflight === pending) this.inflight = null;
+			});
+		this.inflight = pending;
+		return pending;
 	}
 }
 
@@ -330,12 +461,30 @@ export interface ResolvedDataset {
 }
 
 export interface ResolveDeps {
-	config: RagflowConfig;
+	config: PlaneConfig;
 	fetchImpl?: FetchLike | undefined;
 	/** Create on a name-miss. False rehearses discovery without creating (G2 owns real creation). */
 	createOnMiss?: boolean;
 	/** The dataset list reader; the plane directly when omitted. */
 	datasets?: DatasetListSource;
+}
+
+export async function createDataset(
+	config: PlaneConfig,
+	name: string,
+	fetchImpl: FetchLike | undefined = fetch,
+	timeoutMs = 8000,
+): Promise<{ ok: true; id: string } | { ok: false; reason: string }> {
+	const answered = await callPlane(config, fetchImpl, "/api/v1/datasets", {
+		method: "POST",
+		body: JSON.stringify({ name, embedding_model: DATASET_EMBEDDING_MODEL, chunk_method: DATASET_CHUNK_METHOD }),
+		timeoutMs,
+	});
+	if (!answered.ok) return answered;
+	const data = dataOf(answered.body);
+	const id = data !== null && typeof data === "object" ? readString(data, "id") : undefined;
+	if (id === undefined) return { ok: false, reason: "lightrag: unexpected dataset shape" };
+	return { ok: true, id };
 }
 
 /**
@@ -371,7 +520,7 @@ export async function resolveDatasets(
 }
 
 export interface RefreshDeps {
-	config: RagflowConfig;
+	config: PlaneConfig;
 	versions: VersionStore;
 	emit: (event: EventInput) => Promise<unknown>;
 	surface?: Surface | null;
@@ -408,7 +557,7 @@ export async function refreshDataset(
 		commit: input.commit,
 		content_sha256: input.content_sha256,
 		ingested_at: new Date(deps.nowMs ?? Date.now()).toISOString(),
-		backend: "ragflow",
+		backend: "lightrag",
 	};
 	recordVersion(deps.versions, version);
 	await deps.emit({
@@ -430,15 +579,14 @@ export async function refreshDataset(
 /**
  * Whether the Phase 22 skills-sync unit has produced fast-forward evidence.
  * The sync tick's projection step flips it via `noteSkillsSyncFastForward`;
- * until then the unit is not live and `agent-skills` serves degraded.
+ * until then the unit is not live and search marks `agent-skills` results with their pin age.
  */
 export interface SkillsSyncTracker {
 	fastForwardObserved: boolean;
-	notLiveWarned: boolean;
 }
 
 export function createSkillsSyncTracker(): SkillsSyncTracker {
-	return { fastForwardObserved: false, notLiveWarned: false };
+	return { fastForwardObserved: false };
 }
 
 /**
@@ -452,42 +600,4 @@ export function noteSkillsSyncFastForward(tracker: SkillsSyncTracker): void {
 
 export function isSyncLive(tracker: SkillsSyncTracker): boolean {
 	return tracker.fastForwardObserved;
-}
-
-export interface DegradedServe {
-	dataset: string;
-	pin: DatasetPin;
-	pin_age_ms: number;
-}
-
-/**
- * Serve `agent-skills` from its last pin while the sync unit is not live:
- * one warning ever, then the pin with its age for the reply (D25-07). No
- * silent staleness — the pin age travels in the reply.
- */
-export async function degradedAgentSkillsServe(
-	deps: RefreshDeps,
-	tracker: SkillsSyncTracker,
-): Promise<{ ok: true; serve: DegradedServe } | { ok: false; reason: string }> {
-	const pin = latestVersion(deps.versions, "agent-skills");
-	if (!pin) return { ok: false, reason: "no-pinned-version" };
-	const nowMs = deps.nowMs ?? Date.now();
-	if (!tracker.notLiveWarned) {
-		tracker.notLiveWarned = true;
-		await deps.emit({
-			surface: deps.surface ?? "claude-code",
-			kind: "warning",
-			summary: "docs dataset agent-skills serves its pinned version: skills-sync is not live",
-			session_id: deps.sessionId ?? "docs-refresh:agent-skills",
-			payload: { action: "docs.ingest", reason: "skills-sync-not-live", dataset_id: pin.dataset_id, version: pin.version },
-		});
-	}
-	return {
-		ok: true,
-		serve: {
-			dataset: "agent-skills",
-			pin: { dataset: pin.dataset, dataset_id: pin.dataset_id, version: pin.version, commit: pin.commit, ingested_at: pin.ingested_at },
-			pin_age_ms: Math.max(0, nowMs - Date.parse(pin.ingested_at)),
-		},
-	};
 }

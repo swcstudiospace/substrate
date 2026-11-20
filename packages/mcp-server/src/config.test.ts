@@ -723,6 +723,32 @@ describe("authoritative live-session lease", () => {
 	});
 });
 
+describe("planning roots on the loaded config", () => {
+	test("unset: no checkouts, and the plane reports disabled", () => {
+		const config = loadConfig({});
+		expect(config.planningCheckouts).toEqual([]);
+		expect(config.planning).toEqual({ ok: true, settings: expect.objectContaining({ enabled: false, checkouts: [] }) });
+	});
+
+	test("SUBSTRATE_PLANNING_ROOTS yields one keyed checkout per entry, in order", () => {
+		const config = loadConfig({ SUBSTRATE_PLANNING_ROOTS: "/srv/a, /srv/b" });
+		expect(config.planningCheckouts.map((checkout) => checkout.root)).toEqual(["/srv/a", "/srv/b"]);
+		expect(config.planningCheckouts.every((checkout) => /^wt-[0-9a-f]{24}$/.test(checkout.key))).toBe(true);
+		expect(config.planningCheckouts[0]?.key).not.toBe(config.planningCheckouts[1]?.key);
+		expect(config.planning).toEqual({ ok: true, settings: expect.objectContaining({ enabled: true, checkouts: config.planningCheckouts }) });
+	});
+
+	test("a refused roots list leaves no checkouts and reports the key, never the path", () => {
+		const config = loadConfig({ SUBSTRATE_PLANNING_ROOTS: "/srv/secret-checkout,relative" });
+		expect(config.planningCheckouts).toEqual([]);
+		expect(config.planning).toEqual({ ok: false, errors: [{ key: "SUBSTRATE_PLANNING_ROOTS", reason: "not-absolute" }] });
+	});
+
+	test("the retired SUBSTRATE_PLANNING_ROOT variable no longer enables the plane", () => {
+		const config = loadConfig({ SUBSTRATE_PLANNING_ROOT: "/srv/checkout" });
+		expect(config.planningCheckouts).toEqual([]);
+	});
+});
 describe("SUBSTRATE_RECONCILE_* (phase 78, D78-7)", () => {
 	test("the scheduled reconcile is off when the interval is unset, blank or 0", () => {
 		expect(loadConfig({}).reconcile.intervalS).toBe(0);

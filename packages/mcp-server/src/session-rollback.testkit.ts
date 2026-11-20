@@ -67,6 +67,11 @@ export class FakeLedger {
 		return last?.hash ?? null;
 	}
 
+	/** The row for an event id, as `GreptimeClient.eventStored` answers it: a settled delivery checks the row before it writes. */
+	async eventStored(id: string): Promise<boolean> {
+		return this.events.some((event) => event.id === id);
+	}
+
 	async insertEvent(event: SubstrateEvent): Promise<void> {
 		if (this.failInsert !== null) throw new Error(this.failInsert);
 		if (this.failInsertFor?.(event) === true) throw new Error("the ledger refused this write");

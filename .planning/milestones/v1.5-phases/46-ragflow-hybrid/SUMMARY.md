@@ -1,14 +1,14 @@
 ---
 phase: 46-ragflow-hybrid
 requirements: [SOTA-02]
-status: in review (draft PR). In-repo gates green. The live RAGFlow behaviour is unattested and not exercised
+status: in review (draft PR). In-repo gates green. The live RAGFlow (retired, superseded by LightRAG) behaviour is unattested and not exercised
 ---
 
-# 46-SUMMARY: RAGFlow hybrid retrieval with Hindsight and Greptime context
+# 46-SUMMARY: RAGFlow (retired, superseded by LightRAG) hybrid retrieval with Hindsight and Greptime context
 
 ## Built
 
-- **Hybrid knobs (U1).** `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` (0 to 1, default 0.3) sets the vector share of RAGFlow's blend. `SUBSTRATE_RAGFLOW_RERANK_ID` names a reranker, and unset it sends no `rerank_id`, so the default request is unchanged. A non-numeric or out-of-range RAGFlow weight is a `ConfigError` that names the variable.
+- **Hybrid knobs (U1).** `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` (0 to 1, default 0.3) sets the vector share of RAGFlow (retired, superseded by LightRAG)'s blend. `SUBSTRATE_RAGFLOW_RERANK_ID` names a reranker, and unset it sends no `rerank_id`, so the default request is unchanged. A non-numeric or out-of-range RAGFlow (retired, superseded by LightRAG) weight is a `ConfigError` that names the variable.
 - **Context on `docs_search` (U2).** An optional `context` boolean, default false. With it set, the reply gains `context`: up to 3 Hindsight recall hits for the question (text cut to 400 characters), and up to 5 of the newest ledger rows for the caller's `session_id` (summary cut to 200 characters). The context carries the same untrusted notice as the chunks. Missing sources set `degraded` with a reason: `no-session`, `ledger-not-configured`, `ledger: <message>`, or a recall reason.
 - **REST parity.** `POST /docs/search` accepts `context` as a boolean and rejects other types with a 400, as it already does for `datasets` and `session_id`.
 - **Cache rule.** Context is attached after the cache, so the cache holds only chunk answers. `searchReplyStorable` refuses any reply with a `context` key, so a session's events are never served to another caller.
@@ -16,7 +16,7 @@ status: in review (draft PR). In-repo gates green. The live RAGFlow behaviour is
 
 ## Decisions
 
-- D46-a to D46-i in CONTEXT.md. Hybrid is RAGFlow's own blend, tuned by the weight. Reranking is opt-in. Context is opt-in per call, never cached, and carries untrusted text only.
+- D46-a to D46-i in CONTEXT.md. Hybrid is RAGFlow (retired, superseded by LightRAG)'s own blend, tuned by the weight. Reranking is opt-in. Context is opt-in per call, never cached, and carries untrusted text only.
 
 ## Deviations (from the plan, with reasons)
 
@@ -38,7 +38,7 @@ status: in review (draft PR). In-repo gates green. The live RAGFlow behaviour is
 
 ## Not done and open items
 
-- **Live RAGFlow.** The deployed version is unattested (`ragflow.ts` comment). Whether the weight and the reranker id are accepted by the deployment is not proven.
+- **Live RAGFlow (retired, superseded by LightRAG).** The deployed version is unattested (`ragflow.ts` comment). Whether the weight and the reranker id are accepted by the deployment is not proven.
 - **Pre-existing doc mismatch, not changed here (D46-i).** `docs-plane.md` describes `query` and `limit` arguments for `docs_search`, while the input schema uses `question`, `datasets`, `session_id` and `context`. Correcting it is a separate docs change.
 - **Hindsight relevance.** The context proves the plumbing and the caps, not that the recalled memories help the answer.
 

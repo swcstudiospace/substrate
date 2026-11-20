@@ -72,7 +72,10 @@ interface FakeLedger {
 }
 
 const originalFetch = globalThis.fetch;
-afterEach(() => {
+/** Every instance a test builds, closed in `afterEach` the way shutdown closes one: a tick left running would write through the next test's ledger. */
+const opened: Substrate[] = [];
+afterEach(async () => {
+	for (const substrate of opened.splice(0)) await substrate.drainPendingEvents(0, { abandon: true });
 	globalThis.fetch = originalFetch;
 });
 
@@ -171,6 +174,9 @@ function fakeLedger(): FakeLedger {
 				.slice(0, limit);
 			return records(["id", "hash", "payload"], hits.map((hit) => [hit.id, hit.hash, hit.payload]));
 		}
+		// `GreptimeClient.eventStored`: a settled delivery checks the row before it writes, as the real ledger answers it.
+		const stored = /^SELECT "id" FROM "agent_events" WHERE "id" = '([^']*)' LIMIT 1$/.exec(statement);
+		if (stored) return records(["id"], ledger.rows.filter((row) => row.id === stored[1]).map((row) => [row.id]));
 		const session = /WHERE "session_id" = '([^']+)'/.exec(statement);
 		if (session) {
 			const rows = ledger.rows.filter((row) => row.session_id === session[1]).reverse();
@@ -201,7 +207,9 @@ function substrateWith(env: Record<string, string>, seen: Seen = { replays: [], 
 		},
 	};
 	const greptime = new GreptimeClient(config, { ledger: loadConfig(env).ledger });
-	return new Substrate(loadConfig(env), { index: null, greptime }, observer);
+	const substrate = new Substrate(loadConfig(env), { index: null, greptime }, observer);
+	opened.push(substrate);
+	return substrate;
 }
 
 /** Overrides for `base`; `undefined` on these three removes the default, so a test can ask for "no ts", "sessionless" or "no key". */
@@ -397,6 +405,7 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 		let now = originalAt;
 		const client = new GreptimeClient(config, { ledger: loadConfig(ACCEPT).ledger, clock: () => now });
 		const substrate = new Substrate(loadConfig(ACCEPT), { index: null, greptime: client });
+		opened.push(substrate);
 		const first = await substrate.emit(base({ idempotency_key: KEY }));
 		expect(ledger.ingestStamps).toHaveLength(1);
 
@@ -926,6 +935,7 @@ describe("over HTTP", () => {
 		await observability.start();
 		const greptime = new GreptimeClient(config, { ledger: loaded.ledger });
 		const substrate = new Substrate(loaded, { index: null, greptime }, observability.observer);
+		opened.push(substrate);
 		const server = createHttpServer(substrate, loaded, observability, { anonymousLog: () => {} });
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const { port } = server.address() as AddressInfo;

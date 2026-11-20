@@ -5,7 +5,7 @@
 | Trigger | An open issue labelled `hindsight-lag`, opened by the weekly `Hindsight lag` workflow because a newer stable Hindsight release has existed for at least `lag_alert_days` (`.github/hindsight-pin.json`) |
 | Scope | The three Railway services that run Hindsight: `hindsight-api`, `hindsight-worker`, `hindsight-control-plane`, and the Postgres they share |
 | Blast radius | Recall and retain through `planes/hindsight.ts`. A Hindsight outage never turns `/healthz` red; it turns the plane's row red and degrades the reads that plane serves (`docs/runbooks/substrate-red.md`) |
-| Untouched | The Postgres index, the ledger, leases, RAGFlow. Accepted memories are kept in the index first and forwarded to Hindsight afterwards (`docs/data-planes.md`) |
+| Untouched | The Postgres index, the ledger, leases, LightRAG. Accepted memories are kept in the index first and forwarded to Hindsight afterwards (`docs/data-planes.md`) |
 | Who | The operator. Every step marked **OPERATOR ONLY** touches Railway or production; no agent, workflow or script in this repository performs one |
 
 ## What is true today (2026-10-27) and what automates nothing
@@ -22,7 +22,7 @@
 
 `.github/workflows/hindsight-lag.yml` runs `scripts/hindsight-lag.ts` every Monday and on demand, on a GitHub-hosted `ubuntu-latest` runner, behind `CI_ENABLED`. It compares the pin with the stable releases of `vectorize-io/hindsight` (prereleases and drafts ignored), and keeps **one** open issue labelled `hindsight-lag`: opened once the **oldest** stable release newer than the pin has existed for at least `lag_alert_days` (the age counts from that first newer release, so an older release can trigger the alert while the newest one is only a day old), updated while that stays true, closed when it stops being true. The issue and its title name the **newest** stable release as the latest. The issue shows the pinned version, the latest, the age, whether any newer release notes mention a breaking change, and the state of each `blocked_by` issue. It opens no pull request and never touches Railway. If the watcher itself fails, a second job (`report-failure`, with its own checkout and Bun setup) opens one issue labelled `hindsight-lag-failed`; the next good run closes it.
 
-Run it by hand, read-only, without a token:
+Run it by hand, read-only, without a token.
 
 ```sh
 bun scripts/hindsight-lag.ts --dry-run

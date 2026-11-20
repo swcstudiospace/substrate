@@ -1,10 +1,12 @@
-# Docs search and ingest (RAGFlow)
+# Docs search and ingest
 
-Agents answer docs questions from RAGFlow with citations, through the
+Agents answer docs questions from LightRAG with citations, through the
 substrate only. There is exactly one door: `substrate-mcp`
-(`packages/mcp-server/src/planes/ragflow.ts`). No RAGFlow MCP server
+(`packages/mcp-server/src/planes/lightrag.ts`). No other docs backend
 appears in any agent config, and no package outside `mcp-server` imports
 the client — `store-lock.test.ts` fails the build on either.
+
+LightRAG is the docs backend; retired (superseded by LightRAG) had no fallback that calls the retired plane.
 
 ## Reference
 
@@ -20,42 +22,10 @@ the client — `store-lock.test.ts` fails the build on either.
 `datasets` names configured datasets; unknown names are ignored and raw
 ids are never accepted. `dataset` on ingest names one configured dataset.
 
-## RAGFlow HTTP API shapes (uplift-2 R6)
+## Retrieval knobs
 
-The client (`planes/ragflow.ts`) speaks the shapes the RAGFlow HTTP API
-reference documents (https://ragflow.io/docs/http_api_reference, read
-2026-10-13), and the recording fake (`ragflow-fake.ts`) serves exactly
-those and refuses the earlier rehearsal shapes. Every answer is read
-twice: the HTTP status, and the business `code` in the body (`0` is
-success; anything else is a failure even under HTTP 200).
+Unset knobs leave the documented defaults: `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2), `SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3), `SUBSTRATE_DOCS_TOP_K` (1024). Junk or out-of-range values fall back to those defaults. The LightRAG client contract is in `docs/docs-plane.md`.
 
-| Operation | Call | Reference section |
-|---|---|---|
-| discover datasets | `GET /api/v1/datasets?page=1&page_size=100` → `data[{id, name}]`; held in process for 60 s, dropped by a create or a failed list | List datasets |
-| create dataset | `POST /api/v1/datasets` `{name, embedding_model, chunk_method: "naive"}` → `data.id`; only on a name-miss (a taken name is suffixed by RAGFlow, never reused) | Create dataset |
-| upload page | `POST /api/v1/datasets/{id}/documents` multipart form field `file` (one page per request; file name = repo path with `/` → `__`) → `data[0].id` | Upload documents |
-| attach metadata | `PATCH /api/v1/datasets/{id}/documents/{doc}` `{meta_fields: {source_url, commit, heading_path}}`; a failed PATCH deletes the orphan and fails the page | Update document |
-| parse | `POST /api/v1/datasets/{id}/chunks` `{document_ids}` | Parse documents |
-| parse status | `GET /api/v1/datasets/{id}/documents?id={doc}` → `data.docs[0].run` (`DONE` ok; `FAIL`/`CANCEL` fail with `progress_msg`; else poll on; thirty polls two seconds apart, then `parse-timeout`) | List documents |
-| delete | `DELETE /api/v1/datasets/{id}/documents` `{ids}`; the prune and the orphan clean-up are its only callers | Delete documents |
-| retrieve | `POST /api/v1/retrieval` `{question, dataset_ids, page, page_size ≤ 10, similarity_threshold, vector_similarity_weight, top_k}` → `data.chunks[{content, document_id, document_keyword, id, similarity}]` | Retrieve chunks |
-
-Retrieval knobs, defaults equal to RAGFlow's own so an unset knob changes
-nothing: `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
-`SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3; the documented legacy fallback of
-`keywords_similarity_weight` 0.7), `SUBSTRATE_DOCS_TOP_K` (1024; the
-reference marks `top_k` a deprecated alias of `knn_top_k`). Junk or
-out-of-range values fall back.
-
-**Live-unattested.** No call has been made against the deployment
-(Phase 25 G1–G4 are operator-gated), so three things the reference raises
-are recorded rather than resolved: the 1.0 Go backend renames
-`chunk_method: "naive"` to `parser_id: "general"` on create; the
-documented embedding-model format is `model_name@model_factory` and the
-pinned `tei-bge-small` is bare; retrieval chunks document no metadata
-echo, so a citation's `source_url` comes from the ingest record of its
-document id (hence the state file) and `heading_path` is empty unless the
-deployment echoes it.
 
 ## Citation shape
 
@@ -95,7 +65,7 @@ and the rollback). A search therefore costs its slowest dataset, not the
 sum, and a stalled dataset costs the budget. Failure is isolated per
 dataset: a dataset that fails or outlives the deadline is listed in the
 reply as `degraded_datasets: [{dataset, reason}]` — `reason` is the plane
-client's bounded reason (`ragflow 503`, `ragflow circuit open`,
+client's bounded reason (`lightrag unreachable`, `lightrag circuit open`,
 `deadline (4000 ms docs budget)`), redacted and capped at 200 characters
 — while the other datasets' citations are returned, still score-sorted
 and capped at 10. The reply is `degraded: true` only when **no** dataset
@@ -105,11 +75,11 @@ names them all. The single `note` event is unchanged apart from carrying
 in the ledger. A partially served reply is **never cached** (R6's rule
 "a degraded reply is never stored", extended): the next caller retries
 the missing dataset instead of inheriting a hole for a TTL.
-One exception to "leave together": while the RAGFlow breaker is
+One exception to "leave together": while the LightRAG breaker is
 **half-open** (it admits exactly one probe), the first resolved dataset is
 retrieved alone as that probe and the rest leave once it has settled —
 still under the one shared budget — so a recovery search does not see its
-siblings refused as `ragflow circuit open` behind a probe that succeeded
+siblings refused as `lightrag circuit open` behind a probe that succeeded
 (Greptile round 1, PR #61). A closed or open breaker changes nothing.
 
 ### Metrics (uplift-3 N5)
@@ -148,7 +118,7 @@ no `note`.
 
 ## Hybrid retrieval and context augmentation
 
-The docs plane is `lightrag` or `ragflow`, chosen by `resolveDocsBackend` in `packages/mcp-server/src/config.ts`: `SUBSTRATE_DOCS_BACKEND` wins when set to a usable value; otherwise a set `LIGHTRAG_URL` selects `lightrag` and an unset one selects `ragflow`, the legacy fallback. `lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. Production has served docs from LightRAG since the cutover of 2026-10-28 (`SUBSTRATE_DOCS_BACKEND=lightrag`, naive query mode until the operator decides on a real LLM). The RAGFlow service was deleted on 2026-10-25; its code stays until the operator approves removal.
+The docs plane is LightRAG, chosen by `resolveDocsBackend` in `packages/mcp-server/src/config.ts`: `SUBSTRATE_DOCS_BACKEND` must be `lightrag` when set; otherwise a set `LIGHTRAG_URL` selects LightRAG and an unset one leaves the plane unconfigured (search degrades, ingest refuses). `lightragFromEnv` in the same file reads `LIGHTRAG_URL` and the optional `LIGHTRAG_API_KEY`. Production has served docs from LightRAG since the cutover of 2026-10-28 (`SUBSTRATE_DOCS_BACKEND=lightrag`, naive query mode until the operator decides on a real LLM).
 
 ### LightRAG query
 
@@ -162,28 +132,6 @@ The query mode is resolved by `resolveQueryMode` (`lightrag.ts:118-130`):
 
 The modes are `naive`, `local`, `global`, `hybrid` and `mix` (`lightrag.ts:37`). `hybrid` and `mix` fuse the knowledge graph (`isGraphMode`, `lightrag.ts:50`). `dataset_ids` is accepted and ignored: LightRAG serves one knowledge base per server (`lightrag.ts:95-99`).
 
-### RAGFlow hybrid search
-
-On `ragflow`, every retrieval is a hybrid search: RAGFlow combines keyword and vector similarity, and `vector_similarity_weight` sets the vector share. The keyword share is its complement, and the two sum to 1.
-
-#### Vector weight
-
-The weight sent as `vector_similarity_weight` resolves in `loadConfig` (`config.ts`). The first match wins:
-
-1. `SUBSTRATE_DOCS_VECTOR_WEIGHT`, when set to a usable value.
-2. `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`, when set.
-3. `0.3`, RAGFlow's own default.
-
-`SUBSTRATE_DOCS_VECTOR_WEIGHT` keeps precedence because it predates this setting. A blank value counts as unset for both variables.
-
-The two variables do not validate alike:
-
-- `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT` must be a number in [0, 1]. Anything else makes `loadConfig` throw a `ConfigError` that names `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`. The check runs even when `SUBSTRATE_DOCS_VECTOR_WEIGHT` is also set.
-- `SUBSTRATE_DOCS_VECTOR_WEIGHT` is not a configuration error. A value that is not a number, or lies outside [0, 1], falls back to the RAGFlow weight (then 0.3).
-
-#### Reranker
-
-`SUBSTRATE_RAGFLOW_RERANK_ID` names a reranker model. The value is trimmed. Unset or blank, the retrieval request carries no `rerank_id` field. When set, every `POST /api/v1/retrieval` carries `rerank_id` with that id. The reranker is opt-in: the code records that RAGFlow ships no reranker by default (D46-b), and the deployed RAGFlow version is not attested, so the substrate never turns one on by itself.
 
 ### Failure and fallback
 
@@ -194,11 +142,11 @@ On `lightrag`, a failed query is retried under the plane's retry policy (`docs-s
 - A degraded reply is never stored (`docs-search.ts:144`).
 - If recall returns nothing, the plain degraded reply stands, with the LightRAG reason and no Hindsight citations (`docs-search.ts:903`).
 
-A failed LightRAG query does not retry against RAGFlow. The RAGFlow failure reasons and the per-dataset fan-out below describe the `ragflow` plane only.
+A failed LightRAG query does not call another docs backend. An unconfigured plane takes the same Hindsight path, or a degraded empty answer when recall finds nothing.
 
-### Fan-out under one budget (RAGFlow)
+### Fan-out under one budget
 
-The datasets are retrieved **concurrently** on the RAGFlow plane (one retrieval per resolved dataset, at most the configured three) under one shared deadline, `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` (default 4000; `0` keeps only the plane client's own 4 s per-call timeout, the pre-N5 behaviour and the rollback). A search costs its slowest dataset, not the sum, and a stalled dataset costs the budget. Failure is isolated per dataset: a dataset that fails or outlives the deadline is listed as `degraded_datasets: [{dataset, reason}]`, while the other datasets' citations are returned, score-sorted and capped at 10. The reply is `degraded: true` only when **no** dataset answered; then `reason` is the first failure. A partially served reply is never cached.
+The datasets are retrieved **concurrently** (one retrieval per resolved dataset, at most the configured three) under one shared deadline, `SUBSTRATE_DOCS_SEARCH_BUDGET_MS` (default 4000; `0` keeps only the plane client's own 4 s per-call timeout, the pre-N5 behaviour and the rollback). A search costs its slowest dataset, not the sum, and a stalled dataset costs the budget. Failure is isolated per dataset: a dataset that fails or outlives the deadline is listed as `degraded_datasets: [{dataset, reason}]`, while the other datasets' citations are returned, score-sorted and capped at 10. The reply is `degraded: true` only when **no** dataset answered; then `reason` is the first failure. A partially served reply is never cached.
 
 ### The `context` block
 
@@ -228,7 +176,7 @@ The reasons in `degraded` are:
 | Recall | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS`, default 1500 ms; hard deadline at that budget plus 500 ms | `DEFAULT_SEARCH_RECALL_BUDGET_MS` (`config.ts:2066`), `hindsightBudgets.searchRecallBudgetMs` (`config.ts:989`), `CONTEXT_RECALL_MARGIN_MS` (`service.ts:239`, `:4583`) |
 | Ledger read | 1000 ms, fixed | `DOCS_CONTEXT_LEDGER_BUDGET_MS` (`docs-search.ts:249`, used at `service.ts:4608`) |
 
-The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the chunk search on either plane: the RAGFlow dataset fan-out, and the LightRAG query (`docs-search.ts:965`).
+The recall does not run under `SUBSTRATE_DOCS_SEARCH_BUDGET_MS`. That budget is the shared deadline of the LightRAG query (`docs-search.ts:965`).
 
 The ledger read has no row limit: `readEvents` returns every row of the session in time order, and the last five are kept. The 1000 ms budget is the only bound on that read.
 
@@ -349,7 +297,7 @@ the pinned version keeps serving, with `pin_age_ms` on its citations, until a re
 ### Freshness and trigger lag (uplift-4 S7)
 
 Two signals, both computed in-process from the persisted state file
-(`SUBSTRATE_DOCS_STATE_FILE`): no RAGFlow call and no new key. The lag warning
+(`SUBSTRATE_DOCS_STATE_FILE`): no docs-plane call and no new key. The lag warning
 is settled by one unref'd timer (`SUBSTRATE_DOCS_LAG_CHECK_S`, below).
 
 - **Freshness**: `substrate.docs.freshness_seconds{dataset}` is the time since
@@ -435,16 +383,13 @@ operator flips the sync unit live, no code change is needed.
 
 ## Credentials
 
-`RAGFLOW_URL` / `RAGFLOW_API_KEY` live only in the server env file
-(`/etc/substrate/substrate.env`); `substrate-mcp` reads them starting
-this phase. `RAGFLOW_MCP_URL` names the MCP transport this plane
-deliberately does not use and is never read here. No command in this doc
+`LIGHTRAG_URL` and `LIGHTRAG_API_KEY` live only in the server env file
+(`/etc/substrate/substrate.env`); `substrate-mcp` reads them. No command in this doc
 prints a credential value.
 
 ## Rehearsal
 
-Every behavior above is proven against the recording fake
-(`packages/mcp-server/src/ragflow-fake.ts`): the documented request and
+Every behavior above is proven against in-process fakes: citation shape, redacted
 response shapes (multipart upload, `meta_fields`, parse, list-by-id
 status, delete, the three retrieval knobs, `chunk_method` on create),
 explicit-`dataset_ids`, `<= 10` results, citation shape, redacted
@@ -475,14 +420,14 @@ match, and a redaction check (no citation field changes under the
 redactor; no `forbidden` string appears). Two tiers share the scorer:
 
 - **Offline** (`bun run docs:golden`, and `scripts/docs-golden.test.ts` in
-  CI): the real `searchDocs` over a `RagflowFake` that retrieves by
+  CI): the real `searchDocs` over an in-process docs fake that retrieves by
   lexical overlap from the sanitized corpus in
   `fixtures/docs-golden/corpus/` (`packages/mcp-server/src/docs-golden.ts`,
   inside the package because the store lock lets nothing outside import
   the fake). It proves scope isolation, provenance, ordering, the cap,
   redaction of a planted placeholder and the scorer — not relevance;
   every committed fixture must pass its thresholds.
-- **Live** (`SUBSTRATE_URL=… SUBSTRATE_TOKEN=… bun run docs:golden -- --live`,
+- **Live** (with `SUBSTRATE_URL` and `SUBSTRATE_TOKEN` exported: `bun run docs:golden -- --live`,
   opt-in): `POST /docs/search` only; scores are printed, never asserted.
   It refuses (exit 3) when a fixture's `corpus_manifest.sha256` is not the
   corpus on disk (`--manifest` prints it), when a fixture carries no
@@ -520,7 +465,7 @@ only) when the failing set differs from the one recorded in
 `SUBSTRATE_DOCS_CANARY_STATE` (default `/var/lib/substrate/docs-canary-last.json`);
 a failed post keeps the old record, so the next run posts again. The record is
 written through a temp file and a rename. It is
-read-only against RAGFlow and uses no key of its own.
+read-only against the docs plane and uses no key of its own.
 
 Since v1.7 phase 70 the same run also asks the self-supervised golden set (the titles, headings and opening
 sentences of this checkout's `docs/`, see [`corpus-eval.md`](corpus-eval.md)) of the same `POST /docs/search`, up to 200

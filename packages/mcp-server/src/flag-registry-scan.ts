@@ -45,7 +45,7 @@ const DECLARATION_FILES: ReadonlySet<string> = new Set(["packages/mcp-server/src
 export const ENV_NAME_PREFIXES: readonly string[] = [
 	"SUBSTRATE",
 	"HINDSIGHT",
-	"RAGFLOW",
+
 	"GREPTIME",
 	"DRAGONFLY",
 	"OTEL",

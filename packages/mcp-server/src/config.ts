@@ -1,3 +1,4 @@
+/** LightRAG is the docs backend. */
 /**
  * Configuration, loaded from the environment.
  *
@@ -19,19 +20,19 @@ import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
-import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { DEFAULT_RETRIEVAL_KNOBS, type RetrievalKnobs } from "./planes/docs-wire.ts";
 import { isLightragQueryMode, type LightragQueryMode } from "./planes/lightrag.ts";
 import { railwayFromEnv, type RailwayConfig } from "./railway.ts";
 import { hindsightBanksFromEnv } from "./planes/hindsight.ts";
 import { loadRecallConfig, parseRecallScope, type RecallConfig, type RecallScope } from "./recall-snapshot.ts";
 import { DEFAULT_TANDEM_OPTIONS, parseTandemOptions, type TandemOptions } from "./tandem-recall.ts";
-import { loadCheckpointDirectory, loadPlanningSettings, type CheckpointDirectoryResult, type PlanningConfigResult } from "./planning/config.ts";
-import { loadSteeringExpirySettings, loadSteeringIdempotencySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult, type SteeringIdempotencyConfigResult } from "./planning/steering.ts";
+import { loadCheckpointDirectory, loadPlanningSettings, planningPassSetting, type CheckpointDirectoryResult, type PlanningCheckout, type PlanningConfigResult } from "./planning/config.ts";
+import { loadSteeringExpirySettings, loadSteeringSettings, steeringToolsRegistered, type SteeringConfigResult, type SteeringExpiryConfigResult } from "./planning/steering.ts";
 import { steeringAuditTableEnabled } from "./planning/steering-store.ts";
 import { loadBaselineDirectory, type BaselineDirectoryResult } from "./planning/baseline-store.ts";
 import { loadLivenessSettings, type LivenessConfigResult } from "./planning/observer.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
-import { DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
+import { DEFAULT_DEAD_LETTER_MAX, DEFAULT_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS } from "./event-buffer.ts";
 import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 import { DEFAULT_WORKTREE_IDLE_DAYS, DEFAULT_WORKTREE_REGISTRY_TTL_S, type WorktreeRegistryMode } from "./worktree-registry.ts";
 import { repoScopeFromEnv, type RepoScope } from "./repo-scope.ts";
@@ -47,14 +48,14 @@ function parseDodGateTimeoutMs(raw: string | undefined): number {
 	return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : DEFAULT_DOD_GATE_TIMEOUT_MS;
 }
 
-/** The docs plane that serves `docs_search` / `docs_ingest`: RAGFlow or LightRAG. */
-export const DOCS_BACKENDS = ["ragflow", "lightrag"] as const;
+/** The docs plane that serves `docs_search` / `docs_ingest`. Always LightRAG. */
+export const DOCS_BACKENDS = ["lightrag"] as const;
 export type DocsBackend = (typeof DOCS_BACKENDS)[number];
 
 /**
  * LightRAG reach. `LIGHTRAG_URL` names it; `LIGHTRAG_API_KEY` is sent when
  * the deployment guards reads/writes. Null leaves the LightRAG path
- * unconfigured (the RAGFlow path is unchanged).
+ * unconfigured: search degrades and ingest refuses.
  *
  * `queryMode` is the default mode for a query that names none and has no
  * `/mix` or `/hybrid` prefix (`SUBSTRATE_LIGHTRAG_QUERY_MODE`); absent means
@@ -145,21 +146,16 @@ export function embedCacheFromEnv(env: Record<string, string | undefined> = proc
 }
 
 /**
- * Which docs plane serves this process.
+ * Which docs plane serves this process. Always LightRAG.
  *
- * An explicit `SUBSTRATE_DOCS_BACKEND` (`lightrag` or `ragflow`,
- * case-insensitive) wins; otherwise the configured reach decides — a
- * `LIGHTRAG_URL` means lightrag, else ragflow. An unrecognised value keeps
- * the reach-derived backend and is carried back as `rejected`, so a typo
- * never switches the plane.
+ * An explicit `SUBSTRATE_DOCS_BACKEND` other than `lightrag` (case-insensitive)
+ * is rejected and still resolves to lightrag. Unset is lightrag with no rejection.
  */
 export function resolveDocsBackend(env: Record<string, string | undefined> = process.env): { backend: DocsBackend; rejected: string | null } {
-	const fallback: DocsBackend = env.LIGHTRAG_URL?.trim() ? "lightrag" : "ragflow";
 	const raw = env.SUBSTRATE_DOCS_BACKEND?.trim();
-	if (!raw) return { backend: fallback, rejected: null };
-	const lower = raw.toLowerCase();
-	if (lower === "lightrag" || lower === "ragflow") return { backend: lower, rejected: null };
-	return { backend: fallback, rejected: raw };
+	if (!raw) return { backend: "lightrag", rejected: null };
+	if (raw.toLowerCase() === "lightrag") return { backend: "lightrag", rejected: null };
+	return { backend: "lightrag", rejected: raw };
 }
 
 /** Default ms between LightRAG planning polls (SPE-19385). */
@@ -168,14 +164,14 @@ export const DEFAULT_LIGHTRAG_POLL_MS = 5_000;
 export const DEFAULT_LIGHTRAG_PLANNING_ROOTS: readonly string[] = [".planning/"];
 
 /**
- * LightRAG hosting on Railway, in the same project that already runs RAGFlow.
+ * LightRAG hosting on Railway, in the same project that already runs lightrag.
  *
  * The shared plane null-condition is untouched: `lightragFromEnv` alone
  * decides whether the retrieval plane is configured. This block only layers
  * the hosting overrides the orchestrator needs — `SUBSTRATE_LIGHTRAG_URL` /
  * `SUBSTRATE_LIGHTRAG_API_KEY` win over `LIGHTRAG_URL` / `LIGHTRAG_API_KEY`
  * when set, and `SUBSTRATE_LIGHTRAG_PROJECT` scopes ingest/search the way a
- * dataset name does for RAGFlow. Null when nothing hosting-related is set.
+ * dataset name does for lightrag. Null when nothing hosting-related is set.
  */
 export interface RailwayHostingConfig {
 	/** `RAILWAY_TOKEN`: the Railway API token that manages the project. */
@@ -292,18 +288,14 @@ export interface SubstrateConfig {
 	 */
 	notionApiUrl: string;
 	/**
-	 * The RAGFlow reach, or null when the plane is unconfigured (D25-02).
-	 *
-	 * Read from `RAGFLOW_URL` / `RAGFLOW_API_KEY` only; `RAGFLOW_MCP_URL`
-	 * names the unused MCP transport and is never read. Null leaves
-	 * docs_search degraded rather than broken.
+	 * Which docs plane serves `docs_search` / `docs_ingest`. Always lightrag.
+	 * An explicit other value is rejected and still resolves to lightrag.
 	 */
-	ragflow: RagflowConfig | null;
 	/**
 	 * Which docs plane serves `docs_search` / `docs_ingest` (LightRAG cutover).
 	 *
 	 * From `SUBSTRATE_DOCS_BACKEND` when set, else from reach: a `LIGHTRAG_URL`
-	 * means lightrag, otherwise ragflow (`resolveDocsBackend`).
+	 * means lightrag, otherwise lightrag (`resolveDocsBackend`).
 	 */
 	docsBackend: DocsBackend;
 	/**
@@ -366,7 +358,7 @@ export interface SubstrateConfig {
 	 *
 	 * From `SUBSTRATE_DOCS_INGEST_ROOTS` (comma-separated) or the dataset
 	 * sources in `docs/data-planes.md` when unset. A page outside these
-	 * roots is refused before anything is read from RAGFlow.
+	 * roots is refused before anything is read from lightrag.
 	 */
 	docsIngestRoots: readonly string[];
 	/**
@@ -655,17 +647,18 @@ export interface SubstrateConfig {
 	 */
 	retainOutbox: { path: string | null; max: number; maxAttempts: number; drainMs: number };
 	/**
-	 * The telemetry buffer (phase 76). `null` unless `SUBSTRATE_EVENT_BUFFER_PATH` is set: then a failed event write is buffered,
-	 * and the buffer refuses to boot without its dead-letter file. Unset, a failed write answers `stored: false` as it always has.
+	 * The ledger event buffer and dead-letter store (phase 76). `path` from `SUBSTRATE_LEDGER_BUFFER_PATH` and
+	 * `deadLetterPath` from `SUBSTRATE_LEDGER_DEAD_LETTER_PATH` (null = memory-only); `max` parked events and
+	 * `deadLetterMax` records bound each store; `maxAttempts` is the write budget per event, the live one included.
 	 */
-	eventBuffer: EventBufferSettings | null;
+	eventBuffer: { path: string | null; max: number; maxAttempts: number; deadLetterPath: string | null; deadLetterMax: number };
 	/**
 	 * Which Hindsight routing keys were present, for the boot warnings only:
 	 * the legacy single-bank key is unread, and a URL without a bank list means
 	 * recall reads the caller's own bank only. Presence, never a value.
 	 */
 	hindsightEnv: { legacyBankSet: boolean; urlSet: boolean; banksSet: boolean };
-	// uplift-2 R6 — RAGFlow docs plane
+	// uplift-2 R6 — lightrag docs plane
 	/**
 	 * Delete a superseded document after its replacement parsed
 	 * (`SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1`). Off by default: nothing on the
@@ -690,7 +683,7 @@ export interface SubstrateConfig {
 	 * The three documented retrieval knobs sent on every `docs_search`
 	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
 	 * `SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3) and `SUBSTRATE_DOCS_TOP_K` (1024).
-	 * The weight is `SUBSTRATE_DOCS_VECTOR_WEIGHT` when set, else `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`; junk or out-of-range docs values fall back to that. `rerankId` comes only from `SUBSTRATE_RAGFLOW_RERANK_ID`.
+	 * The weight is `SUBSTRATE_DOCS_VECTOR_WEIGHT` when set, else `SUBSTRATE_lightrag_VECTOR_WEIGHT`; junk or out-of-range docs values fall back to that. `rerankId` comes only from `SUBSTRATE_lightrag_RERANK_ID`.
 	 */
 	docsRetrieval: RetrievalKnobs;
 	// uplift-3 N3 — admission budgets
@@ -760,8 +753,12 @@ export interface SubstrateConfig {
 	eventIdempotencyRejected: string | null;
 	/** `SUBSTRATE_EVENT_BUS` (phase 50, D50-g): the Dragonfly wake-up hints. See `EventBusSettings`. */
 	eventBus: EventBusSettings;
-	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08): the planning root, presence window and read bounds. See `planning/config.ts`. */
+	/** `SUBSTRATE_PLANNING_*` (phase 52, SOTA-08; multi-root v1.7): the planning roots, presence window and read bounds. See `planning/config.ts`. */
 	planning: PlanningConfigResult;
+	/** `SUBSTRATE_PLANNING_ROOTS`: the checkouts whose `.planning/` the plane reads, each keyed by `planningSessionId`. Empty when the plane is off or its settings are refused. */
+	planningCheckouts: readonly PlanningCheckout[];
+	/** `SUBSTRATE_PLANNING_PASS=off` (planning/config.ts): no planning pass runs, so nothing under `.planning/` is read or written for LightRAG. The checkouts and the dataset registry are unchanged. */
+	planningPassOn: boolean;
 	/** `SUBSTRATE_PLANNING_CHECKPOINT_DIR` (phase 53, SOTA-09): where completion checkpoints are kept durably. Unset keeps them in memory. See `planning/checkpoint-store.ts`. */
 	planningCheckpoint: CheckpointDirectoryResult;
 	/** `SUBSTRATE_PLANNING_STEERING*` (phase 53, SOTA-09): the steering switch, principal allowlist and rate. See `planning/steering.ts`. */
@@ -780,8 +777,6 @@ export interface SubstrateConfig {
 	steeringRegistered: boolean;
 	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
 	steeringExpiry: SteeringExpiryConfigResult;
-	/** `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_TTL_S` and `SUBSTRATE_PLANNING_STEERING_IDEMPOTENCY_CAP` (phase 77): how long a keyed queue replays and how many keyed queues are kept. A bad value is a typed result. See `planning/steering.ts`. */
-	steeringIdempotency: SteeringIdempotencyConfigResult;
 	/** `SUBSTRATE_PLANNING_BASELINE_DIR` (phase 58): where the observer keeps its publish baseline durably. Unset keeps it in memory. See `planning/baseline-store.ts`. */
 	planningBaseline: BaselineDirectoryResult;
 	/** `SUBSTRATE_PLANNING_LIVENESS_INTERVAL_MS` (phase 58): how often a quiet checkout refreshes its presence record. See `planning/observer.ts`. */
@@ -1102,7 +1097,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 	const dbEndpoints = loadDbEndpointSettings(env);
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	const tokens = tokenConfig(env);
-	const ragflowRetrieval = loadRagflowRetrievalSettings(env);
+	const docsWeight = loadDocsRetrievalWeight(env);
 	const desktopNames = (env.SUBSTRATE_DESKTOP_SURFACES ?? "")
 		.split(",")
 		.map((name) => name.trim())
@@ -1128,6 +1123,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		process.stderr.write("[substrate] SUBSTRATE_CACHE_PRELOAD=on skipped: the cache endpoint is refused, so the cache is off\n");
 	}
 	const cachePreload = cache.cacheEnabled ? cachePreloadRequested : { ...cachePreloadRequested, enabled: false };
+	const planning = loadPlanningSettings(env);
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -1152,7 +1148,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		dodGateTimeoutMs: parseDodGateTimeoutMs(env.SUBSTRATE_DOD_GATE_TIMEOUT_MS),
 		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
-		ragflow: ragflowFromEnv(env),
 		lightrag: lightragFromEnv(env),
 		docsBackend: docsBackendPick.backend,
 		docsBackendRejected: docsBackendPick.rejected,
@@ -1223,7 +1218,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			maxAttempts: positiveIntOr(env.SUBSTRATE_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_MAX_ATTEMPTS),
 			drainMs: positiveIntOr(env.SUBSTRATE_RETAIN_DRAIN_MS, DEFAULT_RETAIN_DRAIN_MS),
 		},
-		eventBuffer: loadEventBufferSettings(env),
+		// phase 76: the ledger event buffer and its dead-letter store.
+		eventBuffer: {
+			path: env.SUBSTRATE_LEDGER_BUFFER_PATH?.trim() || null,
+			max: positiveIntOr(env.SUBSTRATE_LEDGER_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX),
+			maxAttempts: positiveIntOr(env.SUBSTRATE_LEDGER_BUFFER_MAX_ATTEMPTS, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS),
+			deadLetterPath: env.SUBSTRATE_LEDGER_DEAD_LETTER_PATH?.trim() || null,
+			deadLetterMax: positiveIntOr(env.SUBSTRATE_LEDGER_DEAD_LETTER_MAX, DEFAULT_DEAD_LETTER_MAX),
+		},
 		hindsightEnv: {
 			legacyBankSet: (env.HINDSIGHT_BANK?.trim() ?? "") !== "",
 			urlSet: (env.HINDSIGHT_URL?.trim() ?? "") !== "",
@@ -1239,9 +1241,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsSlo: loadSloThresholds(env),
 		docsRetrieval: {
 			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
-			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, ragflowRetrieval.vectorSimilarityWeight),
+			vectorSimilarityWeight: docsWeight,
 			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
-			...(ragflowRetrieval.rerankId !== undefined ? { rerankId: ragflowRetrieval.rerankId } : {}),
 		},
 		// uplift-3 N3
 		admission: loadAdmissionSettings(env),
@@ -1290,8 +1291,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
 		// Phase 50 (D50-g): the bus rides the cache endpoint, and is off with a reason when that endpoint is missing or refused.
 		eventBus: loadEventBusSettings(env, cache),
-		// Phase 52 (SOTA-08): the planning plane's root and limits. Environment only; a bad value is a typed result.
-		planning: loadPlanningSettings(env),
+		// Phase 52 (SOTA-08): the planning plane's roots and limits. Environment only; a bad value is a typed result.
+		planning,
+		planningCheckouts: planning.ok ? planning.settings.checkouts : [],
+		// SUBSTRATE_PLANNING_PASS: a refused value already turns planning off through `planning`, so it reads as on here.
+		planningPassOn: planningPassSetting(env) !== "off",
 		// Phase 53 (SOTA-09): the durable checkpoint directory. Unset keeps checkpoints in memory; a bad value is a typed result.
 		planningCheckpoint: loadCheckpointDirectory(env),
 		// Phase 53 (SOTA-09): the steering switch, allowlist and rate. Environment only; a bad value is a typed result.
@@ -1306,8 +1310,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
 		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
 		steeringExpiry: loadSteeringExpirySettings(env),
-		// Phase 77 (steering idempotency): the keyed-queue replay retention and capacity. Environment only; a bad value is a typed result.
-		steeringIdempotency: loadSteeringIdempotencySettings(env),
 		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
 		planningBaseline: loadBaselineDirectory(env),
 		planningLiveness: loadLivenessSettings(env),
@@ -1595,6 +1597,13 @@ export function loadDocsReflectSettings(env: Record<string, string | undefined>)
 	};
 }
 
+function loadDocsRetrievalWeight(env: Record<string, string | undefined>): number {
+	const rawWeight = env.SUBSTRATE_DOCS_VECTOR_WEIGHT?.trim() ?? "";
+	const weight = rawWeight === "" ? DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight : Number(rawWeight);
+	if (!Number.isFinite(weight) || weight < 0 || weight > 1) return DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight;
+	return weight;
+}
+
 /** The scheduled reconcile's two knobs (Phase 78, D78-7). */
 export interface ReconcileSettings {
 	/** Seconds between scheduled runs (`SUBSTRATE_RECONCILE_INTERVAL_S`); `0` is off, and a value above 0 is at least 60. */
@@ -1630,21 +1639,6 @@ function wholeNumberOrRefuse(name: string, raw: string | undefined): number | nu
 	return Number(trimmed);
 }
 
-/**
- * The RAGFlow retrieval settings (D46-a, D46-b). `SUBSTRATE_RAGFLOW_VECTOR_WEIGHT`
- * is a number in [0, 1], default 0.3 (RAGFlow's own). `SUBSTRATE_RAGFLOW_RERANK_ID`
- * names a reranker; unset or blank, no `rerankId` is returned and no `rerank_id`
- * goes on the wire. A non-numeric or out-of-range weight refuses to start.
- */
-function loadRagflowRetrievalSettings(env: Record<string, string | undefined>): Pick<RetrievalKnobs, "vectorSimilarityWeight" | "rerankId"> {
-	const rawWeight = env.SUBSTRATE_RAGFLOW_VECTOR_WEIGHT?.trim() ?? "";
-	const weight = rawWeight === "" ? DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight : Number(rawWeight);
-	if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
-		throw new ConfigError("SUBSTRATE_RAGFLOW_VECTOR_WEIGHT must be a number in [0, 1]; unset it for RAGFlow's default 0.3");
-	}
-	const rerankId = env.SUBSTRATE_RAGFLOW_RERANK_ID?.trim() ?? "";
-	return { vectorSimilarityWeight: weight, ...(rerankId !== "" ? { rerankId } : {}) };
-}
 
 /** uplift-4 S4: `off`, `shadow` or `enforce` (case-insensitive); anything else, unset included, is `shadow`, which only reports. */
 function cacheSwrOr(raw: string | undefined): "off" | "shadow" | "enforce" {
@@ -2571,40 +2565,6 @@ function positiveIntOr(raw: string | undefined, fallback: number): number {
 	return value > 0 ? value : fallback;
 }
 
-/** The telemetry buffer's settings, present only while the buffer is on. */
-export interface EventBufferSettings {
-	path: string;
-	deadLetterPath: string;
-	max: number;
-	maxAttempts: number;
-	backoffMs: number;
-	backoffCapMs: number;
-}
-
-/**
- * The telemetry buffer's settings (phase 76). The buffer is opt-in: with no `SUBSTRATE_EVENT_BUFFER_PATH` there is nothing to read,
- * and a failed write answers `stored: false` as it always has. A buffer with no dead-letter file is refused at boot, because a
- * buffered event that exhausts its retries would have no record to be kept in.
- */
-function loadEventBufferSettings(env: Record<string, string | undefined>): EventBufferSettings | null {
-	const path = env.SUBSTRATE_EVENT_BUFFER_PATH?.trim() ?? "";
-	if (path === "") return null;
-	const deadLetterPath = env.SUBSTRATE_EVENT_DEAD_LETTER_PATH?.trim() ?? "";
-	if (deadLetterPath === "") {
-		throw new ConfigError(
-			"SUBSTRATE_EVENT_BUFFER_PATH is set, so SUBSTRATE_EVENT_DEAD_LETTER_PATH must be set too: a buffered event that exhausts its " +
-				"retries needs a file to be recorded in. Set SUBSTRATE_EVENT_DEAD_LETTER_PATH, or unset SUBSTRATE_EVENT_BUFFER_PATH",
-		);
-	}
-	return {
-		path,
-		deadLetterPath,
-		max: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX, DEFAULT_EVENT_BUFFER_MAX),
-		maxAttempts: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_MAX_ATTEMPTS, DEFAULT_EVENT_BUFFER_MAX_ATTEMPTS),
-		backoffMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_MS, DEFAULT_EVENT_BUFFER_BACKOFF_MS),
-		backoffCapMs: positiveIntOr(env.SUBSTRATE_EVENT_BUFFER_BACKOFF_CAP_MS, DEFAULT_EVENT_BUFFER_BACKOFF_CAP_MS),
-	};
-}
 
 /**
  * Hindsight routing keys that do not do what their presence suggests,

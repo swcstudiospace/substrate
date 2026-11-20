@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { spawnGit } from "./git.ts";
 import { findIgnoredWork, UNKNOWN_IGNORED } from "./ignored.ts";
 import { addWorktree, cleanupTemp, commit, git, makeRepo, tempDir, write } from "./testkit.ts";
+import { LOOSE_REFUSAL, workspaceGuard } from "./workspace-guard.ts";
 
 afterAll(cleanupTemp);
 
@@ -16,12 +17,20 @@ function ignoringWorktree(): { repo: string; worktree: string } {
 }
 
 describe("findIgnoredWork", () => {
-	test("an ignored regular file named like a rebuildable directory is work; the directory of that name is not", async () => {
+	test("an ignored regular file named like a rebuildable directory is work, and so is anything under a rebuildable directory in .planning/", async () => {
 		const { repo, worktree } = ignoringWorktree();
 		write(worktree, ".planning/target", "notes, not build output\n");
 		write(worktree, ".planning/dist/out.js", "rebuilt by a command\n");
 		write(worktree, ".planning/keep/node_modules/dep.js", "rebuilt by a command\n");
-		expect(await findIgnoredWork(worktree, repo, spawnGit)).toEqual([".planning/target"]);
+		expect(await findIgnoredWork(worktree, repo, spawnGit)).toEqual([".planning/dist/out.js", ".planning/keep/node_modules/dep.js", ".planning/target"]);
+	});
+
+	test("an ignored file in a rebuildable directory under .planning is compared, not skipped", async () => {
+		const { repo, worktree } = ignoringWorktree();
+		write(worktree, ".planning/build/x", "the only copy\n");
+		expect(await findIgnoredWork(worktree, repo, spawnGit)).toEqual([".planning/build/x"]);
+		write(repo, ".planning/build/x", "the only copy\n");
+		expect(await findIgnoredWork(worktree, repo, spawnGit)).toEqual([]);
 	});
 
 	test("an ignored file the primary lacks is work, and equal bytes in the primary make it replaceable", async () => {
@@ -68,5 +77,16 @@ describe("findIgnoredWork", () => {
 	test("a failed listing is unknown, never empty", async () => {
 		const { repo } = ignoringWorktree();
 		expect(await findIgnoredWork(join(tempDir(), "absent"), repo, spawnGit)).toEqual([UNKNOWN_IGNORED]);
+	});
+});
+
+describe("workspaceGuard", () => {
+	test("a dangling .planning link in a root that no worktree holds is refused, not skipped", async () => {
+		const root = tempDir();
+		symlinkSync(join(root, "absent-planning"), join(root, ".planning"));
+		const result = await workspaceGuard(root, spawnGit);
+		expect(result.ok).toBe(false);
+		expect(result.refusals).toHaveLength(1);
+		expect(result.refusals[0]?.endsWith(`/.planning: ${LOOSE_REFUSAL}`)).toBe(true);
 	});
 });

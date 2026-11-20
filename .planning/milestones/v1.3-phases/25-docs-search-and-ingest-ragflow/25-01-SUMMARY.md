@@ -37,9 +37,9 @@ actuals:
 status: complete
 ---
 
-# Phase 25 Plan 01: Substrate-only RAGFlow retrieval path Summary
+# Phase 25 Plan 01: Substrate-only RAGFlow (retired, superseded by LightRAG) retrieval path Summary
 
-JWT-free read path for docs: RAGFlow retrieval through `substrate-mcp` only, proven against a recording fake — explicit dataset ids, <= 10 cited redacted results, untrusted framing, URL-listing event, empty-plus-reason errors.
+JWT-free read path for docs: RAGFlow (retired, superseded by LightRAG) retrieval through `substrate-mcp` only, proven against a recording fake — explicit dataset ids, <= 10 cited redacted results, untrusted framing, URL-listing event, empty-plus-reason errors.
 
 ## Tasks Completed
 

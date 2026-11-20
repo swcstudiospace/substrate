@@ -6,8 +6,10 @@ import { createMcpServer, type McpCaller } from "../mcp.ts";
 import { auditToolCalls, createObservability } from "../observe.ts";
 import { Substrate } from "../service.ts";
 import { createTestLiveSessionAuthority, issueLiveSession } from "./live-session.test-support.ts";
-import { acknowledgeSteering, listSteering, queueSteering, type LiveSessionAuditPort } from "./steering-tools.ts";
+import { acknowledgeSteering, acknowledgeSteeringWithState, listSteering, queueSteering, type LiveSessionAuditPort, type SteeringWriteResult } from "./steering-tools.ts";
 import type { SteeringAuditEntry, SteeringHistorySink } from "./steering.ts";
+import type { SessionStatePort } from "./steering-delivery.ts";
+import { nextQueuedDirective } from "./steering-waiters.ts";
 
 const OWNER = { surface: "cursor", isOperator: false } as const;
 const OPERATOR = { surface: "omp", isOperator: true } as const;
@@ -211,57 +213,135 @@ describe("real registered MCP tools", () => {
 	});
 });
 
-describe("keyed queue through the real boundary: a replay returns the original reply and writes nothing", () => {
-	const KEY = "retry-key-0001";
+/** The id and sequence of a keyed queue that was applied. Anything else fails the test with the refusal it got. */
+function keyedQueued(result: SteeringWriteResult): { directive_id: string; sequence: number } {
+	if (result.status !== "queued" || result.sequence === undefined) throw new Error(`test keyed queue refused: ${result.status}`);
+	return { directive_id: result.directive_id, sequence: result.sequence };
+}
+const keyed = (sessionId: string, key: string, overrides: Record<string, unknown> = {}) => ({ ...queue(sessionId, overrides), idempotency_key: key });
 
-	test("a keyed reply carries its sequence, and a replay returns the same reply with no second audit write", async () => {
+describe("keyed steering commands (phase 77)", () => {
+	test("a replayed keyed queue returns the original reply and writes nothing", async () => {
 		const h = await fixture();
-		const keyed = { ...queue(h.row.sessionId), idempotency_key: KEY };
-		const first = await queueSteering(h.substrate.steering, OPERATOR, keyed);
-		const replay = await queueSteering(h.substrate.steering, OPERATOR, keyed);
-		expect(first).toMatchObject({ status: "queued", target_session_id: h.row.sessionId, sequence: 1 });
-		expect(replay).toEqual(first);
-		expect(h.history.entries.map((entry) => entry.event)).toEqual(["queued"]);
+		const args = keyed(h.row.sessionId, "queue-key-0001");
+		const original = await queueSteering(h.substrate.steering, OPERATOR, args);
+		const audited = h.history.entries.length;
+		expect(await queueSteering(h.substrate.steering, OPERATOR, args)).toEqual(original);
+		expect(h.history.entries).toHaveLength(audited);
+		expect(h.substrate.steering.inbox?.recordsFor(h.row.sessionId)).toHaveLength(1);
+		expect(keyedQueued(original).directive_id).toMatch(/^idem-[a-f0-9]{64}$/);
 	});
 
-	test("an unkeyed queue keeps its reply shape, with no sequence", async () => {
+	test("a replay keeps its sequence after later commands are queued", async () => {
 		const h = await fixture();
-		const queued = await queueSteering(h.substrate.steering, OPERATOR, queue(h.row.sessionId));
-		if (queued.status !== "queued") throw new Error("test queue refused");
-		expect(Object.keys(queued).sort()).toEqual(["directive_id", "queued_at_ms", "status", "target_session_id"]);
+		const first = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001")));
+		const second = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0002", { body: "Second." })));
+		expect(second.sequence).toBeGreaterThan(first.sequence);
+		expect(keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001")))).toEqual(first);
 	});
 
-	test("a key from another operator surface does not replay", async () => {
-		const h = await fixture({ SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp,claude-code" });
-		const keyed = { ...queue(h.row.sessionId), idempotency_key: KEY };
-		const first = await queueSteering(h.substrate.steering, OPERATOR, keyed);
-		const other = await queueSteering(h.substrate.steering, { surface: "claude-code", isOperator: true }, keyed);
-		if (first.status !== "queued" || other.status !== "queued") throw new Error("test queue refused");
-		expect(other.directive_id).not.toBe(first.directive_id);
-		expect(other.sequence).toBe(2);
-		expect(h.history.entries.map((entry) => entry.event)).toEqual(["queued", "queued"]);
+	test("the same key with a different request is refused and writes nothing", async () => {
+		const h = await fixture();
+		keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001")));
+		const audited = h.history.entries.length;
+		const conflict = { status: "refused" as const, error: { code: "idempotency-conflict" as const } };
+		expect(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001", { body: "A different instruction." }))).toEqual(conflict);
+		expect(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001", { action: "annotate" }))).toEqual(conflict);
+		expect(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.sibling.sessionId, "queue-key-0001"))).toEqual(conflict);
+		expect(h.history.entries).toHaveLength(audited);
+		expect(h.substrate.steering.inbox?.recordsFor(h.row.sessionId).map((record) => record.directive.body)).toEqual(["Review schema first."]);
 	});
 
-	test("the MCP steering_queue tool takes the key, and a repeat returns the original reply", async () => {
-		const h = await fixture();
-		const client = await h.connect(OPERATOR);
-		const args = { ...queue(h.row.sessionId), idempotency_key: KEY };
-		const first = await call(client, "steering_queue", args);
-		const replay = await call(client, "steering_queue", args);
-		expect(first.isError).toBe(false);
-		expect(first.body).toMatchObject({ status: "queued", sequence: 1 });
-		expect(replay.body).toEqual(first.body);
-		expect(h.history.entries.map((entry) => entry.event)).toEqual(["queued"]);
+	test("the same key from another surface is a different command", async () => {
+		const h = await fixture({ SUBSTRATE_PLANNING_STEERING_PRINCIPALS: "omp,codex" });
+		const mine = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001")));
+		const theirs = keyedQueued(await queueSteering(h.substrate.steering, { surface: "codex", isOperator: true }, keyed(h.row.sessionId, "queue-key-0001")));
+		expect(theirs.directive_id).not.toBe(mine.directive_id);
 	});
 
-	test("a replayed keyed queue announces nothing: only the fresh queue wakes its session", async () => {
+	test("an unkeyed queue keeps its reply shape and a fresh id, and is never deduplicated", async () => {
 		const h = await fixture();
-		const emit = spyOn(h.substrate, "emit");
-		const first = await queueSteering(h.substrate.steering, OPERATOR, { ...queue(h.row.sessionId), idempotency_key: KEY });
-		const announced = emit.mock.calls.length;
-		const replay = await queueSteering(h.substrate.steering, OPERATOR, { ...queue(h.row.sessionId), idempotency_key: KEY });
-		expect(replay).toEqual(first);
-		expect(announced).toBeGreaterThan(0);
-		expect(emit.mock.calls.length).toBe(announced);
+		const first = await queueSteering(h.substrate.steering, OPERATOR, queue(h.row.sessionId));
+		const second = await queueSteering(h.substrate.steering, OPERATOR, queue(h.row.sessionId));
+		if (first.status !== "queued" || second.status !== "queued") throw new Error("test queue refused");
+		expect(Object.keys(first).sort()).toEqual(["directive_id", "queued_at_ms", "status", "target_session_id"]);
+		expect(second.directive_id).not.toBe(first.directive_id);
+		expect(h.history.entries.filter((entry) => entry.event === "queued")).toHaveLength(2);
+	});
+
+	test("a replayed keyed acknowledgement returns the stored reply and writes no second row", async () => {
+		const h = await fixture();
+		const queuedDirective = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001")));
+		const args = { directive_id: queuedDirective.directive_id, session_id: h.row.sessionId, outcome: "declined" as const, idempotency_key: "ack-key-0001" };
+		const first = await acknowledgeSteering(h.substrate.steering, OPERATOR, args);
+		expect(first).toMatchObject({ status: "acknowledged", outcome: "declined", confirmed: false, sequence: queuedDirective.sequence });
+		const audited = h.history.entries.length;
+		expect(await acknowledgeSteering(h.substrate.steering, OPERATOR, args)).toEqual(first);
+		expect(h.history.entries).toHaveLength(audited);
+	});
+
+	test("a replayed keyed acknowledgement that moved the session does not move it again", async () => {
+		const h = await fixture();
+		const queuedDirective = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0002", { action: "pause" })));
+		const moves: string[] = [];
+		const port: SessionStatePort = { applyTransition: (sessionKey, target) => { moves.push(`${sessionKey}:${target}`); return { ok: true, changed: true }; } };
+		const args = { directive_id: queuedDirective.directive_id, session_id: h.row.sessionId, outcome: "applied" as const, idempotency_key: "ack-key-0002" };
+		const first = await acknowledgeSteeringWithState(h.substrate.steering, OPERATOR, args, port);
+		expect(first).toMatchObject({ status: "acknowledged", sequence: queuedDirective.sequence, session_state: { status: "applied", state: "PAUSED" } });
+		expect(await acknowledgeSteeringWithState(h.substrate.steering, OPERATOR, args, port)).toEqual(first);
+		expect(moves).toEqual([`${h.row.sessionId}:PAUSED`]);
+	});
+
+	test("a keyed acknowledgement with another outcome under the same key is refused", async () => {
+		const h = await fixture();
+		const queuedDirective = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0001")));
+		const args = { directive_id: queuedDirective.directive_id, session_id: h.row.sessionId, outcome: "declined" as const, idempotency_key: "ack-key-0001" };
+		await acknowledgeSteering(h.substrate.steering, OPERATOR, args);
+		expect(await acknowledgeSteering(h.substrate.steering, OPERATOR, { ...args, outcome: "applied" as const })).toEqual({ status: "refused", error: { code: "idempotency-conflict" } });
+	});
+
+	test("two identical keyed acknowledgements running at once apply the directive once", async () => {
+		const h = await fixture();
+		const queuedDirective = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0003")));
+		const args = { directive_id: queuedDirective.directive_id, session_id: h.row.sessionId, outcome: "declined" as const, idempotency_key: "ack-key-0003" };
+		const [a, b] = await Promise.all([acknowledgeSteering(h.substrate.steering, OPERATOR, args), acknowledgeSteering(h.substrate.steering, OPERATOR, args)]);
+		expect(b).toEqual(a);
+		expect(a).toMatchObject({ status: "acknowledged" });
+		expect(h.history.entries.filter((entry) => entry.event === "acknowledged")).toHaveLength(1);
+	});
+
+	test("a keyed command refused by the audit is not kept: the retry applies it", async () => {
+		const h = await fixture();
+		h.history.failing = true;
+		expect(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0004"))).toMatchObject({ status: "refused", error: { code: "audit-unavailable" } });
+		h.history.failing = false;
+		const retried = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0004")));
+		expect(retried.sequence).toEqual(expect.any(Number));
+		expect(h.history.entries.filter((entry) => entry.event === "queued")).toHaveLength(1);
+	});
+
+	test("two distinct keyed commands are delivered in sequence order, and a replay does not reorder them", async () => {
+		const h = await fixture();
+		const inbox = h.substrate.steering.inbox;
+		if (inbox === null) throw new Error("test inbox missing");
+		const first = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0005", { body: "First." })));
+		const second = keyedQueued(await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0006", { body: "Second." })));
+		expect(second.sequence).toBeGreaterThan(first.sequence);
+		expect(nextQueuedDirective(inbox, h.row.sessionId, null)?.record.directive.id).toBe(first.directive_id);
+		expect(nextQueuedDirective(inbox, h.row.sessionId, first.directive_id)?.record.directive.id).toBe(second.directive_id);
+		expect(nextQueuedDirective(inbox, h.row.sessionId, second.directive_id)).toBeNull();
+		await queueSteering(h.substrate.steering, OPERATOR, keyed(h.row.sessionId, "queue-key-0005", { body: "First." }));
+		expect(inbox.queuedFor(h.row.sessionId).map((entry) => entry.record.directive.id)).toEqual([first.directive_id, second.directive_id]);
+	});
+
+	test("the MCP tools expose idempotency_key, and an MCP replay answers the same reply", async () => {
+		const h = await fixture();
+		const operator = await h.connect(OPERATOR);
+		const tools = (await operator.listTools()).tools;
+		for (const name of ["steering_queue", "steering_acknowledge"]) expect(tools.find((tool) => tool.name === name)?.inputSchema.properties).toHaveProperty("idempotency_key");
+		const args = { ...queue(h.row.sessionId), idempotency_key: "mcp-key-0001" };
+		const once = await call(operator, "steering_queue", args);
+		expect(once).toMatchObject({ isError: false, body: { status: "queued", sequence: expect.any(Number) } });
+		expect(await call(operator, "steering_queue", args)).toEqual(once);
 	});
 });
