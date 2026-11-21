@@ -294,7 +294,11 @@ async function propose(args: Args, raw: string[], deps: SkillsDeps): Promise<num
 		for (const dir of matched) picked.push({ dirArg: relative(deps.cwd, dir) || dir, dir });
 	}
 	const seenDirs = new Set<string>();
-	const unique = picked.filter(({ dir }) => (seenDirs.has(dir) ? false : (seenDirs.add(dir), true)));
+	const unique = picked.filter(({ dir }) => {
+		if (seenDirs.has(dir)) return false;
+		seenDirs.add(dir);
+		return true;
+	});
 	if (unique.length > PROPOSE_BATCH_MAX) {
 		return refused(`--dir/--glob may name at most ${PROPOSE_BATCH_MAX} directories, not ${unique.length}`);
 	}

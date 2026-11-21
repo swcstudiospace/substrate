@@ -31,7 +31,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type MigrationOptIns, type MigrationStep } from "./index-store.ts";
+import type { MigrationOptIns, MigrationStep } from "./index-store.ts";
 
 /** One digest disagreement, reported per fixture `key` (the step's version as a string). */
 export interface MigrationDrift {
