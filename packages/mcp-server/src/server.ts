@@ -112,7 +112,7 @@ import { MetricHistoryMemo, bucketedValues, metricHistoryAnswer } from "./metric
 import { redact } from "./redact.ts";
 import { restDeclaration, toolDeclaration } from "./route-policy.ts";
 import { refusalDigest } from "./repo-scope.ts";
-import { LIVE_BRIEF_INPUT, type Substrate } from "./service.ts";
+import { LIVE_BRIEF_INPUT, type DeadLetterListResult, type Substrate } from "./service.ts";
 import {
 	isProposalBatch,
 	proposalBatchProblem,
@@ -1457,7 +1457,7 @@ export function createHttpServer(
 				}
 				const cause = url.searchParams.get("cause");
 				const sessionId = url.searchParams.get("session_id");
-				let result;
+				let result: DeadLetterListResult;
 				try {
 					result = substrate.listDeadLetters({
 						...(limit === undefined ? {} : { limit }),

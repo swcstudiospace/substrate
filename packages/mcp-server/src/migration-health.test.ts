@@ -24,8 +24,9 @@ function step(version: number, sql: string, extra: Partial<MigrationStep> = {}):
 	return { version, name: `s${version}`, sql, ...extra };
 }
 
-const steps = [step(1, "create table if not exists a (id int)"), step(2, "create index if not exists a_idx on a (id)"), step(3, "create table if not exists b (id int)")];
+const steps: [MigrationStep, MigrationStep, MigrationStep] = [step(1, "create table if not exists a (id int)"), step(2, "create index if not exists a_idx on a (id)"), step(3, "create table if not exists b (id int)")];
 const fixture = migrationDigests(steps);
+const digest2 = fixture["2"] as string;
 
 describe("digest agreement", () => {
 	test("migrationStepDigest is the same definition as scripts/migration-digests.ts stepDigest, over every real step", () => {
@@ -53,10 +54,10 @@ describe("digest agreement", () => {
 
 describe("drift per key", () => {
 	test("an edited step reports key, expected and actual, and is unhealthy", () => {
-		const edited = [steps[0]!, step(2, "create index if not exists a_idx on a (id, other)"), steps[2]!];
+		const edited: [MigrationStep, MigrationStep, MigrationStep] = [steps[0], step(2, "create index if not exists a_idx on a (id, other)"), steps[2]];
 		const report = analyzeMigrationHealth({ steps: edited, fixture, appliedVersions: [1, 2, 3] });
 		expect(report.drift).toEqual([
-			{ key: "2", name: "s2", expected: fixture["2"]!, actual: migrationStepDigest(edited[1]!), kind: "edited" },
+			{ key: "2", name: "s2", expected: digest2, actual: migrationStepDigest(edited[1]), kind: "edited" },
 		]);
 		expect(report.healthy).toBe(false);
 	});
@@ -65,18 +66,18 @@ describe("drift per key", () => {
 		const { "2": _dropped, ...partial } = fixture;
 		const report = analyzeMigrationHealth({ steps, fixture: partial, appliedVersions: [1, 2, 3] });
 		expect(report.drift).toEqual([
-			{ key: "2", name: "s2", expected: null, actual: migrationStepDigest(steps[1]!), kind: "missing_fixture_digest" },
+			{ key: "2", name: "s2", expected: null, actual: migrationStepDigest(steps[1]), kind: "missing_fixture_digest" },
 		]);
 	});
 
 	test("a pinned digest whose step is gone reports unknown_step with a null name and actual", () => {
-		const withoutTwo = [steps[0]!, steps[2]!];
+		const withoutTwo = [steps[0], steps[2]];
 		const report = analyzeMigrationHealth({ steps: withoutTwo, fixture, appliedVersions: [1, 3] });
-		expect(report.drift).toEqual([{ key: "2", name: null, expected: fixture["2"]!, actual: null, kind: "unknown_step" }]);
+		expect(report.drift).toEqual([{ key: "2", name: null, expected: digest2, actual: null, kind: "unknown_step" }]);
 	});
 
 	test("drift is ordered by numeric key, not fixture iteration order", () => {
-		const edited = [step(1, "create table if not exists a (id int) -- edited"), steps[1]!, step(3, "create table if not exists b (id int) -- edited")];
+		const edited: [MigrationStep, MigrationStep, MigrationStep] = [step(1, "create table if not exists a (id int) -- edited"), steps[1], step(3, "create table if not exists b (id int) -- edited")];
 		const report = analyzeMigrationHealth({ steps: edited, fixture, appliedVersions: [1, 2, 3] });
 		expect(report.drift.map((entry) => entry.key)).toEqual(["1", "3"]);
 	});
@@ -144,7 +145,7 @@ describe("fixture parsing", () => {
 
 describe("text format", () => {
 	test("names drift per key, pending steps and unreadable records", () => {
-		const edited = [steps[0]!, step(2, "create index if not exists a_idx on a (id, other)"), steps[2]!];
+		const edited: [MigrationStep, MigrationStep, MigrationStep] = [steps[0], step(2, "create index if not exists a_idx on a (id, other)"), steps[2]];
 		const text = formatMigrationHealth(analyzeMigrationHealth({ steps: edited, fixture, appliedVersions: [1], unavailable: ["index: not configured"] }));
 		expect(text).toContain("migration health — unhealthy, 1 digest drift, 2 pending");
 		expect(text).toContain("- [drift] key 2 (s2): edited");
@@ -196,7 +197,9 @@ describe("Substrate.migrationHealth", () => {
 			steering: { history: null, liveSessions: null },
 		});
 		const report = await substrate.migrationHealth();
-		expect(report.pending.map((entry) => entry.version)).toEqual([MIGRATION_STEPS[MIGRATION_STEPS.length - 1]!.version]);
+		const lastStep = MIGRATION_STEPS[MIGRATION_STEPS.length - 1];
+		if (lastStep === undefined) throw new Error("MIGRATION_STEPS is empty");
+		expect(report.pending.map((entry) => entry.version)).toEqual([lastStep.version]);
 		expect(report.healthy).toBe(true);
 	});
 });
