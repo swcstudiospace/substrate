@@ -875,6 +875,117 @@
       "title": "Index capacity runway",
       "transformations": [],
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "substrate-slo-history"
+      },
+      "description": "1 when the last scheduled cross-layer reconcile reported clean, 0 when it reported drift; no point before the first run. The run's counts are in `GET /healthz`'s `reconcile` field. Report-only: the run repairs nothing. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended. Series `reconcile.clean` (gauge, max per step, ratio), source `substrate.reconcile.clean`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "value",
+              "text": "Value",
+              "type": "number"
+            }
+          ],
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "substrate-slo-history"
+          },
+          "filters": [],
+          "format": "table",
+          "refId": "A",
+          "root_selector": "points",
+          "source": "url",
+          "type": "json",
+          "url": "/slo/history",
+          "url_options": {
+            "data": "",
+            "method": "GET",
+            "params": [
+              {
+                "key": "series",
+                "value": "reconcile.clean"
+              },
+              {
+                "key": "window",
+                "value": "$window"
+              },
+              {
+                "key": "step",
+                "value": "$step"
+              }
+            ]
+          }
+        }
+      ],
+      "title": "Scheduled reconcile",
+      "transformations": [],
+      "type": "timeseries"
     }
   ],
   "refresh": "5m",
