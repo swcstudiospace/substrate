@@ -292,7 +292,7 @@ describe("the MCP tools are operator-gated", () => {
 		const result = await client.callTool({ name, arguments: args });
 		const content = result.content as Array<{ type: string; text?: string }>;
 		const text = content[0]?.text ?? "";
-		return { isError: result.isError === true, text, json: () => JSON.parse(text) as Record<string, unknown> };
+		return { isError: result.isError === true, text, json: () => { const parsed: unknown = JSON.parse(text); if (parsed === null || typeof parsed !== "object") throw new Error("json body is not an object"); return parsed as Record<string, unknown>; } };
 	}
 
 	test("both tools are registered and the list read is read-only", async () => {

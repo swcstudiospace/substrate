@@ -7283,7 +7283,11 @@ export class Substrate {
 			}),
 			allowlist: describeRepoAllowlist(allowlist, env),
 		};
-		return { status: 200, body: JSON.parse(redact(JSON.stringify(body))) as Record<string, unknown> };
+		const redacted: unknown = JSON.parse(redact(JSON.stringify(body)));
+		if (redacted === null || typeof redacted !== "object" || Array.isArray(redacted)) {
+			throw new Error("repo-scope status body is not an object after redaction");
+		}
+		return { status: 200, body: redacted as Record<string, unknown> };
 	}
 
 	/**

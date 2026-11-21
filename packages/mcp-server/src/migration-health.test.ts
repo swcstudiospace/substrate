@@ -222,7 +222,9 @@ describe("MCP migration_health", () => {
 		const result = await client.callTool({ name: "migration_health", arguments: {} });
 		expect(result.isError).toBeFalsy();
 		const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
-		const body = JSON.parse(text) as Record<string, unknown>;
+		const parsed: unknown = JSON.parse(text);
+		if (parsed === null || typeof parsed !== "object") throw new Error("json body is not an object");
+		const body = parsed as Record<string, unknown>;
 		expect(body.drift_count).toBe(0);
 		expect(body.unavailable).toEqual(["index: not configured"]);
 	});

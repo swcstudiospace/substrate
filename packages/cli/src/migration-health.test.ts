@@ -47,7 +47,9 @@ describe("runMigrationHealth", () => {
 		const h = deps({ readApplied: async () => [1] });
 		const code = await runMigrationHealth(["--json"], h.deps);
 		expect(code).toBe(0);
-		const body = JSON.parse(h.out.join("")) as Record<string, unknown>;
+		const parsed: unknown = JSON.parse(h.out.join(""));
+		if (parsed === null || typeof parsed !== "object") throw new Error("json body is not an object");
+		const body = parsed as Record<string, unknown>;
 		expect(body.healthy).toBe(true);
 		expect(body.pending_count).toBe(MIGRATION_STEPS.length - 1);
 		expect((body.pending as Array<{ version: number }>).map((entry) => entry.version)).toEqual(MIGRATION_STEPS.slice(1).map((step) => step.version));
