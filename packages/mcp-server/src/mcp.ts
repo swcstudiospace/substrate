@@ -17,6 +17,7 @@ import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import { parseBriefProfile } from "./brief-profile.ts";
 import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
+import { formatMigrationHealth } from "./migration-health.ts";
 import { buildFabricCompliance } from "./fabric/compliance.ts";
 import { gatherFabricFacts } from "./fabric/gather.ts";
 import { buildFabricSuggestions } from "./fabric/optimize.ts";
@@ -1030,6 +1031,38 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 	);
 
+	server.registerTool(
+		"memory_provenance",
+		{
+			title: "Provenance of a memory entry: its verified supersession chain",
+			description:
+				"The versions of one claim around an entry, oldest first: `supersedes` walked back to the first version and " +
+				"`superseded_by` walked forward to the latest. Every hop carries the same verdict `memory_verify` gives — does " +
+				"the content still hash to its `entry_hash`, and is the ledger event it rested on inside an anchored root — " +
+				"plus the pending-review and quarantine rows that hop's content matched, by `entry_hash`, as ids. `back` is " +
+				"`root`, `missing`, `cycle` or `truncated`; `forward` is `current`, `forgotten`, `missing`, `cycle` or " +
+				"`truncated`; `dangling` names links no stored entry holds, and `forgotten_marker` a `forgotten:<id>` tail. " +
+				"An entry you cannot read (another surface's `agent:` scope, or past its lifetime under enforcement) ends " +
+				"that direction of the walk as dangling, as in `memory_verify`. The reply carries ids, hashes and statuses " +
+				"only — never entry text, and never a quarantined body, even with a review token; `authorized` records " +
+				"whether a review_token was presented. Read-only.",
+			inputSchema: {
+				id: z.string().min(1).max(200).describe("the memory entry id to walk from"),
+				repo: z.string().optional().describe("owner/name of the repo you are working in; `agent:` entries are readable only for it, as in memory_search"),
+				review_token: z.string().optional().describe("a reviewer's token; recorded as `authorized` — bodies are never returned either way"),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ id, repo, review_token }) => {
+			try {
+				return json(redactValue(await substrate.memoryProvenance(id, { surface: callerSurface, repo, isOperator, review_token })));
+			} catch (cause) {
+				if (cause instanceof MemoryVerifyError) return refusal(redact(`${cause.rule}: ${cause.message}`).slice(0, 400));
+				throw cause;
+			}
+		},
+	);
+
 	/**
 	 * The caller the session rollback tools act for: the token's surface, or `claude-code` for an untokened local run
 	 * (the `events_emit` rule), refused when the anonymous bridge names that surface as tokened. The tools write
@@ -1201,6 +1234,62 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				...(buffered ? { buffered: true } : {}),
 				...(deadLettered ? { deadLettered: true } : {}),
 			});
+		},
+	);
+
+	/**
+	 * The dead-letter tools are an operator's: a parked event's payload is another session's content, and
+	 * replaying it writes to the ledger. Refused with the reason rather than silently empty, so a non-operator
+	 * caller does not mistake "nothing parked" for "nothing dead-lettered".
+	 */
+	const DEAD_LETTER_REFUSED = {
+		ok: false,
+		reason: "operator-required",
+		detail: "reading or replaying dead-lettered events is an operator action: present a token from SUBSTRATE_OPERATOR_TOKENS. Nothing was read or written.",
+	} as const;
+
+	server.registerTool(
+		"events_dead_letter_list",
+		{
+			title: "List dead-lettered events",
+			description:
+				"Read the substrate's dead-letter store: the events it could neither write to the ledger nor keep " +
+				"in its retry buffer, oldest first, each with its hash, cause (`exhausted`, `overflow`, " +
+				"`chain-blocked`, `abandoned`), attempts and last error, and the event whole so it can be " +
+				"inspected before a replay. `count` is every record in the store before filtering. Operators " +
+				"only: a refused caller gets `operator-required`, never an empty list. The same count rides " +
+				"`/healthz` as `eventBuffer.deadLetters.depth`.",
+			inputSchema: {
+				limit: z.number().int().min(1).max(1000).optional().describe("records, oldest first"),
+				session_id: z.string().optional(),
+				cause: z.enum(["exhausted", "overflow", "chain-blocked", "abandoned"]).optional(),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (args) => {
+			if (!isOperator) return json(DEAD_LETTER_REFUSED);
+			return json(substrate.listDeadLetters(args));
+		},
+	);
+
+	server.registerTool(
+		"events_dead_letter_replay",
+		{
+			title: "Replay a dead-lettered event",
+			description:
+				"Re-append one dead-lettered event to the ledger through the same delivery path a parked event " +
+				"takes, by its event id from `events_dead_letter_list`. On success the record is removed from " +
+				"the store. No double-ingest: an event whose original write already landed answers `ok: true` " +
+				"without a second row. A failed replay re-parks the record with the new error, so the event " +
+				"stays listed and replayable. Operators only.",
+			inputSchema: {
+				id: z.string().describe("the dead-lettered event's id, from events_dead_letter_list"),
+			},
+			annotations: { destructiveHint: false, idempotentHint: true },
+		},
+		async (args) => {
+			if (!isOperator) return json(DEAD_LETTER_REFUSED);
+			return json(await substrate.replayDeadLetter(args.id));
 		},
 	);
 
@@ -1745,6 +1834,25 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	server.registerTool(
+		"repo_scope_status",
+		{
+			title: "Repository scope status (operator only)",
+			description:
+				"Operator-only, read-only: whether repository scoping is enforced, each registered repository with its root count and " +
+				"whether each root exists, every surface and the repositories it is granted (including surfaces granted nothing), the " +
+				"session allowlist's sessions with each repository's credential variable name and whether that variable is set, and the " +
+				"in-process refusal counts by reason and route. Names and presence only: no directory path and no credential value is " +
+				"ever in the reply. Refused to non-operators. A read: it changes nothing.",
+			inputSchema: {},
+			annotations: { readOnlyHint: true },
+		},
+		async () => {
+			const reply = substrate.repoScopeStatus(callerSurface, isOperator);
+			return reply.status === 200 ? json(reply.body) : { ...json(reply.body), isError: true };
+		},
+	);
+
+	server.registerTool(
 		"corpus_status",
 		{
 			title: "Status of the corpus manifest",
@@ -2070,6 +2178,27 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			const outcome = await substrate.scopedDriftScan(request, callerSurface);
 			if (!outcome.ok) return { ...json(outcome.body), isError: true };
 			return format === "text" ? text(formatDrift(outcome.report)) : json(outcome.report);
+		},
+	);
+
+	server.registerTool(
+		"migration_health",
+		{
+			title: "Report index migration health",
+			description:
+				"Read-only health of the index's boot migrations. Reports digest drift per key — the pinned digest in " +
+				"`index-store.migrations.digests.json` against the digest of the step's current text (`edited`, " +
+				"`missing_fixture_digest`, `unknown_step`) — plus the pending migrations in application order and any " +
+				"applied version no current step names. Reports only; it runs no migration and writes nothing. A record " +
+				"that could not be read is listed in `unavailable`.",
+			inputSchema: {
+				format: z.enum(["json", "text"]).optional().describe("`text` for a few printable lines instead of the full report."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ format }) => {
+			const report = await substrate.migrationHealth();
+			return format === "text" ? text(formatMigrationHealth(report)) : json(report);
 		},
 	);
 

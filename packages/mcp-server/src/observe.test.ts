@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuditLog, AuditUnavailableError, argDigest, type AuditRecordInput } from "@substrate/audit";
-import { METRIC, findCounter, sumCounter } from "@substrate/observability";
+import { METRIC, findCounter, findHistogram, mergeHistogram, sumCounter } from "@substrate/observability";
 import { loadConfig } from "./config.ts";
 import {
 	MAX_EVIDENCE_RECORDS,
@@ -13,8 +13,10 @@ import {
 	chainState,
 	claimOutcome,
 	createObservability,
+	measureToolDispatch,
 	normalizeRoute,
 	recordClaimWithdrawal,
+	recordToolDispatch,
 	renderEvidenceHtml,
 	toolCallsIn,
 	toolLabel,
@@ -383,6 +385,46 @@ describe("auditToolCalls", () => {
 		expect(toolLabel("session_rollback_commit")).toBe("session_rollback_commit");
 		expect(toolLabel("events")).toBe("events");
 		expect(toolLabel("../../etc/passwd")).toBe("unrecognized");
+	});
+});
+
+describe("measureToolDispatch", () => {
+	test("times the dispatcher once per audited call and returns its result", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		const calls = [
+			{ id: 1, tool: "graph_claim", args: {} },
+			{ id: 2, tool: "memory_brief", args: {} },
+			{ id: 3, tool: "make-believe-tool", args: {} },
+		];
+
+		const result = await measureToolDispatch(observed, "omp", calls, async () => "dispatched");
+
+		expect(result).toBe("dispatched");
+		const histogram = defined(findHistogram(observed.snapshot(), METRIC.toolDuration), "toolDuration histogram");
+		expect(mergeHistogram(histogram, { tool: "graph_claim" }).count).toBe(1);
+		expect(mergeHistogram(histogram, { tool: "memory_brief" }).count).toBe(1);
+		expect(mergeHistogram(histogram, { tool: "unrecognized" }).count).toBe(1);
+		expect(histogram.points.map((point) => point.attributes.tool).sort()).toEqual(["graph_claim", "memory_brief", "unrecognized"]);
+	});
+
+	test("still records the latency when the dispatch throws, and rethrows", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		await expect(measureToolDispatch(observed, null, [{ id: 1, tool: "events_emit", args: {} }], async () => { throw new Error("dispatch failed"); })).rejects.toThrow("dispatch failed");
+
+		const histogram = defined(findHistogram(observed.snapshot(), METRIC.toolDuration), "toolDuration histogram");
+		expect(mergeHistogram(histogram, { tool: "events_emit" }).count).toBe(1);
+		expect(histogram.points[0]?.attributes.surface).toBe("unknown");
+	});
+
+	test("recordToolDispatch bounds an unknown tool before it reaches the histogram", () => {
+		const observed = createObservability(loadConfig({}));
+		recordToolDispatch(observed, { surface: "omp", tool: "not-a-real-tool", durationMs: 5 });
+
+		const histogram = defined(findHistogram(observed.snapshot(), METRIC.toolDuration), "toolDuration histogram");
+		expect(histogram.points).toHaveLength(1);
+		expect(histogram.points[0]?.attributes.tool).toBe("unrecognized");
 	});
 });
 

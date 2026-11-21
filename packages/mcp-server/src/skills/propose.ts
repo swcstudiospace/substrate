@@ -51,6 +51,10 @@ export const DEFAULT_LIBRARY: SkillsLibrary = { repo: LIBRARY_REPO, remoteUrl: L
 export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /** The HTTP route, the MCP tool and the CLI pre-flight share one cap (D21-08: body ≤ 1 MB). */
 export const ROUTE_MAX_BYTES = 1_000_000;
+/** The most proposals one batch call accepts: a miner drains N skills in a single call. */
+export const PROPOSE_BATCH_MAX = 20;
+/** The most `git diff` patch text one dry-run result carries. */
+export const DIFF_PATCH_MAX_BYTES = 64 * 1024;
 
 export const PR_TITLE_MAX = 256;
 export const PR_BODY_MAX = 20_000;
@@ -115,6 +119,33 @@ export interface ProposeResult {
 	diff_added?: number;
 	diff_changed?: number;
 	diff_deleted?: number;
+	/** Dry-run only: the staged `git diff` patch, bounded to DIFF_PATCH_MAX_BYTES. */
+	diff_patch?: string;
+}
+
+/** One proposal's outcome inside a batch: the single result plus the item's `name`, or a refusal/failure. */
+export type ProposeBatchStatus = ProposeStatus | "refused" | "failed";
+
+/**
+ * What a batch answers per item. A refusal or failure never aborts its siblings. `error`
+ * is present exactly when `status` is `refused` or `failed`; `content_sha256` is absent
+ * when the item was refused before validation produced a content hash, and `findings`
+ * carries a refusal's file/line/rule hits.
+ */
+export interface ProposeBatchItem {
+	name: string;
+	status: ProposeBatchStatus;
+	content_sha256?: string;
+	redactions: SkillFileHit[];
+	diff_patch?: string;
+	diff_added?: number;
+	diff_changed?: number;
+	diff_deleted?: number;
+	pr_url?: string;
+	pr_number?: number;
+	branch?: string;
+	error?: string;
+	findings?: SkillFileHit[];
 }
 
 export interface ValidatedProposal {
@@ -130,7 +161,9 @@ export interface ValidatedProposal {
 
 export interface SkillProposer {
 	propose(input: ProposeInput, opts: Omit<ProposeOptions, "run">): Promise<ProposeResult>;
+	proposeBatch?(inputs: ProposeInput[], opts: Omit<ProposeOptions, "run">): Promise<ProposeBatchItem[]>;
 }
+
 
 /** A guard refused the proposal before any git or gh call. Findings name file, line and rule, never a value. */
 export class ProposeRefused extends Error {
@@ -428,6 +461,11 @@ export function diffQuietArgv(dir: string): string[] {
 
 export function nameStatusArgv(dir: string): string[] {
 	return ["git", "-C", dir, "diff", "--cached", "--name-status", "--no-renames"];
+}
+
+/** The staged diff as a patch: the dry-run preview a single or batch proposal returns. */
+export function patchArgv(dir: string): string[] {
+	return ["git", "-C", dir, "diff", "--cached", "--no-ext-diff", "--no-renames", "--patch"];
 }
 
 export function commitArgv(dir: string, message: string): string[] {
@@ -940,6 +978,17 @@ function countNameStatus(stdout: string): { diff_added: number; diff_changed: nu
 }
 
 /**
+ * The patch text a dry run returns, cut to DIFF_PATCH_MAX_BYTES. A cut inside a
+ * multi-byte character decodes with exactly one U+FFFD; stripping the trailing
+ * replacement characters leaves clean text, and a marker names the cap.
+ */
+export function boundedPatch(patch: string): string {
+	if (Buffer.byteLength(patch, "utf8") <= DIFF_PATCH_MAX_BYTES) return patch;
+	const cut = Buffer.from(patch, "utf8").subarray(0, DIFF_PATCH_MAX_BYTES).toString("utf8").replace(/�+$/u, "");
+	return `${cut}\n… (diff truncated at ${DIFF_PATCH_MAX_BYTES} bytes)\n`;
+}
+
+/**
  * validate → mirror check → per-content lock → ledger → beforeWork → mirror lock, fetch, unlock → shared
  * clone, set-url, checkout → writeTree → add → diff → commit → origin check → push → ledger
  * pushed → gh pr create → ledger opened. The clone is removed and the locks released in finally.
@@ -1007,7 +1056,8 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		const base = { content_sha256: v.content_sha256, redactions: v.redactions };
 		if (opts.dryRun) {
 			const status = await must(run, "git diff", nameStatusArgv(clone));
-			return { status: "dry_run", ...base, ...countNameStatus(status.stdout) };
+			const patch = await must(run, "git diff", patchArgv(clone));
+			return { status: "dry_run", ...base, ...countNameStatus(status.stdout), diff_patch: boundedPatch(patch.stdout) };
 		}
 		const diff = await run(diffQuietArgv(clone));
 		if (diff.code === 0) return { status: "unchanged", ...base };
@@ -1032,6 +1082,51 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		releaseContent?.();
 	}
 }
+/**
+ * Run `inputs` through `proposeSkill` one at a time — the mirror lock serializes them
+ * anyway — answering per item: a refusal or failure never aborts its siblings. The
+ * batch is refused as a whole when empty or over PROPOSE_BATCH_MAX, or over
+ * ROUTE_MAX_BYTES*PROPOSE_BATCH_MAX bytes of JSON; an item over ROUTE_MAX_BYTES alone
+ * is refused, the same cap a single proposal gets. The total is a backstop: with every
+ * item already at or under the per-item cap it cannot be the first to trip.
+ */
+export async function proposeSkillsBatch(inputs: ProposeInput[], opts: ProposeOptions): Promise<ProposeBatchItem[]> {
+	if (!Array.isArray(inputs) || inputs.length === 0) throw new ProposeRefused("a batch needs at least one proposal");
+	if (inputs.length > PROPOSE_BATCH_MAX) throw new ProposeRefused(`a batch takes at most ${PROPOSE_BATCH_MAX} proposals, not ${inputs.length}`);
+	let total = 0;
+	const sizes = inputs.map((item) => {
+		const size = Buffer.byteLength(JSON.stringify(item) ?? "", "utf8");
+		total += size;
+		return size;
+	});
+	if (total > ROUTE_MAX_BYTES * PROPOSE_BATCH_MAX) {
+		throw new ProposeRefused(`the batch is ${total} bytes as JSON, over the limit of ${ROUTE_MAX_BYTES * PROPOSE_BATCH_MAX} bytes`);
+	}
+	const items: ProposeBatchItem[] = [];
+	for (const [index, item] of inputs.entries()) {
+		const name = typeof item?.name === "string" ? item.name : "";
+		const size = sizes[index] ?? 0;
+		if (size > ROUTE_MAX_BYTES) {
+			items.push({ name, status: "refused", redactions: [], error: `the proposal is ${size} bytes as JSON, over the limit of ${ROUTE_MAX_BYTES} bytes` });
+			continue;
+		}
+		try {
+			const result = await proposeSkill(item, opts);
+			items.push({ name, ...result });
+		} catch (cause) {
+			// Cap the tail, not the head: the git/gh output embedded in a ProposeFailed is
+			// already tail-kept by tail() (slice(-400)), so a head cap here would cut off
+			// the [REDACTED] marker at its end (and the tail of the diagnostic output).
+			const error = redact(cause instanceof Error ? cause.message : String(cause)).slice(-400);
+			if (cause instanceof ProposeRefused) {
+				items.push({ name, status: "refused", redactions: [], error, ...(cause.findings ? { findings: cause.findings } : {}) });
+			} else {
+				items.push({ name, status: "failed", redactions: [], error });
+			}
+		}
+	}
+	return items;
+}
 
 /** service.ts's seam: the runner, library and state dir bound once, request options per call. */
 export function createSkillProposer({
@@ -1043,5 +1138,8 @@ export function createSkillProposer({
 	library?: SkillsLibrary;
 	stateDir?: string;
 }): SkillProposer {
-	return { propose: (input, opts) => proposeSkill(input, { library, stateDir, ...opts, run }) };
+	return {
+		propose: (input, opts) => proposeSkill(input, { library, stateDir, ...opts, run }),
+		proposeBatch: (inputs, opts) => proposeSkillsBatch(inputs, { library, stateDir, ...opts, run }),
+	};
 }

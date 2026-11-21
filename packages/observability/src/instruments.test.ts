@@ -122,6 +122,32 @@ describe("recordRequest", () => {
 	});
 });
 
+describe("recordToolCall with dispatch latency", () => {
+	test("still counts every call, and times the dispatched ones per tool", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordToolCall({ surface: "omp", tool: "graph_claim", decision: "allowed", durationMs: 120 });
+		instruments.recordToolCall({ surface: "omp", tool: "graph_get", decision: "allowed", durationMs: 30 });
+		instruments.recordToolCall({ surface: "omp", tool: "graph_claim", decision: "denied" });
+
+		const counter = defined(findCounter(instruments.snapshot(), METRIC.toolCalls));
+		expect(sumCounter(counter, { tool: "graph_claim", decision: "allowed" })).toBe(1);
+		expect(sumCounter(counter, { tool: "graph_claim", decision: "denied" })).toBe(1);
+		const histogram = defined(findHistogram(instruments.snapshot(), METRIC.toolDuration));
+		expect(mergeHistogram(histogram, { tool: "graph_claim" }).count).toBe(1);
+		expect(mergeHistogram(histogram, { tool: "graph_get" }).count).toBe(1);
+	});
+
+	test("a missing or invalid duration records the count and no latency", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordToolCall({ surface: "omp", tool: "graph_claim", decision: "allowed" });
+		instruments.recordToolCall({ surface: "omp", tool: "graph_claim", decision: "allowed", durationMs: -1 });
+		instruments.recordToolCall({ surface: "omp", tool: "graph_claim", decision: "allowed", durationMs: Number.NaN });
+
+		expect(sumCounter(defined(findCounter(instruments.snapshot(), METRIC.toolCalls)))).toBe(3);
+		expect(findHistogram(instruments.snapshot(), METRIC.toolDuration)?.points ?? []).toEqual([]);
+	});
+});
+
 describe("recordBrief", () => {
 	test("records latency for a failed brief too", () => {
 		const instruments = new SubstrateInstruments();

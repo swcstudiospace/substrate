@@ -20,6 +20,7 @@ import { Substrate } from "./service.ts";
 import {
 	ProposeFailed,
 	ProposeRefused,
+	type ProposeBatchItem,
 	type ProposeOptions,
 	type ProposeResult,
 	type SkillProposer,
@@ -1591,6 +1592,90 @@ describe("POST /skills/propose", () => {
 			metrics?: unknown;
 		};
 		expect(JSON.stringify(snapshot)).toContain("/skills/propose");
+	});
+
+	test("a batch drains several proposals in one call, one result each", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent", { proposals: [body, { ...body, name: "second-skill" }], dry_run: true });
+		expect(reply.status).toBe(200);
+		const items = reply.json as unknown as ProposeBatchItem[];
+		expect(Array.isArray(reply.json)).toBe(true);
+		expect(items.map((item) => [item.name, item.status])).toEqual([
+			["demo-skill", "opened"],
+			["second-skill", "opened"],
+		]);
+		expect(calls.map((call) => call.input.name)).toEqual(["demo-skill", "second-skill"]);
+		expect(calls.map((call) => call.opts.dryRun)).toEqual([true, true]);
+		expect(calls.map((call) => call.input.surface)).toEqual(["claude-code", "claude-code"]);
+	});
+
+	test("the batch dispatches to the proposer's batch when it has one", async () => {
+		let batchCalls = 0;
+		let singleCalls = 0;
+		const seam: SkillProposer = {
+			propose: async () => {
+				singleCalls++;
+				return opened;
+			},
+			proposeBatch: async (inputs) => {
+				batchCalls++;
+				return inputs.map((input) => ({ name: input.name, status: "dry_run" as const, content_sha256: opened.content_sha256, redactions: [] }));
+			},
+		};
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent", { proposals: [body, { ...body, name: "second-skill" }], dry_run: true });
+		expect(reply.status).toBe(200);
+		expect(batchCalls).toBe(1);
+		expect(singleCalls).toBe(0);
+		expect((reply.json as unknown as ProposeBatchItem[]).map((item) => item.status)).toEqual(["dry_run", "dry_run"]);
+	});
+
+	test("an item naming another surface is refused as its own item; its sibling still runs", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent", { proposals: [body, { ...body, name: "second-skill", surface: "cursor" }] });
+		expect(reply.status).toBe(200);
+		const items = reply.json as unknown as ProposeBatchItem[];
+		expect(items[0]).toMatchObject({ name: "demo-skill", status: "opened" });
+		expect(items[1]).toMatchObject({ name: "second-skill", status: "refused" });
+		expect(String(items[1]?.error)).toContain("claude-code");
+		expect(calls).toHaveLength(1);
+	});
+
+	test("a batch envelope problem is 400 before anything is proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		for (const [payload, message] of [
+			[{ proposals: [] }, "at least one proposal"],
+			[{ proposals: "nope" }, "proposals must be an array"],
+			[{ proposals: Array.from({ length: 21 }, () => body) }, "at most 20 proposals"],
+			[{ proposals: [body], mode: "merge" }, "mode must be overlay or replace"],
+		] as const) {
+			const reply = await propose(harness, "tok-agent", payload);
+			expect(reply.status).toBe(400);
+			expect(String(reply.json.error)).toContain(message);
+		}
+		expect(calls).toEqual([]);
+	});
+
+	test("an anonymous batch is refused 401, and an over-total batch is 413", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		expect((await propose(harness, null, { proposals: [body] })).status).toBe(401);
+		const over = await propose(harness, "tok-agent", { proposals: [{ ...body, rationale: "x".repeat(20_000_001) }] });
+		expect(over.status).toBe(413);
+		expect(over.json.error).toBe("request body too large");
+		expect(calls).toEqual([]);
+	});
+
+	test("a single proposal still answers the single shape", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent", body);
+		expect(reply.status).toBe(200);
+		expect(reply.json).toEqual(opened as never);
+		expect(calls).toHaveLength(1);
 	});
 });
 

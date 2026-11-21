@@ -19,6 +19,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `SUBSTRATE_HANDOFF_KEY_PREV` | secret-ref | none | previous signing key | no previous key; packets signed under it stop verifying. See `docs/coordination.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_HANDOFF_KEY_PREV_ID` | string | k0 | key id | k0. See `docs/coordination.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_LEASE_TTL_SECONDS` | number | 900 | 30..86400 (clamped) | 900 s. See `docs/coordination.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_LEASE_REAP_INTERVAL_MS` | number | 30000 | whole ms: 0 disables, otherwise 1000..3600000 (out of range clamps; unparseable falls back to 30000) | 30000 ms: a lapsed lease is reaped within about one interval, with no coord_reap_leases call; 0 turns the automatic reap off and lapsed leases stay honoured lazily until someone asks. See `docs/coordination.md` | mcp-server/lease-sweeper.ts | yes |
 | `SUBSTRATE_AUDIT_PATH` | path | none | absolute file path | no durable audit chain: the server boots with a warning and fail-closed tools refuse. See `docs/mcp-audit.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_AUDIT_ROLLOVER_BYTES` | number | none | positive integer bytes | the audit chain never rolls. See `docs/mcp-audit.md` | audit/log.ts | yes |
 | `SUBSTRATE_TOKEN` | secret-ref | none | one bearer token | the client falls back to SUBSTRATE_TOKEN_FILE, then the tokens directory. See `docs/swarm-workspace.md` | cli/token.ts, host/substrate.ts, scripts | yes |

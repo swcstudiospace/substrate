@@ -49,7 +49,12 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	// Phase 74: a cross-repo fan-out writes branches in two or more repositories, so it is recorded before it runs.
 	"cross_repo_fanout",
 	// Phase 74: the operator's compensation of a stored fan-out deletes branches in two or more repositories, so it is recorded before it runs.
+	// The operator-only repository scope status: it names registries, grants and allowlist presence, so an unrecorded read is refused.
+	"repo_scope_status",
 	"cross_repo_compensate",
+	// Phase 76: dead letters. The list reads another session's parked event content and the replay writes it to the ledger, both operator-only, so an unrecorded call is refused — like `repo_scope_status`, not a turn-blocking read.
+	"events_dead_letter_list",
+	"events_dead_letter_replay",
 ]);
 
 /**
@@ -138,6 +143,9 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// v1.7 (phase 66): a verdict on a cited document is advisory input to the re-rank, the nearest write to `session_checkpoint`:
 	// an unwritable audit file must not fail the agent's turn over it, so the record is fail-open.
 	"docs_feedback",
+	// v1.7: memory provenance and migration health are reads like `memory_verify` / `planning_status`.
+	"memory_provenance",
+	"migration_health",
 ]);
 
 /**

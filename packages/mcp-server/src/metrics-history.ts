@@ -45,6 +45,7 @@ import {
 	OUTBOX_OLDEST_METRIC,
 	OUTBOX_SIZE_METRIC,
 	PLANES,
+	RECONCILE_CLEAN_METRIC,
 	RECALL_PREFETCH_RESULTS,
 	attributeKey,
 	quantileFromBuckets,
@@ -160,6 +161,7 @@ export const EXTENDED_METRIC_SERIES: Readonly<Record<string, SeriesSpec>> = {
 	"endpoint.proxy_planes": { kind: "gauge", label: null, values: null, agg: "max", unit: "{plane}" },
 	"corpus.freshness_seconds": { kind: "gauge", label: null, values: null, agg: "max", unit: "s" },
 	"corpus.ingest_docs_per_s": { kind: "gauge", label: null, values: null, agg: "avg", unit: "{document}/s" },
+	"reconcile.clean": { kind: "gauge", label: null, values: null, agg: "max", unit: "ratio" },
 	"corpus.golden_recall5": { kind: "gauge", label: null, values: null, agg: "avg", unit: "ratio" },
 };
 
@@ -414,6 +416,7 @@ const EXTENDED_GAUGE_SOURCES: ReadonlyArray<{ series: string; metric: string }> 
 	{ series: "endpoint.proxy_planes", metric: ENDPOINT_PROXY_PLANES_METRIC },
 	{ series: "corpus.freshness_seconds", metric: CORPUS_FRESHNESS_METRIC },
 	{ series: "corpus.ingest_docs_per_s", metric: CORPUS_INGEST_RATE_METRIC },
+	{ series: "reconcile.clean", metric: RECONCILE_CLEAN_METRIC },
 	{ series: "corpus.golden_recall5", metric: CORPUS_GOLDEN_RECALL5_METRIC },
 ];
 

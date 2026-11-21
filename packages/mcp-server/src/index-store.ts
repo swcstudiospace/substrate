@@ -1971,6 +1971,16 @@ export class IndexStore implements MemoryStore {
 			order by e.graph_id, e.from_node`) as GraphEdge[];
 	}
 
+	/**
+	 * The versions recorded in `schema_migrations`, ascending. Read-only, for
+	 * the `migration_health` report of what is pending and what was applied
+	 * under a step that no longer exists.
+	 */
+	async appliedMigrationVersions(): Promise<number[]> {
+		const rows = (await this.sql`select version from schema_migrations order by version ascending`) as Array<{ version: number | string }>;
+		return rows.map((row) => Number(row.version));
+	}
+
 	// There is deliberately no `setNodeState`.
 	//
 	// It was the unconditional state write that made a completion unfenced, and it

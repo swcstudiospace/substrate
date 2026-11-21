@@ -17,6 +17,8 @@
  *       rate a cited corpus document: POST /docs/feedback, the docs_feedback tool's route (exit 0 stored, 1 refused or failed, 2 usage)
  *   substrate index sweep [--apply] [--json]  the index retention sweep (dry-run unless --apply
  *       AND SUBSTRATE_INDEX_SWEEP=apply are both given)
+ *   substrate index migrate-health [--json]  read-only migration health: digest drift per key plus pending migrations
+ *       (exit 0 no digest drift, 1 drift, 2 usage; pending is read read-only from SUBSTRATE_PG_URL when set)
  *   substrate ledger coverage|archive|verify-archive   anchor coverage and the verified
  *       off-box archive (docs/greptime-ledger.md, "Coverage and archive")
  *   substrate index archive|verify-archive|restore   the verified logical export of the Postgres
@@ -70,6 +72,7 @@ import { runLedger } from "./ledger.ts";
 import { runWorktree } from "./worktree/command.ts";
 import { requestTimeoutMs, substrateUrl, worktreeDeps } from "./worktree/deps.ts";
 import { runSpool } from "./spool.ts";
+import { runMigrationHealth } from "./migration-health.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
 import { runSteer } from "./steer/index.ts";
@@ -553,7 +556,14 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
  * The CLI package does not depend on the server package, which is why this is a
  * spawn and not an import.
  */
-function cmdIndex(argv: string[], args: Record<string, string | true>): number {
+async function cmdIndex(argv: string[], args: Record<string, string | true>): Promise<number> {
+	if (argv[0] === "migrate-health") {
+		return runMigrationHealth(argv.slice(1), {
+			env: process.env,
+			out: (text) => process.stdout.write(text),
+			err: (text) => process.stderr.write(text),
+		});
+	}
 	if ((INDEX_ARCHIVE_SUBCOMMANDS as readonly string[]).includes(argv[0] ?? "")) {
 		// uplift-4 S2: the same spawn-the-runner shape, for the verified index archive.
 		const archiveRunner = join(import.meta.dir, "..", "..", "mcp-server", "src", "index-run.ts");
@@ -768,7 +778,7 @@ switch (command) {
 		);
 		break;
 	case "index":
-		process.exit(cmdIndex(rest, args));
+		process.exit(await cmdIndex(rest, args));
 		break;
 	case "worktree":
 		process.exit(
@@ -882,6 +892,7 @@ switch (command) {
 				"substrate docs feedback <document> <verdict> [--session ID] [--json]\n" +
 				"substrate docs ingest-all --state-dir DIR [--roots DIR,DIR] [--group NAME] [--dry-run | --apply]\n" +
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
+				"substrate index migrate-health [--json]   (read-only: digest drift per key plus pending migrations, from SUBSTRATE_PG_URL when set; exit 0 no drift, 1 drift, 2 usage)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
 				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +

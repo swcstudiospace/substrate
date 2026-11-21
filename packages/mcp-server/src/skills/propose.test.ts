@@ -19,6 +19,7 @@ import {
 	checkoutArgv,
 	childBinary,
 	childEnv,
+	boundedPatch,
 	cloneArgv,
 	commitArgv,
 	createExecFileRunner,
@@ -46,8 +47,11 @@ import {
 	prUrlOf,
 	prViewArgv,
 	pushArgv,
+	PROPOSE_BATCH_MAX,
+	DIFF_PATCH_MAX_BYTES,
 	ROUTE_MAX_BYTES,
 	type RunResult,
+	proposeSkillsBatch,
 	type Runner,
 	setUrlArgv,
 	stagedArgv,
@@ -90,7 +94,7 @@ function step(argv: readonly string[]): string {
 	if (argv[1] === "clone") return "clone";
 	const sub = argv.find((a) => ["fetch", "remote", "checkout", "add", "diff", "commit", "push", "ls-files"].includes(a)) ?? "?";
 	if (sub === "remote") return argv.includes("set-url") ? "set-url" : "get-url";
-	if (sub === "diff") return argv.includes("--quiet") ? "diff-quiet" : "name-status";
+	if (sub === "diff") return argv.includes("--quiet") ? "diff-quiet" : argv.includes("--patch") ? "patch" : "name-status";
 	return sub;
 }
 
@@ -104,6 +108,7 @@ type FakeOptions = {
 function fake(opts: FakeOptions = {}): { run: Runner; calls: string[][]; steps: () => string[] } {
 	const calls: string[][] = [];
 	const replies: Record<string, Partial<RunResult>> = {
+		patch: { stdout: "diff --git a/demo-skill/SKILL.md b/demo-skill/SKILL.md\nindex 1111111..2222222 100644\n--- a/demo-skill/SKILL.md\n+++ b/demo-skill/SKILL.md\n@@ -1,1 +1,1 @@\n-old\n+new\n" },
 		"diff-quiet": { code: 1 },
 		"get-url": { stdout: `${LIBRARY_URL}\n` },
 		"gh pr create": { stdout: `${PR_URL}\n` },
@@ -756,15 +761,24 @@ describe("proposeSkill ledger idempotence", () => {
 		}
 	});
 
-	test("dryRun counts the staged diff and makes no push, gh call or ledger line", async () => {
+	test("dryRun counts the staged diff, carries its patch and makes no push, gh call or ledger line", async () => {
 		const f = fake({
 			base: { "SKILL.md": "old", "references/a.md": "a" },
 			replies: { "name-status": { stdout: `M\t${NAME}/SKILL.md\nA\t${NAME}/references/b.md\nD\t${NAME}/references/a.md\nA\t${NAME}/c.md\n` } },
 		});
 		const result = await proposeSkill(input(), options(f.run, { dryRun: true }));
 		expect(result).toMatchObject({ status: "dry_run", diff_added: 2, diff_changed: 1, diff_deleted: 1, content_sha256: sha() });
-		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "ls-files", "name-status"]);
+		expect(result.diff_patch).toContain("+new");
+		expect(result.diff_patch).toContain("diff --git");
+		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "ls-files", "name-status", "patch"]);
 		expect(ledgerLines()).toEqual([]);
+	});
+
+	test("a live proposal carries no diff_patch", async () => {
+		const f = fake();
+		const result = await proposeSkill(input(), options(f.run));
+		expect(result.status).toBe("opened");
+		expect(result.diff_patch).toBeUndefined();
 	});
 
 	test("the overlay keeps origin/main's other files in the clone", async () => {
@@ -1128,5 +1142,92 @@ describe("lock takeover and release", () => {
 		(await pending)();
 		expect(existsSync(path)).toBe(false);
 		expect(readdirSync(join(state, "locks")).filter((entry) => entry.includes(".stale."))).toEqual([]);
+	});
+});
+
+describe("boundedPatch", () => {
+	test("a patch at or under the cap is returned unchanged", () => {
+		expect(boundedPatch("")).toBe("");
+		expect(boundedPatch("a".repeat(DIFF_PATCH_MAX_BYTES))).toBe("a".repeat(DIFF_PATCH_MAX_BYTES));
+	});
+
+	test("a patch over the cap is cut at a character boundary and names the cap", () => {
+		const capped = boundedPatch("a".repeat(DIFF_PATCH_MAX_BYTES * 2));
+		expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(DIFF_PATCH_MAX_BYTES + 40);
+		expect(capped).toContain(`… (diff truncated at ${DIFF_PATCH_MAX_BYTES} bytes)`);
+		expect(capped.endsWith("\n")).toBe(true);
+	});
+
+	test("a cut inside a multi-byte character leaves no replacement char", () => {
+		const capped = boundedPatch(`${"a".repeat(DIFF_PATCH_MAX_BYTES - 1)}€${"b".repeat(100)}`);
+		expect(capped).not.toContain("�");
+		expect(capped).toContain(`… (diff truncated at ${DIFF_PATCH_MAX_BYTES} bytes)`);
+	});
+});
+
+describe("proposeSkillsBatch", () => {
+	function batchInput(name: string): ProposeInput {
+		return { name, files: { "SKILL.md": skillMd(name) }, rationale: "because", surface: "claude-code" };
+	}
+
+	test("N dry runs drain in one call, each with its own name, hash and patch", async () => {
+		const f = fake();
+		const items = await proposeSkillsBatch([batchInput("skill-one"), batchInput("skill-two")], options(f.run, { dryRun: true }));
+		expect(items.map((item) => [item.name, item.status])).toEqual([
+			["skill-one", "dry_run"],
+			["skill-two", "dry_run"],
+		]);
+		for (const item of items) {
+			expect(item.content_sha256).toMatch(/^[0-9a-f]{64}$/);
+			expect(item.redactions).toEqual([]);
+			expect(item.diff_patch).toContain("diff --git");
+			expect(item.error).toBeUndefined();
+		}
+		expect(items[0]?.content_sha256).not.toBe(items[1]?.content_sha256);
+	});
+
+	test("a refusal does not abort its siblings", async () => {
+		const f = fake();
+		const items = await proposeSkillsBatch(
+			[batchInput("skill-one"), batchInput("Not A Name"), batchInput("skill-three")],
+			options(f.run, { dryRun: true }),
+		);
+		expect(items.map((item) => item.status)).toEqual(["dry_run", "refused", "dry_run"]);
+		expect(items[1]?.name).toBe("Not A Name");
+		expect(items[1]?.error).toContain("invalid skill name");
+		expect(items[1]?.content_sha256).toBeUndefined();
+		expect(items[1]?.redactions).toEqual([]);
+	});
+
+	test("a failing item is failed alone and its error is redacted and capped", async () => {
+		const token = `ghp_${"B".repeat(36)}`;
+		const f = fake();
+		const run: Runner = async (argv) => {
+			if (argv.includes("checkout") && argv.some((part) => part.includes("skill-two"))) {
+				return { code: 1, stdout: "", stderr: `${"x".repeat(1_000)} checkout failed ${token}` };
+			}
+			return f.run(argv);
+		};
+		const items = await proposeSkillsBatch([batchInput("skill-one"), batchInput("skill-two"), batchInput("skill-three")], options(run, { dryRun: true }));
+		expect(items.map((item) => item.status)).toEqual(["dry_run", "failed", "dry_run"]);
+		expect(items[1]?.error).not.toContain(token);
+		expect(items[1]?.error).toContain("[REDACTED]");
+		expect((items[1]?.error ?? "").length).toBeLessThanOrEqual(400);
+	});
+
+	test("an item over the per-item cap is refused alone; its sibling still runs", async () => {
+		const f = fake();
+		const big: ProposeInput = { ...batchInput("skill-big"), rationale: "x".repeat(ROUTE_MAX_BYTES) };
+		const items = await proposeSkillsBatch([big, batchInput("skill-one")], options(f.run, { dryRun: true }));
+		expect(items.map((item) => item.status)).toEqual(["refused", "dry_run"]);
+		expect(items[0]?.error).toContain(`over the limit of ${ROUTE_MAX_BYTES} bytes`);
+	});
+
+	test("an empty batch and an over-cap batch are refused as a whole, before any git work", async () => {
+		const f = fake();
+		expect(await proposeSkillsBatch([], options(f.run, { dryRun: true })).catch((e: unknown) => (e as Error).message)).toContain("at least one proposal");
+		const many = Array.from({ length: PROPOSE_BATCH_MAX + 1 }, (_, i) => batchInput(`skill-${i + 1}`));
+		expect(await proposeSkillsBatch(many, options(f.run, { dryRun: true })).catch((e: unknown) => (e as Error).message)).toContain(`at most ${PROPOSE_BATCH_MAX} proposals`);
+		expect(f.steps()).toEqual([]);
 	});
 });

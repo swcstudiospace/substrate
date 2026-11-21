@@ -218,6 +218,10 @@ export const ROUTE_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	"/cross-repo/compensate": "write",
 	"/corpus/proof": "read",
 	"/corpus/anchor": "read",
+	// Phase 76 dead letters: the operator list is a read, the replay a write, mirroring their MCP tools.
+	"/events/dead-letters": "read",
+	"/events/dead-letters/replay": "write",
+	"/repo-scope/status": "read",
 };
 
 /** Monitoring traffic. Exempt on GET only: a POST to one of these is a 404, and a 404 is metered like any other unknown path. */
@@ -281,10 +285,15 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	memory_recall: "read",
 	memory_pending: "read",
 	memory_verify: "read",
+	memory_provenance: "read",
 	checkpoint_verify: "read",
 	session_rollback_plan: "read",
+	migration_health: "read",
 	events_query: "read",
 	events_verify: "read",
+	// Phase 76 dead letters, operator-gated on both transports.
+	events_dead_letter_list: "read",
+	events_dead_letter_replay: "write",
 	graph_get: "read",
 	graph_find: "read",
 	issue_get: "read",
@@ -305,6 +314,7 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	cross_repo_fanout: "write",
 	cross_repo_status: "read",
 	cross_repo_compensate: "write",
+	repo_scope_status: "read",
 	skills_propose: "write",
 	docs_steering_session: "write",
 	steering_session_heartbeat: "write",

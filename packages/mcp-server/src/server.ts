@@ -65,6 +65,7 @@ import {
 } from "./config.ts";
 import { Admission, admitBatch, budgetBody, budgetRefusal, isRefusal, LONG_POLL_RETRY_AFTER_S, longPollBody, LongPollSlots, routeClass, type AdmissionVerdict } from "./admission.ts";
 import type { SteeringAcknowledgeReply } from "./planning/steering-delivery.ts";
+import { LeaseExpirySweeper, loadLeaseReapSettings } from "./lease-sweeper.ts";
 import { parseAcknowledgeBody, parseDirectivesQuery, parseQueueBody, parseSessionsQuery, parseWaitQuery, restDirective, steeringHttpStatus, steeringRetryAfterS, SteeringReadUnavailableError } from "./planning/steering-rest.ts";
 import { acknowledgeSteeringWithState, DOCS_SEARCH_INPUT, LIVE_SESSION_TARGET_INPUT, LIVE_SESSION_UPDATE_INPUT, LiveSessionBoundaryError, queueSteering, type LiveCallFailure, type PreparedLiveDispatch, type SteeringWriteResult } from "./planning/steering-tools.ts";
 import { z, ZodError } from "zod";
@@ -99,6 +100,7 @@ import { isLightragQueryMode, LIGHTRAG_CIRCUIT_OPEN } from "./planes/lightrag.ts
 import {
 	auditRefusal,
 	auditToolCalls,
+	measureToolDispatch,
 	buildGraphEvidence,
 	normalizeRoute,
 	renderEvidenceHtml,
@@ -110,8 +112,19 @@ import { MetricHistoryMemo, bucketedValues, metricHistoryAnswer } from "./metric
 import { redact } from "./redact.ts";
 import { restDeclaration, toolDeclaration } from "./route-policy.ts";
 import { refusalDigest } from "./repo-scope.ts";
-import { LIVE_BRIEF_INPUT, type Substrate } from "./service.ts";
-import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
+import { LIVE_BRIEF_INPUT, type DeadLetterListResult, type Substrate } from "./service.ts";
+import {
+	isProposalBatch,
+	proposalBatchProblem,
+	proposalBatchSizeProblem,
+	proposalBodyProblem,
+	proposalBodySizeProblem,
+	proposalFailure,
+	toProposalRequest,
+	toProposalRequests,
+	toProposalShared,
+} from "./skills/request.ts";
+import { PROPOSE_BATCH_MAX } from "./skills/propose.ts";
 import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 import { parseClaimsQuery } from "./worktree-claims.ts";
@@ -262,6 +275,8 @@ export interface HttpServerOptions {
 	now?: () => number;
 	anonymousLog?: (line: string) => void;
 	anonymousIntervalMs?: number;
+	/** Lease reap interval in ms; production uses `SUBSTRATE_LEASE_REAP_INTERVAL_MS`. `0` disables the sweeper. */
+	leaseReapIntervalMs?: number;
 	/** Where the hourly refused-event line goes. Defaults to stderr. */
 	refusalLog?: (line: string) => void;
 	/** `/events/stream` poll interval; production uses `STREAM_POLL_MS`. */
@@ -357,6 +372,10 @@ const CROSS_REPO_NEEDS_SURFACE = "cross-repo operations need an authenticated su
 const COMPENSATE_NEEDS_SURFACE = "cross_repo_compensate needs an authenticated surface; nothing was changed";
 /** Why a non-operator compensation is refused: compensating a stored operation is an operator's decision. */
 const COMPENSATE_NEEDS_OPERATOR = "cross_repo_compensate needs an operator token; nothing was changed";
+/** Why an anonymous dead-letter read or replay is refused, even on a run that allows anonymous callers. */
+const DEAD_LETTER_NEEDS_SURFACE = "events_dead_letter needs an authenticated surface; nothing was read or changed";
+/** Why a non-operator dead-letter read or replay is refused: the records are another session's content, and a replay writes to the ledger. */
+const DEAD_LETTER_NEEDS_OPERATOR = "events_dead_letter needs an operator token; nothing was read or changed";
 /** Why an anonymous registry read is refused, even on a run that allows anonymous callers. */
 const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
 /** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
@@ -823,6 +842,11 @@ export function createHttpServer(
 	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
 	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
 	refusalLog.start();
+	// Lease expiry is lazy everywhere, so without this a lapsed lease stays a row until somebody asks:
+	// reap lapsed leases on an unref'd timer so the warning lands within about one interval.
+	const leaseReapIntervalMs = options.leaseReapIntervalMs ?? loadLeaseReapSettings(process.env).intervalMs;
+	const leaseSweeper = leaseReapIntervalMs > 0 ? new LeaseExpirySweeper({ service: substrate, intervalMs: leaseReapIntervalMs }) : null;
+	leaseSweeper?.start();
 	// Dataset versions live in the service since uplift-2 R6, hydrated from and
 	// saved to the docs state file with the ingest records; the merge-trigger
 	// asks the service for the newest one and dedupes by content hash.
@@ -1410,6 +1434,73 @@ export function createHttpServer(
 				return;
 			}
 
+			// Phase 76 dead letters, the REST half of `events_dead_letter_list` / `events_dead_letter_replay`. Both
+			// are an operator's decision (the records are another session's content; a replay writes to the
+			// ledger), so an unauthenticated caller is refused 401 and a non-operator 403, both before the body
+			// is read or audited — the same posture as `/cross-repo/compensate`.
+			if (req.method === "GET" && url.pathname === "/events/dead-letters") {
+				if (surface === null) {
+					sendJson(res, 401, { error: DEAD_LETTER_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!caller.isOperator) {
+					sendJson(res, 403, { error: DEAD_LETTER_NEEDS_OPERATOR, reason: "operator-required" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "events_dead_letter_list", { op: "list" }))) return;
+				const limitRaw = url.searchParams.get("limit");
+				const limit = limitRaw === null ? undefined : Number(limitRaw);
+				// An unparseable or out-of-range limit is the caller's bug, not a silent default.
+				if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 1000)) {
+					sendJson(res, 400, { error: "limit must be an integer between 1 and 1000" });
+					return;
+				}
+				const cause = url.searchParams.get("cause");
+				const sessionId = url.searchParams.get("session_id");
+				let result: DeadLetterListResult;
+				try {
+					result = substrate.listDeadLetters({
+						...(limit === undefined ? {} : { limit }),
+						...(sessionId === null ? {} : { session_id: sessionId }),
+						...(cause === null ? {} : { cause: cause as "exhausted" | "overflow" | "chain-blocked" | "abandoned" }),
+					});
+				} catch (cause) {
+					sendJson(res, 400, { error: redact(String(cause)) });
+					return;
+				}
+				sendJson(res, 200, result);
+				return;
+			}
+			if (req.method === "POST" && url.pathname === "/events/dead-letters/replay") {
+				if (surface === null) {
+					sendJson(res, 401, { error: DEAD_LETTER_NEEDS_SURFACE, reason: "unauthenticated" });
+					return;
+				}
+				if (!caller.isOperator) {
+					sendJson(res, 403, { error: DEAD_LETTER_NEEDS_OPERATOR, reason: "operator-required" });
+					return;
+				}
+				const raw = await readBody(req);
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(raw);
+				} catch {
+					sendJson(res, 400, { error: "the body is not valid JSON" });
+					return;
+				}
+				const id = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>).id : null;
+				if (typeof id !== "string" || id === "") {
+					sendJson(res, 400, { error: "id must be a non-empty string" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "events_dead_letter_replay", { op: "replay" }))) return;
+				const result = await substrate.replayDeadLetter(id);
+				// 200 when the event is in the ledger; 404 when nothing is parked under that id; 503 when the
+				// ledger could not take it again (breaker open, unconfigured, or a re-parked failure).
+				sendJson(res, result.ok ? 200 : result.reason === "not-found" ? 404 : 503, result);
+				return;
+			}
+
 			// U7: the push seam. Every consumer polled the ledger before this — collectors
 			// reconciled on timers — and the stream changes only the transport: the ledger
 			// stays the buffer, each connection keeps its own cursor and one poll timer,
@@ -1872,6 +1963,19 @@ export function createHttpServer(
 				sendJson(res, reply.status, reply.body);
 				return;
 			}
+			// The operator-only, read-only repository scope status: registry roots and their existence, every surface's grant and
+			// the session allowlist's names and credential presence. A caller with no surface is refused 401 and a non-operator
+			// 403 before anything is described; the read is audited fail-closed under `repo_scope_status`.
+			if (req.method === "GET" && url.pathname === "/repo-scope/status") {
+				if (surface === null) {
+					sendJson(res, 401, { error: "repository scope status needs an authenticated surface", reason: "unauthenticated" });
+					return;
+				}
+				if (!(await auditedRest(res, observability, surface, "repo_scope_status", { op: "status" }))) return;
+				const reply = substrate.repoScopeStatus(surface, caller.isOperator);
+				sendJson(res, reply.status, reply.body);
+				return;
+			}
 			// Phase 74: the operator's compensation of a stored operation: undo only, under the key's lock, never a forward apply. This is an
 			// operator's decision, so a caller with no surface is refused 401 and one that is not an operator 403, both before the body is
 			// read or audited. It is not an MCP tool. The engine repeats the operator check, so a refusal never reaches the store or git.
@@ -2223,23 +2327,49 @@ export function createHttpServer(
 
 			// A proposal spends the owner's GitHub credential, so an anonymous caller is refused
 			// before the body is read, even on a run that otherwise allows untokened callers.
+			// A batch of up to PROPOSE_BATCH_MAX proposals is read to the batch cap; the single
+			// 1 MB cap still holds for one proposal, and the batch has its own total.
 			if (req.method === "POST" && url.pathname === "/skills/propose") {
 				if (surface === null) {
 					sendJson(res, 401, { error: PROPOSAL_NEEDS_SURFACE });
 					return;
 				}
-				const body = JSON.parse(await readBody(req)) as unknown;
+				const raw = await readBody(req, MAX_BODY_BYTES * PROPOSE_BATCH_MAX);
+				let body: unknown;
+				try {
+					body = JSON.parse(raw);
+				} catch (cause) {
+					if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) {
+						sendJson(res, 413, { error: "request body too large" });
+						return;
+					}
+					throw cause;
+				}
 				const fields = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
 				// Audited under the tool's own name, fail-closed, before the field check and before any git work.
 				// A parsed object that will be rejected (`mode: "merge"`) is still a proposal attempt.
 				if (fields && !(await auditedRest(res, observability, surface, "skills_propose", fields))) return;
-				const problem = proposalBodyProblem(body);
+				const batch = isProposalBatch(body);
+				const problem = batch ? proposalBatchProblem(body) : proposalBodyProblem(body);
 				if (problem) {
 					sendJson(res, 400, { error: problem });
 					return;
 				}
+				const sizeProblem = batch
+					? proposalBatchSizeProblem(body as object)
+					: proposalBodySizeProblem((fields ?? {}) as object);
+				if (sizeProblem) {
+					sendJson(res, 413, { error: "request body too large" });
+					return;
+				}
 				try {
-					sendJson(res, 200, await substrate.proposeSkill(toProposalRequest(fields ?? {}), { surface, isOperator: caller.isOperator }));
+					sendJson(
+						res,
+						200,
+						batch
+							? await substrate.proposeSkills(toProposalRequests(fields ?? {}), { surface, isOperator: caller.isOperator }, toProposalShared(fields ?? {}))
+							: await substrate.proposeSkill(toProposalRequest(fields ?? {}), { surface, isOperator: caller.isOperator }),
+					);
 				} catch (cause) {
 					const failure = proposalFailure(cause);
 					if (failure === null) throw cause;
@@ -2559,6 +2689,7 @@ export function createHttpServer(
 		anonymousLog.stop();
 		refusalLog.stop();
 		loopLag.stop();
+		leaseSweeper?.stop();
 		// A held `GET /steering/wait` would keep `close` waiting for its connection: end every waiter so none outlives the server.
 		substrate.steeringWaiters.closeAll();
 		// A request still in flight can finish after the timers stop. Flush once more when
@@ -2892,5 +3023,5 @@ async function handleMcp(
 		void server.close();
 	});
 	await server.connect(transport);
-	await transport.inner.handleRequest(req, res, body);
+	await measureToolDispatch(observability, caller.surface, calls, () => transport.inner.handleRequest(req, res, body));
 }

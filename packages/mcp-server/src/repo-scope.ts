@@ -16,7 +16,7 @@
  * digest (see {@link repoRefusalPayload}).
  */
 import { createHmac, randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { scopeRepoId } from "./event.ts";
 import { SURFACES, type Surface } from "./types.ts";
@@ -288,4 +288,62 @@ export function rowsInGrant<T extends { repo: string | null }>(rows: readonly T[
 /** Whether a caller's surface name is a registered surface, so a grant can be looked up for it. A missing or unknown name has no grant. */
 export function isSurfaceName(value: string | null): value is Surface {
 	return value !== null && (SURFACES as readonly string[]).includes(value);
+}
+
+/** One registered repository in the operator status reply: its name, how many roots it has, and whether each root exists. No path is named. */
+export interface RepoScopeRegistryEntry {
+	readonly repo: string;
+	readonly rootCount: number;
+	/** One flag per root, checkouts then worktrees, in registration order. */
+	readonly rootsExist: readonly boolean[];
+}
+
+/** One surface in the operator status reply, including a surface granted nothing. */
+export interface RepoScopeGrantEntry {
+	readonly surface: string;
+	readonly repos: readonly string[];
+}
+
+/** In-process refusal counts, by reason code and by route, as the status reply reports them. */
+export interface RepoScopeRefusalCounts {
+	readonly byReason: Readonly<Record<string, number>>;
+	readonly byRoute: Readonly<Record<string, number>>;
+}
+
+/** The read-only operator view of the repository scope: names and counts only, never a path or a credential. */
+export interface RepoScopeDescription {
+	readonly enforced: boolean;
+	readonly registry: readonly RepoScopeRegistryEntry[];
+	readonly grants: readonly RepoScopeGrantEntry[];
+	readonly refusals: RepoScopeRefusalCounts;
+}
+
+/**
+ * The operator-gated status of `scope`: registry roots and their existence, every known surface and what it is granted
+ * (including surfaces granted nothing), and the refusal counts the caller passes in. Directory paths are never included;
+ * only whether a root exists is reported, so a missing checkout is visible without naming where it should be.
+ */
+export function describeRepoScope(
+	scope: RepoScope,
+	refusals: RepoScopeRefusalCounts = { byReason: {}, byRoute: {} },
+	exists: (path: string) => boolean = existsSync,
+): RepoScopeDescription {
+	const registry: RepoScopeRegistryEntry[] = [...scope.registry.values()]
+		.sort((a, b) => (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : 0))
+		.map((registration) => {
+			const roots = [...registration.checkouts, ...registration.worktrees];
+			return { repo: registration.repo, rootCount: roots.length, rootsExist: roots.map((root) => exists(root)) };
+		});
+	const grants: RepoScopeGrantEntry[] = SURFACES.map((surface) => ({
+		surface,
+		repos: [...(scope.grants.get(surface) ?? [])].sort(),
+	}));
+	const sortedCounts = (counts: Readonly<Record<string, number>>): Record<string, number> =>
+		Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+	return {
+		enforced: scope.enforced,
+		registry,
+		grants,
+		refusals: { byReason: sortedCounts(refusals.byReason), byRoute: sortedCounts(refusals.byRoute) },
+	};
 }

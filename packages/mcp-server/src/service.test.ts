@@ -1194,6 +1194,7 @@ describe("append-mode enforcement", () => {
 			capacity: { index: null, ledger: null },
 			// The stub has no `anchorCoverage`: the jobs row is null with the reason, never a throw.
 			jobs: { ledger: null, ledgerReason: expect.stringContaining("anchorCoverage") },
+			reconcile: { lastRunAt: null, clean: null, counts: {}, truncated: {}, unchecked_layers: [], graphsNamed: null, intervalS: 0, windowHours: 24 },
 		});
 	});
 

@@ -105,6 +105,7 @@ export {
 	PLANE_ERROR_REASONS,
 	SubstrateInstruments,
 	INDEX_ARCHIVE_AGE_METRIC,
+	RECONCILE_CLEAN_METRIC,
 	classifyEventRefusal,
 	classifyPlaneReason,
 	extractUsage,
