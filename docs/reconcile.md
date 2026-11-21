@@ -77,6 +77,16 @@ The server can run the report on an interval. Each run writes one JSON log line 
 
 With the interval at 0 the timer is not started.
 
+Each completed run's verdict is kept in memory and served by `GET /healthz` as the `reconcile` field: `lastRunAt` (the report's `generated_at`), `clean`, `counts`, `truncated`, `unchecked_layers`, `graphsNamed` (the run's `index.graphs` count) and the schedule it ran on (`intervalS`, `windowHours`). All of the run fields are `null` (or empty) until the first run finishes, so a poll that shows `clean: null` means no run has completed yet, not a clean run. This is how an operator checks the scheduled reconcile without reading the journal:
+
+```
+curl -s http://127.0.0.1:<port>/healthz | jq .reconcile
+```
+
+A failed run leaves the previous run's verdict standing: the journal gets the failure line, `/healthz` keeps the last successful run.
+
+The verdict is also a durable history series, `reconcile.clean`, on `GET /slo/history?series=reconcile.clean` (1 when the last run reported clean, 0 when it reported drift, no point before the first run) and as the "Scheduled reconcile" panel on the SLO dashboard. Both need `SUBSTRATE_METRICS_HISTORY_SERIES=extended`; with the default `core` series the `/healthz` field is the only read. The schedule stays report-only: none of these reads runs a reconcile, and the reconcile itself still writes only the journal line.
+
 ## Hazards
 
 - **H1** The memory audit emit swallows failures, so an index row can exist with no ledger event. The reconcile reports it and does not repair it.

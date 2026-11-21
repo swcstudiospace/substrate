@@ -6,8 +6,18 @@
 import { describe, expect, test } from "bun:test";
 import { REDACTED } from "../redact.ts";
 import { SkillProposalDenied } from "../service.ts";
-import { ProposeFailed, ProposeRefused } from "./propose.ts";
-import { proposalBodyProblem, proposalBodySizeProblem, proposalFailure, toProposalRequest } from "./request.ts";
+import { ProposeFailed, ProposeRefused, PROPOSE_BATCH_MAX, ROUTE_MAX_BYTES } from "./propose.ts";
+import {
+	isProposalBatch,
+	proposalBatchProblem,
+	proposalBatchSizeProblem,
+	proposalBodyProblem,
+	proposalBodySizeProblem,
+	proposalFailure,
+	toProposalRequest,
+	toProposalRequests,
+	toProposalShared,
+} from "./request.ts";
 
 const valid = { name: "demo-skill", files: { "SKILL.md": "---\nname: demo-skill\n---\n" }, rationale: "why" };
 
@@ -142,5 +152,56 @@ describe("proposalFailure", () => {
 		expect(proposalFailure(new Error("disk full"))).toBeNull();
 		expect(proposalFailure("text")).toBeNull();
 		expect(proposalFailure(undefined)).toBeNull();
+	});
+});
+
+describe("proposalBatchProblem and friends", () => {
+	test("a batch is told apart from a single proposal by its `proposals` key", () => {
+		expect(isProposalBatch({ proposals: [valid] })).toBe(true);
+		expect(isProposalBatch(valid)).toBe(false);
+		expect(isProposalBatch(null)).toBe(false);
+		expect(isProposalBatch([valid])).toBe(false);
+	});
+
+	test("a well-formed batch, with shared flags, has no problem", () => {
+		expect(proposalBatchProblem({ proposals: [valid, valid], dry_run: true, mode: "replace", allow_doc_examples: ["pem"] })).toBeNull();
+		expect(proposalBatchProblem({ proposals: [valid] })).toBeNull();
+	});
+
+	test.each([
+		["not an object", "text", "body must be a JSON object"],
+		["proposals not an array", { proposals: valid }, "proposals must be an array"],
+		["empty", { proposals: [] }, "at least one proposal"],
+		["over the cap", { proposals: Array.from({ length: PROPOSE_BATCH_MAX + 1 }, () => valid) }, `at most ${PROPOSE_BATCH_MAX} proposals`],
+		["an item not an object", { proposals: [valid, 7] }, "every proposal must be an object"],
+		["dry_run", { proposals: [valid], dry_run: "yes" }, "dry_run must be a boolean"],
+		["mode", { proposals: [valid], mode: "merge" }, "mode must be overlay or replace"],
+		["allow_doc_examples", { proposals: [valid], allow_doc_examples: ["ssh"] }, "allow_doc_examples must be an array of pem or jwt"],
+	])("refuses %s", (_what, body, message) => {
+		expect(proposalBatchProblem(body)).toContain(message);
+	});
+
+	test("item content is not judged: a malformed item has no envelope problem", () => {
+		expect(proposalBatchProblem({ proposals: [{ name: 7 }] })).toBeNull();
+	});
+
+	test("the size problem is the batch total: the single cap per proposal, times the batch cap", () => {
+		expect(proposalBatchSizeProblem({ proposals: [valid, valid] })).toBeNull();
+		const over = { proposals: [{ ...valid, rationale: "x".repeat(ROUTE_MAX_BYTES * PROPOSE_BATCH_MAX) }] };
+		expect(proposalBatchSizeProblem(over)).toContain(`over the limit of ${ROUTE_MAX_BYTES * PROPOSE_BATCH_MAX} bytes`);
+	});
+
+	test("toProposalRequests maps each item; toProposalShared carries only the top-level flags", () => {
+		const requests = toProposalRequests({ proposals: [valid, { ...valid, session_id: "s-1", dry_run: true }] });
+		expect(requests).toHaveLength(2);
+		expect(requests[0]).toEqual(valid);
+		expect(requests[1]).toMatchObject({ name: "demo-skill", session_id: "s-1", dry_run: true });
+		expect(toProposalShared({ proposals: [valid], dry_run: true, mode: "replace", reopen: true, allow_doc_examples: ["pem"] })).toEqual({
+			dry_run: true,
+			mode: "replace",
+			reopen: true,
+			allow_doc_examples: ["pem"],
+		});
+		expect(toProposalShared({ proposals: [valid] })).toEqual({});
 	});
 });

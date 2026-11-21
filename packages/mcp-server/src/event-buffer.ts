@@ -80,7 +80,8 @@ function isEventLike(value: unknown): value is SubstrateEvent {
 	return typeof row.id === "string" && typeof row.hash === "string" && (row.session_id === null || typeof row.session_id === "string");
 }
 
-const DEAD_LETTER_CAUSES: readonly string[] = ["exhausted", "overflow", "chain-blocked", "abandoned"];
+/** Every cause a record can carry, so reads validate against the same set the buffer writes. */
+export const DEAD_LETTER_CAUSES: readonly DeadLetterCause[] = ["exhausted", "overflow", "chain-blocked", "abandoned"];
 
 function isBufferedEvent(value: unknown): value is BufferedEvent {
 	if (value === null || typeof value !== "object") return false;
@@ -102,7 +103,7 @@ function isDeadLetter(value: unknown): value is DeadLetter {
 		typeof row.hash === "string" &&
 		(row.session_id === null || typeof row.session_id === "string") &&
 		typeof row.cause === "string" &&
-		DEAD_LETTER_CAUSES.includes(row.cause) &&
+		(DEAD_LETTER_CAUSES as readonly string[]).includes(row.cause) &&
 		typeof row.attempts === "number" &&
 		typeof row.last_reason === "string" &&
 		typeof row.dead_at === "number" &&
@@ -125,8 +126,10 @@ function deadLetterOf(entry: BufferedEvent, cause: DeadLetterCause, at: number):
 
 /**
  * The dead-letter store: records of events that never reached the ledger. Keyed by event id, which is
- * unique because an event is parked, and so dead-lettered, at most once. Not replayed by the substrate:
- * an operator reads it, and re-appending a record is a deliberate act.
+ * unique because an event is parked, and so dead-lettered, at most once. Replay is an operator act, never
+ * automatic: `events_dead_letter_list` reads the records and `events_dead_letter_replay` re-appends one
+ * through the same delivery path as a parked event, then removes it here on success. A failed replay
+ * re-parks the record with the new error (service `replayDeadLetter`).
  */
 export class DeadLetterStore {
 	private readonly file: OutboxFile<DeadLetter> | null;
@@ -174,6 +177,21 @@ export class DeadLetterStore {
 
 	list(): DeadLetter[] {
 		return [...this.records.values()];
+	}
+
+	/** One record by event id, for an operator replay; undefined when it is not parked. */
+	get(id: string): DeadLetter | undefined {
+		return this.records.get(id);
+	}
+
+	/**
+	 * Take one record out, after its event landed in the ledger. Persists the removal, so an operator list
+	 * after a restart does not resurrect it. False when the id was not parked.
+	 */
+	remove(id: string): boolean {
+		if (!this.records.delete(id)) return false;
+		this.file?.rewrite(() => this.records.values());
+		return true;
 	}
 
 	private evictOldest(): void {

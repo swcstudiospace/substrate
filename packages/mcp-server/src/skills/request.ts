@@ -8,7 +8,7 @@
 import { redact } from "../redact.ts";
 import { SkillProposalDenied, SkillProposalStale, type SkillProposalRequest } from "../service.ts";
 import { SURFACES } from "../types.ts";
-import { ProposeFailed, ProposeRefused, ROUTE_MAX_BYTES } from "./propose.ts";
+import { ProposeFailed, ProposeRefused, PROPOSE_BATCH_MAX, ROUTE_MAX_BYTES } from "./propose.ts";
 
 /** The most a failed git or gh step may say to a caller (D21-09). */
 const FAILURE_MESSAGE_MAX = 400;
@@ -66,6 +66,72 @@ export function proposalBodySizeProblem(body: object): string | null {
 	const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
 	if (bytes > ROUTE_MAX_BYTES) return `the proposal is ${bytes} bytes as JSON, over the limit of ${ROUTE_MAX_BYTES} bytes`;
 	return null;
+}
+
+/** The flags a batch shares across its proposals, as the single body carries them per proposal. */
+export interface ProposalShared {
+	dry_run?: boolean | undefined;
+	mode?: "overlay" | "replace" | undefined;
+	reopen?: boolean | undefined;
+	allow_doc_examples?: Array<"pem" | "jwt"> | undefined;
+}
+
+/** True when the body is the batch shape, `{ proposals: [...] }`, rather than one proposal. */
+export function isProposalBatch(body: unknown): boolean {
+	return body !== null && typeof body === "object" && !Array.isArray(body) && "proposals" in (body as Record<string, unknown>);
+}
+
+/**
+ * The batch envelope's shape, as a message for a 400, or null when well formed. Only the
+ * envelope is judged here — the array, its cap, one object per item, and the shared flags.
+ * Each item's own fields are the engine's to judge, item by item, so one malformed item is
+ * a per-item refusal rather than a whole-batch 400.
+ */
+export function proposalBatchProblem(body: unknown): string | null {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return "body must be a JSON object";
+	const b = body as Record<string, unknown>;
+	if (!Array.isArray(b.proposals)) return "proposals must be an array of proposals";
+	if (b.proposals.length === 0) return "a batch needs at least one proposal";
+	if (b.proposals.length > PROPOSE_BATCH_MAX) return `a batch takes at most ${PROPOSE_BATCH_MAX} proposals, not ${b.proposals.length}`;
+	if (b.proposals.some((item) => item === null || typeof item !== "object" || Array.isArray(item))) return "every proposal must be an object";
+	for (const key of ["dry_run", "reopen"] as const) {
+		if (b[key] !== undefined && typeof b[key] !== "boolean") return `${key} must be a boolean`;
+	}
+	if (b.mode !== undefined && b.mode !== "overlay" && b.mode !== "replace") return "mode must be overlay or replace";
+	if (
+		b.allow_doc_examples !== undefined &&
+		(!Array.isArray(b.allow_doc_examples) || b.allow_doc_examples.some((rule) => rule !== "pem" && rule !== "jwt"))
+	) {
+		return "allow_doc_examples must be an array of pem or jwt";
+	}
+	return null;
+}
+
+/**
+ * The batch body's serialized size as a refusal message, or null when it fits under the
+ * batch's total cap (the single cap per proposal, times the batch cap). A single item over
+ * the per-item cap is not refused here: the engine answers it as that item's own refusal,
+ * so its siblings still run.
+ */
+export function proposalBatchSizeProblem(body: object): string | null {
+	const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+	if (bytes > ROUTE_MAX_BYTES * PROPOSE_BATCH_MAX) return `the batch is ${bytes} bytes as JSON, over the limit of ${ROUTE_MAX_BYTES * PROPOSE_BATCH_MAX} bytes`;
+	return null;
+}
+
+/** The requests `Substrate.proposeSkills` takes, from a body `proposalBatchProblem` accepted. */
+export function toProposalRequests(body: Record<string, unknown>): SkillProposalRequest[] {
+	return ((body.proposals ?? []) as Array<Record<string, unknown>>).map((item) => toProposalRequest(item));
+}
+
+/** The shared flags a batch body carries at the top level, for `Substrate.proposeSkills`. */
+export function toProposalShared(body: Record<string, unknown>): ProposalShared {
+	return {
+		...(body.dry_run !== undefined ? { dry_run: body.dry_run as boolean } : {}),
+		...(body.mode !== undefined ? { mode: body.mode as "overlay" | "replace" } : {}),
+		...(body.reopen !== undefined ? { reopen: body.reopen as boolean } : {}),
+		...(body.allow_doc_examples !== undefined ? { allow_doc_examples: body.allow_doc_examples as Array<"pem" | "jwt"> } : {}),
+	};
 }
 
 /** The request `Substrate.proposeSkill` takes, from a body `proposalBodyProblem` accepted. */

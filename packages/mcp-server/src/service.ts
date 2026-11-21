@@ -111,6 +111,7 @@ import {
 	type DriftGitTip,
 	type DriftReport,
 } from "./drift.ts";
+import { analyzeMigrationHealth, readMigrationDigests, type MigrationHealthReport } from "./migration-health.ts";
 import { createEventBus, type EventBus, type EventBusClient, type EventBusStats, type EventHint } from "./event-bus.ts";
 import { checkIdempotencyKey, checkReplayTs, compareToAnchoredHead, eventHash, headRecordsFromLeaves, IDEMPOTENCY_PAYLOAD_KEY, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, planningIngestTrigger as planningEventTrigger, scopeRepoId, verifyChain, type SteeringSession, type StoredLeaf } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
@@ -131,7 +132,7 @@ import {
 	type QueryableColumn,
 } from "./greptime.ts";
 import { HindsightInventory, type BankGaugeSample, type InventoryHealth, type InventoryReport } from "./hindsight-inventory.ts";
-import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity, type MemoryExpiredSample } from "./index-store.ts";
+import { IndexStore, MIGRATION_STEPS, leaseSnapshot, type GraphBindResult, type IndexCapacity, type MemoryExpiredSample } from "./index-store.ts";
 import { IndexArchiveWatch, evaluateIndexArchiveSlo, type IndexArchiveReading, type IndexArchiveSloResult } from "./index-archive-watch.ts";
 import {
 	buildHandoff,
@@ -157,6 +158,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { FORGET_ACTION, forgetEntries, selectForRollback, type ForgetReport, type ForgetRequest, type PlaneDeleteResult, type RollbackSelectRequest, type RollbackSelection } from "./memory-forget.ts";
 import { ForgetUnavailableError, forgetDocumentId, planeDeleteFor } from "./memory-forget-plane.ts";
 import { verifyMemoryRecord, MemoryVerifyError, type MemoryVerifyResult } from "./memory-verify.ts";
+import { memoryProvenance, type MemoryProvenanceResult } from "./memory-provenance.ts";
 import { anchorEvidenceFor, followReanchor, ReanchorReadIncomplete, resolveSignerSet, verifyCheckpointRef, type AnchorVerifyPorts, type CheckpointVerifyToolResult, type SignerSetSummary } from "./anchor-verify-deps.ts";
 import { CheckpointVerifyError } from "./checkpoint-verify.ts";
 import {
@@ -183,7 +185,8 @@ import { createLightragBulkPlane, type LightragBulkPlane } from "./planes/lightr
 import { corpusNeardupReply } from "./corpus/neardup.ts";
 import { corpusAnchorReply, corpusIngestReply, corpusPlanReply, corpusProofReply, corpusReconcileReply, corpusRootReply, corpusStatusReply, type CorpusReply, type CorpusServiceDeps } from "./corpus/service.ts";
 import { type CrossRepoDeps, type CrossRepoReply, crossRepoCompensateReply, crossRepoFanoutReply, crossRepoStatusReply } from "./cross-repo-ops.ts";
-import { authorizeRepo, authorizeRepoPath, grantedRepos, isSurfaceName, REPO_REFUSAL_MESSAGES, repoRefusalPayload, type RepoRefusalReason, type RepoScopeRefusal, rowsInGrant } from "./repo-scope.ts";
+import { describeRepoAllowlist, EMPTY_REPO_ALLOWLIST, repoAllowlistFromEnv } from "./repo-allowlist.ts";
+import { authorizeRepo, authorizeRepoPath, describeRepoScope, grantedRepos, isSurfaceName, REPO_REFUSAL_MESSAGES, repoRefusalPayload, type RepoRefusalReason, type RepoScopeRefusal, rowsInGrant } from "./repo-scope.ts";
 import type { AnchorVerifier } from "./corpus/anchor.ts";
 import { CorpusRootKeeper, type RootClock } from "./corpus/root.ts";
 import type { CorpusStore } from "./corpus/store.ts";
@@ -235,7 +238,7 @@ import type { FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
-import { DeadLetterStore, EventBuffer, EVENT_DRAIN_TICK_MS, type EventDelivery } from "./event-buffer.ts";
+import { DEAD_LETTER_CAUSES, DeadLetterStore, EventBuffer, EVENT_DRAIN_TICK_MS, type DeadLetterCause, type EventDelivery } from "./event-buffer.ts";
 import {
 	RecallPrefetcher,
 	BRIEF_RECALL_CAP_MS,
@@ -260,13 +263,16 @@ import {
 } from "./recall-snapshot.ts";
 import { RepoAccess, requireComplete, startPreloader, type Preloader } from "./preload.ts";
 import { DEFAULT_RECONCILE_CAPS, runReport } from "./reconcile-run.ts";
+import type { Report as ReconcileReport } from "./reconcile.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
 	ProposeFailed,
 	ProposeRefused,
+	PROPOSE_BATCH_MAX,
 	ROUTE_MAX_BYTES,
 	SKILL_NAME_RE,
+	type ProposeBatchItem,
 	type ProposeInput,
 	type ProposeResult,
 	type Runner,
@@ -681,6 +687,39 @@ export interface EmitResult {
 	lookupFailed?: true;
 }
 
+/** One dead-lettered event as the operator list returns it: the record, with the event whole for inspection. */
+export interface DeadLetterListItem {
+	id: string;
+	hash: string;
+	session_id: string | null;
+	cause: DeadLetterCause;
+	attempts: number;
+	last_reason: string;
+	dead_at: number;
+	event: SubstrateEvent;
+}
+
+/** The operator list of the dead-letter store: the filtered records, oldest first, and the unfiltered total. */
+export interface DeadLetterListResult {
+	dead_letters: DeadLetterListItem[];
+	count: number;
+}
+
+/**
+ * The outcome of one operator replay. `ok` is true only when the event is in the ledger and its record is
+ * gone; every other outcome leaves the record parked, with `reason` naming why.
+ */
+export interface DeadLetterReplayResult {
+	ok: boolean;
+	id: string;
+	/** Set when the event is in the ledger after the call. */
+	stored?: true;
+	/** `not-found` | `no-ledger` | `held` | `re-parked`. */
+	reason?: string;
+	/** Why it was not replayed, or why it was re-parked. Redacted like every ledger error. */
+	error?: string;
+}
+
 /** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
 export interface EmitOptions {
 	replay?: boolean;
@@ -959,6 +998,8 @@ export interface SubstrateObserver {
 	indexArchive?(source: { newestAtMs(): number | null }): void;
 	/** Offered once at construction when `SUBSTRATE_CORPUS=on` (v1.7 phase 70): `newestAtMs` answers the time of the newest corpus manifest change, which `substrate.corpus.freshness_seconds` is computed from at snapshot time. */
 	corpusFreshness?(source: { newestAtMs(): number | null }): void;
+	/** Offered once at construction (phase 78): `read` answers the scheduled reconcile's last verdict at snapshot time, 1 clean / 0 not / null before the first run, read as the `reconcile.clean` gauge. */
+	reconcileClean?(source: { read(): number | null }): void;
 	/** One finished corpus ingest request (phase 70): documents per second of its wall time, 0 when it sent nothing. */
 	corpusIngest?(sample: { docsPerSecond: number }): void;
 	/** The golden-set recall at 5 a `docs.canary` report carried (phase 70). */
@@ -1618,8 +1659,12 @@ export class Substrate {
 	private reconcileStop: (() => void) | null = null;
 	/** The scheduled reconcile pass in flight, so a tick while one runs starts nothing. */
 	private reconcilePass: Promise<void> | null = null;
+	/** The last completed scheduled reconcile, kept in memory for `/healthz.reconcile` (phase 78); null until the first run finishes. A failed run leaves it standing. */
+	private reconcileLast: { lastRunAt: string; clean: boolean; counts: ReconcileReport["counts"]; truncated: ReconcileReport["truncated"]; unchecked_layers: ReconcileReport["unchecked_layers"] } | null = null;
 	/** Re-rank shadow runs since this process started, and the corpus positions they would have moved. */
 	private readonly shadowCounts = { searches: 0, moved: 0 };
+	/** Repository-scope refusals since this process started, by reason and by route: the counts `repoScopeStatus` reports. */
+	private readonly repoRefusalCounts = { byReason: new Map<string, number>(), byRoute: new Map<string, number>() };
 	private corpusRootKeeper: CorpusRootKeeper | null = null;
 	/** The manifest read behind a freshness refresh while it is in flight, shared by every refresh that overlaps it (phase 70). */
 	private corpusNewestRead: Promise<string | null> | null = null;
@@ -1794,6 +1839,8 @@ export class Substrate {
 			goldenRecall: (recall5) => this.observer.corpusGolden?.({ recall5 }),
 		});
 		if (config.corpus.enabled) this.observer.corpusFreshness?.({ newestAtMs: () => this.corpusSlo.newestAtMs() });
+		// The last scheduled reconcile's verdict as a gauge (phase 78), read at snapshot time from the stored run.
+		this.observer.reconcileClean?.({ read: () => (this.reconcileLast === null ? null : this.reconcileLast.clean ? 1 : 0) });
 		if (config.indexArchive.dir !== null) {
 			const watch = new IndexArchiveWatch(config.indexArchive.dir);
 			this.indexArchiveWatch = watch;
@@ -4049,6 +4096,8 @@ export class Substrate {
 				caps: DEFAULT_RECONCILE_CAPS,
 			});
 			const line = { schema: report.schema, generated_at: report.generated_at, clean: report.clean, counts: report.counts, truncated: report.truncated, unchecked_layers: report.unchecked_layers, first: report.first };
+			// Report-only and in memory: the last run's verdict for `/healthz.reconcile`, copied so the report can't be mutated through it.
+			this.reconcileLast = { lastRunAt: report.generated_at, clean: report.clean, counts: { ...report.counts }, truncated: { ...report.truncated }, unchecked_layers: [...report.unchecked_layers] };
 			process.stdout.write(`[substrate] reconcile ${JSON.stringify(line)}\n`);
 		} catch (cause) {
 			process.stderr.write(`[substrate] reconcile: run failed — ${redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200)}\n`);
@@ -4290,6 +4339,57 @@ export class Substrate {
 			}
 			return { transient: redact(String(cause)) };
 		}
+	}
+
+	/**
+	 * The operator read of the dead-letter store (phase 76): the events that never reached the ledger, oldest
+	 * first, with the event whole — already normalised and redacted on the write path — so the record can be
+	 * inspected before it is replayed. `count` is every record in the store before filtering: the operator's
+	 * total. Filters follow the ledger read's rule: an invalid value throws, never silently widens.
+	 */
+	listDeadLetters(input: { limit?: number | undefined; session_id?: string | undefined; cause?: DeadLetterCause | undefined } = {}): DeadLetterListResult {
+		const limit = rows(input.limit);
+		const sessionId = filterText("session_id", input.session_id);
+		const cause = oneOf<DeadLetterCause>("cause", DEAD_LETTER_CAUSES, input.cause);
+		const all = this.deadLetters.list();
+		const filtered = all.filter((record) => (sessionId === undefined || record.session_id === sessionId) && (cause === undefined || record.cause === cause));
+		return {
+			dead_letters: filtered.slice(0, limit).map((record) => ({
+				id: record.id,
+				hash: record.hash,
+				session_id: record.session_id,
+				cause: record.cause,
+				attempts: record.attempts,
+				last_reason: record.last_reason,
+				dead_at: record.dead_at,
+				event: record.event,
+			})),
+			count: all.length,
+		};
+	}
+
+	/**
+	 * Replay one dead-lettered event: re-append it through the same delivery path a parked event takes
+	 * (`deliverBufferedEvent`), then remove its record on success. No double-ingest: the delivery checks
+	 * `eventStored` first, so an event whose original write landed answers delivered and its record is
+	 * removed without a second INSERT. A failure re-parks the record with the new error and the spent
+	 * attempt counted, so the dead letter survives the retry and stays replayable. Never throws.
+	 */
+	async replayDeadLetter(id: string): Promise<DeadLetterReplayResult> {
+		const record = this.deadLetters.get(id);
+		if (record === undefined) return { ok: false, id, reason: "not-found", error: `no dead-lettered event with id ${id}` };
+		const greptime = this.greptime;
+		if (greptime === null) return { ok: false, id, reason: "no-ledger", error: "GREPTIME_URL is not set; the event stays in the dead-letter store" };
+		const delivery = await this.deliverBufferedEvent(greptime, record.event);
+		if (delivery === "delivered") {
+			this.deadLetters.remove(id);
+			return { ok: true, id, stored: true };
+		}
+		if (delivery === "held") return { ok: false, id, reason: "held", error: "the ledger's breaker is open; the event stays in the dead-letter store" };
+		const reason = redact(delivery.transient);
+		this.deadLetters.add({ ...record, attempts: record.attempts + 1, last_reason: reason.slice(0, 300) });
+		process.stderr.write(`[substrate] dead-letter replay of ${id} failed, re-parked — ${reason}\n`);
+		return { ok: false, id, reason: "re-parked", error: reason };
 	}
 
 	/**
@@ -4577,6 +4677,57 @@ export class Substrate {
 		);
 		// What the anchor check judged against: an ignored rotation note or a truncated read is visible here, not only in the reasons.
 		return signers === undefined ? result : { ...result, signer_set: signers };
+	}
+
+	/**
+	 * `memory_provenance` (v1.7): the verified supersession chain around one entry — `supersedes` back to the
+	 * first version and `superseded_by` forward to the latest — with a `memory_verify` verdict per hop and the
+	 * pending-review / quarantine rows each hop's content matched, by `entry_hash`, as ids. Every hop is read
+	 * with the same visibility and expiry rules as `memoryVerify`, so a hop the caller cannot read ends that
+	 * direction of the walk as dangling rather than being revealed. Bodies and subjects are never read into the
+	 * reply, and the governance lookups return row ids only, so a quarantined body cannot be returned even
+	 * with a review token; `authorized` records whether one was presented. Throws `MemoryVerifyError` for a
+	 * bad or unreadable starting id, as `memoryVerify` does.
+	 */
+	async memoryProvenance(
+		id: string,
+		caller: { surface: string | null; repo?: string | undefined; isOperator: boolean; review_token?: string | undefined },
+	): Promise<MemoryProvenanceResult & { authorized: boolean }> {
+		// Phase 72: as in `memoryVerify`, the reader's repository decides which agent-scope entries it may
+		// read, so under scope it must be granted, before the index is read.
+		const scope = this.config.repoScope;
+		if (scope.enforced) {
+			const gate = authorizeRepo(scope, caller.surface as Surface | null, caller.repo ?? "");
+			if (!gate.ok) {
+				await this.repoRefusal("memory_provenance", caller.surface as Surface | null, gate.reason, caller.repo ?? "");
+				throw new MemoryVerifyError("not_found", "no entry can be read for this repository");
+			}
+		}
+		const index = this.index;
+		if (index === null) throw new MemoryVerifyError("not_found", "no memory index is configured (SUBSTRATE_PG_URL), so no entry can be read");
+		const reader = { surface: caller.surface ?? "unattributed", repo: normalizeIdentifier(caller.repo), granted: this.memoryGrant(caller.surface) };
+		const ports = this.anchorVerifyPorts();
+		const result = await memoryProvenance(
+			{
+				getEntry: async (entryId) => {
+					const entry = await index.readEntry(entryId);
+					// An ungranted or expired entry is answered as absent before anything past this line reads
+					// it: its hash, its anchor, its links, its content.
+					if (entry === null || !visibleToCaller(entry.scope, entry.repo, reader)) return null;
+					if (this.config.memoryExpiry === "enforce" && !caller.isOperator) {
+						const graph = entry.ttl === "graph" ? await index.graphLifetime(entry) : null;
+						if (memoryExpiry(entry, graph).expired) return null;
+					}
+					return entry;
+				},
+				anchorEvidence: (eventId) => anchorEvidenceFor(ports, eventId, () => {}),
+				findPendingReviewByHash: (entryHash) => index.findPendingReviewByHash(entryHash),
+				findQuarantineByHash: (entryHash) => index.findQuarantineByHash(entryHash),
+				anchorTimeoutMs: MEMORY_VERIFY_ANCHOR_TIMEOUT_MS,
+			},
+			id,
+		);
+		return { ...result, authorized: isReviewToken(this.config, caller.review_token) };
 	}
 
 	/**
@@ -4978,6 +5129,143 @@ export class Substrate {
 			}
 			throw cause;
 		}
+	}
+
+	/**
+	 * Propose several skills in one call (`POST /skills/propose` with `{ proposals: [...] }`).
+	 * The whole batch carries `proposeSkill`'s authority rules up front — an anonymous
+	 * caller, a privileged shared flag without an operator token, or a broken library
+	 * refuses the batch as a whole, before anything is proposed — and then each item is
+	 * proposed on its own: one refusal or failure never aborts its siblings. The engine
+	 * batch does the per-item work (validation, caps, git); each item is then recorded
+	 * and reported exactly as `proposeSkill` records it. `expected_version` is a
+	 * single-proposal contract: an item carrying it is refused as its own item.
+	 */
+	async proposeSkills(
+		requests: SkillProposalRequest[],
+		caller: { surface: Surface | null; isOperator: boolean },
+		shared: { dry_run?: boolean | undefined; mode?: TreeMode | undefined; reopen?: boolean | undefined; allow_doc_examples?: SkillDocExampleRule[] | undefined } = {},
+	): Promise<ProposeBatchItem[]> {
+		const surface = caller.surface;
+		if (surface === null) {
+			throw new SkillProposalDenied(401, "skills_propose needs an authenticated surface; nothing was proposed");
+		}
+		const privileged = [
+			...(shared.mode === "replace" ? ["mode replace"] : []),
+			...(shared.reopen === true ? ["reopen"] : []),
+			...((shared.allow_doc_examples?.length ?? 0) > 0 ? ["allow_doc_examples"] : []),
+		];
+		if (privileged.length > 0 && !caller.isOperator) {
+			throw new SkillProposalDenied(403, `${privileged.join(", ")} need an operator token; nothing was proposed`);
+		}
+		if (this.config.skills.problem) {
+			throw new ProposeFailed(`skill proposals are refused until the skills library is fixed: ${this.config.skills.problem}`);
+		}
+		if (!Array.isArray(requests) || requests.length === 0 || requests.length > PROPOSE_BATCH_MAX) {
+			throw new ProposeRefused(!Array.isArray(requests) || requests.length === 0 ? "a batch needs at least one proposal" : `a batch takes at most ${PROPOSE_BATCH_MAX} proposals, not ${requests.length}`);
+		}
+
+		const dryRun = shared.dry_run === true;
+		type Pending = { index: number; request: SkillProposalRequest; input: ProposeInput; where: { session_id: string; graph_id?: string } };
+		const items: Array<ProposeBatchItem | undefined> = new Array<ProposeBatchItem | undefined>(requests.length);
+		const pending: Pending[] = [];
+		for (const [index, request] of requests.entries()) {
+			const itemName = typeof request?.name === "string" ? request.name : "";
+			const refuse = (message: string) => items.splice(index, 1, { name: itemName, status: "refused", redactions: [], error: message });
+			if (request?.surface !== undefined && request.surface !== surface) {
+				refuse(
+					`skills_propose proposes as the calling surface (${surface}), not ${JSON.stringify(String(request.surface).slice(0, 80))}; nothing was proposed`,
+				);
+				continue;
+			}
+			if (request?.expected_version !== undefined) {
+				refuse("expected_version is a single-proposal contract; submit this proposal alone to assert a skill version");
+				continue;
+			}
+			const sessionId = normalizeIdentifier(request.session_id);
+			const graphId = normalizeIdentifier(request.graph_id);
+			pending.push({
+				index,
+				request,
+				input: {
+					name: request.name,
+					files: request.files,
+					rationale: request.rationale,
+					surface,
+					...(request.remove !== undefined ? { remove: request.remove } : {}),
+					...(sessionId !== null ? { session_id: sessionId } : {}),
+					...(graphId !== null ? { graph_id: graphId } : {}),
+				},
+				where: { session_id: sessionId ?? `skills-propose:${randomUUID()}`, ...(graphId !== null ? { graph_id: graphId } : {}) },
+			});
+		}
+		const opts = { maxBytes: ROUTE_MAX_BYTES, mode: shared.mode ?? "overlay", dryRun, reopen: shared.reopen === true, allowDocExamples: new Set(shared.allow_doc_examples ?? []) };
+		let engineItems: ProposeBatchItem[];
+		if (this.skills.proposeBatch) {
+			engineItems = await this.skills.proposeBatch(pending.map((entry) => entry.input), opts);
+		} else {
+			// A seam that only speaks the single proposal: propose one at a time, same per-item mapping.
+			engineItems = [];
+			for (const entry of pending) {
+				try {
+					engineItems.push({ name: entry.request.name, ...(await this.skills.propose(entry.input, opts)) });
+				} catch (cause) {
+					const error = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 400);
+					if (cause instanceof ProposeRefused) {
+						engineItems.push({ name: entry.request.name, status: "refused", redactions: [], error, ...(cause.findings ? { findings: cause.findings } : {}) });
+					} else {
+						engineItems.push({ name: entry.request.name, status: "failed", redactions: [], error });
+					}
+				}
+			}
+		}
+		for (const [position, entry] of pending.entries()) {
+			const item = engineItems[position] as ProposeBatchItem;
+			items.splice(entry.index, 1, item);
+			if (dryRun) continue;
+			const name = typeof entry.request.name === "string" && SKILL_NAME_RE.test(entry.request.name) ? entry.request.name : undefined;
+			if (item.status === "refused" || item.status === "failed") {
+				const reason = redact(item.error ?? "").slice(0, item.status === "refused" ? 300 : 400);
+				const rules = item.status === "refused" ? [...new Set((item.findings ?? []).map((finding) => finding.rule))] : [];
+				await this.emit({
+					surface,
+					kind: "warning",
+					summary: item.status === "refused" ? `refused skill proposal ${name ?? "(invalid name)"}: ${reason}` : `skill proposal ${name ?? "(invalid name)"} failed: ${reason}`,
+					...entry.where,
+					payload: { action: "skill.propose", status: item.status, ...(name ? { name } : {}), reason, ...(rules.length > 0 ? { rules } : {}) },
+				}).catch(() => undefined);
+			} else {
+				const result: ProposeResult = {
+					status: item.status,
+					...(item.pr_url !== undefined ? { pr_url: item.pr_url } : {}),
+					...(item.pr_number !== undefined ? { pr_number: item.pr_number } : {}),
+					...(item.branch !== undefined ? { branch: item.branch } : {}),
+					content_sha256: item.content_sha256 as string,
+					redactions: item.redactions,
+					...(item.diff_added !== undefined ? { diff_added: item.diff_added } : {}),
+					...(item.diff_changed !== undefined ? { diff_changed: item.diff_changed } : {}),
+					...(item.diff_deleted !== undefined ? { diff_deleted: item.diff_deleted } : {}),
+					...(item.diff_patch !== undefined ? { diff_patch: item.diff_patch } : {}),
+				};
+				await this.recordProposedSkill(entry.request, result, surface);
+				await this.emit({
+					surface,
+					kind: "note",
+					summary: `proposed skill ${entry.request.name}: ${result.status}`,
+					repo: this.config.skills.repo,
+					...entry.where,
+					payload: {
+						action: "skill.propose",
+						name: entry.request.name,
+						status: result.status,
+						...(result.pr_url !== undefined ? { pr_url: result.pr_url } : {}),
+						content_sha256: result.content_sha256,
+						redactions: result.redactions.length,
+					},
+				}).catch(() => undefined);
+			}
+		}
+		return items as ProposeBatchItem[];
 	}
 
 	/**
@@ -6966,10 +7254,36 @@ export class Substrate {
 	 * asked for, never the request itself. An anonymous refusal is recorded by the route audit, which runs before every handler.
 	 */
 	private async repoRefusal(route: string, surface: Surface | null, reason: RepoRefusalReason, requested: string): Promise<RepoScopeRefusal> {
+		this.repoRefusalCounts.byReason.set(reason, (this.repoRefusalCounts.byReason.get(reason) ?? 0) + 1);
+		this.repoRefusalCounts.byRoute.set(route, (this.repoRefusalCounts.byRoute.get(route) ?? 0) + 1);
 		if (surface !== null) {
 			await this.emit({ surface, kind: "warning", summary: `repo request refused: ${reason}`, payload: repoRefusalPayload(route, reason, requested) }).catch(() => undefined);
 		}
 		return { ok: false, status: 403, body: { error: reason, problem: REPO_REFUSAL_MESSAGES[reason] } };
+	}
+
+	/**
+	 * `GET /repo-scope/status` and the `repo_scope_status` tool: the operator-only, read-only view of the repository scope. A
+	 * non-operator is refused 403 before anything is described, so the reply never leaks registry, grant or allowlist names to
+	 * a caller that may not see them. The allowlist contributes names and presence only (see `describeRepoAllowlist`), and the
+	 * whole body passes through `redact` before it is returned.
+	 */
+	repoScopeStatus(callerSurface: Surface | null, isOperator: boolean, env: Record<string, string | undefined> = process.env): { status: number; body: Record<string, unknown> } {
+		void callerSurface;
+		if (!isOperator) {
+			return { status: 403, body: { ok: false, reason: "operator-required", problem: "repository scope status is operator-only; nothing was described" } };
+		}
+		const parsed = repoAllowlistFromEnv(env);
+		const allowlist = parsed.ok ? parsed.value : EMPTY_REPO_ALLOWLIST;
+		const body = {
+			ok: true,
+			...describeRepoScope(this.config.repoScope, {
+				byReason: Object.fromEntries(this.repoRefusalCounts.byReason),
+				byRoute: Object.fromEntries(this.repoRefusalCounts.byRoute),
+			}),
+			allowlist: describeRepoAllowlist(allowlist, env),
+		};
+		return { status: 200, body: JSON.parse(redact(JSON.stringify(body))) as Record<string, unknown> };
 	}
 
 	/**
@@ -8058,6 +8372,40 @@ export class Substrate {
 	}
 
 	/**
+	 * `migration_health` (MCP only; there is no REST route for it): read the pinned
+	 * digest fixture next to the steps, read the ledger's applied versions through
+	 * the index, and compare. Gathering only: every record is optional and every
+	 * failure degrades to "not compared" rather than throwing, because a health
+	 * report that cannot read one record can still report the disagreement among
+	 * the others. `analyzeMigrationHealth` does the comparing. Runs no migration
+	 * and writes nothing.
+	 */
+	async migrationHealth(): Promise<MigrationHealthReport> {
+		const unavailable: string[] = [];
+		let fixture: Record<string, string> | null = null;
+		try {
+			fixture = readMigrationDigests();
+		} catch {
+			// `analyzeMigrationHealth` records the unreadable fixture on `unavailable`.
+			fixture = null;
+		}
+		let applied: number[] | null = null;
+		if (!this.index) {
+			unavailable.push("index: not configured");
+		} else {
+			// A failed read stays `null`, which `analyzeMigrationHealth` reports as unreadable.
+			applied = await this.index.appliedMigrationVersions().catch(() => null);
+		}
+		return analyzeMigrationHealth({
+			steps: MIGRATION_STEPS,
+			fixture,
+			appliedVersions: applied,
+			...(this.index?.migrationOptIns !== undefined ? { optIns: this.index.migrationOptIns } : {}),
+			unavailable,
+		});
+	}
+
+	/**
 	 * Digest one closed UTC hour of the ledger in ingest order, for the hourly anchor.
 	 *
 	 * The hour is named by its start in epoch milliseconds, which must be a whole UTC
@@ -8976,6 +9324,29 @@ export class Substrate {
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
+			// The last completed scheduled reconcile, in memory (phase 78): the verdict an operator reads instead of grepping the journal.
+			reconcile: this.reconcileHealth(),
+		};
+	}
+
+	/**
+	 * `/healthz.reconcile` (phase 78): the last completed scheduled reconcile, in
+	 * memory only. `lastRunAt`/`clean`/`graphsNamed` are `null` until the first run
+	 * finishes; `intervalS`/`windowHours` are the schedule it runs on. Report-only:
+	 * this reads what the run found, it never runs one.
+	 */
+	private reconcileHealth(): ReconcileHealth {
+		const { intervalS, windowHours } = this.config.reconcile;
+		const last = this.reconcileLast;
+		return {
+			lastRunAt: last?.lastRunAt ?? null,
+			clean: last?.clean ?? null,
+			counts: last === null ? {} : { ...last.counts },
+			truncated: last === null ? {} : { ...last.truncated },
+			unchecked_layers: last === null ? [] : [...last.unchecked_layers],
+			graphsNamed: last?.counts["index.graphs"] ?? null,
+			intervalS,
+			windowHours,
 		};
 	}
 
@@ -9415,6 +9786,23 @@ export interface PlaneHealth {
 	lastErrorAt: number | null;
 }
 
+/** `/healthz.reconcile` (phase 78): the last completed scheduled reconcile, in memory only. Report-only: the run writes nothing but the log line. */
+export interface ReconcileHealth {
+	/** ISO instant the run was generated at (`Report.generated_at`); `null` before the first run finishes. */
+	lastRunAt: string | null;
+	/** Whether the run reported no drift; `null` before the first run finishes. */
+	clean: boolean | null;
+	counts: ReconcileReport["counts"];
+	truncated: ReconcileReport["truncated"];
+	unchecked_layers: ReconcileReport["unchecked_layers"];
+	/** The run's `index.graphs` count; `null` before the first run finishes. */
+	graphsNamed: number | null;
+	/** `SUBSTRATE_RECONCILE_INTERVAL_S` as configured (0 is off). */
+	intervalS: number;
+	/** `SUBSTRATE_RECONCILE_WINDOW_HOURS` as configured. */
+	windowHours: number;
+}
+
 export interface SubstrateHealth {
 	index: boolean;
 	greptime: boolean;
@@ -9432,6 +9820,8 @@ export interface SubstrateHealth {
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
 	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null; index?: IndexArchiveHealth };
+	/** The last completed scheduled reconcile (phase 78), in memory: `null` fields until the first run finishes. */
+	reconcile: ReconcileHealth;
 }
 
 /** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */

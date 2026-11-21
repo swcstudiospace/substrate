@@ -1,11 +1,15 @@
 /**
  * `substrate skills` — propose, list and decide skill-registry rows (SKILL-01).
  *
- *   substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b]
- *       [--session I] [--graph G] [--dry-run]
+ *   substrate skills propose --dir PATH [--dir PATH ...] [--glob 'skills/*'] [--name N]
+ *       [--rationale R] [--remove a,b] [--session I] [--graph G] [--dry-run] [--json]
  *       [--replace] [--reopen] [--allow-doc-examples pem,jwt]      (operator tokens only)
  *   substrate skills list [--state approved|proposed|declined|retired|all]
  *   substrate skills approve --name N --pr NUMBER --decision approve|decline|retire [--reason R]
+ *
+ * One `--dir` posts the single proposal body as before; several directories (repeatable
+ * `--dir`, or a `--glob` expanded against the working directory) post one
+ * `{ proposals: [...] }` body and print every per-item outcome.
  *
  * HTTP over `POST /skills/propose`, `GET /skills` and `POST /skills/approve`, with
  * `SUBSTRATE_TOKEN`. Propose keeps no in-process git path: that would be a second
@@ -23,8 +27,8 @@
  * See `docs/skills-propose.md` and `docs/runbooks/skills-governance.md`.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
-import type { ProposeResult } from "../../mcp-server/src/skills/propose.ts";
+import { basename, join, relative, resolve } from "node:path";
+import { PROPOSE_BATCH_MAX, type ProposeBatchItem, type ProposeResult } from "../../mcp-server/src/skills/propose.ts";
 import { list, parseArgs, str, type Args } from "./args.ts";
 
 /**
@@ -103,7 +107,8 @@ export interface SkillsDeps {
 }
 
 export const USAGE =
-	"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G] [--dry-run]\n" +
+	"substrate skills propose --dir PATH [--dir PATH ...] [--glob 'skills/*'] [--name N] [--rationale R] [--remove a,b]\n" +
+	"                         [--session I] [--graph G] [--dry-run] [--json]      (single --dir only: --name, --remove)\n" +
 	"                         [--replace] [--reopen] [--allow-doc-examples pem,jwt]   (operator tokens only)\n" +
 	"substrate skills list [--state approved|proposed|declined|retired|all]\n" +
 	"substrate skills approve --name N --pr NUMBER --decision approve|decline|retire [--reason R]\n";
@@ -116,7 +121,7 @@ interface ErrorBody {
 
 const DOC_EXAMPLE_RULES: readonly string[] = ["pem", "jwt"];
 const PROPOSE_STATUSES = new Set(["opened", "existing", "unchanged", "declined", "dry_run"]);
-const KNOWN_FLAGS = new Set(["dir", "name", "rationale", "remove", "session", "graph", "dry-run", "replace", "reopen", "allow-doc-examples", "surface", "help"]);
+const KNOWN_FLAGS = new Set(["dir", "glob", "name", "rationale", "remove", "session", "graph", "dry-run", "json", "replace", "reopen", "allow-doc-examples", "surface", "help"]);
 
 function proposeResult(value: unknown): ProposeResult | null {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -124,6 +129,27 @@ function proposeResult(value: unknown): ProposeResult | null {
 	if (typeof record.status !== "string" || !PROPOSE_STATUSES.has(record.status)) return null;
 	if (typeof record.content_sha256 !== "string" || record.content_sha256.length === 0) return null;
 	return value as ProposeResult;
+}
+
+const BATCH_STATUSES = new Set([...PROPOSE_STATUSES, "refused", "failed"]);
+
+/** A batch answer: the bare array, or `{ results: [...] }`. Each item names its skill and its outcome. */
+function batchResults(value: unknown): ProposeBatchItem[] | null {
+	let list: unknown;
+	if (Array.isArray(value)) list = value;
+	else if (value !== null && typeof value === "object" && Array.isArray((value as Record<string, unknown>).results)) {
+		list = (value as Record<string, unknown>).results;
+	} else return null;
+	for (const entry of list as unknown[]) {
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+		const record = entry as Record<string, unknown>;
+		if (typeof record.name !== "string" || typeof record.status !== "string" || !BATCH_STATUSES.has(record.status)) return null;
+		if (record.content_sha256 !== undefined && typeof record.content_sha256 !== "string") return null;
+		if (record.diff_patch !== undefined && typeof record.diff_patch !== "string") return null;
+		if (record.error !== undefined && typeof record.error !== "string") return null;
+		if (record.redactions !== undefined && !Array.isArray(record.redactions)) return null;
+	}
+	return list as ProposeBatchItem[];
 }
 
 const LIST_STATES = new Set(["approved", "proposed", "declined", "retired", "all"]);
@@ -142,7 +168,8 @@ export async function runSkills(argv: string[], deps: SkillsDeps): Promise<numbe
 			deps.out(USAGE);
 			return 0;
 		}
-		return propose(parseArgs(argv.slice(1)), deps);
+		// Raw argv too: `--dir`/`--glob` are repeatable, which parseArgs would collapse to the last value.
+		return propose(parseArgs(argv.slice(1)), argv.slice(1), deps);
 	}
 	if ((command === "list" || command === "approve") && (argv.includes("--help") || argv.includes("-h"))) {
 		deps.out(USAGE);
@@ -154,7 +181,75 @@ export async function runSkills(argv: string[], deps: SkillsDeps): Promise<numbe
 	return 2;
 }
 
-async function propose(args: Args, deps: SkillsDeps): Promise<number> {
+/** Every `--dir`/`--glob` value in order, or the flag whose value is missing. */
+function repeatedArgs(raw: string[]): { dirs: string[]; globs: string[]; missing?: string } {
+	const dirs: string[] = [];
+	const globs: string[] = [];
+	for (let i = 0; i < raw.length; i++) {
+		const token = raw[i];
+		if (token !== "--dir" && token !== "--glob") continue;
+		const value = raw[i + 1];
+		if (value === undefined || value.startsWith("--")) return { dirs, globs, missing: token.slice(2) };
+		(token === "--dir" ? dirs : globs).push(value);
+		i++;
+	}
+	return { dirs, globs };
+}
+
+function segmentMatches(pattern: string, entry: string): boolean {
+	const source = pattern
+		.split("")
+		.map((char) => (char === "*" ? ".*" : char === "?" ? "." : char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+		.join("");
+	return new RegExp(`^${source}$`).test(entry);
+}
+
+/**
+ * A relative `--glob` like `skills/*`, expanded read-only against the working directory:
+ * only directories match, sorted and de-duplicated. No `**`, no braces, no `..`.
+ */
+export function expandGlob(cwd: string, pattern: string): string[] {
+	const segments = pattern.split("/");
+	if (
+		pattern.length === 0 ||
+		pattern.startsWith("/") ||
+		pattern.includes("\\") ||
+		segments.some((segment) => segment === "" || segment === "." || segment === "..") ||
+		segments.some((segment) => segment.includes("**"))
+	) {
+		throw new DirRefused(`--glob takes a relative pattern like skills/*, not ${JSON.stringify(pattern)}`);
+	}
+	let current = [resolve(cwd)];
+	for (const segment of segments) {
+		const next: string[] = [];
+		for (const base of current) {
+			if (segment.includes("*") || segment.includes("?")) {
+				let entries: string[];
+				try {
+					entries = readdirSync(base).sort();
+				} catch {
+					continue;
+				}
+				for (const entry of entries) {
+					if (!segmentMatches(segment, entry)) continue;
+					const path = join(base, entry);
+					if (lstatSync(path).isDirectory()) next.push(path);
+				}
+			} else {
+				const path = join(base, segment);
+				try {
+					if (lstatSync(path).isDirectory()) next.push(path);
+				} catch {
+					// A segment that does not exist matches nothing.
+				}
+			}
+		}
+		current = next;
+	}
+	return [...new Set(current)].sort();
+}
+
+async function propose(args: Args, raw: string[], deps: SkillsDeps): Promise<number> {
 	const field = (key: string, value: string | number | undefined) => {
 		if (value !== undefined) deps.out(`${key}=${value}\n`);
 	};
@@ -174,26 +269,55 @@ async function propose(args: Args, deps: SkillsDeps): Promise<number> {
 	}
 	const unknown = Object.keys(args).find((key) => !KNOWN_FLAGS.has(key));
 	if (unknown !== undefined) return refused(`unknown flag --${unknown}`);
+	const { dirs, globs, missing: repeatedMissing } = repeatedArgs(raw);
+	if (repeatedMissing !== undefined) return refused(`--${repeatedMissing} takes a value`);
 	// A flag that takes a value with none given parses as `true`; `str` and `list` would
 	// silently drop it, posting a live proposal without the removals or identifiers the
-	// user asked for. Refuse before the directory is read or anything is posted.
-	const missing = ["dir", "name", "rationale", "remove", "session", "graph"].find((key) => args[key] === true);
+	// user asked for. Refuse before a directory is read or anything is posted. `--dir`
+	// and `--glob` are repeatable, so their missing-value check ran on the raw argv above.
+	const missing = ["name", "rationale", "remove", "session", "graph"].find((key) => args[key] === true);
 	if (missing !== undefined) return refused(`--${missing} takes a value`);
-	const dirArg = str(args.dir);
-	if (!dirArg) return refused("--dir PATH is required");
+	if (dirs.length === 0 && globs.length === 0) return refused("--dir PATH is required (repeatable, or --glob PATTERN)");
 	if (!deps.token) {
 		return refused("SUBSTRATE_TOKEN is not set; skills propose needs an authenticated surface, and nothing was posted");
 	}
 
-	const dir = resolve(deps.cwd, dirArg);
-	let files: Record<string, string>;
-	try {
-		const stat = lstatSync(dir);
-		if (stat.isSymbolicLink()) return refused(`${dirArg} is a symlink`);
-		if (!stat.isDirectory()) return refused(`${dirArg} is not a directory`);
-		files = readSkillDir(dir);
-	} catch (cause) {
-		return refused(cause instanceof DirRefused ? cause.message : `cannot read ${dirArg}: ${(cause as Error).message}`);
+	const picked: Array<{ dirArg: string; dir: string }> = dirs.map((dirArg) => ({ dirArg, dir: resolve(deps.cwd, dirArg) }));
+	for (const pattern of globs) {
+		let matched: string[];
+		try {
+			matched = expandGlob(deps.cwd, pattern);
+		} catch (cause) {
+			return refused(cause instanceof DirRefused ? cause.message : `cannot expand --glob ${pattern}: ${(cause as Error).message}`);
+		}
+		if (matched.length === 0) return refused(`--glob ${JSON.stringify(pattern)} matched no directories`);
+		for (const dir of matched) picked.push({ dirArg: relative(deps.cwd, dir) || dir, dir });
+	}
+	const seenDirs = new Set<string>();
+	const unique = picked.filter(({ dir }) => (seenDirs.has(dir) ? false : (seenDirs.add(dir), true)));
+	if (unique.length > PROPOSE_BATCH_MAX) {
+		return refused(`--dir/--glob may name at most ${PROPOSE_BATCH_MAX} directories, not ${unique.length}`);
+	}
+	const single = unique.length === 1;
+	if (!single && args.name !== undefined) return refused("--name applies to a single --dir; with several directories each skill takes its directory's name");
+	if (!single && args.remove !== undefined) return refused("--remove applies to a single --dir");
+
+	// Every directory is read before anything is posted: one bad directory refuses the batch.
+	const entries: Array<{ dirArg: string; dir: string; name: string; files: Record<string, string> }> = [];
+	const seenNames = new Map<string, string>();
+	for (const { dirArg, dir } of unique) {
+		const name = basename(dir);
+		const earlier = seenNames.get(name);
+		if (earlier !== undefined) return refused(`duplicate skill name ${JSON.stringify(name)} from ${earlier} and ${dirArg}`);
+		seenNames.set(name, dirArg);
+		try {
+			const stat = lstatSync(dir);
+			if (stat.isSymbolicLink()) return refused(`${dirArg} is a symlink`);
+			if (!stat.isDirectory()) return refused(`${dirArg} is not a directory`);
+			entries.push({ dirArg, dir, name, files: readSkillDir(dir) });
+		} catch (cause) {
+			return refused(cause instanceof DirRefused ? cause.message : `cannot read ${dirArg}: ${(cause as Error).message}`);
+		}
 	}
 
 	let allow: string[] | undefined;
@@ -210,23 +334,51 @@ async function propose(args: Args, deps: SkillsDeps): Promise<number> {
 	const remove = list(args.remove);
 	const session = str(args.session);
 	const graph = str(args.graph);
-	// The keys are the route's snake_case ones, and no `surface` is ever sent.
-	const body = {
-		name: str(args.name) ?? basename(dir),
-		files,
-		rationale: str(args.rationale) ?? `substrate skills propose --dir ${basename(dir)}`,
-		...(remove ? { remove } : {}),
-		...(session ? { session_id: session } : {}),
-		...(graph ? { graph_id: graph } : {}),
+	const rationale = str(args.rationale);
+	const shared = {
 		...(args["dry-run"] !== undefined ? { dry_run: true } : {}),
 		...(args.replace !== undefined ? { mode: "replace" } : {}),
 		...(args.reopen !== undefined ? { reopen: true } : {}),
 		...(allow ? { allow_doc_examples: allow } : {}),
 	};
+	// The keys are the route's snake_case ones, and no `surface` is ever sent. One directory
+	// posts the single shape as before; several post `{ proposals: [...] }` with shared flags
+	// at the top level and each directory's name, files and rationale per item.
+	const proposals = entries.map((entry) => ({
+		name: entry.name,
+		files: entry.files,
+		rationale: rationale ?? `substrate skills propose --dir ${entry.name}`,
+		...(session ? { session_id: session } : {}),
+		...(graph ? { graph_id: graph } : {}),
+	}));
+	const body = single
+		? {
+				name: str(args.name) ?? proposals[0]?.name ?? "",
+				files: proposals[0]?.files ?? {},
+				rationale: proposals[0]?.rationale ?? "",
+				...(remove ? { remove } : {}),
+				...(session ? { session_id: session } : {}),
+				...(graph ? { graph_id: graph } : {}),
+				...shared,
+			}
+		: { proposals, ...shared };
 	const payload = JSON.stringify(body);
 	const size = Buffer.byteLength(payload, "utf8");
-	if (size > MAX_BODY_BYTES) {
-		return refused(`the proposal is ${size} bytes as JSON, over the limit of ${MAX_BODY_BYTES} bytes`);
+	if (single) {
+		if (size > MAX_BODY_BYTES) {
+			return refused(`the proposal is ${size} bytes as JSON, over the limit of ${MAX_BODY_BYTES} bytes`);
+		}
+	} else {
+		// The route's per-item cap, plus the batch's total: MAX_BODY_BYTES per proposal.
+		for (const proposal of proposals) {
+			const itemSize = Buffer.byteLength(JSON.stringify(proposal), "utf8");
+			if (itemSize > MAX_BODY_BYTES) {
+				return refused(`the proposal for ${proposal.name} is ${itemSize} bytes as JSON, over the limit of ${MAX_BODY_BYTES} bytes`);
+			}
+		}
+		if (size > MAX_BODY_BYTES * PROPOSE_BATCH_MAX) {
+			return refused(`the proposals are ${size} bytes as JSON, over the limit of ${MAX_BODY_BYTES * PROPOSE_BATCH_MAX} bytes`);
+		}
 	}
 
 	let response: Response;
@@ -249,18 +401,51 @@ async function propose(args: Args, deps: SkillsDeps): Promise<number> {
 		parsed = null;
 	}
 	if (response.status === 200) {
-		const result = proposeResult(parsed);
-		if (result === null) return failed(`the substrate answered 200 without a proposal result`);
-		field("status", result.status);
-		field("pr_url", result.pr_url);
-		field("pr_number", result.pr_number);
-		field("branch", result.branch);
-		field("content_sha256", result.content_sha256);
-		field("redactions", Array.isArray(result.redactions) ? result.redactions.length : 0);
-		field("diff_added", result.diff_added);
-		field("diff_changed", result.diff_changed);
-		field("diff_deleted", result.diff_deleted);
-		return 0;
+		if (args.json !== undefined) {
+			// The whole answer as JSON: one result, or the batch array. Still validated first.
+			if (single) {
+				if (proposeResult(parsed) === null) return failed(`the substrate answered 200 without a proposal result`);
+			} else if (batchResults(parsed) === null) return failed(`the substrate answered 200 without a batch result`);
+			deps.out(`${JSON.stringify(parsed ?? null, null, 2)}\n`);
+			if (single) return 0;
+			const items = batchResults(parsed) ?? [];
+			return items.every((item) => PROPOSE_STATUSES.has(item.status) && item.error === undefined) ? 0 : 1;
+		}
+		if (single) {
+			const result = proposeResult(parsed);
+			if (result === null) return failed(`the substrate answered 200 without a proposal result`);
+			field("status", result.status);
+			field("pr_url", result.pr_url);
+			field("pr_number", result.pr_number);
+			field("branch", result.branch);
+			field("content_sha256", result.content_sha256);
+			field("redactions", Array.isArray(result.redactions) ? result.redactions.length : 0);
+			field("diff_added", result.diff_added);
+			field("diff_changed", result.diff_changed);
+			field("diff_deleted", result.diff_deleted);
+			if (typeof result.diff_patch === "string" && result.diff_patch.length > 0) deps.out(result.diff_patch + (result.diff_patch.endsWith("\n") ? "" : "\n"));
+			return 0;
+		}
+		const items = batchResults(parsed);
+		if (items === null) return failed(`the substrate answered 200 without a batch result`);
+		let allOk = true;
+		for (const item of items) {
+			field("name", item.name);
+			field("status", item.status);
+			field("pr_url", item.pr_url);
+			field("pr_number", item.pr_number);
+			field("branch", item.branch);
+			field("content_sha256", item.content_sha256);
+			field("redactions", Array.isArray(item.redactions) ? item.redactions.length : 0);
+			field("diff_added", item.diff_added);
+			field("diff_changed", item.diff_changed);
+			field("diff_deleted", item.diff_deleted);
+			if (item.error !== undefined) field("error", item.error);
+			if (typeof item.diff_patch === "string" && item.diff_patch.length > 0) deps.out(item.diff_patch + (item.diff_patch.endsWith("\n") ? "" : "\n"));
+			if (item.error !== undefined || !PROPOSE_STATUSES.has(item.status)) allOk = false;
+		}
+		if (!allOk) deps.err("[substrate] skills propose: one or more proposals were refused or failed\n");
+		return allOk ? 0 : 1;
 	}
 
 	const error = parsed !== null && typeof parsed === "object" ? (parsed as ErrorBody) : {};

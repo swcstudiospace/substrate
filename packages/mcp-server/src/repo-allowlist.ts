@@ -104,3 +104,37 @@ export function credentialValue(grant: RepoGrant, repoId: string, env: Readonly<
 	if (grant.repo !== repoId) throw new CredentialScopeError();
 	return env[grant.credentialEnv];
 }
+
+/** One session's allowlist entry in the operator status reply: the credential variable name and whether it is set. Never the value. */
+export interface RepoAllowlistSessionEntry {
+	readonly credentialEnvName: string;
+	readonly envSet: boolean;
+}
+
+/** The read-only operator view of the session allowlist: session and repository names, credential variable names, and presence only. */
+export interface RepoAllowlistDescription {
+	readonly sessionCount: number;
+	readonly perSession: Readonly<Record<string, Readonly<Record<string, RepoAllowlistSessionEntry>>>>;
+}
+
+/**
+ * The operator-gated status of `allowlist` against `env`: each session's repositories with the name of the variable that
+ * holds the credential and whether that variable is set and non-empty. Credential values are never read into the reply.
+ */
+export function describeRepoAllowlist(
+	allowlist: RepoAllowlist,
+	env: Readonly<Record<string, string | undefined>>,
+): RepoAllowlistDescription {
+	const perSession: Record<string, Record<string, RepoAllowlistSessionEntry>> = {};
+	for (const sessionId of [...allowlist.keys()].sort()) {
+		const repos: Record<string, RepoAllowlistSessionEntry> = {};
+		const entries = allowlistFor(allowlist, sessionId);
+		for (const repo of [...entries.keys()].sort()) {
+			const credentialEnvName = entries.get(repo) as string;
+			const value = env[credentialEnvName];
+			repos[repo] = { credentialEnvName, envSet: value !== undefined && value !== "" };
+		}
+		perSession[sessionId] = repos;
+	}
+	return { sessionCount: allowlist.size, perSession };
+}

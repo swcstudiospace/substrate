@@ -954,6 +954,7 @@ function extendedActivity(instruments: SubstrateInstruments): void {
 	instruments.recordMemoryExpired({ surface: "claude-code", kind: "decision", mode: "hidden" });
 	instruments.setHindsightOutbox({ size: 7, oldestAgeSeconds: 31.5, durable: true });
 	instruments.observeIndexArchiveAge(() => 1_000, () => 61_000);
+	instruments.observeReconcileClean(() => 1);
 	activateCorpusGauges(instruments);
 }
 
@@ -1218,6 +1219,7 @@ describe("the extended series (uplift-5 S6)", () => {
 		for (const mode of MEMORY_EXPIRED_MODES) instruments.recordMemoryExpired({ surface: "grok-bot", kind: "note", mode });
 		instruments.setHindsightOutbox({ size: 1, oldestAgeSeconds: 1, durable: true });
 		instruments.observeIndexArchiveAge(() => 0, () => 1000);
+		instruments.observeReconcileClean(() => 1);
 		activateCorpusGauges(instruments);
 
 		const rows = collector.collect(instruments.snapshot(), 20, 9000);

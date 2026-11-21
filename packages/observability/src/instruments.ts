@@ -19,6 +19,7 @@ export const METRIC = {
 	requestDuration: "substrate.request.duration",
 	requestTotal: "substrate.request.total",
 	toolCalls: "substrate.tool.calls",
+	toolDuration: "substrate.tool.duration",
 	tokens: "substrate.tokens",
 	cost: "substrate.cost.usd",
 	claims: "substrate.lease.claims",
@@ -287,6 +288,7 @@ export class SubstrateInstruments {
 	readonly emitTotal: Counter;
 	readonly requestTotal: Counter;
 	readonly toolCalls: Counter;
+	readonly toolDuration: Histogram;
 	readonly tokens: Counter;
 	readonly cost: Counter;
 	readonly claims: Counter;
@@ -339,6 +341,10 @@ export class SubstrateInstruments {
 		this.toolCalls = registry.counter(METRIC.toolCalls, {
 			description: "MCP tool calls by tool and audit decision (allowed|denied).",
 			unit: "{call}",
+		});
+		this.toolDuration = registry.histogram(METRIC.toolDuration, {
+			...ms,
+			description: "Time to dispatch one MCP tool call, by tool. The per-tool latency subject.",
 		});
 		this.tokens = registry.counter(METRIC.tokens, {
 			description: "Model tokens attributed to a surface and graph, by direction.",
@@ -506,8 +512,22 @@ export class SubstrateInstruments {
 		this.requestTotal.add(1, attributes);
 	}
 
-	recordToolCall(sample: { surface: string; tool: string; decision: "allowed" | "denied" }): void {
-		this.toolCalls.add(1, cleanAttributes({ surface: sample.surface, tool: sample.tool, decision: sample.decision }));
+	/**
+	 * One MCP tool call: the audit count, plus its dispatch latency when the
+	 * caller measured it. `tool` arrives already bounded (`toolLabel` in
+	 * `observe.ts`: the known-tool set, or `unrecognized`), so the histogram
+	 * has one series per known tool and never one per caller-supplied name.
+	 * `durationMs` is the time from dispatch to completion as the caller waited
+	 * for it; it is recorded whether or not the dispatch succeeded. A missing,
+	 * negative or non-finite duration records only the count, so the pre-dispatch
+	 * audit decisions keep their existing shape.
+	 */
+	recordToolCall(sample: { surface: string; tool: string; decision: "allowed" | "denied"; durationMs?: number }): void {
+		const attributes = cleanAttributes({ surface: sample.surface, tool: sample.tool, decision: sample.decision });
+		this.toolCalls.add(1, attributes);
+		if (sample.durationMs !== undefined && Number.isFinite(sample.durationMs) && sample.durationMs >= 0) {
+			this.toolDuration.record(sample.durationMs, cleanAttributes({ surface: sample.surface, tool: sample.tool }));
+		}
 	}
 
 	recordClaim(sample: { surface: string; graph_id?: string | null; outcome: ClaimOutcome }): void {
@@ -705,6 +725,18 @@ export class SubstrateInstruments {
 		if (!Number.isFinite(recall) || recall < 0 || recall > 1) return;
 		this.registry.gauge(CORPUS_GOLDEN_RECALL5_METRIC, { description: "Golden-set recall at 5 as the docs canary last reported it", unit: "1" }).set(recall);
 	}
+	/**
+	 * The scheduled cross-layer reconcile's last verdict (phase 78): 1 when the run
+	 * reported clean, 0 when it reported drift; `read` answers the verdict as the
+	 * service last stored it, or `null` before the first run. Read at snapshot
+	 * time, so the gauge follows the latest run and carries no point until one
+	 * has run. Report-only: the gauge says what the run found, not what it did.
+	 */
+	observeReconcileClean(read: () => number | null): void {
+		const gauge = this.registry.gauge(RECONCILE_CLEAN_METRIC, { description: "1 when the last scheduled reconcile reported clean, 0 when it reported drift; no point before the first run", unit: "1" });
+		gauge.observe = () => read();
+	}
+
 
 	/** One brief's use of the recall snapshot (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
 	recordBriefRecall(sample: { surface: string; result: BriefRecallResult }): void {
@@ -736,3 +768,6 @@ export const CORPUS_SYNC_LAG_METRIC = "substrate.corpus.sync_lag_seconds";
 export const CORPUS_FRESHNESS_METRIC = "substrate.corpus.freshness_seconds";
 export const CORPUS_INGEST_RATE_METRIC = "substrate.corpus.ingest_docs_per_second";
 export const CORPUS_GOLDEN_RECALL5_METRIC = "substrate.corpus.golden_recall5";
+
+/** The gauge `observeReconcileClean` installs (phase 78): the last scheduled reconcile's clean verdict. */
+export const RECONCILE_CLEAN_METRIC = "substrate.reconcile.clean";

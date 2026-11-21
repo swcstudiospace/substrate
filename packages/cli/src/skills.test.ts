@@ -15,6 +15,7 @@ import {
 	DEFAULT_TIMEOUT_MS,
 	DirRefused,
 	MAX_BODY_BYTES,
+	expandGlob,
 	readSkillDir,
 	runSkills,
 	skillsTimeout,
@@ -540,5 +541,114 @@ describe("the real command", () => {
 		expect(result.stdout).toContain("status=declined");
 		expect(stub.seen[0]?.body.pr_number).toBe(9);
 		expect(stub.seen[0]).toMatchObject({ method: "POST", path: "/skills/approve", authorization: "Bearer tok-real" });
+	});
+});
+
+describe("proposing several skills at once", () => {
+	const batch = [
+		{ name: "demo-skill", status: "dry_run", content_sha256: "ab".repeat(32), redactions: [], diff_added: 1, diff_patch: "diff --git a/demo-skill/SKILL.md b/demo-skill/SKILL.md\n@@ -1,1 +1,1 @@\n-old\n+new\n" },
+		{ name: "second-skill", status: "dry_run", content_sha256: "cd".repeat(32), redactions: [] },
+	];
+
+	test("repeatable --dir posts one { proposals } body with each directory's name and files", async () => {
+		stub.reply = { status: 200, body: batch };
+		const { code } = await run(["propose", "--dir", skillDir(), "--dir", skillDir({}, "second-skill"), "--dry-run", "--rationale", "drain two", "--session", "s-1"]);
+		expect(code).toBe(0);
+		expect(stub.seen).toHaveLength(1);
+		const body = stub.seen[0]?.body ?? {};
+		expect(Object.keys(body).sort()).toEqual(["dry_run", "proposals"]);
+		expect(body.dry_run).toBe(true);
+		const proposals = body.proposals as Array<Record<string, unknown>>;
+		expect(proposals.map((p) => p.name)).toEqual(["demo-skill", "second-skill"]);
+		for (const proposal of proposals) {
+			expect(proposal.rationale).toBe("drain two");
+			expect(proposal.session_id).toBe("s-1");
+			expect(Object.keys(proposal.files as object).sort()).toEqual(["SKILL.md", "scripts/run.sh"]);
+		}
+	});
+
+	test("--glob expands to every matching directory, sorted", async () => {
+		const root = join(scratch, `team-${counter++}`);
+		for (const name of ["beta-skill", "alpha-skill"]) {
+			mkdirSync(join(root, "skills", name), { recursive: true });
+			writeFileSync(join(root, "skills", name, "SKILL.md"), SKILL_MD.replace("demo-skill", name));
+		}
+		stub.reply = { status: 200, body: [] };
+		const { code } = await run(["propose", "--glob", "skills/*"], { cwd: root });
+		expect(code).toBe(0);
+		const proposals = (stub.seen[0]?.body.proposals as Array<Record<string, unknown>>) ?? [];
+		expect(proposals.map((p) => p.name)).toEqual(["alpha-skill", "beta-skill"]);
+	});
+
+	test("the default output prints every item and its unified diff hunks", async () => {
+		stub.reply = { status: 200, body: batch };
+		const { code, out } = await run(["propose", "--dir", skillDir(), "--dir", skillDir({}, "second-skill"), "--dry-run"]);
+		expect(code).toBe(0);
+		expect(out).toContain("name=demo-skill\nstatus=dry_run\n");
+		expect(out).toContain("name=second-skill\nstatus=dry_run\n");
+		expect(out).toContain("diff --git a/demo-skill/SKILL.md");
+		expect(out).toContain("+new\n");
+	});
+
+	test("--json prints the batch array", async () => {
+		stub.reply = { status: 200, body: batch };
+		const { code, out } = await run(["propose", "--dir", skillDir(), "--dir", skillDir({}, "second-skill"), "--json"]);
+		expect(code).toBe(0);
+		expect(JSON.parse(out)).toEqual(batch);
+	});
+
+	test("one refused item exits 1 but every sibling is still printed", async () => {
+		stub.reply = {
+			status: 200,
+			body: [batch[0], { name: "bad-skill", status: "refused", redactions: [], error: "invalid skill name" }],
+		};
+		const { code, out, err } = await run(["propose", "--dir", skillDir(), "--dir", skillDir({}, "bad-skill")]);
+		expect(code).toBe(1);
+		expect(out).toContain("name=demo-skill\nstatus=dry_run\n");
+		expect(out).toContain("name=bad-skill\nstatus=refused\n");
+		expect(out).toContain("error=invalid skill name");
+		expect(err).toContain("one or more proposals were refused or failed");
+	});
+
+	test("a malformed batch answer is a failure", async () => {
+		stub.reply = { status: 200, body: [{ status: "dry_run" }] };
+		const { code, err } = await run(["propose", "--dir", skillDir(), "--dir", skillDir({}, "second-skill")]);
+		expect(code).toBe(1);
+		expect(err).toContain("without a batch result");
+	});
+
+	test("--name and --remove refuse with several directories, and nothing is posted", async () => {
+		for (const flags of [["--name", "x"], ["--remove", "a.md"]]) {
+			const { code, err } = await run(["propose", "--dir", skillDir(), "--dir", skillDir({}, "second-skill"), ...flags]);
+			expect(code).toBe(1);
+			expect(err).toContain("applies to a single --dir");
+		}
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("a repeatable --dir with no value, and a glob matching nothing, are refused", async () => {
+		for (const argv of [["propose", "--dir", skillDir(), "--dir"], ["propose", "--glob", "nothing/*"]]) {
+			const { code, err } = await run(argv);
+			expect(code).toBe(1);
+			const flag = argv.at(1);
+			if (flag === undefined) throw new Error("argv has no flag");
+			expect(err).toContain(flag);
+		}
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("a single dry run prints the patch the server sent", async () => {
+		stub.reply = { status: 200, body: { status: "dry_run", content_sha256: "ab".repeat(32), redactions: [], diff_patch: "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n" } };
+		const { code, out } = await run(["propose", "--dir", skillDir(), "--dry-run"]);
+		expect(code).toBe(0);
+		expect(out).toContain("status=dry_run\n");
+		expect(out).toContain("diff --git a/x b/x\n");
+		expect(out).toContain("+b\n");
+	});
+
+	test("expandGlob rejects absolute and parent patterns", () => {
+		for (const pattern of ["/tmp/*", "../*", "skills/../*", "skills/**"]) {
+			expect(() => expandGlob(scratch, pattern)).toThrow(DirRefused);
+		}
 	});
 });

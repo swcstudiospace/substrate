@@ -110,6 +110,9 @@ const KNOWN_ROUTES = [
 	"/worktrees/claims",
 	"/worktrees",
 	"/corpus/neardup",
+	"/events/dead-letters",
+	"/events/dead-letters/replay",
+	"/repo-scope/status",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -433,6 +436,9 @@ export function createObservability(
 		corpusFreshness(source) {
 			instruments.observeCorpusFreshness(() => source.newestAtMs());
 		},
+		reconcileClean(source) {
+			instruments.observeReconcileClean(() => source.read());
+		},
 		corpusIngest(sample) {
 			instruments.setCorpusIngestRate(sample.docsPerSecond);
 		},
@@ -647,6 +653,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"memory_recall",
 	"memory_pending",
 	"memory_verify",
+	"memory_provenance",
 	"checkpoint_verify",
 	"session_checkpoint",
 	"session_rollback_plan",
@@ -654,6 +661,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"events_emit",
 	"events_query",
 	"events_verify",
+	"events_dead_letter_list",
+	"events_dead_letter_replay",
 	"graph_get",
 	"graph_register",
 	"graph_bind",
@@ -804,6 +813,50 @@ export async function auditToolCalls(
 		}
 	}
 	return { denials };
+}
+
+/** One dispatched tool call's latency, as `measureToolDispatch` records it. */
+export interface ToolDispatchSample {
+	surface: string;
+	tool: string;
+	durationMs: number;
+}
+
+/**
+ * Record one dispatched tool call's latency in `substrate.tool.duration`, after
+ * the dispatcher has finished with it. The histogram is keyed by `toolLabel`,
+ * so it carries one series per known tool (or `unrecognized`) and a caller can
+ * never mint a series per invented name. The audit count is left untouched:
+ * this is the timing half, recorded where the time is known.
+ */
+export function recordToolDispatch(observability: Pick<Observability, "instruments">, sample: ToolDispatchSample): void {
+	observability.instruments.recordToolCall({ surface: sample.surface, tool: toolLabel(sample.tool), decision: "allowed", durationMs: sample.durationMs });
+}
+
+/**
+ * Run the MCP dispatcher for one audited batch, then record how long it took,
+ * once per call in the batch. The pattern is `recordDocsSearch`/`recordBrief` —
+ * measured around the work, recorded with the result — applied to the `handleMcp`
+ * dispatch: `measureToolDispatch(observability, caller.surface, calls, () => transport.inner.handleRequest(req, res, body))`.
+ *
+ * Batch members run together inside the dispatcher, so each carries the batch's
+ * wall time rather than a split nobody timed. The sample is recorded whether or
+ * not the dispatch threw: a failed tool still cost the caller its wait. The
+ * error itself is never swallowed.
+ */
+export async function measureToolDispatch<T>(
+	observability: Pick<Observability, "instruments">,
+	surface: Surface | null,
+	calls: McpToolCall[],
+	dispatch: () => Promise<T>,
+): Promise<T> {
+	const started = performance.now();
+	try {
+		return await dispatch();
+	} finally {
+		const durationMs = performance.now() - started;
+		for (const call of calls) recordToolDispatch(observability, { surface: surface ?? "unknown", tool: call.tool, durationMs });
+	}
 }
 
 /** A call already recorded `allowed` in this batch, for the correction to name. */

@@ -60,6 +60,7 @@ import {
 	OUTBOX_OLDEST_METRIC,
 	OUTBOX_SIZE_METRIC,
 	PLANES,
+	RECONCILE_CLEAN_METRIC,
 	docsSearchObjective,
 	sloCatalogue,
 	type SloTarget,
@@ -128,6 +129,7 @@ export const SERIES_SOURCES: Readonly<Record<string, string>> = {
 	"endpoint.proxy_planes": ENDPOINT_PROXY_PLANES_METRIC,
 	"corpus.freshness_seconds": CORPUS_FRESHNESS_METRIC,
 	"corpus.ingest_docs_per_s": CORPUS_INGEST_RATE_METRIC,
+	"reconcile.clean": RECONCILE_CLEAN_METRIC,
 	"corpus.golden_recall5": CORPUS_GOLDEN_RECALL5_METRIC,
 };
 
@@ -259,6 +261,13 @@ function sloItems(ctx: Context): Item[] {
 			title: "Index capacity runway",
 			note: `Days of index growth the volume still has. Objective: at least ${ctx.runwayDays} days at the default.`,
 			threshold: { value: ctx.runwayDays, direction: "floor" },
+		},
+		{
+			kind: "chart",
+			series: "reconcile.clean",
+			title: "Scheduled reconcile",
+			note: "1 when the last scheduled cross-layer reconcile reported clean, 0 when it reported drift; no point before the first run. The run's counts are in `GET /healthz`'s `reconcile` field. Report-only: the run repairs nothing. Needs SUBSTRATE_METRICS_HISTORY_SERIES=extended.",
+			threshold: { value: 1, direction: "floor" },
 		},
 	);
 	return items;
