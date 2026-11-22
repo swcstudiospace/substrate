@@ -7,7 +7,7 @@ status: merged to main in PR #184 (squash 80afb6e5); partial (see Deviations and
 
 # 66-SUMMARY: Docs Reflect, what the docs RAG learns from use
 
-Merged to main by PR #184 (squash 80afb6e5, parent 8af55c5e, 76 files, +7199 / -84, committed 2026-10-30). Decisions are in [66-CONTEXT.md](66-CONTEXT.md); the operator page is [docs/corpus-reflect.md](../../../docs/corpus-reflect.md). Every claim below was read at 80afb6e5 with `git show`. Nothing was run by the author of this record.
+Merged to main by PR #184 (squash 80afb6e5, parent 8af55c5e, 76 files, +7199 / -84, committed 2026-10-30). Decisions are in [66-CONTEXT.md](66-CONTEXT.md); the operator page is [docs/corpus-reflect.md](../../../../docs/corpus-reflect.md). Every claim below was read at 80afb6e5 with `git show`. Nothing was run by the author of this record.
 
 ## What was built
 

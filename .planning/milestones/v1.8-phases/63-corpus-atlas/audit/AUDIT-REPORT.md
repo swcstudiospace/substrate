@@ -1,6 +1,6 @@
 # Run 14 audit
 
-Read-only audit of main at 9d3f2085 that preceded milestone v1.7 (phases 63 to 70). Companion documents: [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md), [RISK-REGISTER.md](RISK-REGISTER.md), [ROSTER-PROPOSAL.md](ROSTER-PROPOSAL.md). The plan itself is in [ROADMAP.md](../../../ROADMAP.md) and [REQUIREMENTS.md](../../../REQUIREMENTS.md).
+Read-only audit of main at 9d3f2085 that preceded milestone v1.7 (phases 63 to 70). Companion documents: [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md), [RISK-REGISTER.md](RISK-REGISTER.md), [ROSTER-PROPOSAL.md](ROSTER-PROPOSAL.md). The plan itself is in [ROADMAP.md](../../../../ROADMAP.md) and [REQUIREMENTS.md](../../../../milestones/v1.8-REQUIREMENTS.md).
 
 ## The two answers
 

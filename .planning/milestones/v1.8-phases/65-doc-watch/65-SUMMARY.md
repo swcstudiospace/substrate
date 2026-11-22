@@ -7,7 +7,7 @@ status: "merged to main in PR #186 (squash aa19c926); PARTIAL in delivery: the w
 
 # 65-SUMMARY: Doc Watch, four triggers into one idempotent sync
 
-Built and merged as one squash commit. Decisions are in [65-CONTEXT.md](65-CONTEXT.md); the verification record is [65-VERIFICATION.md](65-VERIFICATION.md). Operator pages: [docs/corpus-watch.md](../../../docs/corpus-watch.md) and [docs/runbooks/corpus-sync.md](../../../docs/runbooks/corpus-sync.md). Paths are at commit aa19c926 and were read with `git show`; nothing was run.
+Built and merged as one squash commit. Decisions are in [65-CONTEXT.md](65-CONTEXT.md); the verification record is [65-VERIFICATION.md](65-VERIFICATION.md). Operator pages: [docs/corpus-watch.md](../../../../docs/corpus-watch.md) and [docs/runbooks/corpus-sync.md](../../../../docs/runbooks/corpus-sync.md). Paths are at commit aa19c926 and were read with `git show`; nothing was run.
 
 ## What was built
 

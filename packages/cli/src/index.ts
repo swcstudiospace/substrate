@@ -84,6 +84,7 @@ import { createTranscriptPort, resolveOmpSessionsDir } from "./session/transcrip
 import { LocalBlobStore } from "../../mcp-server/src/blob-store.ts";
 import { postEvent as emitEvent } from "../../collectors/src/emit.ts";
 import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
+import { defaultPluginsDeps, runPlugins } from "./plugins.ts";
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
@@ -873,6 +874,9 @@ switch (command) {
 			}),
 		);
 		break;
+	case "plugins":
+		process.exit(runPlugins(rest, defaultPluginsDeps()));
+		break;
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -901,6 +905,7 @@ switch (command) {
 				"substrate reconcile [--plan] | --apply PLAN_ID --confirm   (exit 0 nothing to repair or applied, 1 failed or refused, 2 usage, 3 a plan printed; docs/greptime-ledger.md)\n" +
 				"substrate memory capsule export --out FILE [--session S] [--repo R] [--since ISO] [--limit N] [--store DIR]\n" +
 				"                         | verify FILE [--anchors] | redact FILE --ids a,b --reason TEXT --out FILE2   (substrate memory capsule for the flags)\n" +
+				"substrate plugins [--json]   (read-only per-agent compat status: registry, token presence, MCP entry, hook; token values never printed)\n" +
 				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n" +
 				"substrate worktree list|status|scan|prune|conflicts|provision|disk|guard ...   (substrate worktree --help; roots from SUBSTRATE_WORKTREE_ROOTS)\n" +
 				"substrate corpus scan | plan | ingest [--execute] | reflect [--execute] | status [--gaps] | sync [--repo R] [--execute] | watch [--once] | reconcile [--execute] | prove | verify | hook install|uninstall|status --repo DIR | hint --repo DIR\n" +
