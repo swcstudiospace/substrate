@@ -13,6 +13,7 @@ import {
 	hermesBundle,
 	primeAgentBundle,
 	stale,
+	generateGsdCorePlugin,
 	writeBundle,
 } from "./agent-plugins.ts";
 
@@ -103,5 +104,66 @@ describe("command line", () => {
 			stderr: "pipe",
 		});
 		expect(await proc.exited).toBe(2);
+	});
+});
+
+describe("gsd-core plugin", () => {
+	test("manifest points at the MCP, skills, and tool-surface files in the bundle", () => {
+		const bundle = generateGsdCorePlugin();
+		const manifest = json(bundle[".gsd-plugin/plugin.json"] as string) as {
+			name: string;
+			version: string;
+			surface: string;
+			skillsDir: string;
+			mcpServers: string;
+			toolSurface: string;
+		};
+		expect(manifest.name).toBe("substrate");
+		expect(manifest.surface).toBe("gsd-core");
+		expect(manifest.skillsDir).toBe(".gsd/skills");
+		expect(manifest.mcpServers).toBe("./.mcp.json");
+		expect(manifest.toolSurface).toBe("./gsd/tool-surface.json");
+		expect(bundle[".mcp.json"]).toBeDefined();
+		expect(bundle["gsd/tool-surface.json"]).toBeDefined();
+	});
+
+	test("MCP entry reuses the shared templates, never a token value", () => {
+		const mcp = json(generateGsdCorePlugin()[".mcp.json"] as string) as {
+			mcpServers: { substrate: { url: string; headers: { Authorization: string } } };
+		};
+		expect(mcp.mcpServers.substrate.url).toBe(MCP_URL);
+		expect(mcp.mcpServers.substrate.headers.Authorization).toBe(AUTH);
+	});
+
+	test("tool surface maps GSD commands to resolvable substrate tools with the env template", () => {
+		const surface = json(generateGsdCorePlugin()["gsd/tool-surface.json"] as string) as {
+			surface: string;
+			tokenEnvVar: string;
+			skillsDir: string;
+			envTemplate: Record<string, string>;
+			tools: Record<string, string[]>;
+		};
+		expect(surface.surface).toBe("gsd-core");
+		expect(surface.tokenEnvVar).toBe("SUBSTRATE_TOKEN_GSD_CORE");
+		expect(surface.skillsDir).toBe(".gsd/skills");
+		expect(surface.envTemplate["SUBSTRATE_TOKEN_GSD_CORE"]).toBe("${SUBSTRATE_TOKEN}");
+		expect(Object.keys(surface.tools).length).toBeGreaterThan(0);
+		const allTools = Object.values(surface.tools).flat();
+		expect(allTools.length).toBeGreaterThan(0);
+		for (const tool of allTools) {
+			expect(tool).toMatch(/^[a-z][a-z0-9_]*$/);
+			expect(tool).not.toContain("${");
+		}
+		expect(surface.tools["gsd-plan-phase"]).toContain("planning_status");
+	});
+
+	test("options override the surface, version, and skills directory", () => {
+		const bundle = generateGsdCorePlugin({ surface: "gsd-core-alt", version: "1.2.3", skillsDir: "skills/gsd" });
+		const manifest = json(bundle[".gsd-plugin/plugin.json"] as string) as { version: string; skillsDir: string };
+		expect(manifest.version).toBe("1.2.3");
+		expect(manifest.skillsDir).toBe("skills/gsd");
+		const surface = json(bundle["gsd/tool-surface.json"] as string) as { tokenEnvVar: string; skillsDir: string };
+		expect(surface.tokenEnvVar).toBe("SUBSTRATE_TOKEN_GSD_CORE_ALT");
+		expect(surface.skillsDir).toBe("skills/gsd");
 	});
 });

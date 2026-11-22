@@ -111,6 +111,60 @@ export function primeAgentBundle(): Bundle {
 	};
 }
 
+/** Options for {@link generateGsdCorePlugin}. Every field is optional; defaults keep the shared templates. */
+export interface GsdCorePluginOptions {
+	/** Surface the generated plugin advertises; defaults to `"gsd-core"`. */
+	surface?: string;
+	/** Plugin version written into the manifest; defaults to `"0.1.0"`, the other bundles' version. */
+	version?: string;
+	/** Skills projection directory, as a bundle-relative path; defaults to `".gsd/skills"`. */
+	skillsDir?: string;
+}
+
+/**
+ * GSD-Core CLI agent compat: the manifest plus the tool-surface mapping a GSD-Core agent
+ * resolves substrate tools through. A GSD-Core agent reads `.gsd-plugin/plugin.json`, follows
+ * `skillsDir` to the projected skills, `mcpServers` to `.mcp.json`, and `toolSurface` to the
+ * per-command tool lists. The MCP entry reuses `jsonEntry()` — the same `${SUBSTRATE_URL}/mcp` and
+ * `Bearer ${SUBSTRATE_TOKEN}` templates as every other bundle — and the env template names
+ * `SUBSTRATE_TOKEN_<SURFACE>` for the surface token var; no token value is ever written.
+ */
+export function generateGsdCorePlugin(opts: GsdCorePluginOptions = {}): Bundle {
+	const surface = opts.surface?.trim() || "gsd-core";
+	const version = opts.version?.trim() || "0.1.0";
+	const skillsDir = opts.skillsDir?.trim() || ".gsd/skills";
+	const tokenEnvVar = `SUBSTRATE_TOKEN_${surface.toUpperCase().replaceAll("-", "_")}`;
+	const toolSurface = {
+		surface,
+		server: SERVER,
+		skillsDir,
+		tokenEnvVar,
+		envTemplate: { SUBSTRATE_URL: "${SUBSTRATE_URL}", [tokenEnvVar]: "${SUBSTRATE_TOKEN}" },
+		tools: {
+			"gsd-discuss-phase": ["planning_status", "memory_brief", "memory_search", "docs_search"],
+			"gsd-plan-phase": ["planning_status", "planning_sessions", "memory_brief", "graph_register"],
+			"gsd-execute-phase": ["graph_get", "graph_claim", "graph_heartbeat", "events_emit", "memory_write"],
+			"gsd-verify-work": ["planning_status", "memory_brief", "events_query", "graph_get"],
+			"gsd-progress": ["planning_status", "graph_get", "events_query"],
+		},
+	};
+	return {
+		".gsd-plugin/plugin.json": json({
+			name: "substrate",
+			version,
+			description: `Connects GSD-Core agents (${surface}) to the Agent Substrate: skills projection and MCP tools.`,
+			surface,
+			skillsDir,
+			mcpServers: "./.mcp.json",
+			toolSurface: "./gsd/tool-surface.json",
+			envTemplate: toolSurface.envTemplate,
+		}),
+		".mcp.json": json(PLUGIN_MCP),
+		"gsd/tool-surface.json": json(toolSurface),
+	};
+}
+
+
 export function bundleFor(target: Target): Bundle {
 	switch (target) {
 		case "claude-code":
