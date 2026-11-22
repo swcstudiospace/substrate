@@ -1,5 +1,19 @@
 # Milestones
 
+## v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation (Shipped: 2026-11-22)
+
+**Phases completed:** 41 phases, 15 plans, 0 tasks
+
+**Key accomplishments:**
+- Local implementation and exercised acceptance passed. The authoritative current evidence and remaining external sign-off are in `71-VERIFICATION.md`; earlier unexecuted notes below describe the edit-only handoff, not the final local outcome.
+- Local CLI/hook and integrated acceptance passed, including the actual CLI executable against native PostgreSQL. Current evidence and the outstanding external review are in `71-VERIFICATION.md`; earlier unexecuted notes are retained handoff history.
+- Integrated local acceptance, the complete repository suite/components and native CLI smoke passed. `71-VERIFICATION.md` records the observed evidence and overall `human_needed` external-review blocker. Failed gates and edit-only handoffs below remain dated development history, not the current local status.
+- All local acceptance and final root gates now pass; current exercised evidence is in `71-VERIFICATION.md`. Earlier failing runs and unexecuted correction notes below remain development history. Overall sign-off is still `human_needed`: Desk Quality / Programming Lead review has not been observed. No deployment, security certification, phase-completion authorization or merge readiness is claimed.
+- implemented and written; not verified by execution (see section 4). Per the brief, the orchestrator runs every gate.
+- implemented and verified locally, including against a live Postgres 16 in a disposable container. Not pushed. Route exposure is deliberately not part of this phase (D74-10).
+
+---
+
 ## v1.6 Contextual Memory, Live Steering and Eternal Rollback (Closed: 2026-10-29, override closeout decided 2026-10-28)
 
 **Phases completed:** 8 phases (55-62), all merged to main on 2026-10-28; 6 passed (55, 56, 57, 58, 60, 62), 1 human_needed (59), 1 gaps_found (61). Planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1).

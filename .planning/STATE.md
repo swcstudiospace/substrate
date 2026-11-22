@@ -2,23 +2,24 @@
 gsd_state_version: "1.0"
 milestone: v1.8
 milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-current_phase_name: multi-session-boundary
-status: "v1.8 MERGED 2026-11-20: 72 passed (7/7), 73 passed and 75 passed (re-verified 2026-11-20); 71 human_needed (113 pass/33 PG skip, no SUBSTRATE_TEST_PG_URL); 74 human_needed (route exists, migration step 43 rehearsal only); 76 human_needed (2/2 repo, systemd/claim/scope operator items); 77 human_needed (5/6, restart + rehearsal); 78 human_needed (2/4, unit + pair-scheduling decision). PR #215 merged to main 2026-11-20 (local Green CI 12492/0; GitHub CI 44661878737 success). Greptile unavailable per owner 2026-11-19."
+status: Awaiting next milestone
 stopped_at: "2026-11-12: Desk Quality gate waived by user (answers what=not_real, needs=greptile_only). Remaining open: Greptile review on PR #199 and PR #215; phase 72 owner decisions (HARD-S2, corpus proof disclosure); v1.7 owner decisions open."
-last_updated: "2026-11-20T02:42:00.000Z"
-last_activity: 2026-11-01
-last_activity_desc: "Phase 71: Greptile P2 threads closed (71-05); expiry pass moved to issue so discovery and the digest stay read-only; one full run 11623 pass, 0 fail; phase remains human_needed"
-state_head: a2f438f9768cadf9ffc601ba942fd92325dc4da1
+last_updated: "2026-11-22T00:07:16.201Z"
+last_activity: 2026-11-22
+last_activity_desc: Milestone v1.8 completed and archived
+state_head: b487b30664dc6e247bde83a9ce278e6a72b47a13
 progress:
   total_phases: 61
   completed_phases: 47
-  total_plans: 12
+  total_plans: 13
   completed_plans: 10
   percent: 77
 current_phase: 71
+current_phase_name: multi-session-boundary
 ---
 
 # State
+
 ## Deferred Verification
 
 | Phase | State | Resume |
@@ -291,10 +292,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: milestone v1.7 phases 63-70 are shipped on main; the milestone is not complete. Requirements audit (milestones/v1.7-REQUIREMENTS-AUDIT.md, one grading rule): 25 of 41 requirements MET, 16 PARTIAL, 0 NOT MET. Owner decisions are open. v1.3.x (37-44), v1.5 (45-54) and v1.6 (55-62) are archived as override closeouts.
-Plan: none written (phases are built in orchestrated waves of edit-only units and recorded in SUMMARY.md, as in Runs 12 and 13).
-Status: Not complete. Every gap is pending the owner's decision and none is accepted (see the requirements audit). The owner's 2026-10-28 decision in the section "Accepted debt (owner decision, 2026-10-28)" covers earlier milestones only; the operator-gated steps are listed in the Run 12, Run 13 and Run 14 records.
-Last activity: 2026-10-30 — Run 14 closeout: phases 63-70 shipped; Run 15 fixes merged (#188-#193, claude-ultrathink #76).
+Phase: Milestone v1.8 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-11-22 — Milestone v1.8 completed and archived
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
@@ -346,6 +347,10 @@ Items acknowledged and deferred, most recent first:
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
 | uat_gaps | milestones/v1.0-phases/00-brief/0-UAT.md | partial (8 scenarios pending) | 2026-10-07 | v1.1 |
+| verification_gaps | phases/71-78 (71,74,76,77,78 human_needed; 73 stale dup human_needed) [see v1.8-MILESTONE-AUDIT.md] | human_needed / gaps_found | 2026-11-22 | v1.8 |
+| uat_gaps | 71-UAT.md, 74-UAT.md, 76-UAT.md, 77-UAT.md, 78-UAT.md (operator-gated scenarios, suppressed unknown::scenarios=0) | deferred | 2026-11-22 | v1.8 |
+| verification_gaps | 18 archived duplicates (v1.3/v1.4/v1.6 phases 34,35,16,17,20,22,23,24,25,26,27,28,29,30,31,32,33,59) | accepted debt | 2026-11-22 | v1.8 |
+| verification_gaps | live earlier phases 19,20,21,22,23,24,25,26,28,30,31,32,33,34,63,64,65,67,68,69,70 | human_needed / gaps_found | 2026-11-22 | v1.8 |
 
 ## Operator Next Steps
 

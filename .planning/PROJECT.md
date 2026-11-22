@@ -6,7 +6,7 @@
 
 ## Current State
 
-**In progress: v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** (phases 71-78). The eight accepted features and full criteria are recorded in [REQUIREMENTS.md](REQUIREMENTS.md). Phase 71's independent-credential session boundary is locally verified; the Desk Quality / Programming Lead review was waived by the user on 2026-11-12, so its remaining gate is Greptile 5/5 with no open threads. No v1.8 phase or milestone is signed off. Progress and the review blocker are in [STATE.md](STATE.md) and [ROADMAP.md](ROADMAP.md).
+**Shipped v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** (phases 71-78, override closeout 2026-11-22, audit `gaps_found`): session boundary with independent credentials (71), repo allowlist with scoped grant credentials (72, passed 7/7), ledger tamper evidence with hourly anchors (73, passed), cross-repo compensating actions (74), Dragonfly degradation to the authoritative store (75, passed), telemetry buffer with dead-letter replay (76), keyed steering idempotency (77), cross-layer reconciliation (78). Merged to `main` as PR #223 (8 Graph-Engineering runtime features on top: LeaseExpirySweeper, `memory_provenance`, batch skills propose with dry-run diff, per-tool latency histogram, `migration_health`, `/healthz` reconcile state, `repo_scope_status`, `events_dead_letter` list/replay). Full local gate green: 12615 tests pass, 0 fail. Unresolved requirements HARD-S1, HARD-R1, HARD-R3, HARD-H1, HARD-H2 remain `human_needed` on operator-gated live proofs (PG restart/replay suites, migration-43/44-45 rehearsals, systemd paths, anchor windows); resumes: `/gsd:verify-work 71|74|76|77|78`. Archive: `.planning/milestones/v1.8-*`; known verification overrides: 50 newly acknowledged, 3 carried forward (see STATE.md Deferred Items).
 
 **Prior v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** (phases 63-70, defined 2026-10-29, Run 14): phases shipped with recorded gaps and owner decisions still open; the milestone is not complete. Its eight features ingest documentation and keep it current (Corpus Atlas, Doc Watch), use TEI (Embedding fabric), improve retrieval context (Docs Reflect), expose Live Steering and cross-session context, optimise worktrees (Worktree Fleet), prove the corpus from hourly devnet anchors (Doc Proofs), and guard docs quality (Docs SLO and eval). Existing production/operator limitations below remain in force.
 
@@ -222,4 +222,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-31 for v1.8 and Phase 71 local verification; external sign-off remains pending*
+*Last updated: 2026-11-22 after v1.8 milestone closeout (override, accepted debt); v1.7 remains open*
