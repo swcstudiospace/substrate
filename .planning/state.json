@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.5 — SOTA enhancements",
+  "milestone": "v1.8 — Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation",
   "phases": [
     {
       "number": "16",
@@ -50,7 +50,7 @@
     },
     {
       "number": "25",
-      "name": "Docs search and ingest",
+      "name": "Docs search and ingest (RAG-backend)",
       "status": "complete"
     },
     {
@@ -155,7 +155,7 @@
     },
     {
       "number": "46",
-      "name": "LightRAG hybrid RAG migration",
+      "name": "LightRAG hybrid RAG and the RAG-backend migration",
       "status": "pending"
     },
     {
@@ -237,6 +237,86 @@
       "number": "62",
       "name": "Soak, runbooks and v1.6 close",
       "status": "complete"
+    },
+    {
+      "number": "63",
+      "name": "Corpus Atlas",
+      "status": "pending"
+    },
+    {
+      "number": "64",
+      "name": "Embedding fabric",
+      "status": "pending"
+    },
+    {
+      "number": "65",
+      "name": "Doc Watch",
+      "status": "pending"
+    },
+    {
+      "number": "66",
+      "name": "Docs Reflect",
+      "status": "pending"
+    },
+    {
+      "number": "67",
+      "name": "Live Steering GA",
+      "status": "pending"
+    },
+    {
+      "number": "68",
+      "name": "Worktree Fleet",
+      "status": "pending"
+    },
+    {
+      "number": "69",
+      "name": "Doc Proofs",
+      "status": "pending"
+    },
+    {
+      "number": "70",
+      "name": "Docs SLO and eval",
+      "status": "pending"
+    },
+    {
+      "number": "71",
+      "name": "Multi-Session boundary",
+      "status": "pending"
+    },
+    {
+      "number": "72",
+      "name": "Repo allowlist and scoped credentials",
+      "status": "pending"
+    },
+    {
+      "number": "73",
+      "name": "Ledger tamper evidence",
+      "status": "pending"
+    },
+    {
+      "number": "74",
+      "name": "Cross-repo compensating actions",
+      "status": "pending"
+    },
+    {
+      "number": "75",
+      "name": "DragonflyDB degradation",
+      "status": "pending"
+    },
+    {
+      "number": "76",
+      "name": "Telemetry buffer and dead-letter",
+      "status": "complete"
+    },
+    {
+      "number": "77",
+      "name": "Steering idempotency and ordering",
+      "status": "complete"
+    },
+    {
+      "number": "78",
+      "name": "Cross-layer reconciliation",
+      "status": "pending"
     }
   ],
   "next": {
@@ -244,5 +324,5 @@
     "label": "Show progress",
     "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-10-29T00:04:48.115Z"
+  "updated_at": "2026-11-22T00:07:16.266Z"
 }

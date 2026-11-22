@@ -14,6 +14,10 @@ human_verification:
     why_human: "Needs live Linear, Notion and Hermes model quota and explicit operator approval; the runbook evidence table is NOT RUN. Env provisioning, production restart and the dormant:24 -> live manifest flip are part of the same gated sequence and were not run."
 regressions: []
 gaps: []
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 24: substrate-dispatcher Verification Report

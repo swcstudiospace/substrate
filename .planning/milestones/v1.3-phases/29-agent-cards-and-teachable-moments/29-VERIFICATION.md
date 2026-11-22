@@ -18,6 +18,10 @@ human_verification:
   - test: "G3: with the funded devnet key, emit a proof teachable into production, let the hourly timer anchor its hour, read the memo back by tx_sig, run substrate verify on the proof graph"
     expected: "The teachable's hour reports anchored and the teachable event sits inside it"
     why_human: "Writes to production ledger and devnet; no agent may run it. The in-repo proof uses a fake RPC only"
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 29: Agent Cards and teachable moments Verification Report

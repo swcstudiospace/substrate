@@ -22,6 +22,10 @@ human_verification:
   - test: "Production restarts of substrate-skills-sync and substrate-skills-bridge, and the dirty-tree cleanup of /root/agent-skills with its .gitignore PR"
     expected: "One tick prints current or ff with zero refused; bridge drains without 401s from the staged token"
     why_human: "Operator-approved production actions; agents do not restart production units. Not run."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 22 verification (repo code, re-run)
@@ -114,21 +118,25 @@ No `scripts/*/tests/probe-*.sh` files are declared or implied by this phase. Ski
 ### Human Verification Required
 
 ### 1. SC5 / SKILL-07 live proof
+
 **Test:** Mine a skill from a Cursor session through the production route, let the owner merge the PR, then run one `substrate-skills-sync` tick.
 **Expected:** A real agent-skills PR; after merge, the next tick (≤ 5 min) prints `ff` and symlinks appear in Claude Code and Grok Build with their configs unchanged; both timers and the cron run green on main's code.
 **Why human:** GitHub, owner merge, Hermes model quota, real Cursor session and production timers. Operator-approved only.
 
 ### 2. SC4 / SKILL-04 host cron rebind
+
 **Test:** Confirm the Hermes `substrate-skill-miner` cron entry points at main's monitor and SKILL.md. Verify an unchanged hour makes no model run, and that `skills.write_approval` and `memory.write_approval` read true.
 **Expected:** Cron target matches `packages/miner/hermes/substrate-skill-miner-monitor.sh`; no model run on unchanged hours; flags true.
 **Why human:** The skip behavior lives in the cron binding, not in repo code. The rebind is an operator-gated host change.
 
 ### 3. SC3 / SKILL-05 host rebinds
+
 **Test:** Reinstall skill-autonomy so its output posts to `/skills/propose` (grok-build bearer) or stages to pending; repair the Omp extension symlink.
 **Expected:** skill-autonomy output reaches the propose route or the pending directory; the Omp extension loads from main.
 **Why human:** Host configuration per `docs/skills-sync-bridge-miners.md`; not executed.
 
 ### 4. Production restarts and dirty-tree cleanup
+
 **Test:** After operator approval, restart `substrate-skills-sync` and `substrate-skills-bridge`; clean untracked caches in `/root/agent-skills` and land the `.gitignore` PR; delete `propose.key` after cutover.
 **Expected:** One sync tick prints `current` or `ff` with zero `refused`; the bridge drains without 401s from the staged token.
 **Why human:** Production actions an agent must not take unilaterally.

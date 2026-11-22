@@ -13,6 +13,10 @@ re_verification:
   gaps_closed: []
   gaps_remaining: []
   regressions: []
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 20: Production Identity and Phase 0 UAT — Verification

@@ -26,6 +26,10 @@ human_verification:
   - test: "Confirm the 2026-10-08 window retirement (stray pid 3149064) is still the recorded baseline and no stray holder of 127.0.0.1:7410 exists"
     expected: "Operator confirms only the substrate-mcp.service MainPID holds 7410"
     why_human: "Host process state on the production machine is not observable from this checkout"
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 16: Production Parity and Rehearsal Harness Verification Report

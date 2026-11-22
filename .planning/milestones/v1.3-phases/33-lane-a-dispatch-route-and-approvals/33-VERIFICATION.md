@@ -29,6 +29,10 @@ gaps:
     missing:
       - "Reconcile dispatcher-driver.py S11/S12 with the post-H-D3 sessions behavior (or fix the behavior if the expectation is correct), then re-run to 0 failures"
 deferred: []
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: gaps_found
 ---
 
 # Phase 33: Lane A dispatch route and approvals — Verification

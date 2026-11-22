@@ -22,6 +22,10 @@ human_verification:
   - test: "Confirm that the 15 reviewed swarm surfaces added after phase 17 (swarm-a16-cloud through swarm-a30-custody, listed in REVIEWED_SURFACE_ADDITIONS in scripts/phase-close-check.ts) count toward this phase's SURFACES contract."
     expected: "Accept: SURFACES = 42 at HEAD (v1.2 list + 15 swarm surfaces + substrate) is the current baseline. Reject: SC2 is literal (v1.2 + substrate = 27) and the additions need a fix."
     why_human: "The phase text says 27. The code and vocabulary-lock test now pin 42 by a later reviewed decision. Which one governs is an operator call, not a code check."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 17: Event vocabulary and audit policy Verification Report

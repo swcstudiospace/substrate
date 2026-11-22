@@ -6,6 +6,10 @@ score: 1/3 roadmap success criteria verified in-repo; 2/3 human_needed (operator
 covered_files: [".planning/milestones/v1.3-phases/31-lane-a-runtime/31-01-PLAN.md", ".planning/milestones/v1.3-phases/31-lane-a-runtime/31-01-SUMMARY.md", ".planning/milestones/v1.3-phases/31-lane-a-runtime/31-02-PLAN.md", ".planning/milestones/v1.3-phases/31-lane-a-runtime/31-02-SUMMARY.md", ".planning/milestones/v1.3-phases/31-lane-a-runtime/31-03-PLAN.md", ".planning/milestones/v1.3-phases/31-lane-a-runtime/31-03-SUMMARY.md", ".planning/milestones/v1.3-phases/31-lane-a-runtime/31-SPIKE.md", "docs/runbooks/lane-a-host.md", "infra/sandbox/Dockerfile", "infra/vps/substrate-host.service", "packages/host/src/api.ts", "packages/host/src/main.ts", "packages/host/src/sandbox-provider.test.ts", "packages/host/src/sandbox-provider.ts", "packages/host/src/substrate.ts", "packages/host/src/tasks.ts", "packages/host/src/vm.ts", "scripts/host-smoke.test.ts", "scripts/host-smoke.ts", "scripts/host-spike.test.ts", "scripts/host-spike.ts"]
 covered_digest: "v3:sha256:342b1d4a25cee3838822f5783207692aacf40d1d890fe5a98bb80e8fa4670498"
 overrides_applied: 0
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 31: Lane A runtime — Verification

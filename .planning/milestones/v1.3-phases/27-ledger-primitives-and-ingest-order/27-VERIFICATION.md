@@ -27,6 +27,10 @@ human_verification:
   - test: "Phase 28 devnet anchor transaction checks the memo program ID claim carried over from September (D27-06)."
     expected: "The v1 memo transaction is accepted by the memo program in use."
     why_human: "Devnet-only claim; stays unverified until Phase 28 sends a real transaction."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 27: Ledger Primitives and Ingest Order Verification Report

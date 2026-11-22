@@ -19,6 +19,10 @@ re_verification:
   gaps_remaining: ["live devnet anchor and read-back (SC4 live half, L1-L10 operator gates)"]
   regressions: []
   note: "Prior report said status passed while listing 2 behavior-unverified items; the Step 9 decision tree requires human_needed in that case. Re-derived here."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 28: Hourly Anchor Job and Verify Verification Report

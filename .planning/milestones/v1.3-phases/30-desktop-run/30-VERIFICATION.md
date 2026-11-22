@@ -25,6 +25,10 @@ human_verification:
   - test: "Run the 30-N1-SPIKE.md ladder (as-ported, timing, stacking, forced repaint) and record verdicts"
     expected: "n1_reproduced, capture_path, settle_ms recorded; if no capture path yields fresh pixels, the pixel clause stays a gap (never passed on titles)"
     why_human: "Operator-gated live run; 30-N1-SPIKE.md verdicts are NOT-RUN"
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 30: desktop_run Verification Report
