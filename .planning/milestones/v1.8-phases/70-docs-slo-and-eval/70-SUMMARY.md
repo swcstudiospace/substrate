@@ -7,7 +7,7 @@ status: merged to main in PR #182 (squash 8af55c5e) and the docs lint in PR #176
 
 # 70-SUMMARY: Docs SLO and eval, measured without labels and guarded in CI
 
-Built in one orchestrated wave of edit-only units (no gsd-plan-phase run; `.planning/ROADMAP.md` at 8af55c5e, phase 70, "Plans: none written"). Decisions are in [70-CONTEXT.md](70-CONTEXT.md). The verification record is [70-VERIFICATION.md](70-VERIFICATION.md). Operator pages: [docs/corpus-eval.md](../../../docs/corpus-eval.md) and [docs/runbooks/docs-rag-operations.md](../../../docs/runbooks/docs-rag-operations.md). File references are to the trees at the squash commits named above; the worktree's own HEAD is older and does not contain 8af55c5e.
+Built in one orchestrated wave of edit-only units (no gsd-plan-phase run; `.planning/ROADMAP.md` at 8af55c5e, phase 70, "Plans: none written"). Decisions are in [70-CONTEXT.md](70-CONTEXT.md). The verification record is [70-VERIFICATION.md](70-VERIFICATION.md). Operator pages: [docs/corpus-eval.md](../../../../docs/corpus-eval.md) and [docs/runbooks/docs-rag-operations.md](../../../../docs/runbooks/docs-rag-operations.md). File references are to the trees at the squash commits named above; the worktree's own HEAD is older and does not contain 8af55c5e.
 
 ## What was built
 
