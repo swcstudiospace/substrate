@@ -7,7 +7,7 @@ status: merged to main in PR #177 (squash a1d6e8f7, with the audit in PR #175); 
 
 # 63-SUMMARY: Corpus Atlas, the documentation of every repository in one manifest
 
-Built in one orchestrated wave of edit-only units (no gsd-plan-phase run). Decisions and evidence are in [63-CONTEXT.md](63-CONTEXT.md); the milestone audit and capability matrix are in `.planning/phases/63-corpus-atlas/audit/`. Operator pages: [docs/corpus.md](../../../docs/corpus.md) and [docs/runbooks/corpus-ingest.md](../../../docs/runbooks/corpus-ingest.md).
+Built in one orchestrated wave of edit-only units (no gsd-plan-phase run). Decisions and evidence are in [63-CONTEXT.md](63-CONTEXT.md); the milestone audit and capability matrix are in `.planning/phases/63-corpus-atlas/audit/`. Operator pages: [docs/corpus.md](../../../../docs/corpus.md) and [docs/runbooks/corpus-ingest.md](../../../../docs/runbooks/corpus-ingest.md).
 
 ## What was built
 

@@ -1,6 +1,6 @@
 # Run 14 roster proposal
 
-The eight features of milestone v1.7 and how they map onto the planner's candidate roster. Phase text is in [ROADMAP.md](../../../ROADMAP.md); evidence in [AUDIT-REPORT.md](AUDIT-REPORT.md); status per item in [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md); risks in [RISK-REGISTER.md](RISK-REGISTER.md).
+The eight features of milestone v1.7 and how they map onto the planner's candidate roster. Phase text is in [ROADMAP.md](../../../../ROADMAP.md); evidence in [AUDIT-REPORT.md](AUDIT-REPORT.md); status per item in [CAPABILITY-MATRIX.md](CAPABILITY-MATRIX.md); risks in [RISK-REGISTER.md](RISK-REGISTER.md).
 
 ## The eight features
 
