@@ -14,6 +14,10 @@ human_verification:
   - test: "Live restart mid-session (roadmap Phase 32 Proof; runbook L2, OPERATOR-GATED)"
     expected: "After stop/start of substrate-host, exactly one resume:1 continuation runs against the same session; a second boot sends nothing"
     why_human: "Requires installing/restarting the production unit in an approved window. Only the fake-VM restart rehearsal has run."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 32: Lane A host core Verification Report

@@ -9,6 +9,10 @@ human_verification:
   - test: "Decide whether the skills stale check must be atomic with the PR/registry write"
     expected: "Either accept the advisory check as policy (two concurrent proposals that both pass it each open a PR; the registry gives both the next version), or require enforcement at approval time"
     why_human: "SUMMARY.md GREY_AREA 2 leaves the skills check advisory and not closed. The uplift-7 audit row is about concurrent updates, so this is a policy call."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 35: expected_version for skills and docs — Verification Report

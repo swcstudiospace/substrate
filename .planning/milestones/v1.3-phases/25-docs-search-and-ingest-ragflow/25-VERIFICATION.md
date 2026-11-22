@@ -33,6 +33,10 @@ human_verification:
   - test: "G4 - Headless session answers a docs question with a docs_search source URL (roadmap SC1 proof)"
     expected: "Session cites a URL returned by docs_search, readable back from its note event"
     why_human: "Needs a live headless agent session and the live plane"
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 25: Docs search and ingest (RAGFlow (retired, superseded by LightRAG)) Verification Report
@@ -119,21 +123,25 @@ No probes declared or present for this phase.
 ### Human Verification Required
 
 ### 1. G1 — Live RAGFlow (retired, superseded by LightRAG) reachability and version probe
+
 **Test:** Follow `docs/runbooks/docs-proof.md` G1 against the deployed RAGFlow (retired, superseded by LightRAG).
 **Expected:** Reachable; response matches U-01 shape; U-02 path confirmed; no writes.
 **Why human:** Live plane, operator-approved window.
 
 ### 2. G2 — Dataset discovery and creation (SC3)
+
 **Test:** Run the G2 name-matched dataset list; create only on miss.
 **Expected:** agent-substrate, agent-skills, programming-desk and one per product exist by name; refresh keeps last five.
 **Why human:** Live dataset state.
 
 ### 3. G3 — Real ingest with planted-secret refusal (SC2)
+
 **Test:** Ingest a planted-secret page (expect refusal with rule names only) and a real page; read back U-03 metadata.
 **Expected:** Refusal; real page round-trips.
 **Why human:** Writes to a live dataset.
 
 ### 4. G4 — Served search readable back (SC1 proof)
+
 **Test:** Headless session asks a docs question; confirm it cites a docs_search URL readable from its event.
 **Expected:** Source URL matches a docs_search result.
 **Why human:** Live agent session.

@@ -20,6 +20,10 @@ human_verification:
   - test: "Run `bun run smoke:mirror` after `rehearsal up` (consumer.env present)"
     expected: "Smoke drives claim, refused claim, release, reclaim, complete without/with DoD, steal, forced release, reap and swarm claim against loopback fakes and passes all assertions"
     why_human: "Not run in this verification: the script exits with 'no consumer.env for instance default: run rehearsal up first' and performs no checks. Starting the rehearsal harness was out of scope for this verifier."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 23: Claim mirror and DoD gate Verification Report
@@ -114,11 +118,13 @@ No probes declared for this phase. Skipped.
 ### Human Verification Required
 
 ### 1. MIRROR-08 live proof
+
 **Test:** Follow `docs/runbooks/mirror-proof.md` in an operator-approved window on Linear `SWC-467` and its Notion row.
 **Expected:** Claim, refused second-surface claim, release, complete without DoD and complete with DoD each produce the specified Linear and Notion state within 60 s; only the connector moves the issue to Done.
 **Why human:** Needs live Linear, Notion, the connector on :8792 and production surface tokens. Approval-gated by design; evidence row is NOT RUN.
 
 ### 2. Loopback mirror smoke
+
 **Test:** Start the rehearsal harness (`rehearsal up`), then run `bun run smoke:mirror`.
 **Expected:** Every transition assertion passes against the loopback fakes.
 **Why human:** Not executed in this verification; the consumer.env precondition was absent, so the smoke ran nothing.

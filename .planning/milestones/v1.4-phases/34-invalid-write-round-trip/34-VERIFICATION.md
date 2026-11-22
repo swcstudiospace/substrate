@@ -22,6 +22,10 @@ behavior_unverified_items:
     test: "Same run as above, plus a check that the storedState/registryState/storedDocs before-and-after assertions are present in the run output"
     expected: "Every refusal leaves storedState, registryState and storedDocs equal to their before values; each valid control moves the digest by one write"
     why_human: "Same blocker: the content-comparison assertions only execute against a live Postgres, and the docs assertions run inside the same file, which did not start"
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 34: Invalid-write round trip Verification Report

@@ -11,6 +11,10 @@ re_verification:
   previous_status: passed
   previous_verified: 2026-10-11T02:10:00Z
   reason: "Prior report marked passed while G1-G4 and DOCS-07 are operator-gated; operator-gated checks force human_needed under the verifier decision tree."
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 26 verification: Hindsight recall and Dragonfly cache
@@ -55,21 +59,25 @@ None. No failed truths, missing artifacts, or unwired key links found.
 ## Human verification required
 
 ### 1. Live G1: reachability and version probe
+
 **Test:** Run runbook step G1 (`docs/runbooks/hindsight-cache-proof.md:38`) against the live Hindsight.
 **Expected:** Version and reachability read back as recorded in the runbook.
 **Why human:** Live external service; executor is forbidden from touching it.
 
 ### 2. Live G2: bank ensure plus first live recall
+
 **Test:** Runbook step G2 (`:51`).
 **Expected:** `sub-*` banks ensured; first recall returns bounded, attributed, derived hits.
 **Why human:** Live external service and operator approval.
 
 ### 3. Live G3: first live retain
+
 **Test:** Runbook step G3 (`:62`).
 **Expected:** One gate-accepted memory retained into the writer's bank, read back by document_id.
 **Why human:** Writes to live Hindsight; operator approval.
 
 ### 4. Live G4 plus DOCS-07 headless proof
+
 **Test:** Runbook step G4 (`:74`): cache/topology change, then a headless session holding only the substrate MCP answers a docs question with a `docs_search` source URL readable back from its event; a memory retained by one surface is recalled by another with its source; a second identical brief is a cache hit; with Dragonfly down it returns uncached.
 **Expected:** All four observations hold as specified in ROADMAP SC4.
 **Why human:** Live topology change and cross-surface proof; the Dragonfly private hop must exist first.

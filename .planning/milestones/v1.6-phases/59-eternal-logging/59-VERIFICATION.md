@@ -17,6 +17,10 @@ human_verification:
   - test: "If a devnet reset is ever observed, follow docs/runbooks/devnet-reset-and-reanchor.md: dry-run the plan, then run reanchor-run.ts --execute by hand"
     expected: "Dry run prints the plan with no send; --execute records one anchor.reanchor note per hour and leaves no duplicate anchors row"
     why_human: "The executor has never run against any cluster; the replace-or-ignore behaviour of the anchors table is UNVERIFIED"
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 59: Eternal logging, verifiable checkpoint and rollback events on Solana devnet — Verification
@@ -97,16 +101,19 @@ No TODO, stub, or placeholder markers found in the phase's covered files.
 ## Human Verification Required
 
 ### 1. Live devnet round trip
+
 **Test:** Fund the anchor key, run one anchor cycle, then call `checkpoint_verify` on a checkpoint in that hour.
 **Expected:** Verdict `anchored`; the devnet memo equals the stored root and event count.
 **Why human:** Needs a funded key and a live cluster. Nothing here sent a transaction.
 
 ### 2. Live genesis hash check
+
 **Test:** Read `getGenesisHash` from the configured devnet RPC before any send.
 **Expected:** Equals `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`. A different value must read `reset-suspected`.
 **Why human:** Live network read. The constant was last checked read-only on 2026-10-26.
 
 ### 3. Re-anchor executor against a real cluster
+
 **Test:** If a devnet reset is observed, follow `docs/runbooks/devnet-reset-and-reanchor.md`: dry-run, then `reanchor-run.ts --execute --confirm-genesis <hash>` by hand.
 **Expected:** The dry run sends nothing. Execute records one `anchor.reanchor` note per hour with no duplicate `anchors` row.
 **Why human:** Never executed against any cluster. Whether a second `anchors` insert replaces or is ignored is UNVERIFIED.
