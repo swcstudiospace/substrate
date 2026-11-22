@@ -33,6 +33,10 @@ human_verification:
   - test: "Reconcile the archived records: 20-VERIFICATION.md (2026-10-11) says the switch-on and production scenarios were never run; docs/runbooks/production-identity.md and 0-UAT.md record a switch-on window on 2026-10-10 14:22Z and production passes for scenarios 2 and 5"
     expected: "One consistent account in the milestone archive"
     why_human: "Both records are historical and the operator owns which one is accurate"
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 20: Production Identity and Phase 0 UAT Verification Report

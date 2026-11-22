@@ -23,6 +23,10 @@ re_verification:
   gaps_closed: []
   gaps_remaining: []
   regressions: []
+audit_acknowledged:
+  milestone: v1.8
+  at: 2026-11-22
+  status: human_needed
 ---
 
 # Phase 19: Lane B collectors Verification Report
