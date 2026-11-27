@@ -1095,7 +1095,106 @@ export const MIGRATION_STEPS: ReadonlyArray<MigrationStep> = [
 			create index if not exists context_matrix_entries_source_sha256_idx
 				on context_matrix_entries (source_sha256)`,
 	},
-];
+	// F1 graph history: append-only per-graph event log, partitioned by occurred_at. The table is created plain here
+	// (the boot migrator only holds additive CREATE statements); converting it to a Timescale hypertable with a 30-day
+	// compression policy is an operator step once the plane confirms the TimescaleDB extension (see
+	// docs/data/f1-f7-model.md), so a plain Postgres rehearsal DB applies this step unchanged. No payload text is
+	// stored: only structural ids and the event kind. OPERATORS: rehearse on a restored dump before production, like
+	// the other expand steps.
+	{
+		version: 50,
+		name: "graph_history",
+		phase: "expand",
+		down: `drop table if exists graph_history`,
+		sql: `
+			create table if not exists graph_history (
+				graph_id    text not null,
+				node_id     text not null,
+				occurred_at timestamptz not null,
+				event_kind  text not null check (event_kind in ('register', 'claim', 'release', 'complete', 'heartbeat')),
+				seq         bigint not null default 0,
+				primary key (graph_id, occurred_at, node_id)
+			);
+			create index if not exists graph_history_occurred_at_idx on graph_history (occurred_at desc)`,
+	},
+	// F2 rollups, F3 downsampled buckets and F4 burn forecasts: small summary tables fed by refresh jobs. They never
+	// hold event payloads, only counts and aggregates, so nothing here is PII. Additive: three new tables and three
+	// indexes. OPERATORS: rehearse on a restored dump before production, like the other expand steps.
+	{
+		version: 51,
+		name: "rollup_telemetry_forecast",
+		phase: "expand",
+		down: `drop table if exists ledger_forecast_snapshots; drop table if exists telemetry_buckets; drop table if exists rollup_freshness`,
+		sql: `
+			create table if not exists rollup_freshness (
+				layer         text not null check (layer in ('ledger', 'index', 'cache')),
+				bucket_start  timestamptz not null,
+				row_count     bigint not null,
+				refreshed_at  timestamptz not null,
+				primary key (layer, bucket_start)
+			);
+			create table if not exists telemetry_buckets (
+				bucket_start  timestamptz not null,
+				metric        text not null,
+				sample_count  bigint not null,
+				sum_value     double precision not null,
+				min_value     double precision not null,
+				max_value     double precision not null,
+				avg_value     double precision not null,
+				primary key (bucket_start, metric)
+			);
+			create table if not exists ledger_forecast_snapshots (
+				id           text primary key,
+				window_days  integer not null check (window_days between 1 and 90),
+				computed_at  timestamptz not null,
+				burn_rate    double precision not null,
+				error_bound  double precision not null,
+				p95_ms       integer not null,
+				advisory     boolean not null default true
+			);
+			create index if not exists rollup_freshness_refreshed_at_idx on rollup_freshness (refreshed_at desc);
+			create index if not exists telemetry_buckets_metric_idx on telemetry_buckets (metric, bucket_start desc);
+			create index if not exists ledger_forecast_snapshots_computed_at_idx on ledger_forecast_snapshots (computed_at desc)`,
+	},
+	// F5 ordered event log, F6 causal recall items and F7 retrieval evaluations: append-only logs that the new read
+	// operations answer from. Structural ids, hashes and counters only; no transcripts or payload text. Additive: three
+	// new tables and three indexes. OPERATORS: rehearse on a restored dump before production, like the other expand
+	// steps.
+	{
+		version: 52,
+		name: "eventlog_causal_retrieval",
+		phase: "expand",
+		down: `drop table if exists retrieval_evals; drop table if exists causal_recall_items; drop table if exists ordered_event_log`,
+		sql: `
+			create table if not exists ordered_event_log (
+				event_id    text primary key,
+				kind        text not null,
+				surface     text not null,
+				graph_id    text not null,
+				seq         bigint not null default 0,
+				occurred_at timestamptz not null
+			);
+			create table if not exists causal_recall_items (
+				item_id     text primary key,
+				source      text not null,
+				chain_link  text not null,
+				bank        text not null,
+				graph_id    text not null,
+				created_at  timestamptz not null
+			);
+			create table if not exists retrieval_evals (
+				query_id     text primary key,
+				mode         text not null check (mode in ('naive', 'hybrid')),
+				recall_at_5  double precision not null,
+				cited        boolean not null,
+				latency_ms   integer not null,
+				evaluated_at timestamptz not null
+			);
+			create index if not exists ordered_event_log_graph_occurred_idx on ordered_event_log (graph_id, occurred_at);
+			create index if not exists causal_recall_items_graph_created_idx on causal_recall_items (graph_id, created_at);
+			create index if not exists retrieval_evals_mode_eval_idx on retrieval_evals (mode, evaluated_at desc)`,
+	},
+ ];
 
 /** The steps `migrate()` runs for these opt-ins, in version order. A step whose opt-in is off is left out and not ledgered. */
 export function applicableMigrationSteps(optIns: MigrationOptIns): ReadonlyArray<(typeof MIGRATION_STEPS)[number]> {
