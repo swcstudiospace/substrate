@@ -111,6 +111,7 @@ describeLive("index archive against a live index", () => {
 		await raw`delete from memory_quarantine where id like ${like}`.catch(() => undefined);
 		await raw`delete from memory_writes where idempotency_key like ${like}`.catch(() => undefined);
 		await raw`delete from context_matrix_entries where entry_id like ${like}`.catch(() => undefined);
+		await raw`delete from graph_history where graph_id like ${like}`.catch(() => undefined);
 		await raw`delete from corpus_documents where repo like ${like}`.catch(() => undefined);
 		if (scratchName !== null) await raw.unsafe(`drop database if exists "${scratchName}" with (force)`).catch(() => undefined);
 		await raw.end().catch(() => undefined);
@@ -134,6 +135,9 @@ describeLive("index archive against a live index", () => {
 			await raw`insert into graph_steps (graph_id, node_id, step, state) values (${id("g1")}, ${node}, ${step}, 'todo')`;
 		}
 		for (const name of ["corr1", "corr2", "corr3"]) await raw`insert into graph_bindings (correlation_id, graph_id) values (${id(name)}, ${id("g1")})`;
+		for (const [node, kind] of [["n1", "register"], ["n2", "claim"], ["n3", "complete"]] as const) {
+			await raw`insert into graph_history (graph_id, node_id, occurred_at, event_kind, seq) values (${id("g1")}, ${node}, now(), ${kind}, 0)`;
+		}
 		await raw`insert into memory_entries (id, scope, kind, body, writer, entry_hash, created)
 			values (${id("m1")}, 'global', 'fact', ${`${RUN} ünïcode "quoted" body\nline two`}, 'omp', ${`hash-${RUN}-1`}, '2026-10-14T03:15:00.123456Z')`;
 		for (const name of ["m2", "m3", "m4"]) {
