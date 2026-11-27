@@ -122,14 +122,6 @@ export const ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
 		hasEntryHash: false,
 	},
 	{
-		name: "graph_history",
-		columns: [text("graph_id"), text("node_id"), ts("occurred_at"), text("event_kind"), { name: "seq", type: "bigint" }],
-		key: ["graph_id", "occurred_at", "node_id"],
-		withheld: [],
-		placeholders: {},
-		hasEntryHash: false,
-	},
-	{
 		name: "memory_entries",
 		columns: [
 			text("id"),

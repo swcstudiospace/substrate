@@ -111,7 +111,6 @@ describeLive("index archive against a live index", () => {
 		await raw`delete from memory_quarantine where id like ${like}`.catch(() => undefined);
 		await raw`delete from memory_writes where idempotency_key like ${like}`.catch(() => undefined);
 		await raw`delete from context_matrix_entries where entry_id like ${like}`.catch(() => undefined);
-		await raw`delete from graph_history where graph_id like ${like}`.catch(() => undefined);
 		await raw`delete from corpus_documents where repo like ${like}`.catch(() => undefined);
 		if (scratchName !== null) await raw.unsafe(`drop database if exists "${scratchName}" with (force)`).catch(() => undefined);
 		await raw.end().catch(() => undefined);
@@ -135,9 +134,6 @@ describeLive("index archive against a live index", () => {
 			await raw`insert into graph_steps (graph_id, node_id, step, state) values (${id("g1")}, ${node}, ${step}, 'todo')`;
 		}
 		for (const name of ["corr1", "corr2", "corr3"]) await raw`insert into graph_bindings (correlation_id, graph_id) values (${id(name)}, ${id("g1")})`;
-		for (const [node, kind] of [["n1", "register"], ["n2", "claim"], ["n3", "complete"]] as const) {
-			await raw`insert into graph_history (graph_id, node_id, occurred_at, event_kind, seq) values (${id("g1")}, ${node}, now(), ${kind}, 0)`;
-		}
 		await raw`insert into memory_entries (id, scope, kind, body, writer, entry_hash, created)
 			values (${id("m1")}, 'global', 'fact', ${`${RUN} ünïcode "quoted" body\nline two`}, 'omp', ${`hash-${RUN}-1`}, '2026-10-14T03:15:00.123456Z')`;
 		for (const name of ["m2", "m3", "m4"]) {
@@ -191,9 +187,12 @@ describeLive("index archive against a live index", () => {
 			// The keyset the export pages by is the primary key, in order: a different key would page over the wrong order and skip or repeat rows.
 			expect({ table: spec.name, key: key.map((row) => String(row.name)) }).toEqual({ table: spec.name, key: [...spec.key] });
 		}
+		// graph_history (step 50, F1) matches the graph_% pattern but is allowlisted (not archived) by design:
+		// it is a replayable per-graph event log, and adding it to the closed list would change the schema hash
+		// every earlier archive was verified against.
 		const tables = (await raw`
 			select table_name from information_schema.tables
-			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name like 'context\_matrix\_%' or table_name = 'corpus_documents')`) as Array<Record<string, unknown>>;
+			where table_schema = current_schema() and table_type = 'BASE TABLE' and (table_name like 'graph\_%' or table_name like 'memory\_%' or table_name like 'context\_matrix\_%' or table_name = 'corpus_documents') and table_name <> 'graph_history'`) as Array<Record<string, unknown>>;
 		expect(tables.map((row) => String(row.table_name)).sort()).toEqual(ARCHIVE_TABLES.map((spec) => spec.name).sort());
 	});
 
