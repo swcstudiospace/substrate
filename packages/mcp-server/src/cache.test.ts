@@ -32,6 +32,8 @@ import {
 	type CacheRedis,
 } from "./cache.ts";
 import { loadConfig } from "./config.ts";
+import { clearEnsuredBanks, type FetchLike } from "./planes/hindsight.ts";
+import { recordDragonflyGateVerdict, resetDragonflyGateVerdict, type DragonflyReadinessVerdict } from "./fabric/dragonfly-readiness.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { FakeStore } from "./memory-write.test.ts";
 import { createObservability } from "./observe.ts";
@@ -39,7 +41,6 @@ import { REPO_REGISTRY_ENV, REPO_SCOPES_ENV } from "./repo-scope.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { defined, withoutHindsightEnv } from "./test-support.ts";
-import { clearEnsuredBanks, type FetchLike } from "./planes/hindsight.ts";
 
 /**
  * Point the Hindsight env reads at the fake for one test. Restores every
@@ -2199,5 +2200,113 @@ describe("classOf (uplift-4 S4)", () => {
 		expect(classOf("substrate:v1:unknown:abc")).toBeNull();
 		expect(classOf("other:v1:brief:abc")).toBeNull();
 		expect(classOf("substrate:v1:__proto__:abc")).toBeNull();
+	});
+});
+
+describe("ReadThroughCache dragonfly gate (DG-1b, phase 81)", () => {
+	const gateVerdict = (state: DragonflyReadinessVerdict["state"]): DragonflyReadinessVerdict => ({
+		state,
+		reasons: [`gate test: ${state}`],
+		metrics: {},
+		checkedAt: "2026-11-28T00:00:00.000Z",
+	});
+	const gatedCache = (redis: FakeRedis, gateMode: "off" | "enforce" | undefined): ReadThroughCache =>
+		new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => 1_000, ...(gateMode === undefined ? {} : { gateMode }) });
+
+	test("enforce with an ok verdict serves a hit", async () => {
+		resetDragonflyGateVerdict();
+		recordDragonflyGateVerdict(gateVerdict("ok"));
+		const cache = gatedCache(new FakeRedis(), "enforce");
+		let loads = 0;
+		const load = async () => {
+			loads += 1;
+			return [{ text: "held by cursor" }];
+		};
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
+		expect(loads).toBe(1);
+		expect(cache.health()).toMatchObject({ hits: 1, misses: 1, bypasses: 0 });
+	});
+
+	test("enforce with a degraded verdict still serves", async () => {
+		resetDragonflyGateVerdict();
+		recordDragonflyGateVerdict(gateVerdict("degraded"));
+		const cache = gatedCache(new FakeRedis(), "enforce");
+		let loads = 0;
+		const load = async () => {
+			loads += 1;
+			return [{ text: "held by cursor" }];
+		};
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
+		expect(loads).toBe(1);
+		expect(cache.health()).toMatchObject({ hits: 1, misses: 1, bypasses: 0 });
+	});
+
+	test("enforce with an unavailable verdict bypasses to the durable read and never serves a snapshot", async () => {
+		resetDragonflyGateVerdict();
+		recordDragonflyGateVerdict(gateVerdict("unavailable"));
+		const cache = gatedCache(new FakeRedis(), "enforce");
+		const snapshot = { text: "snap", at: "2026-11-28T00:00:00.000Z" };
+		expect(await cache.put("brief-snapshot", "cursor", { v: 1 }, snapshot, 60)).toBe(true);
+		let loads = 0;
+		const value = await cache.getOrLoad({
+			...read,
+			load: async () => {
+				loads += 1;
+				return [{ text: "from durable source" }];
+			},
+		});
+		expect(value).toEqual([{ text: "from durable source" }]);
+		expect(loads).toBe(1);
+		expect(await cache.peek<{ text: string; at: string }>("brief-snapshot", "cursor", { v: 1 })).toBeNull();
+		expect(await cache.peekQuiet<{ text: string; at: string }>("brief-snapshot", "cursor", { v: 1 })).toBeNull();
+		expect(cache.health()).toMatchObject({ hits: 0, bypasses: 1, errors: 0 });
+	});
+
+	test("enforce with no recorded verdict (unconfigured) bypasses", async () => {
+		resetDragonflyGateVerdict();
+		const cache = gatedCache(new FakeRedis(), "enforce");
+		let loads = 0;
+		const value = await cache.getOrLoad({
+			...read,
+			load: async () => {
+				loads += 1;
+				return [{ text: "from durable source" }];
+			},
+		});
+		expect(value).toEqual([{ text: "from durable source" }]);
+		expect(loads).toBe(1);
+	});
+
+	test("off with an unavailable verdict never changes behaviour", async () => {
+		resetDragonflyGateVerdict();
+		recordDragonflyGateVerdict(gateVerdict("unavailable"));
+		const cache = gatedCache(new FakeRedis(), "off");
+		let loads = 0;
+		const load = async () => {
+			loads += 1;
+			return [{ text: "held by cursor" }];
+		};
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
+		expect(loads).toBe(1);
+		expect(cache.health()).toMatchObject({ hits: 1, misses: 1, bypasses: 0 });
+	});
+
+	test("createReadThroughCache enforces SUBSTRATE_DRAGONFLY_GATE from config without touching the socket", async () => {
+		resetDragonflyGateVerdict();
+		recordDragonflyGateVerdict(gateVerdict("unavailable"));
+		const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: "redis://127.0.0.1:6379", SUBSTRATE_DRAGONFLY_GATE: "enforce" }), { record: () => {} });
+		let loads = 0;
+		const value = await cache.getOrLoad({
+			...read,
+			load: async () => {
+				loads += 1;
+				return [{ text: "from durable source" }];
+			},
+		});
+		expect(value).toEqual([{ text: "from durable source" }]);
+		expect(loads).toBe(1);
 	});
 });

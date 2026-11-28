@@ -605,6 +605,8 @@ export interface SubstrateConfig {
 	cacheSwr: "off" | "shadow" | "enforce";
 	/** How old a last-good brief may be and still be served stale, s (`SUBSTRATE_CACHE_SWR_WINDOW_S`, default 30, max 300). */
 	cacheSwrWindowS: number;
+	/** DG-1b (`SUBSTRATE_DRAGONFLY_GATE=off|enforce`, default off: advisory only). Under `enforce` the read-through cache bypasses to its durable read while the last DG-1a verdict is neither `ok` nor `degraded`; `degraded` still serves, `off` never changes behaviour. */
+	dragonflyGate: "off" | "enforce";
 	/** Pattern-based cache preload (phase 47): `SUBSTRATE_CACHE_PRELOAD` (on | off, default off), `_TOP` (1..20, default 3) and `_S` (10..3600, default 300). See `preload.ts`. */
 	cachePreload: CachePreloadSettings;
 	// uplift-5 U5-3
@@ -1197,6 +1199,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S4
 		cacheSwr: cacheSwrOr(env.SUBSTRATE_CACHE_SWR),
 		cacheSwrWindowS: Math.min(300, positiveOr(env.SUBSTRATE_CACHE_SWR_WINDOW_S, 30)),
+		dragonflyGate: dragonflyGateOr(env.SUBSTRATE_DRAGONFLY_GATE),
 		cachePreload,
 		// uplift-5 U5-3
 		requestPath: loadRequestPathSettings(env),
@@ -1644,6 +1647,14 @@ function wholeNumberOrRefuse(name: string, raw: string | undefined): number | nu
 function cacheSwrOr(raw: string | undefined): "off" | "shadow" | "enforce" {
 	const value = raw?.trim().toLowerCase();
 	return value === "off" || value === "enforce" ? value : "shadow";
+}
+
+/** DG-1b (phase 81): `off` or `enforce` (case-insensitive); unset or blank is `off`, which only reports. Anything else refuses boot, naming the variable. */
+function dragonflyGateOr(raw: string | undefined): "off" | "enforce" {
+	const value = raw?.trim().toLowerCase() ?? "";
+	if (value === "" || value === "off") return "off";
+	if (value === "enforce") return "enforce";
+	throw new ConfigError("SUBSTRATE_DRAGONFLY_GATE is not off or enforce; set off or enforce, or unset it for off");
 }
 
 /** `SUBSTRATE_CACHE_PRELOAD*` (phase 47, D47-d): the pattern-based cache preload. Off unless `SUBSTRATE_CACHE_PRELOAD=on`. */

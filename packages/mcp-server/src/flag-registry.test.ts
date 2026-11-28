@@ -212,6 +212,7 @@ describe("the registry's defaults are the code's defaults", () => {
 	const code: Record<string, string> = {
 		SUBSTRATE_BUDGETS: config.admission.mode,
 		SUBSTRATE_CACHE_SWR: config.cacheSwr,
+		SUBSTRATE_DRAGONFLY_GATE: config.dragonflyGate,
 		SUBSTRATE_BRIEF_PROFILE: config.briefProfile.mode,
 		SUBSTRATE_BRIEF_RECALL: config.briefRecall.mode,
 		SUBSTRATE_MEMORY_EXPIRY: config.memoryExpiry,
@@ -264,6 +265,21 @@ describe("the registry's defaults are the code's defaults", () => {
 		expect(loadConfig({ [name]: "86400" }).liveSessionLeaseS).toBe(86_400);
 		const example = readFileSync(join(ROOT, ".env.example"), "utf8");
 		expect(example.split("\n").some((line) => /^#?\s*SUBSTRATE_LIVE_SESSION_LEASE_S=/.test(line))).toBe(true);
+	});
+
+	test("the DG-1b dragonfly gate is registered, documented and agrees with the real loader", () => {
+		const name = "SUBSTRATE_DRAGONFLY_GATE";
+		const row = defined(FLAGS.find((flag) => flag.name === name), "dragonfly gate row");
+		expect(row.kind).toBe("mode");
+		expect(row.default).toBe("off");
+		expect(row.documented).toBe(true);
+		expect(loadConfig({}).dragonflyGate).toBe("off");
+		expect(loadConfig({ [name]: "off" }).dragonflyGate).toBe("off");
+		expect(loadConfig({ [name]: "enforce" }).dragonflyGate).toBe("enforce");
+		expect(loadConfig({ [name]: " ENFORCE " }).dragonflyGate).toBe("enforce");
+		expect(() => loadConfig({ [name]: "on" })).toThrow("SUBSTRATE_DRAGONFLY_GATE");
+		const example = readFileSync(join(ROOT, ".env.example"), "utf8");
+		expect(example.split("\n").some((line) => /^#?\s*SUBSTRATE_DRAGONFLY_GATE=/.test(line))).toBe(true);
 	});
 });
 

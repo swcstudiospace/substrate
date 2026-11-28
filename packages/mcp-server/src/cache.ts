@@ -36,6 +36,10 @@ import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
 import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
+// DG-1b (phase 81): this import closes a loop (`fabric/dragonfly-readiness.ts` imports
+// `COMMAND_TIMEOUT_MS` and `CacheRedis` from here), but both sides only use each other
+// inside function bodies, never at module scope, so either load order resolves.
+import { dragonflyGateVerdict } from "./fabric/dragonfly-readiness.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { MAX_RECALL_TTL_S } from "./recall-snapshot.ts";
 
@@ -61,6 +65,8 @@ export type CacheMode = "off" | "on" | "degraded";
 export type CacheResult = "hit" | "miss" | "bypass" | "error" | "coalesced" | "stale" | "refresh" | "would_serve_stale";
 /** `SUBSTRATE_CACHE_SWR`: `off` never serves stale, `shadow` only counts `would_serve_stale`, `enforce` serves it. */
 export type CacheSwrMode = "off" | "shadow" | "enforce";
+/** `SUBSTRATE_DRAGONFLY_GATE` (DG-1b, phase 81): `off` never gates, `enforce` bypasses reads (durable read, never stale, never throws) while the last DG-1a verdict is neither `ok` nor `degraded`; `degraded` still serves. */
+export type DragonflyGateMode = "off" | "enforce";
 
 /**
  * Every key class under `substrate:v1:`. The closed set behind the metric label
@@ -216,6 +222,8 @@ export interface ReadThroughOptions {
 	refusedReason?: string;
 	/** Stale-while-revalidate mode and window (`SUBSTRATE_CACHE_SWR`, `SUBSTRATE_CACHE_SWR_WINDOW_S`). Absent is `off`. */
 	swr?: { mode: CacheSwrMode; windowS?: number };
+	/** DG-1b (`SUBSTRATE_DRAGONFLY_GATE`): `off` (absent) never gates; `enforce` bypasses reads while the last DG-1a verdict is neither `ok` nor `degraded`. The verdict is read per call, so a probe recorded after construction governs from then on. */
+	gateMode?: DragonflyGateMode;
 	/** Hard cap on registered loads; beyond it requests load independently. */
 	maxInflight?: number;
 	/** A registered load older than this is not joined (a hung loader must not capture later callers), ms. */
@@ -503,6 +511,7 @@ export function createReadThroughCache(config: SubstrateConfig, options: CreateC
 		now: options.now,
 		commandTimeoutMs: config.cacheCommandTimeoutMs,
 		swr: { mode: config.cacheSwr, windowS: config.cacheSwrWindowS },
+		gateMode: config.dragonflyGate,
 	});
 }
 
@@ -526,6 +535,7 @@ export class ReadThroughCache {
 	private readonly recordSample: ((sample: CacheSample) => void) | undefined;
 	private readonly refusedReason: string | undefined;
 	private readonly swrMode: CacheSwrMode;
+	private readonly gateMode: DragonflyGateMode;
 	private readonly swrWindowMs: number;
 	private readonly maxInflight: number;
 	private readonly flightMaxAgeMs: number;
@@ -555,6 +565,7 @@ export class ReadThroughCache {
 		this.recordSample = options.record;
 		this.refusedReason = options.refusedReason;
 		this.swrMode = options.swr?.mode ?? "off";
+		this.gateMode = options.gateMode ?? "off";
 		this.swrWindowMs = swrWindowMs(options.swr?.windowS);
 		this.maxInflight = Math.max(0, Math.floor(options.maxInflight ?? MAX_INFLIGHT));
 		this.flightMaxAgeMs = Math.max(1, Math.floor(options.flightMaxAgeMs ?? FLIGHT_MAX_AGE_MS));
@@ -563,6 +574,21 @@ export class ReadThroughCache {
 	/** The gated redis client this cache reads through, or null when it is off. The reconcile pairs read the cache through it, so an open breaker reports `unavailable`. */
 	redisClient(): CacheRedis | null {
 		return this.redis;
+	}
+
+	/**
+	 * DG-1b (phase 81): whether a read may be served from the cache at all.
+	 * `off` never gates. Under `enforce` the last DG-1a verdict must be `ok`
+	 * or `degraded`; anything else (including no probe yet, `unconfigured`)
+	 * bypasses to the durable read. The verdict is read per call, never
+	 * baked into `enabled` at construction: the first probe runs after the
+	 * cache is built, so an enablement-time check would disable the cache
+	 * for the process lifetime. Never throws; a missing verdict blocks.
+	 */
+	private gateAllows(): boolean {
+		if (this.gateMode !== "enforce") return true;
+		const state = dragonflyGateVerdict("enforce").state;
+		return state === "ok" || state === "degraded";
 	}
 
 	health(): CacheHealth {
@@ -614,6 +640,12 @@ export class ReadThroughCache {
 		if (!this.enabled || !this.redis) {
 			this.count("bypass", klass);
 			this.note("cache off");
+			return request.load();
+		}
+		// DG-1b (phase 81): a gate that does not allow serving bypasses to the durable read. Never stale, never throws.
+		if (!this.gateAllows()) {
+			this.count("bypass", klass);
+			this.note("dragonfly gate blocked");
 			return request.load();
 		}
 		// A bump that did not land leaves the previous generation readable. Stay
@@ -979,6 +1011,8 @@ export class ReadThroughCache {
 	async peek<T>(klass: CacheClass, surface: string, args: unknown): Promise<T | null> {
 		// Not a counted bypass: the brief this read belongs to already counted one.
 		if (!this.enabled || !this.redis) return null;
+		// DG-1b (phase 81): a gate that does not allow serving never serves a snapshot; the caller composes live.
+		if (!this.gateAllows()) return null;
 		const redis = this.redis;
 		try {
 			const raw = await this.attempt(() => redis.get(snapshotKey(klass, surface, args)));
@@ -1009,6 +1043,8 @@ export class ReadThroughCache {
 	 */
 	async peekQuiet<T>(klass: CacheClass, surface: string, args: unknown): Promise<T | null> {
 		if (!this.enabled || !this.redis) return null;
+		// DG-1b (phase 81): as `peek`, a blocked gate never serves a snapshot.
+		if (!this.gateAllows()) return null;
 		const redis = this.redis;
 		try {
 			const raw = await this.attempt(() => redis.get(snapshotKey(klass, surface, args)));
@@ -1028,6 +1064,8 @@ export class ReadThroughCache {
 	async peekMany<T>(klass: CacheClass, digests: readonly string[]): Promise<Array<T | null>> {
 		const none = digests.map((): T | null => null);
 		if (!this.enabled || !this.redis || digests.length === 0) return none;
+		// DG-1b (phase 81): a blocked gate never serves a cached entry; callers read the durable source.
+		if (!this.gateAllows()) return none;
 		const redis = this.redis;
 		try {
 			const raws = await this.attempt(() =>

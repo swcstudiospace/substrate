@@ -148,6 +148,12 @@ describe("the rendered reference is complete and well-formed", () => {
 		expect(missing).toEqual([]);
 	});
 
+	test("the DG-1b dragonfly gate renders its off|enforce row", () => {
+		const row = text.split("\n").find((line) => line.includes("`SUBSTRATE_DRAGONFLY_GATE`"));
+		expect(row).toContain("off \\| enforce");
+		expect(row).toContain("See `docs/data-planes.md`");
+	});
+
 	test("every table row has as many unescaped columns as its header (a `|` in a value is escaped, not a new cell)", () => {
 		const cells = (line: string): number => line.replace(/\\\|/g, "").split("|").length;
 		let header = 0;

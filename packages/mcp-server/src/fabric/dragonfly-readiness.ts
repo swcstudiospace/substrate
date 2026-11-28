@@ -60,6 +60,34 @@ export function resetDragonflyReadinessBaseline(): void {
 	evictedBaseline = null;
 }
 
+/** DG-1b (phase 81): the last DG-1a verdict, in process memory. The synchronous `dragonflyGateVerdict()` reads it; the gate never probes. */
+let lastGateVerdict: DragonflyReadinessVerdict | null = null;
+
+/** Test seam: record a gate verdict without a probe. */
+export function recordDragonflyGateVerdict(verdict: DragonflyReadinessVerdict): void {
+	lastGateVerdict = verdict;
+}
+
+/** Test seam: clear the last recorded gate verdict. */
+export function resetDragonflyGateVerdict(): void {
+	lastGateVerdict = null;
+}
+
+/**
+ * The synchronous DG-1b gate verdict (phase 81) for `ReadThroughCache` enablement and E2 (phase 82):
+ * the last probe verdict, or `unconfigured` when the gate is `off` or no probe has recorded one yet.
+ * Never probes, never throws, never names an endpoint.
+ */
+export function dragonflyGateVerdict(mode: "off" | "enforce"): DragonflyReadinessVerdict {
+	if (mode === "off") {
+		return { state: "unconfigured", reasons: ["dragonfly gate is off"], metrics: {}, checkedAt: new Date().toISOString() };
+	}
+	if (lastGateVerdict === null) {
+		return { state: "unconfigured", reasons: ["dragonfly gate has no recorded verdict"], metrics: {}, checkedAt: new Date().toISOString() };
+	}
+	return lastGateVerdict;
+}
+
 /** `field:value` lines of an INFO section, only the named fields kept (the `cache-stats.ts` keyset). */
 function infoFields(text: unknown, names: readonly string[]): Map<string, string> {
 	const found = new Map<string, string>();
@@ -106,9 +134,22 @@ function verdict(
 
 /**
  * One DG-1a probe. Never throws: every failure is a verdict, and a missing
- * endpoint or any error yields a bounded, redacted reason.
+ * endpoint or any error yields a bounded, redacted reason. Every verdict is
+ * recorded as the synchronous DG-1b gate verdict (`dragonflyGateVerdict`),
+ * so the production consumers (healthz, fabric) feed the gate with no
+ * wiring change and no second probe.
  */
 export async function probeDragonflyReadiness(
+	deps: DragonflyReadinessDeps,
+	config: DragonflyReadinessConfig,
+): Promise<DragonflyReadinessVerdict> {
+	const verdict = await probeDragonflyReadinessCore(deps, config);
+	recordDragonflyGateVerdict(verdict);
+	return verdict;
+}
+
+/** The probe itself; `probeDragonflyReadiness` above records its verdict. */
+async function probeDragonflyReadinessCore(
 	deps: DragonflyReadinessDeps,
 	config: DragonflyReadinessConfig,
 ): Promise<DragonflyReadinessVerdict> {

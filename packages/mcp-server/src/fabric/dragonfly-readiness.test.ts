@@ -1,6 +1,13 @@
 /** DG-1a gate probe tests (phase 80): fakes only, no live server, no real sleep. */
 import { describe, expect, test } from "bun:test";
-import { probeDragonflyReadiness, resetDragonflyReadinessBaseline, type DragonflyReadinessDeps } from "./dragonfly-readiness.ts";
+import {
+	dragonflyGateVerdict,
+	probeDragonflyReadiness,
+	recordDragonflyGateVerdict,
+	resetDragonflyGateVerdict,
+	resetDragonflyReadinessBaseline,
+	type DragonflyReadinessDeps,
+} from "./dragonfly-readiness.ts";
 
 const CONFIG = { dragonflyUrl: "redis://loopback:6379", cacheEnabled: true, dragonflyRefused: null };
 const NOW = 1_700_000_000_000;
@@ -126,5 +133,48 @@ describe("probeDragonflyReadiness", () => {
 		}), CONFIG);
 		expect(failing.state).toBe("ok");
 		expect(failing.metrics.dbsize).toBeNull();
+	});
+});
+
+describe("dragonflyGateVerdict (DG-1b gate, phase 81)", () => {
+	test("off answers unconfigured and never reads the last verdict", async () => {
+		resetDragonflyGateVerdict();
+		resetDragonflyReadinessBaseline();
+		await probeDragonflyReadiness(deps(), CONFIG);
+		const verdict = dragonflyGateVerdict("off");
+		expect(verdict.state).toBe("unconfigured");
+		expect(verdict.reasons).toEqual(["dragonfly gate is off"]);
+		expect(verdict.metrics).toEqual({});
+	});
+
+	test("enforce with no recorded verdict answers unconfigured", () => {
+		resetDragonflyGateVerdict();
+		const verdict = dragonflyGateVerdict("enforce");
+		expect(verdict.state).toBe("unconfigured");
+		expect(verdict.reasons).toEqual(["dragonfly gate has no recorded verdict"]);
+	});
+
+	test("enforce returns the last probe verdict, ok, unavailable and degraded", async () => {
+		resetDragonflyGateVerdict();
+		resetDragonflyReadinessBaseline();
+		const ok = await probeDragonflyReadiness(deps(), CONFIG);
+		expect(dragonflyGateVerdict("enforce")).toBe(ok);
+		expect(dragonflyGateVerdict("enforce").state).toBe("ok");
+		const unavailable = await probeDragonflyReadiness(deps({ ping: async () => { throw new Error("boom"); } }), CONFIG);
+		expect(dragonflyGateVerdict("enforce")).toBe(unavailable);
+		expect(dragonflyGateVerdict("enforce").state).toBe("unavailable");
+		const breaching = async () => "used_memory_bytes:95\r\nmaxmemory_bytes:100";
+		const degraded = await probeDragonflyReadiness(deps({ info: breaching }), CONFIG);
+		expect(dragonflyGateVerdict("enforce")).toBe(degraded);
+		expect(dragonflyGateVerdict("enforce").state).toBe("degraded");
+	});
+
+	test("recordDragonflyGateVerdict seeds it without a probe, and reset clears it", () => {
+		resetDragonflyGateVerdict();
+		const verdict = { state: "degraded" as const, reasons: ["seeded"], metrics: {}, checkedAt: new Date(NOW).toISOString() };
+		recordDragonflyGateVerdict(verdict);
+		expect(dragonflyGateVerdict("enforce")).toBe(verdict);
+		resetDragonflyGateVerdict();
+		expect(dragonflyGateVerdict("enforce").state).toBe("unconfigured");
 	});
 });
