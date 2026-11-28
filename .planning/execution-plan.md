@@ -1,14 +1,13 @@
-# Execution plan (waves) — Wave 6 (n7 SPE-38290) · 2026-11-26
+# Execution plan (Wave 5, SPE-39535) — Wave 7→8 follow-on
 
-File-disjoint waves; sequential where dependencies demand. Verification per wave; STOP on red.
+## Order (dependency-respecting)
+1. **Lane A — DG readiness** (unblocks E2 cache + cross-resource degradation proofs): DG-1a probe/gate + DG-1b implement-or-document. Decide FIRST; it gates E2/E4 work.
+2. **Lane B — E2 Dragonfly shared-context cache**: cache-aside, TTLs, Lua atomic slots; fallback tests.
+3. **Lane C — E1 Live Steering multi-worktree**: SessionRegistry + live-session bindings; single-operator CLI.
+4. **Lane D — E3 unified memory fabric + E6 episodic**: Hindsight bank owner; LightRAG provenance-only.
+5. **Lane E — E4 orchestration handoffs + E7 Leader fencing**: namespace + permission model, TTL queueing, dead-letter surfacing.
+6. **Lane F — E5 observability + E8 replay/audit**: correlation IDs, dashboards/alerts; append-only audit with replay-to-checkpoint.
 
-- **Wave 1 DONE** — inventory + checkpoint + unknowns (`.planning/audit/*.md`).
-- **Wave 2 DONE** — decomposition + pause call (`.planning/audit/phase-decomposition.md`).
-- **Wave 3 DONE** — F1–F7 matrix (`.planning/selection-matrix.md`).
-- **Wave 4 DONE** — interop/tracking design (`.planning/interoperability-design.md`).
-- **Wave 5 DONE** — risk register (`.planning/risks-verification.md`).
-- **Wave 6** — apply v50–52 on rehearsed prod dump → verify (rowcount/checksum/latency) → LightRAG: resume 4 pending repos per-batch with retrieval check → P0 baselines (recall@5, TTFB). Files: `index-store.ts` (merge PR), rehearsal logs in `audit/`.
-- **Wave 7** — STATE.md + ROADMAP.md update, per-phase CONTEXT/PLAN/SUMMARY, Linear/Notion status reflect true state (after Wave-3 sync gate), milestone acceptance audit.
-- **Verify (final):** `bunx tsc --noEmit` (green 2026-11-26) · `bun run verify` (full) · migrate tests 63 pass (2026-11-26) · LightRAG retrieval suite · secret/injection grep.
-
-Blocked-gates: (a) Wave-3 sync writes (Notion DB ID + Linear team), (b) human-verify closes for 8 `human_needed` phases, (c) prod apply needs operator rehearsal window.
+## Parallel lanes: A, B, C concurrent; D after B; E after C; F last.
+## Gate at each step: live probe green + `bun run verify` + fabric compliance PASS.
+## Deferred: nothing — all 8 enhancements scoped; Leader version/image confirmation is a discovery task within Lane A (not a blocker for others).
