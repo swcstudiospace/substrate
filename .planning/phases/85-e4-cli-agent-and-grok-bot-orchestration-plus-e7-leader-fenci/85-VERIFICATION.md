@@ -1,6 +1,6 @@
 ---
 phase: 85-e4-cli-agent-and-grok-bot-orchestration-plus-e7-leader-fenci
-verified: 2026-11-28T09:07:28Z
+verified: 2026-11-28T09:09:36Z
 status: passed
 score: 5/5 must-haves verified
 covered_files:
@@ -18,8 +18,8 @@ behavior_unverified_items:
     expected: "one stored handoff packet signed by the caller path and one fail-open audit note (kind note, payload delegation) in the ledger"
     why_human: "Phase doctrine is fake-only tests (no planes, no ledger, no network in harness); the production wiring (service.ts:4430 delegateHandoff, service.ts:4505 fenceAcquire) is code-reviewed and unit-pinned via fakes but has never run against a real ledger in this phase"
 re_verification:
-  previous_status: none
-  previous_score: none
+  previous_status: passed
+  previous_score: 5/5 must-haves verified
   gaps_closed: []
   gaps_remaining: []
   regressions: []
@@ -27,44 +27,36 @@ re_verification:
 
 # Phase 85 Verification: E4 CLI Agent and Grok Bot orchestration plus E7 Leader fencing
 
-**Verified:** 2026-11-28T09:07:28Z
+**Verified:** 2026-11-28T09:09:36Z
 **Worktree:** `/tmp/agent-substrate-wave8`
-**HEAD:** `8ea4bc1d` (uncommitted tree per `git status --porcelain`; no commit, per assignment)
-**Scope:** Goal-backward verification against `85-CONTEXT.md` + `85-PLAN.md` (3 tasks). Read-only; no product code, STATE, or ROADMAP edits. This verifier re-ran the focused loop (`orchestration.test.ts` + `service-orchestration.test.ts`: 24 pass / 0 fail), `bunx tsc --noEmit`, `bun run lint`, and `bun run check:phase-close`, and edited nothing outside this file.
+**HEAD:** `955cc206` (`feat(v1.9-p85): E4+E7 orchestration handoffs + Leader fencing`), clean tree (`git status --porcelain` empty)
+**Scope:** Goal-backward re-verification against `85-CONTEXT.md` + `85-PLAN.md` (3 tasks), same 5 must-haves as the prior pass at `8ea4bc1d`. Read-only except this file; no product code, STATE, or ROADMAP edits. This verifier re-ran the focused loop (`orchestration.test.ts` + `service-orchestration.test.ts`: 24 pass / 0 fail), regression loop, `bunx tsc --noEmit`, `bun run lint`, and `bun run check:phase-close`, all green.
 
 ## Verdict summary
 
-**Status: `passed`** — all five must-haves hold in code and tests at current HEAD. Delegation handoffs are namespaced `agent:<surface>` with Phase 72 allowlist permission checked fail-closed and one audit note per delegation; denials store nothing. The leader fence issues `{lease_id, epoch, observed_epoch}` tokens, rejects stale epochs for the same holder after a TTL bump and strangers as `not-holder`, and never runs the write function on rejection. The delegation queue uses a 900s default TTL, moves expired entries to the dead-letter list with reason `ttl-expired` and failed entries with reason `failed` (never silently dropped), surfaced via `queueDeadLetters`. No new store/tool/admission change; `EVENT_KINDS` unchanged at 12. The loop is green. One behavior-unverified item: the production ledger wiring (fake-only doctrine), recorded above.
+**Status: `passed`** — all five must-haves hold in code and tests at HEAD `955cc206`. Delegation handoffs are namespaced `agent:<surface>` with Phase 72 allowlist permission checked fail-closed and one audit note per delegation; denials store nothing. The leader fence issues `{lease_id, epoch, observed_epoch}` tokens, rejects stale epochs for the same holder after a TTL bump and strangers as `not-holder`, and never runs the write function on rejection. The delegation queue uses a 900s default TTL, moves expired entries to the dead-letter list with reason `ttl-expired` and failed entries with reason `failed` (never silently dropped), surfaced via `queueDeadLetters`. No new store/tool/admission change; `EVENT_KINDS` unchanged at 12. The loop is green. One `behavior_unverified` remains: live-ledger writes (see frontmatter).
+
+Prior verification (`passed`, 5/5 at `8ea4bc1d` uncommitted tree) is superseded: `git diff 8ea4bc1d HEAD -- packages/` is exactly the four Phase 85 implementation files; no code drift since that pass.
 
 ## Criterion verdicts
 
-| # | Criterion | Verdict | Evidence (file:line at HEAD) |
+| # | Criterion | Verdict | Evidence (file:line at HEAD `955cc206`) |
 |---|---|---|---|
-| 1 | Namespace `agent:<surface>` + permission via Phase 72 allowlist fail-closed + audit note per delegation; denials store nothing | **passed** | `orchestration.ts:40` `agentNamespace` returns `agent:${surface}`. `orchestration.ts:49` `checkDelegationPermission` requires both sessions granted the repo via `allowlistFor`; `allowlist.size === 0` → `empty-allowlist` (fail-closed); never throws. `orchestration.ts:83` `buildDelegation` reuses `buildHandoff` with receiver as the `to` party. `orchestration.ts:108` `recordDelegationAudit` appends one row via `DelegationAuditPort`. `service.ts:4430` `delegateHandoff` parses allowlist from env (`repoAllowlistFromEnv`, parse failure → empty → deny), checks permission before any store, routes through `this.handoff`, then appends one fail-open `note` (payload `delegation`). Tests: granted → 1 handoff + 1 audit note with namespace; denied → `emitted` length 0; empty allowlist → deny, `emitted` length 0 (`service-orchestration.test.ts:53-86`). |
-| 2 | Fence token `{lease_id, epoch, observed_epoch}`; stale epoch rejected for same holder after TTL bump; stranger `not-holder`; write fn not run on reject | **passed** | `orchestration.ts:145` `LeaderFence` per-worktree `LeaseSnapshot`; `acquire` wraps `decideClaim` (`lease.ts:218`), `renew` wraps `decideHeartbeat` (`lease.ts:312`), token minted with `observed_epoch` (`orchestration.ts:171`). `orchestration.ts:193` `assertFresh`: holder mismatch → `not-holder`; `token.epoch !== current.epoch` → `stale-epoch` (epoch CAS). `orchestration.ts:202` `fencedWrite` returns the denial before calling `fn`. Tests: stranger while held → `held-not-holder`; renew keeps epoch; after TTL expiry new acquire bumps epoch, old token → `stale-epoch` with write fn never run (`orchestration.test.ts:117,146-172`); service-level stale write rejected (`service-orchestration.test.ts:125`). |
-| 3 | TTL 900s default; expired → `listDead` `ttl-expired`; `fail()` → `failed`; never dropped; surfaced via `queueDeadLetters` | **passed** | `orchestration.ts:240` `DelegationQueue`; `enqueue` stamps 900s TTL (`DEFAULT_LEASE_TTL_SECONDS`, `orchestration.ts:244`); `dequeue` moves expired to dead list with `reason: "ttl-expired"` (`orchestration.ts:259`); `fail` moves with `reason: "failed"` (`orchestration.ts:273`); `listDead`/`deadCount`/`pendingCount` (`orchestration.ts:278-286`). `service.ts:4497` `queueDeadLetters` returns `{dead_letters, dead_count}`. Tests: expired entries surface in `queueDeadLetters` with count and `reason: "ttl-expired"` (`service-orchestration.test.ts:98-109`); `deadCount()` matches `listDead().length`. |
-| 4 | No new store/tool/admission change; `EVENT_KINDS` unchanged at 12 | **passed** | `types.ts:69` `EVENT_KINDS` is the 12-kind list; `service.ts:4430-4526` adds `delegateHandoff`/`enqueueDelegation`/`dequeueDelegations`/`queueDeadLetters`/`fenceAcquire`/`fenceRenew`/`fenceWrite` on `Substrate` with owned `delegationQueue`/`leaderFence` (`service.ts:1709-1710`); no new MCP tool, no admission/route-policy change. `check:phase-close` re-run: **pass** — EVENT_KINDS unchanged at 12 against `ab62c91`; SURFACES baseline + substrate at 42. Audit events reuse kind `note` (payload `delegation`), so no vocabulary change. |
-| 5 | Loop green: 24/0, tsc/lint/phase-close | **passed** | Re-run by this verifier at HEAD: `bun test packages/mcp-server/src/orchestration.test.ts packages/mcp-server/src/service-orchestration.test.ts` → **24 pass, 0 fail** (83 expects). `bunx tsc --noEmit` clean (exit 0). `bun run lint` clean (1903 files, exit 0). `bun run check:phase-close` pass (239 pass, 4 lock files; EVENT_KINDS unchanged at 12). Matches `85-SUMMARY.md:14-19`. |
+| 1 | E4 namespace/permission/audit: `agent:<surface>` + Phase 72 allowlist fail-closed + one audit note per delegation; denials store nothing | **passed** | `orchestration.ts:40` `agentNamespace` returns `` `agent:${surface}` ``. `orchestration.ts:49` `checkDelegationPermission` requires both sessions granted the repo via `allowlistFor`; `allowlist.size === 0` → `empty-allowlist` (fail-closed); never throws. `orchestration.ts:83` `buildDelegation` reuses `buildHandoff` with receiver as the `to` party. `orchestration.ts:108` `recordDelegationAudit` appends one row via `DelegationAuditPort`. `service.ts:4430` `delegateHandoff` parses `repoAllowlistFromEnv` (unparseable → empty), returns `not-allowed` when `from.session_id` is missing, checks permission before `this.handoff(...)`, and only when `result.stored` emits one `kind: "note"` event with `payload.delegation` carrying the namespace/from/to/repo/`handoff_id` (`.catch(() => null)` — fail-open audit). `service-orchestration.test.ts` pins: granted stores 1 handoff + 1 audit note with namespace; denied and empty-allowlist store nothing. `orchestration.test.ts:20,27,55` pins namespace, allow/deny/empty, packet receiver, one audit row. |
+| 2 | E7 fence: stale-epoch / not-holder rejection, write fn never runs on rejection | **passed** | `orchestration.ts:151` `LeaderFence.acquire` wraps `decideClaim`; `orchestration.ts:180` `renew` wraps `decideHeartbeat` and maps `not-holder` through. Token `{lease_id, epoch, observed_epoch}` issued on grant and on renewal. `orchestration.ts:192` `assertFresh` is the epoch CAS: holder mismatch (`surface`/`session_id`) → `not-holder`; `token.epoch !== current.epoch \|\| token.lease_id !== current.lease_id` → `stale-epoch`; no hold → `unheld`. `orchestration.ts:202` `fencedWrite` returns the denial before calling `fn`. `service.ts:4505` `fenceAcquire` audits one `note` on grant. `orchestration.test.ts:100-182` pins stranger-while-held denied (`held-not-holder`), renew keeps epoch, TTL-expiry epoch bump makes the old token `stale-epoch`, stranger token `not-holder`, and in both rejection cases the write spy never runs. |
+| 3 | TTL 900s + DLQ: expired → `ttl-expired`, failed → `failed`, never silently dropped | **passed** | `orchestration.ts:244` `DelegationQueue.enqueue` stamps `ttl_seconds` defaulting to `DEFAULT_LEASE_TTL_SECONDS` = 900s (`lease.ts:42`); duplicate ids throw. `orchestration.ts:255` `dequeue` returns non-expired FIFO and moves expired to the dead list with reason `ttl-expired`. `orchestration.ts:268` `fail` moves a task there with reason `failed`; unknown id → `false`. `orchestration.ts:278` `listDead` + `deadCount` + `pendingCount` are the list surface; `service.ts:4497` `queueDeadLetters` exposes `{dead_letters, dead_count}`. `orchestration.test.ts:194` pins `ttl_seconds === 900` and `expires_at === NOW + 900_000`, FIFO, expiry-to-DLQ, fail-to-DLQ; `service-orchestration.test.ts:109` pins TTL expiry surfacing via `queueDeadLetters()` with the count. |
+| 4 | No surface drift: `EVENT_KINDS` = 12, no new store/tool/admission | **passed** | `types.ts:69` `EVENT_KINDS` is the closed 12-element tuple (`session.start … warning`), unchanged. `bun run check:phase-close` reports `EVENT_KINDS unchanged at 12 against ab62c91; SURFACES equals baseline plus substrate at 42`. `git show --stat HEAD` touches only the 4 implementation files + phase docs: no `types.ts`, `mcp.ts`, `server.ts`, store, or admission change. `orchestration.ts` is pure (no I/O; header comment at `orchestration.ts:1` states the fence/queue are in-process memory, audited through the ledger) — no new coordination store or table. |
+| 5 | Loop green: focused + regression + tsc + lint + phase-close | **passed** | `bun test orchestration.test.ts service-orchestration.test.ts` — **24 pass, 0 fail** (83 expects). `bun test service-orchestration.test.ts handoff.test.ts session-registry.test.ts` — **46 pass, 0 fail** (257 expects: 5 + 30 + 11). `bun test service.test.ts service-forget.test.ts` — **445 pass, 0 fail** (2112 expects). `bunx tsc --noEmit` — clean. `bun run lint` — clean (1904 files, biome). `bun run check:phase-close` — **pass** (239 pass, 4 lock files). |
 
-## Decision coverage
+## Gaps / regressions
 
-All four `85-CONTEXT.md` Implementation Decisions are honored:
+None. Prior pass recorded no gaps; this re-verification found no regressions at HEAD `955cc206`.
 
-| Decision | Status | Evidence |
-|---|---|---|
-| Handoff packet: reuse signed `coord_handoff` + namespace (`agent:<surface>`) + permission model (Phase 72 allowlist) | honored | `orchestration.ts:40,49,83`; `service.ts:4430` |
-| E7 fencing: `leaderFence.acquire` issues a fencing token on lease renewal (`lease_id` + epoch CAS); stale tokens rejected — single-writer guaranteed | honored | `orchestration.ts:145-202`; token shape `:131` |
-| TTL queueing + DLQ: default 900s lease TTL; expired/dead entries move to dead-letter surface (count + list), never silently dropped | honored | `orchestration.ts:240-286`; `service.ts:4497` `queueDeadLetters` |
-| Audit: every handoff/fence event appended to ledger with actor/surface/session attribution | honored | `service.ts:4430` delegation `note` (namespace, from/to, repo, handoff_id); `service.ts:4505` fence-acquire `note` (holder, epoch) |
+## Behavior unverified (1, human-needed)
 
-## Gaps
-
-None blocking.
+Live-ledger writes — see frontmatter `behavior_unverified_items`. Fake-only by phase doctrine; the live wiring has never run against a real ledger in this phase.
 
 ## Notes
 
-- Deferred per CONTEXT and correctly absent: fair-queue priorities beyond TTL expiry; CLI `substrate handoff`/`substrate queue` surfaces reuse existing commands in a later phase (no new MCP tool here). `85-SUMMARY.md:21-23`.
-- Fail-closed holds: empty/unparseable allowlist denies every delegation (`service.ts` parse failure → `EMPTY_REPO_ALLOWLIST`); unknown session denies (`not-allowed`); permission check precedes any store, so denials emit nothing.
-- `fencedWrite` is check-then-run within the returned promise; the fence is in-memory per `Substrate` instance (no new coordination store, per CONTEXT).
-
-_Verified: 2026-11-28T09:07:28Z — Verifier: GSD verifier, HEAD 8ea4bc1d_
+- Test-count note vs the prior pass: the regression combo now reads 46 pass (5 service-orchestration + 30 handoff + 11 session-registry), not 65 — the prior report's arithmetic overstated the same files; the fresh run above is authoritative. The focused loop (24) and touched suites (445) match the prior pass exactly.
+- Deferred (out of scope, per CONTEXT): fair-queue priorities beyond TTL expiry; CLI `substrate handoff`/`substrate queue` surfaces reusing existing commands in a later phase (no new MCP tool here).
