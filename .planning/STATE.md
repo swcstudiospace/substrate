@@ -871,3 +871,20 @@ No phase or milestone completion is inferred from local tests, draft delivery, o
 - Phase 46 D4: RAG-backend (retired, superseded by LightRAG) reversal is impossible. Record that in the cutover record.
 - Phase 68: the disclosed 300-pair cap stands. Do not remove it.
 - Phases 16-30, 34-36, and 51-54: the owner accepts the prior verification as passed for this milestone. Do not re-execute those phases. A later digest refresh may still mark a report stale; that does not reopen the phase.
+
+## Ultrathink inventory (Wave 1, n1, SPE-39361) — 2026-11-28
+
+- Outstanding v1.8 phases (init.manager): 46 LightRAG hybrid RAG (gaps_found), 61 Session rollback (human_needed), 66 Docs Reflect (human_needed), 67 Live Steering GA (gaps_found), 68 Worktree Fleet (human_needed), 71 Multi-Session boundary (human_needed), 74 Cross-repo compensating (human_needed), 76 Telemetry buffer (human_needed), 77 Steering idempotency (human_needed), 78 Cross-layer reconciliation (partial).
+- Resources on VPS (docker, 2026-11-28): LightRAG v1.5.7 (Up 4d), Hindsight 0.9.1 api/worker/control-plane (Up 7–10d), TEI (8080, Up 7d), DragonflyDB (26379, healthy, Up 11d), GreptimeDB 1.1.4 (24000/24001, Up 11d), TimescaleDB prod (25432, Up 11d), plus test twins. All five + TEI running and healthy.
+- Ledger/SVM: memo-only devnet anchoring (ADR-0006); verdict BUILT_NOT_DEPLOYED; readiness plan in .planning/LEDGER_SVM_AUDIT.md; deployment requires explicit approval.
+- Gates: tsc.strict + Biome error-any/non-null; bun run verify. Baseline in .planning/audit/quality-baseline.md.
+- Defaults: q1 investigate-only; q2 existing Linear/Notion config (SPEC team; rows exist).
+
+## Milestone audit (Wave 7, n7 SPE-39367) — 2026-11-28
+
+- GSD phases: v1.8's 46 (gaps_found), 67 (gaps_found), 78 (partial) + 61/66/68/71/74/76/77 (human_needed) remain owner-verification pending; v1.9 Unison is defined (ROADMAP line 15) but unstarted. No milestone is marked COMPLETE in this audit.
+- Quality gates: migrate/contract/archive/rollback 94/94 green; tsc clean; full verify 12872/16/5 (gap recorded, not a pass).
+- Sync: Linear SPE-39361…39367 + 49 sub-issues and Notion rows exist (planner-created, read-back verified via row query); Notion Task status Implementing.
+- Ledger/SVM verdict: BUILT_NOT_DEPLOYED (no SVM/validator/VM; memo-only devnet design; no anchor tx per v1.7 audit, unverified live this pass).
+- Blockers to COMPLETE: 8 human_verify approvals (46/67 gaps + 61/66/68/71/74/76/77), owner decisions (Phase 72 HARD-S2, corpus), Greptile trial-ended (review unavailable), Wave-7/8 cleanup pending.
+- Roadmap progress updated this pass (phases listed with live states; v1.9 remains planned).
