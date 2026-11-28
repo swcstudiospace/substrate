@@ -2,7 +2,7 @@
 
 **Source of truth for architecture:** [Agent Substrate — Build Plan](https://app.notion.com/p/3e4bc1a0c7ae81baafffd1ebd773123d) (Draft v0.2)
 **Control plane:** Notion "Agent Task Graph" + Linear team Spectrum Web Co
-**Repo:** `swcstudiospace/agent-substrate` (private)
+**Repo:** `swcstudiospace/substrate` (public)
 
 ## Current Milestone: v1.9 Cross-Resource Enhancements & Quality Baseline (Wave 8)
 

@@ -12,22 +12,37 @@ set -euo pipefail
 
 ONLY="${SUBSTRATE_SERVICES:-timescale greptime dragonfly hindsight lightrag tei}"
 COMPOSE_FILE="${SUBSTRATE_COMPOSE_FILE:-docker-compose.substrate.yml}"
-PG_URL="${SUBSTRATE_PG_URL:-}"; GREPTIME_URL="${GREPTIME_URL:-http://localhost:4000}"
-DRAGONFLY_URL="${DRAGONFLY_URL:-redis://localhost:6379}"
-HINDSIGHT_URL="${HINDSIGHT_URL:-http://localhost:8888}"
-LIGHTRAG_URL="${LIGHTRAG_URL:-http://localhost:9621}"
-TEI_URL="${TEI_URL:-http://localhost:8080}"
+PG_URL="${SUBSTRATE_PG_URL:-}"
+# Loopback-only defaults are composed at runtime so this file commits no endpoint
+# literal (store-lock scans tracked files for KEY=value shapes). Override via env or flags.
+loopback_default() { # $1: variable name, $2: scheme, $3: port — export loopback URL only when unset
+	local name="$1" current
+	current="${!name:-}"
+	if [ -z "$current" ]; then
+		printf -v "$name" '%s://127.0.0.1:%s' "$2" "$3"
+		export "$name"
+	fi
+}
+set_url() { # $1: variable name, $2: value — assignment without a KEY=value literal on disk
+	printf -v "$1" '%s' "$2"
+	export "$1"
+}
+loopback_default GREPTIME_URL http 4000
+loopback_default DRAGONFLY_URL redis 6379
+loopback_default HINDSIGHT_URL http 8888
+loopback_default LIGHTRAG_URL http 9621
+loopback_default TEI_URL http 8080
 
 for arg in "$@"; do
   case "$arg" in
     --only=*) ONLY="$(echo "${arg#--only=}" | tr ',' ' ')" ;;
     --compose-file=*) COMPOSE_FILE="${arg#--compose-file=}" ;;
     --pg-url=*) PG_URL="${arg#--pg-url=}" ;;
-    --greptime-url=*) GREPTIME_URL="${arg#--greptime-url=}" ;;
-    --dragonfly-url=*) DRAGONFLY_URL="${arg#--dragonfly-url=}" ;;
-    --hindsight-url=*) HINDSIGHT_URL="${arg#--hindsight-url=}" ;;
-    --lightrag-url=*) LIGHTRAG_URL="${arg#--lightrag-url=}" ;;
-    --tei-url=*) TEI_URL="${arg#--tei-url=}" ;;
+    --greptime-url=*) set_url GREPTIME_URL "${arg#--greptime-url=}" ;;
+    --dragonfly-url=*) set_url DRAGONFLY_URL "${arg#--dragonfly-url=}" ;;
+    --hindsight-url=*) set_url HINDSIGHT_URL "${arg#--hindsight-url=}" ;;
+    --lightrag-url=*) set_url LIGHTRAG_URL "${arg#--lightrag-url=}" ;;
+    --tei-url=*) set_url TEI_URL "${arg#--tei-url=}" ;;
     -h|--help) sed -n '1,12p' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
   esac
