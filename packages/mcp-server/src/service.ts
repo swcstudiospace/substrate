@@ -237,6 +237,7 @@ import { DeadlineError, sharedDeadline } from "./deadline.ts";
 import type { DragonflyReadinessVerdict, FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
 import { makeDragonflyProbe } from "./fabric/dragonfly-readiness.ts";
+import { episodicPayload, parseEpisodicEvents, episodesForGraph, episodesForSession, type EpisodicRecord, type LinkedEpisodic } from "./fabric/episodic.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import { DEAD_LETTER_CAUSES, DeadLetterStore, EventBuffer, EVENT_DRAIN_TICK_MS, type DeadLetterCause, type EventDelivery } from "./event-buffer.ts";
@@ -3198,6 +3199,37 @@ export class Substrate {
 		} catch (cause) {
 			return { events: [], count: 0, truncated: false, error: redact(String(cause)) };
 		}
+	}
+
+	/**
+	 * E6 episodic record (phase 84): one session outcome appended to the
+	 * ledger as a `note` carrying the episode payload. Fail-open like every
+	 * event — a down ledger costs the record, never the session's work.
+	 */
+	async recordEpisode(record: EpisodicRecord, surface: Surface): Promise<{ episode_id: string; stored: boolean }> {
+		const emitted = await this.emit({
+			surface,
+			kind: "note",
+			summary: `episode ${record.episode_id}: ${record.outcome}`,
+			actor: "agent",
+			session_id: record.session_id,
+			graph_id: record.graph_id,
+			payload: episodicPayload(record),
+		}).catch(() => null);
+		return { episode_id: record.episode_id, stored: emitted?.stored ?? false };
+	}
+
+	/**
+	 * E6 episodic read (phase 84): the episodes of one session or one graph,
+	 * with supersession links resolved. The `session_registry` /
+	 * `graph_get` read path; a down ledger answers empty, never throws.
+	 */
+	async listEpisodes(query: { session_id?: string; graph_id?: string }): Promise<LinkedEpisodic[]> {
+		const result = await this.queryEvents({ session_id: query.session_id, graph_id: query.graph_id, kind: "note", include_payload: true });
+		const records = parseEpisodicEvents(result.events);
+		if (query.session_id !== undefined) return episodesForSession(records, query.session_id, query.graph_id);
+		if (query.graph_id !== undefined) return episodesForGraph(records, query.graph_id);
+		return [];
 	}
 
 	/**

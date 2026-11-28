@@ -22,6 +22,7 @@ import type { SQL } from "bun";
 import { DEFAULT_WORKTREE_REGISTRY_TTL_S } from "./worktree-registry.ts";
 import { decideClaim, decideRelease, leaseState, type ClaimDecision, type LeaseHolder, type LeaseSnapshot, type ReleaseDecision } from "./lease.ts";
 import type { Surface } from "./types.ts";
+import { episodicIndex, type EpisodicSession } from "./fabric/episodic.ts";
 
 /** One `graph_nodes` row a registry read needs: the holder columns and the lease columns, nothing else. */
 export interface RegistryGraphNode {
@@ -429,3 +430,5 @@ export class MemorySessionRegistry implements SessionRegistryStore {
 }
 
 export type { ClaimDecision, ReleaseDecision };
+export { episodicIndex };
+export type { EpisodicSession };
