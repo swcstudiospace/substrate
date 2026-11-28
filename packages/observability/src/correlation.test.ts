@@ -6,7 +6,7 @@ import {
 	correlationFromHeaders,
 	currentCorrelation,
 	normalizeCorrelationId,
-	redactedCorrelation,
+	safeCorrelationId,
 	runWithCorrelation,
 } from "./correlation.ts";
 
@@ -29,15 +29,15 @@ describe("normalizeCorrelationId", () => {
 			42,
 		]) {
 			expect(normalizeCorrelationId(bad)).toBeNull();
-			expect(redactedCorrelation(bad)).toBeNull();
+			expect(safeCorrelationId(bad)).toBeNull();
 		}
 	});
 });
 
 describe("redaction", () => {
 	test("only the validated form is ever emitted", () => {
-		expect(redactedCorrelation("ok-1")).toBe("ok-1");
-		expect(redactedCorrelation("<script>alert(1)</script>")).toBeNull();
+		expect(safeCorrelationId("ok-1")).toBe("ok-1");
+		expect(safeCorrelationId("<script>alert(1)</script>")).toBeNull();
 	});
 });
 

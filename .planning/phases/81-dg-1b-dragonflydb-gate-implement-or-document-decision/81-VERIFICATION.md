@@ -36,7 +36,7 @@ re_verification:
 # Phase 81 Verification: DG-1b DragonflyDB Gate — Implement-or-Document Decision (Re-verification)
 
 **Verified:** 2026-11-28T14:57:44Z
-**Worktree:** `/tmp/agent-substrate-wave8`
+**Worktree:** `<repo-root>`
 **HEAD:** `8af8b844f00b44dd7132cae85231913080973fe7` (`docs(86): VERIFICATION + phase complete`)
 **Scope:** Re-verification against `81-CONTEXT.md` + `81-PLAN.md` at current HEAD. Read-only; no product code, STATE, or ROADMAP edits. Focused test harness re-run by this verifier (see §5).
 

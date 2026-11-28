@@ -29,7 +29,7 @@ re_verification:
 # Phase 85 Verification: E4 CLI Agent and Grok Bot orchestration plus E7 Leader fencing
 
 **Verified:** 2026-11-28T09:13:43Z
-**Worktree:** `/tmp/agent-substrate-wave8`
+**Worktree:** `<repo-root>`
 **HEAD:** `841e8b9e` (`docs(85): VERIFICATION + phase complete`), clean tree (`git status --porcelain` empty)
 **Scope:** Goal-backward re-verification against `85-CONTEXT.md` + `85-PLAN.md` (3 tasks), same 5 must-haves as the prior pass at `955cc206`. Read-only except this file; no product code, STATE, or ROADMAP edits. This verifier re-ran the focused loop (`orchestration.test.ts` + `service-orchestration.test.ts`: 24 pass / 0 fail), regression loop, `bunx tsc --noEmit`, `bun run lint`, and `bun run check:phase-close`, all green.
 

@@ -11,6 +11,18 @@ build/
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+*.asc
+*.gpg
+id_rsa*
+id_ed25519*
+*credentials*.json
+secrets.json
+secrets.yaml
+secrets.yml
+.vault-token
 
 # Local state
 .substrate/

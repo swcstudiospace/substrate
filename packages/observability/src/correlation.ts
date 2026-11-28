@@ -30,7 +30,7 @@ export function normalizeCorrelationId(value: unknown): string | null {
  * because the alphabet carries no PII or secrets by construction; validation
  * IS the redaction.
  */
-export function redactedCorrelation(value: unknown): string | null {
+export function safeCorrelationId(value: unknown): string | null {
 	return normalizeCorrelationId(value);
 }
 

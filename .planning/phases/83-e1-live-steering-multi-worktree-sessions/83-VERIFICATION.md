@@ -38,7 +38,7 @@ re_verification:
 # Phase 83 Verification: E1 Live Steering multi-worktree sessions
 
 **Verified:** 2026-11-28T15:07:44Z
-**Worktree:** `/tmp/agent-substrate-wave8`
+**Worktree:** `<repo-root>`
 **HEAD:** `d4deb86` (clean code tree per `git status --porcelain -- packages/`; only `.planning/STATE.md` + `state.json` dirty, owned by another process).
 **Scope:** Sequential re-verification against `83-CONTEXT.md` + `83-PLAN.md` (3 tasks) at HEAD. Read-only except this file; no product code edits. This verifier re-ran the focused + touched regression suites and recomputed `covered_digest` with the canonical gate algorithm (`gsd_run verification fingerprint` over the 12 impl/test files; PLAN/SUMMARY auto-unioned, report self-filtered under v3).
 

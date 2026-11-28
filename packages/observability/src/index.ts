@@ -258,7 +258,7 @@ export {
 	correlationFromHeaders,
 	currentCorrelation,
 	normalizeCorrelationId,
-	redactedCorrelation,
+	safeCorrelationId,
 	runWithCorrelation,
 } from "./correlation.ts";
 export {

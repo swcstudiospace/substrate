@@ -58,13 +58,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DG-1a | Phase 80 | Pending |
-| DG-1b | Phase 81 | Pending |
-| E2-01, E2-02 | Phase 82 | Pending |
-| E1-01 | Phase 83 | Pending |
-| E3-01, E6-01 | Phase 84 | Pending |
-| E4-01, E7-01 | Phase 85 | Pending |
-| E5-01, E8-01 | Phase 86 | Pending |
+| DG-1a | Phase 80 | Complete |
+| DG-1b | Phase 81 | Complete |
+| E2-01, E2-02 | Phase 82 | Complete |
+| E1-01 | Phase 83 | Complete |
+| E3-01, E6-01 | Phase 84 | Complete |
+| E4-01, E7-01 | Phase 85 | Complete |
+| E5-01, E8-01 | Phase 86 | Complete |
 
 **Coverage:**
 - v1 requirements: 10 total
@@ -73,4 +73,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-11-28*
-*Last updated: 2026-11-28 after Wave 8 milestone creation*
+*Last updated: 2026-11-28 after Wave 8 milestone creation; statuses → Complete 2026-11-28 after all 7 phases verified passed*

@@ -31,7 +31,7 @@ re_verification:
 # Phase 82 Verification: E2 Dragonfly Shared-Context Cache for CLI Agents and Grok Bot
 
 **Verified:** 2026-11-28T07:34:52Z
-**Worktree:** `/tmp/agent-substrate-wave8`
+**Worktree:** `<repo-root>`
 **HEAD:** `312e6a1cfe2084f4f57533f1130902d0efac32d1` (Phase 82 committed as `feat(v1.9-p82): E2 Dragonfly shared-context cache (namespace/TTL/Lua claim/fallback)`; tree clean)
 **Scope:** Re-verification against `82-CONTEXT.md` + `82-PLAN.md` (3 tasks) at HEAD `312e6a1c`. Read-only; no product code, STATE, or ROADMAP edits. This regenerates the prior verification (HEAD `fca4b068`, uncommitted tree) with the canonical `gsd_run verification.fingerprint` digest; goal-backward verdicts re-checked in code and the loop harness re-run by this verifier (all green; see criterion 6).
 

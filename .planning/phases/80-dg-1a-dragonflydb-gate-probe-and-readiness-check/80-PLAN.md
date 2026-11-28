@@ -1,6 +1,6 @@
 # Phase 80 Plan: DG-1a DragonflyDB Gate probe and readiness check
 
-Source of decisions: `80-CONTEXT.md` (probe surface, readiness criteria, fail-closed gate, live evidence, DG-1b handoff). Base: wave8 worktree `/tmp/agent-substrate-wave8`. Branch per GSD (`gsd/v19-p80-dg1a-probe` or executor's default).
+Source of decisions: `80-CONTEXT.md` (probe surface, readiness criteria, fail-closed gate, live evidence, DG-1b handoff). Base: wave8 worktree `<repo-root>`. Branch per GSD (`gsd/v19-p80-dg1a-probe` or executor's default).
 
 Rules for every task: edit only the files named for that task. Do not run builds/tests/linters/formatters mid-plan; the orchestrator/verifier runs the gates once after all tasks land (see `## Verification` loop harness). Do not commit. Do not touch `.planning/STATE.md`, `ROADMAP.md`, or other phases' files. No new HTTP routes. `healthz` never takes its status code from the cache/probe (body field only, as today). Plans only — no code edits in this phase's planning step.
 
@@ -71,7 +71,7 @@ Acceptance: fabric truth flows from the probe in production wiring; no second Re
 ## Verification (loop harness — orchestrator/verifier runs once, after all tasks)
 
 ```bash
-cd /tmp/agent-substrate-wave8
+cd <repo-root>
 bun test packages/mcp-server/src/fabric/dragonfly-readiness.test.ts packages/mcp-server/src/cache.test.ts packages/mcp-server/src/fabric/gather.test.ts packages/mcp-server/src/fabric/status.test.ts packages/mcp-server/src/fabric/compliance.test.ts packages/mcp-server/src/fabric/optimize.test.ts
 tsc --noEmit -p packages/mcp-server/tsconfig.json
 bun run lint
