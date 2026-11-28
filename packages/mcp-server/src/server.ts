@@ -45,6 +45,8 @@ import {
 	classifyEventRefusal,
 	evaluateAdmissionSlo,
 	evaluateDocsFreshnessSlo,
+	evaluateErrorBurnFromSnapshot,
+	type ErrorBurnResult,
 	type EventRefusalReason,
 	FORECAST_HORIZON_MS,
 	FORECAST_STEP_S,
@@ -54,6 +56,7 @@ import {
 	type ForecastRow,
 	forecastRow,
 	loadBurnThresholds,
+	redactedCorrelation,
 } from "@substrate/observability";
 import {
 	anonymousBridge,
@@ -1083,7 +1086,20 @@ export function createHttpServer(
 					memo = await compute();
 					healthMemo = memo;
 				}
-				sendJson(res, memo.status, { ...memo.body, cachedAt: new Date(memo.at).toISOString(), stale });
+				// Phase 86 (E5): per-request, never memoised. The validated incoming
+				// correlation id is echoed body-only so a caller can join this poller's
+				// pass to its plane calls; raw header values never reach the body.
+				const rawCorrelation = req.headers["x-correlation-id"];
+				const correlationId = redactedCorrelation(Array.isArray(rawCorrelation) ? rawCorrelation[0] : rawCorrelation);
+				// Phase 86 (E5): the plane error/timeout burn rides beside the body,
+				// never the status — a breached burn is information, not an outage.
+				let errorBurn: ErrorBurnResult;
+				try {
+					errorBurn = evaluateErrorBurnFromSnapshot(observability.snapshot());
+				} catch {
+					errorBurn = evaluateErrorBurnFromSnapshot([]);
+				}
+				sendJson(res, memo.status, { ...memo.body, ...(correlationId !== null ? { correlationId } : {}), errorBurn, cachedAt: new Date(memo.at).toISOString(), stale });
 				return;
 			}
 
