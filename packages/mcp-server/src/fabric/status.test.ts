@@ -19,6 +19,15 @@ function withCorpus(patch: Partial<FabricFacts["corpus"]>): FabricFacts {
 	return healthyFacts({ corpus: { ...healthyFacts().corpus, ...patch } });
 }
 
+
+describe("the Dragonfly gate probe row (phase 80)", () => {
+	test("probe-derived readings map exactly as the verdict states", () => {
+		expect(rowOf(withService("dragonfly", { answered: true, degraded: false, source: "health().dragonflyReadiness" }), "dragonfly").state).toBe("ok");
+		expect(rowOf(withService("dragonfly", { answered: true, degraded: true, source: "health().dragonflyReadiness" }), "dragonfly").state).toBe("degraded");
+		expect(rowOf(withService("dragonfly", { answered: false, source: "health().dragonflyReadiness" }), "dragonfly").state).toBe("unavailable");
+		expect(rowOf(withService("dragonfly", { configured: false, answered: false, source: "health().dragonflyReadiness" }), "dragonfly").state).toBe("unconfigured");
+	});
+});
 describe("the corpus row (phase 70)", () => {
 	test("unconfigured while SUBSTRATE_CORPUS is off, whatever the readings say, and carries no detail", () => {
 		const row = rowOf(withCorpus({ enabled: false, readings: { freshnessS: 10_000_000, recall5: 0, ingestDocsPerS: 0 } }), "corpus");

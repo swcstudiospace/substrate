@@ -617,6 +617,7 @@ export const FLAGS: readonly FlagSpec[] = [
 	{ name: "SUBSTRATE_EVENT_BUS", kind: "toggle", plane: "cache", default: "off", allowed: "on | off (case- and space-insensitive; anything else refuses boot naming the variable)", unset: "off: no pub/sub connection and /events/stream reads the ledger on its poll only; on without DRAGONFLY_URL, or with a refused URL, is off with a boot log line", readBy: "mcp-server/config.ts", documented: true, doc: "docs/data-planes.md" },
 	{ name: "SUBSTRATE_EMBED_CACHE", kind: "toggle", plane: "cache", default: "off", allowed: "on | off (case- and space-insensitive; anything else is off)", unset: "off: every embed goes to TEI and nothing is read from or written to the emb cache class", readBy: "mcp-server/config.ts", documented: true, doc: "docs/embedding-fabric.md" },
 	{ name: "SUBSTRATE_EMBED_CACHE_TTL_S", kind: "number", plane: "cache", default: "604800", allowed: "60..2592000 seconds (clamped)", unset: "604800 s (one week); every written entry carries it", readBy: "mcp-server/config.ts", documented: true, doc: "docs/embedding-fabric.md" },
+	{ name: "SUBSTRATE_DRAGONFLY_GATE", kind: "mode", plane: "cache", default: "off", allowed: "off | enforce (case- and space-insensitive; unset or blank is off; anything else refuses boot naming the variable)", unset: "off: the DG-1a verdict is advisory only; the read-through cache serves exactly as before", readBy: "mcp-server/config.ts, cache.ts", documented: true, doc: "docs/data-planes.md" },
 	{
 		name: "SUBSTRATE_CACHE_BUMP_SCOPE",
 		kind: "mode",

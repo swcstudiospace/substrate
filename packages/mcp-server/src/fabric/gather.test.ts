@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { gatherFabricFacts } from "./gather.ts";
 import { buildFabricStatus } from "./status.ts";
 import { SLO_DEFAULTS, type SloReadings } from "@substrate/corpus";
-import { FABRIC_RESOURCES, type CorpusSourceReading, type FabricCostView, type FabricFacts, type FabricHealthParts, type FabricHealthView, type FabricSources } from "./types.ts";
+import { FABRIC_RESOURCES, type CorpusSourceReading, type DragonflyReadinessVerdict, type FabricCostView, type FabricFacts, type FabricHealthParts, type FabricHealthView, type FabricSources } from "./types.ts";
+import { degradedReadiness, okReadiness, unconfiguredReadiness, unavailableReadiness } from "./fixtures.ts";
 
 const NOW = "2026-10-21T00:00:00.000Z";
 const COST: FabricCostView = { status: "ok", projectedMonthlyUsd: 3, budgetUsd: 50 };
@@ -163,6 +164,36 @@ describe("gatherFabricFacts", () => {
 		expect(row.state).toBe("unconfigured");
 		expect(row.detail).toBeUndefined();
 		expect(facts.tei.endpointClass).toBeNull();
+	});
+});
+
+describe("the Dragonfly gate probe (phase 80)", () => {
+	test("a probe ok is the dragonfly row, and the facts carry the verdict", async () => {
+		const facts = await gatherFabricFacts(sources({ dragonflyProbe: async () => okReadiness() }));
+		expect(rowOf(facts, "dragonfly")).toMatchObject({ state: "ok", source: "health().dragonflyReadiness" });
+		expect(facts.dragonflyReadiness).toEqual(okReadiness());
+	});
+
+	test("degraded, unavailable and unconfigured verdicts map to the row and leave the other rows alone", async () => {
+		for (const [verdict, state] of [[degradedReadiness(), "degraded"], [unavailableReadiness(), "unavailable"], [unconfiguredReadiness(), "unconfigured"]] as const) {
+			const facts = await gatherFabricFacts(sources({ dragonflyProbe: async () => verdict }));
+			expect(rowOf(facts, "dragonfly").state).toBe(state);
+			expect(rowOf(facts, "greptime").state).toBe("ok");
+			expect(facts.dragonflyReadiness).toEqual(verdict);
+		}
+	});
+
+	test("a missing or null probe source keeps today's cache row exactly", async () => {
+		const facts = await gatherFabricFacts(sources());
+		expect(rowOf(facts, "dragonfly")).toMatchObject({ state: "ok", source: "health().cache" });
+		const nulls = await gatherFabricFacts(sources({ dragonflyProbe: async () => null }));
+		expect(nulls.services.dragonfly).toEqual(facts.services.dragonfly);
+	});
+
+	test("a probe that misses the deadline is unavailable for its row alone", async () => {
+		const facts = await gatherFabricFacts(sources({ dragonflyProbe: () => never<DragonflyReadinessVerdict | null>() }), { deadlineMs: 20 });
+		expect(rowOf(facts, "dragonfly")).toMatchObject({ state: "unavailable", source: "health().dragonflyReadiness" });
+		expect(rowOf(facts, "greptime").state).toBe("ok");
 	});
 });
 

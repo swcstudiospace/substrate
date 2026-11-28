@@ -36,6 +36,10 @@ import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
 import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
+// DG-1b (phase 81): this import closes a loop (`fabric/dragonfly-readiness.ts` imports
+// `COMMAND_TIMEOUT_MS` and `CacheRedis` from here), but both sides only use each other
+// inside function bodies, never at module scope, so either load order resolves.
+import { dragonflyGateVerdict } from "./fabric/dragonfly-readiness.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { MAX_RECALL_TTL_S } from "./recall-snapshot.ts";
 
@@ -52,8 +56,9 @@ export const CACHE_TTL = {
 	"brief-snapshot": 3600,
 	"recall-snapshot": MAX_RECALL_TTL_S,
 	"docs-search": 300,
-	// One week, the default of `SUBSTRATE_EMBED_CACHE_TTL_S`; the embedding service sets its own TTL on every write.
 	emb: 604_800,
+	// E2 (phase 82): the shared lane's `context` TTL. `output` (60 s) and `recall` (600 s) govern their own writes through `SHARED_KIND_TTL` (`fabric/shared-context.ts`); every shared write carries its kind's TTL, this is only the class ceiling.
+	shared: 300,
 } as const;
 
 export type CacheClass = keyof typeof CACHE_TTL;
@@ -61,6 +66,8 @@ export type CacheMode = "off" | "on" | "degraded";
 export type CacheResult = "hit" | "miss" | "bypass" | "error" | "coalesced" | "stale" | "refresh" | "would_serve_stale";
 /** `SUBSTRATE_CACHE_SWR`: `off` never serves stale, `shadow` only counts `would_serve_stale`, `enforce` serves it. */
 export type CacheSwrMode = "off" | "shadow" | "enforce";
+/** `SUBSTRATE_DRAGONFLY_GATE` (DG-1b, phase 81): `off` never gates, `enforce` bypasses reads (durable read, never stale, never throws) while the last DG-1a verdict is neither `ok` nor `degraded`; `degraded` still serves. */
+export type DragonflyGateMode = "off" | "enforce";
 
 /**
  * Every key class under `substrate:v1:`. The closed set behind the metric label
@@ -68,7 +75,7 @@ export type CacheSwrMode = "off" | "shadow" | "enforce";
  * request classes plus the two that are not a cached answer (`budget` buckets,
  * `gen` counters).
  */
-export const CACHE_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
+export const CACHE_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "shared", "budget", "gen"] as const;
 export type CacheKeyClass = (typeof CACHE_CLASSES)[number];
 
 /** The class a `substrate:v1:` key belongs to, or null for anything else. Reads the key name only. */
@@ -195,6 +202,14 @@ export interface CacheRedis {
 	scan?(match: string, count: number, cursor: string): Promise<[string, string[]]>;
 	/** Remove keys with UNLINK. Returns how many were removed. Used only by the confirmed reconcile repair. */
 	unlink?(keys: readonly string[]): Promise<number>;
+	/** DG-1a gate probe (phase 80): `PING` through the gated, deadline-bound `run` path. Absent on fakes that predate it; the probe answers `unavailable`, never throws. */
+	ping?(): Promise<string>;
+	/** DG-1a gate probe: `INFO <section>` as raw text through `run`, using the `cache-stats.ts` field keyset. Absent on older fakes. */
+	info?(section: "memory" | "stats"): Promise<string>;
+	/** DG-1a gate probe: a write round-trip outside the cache's key/TTL policy (`run("set", …)`). Absent on older fakes. */
+	probeSet?(key: string, value: string, ttlSeconds: number): Promise<void>;
+	/** DG-1a optional visibility: `DBSIZE` as a count; reported in probe metrics only, never changes state. */
+	dbsize?(): Promise<number>;
 }
 
 export interface ReadThroughOptions {
@@ -208,6 +223,8 @@ export interface ReadThroughOptions {
 	refusedReason?: string;
 	/** Stale-while-revalidate mode and window (`SUBSTRATE_CACHE_SWR`, `SUBSTRATE_CACHE_SWR_WINDOW_S`). Absent is `off`. */
 	swr?: { mode: CacheSwrMode; windowS?: number };
+	/** DG-1b (`SUBSTRATE_DRAGONFLY_GATE`): `off` (absent) never gates; `enforce` bypasses reads while the last DG-1a verdict is neither `ok` nor `degraded`. The verdict is read per call, so a probe recorded after construction governs from then on. */
+	gateMode?: DragonflyGateMode;
 	/** Hard cap on registered loads; beyond it requests load independently. */
 	maxInflight?: number;
 	/** A registered load older than this is not joined (a hung loader must not capture later callers), ms. */
@@ -414,7 +431,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	// is one outcome — a failed connect still charges the breaker, a successful
 	// one on its own never clears it — and an open breaker refuses before any
 	// socket is opened, so no cooldown starts from a refusal.
-	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval" | "scan" | "unlink", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
+	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval" | "scan" | "unlink" | "ping" | "info" | "dbsize", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
 		if (cooldownUntil !== null && now() < cooldownUntil) {
 			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
@@ -441,6 +458,27 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 		eval: (script, keys, args) => run("eval", (redis) => redis.eval(script, keys.length, ...keys, ...args)),
 		scan: (match, count, cursor) => run("scan", (redis) => redis.scan(cursor, "MATCH", match, "COUNT", count)),
 		unlink: (keys) => run("unlink", (redis) => redis.unlink(...keys)),
+		// DG-1a gate probe (phase 80): PING/INFO/DBSIZE ride the same `send` path as the presence client; no second RedisClient lifecycle.
+		// `PING`/`INFO`/`DBSIZE` have no typed Bun method, so they use `send` like `presence-client.ts` and `scripts/cache-stats.ts`.
+		ping: () =>
+			run("ping", async (redis) => {
+				const reply: unknown = await redis.send("PING", []);
+				if (typeof reply !== "string") throw new Error("dragonfly ping reply is not a string");
+				return reply;
+			}),
+		info: (section) =>
+			run("info", async (redis) => {
+				const reply: unknown = await redis.send("INFO", [section]);
+				if (typeof reply !== "string") throw new Error("dragonfly info reply is not a string");
+				return reply;
+			}),
+		probeSet: (key, value, ttlSeconds) => run("set", (redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
+		dbsize: () =>
+			run("dbsize", async (redis) => {
+				const reply: unknown = await redis.send("DBSIZE", []);
+				if (typeof reply !== "number" || !Number.isFinite(reply)) throw new Error("dragonfly dbsize reply is not a number");
+				return reply;
+			}),
 		cooldownUntil: () => (cooldownUntil !== null && now() < cooldownUntil ? cooldownUntil : null),
 	};
 }
@@ -474,8 +512,16 @@ export function createReadThroughCache(config: SubstrateConfig, options: CreateC
 		now: options.now,
 		commandTimeoutMs: config.cacheCommandTimeoutMs,
 		swr: { mode: config.cacheSwr, windowS: config.cacheSwrWindowS },
+		gateMode: config.dragonflyGate,
 	});
 }
+
+/**
+ * E2 (phase 82) Lua claim-once for the shared lane: `KEYS[1]` is the claim slot, `ARGV[1]` the caller's claimId, `ARGV[2]` the slot TTL in seconds. Returns `1` when this caller won the slot (the key was absent and is now set), `0` when another caller already holds it. One round trip through the `eval` seam — no client-side race, no second client.
+ */
+export const SHARED_CLAIM_SCRIPT = `if redis.call("exists", KEYS[1]) == 1 then return 0 end
+redis.call("set", KEYS[1], ARGV[1], "EX", ARGV[2])
+return 1`;
 
 /**
  * Get-or-load. Values are JSON envelopes `{ v }` so a string, `null` and a
@@ -497,6 +543,7 @@ export class ReadThroughCache {
 	private readonly recordSample: ((sample: CacheSample) => void) | undefined;
 	private readonly refusedReason: string | undefined;
 	private readonly swrMode: CacheSwrMode;
+	private readonly gateMode: DragonflyGateMode;
 	private readonly swrWindowMs: number;
 	private readonly maxInflight: number;
 	private readonly flightMaxAgeMs: number;
@@ -526,6 +573,7 @@ export class ReadThroughCache {
 		this.recordSample = options.record;
 		this.refusedReason = options.refusedReason;
 		this.swrMode = options.swr?.mode ?? "off";
+		this.gateMode = options.gateMode ?? "off";
 		this.swrWindowMs = swrWindowMs(options.swr?.windowS);
 		this.maxInflight = Math.max(0, Math.floor(options.maxInflight ?? MAX_INFLIGHT));
 		this.flightMaxAgeMs = Math.max(1, Math.floor(options.flightMaxAgeMs ?? FLIGHT_MAX_AGE_MS));
@@ -534,6 +582,25 @@ export class ReadThroughCache {
 	/** The gated redis client this cache reads through, or null when it is off. The reconcile pairs read the cache through it, so an open breaker reports `unavailable`. */
 	redisClient(): CacheRedis | null {
 		return this.redis;
+	}
+
+	/**
+	 * DG-1b (phase 81): whether a read may be served from the cache at all.
+	 * `off` never gates. Under `enforce` the last DG-1a verdict must be `ok`
+	 * or `degraded`; anything else (including no probe yet, `unconfigured`)
+	 * bypasses to the durable read. The verdict is read per call, never
+	 * baked into `enabled` at construction: the first probe runs after the
+	 * cache is built, so an enablement-time check would disable the cache
+	 * for the process lifetime. Never throws; a missing verdict blocks.
+	 *
+	 * Public since E2 (phase 82): `SharedContextStore` reads it for its
+	 * write-skip and claim decisions, so the store never needs a second copy
+	 * of the gate rule or its own `gateMode` — the cache is the single owner.
+	 */
+	gateAllows(): boolean {
+		if (this.gateMode !== "enforce") return true;
+		const state = dragonflyGateVerdict("enforce").state;
+		return state === "ok" || state === "degraded";
 	}
 
 	health(): CacheHealth {
@@ -585,6 +652,12 @@ export class ReadThroughCache {
 		if (!this.enabled || !this.redis) {
 			this.count("bypass", klass);
 			this.note("cache off");
+			return request.load();
+		}
+		// DG-1b (phase 81): a gate that does not allow serving bypasses to the durable read. Never stale, never throws.
+		if (!this.gateAllows()) {
+			this.count("bypass", klass);
+			this.note("dragonfly gate blocked");
 			return request.load();
 		}
 		// A bump that did not land leaves the previous generation readable. Stay
@@ -950,6 +1023,8 @@ export class ReadThroughCache {
 	async peek<T>(klass: CacheClass, surface: string, args: unknown): Promise<T | null> {
 		// Not a counted bypass: the brief this read belongs to already counted one.
 		if (!this.enabled || !this.redis) return null;
+		// DG-1b (phase 81): a gate that does not allow serving never serves a snapshot; the caller composes live.
+		if (!this.gateAllows()) return null;
 		const redis = this.redis;
 		try {
 			const raw = await this.attempt(() => redis.get(snapshotKey(klass, surface, args)));
@@ -980,6 +1055,8 @@ export class ReadThroughCache {
 	 */
 	async peekQuiet<T>(klass: CacheClass, surface: string, args: unknown): Promise<T | null> {
 		if (!this.enabled || !this.redis) return null;
+		// DG-1b (phase 81): as `peek`, a blocked gate never serves a snapshot.
+		if (!this.gateAllows()) return null;
 		const redis = this.redis;
 		try {
 			const raw = await this.attempt(() => redis.get(snapshotKey(klass, surface, args)));
@@ -999,6 +1076,8 @@ export class ReadThroughCache {
 	async peekMany<T>(klass: CacheClass, digests: readonly string[]): Promise<Array<T | null>> {
 		const none = digests.map((): T | null => null);
 		if (!this.enabled || !this.redis || digests.length === 0) return none;
+		// DG-1b (phase 81): a blocked gate never serves a cached entry; callers read the durable source.
+		if (!this.gateAllows()) return none;
 		const redis = this.redis;
 		try {
 			const raws = await this.attempt(() =>
@@ -1064,6 +1143,62 @@ export class ReadThroughCache {
 			this.fail(cause, false, klass);
 			return false;
 		}
+	}
+	/**
+	 * Read one E2 shared-lane entry by its exact `substrate:v1:shared:` key (`fabric/shared-context.ts` builds it). Null when the cache is off, the gate blocks serving, the key is absent or expired, the value fails the shared shape, or the command errors — every null is the same to the caller: fall back to the durable load. Unlike `peek`, a gate block counts one `bypass`: the lane's fallback read is this call, and the bypass belongs with the read that was refused. Never throws; an expired key is a miss, so a stale value is never served.
+	 */
+	async getShared<T>(key: string): Promise<T | null> {
+		if (!this.enabled || !this.redis) {
+			this.count("bypass", "shared");
+			this.note("cache off");
+			return null;
+		}
+		// DG-1b (phase 81): a gate that does not allow serving never serves a shared entry; the caller loads durably.
+		if (!this.gateAllows()) {
+			this.count("bypass", "shared");
+			this.note("dragonfly gate blocked");
+			return null;
+		}
+		const redis = this.redis;
+		try {
+			const raw = await this.attempt(() => redis.get(key));
+			this.noteConnected();
+			if (raw === null) {
+				this.count("miss", "shared");
+				return null;
+			}
+			const parsed = parseEnvelope<T>(raw, "shared");
+			if (!parsed.ok) {
+				this.count("error", "shared");
+				this.count("bypass", "shared");
+				this.note("malformed cache value");
+				return null;
+			}
+			this.count("hit", "shared");
+			return parsed.value;
+		} catch (cause) {
+			this.fail(cause, true, "shared");
+			return null;
+		}
+	}
+
+	/**
+	 * Write one E2 shared-lane entry by its exact key with its own TTL — the per-kind TTL the store passes (`output` 60 s, `context` 300 s, `recall` 600 s). `ttlSeconds` ≤ 0 writes nothing. Never throws; the caller already has its answer. Writes are not gate-blocked (DG-1b leaves the write path for the probe): a write under a blocked gate is never read back until the gate allows.
+	 */
+	async putShared(key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
+		return this.writeKey("shared", key, value, ttlSeconds);
+	}
+
+	/**
+	 * E2 (phase 82) Lua claim-once on a shared-lane slot: one `eval` round trip. `"won"` when this caller claimed the slot, `"lost"` when another caller already holds it, `"bypass"` when no command could be sent (cache off, gate blocked, no `EVAL`, or a failed/timed-out script — `script()` already counted that failure as an `error`; the store counts claim bypasses separately). Never throws. The TTL is the slot's own lifetime, at least one second.
+	 */
+	async claimShared(key: string, claimId: string, ttlSeconds: number): Promise<"won" | "lost" | "bypass"> {
+		if (!this.enabled || !this.redis) return "bypass";
+		if (!this.gateAllows()) return "bypass";
+		const ttl = Math.max(1, Math.floor(ttlSeconds));
+		const outcome = await this.script(SHARED_CLAIM_SCRIPT, [key], [claimId, String(ttl)]);
+		if (!outcome.ok) return "bypass";
+		return outcome.value === 1 ? "won" : "lost";
 	}
 
 	/**
@@ -1274,6 +1409,10 @@ function cacheTtl(klass: CacheClass, refreshAt: number | null, now: number): num
 }
 
 function shapeOk(klass: CacheClass, value: unknown): boolean {
+	if (klass === "shared") {
+		// E2 shared lane: the context is text, output/recall are objects; any JSON value round-trips the envelope. A value `JSON.stringify` drops or throws can never be a served value, so it is not storable either.
+		return value !== undefined && typeof value !== "function" && typeof value !== "symbol" && typeof value !== "bigint";
+	}
 	if (klass === "brief") return typeof value === "string";
 	if (klass === "brief-snapshot") {
 		if (!value || typeof value !== "object") return false;

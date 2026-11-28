@@ -23,6 +23,7 @@
  * Kill switch: `SUBSTRATE_BREAKER=0` leaves every gate's breaker `null`, which
  * is exactly today's behaviour plus the metrics.
  */
+import { normalizeCorrelationId } from "./correlation.ts";
 
 export const PLANES = ["greptime", "index", "cache", "hindsight", "lightrag"] as const;
 export type PlaneName = (typeof PLANES)[number];
@@ -191,6 +192,12 @@ export interface PlaneSample {
 	outcome: PlaneOutcome;
 	durationMs: number;
 	reason?: string;
+	/**
+	 * The validated correlation id this call ran under (phase 86, E5), or
+	 * absent when the caller ran uncorrelated. Always the validated form —
+	 * raw caller input never reaches a sample.
+	 */
+	correlationId?: string;
 }
 
 export type PlaneObserver = (sample: PlaneSample) => void;
@@ -216,19 +223,22 @@ export async function callPlane<T>(
 	gate: PlaneGate | null | undefined,
 	op: string,
 	fn: () => Promise<T>,
-	opts: { isFailure?: (error: unknown) => boolean } = {},
+	opts: { isFailure?: (error: unknown) => boolean; correlationId?: string | null } = {},
 ): Promise<T> {
 	if (!gate) return fn();
+	// Validation IS the redaction: only the strict alphabet reaches a sample.
+	const validated = normalizeCorrelationId(opts.correlationId ?? null);
+	const correlationId = validated === null ? undefined : validated;
 	const breaker = gate.breaker;
 	if (breaker && !breaker.allow()) {
-		gate.observe?.({ plane: gate.plane, op, outcome: "open", durationMs: 0 });
+		gate.observe?.({ plane: gate.plane, op, outcome: "open", durationMs: 0, ...(correlationId === undefined ? {} : { correlationId }) });
 		throw new BreakerOpenError(gate.plane, breaker.retryAfterMs());
 	}
 	const started = performance.now();
 	try {
 		const value = await fn();
 		breaker?.onSuccess();
-		gate.observe?.({ plane: gate.plane, op, outcome: "ok", durationMs: performance.now() - started });
+		gate.observe?.({ plane: gate.plane, op, outcome: "ok", durationMs: performance.now() - started, ...(correlationId === undefined ? {} : { correlationId }) });
 		return value;
 	} catch (error) {
 		const durationMs = performance.now() - started;
@@ -236,12 +246,12 @@ export async function callPlane<T>(
 			const reason = error instanceof Error ? error.message : String(error);
 			breaker?.onFailure(reason);
 			const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
-			gate.observe?.({ plane: gate.plane, op, outcome: timedOut ? "timeout" : "error", durationMs, reason });
+			gate.observe?.({ plane: gate.plane, op, outcome: timedOut ? "timeout" : "error", durationMs, reason, ...(correlationId === undefined ? {} : { correlationId }) });
 		} else {
 			// The plane answered; the call was wrong. Not the breaker's business, but
 			// still a measured call.
 			breaker?.onSuccess();
-			gate.observe?.({ plane: gate.plane, op, outcome: "ok", durationMs });
+			gate.observe?.({ plane: gate.plane, op, outcome: "ok", durationMs, ...(correlationId === undefined ? {} : { correlationId }) });
 		}
 		throw error;
 	}
@@ -281,32 +291,51 @@ export function gatedFetch(
 	gate: PlaneGate | null | undefined,
 	fetchImpl: PlaneFetch,
 	opOf: (method: string, url: string) => string,
+	correlationOf?: () => string | null,
 ): PlaneFetch {
 	if (!gate) return fetchImpl;
 	return async (input, init) => {
 		const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
 		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 		const op = opOf(method, url);
+		// E5 (phase 86): the validated correlation id rides the outgoing plane
+		// fetch as a header and is attached to the observed sample, so one id
+		// joins the Timescale/Greptime/Dragonfly calls of a single service pass.
+		const validated = normalizeCorrelationId(correlationOf?.() ?? null);
+		const correlationId = validated === null ? undefined : validated;
+		const correlatedInit = correlationId === undefined ? init : { ...init, headers: withCorrelation(init?.headers, correlationId) };
 		try {
-			return await callPlane(gate, op, async () => {
-				const response = await fetchImpl(input, init);
-				// Same signal as the request: an `AbortSignal.timeout` that fires during
-				// the body read ends it with the TimeoutError the gate classifies, whether
-				// or not the underlying stream is wired to the signal.
-				const body = await readBody(response, init?.signal ?? null);
-				const buffered = new Response(response.status === 204 || response.status === 304 ? null : body, {
-					status: response.status,
-					statusText: response.statusText,
-					headers: response.headers,
-				});
-				if (response.status >= 500) throw new PlaneServerError(buffered);
-				return buffered;
-			});
+			return await callPlane(
+				gate,
+				op,
+				async () => {
+					const response = await fetchImpl(input, correlatedInit);
+					// Same signal as the request: an `AbortSignal.timeout` that fires during
+					// the body read ends it with the TimeoutError the gate classifies, whether
+					// or not the underlying stream is wired to the signal.
+					const body = await readBody(response, correlatedInit?.signal ?? null);
+					const buffered = new Response(response.status === 204 || response.status === 304 ? null : body, {
+						status: response.status,
+						statusText: response.statusText,
+						headers: response.headers,
+					});
+					if (response.status >= 500) throw new PlaneServerError(buffered);
+					return buffered;
+				},
+				correlationId === undefined ? {} : { correlationId },
+			);
 		} catch (error) {
 			if (error instanceof PlaneServerError) return error.response;
 			throw error;
 		}
 	};
+}
+
+/** A headers value with the correlation id set. Pure: the input is never mutated. */
+function withCorrelation(headers: ConstructorParameters<typeof Headers>[0] | undefined, correlationId: string): Headers {
+	const out = new Headers(headers);
+	out.set("x-correlation-id", correlationId);
+	return out;
 }
 
 /** The whole body, or the signal's reason (as an Error carrying its name) once it aborts. */

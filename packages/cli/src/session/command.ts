@@ -58,6 +58,7 @@ import { HookInstallError, installClaudeCodeHook } from "./hook-install.ts";
 import { HOOK_TRIGGERS, type HookTrigger } from "./trigger-policy.ts";
 import { type SteerClient, type SteerFetch, createSteerClient } from "../steer/client.ts";
 import { MAX_DIGEST_CHARS } from "../steer/render.ts";
+import { RegistryMcpError, type SessionRegistryClient } from "./registry-client.ts";
 
 export const EXIT_DONE = 0;
 export const EXIT_FAILED = 1;
@@ -72,6 +73,8 @@ export const SESSION_USAGE =
 	"       substrate session recover [--json]\n" +
 	"       substrate session sync [--json]\n" +
 	"       substrate session hook <turn|plan-step|steering|baseline|context> [--session HISTORICAL_ID] [--steering-session LIVE_ID] [--binding-file PATH] [--surface S] [--plan-phase P] [--plan-step S] [--verbose]   (reads a JSON envelope on stdin; fail-open: always exits 0; `context` prints the historical-filtered live-context digest; steering hints require an explicit live handle and matching private record)\n" +
+	"       substrate session operator --session ID [--surface S] [--graph G --node N] --take | --release --lease LSE [--json]   (take or release the single-operator lease; the holder check is the server's, never this CLI's own)\n" +
+	"       substrate session conflicts [--graph G] [--json]   (read-only: (worktree, file) pairs two or more live sessions touch, sorted)\n" +
 	`       substrate session hook-config <${HOOK_CONFIG_TARGETS.join("|")}>   (prints the hook configuration to install; installs nothing)\n` +
 	"       substrate session hook-install claude-code --settings PATH [--write]   (merges the Stop hook into a Claude Code settings file; without --write it only reports; an operator runs it, never this repository)\n" +
 	`triggers: ${CHECKPOINT_TRIGGERS.join(", ")}\n` +
@@ -116,6 +119,8 @@ export interface SessionDeps {
 	/** The overall budget of `session hook` in milliseconds (default `HOOK_TIMEOUT_MS`). A test seam. */
 	hookTimeoutMs?: number;
 	/** The fetch of the REST routes the `steering` and `context` hook triggers read (default: global `fetch`). A test seam. */
+	/** The MCP client for `operator`/`conflicts` (phase 83). Absent: those subcommands refuse with exit 3 rather than guessing. */
+	registry?: SessionRegistryClient | undefined;
 	steerFetch?: SteerFetch;
 }
 
@@ -123,10 +128,10 @@ export interface SessionDeps {
 // Grammar
 // ---------------------------------------------------------------------------
 
-type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync" | "hook" | "hook-config" | "hook-install";
+type Sub = "checkpoint" | "checkpoints" | "rollback" | "recover" | "sync" | "hook" | "hook-config" | "hook-install" | "operator" | "conflicts";
 
-const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config", "hook-install"];
-const VALUE_FLAGS: readonly string[] = ["session", "steering-session", "binding-file", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step", "settings"];
+const SUBCOMMANDS: readonly Sub[] = ["checkpoint", "checkpoints", "rollback", "recover", "sync", "hook", "hook-config", "hook-install", "operator", "conflicts"];
+const VALUE_FLAGS: readonly string[] = ["session", "steering-session", "binding-file", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step", "settings", "graph", "node", "lease"];
 const ALLOWED: Record<Sub, readonly string[]> = {
 	checkpoint: ["json", "session", "surface", "trigger", "transcript-ref", "omp-session", "plan-phase", "plan-step"],
 	checkpoints: ["json", "session", "surface", "offline"],
@@ -136,6 +141,8 @@ const ALLOWED: Record<Sub, readonly string[]> = {
 	hook: ["session", "steering-session", "binding-file", "surface", "plan-phase", "plan-step", "verbose"],
 	"hook-config": [],
 	"hook-install": ["settings", "write"],
+	operator: ["json", "session", "surface", "graph", "node", "take", "release", "lease"],
+	conflicts: ["json", "graph"],
 };
 
 interface Parsed {
@@ -310,6 +317,10 @@ export async function runSession(argv: readonly string[], deps: SessionDeps): Pr
 				return await commandRecover(deps, out, run, json, failure);
 			case "hook":
 				return await commandHook(parsed, deps, out, run, surface, clientFor, steerClientFor);
+			case "operator":
+				return await commandOperator(parsed, deps, out, surface, json, failure, usage);
+			case "conflicts":
+				return await commandConflicts(parsed, deps, out, json, failure);
 			case "hook-config":
 				deps.out(renderHookConfig(parsed.positional[0] as HookConfigTarget));
 				return EXIT_DONE;
@@ -830,4 +841,84 @@ async function commandHook(parsed: Parsed, deps: SessionDeps, out: Output, run: 
 	}
 	if (parsed.flags.has("verbose")) out.error(line);
 	return EXIT_DONE;
+}
+
+// ---------------------------------------------------------------------------
+// operator / conflicts (phase 83, E1)
+// ---------------------------------------------------------------------------
+
+async function commandOperator(parsed: Parsed, deps: SessionDeps, out: Output, surface: string, json: boolean, failure: Failure, usage: Usage): Promise<number> {
+	const take = parsed.flags.has("take");
+	const release = parsed.flags.has("release");
+	if (take === release) return usage("operator takes exactly one of --take or --release");
+	if (parsed.positional.length > 0) return usage("`session operator` takes no positional argument");
+	const sessionId = flagValue(parsed, "session");
+	if (sessionId === undefined || sessionId.length === 0 || sessionId.length > 512) return usage("operator needs --session ID (1 to 512 characters)");
+	const registry = deps.registry;
+	if (registry === undefined) return failure("unavailable", "the session registry client is not configured: cannot take or release an operator lease", EXIT_REFUSED);
+	const leaseId = flagValue(parsed, "lease");
+	if (release && leaseId === undefined) {
+		return failure("lease-id-required", "release needs --lease with the id printed by --take: without it the server refuses (lease-id-required), so only the holder's token lands", EXIT_REFUSED);
+	}
+	let targets: Array<{ graph_id: string; node_id: string }> = [];
+	const graphId = flagValue(parsed, "graph");
+	const nodeId = flagValue(parsed, "node");
+	try {
+		if (graphId !== undefined || nodeId !== undefined) {
+			if (graphId === undefined || nodeId === undefined) return usage("operator needs --graph G and --node N together, or neither (all attributed nodes)");
+			targets = [{ graph_id: graphId, node_id: nodeId }];
+		} else {
+			const snapshot = await registry.snapshot();
+			const seen = new Set<string>();
+			for (const entry of snapshot.entries) {
+				if (entry.session_id !== sessionId || entry.graph_id === null || entry.node_id === null || entry.lease_state !== "held") continue;
+				const key = `${entry.graph_id} ${entry.node_id}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				targets.push({ graph_id: entry.graph_id, node_id: entry.node_id });
+			}
+		}
+		if (targets.length === 0) return failure("no-target", `no held node is attributed to session ${sessionId}: pass --graph G --node N`, EXIT_REFUSED);
+		const results = [];
+		let refused = false;
+		for (const target of targets) {
+			const outcome = take
+				? await registry.take({ graph_id: target.graph_id, node_id: target.node_id, session_id: sessionId, surface })
+				: await registry.release({ graph_id: target.graph_id, node_id: target.node_id, lease_id: leaseId as string });
+			const ok = take ? outcome.claimed === true : outcome.released === true || outcome.ok === true;
+			if (!ok) refused = true;
+			results.push({ graph_id: target.graph_id, node_id: target.node_id, ok, action: outcome.action, reason: outcome.reason, holder: outcome.holder, lease_id: outcome.lease_id });
+		}
+		if (json) out.json({ ok: !refused, command: "operator", session_id: sessionId, action: take ? "take" : "release", results });
+		else {
+			for (const result of results) {
+				out.line(`${result.ok ? "operator" : "refused"} ${result.graph_id}/${result.node_id}: ${result.action ?? "unknown"}${result.lease_id !== null && take ? ` lease ${result.lease_id}` : ""}${result.reason !== null ? ` reason ${result.reason}` : ""}${result.holder !== null ? ` holder ${result.holder}` : ""}`);
+			}
+		}
+		return refused ? EXIT_REFUSED : EXIT_DONE;
+	} catch (error) {
+		if (error instanceof RegistryMcpError) return failure(error.kind, error.message, error.kind === "refused" ? EXIT_REFUSED : EXIT_FAILED);
+		return failure("unexpected", error instanceof Error ? error.message : String(error));
+	}
+}
+
+async function commandConflicts(parsed: Parsed, deps: SessionDeps, out: Output, json: boolean, failure: Failure): Promise<number> {
+	if (parsed.positional.length > 0) return failure("usage", "`session conflicts` takes no positional argument", EXIT_USAGE);
+	const registry = deps.registry;
+	if (registry === undefined) return failure("unavailable", "the session registry client is not configured: cannot list conflicts", EXIT_REFUSED);
+	try {
+		const snapshot = await registry.snapshot();
+		const graph = flagValue(parsed, "graph");
+		const conflicts = graph === undefined ? snapshot.conflicts : snapshot.conflicts.filter((conflict) => snapshot.entries.some((entry) => entry.graph_id === graph && entry.worktree_path === conflict.worktree_path));
+		if (json) out.json({ ok: true, command: "conflicts", as_of: snapshot.as_of, degraded: snapshot.degraded, conflicts });
+		else {
+			if (conflicts.length === 0) out.line("no conflicting files");
+			for (const conflict of conflicts) out.line(`conflict ${conflict.worktree_path} ${conflict.file} sessions ${conflict.session_ids.join(",")}`);
+			if (snapshot.degraded) out.line("degraded: last-known registry, the index did not answer");
+		}
+		return EXIT_DONE;
+	} catch (error) {
+		if (error instanceof RegistryMcpError) return failure(error.kind, error.message, error.kind === "refused" ? EXIT_REFUSED : EXIT_FAILED);
+		return failure("unexpected", error instanceof Error ? error.message : String(error));
+	}
 }

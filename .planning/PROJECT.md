@@ -4,6 +4,18 @@
 **Control plane:** Notion "Agent Task Graph" + Linear team Spectrum Web Co
 **Repo:** `swcstudiospace/agent-substrate` (private)
 
+## Current Milestone: v1.9 Cross-Resource Enhancements & Quality Baseline (Wave 8)
+
+**Goal:** Deliver the 8 cross-resource enhancements (E1–E8) across Leader, Hindsight, DragonflyDB, TimescaleDB, GreptimeDB and LightRAG on the VPS with a production-grade, enterprise-ready quality baseline.
+
+**Target features:**
+- DG-1a/DG-1b DragonflyDB Gate (Dragonfly readiness gate before E2 cache)
+- E2 Dragonfly shared-context cache for CLI Agents and Grok Bot
+- E1 Live Steering multi-worktree sessions
+- E3 unified memory fabric + E6 episodic memory (Hindsight/LightRAG)
+- E4 CLI Agent + Grok Bot orchestration + E7 Leader fencing
+- E5 observability loop + E8 session replay and audit
+
 ## Current State
 
 **Shipped v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** (phases 71-78, override closeout 2026-11-22, audit `gaps_found`): session boundary with independent credentials (71), repo allowlist with scoped grant credentials (72, passed 7/7), ledger tamper evidence with hourly anchors (73, passed), cross-repo compensating actions (74), Dragonfly degradation to the authoritative store (75, passed), telemetry buffer with dead-letter replay (76), keyed steering idempotency (77), cross-layer reconciliation (78). Merged to `main` as PR #223 (8 Graph-Engineering runtime features on top: LeaseExpirySweeper, `memory_provenance`, batch skills propose with dry-run diff, per-tool latency histogram, `migration_health`, `/healthz` reconcile state, `repo_scope_status`, `events_dead_letter` list/replay). Full local gate green: 12615 tests pass, 0 fail. Unresolved requirements HARD-S1, HARD-R1, HARD-R3, HARD-H1, HARD-H2 remain `human_needed` on operator-gated live proofs (PG restart/replay suites, migration-43/44-45 rehearsals, systemd paths, anchor windows); resumes: `/gsd:verify-work 71|74|76|77|78`. Archive: `.planning/milestones/v1.8-*`; known verification overrides: 50 newly acknowledged, 3 carried forward (see STATE.md Deferred Items).

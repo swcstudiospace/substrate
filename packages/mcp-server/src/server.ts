@@ -45,6 +45,8 @@ import {
 	classifyEventRefusal,
 	evaluateAdmissionSlo,
 	evaluateDocsFreshnessSlo,
+	evaluateErrorBurnFromSnapshot,
+	type ErrorBurnResult,
 	type EventRefusalReason,
 	FORECAST_HORIZON_MS,
 	FORECAST_STEP_S,
@@ -54,6 +56,7 @@ import {
 	type ForecastRow,
 	forecastRow,
 	loadBurnThresholds,
+	safeCorrelationId,
 } from "@substrate/observability";
 import {
 	anonymousBridge,
@@ -1030,11 +1033,14 @@ export function createHttpServer(
 					const health = await substrate.health();
 					const hindsight = substrate.hindsightInventoryHealth();
 					const recall = substrate.recallHealth();
+					// DG-1a (phase 80): the gate verdict is body-only; it never takes the status code, which `healthStatus` already derived. A probe failure reads as no field, never an error.
+					const readiness = await substrate.dragonflyReadiness().catch(() => null);
 					return {
 						status: healthStatus(health, config.greptime !== null),
 						at: nowMs,
 						body: {
 							...health,
+							cache: readiness !== null ? { ...health.cache, readiness } : health.cache,
 							publicOrigin: config.publicOrigin,
 							// U5-4a: what a replaying client may rely on. It MUST NOT replay against `off` (or a body
 							// without this field); the mode is static config, so the memo cannot make it stale.
@@ -1080,7 +1086,20 @@ export function createHttpServer(
 					memo = await compute();
 					healthMemo = memo;
 				}
-				sendJson(res, memo.status, { ...memo.body, cachedAt: new Date(memo.at).toISOString(), stale });
+				// Phase 86 (E5): per-request, never memoised. The validated incoming
+				// correlation id is echoed body-only so a caller can join this poller's
+				// pass to its plane calls; raw header values never reach the body.
+				const rawCorrelation = req.headers["x-correlation-id"];
+				const correlationId = safeCorrelationId(Array.isArray(rawCorrelation) ? rawCorrelation[0] : rawCorrelation);
+				// Phase 86 (E5): the plane error/timeout burn rides beside the body,
+				// never the status — a breached burn is information, not an outage.
+				let errorBurn: ErrorBurnResult;
+				try {
+					errorBurn = evaluateErrorBurnFromSnapshot(observability.snapshot());
+				} catch {
+					errorBurn = evaluateErrorBurnFromSnapshot([]);
+				}
+				sendJson(res, memo.status, { ...memo.body, ...(correlationId !== null ? { correlationId } : {}), errorBurn, cachedAt: new Date(memo.at).toISOString(), stale });
 				return;
 			}
 

@@ -78,6 +78,7 @@ import { transition, type SkillDecision, type SkillDecisionResult, type SkillReg
 import type { CrossRepoStore } from "./cross-repo-ops.ts";
 import { PgCrossRepoStore } from "./cross-repo-store.ts";
 import { PgWorktreeRegistry, type WorktreeRegistryStore } from "./worktree-registry.ts";
+import { PgSessionRegistry, type SessionRegistryStore } from "./session-registry.ts";
 
 /** The most entry ids one `forgottenEntryIds` call reads (a recall fan-out holds a few hits per bank). */
 const MAX_FORGET_LOOKUP_IDS = 500;
@@ -1334,6 +1335,13 @@ export class IndexStore implements MemoryStore {
 	 */
 	worktreeRegistry(): WorktreeRegistryStore {
 		return new PgWorktreeRegistry(this.sql, (op, fn) => this.plane(op, fn));
+	}
+
+	/**
+	 * The live-session registry over this store's pool (phase 83, E1): a read-only view joining `graph_nodes` leases, `live_session_bindings` and the `worktrees` registry. It only builds the adapter; no statement runs until a snapshot is served. No new table.
+	 */
+	sessionRegistry(): SessionRegistryStore {
+		return new PgSessionRegistry(this.sql, (op, fn) => this.plane(op, fn));
 	}
 
 	/**

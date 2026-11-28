@@ -337,6 +337,7 @@ export const TOOL_CLASSES: Readonly<Record<string, AdmissionClass>> = {
 	steering_wait: "read",
 	session_context: "read",
 	worktree_list: "read",
+	session_registry: "read",
 	railway_scale: "write",
 	railway_deploy: "write",
 	coord_handoff: "write",

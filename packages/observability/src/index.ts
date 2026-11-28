@@ -241,6 +241,27 @@ export {
 } from "./burn.ts";
 
 export {
+	type ErrorBurnCounts,
+	type ErrorBurnOptions,
+	type ErrorBurnResult,
+	type ErrorBurnStatus,
+	DEFAULT_ERROR_BURN_MIN_SAMPLES,
+	DEFAULT_ERROR_BURN_TARGET,
+	ERROR_BURN_ID,
+	evaluateErrorBurn,
+	evaluateErrorBurnFromSnapshot,
+} from "./error-burn.ts";
+
+export {
+	applyCorrelationHeader,
+	CORRELATION_HEADER,
+	correlationFromHeaders,
+	currentCorrelation,
+	normalizeCorrelationId,
+	safeCorrelationId,
+	runWithCorrelation,
+} from "./correlation.ts";
+export {
 	type CheckpointCounter,
 	type CheckpointExtras,
 	type CheckpointHistogram,

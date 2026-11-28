@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.8
-milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
-status: Awaiting next milestone
-stopped_at: "2026-11-12: Desk Quality gate waived by user (answers what=not_real, needs=greptile_only). Remaining open: Greptile review on PR #199 and PR #215; phase 72 owner decisions (HARD-S2, corpus proof disclosure); v1.7 owner decisions open."
-last_updated: "2026-11-22T00:07:16.201Z"
-last_activity: 2026-11-22
-last_activity_desc: Milestone v1.8 completed and archived
-state_head: b487b30664dc6e247bde83a9ce278e6a72b47a13
+current_phase: 71
+current_phase_name: Multi-Session boundary
+status: verifying
+stopped_at: Phase 86 complete, ready to verify Phase 71
+last_updated: "2026-11-28T16:02:11.884Z"
+last_activity: 2026-11-28
+last_activity_desc: Phase 86 complete, transitioned to Phase 71
+state_head: 02238999e9f77b393fea29c02ccb325d7918527f
 progress:
   total_phases: 61
   completed_phases: 47
-  total_plans: 13
+  total_plans: 0
   completed_plans: 10
-  percent: 77
-current_phase: 71
-current_phase_name: multi-session-boundary
+  percent: 75
+milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
 ---
 
 # State
@@ -292,10 +292,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.8 complete
-Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-11-22 — Milestone v1.8 completed and archived
+Phase: 71 — Multi-Session boundary
+Plan: 4
+Status: Phase complete — ready for verification
+Last activity: 2026-11-28 — Phase 86 complete, transitioned to Phase 71
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
@@ -406,7 +406,7 @@ Phases 40-43, 45 and 47-50 are accepted debt (operator decision, 2026-10-23). Ph
 ## Session Continuity
 
 Last session: 2026-10-08T21:29:12Z
-Stopped at: Phase 18 complete, ready to plan Phase 19
+Stopped at: Phase 86 complete, ready to verify Phase 71
 Resume file: None
 
 ## Performance Metrics

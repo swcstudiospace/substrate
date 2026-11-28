@@ -145,6 +145,18 @@ import {
 	type HandoffPacket,
 	type HandoffVerdict,
 } from "./handoff.ts";
+import {
+	agentNamespace,
+	checkDelegationPermission,
+	DelegationQueue,
+	LeaderFence,
+	type DeadLetter,
+	type DelegationInput,
+	type FenceResult,
+	type FenceToken,
+	type QueueEntry,
+	type QueueTask,
+} from "./orchestration.ts";
 import { holderOf, leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
 import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp, type MirrorSuccess } from "./mirror.ts";
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
@@ -234,8 +246,10 @@ import { z } from "zod";
 import { composeLiveSections, type BriefSteeringInput, type BriefWorktreesInput } from "./brief-sessions.ts";
 import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
 import { DeadlineError, sharedDeadline } from "./deadline.ts";
-import type { FabricSources } from "./fabric/types.ts";
+import type { DragonflyReadinessVerdict, FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
+import { makeDragonflyProbe } from "./fabric/dragonfly-readiness.ts";
+import { episodicPayload, parseEpisodicEvents, episodesForGraph, episodesForSession, type EpisodicRecord, type LinkedEpisodic } from "./fabric/episodic.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import { DEAD_LETTER_CAUSES, DeadLetterStore, EventBuffer, EVENT_DRAIN_TICK_MS, type DeadLetterCause, type EventDelivery } from "./event-buffer.ts";
@@ -337,6 +351,9 @@ import {
 	type WorktreeReport,
 	type WorktreeReportOutcome,
 } from "./worktree-registry.ts";
+import { detectSessionConflicts, SessionRegistry, type SessionRegistrySnapshot } from "./session-registry.ts";
+ 
+ /** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
 
 /** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
 const ANONYMOUS_RECALL_REFUSAL = "no recall bank for surface unattributed: configure HINDSIGHT_BANKS";
@@ -1606,6 +1623,7 @@ function liveInvocationFor(caller: LiveSessionCaller, call: McpToolCall): LiveSe
 export class Substrate {
 	readonly index: IndexStore | null;
 	/** Phase 68: the registry store a test injected, `null` for none; undefined builds it from the index on first use (see `worktreeAccess`). */
+	private sessionRegistryReader: SessionRegistry | null = null;
 	private readonly worktreeSeam: WorktreeRegistryStore | null | undefined;
 	private worktreeFromIndex: WorktreeRegistryStore | null = null;
 	readonly greptime: GreptimeClient | null;
@@ -1687,6 +1705,9 @@ export class Substrate {
 	/** Phase 76: the ledger event buffer (parked events awaiting retry) and the dead-letter store (events that never reached the ledger). */
 	private readonly eventBuffer: EventBuffer;
 	private readonly deadLetters: DeadLetterStore;
+	/** Phase 85 (E4/E7): the TTL'd delegation queue and the per-worktree leader fence, both in-process, audited through the ledger. */
+	private readonly delegationQueue = new DelegationQueue();
+	private readonly leaderFence = new LeaderFence();
 	/** The event buffer's drain tick, started on the first parked event and left unref'd. */
 	private eventDrainTimer: NodeJS.Timeout | null = null;
 	/** Set by the shutdown close: the tick is never re-armed, so a closed instance starts no pass. */
@@ -3196,6 +3217,37 @@ export class Substrate {
 	}
 
 	/**
+	 * E6 episodic record (phase 84): one session outcome appended to the
+	 * ledger as a `note` carrying the episode payload. Fail-open like every
+	 * event — a down ledger costs the record, never the session's work.
+	 */
+	async recordEpisode(record: EpisodicRecord, surface: Surface): Promise<{ episode_id: string; stored: boolean }> {
+		const emitted = await this.emit({
+			surface,
+			kind: "note",
+			summary: `episode ${record.episode_id}: ${record.outcome}`,
+			actor: "agent",
+			session_id: record.session_id,
+			graph_id: record.graph_id,
+			payload: episodicPayload(record),
+		}).catch(() => null);
+		return { episode_id: record.episode_id, stored: emitted?.stored ?? false };
+	}
+
+	/**
+	 * E6 episodic read (phase 84): the episodes of one session or one graph,
+	 * with supersession links resolved. The `session_registry` /
+	 * `graph_get` read path; a down ledger answers empty, never throws.
+	 */
+	async listEpisodes(query: { session_id?: string; graph_id?: string }): Promise<LinkedEpisodic[]> {
+		const result = await this.queryEvents({ session_id: query.session_id, graph_id: query.graph_id, kind: "note", include_payload: true });
+		const records = parseEpisodicEvents(result.events);
+		if (query.session_id !== undefined) return episodesForSession(records, query.session_id, query.graph_id);
+		if (query.graph_id !== undefined) return episodesForGraph(records, query.graph_id);
+		return [];
+	}
+
+	/**
 	 * One node's artifact, read completely from the graph's ledger: every event that carries the node's id, with its
 	 * payload. Not a browse window, so nothing is cut off by a limit. An unreachable ledger is an error, not an empty
 	 * artifact, so the caller can tell the two apart.
@@ -4366,6 +4418,112 @@ export class Substrate {
 			})),
 			count: all.length,
 		};
+	}
+
+	// ── E4/E7 orchestration (phase 85) ───────────────────────────────────────────
+
+	/**
+	 * Delegate work to one receiving session under the Phase 72 allowlist permission model. Denials store
+	 * nothing and return the refusal; a granted delegation is one signed handoff event plus one fail-open
+	 * audit note carrying the `agent:<surface>` namespace (the per-agent audit).
+	 */
+	async delegateHandoff(
+		input: DelegationInput & { release_lease?: boolean | undefined },
+		env: Record<string, string | undefined> = process.env,
+	): Promise<
+		| {
+				ok: true;
+				packet: HandoffPacket;
+				signed: boolean;
+				stored: boolean;
+				event: { id: string; ts: string; hash: string; prev: string | null } | null;
+				gaps: string[];
+				namespace: string;
+				error?: string;
+				warning?: string;
+				lease_released?: boolean;
+		  }
+		| { ok: false; reason: "not-allowed" | "empty-allowlist" }
+	> {
+		const parsed = repoAllowlistFromEnv(env);
+		const allowlist = parsed.ok ? parsed.value : EMPTY_REPO_ALLOWLIST;
+		const fromSession = input.from?.session_id;
+		if (!fromSession) return { ok: false, reason: "not-allowed" };
+		const permission = checkDelegationPermission(allowlist, fromSession, input.to_session, input.repo ?? "");
+		if (!permission.ok) return permission;
+		const namespace = agentNamespace(input.from.surface);
+		const result = await this.handoff({
+			...input,
+			to: { surface: input.to_surface, session_id: input.to_session },
+			release_lease: input.release_lease,
+		});
+		if (result.stored) {
+			await this.emit({
+				surface: input.from.surface,
+				kind: "note",
+				summary: `delegation ${namespace} ${fromSession} -> ${input.to_session}`,
+				session_id: fromSession,
+				graph_id: input.graph_id ?? undefined,
+				node_id: input.node_id ?? undefined,
+				repo: input.repo ?? undefined,
+				branch: input.branch ?? undefined,
+				payload: {
+					delegation: {
+						namespace,
+						from_surface: input.from.surface,
+						from_session: fromSession,
+						to_surface: input.to_surface,
+						to_session: input.to_session,
+						repo: result.packet.repo,
+						handoff_id: result.packet.handoff_id,
+					},
+				},
+			}).catch(() => null);
+		}
+		return { ...result, ok: true as const, namespace };
+	}
+
+	/** Queue one delegation task under its TTL (default 900s). Duplicate ids throw. */
+	enqueueDelegation(task: QueueTask, options: { ttlSeconds?: number | undefined; now?: number | undefined } = {}): QueueEntry {
+		return this.delegationQueue.enqueue(task, options);
+	}
+
+	/** Take the non-expired delegation tasks; expired ones move to the dead-letter list. */
+	dequeueDelegations(nowMs: number = Date.now()): QueueEntry[] {
+		return this.delegationQueue.dequeue(nowMs);
+	}
+
+	/** The delegation dead-letter list surface: every expired or failed delegation, with the count. */
+	queueDeadLetters(): { dead_letters: readonly DeadLetter[]; dead_count: number } {
+		return { dead_letters: this.delegationQueue.listDead(), dead_count: this.delegationQueue.deadCount() };
+	}
+
+	/**
+	 * Acquire (or renew) the single-writer fence for one worktree, plus one
+	 * fail-open audit note naming the holder and epoch.
+	 */
+	async fenceAcquire(sessionId: string, surface: Surface, worktreePath: string, nowMs: number = Date.now()): Promise<FenceResult> {
+		const result = this.leaderFence.acquire(sessionId, surface, worktreePath, nowMs);
+		if (result.ok) {
+			await this.emit({
+				surface,
+				kind: "note",
+				summary: `fence ${worktreePath} held by ${sessionId} at epoch ${result.token.epoch}`,
+				session_id: sessionId,
+				payload: { fence: { worktree_path: worktreePath, session_id: sessionId, epoch: result.token.epoch } },
+			}).catch(() => null);
+		}
+		return result;
+	}
+
+	/** Extend the hold behind `token`. */
+	fenceRenew(token: FenceToken, nowMs: number = Date.now()): FenceResult {
+		return this.leaderFence.renew(token, nowMs);
+	}
+
+	/** Run `fn` only while `token` is still the current hold; a stale token is rejected and `fn` never runs. */
+	fenceWrite<T>(token: FenceToken, fn: () => Promise<T> | T): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
+		return this.leaderFence.fencedWrite(token, fn);
 	}
 
 	/**
@@ -5558,6 +5716,34 @@ export class Substrate {
 			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
 			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: `the worktree registry could not be read: ${problem}` } };
 		}
+	}
+
+	/**
+	 * The live-session registry (phase 83, E1): a read-only view over `graph_nodes` leases, `live_session_bindings` and the `worktrees` registry. Never throws: a missing or failing index degrades to last-known with `degraded: true` (the ambient tree is a read, so an empty answer loses nothing and a refusal would cost every caller).
+	 */
+	async sessionRegistrySnapshot(
+		query: { repo: string | null },
+		callerSurface: Surface | null = null,
+	): Promise<{ ok: true; snapshot: SessionRegistrySnapshot } | WorktreeRefusal> {
+		if (query.repo !== null) {
+			const gate = authorizeRepo(this.config.repoScope, callerSurface, query.repo);
+			if (!gate.ok) return this.repoRefusal("session_registry", callerSurface, gate.reason, query.repo);
+		}
+		// A scoped caller reads only its own repositories, and a caller granted none reads nothing.
+		const repos = grantedRepos(this.config.repoScope, callerSurface);
+		const empty = (): { ok: true; snapshot: SessionRegistrySnapshot } => ({
+			ok: true,
+			snapshot: { entries: [], conflicts: [], as_of: new Date().toISOString(), degraded: false },
+		});
+		if (repos !== null && repos.length === 0) return empty();
+		if (this.index === null) return { ok: true, snapshot: { entries: [], conflicts: [], as_of: new Date().toISOString(), degraded: true } };
+		if (this.sessionRegistryReader === null) this.sessionRegistryReader = new SessionRegistry(this.index.sessionRegistry());
+		const snapshot = await this.sessionRegistryReader.current();
+		let entries = snapshot.entries;
+		const namedRepo = query.repo;
+		if (namedRepo !== null) entries = entries.filter((entry) => entry.repo !== null && entry.repo.toLowerCase() === namedRepo.toLowerCase());
+		if (repos !== null) entries = entries.filter((entry) => entry.repo !== null && repos.includes(entry.repo.toLowerCase()));
+		return { ok: true, snapshot: { ...snapshot, entries, conflicts: detectSessionConflicts(entries) } };
 	}
 
 	/**
@@ -9523,6 +9709,8 @@ export class Substrate {
 				const stats = this.retainOutboxStats();
 				return { size: stats.size, oldestAt: stats.oldestAt };
 			},
+			// DG-1a (phase 80): the probe reuses the cache's own `bunRedis` connection; no second client, and its timeout is the cache's command timeout.
+			dragonflyProbe: () => this.dragonflyReadiness(),
 			config: {
 				endpointPolicy: dbEndpoints.policy,
 				endpointClasses: { ...dbEndpoints.classes },
@@ -9541,6 +9729,15 @@ export class Substrate {
 			},
 		};
 	}
+	/** DG-1a gate probe verdict (phase 80), over the cache's own connection; `null` when the cache holds no client. Never throws. */
+	dragonflyReadiness(): Promise<DragonflyReadinessVerdict | null> {
+		return makeDragonflyProbe(this.cache.redisClient(), {
+			dragonflyUrl: this.config.dragonflyUrl,
+			cacheEnabled: this.config.cacheEnabled,
+			dragonflyRefused: this.config.dragonflyRefused,
+		}, { commandTimeoutMs: this.config.cacheCommandTimeoutMs })();
+	}
+
 
 	/** The field behind `teiProbe`: the last probe and when it started. */
 	private teiProbeShare: { at: number; probe: Promise<boolean | null> } | null = null;

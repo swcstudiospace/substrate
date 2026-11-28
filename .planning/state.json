@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.8 — Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation",
+  "milestone": "v1.8",
   "phases": [
     {
       "number": "16",
@@ -320,9 +320,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step (verify)",
+    "reason": "Phase 54 of 61 · 75% · ready to verify"
   },
-  "updated_at": "2026-11-22T00:07:16.266Z"
+  "updated_at": "2026-11-28T16:02:11.938Z"
 }
