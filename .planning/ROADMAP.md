@@ -13,7 +13,7 @@
 - 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); phases 66, 67 and 68 are PARTIAL, every phase with a VERIFICATION record records gaps, and the milestone is not complete. Requirements: [REQUIREMENTS.md](milestones/v1.8-REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
 - ⚠️ **v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** — Phases 71-78; closed 2026-11-22 as an override closeout with accepted debt (audit status gaps_found): 72, 73, 75 passed; 71/74/76/77/78 human_needed on operator-gated live proofs. Merged to main as PR #223 (8 Graph-Engineering features, squash b487b306). Archive: [milestones/v1.8-ROADMAP.md](milestones/v1.8-ROADMAP.md) · audit: [milestones/v1.8-MILESTONE-AUDIT.md](milestones/v1.8-MILESTONE-AUDIT.md). Known verification overrides: 50 newly acknowledged, 3 carried forward.
 - ✅ **v1.9 Cross-Resource Enhancements & Quality Baseline (Wave 8)** — Phases 80-86; shipped 2026-11-28 as PR #229 (squash 4cd42fbd): DG-1a/DG-1b DragonflyDB Gate, E2 shared-context cache, E1 Live Steering multi-worktree, E3+E6 memory fabric/episodic, E4+E7 orchestration/Leader fencing, E5+E8 observability/replay-audit. All 7 verified passed (digests canonical at merge). Pre-existing full-suite reds unchanged from main; one Wave-8 regression fixed (redaction lock). Audit: [milestones/v1.9-MILESTONE-AUDIT.md](milestones/v1.9-MILESTONE-AUDIT.md). Archive: [milestones/v1.9-ROADMAP.md](milestones/v1.9-ROADMAP.md).
-- 🚧 **v1.11 Live Fabric Interop (Wave 9)** — Phases 100-106: FSM states as live LightRAG documents (F1), Hindsight relationship learning (F2), Greptime event-driven doc refresh (F3), multi-worktree/project state sharing (F4), Live Session Steering injection v2 (F5), in-session recall (F6), 15-repo ingest verification + steering test (F7). Live windows granted for LightRAG ingest; merge without Greptile on green CI.
+- ✅ **v1.11 Live Fabric Interop (Wave 9)** — Phases 100-106; shipped 2026-11-28 as PR #232 (squash 00cba654): F1 live STATE reflection + T0 contract, F2 Hindsight relationships, F3 event-driven doc refresh, F4 multi-worktree sharing, F5 steering injection v2, F6 in-session recall, F7 15-repo ingest + steering proof. All 7 verified passed (106 via gap closure). Audit: [milestones/v1.11-MILESTONE-AUDIT.md](milestones/v1.11-MILESTONE-AUDIT.md). Archive: [milestones/v1.11-ROADMAP.md](milestones/v1.11-ROADMAP.md).
   Audited 2026-11-28 (milestone audit Wave 7, STATE.md): gates 94/94 + full-verify gap recorded; SVM verdict BUILT_NOT_DEPLOYED; NOT complete — 8 human_verify approvals, owner decisions (Phase 72 HARD-S2, corpus), Greptile trial-ended, and Wave-8 cleanup pending.
 
 <details>
@@ -1520,7 +1520,7 @@ Plans:
 
 **Goal**: STATE.md and phase transitions are ingested to LightRAG on write, so FSM states-as-docs stay current in realtime.
 
-**Status**: Not started
+**Status**: Shipped in PR #232. Verified passed 7/7 (100-VERIFICATION.md, canonical digest at merge).
 
 **Depends on**: Phase 86
 
@@ -1535,7 +1535,7 @@ Plans:
 
 **Goal**: Cross-file and cross-markdown relationships are learned into Hindsight banks and enrich recall.
 
-**Status**: Not started
+**Status**: Shipped in PR #232. Verified passed 6/6 (101-VERIFICATION.md, canonical digest at merge).
 
 **Depends on**: Phase 86
 
@@ -1550,7 +1550,7 @@ Plans:
 
 **Goal**: Agent/file-change events in Greptime trigger debounced LightRAG re-ingest of affected docs.
 
-**Status**: Not started
+**Status**: Shipped in PR #232. Verified passed 6/6 (102-VERIFICATION.md, canonical digest at merge).
 
 **Depends on**: Phase 100
 
@@ -1565,7 +1565,7 @@ Plans:
 
 **Goal**: Other agents/sessions read live state snapshots across worktrees and projects in realtime.
 
-**Status**: Not started
+**Status**: Shipped in PR #232. Verified passed 7/7 (103-VERIFICATION.md, canonical digest at merge).
 
 **Depends on**: Phase 100
 
@@ -1580,7 +1580,7 @@ Plans:
 
 **Goal**: Event-driven TODO injection into live sessions with filters, idempotency and ordering.
 
-**Status**: Not started
+**Status**: Shipped in PR #232. Verified passed 7/7 (104-VERIFICATION.md, canonical digest at merge).
 
 **Depends on**: Phases 102, 103
 
@@ -1595,7 +1595,7 @@ Plans:
 
 **Goal**: Agents recall memory/provenance mid-session within a latency budget.
 
-**Status**: Not started
+**Status**: Shipped in PR #232. Verified passed 7/7 (105-VERIFICATION.md, canonical digest at merge).
 
 **Depends on**: Phase 101
 
@@ -1610,7 +1610,7 @@ Plans:
 
 **Goal**: Ingest all 15 repos to live LightRAG and prove realtime markdown→state→session steering.
 
-**Status**: Not started
+**Status**: Shipped in PR #232. Verified passed via gap closure (106-VERIFICATION.md, canonical digest at merge). Milestone-closing phase.
 
 **Depends on**: Phases 102, 104, 105
 
