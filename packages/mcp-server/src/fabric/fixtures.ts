@@ -1,10 +1,24 @@
 /** Facts builders for the fabric's tests. Every value is a name, an enum or a count, as in production. */
 import { SLO_DEFAULTS } from "@substrate/corpus";
-import type { FabricFacts, ServiceName, ServiceReading } from "./types.ts";
-
-export const CHECKED_AT = "2026-10-21T00:00:00.000Z";
+import type { DragonflyReadinessVerdict, FabricFacts, ServiceName, ServiceReading } from "./types.ts";
 
 /** A service that is configured, answers, has a closed breaker and is not degraded. */
+
+export const CHECKED_AT = "2026-10-21T00:00:00.000Z";
+/** DG-1a verdict fixtures (phase 80): the four gate states with the same metrics vocabulary the probe emits. */
+export const READINESS_CHECKED_AT = "2026-11-28T00:00:00.000Z";
+export function okReadiness(): DragonflyReadinessVerdict {
+	return { state: "ok", reasons: [], metrics: { used_memory_bytes: 10_000_000, maxmemory_bytes: 100_000_000, headroom_ratio: 0.1, evicted_keys: 0, evicted_keys_baseline: 0 }, checkedAt: READINESS_CHECKED_AT };
+}
+export function degradedReadiness(): DragonflyReadinessVerdict {
+	return { state: "degraded", reasons: ["memory headroom ratio at or above 0.80"], metrics: { used_memory_bytes: 90_000_000, maxmemory_bytes: 100_000_000, headroom_ratio: 0.9, evicted_keys: 0, evicted_keys_baseline: 0 }, checkedAt: READINESS_CHECKED_AT };
+}
+export function unavailableReadiness(): DragonflyReadinessVerdict {
+	return { state: "unavailable", reasons: ["ping failed"], metrics: {}, checkedAt: READINESS_CHECKED_AT };
+}
+export function unconfiguredReadiness(): DragonflyReadinessVerdict {
+	return { state: "unconfigured", reasons: ["dragonfly url unset"], metrics: {}, checkedAt: READINESS_CHECKED_AT };
+}
 export function readyService(source = "health().test"): ServiceReading {
 	return { configured: true, held: false, answered: true, breaker: "closed", degraded: false, source };
 }

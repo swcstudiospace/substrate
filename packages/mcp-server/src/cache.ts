@@ -195,6 +195,14 @@ export interface CacheRedis {
 	scan?(match: string, count: number, cursor: string): Promise<[string, string[]]>;
 	/** Remove keys with UNLINK. Returns how many were removed. Used only by the confirmed reconcile repair. */
 	unlink?(keys: readonly string[]): Promise<number>;
+	/** DG-1a gate probe (phase 80): `PING` through the gated, deadline-bound `run` path. Absent on fakes that predate it; the probe answers `unavailable`, never throws. */
+	ping?(): Promise<string>;
+	/** DG-1a gate probe: `INFO <section>` as raw text through `run`, using the `cache-stats.ts` field keyset. Absent on older fakes. */
+	info?(section: "memory" | "stats"): Promise<string>;
+	/** DG-1a gate probe: a write round-trip outside the cache's key/TTL policy (`run("set", …)`). Absent on older fakes. */
+	probeSet?(key: string, value: string, ttlSeconds: number): Promise<void>;
+	/** DG-1a optional visibility: `DBSIZE` as a count; reported in probe metrics only, never changes state. */
+	dbsize?(): Promise<number>;
 }
 
 export interface ReadThroughOptions {
@@ -414,7 +422,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	// is one outcome — a failed connect still charges the breaker, a successful
 	// one on its own never clears it — and an open breaker refuses before any
 	// socket is opened, so no cooldown starts from a refusal.
-	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval" | "scan" | "unlink", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
+	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval" | "scan" | "unlink" | "ping" | "info" | "dbsize", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
 		if (cooldownUntil !== null && now() < cooldownUntil) {
 			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
@@ -441,6 +449,27 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 		eval: (script, keys, args) => run("eval", (redis) => redis.eval(script, keys.length, ...keys, ...args)),
 		scan: (match, count, cursor) => run("scan", (redis) => redis.scan(cursor, "MATCH", match, "COUNT", count)),
 		unlink: (keys) => run("unlink", (redis) => redis.unlink(...keys)),
+		// DG-1a gate probe (phase 80): PING/INFO/DBSIZE ride the same `send` path as the presence client; no second RedisClient lifecycle.
+		// `PING`/`INFO`/`DBSIZE` have no typed Bun method, so they use `send` like `presence-client.ts` and `scripts/cache-stats.ts`.
+		ping: () =>
+			run("ping", async (redis) => {
+				const reply: unknown = await redis.send("PING", []);
+				if (typeof reply !== "string") throw new Error("dragonfly ping reply is not a string");
+				return reply;
+			}),
+		info: (section) =>
+			run("info", async (redis) => {
+				const reply: unknown = await redis.send("INFO", [section]);
+				if (typeof reply !== "string") throw new Error("dragonfly info reply is not a string");
+				return reply;
+			}),
+		probeSet: (key, value, ttlSeconds) => run("set", (redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
+		dbsize: () =>
+			run("dbsize", async (redis) => {
+				const reply: unknown = await redis.send("DBSIZE", []);
+				if (typeof reply !== "number" || !Number.isFinite(reply)) throw new Error("dragonfly dbsize reply is not a number");
+				return reply;
+			}),
 		cooldownUntil: () => (cooldownUntil !== null && now() < cooldownUntil ? cooldownUntil : null),
 	};
 }

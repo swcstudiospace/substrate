@@ -234,8 +234,9 @@ import { z } from "zod";
 import { composeLiveSections, type BriefSteeringInput, type BriefWorktreesInput } from "./brief-sessions.ts";
 import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
 import { DeadlineError, sharedDeadline } from "./deadline.ts";
-import type { FabricSources } from "./fabric/types.ts";
+import type { DragonflyReadinessVerdict, FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
+import { makeDragonflyProbe } from "./fabric/dragonfly-readiness.ts";
 import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import { DEAD_LETTER_CAUSES, DeadLetterStore, EventBuffer, EVENT_DRAIN_TICK_MS, type DeadLetterCause, type EventDelivery } from "./event-buffer.ts";
@@ -9523,6 +9524,8 @@ export class Substrate {
 				const stats = this.retainOutboxStats();
 				return { size: stats.size, oldestAt: stats.oldestAt };
 			},
+			// DG-1a (phase 80): the probe reuses the cache's own `bunRedis` connection; no second client, and its timeout is the cache's command timeout.
+			dragonflyProbe: () => this.dragonflyReadiness(),
 			config: {
 				endpointPolicy: dbEndpoints.policy,
 				endpointClasses: { ...dbEndpoints.classes },
@@ -9541,6 +9544,15 @@ export class Substrate {
 			},
 		};
 	}
+	/** DG-1a gate probe verdict (phase 80), over the cache's own connection; `null` when the cache holds no client. Never throws. */
+	dragonflyReadiness(): Promise<DragonflyReadinessVerdict | null> {
+		return makeDragonflyProbe(this.cache.redisClient(), {
+			dragonflyUrl: this.config.dragonflyUrl,
+			cacheEnabled: this.config.cacheEnabled,
+			dragonflyRefused: this.config.dragonflyRefused,
+		}, { commandTimeoutMs: this.config.cacheCommandTimeoutMs })();
+	}
+
 
 	/** The field behind `teiProbe`: the last probe and when it started. */
 	private teiProbeShare: { at: number; probe: Promise<boolean | null> } | null = null;

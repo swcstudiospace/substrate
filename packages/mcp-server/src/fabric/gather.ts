@@ -7,7 +7,7 @@
  * in the fixed `source` phrase. The synchronous counters and breaker states need no wait. The call always returns
  * the facts, and nothing throws to the caller.
  */
-import type { BreakerReading, CorpusSourceReading, FabricCostView, FabricFacts, FabricSources, ServiceName, ServiceReading } from "./types.ts";
+import type { BreakerReading, CorpusSourceReading, DragonflyReadinessVerdict, FabricCostView, FabricFacts, FabricSources, ServiceName, ServiceReading } from "./types.ts";
 
 /** The per-plane deadline for each read the fabric makes, in ms. */
 export const FABRIC_SOURCE_DEADLINE_MS = 1500;
@@ -58,16 +58,19 @@ export async function gatherFabricFacts(
 	const deadlineMs = options.deadlineMs ?? FABRIC_SOURCE_DEADLINE_MS;
 	const checkedAt = sources.now();
 	const parts = sources.health();
-	const [greptimeRead, indexRead, hindsightRead, lightragRead, teiRead, costRead, corpusRead] = await Promise.all([
+	// DG-1a (phase 80): the Dragonfly gate probe rides the same per-source deadline as every other plane; absent, today's row is kept exactly. `null` verdicts likewise.
+	const probeSource = sources.dragonflyProbe;
+	const [greptimeRead, indexRead, hindsightRead, lightragRead, teiRead, costRead, corpusRead, dragonflyRead] = await Promise.all([
 		within(() => parts.greptime, deadlineMs),
 		within(() => parts.index, deadlineMs),
 		within(() => parts.hindsight, deadlineMs),
 		within(() => parts.lightrag, deadlineMs),
 		within(() => parts.tei, deadlineMs),
 		within<FabricCostView>(() => sources.railwayCost(), deadlineMs),
-		// A server with the corpus off has no readings and is not asked.
 		sources.config.corpusEnabled ? within<CorpusSourceReading>(() => sources.corpus(), deadlineMs) : Promise.resolve(null),
+		probeSource !== undefined ? within<DragonflyReadinessVerdict | null>(() => probeSource(), deadlineMs) : Promise.resolve(null),
 	]);
+	const dragonflyVerdict: DragonflyReadinessVerdict | null = dragonflyRead === null ? null : dragonflyRead.ok ? dragonflyRead.value : { state: "unavailable", reasons: [`probe ${dragonflyRead.reason}`], metrics: {}, checkedAt };
 	const snapshot = sources.snapshot();
 	const config = sources.config;
 	const outbox = sources.outbox();
@@ -79,14 +82,24 @@ export async function gatherFabricFacts(
 	const writeUnread = greptime?.up === true && greptime.writeUnread;
 
 	const services: Record<ServiceName, ServiceReading> = {
-		dragonfly: {
-			configured: config.configured.dragonfly,
-			held: config.configured.dragonfly && (config.dragonflyRefused || !cache.enabled),
-			answered: cache.connected,
-			breaker: breakerOf(breakers.cache),
-			degraded: cache.mode === "degraded",
-			source: "health().cache",
-		},
+		// DG-1a (phase 80): with a probe verdict present it is the row's truth; without one, today's `health().cache` row is kept exactly.
+		dragonfly: dragonflyVerdict === null
+			? {
+					configured: config.configured.dragonfly,
+					held: config.configured.dragonfly && (config.dragonflyRefused || !cache.enabled),
+					answered: cache.connected,
+					breaker: breakerOf(breakers.cache),
+					degraded: cache.mode === "degraded",
+					source: "health().cache",
+				}
+			: {
+					configured: dragonflyVerdict.state === "unconfigured" ? false : config.configured.dragonfly,
+					held: dragonflyVerdict.state === "unconfigured" ? false : config.configured.dragonfly && (config.dragonflyRefused || !cache.enabled),
+					answered: dragonflyVerdict.state === "ok" || dragonflyVerdict.state === "degraded",
+					breaker: breakerOf(breakers.cache),
+					degraded: dragonflyVerdict.state === "degraded" || cache.mode === "degraded",
+					source: "health().dragonflyReadiness",
+				},
 		"timescaledb-index": {
 			configured: config.configured["timescaledb-index"],
 			held: false,
@@ -156,5 +169,6 @@ export async function gatherFabricFacts(
 			// A read the source itself reports as failed is as unread as one that missed this deadline.
 			unread: corpusRead === null ? null : corpusRead.ok ? corpusRead.value.unread : corpusRead.reason,
 		},
+		dragonflyReadiness: dragonflyVerdict,
 	};
 }

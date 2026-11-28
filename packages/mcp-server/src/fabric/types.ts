@@ -41,6 +41,15 @@ export type FabricSeverity = "info" | "attention";
 export type BreakerReading = "closed" | "open" | "half-open" | "off";
 export type CostReading = "ok" | "over-budget" | "unpriced" | "unavailable" | "unconfigured" | "unknown";
 
+/** DG-1a gate probe verdict (phase 80, DG-1a): the Dragonfly readiness reading, in the same `ok`/`degraded`/`unavailable`/`unconfigured` vocabulary the fabric uses. `reasons` are bounded phrases; `metrics` are numbers, strings or `null` (`unknown`). Never a URL, host or error text. */
+export type DragonflyReadinessState = "ok" | "degraded" | "unavailable" | "unconfigured";
+export interface DragonflyReadinessVerdict {
+	state: DragonflyReadinessState;
+	reasons: string[];
+	metrics: Record<string, number | string | null>;
+	checkedAt: string;
+}
+
 /** The MCP tools this module serves. Each one is read-only and fail-open. */
 export const FABRIC_TOOLS = ["fabric_status", "fabric_optimize", "fabric_compliance"] as const;
 
@@ -153,6 +162,8 @@ export interface FabricFacts {
 	outbox: { parked: number; oldestAt: string | null };
 	railway: { status: CostReading; projectedMonthlyUsd: number | null; budgetUsd: number | null };
 	corpus: CorpusSloFacts;
+	/** DG-1a gate probe verdict (phase 80) when a probe source was present; `null` or absent when it was not. */
+	dragonflyReadiness?: DragonflyReadinessVerdict | null;
 }
 
 /** The synchronous part of the health reading: counters and breaker states that need no probe. */
@@ -222,5 +233,7 @@ export interface FabricSources {
 	 */
 	corpus(): Promise<CorpusSourceReading>;
 	outbox(): { size: number; oldestAt: string | null };
+	/** DG-1a gate probe (phase 80): the Dragonfly readiness verdict behind the cache's connection. Absent keeps today's `health().cache` row exactly; `null` likewise. */
+	dragonflyProbe?(): Promise<DragonflyReadinessVerdict | null>;
 	config: FabricConfigView;
 }

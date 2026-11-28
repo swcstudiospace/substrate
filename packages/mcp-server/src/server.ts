@@ -1030,11 +1030,14 @@ export function createHttpServer(
 					const health = await substrate.health();
 					const hindsight = substrate.hindsightInventoryHealth();
 					const recall = substrate.recallHealth();
+					// DG-1a (phase 80): the gate verdict is body-only; it never takes the status code, which `healthStatus` already derived. A probe failure reads as no field, never an error.
+					const readiness = await substrate.dragonflyReadiness().catch(() => null);
 					return {
 						status: healthStatus(health, config.greptime !== null),
 						at: nowMs,
 						body: {
 							...health,
+							cache: readiness !== null ? { ...health.cache, readiness } : health.cache,
 							publicOrigin: config.publicOrigin,
 							// U5-4a: what a replaying client may rely on. It MUST NOT replay against `off` (or a body
 							// without this field); the mode is static config, so the memo cannot make it stale.

@@ -1230,6 +1230,12 @@ describe("Bun RedisClient", () => {
 				const next = Number(store.get(key) ?? "0") + 1;
 				store.set(key, String(next));
 				out.push(`:${next}\r\n`);
+			} else if (command === "PING") {
+				out.push("+PONG\r\n");
+			} else if (command === "INFO") {
+				out.push(bulk("used_memory_bytes:100\r\nmaxmemory_bytes:1000\r\nevicted_keys:0"));
+			} else if (command === "DBSIZE") {
+				out.push(":1\r\n");
 			}
 		}
 		return { answer: out.join(""), rest: text.slice(i) };
@@ -1430,7 +1436,34 @@ describe("Bun RedisClient", () => {
 			server.close();
 		}
 	});
+	test("DG-1a probe commands ride the same gated socket: ping, info, probeSet and dbsize", async () => {
+		const store = new Map<string, string>();
+		const server = net.createServer((socket) => {
+			let pending = "";
+			socket.on("data", (buf) => {
+				pending += buf.toString("utf8");
+				const taken = takeCommands(store, pending);
+				pending = taken.rest;
+				if (taken.answer.length > 0) socket.write(taken.answer);
+			});
+			socket.on("error", () => {});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		try {
+			const redis = bunRedis(`redis://127.0.0.1:${port}`, { commandTimeoutMs: 500, cooldownMs: 0 });
+			expect(await redis.ping?.()).toBe("PONG");
+			expect(await redis.info?.("memory")).toContain("maxmemory_bytes:1000");
+			expect(await redis.info?.("stats")).toContain("evicted_keys:0");
+			await redis.probeSet?.("substrate:v1:readiness:1", "1", 60);
+			expect(await redis.get("substrate:v1:readiness:1")).toBe("1");
+			expect(await redis.dbsize?.()).toBe(1);
+		} finally {
+			server.close();
+		}
+	});
 });
+
 
 describe("GET /healthz", () => {
 	const running: Array<{ close: () => void }> = [];
