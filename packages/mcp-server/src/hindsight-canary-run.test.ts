@@ -422,10 +422,10 @@ describe("runCanary against the fake", () => {
 		test("uses HINDSIGHT_RECALL_BUDGET_MS, as the client does", async () => {
 			expect(await recallTimerMs({ HINDSIGHT_RECALL_BUDGET_MS: "2500" })).toContain(2500);
 		});
-		test("an invalid or non-positive value falls back to the 4000 ms default", async () => {
+		test("an invalid or non-positive value falls back to the 1500 ms default", async () => {
 			for (const raw of ["abc", "0", "-5", "1.5", ""]) {
 				const seen = await recallTimerMs({ HINDSIGHT_RECALL_BUDGET_MS: raw });
-				expect(seen).toContain(4000);
+				expect(seen).toContain(1500);
 			}
 		});
 		test("limits.recallBudgetMs wins over the env", async () => {

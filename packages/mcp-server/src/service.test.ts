@@ -1195,6 +1195,8 @@ describe("append-mode enforcement", () => {
 			// The stub has no `anchorCoverage`: the jobs row is null with the reason, never a throw.
 			jobs: { ledger: null, ledgerReason: expect.stringContaining("anchorCoverage") },
 			reconcile: { lastRunAt: null, clean: null, counts: {}, truncated: {}, unchecked_layers: [], graphsNamed: null, intervalS: 0, windowHours: 24 },
+			// Phase 100 (F1): no planning checkouts and no completed pass reads unknown.
+			stateFreshness: { lagSeconds: null, stale: false, reason: expect.stringContaining("unknown") },
 		});
 	});
 

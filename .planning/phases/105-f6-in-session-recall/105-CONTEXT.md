@@ -18,6 +18,8 @@ On-demand recall during sessions (brief + ad-hoc queries) with provenance and a 
 - **Path**: single `recall` entry serving brief-prefill + ad-hoc tool calls; budget enforced via deadline (fallback: Hindsight-only, then empty-with-reason).
 - **Provenance**: every hit carries bank + document + freshness; gaps explicit.
 - **Budget**: default 1.5s (brief path precedent); tunable flag, tested with fake timers.
+- **Recall composition (serves the full path)**: LightRAG retrieval + Hindsight graph expansion + TimescaleDB recency boost + DragonflyDB version-keyed cache (scope+queryHash+version keys, TTL + explicit invalidation); each leg degrades explicitly (Hindsight down → direct retrieval; cache down → bypass; Timescale down → no temporal boost).
+- **Ledger status**: hits surface ledger verification status (verified/untrusted/pending) where present; F6 never promotes (promotion lives in F7 scope).
 
 </decisions>
 

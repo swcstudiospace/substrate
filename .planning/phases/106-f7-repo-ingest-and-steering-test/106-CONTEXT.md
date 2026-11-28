@@ -18,6 +18,8 @@ Ingest all 15 originally-provided repos to live LightRAG with per-repo evidence 
 - **Ingest**: reuse `scripts/lightrag_ingestion_orchestrator.py` state machine against live LightRAG; per-repo evidence rows (docs count, samples).
 - **E2E proof**: controlled doc edit in a scratch repo → observe event → refresh → STATE/SUMMARY update → steering injection lands in a live test session's TODOs.
 - **Safety**: scratch repos only; no production doc mutation; live window recorded in SUMMARY.
+- **Ledgered intelligence proof**: one curated promotion (explicit action, content hash, rationale, session identity) → ledger receipt recorded → verify-on-recall shows trusted badge; duplicate hash spends nothing; outage queues pending with replay. Devnet only, fail-closed config; secrets redacted, never promoted.
+- **Temporal + cache proof**: windowed recency queries reconcile out-of-order events without dupes (staleness detector fires past threshold); version-keyed cache hit preserves provenance, invalidation on state-version bump verified, outage still serves source-of-truth.
 
 </decisions>
 

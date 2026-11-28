@@ -25,6 +25,7 @@
  * Every timer here is unref'd and cleared by `stop()`, which also waits for
  * the refresh in flight. Nothing on a request path waits for any of it.
  */
+import { createHash } from "node:crypto";
 import { BRIEF_RECALL_MODES, type BriefRecallMode, type BriefRecallResult, type RecallPrefetchResult } from "@substrate/observability";
 import { z } from "zod";
 import { foldLine, type BriefItem, type BriefSection } from "./brief-profile.ts";
@@ -40,8 +41,9 @@ export const DEFAULT_RECALL_TTL_S = 900;
 const MIN_RECALL_TTL_S = 60;
 export const MAX_RECALL_TTL_S = 86_400;
 export const DEFAULT_RECALL_BUDGET_MS = 1500;
-const MIN_RECALL_BUDGET_MS = 100;
-const MAX_RECALL_BUDGET_MS = 10_000;
+/** Phase 105 F6: the single tunable's range, shared with the ad-hoc fan-out (`clampRecallBudgetMs`). */
+export const MIN_RECALL_BUDGET_MS = 100;
+export const MAX_RECALL_BUDGET_MS = 10_000;
 /** The brief's wait for its recall read in `enforce`: outside the brief budget, and never longer than this. Not an env knob. */
 export const BRIEF_RECALL_CAP_MS = 3000;
 /** The fan-out's own abort budget ends this far inside the brief's cap, so a bank still running at the budget is cut before the cap fires. Not an env knob. */
@@ -421,9 +423,25 @@ export function withGraphScope(
 	return { ...snapshot, graph: { graph_id: graphId.trim().slice(0, MAX_GRAPH_ID_CHARS), hits: lines } };
 }
 
-/** The cache arguments of one fan-out answer: the sorted bank set and the query, so another set or another query is another entry. */
-export function fanoutSnapshotArgs(repo: string, banks: readonly string[], query: string): { repo: string; banks: string[]; query: string } {
-	return { repo, banks: [...banks].sort(), query };
+/** Phase 105 F6: the recall cache entry's schema version, keyed into every fan-out entry: a schema change misses once, then heals. Bump with the entry shape. */
+export const RECALL_CACHE_VERSION = 1;
+
+/** The first 16 hex chars of the sha256 of the recall query: the bounded, stable half of a fan-out cache key. */
+export function recallQueryHash(query: string): string {
+	return createHash("sha256").update(query, "utf8").digest("hex").slice(0, 16);
+}
+
+/**
+ * Phase 105 F6: the version-keyed cache arguments of one fan-out answer.
+ * Key dimensions: scope (`repo`), the sorted bank set, the query (raw for
+ * readability, `queryHash` for bounded stable matching) and the entry version
+ * `v`. TTL is `ttlS` at the call site; explicit invalidation is the memory and
+ * recall generation bump on retain/forget plus a `RECALL_CACHE_VERSION` bump
+ * on entry-shape change. A cache miss re-runs the fan-out; a cache outage
+ * bypasses (the read re-runs live), never blocks.
+ */
+export function fanoutSnapshotArgs(repo: string, banks: readonly string[], query: string): { repo: string; banks: string[]; query: string; queryHash: string; v: number } {
+	return { repo, banks: [...banks].sort(), query, queryHash: recallQueryHash(query), v: RECALL_CACHE_VERSION };
 }
 
 /** The snapshot of one fan-out: the lines of the banks that answered, the banks named, stamped `nowMs`. `bank` is the surface's own. */

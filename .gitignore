@@ -43,3 +43,6 @@ venv/
 .DS_Store
 .idea/
 *.swp
+
+# Substrate runtime state (per-machine, regenerated)
+.lightrag_ingest_state.json
