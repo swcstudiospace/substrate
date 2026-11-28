@@ -915,7 +915,9 @@ describe("the same answer with the cache off, on and broken", () => {
 			expect(first.degraded).toBe(false);
 			expect(first.results.length).toBe(2);
 			const second = await substrate.recallMemories({ query: "lease" }, "cursor");
-			expect(second).toEqual(first);
+			// asOf is a per-call freshness anchor (Phase 105); semantic equality ignores it.
+			const timeless = (reply: { results: Array<Record<string, unknown>> }) => ({ ...reply, results: reply.results.map((hit) => { const copy = { ...hit }; delete copy.asOf; return copy; }) });
+			expect(timeless(second)).toEqual(timeless(first));
 			expect(cache.health().hits).toBe(1);
 			expect(redis.sets).toBe(1);
 		} finally {
@@ -971,7 +973,9 @@ describe("the same answer with the cache off, on and broken", () => {
 			const down = new Substrate(loadConfig({}), { index: null, greptime: null, cache: brokenCache, hindsightFetch: fake.fetch });
 			const plain = await off.recallMemories({ query: "lease" }, "cursor");
 			const uncached = await down.recallMemories({ query: "lease" }, "cursor");
-			expect(uncached).toEqual(plain);
+			// asOf is a per-call freshness anchor (Phase 105); semantic equality ignores it.
+			const timeless = (reply: { results: Array<Record<string, unknown>> }) => ({ ...reply, results: reply.results.map((hit) => { const copy = { ...hit }; delete copy.asOf; return copy; }) });
+			expect(timeless(uncached)).toEqual(timeless(plain));
 			expect(brokenCache.health().bypasses).toBe(1);
 		} finally {
 			if (saved.url === undefined) delete process.env.HINDSIGHT_URL;
