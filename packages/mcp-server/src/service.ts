@@ -145,6 +145,18 @@ import {
 	type HandoffPacket,
 	type HandoffVerdict,
 } from "./handoff.ts";
+import {
+	agentNamespace,
+	checkDelegationPermission,
+	DelegationQueue,
+	LeaderFence,
+	type DeadLetter,
+	type DelegationInput,
+	type FenceResult,
+	type FenceToken,
+	type QueueEntry,
+	type QueueTask,
+} from "./orchestration.ts";
 import { holderOf, leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
 import { createMirror, type EdgeOutcome, type EdgeRelation, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp, type MirrorSuccess } from "./mirror.ts";
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
@@ -1693,6 +1705,9 @@ export class Substrate {
 	/** Phase 76: the ledger event buffer (parked events awaiting retry) and the dead-letter store (events that never reached the ledger). */
 	private readonly eventBuffer: EventBuffer;
 	private readonly deadLetters: DeadLetterStore;
+	/** Phase 85 (E4/E7): the TTL'd delegation queue and the per-worktree leader fence, both in-process, audited through the ledger. */
+	private readonly delegationQueue = new DelegationQueue();
+	private readonly leaderFence = new LeaderFence();
 	/** The event buffer's drain tick, started on the first parked event and left unref'd. */
 	private eventDrainTimer: NodeJS.Timeout | null = null;
 	/** Set by the shutdown close: the tick is never re-armed, so a closed instance starts no pass. */
@@ -4403,6 +4418,112 @@ export class Substrate {
 			})),
 			count: all.length,
 		};
+	}
+
+	// ── E4/E7 orchestration (phase 85) ───────────────────────────────────────────
+
+	/**
+	 * Delegate work to one receiving session under the Phase 72 allowlist permission model. Denials store
+	 * nothing and return the refusal; a granted delegation is one signed handoff event plus one fail-open
+	 * audit note carrying the `agent:<surface>` namespace (the per-agent audit).
+	 */
+	async delegateHandoff(
+		input: DelegationInput & { release_lease?: boolean | undefined },
+		env: Record<string, string | undefined> = process.env,
+	): Promise<
+		| {
+				ok: true;
+				packet: HandoffPacket;
+				signed: boolean;
+				stored: boolean;
+				event: { id: string; ts: string; hash: string; prev: string | null } | null;
+				gaps: string[];
+				namespace: string;
+				error?: string;
+				warning?: string;
+				lease_released?: boolean;
+		  }
+		| { ok: false; reason: "not-allowed" | "empty-allowlist" }
+	> {
+		const parsed = repoAllowlistFromEnv(env);
+		const allowlist = parsed.ok ? parsed.value : EMPTY_REPO_ALLOWLIST;
+		const fromSession = input.from?.session_id;
+		if (!fromSession) return { ok: false, reason: "not-allowed" };
+		const permission = checkDelegationPermission(allowlist, fromSession, input.to_session, input.repo ?? "");
+		if (!permission.ok) return permission;
+		const namespace = agentNamespace(input.from.surface);
+		const result = await this.handoff({
+			...input,
+			to: { surface: input.to_surface, session_id: input.to_session },
+			release_lease: input.release_lease,
+		});
+		if (result.stored) {
+			await this.emit({
+				surface: input.from.surface,
+				kind: "note",
+				summary: `delegation ${namespace} ${fromSession} -> ${input.to_session}`,
+				session_id: fromSession,
+				graph_id: input.graph_id ?? undefined,
+				node_id: input.node_id ?? undefined,
+				repo: input.repo ?? undefined,
+				branch: input.branch ?? undefined,
+				payload: {
+					delegation: {
+						namespace,
+						from_surface: input.from.surface,
+						from_session: fromSession,
+						to_surface: input.to_surface,
+						to_session: input.to_session,
+						repo: result.packet.repo,
+						handoff_id: result.packet.handoff_id,
+					},
+				},
+			}).catch(() => null);
+		}
+		return { ...result, ok: true as const, namespace };
+	}
+
+	/** Queue one delegation task under its TTL (default 900s). Duplicate ids throw. */
+	enqueueDelegation(task: QueueTask, options: { ttlSeconds?: number | undefined; now?: number | undefined } = {}): QueueEntry {
+		return this.delegationQueue.enqueue(task, options);
+	}
+
+	/** Take the non-expired delegation tasks; expired ones move to the dead-letter list. */
+	dequeueDelegations(nowMs: number = Date.now()): QueueEntry[] {
+		return this.delegationQueue.dequeue(nowMs);
+	}
+
+	/** The delegation dead-letter list surface: every expired or failed delegation, with the count. */
+	queueDeadLetters(): { dead_letters: readonly DeadLetter[]; dead_count: number } {
+		return { dead_letters: this.delegationQueue.listDead(), dead_count: this.delegationQueue.deadCount() };
+	}
+
+	/**
+	 * Acquire (or renew) the single-writer fence for one worktree, plus one
+	 * fail-open audit note naming the holder and epoch.
+	 */
+	async fenceAcquire(sessionId: string, surface: Surface, worktreePath: string, nowMs: number = Date.now()): Promise<FenceResult> {
+		const result = this.leaderFence.acquire(sessionId, surface, worktreePath, nowMs);
+		if (result.ok) {
+			await this.emit({
+				surface,
+				kind: "note",
+				summary: `fence ${worktreePath} held by ${sessionId} at epoch ${result.token.epoch}`,
+				session_id: sessionId,
+				payload: { fence: { worktree_path: worktreePath, session_id: sessionId, epoch: result.token.epoch } },
+			}).catch(() => null);
+		}
+		return result;
+	}
+
+	/** Extend the hold behind `token`. */
+	fenceRenew(token: FenceToken, nowMs: number = Date.now()): FenceResult {
+		return this.leaderFence.renew(token, nowMs);
+	}
+
+	/** Run `fn` only while `token` is still the current hold; a stale token is rejected and `fn` never runs. */
+	fenceWrite<T>(token: FenceToken, fn: () => Promise<T> | T): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
+		return this.leaderFence.fencedWrite(token, fn);
 	}
 
 	/**
