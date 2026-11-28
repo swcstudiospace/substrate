@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.9 — Unison Graph Engineering",
+  "milestone": "v1.9 — Cross-Resource Enhancements & Quality Baseline (Wave 8)",
   "phases": [
     {
       "number": "16",
@@ -320,9 +320,9 @@
     }
   ],
   "next": {
-    "command": "/gsd-discuss-phase",
-    "label": "Discuss the first phase",
-    "reason": "Project initialized — plan your first phase"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 31 of 70 · 75% · executing"
   },
-  "updated_at": "2026-11-28T04:56:57.274Z"
+  "updated_at": "2026-11-28T05:22:14.517Z"
 }
