@@ -1,76 +1,78 @@
-# Requirements: Agent Substrate v1.9 Wave 8
+# Requirements: Agent Substrate v1.11 Live Fabric Interop (Wave 9)
 
 **Defined:** 2026-11-28
-**Core Value:** CLI Agents and Grok Bot share one briefing, one event log, one skills library and one task key across Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB.
+**Core Value:** Substrate states stay live — FSM states-as-docs reflected in LightRAG in realtime, relationships learned, events refreshing docs, state shared across sessions, steering injected live, recall available mid-session.
 
 ## v1 Requirements
 
-### DG Gate
+### F1 Live STATE reflection
 
-- [ ] **DG-1a**: System has a Dragonfly readiness probe/gate that reports whether DragonflyDB is running, healthy and within capacity before any E2 cache work
-- [ ] **DG-1b**: Gate decision is implemented or documented: either the gate blocks E2 on not-ready, or records why it does not
+- [ ] **F1-01**: Post-write hook ingests STATE.md + phase SUMMARY transitions to LightRAG with run lineage
+- [ ] **F1-02**: Freshness SLI reports ingest lag; stale states detectable, never silently served
 
-### E2 Cache
+### F2 Hindsight relationships
 
-- [ ] **E2-01**: Dragonfly shared-context cache serves CLI Agents and Grok Bot with cache-aside, TTLs and Lua atomic slots
-- [ ] **E2-02**: Cache fallback to durable read is tested; stale/expired data is never served fresh
+- [ ] **F2-01**: Relation extractor records file/markdown relations (imports, refs, phase deps) with provenance
+- [ ] **F2-02**: Recall returns relationship context; loop updates relations on new evidence
 
-### E1 Steering
+### F3 Event-driven doc refresh
 
-- [ ] **E1-01**: Live Steering sessions support multi-worktree execution via SessionRegistry and live-session bindings, single operator per session via CLI
+- [ ] **F3-01**: File/change events in Greptime map to debounced, coalesced LightRAG re-ingest
+- [ ] **F3-02**: Failed refreshes surface to dead-letter; no event loss on restarts
 
-### E3/E6 Memory
+### F4 State sharing
 
-- [ ] **E3-01**: Unified memory fabric separates Hindsight bank ownership (writer) from LightRAG provenance (reader) with no silent competing writers
-- [ ] **E6-01**: Episodic memory records session outcomes indexed with provenance, supercession visible
+- [ ] **F4-01**: SessionRegistry snapshot read API keyed by session/graph/worktree with freshness metadata
+- [ ] **F4-02**: Cross-project reads work without credential leaks; degraded reads labeled
 
-### E4/E7 Orchestration
+### F5 Steering injection v2
 
-- [ ] **E4-01**: CLI Agent + Grok Bot orchestration uses delegation handoffs with namespace and permission model
-- [ ] **E7-01**: Leader fencing enforces single-writer session mutation with TTL'd queueing and dead-letter surfacing
+- [ ] **F5-01**: Subscription filters select steering-worthy events; injections idempotent + ordered per session
+- [ ] **F5-02**: Injection failures visible with retry; never duplicates a TODO
 
-### E5/E8 Observability
+### F6 In-session recall
 
-- [ ] **E5-01**: Observability loop carries correlation IDs across Timescale/Greptime/Dragonfly with dashboards and burn alerts
-- [ ] **E8-01**: Session replay/audit appends to append-only audit with replay-to-checkpoint; summary mirrors to Linear/Notion read-only
+- [ ] **F6-01**: On-demand recall path serves brief + ad-hoc queries with provenance in budget
+- [ ] **F6-02**: Misses degrade gracefully with explicit provenance gaps (never fabricated)
+
+### F7 Ingest + steering test
+
+- [ ] **F7-01**: All 15 repos ingested to live LightRAG with per-repo evidence (operator live window)
+- [ ] **F7-02**: End-to-end test proves doc edit → event → refresh → state update → steering injection
 
 ## v2 Requirements
 
-Deferred to future release. Tracked but not in current roadmap.
+Deferred.
 
-### Plug-ins
-
-- **PLUG-01**: Probe adapter (optional — decisions via code review, not a phase)
+- **F8**: Cross-machine state sync over linked machines (linking exists; state sync future)
 
 ## Out of Scope
 
-Explicitly excluded. Documented to prevent scope creep.
-
 | Feature | Reason |
-|---------|--------|
-| Hypertable conversion of non-time-series tables | Adopt-gate not met; only justified for proven volume |
-| Reversible LightRAG→RAG-backend cutover | Owner decision 2026-11-16: not reversible |
-| Leader as primary writer | Leader is GPX gate; Greptime owns ledger writes alone |
+|---|---|
+| Hypertable conversion of non-time-series tables | Adopt-gate not met (baseline guardrail) |
+| Reversible LightRAG→RAG cutover | Owner decision 2026-11-16: not reversible |
+| Solana anchor changes | No anchor work in this milestone; ledger as-is |
+| History rewrite for secrets | Never without explicit HITL approval |
+| Greptile review | Skipped per explicit operator approval (merge-no-greptile) |
 
 ## Traceability
 
-Which phases cover which requirements. Updated during roadmap creation.
-
 | Requirement | Phase | Status |
-|-------------|-------|--------|
-| DG-1a | Phase 80 | Complete |
-| DG-1b | Phase 81 | Complete |
-| E2-01, E2-02 | Phase 82 | Complete |
-| E1-01 | Phase 83 | Complete |
-| E3-01, E6-01 | Phase 84 | Complete |
-| E4-01, E7-01 | Phase 85 | Complete |
-| E5-01, E8-01 | Phase 86 | Complete |
+|---|---|---|
+| F1-01, F1-02 | Phase 100 | Pending |
+| F2-01, F2-02 | Phase 101 | Pending |
+| F3-01, F3-02 | Phase 102 | Pending |
+| F4-01, F4-02 | Phase 103 | Pending |
+| F5-01, F5-02 | Phase 104 | Pending |
+| F6-01, F6-02 | Phase 105 | Pending |
+| F7-01, F7-02 | Phase 106 | Pending |
 
 **Coverage:**
-- v1 requirements: 10 total
-- Mapped to phases: 10
+- v1 requirements: 14 total
+- Mapped to phases: 14
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-11-28*
-*Last updated: 2026-11-28 after Wave 8 milestone creation; statuses → Complete 2026-11-28 after all 7 phases verified passed*
+*Last updated: 2026-11-28 after v1.11 milestone creation*

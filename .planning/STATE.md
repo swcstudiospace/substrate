@@ -1,21 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.9
-current_phase: 86
-current_phase_name: E5 observability loop plus E8 session replay and audit
-status: complete
-stopped_at: Phase 86 complete; milestone v1.9 shipped as PR #229 (squash 4cd42fbd) 2026-11-28
-last_updated: "2026-11-28T16:30:00.000Z"
+milestone: v1.11
+milestone_name: Live Fabric Interop (Wave 9)
+status: planning
+last_updated: "2026-11-28T18:10:50.066Z"
 last_activity: 2026-11-28
-last_activity_desc: Milestone v1.9 completed and archived; 7/7 phases verified passed
-state_head: 4cd42fbdd19277deec6b6461878b1a4adc090ffc
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 7
-  completed_plans: 7
-  percent: 100
-milestone_name: "Cross-Resource Enhancements & Quality Baseline (Wave 8)"
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # State
@@ -299,10 +294,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 71 — Multi-Session boundary
-Plan: 4
-Status: Phase complete — ready for verification
-Last activity: 2026-11-28 — Phase 86 complete, transitioned to Phase 71
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-11-28 — Milestone v1.11 started
 
 ## Preflight record (2026-10-23, graph ut-mvlknrx6-2849044e)
 
