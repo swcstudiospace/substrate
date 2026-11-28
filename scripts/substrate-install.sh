@@ -166,8 +166,7 @@ put_secret() { # name value
     "    image: ${TIMESCALE_IMAGE}" \
     "    container_name: substrate-timescale" \
     "    restart: unless-stopped" \
-    "    environment:" \
-    "      POSTGRES_PASSWORD: \${SUBSTRATE_PG_PASSWORD:?set in ${ENV_FILE}}" \
+    "    env_file: [${ENV_FILE}]" \
     "    ports: ['5432:5432']" \
     "    volumes: [timescale-data:/var/lib/postgresql/data]" \
     "    healthcheck: {test: ['CMD-SHELL','pg_isready -U postgres'], interval: 10s, retries: 5}"
@@ -196,8 +195,7 @@ put_secret() { # name value
     "    image: ${HINDSIGHT_IMAGE}" \
     "    container_name: substrate-hindsight" \
     "    restart: unless-stopped" \
-    "    environment:" \
-    "      HINDSIGHT_API_KEY: \${HINDSIGHT_API_KEY:?set in ${ENV_FILE}}" \
+    "    env_file: [${ENV_FILE}]" \
     "    ports: ['8888:8888']" \
     "    volumes: [hindsight-data:/data]" \
     "    healthcheck: {test: ['CMD-SHELL','curl -sf http://localhost:8888/healthz || curl -sf http://localhost:8888/health || exit 1'], interval: 15s, retries: 5}"
@@ -207,8 +205,7 @@ put_secret() { # name value
     "    image: ${LIGHTRAG_IMAGE}" \
     "    container_name: substrate-lightrag" \
     "    restart: unless-stopped" \
-    "    environment:" \
-    "      LIGHTRAG_API_KEY: \${HINDSIGHT_API_KEY:-unset}" \
+    "    env_file: [${ENV_FILE}]" \
     "    ports: ['9621:9621']" \
     "    volumes: [lightrag-data:/app/data]" \
     "    healthcheck: {test: ['CMD-SHELL','curl -sf http://localhost:9621/health || exit 1'], interval: 15s, retries: 5}"
@@ -238,8 +235,7 @@ if [ "$NO_START" -eq 1 ]; then
   exit 0
 fi
 
-export SUBSTRATE_PG_PASSWORD="$PG_PASS" GREPTIME_PASSWORD="$GREPTIME_PASS" \
-  HINDSIGHT_API_KEY="$HINDSIGHT_KEY" LIGHTRAG_API_KEY="$LIGHTRAG_KEY"
+export SUBSTRATE_PG_PASSWORD="$PG_PASS"
 
 if [ "$RESET" -eq 1 ]; then
   docker compose -f "$COMPOSE_FILE" down -v
@@ -257,6 +253,6 @@ done
 
 echo "---"
 echo "next: scripts/substrate-verify.sh [--only=$(echo "$ONLY" | tr ' ' ',')]"
-echo "wire URLs: SUBSTRATE_PG_URL=postgresql://postgres:\$SUBSTRATE_PG_PASSWORD@localhost:5432/postgres"
-echo "  GREPTIME_URL=http://localhost:4000 DRAGONFLY_URL=redis://localhost:6379"
-echo "  HINDSIGHT_URL=http://localhost:8888 LIGHTRAG_URL=http://localhost:9621 TEI_URL=http://localhost:8080"
+printf 'wire URLs: SUBSTRATE_PG_URL=postgresql://postgres:$SUBSTRATE_PG_PASSWORD@localhost:5432/postgres\n'
+printf '  %s=%s %s=%s\n' GREPTIME_URL "http://localhost:4000" DRAGONFLY_URL "redis://localhost:6379"
+printf '  %s=%s %s=%s %s=%s\n' HINDSIGHT_URL "http://localhost:8888" LIGHTRAG_URL "http://localhost:9621" TEI_URL "http://localhost:8080"

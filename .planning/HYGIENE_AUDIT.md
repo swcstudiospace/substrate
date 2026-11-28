@@ -15,7 +15,7 @@
 - High-entropy (≥40-char) strings in added lines are all benign: git SHAs, phase slugs (`80-dg-1a-…` … `86-e5-…`), source paths (`packages/mcp-server/src/session-registry`, `…/shared-context`, …), and one UI menu-path sentence. No opaque secret-shaped values.
 - `README.md`: no secret patterns (only architectural mention of Tailscale + links to `docs/data-planes.md`, `docs/railway-tailscale.md`).
 - `docs/` + `infra/`: `tailscale`/`Tailscale` hits are architectural prose only (forwarder topology, `TS_AUTHKEY` *by name*, redaction-table entry for a `tskey-` key shape). **No `tskey-…` value, no `TS_AUTHKEY=…` value anywhere.**
-- `.env.example` (1148 lines, 430 `=` lines; wave adds only 4 comment lines + empty `SUBSTRATE_DRAGONFLY_GATE=off`): all sensitive keys are empty placeholders (`GREPTIME_PASSWORD=`, `SUBSTRATE_PG_URL=`, `SUBSTRATE_OPERATOR_TOKENS=`, …). Targeted secret-value grep: **zero hits**.
+- `.env.example` (1148 lines; wave adds only 4 comment lines plus an empty `SUBSTRATE_DRAGONFLY_GATE` entry, off by default): all sensitive keys are empty placeholders — GREPTIME_PASSWORD, SUBSTRATE_PG_URL and SUBSTRATE_OPERATOR_TOKENS are left blank. Targeted secret-value grep: **zero hits**.
 - `.gitignore` correctly excludes `.env`/`.env.*` (except `.env.example`), `*.pem`, `*.key`, `*.db`/`*.sqlite*`, `*.log`.
 
 ## 2. Internal hosts / tailnet names — NONE INTRODUCED
