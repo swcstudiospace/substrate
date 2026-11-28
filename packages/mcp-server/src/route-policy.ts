@@ -69,6 +69,7 @@ export const MCP_TOOL_POLICY: Readonly<Record<string, Declaration>> = {
 	docs_search: GATED("scopedDocsRefusal: refused to a scoped caller, since the docs corpus spans every repository"),
 	docs_lightrag_query: GATED("scopedDocsRefusal: refused to a scoped caller, since the LightRAG corpus spans every repository"),
 	worktree_list: GATED("listWorktrees: a named repository must be granted; otherwise the store reads granted rows only"),
+	session_registry: GATED("sessionRegistrySnapshot: a named repository must be granted; otherwise granted rows only"),
 	coord_drift_scan: GATED("scopedDriftScan: the repository and any path must be granted"),
 	coord_handoff: GATED("scopedWriteRefusal: the named repository and any named graph's repository must be granted and agree"),
 	coord_handoff_list: GATED("scopedGraphRefusal: the graph's repository must be granted before its packets are read"),

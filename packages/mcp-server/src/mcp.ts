@@ -2352,6 +2352,28 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 	);
 
+	server.registerTool(
+		"session_registry",
+		{
+			title: "Read the live-session registry",
+			description:
+				"The live-session registry (phase 83, E1): which sessions are live for which worktree, as a view over the graph_nodes leases, the live_session_bindings and the worktrees registry — no new table. " +
+				"`entries` has one row per live session per worktree with its graph, lease state and the files it touches; `conflicts` names every (worktree, file) pair two or more live sessions touch, sorted. " +
+				"`degraded` is true when the index could not answer and the rows are last-known instead (an empty ambient answer loses nothing). " +
+				"A read: it changes nothing. Entries never carry a lease id.",
+			inputSchema: {
+				repo: z.string().optional().describe("owner/name, to read one repository's entries and conflicts."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (request) => {
+			const repo = typeof request.repo === "string" && request.repo.length > 0 ? request.repo : null;
+			const outcome = await substrate.sessionRegistrySnapshot({ repo }, callerSurface);
+			if (!outcome.ok) return { ...json(outcome.body), isError: true };
+			return json(outcome.snapshot);
+		},
+	);
+
 	/** A Railway read: the client's own failures become a tool error carrying the kind and the redacted message only (D45-j). */
 	const railwayRead = async (run: () => Promise<unknown>) => {
 		try {

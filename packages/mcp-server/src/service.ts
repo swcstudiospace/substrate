@@ -338,6 +338,9 @@ import {
 	type WorktreeReport,
 	type WorktreeReportOutcome,
 } from "./worktree-registry.ts";
+import { detectSessionConflicts, SessionRegistry, type SessionRegistrySnapshot } from "./session-registry.ts";
+ 
+ /** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
 
 /** The refusal `resolveRecallBanks` gives an anonymous caller with no bank of its own; the docs context's recall gives the same. */
 const ANONYMOUS_RECALL_REFUSAL = "no recall bank for surface unattributed: configure HINDSIGHT_BANKS";
@@ -1607,6 +1610,7 @@ function liveInvocationFor(caller: LiveSessionCaller, call: McpToolCall): LiveSe
 export class Substrate {
 	readonly index: IndexStore | null;
 	/** Phase 68: the registry store a test injected, `null` for none; undefined builds it from the index on first use (see `worktreeAccess`). */
+	private sessionRegistryReader: SessionRegistry | null = null;
 	private readonly worktreeSeam: WorktreeRegistryStore | null | undefined;
 	private worktreeFromIndex: WorktreeRegistryStore | null = null;
 	readonly greptime: GreptimeClient | null;
@@ -5559,6 +5563,34 @@ export class Substrate {
 			const problem = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
 			return { ok: false, status: 503, body: { error: "worktrees.unavailable", problem: `the worktree registry could not be read: ${problem}` } };
 		}
+	}
+
+	/**
+	 * The live-session registry (phase 83, E1): a read-only view over `graph_nodes` leases, `live_session_bindings` and the `worktrees` registry. Never throws: a missing or failing index degrades to last-known with `degraded: true` (the ambient tree is a read, so an empty answer loses nothing and a refusal would cost every caller).
+	 */
+	async sessionRegistrySnapshot(
+		query: { repo: string | null },
+		callerSurface: Surface | null = null,
+	): Promise<{ ok: true; snapshot: SessionRegistrySnapshot } | WorktreeRefusal> {
+		if (query.repo !== null) {
+			const gate = authorizeRepo(this.config.repoScope, callerSurface, query.repo);
+			if (!gate.ok) return this.repoRefusal("session_registry", callerSurface, gate.reason, query.repo);
+		}
+		// A scoped caller reads only its own repositories, and a caller granted none reads nothing.
+		const repos = grantedRepos(this.config.repoScope, callerSurface);
+		const empty = (): { ok: true; snapshot: SessionRegistrySnapshot } => ({
+			ok: true,
+			snapshot: { entries: [], conflicts: [], as_of: new Date().toISOString(), degraded: false },
+		});
+		if (repos !== null && repos.length === 0) return empty();
+		if (this.index === null) return { ok: true, snapshot: { entries: [], conflicts: [], as_of: new Date().toISOString(), degraded: true } };
+		if (this.sessionRegistryReader === null) this.sessionRegistryReader = new SessionRegistry(this.index.sessionRegistry());
+		const snapshot = await this.sessionRegistryReader.current();
+		let entries = snapshot.entries;
+		const namedRepo = query.repo;
+		if (namedRepo !== null) entries = entries.filter((entry) => entry.repo !== null && entry.repo.toLowerCase() === namedRepo.toLowerCase());
+		if (repos !== null) entries = entries.filter((entry) => entry.repo !== null && repos.includes(entry.repo.toLowerCase()));
+		return { ok: true, snapshot: { ...snapshot, entries, conflicts: detectSessionConflicts(entries) } };
 	}
 
 	/**

@@ -110,6 +110,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"session_context",
 	// Phase 68 (FLEET-02): the worktree registry read, as an MCP tool and the `GET /worktrees` route under one name. Inspection only.
 	"worktree_list",
+	// Phase 83 (E1): the live-session registry read. Inspection only, and a failed read degrades to last-known instead of refusing.
+	"session_registry",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",

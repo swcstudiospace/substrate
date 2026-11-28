@@ -75,6 +75,7 @@ import { runSpool } from "./spool.ts";
 import { runMigrationHealth } from "./migration-health.ts";
 import { spoolConfig } from "../../collectors/src/spool.ts";
 import { runSession } from "./session/command.ts";
+import { createSessionRegistryClient } from "./session/registry-client.ts";
 import { runSteer } from "./steer/index.ts";
 import { CORPUS_TIMEOUT_MS, runCorpus } from "./corpus/index.ts";
 import type { TranscriptPort } from "./session/rollback.ts";
@@ -840,6 +841,7 @@ switch (command) {
 				transcript: transcriptPort(str(args.surface) ?? "claude-code"),
 				out: (text) => process.stdout.write(text),
 				err: (text) => process.stderr.write(text),
+				registry: createSessionRegistryClient({ url: base(), tokenFor: (surface) => resolveBearer(surface, process.env) ?? undefined, timeoutMs: timeout() }),
 			}),
 		);
 		break;
@@ -899,7 +901,7 @@ switch (command) {
 				"substrate index migrate-health [--json]   (read-only: digest drift per key plus pending migrations, from SUBSTRATE_PG_URL when set; exit 0 no drift, 1 drift, 2 usage)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
 				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
-				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync   (substrate session for the flags)\n" +
+				"substrate session checkpoint | checkpoints | rollback <ckpt|seq|previous> | recover | sync | operator --session ID --take|--release | conflicts   (substrate session for the flags)\n" +
 				"substrate steer open --repo R | heartbeat --session ID | close --session ID | sessions | status | queue --session ID --action A --body T | ack DIRECTIVE --applied|--declined | list --session ID | listen --session ID [--once] | context   (private commands use --binding-file PATH; substrate steer for all flags; exit 0 done, 1 failed, 2 usage, 3 refused)\n" +
 				"substrate consistency verify [--json] [--bank B] [--limit N] [--since ISO] [--repair --server-stopped [--repair-orphans]]   (exit 0 consistent, 1 drift, 2 usage, 3 unreadable store)\n" +
 				"substrate reconcile [--plan] | --apply PLAN_ID --confirm   (exit 0 nothing to repair or applied, 1 failed or refused, 2 usage, 3 a plan printed; docs/greptime-ledger.md)\n" +
