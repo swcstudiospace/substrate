@@ -63,18 +63,38 @@ function hindsightEnv(): () => void {
 class FakeRedis implements CacheRedis {
 	readonly values = new Map<string, string>();
 	readonly ttls: number[] = [];
+	readonly expiresAt = new Map<string, number>();
+	/** Fake clock (epoch ms) for TTL expiry; null is real time. The E2 shared-lane tests pin it, so expiry is deterministic. */
+	nowMs: number | null = null;
 	fail = false;
 	/** GET succeeds and SET rejects, so a save failure is distinct from a dead server. */
 	failSet = false;
 	hang = false;
 	failMessage = "connect ECONNREFUSED redis://default:s3cret@db.internal:6379";
 	sets = 0;
+	evals = 0;
 	private readonly waiting: Array<() => void> = [];
+
+	private now(): number {
+		return this.nowMs ?? Date.now();
+	}
+
+	/** Live-value check with expiry: an expired key is absent. */
+	private live(key: string): boolean {
+		const at = this.expiresAt.get(key);
+		if (at === undefined) return this.values.has(key);
+		if (at <= this.now()) {
+			this.expiresAt.delete(key);
+			this.values.delete(key);
+			return false;
+		}
+		return this.values.has(key);
+	}
 
 	async get(key: string): Promise<string | null> {
 		if (this.hang) await new Promise<void>((resolve) => this.waiting.push(resolve));
 		if (this.fail) throw new Error(this.failMessage);
-		return this.values.get(key) ?? null;
+		return this.live(key) ? (this.values.get(key) ?? null) : null;
 	}
 
 	async set(key: string, value: string, ttlSeconds: number): Promise<void> {
@@ -82,6 +102,7 @@ class FakeRedis implements CacheRedis {
 		if (this.hang) await new Promise<void>((resolve) => this.waiting.push(resolve));
 		if (this.fail || this.failSet) throw new Error(this.failMessage);
 		this.values.set(key, value);
+		this.expiresAt.set(key, this.now() + ttlSeconds * 1000);
 		this.ttls.push(ttlSeconds);
 	}
 
@@ -91,6 +112,20 @@ class FakeRedis implements CacheRedis {
 		const next = Number(this.values.get(key) ?? "0") + 1;
 		this.values.set(key, String(next));
 		return next;
+	}
+
+	/** The E2 claim Lua's semantics, atomically per call: live key → 0, else set with EX → 1. */
+	async eval(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown> {
+		this.evals += 1;
+		if (this.hang) await new Promise<void>((resolve) => this.waiting.push(resolve));
+		if (this.fail) throw new Error(this.failMessage);
+		expect(script).toContain("exists");
+		expect(keys).toHaveLength(1);
+		const key = keys[0] as string;
+		if (this.live(key)) return 0;
+		this.values.set(key, args[0] as string);
+		this.expiresAt.set(key, this.now() + Number(args[1]) * 1000);
+		return 1;
 	}
 
 	release(): void {
@@ -2308,5 +2343,97 @@ describe("ReadThroughCache dragonfly gate (DG-1b, phase 81)", () => {
 		});
 		expect(value).toEqual([{ text: "from durable source" }]);
 		expect(loads).toBe(1);
+	});
+});
+describe("shared lane (E2, phase 82)", () => {
+	const SHARED_KEY = "substrate:v1:shared:herdr:ut-1:context:sess-7";
+	const gateVerdict = (state: DragonflyReadinessVerdict["state"]): DragonflyReadinessVerdict => ({
+		state,
+		reasons: [`shared test: ${state}`],
+		metrics: {},
+		checkedAt: "2026-11-28T00:00:00.000Z",
+	});
+
+	test("classOf names a shared key shared and nothing else shapes it", () => {
+		expect(classOf(SHARED_KEY)).toBe("shared");
+		expect(classOf("substrate:v1:shared:herdr:ut-1:output:pane-7")).toBe("shared");
+		expect(classOf("substrate:v1:sharedx:herdr:ut-1:context:s")).toBeNull();
+	});
+
+	test("putShared and getShared round-trip under the exact namespaced key with the caller's TTL", async () => {
+		resetDragonflyGateVerdict();
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		expect(await cache.putShared(SHARED_KEY, "held by herdr", 300)).toBe(true);
+		expect(await cache.getShared<string>(SHARED_KEY)).toBe("held by herdr");
+		expect(redis.values.has(SHARED_KEY)).toBe(true);
+		expect(redis.ttls).toEqual([300]);
+		expect(cache.health()).toMatchObject({ hits: 1, misses: 0, bypasses: 0, errors: 0 });
+	});
+
+	test("an expired shared entry is a miss, never a stale hit", async () => {
+		resetDragonflyGateVerdict();
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		redis.nowMs = 1_700_000_000_000;
+		expect(await cache.putShared(SHARED_KEY, "old", 60)).toBe(true);
+		redis.nowMs += 61_000;
+		expect(await cache.getShared<string>(SHARED_KEY)).toBeNull();
+		expect(cache.health()).toMatchObject({ hits: 0, misses: 1, bypasses: 0, errors: 0 });
+	});
+
+	test("a malformed value on a shared key is an error plus a bypass, and null", async () => {
+		resetDragonflyGateVerdict();
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		redis.values.set(SHARED_KEY, "not an envelope");
+		expect(await cache.getShared<string>(SHARED_KEY)).toBeNull();
+		expect(cache.health()).toMatchObject({ hits: 0, errors: 1, bypasses: 1 });
+	});
+
+	test("claimShared wins once, loses on the same slot, and wins on another — one eval each", async () => {
+		resetDragonflyGateVerdict();
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		expect(await cache.claimShared(`${SHARED_KEY}:claim`, "c1", 300)).toBe("won");
+		expect(await cache.claimShared(`${SHARED_KEY}:claim`, "c2", 300)).toBe("lost");
+		expect(await cache.claimShared("substrate:v1:shared:grok:-:output:slot-2:claim", "c3", 60)).toBe("won");
+		expect(redis.evals).toBe(3);
+		expect(redis.values.get(`${SHARED_KEY}:claim`)).toBe("c1");
+	});
+
+	test("claimShared is bypass without EVAL, and a gate block sends no command", async () => {
+		resetDragonflyGateVerdict();
+		const noEval = new FakeRedis();
+		(noEval as unknown as { eval: unknown }).eval = undefined;
+		expect(await cacheOf(noEval).claimShared(`${SHARED_KEY}:claim`, "c1", 300)).toBe("bypass");
+
+		recordDragonflyGateVerdict(gateVerdict("unavailable"));
+		const gated = new FakeRedis();
+		const enforceCache = new ReadThroughCache({ redis: gated, enabled: true, log: () => {}, now: () => 1_000, gateMode: "enforce" });
+		expect(await enforceCache.claimShared(`${SHARED_KEY}:claim`, "c1", 300)).toBe("bypass");
+		expect(gated.evals).toBe(0);
+	});
+
+	test("a gate-blocked getShared is null with one counted bypass; off never changes behaviour", async () => {
+		resetDragonflyGateVerdict();
+		const redis = new FakeRedis();
+		// Seed the envelope directly: reads are judged under the recorded verdict, writes never are.
+		redis.values.set(SHARED_KEY, JSON.stringify({ v: "held by herdr" }));
+		recordDragonflyGateVerdict(gateVerdict("unavailable"));
+		const enforceCache = new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => 1_000, gateMode: "enforce" });
+		expect(await enforceCache.getShared<string>(SHARED_KEY)).toBeNull();
+		expect(enforceCache.health()).toMatchObject({ hits: 0, bypasses: 1, errors: 0 });
+
+		const offCache = cacheOf(redis);
+		expect(await offCache.getShared<string>(SHARED_KEY)).toBe("held by herdr");
+		expect(offCache.health()).toMatchObject({ hits: 1, bypasses: 0 });
+	});
+
+	test("cache off getShared is null with one counted bypass", async () => {
+		resetDragonflyGateVerdict();
+		const cache = new ReadThroughCache({ redis: null, enabled: false, log: () => {} });
+		expect(await cache.getShared<string>(SHARED_KEY)).toBeNull();
+		expect(cache.health()).toMatchObject({ hits: 0, bypasses: 1, errors: 0 });
 	});
 });

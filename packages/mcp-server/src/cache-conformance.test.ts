@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { CACHE_CLASSES, CACHE_PREFIX, MEMORY_GENERATION_KEY, bunRedis, cacheKey, classOf, snapshotKey, type CacheClass } from "./cache.ts";
 
-const EXPECTED_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "budget", "gen"] as const;
+const EXPECTED_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "emb", "shared", "budget", "gen"] as const;
 
 const FORBIDDEN_CLASSES = ["idempotency", "idem", "mirror"];
 
