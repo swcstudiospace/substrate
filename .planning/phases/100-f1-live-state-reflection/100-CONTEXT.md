@@ -18,6 +18,7 @@ Post-write hook ingests STATE.md and phase SUMMARY transitions to LightRAG with 
 - **Hook point**: reuse the existing post-write/git hook path (collector/projector), not a new daemon; hook emits ingest event with run lineage (graph_id, phase, commit).
 - **Ingest target**: LightRAG documents/texts endpoint via existing client; failures degrade to last-good with freshness timestamp, never silent.
 - **SLI**: `state_freshness_lag_seconds` gauge (last successful ingest vs STATE mtime); alert threshold documented, no new alerting infra.
+- **T0 data-plane contract (unified, enforced here first)**: validated write/read/update/supersede for Tools, Skills, Memory, Context, Lessons, Teachable Moments with mandatory provenance (worktree, project, agent/session, event, content-hash); missing provenance rejected with structured error, never silent default; default-deny cross-scope reads unless an explicit shared-scope flag is present.
 
 </decisions>
 

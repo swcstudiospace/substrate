@@ -18,6 +18,7 @@ Event-driven TODO injection into live sessions (Omp steering): subscription filt
 - **Filters**: per-session subscription (event kinds + path/graph scope); default-off for noise (explicit opt-in per session).
 - **Idempotency**: injection keys (event id + session id) deduped; ordering by (occurred_at, seq) per session.
 - **Builds on**: existing steering path + Phase 83 registry + Phase 77 keyed idempotency; no new coordination store.
+- **Safety (enterprise hardening)**: allowlisted TODO mutations + size limits; validation for instruction-injection; consent-gated auto-apply (default propose-only); one-step revert + audit trail; per-session rate limit + kill switch; loop guards against self-triggering steers.
 
 </decisions>
 
