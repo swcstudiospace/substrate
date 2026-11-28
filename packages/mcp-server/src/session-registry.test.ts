@@ -208,27 +208,27 @@ describe("operator lease helpers", () => {
 	};
 
 	test("registryTake renews for the holder and denies a stranger's surface", () => {
-		const holder = registryTake(held, { surface: "hermes", session_id: "sess-1" }, "hermes");
+		const holder = registryTake(held, { surface: "hermes", session_id: "sess-1" }, "hermes", NOW);
 		expect(holder.granted).toBe(true);
 		expect(holder.action).toBe("renewed");
-		const stranger = registryTake(held, { surface: "hermes", session_id: "sess-1" }, "claude-code");
+		const stranger = registryTake(held, { surface: "hermes", session_id: "sess-1" }, "claude-code", NOW);
 		expect(stranger.granted).toBe(false);
 		expect(stranger.reason).toBe("not-holder");
 	});
 
 	test("registryRelease needs the holder's lease id; the holder is accepted", () => {
-		const missing = registryRelease(held, {}, "hermes");
+		const missing = registryRelease(held, {}, "hermes", NOW);
 		expect(missing.ok).toBe(false);
 		expect("reason" in missing && missing.reason).toBe("lease-id-required");
-		const released = registryRelease(held, { lease_id: "lse_abc" }, "hermes");
+		const released = registryRelease(held, { lease_id: "lse_abc" }, "hermes", NOW);
 		expect(released.ok).toBe(true);
-		const stranger = registryRelease(held, { lease_id: "lse_abc" }, "claude-code");
+		const stranger = registryRelease(held, { lease_id: "lse_abc" }, "claude-code", NOW);
 		expect(stranger.ok).toBe(false);
 		expect("reason" in stranger && stranger.reason).toBe("not-holder");
 	});
 
 	test("a released node has nothing to hold", () => {
-		const decision = registryRelease(NO_LEASE, {}, null);
+		const decision = registryRelease(NO_LEASE, {}, null, NOW);
 		expect(decision.ok).toBe(true);
 	});
 });

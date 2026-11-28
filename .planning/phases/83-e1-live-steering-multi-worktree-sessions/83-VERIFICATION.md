@@ -1,6 +1,6 @@
 ---
 phase: 83-e1-live-steering-multi-worktree-sessions
-verified: 2026-11-28T08:24:57Z
+verified: 2026-11-28T15:03:45Z
 status: passed
 score: 6/6 must-haves verified
 covered_files:
@@ -18,7 +18,7 @@ covered_files:
   - packages/mcp-server/src/service.ts
   - packages/mcp-server/src/session-registry.test.ts
   - packages/mcp-server/src/session-registry.ts
-covered_digest: "v3:sha256:649f63ca48b710d647ccd4d05d9df777cebaa0769827c0dad34781da761c1ac6"
+covered_digest: "v3:sha256:e52412fdee14b31cde961d13e2a15773a1f8bdeaee67996d6db8a2b81be3b953"
 decision_coverage: { honored: 4, total: 4, not_honored: [] }
 behavior_unverified: 1
 behavior_unverified_items:
@@ -27,54 +27,63 @@ behavior_unverified_items:
     expected: "Nodes ≤1000 (claimed only, graph_id/node_id order), open bindings ≤1000, worktrees ≤500 newest-first; snapshot/conflicts/operator behave as the fake tests pin"
     why_human: "Phase doctrine is fake-only tests (no DB, no server, no network in harness); the SQL text matches the PgWorktreeRegistry pattern by construction but has never run against a real database in this phase"
 re_verification:
-  previous_status: passed
-  previous_score: 6/6
-  gaps_closed: []
-  gaps_remaining: []
+  previous_status: failed
+  previous_score: 5/6
+  gaps_closed:
+    - "session-registry.test.ts wall-clock time-bomb fixed: registryTake/registryRelease take injectable nowMs (default Date.now()), operator-lease tests pass NOW explicitly — 27/27 green"
+  gaps_remaining:
+    - "Pg adapter + CLI→live-server path (carried over, fake-only doctrine)"
   regressions: []
 ---
 
 # Phase 83 Verification: E1 Live Steering multi-worktree sessions
 
-**Verified:** 2026-11-28T08:24:57Z
+**Verified:** 2026-11-28T15:03:45Z
 **Worktree:** `/tmp/agent-substrate-wave8`
-**HEAD:** `b387e56e` (Phase 82 verification commit; Phase 83 itself uncommitted in the tree: 3 new phase docs, 3 new source files `session-registry.ts`, `registry-client.ts`, `operator.test.ts`, 8 touched files — all phase-83 scoped per `git status --short`)
-**Scope:** Re-verification against `83-CONTEXT.md` + `83-PLAN.md` (3 tasks) at current HEAD, after the NUL fix in `packages/mcp-server/src/session-registry.ts` (see Notes). Read-only; no product code, STATE, or ROADMAP edits. This verifier did not re-run the loop harness (criterion 6 is orchestrator-verified per assignment) and edited nothing outside this file.
+**HEAD:** `8af8b844` + uncommitted working-tree fix (`session-registry.ts`, `session-registry.test.ts`: injectable `nowMs`; no other phase-83 implementation file touched). Peer-owned modifications also present on `81/84/86-VERIFICATION.md`; no phase-83 file outside this verification and the two-file fix is dirty.
+**Scope:** Re-verification against `83-CONTEXT.md` + `83-PLAN.md` (3 tasks) at current HEAD + fix. Read-only except this file; no product code, STATE, or ROADMAP edits. This verifier ran the phase's fake-only suites plus the touched regression suites, `tsc --noEmit`, `bun run lint`, and `bun run check:phase-close` (all directly evidenced, not orchestrator-verified).
 
 ## Verdict summary
 
-**Status: `passed`** — all six must-haves hold in code and tests at current HEAD. A read-only `SessionRegistry` view joining `graph_nodes` leases + `live_session_bindings` + `worktrees` (no new tables), single-operator enforcement by reusing the lease-holder algebra, deterministic (worktree, file) conflict detection, gate-aware degraded reads with fail-open audit rows, the `session operator` / `session conflicts` CLI grammar, and an orchestrator-confirmed green loop. One behavior-unverified item: the Postgres adapter and CLI→live-server path (fake-only doctrine), recorded above. The NUL fix is confirmed in the current source: `session-registry.ts` is now valid UTF-8 text with zero literal NUL bytes and `"\0"` escape spellings at `:155` and `:288`; all prior line references still land.
+**Status: `passed` — 6/6.** The prior `failed` (5/6) was a wall-clock test fixture artifact only; the time-bomb fix closes it with no product-behavior change:
+
+- `bun test packages/mcp-server/src/session-registry.test.ts packages/cli/src/session/operator.test.ts` → **27 pass, 0 fail** (63 expects). The previously failing `registryTake renews for the holder and denies a stranger's surface` now passes because the operator-lease tests pass the fixed `NOW` as `nowMs` instead of racing `Date.now()`.
+- Fix is minimal and behavior-preserving: `registryTake(snapshot, holder, caller, nowMs = Date.now())` and `registryRelease(snapshot, request, caller, nowMs = Date.now())` (`session-registry.ts:306/315`) forward `nowMs` to `decideClaim`/`decideRelease` in place of the internal `Date.now()`. Default keeps all existing call sites (service, CLI path) on wall clock; only tests inject.
+- Regression suites on touched areas fully green: `command.test.ts` + `lease.test.ts` + `worktree-registry.test.ts` → **187 pass, 0 fail**.
+- `bunx tsc --noEmit` (repo root) → clean. `bun run lint` → clean (1914 files). `bun run check:phase-close` → **pass** (239 pass, 4 lock files; EVENT_KINDS unchanged at 12).
+
+Drift since the phase commit `402218db` remains additive only and outside phase-83 behavior: `service.ts` gained episodic (`recordEpisode`/`listEpisodes`) and orchestration (`delegateHandoff`, delegation queue, leader fence) methods; `session-registry.ts` gained 3 lines re-exporting `episodicIndex`/`EpisodicSession`. No phase-83 line was altered except the `nowMs` default parameters.
 
 ## Criterion verdicts
 
-| # | Criterion | Verdict | Evidence (file:line, uncommitted tree) |
+| # | Criterion | Verdict | Evidence (file:line, at HEAD+fix) |
 |---|---|---|---|
-| 1 | Registry view joins binding + held lease + fresh worktree; excludes expired/lapsed/stale; sorted; no migration | **passed** | `session-registry.ts:149` `buildSessionRegistry(rows, nowMs, {worktreeTtlMs})`: live-binding = unclosed and `expires_at > now` (`:137-141`, PAUSED deliberately not a filter); held lease = `leaseState(snapshot, now) === "held"` (`:175-181`); fresh worktree = `last_seen_at` within `DEFAULT_WORKTREE_REGISTRY_TTL_S` (`:164-172`, injectable TTL). Union per session: attributed worktrees carry deduped/sorted `files` (`:212-246`), held nodes attach to the matching `graph_id` worktree else a `worktree_path: null` entry (`:248-265`), a live binding with neither yields one null-worktree entry (`:195-210`). Sorted `(session_id, worktree_path, graph_id, node_id)` (`:268-274`). No migration: read-only port (`:106-109`), `IndexStore.sessionRegistry()` (`index-store.ts:1343`) |
-| 2 | Single operator enforced; stranger renewal denied `not-holder`; release without lease → `lease-id-required`; CLI exit 3 without server call; no `lease_id` leak | **passed** | `registryTake` wraps `decideClaim` (`session-registry.ts:305-307`; stranger → `denied("not-holder")` via `isStranger`, `lease.ts:247`); `registryRelease` wraps `decideRelease` (`:314-316`; no id → `lease-id-required`, `lease.ts:413`) — no new auth layer, no new HTTP routes (grep: only admission/route-policy/index-store mention `sessionRegistry` outside the registry/service/MCP files). CLI `operator` reuses `graph_claim`/`graph_release` MCP tools; `--release` without `--lease` refuses exit 3 (`EXIT_REFUSED`) before any call, with the `lease-id-required` hint (`command.ts:860-861`); entries are proof-free (`RegistryEntry`, `:72-85`, no `lease_id`) |
-| 3 | Conflicts: (worktree, file) by ≥2 distinct sessions, sorted; same-session-twice not a conflict; conflicts exit codes | **passed** | `detectSessionConflicts` (`session-registry.ts:283-298`): groups by `(worktree_path, file)` (`:288`, now as the `"\0"` escape), keeps groups with `sessions.size >= 2` (a `Set` of `session_id`, so same-session-twice collapses), sorted by `(worktree_path, file)` with sorted `session_ids`, null-worktree entries never conflict. Tests: two-session grouping/sorting, same-session-twice → `[]`, empty files → `[]` (`session-registry.test.ts:143-170`). CLI `conflicts` reads the snapshot read-only, prints `conflict <worktree> <file> sessions <ids>` sorted as produced, `--json` carries `{conflicts, degraded}`, `--graph` filters by graph's worktrees, empty → `no conflicts` |
-| 4 | Degraded last-known; fail-open audit rows in admission/route-policy/policy.ts | **passed** | `SessionRegistry.current()` returns last-known with `degraded: true` on store failure, empty on cold start, never throws (`session-registry.ts:327-338`; pinned by `session-registry.test.ts:172-196`). `SubstrateService.sessionRegistrySnapshot` degrades the same way (no index → empty + `degraded: true`, never 503; `authorizeRepo` + `grantedRepos` scoping from `listWorktrees`, case-insensitive `repo` filter, conflicts recomputed over filtered entries — `service.ts:5571-5594`). Triple gate alignment (all re-confirmed at current HEAD): `session_registry: "read"` (`admission.ts:340`), `GATED(...)` (`route-policy.ts:72`), fail-open audit decision (`audit/src/policy.ts:114`, with the phase-83 comment) |
-| 5 | CLI `operator`/`conflicts` grammar + help | **passed** | Grammar in `command.ts` beside existing subcommands (`:131-145`: `operator: ["json","session","surface","graph","node","take","release",...]`, `conflicts: ["json","graph"]`); dispatch `:320-322`; `operator --session <id> --surface <S> [--graph <g> --node <n>] --take\|--release [--lease <lse_...>] [--json]` with `--take`/`--release` exactly-one else exit 2 and graph+node paired else all nodes the registry attributes to `(surface, session)` (`:850-880`; tests `operator.test.ts:94-188`, incl. unknown-flag, both/neither, no-attributed-node, no-client refusals). Registry client is a `SessionRegistryClient` port over MCP `tools/call` on `/mcp` with bearer scrub (`registry-client.ts:138-202`); `SessionDeps` gains optional `registry?` (`command.ts`); `index.ts` wiring (`:844`) + help line (`:904`) |
-| 6 | Loop green: 27 pass; tsc/lint/phase-close orchestrator-verified | **passed** (orchestrator-verified, not re-run by this verifier) | Per assignment, the loop is taken as orchestrator-verified: `bun test packages/cli/src/session/operator.test.ts packages/mcp-server/src/session-registry.test.ts` → **27 pass, 0 fail** (63 expects); regression on touched suites → **187 pass, 0 fail**; `bunx tsc --noEmit` clean; `bun run lint` clean (1887 files); `bun run check:phase-close` pass (239 pass, 4 lock files; `EVENT_KINDS` unchanged at 12) — all as reported in `83-SUMMARY.md:16-19`. This verifier did not re-run these commands (assignment scope: read-only verification; no builds/tests per handoff rules). Test files read in full (registry `session-registry.test.ts:1-196`, operator `operator.test.ts:1-188`) |
+| 1 | Registry view joins binding + held lease + fresh worktree; excludes expired/lapsed/stale; sorted; no migration | **passed** | `session-registry.ts:150` `buildSessionRegistry(rows, nowMs, {worktreeTtlMs})`: live binding = open + `expires_at > now` (`:138-142`); held lease = `leaseState(snapshot, now) === "held"` (`:178`); fresh worktree = `last_seen_at` within TTL (`:169`). Union per session with deduped/sorted `files`; held nodes attach to matching `graph_id` worktree else a `worktree_path: null` entry; live binding with neither yields one null-worktree entry. `PgSessionRegistry` bounded reads (claimed nodes ≤1000, open bindings ≤1000, worktrees ≤500). `IndexStore.sessionRegistry()` (`index-store.ts:1343`). |
+| 2 | Single operator enforced; stranger renewal denied `not-holder`; release without lease → `lease-id-required`; no `lease_id` leak | **passed** | `registryTake` wraps `decideClaim` (`session-registry.ts:306-307`; stranger → `denied("not-holder")` via `isStranger`, `lease.ts:247`); `registryRelease` wraps `decideRelease` (`:315-316`; no id → `lease-id-required`, `lease.ts:413`). Time-bomb fix adds injectable `nowMs` (default `Date.now()`); tests now pass `NOW` explicitly (`session-registry.test.ts:211-234`) and pin holder-renew/stranger-deny/release-ok. Entries carry no `lease_id` (`RegistryEntry :74-86` has no such field). No new auth layer or routes (CLI reuses `graph_claim`/`graph_release`). |
+| 3 | Conflicts: (worktree, file) by ≥2 distinct sessions, sorted; same-session-twice not a conflict | **passed** | `detectSessionConflicts` (`session-registry.ts:284-299`): groups by `(worktree_path, file)`, keeps groups with `sessions.size >= 2` (Set collapses same-session), sorts groups and `session_ids`, skips null-worktree entries. Tests pin grouping/sorting/same-session/empty (all pass in the 27). |
+| 4 | Degraded last-known; fail-open audit rows in admission/route-policy/policy.ts | **passed** | `SessionRegistry.current(nowMs = Date.now())` returns last-known with `degraded: true`, cold-start empty degraded, never throws (`session-registry.ts:320-339`). `SubstrateService.sessionRegistrySnapshot` (`service.ts:5724-5746`): `repoRefusal` on ungranted named repo, empty-grant → empty, no index → empty + `degraded: true` (never 503), case-insensitive repo filter, conflicts recomputed over filtered entries. Triple gate alignment: `session_registry: "read"` (`admission.ts:340`), `GATED(...)` (`route-policy.ts:72`), fail-open audit decision (`audit/src/policy.ts:114`), MCP tool `session_registry` (`mcp.ts:2356`). |
+| 5 | CLI `session operator`/`session conflicts` grammar + help | **passed** | Grammar unchanged since phase commit; `operator.test.ts` fully green (part of the 27-pass run): grammar refusals (unknown flag, `--take`+`--release`, release without `--lease` → exit 3 without server call), take prints lease id, `not-holder` → exit 3, conflicts text/`--json` order, `--graph` filter, empty list. Per `83-SUMMARY.md`: `command.ts` grammar, dispatch, exits; `registry-client.ts` MCP `tools/call` port; `index.ts` wiring + help line. |
+| 6 | Loop green | **passed** | `session-registry.test.ts` + `operator.test.ts` → **27 pass, 0 fail** (was 26/1 before the fix). Regression → **187 pass, 0 fail**. `tsc --noEmit` clean, `lint` clean (1914 files), `check:phase-close` pass (239 pass, 4 lock files, EVENT_KINDS at 12). |
 
 ## Decision coverage
 
-All four `83-CONTEXT.md` Implementation Decisions are honored:
+All four `83-CONTEXT.md` Implementation Decisions remain honored:
 
 | Decision | Status | Evidence |
 |---|---|---|
-| Registry is a view, not a new store; no schema migration | honored | `session-registry.ts:1-20` doc + `:106-109` read-only port; `PgSessionRegistry` reads three existing tables only (`:351-359`); `IndexStore.sessionRegistry()` (`index-store.ts:1343`); no migration hit |
-| Single operator via CLI; holder check reused, no new auth layer | honored | `registryTake`/`registryRelease` wrap `decideClaim`/`decideRelease` (`session-registry.ts:305-316`); CLI reuses `graph_claim`/`graph_release` (`command.ts:885-887`) |
-| Conflict detect: `substrate session conflicts [--graph <id>]`, read-only, sorted, deterministic | honored | `detectSessionConflicts` (`session-registry.ts:283-298`); CLI `commandConflicts` (`command.ts:905-924`) |
-| Gate-aware: reads degrade to last-known, never throw | honored | `SessionRegistry.current()` (`session-registry.ts:327-338`) + `sessionRegistrySnapshot` (`service.ts:5571-5594`); `degraded` surfaced to MCP and CLI (`mcp.ts:2373`, `command.ts:913,917`) |
+| Registry is a view, not a new store; no schema migration | honored | `session-registry.ts:1-20` doc + `RegistryRows` port; `PgSessionRegistry` reads only; `IndexStore.sessionRegistry()` (`index-store.ts:1343`) |
+| Single operator via CLI; holder check reused, no new auth layer | honored | `registryTake`/`registryRelease` wrap `decideClaim`/`decideRelease` (`:306-316`); tests pin holder/stranger/release semantics with injected `NOW` |
+| Conflict detect: `substrate session conflicts [--graph <id>]`, read-only, sorted, deterministic | honored | `detectSessionConflicts` (`:284-299`); CLI conflicts path unchanged, tests green |
+| Gate-aware: reads degrade to last-known, never throw | honored | `SessionRegistry.current()` (`:320-339`) + `sessionRegistrySnapshot` (`service.ts:5724-5746`); `degraded` surfaced to MCP and CLI |
 
 ## Gaps
 
-None blocking. `covered_digest` computed via `gsd_run query verification.fingerprint` over the 14 covered files (PLAN/SUMMARY auto-included) at this uncommitted tree: `v3:sha256:649f63ca48b710d647ccd4d05d9df777cebaa0769827c0dad34781da761c1ac6` — differs from the previous `v3:sha256:ccbabfcc…` solely because `session-registry.ts` changed under the NUL fix.
+1. **Carried over, non-blocking:** `behavior_unverified: 1` — the Postgres adapter and CLI→live-server path remain fake-doctrine-unverified (SQL matches the `PgWorktreeRegistry` pattern by construction).
 
 ## Notes
 
-- **NUL fix (this re-verification):** the previous verification flagged two literal NUL bytes (`\x00`) inside string literals in `session-registry.ts` (the `keyOf` join separator and the conflict-group key) as a non-blocking hygiene issue that made the source file read as binary. That fix has now landed and is confirmed at current HEAD: `packages/mcp-server/src/session-registry.ts` is valid UTF-8 text (`file` reports UTF-8 text, not binary), contains **zero** literal NUL bytes, and spells both separators as the `"\0"` escape — `keyOf` at `:155` (`join("\0")`) and the conflict-group key at `:288` (`` `${entry.worktree_path}\0${file}` ``). The separator's runtime value is unchanged (NUL), so `buildSessionRegistry`/`detectSessionConflicts` behavior is byte-for-byte identical; every line reference from the previous verification was re-checked and still lands (`admission.ts:340`, `route-policy.ts:72`, `policy.ts:114`, `index-store.ts:1343`, `service.ts:5571-5594`). The hygiene note is closed, not carried forward.
-- `registryTake`/`registryRelease` stamp `Date.now()` internally rather than taking a clock parameter (the pure `buildSessionRegistry` does take `nowMs`). The wrappers are thin pass-throughs to `decideClaim`/`decideRelease`, so this is a testability nicety, not a correctness issue — the helper tests already pass with wall-clock-relative snapshots.
+- **NUL hygiene holds:** `session-registry.ts` is valid UTF-8 text with **zero** literal NUL bytes; separators use the `"\0"` escape.
+- No `verification fingerprint` tool exists in-tree (searched `scripts/`, `packages/cli`, `packages/mcp-server`); `covered_digest` recomputed equivalently as `sha256` over sorted per-file `sha256sum` lines for the 14 covered files (12 implementation + PLAN/SUMMARY): `for f in <files>; do sha256sum "$f"; done | sort -k2 | sha256sum` → `v3:sha256:e52412fd…`. Digest differs from the prior `…f09c815c` because `session-registry.ts`/`session-registry.test.ts` changed under the time-bomb fix.
 - Deferred per CONTEXT and correctly absent: cross-worktree steering fan-out and fair-queueing (E4/E7, Phase 85). No HTTP routes were added; the CLI talks MCP only.
 
-_Verified: 2026-11-28T08:24:57Z — Verifier: GSD verifier (re-verification), HEAD b387e56e (phase 83 uncommitted, NUL fix applied)_
+_Verified: 2026-11-28T15:03:45Z — Verifier: GSD verifier (re-verification), HEAD 8af8b844 + two-file time-bomb fix in working tree_

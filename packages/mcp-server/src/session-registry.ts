@@ -303,8 +303,8 @@ export function detectSessionConflicts(entries: readonly RegistryEntry[]): Sessi
  * caller decides through `decideClaim`: a stranger's token surface renewing somebody else's hold is
  * `denied` with reason `not-holder` (`lease.ts:247`), never a second operator.
  */
-export function registryTake(snapshot: LeaseSnapshot, holder: LeaseHolder, caller: Surface | null): ClaimDecision {
-	return decideClaim(snapshot, { surface: holder.surface, session_id: holder.session_id, ttl_seconds: 900, caller }, Date.now());
+export function registryTake(snapshot: LeaseSnapshot, holder: LeaseHolder, caller: Surface | null, nowMs: number = Date.now()): ClaimDecision {
+	return decideClaim(snapshot, { surface: holder.surface, session_id: holder.session_id, ttl_seconds: 900, caller }, nowMs);
 }
 
 /**
@@ -312,8 +312,8 @@ export function registryTake(snapshot: LeaseSnapshot, holder: LeaseHolder, calle
  * `lease-id-required` (`lease.ts:413`) — that refusal is the proof that only the operator session mutates
  * steering for its worktree, without a new auth layer.
  */
-export function registryRelease(snapshot: LeaseSnapshot, request: { lease_id?: string | null; force?: boolean }, caller: Surface | null): ReleaseDecision {
-	return decideRelease(snapshot, { ...request, caller }, Date.now());
+export function registryRelease(snapshot: LeaseSnapshot, request: { lease_id?: string | null; force?: boolean }, caller: Surface | null, nowMs: number = Date.now()): ReleaseDecision {
+	return decideRelease(snapshot, { ...request, caller }, nowMs);
 }
 
 /** Gate-aware reader: a store failure degrades to last-known, never to a throw. One instance per process keeps the last-known snapshot. */
