@@ -12,7 +12,7 @@
 - ⚠️ **v1.6 Contextual Memory, Live Steering and Eternal Rollback** — Phases 55-62, planned 2026-10-26 (Ultrathink graph ut-mvp59le0-8815e6d1); closed 2026-10-28 as an override closeout with accepted debt (audit status gaps_found). Built 2026-10-26 and merged to main on 2026-10-28: PR #127 (phases 55 and 56), PRs #128 and #129 (phases 57 and 59-61) and PR #130 (phase 62); phase 58 merged as PR #137 (replaces #131, closed). Gap closure merged 2026-10-28: PR #147 (phase 58 criterion 2, verified passed 5/5), PR #150 (phase 59 criterion 5, verified human_needed 6/6 in the repository, live proofs operator-gated) and PRs #146 and #148 (phase 61: the checkpoint sequence lock, `substrate session hook`, trigger policy, printed host configuration); phase 61 criterion 3 stays partial because no host runs the hook until an operator installs the printed configuration (ADR 0007, D55-4), accepted as debt by the owner on 2026-10-28 together with phase 59's live proofs. Live steps (a LightRAG deploy, anchor funding and the anchor timer, any devnet send, production migrations) stay operator-gated. Discovery record: [milestones/v1.6-phases/55-migration-safety/CONTEXT.md](milestones/v1.6-phases/55-migration-safety/CONTEXT.md). Archive: [milestones/v1.6-ROADMAP.md](milestones/v1.6-ROADMAP.md) · audit: [milestones/v1.6-MILESTONE-AUDIT.md](milestones/v1.6-MILESTONE-AUDIT.md)
 - 🚧 **v1.7 Docs Atlas, Self-Improving Context, Live Steering GA and Worktree Fleet** — Phases 63-70, defined 2026-10-29 (Run 14): ingest the documentation of every repository into the docs plane and keep it current, make the docs RAG learn from use, make Live Steering visible and cross-session, and manage many sessions' git worktrees. Phases 63-70 are shipped (PRs #177-#186 on 2026-10-29 and 2026-10-30; follow-ups #187-#193); phases 66, 67 and 68 are PARTIAL, every phase with a VERIFICATION record records gaps, and the milestone is not complete. Requirements: [REQUIREMENTS.md](milestones/v1.8-REQUIREMENTS.md). Audit: [milestones/v1.7-MILESTONE-AUDIT.md](milestones/v1.7-MILESTONE-AUDIT.md).
 - ⚠️ **v1.8 Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation** — Phases 71-78; closed 2026-11-22 as an override closeout with accepted debt (audit status gaps_found): 72, 73, 75 passed; 71/74/76/77/78 human_needed on operator-gated live proofs. Merged to main as PR #223 (8 Graph-Engineering features, squash b487b306). Archive: [milestones/v1.8-ROADMAP.md](milestones/v1.8-ROADMAP.md) · audit: [milestones/v1.8-MILESTONE-AUDIT.md](milestones/v1.8-MILESTONE-AUDIT.md). Known verification overrides: 50 newly acknowledged, 3 carried forward.
-- 🚧 **v1.9 Unison Graph Engineering** — coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB. Sections added for data flow/indexing/retrieval patterns (Graph Engineering), coordination layers for unison, impact parity for long sessions using three coordinated graphed structures (data, coordination, uplift). References SPE-34076, SPE-34079. Updated with SOTA patterns mention from v1.5.
+- ✅ **v1.9 Cross-Resource Enhancements & Quality Baseline (Wave 8)** — Phases 80-86; shipped 2026-11-28 as PR #229 (squash 4cd42fbd): DG-1a/DG-1b DragonflyDB Gate, E2 shared-context cache, E1 Live Steering multi-worktree, E3+E6 memory fabric/episodic, E4+E7 orchestration/Leader fencing, E5+E8 observability/replay-audit. All 7 verified passed (digests canonical at merge). Pre-existing full-suite reds unchanged from main; one Wave-8 regression fixed (redaction lock). Audit: [milestones/v1.9-MILESTONE-AUDIT.md](milestones/v1.9-MILESTONE-AUDIT.md). Archive: [milestones/v1.9-ROADMAP.md](milestones/v1.9-ROADMAP.md).
   Audited 2026-11-28 (milestone audit Wave 7, STATE.md): gates 94/94 + full-verify gap recorded; SVM verdict BUILT_NOT_DEPLOYED; NOT complete — 8 human_verify approvals, owner decisions (Phase 72 HARD-S2, corpus), Greptile trial-ended, and Wave-8 cleanup pending.
 
 
@@ -148,6 +148,16 @@ Closeout: merged 2026-11-21 as PR #223 after a full green local gate (12615 pass
 - [x] **Phase 76: Telemetry buffer and dead-letter** - failed event writes buffered, retried and dead-lettered (f3e6798b; claim-withdrawal policy and buffer paths in systemd are operator-gated)
 - [x] **Phase 77: Steering idempotency and ordering** - keyed commands apply once; unkeyed commands unchanged (c26b1ef3 in process; b9ecd215 durable via migrations 44 and 45, the rehearsal is operator-gated)
 - [ ] **Phase 78: Cross-layer reconciliation** - ledger, index and cache drift reported, never auto-repaired. memory.forget pair compared and repaired via confirmed plan; graph pairs implemented in cross-layer-reconcile-pairs.ts (index->ledger detection-only, cache->index confirmed-plan repair), scheduled only when SUBSTRATE_RECONCILE_GRAPHS names graphs. Unit staged under infra/vps, not installed (operator gate).
+
+### ✅ v1.9 Cross-Resource Enhancements & Quality Baseline (Wave 8) (shipped 2026-11-28, PR #229)
+
+- [x] **Phase 80: DG-1a DragonflyDB Gate probe and readiness check** - readiness probe (ok/degraded/unavailable/unconfigured) as fabric dragonfly truth + healthz body (verified passed 9/10, live INFO excerpt captured)
+- [x] **Phase 81: DG-1b DragonflyDB Gate implement-or-document decision** - DECISION: implement; SUBSTRATE_DRAGONFLY_GATE (off|enforce, default off, fail-open) blocks E2 serving on unavailable/unconfigured (verified passed 6/6)
+- [x] **Phase 82: E2 Dragonfly shared-context cache** - namespaced context/output/recall cache, per-kind TTL, Lua claim-once, tested durable fallback (verified passed 6/6)
+- [x] **Phase 83: E1 Live Steering multi-worktree sessions** - SessionRegistry view, single-operator CLI, deterministic conflict detect (verified passed 6/6)
+- [x] **Phase 84: E3 unified memory fabric + E6 episodic memory** - Hindsight-owner routing, provenance-only LightRAG join, episodic supersession chains (verified passed 6/6)
+- [x] **Phase 85: E4 orchestration + E7 Leader fencing** - namespaced delegation handoffs, epoch-fenced writes, TTL queue with dead-letter surfacing (verified passed 5/5)
+- [x] **Phase 86: E5 observability + E8 replay/audit** - correlation threading, burn detector, read-only replay, mirrored summaries (verified passed 5/5)
 
 ### Unison enhancements for coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB (SPE-34076, SPE-34079)
 
@@ -1389,6 +1399,111 @@ Plans:
 
 **Plans**: none written
 
+### Phase 80: DG-1a DragonflyDB Gate probe and readiness check
+
+**Goal**: A deterministic DragonflyDB readiness probe (PING liveness, memory headroom <0.80, eviction growth, write round-trip, optional visibility) whose verdict is the fabric dragonfly row truth and a healthz body field.
+
+**Status**: Shipped in PR #229. Verified passed 9/10 (80-VERIFICATION.md, canonical digest at merge; criterion 9 live healthz/fabric capture human_needed, INFO excerpt captured).
+
+**Depends on**: Phase 78
+
+**Success Criteria**:
+
+  1. Verdict ok only on real PONG with passing headroom, no eviction growth, passing write round-trip.
+  2. Fabric row and healthz body carry the verdict; status codes untouched; no second RedisClient.
+
+**Plans**: 1/1 complete (80-PLAN.md)
+
+### Phase 81: DG-1b DragonflyDB Gate implement-or-document decision
+
+**Goal**: Decide implement vs document-only for the gate; implement enforcement if the probe is healthy.
+
+**Status**: Shipped in PR #229. DECISION: implement. Verified passed 6/6 (81-VERIFICATION.md).
+
+**Depends on**: Phase 80
+
+**Success Criteria**:
+
+  1. Gate flag registered, default off, junk refused; enforce blocks serving on unavailable/unconfigured, degraded still serves.
+  2. No second RedisClient; fail-open preserved.
+
+**Plans**: 1/1 complete (81-PLAN.md)
+
+### Phase 82: E2 Dragonfly shared-context cache
+
+**Goal**: Namespaced session/worktree context + output + hot-retrieval cache with per-kind TTL, Lua atomic claim-once, tested durable fallback.
+
+**Status**: Shipped in PR #229. Verified passed 6/6 (82-VERIFICATION.md).
+
+**Depends on**: Phase 81
+
+**Success Criteria**:
+
+  1. Shared keys namespaced with per-kind TTL on every put/claim; claim-once atomic via eval.
+  2. Fallback to durable read on gate block/expiry, never stale, bypass counted; single gate owner.
+
+**Plans**: 1/1 complete (82-PLAN.md)
+
+### Phase 83: E1 Live Steering multi-worktree sessions
+
+**Goal**: SessionRegistry view over leases + live-session bindings, single operator per session via CLI, deterministic conflict detection.
+
+**Status**: Shipped in PR #229. Verified passed 6/6 (83-VERIFICATION.md).
+
+**Depends on**: Phase 82
+
+**Success Criteria**:
+
+  1. Registry joins binding + held lease + fresh worktree, excludes expired/lapsed/stale, sorted; no migration.
+  2. Single operator enforced (stranger denied, no-lease-id refused pre-call, no lease leak); conflicts deterministic.
+
+**Plans**: 1/1 complete (83-PLAN.md)
+
+### Phase 84: E3 unified memory fabric + E6 episodic memory
+
+**Goal**: remember/recall/forget routed to Hindsight-owned banks with provenance-only LightRAG join; episodic outcomes with visible supersession.
+
+**Status**: Shipped in PR #229. Verified passed 6/6 (84-VERIFICATION.md).
+
+**Depends on**: Phase 83
+
+**Success Criteria**:
+
+  1. Hindsight-only writes; provenance metadata-only; LightRAG writes structurally rejected.
+  2. Episodic record + supersession chain both ways + retrieval; loop green.
+
+**Plans**: 1/1 complete (84-PLAN.md)
+
+### Phase 85: E4 orchestration + E7 Leader fencing
+
+**Goal**: Delegation handoffs with namespace + permission model and per-agent audit; epoch-fenced single-writer with TTL queue and dead-letter surfacing.
+
+**Status**: Shipped in PR #229. Verified passed 5/5 (85-VERIFICATION.md).
+
+**Depends on**: Phase 84
+
+**Success Criteria**:
+
+  1. agent:<surface> namespace, allowlist fail-closed, one audit note per delegation.
+  2. Stale-epoch/stranger writes rejected without running; TTL expiry surfaces to DLQ, never dropped.
+
+**Plans**: 1/1 complete (85-PLAN.md)
+
+### Phase 86: E5 observability + E8 replay/audit
+
+**Goal**: Correlation threading, burn alerts, read-only replay to checkpoint, mirrored summaries.
+
+**Status**: Shipped in PR #229. Verified passed 5/5 (86-VERIFICATION.md). Milestone-closing phase.
+
+**Depends on**: Phase 85
+
+**Success Criteria**:
+
+  1. Correlation traced to all plane paths; healthz echo validated-only per-request.
+  2. Burn detector fires/degrades correctly; replay read-only with chain-first verify; mirrors never throw.
+
+**Plans**: 1/1 complete (86-PLAN.md)
+
 
 ## Progress
 
@@ -1457,3 +1572,10 @@ Plans:
 | 76. Telemetry buffer and dead-letter | v1.8 | 1/1 | Complete (f3e6798b); buffer paths and claim-withdrawal policy operator-gated | 2026-11-11 |
 | 77. Steering idempotency and ordering | v1.8 | 1/1 | Complete (c26b1ef3, b9ecd215); migrations 44-45 rehearsal operator-gated | 2026-11-11 |
 | 78. Cross-layer reconciliation | v1.8 | 0/1 | Partial: memory.forget pair only (46956358); scheduler unwired | - |
+| 80. DG-1a DragonflyDB Gate probe | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
+| 81. DG-1b Gate implement-or-document | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
+| 82. E2 shared-context cache | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
+| 83. E1 Live Steering multi-worktree | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
+| 84. E3+E6 memory fabric + episodic | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
+| 85. E4+E7 orchestration + fencing | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
+| 86. E5+E8 observability + replay/audit | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |

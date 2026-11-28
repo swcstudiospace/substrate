@@ -1,24 +1,31 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.8
-current_phase: 71
-current_phase_name: Multi-Session boundary
-status: verifying
-stopped_at: Phase 86 complete, ready to verify Phase 71
-last_updated: "2026-11-28T16:02:11.884Z"
+milestone: v1.9
+current_phase: 86
+current_phase_name: E5 observability loop plus E8 session replay and audit
+status: complete
+stopped_at: Phase 86 complete; milestone v1.9 shipped as PR #229 (squash 4cd42fbd) 2026-11-28
+last_updated: "2026-11-28T16:30:00.000Z"
 last_activity: 2026-11-28
-last_activity_desc: Phase 86 complete, transitioned to Phase 71
-state_head: 02238999e9f77b393fea29c02ccb325d7918527f
+last_activity_desc: Milestone v1.9 completed and archived; 7/7 phases verified passed
+state_head: 4cd42fbdd19277deec6b6461878b1a4adc090ffc
 progress:
-  total_phases: 61
-  completed_phases: 47
-  total_plans: 0
-  completed_plans: 10
-  percent: 75
-milestone_name: "Hardening: Multi-Session, Ledger Integrity, Degradation and Reconciliation"
+  total_phases: 7
+  completed_phases: 7
+  total_plans: 7
+  completed_plans: 7
+  percent: 100
+milestone_name: "Cross-Resource Enhancements & Quality Baseline (Wave 8)"
 ---
 
 # State
+
+## Milestone v1.9 closeout (2026-11-28)
+
+- 7/7 phases verified passed, merged as PR #229 (squash 4cd42fbd), no Greptile review per explicit operator approval.
+- Pre-existing full-suite reds unchanged from main; one Wave-8 regression fixed (redaction lock).
+- Outstanding GSD phases carried forward unchanged: 46, 61, 66, 67, 68, 71, 74, 78 (operator-gated; see Deferred Verification).
+- Audit: milestones/v1.9-MILESTONE-AUDIT.md. Artifacts archived under milestones/v1.9-phases/.
 
 ## Deferred Verification
 
