@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.9 — Cross-Resource Enhancements & Quality Baseline (Wave 8)",
+  "milestone": "v1.8",
   "phases": [
     {
       "number": "16",
@@ -321,8 +321,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 31 of 70 · 75% · executing"
+    "label": "Advance to the next step (verify)",
+    "reason": "Phase 54 of 61 · 75% · ready to verify"
   },
-  "updated_at": "2026-11-28T15:09:49.532Z"
+  "updated_at": "2026-11-28T16:02:11.938Z"
 }
