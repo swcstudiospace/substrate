@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.11",
+  "milestone": "v1.11 — Live Fabric Interop (Wave 9)",
   "phases": [
     {
       "number": "16",
@@ -352,12 +352,47 @@
       "number": "86",
       "name": "E5+E8 observability + replay/audit",
       "status": "complete"
+    },
+    {
+      "number": "100",
+      "name": "F1 live STATE reflection",
+      "status": "complete"
+    },
+    {
+      "number": "101",
+      "name": "F2 Hindsight relationships",
+      "status": "complete"
+    },
+    {
+      "number": "102",
+      "name": "F3 event-driven doc refresh",
+      "status": "complete"
+    },
+    {
+      "number": "103",
+      "name": "F4 multi-worktree sharing",
+      "status": "complete"
+    },
+    {
+      "number": "104",
+      "name": "F5 steering injection v2",
+      "status": "complete"
+    },
+    {
+      "number": "105",
+      "name": "F6 in-session recall",
+      "status": "complete"
+    },
+    {
+      "number": "106",
+      "name": "F7 ingest + steering test",
+      "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd-discuss-phase",
-    "label": "Discuss the first phase",
-    "reason": "Project initialized — plan your first phase"
+    "command": "/gsd-progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-11-28T18:10:50.079Z"
+  "updated_at": "2026-11-28T19:32:26.186Z"
 }

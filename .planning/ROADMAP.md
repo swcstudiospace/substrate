@@ -16,7 +16,6 @@
 - 🚧 **v1.11 Live Fabric Interop (Wave 9)** — Phases 100-106: FSM states as live LightRAG documents (F1), Hindsight relationship learning (F2), Greptime event-driven doc refresh (F3), multi-worktree/project state sharing (F4), Live Session Steering injection v2 (F5), in-session recall (F6), 15-repo ingest verification + steering test (F7). Live windows granted for LightRAG ingest; merge without Greptile on green CI.
   Audited 2026-11-28 (milestone audit Wave 7, STATE.md): gates 94/94 + full-verify gap recorded; SVM verdict BUILT_NOT_DEPLOYED; NOT complete — 8 human_verify approvals, owner decisions (Phase 72 HARD-S2, corpus), Greptile trial-ended, and Wave-8 cleanup pending.
 
-
 <details>
 <summary>⚠️ v1.0 build plan (Phases 0-6, with 0.5) — CLOSED 2026-10-01 with known gaps</summary>
 
@@ -159,15 +158,16 @@ Closeout: merged 2026-11-21 as PR #223 after a full green local gate (12615 pass
 - [x] **Phase 84: E3 unified memory fabric + E6 episodic memory** - Hindsight-owner routing, provenance-only LightRAG join, episodic supersession chains (verified passed 6/6)
 - [x] **Phase 85: E4 orchestration + E7 Leader fencing** - namespaced delegation handoffs, epoch-fenced writes, TTL queue with dead-letter surfacing (verified passed 5/5)
 - [x] **Phase 86: E5 observability + E8 replay/audit** - correlation threading, burn detector, read-only replay, mirrored summaries (verified passed 5/5)
+
 ### 🚧 v1.11 Live Fabric Interop (Wave 9)
 
-- [ ] **Phase 100: F1 live STATE reflection** - post-write hook ingests STATE.md + phase transitions to LightRAG; freshness SLI keeps states-as-docs current in realtime
-- [ ] **Phase 101: F2 Hindsight relationship learning** - cross-file/markdown relations (imports, refs, phase deps) learned into Hindsight banks; recall carries relationship context
-- [ ] **Phase 102: F3 Greptime event-driven doc refresh** - agent_events file/change events trigger debounced LightRAG re-ingest; coalesced, DLQ on failure
-- [ ] **Phase 103: F4 multi-worktree/project state sharing** - SessionRegistry snapshot read API across worktrees/graphs for realtime cross-agent reads
-- [ ] **Phase 104: F5 Live Session Steering injection v2** - event-driven TODO injection with subscription filters, idempotency and ordering (builds on steering + registry)
-- [ ] **Phase 105: F6 in-session recall** - on-demand recall during sessions with provenance and latency budget
-- [ ] **Phase 106: F7 15-repo ingest verification + steering test** - ingest all 15 repos, prove realtime markdown→state→session steering updates
+- [x] **Phase 100: F1 live STATE reflection** - post-write hook ingests STATE.md + phase transitions to LightRAG; freshness SLI keeps states-as-docs current in realtime (completed 2026-11-28)
+- [x] **Phase 101: F2 Hindsight relationship learning** - cross-file/markdown relations (imports, refs, phase deps) learned into Hindsight banks; recall carries relationship context (completed 2026-11-28)
+- [x] **Phase 102: F3 Greptime event-driven doc refresh** - agent_events file/change events trigger debounced LightRAG re-ingest; coalesced, DLQ on failure (completed 2026-11-28)
+- [x] **Phase 103: F4 multi-worktree/project state sharing** - SessionRegistry snapshot read API across worktrees/graphs for realtime cross-agent reads (completed 2026-11-28)
+- [x] **Phase 104: F5 Live Session Steering injection v2** - event-driven TODO injection with subscription filters, idempotency and ordering (builds on steering + registry) (completed 2026-11-28)
+- [x] **Phase 105: F6 in-session recall** - on-demand recall during sessions with provenance and latency budget (completed 2026-11-28)
+- [x] **Phase 106: F7 15-repo ingest verification + steering test** - ingest all 15 repos, prove realtime markdown→state→session steering updates (completed 2026-11-28)
 
 ### Unison enhancements for coordinated operation of Hindsight, LightRAG, DragonflyDB, GreptimeDB and TimescaleDB (SPE-34076, SPE-34079)
 
@@ -562,6 +562,7 @@ Plans:
 
   1. Memory, skill, and docs writes refuse an invalid payload with the surface's documented error status.
   2. Before-and-after checks of stored content (memory records, docs state, uploaded documents) prove nothing was persisted or mutated on a refusal (row count alone is insufficient because `decideSkill` can mutate without changing count, and docs perform uploads + disk writes). Row counts kept as an extra check. Proven in an isolated namespace per surface.
+
 **Plans**: 1/1 plans complete; verified 2026-10-21, all criteria PASS, see 34-VERIFICATION.md
 
 ### Phase 35: expected_version for skills and docs
@@ -575,6 +576,7 @@ Plans:
   1. A skill or docs write with a stale `expected_version` is rejected with the memory path's error, and the stored row is unchanged.
   2. A matching `expected_version` is accepted and the version increments.
   3. A write without the field behaves exactly as it does today.
+
 **Plans**: 1/1 plans complete
 
 ### Phase 36: Degraded-mode exactly-once replay
@@ -589,6 +591,7 @@ Plans:
   2. A write without a key behaves exactly as it does today.
   3. The 503 path is covered by a test.
   4. The dependent client's local queue is built for the identified client, or recorded as a decision request with a default.
+
 **Plans**: 1/1 plans complete; verified 2026-10-21, see 36-VERIFICATION.md
 
 ### Phase 37: LANEB
@@ -855,7 +858,6 @@ Plans:
   2. Compliance report.
 
 **Plans**: 1/1 plans complete; verified 2026-10-22 in phases/51-enterprise-fabric/VERIFICATION.md; merged in PR #108
-
 
 ### Phase 52: GSD-Core planning index and cross-session awareness core
 
@@ -1619,7 +1621,6 @@ Plans:
 
 **Plans**: TBD (run /gsd-plan-phase 106 to break down)
 
-
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -1694,10 +1695,10 @@ Plans:
 | 84. E3+E6 memory fabric + episodic | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
 | 85. E4+E7 orchestration + fencing | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
 | 86. E5+E8 observability + replay/audit | v1.9 | 1/1 | Complete — merged as PR #229 | 2026-11-28 |
-| 100. F1 live STATE reflection | v1.11 | 0/0 | Not started | - |
-| 101. F2 Hindsight relationships | v1.11 | 0/0 | Not started | - |
-| 102. F3 event-driven doc refresh | v1.11 | 0/0 | Not started | - |
-| 103. F4 multi-worktree sharing | v1.11 | 0/0 | Not started | - |
-| 104. F5 steering injection v2 | v1.11 | 0/0 | Not started | - |
-| 105. F6 in-session recall | v1.11 | 0/0 | Not started | - |
-| 106. F7 ingest + steering test | v1.11 | 0/0 | Not started | - |
+| 100. F1 live STATE reflection | v1.11 | 1/1 | Complete    | 2026-11-28 |
+| 101. F2 Hindsight relationships | v1.11 | 1/1 | Complete    | 2026-11-28 |
+| 102. F3 event-driven doc refresh | v1.11 | 1/1 | Complete    | 2026-11-28 |
+| 103. F4 multi-worktree sharing | v1.11 | 1/1 | Complete    | 2026-11-28 |
+| 104. F5 steering injection v2 | v1.11 | 1/1 | Complete    | 2026-11-28 |
+| 105. F6 in-session recall | v1.11 | 1/1 | Complete    | 2026-11-28 |
+| 106. F7 ingest + steering test | v1.11 | 1/1 | Complete    | 2026-11-28 |

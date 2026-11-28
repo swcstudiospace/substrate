@@ -102,6 +102,50 @@ heartbeat CONTEXT_REFRESH 19:04:26Z, `event_stored:true` both).
   consistent. Invalidation-on-state-version-bump remains code-path only
   (Phase 105 fake tests) — not exercised live, recorded as such.
 
+## Gap closure (4 named gaps, ~19:23–19:25 UTC, same live window)
+
+Auth note: instance now requires `X-API-Key` (via operator file
+`/etc/substrate/substrate.env`, `LIGHTRAG_API_KEY`; redacted, never committed).
+First keyless `--project ClippyOS` attempt failed closed with 403s (no state
+damage; log `/tmp/as-wave9-106-gapclosure-clippyos.log`); all runs below used
+the key. State backed up pre-run
+(`/tmp/as-wave9-106-gapclosure-state-backup.json`); state left exactly as the
+orchestrator wrote it; no commits.
+
+- ClippyOS — RESOLVED. Re-ingest `completed`: 5 new tracks
+  (`insert_20261128_192312_*`,
+  log `/tmp/as-wave9-106-gapclosure-clippyos2.log`). Prefix inventory 33 docs,
+  33 `processed` (was 28 docs, 0 processed). Naive-mode
+  `ClippyOS frontend dogfood` → 19 refs incl. own-prefix
+  `ClippyOS__docs__superpowers__plans__2026-09-18-clippyos-frontend-dogfood.md`.
+  Caveat: mix-mode generic `What is ClippyOS?` still 0 own — retrieval is
+  mode/phrasing-dependent.
+- motion-playbook — RESOLVED via corpus namespace; prefix processing ACCEPTED.
+  Re-ingest `completed`: 10 new tracks (`insert_20261128_192323_*`,
+  log `/tmp/as-wave9-106-gapclosure-motion.log`, pipeline busy → idle attempt
+  4). Prefix inventory 23 docs, all `failed` (instance-side processing failure
+  persists). Mix `motion-playbook frame budget` → 19 refs, 3 own-topic
+  (`corpus:motion-playbook:docs/02-frame-budget.md`, `docs/09-measuring.md`,
+  `SKILL.md`). Forcing prefix reprocessing needs delete+re-upload: out of bounds.
+- trading-desk — ACCEPTED gap with reason. Orchestrator resume-skips
+  (`completed`): repo has no `docs/` dir (autonomy/briefs/data/journal/
+  proposals/research/strategies/watch/ only), so nothing in-scope to ingest.
+  Prefix still 5 docs, all `failed`; mix queries (`What is trading-desk?`,
+  `trading-desk risk manager`) → 16/14 refs, 0 own (hypergrok desk content
+  only). Expanding discovery scope is a code change: out of bounds.
+- autonogrammer — RESOLVED. Re-ingest re-attempted → 30× 409 (already live,
+  expected; log `/tmp/as-wave9-106-gapclosure-autonogrammer.log`; state stays
+  `failed`). Prefix 3,508 docs / 1,311 `processed`. Mix
+  `What is autonogrammer?` → 18 refs, 2 own-prefix
+  (`autonogrammer__README.md`, `autonogrammer__docs__README.md`); mix
+  accessibility phrasing → 20 refs, 13 own-prefix. Prior 0-own was a
+  probe-matcher artifact (`startswith` on stringified ref dicts), corrected.
+
+Consolidated evidence: `/tmp/as-wave9-106-gapclosure-evidence.json`
+(per-prefix inventory + full ref paths per query), probe `/tmp/probe_gapclosure.py`.
+Per-repo rows updated in `.planning/15-repos-lightrag-ingest-evidence.md`
+(gap-closure annotations + re-run section).
+
 ## Files
 
 - Rewrote: `.planning/15-repos-lightrag-ingest-evidence.md` (live-only rows).
@@ -110,5 +154,8 @@ heartbeat CONTEXT_REFRESH 19:04:26Z, `event_stored:true` both).
 - Run artifacts (outside repo, cited): `/tmp/as-wave9-106-live-run.log`,
   `/tmp/probe_found.json`, `/tmp/probe_query_short.json`,
   `/tmp/probe_query_targeted.json`, `/tmp/as-wave9-106-state-backup.json`.
+- Gap-closure artifacts (outside repo, cited): `/tmp/as-wave9-106-gapclosure-*.log`,
+  `/tmp/as-wave9-106-gapclosure-evidence.json`, `/tmp/probe_gapclosure.py`,
+  `/tmp/as-wave9-106-gapclosure-state-backup.json`.
 - Touched live (append-only/expected): `.lightrag_ingest_state.json`
   (orchestrator-written); no commits (per instructions).
