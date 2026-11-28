@@ -10,7 +10,7 @@
  * bank prefix): no new env var. The run touches ONE bank it creates, named
  * `<prefix>canary-<random>`, and deletes it at the end even after a failure.
  * The recall check uses the client's own budget: HINDSIGHT_RECALL_BUDGET_MS when
- * set to a positive integer, else the 4000 ms default.
+ * set to a positive integer, else the 1500 ms default (clamped to 100..10000).
  *
  * Exit codes: 0 every check passed (skips allowed), 1 a check failed,
  * 2 usage or configuration refused, 3 the candidate was unreachable.

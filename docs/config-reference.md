@@ -170,6 +170,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | Name | Kind | Default | Allowed | Unset means | Read by | In `.env.example` |
 | --- | --- | --- | --- | --- | --- | --- |
 | `SUBSTRATE_BRIEF_SESSIONS` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: the brief carries no sessions, steering or handoffs section and is byte-identical to before, and the session_context tool and GET /session/context refuse with session-context.disabled; on: those sections are appended live to every full brief (under the brief's own deadline) and the digest is served. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `SUBSTRATE_SESSION_SNAPSHOT` | toggle | off | on \| off (1/0, true/false, yes/no; anything else is off) | off: the session_snapshot tool refuses with session-snapshot.disabled and reads nothing; on: the read-only multi-worktree snapshot digest is served, gated by the repo allowlist and labeled with freshness and degradation. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_BUDGET_MS` | number | 1200 | 0 = no deadline | 1200 ms. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS` | number | 30 | positive integer | 30 days. See `docs/observability.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` | number | 3600 | 0 = no snapshots | 3600 s. See `docs/observability.md` | mcp-server/config.ts | yes |
@@ -197,7 +198,7 @@ Which environment a name belongs in is part of the row: the server's shared env 
 | `HINDSIGHT_BANK_PREFIX` | string | sub- | bank name prefix | sub-. See `docs/data-planes.md` | mcp-server/planes/hindsight.ts | yes |
 | `HINDSIGHT_BANKS` | list | none | comma separated bank names | recall reads the caller's own bank only. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `HINDSIGHT_BANK` | string | none | legacy | nothing: set or not, it is unread and only triggers a boot warning (LEGACY: read only to warn at boot). See `docs/data-planes.md` | mcp-server/config.ts, legacy-env.ts | no |
-| `HINDSIGHT_RECALL_BUDGET_MS` | number | 4000 | positive integer ms | 4000 ms. See `docs/data-planes.md` | mcp-server/config.ts | yes |
+| `HINDSIGHT_RECALL_BUDGET_MS` | number | 1500 | positive integer ms, clamped to 100..10000 | 1500 ms. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS` | number | 1500 | positive integer ms | 1500 ms. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `HINDSIGHT_RETAIN_TIMEOUT_MS` | number | 8000 | positive integer ms | 8000 ms. See `docs/data-planes.md` | mcp-server/config.ts | yes |
 | `SUBSTRATE_RETAIN_OUTBOX_PATH` | path | none | file path | memory-only retain queue. See `docs/data-planes.md` | mcp-server/config.ts | yes |

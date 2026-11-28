@@ -10,7 +10,18 @@ import { describe, expect, test } from "bun:test";
 import { auditMode } from "../../audit/src/policy.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { forwardRetain } from "./memory-retain.ts";
-import { recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type RecallDeps } from "./memory-recall.ts";
+import {
+	clampRecallBudgetMs,
+	DEFAULT_RECALL_BUDGET_MS,
+	MAX_RECENCY_BOOST,
+	MAX_RECALL_BUDGET_MS,
+	MIN_RECALL_BUDGET_MS,
+	recallMemories,
+	recencyBoostForAgeMs,
+	resolveRecallBanks,
+	UNTRUSTED_MEMORY_NOTICE,
+	type RecallDeps,
+} from "./memory-recall.ts";
 import { mergeDerivedHits } from "./memory-search.ts";
 import { normalizeRoute, toolLabel } from "./observe.ts";
 import { clearEnsuredBanks, type HindsightConfig } from "./planes/hindsight.ts";
@@ -361,5 +372,137 @@ describe("scoped merge", () => {
 		]);
 		const reply = await recallMemories(deps(fake), "lease", "cursor");
 		expect(reply.results.map((hit) => hit.scope)).toEqual(["repo:acme/app"]);
+	});
+});
+
+// ── phase 105 F6: single recall entry, provenance, recency, budget ────────────
+
+describe("phase 105 F6 provenance (bank + document/entry + freshness)", () => {
+	test("every served hit names its bank and document, and carries a freshness anchor", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-cursor", [{ id: "c1", text: "fence the lease", document_id: "mwd_c1", tags: ["cursor"], metadata: { entry_id: "mem_c1" }, score: 0.5 }]);
+		fake.seed("sub-hermes", [{ id: "h1", text: "rotate the key", document_id: "mwd_h1", tags: ["hermes"], metadata: {}, score: 0.9 }]);
+		const before = Date.now();
+		const reply = await recallMemories(deps(fake), "lease", "cursor");
+		expect(reply.degraded).toBe(false);
+		expect(reply.results.length).toBe(2);
+		// Caller-first ordering is preserved: the own bank's hit leads on ties is covered above; here the bank is named per hit.
+		for (const hit of reply.results) {
+			expect(hit.bank).toMatch(/^sub-/);
+			expect(hit.document_id ?? hit.id).toBeTruthy();
+			expect(hit.asOf).toBeDefined();
+			const age = before - Date.parse(hit.asOf ?? "");
+			expect(Number.isFinite(age)).toBe(true);
+		}
+		expect(reply.results.find((hit) => hit.document_id === "mwd_c1")).toMatchObject({ bank: "sub-cursor", entry_id: "mem_c1" });
+		expect(reply.results.find((hit) => hit.document_id === "mwd_h1")).toMatchObject({ bank: "sub-hermes" });
+		expect(reply.results.find((hit) => hit.document_id === "mwd_h1")?.entry_id).toBeUndefined();
+	});
+});
+
+describe("phase 105 F6 ledger status (surfaced, never promoted)", () => {
+	test("known statuses pass through, unknown stays absent, and score order stands", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-cursor", [
+			{ id: "low", text: "verified but weak", document_id: "mwd_low", tags: [], metadata: { ledger_status: "verified" }, score: 0.1 },
+			{ id: "high", text: "strong but untrusted", document_id: "mwd_high", tags: [], metadata: { ledger_status: "untrusted" }, score: 0.9 },
+			{ id: "odd", text: "unknown status stays absent", document_id: "mwd_odd", tags: [], metadata: { ledger_status: "anchored" }, score: 0.5 },
+			{ id: "plain", text: "no status stays absent", document_id: "mwd_plain", tags: [], metadata: {}, score: 0.4 },
+		]);
+		const reply = await recallMemories({ config: CONFIG, banks: null, fetchImpl: fake.fetch, budgetMs: 2000 }, "ledger", "cursor");
+		const byDoc = new Map(reply.results.map((hit) => [hit.document_id, hit]));
+		expect(byDoc.get("mwd_low")).toMatchObject({ ledgerStatus: "verified" });
+		expect(byDoc.get("mwd_high")).toMatchObject({ ledgerStatus: "untrusted" });
+		expect(byDoc.get("mwd_odd")?.ledgerStatus).toBeUndefined();
+		expect(byDoc.get("mwd_plain")?.ledgerStatus).toBeUndefined();
+		// F6 never promotes: the verified-but-weak hit still ranks last.
+		expect(reply.results.map((hit) => hit.document_id)).toEqual(["mwd_high", "mwd_odd", "mwd_plain", "mwd_low"]);
+	});
+});
+
+describe("phase 105 F6 recency boost (Timescale leg, fail-open)", () => {
+	const NOW_MS = Date.parse("2026-11-28T12:00:00.000Z");
+	const signalOf = (nowMs: number) => ({
+		nowMs,
+		ageMsOf: (hit: { metadata: Record<string, unknown> }): number | null => {
+			const raw = hit.metadata.updated_at;
+			if (typeof raw !== "string") return null;
+			const age = nowMs - Date.parse(raw);
+			return Number.isFinite(age) ? age : null;
+		},
+	});
+
+	test("a bounded boost lifts the fresher hit; without the leg score order stands", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-cursor", [
+			{ id: "stale", text: "older strong match", document_id: "mwd_stale", tags: [], metadata: { updated_at: "2026-10-01T00:00:00.000Z" }, score: 0.9 },
+			{ id: "fresh", text: "newer close match", document_id: "mwd_fresh", tags: [], metadata: { updated_at: "2026-11-28T00:00:00.000Z" }, score: 0.85 },
+		]);
+		const plain = await recallMemories({ config: CONFIG, banks: null, fetchImpl: fake.fetch, budgetMs: 2000 }, "match", "cursor");
+		expect(plain.results.map((hit) => hit.document_id)).toEqual(["mwd_stale", "mwd_fresh"]);
+		const boosted = await recallMemories({ config: CONFIG, banks: null, fetchImpl: fake.fetch, budgetMs: 2000, recency: signalOf(NOW_MS) }, "match", "cursor");
+		expect(boosted.results.map((hit) => hit.document_id)).toEqual(["mwd_fresh", "mwd_stale"]);
+	});
+
+	test("the boost is bounded and unknown ages gain nothing", async () => {
+		expect(recencyBoostForAgeMs(0)).toBe(MAX_RECENCY_BOOST);
+		expect(recencyBoostForAgeMs(-5)).toBe(0);
+		expect(recencyBoostForAgeMs(Number.NaN)).toBe(0);
+		const yearOld = recencyBoostForAgeMs(365 * 86_400_000);
+		expect(yearOld).toBeGreaterThanOrEqual(0);
+		expect(yearOld).toBeLessThan(0.01);
+		// 0.1 + MAX_RECENCY_BOOST still loses to 0.9: recency never buries a strong match.
+		const fake = new HindsightFake();
+		fake.seed("sub-cursor", [
+			{ id: "strong", text: "strong stale match", document_id: "mwd_strong", tags: [], metadata: { updated_at: "2026-01-01T00:00:00.000Z" }, score: 0.9 },
+			{ id: "weak", text: "weak fresh match", document_id: "mwd_weak", tags: [], metadata: {}, score: 0.1 },
+		]);
+		const boosted = await recallMemories({ config: CONFIG, banks: null, fetchImpl: fake.fetch, budgetMs: 2000, recency: signalOf(NOW_MS) }, "match", "cursor");
+		expect(boosted.results.map((hit) => hit.document_id)).toEqual(["mwd_strong", "mwd_weak"]);
+	});
+});
+
+describe("phase 105 F6 single tunable budget", () => {
+	test("the ad-hoc budget defaults to 1.5s and clamps to the shared range", () => {
+		expect(DEFAULT_RECALL_BUDGET_MS).toBe(1500);
+		expect(clampRecallBudgetMs(undefined)).toBe(1500);
+		expect(clampRecallBudgetMs(Number.NaN)).toBe(1500);
+		expect(clampRecallBudgetMs("1500" as unknown as number)).toBe(1500);
+		expect(clampRecallBudgetMs(50)).toBe(MIN_RECALL_BUDGET_MS);
+		expect(clampRecallBudgetMs(30_000)).toBe(MAX_RECALL_BUDGET_MS);
+		expect(clampRecallBudgetMs(2000)).toBe(2000);
+	});
+});
+
+describe("phase 105 F6 degradation ladder (Hindsight-only, then empty-with-reason)", () => {
+	test("a forgotten-check that misses the budget still serves entry-free hits with a named gap", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-cursor", [
+			{ id: "c1", text: "names an entry", document_id: "mwd_c1", tags: [], metadata: { entry_id: "mem_c1" }, score: 0.9 },
+			{ id: "c2", text: "names no entry", document_id: "mwd_c2", tags: [], metadata: {}, score: 0.5 },
+		]);
+		const hanging = async (): Promise<ReadonlySet<string>> => {
+			await new Promise((resolve) => setTimeout(resolve, 5000));
+			return new Set();
+		};
+		const reply = await recallMemories({ config: CONFIG, banks: null, fetchImpl: fake.fetch, budgetMs: 2000, forgotten: hanging }, "lease", "cursor");
+		expect(reply.degraded).toBe(true);
+		expect(reply.results.map((hit) => hit.document_id)).toEqual(["mwd_c2"]);
+		expect(reply.reason).toContain("withheld");
+	});
+
+	test("a failed forgotten-check withholds entry hits fail-closed, keeping the rest", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-cursor", [
+			{ id: "c1", text: "names an entry", document_id: "mwd_c1", tags: [], metadata: { entry_id: "mem_c1" }, score: 0.9 },
+			{ id: "c2", text: "names no entry", document_id: "mwd_c2", tags: [], metadata: {}, score: 0.5 },
+		]);
+		const failing = async (): Promise<ReadonlySet<string>> => {
+			throw new Error("index down");
+		};
+		const reply = await recallMemories({ config: CONFIG, banks: null, fetchImpl: fake.fetch, budgetMs: 2000, forgotten: failing }, "lease", "cursor");
+		expect(reply.degraded).toBe(true);
+		expect(reply.results.map((hit) => hit.document_id)).toEqual(["mwd_c2"]);
+		expect(reply.reason).toContain("withheld");
 	});
 });

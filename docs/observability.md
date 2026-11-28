@@ -505,6 +505,21 @@ directory's manifests, memoised for 60 s and bounded to the 1 s probe; with the
 variable unset the key and the row are absent. The archive itself:
 `docs/runbooks/index-archive.md`.
 
+### STATE freshness (Phase 100)
+
+`GET /healthz` carries `stateFreshness = { lagSeconds, stale, reason }`, the
+`state_freshness_lag_seconds` gauge: now minus the newer of the newest
+`.planning/STATE.md` mtime across planning checkouts and the last successful
+planning-pass ingest. No checkouts (or no completed pass yet) reads
+`lagSeconds: null` with an `unknown` reason — never a throw, never the status
+code. **Alert threshold: `lagSeconds > 300` reads `stale`.** The threshold is
+documented only: no new alerting infra watches it (a monitor scrapes
+`/healthz` like every other gauge). Last-good STATE fallback state lives in
+`.lightrag_ingest_state.json` (`last_good_state_reflect` + `last_attempt`
+freshness timestamp); the ingest itself is `ingestStateReflectDocument` in
+`packages/mcp-server/src/state-ingest.ts` (fake-tested, `documents/text`
+upload → `track_status` → scan → poll, 409 delete-first retry).
+
 ### Railway cost report (Phase 45)
 
 `GET /slo` carries a `railwayCost` key on every 200 response. It is the Railway cost

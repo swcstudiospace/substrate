@@ -11,7 +11,7 @@ import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { fanOutBriefRecall } from "./memory-recall.ts";
 import { clearEnsuredBanks, hindsightFromEnv } from "./planes/hindsight.ts";
-import { BRIEF_RECALL_CAP_MS, DEFAULT_RECALL_TTL_S, RECALL_TITLE_PREFIX, briefRecallBudgetMs, buildRecallQuery, fanoutSnapshot, type RecallSnapshot } from "./recall-snapshot.ts";
+import { BRIEF_RECALL_CAP_MS, DEFAULT_RECALL_TTL_S, RECALL_CACHE_VERSION, RECALL_TITLE_PREFIX, briefRecallBudgetMs, buildRecallQuery, fanoutSnapshot, fanoutSnapshotArgs, recallQueryHash, type RecallSnapshot } from "./recall-snapshot.ts";
 import { Substrate } from "./service.ts";
 
 const REQUEST = { repo: "acme/app", surface: "grok-bot" } as const;
@@ -439,5 +439,22 @@ describe("brief recall fan-out is off the text for off and shadow", () => {
 			expect(shadow.etag).toBe(off.etag);
 			expect(recallCalls(shadowFake)).toEqual([]);
 		});
+	});
+});
+
+// ── phase 105 F6: version-keyed fan-out cache args ────────────────────────────
+
+describe("phase 105 F6 version-keyed fan-out cache args", () => {
+	test("args are stable per query, distinct across queries, and carry the entry version", () => {
+		const query = buildRecallQuery(REPO, ["fence the lease"]);
+		const a = fanoutSnapshotArgs(REPO, [...CONFIGURED].reverse(), query);
+		const b = fanoutSnapshotArgs(REPO, CONFIGURED, query);
+		expect(b).toEqual(a); // bank order normalizes
+		expect(a.v).toBe(RECALL_CACHE_VERSION);
+		expect(a.queryHash).toBe(recallQueryHash(query));
+		expect(a.queryHash).toMatch(/^[0-9a-f]{16}$/);
+		const other = fanoutSnapshotArgs(REPO, CONFIGURED, buildRecallQuery(REPO, ["rotate the key"]));
+		expect(other.queryHash).not.toBe(a.queryHash);
+		expect(other.v).toBe(RECALL_CACHE_VERSION);
 	});
 });

@@ -6,6 +6,8 @@
  * get MCP. Same code underneath.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import { RedisClient } from "bun";
 import { canonicalJson, decideClaim, type AuditTransport, type ClaimDecision } from "@substrate/audit";
 import { acceptsSigner, createRpc, formatMemo, headsRoot, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type SignerSet, type TransactionMemo } from "@substrate/ledger";
@@ -88,6 +90,7 @@ import {
 	planningHintFromJson,
 	planningIngestTrigger,
 	planningPageSha,
+	planningPhaseOf,
 	scanIngestPages,
 	ingestDocs,
 	loadIngestRecords,
@@ -100,6 +103,9 @@ import {
 	type IngestRecord,
 	type PageSettlement,
 } from "./docs-ingest.ts";
+import { buildStateReflectEvent, isStateReflectPath, summaryPhaseOf, type StateReflectEvent } from "./state-reflect.ts";
+import { computeStateFreshnessLag, type StateFreshnessReading } from "./state-freshness.ts";
+import { validateT0Provenance } from "./t0-provenance.ts";
 import { CORPUS_FRESHNESS_DATASET, LagSettler, TRIGGER_RECORD_DEADLINE_MS, corpusFreshnessRow, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
 import { augmentQuestionWithSteering, DOCS_CONTEXT_LEDGER_BUDGET_MS, UNTRUSTED_DOCS_NOTICE, citationProvenanceCounts, docsContextEvents, docsContextMemories, normalizeRepoId, scopedDatasetName, searchDocs, searchReplyStorable, type DocsContext, type DocsContextEvent, type DocsContextMemory, type SearchReply } from "./docs-search.ts";
 import {
@@ -245,6 +251,8 @@ import type { AuditOutcome, McpToolCall } from "./observe.ts";
 import { z } from "zod";
 import { composeLiveSections, type BriefSteeringInput, type BriefWorktreesInput } from "./brief-sessions.ts";
 import { assembleSessionContext, HANDOFF_READ_LIMIT, OPEN_GRAPHS_READ_LIMIT, planningChangedCount, SESSION_CONTEXT_BUDGET_MS, type SessionContext, type SessionContextRequest } from "./session-context.ts";
+import { assembleSessionSnapshot, gateSnapshotScope, SESSION_SNAPSHOT_MAX_REPOS, snapshotNotAllowed } from "./session-snapshot.ts";
+import type { SessionSnapshot, SnapshotBindingRow, SnapshotEventRow, SnapshotRegistryRow, SnapshotRefusal, SnapshotScope, SnapshotWorktreeRow } from "./session-snapshot.ts";
 import { DeadlineError, sharedDeadline } from "./deadline.ts";
 import type { DragonflyReadinessVerdict, FabricSources } from "./fabric/types.ts";
 import { CORPUS_MANIFEST_READ_MS, FABRIC_HEALTH_WINDOW_MS, within } from "./fabric/gather.ts";
@@ -1756,6 +1764,8 @@ export class Substrate {
 	/** The planning pass in flight, if any: one at a time, and a request during it marks the next pass dirty. */
 	private planningPass: Promise<void> | null = null;
 	private planningDirty = false;
+	/** Phase 100 (F1): epoch ms of the last planning pass that ingested without failure; null until one completes. Feeds the `state_freshness_lag_seconds` gauge. */
+	private lastStateReflectAtMs: number | null = null;
 	/** Stops the planning poll's interval; null while the poll is not running. */
 	private planningStop: (() => void) | null = null;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
@@ -4002,6 +4012,113 @@ export class Substrate {
 			{ nowMs: Date.now(), ...(budgetMs !== undefined && budgetMs > 0 ? { budgetMs } : {}) },
 		);
 	}
+
+	/**
+	 * Phase 103 (F4): the read-only multi-worktree snapshot for one scope (`session_snapshot`): what the
+	 * SessionRegistry, live bindings, worktree registry and recent ledger events say, with freshness and
+	 * labeled degradation. The session allowlist gates first (`gateSnapshotScope`): a caller or scope without
+	 * a grant is refused before any source is read. Sources fan out across the granted repositories, capped
+	 * at `SESSION_SNAPSHOT_MAX_REPOS`. A read: it writes nothing and emits nothing.
+	 */
+	async sessionSnapshot(
+		scope: SnapshotScope,
+		callerSessionId: string | null,
+		env: Record<string, string | undefined> = process.env,
+		budgetMs?: number,
+	): Promise<SessionSnapshot | SnapshotRefusal> {
+		const parsed = repoAllowlistFromEnv(env);
+		const allowlist = parsed.ok ? parsed.value : EMPTY_REPO_ALLOWLIST;
+		const gate = gateSnapshotScope(scope, allowlist, callerSessionId);
+		if (!gate.ok) return snapshotNotAllowed();
+		const repos = gate.repos.slice(0, SESSION_SNAPSHOT_MAX_REPOS);
+		const reposTruncated = gate.repos.length > repos.length;
+		const storedFor = (repo: string): string => normalizeIdentifier(repo) ?? repo;
+		const greptime = this.greptime;
+		return assembleSessionSnapshot(
+			scope,
+			repos,
+			{
+				registry: this.planning.presenceConfigured()
+					? async () => {
+							const items: SnapshotRegistryRow[] = [];
+							let truncated = false;
+							for (const repo of repos) {
+								const listing = await this.planning.sessionsForRepo(repo);
+								truncated = truncated || listing.truncated;
+								for (const row of listing.rows) {
+									items.push({ repo, sessionId: row.sessionId, graphId: null, worktree: row.worktree, branch: row.branch, updatedAtMs: row.lastHeartbeatMs, state: row.status });
+								}
+							}
+							return { items, truncated };
+						}
+					: null,
+				bindings: async () => {
+					if (this.liveSessions === null) throw new Error("live session metadata unavailable");
+					const items: SnapshotBindingRow[] = [];
+					let truncated = false;
+					for (const repo of repos) {
+						const listed = await this.liveSessions.listMetadata({ repoId: scopeRepoId(repo), limit: 200 });
+						if (!listed.ok) throw new Error("live session metadata unavailable");
+						truncated = truncated || listed.nextCursor !== undefined;
+						for (const session of listed.sessions) {
+							items.push({ repo, sessionId: session.session_id, kind: "steering", state: session.state, updatedAtMs: Date.parse(session.updated_at) });
+						}
+					}
+					return { items, truncated };
+				},
+				worktrees: (() => {
+					const access = this.worktreeAccess(false);
+					if (!access.ok) return null;
+					return async () => {
+						const items: SnapshotWorktreeRow[] = [];
+						let truncated = false;
+						for (const repo of repos) {
+							const rows = await access.store.candidates({ repo, limit: WORKTREE_BRIEF_CANDIDATES_MAX + 1 });
+							const capped = rows.length > WORKTREE_BRIEF_CANDIDATES_MAX;
+							truncated = truncated || capped;
+							for (const row of capped ? rows.slice(0, WORKTREE_BRIEF_CANDIDATES_MAX) : rows) {
+								const commitMs = row.last_commit_at === null ? null : Date.parse(row.last_commit_at);
+								items.push({
+									repo,
+									path: row.path,
+									branch: row.branch,
+									sessionId: row.session_id ?? null,
+									graphId: row.graph_id ?? null,
+									lastCommitMs: commitMs !== null && Number.isFinite(commitMs) ? commitMs : null,
+								});
+							}
+						}
+						return { items, truncated };
+					};
+				})(),
+				events:
+					greptime === null
+						? null
+						: async () => {
+								const items: SnapshotEventRow[] = [];
+								let truncated = false;
+								for (const repo of repos) {
+									const stored = storedFor(repo);
+									const rows = await greptime.recentForRepo(stored, 200);
+									truncated = truncated || rows.length >= 200;
+									for (const row of rows) {
+										try {
+											const event = rowToEvent(row);
+											const tsMs = Date.parse(event.ts);
+											if (!Number.isFinite(tsMs)) continue;
+											items.push({ repo, tsMs, kind: event.kind, summary: event.summary, sessionId: event.session_id });
+										} catch {
+											// A row the ledger returned malformed is one fewer line in the snapshot, not a failed snapshot.
+										}
+									}
+								}
+								return { items, truncated, run: repos.length > 0 ? { id: `ledger:${storedFor(repos[0] as string)}` } : null };
+							},
+			},
+			{ nowMs: Date.now(), ...(budgetMs !== undefined && budgetMs > 0 ? { budgetMs } : {}), ...(reposTruncated ? { reposTruncated: true as const } : {}) },
+		);
+	}
+
 
 	/**
 	 * The brief's live sections, built per request and never cached. `SUBSTRATE_BRIEF_SESSIONS` (phase 67) adds the other live
@@ -7974,9 +8091,13 @@ export class Substrate {
 				byDataset.set(dataset, group);
 			}
 			const batches = [...byDataset].flatMap(([dataset, group]) => (batchPagesForIngest(group) as PlanningPage[][]).map((batch) => ({ dataset, batch })));
+			let ingestOk = true;
 			for (const { dataset, batch } of batches) {
 				const outcome = await this.ingestDocs({ dataset, pages: batch }, "substrate");
-				if (!outcome.ok) break;
+				if (!outcome.ok) {
+					ingestOk = false;
+					break;
+				}
 				// A result names its page by source URL: a checkout's absolute file URL, which no other checkout shares. The repo path
 				// alone would not do, since two checkouts can hold the same relative path.
 				const keyBySource = new Map<string | undefined, string>(batch.map((page) => [page.source_url, planningPageKey(page.checkout, page.path)] as const));
@@ -7991,15 +8112,72 @@ export class Substrate {
 				}
 				await this.savePlanningHashes(stored);
 			}
-			await this.emit({
-				surface: "substrate",
-				kind: "note",
-				summary: `planning refresh (${reason}): ${trigger.paths.length} changed page(s) under .planning/`,
-				payload: { action: "docs.planning", reason, paths: trigger.paths, planning_hash: planningContentHash(pages) },
-			});
+			// Phase 100 (F1): STATE.md writes and SUMMARY transitions in this pass emit reflect events carrying run lineage.
+			// Fail-open: a builder refusal is logged and the pass (and its note) continues.
+			const stateReflect = this.buildStateReflectEvents(pages, pending, registry.datasetOf, reason);
+			if (ingestOk) this.lastStateReflectAtMs = Date.now();
+		await this.emit({
+			surface: "substrate",
+			kind: "note",
+			summary: `planning refresh (${reason}): ${trigger.paths.length} changed page(s) under .planning/`,
+			payload: {
+				action: "docs.planning",
+				reason,
+				paths: trigger.paths,
+				planning_hash: planningContentHash(pages),
+				...(stateReflect.length > 0 ? { state_reflect: stateReflect } : {}),
+			},
+		});
 		} catch (cause) {
 			process.stderr.write(`[substrate] planning refresh failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
 		}
+	}
+
+	/**
+	 * Phase 100 (F1): the STATE reflection hook. For every changed page that is a
+	 * STATE.md write or a phase SUMMARY transition, validate T0 provenance for kind
+	 * `context` and build the lineage-carrying reflect event. Every refusal is
+	 * logged with its reason and skipped: the hook never fails the pass. Never throws.
+	 */
+	private buildStateReflectEvents(
+		pages: readonly PlanningPage[],
+		pending: ReadonlySet<string>,
+		datasetOf: ReadonlyMap<string, string>,
+		reason: string,
+	): StateReflectEvent[] {
+		const events: StateReflectEvent[] = [];
+		try {
+			const rootByCheckout = new Map(this.config.planningCheckouts.map((checkout) => [checkout.key, checkout.root] as const));
+			for (const page of pages) {
+				if (!pending.has(planningPageKey(page.checkout, page.path)) || !isStateReflectPath(page.path)) continue;
+				const contentHash = planningPageSha(page);
+				const proven = validateT0Provenance("context", {
+					worktree: rootByCheckout.get(page.checkout) ?? page.checkout,
+					project: datasetOf.get(page.checkout) ?? page.checkout,
+					agent: "substrate",
+					session: "planning-refresh",
+					event: reason,
+					content_hash: contentHash,
+				});
+				if (!proven.ok) {
+					process.stderr.write(`[substrate] state reflect skipped ${page.path} — ${proven.reason}\n`);
+					continue;
+				}
+				const built = buildStateReflectEvent({
+					path: page.path,
+					body: page.body,
+					lineage: { graph_id: page.checkout, phase: summaryPhaseOf(page.path) ?? planningPhaseOf(page.path), commit: contentHash },
+				});
+				if (!built.ok) {
+					process.stderr.write(`[substrate] state reflect skipped ${page.path} — ${built.reason}\n`);
+					continue;
+				}
+				events.push(built.event);
+			}
+		} catch (cause) {
+			process.stderr.write(`[substrate] state reflect hook failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+		return events;
 	}
 
 	/**
@@ -9516,7 +9694,36 @@ export class Substrate {
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
 			// The last completed scheduled reconcile, in memory (phase 78): the verdict an operator reads instead of grepping the journal.
 			reconcile: this.reconcileHealth(),
+			// Phase 100 (F1): the STATE freshness SLI. Fail-open local stats only; never the status code.
+			stateFreshness: await this.stateFreshness(),
 		};
+	}
+
+	/**
+	 * Phase 100 (F1): `state_freshness_lag_seconds` = now − max(newest STATE.md
+	 * mtime across planning checkouts, last successful planning-pass ingest).
+	 * Both inputs are fail-open: no checkouts (or no completed pass yet) reads
+	 * `unknown`, never a throw. Report-only: it never runs an ingest.
+	 */
+	private async stateFreshness(): Promise<StateFreshnessReading> {
+		try {
+			const mtimes = await Promise.all(
+				this.config.planningCheckouts.map(async (checkout) => {
+					try {
+						return (await stat(join(checkout.root, ".planning", "STATE.md"))).mtimeMs;
+					} catch {
+						return null;
+					}
+				}),
+			);
+			const stateMtimeMs = mtimes.reduce<number | null>(
+				(max, value) => (typeof value === "number" && (max === null || value > max) ? value : max),
+				null,
+			);
+			return computeStateFreshnessLag({ stateMtimeMs, lastSuccessIngestAtMs: this.lastStateReflectAtMs, nowMs: Date.now() });
+		} catch {
+			return { lagSeconds: null, stale: false, reason: "unknown: freshness read failed" };
+		}
 	}
 
 	/**
@@ -10023,6 +10230,8 @@ export interface SubstrateHealth {
 	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null; index?: IndexArchiveHealth };
 	/** The last completed scheduled reconcile (phase 78), in memory: `null` fields until the first run finishes. */
 	reconcile: ReconcileHealth;
+	/** Phase 100 (F1): the STATE freshness SLI gauge; `lagSeconds` null while unknown. Never the status code. */
+	stateFreshness: StateFreshnessReading;
 }
 
 /** `/healthz.eventBus` (phase 50): the bus's counters since boot; `{ enabled: false }` while `SUBSTRATE_EVENT_BUS` is off. */

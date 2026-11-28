@@ -704,6 +704,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"steering_wait",
 	"live_session_discovery",
 	"session_context",
+	"session_snapshot",
 	"worktree_list",
 	"worktree_report",
 	"corpus_status",

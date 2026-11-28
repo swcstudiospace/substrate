@@ -212,7 +212,7 @@ describe("config knobs", () => {
 			searchRecallBudgetMs: DEFAULT_SEARCH_RECALL_BUDGET_MS,
 			retainTimeoutMs: DEFAULT_RETAIN_TIMEOUT_MS,
 		});
-		expect(config.hindsightBudgets).toEqual({ recallBudgetMs: 4000, searchRecallBudgetMs: 1500, retainTimeoutMs: 8000 });
+		expect(config.hindsightBudgets).toEqual({ recallBudgetMs: 1500, searchRecallBudgetMs: 1500, retainTimeoutMs: 8000 });
 		expect(config.retainOutbox).toEqual({
 			path: null,
 			max: DEFAULT_RETAIN_OUTBOX_MAX,

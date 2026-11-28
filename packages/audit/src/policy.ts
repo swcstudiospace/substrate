@@ -112,6 +112,8 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"worktree_list",
 	// Phase 83 (E1): the live-session registry read. Inspection only, and a failed read degrades to last-known instead of refusing.
 	"session_registry",
+	// Phase 103 (F4): the multi-worktree session snapshot read. Inspection only; refused scopes and stale sources degrade, never throw.
+	"session_snapshot",
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",

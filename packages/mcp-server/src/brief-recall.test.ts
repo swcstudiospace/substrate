@@ -950,3 +950,21 @@ describe("the recall-snapshot cache class", () => {
 		expect(keys.size).toBe(4);
 	});
 });
+
+// ── phase 105 F6: provenance renders in the section title ─────────────────────
+
+describe("phase 105 F6 provenance (banks + age in the Recalled context title)", () => {
+	test("a stored fan-out answer renders its banks and its age, with the hits below", async () => {
+		await withHindsight(async () => {
+			const w = world(ENFORCE, { index: indexOf({ memory: [] }) });
+			seedFanout(w.redis, 5 * 60_000, [{ text: "fence the lease before handoff", type: "fact" }]);
+			const detail = await w.substrate.briefDetailed(WITH_GRAPH, undefined, WITH_GRAPH.surface);
+			expect(detail.state).toBe("complete");
+			const line = detail.text.split("\n").find((l) => l.startsWith(RECALL_TITLE_PREFIX));
+			expect(line).toBeDefined();
+			for (const bank of fanoutBanks("grok-bot")) expect(line).toContain(bank);
+			expect(line).toContain("5m old):");
+			expect(detail.text).toContain("- fence the lease before handoff (fact)");
+		});
+	});
+});

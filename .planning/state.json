@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.8",
+  "milestone": "v1.11 — Live Fabric Interop (Wave 9)",
   "phases": [
     {
       "number": "16",
@@ -317,12 +317,82 @@
       "number": "78",
       "name": "Cross-layer reconciliation",
       "status": "pending"
+    },
+    {
+      "number": "80",
+      "name": "DG-1a DragonflyDB Gate probe",
+      "status": "complete"
+    },
+    {
+      "number": "81",
+      "name": "DG-1b Gate implement-or-document",
+      "status": "complete"
+    },
+    {
+      "number": "82",
+      "name": "E2 shared-context cache",
+      "status": "complete"
+    },
+    {
+      "number": "83",
+      "name": "E1 Live Steering multi-worktree",
+      "status": "complete"
+    },
+    {
+      "number": "84",
+      "name": "E3+E6 memory fabric + episodic",
+      "status": "complete"
+    },
+    {
+      "number": "85",
+      "name": "E4+E7 orchestration + fencing",
+      "status": "complete"
+    },
+    {
+      "number": "86",
+      "name": "E5+E8 observability + replay/audit",
+      "status": "complete"
+    },
+    {
+      "number": "100",
+      "name": "F1 live STATE reflection",
+      "status": "complete"
+    },
+    {
+      "number": "101",
+      "name": "F2 Hindsight relationships",
+      "status": "complete"
+    },
+    {
+      "number": "102",
+      "name": "F3 event-driven doc refresh",
+      "status": "complete"
+    },
+    {
+      "number": "103",
+      "name": "F4 multi-worktree sharing",
+      "status": "complete"
+    },
+    {
+      "number": "104",
+      "name": "F5 steering injection v2",
+      "status": "complete"
+    },
+    {
+      "number": "105",
+      "name": "F6 in-session recall",
+      "status": "complete"
+    },
+    {
+      "number": "106",
+      "name": "F7 ingest + steering test",
+      "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd-progress --next",
-    "label": "Advance to the next step (verify)",
-    "reason": "Phase 54 of 61 · 75% · ready to verify"
+    "command": "/gsd-progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-11-28T16:02:11.938Z"
+  "updated_at": "2026-11-28T19:32:26.186Z"
 }

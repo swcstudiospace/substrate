@@ -83,10 +83,17 @@ export function hindsightBanksFromEnv(env: Record<string, string | undefined> = 
 	return banks.length > 0 ? banks : null;
 }
 
-/** The writer's bank on retain: `HINDSIGHT_BANK_PREFIX + surface` (D26-03). */
-export function bankForSurface(config: HindsightConfig, surface: string): string {
-	return `${config.bankPrefix}${surface}`;
-}
+ /** The writer's bank on retain: `HINDSIGHT_BANK_PREFIX + surface` (D26-03). */
+ export function bankForSurface(config: HindsightConfig, surface: string): string {
+ 	return `${config.bankPrefix}${surface}`;
+ }
+
+/**
+ * Phase 101 F2: the surface that owns relation episodes. The relations bank
+ * is `bankForSurface(config, RELATION_BANK_SURFACE)` — one bank write per
+ * relation, never a dual-write beside the source bank (bank = owner).
+ */
+export const RELATION_BANK_SURFACE = "relations";
 
 /** The most results one bank contributes to a recall (D26-05). */
 export const MAX_RECALL_PER_BANK = 4;

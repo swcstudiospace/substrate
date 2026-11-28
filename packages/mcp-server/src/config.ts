@@ -18,7 +18,7 @@ import { normalizeTtlSeconds } from "./lease.ts";
 import { LEGACY_ENV_KEYS } from "./legacy-env.ts";
 import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
-import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
+import { clampRecallBudgetMs, DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, type RetrievalKnobs } from "./planes/docs-wire.ts";
 import { isLightragQueryMode, type LightragQueryMode } from "./planes/lightrag.ts";
@@ -775,6 +775,8 @@ export interface SubstrateConfig {
 	steeringWaitMaxMs: number;
 	/** `SUBSTRATE_BRIEF_SESSIONS` (phase 67): on adds the `sessions`, `steering` and `handoffs` sections to the brief. Off by default: the brief is exactly what it was. */
 	briefSessions: boolean;
+	/** `SUBSTRATE_SESSION_SNAPSHOT` (phase 103, F4): on serves the read-only `session_snapshot` digest. Off by default: the tool refuses with `session-snapshot.disabled` and reads nothing. */
+	sessionSnapshot: boolean;
 	/** Whether the steering tools are registered: the switch is on, or it is malformed and so answered as `misconfigured`. Off registers none. */
 	steeringRegistered: boolean;
 	/** `SUBSTRATE_PLANNING_STEERING_ACK_TTL_S` and `SUBSTRATE_PLANNING_STEERING_EXPIRY_SWEEP_S` (phase 58): the acknowledgement deadline and the expiry sweep interval. A bad value is a typed result, and the steering tools answer `misconfigured`. See `planning/steering.ts`. */
@@ -1211,7 +1213,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		indexArchive: loadIndexArchiveSettings(env),
 		// uplift-2 R3
 		hindsightBudgets: {
-			recallBudgetMs: positiveIntOr(env.HINDSIGHT_RECALL_BUDGET_MS, DEFAULT_RECALL_BUDGET_MS),
+			// Phase 105 F6: single tunable — the brief path's 1.5s default, clamped to the shared range at parse as at use.
+			recallBudgetMs: clampRecallBudgetMs(positiveIntOr(env.HINDSIGHT_RECALL_BUDGET_MS, DEFAULT_RECALL_BUDGET_MS)),
 			searchRecallBudgetMs: positiveIntOr(env.HINDSIGHT_SEARCH_RECALL_BUDGET_MS, DEFAULT_SEARCH_RECALL_BUDGET_MS),
 			retainTimeoutMs: positiveIntOr(env.HINDSIGHT_RETAIN_TIMEOUT_MS, DEFAULT_RETAIN_TIMEOUT_MS),
 		},
@@ -1311,6 +1314,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		liveSessionLeaseS: clampedIntOr(env.SUBSTRATE_LIVE_SESSION_LEASE_S, { min: 60, max: 86_400, fallback: 3_600 }),
 		steeringWaitMaxMs: boundedInt(env.SUBSTRATE_STEERING_WAIT_MAX_MS, 30_000, 1_000, 120_000),
 		briefSessions: toggleOn(env.SUBSTRATE_BRIEF_SESSIONS),
+		sessionSnapshot: toggleOn(env.SUBSTRATE_SESSION_SNAPSHOT),
 		// Phase 58 (live steering): the acknowledgement deadline and the expiry sweep interval. Environment only; a bad value is a typed result.
 		steeringExpiry: loadSteeringExpirySettings(env),
 		// Phase 58: the durable observer baseline directory and the liveness interval. Environment only; a bad value is a typed result.
